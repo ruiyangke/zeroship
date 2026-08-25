@@ -231,6 +231,15 @@ impl ConnectionRelease {
     /// connection task keep draining an unacknowledged cancelled query, so the
     /// backend could remain occupied indefinitely.
     pub(crate) fn shutdown(&self) {
+        // The alert belongs HERE rather than in `Drop`, because six production
+        // sites call this without dropping: pool command-timeout recovery
+        // through `Client::force_close`, and four replication cleanup paths.
+        // With it in `Drop` only, every one of those ended a TLS session with
+        // no alert, and the later `Drop` could not make up for it - by then
+        // this socket is already down and the send fails.
+        #[cfg(feature = "tls")]
+        self.send_close_notify();
+
         // A peer close or another release guard may win the race. In every
         // error case the socket is already unusable, which is the requested
         // postcondition, so there is no useful error to propagate.
@@ -268,9 +277,9 @@ impl ConnectionDropRelease {
 
 impl Drop for ConnectionRelease {
     fn drop(&mut self) {
-        #[cfg(feature = "tls")]
-        self.send_close_notify();
-
+        // `shutdown` sends the TLS alert first; see it for why that is not
+        // done here.
+        //
         // `Both`, not `Write`: a half-close would leave this side reading, and
         // the point is that the server observes the end of the session now.
         //

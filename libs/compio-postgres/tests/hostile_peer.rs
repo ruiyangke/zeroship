@@ -533,6 +533,86 @@ async fn dropping_an_unrun_tls_connection_sends_close_notify() {
     drop(client);
 }
 
+/// A command timeout retires the session through `Client::force_close`, which
+/// calls `ConnectionRelease::shutdown()` DIRECTLY rather than dropping it.
+///
+/// That direct path is the one the fixes above did not reach: `Drop` sent the
+/// alert, `shutdown()` did not, and six production sites call `shutdown()`
+/// without dropping - pool command-timeout recovery here, plus four
+/// replication cleanup paths. So a pool that times out a query over TLS ended
+/// the session with no alert, which is the case a real deployment hits most.
+#[cfg(feature = "tls")]
+#[compio::test]
+async fn a_command_timeout_closes_the_tls_session_cleanly() {
+    let server_config = scripted_tls_server_config();
+
+    let server = StubServer::spawn(move |listener| {
+        let mut socket = accept_bounded(&listener);
+        // Expiry attempts a REAL cancel first, on a second connection this
+        // scripted peer never accepts, so recovery takes about as long as the
+        // shared socket watchdog. Wait longer than that here, or the peer
+        // stops reading just before the alert and the test measures its own
+        // patience instead of the driver.
+        socket
+            .set_read_timeout(Some(Duration::from_secs(8)))
+            .expect("extend this peer's read watchdog");
+
+        let mut ssl_request = [0u8; 8];
+        socket
+            .read_exact(&mut ssl_request)
+            .expect("read PostgreSQL SSLRequest");
+        socket.write_all(b"S").expect("accept TLS negotiation");
+        socket.flush().expect("flush TLS negotiation response");
+
+        let mut tls =
+            rustls::ServerConnection::new(server_config).expect("build TLS server session");
+        {
+            let mut stream = rustls::Stream::new(&mut tls, &mut socket);
+            complete_startup(&mut stream, 216);
+            // Take the query and never answer it. The client's command timeout
+            // is what ends this session.
+            let _ = expect_simple_query(&mut stream);
+        }
+
+        expect_close_notify(&mut tls, &mut socket);
+    });
+
+    let dsn = format!(
+        "host=localhost hostaddr={} port={} user=scripted-user sslmode=require connect_timeout=2",
+        server.addr.ip(),
+        server.addr.port()
+    );
+    let config = dsn.parse::<Config>().expect("parse TLS peer config");
+    let mut pool_config = compio_postgres::PoolConfig::new();
+    // ONE connection: the scripted peer accepts exactly one, and a warm-up
+    // that opens a second fails the test for a reason that is not the claim.
+    pool_config.max_size(1);
+    pool_config.min_idle(0);
+    pool_config.command_timeout(Duration::from_millis(300));
+
+    let pool = compio_postgres::Pool::connect_with_config(config, pool_config)
+        .await
+        .expect("build a pool against the scripted TLS peer");
+    let mut client = pool.get().await.expect("lease a pooled connection");
+
+    // `command` is what arms the recovery guard; a bare `simple_query` derefs
+    // straight to `Client` and never reaches the pool's timeout at all.
+    let outcome = client
+        .command(async |client| client.simple_query("SELECT 1").await.map(|_| ()))
+        .await;
+    assert!(
+        outcome.is_err(),
+        "the scripted peer never answered, so this must time out"
+    );
+
+    // Order matters: the lease and the pool must go away while the scripted
+    // peer is still reading, or it stops waiting before the alert is sent and
+    // the test fails for its own reason rather than the driver's.
+    drop(client);
+    drop(pool);
+    server.finish();
+}
+
 #[cfg(feature = "tls")]
 #[compio::test]
 async fn dropping_a_tls_client_sends_close_notify() {
