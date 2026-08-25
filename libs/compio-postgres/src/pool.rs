@@ -203,6 +203,12 @@ impl PoolConfig {
     ///
     /// This prevents silent death from firewalls, PostgreSQL idle timeouts, and
     /// DNS failover. Each entry gets a +/-25% jitter so expiries are staggered.
+    ///
+    /// Enforced WITHOUT the housekeeper as well: a connection past its lifetime
+    /// is discarded when it is returned, not only when background maintenance
+    /// sweeps. So this setting takes effect on a pool that never called
+    /// [`Pool::start_housekeeper`] - unlike [`PoolConfig::idle_timeout`], which
+    /// does not. Measured, and pinned by `tests/pool_lifetime.rs`.
     pub fn max_lifetime(&mut self, max_lifetime: Duration) -> &mut Self {
         self.max_lifetime = max_lifetime;
         self
@@ -218,6 +224,14 @@ impl PoolConfig {
     ///
     /// Connections idle longer than this are closed only when the idle count
     /// exceeds `min_idle`.
+    ///
+    /// REQUIRES THE HOUSEKEEPER. Idle eviction happens only in background
+    /// maintenance, so on a pool that never called [`Pool::start_housekeeper`]
+    /// this setting does nothing at all - an idle connection is handed straight
+    /// back out however long it sat. That is worth saying here rather than only
+    /// on the type, because [`PoolConfig::max_lifetime`] IS enforced without
+    /// the housekeeper, and a caller who sets both and watches lifetime
+    /// rotation work will reasonably conclude this one is working too.
     pub fn idle_timeout(&mut self, idle_timeout: Duration) -> &mut Self {
         self.idle_timeout = idle_timeout;
         self
