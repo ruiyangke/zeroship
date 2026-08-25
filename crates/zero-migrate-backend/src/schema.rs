@@ -444,6 +444,37 @@ pub trait SchemaRenderer: std::fmt::Debug + Sync {
         &self,
         request: CreateIndexIfNotExistsRequest<'_>,
     ) -> Result<String, &'static str>;
+
+    /// Render an exclusion-constraint body, or explicitly refuse with `None`.
+    ///
+    /// The engine renders the parts it can render neutrally — each element's target is
+    /// quoted, or its expression lowered, through this same backend — and hands them
+    /// over as [`crate::ddl::ExclusionConstraintRequest`]. Everything that is GRAMMAR is
+    /// spelled here: the `EXCLUDE USING` frame, the access-method token, the
+    /// `WITH <operator>` pairing, the `WHERE` tail and the deferrability clause.
+    ///
+    /// It moved for the reason the ALTER COLUMN family and the SQLite trigger family
+    /// moved before it. The engine used to assemble the whole body itself, including the
+    /// access-method names `gist` and `spgist` and the `&&` overlap operator, none of
+    /// which any other shipping vendor can execute. Nothing about that NAMED a vendor,
+    /// so the product-name census read it as clean — which is the hole the grammar
+    /// census now covers.
+    ///
+    /// # Why here and not on `DdlEmitter`
+    ///
+    /// A constraint body is a FRAGMENT, and this is the fragment trait — it sits beside
+    /// [`SchemaRenderer::column_type`] rather than beside a statement emitter. The
+    /// practical half of the same point: a `DdlEmitter` is bound to a project schema at
+    /// construction, and this body has no qualified name in it, so putting it there
+    /// would have meant threading a schema through five call sites purely to satisfy a
+    /// constructor.
+    ///
+    /// Required with no default: a backend that cannot do this says `None` in its own
+    /// file rather than inheriting another vendor's SQL.
+    fn exclusion_constraint_body(
+        &self,
+        req: &crate::ddl::ExclusionConstraintRequest<'_>,
+    ) -> Option<String>;
 }
 
 /// True for top-level schema keys that carry

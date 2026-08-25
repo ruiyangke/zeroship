@@ -1,5 +1,6 @@
 //! PostgreSQL schema/DDL spelling. The future `zero-migrate-postgres`.
 
+use zero_migrate_backend::ddl::ExclusionConstraintRequest;
 use zero_migrate_backend::renderer::DmlRenderer;
 use zero_migrate_backend::schema::{
     build_encryption_sentinel_comments, build_mask_sentinel_comments, char_len,
@@ -8,6 +9,7 @@ use zero_migrate_backend::schema::{
 };
 use zero_migrate_backend::snapshot::ColumnSnapshot;
 use zero_migrate_ir::dialect::DialectId;
+use zero_migrate_ir::ir::{ExclusionMethod, ExclusionOperator};
 
 // This module's vendor identity, read from the crate's ONE declaration of it.
 use crate::DIALECT;
@@ -400,6 +402,53 @@ impl SchemaRenderer for PostgresSchemaRenderer {
             columns,
         ))
     }
+
+    /// PostgreSQL is the only shipping vendor with exclusion constraints, so this is the
+    /// only implementation that returns `Some`.
+    ///
+    /// Moved here from the engine's lowering, unchanged in what it emits. `gist` and
+    /// `spgist` are PostgreSQL index access methods and `&&` is its overlap operator;
+    /// none of that named a vendor while it sat in neutral code, which is why a
+    /// product-name census never saw it.
+    fn exclusion_constraint_body(&self, req: &ExclusionConstraintRequest<'_>) -> Option<String> {
+        let elements = req
+            .elements
+            .iter()
+            .map(|element| {
+                format!(
+                    "{} WITH {}",
+                    element.target,
+                    exclusion_operator_sql(element.operator)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let mut body = format!(
+            "EXCLUDE USING {} ({elements})",
+            exclusion_method_sql(req.method)
+        );
+        if let Some(predicate) = req.where_predicate {
+            body.push_str(" WHERE (");
+            body.push_str(predicate);
+            body.push(')');
+        }
+        if let Some(deferrable) = req.deferrable {
+            if deferrable {
+                body.push_str(" DEFERRABLE");
+                if let Some(initially_deferred) = req.initially_deferred {
+                    body.push_str(if initially_deferred {
+                        " INITIALLY DEFERRED"
+                    } else {
+                        " INITIALLY IMMEDIATE"
+                    });
+                }
+            } else {
+                body.push_str(" NOT DEFERRABLE");
+            }
+        }
+        Some(body)
+    }
 }
 
 fn column_type_for_def(def: &serde_json::Value) -> String {
@@ -530,6 +579,28 @@ pub fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
             _ => "TEXT",
         },
         _ => "TEXT",
+    }
+}
+
+/// The index access method token for an exclusion constraint.
+fn exclusion_method_sql(method: ExclusionMethod) -> &'static str {
+    match method {
+        ExclusionMethod::Gist => "gist",
+        ExclusionMethod::Spgist => "spgist",
+        ExclusionMethod::Btree => "btree",
+    }
+}
+
+/// The operator token one exclusion element compares with.
+fn exclusion_operator_sql(operator: ExclusionOperator) -> &'static str {
+    match operator {
+        ExclusionOperator::Overlaps => "&&",
+        ExclusionOperator::Equal => "=",
+        ExclusionOperator::NotEqual => "<>",
+        ExclusionOperator::Less => "<",
+        ExclusionOperator::Greater => ">",
+        ExclusionOperator::LessEqual => "<=",
+        ExclusionOperator::GreaterEqual => ">=",
     }
 }
 

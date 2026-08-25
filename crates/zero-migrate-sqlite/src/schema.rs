@@ -1,5 +1,6 @@
 //! SQLite schema/DDL spelling. The future `zero-migrate-sqlite`.
 
+use zero_migrate_backend::ddl::ExclusionConstraintRequest;
 use zero_migrate_backend::renderer::DmlRenderer;
 use zero_migrate_backend::schema::{
     decimal_precision_scale, AddColumnIfNotExistsRequest, CreateIndexIfNotExistsRequest,
@@ -327,6 +328,16 @@ impl SchemaRenderer for SqliteSchemaRenderer {
         _request: CreateIndexIfNotExistsRequest<'_>,
     ) -> Result<String, &'static str> {
         Err("SQLite has no concurrent index-build grammar")
+    }
+
+    /// REFUSED: SQLite has no exclusion constraint.
+    ///
+    /// `None` rather than an approximation. The nearest SQLite shape is a unique
+    /// index, which excludes only on equality and would silently accept an authored
+    /// overlap constraint while enforcing something narrower. The engine turns this
+    /// into its own refusal, naming this dialect.
+    fn exclusion_constraint_body(&self, _req: &ExclusionConstraintRequest<'_>) -> Option<String> {
+        None
     }
 }
 

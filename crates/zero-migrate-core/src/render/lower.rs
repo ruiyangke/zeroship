@@ -36,12 +36,11 @@ use crate::model::backfill::{
 };
 use crate::model::expr::Expr;
 use crate::model::ir::{
-    ColType, ColumnCollation, ColumnOrExpr, EmptyContainerKind, ExclusionElement, ExclusionMethod,
-    ExclusionOperator, ExistenceGuard, IndexElement, IndexMethod, IndexStorageParams, IrColumn,
-    IrConstraint, IrConstraintKind, IrDefault, IrIndex, IrMask, Join, MigrationIr, Op, OrderDir,
-    OrderItem, PartitionBoundValue, PartitionBounds, PartitionSpec, RefAction, SelectAst,
-    SelectItem, TableRef, TableRuntimeOptions, TriggerAction, TriggerStmt, ValueFormat,
-    VectorMetric, ViewQuery,
+    ColType, ColumnCollation, ColumnOrExpr, EmptyContainerKind, ExclusionElement, ExistenceGuard,
+    IndexElement, IndexMethod, IndexStorageParams, IrColumn, IrConstraint, IrConstraintKind,
+    IrDefault, IrIndex, IrMask, Join, MigrationIr, Op, OrderDir, OrderItem, PartitionBoundValue,
+    PartitionBounds, PartitionSpec, RefAction, SelectAst, SelectItem, TableRef,
+    TableRuntimeOptions, TriggerAction, TriggerStmt, ValueFormat, VectorMetric, ViewQuery,
 };
 use crate::model::load::ir_created_tables;
 use crate::model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
@@ -68,6 +67,7 @@ use crate::render::value_format::{
 };
 use crate::ResolvedInject;
 use zero_migrate_backend::advisory::Advisory;
+use zero_migrate_backend::ddl::{ExclusionConstraintRequest, ExclusionElementParts};
 use zero_migrate_backend::fold::{
     AuthorTypeOverride, FoldCursorComparison, FoldCursorScalarType, FoldDatabaseFeature,
 };
@@ -10068,40 +10068,51 @@ pub(crate) fn render_exclusion_constraint_body(
         ));
     }
 
-    let rendered_elements = elements
+    // The engine renders each element's TARGET, because that goes through this
+    // backend's own quoter or expression renderer, and it renders the WHERE predicate
+    // for the same reason. It renders nothing else: the frame, the access method, the
+    // `WITH <operator>` pairing and the deferrability clause are grammar, and grammar is
+    // the backend's to spell.
+    let targets = elements
         .iter()
-        .map(|element| render_exclusion_element(vendors, element, dialect))
-        .collect::<Result<Vec<_>, _>>()?
-        .join(", ");
-    let mut body = format!(
-        "EXCLUDE USING {} ({rendered_elements})",
-        exclusion_method_sql(*using_method)
-    );
-    if let Some(predicate) = where_predicate {
-        let pred = crate::render::dml::render_expr_inline(vendors, predicate, dialect)
-            .map_err(IrLowerError::DmlAssemble)?;
-        body.push_str(" WHERE (");
-        body.push_str(&pred);
-        body.push(')');
-    }
-    if let Some(deferrable) = deferrable {
-        if *deferrable {
-            body.push_str(" DEFERRABLE");
-            if let Some(initially_deferred) = initially_deferred {
-                body.push_str(if *initially_deferred {
-                    " INITIALLY DEFERRED"
-                } else {
-                    " INITIALLY IMMEDIATE"
-                });
-            }
-        } else {
-            body.push_str(" NOT DEFERRABLE");
-        }
-    }
-    Ok(body)
+        .map(|element| render_exclusion_element_target(vendors, element, dialect))
+        .collect::<Result<Vec<_>, _>>()?;
+    let parts = elements
+        .iter()
+        .zip(&targets)
+        .map(|(element, target)| ExclusionElementParts {
+            target: target.as_str(),
+            operator: element.operator,
+        })
+        .collect::<Vec<_>>();
+
+    let predicate = where_predicate
+        .as_ref()
+        .map(|predicate| {
+            crate::render::dml::render_expr_inline(vendors, predicate, dialect)
+                .map_err(IrLowerError::DmlAssemble)
+        })
+        .transpose()?;
+
+    let request = ExclusionConstraintRequest {
+        method: *using_method,
+        elements: &parts,
+        where_predicate: predicate.as_deref(),
+        deferrable: *deferrable,
+        initially_deferred: *initially_deferred,
+    };
+
+    crate::render::backends::schema_renderer(vendors, dialect)
+        .exclusion_constraint_body(&request)
+        .ok_or_else(|| IrLowerError::ExclusionConstraintUnsupported {
+            kind: "exclusionConstraint",
+            dialect: dialect.clone(),
+        })
 }
 
-fn render_exclusion_element(
+/// Render one element's TARGET only — the quoted column, or the parenthesised
+/// expression. The `WITH <operator>` half used to live here and is now the backend's.
+fn render_exclusion_element_target(
     vendors: VendorSet,
     element: &ExclusionElement,
     dialect: &DialectId,
@@ -10119,31 +10130,14 @@ fn render_exclusion_element(
             format!("({expr})")
         }
     };
-    Ok(format!(
-        "{target} WITH {}",
-        exclusion_operator_sql(element.operator)
-    ))
+    Ok(target)
 }
 
-fn exclusion_method_sql(method: ExclusionMethod) -> &'static str {
-    match method {
-        ExclusionMethod::Gist => "gist",
-        ExclusionMethod::Spgist => "spgist",
-        ExclusionMethod::Btree => "btree",
-    }
-}
-
-fn exclusion_operator_sql(operator: ExclusionOperator) -> &'static str {
-    match operator {
-        ExclusionOperator::Overlaps => "&&",
-        ExclusionOperator::Equal => "=",
-        ExclusionOperator::NotEqual => "<>",
-        ExclusionOperator::Less => "<",
-        ExclusionOperator::Greater => ">",
-        ExclusionOperator::LessEqual => "<=",
-        ExclusionOperator::GreaterEqual => ">=",
-    }
-}
+// `exclusion_method_sql` and `exclusion_operator_sql` stood here, mapping the IR enums
+// onto `gist`/`spgist`/`btree` and onto `&&`/`=`/`<>`/`<`/`>`/`<=`/`>=`. Those are
+// PostgreSQL index access methods and PostgreSQL operator spellings, and they now live
+// in `zero_migrate_postgres::ddl` beside the frame that uses them. Core passes the IR
+// enums through untouched and never learns what either spells.
 
 pub(crate) fn derived_exclusion_constraint_name(
     vendors: VendorSet,

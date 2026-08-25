@@ -1090,6 +1090,19 @@ impl SchemaRenderer for DuckDbSchemaRenderer {
     ) -> Result<String, &'static str> {
         Err("DuckDB test backend does not implement idempotent additive indexes")
     }
+
+    /// REFUSED: this fourth backend has no exclusion constraint.
+    ///
+    /// The compiler asked for this, which is the point of the method being required
+    /// with no default. A default body would have handed this backend PostgreSQL's
+    /// `EXCLUDE USING gist (...)` for free, and the fixture would have compiled while
+    /// claiming a constraint kind it cannot enforce.
+    fn exclusion_constraint_body(
+        &self,
+        _req: &zero_migrate_backend::ddl::ExclusionConstraintRequest<'_>,
+    ) -> Option<String> {
+        None
+    }
 }
 
 impl ValueFormatRenderer for DuckDbValueFormatRenderer {

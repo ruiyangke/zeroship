@@ -51,6 +51,7 @@ use crate::snapshot::{
 use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_ir::ir::IndexSortOrder;
 use zero_migrate_ir::ir::PartitionBounds;
+use zero_migrate_ir::ir::{ExclusionMethod, ExclusionOperator};
 
 /// True if `index_name` is the implicit index a PRIMARY KEY materialises. It is
 /// created/dropped by the PK clause, never by a standalone CREATE/DROP INDEX, so
@@ -321,6 +322,41 @@ pub trait DdlEmitter {
     /// state the complete boundary instead of silently borrowing another
     /// vendor's partition grammar.
     fn drop_partition(&self, name: &str, cascade: bool) -> Option<String>;
+}
+
+/// One element of an exclusion constraint, with its target already rendered.
+///
+/// `target` arrives quoted (a column) or parenthesised (an expression), because both of
+/// those go through the backend's own quoter and expression renderer before they get
+/// here. `operator` stays structured so the vendor picks the spelling.
+#[derive(Debug, Clone, Copy)]
+pub struct ExclusionElementParts<'a> {
+    /// The already-rendered column reference or parenthesised expression.
+    pub target: &'a str,
+    /// The comparison this element excludes on, unspelled.
+    pub operator: ExclusionOperator,
+}
+
+/// Everything a backend needs to spell one exclusion constraint.
+///
+/// A request struct rather than a long parameter list, for the reason
+/// [`CreateTableRequest`] is one: the arguments are same-typed and easy to transpose,
+/// and rustc's "provide the argument" suggestion silently reorders same-typed arguments
+/// when a signature changes.
+#[derive(Debug, Clone, Copy)]
+pub struct ExclusionConstraintRequest<'a> {
+    /// The index access method the constraint is built on, unspelled.
+    pub method: ExclusionMethod,
+    /// The elements, in authored order. Never empty — the engine refuses that earlier.
+    pub elements: &'a [ExclusionElementParts<'a>],
+    /// An already-rendered `WHERE` predicate, without the keyword.
+    pub where_predicate: Option<&'a str>,
+    /// `Some(true)` for `DEFERRABLE`, `Some(false)` for `NOT DEFERRABLE`, `None` to say
+    /// nothing and take the server's default.
+    pub deferrable: Option<bool>,
+    /// `Some(true)` for `INITIALLY DEFERRED`, `Some(false)` for `INITIALLY IMMEDIATE`.
+    /// Only meaningful alongside `deferrable: Some(true)`.
+    pub initially_deferred: Option<bool>,
 }
 
 /// Render an index element's canonical order suffix.

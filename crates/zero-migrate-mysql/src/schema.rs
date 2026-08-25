@@ -2,6 +2,7 @@
 
 use crate::collation::{mysql_pin_collation, mysql_type_without_collation};
 use crate::physical_type::{self, MysqlPhysicalType};
+use zero_migrate_backend::ddl::ExclusionConstraintRequest;
 use zero_migrate_backend::renderer::DmlRenderer;
 use zero_migrate_backend::schema::{
     char_len, decimal_precision_scale, def_case_sensitive, AddColumnIfNotExistsRequest,
@@ -532,6 +533,16 @@ impl SchemaRenderer for MysqlSchemaRenderer {
         _request: CreateIndexIfNotExistsRequest<'_>,
     ) -> Result<String, &'static str> {
         Err("MySQL has no concurrent index-build grammar")
+    }
+
+    /// REFUSED: MySQL has no exclusion constraint.
+    ///
+    /// `None` rather than an approximation. The nearest MySQL shape is a unique
+    /// index, which excludes only on equality and would silently accept an authored
+    /// overlap constraint while enforcing something narrower. The engine turns this
+    /// into its own refusal, naming this dialect.
+    fn exclusion_constraint_body(&self, _req: &ExclusionConstraintRequest<'_>) -> Option<String> {
+        None
     }
 }
 
