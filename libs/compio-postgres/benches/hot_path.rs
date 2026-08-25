@@ -94,11 +94,11 @@ pub mod test_utils;
 #[path = "../src/tls.rs"]
 pub mod tls;
 #[cfg(feature = "tls")]
-#[path = "../src/tls_sansio.rs"]
-mod tls_sansio;
-#[cfg(feature = "tls")]
 #[path = "../src/tls_rustls.rs"]
 pub mod tls_rustls;
+#[cfg(feature = "tls")]
+#[path = "../src/tls_sansio.rs"]
+mod tls_sansio;
 #[path = "../src/to_statement.rs"]
 mod to_statement;
 #[path = "../src/transaction.rs"]
@@ -195,6 +195,8 @@ use std::hint::black_box;
 use std::io;
 use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
+#[cfg(feature = "tls")]
+use std::{cell::RefCell, rc::Rc};
 
 use bytes::BytesMut;
 use client::{InnerClient, QueryObservation, StatementCacheAdmission, StatementCacheSettings};
@@ -233,9 +235,7 @@ impl AsyncWrite for NoIo {
     }
 }
 
-fn response_obligation_pair(
-    stream: &buf_stream::BufStream<NoIo>,
-) -> &buf_stream::BufStream<NoIo> {
+fn response_obligation_pair(stream: &buf_stream::BufStream<NoIo>) -> &buf_stream::BufStream<NoIo> {
     let stream = black_box(stream);
     stream.begin_read_response();
     stream.finish_read_response();
@@ -441,11 +441,178 @@ fn bench_with_buf(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(feature = "tls")]
+/// A PostgreSQL Simple Query frame: tag, 13-byte message length, SQL, NUL.
+const TLS_QUERY_FRAME: &[u8] = b"Q\0\0\0\rSELECT 1\0";
+
+#[cfg(feature = "tls")]
+struct TlsBenchConfigs {
+    client: Arc<rustls::ClientConfig>,
+    server: Arc<rustls::ServerConfig>,
+}
+
+#[cfg(feature = "tls")]
+impl TlsBenchConfigs {
+    fn new() -> Self {
+        let issued = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("generate a self-signed certificate");
+        let cert = rustls::pki_types::CertificateDer::from(issued.cert.der().to_vec());
+        let key = rustls::pki_types::PrivateKeyDer::try_from(issued.signing_key.serialize_der())
+            .expect("serialize the benchmark key");
+
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let server = rustls::ServerConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .expect("server protocol versions")
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.clone()], key)
+            .expect("server config");
+
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(cert).expect("trust the benchmark certificate");
+        let client = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("client protocol versions")
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+
+        Self {
+            client: Arc::new(client),
+            server: Arc::new(server),
+        }
+    }
+
+    fn handshaken_client(&self) -> rustls::ClientConnection {
+        let mut client = rustls::ClientConnection::new(
+            self.client.clone(),
+            rustls::pki_types::ServerName::try_from("localhost").expect("server name"),
+        )
+        .expect("client connection");
+        let mut server =
+            rustls::ServerConnection::new(self.server.clone()).expect("server connection");
+
+        for _ in 0..16 {
+            let mut to_server = Vec::new();
+            while client.wants_write() {
+                client
+                    .write_tls(&mut to_server)
+                    .expect("client handshake write");
+            }
+            if !to_server.is_empty() {
+                let mut cursor = &to_server[..];
+                while !cursor.is_empty() {
+                    server.read_tls(&mut cursor).expect("server handshake read");
+                    server
+                        .process_new_packets()
+                        .expect("server handshake process");
+                }
+            }
+
+            let mut to_client = Vec::new();
+            while server.wants_write() {
+                server
+                    .write_tls(&mut to_client)
+                    .expect("server handshake write");
+            }
+            if !to_client.is_empty() {
+                let mut cursor = &to_client[..];
+                while !cursor.is_empty() {
+                    client.read_tls(&mut cursor).expect("client handshake read");
+                    client
+                        .process_new_packets()
+                        .expect("client handshake process");
+                }
+            }
+
+            if !client.is_handshaking() && !server.is_handshaking() {
+                return client;
+            }
+        }
+        panic!("the in-memory benchmark handshake did not converge");
+    }
+}
+
+/// The real rustls work shared by both synchronization proxies.
+#[cfg(feature = "tls")]
+#[inline(never)]
+fn tls_session_write_work(
+    session: &mut tls_sansio::TlsSession,
+    plaintext: &[u8],
+) -> (usize, Vec<u8>) {
+    let written = session
+        .write_plaintext(plaintext)
+        .expect("encrypt the benchmark frame");
+    (written, session.take_outgoing())
+}
+
+/// The shipped session shape, with one uncontended lock per operation.
+#[cfg(feature = "tls")]
+#[inline(never)]
+fn mutex_tls_session_write_proxy(session: &Arc<Mutex<tls_sansio::TlsSession>>) -> (usize, Vec<u8>) {
+    tls_session_write_work(&mut session.lock(), TLS_QUERY_FRAME)
+}
+
+/// Benchmark-only control matching the session shape before `close_notify`.
+#[cfg(feature = "tls")]
+#[inline(never)]
+fn refcell_tls_session_write_proxy(
+    session: &Rc<RefCell<tls_sansio::TlsSession>>,
+) -> (usize, Vec<u8>) {
+    tls_session_write_work(&mut session.borrow_mut(), TLS_QUERY_FRAME)
+}
+
+#[cfg(feature = "tls")]
+fn bench_tls_session_lock(c: &mut Criterion) {
+    let configs = TlsBenchConfigs::new();
+    let mutex = Arc::new(Mutex::new(tls_sansio::TlsSession::new(
+        configs.handshaken_client(),
+    )));
+    let mutex_peer = mutex.clone();
+    let refcell = Rc::new(RefCell::new(tls_sansio::TlsSession::new(
+        configs.handshaken_client(),
+    )));
+    let refcell_peer = refcell.clone();
+
+    // Prove both steady-state sessions encrypt the same real PostgreSQL frame
+    // before Criterion enters the timed region. Retaining a second handle also
+    // keeps both cases in their shared-session shape during measurement.
+    let mutex_warmup = mutex_tls_session_write_proxy(&mutex);
+    let refcell_warmup = refcell_tls_session_write_proxy(&refcell);
+    assert_eq!(mutex_warmup.0, TLS_QUERY_FRAME.len());
+    assert_eq!(mutex_warmup.0, refcell_warmup.0);
+    assert_eq!(mutex_warmup.1.len(), refcell_warmup.1.len());
+    assert!(!mutex_warmup.1.is_empty());
+    black_box((&mutex_peer, &refcell_peer));
+
+    let mut group = c.benchmark_group("compio_postgres/hot_path/tls_session_write_proxy");
+    // `iter_batched` retains each ciphertext Vec until timing stops, so its
+    // destruction is excluded without letting the session queue hit its cap.
+    group.bench_function("arc_mutex_shipped", |b| {
+        b.iter_batched(
+            || (),
+            |()| mutex_tls_session_write_proxy(black_box(&mutex)),
+            BatchSize::SmallInput,
+        );
+    });
+    group.bench_function("rc_refcell_control", |b| {
+        b.iter_batched(
+            || (),
+            |()| refcell_tls_session_write_proxy(black_box(&refcell)),
+            BatchSize::SmallInput,
+        );
+    });
+    group.finish();
+}
+
+#[cfg(not(feature = "tls"))]
+fn bench_tls_session_lock(_c: &mut Criterion) {}
+
 criterion_group!(
     benches,
     bench_read_deadline,
     bench_statement_cache,
     bench_query_observer,
-    bench_with_buf
+    bench_with_buf,
+    bench_tls_session_lock
 );
 criterion_main!(benches);
