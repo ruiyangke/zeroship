@@ -675,6 +675,26 @@ impl Error {
 
     /// Build the same public classification for a response channel while the
     /// original error remains owned by `Connection::run`.
+    /// A copy of a terminal connection error, for handing to a request that
+    /// was waiting on the connection when it died.
+    ///
+    /// `Error` is not `Clone` - it owns a boxed cause - so the copy carries the
+    /// RENDERED text of this error and its cause chain rather than the cause
+    /// itself. That loses the concrete type and keeps the diagnosis, which is
+    /// the part the caller needs: the alternative is `Kind::Closed` with an
+    /// empty cause chain, which says only that the connection is gone and
+    /// never why.
+    pub(crate) fn duplicate_terminal(&self) -> Error {
+        let mut detail = self.to_string();
+        let mut source = self.source();
+        while let Some(cause) = source {
+            detail.push_str(": ");
+            detail.push_str(&cause.to_string());
+            source = cause.source();
+        }
+        Error::io(io::Error::other(detail))
+    }
+
     pub(crate) fn duplicate_read_timeout(&self) -> Option<Error> {
         if !self.is_read_timeout() {
             return None;

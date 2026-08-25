@@ -1223,8 +1223,18 @@ impl Error {
 /// clean iff no awaited response is in flight, else `Error::closed()`. A
 /// decoded backend frames and ordinary I/O errors share one FIFO channel;
 /// ReadTimeout alone arrives on the acknowledged out-of-band path.
+/// Hand the error that is killing this connection to everyone waiting on it.
+///
+/// Without this a waiting request learns only that its response channel was
+/// dropped, and reports `Kind::Closed` with an EMPTY cause chain - so a
+/// message over the size limit, a protocol violation and an ordinary reset all
+/// arrive as the same unexplained disconnect. The connection task is holding
+/// the explanation at that moment; this is what gives it away.
+///
+/// A clean EOF is exempt, because "closed" is an honest and complete account
+/// of it: there is no failure to explain, the peer simply went away.
 fn publish_read_timeout(error: &Error, responses: &mut VecDeque<Response>) {
-    if !error.is_read_timeout() {
+    if is_eof(error) {
         return;
     }
 
@@ -1233,10 +1243,14 @@ fn publish_read_timeout(error: &Error, responses: &mut VecDeque<Response>) {
     // the ordinary stalled-query case has an empty capacity-one channel and
     // receives the distinguishable error directly. A consumer that has filled
     // its own channel is application backpressure, not a socket-read wait.
+    //
+    // A read timeout keeps its own duplication, so it stays classifiable as
+    // one (`Error::is_read_timeout`) on the receiving side; anything else
+    // travels as its rendered text.
     for response in responses {
-        let Some(response_error) = error.duplicate_read_timeout() else {
-            unreachable!("read-timeout classification changed while publishing it");
-        };
+        let response_error = error
+            .duplicate_read_timeout()
+            .unwrap_or_else(|| error.duplicate_terminal());
         let _ = response
             .sender
             .try_send(ResponseMessages::Observed(VecDeque::from([Err(
@@ -3404,6 +3418,31 @@ mod tests {
             assert!(
                 write_future_dropped.get(),
                 "the terminal read left the parked write alive"
+            );
+            // The registered response is failed by being TOLD, not merely by
+            // having its sender dropped. Asserting only that the channel
+            // closed would pass for a connection that died silently, which is
+            // what left a caller reading `connection closed` with no cause.
+            let delivered = response_rx
+                .next()
+                .await
+                .expect("the terminal read told the registered response nothing");
+            let ResponseMessages::Observed(mut messages) = delivered else {
+                panic!("the terminal read delivered frames rather than its error");
+            };
+            // `Message` is not Debug, so unwrap the Result by hand rather than
+            // through `expect_err`.
+            let first = match messages.pop_front().expect("the delivered batch is empty") {
+                Err(error) => error,
+                Ok(_) => panic!("the terminal read delivered a frame rather than its error"),
+            };
+            // It has to carry THIS failure's account of itself, not a generic
+            // "closed": the scripted reader fails with a message of its own,
+            // and that message is what a caller needs in order to tell one
+            // cause of death from another.
+            assert!(
+                format!("{:?}", first).contains("scripted read failure during write"),
+                "the delivered error does not describe the failure that caused it: {first:?}"
             );
             assert!(
                 response_rx.next().await.is_none(),
