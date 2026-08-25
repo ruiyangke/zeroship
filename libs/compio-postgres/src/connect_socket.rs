@@ -1,8 +1,8 @@
 // Ported from tokio-postgres (MIT/Apache-2.0). Copyright (c) 2016 Steven Fackler.
 //
-// tokio → compio migration notes:
-//   - `tokio::net::{TcpStream, UnixStream}` → `compio::net::{TcpStream, UnixStream}`
-//   - `tokio::time::timeout`                → `compio::time::timeout`
+// tokio -> compio migration notes:
+//   - `tokio::net::{TcpStream, UnixStream}` -> `compio::net::{TcpStream, UnixStream}`
+//   - `tokio::time::timeout`                -> `compio::time::timeout`
 //   - `socket2::SockRef` for keepalive and TCP_USER_TIMEOUT works unchanged
 //     because compio exposes `AsRawFd` on its sockets.
 //
@@ -34,7 +34,7 @@ pub(crate) async fn connect_socket(
 ) -> Result<Socket, Error> {
     match addr {
         Addr::Tcp(ip) => {
-            // compio's TcpStream::connect takes any `ToSocketAddrsAsync` — a
+            // compio's TcpStream::connect takes any `ToSocketAddrsAsync` - a
             // `(IpAddr, u16)` tuple is directly supported.
             let stream = TcpStream::connect((*ip, port))
                 .await
@@ -42,7 +42,7 @@ pub(crate) async fn connect_socket(
 
             stream.set_nodelay(true).map_err(Error::connect)?;
 
-            // socket2 borrows the raw fd via AsFd — no ownership change,
+            // socket2 borrows the raw fd via AsFd - no ownership change,
             // so the TcpStream remains usable afterwards.
             let sock_ref = SockRef::from(&stream);
 

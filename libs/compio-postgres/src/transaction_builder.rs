@@ -119,7 +119,7 @@ impl<'a> TransactionBuilder<'a> {
                     return;
                 }
 
-                // Mark dirty before firing — the pool's checkout barrier
+                // Mark dirty before firing - the pool's checkout barrier
                 // will drain this queued ROLLBACK. See `Transaction::drop`
                 // for the full lifecycle.
                 self.client.inner().set_dirty();

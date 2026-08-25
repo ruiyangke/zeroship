@@ -1,4 +1,4 @@
-# Phase 6 — pool + workspace migration + legacy disposal
+# Phase 6 - pool + workspace migration + legacy disposal
 
 `cargo check --workspace` passes cleanly (only a pre-existing unsafe-op
 warning in `crates/runtime/src/runtime.rs:435` remains; unrelated to this
@@ -6,7 +6,7 @@ port). `cargo test -p compio-postgres --no-run` is clean. `cargo test -p
 zeroship-plugin-db --test integration -- --test-threads=1` reaches parity
 with pre-migration: 16/21 pass; the 5 failures (`update_one_inc`,
 `update_one_dec_mul`, `update_one_jsonb_array_ops`, `update_many_round_trip`,
-`mixed_update`) reproduce **bit-for-bit on the pre-migration HEAD** — they
+`mixed_update`) reproduce **bit-for-bit on the pre-migration HEAD** - they
 are pre-existing test bugs where `setup()` doesn't create the `updated_at`
 column that `build_update_one` always writes.
 
@@ -16,18 +16,18 @@ column that `build_update_one` always writes.
 |---|---|---|---|
 | `src/pool.rs` | 579 (new) | port | HikariCP pool from `crates/pg/src/pool.rs`. Stores `Client` per entry, not `Conn`; dropped `needs_rollback` flag (Transaction handles it); `simple_query("")` for alive-validation; `Error::connect(io::Error::other(...))` for pool-layer failures |
 | `src/client.rs` | +15 | feature | Added `Client::query_text_params(sql, &[&str])` convenience that delegates to `query::query_text_params` (see below) |
-| `src/query.rs` | +92 | feature | Added `pub async fn query_text_params` — Parse with empty OID list (server infers), Bind with text format for params (code 0) and binary format for results (code 1). Matches legacy `zeroship-pg` semantics exactly |
-| `src/row.rs` | +16 | feature | Added `Row::raw_value<I>(idx)` for callers that decode wire bytes manually (used by plugin-db for TIMESTAMP → Unix ms conversion) |
-| `src/connect_raw.rs` | +20 | **bug fix** | `Handshake::next()` was dropping unread messages from each `BackendMessages` batch — the startup sequence (`AuthenticationOk + ParameterStatus* + BackendKeyData + ReadyForQuery`) arrives as one batch, we were returning the first and throwing the rest away. Added a `pending: BackendMessages` field that persists the iterator across calls |
+| `src/query.rs` | +92 | feature | Added `pub async fn query_text_params` - Parse with empty OID list (server infers), Bind with text format for params (code 0) and binary format for results (code 1). Matches legacy `zeroship-pg` semantics exactly |
+| `src/row.rs` | +16 | feature | Added `Row::raw_value<I>(idx)` for callers that decode wire bytes manually (used by plugin-db for TIMESTAMP -> Unix ms conversion) |
+| `src/connect_raw.rs` | +20 | **bug fix** | `Handshake::next()` was dropping unread messages from each `BackendMessages` batch - the startup sequence (`AuthenticationOk + ParameterStatus* + BackendKeyData + ReadyForQuery`) arrives as one batch, we were returning the first and throwing the rest away. Added a `pending: BackendMessages` field that persists the iterator across calls |
 | `src/lib.rs` | +1 | wiring | `mod pool;` + `pub use pool::{Pool, PoolConfig, PoolMetrics, PooledClient};` |
 
 ## Downstream crates migrated
 
 | Crate | Files | Changes |
 |---|---|---|
-| `plugin-db` | `Cargo.toml`, `src/lib.rs`, `src/callbacks.rs`, `tests/integration.rs` | `zeroship-pg` → `compio-postgres` + `compio`; `TX_CONN: Option<Conn>` → `Option<Client>`; `Conn::connect` → `compio_postgres::connect + spawn`; `row.try_get::<T>` → `row.try_get::<_, T>` (compio-postgres has 2 generics); `col.oid` → `col.type_().oid()`; `col.name` → `col.name().to_string()` |
-| `control` | `Cargo.toml`, `src/registry.rs`, `src/auth_service.rs` | Same pattern. `From<compio_postgres::Error>` for `RegistryError` now walks the `source()` chain to reach `DbError` messages (was matching on the old enum's Display) — preserves the duplicate-key detection heuristic |
-| `auth` | `Cargo.toml`, `src/service.rs` | Same pattern. `open_conn` helper per crate spawns the connection task and returns the Client. Matches the spec — no `Transaction<'a>` used, we do manual BEGIN/COMMIT/ROLLBACK via `Client::execute` |
+| `plugin-db` | `Cargo.toml`, `src/lib.rs`, `src/callbacks.rs`, `tests/integration.rs` | `zeroship-pg` -> `compio-postgres` + `compio`; `TX_CONN: Option<Conn>` -> `Option<Client>`; `Conn::connect` -> `compio_postgres::connect + spawn`; `row.try_get::<T>` -> `row.try_get::<_, T>` (compio-postgres has 2 generics); `col.oid` -> `col.type_().oid()`; `col.name` -> `col.name().to_string()` |
+| `control` | `Cargo.toml`, `src/registry.rs`, `src/auth_service.rs` | Same pattern. `From<compio_postgres::Error>` for `RegistryError` now walks the `source()` chain to reach `DbError` messages (was matching on the old enum's Display) - preserves the duplicate-key detection heuristic |
+| `auth` | `Cargo.toml`, `src/service.rs` | Same pattern. `open_conn` helper per crate spawns the connection task and returns the Client. Matches the spec - no `Transaction<'a>` used, we do manual BEGIN/COMMIT/ROLLBACK via `Client::execute` |
 
 ## Workspace Cargo.toml
 
@@ -49,12 +49,12 @@ column that `build_update_one` always writes.
 
 Found while the first smoke test hung in `connect`. The existing
 `Handshake::next` took a `read_backend` result, matched `Normal { mut
-messages, .. }`, and returned `messages.next()` — dropping the rest of the
+messages, .. }`, and returned `messages.next()` - dropping the rest of the
 batch. Postgres almost always bundles AuthOk + ParameterStatus* +
 BackendKeyData + ReadyForQuery into one TCP segment, so the second call to
 `next()` would re-enter `read_backend` and block. Fixed by storing the
 `BackendMessages` iterator in `Handshake.pending` and draining it across
-calls. Strictly a correctness fix in Phase 3 code — unblocks the runtime.
+calls. Strictly a correctness fix in Phase 3 code - unblocks the runtime.
 
 ### 2. `Type::TEXT` is not a drop-in replacement for "text-format, infer type"
 
@@ -76,7 +76,7 @@ delegates to this; the typed-text path from the original spec is not used.
 As the spec anticipated, tokio-postgres's `Transaction<'a>` handles
 rollback-on-drop inside the transaction type itself. The pool never needs
 to know. Both `get_inner`'s cleanup branch and `return_client`'s broken
-check are now just `client.is_closed()` — no special ROLLBACK logic.
+check are now just `client.is_closed()` - no special ROLLBACK logic.
 
 ### 4. Pool error kind = `Connect`
 
@@ -84,13 +84,13 @@ Pool-layer synthetic errors (timeout, retries exhausted, warm-up failure)
 are routed through `Error::connect(io::Error::other(msg))`. The
 crate-private constructor is available because the pool lives inside
 compio-postgres. Callers see `kind: Kind::Connect`, which is the closest
-semantic match in the new error enum — failures are "can't hand you a
+semantic match in the new error enum - failures are "can't hand you a
 usable connection", which is what `Connect` means.
 
 ### 5. Test flakiness is unrelated
 
 Ran the full integration suite on the pre-migration HEAD
-(`3113934 feat(pg): HikariCP-inspired pool ...`) — same 5 `update_*`
+(`3113934 feat(pg): HikariCP-inspired pool ...`) - same 5 `update_*`
 failures, same `column "updated_at" of relation "notes" does not exist`
 errors. The schema in `tests/integration.rs::setup` has never matched the
 SQL that `build_update_one` emits; this is a test-side issue unrelated to
@@ -108,15 +108,15 @@ the port. 16 of 21 passing matches pre-migration exactly.
 
  crates/pg/                              -1600  (entire crate deleted)
 
- crates/plugin-db/src/{lib,callbacks}.rs   +20  (net) — swap Conn→Client,
+ crates/plugin-db/src/{lib,callbacks}.rs   +20  (net) - swap Conn->Client,
                                                 spawn Connection task
- crates/plugin-db/tests/integration.rs     ~20  — same renames in tests
- crates/control/src/registry.rs            +30  (net) — open_conn helper,
+ crates/plugin-db/tests/integration.rs     ~20  - same renames in tests
+ crates/control/src/registry.rs            +30  (net) - open_conn helper,
                                                 source-chain error match
- crates/control/src/auth_service.rs        +15  (net) — open_conn helper
- crates/auth/src/service.rs                +15  (net) — open_conn helper
- crates/*/Cargo.toml                       ~5   — dep swap
- Cargo.toml                                 ~3   — workspace dep swap
+ crates/control/src/auth_service.rs        +15  (net) - open_conn helper
+ crates/auth/src/service.rs                +15  (net) - open_conn helper
+ crates/*/Cargo.toml                       ~5   - dep swap
+ Cargo.toml                                 ~3   - workspace dep swap
 ```
 
 Net: +741 lines in compio-postgres, -1600 lines in legacy crate,

@@ -13,7 +13,7 @@
 //!   - Metrics (acquire time, usage time, creation time, timeouts)
 //!
 //! Single-threaded: uses `Cell`/`RefCell` (no atomics, no Mutex). The pool
-//! is `!Send` because compio's TcpStream uses `Rc` internally — the type
+//! is `!Send` because compio's TcpStream uses `Rc` internally - the type
 //! system enforces that all access is on one thread.
 //!
 //! Connection lifecycle
@@ -405,13 +405,13 @@ impl std::fmt::Debug for PoolConfig {
 // ---------------------------------------------------------------------------
 // Lightweight random (xorshift64*) for lifetime jitter.
 //
-// Seeded once per thread from the system clock — good enough for load
+// Seeded once per thread from the system clock - good enough for load
 // spreading, not for security. Avoids pulling in `rand`.
 // ---------------------------------------------------------------------------
 
 thread_local! {
     static JITTER_RNG: Cell<u64> = Cell::new({
-        // Seed from the system clock (wall-clock nanos) — good enough for
+        // Seed from the system clock (wall-clock nanos) - good enough for
         // spreading expiries across a pool. Falls back to a constant if the
         // system clock is before UNIX_EPOCH or mod gives 0.
         let nanos = std::time::SystemTime::now()
@@ -445,7 +445,7 @@ fn next_rand_f64() -> f64 {
     (next_rand_u64() >> 11) as f64 / (1u64 << 53) as f64
 }
 
-/// Compute jittered lifetime: ±25% of `base`.
+/// Compute jittered lifetime: +/-25% of `base`.
 fn jittered_lifetime(base: Duration) -> Duration {
     let factor = 0.75 + 0.5 * next_rand_f64();
     base.mul_f64(factor)
@@ -499,7 +499,7 @@ impl PoolEntry {
 // Metrics
 // ---------------------------------------------------------------------------
 
-/// Pool metrics — all Cell<u64> since we're single-threaded.
+/// Pool metrics - all Cell<u64> since we're single-threaded.
 #[derive(Debug)]
 pub struct PoolMetrics {
     /// Total connections created since pool start.
@@ -736,7 +736,7 @@ pub struct Pool {
     /// Callers waiting for a connection, in FIFO order.
     ///
     /// Each live slot is a shared [`WaiterSlot`] the pool can deposit a freed
-    /// [`PoolEntry`] directly into — handing the connection straight to the
+    /// [`PoolEntry`] directly into - handing the connection straight to the
     /// longest-queued waiter instead of returning it to `idle` where a fresh
     /// caller could barge it (POOL-2 / bb8/deadpool fairness model).
     ///
@@ -1105,8 +1105,8 @@ impl Pool {
                 // Adopt the popped slot: it is already counted in `total`, and
                 // until a PooledClient owns it (or it is pushed back to idle)
                 // its decrement must ride on Drop so cancellation during the
-                // dirty barrier / alive validation below — or an eviction
-                // `continue` — releases it exactly once. The manual
+                // dirty barrier / alive validation below - or an eviction
+                // `continue` - releases it exactly once. The manual
                 // `total -= 1` on the eviction paths is therefore gone; the
                 // guard's Drop does it when the loop body unwinds on `continue`.
                 let permit = PermitGuard::adopt(self);
@@ -1152,7 +1152,7 @@ impl Pool {
                 // unconditionally there is no interleaving that reaches it, and
                 // an unreachable guard is a claim in its own right.
                 //
-                // Runs regardless of `validation_bypass` — a dirty
+                // Runs regardless of `validation_bypass` - a dirty
                 // connection must be validated even if last_used is
                 // extremely recent, because dirtiness is precisely the case
                 // where "last_used was recent" is insufficient.
@@ -1212,13 +1212,13 @@ impl Pool {
                 });
             }
 
-            // 2. No idle connections — create a new one if under limit.
+            // 2. No idle connections - create a new one if under limit.
             // Reserve the slot synchronously *before* the await so concurrent
             // callers in the same loop see the bumped `total` and don't race
             // past `max_size`. The reservation rides on a PermitGuard: if this
             // future is cancelled while parked at `connect_one().await` (the
             // outer `acquire_timeout`, or a caller dropping the get()), the
-            // guard's Drop releases the slot — without it the `+1` would leak
+            // guard's Drop releases the slot - without it the `+1` would leak
             // forever (POOL-1). On Err the guard also releases it on return.
             if self.total.get() < self.config.max_size {
                 let permit = PermitGuard::reserve(self);
@@ -1275,15 +1275,15 @@ impl Pool {
                 });
                 // H7 design note: we don't wake a waiter on successful
                 // connect. The freshly-connected client is immediately
-                // consumed by the current caller — there's no idle entry
+                // consumed by the current caller - there's no idle entry
                 // for a waiter to acquire. Waiters are woken on
                 // `return_client`, which is when a borrowed entry
                 // actually becomes available.
             }
 
-            // 3. Pool is full — park in the FIFO wait queue. Resolves either
+            // 3. Pool is full - park in the FIFO wait queue. Resolves either
             // with a connection handed *directly* to us by `return_client`
-            // (bypassing `idle`, so no fresh caller can barge it — POOL-2), or
+            // (bypassing `idle`, so no fresh caller can barge it - POOL-2), or
             // with `None` meaning capacity/idle opened up and we should loop.
             if let Some(entry) = Waiter::new(self).await {
                 // A direct hand-off still needs the same expiry, closed, dirty,
@@ -1293,7 +1293,7 @@ impl Pool {
                 // caller cannot barge ahead of this waiter.
                 self.idle.borrow_mut().push(entry);
             }
-            // else: woken for capacity/idle — loop and retry the acquire.
+            // else: woken for capacity/idle - loop and retry the acquire.
         }
     }
 
@@ -1428,7 +1428,7 @@ impl Pool {
         }
 
         // Live connection. Hand it DIRECTLY to the longest-queued waiter if one
-        // exists — bypassing `idle` so a fresh, never-parked caller cannot pop
+        // exists - bypassing `idle` so a fresh, never-parked caller cannot pop
         // it first (POOL-2 FIFO fairness). Otherwise park it in `idle`.
         entry.touch();
         let waker = self.deposit_freed_entry(entry);
@@ -1442,7 +1442,7 @@ impl Pool {
 
     /// Home an alive, un-owned [`PoolEntry`] that needs a new holder: hand it
     /// directly to the front live waiter, or push it to `idle` if none is
-    /// waiting. Does NOT touch `active` or `total` — the connection is alive
+    /// waiting. Does NOT touch `active` or `total` - the connection is alive
     /// and already counted. `active` is bumped only after the next checkout's
     /// validation succeeds.
     ///
@@ -1578,7 +1578,7 @@ impl Pool {
             pool.wake_one_waiter();
         }
 
-        // 3. Refill to min_idle. No retry here — if connect fails, back off
+        // 3. Refill to min_idle. No retry here - if connect fails, back off
         // until the next 30s tick. Reserve the slot before the await so
         // concurrent get_inner calls see the bumped `total`.
         let (need, can_create) = {
@@ -1700,7 +1700,7 @@ impl Pool {
         weak.upgrade().is_some_and(|pool| !pool.closed.get())
     }
 
-    // ── Convenience methods ──────────────────────────────────────────────
+    // -- Convenience methods ----------------------------------------------
 
     /// Acquire a connection, run a query, return the connection.
     pub async fn query(
@@ -1730,7 +1730,7 @@ impl Pool {
 
     /// Acquire a connection, execute a statement, return the connection.
     ///
-    /// Uses the **extended/prepared** protocol — exactly ONE command per call.
+    /// Uses the **extended/prepared** protocol - exactly ONE command per call.
     /// Multi-statement SQL (e.g. DDL with a trailing `COMMENT ON COLUMN`
     /// sentinel) raises `42601 cannot insert multiple commands into a prepared
     /// statement`; use [`Pool::batch_execute`] for those.
@@ -1748,8 +1748,8 @@ impl Pool {
     /// Acquire a connection and run one or more `;`-separated statements via the
     /// **simple-query** protocol, then return the connection.
     ///
-    /// This is the correct primitive for multi-statement DDL — e.g. the
-    /// `CREATE TABLE …; COMMENT ON COLUMN … IS 'zsenc:…'` / `'__zsmask:…'`
+    /// This is the correct primitive for multi-statement DDL - e.g. the
+    /// `CREATE TABLE ...; COMMENT ON COLUMN ... IS 'zsenc:...'` / `'__zsmask:...'`
     /// sentinel batches the schema builder emits (P4 HALF A / P5.5 PR 6).
     /// `Pool::execute` cannot run those (it prepares a single command).
     ///
@@ -1763,7 +1763,7 @@ impl Pool {
             .await
     }
 
-    // ── Pool stats (for metrics endpoint) ────────────────────────────────
+    // -- Pool stats (for metrics endpoint) --------------------------------
 
     /// Number of idle connections available.
     pub fn idle_count(&self) -> usize {
@@ -1798,10 +1798,10 @@ impl Pool {
 /// touches it crosses an `.await` (on-demand `connect_one`, the dirty barrier,
 /// alive-bypass validation). `Pool::get` runs `get_inner`
 /// under `compio::time::timeout`, a `select!` that DROPS the inner future when
-/// the timer wins — so a post-await `total -= 1` statement is skipped on
+/// the timer wins - so a post-await `total -= 1` statement is skipped on
 /// cancellation, leaking the permit forever (POOL-1). Tying the decrement to
 /// `Drop` makes it fire on every exit: success, error, early return, panic,
-/// and — crucially — cancellation. The guard is `disarm()`ed once a
+/// and - crucially - cancellation. The guard is `disarm()`ed once a
 /// `PooledClient` owns the slot (its own Drop -> `return_client` then accounts
 /// for it) or the entry is back in `idle`.
 struct PermitGuard<'a> {
@@ -1818,7 +1818,7 @@ impl<'a> PermitGuard<'a> {
         guard
     }
 
-    /// Adopt an EXISTING slot already counted in `total` — a `PoolEntry`
+    /// Adopt an EXISTING slot already counted in `total` - a `PoolEntry`
     /// popped out of `idle`. Does not touch `total`; only governs the
     /// decrement-on-drop so a cancellation during the barrier / validation
     /// await releases the popped entry's slot.
@@ -1956,7 +1956,7 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Waiter — drop-safe slot in the wait queue with direct connection hand-off
+// Waiter - drop-safe slot in the wait queue with direct connection hand-off
 // ---------------------------------------------------------------------------
 
 /// Shared rendezvous between a parked [`Waiter`] and `return_client`.
@@ -1964,7 +1964,7 @@ where
 /// `return_client` deposits a freed [`PoolEntry`] into `entry` and wakes the
 /// waiter via `waker`, handing the connection *directly* to the longest-queued
 /// caller instead of pushing it to `idle` (which a fresh, never-parked caller
-/// could pop first — the POOL-2 barge). The slot is an `Rc` so the pool holds
+/// could pop first - the POOL-2 barge). The slot is an `Rc` so the pool holds
 /// one clone (in the `waiters` queue, for depositing) and the `Waiter` future
 /// holds another (so it can still read a deposited entry even after the pool
 /// has popped its queue slot).
@@ -1987,9 +1987,9 @@ impl WaiterSlot {
 
 /// A future that registers itself in the pool's wait queue and unregisters on
 /// drop. Resolves to:
-///   - `Some(entry)` — `return_client` handed us a connection directly; the
+///   - `Some(entry)` - `return_client` handed us a connection directly; the
 ///     caller must run it through the common checkout checks.
-///   - `None` — we were woken because capacity opened up or an idle entry
+///   - `None` - we were woken because capacity opened up or an idle entry
 ///     appeared (e.g. an eviction freed a `total` slot); the caller should loop
 ///     and retry the acquire (pop idle / create).
 ///
@@ -2001,7 +2001,7 @@ impl WaiterSlot {
 struct Waiter<'a> {
     pool: &'a Pool,
     /// Our own clone of the shared slot, retained even after the pool pops our
-    /// queue entry on hand-off — so `poll`/`drop` can still see a deposited
+    /// queue entry on hand-off - so `poll`/`drop` can still see a deposited
     /// entry. `None` until first poll registers us.
     slot: Option<Rc<WaiterSlot>>,
 }
@@ -2054,7 +2054,7 @@ impl Future for Waiter<'_> {
             return Poll::Ready(None);
         }
 
-        // 1. A connection handed directly to us takes priority — claim it and
+        // 1. A connection handed directly to us takes priority - claim it and
         // remove its otherwise-hidden ownership record.
         if let Some(slot) = self.slot.as_ref().map(Rc::clone) {
             let entry = slot.entry.borrow_mut().take();
@@ -2150,7 +2150,7 @@ fn wake_all(wakers: Vec<Waker>) {
 }
 
 // ---------------------------------------------------------------------------
-// Close waiter — cancellation-safe multi-caller active drain
+// Close waiter - cancellation-safe multi-caller active drain
 // ---------------------------------------------------------------------------
 
 struct CloseWaiterSlot {
@@ -2273,8 +2273,8 @@ impl Drop for CommandRecoveryGuard<'_> {
 
 /// A borrowed connection that returns to the pool on drop.
 ///
-/// Dereferences to [`Client`] — call any client method (`.query(...)`,
-/// `.execute(...)`, `.transaction()`, …) directly on the borrow. Those direct
+/// Dereferences to [`Client`] - call any client method (`.query(...)`,
+/// `.execute(...)`, `.transaction()`, ...) directly on the borrow. Those direct
 /// calls retain bare-Client semantics and do not acquire a command deadline;
 /// use [`PooledClient::command`] to apply this pool's configured deadline.
 /// [`Pool::query`], [`Pool::execute`], and the other Pool convenience methods

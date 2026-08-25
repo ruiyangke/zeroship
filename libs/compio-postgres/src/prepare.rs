@@ -5,7 +5,7 @@
 // cancellation ownership, recursive-type cycle detection, cache races, and
 // multirange resolution deliberately diverge and are documented inline. The
 // recursive helpers (`prepare_rec`, `get_type_rec`) remain boxed futures
-// because the recursion between `prepare` ↔ `get_type` ↔ `prepare_rec`
+// because the recursion between `prepare` <-> `get_type` <-> `prepare_rec`
 // cannot be expressed as a plain async fn.
 
 use crate::client::{InnerClient, Responses, StatementCacheAdmission};
@@ -418,7 +418,7 @@ async fn prepare_and_cache(
 /// constructor and this file is not allowed to modify the error module,
 /// so we reuse `Error::parse` (which wraps an `io::Error`) to surface the
 /// cycle with a descriptive message. Semantically the failure is "we
-/// cannot resolve this type from pg_catalog" — close enough to a parse
+/// cannot resolve this type from pg_catalog" - close enough to a parse
 /// error over the type-info response.
 fn cycle_detected(oid: Oid) -> Error {
     Error::parse(io::Error::new(
@@ -459,7 +459,7 @@ pub(crate) async fn get_type(client: &Arc<InnerClient>, oid: Oid) -> Result<Type
 /// to detect cycles. A cycle can occur when a domain type is defined over
 /// itself, or a composite type transitively references its own row type.
 /// Without this guard, resolution recurses forever because `client.cached_type`
-/// only returns `Some` after `set_type` fires — so any OID currently
+/// only returns `Some` after `set_type` fires - so any OID currently
 /// being resolved is invisible to nested callers.
 async fn get_type_inner(
     client: &Arc<InnerClient>,
@@ -488,7 +488,7 @@ async fn get_type_inner(
     result
 }
 
-/// Body of `get_type_inner` — separated so the parent can guarantee
+/// Body of `get_type_inner` - separated so the parent can guarantee
 /// `in_flight.remove(&oid)` runs on every return path. The caller is
 /// responsible for inserting `oid` into `in_flight` before calling.
 async fn get_type_body(
@@ -579,7 +579,7 @@ async fn typeinfo_statement(client: &Arc<InnerClient>) -> Result<Statement, Erro
     // Recheck-before-set: two concurrent `query_raw` calls can both miss
     // the cache, both PREPARE on the server, and only one can win the
     // cache slot. If another task beat us, return its Statement and drop
-    // ours — `StatementInner::drop` in statement.rs sends `Close S`, so
+    // ours - `StatementInner::drop` in statement.rs sends `Close S`, so
     // the extra server-side statement is DEALLOCATEd instead of leaking
     // until connection close.
     if let Some(other) = client.typeinfo() {

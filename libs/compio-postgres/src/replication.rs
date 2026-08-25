@@ -7,7 +7,7 @@
 //!   [`crate::config::Config::replication`] /
 //!   [`crate::config::ReplicationMode`]).
 //! - `IDENTIFY_SYSTEM` (simple-query response shape).
-//! - `START_REPLICATION SLOT ... LOGICAL <lsn> (...)` — the server
+//! - `START_REPLICATION SLOT ... LOGICAL <lsn> (...)` - the server
 //!   transitions to the **CopyBoth** sub-protocol, returning
 //!   `CopyBothResponse` (`W`) followed by a stream of `CopyData` (`d`)
 //!   frames carrying either `XLogData` (`w`) or
@@ -18,7 +18,7 @@
 //!   (Begin/Commit/Origin/Relation/Type/Insert/Update/Delete/Truncate/Message).
 //!
 //! `postgres-protocol` 0.6 does **not** expose `CopyBothResponse` or
-//! the replication payload tags — see the `Message::parse` match in
+//! the replication payload tags - see the `Message::parse` match in
 //! that crate; an unknown tag errors out. The replication-mode
 //! connection therefore owns the raw [`crate::buf_stream::BufStream`]
 //! and runs its own framer.
@@ -28,28 +28,28 @@
 //! The "right place" debate is between
 //!
 //! 1. **plugin-db**, where the consumer's *policy* (broker fan-out,
-//!    LSN tracking, watchdog, …) already lives, and
+//!    LSN tracking, watchdog, ...) already lives, and
 //! 2. **compio-postgres**, where the *protocol* lives.
 //!
 //! Mixing protocol + policy in plugin-db means re-implementing the
 //! BufStream framing on top of a public-API surface that doesn't exist
 //! today. Keeping protocol here gives plugin-db (and any future
-//! consumer — e.g. a CDC export job) a clean async-stream API.
+//! consumer - e.g. a CDC export job) a clean async-stream API.
 //!
 //! ## What this module ships in P8a.2
 //!
 //! - [`ReplicationMode`] / [`Config::replication`] (in [`crate::config`])
-//! - [`connect_replication`] — TCP + TLS + handshake + auth +
+//! - [`connect_replication`] - TCP + TLS + handshake + auth +
 //!   `replication=database`, returning a [`ReplicationConnection`].
-//! - [`ReplicationConnection::identify_system`] — minimal,
+//! - [`ReplicationConnection::identify_system`] - minimal,
 //!   used for picking the timeline / `xlogpos` on startup.
-//! - [`ReplicationConnection::start_logical_replication`] — issues
+//! - [`ReplicationConnection::start_logical_replication`] - issues
 //!   `START_REPLICATION SLOT ... LOGICAL ...`, waits for
 //!   `CopyBothResponse`, and returns a [`ReplicationStream`].
-//! - [`ReplicationStream::next`] — yields [`ReplicationMessage`]
+//! - [`ReplicationStream::next`] - yields [`ReplicationMessage`]
 //!   (`XLogData` / `PrimaryKeepalive`). The caller drives
 //!   [`ReplicationStream::send_standby_status_update`] periodically.
-//! - [`pgoutput`] — pure decoder. The stream layer is *agnostic* to
+//! - [`pgoutput`] - pure decoder. The stream layer is *agnostic* to
 //!   the logical-decoding plugin; `pgoutput` is just the parser we
 //!   ship because every consumer in zeroship uses it.
 //!
@@ -87,7 +87,7 @@ use std::collections::HashMap;
 //
 // Tags drawn directly from the PG 16 wire-protocol spec. We keep them
 // here, NOT in `codec.rs`, because the regular Message::parse in
-// postgres-protocol doesn't recognise them — including them in the
+// postgres-protocol doesn't recognise them - including them in the
 // query path would just add dead branches.
 
 /// Backend tag: `CopyBothResponse`. Sent in response to
@@ -96,7 +96,7 @@ pub const COPY_BOTH_RESPONSE_TAG: u8 = b'W';
 /// Backend tag: a frame inside the CopyBoth channel. Same as the
 /// regular `CopyData` tag.
 pub const COPY_DATA_TAG: u8 = b'd';
-/// Backend tag: a `CopyDone` signal — terminates the stream.
+/// Backend tag: a `CopyDone` signal - terminates the stream.
 pub const COPY_DONE_TAG: u8 = b'c';
 /// Backend tag: `ErrorResponse`.
 pub const ERROR_RESPONSE_TAG: u8 = b'E';
@@ -107,9 +107,9 @@ pub const NOTICE_RESPONSE_TAG: u8 = b'N';
 pub const XLOG_DATA_TAG: u8 = b'w';
 /// CopyData sub-tag: `PrimaryKeepaliveMessage`.
 pub const PRIMARY_KEEPALIVE_TAG: u8 = b'k';
-/// CopyData sub-tag: `StandbyStatusUpdate` (frontend → backend).
+/// CopyData sub-tag: `StandbyStatusUpdate` (frontend -> backend).
 pub const STANDBY_STATUS_UPDATE_TAG: u8 = b'r';
-/// CopyData sub-tag: `HotStandbyFeedback` (frontend → backend, unused).
+/// CopyData sub-tag: `HotStandbyFeedback` (frontend -> backend, unused).
 pub const HOT_STANDBY_FEEDBACK_TAG: u8 = b'h';
 
 // ---------------------------------------------------------------------------
@@ -270,7 +270,7 @@ where
     )
     .await?;
 
-    // Run the normal startup + auth handshake — connect_raw_into
+    // Run the normal startup + auth handshake - connect_raw_into
     // exposes the post-handshake BufStream that the replication
     // connection then owns.
     let (stream, parameters) = handshake_replication(stream, cfg).await?;
@@ -286,7 +286,7 @@ where
 }
 
 /// Run the startup + auth handshake through a wrapper that hands us
-/// back the raw, post-handshake stream — not a Client/Connection pair.
+/// back the raw, post-handshake stream - not a Client/Connection pair.
 ///
 /// We can't reuse [`crate::connect_raw::connect_raw`] verbatim because
 /// it constructs a `Connection` (which immediately wants to be
@@ -396,13 +396,13 @@ where
     T: AsyncRead + AsyncWrite + Unpin,
 {
     /// Server-reported parameter map captured during handshake
-    /// (`server_version`, `server_encoding`, …). Convenience for
+    /// (`server_version`, `server_encoding`, ...). Convenience for
     /// callers that need to gate on PG version.
     pub fn parameters(&self) -> &HashMap<String, String> {
         &self.parameters
     }
 
-    /// Issue `IDENTIFY_SYSTEM` — used at start-up to discover the
+    /// Issue `IDENTIFY_SYSTEM` - used at start-up to discover the
     /// current WAL position when there's no prior `confirmed_flush_lsn`
     /// to resume from.
     ///
@@ -429,7 +429,7 @@ where
 
         // IDENTIFY_SYSTEM returns: RowDescription, DataRow,
         // CommandComplete, ReadyForQuery. We use postgres-protocol's
-        // parser for these — they're regular tags.
+        // parser for these - they're regular tags.
         //
         // The outcome is decided at `ReadyForQuery`, NOT at the frame that
         // produced it. Two reasons, and each was its own defect:
@@ -538,7 +538,7 @@ where
     /// (e.g. from [`identify_system`](Self::identify_system) or the
     /// plugin-db setup outcome) and pass it as `start_lsn`. Passing
     /// `"0/0"` lets the server resume from the slot's own
-    /// `confirmed_flush_lsn` — the simplest correct choice.
+    /// `confirmed_flush_lsn` - the simplest correct choice.
     pub async fn start_logical_replication(
         mut self,
         opts: StartReplicationOptions<'_>,
@@ -667,7 +667,7 @@ where
             let header = read_header(&mut self.stream).await?;
             match header.tag {
                 COPY_BOTH_RESPONSE_TAG => {
-                    // Consume payload — we don't need its fields
+                    // Consume payload - we don't need its fields
                     // (overall format byte + column count + per-column
                     // format byte). The CopyBoth channel is open after
                     // this.
@@ -863,15 +863,15 @@ pub struct ReplicationStream<S, T> {
 /// Tracks the two distinct LSN positions a logical-replication client
 /// reports back to the walsender in a `StandbyStatusUpdate`:
 ///
-/// - `received` — the highest LSN we've *seen on the wire* (the
+/// - `received` - the highest LSN we've *seen on the wire* (the
 ///   `wal_end` of an XLogData / PrimaryKeepalive). Reported as
 ///   `write_lsn`.
-/// - `processed` — the highest LSN the caller has *durably handled*
+/// - `processed` - the highest LSN the caller has *durably handled*
 ///   (advanced via [`ReplicationStream::advance_lsn`]). Reported as both
 ///   `flush_lsn` and `apply_lsn`.
 ///
 /// Keeping them separate matters: `flush_lsn` is a *durability promise*
-/// — Postgres recycles WAL and advances the slot's `confirmed_flush`
+/// - Postgres recycles WAL and advances the slot's `confirmed_flush`
 /// up to it. Conflating "received" (merely buffered) with "flushed"
 /// (durably processed) would let the server discard WAL the consumer
 /// hasn't actually persisted.
@@ -936,7 +936,7 @@ pub enum ReplicationMessage {
         /// pgoutput frame bytes.
         body: bytes::Bytes,
     },
-    /// Periodic keepalive — the server's current `wal_end`, plus a
+    /// Periodic keepalive - the server's current `wal_end`, plus a
     /// flag asking us to reply with a StandbyStatusUpdate right now.
     PrimaryKeepalive {
         wal_end: u64,
@@ -1151,7 +1151,7 @@ where
         self.lsn.received
     }
 
-    /// Highest WAL LSN the caller has confirmed it processed —
+    /// Highest WAL LSN the caller has confirmed it processed -
     /// reported as `flush_lsn` in StandbyStatusUpdate frames.
     pub fn last_processed_lsn(&self) -> u64 {
         self.lsn.processed
@@ -1167,7 +1167,7 @@ where
     /// [`next`](Self::next). Fully realizing the durability guarantee
     /// therefore requires the CONSUMER to call `advance_lsn` only
     /// *after* a durable hand-off (persisted / acknowledged), never on
-    /// mere receipt — a concern that lives in the consumer
+    /// mere receipt - a concern that lives in the consumer
     /// (`wal_consumer.rs`), intentionally out of scope of this driver.
     pub fn advance_lsn(&mut self, lsn: u64) {
         self.lsn.advance_processed(lsn);
@@ -1185,7 +1185,7 @@ where
     /// consumer hasn't actually persisted.
     ///
     /// `reply_requested = true` makes the server reply with an
-    /// immediate PrimaryKeepalive — typically left `false`.
+    /// immediate PrimaryKeepalive - typically left `false`.
     ///
     /// NOT CANCEL-SAFE. Dropping this future before it resolves can leave a
     /// fraction of the frame on the wire, which no later frame can repair;
@@ -1300,7 +1300,7 @@ where
 }
 
 /// Read one message via postgres-protocol's framer. Used by
-/// IDENTIFY_SYSTEM (DataRow / CommandComplete / ReadyForQuery — all
+/// IDENTIFY_SYSTEM (DataRow / CommandComplete / ReadyForQuery - all
 /// regular tags Message::parse already knows).
 async fn read_one_message<S>(stream: &mut BufStream<S>) -> Result<Message, Error>
 where
@@ -1315,7 +1315,7 @@ where
     }
 }
 
-/// Send a simple-query (`Q`) frontend message — used to issue both
+/// Send a simple-query (`Q`) frontend message - used to issue both
 /// `IDENTIFY_SYSTEM` and `START_REPLICATION`. The walsender accepts
 /// the simple-query path for the replication command grammar.
 async fn send_simple_query<S>(stream: &mut BufStream<S>, query: &str) -> Result<(), Error>
@@ -1331,7 +1331,7 @@ where
 /// Encode a `StandbyStatusUpdate` frame into the stream's write
 /// buffer.
 ///
-/// Wire layout (frontend → backend, inside CopyData):
+/// Wire layout (frontend -> backend, inside CopyData):
 ///
 /// ```text
 ///   'd' tag, length, [
@@ -1355,7 +1355,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let dst = stream.write_buf_mut();
-    // Body length = sub-tag(1) + 4×i64(32) + reply(1) = 34 bytes
+    // Body length = sub-tag(1) + 4xi64(32) + reply(1) = 34 bytes
     // CopyData wire length field includes itself (4 bytes), so the
     // declared length = 4 + 34 = 38.
     const BODY_BYTES: u32 = 34;
@@ -1387,7 +1387,7 @@ fn error_from_error_response_frame(header: &WireHeader, payload: &[u8]) -> Error
 /// big-endian length + field payload) into an [`Error`].
 ///
 /// Runs `postgres_protocol`'s framer over `body` so the SQLSTATE,
-/// severity, and message survive as a [`crate::error::DbError`] — the
+/// severity, and message survive as a [`crate::error::DbError`] - the
 /// same shape the `IDENTIFY_SYSTEM` loop produces via
 /// `Message::ErrorResponse(body) => Error::db(body)`. A byte count alone
 /// (the former behaviour) made `START_REPLICATION` failures
@@ -1522,7 +1522,7 @@ fn missing_identify_field(name: &str) -> Error {
 
 /// Parse a Postgres text LSN like `"0/16B3750"` into a `u64`.
 ///
-/// Returns `None` on malformed input rather than erroring — the
+/// Returns `None` on malformed input rather than erroring - the
 /// callers that need correctness gate on the input source (the slot
 /// setup outcome) and a malformed value just means we resume from
 /// `0/0`, which Postgres treats as "use the slot's flush_lsn".
@@ -1552,7 +1552,7 @@ fn postgres_microseconds_since_epoch() -> i64 {
 }
 
 // ---------------------------------------------------------------------------
-// pgoutput — logical-decoding payload decoder
+// pgoutput - logical-decoding payload decoder
 // ---------------------------------------------------------------------------
 
 /// pgoutput logical-decoding message decoder.
@@ -1582,7 +1582,7 @@ pub mod pgoutput {
         },
         /// Commit of a transaction.
         Commit {
-            /// Flags — currently always 0.
+            /// Flags - currently always 0.
             flags: u8,
             /// LSN of the commit record.
             commit_lsn: u64,
@@ -1593,7 +1593,7 @@ pub mod pgoutput {
         },
         /// Replication origin.
         Origin { commit_lsn: u64, name: String },
-        /// A relation (table) descriptor — emitted before the first
+        /// A relation (table) descriptor - emitted before the first
         /// Insert/Update/Delete on that relation. Cache the mapping
         /// `rel_id -> (namespace, name, columns)` for use when the
         /// tuple messages reference it.
@@ -1829,7 +1829,7 @@ pub mod pgoutput {
         Binary(Bytes),
     }
 
-    /// A tuple — one ordered list of column values.
+    /// A tuple - one ordered list of column values.
     #[derive(Debug, Clone, PartialEq)]
     pub struct TupleData {
         pub columns: Vec<TupleColumn>,
@@ -1923,7 +1923,7 @@ pub mod pgoutput {
         Ok(read_u64(buf)? as i64)
     }
 
-    /// Decode a tuple — a u16 column count followed by per-column
+    /// Decode a tuple - a u16 column count followed by per-column
     /// `(format_byte, [u32 len + bytes])`.
     fn read_tuple(buf: &mut &[u8]) -> Result<TupleData, DecodeError> {
         let n = read_u16(buf)? as usize;
@@ -2284,7 +2284,7 @@ pub mod pgoutput {
             }
             other => return Err(DecodeError::UnknownTag(other)),
         };
-        // We do NOT enforce `cur.is_empty()` — a future pgoutput proto
+        // We do NOT enforce `cur.is_empty()` - a future pgoutput proto
         // version may append optional fields, and the docs explicitly
         // reserve forward-compatibility space. The caller has the data
         // it needs.
@@ -2294,7 +2294,7 @@ pub mod pgoutput {
 
     // ----- Test-only encoders -----
     //
-    // pgoutput messages are server → client only; nobody sends them
+    // pgoutput messages are server -> client only; nobody sends them
     // from the client side. The codec tests need to construct frames
     // to assert the decoder reads what we expect. Encoders are
     // `#[cfg(test)]` so they don't bloat the release binary.
@@ -3131,7 +3131,7 @@ mod tests {
         // The walsender protocol distinguishes write (received) from
         // flush (durably processed). A careful caller that has *seen*
         // up to LSN 100 on the wire but only durably *flushed* 50 must
-        // be able to report write=100, flush=50, apply=50 — otherwise
+        // be able to report write=100, flush=50, apply=50 - otherwise
         // Postgres would recycle WAL the consumer hasn't persisted.
         let mut t = LsnTracker::new(0);
         t.observe_received(100);

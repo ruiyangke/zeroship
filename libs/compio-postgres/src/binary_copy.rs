@@ -288,7 +288,7 @@ fn parse_binary_copy_header(chunk: &mut Cursor<Bytes>) -> Result<Header, Error> 
     // Per PG COPY binary format spec: bits 16-31 are critical (abort on an
     // UNRECOGNIZED bit) and bits 0-15 are backward-compatible (ignore). Bit 16
     // is the recognized has-OIDs flag, so the unknown-critical range is bits
-    // 17-31 (mask 0xFFFE_0000) — bit 16 must NOT be swallowed here, else the
+    // 17-31 (mask 0xFFFE_0000) - bit 16 must NOT be swallowed here, else the
     // has_oids report below becomes unreachable.
     if (flags as u32) & 0xFFFE_0000 != 0 {
         return Err(Error::parse(io::Error::new(
@@ -406,7 +406,7 @@ mod tests {
 
     #[test]
     fn header_accepts_oid_flag() {
-        // Bit 16 is the recognized has-OIDs flag — it must NOT be rejected as
+        // Bit 16 is the recognized has-OIDs flag - it must NOT be rejected as
         // an unknown critical bit, and must surface as `has_oids == true`.
         let mut chunk = header_buf(1 << 16);
         let header = parse_binary_copy_header(&mut chunk).expect("OID-flag header must parse");

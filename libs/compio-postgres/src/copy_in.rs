@@ -2,7 +2,7 @@
 //
 // COPY FROM STDIN. The frontend pipes frames through an mpsc channel; the
 // connection task drains that channel directly, writing CopyData / CopyDone /
-// CopyFail frames onto the wire. Logic mirrors tokio-postgres exactly — the
+// CopyFail frames onto the wire. Logic mirrors tokio-postgres exactly - the
 // only compio-specific bit is in `connection.rs`, where the request-handler
 // branch reads the `CopyInReceiver` with `next().await` instead of
 // `poll_next_unpin(cx)`.

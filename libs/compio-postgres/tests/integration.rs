@@ -474,7 +474,7 @@ async fn connect_and_close() {
     assert!(!client.is_closed());
     let rows = client.query("SELECT 1::int4", &[]).await.unwrap();
     assert_eq!(rows.len(), 1);
-    // Drop closes the client — driver task exits gracefully.
+    // Drop closes the client - driver task exits gracefully.
     drop(client);
 }
 
@@ -651,10 +651,10 @@ async fn transaction_rollback_on_drop() {
         )
         .await
         .unwrap();
-        // tx dropped without commit — Drop impl enqueues ROLLBACK.
+        // tx dropped without commit - Drop impl enqueues ROLLBACK.
     }
 
-    // Client should still be usable for subsequent queries — this is the
+    // Client should still be usable for subsequent queries - this is the
     // key observable that replaces the legacy `needs_rollback` flag.
     let rows = client
         .query("SELECT val FROM test_tx_rollback", &[])
@@ -741,7 +741,7 @@ async fn pool_reuse() {
     let Some(url) = require_pg().await else { return };
     let pool = Pool::connect(&url, 2).await.unwrap();
 
-    // Use the pool 5 times — should reuse connections, not create new ones each time
+    // Use the pool 5 times - should reuse connections, not create new ones each time
     for i in 0..5 {
         let val: i32 = i;
         let rows = pool
@@ -1587,7 +1587,7 @@ async fn error_recovery_in_transaction() {
         .await
         .unwrap();
 
-    // INSERT with duplicate primary key — triggers unique_violation
+    // INSERT with duplicate primary key - triggers unique_violation
     let err = client
         .execute(
             &format!("INSERT INTO {COMPLEX_TABLE} (id, name) VALUES (1, $1)"),
@@ -1897,7 +1897,7 @@ async fn get_cancellation_during_connect_does_not_leak_permits() {
 //
 // Pre-fix `return_client` pushed the freed entry onto the shared `idle` vec and
 // only *advisory-woke* the front waiter. A fresh caller entering `get_inner`
-// between the wake and the woken waiter's re-poll pops the idle entry first —
+// between the wake and the woken waiter's re-poll pops the idle entry first -
 // barging ahead of the longer-queued waiter. Under load the parked waiter is
 // repeatedly barged -> starvation.
 //
@@ -1954,7 +1954,7 @@ async fn freed_connection_goes_to_front_waiter_not_a_barging_fresh_caller() {
         .min_idle(0)
         .acquire_timeout(std::time::Duration::from_secs(5))
         // Large so reacquiring the warm entry never does a network round-trip
-        // (no validation / dirty barrier) — keeps the interleaving synchronous
+        // (no validation / dirty barrier) - keeps the interleaving synchronous
         // and deterministic.
         .validation_bypass(std::time::Duration::from_secs(60));
     // Warm-up opens exactly one connection (min_idle=0 -> warm = max(0,1) = 1).
@@ -2044,20 +2044,20 @@ async fn freed_connection_goes_to_front_waiter_not_a_barging_fresh_caller() {
 // 26. handed_off_connection_is_reclaimed_if_waiter_is_cancelled (POOL-2 edge)
 //
 // The dangerous edge case of the direct hand-off: `return_client` deposits a
-// freed connection into the front waiter's slot and wakes it — but if that
+// freed connection into the front waiter's slot and wakes it - but if that
 // waiter's `get()` future is DROPPED/cancelled before it polls the entry out,
 // the connection must be re-homed (back to `idle`, or to the next live waiter),
 // NOT lost. A leaked entry here would be a worse bug than the unfairness we are
 // fixing.
 //
 // Accounting: the reclaim must NOT decrement `active` (it was never incremented
-// for this waiter — `active += 1` happens only when a waiter actually takes the
+// for this waiter - `active += 1` happens only when a waiter actually takes the
 // entry) and must NOT decrement `total` (the connection is still alive).
 //
 // In compio, dropping a task's `JoinHandle` (instead of `.detach()`-ing it)
 // cancels the task: its future is dropped without further polling. So we drop
 // A's handle AFTER the connection lands in A's slot but BEFORE A is polled to
-// take it — driving exactly the cancel-with-stranded-entry path.
+// take it - driving exactly the cancel-with-stranded-entry path.
 // ---------------------------------------------------------------------------
 
 #[compio::test]
@@ -2127,7 +2127,7 @@ async fn handed_off_connection_is_reclaimed_if_waiter_is_cancelled() {
         spins += 1;
         assert!(
             spins < 1000,
-            "reclaim never happened — the handed-off connection was LEAKED \
+            "reclaim never happened - the handed-off connection was LEAKED \
              (idle={}, active={}, total={})",
             pool.idle_count(),
             pool.active_count(),
@@ -2204,7 +2204,7 @@ async fn notify_delivered_on_idle_listener() {
         .unwrap();
 
     // Notifier connection B fires the NOTIFY. A issues NO further query after
-    // its LISTEN — the notification must arrive purely from A's idle read.
+    // its LISTEN - the notification must arrive purely from A's idle read.
     let client_b = connect(&url).await.unwrap();
     client_b
         .batch_execute(&format!("NOTIFY {chan}, 'hello-from-b'"))
@@ -2267,7 +2267,7 @@ async fn copy_in_error_does_not_deadlock() {
     // a PARSE error ("notanint" is not valid for `n int`); the server reports
     // it with an ErrorResponse. We then keep streaming a large volume of
     // further rows so the client is still writing long after the server has
-    // produced its error and stopped draining — exactly the condition that
+    // produced its error and stopped draining - exactly the condition that
     // wedges the serialized loop (server's send buffer fills with the
     // ErrorResponse while the client floods; both block). PG buffers a lot of
     // COPY input before surfacing the error, so the volume must be large
@@ -2275,7 +2275,7 @@ async fn copy_in_error_does_not_deadlock() {
     //
     // `feed` (not `send`) is used for the bulk rows: `send` force-flushes a
     // CopyData frame per call, while `feed` lets `CopyInSink` batch into ~4 KB
-    // frames — without it, this is hundreds of thousands of tiny io_uring
+    // frames - without it, this is hundreds of thousands of tiny io_uring
     // writes and the test is dominated by syscall latency rather than the
     // deadlock it is meant to probe.
     let copy_fut = async {
@@ -2292,13 +2292,13 @@ async fn copy_in_error_does_not_deadlock() {
     };
 
     // A deadlock manifests as the copy future never completing. Bound it
-    // generously — the multiplexed loop completes well within this, while the
+    // generously - the multiplexed loop completes well within this, while the
     // serialized loop wedges forever (RED-proven).
     let outcome = compio::time::timeout(std::time::Duration::from_secs(15), copy_fut).await;
 
     match outcome {
         Err(_) => panic!(
-            "COPY-1: copy_in deadlocked (timed out) — the loop never read the \
+            "COPY-1: copy_in deadlocked (timed out) - the loop never read the \
              server's ErrorResponse while streaming COPY frames"
         ),
         Ok(Ok(rows)) => panic!(
@@ -2980,7 +2980,7 @@ async fn failed_copy_in_transaction_can_be_rolled_back() {
 // PostgreSQL connection. A backend executes one connection's messages strictly
 // in order, so two `pg_sleep(0.4)` always take ~0.8s wall-clock whether the
 // second request is written up-front (multiplexed) or after the first response
-// (serialized) — the second query cannot begin on the server until the first
+// (serialized) - the second query cannot begin on the server until the first
 // finishes regardless. The serialized loop also already drains its queued
 // requests right after the first read, so the only difference is a single
 // round-trip's worth of latency (sub-millisecond on localhost). A timing
@@ -2990,7 +2990,7 @@ async fn failed_copy_in_transaction_can_be_rolled_back() {
 //
 // We drive several queries via `join_all` on the same `&Client`. Each
 // `simple_query` enqueues its request synchronously on first poll (before
-// awaiting its response), so all are outstanding at once — exercising the
+// awaiting its response), so all are outstanding at once - exercising the
 // multiplexed loop with a full pipeline of overlapping requests.
 // ---------------------------------------------------------------------------
 
@@ -3012,7 +3012,7 @@ async fn concurrent_queries_are_pipelined() {
     let results = join_all(futs).await;
 
     // Every concurrently-issued request must come back with its own correct
-    // value — proving the multiplexed loop routed the overlapping responses to
+    // value - proving the multiplexed loop routed the overlapping responses to
     // the right callers (FIFO), with no corruption, loss, or hang.
     assert_eq!(results, (0..32i32).collect::<Vec<_>>());
 
@@ -3534,7 +3534,7 @@ async fn concurrent_large_bidirectional_queries_do_not_deadlock() {
 // When the `Client` is dropped, the multiplexed driver must (a) send
 // Terminate, (b) emit a clean TCP FIN via the write half's `shutdown`, (c)
 // stop the dedicated read task, and (d) have `Connection::run` resolve
-// `Ok(())` promptly — never hang.
+// `Ok(())` promptly - never hang.
 //
 // We RETAIN the connection task's JoinHandle (instead of the detaching
 // `connect` helper) so we can observe the task actually finishing. Dropping
@@ -3545,8 +3545,8 @@ async fn concurrent_large_bidirectional_queries_do_not_deadlock() {
 // shutdown that wedges) into a fast, loud failure.
 //
 // This is the deterministically-testable slice of the teardown fix. The
-// other half — a leak on a WRITE-error exit against a half-open / partitioned
-// peer — cannot be forced reliably against a live PG without a custom
+// other half - a leak on a WRITE-error exit against a half-open / partitioned
+// peer - cannot be forced reliably against a live PG without a custom
 // man-in-the-middle socket, and is covered by code review (the teardown block
 // runs on every exit path, including `?`-propagated errors).
 // ---------------------------------------------------------------------------
@@ -3580,7 +3580,7 @@ async fn multiplexed_clean_shutdown_completes_without_hang() {
         .await
         .expect(
             "multiplexed driver did not shut down within 5s after client drop \
-             — read task likely left parked / teardown hung",
+             - read task likely left parked / teardown hung",
         );
     // Task ran to completion (not cancelled / panicked) ...
     let run_result = join_result.expect("connection task panicked or was cancelled");

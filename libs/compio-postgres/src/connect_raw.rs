@@ -110,7 +110,7 @@ where
     ///
     /// Classification of async messages (those `read_backend` returns as
     /// `BackendMessage::Async` because they arrive at the head of a
-    /// batch — ParameterStatus, NoticeResponse, NotificationResponse):
+    /// batch - ParameterStatus, NoticeResponse, NotificationResponse):
     ///
     /// - `NoticeResponse` / `NotificationResponse` are deferred into
     ///   `delayed` so the connection task can replay them on its first
@@ -123,7 +123,7 @@ where
     ///   sent (e.g. `server_version`).
     async fn next(&mut self) -> Result<Option<Message>, Error> {
         loop {
-            // First, drain any unread messages from the previous batch —
+            // First, drain any unread messages from the previous batch -
             // only pull a fresh batch off the wire when the pending
             // iterator is empty.
             if let Some(m) = self.pending.next().map_err(Error::parse)? {
@@ -134,7 +134,7 @@ where
             match batch {
                 BackendMessage::Async { message: msg, frame_len } => match msg {
                     Message::NoticeResponse(_) | Message::NotificationResponse(_) => {
-                        // Preserve ordering — the connection task
+                        // Preserve ordering - the connection task
                         // will replay these in front of its first
                         // real read.
                         self.delay(msg, frame_len)?;
@@ -553,7 +553,7 @@ fn target_session_attrs_mismatch(message: &'static str) -> Error {
 /// (and parameter map) instead of wiring it into a Client/Connection
 /// pair.
 ///
-/// Used by [`crate::replication::connect_replication`] — the
+/// Used by [`crate::replication::connect_replication`] - the
 /// replication-mode connection does NOT spawn a `Connection::run` task
 /// because the wire protocol after `START_REPLICATION` is bespoke
 /// (`CopyBothResponse` is not in postgres-protocol's tag list).

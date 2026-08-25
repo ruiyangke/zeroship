@@ -12,7 +12,7 @@
 //! `postgres-protocol`; the only public path to one is feeding raw
 //! wire bytes through [`postgres_protocol::message::backend::Message::parse`].
 //! [`Statement::unnamed`] and [`Column`]'s fields are also `pub(crate)`.
-//! This module wraps both — callers hand us column descriptors + raw
+//! This module wraps both - callers hand us column descriptors + raw
 //! binary values and get back a `Row` that behaves exactly like one
 //! produced by a real query (same `RowIndex` paths, same
 //! `column_to_json` branches).
@@ -47,7 +47,7 @@ pub fn column_for_test(name: impl Into<String>, ty: Type) -> Column {
 }
 
 /// Construct an unnamed [`Statement`] from a column list. Parameter
-/// types default to empty — the bench harness only needs the column
+/// types default to empty - the bench harness only needs the column
 /// metadata for `Row::columns()` / `Row::try_get` / `Row::raw_value`.
 #[must_use]
 pub fn statement_for_test(columns: Vec<Column>) -> Statement {
@@ -58,7 +58,7 @@ pub fn statement_for_test(columns: Vec<Column>) -> Statement {
 /// binary values (PostgreSQL binary wire format; `None` is SQL NULL).
 ///
 /// Wire-format reminder: the values you pass here must match what
-/// Postgres would send for the column's `Type` — e.g. `INT4` is a
+/// Postgres would send for the column's `Type` - e.g. `INT4` is a
 /// 4-byte big-endian `i32`, `BOOL` is a single byte (0 or 1), `JSONB`
 /// is a 1-byte version prefix (0x01) followed by UTF-8 JSON text,
 /// `TIMESTAMPTZ` is an 8-byte BE `i64` of microseconds since
@@ -69,8 +69,8 @@ pub fn statement_for_test(columns: Vec<Column>) -> Statement {
 ///
 /// Returns the same `Error` variants as a normal `Row::new` call would
 /// (parse error if the synthesised buffer is malformed). The function
-/// panics on `usize → i32 / u16 / u32` overflow because the test inputs
-/// are bounded by what fits on a stack — overflow here would mean
+/// panics on `usize -> i32 / u16 / u32` overflow because the test inputs
+/// are bounded by what fits on a stack - overflow here would mean
 /// something is deeply wrong with the test fixture.
 pub fn row_for_test(columns: Vec<Column>, values: Vec<Option<Vec<u8>>>) -> Result<Row, Error> {
     assert_eq!(

@@ -1,6 +1,6 @@
 // Ported from tokio-postgres (MIT/Apache-2.0). Copyright (c) 2016 Steven Fackler.
 
-//! compio-postgres — a native, asynchronous PostgreSQL client for compio/io_uring.
+//! compio-postgres - a native, asynchronous PostgreSQL client for compio/io_uring.
 //!
 //! Port of [`tokio-postgres`](https://github.com/rust-postgres/rust-postgres), adapted to
 //! compio's completion-based, owned-buffer I/O model. Client/Connection split preserved;

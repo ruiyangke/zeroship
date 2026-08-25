@@ -360,7 +360,7 @@ where
 
     /// Reject a framed message whose declared length (from the 4-byte length
     /// field, which itself counts its own 4 bytes but not the 1-byte tag)
-    /// would exceed `MAX_MESSAGE_SIZE`. O(1) — called before we buffer the
+    /// would exceed `MAX_MESSAGE_SIZE`. O(1) - called before we buffer the
     /// payload, so a malicious server can't coerce us to allocate up to
     /// 64 MB per connection.
     pub fn validate_length(&self, length: u32) -> Result<(), Error> {
@@ -391,7 +391,7 @@ where
         self.write_buf.extend_from_slice(data);
     }
 
-    /// Mutable access to the write buffer — used by the codec layer to
+    /// Mutable access to the write buffer - used by the codec layer to
     /// encode directly into the buffer (avoids a copy vs. building a
     /// temporary BytesMut and calling `write_bytes`).
     pub fn write_buf_mut(&mut self) -> &mut BytesMut {
@@ -459,8 +459,8 @@ where
 /// A stream that can be torn into independently-owned read and write
 /// halves, each pollable without aliasing the other.
 ///
-/// Implemented for the plain socket (`Socket` → compio `into_split`,
-/// which `clone()`s a refcounted shared fd into two owned halves — one fd,
+/// Implemented for the plain socket (`Socket` -> compio `into_split`,
+/// which `clone()`s a refcounted shared fd into two owned halves - one fd,
 /// shared, NOT a `dup`) and for BOTH variants of `MaybeTlsStream`. The
 /// plain-socket halves run concurrent `io_uring` submissions safely because
 /// the kernel allows concurrent read+write SQEs on a single socket fd, and
@@ -468,7 +468,7 @@ where
 ///
 /// **TLS splits too, and why that is sound is worth stating.** rustls does
 /// keep one session behind both directions, so the halves do not each get a
-/// copy of it — they share it (`Rc<RefCell<..>>`) and reach it only through
+/// copy of it - they share it (`Rc<RefCell<..>>`) and reach it only through
 /// synchronous helpers that never hold a borrow across an `await` (see
 /// `tls_sansio`). What they own separately is the socket, which is the same
 /// already-safe split as the plaintext case.
@@ -628,7 +628,7 @@ where
     /// reconstructed and returned in `Err` so the caller can keep using the
     /// serialized loop.
     ///
-    /// A non-empty `write_buf` does NOT force the serialized fallback — those
+    /// A non-empty `write_buf` does NOT force the serialized fallback - those
     /// bytes are simply carried onto the new write half and flushed with the
     /// next frame by [`BufWriteHalf::flush`] (which prepends them). In
     /// practice the split is taken at an idle point right after the handshake,

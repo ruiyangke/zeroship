@@ -6,12 +6,12 @@
 // equivalent; instead we use the async-fn `read_backend` /
 // `write_frontend` primitives defined in `codec.rs` over a `BufStream`.
 //
-// ## THE cancel-safety invariant (load-bearing — do not weaken)
+// ## THE cancel-safety invariant (load-bearing - do not weaken)
 //
 // compio is completion-based: dropping a future whose io_uring read
 // submission is in flight can silently lose bytes the kernel has already
-// moved into the owned buffer. So the cancel-unsafe primitive — the
-// socket `read` inside `read_backend` — must NEVER be dropped while a
+// moved into the owned buffer. So the cancel-unsafe primitive - the
+// socket `read` inside `read_backend` - must NEVER be dropped while a
 // submission is outstanding on a connection that may be reused. Both
 // run-loops below honour this. The one deliberate exception is expiry of the
 // configured socket-read deadline: that drops the read, returns a terminal
@@ -20,7 +20,7 @@
 //
 // ## Two run-loops (`run` picks one)
 //
-// * `run_multiplexed` — the splittable plain-socket path. A pooled connection
+// * `run_multiplexed` - the splittable plain-socket path. A pooled connection
 //   takes this path only when its selected transport is plaintext. The socket
 //   is split into two owned halves (compio `into_split` clones ONE refcounted
 //   shared fd; it does not `dup`). A DEDICATED read task owns the read half
@@ -29,7 +29,7 @@
 //   loop and is never dropped mid-submission during normal operation. The
 //   read task's JoinHandle is RETAINED (not detached): on a clean close the
 //   server's FIN resolves the parked read to EOF, and on every exit path the
-//   teardown step cancels the task — compio defers the in-flight read's
+//   teardown step cancels the task - compio defers the in-flight read's
 //   io_uring buffer reclaim, so cancelling is memory-safe (losing in-flight
 //   bytes is acceptable on a connection that is closing). This closes the
 //   half-open write-error leak (MUX-1).
@@ -120,7 +120,7 @@ pub(crate) enum TransactionEffect {
 }
 
 /// The payload of a [`Request`]: either a pre-encoded batch of frontend
-/// messages (`Parse + Bind + …`) or a streaming COPY IN source.
+/// messages (`Parse + Bind + ...`) or a streaming COPY IN source.
 pub enum RequestMessages {
     /// A fully pre-encoded batch of frontend messages.
     Single(FrontendMessage),
@@ -529,7 +529,7 @@ where
     /// Reads run to completion before control returns to the dispatch
     /// point (the cancel-safety invariant documented at the top of this
     /// file). This is the fallback path for a stream that cannot be split
-    /// into independent owned read/write halves — today only a custom
+    /// into independent owned read/write halves - today only a custom
     /// `TlsConnect` whose stream answers `Err` to `try_into_split`. Both
     /// transports this crate ships (plain socket and rustls) split, and use
     /// [`run_multiplexed`](Self::run_multiplexed) instead.
@@ -537,14 +537,14 @@ where
         let mut terminating = false;
 
         loop {
-            // Step A — flush any batches that couldn't be delivered last
+            // Step A - flush any batches that couldn't be delivered last
             // iteration because the downstream `Sender<BackendMessages>`
             // slot was still occupied. Doing this BEFORE any read keeps
             // batch ordering correct (a second batch for the same request
             // can never overtake the first).
             self.drain_pending_responses().await;
 
-            // Step B — clean shutdown once the client has gone away and
+            // Step B - clean shutdown once the client has gone away and
             // all awaited work is done. Drop-time housekeeping has no
             // receiver waiting for its response and must not delay shutdown.
             if terminating && !has_awaited_response(&self.responses, &self.pending_responses) {
@@ -568,7 +568,7 @@ where
                 return Ok(());
             }
 
-            // Step C — terminating branch: Terminate has been sent; we
+            // Step C - terminating branch: Terminate has been sent; we
             // only drain any remaining inbound bytes until we see EOF or
             // finish the awaited responses. No new requests.
             if terminating {
@@ -587,14 +587,14 @@ where
                 continue;
             }
 
-            // Step D — if responses are in-flight we MUST read the
+            // Step D - if responses are in-flight we MUST read the
             // socket to completion; racing the read future against
             // `receiver.next()` would drop an in-progress compio
             // submission, whose owned buffer (potentially already
             // written to by the kernel) would be discarded.
             //
             // Between messages we still want to make progress on any
-            // queued requests — `receiver.try_recv()` is non-blocking
+            // queued requests - `receiver.try_recv()` is non-blocking
             // and safe to call between awaits.
             if !self.responses.is_empty() {
                 let msg = match read_backend(&mut self.stream).await {
@@ -624,7 +624,7 @@ where
                 continue;
             }
 
-            // Step E — idle. No responses in flight, nothing pending.
+            // Step E - idle. No responses in flight, nothing pending.
             // We await a new request. Unsolicited server messages
             // arriving here (LISTEN/NOTIFY, Notice, ParameterStatus)
             // remain in the kernel socket buffer and will be drained on
@@ -837,7 +837,7 @@ where
 /// It holds four **disjoint** mutable borrows (plus the shared async
 /// sender). The multiplexed loop keeps the socket's read/write halves in
 /// separate locals, so building a `Dispatch` over the remaining state
-/// never aliases the carried read future — that is what lets the read
+/// never aliases the carried read future - that is what lets the read
 /// future stay alive across a `deliver_batch`/`handle_message` call.
 struct Dispatch<'a> {
     /// Shared, not `&mut`: the map lives behind a `Mutex` so the `Client` can
@@ -979,7 +979,7 @@ impl Dispatch<'_> {
                 // previous batch yet. Stash this batch and retry from
                 // the top of the loop via `pending_responses`; this is
                 // exactly how tokio-postgres handles `Poll::Pending`
-                // from `response.sender.poll_ready(cx)` — the batch is
+                // from `response.sender.poll_ready(cx)` - the batch is
                 // queued and the whole loop re-enters `poll_read` on
                 // the next wake.
                 let messages = e.into_inner();
@@ -1334,7 +1334,7 @@ enum MuxEvent {
     CopyFrame(Option<FrontendMessage>),
 }
 
-/// Drive `write_half`'s flush while concurrently draining the read channel —
+/// Drive `write_half`'s flush while concurrently draining the read channel -
 /// the cancel-safe interleave that keeps the multiplexed loop's
 /// "reads and writes proceed in the same poll" property even across a large
 /// write (MUX-DEADLOCK-1).
@@ -1724,7 +1724,7 @@ where
         // bounded FIFO; their pool poison is still published immediately.
         //
         // The JoinHandle is RETAINED (not detached) so every exit path can
-        // stop the task — see the `teardown:` block below. Without that, a
+        // stop the task - see the `teardown:` block below. Without that, a
         // main loop returning for a WRITE reason (a `?`-propagated error on a
         // flush) against a half-open/partitioned peer would leave this task
         // parked forever in `read_backend().await`, leaking the task, its
@@ -1809,9 +1809,9 @@ where
         let mut client_gone = false;
         let mut terminate_sent = false;
 
-        // Run the loop inside an inner future so that EVERY exit path — a
+        // Run the loop inside an inner future so that EVERY exit path - a
         // clean `return Ok(())`, a `?`-propagated write/read error, all of it
-        // — falls through to the `teardown:` block below, which stops the read
+        // - falls through to the `teardown:` block below, which stops the read
         // task and emits a FIN. `?` and `return` inside resolve this block.
         let run_result: Result<(), Error> = async {
             loop {
@@ -1869,7 +1869,7 @@ where
                 }
 
                 // ---- Gating for this iteration.
-                // Read is consumed only when no stashed batch is waiting — that
+                // Read is consumed only when no stashed batch is waiting - that
                 // gate preserves FIFO batch ordering (a stashed batch is always
                 // re-delivered before the next inbound frame is dispatched).
                 let accept_read = pending_responses.is_empty();
@@ -1885,7 +1885,7 @@ where
                             .is_some_and(ReadObligation::accepts_copy_input));
 
                 // ---- Single-event select. Every branch is a channel op or a
-                // `poll_ready` — all cancel-safe, so a not-ready branch being
+                // `poll_ready` - all cancel-safe, so a not-ready branch being
                 // dropped here loses nothing (the cancel-unsafe socket read lives
                 // in the detached read task, never here).
                 let event = poll_fn(|cx| -> Poll<MuxEvent> {
@@ -1897,7 +1897,7 @@ where
                         Poll::Pending => {}
                     }
 
-                    // (2) Inbound frame from the read task — next priority so
+                    // (2) Inbound frame from the read task - next priority so
                     // the server's send buffer keeps draining (delivers idle
                     // NOTIFYs and races COPY ErrorResponses).
                     if accept_read {
@@ -2168,7 +2168,7 @@ where
         // exiting on its own. But on a WRITE-error exit against a half-open /
         // partitioned peer, no FIN/RST is coming and the read is parked
         // forever. `JoinHandle::cancel().await` cancels the task (compio
-        // defers the in-flight read's io_uring buffer reclaim — memory-safe;
+        // defers the in-flight read's io_uring buffer reclaim - memory-safe;
         // losing in-flight bytes is fine since the connection is going away)
         // and drops the task's `read_half`, releasing its clone of the shared
         // fd. With `write_half` dropped on return, the last fd reference goes
