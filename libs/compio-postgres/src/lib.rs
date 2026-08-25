@@ -253,10 +253,22 @@ mod transaction;
 mod transaction_builder;
 pub mod types;
 
-// Test-only constructors for `Row` / `Statement` / `Column`. Gated
-// behind the `test-utils` Cargo feature so production builds never see
-// the surface. Added for plugin-db's `bench_row_to_json`.
-#[cfg(feature = "test-utils")]
+// Test-only constructors for `Row` / `Statement` / `Column`, plus the
+// serialized-loop transport the suite needs to reach that loop over
+// plaintext.
+//
+// NOT behind a Cargo feature, deliberately. It was, and the flag split
+// "the suite" into two different test sets: `cargo test -p compio-postgres`
+// built 72 targets and 1628 tests, while the same command with
+// `--features test-utils` built 73 and 1652. The 24 it silently dropped were
+// all of `tests/serialized_loop.rs` - the fallback transport, i.e. exactly
+// the code least likely to be covered another way. A flag that decides
+// whether a whole transport is tested is worse than a doc-hidden module.
+//
+// `#[doc(hidden)]` keeps it off the published surface. That is the same
+// trade `plugin-db` documents for its own bench-only items: still `pub`,
+// because an external test or bench target cannot reach `pub(crate)`.
+#[doc(hidden)]
 pub mod test_utils;
 
 /// An asynchronous notification.

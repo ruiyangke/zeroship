@@ -13,9 +13,8 @@
 //! This file unblocks measurement by synthesising rows from outside the
 //! crate. The blocker was that `compio_postgres::Row::new` is
 //! `pub(crate)`; this is worked around with
-//! `compio_postgres::test_utils::row_for_test` (gated behind the
-//! `test-utils` Cargo feature, which `plugin-db` enables in
-//! `[dev-dependencies]`).
+//! `compio_postgres::test_utils::row_for_test` (doc-hidden there, and always
+//! compiled).
 //!
 //! ## Workloads
 //!

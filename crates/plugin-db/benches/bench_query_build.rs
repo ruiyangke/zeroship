@@ -30,12 +30,13 @@
 //! benchable now, and `bench_row_to_json.rs` sits next to this file. The
 //! route taken was the first of the two this paragraph used to offer -
 //! `compio-postgres` exposes `Row` / `Statement` / `Column` constructors
-//! from `test_utils`, behind its `test-utils` feature, which `plugin-db`
-//! turns on as a dev-dependency (see this crate's `Cargo.toml`).
+//! from `test_utils`, a doc-hidden module there that is always compiled. It
+//! used to sit behind a `test-utils` feature; that flag stopped
+//! `serialized_loop.rs` from building under the plain test command, so it was
+//! removed.
 //!
-//! The feature is `test-utils` and it belongs to `compio-postgres`. This
-//! paragraph previously named `test-helpers`, which is THIS crate's
-//! feature and does not exist in `compio-postgres` at all - so a reader
+//! An earlier version of this paragraph named `test-helpers`, which is THIS
+//! crate's feature and never existed in `compio-postgres` at all - so a reader
 //! following it would look for a feature that is not there and conclude
 //! the work was still undone.
 //!

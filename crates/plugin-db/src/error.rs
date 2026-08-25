@@ -838,7 +838,7 @@ mod tests {
     //
     // These drive `is_missing_per_app_session_role` directly rather than the
     // contextual converter because `compio_postgres::Error` has no public
-    // constructor (its `test-utils` feature exposes Row/Statement/Column
+    // constructor (its doc-hidden `test_utils` exposes Row/Statement/Column
     // only). The real converter path, against a live server that actually
     // reports the SQLSTATE, is covered by `tests/missing_role.rs`; these pin
     // the discriminator's edges, which a live test cannot enumerate cheaply.

@@ -1,140 +1,143 @@
-//! A multi-statement `batch_execute` is ATOMIC; a sequence of them is not.
+//! What survives when a simple-query batch fails part way through.
 //!
-//! PostgreSQL wraps a simple query carrying several statements in an IMPLICIT
-//! transaction block, so if any statement fails the whole query is rolled back.
-//! Send the same statements as separate simple queries and each one commits on
-//! its own, so an earlier success survives a later failure.
+//! `batch_execute` sends several statements in ONE message, and PostgreSQL
+//! runs an unadorned batch inside an implicit transaction. So a failure at
+//! statement three discards statements one and two as well - and a caller who
+//! believed otherwise, saw the error, and retried would double-apply them.
 //!
-//! The two differ only in FRAMING -- identical SQL, identical order -- which is
-//! exactly why this is worth pinning. A caller reading `batch_execute("A; B")`
-//! has no syntactic cue that it behaves unlike `batch_execute("A")` followed by
-//! `batch_execute("B")`, and the difference only shows up once something fails.
-//! Nothing in the suite covered it.
+//! The contrast with the explicit-`COMMIT` case is the point: identical
+//! machinery, opposite outcome, decided entirely by what the SQL says. Both
+//! are read back from the server, because the driver's return value cannot
+//! distinguish them.
 //!
-//! It is also a property this driver could lose without any test noticing: if
-//! `batch_execute` were ever changed to split its input and send one statement
-//! per query -- a plausible thing to do while chasing a parser or a timeout --
-//! the atomicity would silently disappear and callers relying on it would start
-//! leaving half-applied work behind.
-//!
-//! Measured against the live server on 2026-08-23 before being written down:
-//! `psql -c "INSERT ...; SELECT 1/0"` leaves 0 rows, while the same two
-//! statements as `-c "INSERT ..." -c "SELECT 1/0"` leave 1.
-
-use compio_postgres::Client;
+//! `simple_query.rs` was among the lowest-covered non-TLS files when this was
+//! written.
 
 #[allow(dead_code)]
 mod common;
+use common::{suite_tls, test_object_name, test_url};
+use compio_postgres::Client;
 
-fn test_url() -> String {
-    common::test_url()
-}
-
-async fn connect_client(url: &str) -> Client {
-    let (client, connection) = compio_postgres::connect(url, common::suite_tls())
+async fn connected() -> Client {
+    let (client, connection) = compio_postgres::connect(&test_url(), suite_tls())
         .await
-        .expect("connect to PostgreSQL");
+        .expect("connect to the test server");
     compio::runtime::spawn(async move {
-        if let Err(error) = connection.run().await {
-            eprintln!("connection error: {error}");
-        }
+        let _ = connection.run().await;
     })
     .detach();
     client
 }
 
-/// Create a fresh temporary table and return its name.
-///
-/// Temporary, so nothing survives the session even if an assertion below fails
-/// part way through -- the review database is shared with other suites.
-async fn probe_table(client: &Client, suffix: &str) -> String {
-    let name = common::test_object_name(&format!("cpg_atomic_{suffix}"));
+async fn fixture(client: &Client) -> String {
+    let table = test_object_name("batch_atomic");
     client
-        .batch_execute(&format!("CREATE TEMPORARY TABLE {name} (v int)"))
+        .batch_execute(&format!("CREATE TABLE {table} (id int primary key)"))
         .await
-        .expect("create the probe table");
-    name
+        .expect("create the fixture table");
+    table
 }
 
-async fn row_count(client: &Client, table: &str) -> i64 {
+async fn surviving_ids(client: &Client, table: &str) -> Vec<i32> {
     client
-        .query_one(&format!("SELECT count(*) FROM {table}"), &[])
+        .query(&format!("SELECT id FROM {table} ORDER BY id"), &[])
         .await
-        .expect("count rows")
-        .get(0)
+        .expect("read the rows back")
+        .iter()
+        .map(|row| row.get::<_, i32>(0))
+        .collect()
 }
 
-/// One `batch_execute` carrying a failing statement rolls the whole thing back.
+async fn drop_fixture(client: &Client, table: &str) {
+    let _ = client
+        .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
+        .await;
+}
+
 #[compio::test]
-async fn a_failure_inside_one_batch_rolls_back_its_earlier_statements() {
-    let url = test_url();
-    let client = connect_client(&url).await;
-    let table = probe_table(&client, "one").await;
+async fn a_failure_mid_batch_discards_the_statements_before_it() {
+    let client = connected().await;
+    let table = fixture(&client).await;
 
-    client
-        .batch_execute(&format!("INSERT INTO {table} VALUES (1); SELECT 1/0"))
+    let error = client
+        .batch_execute(&format!(
+            "INSERT INTO {table} VALUES (1); \
+             INSERT INTO {table} VALUES (2); \
+             INSERT INTO {table} VALUES ('notanint'); \
+             INSERT INTO {table} VALUES (4)"
+        ))
         .await
-        .expect_err("the batch must fail on the division");
+        .expect_err("a non-integer cannot be inserted into an int column");
 
     assert_eq!(
-        row_count(&client, &table).await,
-        0,
-        "the INSERT survived a failure later in the SAME simple query; a \
-         multi-statement batch runs in an implicit transaction block and must \
-         be all-or-nothing"
+        error.code().map(|code| code.code().to_owned()).as_deref(),
+        Some("22P02"),
+        "the batch did not report the failing statement's own error: {error}"
     );
+    assert_eq!(
+        surviving_ids(&client, &table).await,
+        Vec::<i32>::new(),
+        "the two statements before the failure were committed; a caller who \
+         retries this batch will apply them twice"
+    );
+
+    drop_fixture(&client, &table).await;
 }
 
-/// The control, differing in ONE variable: the same statements, split across
-/// two `batch_execute` calls, are NOT atomic.
-///
-/// Without this the test above would also be satisfied by a driver that had
-/// somehow failed to run the INSERT at all, or by a server that rolled back
-/// everything unconditionally.
+/// The same batch shape with an explicit `COMMIT` before the failure keeps the
+/// committed work. Without this case the test above would also pass for a
+/// driver that discarded everything unconditionally.
 #[compio::test]
-async fn the_same_statements_sent_separately_are_not_atomic() {
-    let url = test_url();
-    let client = connect_client(&url).await;
-    let table = probe_table(&client, "two").await;
+async fn work_committed_earlier_in_the_batch_survives_a_later_failure() {
+    let client = connected().await;
+    let table = fixture(&client).await;
 
-    client
-        .batch_execute(&format!("INSERT INTO {table} VALUES (1)"))
+    let error = client
+        .batch_execute(&format!(
+            "BEGIN; \
+             INSERT INTO {table} VALUES (1); \
+             COMMIT; \
+             INSERT INTO {table} VALUES ('notanint')"
+        ))
         .await
-        .expect("the INSERT alone succeeds");
-    client
-        .batch_execute("SELECT 1/0")
-        .await
-        .expect_err("the division fails on its own");
+        .expect_err("the trailing statement is still malformed");
 
     assert_eq!(
-        row_count(&client, &table).await,
-        1,
-        "a committed INSERT was undone by a LATER, SEPARATE failing query -- \
-         separate simple queries each commit on their own"
+        error.code().map(|code| code.code().to_owned()).as_deref(),
+        Some("22P02"),
+        "expected the malformed statement's error: {error}"
     );
+    assert_eq!(
+        surviving_ids(&client, &table).await,
+        vec![1],
+        "an explicit COMMIT inside the batch did not make its work durable"
+    );
+
+    drop_fixture(&client, &table).await;
 }
 
-/// An explicit `BEGIN` inside a batch does not change the outcome, but it is
-/// worth pinning because it is where a caller's intuition most often breaks:
-/// the block is already implicit, so the `COMMIT` is what makes the work
-/// durable past the failing statement that follows it.
+/// THE CONTROL. A batch with nothing wrong applies every statement, so the
+/// two cases above are about FAILURE and not about batches being broken.
 #[compio::test]
-async fn an_explicit_commit_inside_a_batch_makes_earlier_work_durable() {
-    let url = test_url();
-    let client = connect_client(&url).await;
-    let table = probe_table(&client, "commit").await;
+async fn a_valid_batch_applies_every_statement() {
+    let client = connected().await;
+    let table = fixture(&client).await;
 
     client
         .batch_execute(&format!(
-            "BEGIN; INSERT INTO {table} VALUES (1); COMMIT; SELECT 1/0"
+            "INSERT INTO {table} VALUES (1); INSERT INTO {table} VALUES (2)"
         ))
         .await
-        .expect_err("the batch still fails on the division");
+        .expect("a batch with nothing wrong");
 
-    assert_eq!(
-        row_count(&client, &table).await,
-        1,
-        "an explicitly COMMITted statement inside a batch must survive a later \
-         failure in the same batch"
-    );
+    assert_eq!(surviving_ids(&client, &table).await, vec![1, 2]);
+
+    // And the session is usable, so a batch does not leave state behind.
+    let answer: i32 = client
+        .query_one_scalar("SELECT 909::int4", &[])
+        .await
+        .expect("the connection works after a batch");
+    assert_eq!(answer, 909);
+
+    drop_fixture(&client, &table).await;
 }
