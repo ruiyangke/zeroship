@@ -2323,3 +2323,209 @@ async fn compio_implicit_cache(
         .await;
     outcomes
 }
+
+// ---------------------------------------------------------------------------
+// A COPY this API cannot feed
+// ---------------------------------------------------------------------------
+
+/// What one driver did with a COPY it had no data channel for, and whether the
+/// session outlived it.
+#[derive(Debug, PartialEq, Eq)]
+struct CopyOutcome {
+    copy: Outcome,
+    session_usable_after: bool,
+}
+
+fn tokio_producerless_copy(url: String, table: String) -> CopyOutcome {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build the tokio runtime");
+        let outcome = runtime.block_on(async move {
+            let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+                .await
+                .expect("tokio-postgres connect");
+            let driver = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+
+            client
+                .batch_execute(&format!("CREATE TABLE {table}(v int4)"))
+                .await
+                .expect("tokio fixture");
+            let statement = client
+                .prepare(&format!("COPY {table} FROM STDIN"))
+                .await
+                .expect("tokio prepare");
+
+            let copy = match client.query(&statement, &[]).await {
+                Ok(rows) => Outcome::Rows(rows.len() as u64),
+                Err(error) => match error.sqlstate() {
+                    Some(code) => Outcome::SqlState(code),
+                    None => Outcome::LocalFailure,
+                },
+            };
+            let session_usable_after = client.query_one("SELECT 1::int4", &[]).await.is_ok();
+
+            let _ = client
+                .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
+                .await;
+            drop(client);
+            let _ = driver.await;
+            CopyOutcome {
+                copy,
+                session_usable_after,
+            }
+        });
+        let _ = sender.send(outcome);
+    });
+    handle.join().expect("the tokio thread panicked");
+    receiver
+        .recv()
+        .expect("no copy outcome came back from tokio")
+}
+
+async fn compio_producerless_copy(url: &str, table: &str) -> CopyOutcome {
+    let (client, connection) = compio_postgres::connect(url, common::suite_tls())
+        .await
+        .unwrap_or_else(|error| common::postgres_unreachable(url, &error));
+    compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    })
+    .detach();
+
+    client
+        .batch_execute(&format!("CREATE TABLE {table}(v int4)"))
+        .await
+        .expect("fixture");
+    let statement = client
+        .prepare(&format!("COPY {table} FROM STDIN"))
+        .await
+        .expect("prepare");
+
+    let copy = match client.query(&statement, &[]).await {
+        Ok(rows) => Outcome::Rows(rows.len() as u64),
+        Err(error) => match error.sqlstate() {
+            Some(code) => Outcome::SqlState(code),
+            None => Outcome::LocalFailure,
+        },
+    };
+    let session_usable_after = client
+        .query_one_scalar::<i32, _>("SELECT 1::int4", &[])
+        .await
+        .is_ok();
+
+    let _ = client
+        .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
+        .await;
+    CopyOutcome {
+        copy,
+        session_usable_after,
+    }
+}
+
+/// Asked for a COPY it cannot supply data for, this crate ABORTS the copy and
+/// keeps the session; tokio-postgres abandons it and loses the connection.
+///
+/// A deliberate divergence, and the header of `src/simple_query.rs` names it as
+/// the one place this port departs from upstream: "a `CopyInResponse` is
+/// answered with `CopyFail` rather than reported as an unexpected message and
+/// abandoned. Upstream abandons it, and abandoning it leaves the SESSION in
+/// copy mode, which costs the connection."
+///
+/// The scenarios are MATCHED - an explicit prepared statement and `query` on
+/// both drivers - because an earlier divergence reported in this file turned
+/// out to be one driver using an implicit statement cache and the other an
+/// explicit statement, which is two tests rather than a disagreement.
+///
+/// MEASURED 2026-08-24:
+///
+/// ```text
+///   ours:            57014, session usable afterwards
+///   tokio-postgres:  local failure (no SQLSTATE), connection closed
+/// ```
+///
+/// WHAT THIS DOES NOT CATCH: the caller-abandons-a-sink case. Both drivers end
+/// an unfinished `copy_in` by DROPPING the sink and neither reports the
+/// server's SQLSTATE through that path, so there is nothing to compare.
+#[compio::test]
+async fn a_copy_without_a_producer_costs_tokio_the_connection_and_not_this_one() {
+    let url = common::test_url();
+
+    // A WATCHDOG, because the failure this pins is a HANG and not an error.
+    // MEASURED 2026-08-24: routing the producerless COPY the way upstream does
+    // leaves the session in copy mode, and this test then waits forever rather
+    // than failing. Without the bound, a regression here looks like a slow
+    // server.
+    let ours = compio::time::timeout(
+        std::time::Duration::from_secs(20),
+        compio_producerless_copy(&url, &common::test_object_name("cpg_copyfail_ours")),
+    )
+    .await
+    .expect("the producerless COPY never returned; the session is wedged in copy mode");
+    let theirs = tokio_producerless_copy(
+        common::plaintext_url(),
+        common::test_object_name("cpg_copyfail_theirs"),
+    );
+
+    assert_eq!(
+        ours,
+        CopyOutcome {
+            copy: Outcome::SqlState("57014".to_owned()),
+            session_usable_after: true,
+        },
+        "this crate stopped aborting a producerless COPY, or stopped surviving it"
+    );
+    assert_eq!(
+        theirs,
+        CopyOutcome {
+            copy: Outcome::LocalFailure,
+            session_usable_after: false,
+        },
+        "tokio-postgres changed how it handles a producerless COPY, so the \
+         divergence this pins is no longer the one described"
+    );
+    assert_ne!(
+        ours.session_usable_after, theirs.session_usable_after,
+        "the whole point of the divergence is that one session survives and the \
+         other does not"
+    );
+}
+
+/// A COPY OUT whose own query fails partway is reported identically by both,
+/// and neither loses the session.
+///
+/// The control for the divergence above: the drivers are NOT generally
+/// different about failed copies, only about the one case upstream abandons.
+#[compio::test]
+async fn both_drivers_survive_a_copy_out_whose_query_fails() {
+    let url = common::test_url();
+
+    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+        .await
+        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+    compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    })
+    .detach();
+
+    let failed = client
+        .batch_execute("COPY (SELECT 1/0) TO STDOUT")
+        .await
+        .expect_err("a COPY OUT of a failing query must not succeed");
+    assert_eq!(
+        failed.code().map(|code| code.code()),
+        Some("22012"),
+        "the division by zero lost its SQLSTATE: {}",
+        common::error_chain(&failed)
+    );
+    assert!(
+        client
+            .query_one_scalar::<i32, _>("SELECT 2::int4", &[])
+            .await
+            .is_ok(),
+        "the failed COPY OUT left the session unusable"
+    );
+}
