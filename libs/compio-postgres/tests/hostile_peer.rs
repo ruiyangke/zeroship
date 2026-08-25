@@ -422,9 +422,9 @@ fn row_description(columns: &[&str]) -> Vec<u8> {
 /// This peer inspects rustls' processed record state. A bare EOF, a reset, or
 /// arbitrary bytes cannot set `peer_has_closed`, so the assertion observes the
 /// real encrypted `close_notify` rather than a teardown helper being called.
+/// A self-signed TLS server configuration for the scripted peers below.
 #[cfg(feature = "tls")]
-#[compio::test]
-async fn dropping_a_tls_client_sends_close_notify() {
+fn scripted_tls_server_config() -> std::sync::Arc<rustls::ServerConfig> {
     let issued = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
         .expect("generate test certificate");
     let cert = rustls::pki_types::CertificateDer::from(issued.cert.der().to_vec());
@@ -438,7 +438,105 @@ async fn dropping_a_tls_client_sends_close_notify() {
     .with_no_client_auth()
     .with_single_cert(vec![cert], key)
     .expect("build TLS server config");
-    let server_config = std::sync::Arc::new(server_config);
+    std::sync::Arc::new(server_config)
+}
+
+/// Read TLS records until the peer's `close_notify` arrives.
+///
+/// Fails on EOF rather than treating it as an ending: a transport that just
+/// stops is exactly the unclean shutdown these tests exist to catch.
+#[cfg(feature = "tls")]
+fn expect_close_notify(tls: &mut rustls::ServerConnection, socket: &mut TcpStream) {
+    loop {
+        let read = tls.read_tls(socket).unwrap_or_else(|error| {
+            panic!("TLS transport failed before close_notify arrived: {error}")
+        });
+        assert_ne!(
+            read, 0,
+            "TLS transport reached EOF before close_notify arrived"
+        );
+        let state = tls
+            .process_new_packets()
+            .expect("process client TLS shutdown records");
+        let peer_has_closed = state.peer_has_closed();
+
+        let mut plaintext = [0u8; 64];
+        loop {
+            match tls.reader().read(&mut plaintext) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                Err(error) => panic!("read client shutdown plaintext: {error}"),
+            }
+        }
+        if peer_has_closed {
+            break;
+        }
+    }
+}
+
+/// The CONNECTION half going away must also close the session cleanly.
+///
+/// `ConnectionRelease` (the client half) was taught to send `close_notify`
+/// first; `ConnectionDropRelease` is the guard for every connection-side exit -
+/// discarded without being run, `run` cancelled, the future unwound, the task
+/// returned - and the read-timeout recovery path calls its `shutdown()`
+/// deliberately. MEASURED 2026-08-25 against a live TLS server, one connection
+/// per case: dropping the CLIENT logged nothing, dropping an unrun CONNECTION
+/// logged `could not receive data from client: Connection reset by peer`.
+///
+/// The client is kept alive here on purpose. Dropping it would fire the
+/// already-fixed client-side release and this test would pass without the
+/// guard doing anything.
+#[cfg(feature = "tls")]
+#[compio::test]
+async fn dropping_an_unrun_tls_connection_sends_close_notify() {
+    let server_config = scripted_tls_server_config();
+
+    let server = StubServer::spawn(move |listener| {
+        let mut socket = accept_bounded(&listener);
+
+        let mut ssl_request = [0u8; 8];
+        socket
+            .read_exact(&mut ssl_request)
+            .expect("read PostgreSQL SSLRequest");
+        socket.write_all(b"S").expect("accept TLS negotiation");
+        socket.flush().expect("flush TLS negotiation response");
+
+        let mut tls =
+            rustls::ServerConnection::new(server_config).expect("build TLS server session");
+        {
+            let mut stream = rustls::Stream::new(&mut tls, &mut socket);
+            complete_startup(&mut stream, 215);
+        }
+
+        expect_close_notify(&mut tls, &mut socket);
+    });
+
+    let dsn = format!(
+        "host=localhost hostaddr={} port={} user=scripted-user sslmode=require connect_timeout=2",
+        server.addr.ip(),
+        server.addr.port()
+    );
+    let config = dsn.parse::<Config>().expect("parse TLS peer config");
+    let tls = compio_postgres::MakeRustlsConnect::from_config(&config)
+        .expect("build unverified rustls connector");
+    let (client, connection) = config
+        .connect(tls)
+        .await
+        .expect("connect to scripted TLS PostgreSQL peer");
+
+    // The guard fires here, with the client still holding its own dup.
+    drop(connection);
+
+    server.finish();
+    drop(client);
+}
+
+#[cfg(feature = "tls")]
+#[compio::test]
+async fn dropping_a_tls_client_sends_close_notify() {
+    let server_config = scripted_tls_server_config();
 
     let server = StubServer::spawn(move |listener| {
         let mut socket = accept_bounded(&listener);
@@ -483,32 +581,7 @@ async fn dropping_a_tls_client_sends_close_notify() {
             stream.flush().expect("flush SELECT 1 response");
         }
 
-        loop {
-            let read = tls.read_tls(&mut socket).unwrap_or_else(|error| {
-                panic!("TLS transport failed before close_notify arrived: {error}")
-            });
-            assert_ne!(
-                read, 0,
-                "TLS transport reached EOF before close_notify arrived"
-            );
-            let state = tls
-                .process_new_packets()
-                .expect("process client TLS shutdown records");
-            let peer_has_closed = state.peer_has_closed();
-
-            let mut plaintext = [0u8; 64];
-            loop {
-                match tls.reader().read(&mut plaintext) {
-                    Ok(0) => break,
-                    Ok(_) => {}
-                    Err(error) if error.kind() == ErrorKind::WouldBlock => break,
-                    Err(error) => panic!("read client shutdown plaintext: {error}"),
-                }
-            }
-            if peer_has_closed {
-                break;
-            }
-        }
+        expect_close_notify(&mut tls, &mut socket);
     });
 
     let dsn = format!(

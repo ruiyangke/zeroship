@@ -101,9 +101,71 @@ impl fmt::Debug for ConnectionRelease {
 }
 
 /// A non-owning shutdown guard for every connection-side exit.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct ConnectionDropRelease {
     socket: Weak<socket2::Socket>,
+    /// The same live rustls state the client-side release carries. This guard
+    /// needs it for the same reason: every exit it covers ends the physical
+    /// session, and ending a TLS session without an alert makes the server log
+    /// a reset. Cloning the `Arc` is what shares it, not a second session.
+    #[cfg(feature = "tls")]
+    tls_session: Option<crate::tls_sansio::SharedSession>,
+}
+
+impl fmt::Debug for ConnectionDropRelease {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = formatter.debug_struct("ConnectionDropRelease");
+        debug.field("socket", &self.socket);
+        #[cfg(feature = "tls")]
+        debug.field("has_tls_session", &self.tls_session.is_some());
+        debug.finish()
+    }
+}
+
+/// Serialize and send `close_notify` on `socket`, best effort.
+///
+/// Shared by both guards: the client half and the connection half each end the
+/// physical session, and both must close TLS cleanly. Everything here is best
+/// effort because a `Drop` has no caller to report to and the session is
+/// ending regardless.
+#[cfg(feature = "tls")]
+#[allow(clippy::significant_drop_tightening)]
+fn send_close_notify_on(
+    socket: &socket2::Socket,
+    session: Option<&crate::tls_sansio::SharedSession>,
+) {
+    let Some(session) = session else {
+        return;
+    };
+
+    // `Drop` must not wait for socket backpressure. Setting O_NONBLOCK on the
+    // shared file description is harmless here because shutdown is the very
+    // next operation on this connection, successful alert or not.
+    if socket.set_nonblocking(true).is_err() {
+        return;
+    }
+
+    // Keep the lock through the synchronous sends so no connection-task write
+    // can change the record sequence between serialization and delivery.
+    let mut session = session.lock();
+    let Ok(ciphertext) = session.take_close_notify() else {
+        return;
+    };
+    let mut remaining = ciphertext.as_slice();
+    while !remaining.is_empty() {
+        #[cfg(target_os = "linux")]
+        let sent =
+            socket.send_with_flags(remaining, nix::sys::socket::MsgFlags::MSG_NOSIGNAL.bits());
+        #[cfg(not(target_os = "linux"))]
+        let sent = socket.send(remaining);
+
+        match sent {
+            Ok(0) => break,
+            Ok(count) => remaining = &remaining[count..],
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
 }
 
 /// Duplicates the descriptor behind `handle` and takes ownership of the copy.
@@ -150,47 +212,16 @@ impl ConnectionRelease {
     pub(crate) fn connection_guard(&self) -> ConnectionDropRelease {
         ConnectionDropRelease {
             socket: Arc::downgrade(&self.socket),
+            // The guard is built after `configure_release` has attached the
+            // session, so it gets the same handle rather than nothing.
+            #[cfg(feature = "tls")]
+            tls_session: self.tls_session.clone(),
         }
     }
 
     #[cfg(feature = "tls")]
-    #[allow(clippy::significant_drop_tightening)]
     fn send_close_notify(&self) {
-        let Some(session) = &self.tls_session else {
-            return;
-        };
-
-        // `Drop` must not wait for socket backpressure. Setting O_NONBLOCK on
-        // the shared file description is harmless here because shutdown is the
-        // very next operation on this connection, successful alert or not.
-        if self.socket.set_nonblocking(true).is_err() {
-            return;
-        }
-
-        // Keep the lock through the synchronous sends so no connection-task
-        // write can change the record sequence between serialization and
-        // delivery. Everything here is best effort: the client half is
-        // disappearing and there is no caller to report an error to.
-        let mut session = session.lock();
-        let Ok(ciphertext) = session.take_close_notify() else {
-            return;
-        };
-        let mut remaining = ciphertext.as_slice();
-        while !remaining.is_empty() {
-            #[cfg(target_os = "linux")]
-            let sent = self
-                .socket
-                .send_with_flags(remaining, nix::sys::socket::MsgFlags::MSG_NOSIGNAL.bits());
-            #[cfg(not(target_os = "linux"))]
-            let sent = self.socket.send(remaining);
-
-            match sent {
-                Ok(0) => break,
-                Ok(count) => remaining = &remaining[count..],
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(_) => break,
-            }
-        }
+        send_close_notify_on(&self.socket, self.tls_session.as_ref());
     }
 
     /// End the session synchronously while client handles still exist.
@@ -224,6 +255,12 @@ impl ConnectionDropRelease {
     /// main connection task to finish its teardown.
     pub(crate) fn shutdown(&self) {
         if let Some(socket) = self.socket.upgrade() {
+            // The alert first, then the shutdown, in that order and for the
+            // same reason as the client half: once the socket is down for
+            // reading there is nothing left to write the alert through.
+            #[cfg(feature = "tls")]
+            send_close_notify_on(&socket, self.tls_session.as_ref());
+
             let _ = socket.shutdown(Shutdown::Both);
         }
     }

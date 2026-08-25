@@ -188,6 +188,9 @@ pub(crate) struct TlsSession {
     /// Ciphertext removed from `outgoing` and owned by an async socket write.
     /// A synchronous release cannot safely overtake that earlier TLS record.
     write_in_flight: bool,
+    /// Whether `close_notify` has already been serialized. Both release
+    /// guards can reach `take_close_notify`; only the first may act.
+    close_notify_sent: bool,
 }
 
 impl TlsSession {
@@ -196,6 +199,7 @@ impl TlsSession {
             conn,
             outgoing: Vec::new(),
             write_in_flight: false,
+            close_notify_sent: false,
         }
     }
 
@@ -300,6 +304,16 @@ impl TlsSession {
                 "TLS ciphertext is still being written",
             ));
         }
+        // BOTH release guards can reach this: the client half and the
+        // connection half each end the physical session, and whichever loses
+        // the race must not queue a SECOND alert onto the session.
+        if self.close_notify_sent {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "close_notify has already been serialized for this session",
+            ));
+        }
+        self.close_notify_sent = true;
         self.conn.send_close_notify();
         let mut outgoing = self.take_outgoing();
         while self.conn.wants_write() {
