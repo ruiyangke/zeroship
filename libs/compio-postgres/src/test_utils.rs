@@ -9,8 +9,29 @@
 //! transport nor the split refusal that routes onto it. Compiling a
 //! doc-hidden module into release builds is the smaller cost.
 //!
-//! Added to unblock plugin-db's `bench_row_to_json`; see
-//! `crates/plugin-db/benches/bench_row_to_json.rs`.
+//! TWO HALVES, AND ONLY ONE OF THEM IS FOR THIS CRATE.
+//!
+//! `SerializedSocket` / `connect_serialized` are used by this crate's own
+//! `tests/serialized_loop.rs` (24 tests) and are the reason this module cannot
+//! be feature-gated: gating it stopped that target building under the plain
+//! test command.
+//!
+//! The three `*_for_test` synthesisers are used by NOTHING here. They exist
+//! for `plugin-db`'s microbenchmarks, which price row decoding and would
+//! measure a network round trip instead if they had to fetch a real row;
+//! `Row::new` is `pub(crate)`, so an external bench cannot build one. Both
+//! places in this crate that could have used them deliberately do not, and
+//! their reasons are worth knowing before reaching for one:
+//!
+//! * `tests/raw_value_column_identity.rs` wants the claim to be about what a
+//!   real server sends, because a fixture cannot be wrong about a wire format
+//!   in the same direction the driver is.
+//! * `row.rs`'s own test module needs a `DataRow` whose field count does NOT
+//!   match its `RowDescription` - the arity-panic guard - and `row_for_test`
+//!   refuses to build one.
+//!
+//! So: reach for a live row unless you are measuring, and never reach for
+//! these to test decoding of malformed input, which they cannot express.
 //!
 //! ## Why a builder, not just `Row::new`
 //!
