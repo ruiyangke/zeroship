@@ -524,6 +524,8 @@ pub enum Host {
 ///     and then `~/.pgpass`. Ignored if the file is group- or world-accessible, as libpq ignores it.
 /// * `service` - Name of a `pg_service.conf` section supplying connection parameters. Parameters given explicitly
 ///     win over the service's, whatever order they appear in. A service that is not defined is an error.
+/// * `sslkeylogfile` - File to append this session's TLS secrets to, in NSS key-log format, so a capture can be
+///     decrypted. DEFEATS THE CONFIDENTIALITY OF THE CONNECTION; for deliberate diagnosis only.
 /// * `dbname` - The name of the database to connect to. Defaults to the username.
 /// * `options` - Command line options used to configure the server.
 /// * `application_name` - Sets the `application_name` parameter on the server.
@@ -685,6 +687,8 @@ pub struct Config {
     pub(crate) passfile: Option<String>,
     /// Name of a `pg_service.conf` section supplying connection parameters.
     pub(crate) service: Option<String>,
+    /// Path to write TLS secrets to, in NSS key-log format, for debugging.
+    pub(crate) ssl_key_log_file: Option<String>,
     pub(crate) dbname: Option<String>,
     pub(crate) options: Option<String>,
     pub(crate) application_name: Option<String>,
@@ -736,6 +740,7 @@ impl Config {
             password: None,
             passfile: None,
             service: None,
+            ssl_key_log_file: None,
             dbname: None,
             options: None,
             application_name: None,
@@ -836,6 +841,28 @@ impl Config {
     /// Gets the service name, if one was given.
     pub fn get_service(&self) -> Option<&str> {
         self.service.as_deref()
+    }
+
+    /// Sets a file to write this connection's TLS secrets to, in NSS key-log
+    /// format, so a packet capture of it can be decrypted.
+    ///
+    /// THIS DEFEATS THE CONFIDENTIALITY OF THE CONNECTION. Anyone who can read
+    /// the file can decrypt any capture of any session it describes, including
+    /// captures taken before the file was read. It exists because diagnosing a
+    /// protocol fault otherwise means reproducing it without encryption, and
+    /// libpq offers the same switch under the same name. Turn it on
+    /// deliberately, for a diagnosis, and delete the file afterwards.
+    ///
+    /// Has no effect unless the `tls` feature is enabled and the connection
+    /// actually negotiates TLS.
+    pub fn ssl_key_log_file(&mut self, path: impl Into<String>) -> &mut Config {
+        self.ssl_key_log_file = Some(path.into());
+        self
+    }
+
+    /// Gets the TLS key-log file path, if one was set.
+    pub fn get_ssl_key_log_file(&self) -> Option<&str> {
+        self.ssl_key_log_file.as_deref()
     }
 
     /// Fill parameters the caller did not give from the named service.
@@ -1588,6 +1615,12 @@ impl Config {
                     return Err(Error::config_parse(Box::new(InvalidValue("service"))));
                 }
                 self.service(value);
+            }
+            "sslkeylogfile" => {
+                if value.is_empty() {
+                    return Err(Error::config_parse(Box::new(InvalidValue("sslkeylogfile"))));
+                }
+                self.ssl_key_log_file(value);
             }
             "sslcertmode" => {
                 let mode = match value {

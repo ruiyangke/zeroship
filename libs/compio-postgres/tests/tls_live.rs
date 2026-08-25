@@ -1469,3 +1469,143 @@ async fn a_notification_reaches_an_idle_tls_connection() {
     );
     assert_eq!(idle, "while idle");
 }
+
+// ---------------------------------------------------------------------------
+// sslkeylogfile
+// ---------------------------------------------------------------------------
+
+/// A unique path under the temp directory for one key-log case.
+fn key_log_path(tag: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("compio_pg_keylog_{}_{tag}.log", std::process::id()))
+}
+
+/// Connect over TLS with `sslkeylogfile` pointed wherever `path` says, or not
+/// set at all when `path` is `None`.
+async fn connect_logging_keys_to(path: Option<&std::path::Path>) -> Result<(), Error> {
+    let servers = servers();
+    let mut config: Config = servers.tls_url.parse().expect("the TLS fixture DSN parses");
+    if let Some(path) = path {
+        config.ssl_key_log_file(path.to_str().expect("a UTF-8 temp path"));
+    }
+
+    let connector = MakeRustlsConnect::from_config(&config)?;
+    let (client, connection) = config.connect(connector).await?;
+    compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    })
+    .detach();
+
+    let (ssl, _version) = server_reports_ssl(&client).await;
+    assert!(ssl, "this case is only meaningful over a TLS session");
+    Ok(())
+}
+
+/// Every line is `<LABEL> <64 hex chars> <hex secret>`, the NSS key-log format
+/// Wireshark reads. Asserting the SHAPE rather than merely "the file is not
+/// empty" is the difference between proving we wrote key material and proving
+/// we wrote something.
+fn assert_nss_key_log_format(contents: &str) {
+    let mut lines = 0;
+    for line in contents.lines() {
+        let mut fields = line.split(' ');
+        let label = fields.next().expect("a label");
+        let client_random = fields.next().unwrap_or_default();
+        let secret = fields.next().unwrap_or_default();
+        assert!(
+            fields.next().is_none(),
+            "a key-log line has more than three fields: {line:?}"
+        );
+        assert!(
+            label
+                .bytes()
+                .all(|b| b.is_ascii_uppercase() || b == b'_' || b.is_ascii_digit()),
+            "the label is not an NSS key-log label: {label:?}"
+        );
+        assert_eq!(
+            client_random.len(),
+            64,
+            "client_random is not 32 bytes of hex: {client_random:?}"
+        );
+        assert!(
+            !secret.is_empty() && secret.len() % 2 == 0,
+            "the secret is not a hex string: {secret:?}"
+        );
+        assert!(
+            client_random
+                .bytes()
+                .chain(secret.bytes())
+                .all(|b| b.is_ascii_hexdigit()),
+            "a key-log line carries non-hex characters: {line:?}"
+        );
+        lines += 1;
+    }
+    assert!(lines > 0, "the key log parsed as zero lines");
+}
+
+#[compio::test]
+async fn sslkeylogfile_writes_the_session_secrets() {
+    let path = key_log_path("written");
+    let _ = std::fs::remove_file(&path);
+
+    connect_logging_keys_to(Some(&path))
+        .await
+        .expect("the TLS connection succeeds with key logging on");
+
+    let contents = std::fs::read_to_string(&path).expect("the key log was created");
+    assert_nss_key_log_format(&contents);
+
+    // Created no wider than libpq creates it: anyone who can read this file
+    // can decrypt a capture of the session.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the key log is readable beyond its owner");
+    }
+
+    // MEASURED against libpq: a second connection APPENDS rather than
+    // replacing, so a capture spanning several connections stays decryptable.
+    let first = contents.lines().count();
+    connect_logging_keys_to(Some(&path))
+        .await
+        .expect("the second TLS connection succeeds");
+    let after = std::fs::read_to_string(&path).expect("read again");
+    assert!(
+        after.lines().count() > first,
+        "a second connection did not append: {first} lines before, {} after",
+        after.lines().count()
+    );
+
+    std::fs::remove_file(&path).ok();
+}
+
+/// THE CONTROL. Without the parameter nothing is written - otherwise the test
+/// above would pass for a driver that logged every connection's secrets, which
+/// is the failure that actually matters here.
+#[compio::test]
+async fn no_key_log_is_written_without_the_parameter() {
+    let path = key_log_path("absent");
+    let _ = std::fs::remove_file(&path);
+
+    connect_logging_keys_to(None)
+        .await
+        .expect("the TLS connection succeeds with key logging off");
+
+    assert!(
+        !path.exists(),
+        "a key log appeared for a connection that never asked for one"
+    );
+}
+
+/// A path that cannot be opened must not fail the connection: libpq warns and
+/// carries on, and turning a debugging switch into an outage would be worse
+/// than losing the diagnostic.
+#[compio::test]
+async fn an_unwritable_key_log_path_does_not_fail_the_connection() {
+    let path = std::path::Path::new("/nonexistent-directory-compio-pg/keys.log");
+    assert!(!path.exists(), "this case needs an unopenable path");
+
+    connect_logging_keys_to(Some(path))
+        .await
+        .expect("an unopenable key log must not fail the connection");
+}
