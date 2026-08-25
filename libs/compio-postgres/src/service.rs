@@ -92,17 +92,26 @@ fn section_of(
     let mut pairs = Vec::new();
 
     for (index, raw) in contents.lines().enumerate() {
-        let line = raw.trim();
+        // Trailing whitespace goes; LEADING whitespace only decides whether
+        // this is a comment or blank. It is not removed from the value, and
+        // the asymmetry is libpq's, not a simplification - see the tests.
+        let line = raw.trim_end().trim_start();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
 
-        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+        // A header ends at the FIRST `]`; whatever follows on the line is
+        // ignored, and the name between the brackets is taken VERBATIM.
+        // `[` with no `]` is not a header at all and falls through to be
+        // parsed as a parameter, which is how libpq reports it.
+        if let Some(rest) = line.strip_prefix('[')
+            && let Some(end) = rest.find(']')
+        {
             if in_section {
                 // The next section begins, so the requested one is complete.
                 return Ok(Some(pairs));
             }
-            in_section = name.trim() == service;
+            in_section = &rest[..end] == service;
             continue;
         }
 
@@ -116,7 +125,15 @@ fn section_of(
                 line: index + 1,
             });
         };
-        pairs.push((key.trim().to_owned(), value.trim().to_owned()));
+        // libpq refuses `host =x`. Accepting it would take a file psql
+        // rejects, so the same service works here and fails there.
+        if key.trim_end() != key {
+            return Err(ServiceError::Syntax {
+                path: path.to_path_buf(),
+                line: index + 1,
+            });
+        }
+        pairs.push((key.to_owned(), value.to_owned()));
     }
 
     Ok(if in_section { Some(pairs) } else { None })
@@ -206,10 +223,113 @@ mod tests {
         assert_eq!(found, vec![("host".to_owned(), "db.example".to_owned())]);
     }
 
+    // The whitespace rules below are ASYMMETRIC in a way no reading of the
+    // documentation suggests, and this file asserted the tidy symmetric
+    // version until it was probed. Measured against libpq 16.14, one variable
+    // at a time (`docs/runbooks/compio-postgres-service-file-semantics.md`).
+
     #[test]
-    fn surrounding_whitespace_is_not_part_of_a_key_or_value() {
-        let found = pairs("[prod]\n  host = db.example  \n", "prod");
+    fn whitespace_before_the_key_is_allowed() {
+        let found = pairs("[prod]\n   host=db.example\n", "prod");
         assert_eq!(found, vec![("host".to_owned(), "db.example".to_owned())]);
+    }
+
+    /// libpq REFUSES this: `host =x` is `syntax error in service file`. Being
+    /// more permissive than libpq is not a kindness - it accepts a file that
+    /// psql rejects, so the same config works here and fails there.
+    #[test]
+    fn whitespace_before_the_equals_is_a_syntax_error() {
+        let error = parse("[prod]\nhost =db.example\n", "prod")
+            .expect_err("libpq rejects a space before the equals");
+        match error {
+            ServiceError::Syntax { line, .. } => assert_eq!(line, 2),
+            other => panic!("expected a syntax error, got {other:?}"),
+        }
+    }
+
+    /// And yet whitespace AFTER the equals is kept, so `host= x` asks for a
+    /// host literally named " x" - which is why libpq reports
+    /// `could not translate host name " aftereq.invalid"`. Trimming it here
+    /// would make this crate resolve a name psql cannot.
+    #[test]
+    fn whitespace_after_the_equals_is_part_of_the_value() {
+        let found = pairs("[prod]\nhost= db.example\n", "prod");
+        assert_eq!(found, vec![("host".to_owned(), " db.example".to_owned())]);
+    }
+
+    /// Trailing whitespace IS stripped. The control for this pairing is the
+    /// test above: libpq's own error text preserved a leading space, so it
+    /// does not trim what it prints, and the absence of a trailing one is the
+    /// file being read that way rather than the message being tidied.
+    #[test]
+    fn trailing_whitespace_is_not_part_of_the_value() {
+        let found = pairs("[prod]\nhost=db.example   \n", "prod");
+        assert_eq!(found, vec![("host".to_owned(), "db.example".to_owned())]);
+    }
+
+    #[test]
+    fn an_indented_comment_is_still_a_comment() {
+        let found = pairs("[prod]\n   # indented\nhost=db.example\n", "prod");
+        assert_eq!(found, vec![("host".to_owned(), "db.example".to_owned())]);
+    }
+
+    /// A `#` that is not the first thing on a line is ORDINARY TEXT - libpq
+    /// has no inline comments, and tried to resolve a host named
+    /// `inline.invalid # a note`.
+    #[test]
+    fn a_hash_inside_a_value_is_not_a_comment() {
+        let found = pairs("[prod]\nhost=db.example # note\n", "prod");
+        assert_eq!(
+            found,
+            vec![("host".to_owned(), "db.example # note".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_header_may_carry_trailing_content_after_the_bracket() {
+        let found = pairs("[prod] # the live one\nhost=db.example\n", "prod");
+        assert_eq!(found, vec![("host".to_owned(), "db.example".to_owned())]);
+    }
+
+    /// The name ends at the FIRST `]`, so `[two]b]` defines `two` - not
+    /// `two]b`, and not `two]`. Both of those were probed and are not found.
+    #[test]
+    fn a_header_name_ends_at_the_first_closing_bracket() {
+        let found = pairs("[two]b]\nhost=db.example\n", "two");
+        assert_eq!(found, vec![("host".to_owned(), "db.example".to_owned())]);
+        assert_eq!(
+            parse("[two]b]\nhost=x\n", "two]b").expect("well-formed"),
+            None
+        );
+    }
+
+    /// A `[` with no `]` is not a header at all, so it never opens a section.
+    #[test]
+    fn an_unclosed_header_does_not_open_a_section() {
+        let found = parse("[unclosed\nhost=db.example\n", "unclosed").expect("well-formed");
+        assert_eq!(found, None);
+    }
+
+    /// The name is taken VERBATIM, so `[ prod ]` defines a service whose name
+    /// has spaces in it and `service=prod` does not find it. Probed: libpq
+    /// reports `definition of service "prod" not found` for exactly this file.
+    #[test]
+    fn a_bracketed_name_is_not_trimmed() {
+        assert_eq!(
+            parse("[ prod ]\nhost=x\n", "prod").expect("well-formed"),
+            None
+        );
+        let found = pairs("[ prod ]\nhost=x\n", " prod ");
+        assert_eq!(found, vec![("host".to_owned(), "x".to_owned())]);
+    }
+
+    #[test]
+    fn the_first_of_two_sections_with_one_name_wins() {
+        let found = pairs(
+            "[prod]\nhost=first.example\n[other]\nhost=o\n[prod]\nhost=second.example\n",
+            "prod",
+        );
+        assert_eq!(found, vec![("host".to_owned(), "first.example".to_owned())]);
     }
 
     #[test]

@@ -84,6 +84,61 @@ async fn a_service_file_supplies_every_connection_parameter() {
     std::fs::remove_file(&path).ok();
 }
 
+/// The same working service, written in the awkward forms libpq accepts: a
+/// header carrying a trailing comment, an indented comment line, leading
+/// whitespace before a key, and `dbname` given TWICE where only the first is
+/// real. Every one of these was probed against libpq 16.14
+/// (`docs/runbooks/compio-postgres-service-file-semantics.md`); before that
+/// this crate rejected the header outright and took the LAST duplicate, so
+/// this connects only if the parser agrees with libpq rather than with the
+/// tidy shape the format description suggests.
+#[compio::test]
+async fn a_service_written_in_libpq_s_awkward_forms_still_connects() {
+    let plain = service_file_contents();
+    let mut awkward = String::new();
+    for line in plain.lines() {
+        if let Some(rest) = line.strip_prefix('[') {
+            let name = &rest[..rest.find(']').expect("the fixture header closes")];
+            awkward.push_str(&format!("[{name}] # the section for this test\n"));
+            awkward.push_str("   # an indented comment inside the section\n");
+        } else if let Some(dbname) = line.strip_prefix("dbname=") {
+            // The FIRST wins, so the bogus one must never be reached.
+            awkward.push_str(&format!("dbname={dbname}\n"));
+            awkward.push_str("dbname=zs_no_such_database\n");
+        } else if let Some(port) = line.strip_prefix("port=") {
+            awkward.push_str(&format!("   port={port}\n"));
+        } else {
+            awkward.push_str(line);
+            awkward.push('\n');
+        }
+    }
+    assert!(
+        awkward.contains("zs_no_such_database"),
+        "the fixture lost its duplicate key, so it proves nothing: {awkward}"
+    );
+
+    let path = service_file_path("awkward");
+    std::fs::write(&path, &awkward).expect("write the service file");
+
+    let config = config_for_service(&path).expect("the awkward service expands");
+    let (client, connection) = config
+        .connect(suite_tls())
+        .await
+        .expect("the awkward service supplies a working connection");
+    compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    })
+    .detach();
+
+    let one: i32 = client
+        .query_one_scalar("SELECT 1::int4", &[])
+        .await
+        .expect("the connection works");
+    assert_eq!(one, 1);
+
+    std::fs::remove_file(&path).ok();
+}
+
 /// A service the file does not define is an error, not a silent fallback.
 #[test]
 fn an_undefined_service_is_an_error() {
