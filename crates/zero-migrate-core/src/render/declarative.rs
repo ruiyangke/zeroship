@@ -5680,6 +5680,26 @@ impl DeclarativeAuthor {
         )
     }
 
+    /// Render an `ALTER TABLE <parent> DETACH PARTITION <name>`.
+    ///
+    /// Gated exactly like [`Self::render_drop_partition`], and for a reason already
+    /// settled elsewhere in the tree: `Op::is_destructive` lists `DetachPartition` and
+    /// `DropPartition` together under one "partition drop / detach" heading, and the
+    /// posture walk in `check_ir_data_security_policy` acts on that classification —
+    /// under `data_security.destructive_ops = forbid` it refuses BOTH.
+    ///
+    /// This used to pass `MigrationFlags::default()`, the only member of the drop family
+    /// that did. The flags are the OTHER gate: `PlanStep::approval_scope_version` fires
+    /// on `destructive || requires_approval`, so a detach carrying neither was ungated on
+    /// the approval path while every sibling drop was gated. Two gates disagreeing about
+    /// one operation is the defect, whichever way it is resolved; it is resolved toward
+    /// the classifier because the classifier is the one already being enforced.
+    ///
+    /// Detaching does not delete rows — the partition survives as a standalone table —
+    /// so this is not "destructive" in the narrow data-loss sense. It is destructive in
+    /// the sense the gate cares about: rows vanish from the parent, and `down` is `None`
+    /// below because reversing it needs the original bounds, which are not available
+    /// here. An operation the engine cannot undo should not apply without a human.
     fn render_detach_partition(&self, parent: &str, name: &str, concurrently: bool) -> Migration {
         let up = self
             .emitter()
@@ -5689,7 +5709,7 @@ impl DeclarativeAuthor {
             &format!("detach_partition_{parent}_{name}"),
             up,
             None,
-            MigrationFlags::default(),
+            destructive_flags(),
             Vec::new(),
         )
     }

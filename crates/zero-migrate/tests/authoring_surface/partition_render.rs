@@ -81,6 +81,20 @@ fn pg_sql(op: Op) -> Vec<String> {
     .collect()
 }
 
+/// Lower one op the way [`pg_sql`] does, but keep the whole `Migration` so a test can
+/// read the FLAGS the author attached rather than only the SQL it spelled.
+fn pg_lower(op: Op) -> Vec<zero_migrate::Migration> {
+    IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        "app",
+        "app_partition",
+        &zero_migrate_postgres::DIALECT,
+        &support::no_inject("app"),
+    )
+    .lower(&ir(op), &LiveSchema::default())
+    .expect("lower")
+}
+
 fn int_bound(value: i64) -> PartitionBoundValue {
     PartitionBoundValue::Int {
         value: SafeI64::new(value).expect("test partition bound is JS-safe"),
@@ -830,6 +844,73 @@ fn render_detach_partition_pg() {
     assert!(
         sql.contains("ALTER TABLE \"app\".\"events\" DETACH PARTITION \"app\".\"events_default\" CONCURRENTLY"),
         "detach SQL was:\n{sql}"
+    );
+}
+
+/// A detach is gated exactly as its sibling drop is, because one classifier already
+/// says they are the same kind of thing.
+///
+/// `Op::is_destructive` lists `DetachPartition` and `DropPartition` together, under one
+/// comment reading "partition drop / detach". The posture walk in
+/// `check_ir_data_security_policy` acts on that: under
+/// `data_security.destructive_ops = forbid` BOTH are refused, because `posture_denies`
+/// excludes only `Update`/`Delete`/`Backfill`/`Raw`.
+///
+/// The flags the author attaches are the OTHER gate, and they are what the approval
+/// path reads — `PlanStep::approval_scope_version` fires on
+/// `flags.destructive || flags.requires_approval`. So a detach that carries neither is
+/// ungated on that path while every sibling drop is gated, and a detach lowers with
+/// `down = None`, which means the engine cannot reverse what it did.
+///
+/// This is asserted DIFFERENTIALLY rather than against the literal flag values. The
+/// claim worth holding is that the two agree; if the project later changes what a
+/// destructive drop's flags are, this must follow that change rather than pin a stale
+/// pair.
+#[test]
+fn a_detach_partition_is_gated_like_the_drop_it_is_classified_with() {
+    let detach = pg_lower(Op::DetachPartition {
+        parent: "events".into(),
+        name: "events_default".into(),
+        schema: None,
+        concurrently: Some(true),
+    });
+    let drop = pg_lower(Op::DropPartition {
+        parent: "events".into(),
+        name: "events_default".into(),
+        schema: None,
+        existence_guard: None,
+        cascade: None,
+    });
+
+    let detach_flags = detach
+        .first()
+        .expect("a detachPartition lowers to at least one migration")
+        .flags;
+    let drop_flags = drop
+        .first()
+        .expect("a dropPartition lowers to at least one migration")
+        .flags;
+
+    assert!(
+        drop_flags.destructive && drop_flags.requires_approval,
+        "the control failed: `dropPartition` is supposed to be the GATED sibling, so if \
+         it is not destructive-and-approval-gated then this test is comparing against \
+         nothing. Got {drop_flags:?}"
+    );
+
+    assert_eq!(
+        detach_flags.destructive, drop_flags.destructive,
+        "`detachPartition` and `dropPartition` are one family to `Op::is_destructive`, \
+         and the posture walk refuses BOTH under `destructive_ops = forbid`. The \
+         approval path reads these flags instead, so a detach that is not marked \
+         destructive is ungated there while its sibling is gated — and a detach lowers \
+         with no `down`, so nothing can undo it either."
+    );
+    assert_eq!(
+        detach_flags.requires_approval, drop_flags.requires_approval,
+        "same family, same approval requirement: `PlanStep::approval_scope_version` \
+         fires on `destructive || requires_approval`, so this is the field that decides \
+         whether a human sees the operation at all"
     );
 }
 
