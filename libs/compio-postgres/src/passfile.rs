@@ -12,7 +12,7 @@
 //! The file is consulted only when the config carries no password, and the
 //! first matching line wins.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// The connection identity a passfile line is matched against.
 ///
@@ -35,26 +35,20 @@ pub(crate) struct PassfileKey<'a> {
 /// was measured.
 pub(crate) const UNIX_SOCKET_HOST: &str = "localhost";
 
-/// Where the password file lives: an explicit setting, else `$PGPASSFILE`,
-/// else `$HOME/.pgpass`.
-///
-/// Returns `None` when none of those yield a path, which is not an error - it
-/// just means there is no file to consult.
-pub(crate) fn resolve_path(explicit: Option<&Path>) -> Option<PathBuf> {
-    if let Some(path) = explicit {
-        return Some(path.to_path_buf());
-    }
-    if let Some(from_env) = std::env::var_os("PGPASSFILE")
-        && !from_env.is_empty()
-    {
-        return Some(PathBuf::from(from_env));
-    }
-    let home = std::env::var_os("HOME")?;
-    if home.is_empty() {
-        return None;
-    }
-    Some(PathBuf::from(home).join(".pgpass"))
-}
+// THE PATH COMES FROM THE CALLER, and this module does not go looking.
+//
+// libpq resolves an unset `passfile` from `$PGPASSFILE` and then
+// `$HOME/.pgpass`. This crate is a standalone, publishable driver
+// (`AGENTS.md`, the `libs/` boundary) and a published library takes resolved
+// options from its caller rather than reading process configuration - a rule
+// the workspace enforces mechanically, in `crates/core/tests/
+// config_env_access_gate.rs`, with an exemption list that is deliberately
+// empty. Reading `$PGPASSFILE` here was exactly the thing it forbids.
+//
+// So an application that wants libpq's default locations resolves them itself
+// and passes the result to `Config::passfile`. That keeps the decision to read
+// a user's environment where it belongs - in the program that has one - and
+// keeps this driver's behaviour a function of its arguments.
 
 /// Whether this file's permissions let libpq use it.
 ///

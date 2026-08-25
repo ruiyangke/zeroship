@@ -520,10 +520,13 @@ pub enum Host {
 ///
 /// * `user` - The username to authenticate with. Defaults to the user executing this process.
 /// * `password` - The password to authenticate with.
-/// * `passfile` - Path to a password file to read the password from when none is set. Falls back to `$PGPASSFILE`
-///     and then `~/.pgpass`. Ignored if the file is group- or world-accessible, as libpq ignores it.
+/// * `passfile` - Path to a password file to read the password from when none is set. Ignored if the file is
+///     group- or world-accessible, as libpq ignores it. NO default location is searched; see "The environment".
 /// * `service` - Name of a `pg_service.conf` section supplying connection parameters. Parameters given explicitly
-///     win over the service's, whatever order they appear in. A service that is not defined is an error.
+///     win over the service's, whatever order they appear in. A service that is not defined is an error, and so is
+///     naming one without a `servicefile`.
+/// * `servicefile` - Path of the `pg_service.conf` a `service` is read from. NOT a libpq parameter: libpq finds this
+///     file through the environment and this driver does not read the environment.
 /// * `sslkeylogfile` - File to append this session's TLS secrets to, in NSS key-log format, so a capture can be
 ///     decrypted. DEFEATS THE CONFIDENTIALITY OF THE CONNECTION; for deliberate diagnosis only.
 /// * `dbname` - The name of the database to connect to. Defaults to the username.
@@ -656,6 +659,29 @@ pub enum Host {
 /// host=host1,host2,host3 port=1234,,5678 user=postgres target_session_attrs=read-write
 /// ```
 ///
+/// # The environment
+///
+/// libpq takes a default for nearly every parameter above from the environment:
+/// `PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE`, `PGPASSWORD`, `PGSSLMODE`, `PGAPPNAME` and the rest.
+///
+/// **This driver reads NONE of them - it reads no environment variable at all.** It is a library,
+/// not a command-line tool: a connection whose target depends on ambient process state is one whose
+/// target cannot be read off the call site, and a stray `PGDATABASE` in a service manager's
+/// environment would silently redirect every connection the process makes. Everything that decides
+/// where this driver connects, and as whom, comes from the `Config` or the connection string.
+///
+/// That is not only a preference here, it is a workspace rule with a gate behind it: a published
+/// library takes resolved options from its caller, and `crates/core/tests/config_env_access_gate.rs`
+/// rejects a raw environment read anywhere in this crate's sources, against an exemption list that
+/// is deliberately empty.
+///
+/// The consequence is that the file-valued parameters need their paths GIVEN, since there is
+/// nothing else to find them with: `passfile` names the password file, and `servicefile` names the
+/// `pg_service.conf` that a `service` is read from. An application that wants libpq's search order
+/// (`$PGPASSFILE` then `~/.pgpass`; `$PGSERVICEFILE` then `~/.pg_service.conf` then
+/// `$PGSYSCONFDIR/pg_service.conf`) performs it and passes the winner - which leaves the decision
+/// to read a user's environment with the program that has one.
+///
 /// # Url
 ///
 /// This format resembles a URL with a scheme of either `postgres://` or `postgresql://`. All components are optional,
@@ -684,11 +710,14 @@ pub enum Host {
 pub struct Config {
     pub(crate) user: Option<String>,
     pub(crate) password: Option<Vec<u8>>,
-    /// Path to a libpq password file. `None` means "not set here"; the
-    /// lookup still falls back to `$PGPASSFILE` and `~/.pgpass`.
+    /// Path to a libpq password file. `None` means no password file is read;
+    /// this driver searches no default location.
     pub(crate) passfile: Option<String>,
     /// Name of a `pg_service.conf` section supplying connection parameters.
     pub(crate) service: Option<String>,
+    /// Path of the `pg_service.conf` a named service is read from. This crate
+    /// never searches for one; see `service.rs`.
+    pub(crate) service_file: Option<String>,
     /// Path to write TLS secrets to, in NSS key-log format, for debugging.
     pub(crate) ssl_key_log_file: Option<String>,
     pub(crate) dbname: Option<String>,
@@ -742,6 +771,7 @@ impl Config {
             password: None,
             passfile: None,
             service: None,
+            service_file: None,
             ssl_key_log_file: None,
             dbname: None,
             options: None,
@@ -814,8 +844,9 @@ impl Config {
 
     /// Sets the path of the password file to read a missing password from.
     ///
-    /// Consulted only when no password is set. Overrides `$PGPASSFILE` and
-    /// `~/.pgpass`; see [`Config::password`] for the password itself.
+    /// Consulted only when no password is set. No default location is
+    /// searched: this driver reads no environment, so libpq's `$PGPASSFILE`
+    /// and `~/.pgpass` are the caller's to resolve.
     pub fn passfile(&mut self, passfile: impl Into<String>) -> &mut Config {
         self.passfile = Some(passfile.into());
         self
@@ -823,8 +854,7 @@ impl Config {
 
     /// Gets the password file path, if one has been configured.
     ///
-    /// `None` does NOT mean no file will be read: the lookup still falls back
-    /// to `$PGPASSFILE` and then `~/.pgpass`, as libpq does.
+    /// `None` means no password file is consulted at all.
     pub fn get_passfile(&self) -> Option<&str> {
         self.passfile.as_deref()
     }
@@ -843,6 +873,23 @@ impl Config {
     /// Gets the service name, if one was given.
     pub fn get_service(&self) -> Option<&str> {
         self.service.as_deref()
+    }
+
+    /// Sets the `pg_service.conf` file that [`Config::service`] is read from.
+    ///
+    /// Required whenever a service is named: this driver does not search
+    /// `$PGSERVICEFILE`, `~/.pg_service.conf` or `$PGSYSCONFDIR` for one. An
+    /// application that wants libpq's search order performs it and passes the
+    /// winner here - see the "The environment" section above for why that
+    /// division exists.
+    pub fn service_file(&mut self, path: impl Into<String>) -> &mut Config {
+        self.service_file = Some(path.into());
+        self
+    }
+
+    /// Gets the service file path, if one was set.
+    pub fn get_service_file(&self) -> Option<&str> {
+        self.service_file.as_deref()
     }
 
     /// Sets a file to write this connection's TLS secrets to, in NSS key-log
@@ -879,8 +926,14 @@ impl Config {
             return Ok(());
         };
 
-        let parameters =
-            crate::service::parameters(&service).map_err(|e| Error::config(Box::new(e)))?;
+        let Some(path) = self.service_file.clone() else {
+            return Err(Error::config(Box::new(
+                crate::service::ServiceError::NoServiceFile { service },
+            )));
+        };
+
+        let parameters = crate::service::parameters(&service, std::path::Path::new(&path))
+            .map_err(|e| Error::config(Box::new(e)))?;
 
         self.fill_unset(parameters, explicit)
     }
@@ -1617,6 +1670,18 @@ impl Config {
                     return Err(Error::config_parse(Box::new(InvalidValue("service"))));
                 }
                 self.service(value);
+            }
+            // NOT a libpq key - libpq 18.4 rejects it, measured. It exists
+            // because libpq finds the service file through the environment and
+            // this driver does not, so the path has to arrive some other way,
+            // and it has to arrive in the CONNECTION STRING: a service is
+            // expanded while the string is parsed, which is the only point at
+            // which the set of explicitly given keys is still known.
+            "servicefile" => {
+                if value.is_empty() {
+                    return Err(Error::config_parse(Box::new(InvalidValue("servicefile"))));
+                }
+                self.service_file(value);
             }
             "sslkeylogfile" => {
                 if value.is_empty() {
