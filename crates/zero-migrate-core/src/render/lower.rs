@@ -2822,6 +2822,9 @@ impl IrAuthor {
             // so it cannot disagree with them. Apply refuses the whole plan against a
             // target this does not admit, before a single step runs.
             dialect_scope: dialect_scope_for_ir(self.vendors, ir, &self.dialect),
+            // The backend that is doing the rendering, recorded as it renders. Apply
+            // compares this against the target it meets.
+            rendered_for: Some(self.dialect.clone()),
             rollbackable,
             owner_app: ir.owner_app.clone(),
             depends_on: Vec::new(),

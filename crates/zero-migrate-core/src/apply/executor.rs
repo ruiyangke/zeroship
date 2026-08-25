@@ -2237,6 +2237,7 @@ mod rollback_selection_tests {
             checksum: migration.checksum.clone(),
             flags: migration.flags,
             dialect_scope: crate::render::step::DialectScope::Portable,
+            rendered_for: None,
             rollbackable: false,
             owner_app: migration.owner_app.clone(),
             depends_on: vec![],

@@ -182,6 +182,26 @@ pub enum EngineError {
         /// The identity the connected backend reported for itself.
         target: zero_migrate_ir::dialect::DialectId,
     },
+    /// The plan's STEPS were rendered by one backend and the connected target is a
+    /// different one.
+    ///
+    /// Distinct from [`Self::DialectScopeRefused`], which is about the ops' REACH —
+    /// which backends could render them. This is about provenance: which one did. A
+    /// plan of entirely portable ops has an honest reach of every dialect while its SQL
+    /// carries one vendor's spelling, so the reach gate admits a target the rendering
+    /// never targeted.
+    #[error(
+        "this plan's steps were rendered by {rendered_for}, and the connected target is \
+         {target}. Nothing was applied. The plan's ops may well be portable — the SQL in \
+         it is not, because one backend spelled it. Lower the same artifact against \
+         {target} and apply that instead"
+    )]
+    PlanRenderedForAnotherDialect {
+        /// The backend that rendered the plan's steps.
+        rendered_for: zero_migrate_ir::dialect::DialectId,
+        /// The identity the connected backend reported for itself.
+        target: zero_migrate_ir::dialect::DialectId,
+    },
     /// The executor failed (DB error, checksum drift, mid-apply failure, or the
     /// executor's own re-run of the guard denied a migration — defense in depth).
     #[error(transparent)]
@@ -1316,6 +1336,21 @@ impl MigrationEngine {
                     target,
                 },
             ));
+        }
+        // THE PROVENANCE GATE, beside the reach gate above and for the same reasons:
+        // decided from the plan and the backend's own identity, so it costs no round
+        // trip and runs before the lock. The reach gate asks which backends COULD have
+        // rendered these ops; this asks which one DID, and a portable-reach plan passes
+        // the first while still carrying one vendor's SQL.
+        if let Some(rendered_for) = &plan.rendered_for {
+            if rendered_for != &target {
+                return Err(DeclarativeApplyError::Plain(
+                    EngineError::PlanRenderedForAnotherDialect {
+                        rendered_for: rendered_for.clone(),
+                        target,
+                    },
+                ));
+            }
         }
         let owns_lock = lock_mode == LockMode::Acquire;
         if owns_lock {

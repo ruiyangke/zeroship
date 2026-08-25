@@ -240,6 +240,83 @@ fn the_out_of_envelope_remedy_names_the_escape_that_exists() {
     );
 }
 
+/// A plan whose OPS are portable is still a plan ONE backend rendered, and the target
+/// it meets must be that backend.
+///
+/// # Why the reach gate above does not already cover this
+///
+/// `dialect_scope` measures which backends COULD render these ops. For a bare
+/// `createTable` the honest answer is "all of them", so the scope is `Portable` and
+/// admits every target — see `a_portable_artifact_stays_portable`, which pins exactly
+/// that and is correct about reach.
+///
+/// What it does not measure is which backend DID render them. The lowering below runs
+/// on PostgreSQL, so the SQL in the plan is PostgreSQL's spelling: schema-qualified and
+/// double-quoted, `"main"."scope_notes"`, where this same op lowered on SQLite would
+/// read `main.scope_notes`. Two different artifacts, and only the reach was ever
+/// compared.
+///
+/// # And it is the SILENT direction
+///
+/// SQLite accepts double-quoted identifiers and calls its own database `main`, so the
+/// PostgreSQL rendering does not fail here — it SUCCEEDS, against a server it was not
+/// rendered for. The file header already relies on that property to keep its own
+/// control honest ("portable text makes the un-gated behaviour a clean SUCCESS"); this
+/// test turns the same property into the thing being checked. A MySQL target would have
+/// rejected the double quotes and made the bug loud; SQLite makes it quiet, which is
+/// why the assertion belongs here.
+#[compio::test]
+async fn a_portable_plan_rendered_for_one_backend_is_refused_by_another() {
+    let p = paths("rendered_for");
+    let be = backend(&p);
+    let artifact = lower_on_postgres(
+        r#"{"ir_version":1,"name":"portable_notes","owner_app":"app_scope","ops":[
+        {"op":"createTable","name":"scope_notes","columns":[
+            {"name":"title","type":"text","nullable":false}
+        ]}
+    ]}"#,
+    );
+
+    assert_eq!(
+        artifact.plan.dialect_scope,
+        DialectScope::Portable,
+        "the control's premise: these ops really are portable, so the REACH gate cannot \
+         be what refuses this plan and anything that does refuse it is the provenance \
+         gate this test is about"
+    );
+
+    let result = MigrationEngine::new(zero_migrate::shipping_vendors())
+        .apply_applied_plan_with_touched_and_depends(
+            &artifact.plan,
+            &artifact.touched_tables,
+            &artifact.depends_on,
+            Approval::None,
+            &be,
+            &ExecutorConfig::new(PROJECT, SCHEMA, support::no_inject(SCHEMA)),
+            "tester",
+            LockMode::Acquire,
+        )
+        .await;
+
+    let error = result.expect_err(
+        "a plan rendered by PostgreSQL must be refused against a SQLite target, not \
+         applied — its SQL is PostgreSQL's spelling and SQLite happens to accept it",
+    );
+    let text = error.to_string();
+    assert!(
+        text.contains(zero_migrate_postgres::DIALECT.as_str())
+            && text.contains(zero_migrate_sqlite::DIALECT.as_str()),
+        "the refusal must name the backend that RENDERED the plan and the target it met. \
+         An error mentioning neither is the database complaining about syntax, which is \
+         a different failure and would let a missing gate pass this test: {text}"
+    );
+    assert!(
+        !table_exists(&p, "scope_notes"),
+        "the refusal must precede every step: PostgreSQL-rendered DDL executed against a \
+         SQLite database"
+    );
+}
+
 /// THE REFUSAL. The pinned plan meets a real SQLite database and is declined
 /// whole-plan: nothing in it executes, and the portable-looking raw statement does
 /// NOT land on the wrong server.

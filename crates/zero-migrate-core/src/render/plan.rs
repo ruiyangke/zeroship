@@ -31,6 +31,7 @@
 use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId};
 use crate::model::precondition::PreconditionCheck;
 use crate::render::step::{DialectScope, PlanStep, StepReversibility};
+use zero_migrate_ir::dialect::DialectId;
 
 // What a lowered plan needs the LIVE target to be able to do. Both types moved
 // down to the backend contract, beside the
@@ -104,6 +105,30 @@ pub struct AppliedPlan {
     /// A `.sql` plan is always [`DialectScope::Portable`] — its text is opaque to the
     /// engine, so there is nothing to measure.
     pub dialect_scope: DialectScope,
+    /// The backend that RENDERED these steps, when the engine rendered them.
+    ///
+    /// [`Self::dialect_scope`] answers which backends COULD render this plan's ops;
+    /// this answers which one DID. They are different questions and only the first was
+    /// ever compared against the deploy target. For a bare `createTable` the reach is
+    /// honestly `Portable`, so the reach gate admits every target — while the SQL in
+    /// the plan is one vendor's spelling: PostgreSQL lowers the op to
+    /// `"main"."notes"`, SQLite to `main.notes`.
+    ///
+    /// The gap was not theoretical and not loud. SQLite accepts double-quoted
+    /// identifiers and calls its own database `main`, so a PostgreSQL-rendered plan
+    /// APPLIED CLEANLY against a SQLite target rather than failing — measured, not
+    /// predicted. A MySQL target would have rejected the quoting and made it obvious;
+    /// the quiet direction is the one that needed the gate.
+    ///
+    /// `None` for a `.sql` plan, and that is honest rather than a hole: the engine did
+    /// not render that text, so it has no rendering backend to name. Such a plan is
+    /// still bounded by `dialect_scope`, which is all the engine can say about an
+    /// artifact whose contents are opaque to it.
+    ///
+    /// Not folded into the checksum, for the same reason `dialect_scope` is not: it is
+    /// measured at lowering rather than authored, so folding it in would make one
+    /// artifact checksum differently per target.
+    pub rendered_for: Option<DialectId>,
     /// `false` if ANY step is `down: None` (Backfill/Dml/incomplete OnlineRename);
     /// surfaced by status/rollback BEFORE attempt.
     ///
@@ -173,6 +198,10 @@ impl AppliedPlan {
             checksum,
             flags,
             dialect_scope: DialectScope::Portable,
+            // A `.sql` plan's text is the author's, not the engine's, so there is no
+            // rendering backend to name. `dialect_scope` above is the whole of what
+            // the engine can say about an artifact it cannot read.
+            rendered_for: None,
             rollbackable,
             owner_app,
             depends_on,
