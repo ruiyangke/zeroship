@@ -23,12 +23,14 @@ use crate::connect_raw::connect_raw_with_target_session_attrs;
 use crate::connect_socket::connect_socket;
 use crate::connect_tls::Encryption;
 use crate::connection::Connection;
+use crate::passfile;
 use crate::tls::MakeTlsConnect;
 use crate::{Config, Error, Socket};
 use compio::net::ToSocketAddrsAsync;
 use rand::seq::SliceRandom;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
+use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
 use std::time::Duration;
@@ -72,6 +74,21 @@ impl Endpoint {
 
     pub(crate) fn port(&self) -> u16 {
         self.port
+    }
+
+    /// The hostname this endpoint is spelled with in a password file.
+    ///
+    /// A Unix socket matches as `localhost` rather than as its socket path. A
+    /// bare `hostaddr` with no name matches as the ADDRESS - measured against
+    /// libpq 16.14, where a file keyed by the IP was used and one keyed by
+    /// `localhost` was not.
+    fn passfile_host(&self) -> String {
+        match &self.target {
+            #[cfg(unix)]
+            EndpointTarget::Unix(_) => passfile::UNIX_SOCKET_HOST.to_owned(),
+            EndpointTarget::Name(host) => host.clone(),
+            EndpointTarget::Ip(ip) => self.hostname.clone().unwrap_or_else(|| ip.to_string()),
+        }
     }
 
     /// Resolve this host entry to the addresses it denotes. Numeric
@@ -269,6 +286,12 @@ where
 {
     let mut error = None;
     for endpoint in endpoints {
+        // The password file is keyed on host, port, database and user, so it
+        // is consulted PER ENDPOINT: failover to a different host or port can
+        // legitimately select a different line. libpq does the same.
+        let from_passfile = password_from_passfile(config, endpoint);
+        let config = from_passfile.as_ref().unwrap_or(config);
+
         match connect_host(
             endpoint,
             resolver,
@@ -284,6 +307,42 @@ where
     }
 
     Err(error.expect("endpoints rejects an empty host list"))
+}
+
+/// A copy of `config` carrying the password a password file supplies for this
+/// endpoint, or `None` to use `config` unchanged.
+///
+/// `None` covers every case where the file has nothing to say: a password was
+/// already configured, no file exists, the file is too permissive, or no line
+/// matches. None of those is an error - libpq lets authentication fail on its
+/// own terms rather than refusing to connect, and a driver that raised here
+/// would reject setups libpq accepts.
+fn password_from_passfile(config: &Config, endpoint: &Endpoint) -> Option<Config> {
+    if config.get_password().is_some() {
+        return None;
+    }
+
+    let path = passfile::resolve_path(config.get_passfile().map(Path::new))?;
+    let user = config.get_user()?;
+    // libpq defaults the database to the user, and matches the file on the
+    // database it will actually connect to.
+    let dbname = config.get_dbname().unwrap_or(user);
+    let host = endpoint.passfile_host();
+    let port = endpoint.port().to_string();
+
+    let password = passfile::lookup(
+        &path,
+        passfile::PassfileKey {
+            host: &host,
+            port: &port,
+            dbname,
+            user,
+        },
+    )?;
+
+    let mut with_password = config.clone();
+    with_password.password(password);
+    Some(with_password)
 }
 
 /// One configured host entry: resolve it, then try each address it denotes

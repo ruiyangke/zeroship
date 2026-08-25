@@ -59,7 +59,7 @@ const LIBPQ_PARAMETERS: &[(&str, &str, Verdict)] = &[
     // Space-free on purpose: in keyword syntax an unquoted value ends at the
     // first space, so `-c geqo=off` would test the DSN lexer, not this key.
     ("options", "-cgeqo=off", Accepted),
-    ("passfile", "/tmp/pgpass", Refused),
+    ("passfile", "/tmp/pgpass", Accepted),
     ("password", "p", Accepted),
     ("port", "5432", Accepted),
     ("replication", "false", Accepted),

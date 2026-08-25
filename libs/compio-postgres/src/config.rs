@@ -520,6 +520,8 @@ pub enum Host {
 ///
 /// * `user` - The username to authenticate with. Defaults to the user executing this process.
 /// * `password` - The password to authenticate with.
+/// * `passfile` - Path to a password file to read the password from when none is set. Falls back to `$PGPASSFILE`
+///     and then `~/.pgpass`. Ignored if the file is group- or world-accessible, as libpq ignores it.
 /// * `dbname` - The name of the database to connect to. Defaults to the username.
 /// * `options` - Command line options used to configure the server.
 /// * `application_name` - Sets the `application_name` parameter on the server.
@@ -676,6 +678,9 @@ pub enum Host {
 pub struct Config {
     pub(crate) user: Option<String>,
     pub(crate) password: Option<Vec<u8>>,
+    /// Path to a libpq password file. `None` means "not set here"; the
+    /// lookup still falls back to `$PGPASSFILE` and `~/.pgpass`.
+    pub(crate) passfile: Option<String>,
     pub(crate) dbname: Option<String>,
     pub(crate) options: Option<String>,
     pub(crate) application_name: Option<String>,
@@ -725,6 +730,7 @@ impl Config {
         Config {
             user: None,
             password: None,
+            passfile: None,
             dbname: None,
             options: None,
             application_name: None,
@@ -792,6 +798,23 @@ impl Config {
     /// the `password` method.
     pub fn get_password(&self) -> Option<&[u8]> {
         self.password.as_deref()
+    }
+
+    /// Sets the path of the password file to read a missing password from.
+    ///
+    /// Consulted only when no password is set. Overrides `$PGPASSFILE` and
+    /// `~/.pgpass`; see [`Config::password`] for the password itself.
+    pub fn passfile(&mut self, passfile: impl Into<String>) -> &mut Config {
+        self.passfile = Some(passfile.into());
+        self
+    }
+
+    /// Gets the password file path, if one has been configured.
+    ///
+    /// `None` does NOT mean no file will be read: the lookup still falls back
+    /// to `$PGPASSFILE` and then `~/.pgpass`, as libpq does.
+    pub fn get_passfile(&self) -> Option<&str> {
+        self.passfile.as_deref()
     }
 
     /// Sets the name of the database to connect to.
@@ -1493,6 +1516,12 @@ impl Config {
                     return Err(Error::config_parse(Box::new(InvalidValue("sslkey"))));
                 }
                 self.ssl_key(value);
+            }
+            "passfile" => {
+                if value.is_empty() {
+                    return Err(Error::config_parse(Box::new(InvalidValue("passfile"))));
+                }
+                self.passfile(value);
             }
             "sslcertmode" => {
                 let mode = match value {

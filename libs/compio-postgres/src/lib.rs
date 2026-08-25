@@ -232,6 +232,7 @@ mod keepalive;
 mod live;
 mod maybe_tls_stream;
 mod pool;
+mod passfile;
 mod portal;
 mod prepare;
 mod query;

@@ -65,6 +65,8 @@ mod keepalive;
 mod live;
 #[path = "../src/maybe_tls_stream.rs"]
 mod maybe_tls_stream;
+#[path = "../src/passfile.rs"]
+mod passfile;
 #[path = "../src/pool.rs"]
 mod pool;
 #[path = "../src/portal.rs"]
