@@ -69,7 +69,7 @@ use crate::connect::{
 };
 use crate::connect_socket::connect_socket;
 use crate::connect_tls::negotiate_tls;
-use crate::escape::{escape_literal_body, quote_identifier};
+use crate::escape::{quote_identifier, quote_literal};
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::release::ConnectionRelease;
 use crate::tls::MakeTlsConnect;
@@ -630,9 +630,11 @@ where
         cmd.push_str(opts.start_lsn);
         cmd.push_str(" (\"proto_version\" '");
         cmd.push_str(&opts.proto_version.to_string());
-        cmd.push_str("', \"publication_names\" '");
-        cmd.push_str(&escape_literal_body(&publications));
-        cmd.push('\'');
+        // `quote_literal` renders the quotes itself, because whether the
+        // literal needs `E'...'` depends on the value - a caller that supplied
+        // its own `'` could not know.
+        cmd.push_str("', \"publication_names\" ");
+        cmd.push_str(&quote_literal(&publications));
 
         // Only options the caller actually asked for are sent. pgoutput
         // REFUSES an option it does not know - `unrecognized pgoutput option:
