@@ -2159,6 +2159,14 @@ impl fmt::Debug for Config {
         config_dbg = config_dbg
             .field("user", &self.user)
             .field("password", &self.password.as_ref().map(|_| Redaction {}))
+            // Paths and names, not secrets: `passfile` and `servicefile` say
+            // WHERE a credential lives, which is the thing a caller debugging
+            // "why is it not using my password" needs to see. The password
+            // itself is redacted above however it arrived, including from a
+            // file.
+            .field("passfile", &self.passfile)
+            .field("service", &self.service)
+            .field("service_file", &self.service_file)
             .field("dbname", &self.dbname)
             .field("options", &self.options)
             .field("application_name", &self.application_name)
@@ -2186,6 +2194,8 @@ impl fmt::Debug for Config {
             .field("ssl_min_protocol_version", &self.ssl_min_protocol_version)
             .field("ssl_max_protocol_version", &self.ssl_max_protocol_version)
             .field("ssl_sni", &self.ssl_sni)
+            .field("ssl_key_log_file", &self.ssl_key_log_file)
+            .field("max_message_size", &self.max_message_size)
             .field("require_peer", &self.require_peer)
             .field("host", &self.host)
             .field("hostaddr", &self.hostaddr)
@@ -3293,6 +3303,56 @@ mod tests {
     fn test_invalid_hostaddr_parsing() {
         let s = "user=pass_user dbname=postgres host=host1 hostaddr=127.0.0 port=26257";
         s.parse::<Config>().err().unwrap();
+    }
+
+    /// The MAIN password must not reach `Debug`, whichever way it arrived.
+    ///
+    /// `ssl_password` has been covered since it was added; this one - the
+    /// secret every connection carries, and the one most likely to be in a
+    /// log line - had nothing. A `Config` is `Debug`-printed in error paths
+    /// and by callers tracing their own setup, so a leak here ends up at rest
+    /// in whatever collects those logs.
+    #[test]
+    fn the_password_never_reaches_debug_output() {
+        const SECRET: &str = "hunter2-do-not-log";
+
+        // From a keyword DSN, from a URL, and from the builder: three
+        // different paths into the same field, and a redaction that covered
+        // only one of them would be worth nothing.
+        let from_keywords: Config = format!("host=h user=u password={SECRET}")
+            .parse()
+            .expect("the keyword DSN parses");
+        let from_url: Config = format!("postgres://u:{SECRET}@h/db")
+            .parse()
+            .expect("the URL parses");
+        let mut from_builder = Config::new();
+        from_builder.host("h").user("u").password(SECRET);
+
+        for (source, config) in [
+            ("keyword DSN", from_keywords),
+            ("URL", from_url),
+            ("builder", from_builder),
+        ] {
+            assert_eq!(
+                config.get_password(),
+                Some(SECRET.as_bytes()),
+                "{source}: the password did not survive parsing, so the \
+                 redaction check below would pass for the wrong reason"
+            );
+
+            let debug = format!("{config:?}");
+            assert!(
+                !debug.contains(SECRET),
+                "{source}: Debug leaked the password: {debug}"
+            );
+            // THE CONTROL. `!contains` is satisfied by an empty string, so
+            // prove the output is real and still useful for diagnosis.
+            assert!(
+                debug.contains("user"),
+                "{source}: Debug printed nothing recognisable, so the leak \
+                 assertion above proves nothing: {debug}"
+            );
+        }
     }
 
     #[test]
