@@ -65,12 +65,17 @@ Run the suite against it:
 
 ```bash
 PG_TEST_URL=postgres://postgres:zeroship@127.0.0.1:5459/zeroship \
-  cargo test -p compio-postgres --features test-utils -- --test-threads=1
+  cargo test -p compio-postgres -- --test-threads=1
 ```
 
 Expected: the same pass count as the primary server, 0 failed. Anything else
 is either a real version difference or a test that pinned one version's
 behaviour - triage below.
+
+MEASURED 2026-08-25: **1720 passed, 0 failed on 18.4**, the same totals as
+16.14 on 5455 in the same session. Re-measure rather than carrying that number
+forward - it moves whenever the suite grows, and the claim worth holding is
+"the same as the primary server on the same day", not any particular figure.
 
 Tear down when finished:
 

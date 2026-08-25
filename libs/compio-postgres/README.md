@@ -40,7 +40,7 @@ run, not a green one - see the header of `tests/common/mod.rs` for why.
 ```bash
 # The ordinary suite.
 PG_TEST_URL=postgres://postgres:zeroship@127.0.0.1:5455/zeroship \
-  cargo test -p compio-postgres --features test-utils -- --test-threads=1
+  cargo test -p compio-postgres -- --test-threads=1
 ```
 
 `--test-threads=1` is not superstition: several tests measure server-visible
@@ -54,11 +54,11 @@ whole class of behaviour was otherwise measured on exactly one configuration.
 
 ```bash
 # Over TLS. Needs tests/tls_live_setup.sh first (see below).
-cargo test -p compio-postgres --features test-utils,suite-over-tls -- --test-threads=1
+cargo test -p compio-postgres --features suite-over-tls -- --test-threads=1
 
 # With the implicit prepared-statement cache on (it is OFF by default, so its
 # eviction and stale-plan retry are otherwise barely exercised).
-PG_TEST_URL=... cargo test -p compio-postgres --features test-utils,suite-with-statement-cache -- --test-threads=1
+PG_TEST_URL=... cargo test -p compio-postgres --features suite-with-statement-cache -- --test-threads=1
 
 # The TLS-specific suite: negotiation, verification modes, CRLs, client
 # certificates, channel binding, direct SSL. Not built without the feature.
@@ -92,9 +92,11 @@ question rather than gate a change:
   note first, or you will measure pgbouncer refusing this suite's
   schema-isolation `options` rather than measuring the driver.
 - `docs/runbooks/compio-postgres-cross-version-check.md` - a second server
-  version. PostgreSQL 16 and 18 are both known green; the runbook exists
-  because a protocol claim measured on one version is a claim about that
-  version.
+  version. The runbook exists because a protocol claim measured on one version
+  is a claim about that version: 16.14 streams a rolled-back transaction and
+  sends `StreamAbort`, while 18.4 sends nothing at all. Both are green as of
+  2026-08-25, same totals on each; the runbook records the figure and says to
+  re-measure rather than trust it.
 
 ## The oracles
 
