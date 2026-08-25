@@ -277,13 +277,13 @@ impl TlsSession {
     }
 
     /// Encrypt plaintext into the outbound queue.
-    fn write_plaintext(&mut self, src: &[u8]) -> io::Result<usize> {
+    pub(crate) fn write_plaintext(&mut self, src: &[u8]) -> io::Result<usize> {
         let n = self.conn.writer().write(src)?;
         self.collect_outgoing()?;
         Ok(n)
     }
 
-    fn take_outgoing(&mut self) -> Vec<u8> {
+    pub(crate) fn take_outgoing(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.outgoing)
     }
 
