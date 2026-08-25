@@ -80,9 +80,12 @@ protocol question; a whole-suite run needs enough backends not to serialise
 
 ## What SHOULD still fail, and why
 
-MEASURED 2026-08-24 on the configured pooler: **1374 passed, 49 failed**, and
-every failure was session state that a transaction pooler does not preserve.
-Expect roughly this set, and treat anything OUTSIDE it as the finding:
+MEASURED 2026-08-24 on the configured pooler, twice: **1374/49** against
+PostgreSQL 16, and **1407/50** against 18 after the suite had grown by ~35
+tests. Do not read the residue as a fixed number - it tracks how many
+session-dependent tests the suite contains, so it moves with the suite. What
+matters is that every failure is session state a transaction pooler does not
+preserve. Treat anything OUTSIDE this set as the finding:
 
 - the implicit statement cache (`0A000` cached plan, `26000` prepared
   statement gone) - `Config::statement_cache_capacity` says in as many words
@@ -91,12 +94,20 @@ Expect roughly this set, and treat anything OUTSIDE it as the finding:
 - `CancelRequest` - the pooler owns the cancel key, not the backend
 - session GUCs, `target_session_attrs` read-only checks, dirty-state and
   hand-off assertions, template-database fixtures
-- one hardcoded temp table (`cpg_diff` in `differential_tokio.rs`) that two
-  sessions can collide on when they share a backend; the newer surfaces in
-  that file use `common::test_object_name` and do not
+- the pool's own backend-identity tests (`connection_churn.rs`, the
+  mass-termination and terminated-backend tests): a pooler hands out whichever
+  backend it likes, so "the same connection came back" is not a claim that can
+  hold behind one
 
-None of that is a defect. The value of the run is the 1374, and any failure
-whose cause is not in the list above.
+FIXED on 2026-08-24, so do NOT expect it any more: `differential_tokio.rs` used
+to carry four hardcoded temp-table names, and behind a pooler the two drivers
+shared a backend and collided on them - `both_drivers_agree_on_command_tags_and
+_sqlstates` reported 42P07 against tokio's Rows(0), which reads as a driver
+disagreement and was not one. Every fixture there is now per-driver, measured
+24/4 -> 26/2 on that file alone.
+
+None of that is a defect. The value of the run is the ~1400 that pass, and any
+failure whose cause is not in the list above.
 
 Run the suite through it:
 
