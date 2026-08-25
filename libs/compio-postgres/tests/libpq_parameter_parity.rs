@@ -25,9 +25,23 @@ enum Verdict {
     Accepted,
     /// We deliberately do not, and say so naming the key.
     Refused,
+    /// We implement it, but it names EXTERNAL STATE that this test cannot
+    /// stand up, so parsing a probe value legitimately fails.
+    ///
+    /// This needs its own verdict rather than being folded into one of the
+    /// other two, because both would be wrong in a way that reads as right.
+    /// `Accepted` fails outright. `Refused` PASSES - the error mentions the
+    /// key - while asserting the opposite of the truth, which is exactly the
+    /// silent-misclassification this whole test exists to prevent.
+    ///
+    /// The evidence that it is implemented is that the failure is about
+    /// RESOLVING the value: an unrecognised key reports `unknown option
+    /// <key>` and could not mention the value, whereas a key we act on
+    /// reports that it could not find `<value>`.
+    Resolved,
 }
 
-use Verdict::{Accepted, Refused};
+use Verdict::{Accepted, Refused, Resolved};
 
 /// `(parameter, a value libpq would consider well formed, our verdict)`.
 ///
@@ -68,7 +82,7 @@ const LIBPQ_PARAMETERS: &[(&str, &str, Verdict)] = &[
     ("requiressl", "0", Refused),
     ("scram_client_key", "key", Refused),
     ("scram_server_key", "key", Refused),
-    ("service", "svc", Refused),
+    ("service", "svc", Resolved),
     ("ssl_max_protocol_version", "TLSv1.3", Accepted),
     ("ssl_min_protocol_version", "TLSv1.2", Accepted),
     ("sslcert", "/tmp/client.crt", Accepted),
@@ -116,6 +130,18 @@ fn every_libpq_parameter_is_implemented_or_refused_by_name() {
             }
             (Refused, Ok(_)) => wrong.push(format!(
                 "{key}: accepted but unimplemented, so it is silently ignored"
+            )),
+            // Naming the VALUE is what separates "we tried to resolve it" from
+            // "we do not know this key": an unknown-option error cannot
+            // mention a value it never looked at.
+            (Resolved, Err(error)) if a_cause_names(&error, value) => {}
+            (Resolved, Err(error)) => wrong.push(format!(
+                "{key}: expected a failure to RESOLVE {value}, but no cause \
+                 names it, so this looks like the key being rejected ({error})"
+            )),
+            (Resolved, Ok(_)) => wrong.push(format!(
+                "{key}: resolved {value} against external state this test did \
+                 not create, so it cannot have been looked up"
             )),
         }
     }

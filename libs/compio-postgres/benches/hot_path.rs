@@ -81,6 +81,8 @@ mod release;
 pub mod replication;
 #[path = "../src/row.rs"]
 pub mod row;
+#[path = "../src/service.rs"]
+mod service;
 #[path = "../src/simple_query.rs"]
 mod simple_query;
 #[path = "../src/socket.rs"]

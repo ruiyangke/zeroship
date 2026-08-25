@@ -238,6 +238,7 @@ mod prepare;
 mod query;
 mod release;
 pub mod row;
+mod service;
 mod simple_query;
 mod socket;
 mod statement;
