@@ -257,6 +257,9 @@ impl TlsSession {
 /// The handle both halves share.
 pub(crate) type SharedSession = Rc<RefCell<TlsSession>>;
 
+/// Used by this module's own tests; `cargo build` reports it dead because it
+/// does not compile `cfg(test)`.
+#[cfg(test)]
 pub(crate) fn share(conn: ClientConnection) -> SharedSession {
     Rc::new(RefCell::new(TlsSession::new(conn)))
 }
@@ -337,10 +340,6 @@ impl<R> TlsReader<R> {
 
     fn socket_mut(&mut self) -> &mut R {
         &mut self.socket
-    }
-
-    fn session(&self) -> &SharedSession {
-        &self.session
     }
 }
 
@@ -506,10 +505,6 @@ impl<S> TlsStreamCore<S> {
 
     pub(crate) fn into_parts(self) -> (S, SharedSession) {
         (self.reader.socket, self.reader.session)
-    }
-
-    pub(crate) fn session(&self) -> &SharedSession {
-        self.reader.session()
     }
 }
 
