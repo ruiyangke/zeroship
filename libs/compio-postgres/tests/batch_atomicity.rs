@@ -141,3 +141,40 @@ async fn a_valid_batch_applies_every_statement() {
 
     drop_fixture(&client, &table).await;
 }
+
+/// The control differing in ONE variable: the same statements split across TWO
+/// `batch_execute` calls are NOT atomic, because each simple query gets its own
+/// implicit transaction.
+///
+/// This is the contrast the whole file exists for. The two forms carry
+/// identical SQL in identical order and differ only in FRAMING, so a caller
+/// reading `batch_execute("A; B")` has no syntactic cue that it behaves
+/// unlike `batch_execute("A")` followed by `batch_execute("B")` - and the
+/// difference only appears once something fails.
+///
+/// It also keeps the first test honest: without this, that test would be
+/// satisfied by a driver that never ran the INSERT at all, or by a server
+/// rolling everything back unconditionally.
+#[compio::test]
+async fn the_same_statements_sent_separately_are_not_atomic() {
+    let client = connected().await;
+    let table = fixture(&client).await;
+
+    client
+        .batch_execute(&format!("INSERT INTO {table} VALUES (1)"))
+        .await
+        .expect("the INSERT alone succeeds");
+    client
+        .batch_execute("SELECT 1/0")
+        .await
+        .expect_err("the division fails on its own");
+
+    assert_eq!(
+        surviving_ids(&client, &table).await,
+        vec![1],
+        "a committed INSERT was undone by a LATER, SEPARATE failing query; \
+         separate simple queries each commit on their own"
+    );
+
+    drop_fixture(&client, &table).await;
+}
