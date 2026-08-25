@@ -2725,6 +2725,78 @@ mod tests {
     use std::num::NonZeroUsize;
     use std::time::Duration;
 
+    /// Every parameter whose value carries a UNIT or a value convention,
+    /// pinned against what PostgreSQL documents it to mean.
+    ///
+    /// This exists because a wrong unit is invisible to every other check we
+    /// have. The DSN parses, the setting is applied, and the number is simply
+    /// wrong by a factor - so the libpq parity table (which only rules on
+    /// accept-vs-refuse) reports it as implemented, and the differential suite
+    /// cannot see it at all because that compares QUERY RESULTS and never DSN
+    /// interpretation.
+    ///
+    /// `tcp_user_timeout` was read as seconds here for exactly that reason,
+    /// inherited verbatim from tokio-postgres 0.7.18, which still reads it
+    /// that way. libpq documents it in MILLISECONDS and it is the only member
+    /// of this family that is not seconds.
+    mod parameter_units {
+        use super::super::Config;
+        use std::time::Duration;
+
+        fn parse(fragment: &str) -> Config {
+            format!("host=h {fragment}")
+                .parse()
+                .expect("the fragment parses")
+        }
+
+        #[test]
+        fn connect_timeout_is_seconds() {
+            assert_eq!(
+                parse("connect_timeout=10").get_connect_timeout(),
+                Some(&Duration::from_secs(10))
+            );
+        }
+
+        #[test]
+        fn tcp_user_timeout_is_milliseconds() {
+            assert_eq!(
+                parse("tcp_user_timeout=7000").get_tcp_user_timeout(),
+                Some(&Duration::from_millis(7000)),
+                "libpq documents this one in milliseconds, unlike the rest"
+            );
+        }
+
+        #[test]
+        fn the_keepalive_timings_are_seconds_and_the_count_is_a_count() {
+            let config = parse("keepalives_idle=11 keepalives_interval=3 keepalives_count=5");
+            assert_eq!(config.keepalive_config.idle, Duration::from_secs(11));
+            assert_eq!(
+                config.keepalive_config.interval,
+                Some(Duration::from_secs(3))
+            );
+            assert_eq!(config.keepalive_config.retries, Some(5));
+        }
+
+        /// libpq reads `keepalives` with `strtol` and tests the result against
+        /// zero, so a NEGATIVE value means on. Parsing it as unsigned would
+        /// refuse a DSN psql accepts.
+        #[test]
+        fn keepalives_is_nonzero_rather_than_boolean() {
+            assert!(parse("keepalives=1").get_keepalives());
+            assert!(parse("keepalives=-1").get_keepalives());
+            assert!(!parse("keepalives=0").get_keepalives());
+        }
+
+        /// Zero means "use the system default" for both timeouts, which is
+        /// expressed by leaving the setting unset rather than by passing a
+        /// zero down to the socket.
+        #[test]
+        fn a_zero_timeout_is_left_unset_so_the_default_applies() {
+            assert_eq!(parse("connect_timeout=0").get_connect_timeout(), None);
+            assert_eq!(parse("tcp_user_timeout=0").get_tcp_user_timeout(), None);
+        }
+    }
+
     /// The service-precedence rule, measured against libpq: an explicitly
     /// given key wins REGARDLESS OF ORDER, so these exercise
     /// `Config::fill_unset` directly rather than going through the file
