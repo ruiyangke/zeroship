@@ -460,8 +460,8 @@ async fn dropping_a_tls_client_sends_close_notify() {
         socket.write_all(b"S").expect("accept TLS negotiation");
         socket.flush().expect("flush TLS negotiation response");
 
-        let mut tls = rustls::ServerConnection::new(server_config)
-            .expect("build TLS server session");
+        let mut tls =
+            rustls::ServerConnection::new(server_config).expect("build TLS server session");
 
         {
             let mut stream = rustls::Stream::new(&mut tls, &mut socket);

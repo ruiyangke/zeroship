@@ -78,9 +78,7 @@ use crate::config::{Config, SslCertMode, SslMode, SslProtocolVersion, SslRootCer
 use crate::tls::{
     ChannelBinding, ClientCertStatus, MakeTlsConnect, ServerVerification, TlsConnect, TlsStream,
 };
-use crate::tls_sansio::{
-    self, SharedSession, TlsReadHalf, TlsStreamCore, TlsWriteHalf, share,
-};
+use crate::tls_sansio::{self, SharedSession, TlsReadHalf, TlsStreamCore, TlsWriteHalf, share};
 
 /// `PostgreSQL`'s registered ALPN protocol identifier.
 const POSTGRESQL_ALPN_PROTOCOL: &[u8] = b"postgresql";
@@ -256,9 +254,8 @@ fn verifier_for(
         return Ok((Arc::new(AcceptAnyServerCert { algorithms }), policy));
     }
 
-    let builder = || {
-        WebPkiServerVerifier::builder_with_provider(roots.clone(), Arc::new(provider.clone()))
-    };
+    let builder =
+        || WebPkiServerVerifier::builder_with_provider(roots.clone(), Arc::new(provider.clone()));
 
     // Preserve sslcrl's libpq behaviour: a file OpenSSL cannot load is
     // ignored. Validate it alone before combining it with the directory so an
@@ -271,12 +268,10 @@ fn verifier_for(
             Err(error) => return Err(Error::tls(Box::new(error))),
         }
     }
-    let file_issuers = distinct_crl_issuers(&file_crls).map_err(|reason| {
-        Error::tls(format!("sslcrl: {reason}").into())
-    })?;
-    ensure_crls_started(&file_crls).map_err(|reason| {
-        Error::tls(format!("sslcrl: {reason}").into())
-    })?;
+    let file_issuers = distinct_crl_issuers(&file_crls)
+        .map_err(|reason| Error::tls(format!("sslcrl: {reason}").into()))?;
+    ensure_crls_started(&file_crls)
+        .map_err(|reason| Error::tls(format!("sslcrl: {reason}").into()))?;
 
     let (all_crls, directory_path) = match crls.directory {
         Some(directory) => {
@@ -313,7 +308,9 @@ fn verifier_for(
     };
 
     let verifier = if all_crls.is_empty() {
-        builder().build().map_err(|error| Error::tls(Box::new(error)))?
+        builder()
+            .build()
+            .map_err(|error| Error::tls(Box::new(error)))?
     } else {
         match builder()
             .with_crls(all_crls)
@@ -548,19 +545,21 @@ fn protocol_versions_from_config(
 ) -> Result<&'static [&'static SupportedProtocolVersion], Error> {
     config.validate_ssl_protocol_version_range()?;
 
-    Ok(match (
-        config.get_ssl_min_protocol_version(),
-        config.get_ssl_max_protocol_version(),
-    ) {
-        (SslProtocolVersion::TlsV1_2, Some(SslProtocolVersion::TlsV1_2)) => TLS12_ONLY,
-        (SslProtocolVersion::TlsV1_2, None | Some(SslProtocolVersion::TlsV1_3)) => {
-            TLS12_AND_TLS13
-        }
-        (SslProtocolVersion::TlsV1_3, None | Some(SslProtocolVersion::TlsV1_3)) => TLS13_ONLY,
-        (SslProtocolVersion::TlsV1_3, Some(SslProtocolVersion::TlsV1_2)) => {
-            unreachable!("the inverted range was rejected above")
-        }
-    })
+    Ok(
+        match (
+            config.get_ssl_min_protocol_version(),
+            config.get_ssl_max_protocol_version(),
+        ) {
+            (SslProtocolVersion::TlsV1_2, Some(SslProtocolVersion::TlsV1_2)) => TLS12_ONLY,
+            (SslProtocolVersion::TlsV1_2, None | Some(SslProtocolVersion::TlsV1_3)) => {
+                TLS12_AND_TLS13
+            }
+            (SslProtocolVersion::TlsV1_3, None | Some(SslProtocolVersion::TlsV1_3)) => TLS13_ONLY,
+            (SslProtocolVersion::TlsV1_3, Some(SslProtocolVersion::TlsV1_2)) => {
+                unreachable!("the inverted range was rejected above")
+            }
+        },
+    )
 }
 
 fn crls_from_pem_file(path: &Path) -> Option<Vec<CertificateRevocationListDer<'static>>> {
@@ -662,9 +661,7 @@ fn openssl_canonical_string(value: &Any<'_>) -> Result<Option<Vec<u8>>, String> 
 
 /// OpenSSL hashes a canonicalised X509_NAME, not the issuer's original DER.
 /// Reproducing those bytes is what makes a rehashed filename meaningful here.
-fn openssl_crl_issuer(
-    crl: &CertificateRevocationListDer<'_>,
-) -> Result<(Vec<u8>, i64), String> {
+fn openssl_crl_issuer(crl: &CertificateRevocationListDer<'_>) -> Result<(Vec<u8>, i64), String> {
     let (remaining, parsed) = x509_parser::parse_x509_crl(crl.as_ref())
         .map_err(|error| format!("cannot parse CRL issuer: {error}"))?;
     if !remaining.is_empty() {
@@ -764,8 +761,8 @@ fn hashed_crl_name(name: &OsStr) -> Option<(&str, usize)> {
 fn crls_from_hashed_directory(
     path: &Path,
 ) -> Result<Vec<CertificateRevocationListDer<'static>>, String> {
-    let entries = std::fs::read_dir(path)
-        .map_err(|error| format!("cannot read directory: {error}"))?;
+    let entries =
+        std::fs::read_dir(path).map_err(|error| format!("cannot read directory: {error}"))?;
     let mut by_issuer = BTreeMap::<String, BTreeMap<usize, PathBuf>>::new();
     for entry in entries {
         let entry = entry.map_err(|error| format!("cannot read directory entry: {error}"))?;
@@ -899,10 +896,7 @@ struct ObservingSigningKey {
 }
 
 impl SigningKey for ObservingSigningKey {
-    fn choose_scheme(
-        &self,
-        offered: &[SignatureScheme],
-    ) -> Option<Box<dyn rustls::sign::Signer>> {
+    fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn rustls::sign::Signer>> {
         let signer = self.inner.choose_scheme(offered)?;
         self.observation.sent.store(true, Ordering::Relaxed);
         Some(signer)
@@ -980,10 +974,7 @@ impl MakeRustlsConnect {
     ///
     /// [`MakeRustlsConnect::from_config`] needs no such argument: it builds the
     /// verifier itself from `sslmode` and `sslrootcert`, so it knows.
-    pub fn new(
-        config: Arc<ClientConfig>,
-        verification: ServerVerification,
-    ) -> MakeRustlsConnect {
+    pub fn new(config: Arc<ClientConfig>, verification: ServerVerification) -> MakeRustlsConnect {
         let config = if config.alpn_protocols.is_empty() {
             let mut config = (*config).clone();
             config.alpn_protocols = vec![POSTGRESQL_ALPN_PROTOCOL.to_vec()];
@@ -1169,8 +1160,7 @@ impl MakeRustlsConnect {
         // that need `Resumption::disabled()` and this whole decision has to be
         // re-taken. Re-run the probe above rather than assuming either way.
 
-        let mut connector =
-            MakeRustlsConnect::new(Arc::new(client_config), server_verification);
+        let mut connector = MakeRustlsConnect::new(Arc::new(client_config), server_verification);
         connector.ssl_cert_mode = config.get_ssl_cert_mode();
         connector.crl_directory_reload = crl_directory_reload;
         Ok(connector)
@@ -1230,18 +1220,17 @@ where
         Box::pin(async move {
             let server_name = ServerName::try_from(self.domain.clone())
                 .map_err(|e| io::Error::other(format!("invalid TLS hostname: {e}")))?;
-            let (config, client_cert_observation) =
-                if self.ssl_cert_mode == SslCertMode::Require {
-                    let observation = Arc::new(ClientCertObservation::default());
-                    let mut config = (*self.config).clone();
-                    config.client_auth_cert_resolver = Arc::new(ObservingClientCertResolver {
-                        inner: config.client_auth_cert_resolver.clone(),
-                        observation: observation.clone(),
-                    });
-                    (Arc::new(config), Some(observation))
-                } else {
-                    (self.config, None)
-                };
+            let (config, client_cert_observation) = if self.ssl_cert_mode == SslCertMode::Require {
+                let observation = Arc::new(ClientCertObservation::default());
+                let mut config = (*self.config).clone();
+                config.client_auth_cert_resolver = Arc::new(ObservingClientCertResolver {
+                    inner: config.client_auth_cert_resolver.clone(),
+                    observation: observation.clone(),
+                });
+                (Arc::new(config), Some(observation))
+            } else {
+                (self.config, None)
+            };
             // The handshake is driven against the socket directly rather than
             // through a poll-based adapter, so the socket is still ours
             // afterwards. That is the whole point: an adapter that keeps the
@@ -1518,14 +1507,12 @@ mod tests {
         let stream = TcpStream::connect(address)
             .await
             .expect("connect to rustls server");
-        let mut make =
-            MakeRustlsConnect::new(Arc::new(client_config), ServerVerification::None);
-        let connector =
-            <MakeRustlsConnect as MakeTlsConnect<TcpStream>>::make_tls_connect(
-                &mut make,
-                "localhost",
-            )
-            .expect("make rustls connector");
+        let mut make = MakeRustlsConnect::new(Arc::new(client_config), ServerVerification::None);
+        let connector = <MakeRustlsConnect as MakeTlsConnect<TcpStream>>::make_tls_connect(
+            &mut make,
+            "localhost",
+        )
+        .expect("make rustls connector");
         assert!(
             connector.connect(stream).await.is_err(),
             "capture-only rustls server must end the client handshake"
@@ -1537,10 +1524,7 @@ mod tests {
     #[compio::test]
     async fn empty_client_alpn_offers_postgresql_on_wire() {
         let offered = alpn_offered_on_wire(client_config(Vec::new())).await;
-        assert_eq!(
-            offered,
-            Some(vec![POSTGRESQL_ALPN_PROTOCOL.to_vec()])
-        );
+        assert_eq!(offered, Some(vec![POSTGRESQL_ALPN_PROTOCOL.to_vec()]));
     }
 
     #[compio::test]
@@ -1602,8 +1586,12 @@ mod tests {
 
         // `require` with no anchors accepts what both of those rejected. This
         // is libpq's "encrypted, unverified", and it is deliberate.
-        verify_as(SslMode::Require, Arc::new(RootCertStore::empty()), "wrong.example")
-            .expect("sslmode=require without sslrootcert performs no verification");
+        verify_as(
+            SslMode::Require,
+            Arc::new(RootCertStore::empty()),
+            "wrong.example",
+        )
+        .expect("sslmode=require without sslrootcert performs no verification");
 
         // THE PAIR. Same certificate, same wrong name, same trust anchors;
         // only the mode differs, and the verdicts must differ with it.
@@ -1623,8 +1611,9 @@ mod tests {
     fn a_configured_ca_upgrades_require_and_prefer_to_chain_checking() {
         let foreign = roots_with(SERVER_LOCALHOST);
         for mode in [SslMode::Require, SslMode::Prefer, SslMode::Allow] {
-            verify_as(mode, Arc::new(RootCertStore::empty()), "localhost")
-                .unwrap_or_else(|e| panic!("sslmode={} unverified must accept: {e}", mode.as_str()));
+            verify_as(mode, Arc::new(RootCertStore::empty()), "localhost").unwrap_or_else(|e| {
+                panic!("sslmode={} unverified must accept: {e}", mode.as_str())
+            });
             verify_as(mode, foreign.clone(), "localhost").unwrap_err();
         }
     }
@@ -1741,15 +1730,10 @@ mod tests {
         );
 
         let root = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/verifier_ca.pem");
-        let invalid_crl = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/data/invalid_crl.pem"
-        );
-        let config = format!(
-            "host=h sslmode=verify-full sslrootcert={root} sslcrl={invalid_crl}"
-        )
-        .parse::<Config>()
-        .unwrap();
+        let invalid_crl = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/invalid_crl.pem");
+        let config = format!("host=h sslmode=verify-full sslrootcert={root} sslcrl={invalid_crl}")
+            .parse::<Config>()
+            .unwrap();
         MakeRustlsConnect::from_config(&config)
             .expect("libpq ignores a CRL file whose DER cannot be parsed");
     }
@@ -1767,11 +1751,10 @@ mod tests {
             .expect("libpq does not consult CRLs when no trust anchors are configured");
 
         let root = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/verifier_ca.pem");
-        let verified = format!(
-            "host=h sslmode=verify-full sslrootcert={root} sslcrldir={directory}"
-        )
-        .parse::<Config>()
-        .unwrap();
+        let verified =
+            format!("host=h sslmode=verify-full sslrootcert={root} sslcrldir={directory}")
+                .parse::<Config>()
+                .unwrap();
         let error = MakeRustlsConnect::from_config(&verified)
             .expect_err("an unusable hash directory must not disable revocation checking");
         let cause = std::error::Error::source(&error)
@@ -1790,12 +1773,11 @@ mod tests {
             .unwrap();
         let mut make = MakeRustlsConnect::from_config(&config)
             .expect("an unverified connection does not consult the missing directory");
-        let connector =
-            <MakeRustlsConnect as MakeTlsConnect<TcpStream>>::make_tls_connect(
-                &mut make,
-                "localhost",
-            )
-            .expect("rebuild the per-connection verifier");
+        let connector = <MakeRustlsConnect as MakeTlsConnect<TcpStream>>::make_tls_connect(
+            &mut make,
+            "localhost",
+        )
+        .expect("rebuild the per-connection verifier");
         assert!(
             !Arc::ptr_eq(&make.config, &connector.config),
             "the pool's initial CRL snapshot was reused"

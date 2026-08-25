@@ -118,15 +118,11 @@ pub(crate) struct ConnectionDropRelease {
 #[cfg(unix)]
 impl ConnectionRelease {
     pub(crate) fn dup_of<F: std::os::fd::AsFd>(handle: &F) -> Option<Self> {
-        handle
-            .as_fd()
-            .try_clone_to_owned()
-            .ok()
-            .map(|owned| Self {
-                socket: Arc::new(socket2::Socket::from(owned)),
-                #[cfg(feature = "tls")]
-                tls_session: None,
-            })
+        handle.as_fd().try_clone_to_owned().ok().map(|owned| Self {
+            socket: Arc::new(socket2::Socket::from(owned)),
+            #[cfg(feature = "tls")]
+            tls_session: None,
+        })
     }
 }
 
@@ -182,10 +178,9 @@ impl ConnectionRelease {
         let mut remaining = ciphertext.as_slice();
         while !remaining.is_empty() {
             #[cfg(target_os = "linux")]
-            let sent = self.socket.send_with_flags(
-                remaining,
-                nix::sys::socket::MsgFlags::MSG_NOSIGNAL.bits(),
-            );
+            let sent = self
+                .socket
+                .send_with_flags(remaining, nix::sys::socket::MsgFlags::MSG_NOSIGNAL.bits());
             #[cfg(not(target_os = "linux"))]
             let sent = self.socket.send(remaining);
 

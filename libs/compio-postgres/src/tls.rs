@@ -26,10 +26,7 @@ pub(crate) mod private {
         }
 
         #[cfg(feature = "tls")]
-        pub(crate) fn set_tls_session(
-            &mut self,
-            session: crate::tls_sansio::SharedSession,
-        ) {
+        pub(crate) fn set_tls_session(&mut self, session: crate::tls_sansio::SharedSession) {
             self.0.set_tls_session(session);
         }
     }
@@ -244,12 +241,7 @@ pub trait TlsStream: AsyncRead + AsyncWrite {
     /// Lets this crate's `rustls` stream attach its live session to the
     /// synchronous socket-release guard.
     #[doc(hidden)]
-    fn configure_release(
-        &self,
-        _: private::ForcePrivateApi,
-        _: private::ReleaseConfig<'_>,
-    ) {
-    }
+    fn configure_release(&self, _: private::ForcePrivateApi, _: private::ReleaseConfig<'_>) {}
 }
 
 /// A `MakeTlsConnect` and `TlsConnect` implementation which simply returns an error.
