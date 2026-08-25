@@ -72,10 +72,18 @@ Expected: the same pass count as the primary server, 0 failed. Anything else
 is either a real version difference or a test that pinned one version's
 behaviour - triage below.
 
-MEASURED 2026-08-25: **1720 passed, 0 failed on 18.4**, the same totals as
+MEASURED 2026-08-25: **1738 passed, 0 failed on 18.4**, the same totals as
 16.14 on 5455 in the same session. Re-measure rather than carrying that number
 forward - it moves whenever the suite grows, and the claim worth holding is
 "the same as the primary server on the same day", not any particular figure.
+It read 1720 earlier the same day, before three commits added 18 tests.
+
+Wait for the run to EXIT, not for its output to go quiet.
+`pgoutput_subtransactions` streams for minutes on 18 without printing, so a
+"has the log stopped growing" check calls the run finished at roughly half the
+binaries - 39 of 78 - and prints a clean 0 failures for the half it saw. Poll
+`pgrep -f 'cargo[ ]test -p compio-postgres'` instead, and confirm the binary
+count as well as the failure count.
 
 Tear down when finished:
 
