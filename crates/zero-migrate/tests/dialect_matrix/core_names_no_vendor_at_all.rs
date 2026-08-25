@@ -227,7 +227,7 @@ const NEEDLE_CONTROL_CRATE: &str = "zero-migrate-postgres";
 /// inside a block comment that starts mid-line and does not try. It over-counts prose
 /// into code, never the reverse, which is the safe direction for a census asserting a
 /// bound.
-fn code_of(line: &str) -> Option<&str> {
+pub(crate) fn code_of(line: &str) -> Option<&str> {
     let trimmed = line.trim_start();
     if trimmed.starts_with("//") || trimmed.starts_with("/*") || trimmed.starts_with('*') {
         return None;
@@ -436,7 +436,7 @@ fn line_index(text: &str) -> impl Fn(usize) -> usize + '_ {
 /// one-line `#[cfg(test)] fn` helper 2,100 lines above its 5,600-line test module, and
 /// treating the first attribute as the boundary put 68 test lines in the production
 /// column.
-fn test_line_span(text: &str) -> BTreeSet<usize> {
+pub(crate) fn test_line_span(text: &str) -> BTreeSet<usize> {
     let tokens = lex(text);
     let line_of = line_index(text);
     let mut inside = BTreeSet::new();
@@ -478,7 +478,7 @@ fn test_line_span(text: &str) -> BTreeSet<usize> {
 }
 
 /// Every `.rs` file under `dir`, recursively, in stable order.
-fn rust_files(dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn rust_files(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(next) = stack.pop() {
@@ -562,7 +562,7 @@ fn declared_mods(text: &str) -> Vec<(String, bool)> {
 /// lines, the single biggest concentration in the crate — that says it is a test. The
 /// fact lives one file away, in `render/gen_types.rs`, as `#[cfg(test)] mod
 /// differential_corpus;`.
-fn cfg_test_module_files(root: &Path) -> BTreeSet<PathBuf> {
+pub(crate) fn cfg_test_module_files(root: &Path) -> BTreeSet<PathBuf> {
     let mut out = BTreeSet::new();
     let mut frontier: Vec<PathBuf> = Vec::new();
     for path in rust_files(root) {
@@ -635,7 +635,7 @@ fn census(dir: &Path) -> (usize, BTreeMap<String, usize>) {
 /// Censusing THAT would be a one-file walk in which every finding is by design.
 const ENGINE_CRATE: &str = "zero-migrate-core";
 
-fn crate_src(name: &str) -> PathBuf {
+pub(crate) fn crate_src(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("this crate lives at <workspace>/crates/<name>")

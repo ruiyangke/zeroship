@@ -24,6 +24,7 @@ mod core_does_not_spell_a_vendors_bytes;
 mod core_names_no_vendor_at_all;
 mod core_names_no_vendor_backend_module;
 mod core_names_no_vendor_crate;
+mod core_spells_no_vendor_grammar;
 mod created_tables_dialect_legs;
 mod dialect_conformance_live;
 mod dialect_table;
