@@ -238,7 +238,7 @@ where
     // Keep an owned dup before TLS wraps the descriptor. A read timeout may
     // cancel a partially completed frame, so logical poisoning alone is not
     // enough: the peer must observe this physical session end immediately.
-    let release = socket.release_handle();
+    let mut release = socket.release_handle();
 
     let tls_inst = tls
         .make_tls_connect(hostname.unwrap_or(""))
@@ -269,6 +269,13 @@ where
         has_hostname,
     )
     .await?;
+    if let Some(release) = release.as_mut() {
+        crate::tls::TlsStream::configure_release(
+            &stream,
+            crate::tls::private::ForcePrivateApi,
+            crate::tls::private::ReleaseConfig::new(release),
+        );
+    }
 
     // Run the normal startup + auth handshake - connect_raw_into
     // exposes the post-handshake BufStream that the replication

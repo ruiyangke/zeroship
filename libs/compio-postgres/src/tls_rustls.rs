@@ -79,10 +79,8 @@ use crate::tls::{
     ChannelBinding, ClientCertStatus, MakeTlsConnect, ServerVerification, TlsConnect, TlsStream,
 };
 use crate::tls_sansio::{
-    self, SharedSession, TlsReadHalf, TlsSession, TlsStreamCore, TlsWriteHalf,
+    self, SharedSession, TlsReadHalf, TlsStreamCore, TlsWriteHalf, share,
 };
-use std::cell::RefCell;
-use std::rc::Rc;
 
 /// `PostgreSQL`'s registered ALPN protocol identifier.
 const POSTGRESQL_ALPN_PROTOCOL: &[u8] = b"postgresql";
@@ -1253,13 +1251,11 @@ where
                 .map_err(|error| io::Error::other(format!("TLS session setup failed: {error}")))?;
             let (stream, connection) = tls_sansio::handshake(stream, connection).await?;
 
-            let session: SharedSession = Rc::new(RefCell::new(TlsSession::new(connection)));
-            let tls_server_end_point = session
-                .borrow()
-                .connection()
+            let tls_server_end_point = connection
                 .peer_certificates()
                 .and_then(<[CertificateDer<'_>]>::first)
                 .and_then(tls_server_end_point);
+            let session: SharedSession = share(connection);
             let client_cert_status = client_cert_observation
                 .as_deref()
                 .map_or(ClientCertStatus::Unknown, ClientCertObservation::status);
@@ -1316,10 +1312,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + 'static> AsyncWrite for RustlsStream<S>
 ///
 /// The rustls session cannot be duplicated, so it is not: both halves share
 /// the one session and reach it only through synchronous helpers that never
-/// hold a borrow across an `await`. What gets split is the socket, which is
-/// the same operation the plaintext path already performs. `tls_sansio` has
-/// the full argument, including the one asymmetry - ciphertext produced by the
-/// read path leaves with the next write.
+/// hold a mutex guard across an `await`. What gets split is the socket, which
+/// is the same operation the plaintext path already performs. `tls_sansio`
+/// has the full argument, including the one asymmetry - ciphertext produced by
+/// the read path leaves with the next write.
 impl<S> crate::buf_stream::SplitStream for RustlsStream<S>
 where
     S: crate::buf_stream::SplitStream,
@@ -1359,6 +1355,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin + 'static> TlsStream for RustlsStream<S> 
 
     fn client_cert_status(&self) -> ClientCertStatus {
         self.client_cert_status
+    }
+
+    fn configure_release(
+        &self,
+        _: crate::tls::private::ForcePrivateApi,
+        mut release: crate::tls::private::ReleaseConfig<'_>,
+    ) {
+        release.set_tls_session(self.inner.session());
     }
 }
 

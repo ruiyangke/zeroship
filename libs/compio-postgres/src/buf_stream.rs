@@ -496,8 +496,8 @@ where
 ///
 /// **TLS splits too, and why that is sound is worth stating.** rustls does
 /// keep one session behind both directions, so the halves do not each get a
-/// copy of it - they share it (`Rc<RefCell<..>>`) and reach it only through
-/// synchronous helpers that never hold a borrow across an `await` (see
+/// copy of it - they share it (`Arc<Mutex<..>>`) and reach it only through
+/// synchronous helpers that never hold a mutex guard across an `await` (see
 /// `tls_sansio`). What they own separately is the socket, which is the same
 /// already-safe split as the plaintext case.
 ///

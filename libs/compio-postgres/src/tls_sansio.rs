@@ -30,11 +30,12 @@
 //! # `close_notify` on teardown is BEST EFFORT, and that is not a bug here
 //!
 //! `TlsWriteHalf::shutdown` sends `close_notify`, and the multiplexed loop
-//! calls it after `Terminate`. It frequently does not arrive, for the reason
-//! `crate::release` documents about `Terminate` itself: dropping the `Client`
-//! shuts the socket down SYNCHRONOUSLY through a dup of the descriptor, so by
-//! the time the connection task next runs there is often nothing left to write
-//! through.
+//! calls it after `Terminate`. That asynchronous fallback frequently does not
+//! arrive, for the reason `crate::release` documents about `Terminate` itself:
+//! dropping the `Client` shuts the socket down SYNCHRONOUSLY through a dup of
+//! the descriptor, so by the time the connection task next runs there is often
+//! nothing left to write through. The synchronous release therefore serializes
+//! its own alert before it shuts down the socket.
 //!
 //! What is new under TLS is that the SERVER now has something to say back. It
 //! answers a client close with its own `close_notify`, that write lands on a
@@ -71,25 +72,23 @@
 //!   TLS layer and not the `Terminate` message. libpq over TLS is the other
 //!   control: it logs nothing either.
 //!
-//! So the fix needs the rustls session to be reachable from `Drop`, which
-//! today it is not: the session is `Rc<RefCell<ClientConnection>>` owned by the
-//! connection task, while `ConnectionRelease` must stay `Send` because it lives
-//! in `Client` (`crate::release` explains why a `SharedFd` was rejected for the
-//! same reason). `close_notify` cannot be precomputed at handshake time either:
-//! it is an encrypted record whose sequence number depends on every write that
-//! precedes it, and `send_close_notify` commits the session irreversibly.
-//!
-//! That leaves one shape: make the session `Arc<Mutex<ClientConnection>>` so a
-//! `Drop` can lock it, serialise `close_notify`, and `send` it on the dup
-//! before shutting the socket down. It costs an uncontended lock on the TLS
-//! write path and touches the handshake, both halves and the split.
+//! The rustls session is therefore an `Arc<Mutex<TlsSession>>` shared with
+//! `ConnectionRelease`. `TlsSession` owns both `ClientConnection` and the
+//! ordered ciphertext queue; locking only the former would let queued records
+//! be overtaken by the alert. `Drop` locks that pair, serializes the queued
+//! records plus `close_notify`, and sends them on the dup before shutting the
+//! socket down. The `Arc` also keeps `Client` `Send`, unlike compio's default
+//! `Rc`-backed `SharedFd`. If an earlier record has already left the queue for
+//! an async socket write, release skips the alert rather than sending a later
+//! TLS sequence number first. Teardown is best effort, but never misordered.
 
 use compio::buf::{BufResult, IoBuf, IoBufMut};
 use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use rustls::ClientConnection;
-use std::cell::RefCell;
 use std::io::{self, Read, Write};
-use std::rc::Rc;
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 /// Bytes requested per socket read while handshaking.
 ///
@@ -180,11 +179,14 @@ where
 ///
 /// Every method here is SYNCHRONOUS and none of them may be made async. That is
 /// the invariant that makes sharing the session between two concurrently
-/// running halves sound: a `RefCell` borrow never spans a suspension point, so
-/// the halves can never both hold one.
+/// running halves sound: a mutex guard never spans a suspension point, so the
+/// halves can never both hold one.
 pub(crate) struct TlsSession {
     conn: ClientConnection,
     outgoing: Vec<u8>,
+    /// Ciphertext removed from `outgoing` and owned by an async socket write.
+    /// A synchronous release cannot safely overtake that earlier TLS record.
+    write_in_flight: bool,
 }
 
 impl TlsSession {
@@ -192,11 +194,8 @@ impl TlsSession {
         Self {
             conn,
             outgoing: Vec::new(),
+            write_in_flight: false,
         }
-    }
-
-    pub(crate) fn connection(&self) -> &ClientConnection {
-        &self.conn
     }
 
     /// Move any ciphertext rustls is holding into the outbound queue, up to
@@ -287,16 +286,40 @@ impl TlsSession {
         self.conn.send_close_notify();
         self.collect_outgoing()
     }
+
+    /// Serialize everything already queued followed by a `close_notify`.
+    ///
+    /// This deliberately bypasses [`OUTGOING_SOFT_CAP`]. The session is being
+    /// discarded, so retaining rustls' bounded queue no longer buys anything,
+    /// while stopping at the cap could leave the alert itself inside rustls.
+    pub(crate) fn take_close_notify(&mut self) -> io::Result<Vec<u8>> {
+        if self.write_in_flight {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "TLS ciphertext is still being written",
+            ));
+        }
+        self.conn.send_close_notify();
+        let mut outgoing = self.take_outgoing();
+        while self.conn.wants_write() {
+            let before = outgoing.len();
+            self.conn.write_tls(&mut outgoing)?;
+            if outgoing.len() == before {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "rustls did not serialize pending TLS ciphertext",
+                ));
+            }
+        }
+        Ok(outgoing)
+    }
 }
 
 /// The handle both halves share.
-pub(crate) type SharedSession = Rc<RefCell<TlsSession>>;
+pub(crate) type SharedSession = Arc<Mutex<TlsSession>>;
 
-/// Used by this module's own tests; `cargo build` reports it dead because it
-/// does not compile `cfg(test)`.
-#[cfg(test)]
 pub(crate) fn share(conn: ClientConnection) -> SharedSession {
-    Rc::new(RefCell::new(TlsSession::new(conn)))
+    Arc::new(Mutex::new(TlsSession::new(conn)))
 }
 
 /// Copy `src` into a compio buffer and declare that many bytes valid.
@@ -402,7 +425,7 @@ where
             // condition `feed_ciphertext_step` documents.
             let n = self
                 .session
-                .borrow_mut()
+                .lock()
                 .read_plaintext(&mut self.plain[..cap])?;
             if n > 0 {
                 return Ok(n);
@@ -413,7 +436,7 @@ where
             if self.cipher_read < self.cipher_len {
                 let mut src = &self.cipher[self.cipher_read..self.cipher_len];
                 let before = src.len();
-                let outcome = self.session.borrow_mut().feed_ciphertext_step(&mut src);
+                let outcome = self.session.lock().feed_ciphertext_step(&mut src);
                 self.cipher_read += before - src.len();
                 let peer_has_closed = outcome?;
                 if before == src.len() {
@@ -427,7 +450,7 @@ where
                     if peer_has_closed {
                         return self
                             .session
-                            .borrow_mut()
+                            .lock()
                             .read_plaintext(&mut self.plain[..cap]);
                     }
                     return Err(io::Error::new(
@@ -456,7 +479,7 @@ where
                 // real end of stream.
                 return self
                     .session
-                    .borrow_mut()
+                    .lock()
                     .read_plaintext(&mut self.plain[..cap]);
             }
             self.cipher_read = 0;
@@ -487,23 +510,27 @@ where
 /// again. Topping up each pass keeps the cap as a bound on what is held AT ONE
 /// MOMENT rather than a bound on what is ever sent.
 ///
-/// The queue is taken by value so the `RefCell` borrow ends before the write is
+/// The queue is taken by value so the mutex guard ends before the write is
 /// awaited; anything the read path appends meanwhile is picked up by the next
-/// pass.
+/// pass. `write_in_flight` records the gap where the bytes are owned by the
+/// async operation, so synchronous release never overtakes them.
 async fn flush_outgoing<W>(socket: &mut W, session: &SharedSession) -> io::Result<()>
 where
     W: AsyncWrite + Unpin,
 {
     loop {
         let pending = {
-            let mut guard = session.borrow_mut();
+            let mut guard = session.lock();
             guard.collect_outgoing()?;
-            guard.take_outgoing()
+            let pending = guard.take_outgoing();
+            guard.write_in_flight = !pending.is_empty();
+            pending
         };
         if pending.is_empty() {
             return Ok(());
         }
         let BufResult(result, _) = socket.write_all(pending).await;
+        session.lock().write_in_flight = false;
         result?;
     }
 }
@@ -512,7 +539,7 @@ async fn write_through<W>(socket: &mut W, session: &SharedSession, src: &[u8]) -
 where
     W: AsyncWrite + Unpin,
 {
-    let n = session.borrow_mut().write_plaintext(src)?;
+    let n = session.lock().write_plaintext(src)?;
     flush_outgoing(socket, session).await?;
     Ok(n)
 }
@@ -521,7 +548,7 @@ async fn shutdown_through<W>(socket: &mut W, session: &SharedSession) -> io::Res
 where
     W: AsyncWrite + Unpin,
 {
-    session.borrow_mut().send_close_notify()?;
+    session.lock().send_close_notify()?;
     flush_outgoing(socket, session).await?;
     socket.shutdown().await
 }
@@ -540,6 +567,10 @@ impl<S> TlsStreamCore<S> {
 
     pub(crate) fn into_parts(self) -> (S, SharedSession) {
         (self.reader.socket, self.reader.session)
+    }
+
+    pub(crate) fn session(&self) -> SharedSession {
+        self.reader.session.clone()
     }
 }
 
@@ -708,9 +739,9 @@ mod tests {
         // The state described above: a queue already at the cap, and ciphertext
         // that arrived afterwards. `writer()` directly, not `write_plaintext`,
         // because the latter collects and would hide the very gap under test.
-        session.borrow_mut().outgoing = vec![0u8; OUTGOING_SOFT_CAP];
+        session.lock().outgoing = vec![0u8; OUTGOING_SOFT_CAP];
         {
-            let mut guard = session.borrow_mut();
+            let mut guard = session.lock();
             guard
                 .conn
                 .writer()
@@ -718,7 +749,7 @@ mod tests {
                 .expect("queue application data");
         }
         assert!(
-            session.borrow().conn.wants_write(),
+            session.lock().conn.wants_write(),
             "the fixture must leave ciphertext inside rustls, or this asserts nothing"
         );
 
@@ -727,11 +758,11 @@ mod tests {
             .expect("flush the session");
 
         assert!(
-            !session.borrow().conn.wants_write(),
+            !session.lock().conn.wants_write(),
             "the flush returned success with ciphertext still inside the session"
         );
         assert!(
-            session.borrow().outgoing.is_empty(),
+            session.lock().outgoing.is_empty(),
             "the outbound queue is not empty after a flush"
         );
         assert!(

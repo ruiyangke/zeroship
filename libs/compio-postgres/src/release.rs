@@ -54,8 +54,22 @@
 //! guard holds only a `Weak` view of the client's dup. If the client goes away
 //! first, its drop must still close that descriptor even when compio never
 //! reclaims the parked connection task described above.
+//!
+//! # Why TLS state is attached to the client-side release
+//!
+//! A TLS session must send an encrypted `close_notify` before the socket is
+//! shut down. The record cannot be prepared during the handshake because its
+//! sequence number follows every application write. The rustls connection and
+//! its ordered ciphertext queue are therefore shared as an
+//! `Arc<Mutex<TlsSession>>`. `ConnectionRelease::drop` locks that live state,
+//! serializes the alert, sends it nonblocking on the owned dup, and only then
+//! calls `shutdown(Both)`. It skips the alert if an earlier TLS write is still
+//! in flight, because overtaking that record would make the alert invalid.
+//! Every step remains best effort because `Drop` has no caller to report an
+//! error to and the physical session is ending regardless.
 
 use std::{
+    fmt,
     net::Shutdown,
     sync::{Arc, Weak},
 };
@@ -65,12 +79,25 @@ use std::{
 /// Lives in `InnerClient`, so it drops when the last handle to a given
 /// connection's client half drops - which is the point at which no caller can
 /// issue another query on it.
-#[derive(Debug)]
 pub(crate) struct ConnectionRelease {
     /// A dup of the connection's socket. Owned, so dropping this closes it;
     /// `shutdown` on it reaches the same underlying socket the connection task
     /// is using.
     socket: Arc<socket2::Socket>,
+    /// The live rustls state, including ciphertext not yet handed to the
+    /// socket. Present only when this physical connection negotiated TLS.
+    #[cfg(feature = "tls")]
+    tls_session: Option<crate::tls_sansio::SharedSession>,
+}
+
+impl fmt::Debug for ConnectionRelease {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = formatter.debug_struct("ConnectionRelease");
+        debug.field("socket", &self.socket);
+        #[cfg(feature = "tls")]
+        debug.field("has_tls_session", &self.tls_session.is_some());
+        debug.finish()
+    }
 }
 
 /// A non-owning shutdown guard for every connection-side exit.
@@ -97,6 +124,8 @@ impl ConnectionRelease {
             .ok()
             .map(|owned| Self {
                 socket: Arc::new(socket2::Socket::from(owned)),
+                #[cfg(feature = "tls")]
+                tls_session: None,
             })
     }
 }
@@ -110,14 +139,62 @@ impl ConnectionRelease {
             .ok()
             .map(|owned| Self {
                 socket: Arc::new(socket2::Socket::from(owned)),
+                #[cfg(feature = "tls")]
+                tls_session: None,
             })
     }
 }
 
 impl ConnectionRelease {
+    #[cfg(feature = "tls")]
+    pub(crate) fn set_tls_session(&mut self, session: crate::tls_sansio::SharedSession) {
+        self.tls_session = Some(session);
+    }
+
     pub(crate) fn connection_guard(&self) -> ConnectionDropRelease {
         ConnectionDropRelease {
             socket: Arc::downgrade(&self.socket),
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    #[allow(clippy::significant_drop_tightening)]
+    fn send_close_notify(&self) {
+        let Some(session) = &self.tls_session else {
+            return;
+        };
+
+        // `Drop` must not wait for socket backpressure. Setting O_NONBLOCK on
+        // the shared file description is harmless here because shutdown is the
+        // very next operation on this connection, successful alert or not.
+        if self.socket.set_nonblocking(true).is_err() {
+            return;
+        }
+
+        // Keep the lock through the synchronous sends so no connection-task
+        // write can change the record sequence between serialization and
+        // delivery. Everything here is best effort: the client half is
+        // disappearing and there is no caller to report an error to.
+        let mut session = session.lock();
+        let Ok(ciphertext) = session.take_close_notify() else {
+            return;
+        };
+        let mut remaining = ciphertext.as_slice();
+        while !remaining.is_empty() {
+            #[cfg(target_os = "linux")]
+            let sent = self.socket.send_with_flags(
+                remaining,
+                nix::sys::socket::MsgFlags::MSG_NOSIGNAL.bits(),
+            );
+            #[cfg(not(target_os = "linux"))]
+            let sent = self.socket.send(remaining);
+
+            match sent {
+                Ok(0) => break,
+                Ok(count) => remaining = &remaining[count..],
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
         }
     }
 
@@ -159,6 +236,9 @@ impl ConnectionDropRelease {
 
 impl Drop for ConnectionRelease {
     fn drop(&mut self) {
+        #[cfg(feature = "tls")]
+        self.send_close_notify();
+
         // `Both`, not `Write`: a half-close would leave this side reading, and
         // the point is that the server observes the end of the session now.
         //
