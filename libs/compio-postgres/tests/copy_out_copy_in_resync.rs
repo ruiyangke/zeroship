@@ -9,8 +9,8 @@
 //! Every assertion about recovery reuses the exact `Client` that made the bad
 //! request. A fresh connection would hide response-slot desynchronisation.
 
+use compio_postgres::Client;
 use compio_postgres::error::SqlState;
-use compio_postgres::{Client, NoTls};
 use std::time::Duration;
 
 #[allow(dead_code)]

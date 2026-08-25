@@ -24,7 +24,7 @@
 //! second test below is what proves the constraint was not bypassed along with
 //! the type check.
 
-use compio_postgres::{Client, NoTls};
+use compio_postgres::Client;
 
 #[allow(dead_code)]
 mod common;

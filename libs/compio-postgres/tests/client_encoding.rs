@@ -30,8 +30,7 @@
 //! visible rather than discovered.
 
 use compio::runtime::JoinHandle;
-use compio_postgres::tls::NoTlsStream;
-use compio_postgres::{Client, Connection, Error, NoTls, Socket};
+use compio_postgres::{Client, Error};
 use std::time::Duration;
 
 #[allow(dead_code)]

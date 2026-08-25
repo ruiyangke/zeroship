@@ -30,7 +30,7 @@
 //! rework the run loop, this is one of the tests that should be able to catch
 //! you, and it is worth re-checking that it still can.
 
-use compio_postgres::{Client, NoTls};
+use compio_postgres::Client;
 
 #[allow(dead_code)]
 mod common;

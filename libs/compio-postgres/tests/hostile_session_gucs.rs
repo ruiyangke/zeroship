@@ -21,7 +21,7 @@
 //! path is correct would still pass, because it would be correct by accident
 //! on a default server.
 
-use compio_postgres::{Client, NoTls, SimpleQueryMessage};
+use compio_postgres::{Client, SimpleQueryMessage};
 use std::time::Duration;
 
 #[allow(dead_code)]

@@ -1,6 +1,6 @@
 use compio_postgres::error::SqlState;
 use compio_postgres::types::ToSql;
-use compio_postgres::{Client, NoTls, QueryEvent, QueryOutcome};
+use compio_postgres::{Client, QueryEvent, QueryOutcome};
 use futures_channel::mpsc;
 use futures_util::{FutureExt, StreamExt};
 use std::future::Future;

@@ -27,7 +27,7 @@
 //! polite kill and the server does try to say so first.
 
 use bytes::Bytes;
-use compio_postgres::{Client, NoTls};
+use compio_postgres::Client;
 use futures_util::{SinkExt, TryStreamExt};
 use std::time::Duration;
 

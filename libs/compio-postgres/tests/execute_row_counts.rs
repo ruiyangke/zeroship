@@ -17,7 +17,7 @@
 //! below uses counts greater than one, and the DDL case is the one-variable
 //! partner that keeps "returns the last number it can find" from passing.
 
-use compio_postgres::{Client, NoTls};
+use compio_postgres::Client;
 
 #[allow(dead_code)]
 mod common;

@@ -13,7 +13,6 @@ use std::time::Duration;
 
 #[allow(dead_code)]
 mod common;
-use common::env as test_env;
 
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 

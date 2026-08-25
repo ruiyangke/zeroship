@@ -5,9 +5,9 @@
 //! `0x50`, Commit Prepared `0x4b`, Rollback Prepared `0x72`, and Stream
 //! Prepare `0x70`. These bytes came from the live walsender, not a document.
 
+use compio_postgres::Client;
 use compio_postgres::replication::pgoutput::{self, PgOutputMessage};
 use compio_postgres::replication::{ReplicationMessage, StartReplicationOptions, Streaming};
-use compio_postgres::{Client, NoTls};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
@@ -267,9 +267,10 @@ async fn prepared_transactions_expose_every_two_phase_frame() {
 
         let mut config = common::replication_config("cpg_two_phase_observe");
         config.options("-c logical_decoding_work_mem=64kB");
-        let replication = compio_postgres::replication::connect_replication(common::suite_tls(), &config)
-            .await
-            .expect("replication connect failed");
+        let replication =
+            compio_postgres::replication::connect_replication(common::suite_tls(), &config)
+                .await
+                .expect("replication connect failed");
         let mut stream = replication
             .start_logical_replication(StartReplicationOptions {
                 slot_name: &slot,

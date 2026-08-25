@@ -21,9 +21,9 @@
 //! This file exists because that check shipped. `17c09e7ce` added
 //! `DecodeError::StreamXidMismatch` and errored on it.
 
+use compio_postgres::Client;
 use compio_postgres::replication::pgoutput::{self, PgOutputMessage};
 use compio_postgres::replication::{ReplicationMessage, StartReplicationOptions, Streaming};
-use compio_postgres::{Client, NoTls};
 use std::time::Duration;
 
 #[allow(dead_code)]
@@ -94,9 +94,10 @@ async fn a_streamed_transaction_with_a_savepoint_decodes() {
 
         let mut config = common::replication_config("cpg_subtxn");
         config.options(format!("-c logical_decoding_work_mem={DECODING_WORK_MEM}"));
-        let mut replication = compio_postgres::replication::connect_replication(common::suite_tls(), &config)
-            .await
-            .expect("replication connect failed");
+        let mut replication =
+            compio_postgres::replication::connect_replication(common::suite_tls(), &config)
+                .await
+                .expect("replication connect failed");
         let mut stream = replication
             .start_logical_replication(StartReplicationOptions {
                 slot_name: &slot,

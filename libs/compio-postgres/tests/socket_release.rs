@@ -1,6 +1,6 @@
 //! Regression coverage for every connection-side socket release path.
 
-use compio_postgres::{Client, Error, NoTls};
+use compio_postgres::{Client, Error};
 use log::{Level, LevelFilter, Log, Metadata, Record};
 use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};

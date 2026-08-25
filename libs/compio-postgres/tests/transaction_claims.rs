@@ -1,7 +1,7 @@
 //! Mutation-sensitive coverage for runtime guarantees documented by
 //! `Transaction`.
 
-use compio_postgres::{Client, Error, NoTls};
+use compio_postgres::{Client, Error};
 use futures_util::FutureExt;
 use log::{Level, LevelFilter, Log, Metadata, Record};
 use std::cell::Cell;

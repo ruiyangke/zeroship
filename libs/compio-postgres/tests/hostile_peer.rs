@@ -96,8 +96,8 @@
 //! NOT covered here: TLS, authentication, replication framing, or a peer that
 //! trickles bytes slowly rather than sending wrong ones.
 
+use compio_postgres::Config;
 use compio_postgres::config::SslMode;
-use compio_postgres::{Config, NoTls};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::thread;
@@ -205,7 +205,11 @@ fn complete_startup(stream: &mut TcpStream, process_id: i32) {
     stream
         .read_exact(&mut body)
         .expect("read startup packet body");
-    assert_eq!(&body[..4], &[0, 3, 0, 0], "client did not request protocol 3");
+    assert_eq!(
+        &body[..4],
+        &[0, 3, 0, 0],
+        "client did not request protocol 3"
+    );
 
     let mut response = backend_frame(b'R', &0u32.to_be_bytes());
     let mut key_data = Vec::with_capacity(8);
@@ -354,7 +358,8 @@ async fn hostile_response_retires_session(process_id: i32, response: Vec<u8>) ->
 #[compio::test]
 async fn an_unknown_message_tag_is_refused_and_retires_the_session() {
     compio::time::timeout(ASYNC_WATCHDOG, async {
-        let outcome = hostile_response_retires_session(201, backend_frame(b'\x7f', b"nonsense")).await;
+        let outcome =
+            hostile_response_retires_session(201, backend_frame(b'\x7f', b"nonsense")).await;
         outcome.names("unknown message tag `127`");
     })
     .await
@@ -392,7 +397,11 @@ async fn a_data_row_without_a_row_description_is_refused() {
 /// pins the one that the simple-query path uses.
 fn row_description(columns: &[&str]) -> Vec<u8> {
     let mut body = Vec::new();
-    body.extend_from_slice(&u16::try_from(columns.len()).expect("column count").to_be_bytes());
+    body.extend_from_slice(
+        &u16::try_from(columns.len())
+            .expect("column count")
+            .to_be_bytes(),
+    );
     for name in columns {
         body.extend_from_slice(name.as_bytes());
         body.push(0);
@@ -534,7 +543,8 @@ async fn a_truncated_frame_followed_by_silence_does_not_hang() {
             client.is_closed(),
             "the driver kept the session usable after its read deadline expired"
         );
-        let reuse = compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 2")).await;
+        let reuse =
+            compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 2")).await;
         match reuse {
             Err(_) => panic!("reusing the timed-out session hung instead of failing"),
             Ok(Ok(_)) => panic!("the driver reused a session after its read deadline expired"),
@@ -1028,8 +1038,10 @@ async fn a_well_formed_copy_out_is_accepted() {
         })
         .await
         .expect("a well-formed COPY OUT hung")
-        .expect("the driver rejected a well-formed COPY OUT, so the hostile COPY tests below \
-                 cannot be attributing their errors to the violation they substitute");
+        .expect(
+            "the driver rejected a well-formed COPY OUT, so the hostile COPY tests below \
+                 cannot be attributing their errors to the violation they substitute",
+        );
 
         assert_eq!(
             collected, b"row-one\n",

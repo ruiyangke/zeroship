@@ -21,7 +21,7 @@
 //! right thing to do". These tests pin what the code DOES, so changing it is a
 //! decision someone takes on purpose rather than a silent drift.
 
-use compio_postgres::{Client, NoTls};
+use compio_postgres::Client;
 
 #[allow(dead_code)]
 mod common;

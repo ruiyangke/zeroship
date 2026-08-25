@@ -31,10 +31,10 @@
 //! came from PostgreSQL 16.14 on 2026-08-24 while the decoder still returned
 //! `DecodeError::UnknownTag` for these tags.
 
+use compio_postgres::Client;
 use compio_postgres::error::SqlState;
 use compio_postgres::replication::pgoutput::{self, PgOutputMessage, TupleColumn};
 use compio_postgres::replication::{ReplicationMessage, StartReplicationOptions, Streaming};
-use compio_postgres::{Client, NoTls};
 use std::collections::BTreeSet;
 use std::time::Duration;
 
@@ -88,14 +88,15 @@ async fn try_collect(
     // connection has for that - it never runs a `SET`.
     config.options(format!("-c logical_decoding_work_mem={DECODING_WORK_MEM}"));
 
-    let replication = compio_postgres::replication::connect_replication(common::suite_tls(), &config)
-        .await
-        .map_err(|error| {
-            format!(
-                "replication connect failed: {}",
-                common::error_chain(&error)
-            )
-        })?;
+    let replication =
+        compio_postgres::replication::connect_replication(common::suite_tls(), &config)
+            .await
+            .map_err(|error| {
+                format!(
+                    "replication connect failed: {}",
+                    common::error_chain(&error)
+                )
+            })?;
 
     let proto_version = match streaming {
         Streaming::Parallel => 4,

@@ -1,4 +1,4 @@
-use compio_postgres::{Client, Error, NoTls};
+use compio_postgres::{Client, Error};
 use std::future::Future;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
