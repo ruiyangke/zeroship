@@ -213,9 +213,14 @@ pub fn postgres_unreachable(dsn: &str, error: &(dyn std::error::Error + 'static)
 /// Absent is NOT "do not run" - see `TestEnvKey::PgTestUrl`. A target that
 /// cannot reach this server must fail, not skip.
 #[cfg(not(feature = "suite-over-tls"))]
-pub fn test_url() -> String {
+fn plaintext_test_url() -> String {
     env::get(env::TestEnvKey::PgTestUrl)
         .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
+}
+
+#[cfg(not(feature = "suite-over-tls"))]
+pub fn test_url() -> String {
+    suite_test_url(plaintext_test_url())
 }
 
 /// Under `--features suite-over-tls` the whole suite runs against the
@@ -243,14 +248,25 @@ pub fn test_url() -> String {
             .unwrap_or_else(|| panic!("the TLS descriptor's tls_url has no `{key}`"))
             .to_string()
     };
-    format!(
+    suite_test_url(format!(
         "postgres://{}:{}@{}:{}/{}?sslmode=verify-full&sslrootcert={ca}",
         field("user"),
         field("password"),
         field("host"),
         field("port"),
         field("dbname"),
-    )
+    ))
+}
+
+#[cfg(not(feature = "suite-with-statement-cache"))]
+fn suite_test_url(base: String) -> String {
+    base
+}
+
+#[cfg(feature = "suite-with-statement-cache")]
+fn suite_test_url(base: String) -> String {
+    let separator = if base.contains('?') { '&' } else { '?' };
+    format!("{base}{separator}statement_cache_capacity=32")
 }
 
 /// The transport every suite helper connects over.
@@ -514,9 +530,10 @@ pub fn replication_config(application_name: &str) -> compio_postgres::Config {
 ///
 /// The differential suite runs `tokio-postgres` beside this crate as an
 /// oracle, and the oracle stays on PLAINTEXT even when this crate is built
-/// with `suite-over-tls`. That is the comparison worth making: the transport
-/// must not change any observable protocol behaviour, so the reference should
-/// differ from the subject in exactly the transport and nothing else.
+/// with `suite-over-tls`. It also stays free of the compio-postgres-only
+/// `statement_cache_capacity` parameter under `suite-with-statement-cache`.
+/// That is the comparison worth making: the reference should differ from the
+/// subject only in the property the suite mode is exercising.
 ///
 /// Without this the oracle would inherit `sslmode=verify-full` from
 /// [`test_url`] and fail to connect at all.
@@ -527,7 +544,7 @@ pub fn plaintext_url() -> String {
 
 #[cfg(not(feature = "suite-over-tls"))]
 pub fn plaintext_url() -> String {
-    test_url()
+    plaintext_test_url()
 }
 
 /// Replace the password in a `postgres://user:pass@host/db` DSN.

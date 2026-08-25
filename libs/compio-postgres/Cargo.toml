@@ -69,6 +69,17 @@ live-tls-tests = ["tls"]
 # transport has to be chosen at COMPILE time, because the two connectors are
 # different types.
 suite-over-tls = ["tls"]
+# Run the ORDINARY suite with the implicit raw-SQL prepared-statement cache.
+#
+# The default capacity is zero, so the ordinary test bodies otherwise leave
+# admission, reuse, eviction and stale-statement retry almost entirely to the
+# handful of cache-specific tests. With this feature `common::test_url()` adds
+# a capacity of 32, so those same bodies exercise the cache too.
+#
+# A feature rather than an env var makes this an explicit suite variant and
+# lets the common helper keep the crate-only parameter away from the
+# tokio-postgres oracle, which rejects it.
+suite-with-statement-cache = []
 # Test-only surface for downstream bench / unit-test crates that need to
 # synthesise `Row` / `Statement` / `Column` values without a live
 # Postgres. The feature is dev-only (consumers add it under

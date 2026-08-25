@@ -5366,6 +5366,37 @@ async fn statement_cache_reuses_identical_sql() {
     assert_eq!(prepared_statement_names(&client, SQL).await.len(), 1);
 }
 
+/// The suite mode reaches ordinary connections rather than only the helpers
+/// that opt into a cache explicitly. Keeping both results alive makes a
+/// no-op mode observable: capacity zero leaves two server statements here.
+#[cfg(feature = "suite-with-statement-cache")]
+#[compio::test]
+async fn suite_statement_cache_mode_reuses_identical_sql() {
+    let url = test_url();
+    let client = connect(&url).await.unwrap();
+
+    const SQL: &str = "SELECT 53::int4 AS cpg_suite_cache_mode";
+    let first = client.query(SQL, &[]).await.unwrap();
+    let cached_name = prepared_statement_name(&client, SQL).await;
+    let second = client.query(SQL, &[]).await.unwrap();
+
+    assert_eq!(first[0].get::<_, i32>(0), 53);
+    assert_eq!(second[0].get::<_, i32>(0), 53);
+    assert_eq!(
+        prepared_statement_names(&client, SQL).await,
+        vec![cached_name.clone()],
+        "the second execution did not reuse the first server statement"
+    );
+
+    drop((first, second));
+    client.simple_query("").await.unwrap();
+    assert_eq!(
+        prepared_statement_names(&client, SQL).await,
+        vec![cached_name],
+        "the ordinary connection did not retain the statement in its cache"
+    );
+}
+
 /// The target SQL observes itself while it is executing. A named Parse is
 /// already visible in `pg_prepared_statements` at that point; an unnamed Parse
 /// is not, so this cannot pass merely because a transient name was closed
