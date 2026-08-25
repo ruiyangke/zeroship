@@ -223,3 +223,41 @@ async fn uncontended_callers_never_enter_the_wait_queue() {
     assert_eq!(pool.total_count(), CALLERS);
     pool.close().await;
 }
+
+/// The acquire timeout an error REPORTS has to be the one that was configured.
+///
+/// It was rendered with `Duration::as_secs`, which truncates: every sub-second
+/// setting described itself as `0s`. A caller who set 300 ms and is told the
+/// pool "timed out after 0s" reads that as a misconfigured zero timeout and
+/// goes looking for the wrong thing - the number is the one piece of the
+/// message they would act on.
+#[compio::test]
+async fn a_sub_second_acquire_timeout_is_reported_accurately() {
+    let mut pool_config = config(1, 0);
+    pool_config.acquire_timeout(Duration::from_millis(300));
+    let pool = Pool::connect_with_config(
+        test_url().parse().expect("the suite DSN parses"),
+        pool_config,
+    )
+    .await
+    .expect("build a single-connection pool");
+
+    let _held = pool.get().await.expect("hold the only connection");
+
+    let error = pool
+        .get()
+        .await
+        .expect_err("a second checkout cannot succeed while the only one is held");
+
+    let cause = std::error::Error::source(&error)
+        .map(ToString::to_string)
+        .expect("the timeout error carries a cause describing itself");
+    assert!(
+        !cause.contains("after 0s"),
+        "a 300ms acquire timeout reported itself as zero seconds: {cause}"
+    );
+    assert!(
+        cause.contains("300ms"),
+        "the reported timeout is not the configured one: {cause}"
+    );
+}

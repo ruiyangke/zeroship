@@ -1084,8 +1084,13 @@ impl Pool {
                 self.ensure_open()?;
                 self.metrics.inc_timeouts();
                 Err(pool_error(format!(
-                    "connection timeout after {}s (pool: {}/{} idle, {}/{} total)",
-                    self.config.acquire_timeout.as_secs(),
+                    // `{:?}` on a Duration, not `as_secs()`: that truncated, so
+                    // every sub-second acquire timeout described itself as
+                    // `0s` - which reads as a misconfigured zero and sends the
+                    // caller after the wrong thing. Debug renders `300ms`,
+                    // `1.5s`, `2s`.
+                    "connection timeout after {:?} (pool: {}/{} idle, {}/{} total)",
+                    self.config.acquire_timeout,
                     self.idle.borrow().len(),
                     self.config.max_size,
                     self.total.get(),
