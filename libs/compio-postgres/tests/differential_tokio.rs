@@ -242,10 +242,7 @@ fn transaction_sequences() -> Vec<TransactionSequence> {
 }
 
 /// Run every transaction sequence through tokio-postgres on one session.
-fn tokio_transaction_outcomes(
-    url: String,
-    sequences: Vec<Vec<&'static str>>,
-) -> Vec<Vec<Outcome>> {
+fn tokio_transaction_outcomes(url: String, sequences: Vec<Vec<&'static str>>) -> Vec<Vec<Outcome>> {
     let (sender, receiver) = std::sync::mpsc::channel();
     let handle = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -370,9 +367,7 @@ async fn both_drivers_agree_on_transaction_recovery() {
 
         for (statement_index, statement) in sequence.statements.iter().enumerate() {
             comparisons += 1;
-            if ours[sequence_index][statement_index]
-                != theirs[sequence_index][statement_index]
-            {
+            if ours[sequence_index][statement_index] != theirs[sequence_index][statement_index] {
                 first_divergence = Some(format!(
                     "  sequence {:?}, statement {}: {:?}\n    ours: {:?}\n    \
                      tokio-postgres: {:?}\n    matters because {}",
@@ -773,10 +768,8 @@ async fn both_drivers_agree_on_a_raised_notice() {
     );
 }
 
-const NOTIFICATION_DELIVERY_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(10);
-const NOTIFICATION_SCENARIO_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(20);
+const NOTIFICATION_DELIVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const NOTIFICATION_SCENARIO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const NOTIFICATION_FENCE: &str = "order-fence";
 
 /// Which of the two sessions a notification's reported PID identifies.
@@ -825,10 +818,7 @@ fn notification_source(
 /// `pg_notify` accepts parameters, unlike the `NOTIFY` grammar. That keeps the
 /// quote payload data rather than test SQL, while the escaped Unicode keeps
 /// this source file ASCII and produces a NUL-free multibyte UTF-8 payload.
-fn notification_sends(
-    listened_channel: &str,
-    unlistened_channel: &str,
-) -> Vec<(String, String)> {
+fn notification_sends(listened_channel: &str, unlistened_channel: &str) -> Vec<(String, String)> {
     vec![
         (listened_channel.to_owned(), "".to_owned()),
         (
@@ -836,14 +826,8 @@ fn notification_sends(
             "\u{96ea}\u{3060}\u{308b}\u{307e}".to_owned(),
         ),
         (listened_channel.to_owned(), "it's intact".to_owned()),
-        (
-            unlistened_channel.to_owned(),
-            "must-not-arrive".to_owned(),
-        ),
-        (
-            listened_channel.to_owned(),
-            NOTIFICATION_FENCE.to_owned(),
-        ),
+        (unlistened_channel.to_owned(), "must-not-arrive".to_owned()),
+        (listened_channel.to_owned(), NOTIFICATION_FENCE.to_owned()),
     ]
 }
 
@@ -896,8 +880,7 @@ fn tokio_notifications(
                         tokio_postgres::connect(&url, tokio_postgres::NoTls)
                             .await
                             .expect("tokio-postgres listener connect");
-                    let (message_sender, mut message_receiver) =
-                        futures_channel::mpsc::unbounded();
+                    let (message_sender, mut message_receiver) = futures_channel::mpsc::unbounded();
 
                     // `Connection` is not a Stream, but `poll_message` is its
                     // asynchronous-message surface. The pump must be running
@@ -945,25 +928,20 @@ fn tokio_notifications(
                         notification_sends(&listened_channel, &unlistened_channel)
                     {
                         notifier
-                            .query_one(
-                                "SELECT pg_notify($1, $2)",
-                                &[&send_channel, &payload],
-                            )
+                            .query_one("SELECT pg_notify($1, $2)", &[&send_channel, &payload])
                             .await
                             .expect("tokio-postgres pg_notify");
                     }
 
                     let mut notifications = Vec::new();
-                    let reached_fence = tokio::time::timeout(
-                        NOTIFICATION_DELIVERY_TIMEOUT,
-                        async {
+                    let reached_fence =
+                        tokio::time::timeout(NOTIFICATION_DELIVERY_TIMEOUT, async {
                             loop {
                                 match message_receiver.next().await {
                                     Some(Ok(tokio_postgres::AsyncMessage::Notification(
                                         notification,
                                     ))) => {
-                                        let is_fence = notification.channel()
-                                            == listened_channel
+                                        let is_fence = notification.channel() == listened_channel
                                             && notification.payload() == NOTIFICATION_FENCE;
                                         notifications.push(ObservedNotification {
                                             source: notification_source(
@@ -985,10 +963,9 @@ fn tokio_notifications(
                                     None => break false,
                                 }
                             }
-                        },
-                    )
-                    .await
-                    .unwrap_or(false);
+                        })
+                        .await
+                        .unwrap_or(false);
 
                     drop(listener);
                     drop(notifier);
@@ -1039,10 +1016,9 @@ async fn compio_notifications(
             .expect("listener pid")
             .get::<_, i32>(0);
 
-        let (notifier, notifier_connection) =
-            compio_postgres::connect(url, common::suite_tls())
-                .await
-                .unwrap_or_else(|error| common::postgres_unreachable(url, &error));
+        let (notifier, notifier_connection) = compio_postgres::connect(url, common::suite_tls())
+            .await
+            .unwrap_or_else(|error| common::postgres_unreachable(url, &error));
         compio::runtime::spawn(async move {
             let _ = notifier_connection.run().await;
         })
@@ -1057,9 +1033,7 @@ async fn compio_notifications(
             "listener and notifier must be separate backends"
         );
 
-        for (send_channel, payload) in
-            notification_sends(listened_channel, unlistened_channel)
-        {
+        for (send_channel, payload) in notification_sends(listened_channel, unlistened_channel) {
             notifier
                 .query_one("SELECT pg_notify($1, $2)", &[&send_channel, &payload])
                 .await
