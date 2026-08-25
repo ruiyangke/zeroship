@@ -16,9 +16,21 @@
 //! be feature-gated: gating it stopped that target building under the plain
 //! test command.
 //!
-//! The three `*_for_test` synthesisers are used by NOTHING here. They exist
-//! for `plugin-db`'s microbenchmarks, which price row decoding and would
-//! measure a network round trip instead if they had to fetch a real row;
+//! The three `*_for_test` synthesisers are used by NOTHING here. Their callers
+//! are all in `plugin-db`, and there are THREE of them, not the two benches
+//! this note used to name (checked 2026-08-25):
+//!
+//! * `benches/bench_row_to_json.rs` and `benches/bench_first_row_or_null.rs`,
+//!   which price row decoding and would measure a network round trip instead
+//!   if they had to fetch a real row.
+//! * `src/audit.rs`'s `#[cfg(test)]` module, which decodes synthetic `jsonb`
+//!   audit rows - a pure decoding test that has no reason to need a server.
+//!
+//! Keeping them was re-ruled on 2026-08-25. The alternative considered was
+//! having the benches fetch one real row before the timed loop, which would
+//! put a network round trip inside a decode benchmark, and would still leave
+//! the audit test needing a live database to check pure decoding.
+//!
 //! `Row::new` is `pub(crate)`, so an external bench cannot build one. Both
 //! places in this crate that could have used them deliberately do not, and
 //! their reasons are worth knowing before reaching for one:
