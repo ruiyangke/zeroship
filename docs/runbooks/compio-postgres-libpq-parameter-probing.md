@@ -1,4 +1,9 @@
-# Derive pg_service.conf semantics by probing libpq
+# Derive libpq parameter semantics by probing psql
+
+Covers the two surfaces that take connection parameters as text: the
+`pg_service.conf` file, and the conninfo string / URI. Their rules are NOT the
+same - whitespace around `=` is a syntax error in a service file and perfectly
+legal in a conninfo string - so measure the one you are changing.
 
 ## Why
 
@@ -111,10 +116,58 @@ PGSERVICEFILE=/tmp/svc2.conf psql "service=dup" -c "select 1" 2>&1 | head -1'
   a real server and the value under test is not what you are reading. Check
   that the `.invalid` host actually landed.
 
+## The other surface: conninfo strings
+
+The same read-out works on a conninfo string, since psql takes one directly:
+
+```bash
+docker exec $C sh -c 'psql "host=  extra.invalid" -c "select 1" 2>&1 | head -1'
+```
+
+Measured 2026-08-25. Where the service file and the conninfo string disagree,
+both columns are given, because the temptation is to assume one parser.
+
+| Input | conninfo | service file |
+| --- | --- | --- |
+| space around `=` | accepted, stripped | **syntax error** |
+| space after `=` | stripped | KEPT in the value |
+| `'quoted value'` | quoted, may contain spaces | no quoting; quotes are literal |
+| `\` before a character | escape; removed, next char literal | no escaping |
+| unterminated `'` | error | n/a |
+
+The conninfo rules above are ALREADY correct in this crate - all fourteen forms
+were checked and matched. What was not correct is the empty value.
+
+**`key=` is per-TYPE, and this is the trap.** A numeric option takes empty as
+"not given"; an enum REFUSES it; a string keeps it:
+
+```bash
+docker exec $C sh -c 'for k in port connect_timeout keepalives_idle sslmode \
+    channel_binding target_session_attrs gssencmode load_balance_hosts; do
+  printf "%-24s " "$k"
+  psql "host=x.invalid $k=" -c "select 1" 2>&1 | head -1 | sed "s/^psql: error: //"
+done'
+```
+
+Expect a host-resolution failure for the numeric ones and
+`invalid <name> value: ""` for the enums. `require_auth=` accepts empty despite
+looking like an enum - do not infer it from the others.
+
+**An empty value can only occur at the END of the string.** After `=` libpq
+skips whitespace and takes what follows as the value, so `user= host=h` asks for
+a user literally named `host=h` and sets no host, and `port= connect_timeout=`
+hands `port` the text `connect_timeout=` to parse as an integer. Both are
+libpq's behaviour and this crate reproduces them; they look like parser bugs and
+are not. That is why a test for an empty numeric must use ONE trailing
+parameter - a DSN with two "empty" numerics is measuring the swallow, not the
+empty value.
+
 ## Where this is pinned
 
 `libs/compio-postgres/src/service.rs`, in the tests below the parser - one test
-per row above. The live end-to-end case is
+per service-file row above. The conninfo rows are pinned in
+`src/config.rs`, in the `empty_parameter_values` test module. The live
+end-to-end case is
 `a_service_written_in_libpq_s_awkward_forms_still_connects` in
 `tests/service_live.rs`, which writes a working service in the awkward forms and
 requires it to connect; it fails with `Undefined` on a parser that only accepts
