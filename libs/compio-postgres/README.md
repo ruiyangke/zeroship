@@ -92,10 +92,17 @@ Bugs in a port hide in the places where it is NOT a transcription, so the suite
 leans on things that can disagree with it:
 
 - `tests/differential_tokio.rs` runs `tokio-postgres` beside this crate against
-  the same server and compares observable results across fifteen tests.
-  tokio is a `[dev-dependencies]` exemption to the workspace zero-tokio rule
-  (AGENTS.md records the decision). Two divergences are DELIBERATE and pinned
-  in that file rather than left to drift.
+  the same server and compares observable results. tokio is a
+  `[dev-dependencies]` exemption to the workspace zero-tokio rule (AGENTS.md
+  records the decision). Two divergences are DELIBERATE and pinned in that file
+  rather than left to drift.
+
+  The oracle is pinned to an EXACT version, because an oracle is only an oracle
+  for the version it is. A `"0.7"` requirement resolved to 0.7.17 while this
+  crate tracks 0.7.18 - whose sole source change is a panic fix this crate
+  already carries - so the suite was comparing a fixed driver against an
+  unfixed one, and a difference would have read as OUR defect. Move the pin
+  when the port moves, never by resolution.
 - `tests/frame_fuzz.rs` and `tests/pgoutput_fuzz.rs` feed seeded corpora to the
   backend-frame and replication decoders. Both assert termination, no panic,
   and a decoder that is still usable afterwards - plus FLOORS on what the
