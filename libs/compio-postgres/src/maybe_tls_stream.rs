@@ -92,6 +92,16 @@ where
             MaybeTlsStream::Tls(s) => s.client_cert_status(),
         }
     }
+
+    fn configure_release(
+        &self,
+        private: crate::tls::private::ForcePrivateApi,
+        release: crate::tls::private::ReleaseConfig<'_>,
+    ) {
+        if let MaybeTlsStream::Tls(stream) = self {
+            stream.configure_release(private, release);
+        }
+    }
 }
 
 /// Read half of a split [`MaybeTlsStream`].

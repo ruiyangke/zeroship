@@ -235,7 +235,7 @@ pub(crate) async fn connect_raw_with_target_session_attrs<S, T>(
     has_hostname: bool,
     config: &Config,
     target_session_attrs: TargetSessionAttrs,
-    release: Option<crate::release::ConnectionRelease>,
+    mut release: Option<crate::release::ConnectionRelease>,
 ) -> Result<(Client, Connection<S, T::Stream>, Encryption), Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -252,6 +252,12 @@ where
     )
     .await?;
     let negotiated = stream.negotiated_encryption();
+    if let Some(release) = release.as_mut() {
+        stream.configure_release(
+            crate::tls::private::ForcePrivateApi,
+            crate::tls::private::ReleaseConfig::new(release),
+        );
+    }
 
     let mut handshake = Handshake {
         stream: BufStream::new(stream),
