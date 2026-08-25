@@ -3,7 +3,7 @@ name = "compio-postgres"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-description = "Native, asynchronous PostgreSQL client for compio/io_uring — port of tokio-postgres"
+description = "Native, asynchronous PostgreSQL client for compio/io_uring - port of tokio-postgres"
 repository = "https://github.com/zeroship/zeroship"
 keywords = ["database", "postgres", "postgresql", "sql", "compio"]
 categories = ["database"]
@@ -194,7 +194,7 @@ criterion = { workspace = true }
 # Integration tests consume the LISTEN/NOTIFY async-message stream
 # (`StreamExt::next`) and drive two pipelined queries concurrently
 # (`future::join`). Same version as the regular dependency above, so this
-# adds no new crate to the lock — it only makes the surface visible to the
+# adds no new crate to the lock - it only makes the surface visible to the
 # `tests/integration.rs` target.
 futures-util = { version = "0.3", default-features = false, features = ["sink", "async-await"] }
 tempfile = { workspace = true }

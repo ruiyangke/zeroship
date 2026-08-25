@@ -477,7 +477,7 @@ pub enum LoadBalanceHosts {
 /// enables the Postgres streaming-replication protocol. Once the
 /// connection enters replication mode the regular `query` / `execute`
 /// surface is **not used**; replication commands (`IDENTIFY_SYSTEM`,
-/// `START_REPLICATION`, `CREATE_REPLICATION_SLOT`, …) are issued via
+/// `START_REPLICATION`, `CREATE_REPLICATION_SLOT`, ...) are issued via
 /// the simple-query path and the connection returns
 /// `CopyBothResponse` for `START_REPLICATION`.
 ///
@@ -485,7 +485,7 @@ pub enum LoadBalanceHosts {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ReplicationMode {
-    /// Physical replication. Streams the raw WAL — not used by
+    /// Physical replication. Streams the raw WAL - not used by
     /// zeroship; documented for completeness because the startup
     /// parameter value is just `replication=true`.
     Physical,
@@ -1289,7 +1289,7 @@ impl Config {
     }
 
     /// Sets the time interval between TCP keepalive probes.
-    /// On Windows, this sets the value of the tcp_keepalive struct’s keepaliveinterval field.
+    /// On Windows, this sets the value of the tcp_keepalive struct's keepaliveinterval field.
     ///
     /// This is ignored for Unix domain sockets, or if the `keepalives` option is disabled.
     #[cfg(not(target_arch = "wasm32"))]
@@ -1380,7 +1380,7 @@ impl Config {
     /// The startup handshake includes `replication=<value>`, putting the
     /// server in walsender mode. After authentication the connection
     /// accepts replication commands (`IDENTIFY_SYSTEM`,
-    /// `START_REPLICATION`, …) through the dedicated replication client in
+    /// `START_REPLICATION`, ...) through the dedicated replication client in
     /// [`crate::replication`] - `identify_system` and
     /// `start_logical_replication`, not a `Client` method. Regular query
     /// pipelining is not supported on a replication connection.

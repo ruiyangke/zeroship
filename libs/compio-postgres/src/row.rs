@@ -289,7 +289,7 @@ impl Row {
     /// name or index this row does not carry - [`Error::column`], naming it,
     /// the same refusal [`Row::try_get`] gives.
     ///
-    /// Values are in PostgreSQL's binary wire format — the shape depends on
+    /// Values are in PostgreSQL's binary wire format - the shape depends on
     /// the column's OID. Intended for callers that want to bypass the
     /// `FromSql` trait and do custom decoding (for example, re-encoding
     /// `TIMESTAMPTZ` as JS Unix milliseconds).

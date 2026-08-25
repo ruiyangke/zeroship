@@ -6,7 +6,7 @@
 //
 // Differences from the tokio source:
 //
-// * DNS resolution uses compio's `ToSocketAddrsAsync` — we call
+// * DNS resolution uses compio's `ToSocketAddrsAsync` - we call
 //   `(host, port).to_socket_addrs_async()` instead of
 //   `tokio::net::lookup_host`.
 // * Host failover is sequential (`for host in hosts`). The source uses

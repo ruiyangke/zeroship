@@ -2,7 +2,7 @@
 //
 // Near-verbatim port of tokio-postgres's `transaction.rs`. The only
 // adaptation is the `tokio::io::{AsyncRead, AsyncWrite}` bound on the
-// deprecated `cancel_query_raw` method — swapped for compio's counterparts.
+// deprecated `cancel_query_raw` method - swapped for compio's counterparts.
 
 use crate::Socket;
 use crate::copy_out::CopyOutStream;
@@ -91,7 +91,7 @@ impl Drop for Transaction<'_> {
         // inspects this flag at checkout time and drains any pending
         // ROLLBACK via a barrier (`simple_query("")`) so the next caller
         // never inherits a broken-tx state. `__private_api_rollback` also
-        // sets the flag — we set it here too so the invariant holds even
+        // sets the flag - we set it here too so the invariant holds even
         // if the encode step fails silently.
         self.client.inner().set_dirty();
 
@@ -203,7 +203,7 @@ impl<'a> Transaction<'a> {
         self.done = true;
         let r = crate::simple_query::finish_batch_execute(responses).await;
         if r.is_ok() {
-            // Explicit rollback awaited to completion — the connection is
+            // Explicit rollback awaited to completion - the connection is
             // clean regardless of what came before.
             self.client.inner().clear_dirty();
         }
@@ -280,7 +280,7 @@ impl<'a> Transaction<'a> {
         self.client.query_typed(statement, params).await
     }
 
-    /// Like `Client::query_text_params` — text-format params with
+    /// Like `Client::query_text_params` - text-format params with
     /// implicit cast, run inside this transaction. Mirrors the
     /// `query_typed` passthrough; the JSON-driven query builders in
     /// `zeroship-plugin-db` use this to run the autocommit CRUD path

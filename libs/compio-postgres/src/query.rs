@@ -133,7 +133,7 @@ pub async fn query_text_params(
     params: &[&str],
 ) -> Result<RowStream, Error> {
     let buf = client.with_buf(|buf| {
-        // Parse with no type hints — server infers.
+        // Parse with no type hints - server infers.
         frontend::parse("", query, std::iter::empty::<u32>(), buf).map_err(Error::encode)?;
 
         // Bind: text format for parameters (code 0), binary format for results (code 1).
@@ -212,12 +212,12 @@ pub async fn query_text_params(
 /// The `execute` peer of [`query_text_params`]: Parse is sent with an empty OID
 /// list so the server infers each parameter's type FROM ITS POSITION in the SQL,
 /// and every param is encoded in TEXT format (code 0). This is the
-/// JSON-query-builder coercion model — a value passed as text is implicit-cast to
-/// the target column type (`'2026-01-01'` → `timestamptz`, `'1.5'` → `numeric`),
+/// JSON-query-builder coercion model - a value passed as text is implicit-cast to
+/// the target column type (`'2026-01-01'` -> `timestamptz`, `'1.5'` -> `numeric`),
 /// which the typed-binary `execute_typed` path cannot do for a cross-type bind.
 /// A `None` param is a SQL NULL (sent with no bytes). The op.* DML executor uses
 /// this so a creator `insert`/`update` value coerces to the column type without
-/// the assembler knowing the schema (names-are-strings, §3.3).
+/// the assembler knowing the schema (names-are-strings, section 3.3).
 pub async fn execute_text_params(
     client: &Arc<InnerClient>,
     query: &str,

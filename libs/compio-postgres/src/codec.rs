@@ -24,7 +24,7 @@ use postgres_protocol::message::backend;
 use postgres_protocol::message::frontend::CopyData;
 use std::io;
 
-/// A frontend (client → server) message ready to be serialized onto the wire.
+/// A frontend (client -> server) message ready to be serialized onto the wire.
 pub enum FrontendMessage {
     /// Pre-encoded bytes (the common path: `postgres_protocol::message::frontend::*`
     /// writes directly into a `BytesMut`, which we convert to `Bytes` for cheap
@@ -35,7 +35,7 @@ pub enum FrontendMessage {
     CopyData(CopyData<Box<dyn Buf + Send>>),
 }
 
-/// A backend (server → client) message or batch thereof.
+/// A backend (server -> client) message or batch thereof.
 ///
 /// Matches tokio-postgres's `BackendMessage` shape so the demux logic in
 /// `connection.rs` can remain a close translation of the upstream source.
@@ -47,7 +47,7 @@ pub enum BackendMessage {
         request_complete: bool,
     },
     /// An out-of-band async notification / notice / parameter status
-    /// update — must be routed to the dedicated async channel, not the
+    /// update - must be routed to the dedicated async channel, not the
     /// in-flight request.
     ///
     /// `frame_len` is the whole frame the message OWNS: `Message::parse`
@@ -175,7 +175,7 @@ impl FallibleIterator for BackendMessages {
 
 /// Encode a frontend message into the stream's write buffer.
 ///
-/// This does not flush — callers batch multiple frontend messages
+/// This does not flush - callers batch multiple frontend messages
 /// (Parse + Bind + Describe + Execute + Sync) into one flush, matching
 /// tokio-postgres's `Framed::send` + `Sink::poll_flush` split.
 #[allow(dead_code)]
@@ -205,7 +205,7 @@ where
 /// than reading until the run happens to end on a message boundary.
 ///
 /// On a Normal batch, the returned `BackendMessages` owns the underlying
-/// `BytesMut` slice — the stream's read buffer is drained exactly that
+/// `BytesMut` slice - the stream's read buffer is drained exactly that
 /// many bytes via `split_to`, so subsequent reads start fresh.
 #[allow(dead_code)]
 pub async fn read_backend<S>(stream: &mut S) -> Result<BackendMessage, Error>
@@ -241,7 +241,7 @@ where
                 | backend::NOTIFICATION_RESPONSE_TAG
                 | backend::PARAMETER_STATUS_TAG => {
                     if idx == 0 {
-                        // Async message sits at the head — return it alone.
+                        // Async message sits at the head - return it alone.
                         // Measured BEFORE the parse consumes it: `header.len()` counts
                         // itself but not the tag, so the frame is one more.
                         let frame_len = header.len() as usize + 1;

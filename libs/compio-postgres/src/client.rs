@@ -1534,7 +1534,7 @@ impl InnerClient {
         f(&mut *clear.0)
     }
 
-    /// Mark the connection as "dirty" — a fire-and-forget message (e.g.
+    /// Mark the connection as "dirty" - a fire-and-forget message (e.g.
     /// ROLLBACK queued from `Transaction::drop`) is pending but not yet
     /// observed to completion.
     pub(crate) fn set_dirty(&self) {
@@ -2155,7 +2155,7 @@ impl Client {
 
     /// Run a query with text-format string parameters.
     ///
-    /// Parse is sent with no type hints — the server infers each parameter's
+    /// Parse is sent with no type hints - the server infers each parameter's
     /// type from its position in the SQL. This matches the legacy
     /// `zeroship-pg` `query_text_params` API and is what JSON-driven query
     /// builders rely on (they pass everything as strings and expect
@@ -2187,8 +2187,8 @@ impl Client {
     /// returning the affected-row count. The `execute` peer of
     /// [`query_text_params`](Self::query_text_params): the server infers each
     /// parameter's type from its SQL position and a text value implicit-casts to
-    /// the target column type — the coercion model a schema-blind DML assembler
-    /// (op.* §3.3) needs. A `None` element is a SQL NULL.
+    /// the target column type - the coercion model a schema-blind DML assembler
+    /// (op.* section 3.3) needs. A `None` element is a SQL NULL.
     pub async fn execute_text_params(
         &self,
         sql: &str,
