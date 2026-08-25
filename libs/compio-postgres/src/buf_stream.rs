@@ -49,6 +49,23 @@ pub(crate) trait WriteFramer {
     fn write_buf_mut(&mut self) -> &mut BytesMut;
 }
 
+/// Starting size of the read buffer. It GROWS to hold the largest single
+/// message the connection has seen and is never shrunk back.
+///
+/// MEASURED 2026-08-25: one `SELECT repeat('x', 50MB)` takes the test
+/// process from 6 MB to 56 MB of RSS, and it stays there after the row is
+/// dropped and 50 further small queries run. tokio-postgres, measured the
+/// same way in the same process, is identical (+50.1 MB, retained) - so this
+/// is the shape a buffered driver has, not a divergence.
+///
+/// It is left alone deliberately. Shrinking after each message would trade a
+/// reallocation on every large row for memory a workload with recurring large
+/// rows is about to need again. What bounds it instead is connection
+/// LIFETIME: `PoolConfig::max_lifetime` (30 minutes by default) rotates the
+/// entry, and the allocation goes with it. A pool sized for peak memory
+/// should therefore reckon on `max_size * largest expected message`, not on
+/// the 8 KB below - and `Config::max_message_size` is the ceiling on that
+/// term.
 const READ_BUF_CAPACITY: usize = 8192;
 
 /// Per-`fill()` syscall chunk size. We do not allocate `min_bytes`-sized

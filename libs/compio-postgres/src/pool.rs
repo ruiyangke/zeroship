@@ -204,6 +204,13 @@ impl PoolConfig {
     /// This prevents silent death from firewalls, PostgreSQL idle timeouts, and
     /// DNS failover. Each entry gets a +/-25% jitter so expiries are staggered.
     ///
+    /// This is also what bounds a pooled connection's MEMORY. A connection's
+    /// read buffer grows to the largest message it has carried and is never
+    /// shrunk, so an entry that once served a 50 MB row holds 50 MB until it
+    /// rotates - measured, and the same in tokio-postgres. Size a pool for
+    /// `max_size * largest expected message`, and shorten this if that product
+    /// is uncomfortable.
+    ///
     /// Enforced WITHOUT the housekeeper as well: a connection past its lifetime
     /// is discarded when it is returned, not only when background maintenance
     /// sweeps. So this setting takes effect on a pool that never called
