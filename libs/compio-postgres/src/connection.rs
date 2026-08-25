@@ -714,7 +714,7 @@ where
         // Publish poison before the operation receives its error: a pooled
         // borrower may drop immediately and synchronous return must evict it.
         self.tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
-        publish_read_timeout(error, &mut self.responses);
+        publish_terminal_error(error, &mut self.responses);
     }
 
     /// Handle a request received from the client (serialized path).
@@ -1233,7 +1233,7 @@ impl Error {
 ///
 /// A clean EOF is exempt, because "closed" is an honest and complete account
 /// of it: there is no failure to explain, the peer simply went away.
-fn publish_read_timeout(error: &Error, responses: &mut VecDeque<Response>) {
+fn publish_terminal_error(error: &Error, responses: &mut VecDeque<Response>) {
     if is_eof(error) {
         return;
     }
@@ -1266,7 +1266,7 @@ fn classify_read_terminal(
 ) -> Result<(), Error> {
     match terminal {
         Some(e) => {
-            publish_read_timeout(&e, responses);
+            publish_terminal_error(&e, responses);
             // EOF with no awaited response is a clean close; otherwise it is
             // a genuine error (IO-4: EOF mid-awaited-response is always an
             // error on the multiplexed path).
@@ -2058,7 +2058,7 @@ where
                                 if let Some(error) =
                                     take_captured_non_eof_terminal(&mut terminal)
                                 {
-                                    publish_read_timeout(&error, &mut responses);
+                                    publish_terminal_error(&error, &mut responses);
                                     return Err(error);
                                 }
                                 if write_result.is_ok() {
@@ -2140,7 +2140,7 @@ where
                         )
                         .await;
                         if let Some(error) = take_captured_non_eof_terminal(&mut terminal) {
-                            publish_read_timeout(&error, &mut responses);
+                            publish_terminal_error(&error, &mut responses);
                             return Err(error);
                         }
                         res?;
