@@ -258,7 +258,7 @@ pub struct AttrDef {
 /// Naming the op as a type moves that to the compiler: the misspelling is `E0425` in the
 /// vendor's own crate, alongside the `E0080` a malformed [`AttrKey`] already produces. The
 /// op STRING is then read back out of the carrier's own
-/// [`OpAttributes::OP`](zero_migrate_ir::attribute::OpAttributes::OP), so the declaration
+/// [`OpAttributes::OP`](zero_migrate_ir::attribute::OpAttributes), so the declaration
 /// and the carrier cannot disagree about what op they mean.
 ///
 /// This does not retire `every_declared_op_is_a_real_op` — the op string still originates
