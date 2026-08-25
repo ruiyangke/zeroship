@@ -1015,12 +1015,14 @@ pub struct InnerClient {
     /// is, when the last handle that could still issue a query on this
     /// connection goes away.
     ///
-    /// Dropping the client already ASKS the connection task to terminate (the
-    /// `sender` above closes), but that request is only honoured if something
+    /// Dropping the client also ASKS the connection task to terminate when the
+    /// `sender` above closes, but that request is only honoured if something
     /// polls the task afterwards, and nothing guarantees that: a compio runtime
     /// torn down with the task parked leaves the socket - and with it the
-    /// server-side backend - alive for the rest of the process. See
-    /// [`crate::release`] for the mechanism and the measurement.
+    /// server-side backend - alive for the rest of the process. `InnerClient`'s
+    /// `Drop` takes this field first so TLS release cannot race the sender's
+    /// asynchronous teardown. See [`crate::release`] for the mechanism and the
+    /// measurement.
     ///
     /// `None` for [`Config::connect_raw`](crate::Config::connect_raw), whose
     /// stream belongs to the caller and need not be a socket at all.
@@ -1036,6 +1038,15 @@ pub struct InnerClient {
     /// hot path touches it, and `route_async` locks it only for the
     /// `ParameterStatus` arm.
     parameters: Arc<Mutex<HashMap<String, String>>>,
+}
+
+impl Drop for InnerClient {
+    fn drop(&mut self) {
+        // Struct fields normally drop in declaration order, which would close
+        // `sender` first and let the connection task race this synchronous TLS
+        // release. Take it while every request-channel handle is still alive.
+        drop(self.release.take());
+    }
 }
 
 struct ClearBufferOnDrop<'a>(&'a mut BytesMut);
@@ -1612,6 +1623,11 @@ pub struct Client {
     process_id: i32,
     secret_key: i32,
 }
+
+const _: () = {
+    const fn assert_send<T: Send>() {}
+    assert_send::<Client>();
+};
 
 #[derive(Clone, Copy)]
 pub(crate) struct StatementCacheSettings {

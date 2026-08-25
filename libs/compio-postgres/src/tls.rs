@@ -17,6 +17,22 @@ use std::io;
 
 pub(crate) mod private {
     pub struct ForcePrivateApi;
+
+    pub struct ReleaseConfig<'a>(&'a mut crate::release::ConnectionRelease);
+
+    impl<'a> ReleaseConfig<'a> {
+        pub(crate) fn new(release: &'a mut crate::release::ConnectionRelease) -> Self {
+            Self(release)
+        }
+
+        #[cfg(feature = "tls")]
+        pub(crate) fn set_tls_session(
+            &mut self,
+            session: crate::tls_sansio::SharedSession,
+        ) {
+            self.0.set_tls_session(session);
+        }
+    }
 }
 
 /// What a connection string asks a connector to check about the certificate
@@ -223,6 +239,16 @@ pub trait TlsStream: AsyncRead + AsyncWrite {
     /// Reports whether the handshake requested and sent a client certificate.
     fn client_cert_status(&self) -> ClientCertStatus {
         ClientCertStatus::Unknown
+    }
+
+    /// Lets this crate's `rustls` stream attach its live session to the
+    /// synchronous socket-release guard.
+    #[doc(hidden)]
+    fn configure_release(
+        &self,
+        _: private::ForcePrivateApi,
+        _: private::ReleaseConfig<'_>,
+    ) {
     }
 }
 

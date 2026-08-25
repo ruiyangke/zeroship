@@ -93,8 +93,9 @@
 //! every `cargo test`, and the four COPY tests were re-checked by substitution:
 //! all four fail, each at its own `expect_err`.
 //!
-//! NOT covered here: TLS, authentication, replication framing, or a peer that
-//! trickles bytes slowly rather than sending wrong ones.
+//! The `close_notify` regression below is the sole TLS case. NOT covered here:
+//! TLS policy, authentication, replication framing, or a peer that trickles
+//! bytes slowly rather than sending wrong ones.
 
 use compio_postgres::Config;
 use compio_postgres::config::SslMode;
@@ -193,7 +194,7 @@ fn lying_frame(tag: u8, body: &[u8], declared: u32) -> Vec<u8> {
     frame
 }
 
-fn complete_startup(stream: &mut TcpStream, process_id: i32) {
+fn complete_startup(stream: &mut (impl Read + Write), process_id: i32) {
     let mut length = [0u8; 4];
     stream
         .read_exact(&mut length)
@@ -223,7 +224,7 @@ fn complete_startup(stream: &mut TcpStream, process_id: i32) {
     stream.flush().expect("flush scripted startup response");
 }
 
-fn expect_simple_query(stream: &mut TcpStream) -> Vec<u8> {
+fn expect_simple_query(stream: &mut (impl Read + Write)) -> Vec<u8> {
     let mut tag = [0u8; 1];
     stream.read_exact(&mut tag).expect("read frontend tag");
     assert_eq!(tag[0], b'Q', "expected a simple-query frame");
@@ -413,6 +414,134 @@ fn row_description(columns: &[&str]) -> Vec<u8> {
         body.extend_from_slice(&0u16.to_be_bytes()); // text format
     }
     body
+}
+
+/// Dropping the last client handle ends TLS with the authenticated alert, not
+/// by cutting off the transport underneath rustls.
+///
+/// This peer inspects rustls' processed record state. A bare EOF, a reset, or
+/// arbitrary bytes cannot set `peer_has_closed`, so the assertion observes the
+/// real encrypted `close_notify` rather than a teardown helper being called.
+#[cfg(feature = "tls")]
+#[compio::test]
+async fn dropping_a_tls_client_sends_close_notify() {
+    let issued = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+        .expect("generate test certificate");
+    let cert = rustls::pki_types::CertificateDer::from(issued.cert.der().to_vec());
+    let key = rustls::pki_types::PrivateKeyDer::try_from(issued.signing_key.serialize_der())
+        .expect("serialize test key");
+    let server_config = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("safe TLS protocol versions")
+    .with_no_client_auth()
+    .with_single_cert(vec![cert], key)
+    .expect("build TLS server config");
+    let server_config = std::sync::Arc::new(server_config);
+
+    let server = StubServer::spawn(move |listener| {
+        let mut socket = accept_bounded(&listener);
+
+        let mut ssl_request = [0u8; 8];
+        socket
+            .read_exact(&mut ssl_request)
+            .expect("read PostgreSQL SSLRequest");
+        assert_eq!(
+            u32::from_be_bytes(ssl_request[..4].try_into().unwrap()),
+            8,
+            "SSLRequest length"
+        );
+        assert_eq!(
+            u32::from_be_bytes(ssl_request[4..].try_into().unwrap()),
+            80_877_103,
+            "SSLRequest code"
+        );
+        socket.write_all(b"S").expect("accept TLS negotiation");
+        socket.flush().expect("flush TLS negotiation response");
+
+        let mut tls = rustls::ServerConnection::new(server_config)
+            .expect("build TLS server session");
+
+        {
+            let mut stream = rustls::Stream::new(&mut tls, &mut socket);
+            complete_startup(&mut stream, 214);
+            let query = expect_simple_query(&mut stream);
+            assert_eq!(query, b"SELECT 1\0");
+
+            let mut row = Vec::new();
+            row.extend_from_slice(&1u16.to_be_bytes());
+            row.extend_from_slice(&1u32.to_be_bytes());
+            row.push(b'1');
+            let mut response = backend_frame(b'T', &row_description(&["?column?"]));
+            response.extend_from_slice(&backend_frame(b'D', &row));
+            response.extend_from_slice(&backend_frame(b'C', b"SELECT 1\0"));
+            response.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream
+                .write_all(&response)
+                .expect("write SELECT 1 response");
+            stream.flush().expect("flush SELECT 1 response");
+        }
+
+        loop {
+            let read = tls.read_tls(&mut socket).unwrap_or_else(|error| {
+                panic!("TLS transport failed before close_notify arrived: {error}")
+            });
+            assert_ne!(
+                read, 0,
+                "TLS transport reached EOF before close_notify arrived"
+            );
+            let state = tls
+                .process_new_packets()
+                .expect("process client TLS shutdown records");
+            let peer_has_closed = state.peer_has_closed();
+
+            let mut plaintext = [0u8; 64];
+            loop {
+                match tls.reader().read(&mut plaintext) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                    Err(error) => panic!("read client shutdown plaintext: {error}"),
+                }
+            }
+            if peer_has_closed {
+                break;
+            }
+        }
+    });
+
+    let dsn = format!(
+        "host=localhost hostaddr={} port={} user=scripted-user sslmode=require connect_timeout=2",
+        server.addr.ip(),
+        server.addr.port()
+    );
+    let config = dsn.parse::<Config>().expect("parse TLS peer config");
+    let tls = compio_postgres::MakeRustlsConnect::from_config(&config)
+        .expect("build unverified rustls connector");
+    let (client, connection) = config
+        .connect(tls)
+        .await
+        .expect("connect to scripted TLS PostgreSQL peer");
+    let driver = compio::runtime::spawn(async move { connection.run().await });
+
+    let messages = compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 1"))
+        .await
+        .expect("SELECT 1 over TLS exceeded its watchdog")
+        .expect("run SELECT 1 over TLS");
+    assert!(
+        messages.iter().any(|message| matches!(
+            message,
+            compio_postgres::SimpleQueryMessage::Row(row) if row.get(0) == Some("1")
+        )),
+        "the scripted SELECT 1 response did not reach the client"
+    );
+    drop(client);
+
+    server.finish();
+    let _ = compio::time::timeout(OPERATION_WATCHDOG, driver)
+        .await
+        .expect("connection task did not exit after client release");
 }
 
 #[compio::test]
