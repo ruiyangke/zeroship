@@ -101,6 +101,95 @@ const TLS12_AND_TLS13: &[&SupportedProtocolVersion] =
 // same function to hold a NON-rustls connector to the same promise. Read
 // `ServerVerification::select`'s arms against [`SslRootCert`]'s table.
 
+/// Writes TLS secrets to a named file in NSS key-log format, so a capture of
+/// the connection can be decrypted.
+///
+/// rustls ships [`rustls::KeyLogFile`], but it takes its path from the
+/// `SSLKEYLOGFILE` environment variable and reads it once at construction.
+/// libpq's `sslkeylogfile` names the path as a CONNECTION PARAMETER, so
+/// different connections in one process can log to different files - or, much
+/// more importantly, so that only the connection that asked for it logs at
+/// all. That is not something an environment variable can express, hence this.
+///
+/// Behaviour matches libpq 18, measured rather than assumed: the file is
+/// created 0600, secrets are APPENDED (a second connection to the same path
+/// adds to it rather than replacing it), and a path that cannot be opened is a
+/// WARNING that still lets the connection proceed. That last one is a
+/// deliberate choice of libpq's and worth keeping: failing the connection
+/// because a debugging aid could not be written would turn a diagnostic switch
+/// into an outage.
+#[derive(Debug)]
+struct KeyLogToFile {
+    /// `None` once opening has failed, so a broken path warns once rather than
+    /// on every secret of every handshake.
+    file: std::sync::Mutex<Option<std::fs::File>>,
+}
+
+impl KeyLogToFile {
+    fn new(path: &str) -> Self {
+        let mut options = std::fs::OpenOptions::new();
+        options.append(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // Anyone who can read this file can decrypt the session, so it is
+            // created as tightly as libpq creates it. This sets the mode only
+            // when the file is CREATED; an existing file keeps its own, which
+            // is the same corner libpq has.
+            options.mode(0o600);
+        }
+
+        let file = match options.open(path) {
+            Ok(file) => Some(file),
+            Err(error) => {
+                log::warn!("could not open SSL key logging file {path:?}: {error}");
+                None
+            }
+        };
+
+        Self {
+            file: std::sync::Mutex::new(file),
+        }
+    }
+}
+
+impl rustls::KeyLog for KeyLogToFile {
+    fn log(&self, label: &str, client_random: &[u8], secret: &[u8]) {
+        // Both traits are in play: `fmt::Write` builds the hex line in memory,
+        // `io::Write` puts it on disk.
+        use std::fmt::Write as _;
+        use std::io::Write as _;
+
+        let mut guard = match self.file.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let Some(file) = guard.as_mut() else {
+            return;
+        };
+
+        let mut line =
+            String::with_capacity(label.len() + 2 * client_random.len() + 2 * secret.len() + 3);
+        line.push_str(label);
+        line.push(' ');
+        for byte in client_random {
+            let _ = write!(line, "{byte:02x}");
+        }
+        line.push(' ');
+        for byte in secret {
+            let _ = write!(line, "{byte:02x}");
+        }
+        line.push('\n');
+
+        if let Err(error) = file.write_all(line.as_bytes()) {
+            log::warn!("could not write to SSL key logging file: {error}");
+            // Stop trying: a file that has started failing will keep failing,
+            // and a warning per secret per handshake is its own problem.
+            *guard = None;
+        }
+    }
+}
+
 #[derive(Default)]
 struct ConfiguredCrls {
     file: Vec<CertificateRevocationListDer<'static>>,
@@ -1051,6 +1140,13 @@ impl MakeRustlsConnect {
         // This field controls emission of the SNI extension without changing
         // the ServerName that rustls still uses for certificate verification.
         client_config.enable_sni = config.get_ssl_sni();
+
+        // Installed only when the connection asked for it, so a process that
+        // never sets `sslkeylogfile` cannot be made to leak secrets by an
+        // environment variable it did not choose.
+        if let Some(path) = config.get_ssl_key_log_file() {
+            client_config.key_log = Arc::new(KeyLogToFile::new(path));
+        }
 
         if crl_directory_reload.is_some() || config.get_ssl_cert_mode() == SslCertMode::Require {
             // Resumption can skip both server-certificate verification and a

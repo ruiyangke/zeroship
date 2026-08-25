@@ -91,7 +91,7 @@ const LIBPQ_PARAMETERS: &[(&str, &str, Verdict)] = &[
     ("sslcrl", "/tmp/root.crl", Accepted),
     ("sslcrldir", "/tmp/crls", Accepted),
     ("sslkey", "/tmp/client.key", Accepted),
-    ("sslkeylogfile", "/tmp/keys.log", Refused),
+    ("sslkeylogfile", "/tmp/keys.log", Accepted),
     ("sslmode", "prefer", Accepted),
     ("sslnegotiation", "postgres", Accepted),
     ("sslpassword", "pw", Accepted),
