@@ -48,6 +48,10 @@ mod common;
 /// the file inside a normal `cargo test` run. Raise it locally to hunt.
 const CASES: u32 = 4096;
 
+/// Sequences fed to the stateful decoder. Smaller than `CASES` because each
+/// one is several frames.
+const SEQUENCES: u32 = 2048;
+
 /// Every tag the decoder claims to know, from its own match arms.
 const KNOWN_TAGS: &[u8] = b"BCORYIUDTMSEcAbPKrpNntu";
 
@@ -398,4 +402,217 @@ fn a_rejected_frame_leaves_the_stateful_decoder_usable() {
     }
 
     assert_eq!(survived, 512, "every probe must have been answered");
+}
+
+/// A transactional message carrying the in-chunk xid prefix.
+///
+/// Inside a stream chunk every `R Y I U D T M` message repeats an xid before
+/// its payload. It need NOT equal the chunk's own xid: a change made after a
+/// SAVEPOINT carries the subtransaction's. `valid_case` builds the unprefixed
+/// form, so the prefix is spliced in after the tag.
+fn prefixed(body: Vec<u8>, xid: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(body.len() + 4);
+    out.push(body[0]);
+    out.extend_from_slice(&xid.to_be_bytes());
+    out.extend_from_slice(&body[1..]);
+    out
+}
+
+/// Tags that take the in-chunk xid prefix, per `decode_frame`.
+const PREFIXED_TAGS: &[u8] = b"RYIUDTM";
+
+fn stream_start(xid: u32) -> Vec<u8> {
+    let mut f = vec![b'S'];
+    f.extend_from_slice(&xid.to_be_bytes());
+    f.push(1);
+    f
+}
+
+fn stream_commit(xid: u32) -> Vec<u8> {
+    let mut f = vec![b'c'];
+    f.extend_from_slice(&xid.to_be_bytes());
+    f.push(0);
+    f.extend_from_slice(&[0u8; 24]);
+    f
+}
+
+fn stream_abort(xid: u32, subxid: u32) -> Vec<u8> {
+    let mut f = vec![b'A'];
+    f.extend_from_slice(&xid.to_be_bytes());
+    f.extend_from_slice(&subxid.to_be_bytes());
+    f
+}
+
+/// One sequence of frames destined for a single `Decoder`.
+///
+/// Three shapes, because they answer different questions: a well-formed chunk
+/// reaches the state machine at all, a misframed one reaches the arms that
+/// have no chunk to work with, and a mutated one lands between the two.
+fn sequence(rng: &mut Rng) -> Vec<Vec<u8>> {
+    let xid = 0x000a_b400 + rng.below(4) as u32;
+    match rng.below(4) {
+        // Well-formed chunk.
+        0 | 1 => {
+            let mut frames = vec![stream_start(xid)];
+            for _ in 0..rng.below(4) {
+                let body = valid_case(rng);
+                if PREFIXED_TAGS.contains(&body[0]) {
+                    // SOMETIMES a different xid: the SAVEPOINT case, which is
+                    // the one this corpus exists to keep decodable.
+                    let carried = if rng.below(2) == 0 { xid } else { xid + 1 };
+                    frames.push(prefixed(body, carried));
+                } else {
+                    frames.push(body);
+                }
+            }
+            frames.push(match rng.below(3) {
+                0 => vec![b'E'],
+                1 => stream_commit(xid),
+                _ => stream_abort(xid, xid + 1),
+            });
+            frames
+        }
+        // Framing deliberately wrong.
+        2 => match rng.below(4) {
+            0 => vec![vec![b'E']],
+            1 => vec![stream_start(xid), stream_start(xid + 1)],
+            2 => vec![prefixed(valid_case(rng), xid)],
+            _ => vec![stream_start(xid), stream_commit(xid + 7)],
+        },
+        // Well-formed, then damaged.
+        _ => {
+            let mut frames = vec![stream_start(xid)];
+            frames.push(mutated_case(rng));
+            frames.push(vec![b'E']);
+            frames
+        }
+    }
+}
+
+/// What a sequence run observed.
+#[derive(Default)]
+struct SequenceReach {
+    sequences: u32,
+    opened_a_chunk: u32,
+    in_chunk_tags: std::collections::BTreeSet<u8>,
+    foreign_xid_accepted: u32,
+}
+
+/// Whole SEQUENCES through one stateful decoder, which is the only way to
+/// reach its state machine.
+///
+/// `a_hostile_pgoutput_body_is_refused_rather_than_fatal` feeds single bodies
+/// to the stateless `decode`, and that cannot enter the chunk logic at all -
+/// the stateless entry point refuses `S E c A p` outright.
+///
+/// One assertion here is about BEHAVIOUR rather than robustness, and it is the
+/// reason this file bothers with sequences: an in-chunk xid that DIFFERS from
+/// the chunk's must be accepted. Commit 17c09e7ce added a check that the two
+/// must agree and shipped it; a transaction with a SAVEPOINT carries its
+/// subtransaction's xid and was rejected. `tests/pgoutput_subtransactions.rs`
+/// pins that against a live server. This pins it against a corpus.
+///
+/// WHAT THIS DOES NOT CATCH: it does not assert that a malformed ORDER is
+/// refused. Some orders are indistinguishable from forward-compatible ones,
+/// and the decoder tolerates trailing bytes on purpose, so demanding an error
+/// would be a claim about the protocol rather than about the driver.
+#[test]
+fn a_hostile_pgoutput_sequence_is_refused_rather_than_fatal() {
+    let mut rng = Rng::new(0x51ea_d0a1_b2c3_d4e5);
+    let mut reach = SequenceReach::default();
+
+    for _ in 0..SEQUENCES {
+        let frames = sequence(&mut rng);
+        let mut decoder = pgoutput::Decoder::new();
+        let mut inside = false;
+        let mut chunk_xid = None;
+
+        reach.sequences += 1;
+        for frame in &frames {
+            match decoder.decode(frame) {
+                Ok(PgOutputMessage::StreamStart { xid, .. }) => {
+                    inside = true;
+                    chunk_xid = Some(xid);
+                    reach.opened_a_chunk += 1;
+                }
+                Ok(message) => {
+                    let tag = tag_of(&message);
+                    if inside {
+                        reach.in_chunk_tags.insert(tag);
+                        if let (Some(chunk), Some(carried)) = (chunk_xid, carried_xid(&message))
+                            && carried != chunk
+                        {
+                            reach.foreign_xid_accepted += 1;
+                        }
+                    }
+                    if matches!(tag, b'E' | b'c' | b'A' | b'p') {
+                        inside = false;
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+
+        // A bad sequence must not wedge the decoder. `StreamStop` is the
+        // shortest well-formed frame there is.
+        assert!(
+            matches!(decoder.decode(b"E"), Ok(PgOutputMessage::StreamStop)),
+            "a sequence wedged the decoder"
+        );
+    }
+
+    println!(
+        "  [pgoutput sequence fuzz] {} sequences, {} opened a chunk, {} distinct in-chunk tags {:?}, {} foreign xids accepted",
+        reach.sequences,
+        reach.opened_a_chunk,
+        reach.in_chunk_tags.len(),
+        reach
+            .in_chunk_tags
+            .iter()
+            .map(|tag| *tag as char)
+            .collect::<Vec<_>>(),
+        reach.foreign_xid_accepted
+    );
+
+    // Floors, in the same spirit as the single-body run: a corpus that never
+    // opens a chunk cannot have tested the state machine, however green it is.
+    // MEASURED 2026-08-24 with SEQUENCES=2048.
+    assert!(
+        reach.opened_a_chunk >= 800,
+        "only {} sequences opened a chunk; the corpus is not reaching the state \
+         machine",
+        reach.opened_a_chunk
+    );
+    assert!(
+        reach.in_chunk_tags.len() >= 4,
+        "only {} distinct tags decoded inside a chunk ({:?})",
+        reach.in_chunk_tags.len(),
+        reach
+            .in_chunk_tags
+            .iter()
+            .map(|tag| *tag as char)
+            .collect::<Vec<_>>()
+    );
+    // The behavioural one. If a future change reinstates the xid equality
+    // check, this drops to zero long before any live test notices.
+    assert!(
+        reach.foreign_xid_accepted >= 100,
+        "only {} messages carried an xid differing from their chunk's and were \
+         accepted; a SAVEPOINT's subtransaction xid must not be refused",
+        reach.foreign_xid_accepted
+    );
+}
+
+/// The xid a decoded message carried inside its chunk, if it takes one.
+fn carried_xid(message: &PgOutputMessage) -> Option<u32> {
+    match message {
+        PgOutputMessage::Relation { xid, .. }
+        | PgOutputMessage::Type { xid, .. }
+        | PgOutputMessage::Insert { xid, .. }
+        | PgOutputMessage::Update { xid, .. }
+        | PgOutputMessage::Delete { xid, .. }
+        | PgOutputMessage::Truncate { xid, .. }
+        | PgOutputMessage::Message { xid, .. } => *xid,
+        _ => None,
+    }
 }
