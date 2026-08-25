@@ -48,6 +48,41 @@
 //! was nearly diagnosed as one. Making it orderly means sending `close_notify`
 //! BEFORE the synchronous release, which is a change to the release design and
 //! not to this file.
+//!
+//! ## What the fix is NOT, measured 2026-08-25
+//!
+//! Three cheaper repairs were tried against a live TLS server and none of them
+//! removes the line. Each was one connection: connect, `SELECT 1`, drop.
+//!
+//! * **Letting the connection task run.** Sleeping 300ms after dropping the
+//!   `Client`, so the task certainly gets polled and reaches its
+//!   `Terminate` + `TlsWriteHalf::shutdown` teardown, logs the line anyway.
+//!   `ConnectionRelease::drop` has already done `shutdown(Both)` by then, so
+//!   the teardown has no writable socket left. The paragraph above says this
+//!   write "frequently does not arrive"; it does not arrive AT ALL on this
+//!   path, and no amount of scheduling changes that.
+//! * **FIN, drain, then close.** Replacing `shutdown(Both)` with
+//!   `shutdown(Write)`, draining the receive buffer with a 20ms timeout, then
+//!   closing - so that no unread bytes are pending at `close(2)` - also logs
+//!   it. The server is not complaining about unread data; it is complaining
+//!   that the TLS session ended without `close_notify`.
+//! * **Doing nothing special for plaintext.** The same drop against the
+//!   plaintext server logs NOTHING, which is the control proving this is the
+//!   TLS layer and not the `Terminate` message. libpq over TLS is the other
+//!   control: it logs nothing either.
+//!
+//! So the fix needs the rustls session to be reachable from `Drop`, which
+//! today it is not: the session is `Rc<RefCell<ClientConnection>>` owned by the
+//! connection task, while `ConnectionRelease` must stay `Send` because it lives
+//! in `Client` (`crate::release` explains why a `SharedFd` was rejected for the
+//! same reason). `close_notify` cannot be precomputed at handshake time either:
+//! it is an encrypted record whose sequence number depends on every write that
+//! precedes it, and `send_close_notify` commits the session irreversibly.
+//!
+//! That leaves one shape: make the session `Arc<Mutex<ClientConnection>>` so a
+//! `Drop` can lock it, serialise `close_notify`, and `send` it on the dup
+//! before shutting the socket down. It costs an uncontended lock on the TLS
+//! write path and touches the handshake, both halves and the split.
 
 use compio::buf::{BufResult, IoBuf, IoBufMut};
 use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
