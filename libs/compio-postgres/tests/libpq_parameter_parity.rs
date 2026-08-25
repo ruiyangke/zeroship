@@ -14,6 +14,7 @@
 //! is the point: it means we have not decided.
 
 use compio_postgres::Config;
+use compio_postgres::config::Host;
 
 #[allow(dead_code)]
 mod common;
@@ -466,6 +467,94 @@ fn a_url_authority_appends_every_host() {
         overridden.get_hosts().len(),
         1,
         "a query-string host must replace the authority's list"
+    );
+}
+
+/// The URI rules that are not about which shapes parse, but about what the
+/// parts MEAN: percent-decoding, bracketed IPv6, and which of the authority
+/// and the query string wins.
+///
+/// Every row was measured against psql 16.14 on 2026-08-25 and this crate
+/// already agreed with all of them - the test exists because nothing pinned
+/// them, and this file records two regressions in exactly this area (the
+/// per-host port, below). A rule nothing asserts is one a refactor may quietly
+/// change.
+#[test]
+fn uri_components_are_decoded_and_the_query_string_wins() {
+    fn parsed(url: &str) -> Config {
+        url.parse::<Config>()
+            .unwrap_or_else(|error| panic!("libpq accepts {url}: {error}"))
+    }
+
+    fn tcp_hosts(config: &Config) -> Vec<String> {
+        config
+            .get_hosts()
+            .iter()
+            .map(|host| match host {
+                Host::Tcp(host) => host.clone(),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    // Percent-decoding reaches every component, not just the host.
+    assert_eq!(
+        tcp_hosts(&parsed("postgresql://pct%2Ddash.invalid/db")),
+        vec!["pct-dash.invalid".to_owned()]
+    );
+    assert_eq!(
+        parsed("postgresql://u%40dom@127.0.0.1/db").get_user(),
+        Some("u@dom"),
+        "userinfo is percent-decoded; libpq reports `role \"u@dom\" does not exist`"
+    );
+    assert_eq!(
+        parsed("postgresql://127.0.0.1/a%2Fb").get_dbname(),
+        Some("a/b"),
+        "a database name may contain an encoded slash"
+    );
+
+    // A malformed escape is an ERROR, not a literal percent sign. libpq:
+    // `invalid percent-encoded token: "bad%zz.invalid"`.
+    for bad in [
+        "postgresql://bad%zz.invalid/db",
+        "postgresql://trunc%2.invalid/db",
+    ] {
+        assert!(
+            bad.parse::<Config>().is_err(),
+            "an invalid percent-encoded token must be refused: {bad}"
+        );
+    }
+
+    // A bracketed IPv6 literal keeps its brackets out of the host, with and
+    // without an explicit port.
+    assert_eq!(
+        tcp_hosts(&parsed("postgresql://[::1]:5432/db")),
+        vec!["::1".to_owned()]
+    );
+    assert_eq!(
+        tcp_hosts(&parsed("postgresql://[fe80::1]/db")),
+        vec!["fe80::1".to_owned()]
+    );
+
+    // The QUERY STRING wins over the authority, for host and for port.
+    assert_eq!(
+        tcp_hosts(&parsed("postgresql://h.invalid/db?host=query.invalid")),
+        vec!["query.invalid".to_owned()],
+        "libpq resolves query.invalid, never the authority's h.invalid"
+    );
+    assert_eq!(
+        parsed("postgresql://127.0.0.1:1/db?port=2").get_ports(),
+        [2],
+        "libpq reports `port 2 failed`, so the query overrides the authority"
+    );
+
+    // And a query parameter can name a unix socket directory.
+    assert!(
+        matches!(
+            parsed("postgresql:///db?host=/tmp").get_hosts().first(),
+            Some(Host::Unix(_))
+        ),
+        "?host=/tmp is a socket directory, as libpq treats it"
     );
 }
 
