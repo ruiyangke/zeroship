@@ -73,6 +73,32 @@
 //!   TLS layer and not the `Terminate` message. libpq over TLS is the other
 //!   control: it logs nothing either.
 //!
+//! ## What the residue is now, measured at SUITE scale
+//!
+//! Every figure above is one connection in isolation, and that is how two of
+//! the three teardown paths were missed: the client release, the connection
+//! guard, and `ConnectionRelease::shutdown` called directly all had to be
+//! fixed, and single-connection probes read clean after each one.
+//!
+//! MEASURED 2026-08-25 over a whole `suite-over-tls` run - 1721 tests through
+//! the encrypted server - the TLS server logged **11** of these lines, and the
+//! other four TLS servers logged NONE. Attributed by re-running binaries
+//! alone: `connection_churn` accounts for 7 to 9 of them on its own, and
+//! `cancel_request`, `backend_termination`, `socket_release`,
+//! `query_backpressure` and `connect_failure_diagnosis` each account for zero.
+//!
+//! That residue is CORRECT, not a fourth missed path. `connection_churn` runs
+//! `BAD_CONNECTION_ITERATIONS` sessions that are abandoned mid-query while
+//! holding an advisory lock - the server logs `connection to client lost` for
+//! its `cpg_connection_churn_in_flight` statements in the same place - so the
+//! write is still in flight when the release runs, and `take_close_notify`
+//! declines rather than emit an alert that would overtake an earlier record.
+//! Skipping is the documented choice; see `write_in_flight` below.
+//!
+//! So the number to watch is not zero, it is "11, nearly all from one test
+//! that ends connections badly on purpose". A count that grows elsewhere is
+//! the finding.
+//!
 //! The rustls session is therefore an `Arc<Mutex<TlsSession>>` shared with
 //! `ConnectionRelease`. `TlsSession` owns both `ClientConnection` and the
 //! ordered ciphertext queue; locking only the former would let queued records
