@@ -28,52 +28,20 @@
 
 use crate::policy::{SchemaScope, TrustProfile};
 
-/// A zero-sized operator capability token.
-///
-/// The token type lives with the capability model (in the `zero-migrate-ir` leaf)
-/// so operator-side engine seams can name it without depending on the runner. The
-/// PRIVATE `()` field blocks only the struct-literal form. The token is freely
-/// mintable by any dependent crate through the public [`OperatorCapability::new`],
-/// through `Default`, and through `for_test` — all three are the same mint.
-///
-/// It authorises nothing. The two functions that take one bind it and never read it,
-/// and the config they build is what the public `ExecutorConfig::new` returns anyway.
-/// Privilege comes from the composed `EffectivePolicy` argument and from nowhere else
-/// - that is the unforgeable type, and its own docs record that it replaced this
-/// token. Do NOT hang a real check on holding one of these.
-#[derive(Debug, Clone)]
-pub struct OperatorCapability(());
-
-/// Alias name for the zero-sized token that gates sealed shared-infra apply.
-///
-/// This is an alias, not a second forgeable token: it still has a private field,
-/// so external crates cannot construct it.
-pub type SealApplier = OperatorCapability;
-
-impl OperatorCapability {
-    /// The production mint. Reachable across the crate graph (the engine runner
-    /// is the single production caller). The token does not select or construct a
-    /// policy; policy-bearing APIs require an explicit composed policy.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self(())
-    }
-
-    /// **Test-support seam.** Lets the engine-crate test suite exercise
-    /// operator-gated entry points. A named alias for [`Self::new`], which is
-    /// already the public production mint — it grants nothing extra, it only
-    /// spells the intent at the call site.
-    #[must_use]
-    pub const fn for_test() -> Self {
-        Self::new()
-    }
-}
-
-impl Default for OperatorCapability {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// There was an `OperatorCapability` token here, aliased as `SealApplier`, and an
+// `ExecutorConfig::platform` seam that took one. Both are deleted.
+//
+// The token was a zero-sized struct with a private field, which blocks only the
+// struct-literal form — `new`, `Default` and `for_test` were all public, all the same
+// mint, and reachable from any dependent crate. So holding one proved nothing about
+// the holder, and the one function that took it bound it as `_cap` and never read it,
+// returning exactly what the public `ExecutorConfig::new` returns.
+//
+// Its own doc said so ("It authorises nothing... Do NOT hang a real check on holding
+// one of these") while two other docs described it as a seam that "neither the control
+// plane nor any in-crate module" could pass — a shape that reads as a security boundary
+// to anyone who does not read all three. Privilege comes from the composed
+// `EffectivePolicy` argument and from nowhere else; that is the unforgeable type.
 
 /// The CLOSED set of vendor capabilities a privileged op can require.
 /// Each [`crate::ir::Op`] vendor variant maps to one or more of these through

@@ -37,7 +37,6 @@
 use zero_migrate::guard::{
     check_ir_data_security_policy, data_security_rule, GuardConfig, GuardError, MigrationGuard,
 };
-use zero_migrate::model::capability::OperatorCapability;
 use zero_migrate::model::ir::{MigrationIr, Op};
 use zero_migrate::model::policy::{DestructiveOps, SchemaScope};
 use zero_migrate::DialectId;
@@ -48,10 +47,12 @@ use zero_migrate_postgres::DIALECT as POSTGRES;
 use zero_migrate_sqlite::DIALECT as SQLITE;
 
 /// A Platform guard over the real port allowlist (`zero_migrate` / `public`) +
-/// the two ported extensions. Minted via the `for_test` seam, a named alias for
-/// `OperatorCapability::new` that `zero-migrate-ir` exposes unconditionally. The
-/// token authorises nothing on its own; privilege comes from the composed
-/// `EffectivePolicy`.
+/// the two ported extensions.
+///
+/// It is built straight from a composed `EffectivePolicy`, which is where the Platform
+/// posture lives. No token is involved — this doc used to describe one being minted
+/// through a `for_test` seam, which this function never did even while that seam
+/// existed, and the seam is now deleted.
 fn platform_guard() -> SqlGuard {
     SqlGuard::new(platform_guard_config())
 }
@@ -769,19 +770,23 @@ fn m2_stage2_superuser_belt_sites_stay_hard_denied() {
     }
 }
 
-// ---- T11: capability minting uses named seams --------------------------
+// ---- T11: the Platform posture comes from the policy -------------------
 
-/// What this pins is the CONFIG the policy produces, not exclusive minting - the
-/// name is historical. `OperatorCapability` is freely mintable by any dependent
-/// crate (`new`, `Default`, and `for_test` under an additive feature), and it
-/// authorises nothing; `ExecutorConfig::platform` ignores the token and returns what
-/// the public `ExecutorConfig::new` returns. The assertions below are about the
-/// composed `EffectivePolicy`, which is the part that cannot be forged.
+/// The Platform posture is carried by the composed `EffectivePolicy` and by nothing
+/// else, and both readers of that policy agree about it.
+///
+/// This test used to be named for capability minting and passed an
+/// `OperatorCapability` token to an `ExecutorConfig::platform` seam. Both are deleted:
+/// the token's mint was public, so holding one proved nothing, and `platform` bound it
+/// as `_cap` and returned exactly what `new` returns. The assertions never depended on
+/// the token — they read the schema scope off the composed policy — so they are
+/// unchanged here, and the name now says what they check.
+///
+/// The boundary that IS pinned is the unforgeable `EffectivePolicy`, held by the T8
+/// `compile_fail` doctests in `zero_migrate_backend::guard`.
 #[test]
-fn t11_platform_capability_mints_only_via_runner_seam() {
-    let cap = OperatorCapability::for_test();
-    // The token grants a Platform GuardConfig + ExecutorConfig. The Platform posture is
-    // identified by its PDP shape: a schema allowlist scope.
+fn t11_platform_posture_is_carried_by_the_composed_policy() {
+    // The Platform posture is identified by its PDP shape: a schema allowlist scope.
     //
     // Each assertion below had a `!skips_denylist_belt()` partner reading "Platform
     // runs the full static belt", which distinguished Platform from the one posture
@@ -793,8 +798,7 @@ fn t11_platform_capability_mints_only_via_runner_seam() {
         gcfg.schema_scope(),
         Some(SchemaScope::Allowlist(vec!["zero_migrate".into()]))
     );
-    let ecfg = zero_migrate::conn::ExecutorConfig::platform(
-        &cap,
+    let ecfg = zero_migrate::conn::ExecutorConfig::new(
         "platform",
         "zero_migrate",
         crate::support::operator_no_inject("zero_migrate"),
@@ -803,11 +807,6 @@ fn t11_platform_capability_mints_only_via_runner_seam() {
         ecfg.guard_config_for(&POSTGRES).schema_scope(),
         Some(SchemaScope::Allowlist(vec!["zero_migrate".into()]))
     );
-    // NOTE: `OperatorCapability::new` is PUBLIC, as are `Default` and (under an
-    // additive feature) `for_test`, so any dependent crate can mint one. Nothing
-    // reads it. The boundary that is actually pinned is the unforgeable
-    // `EffectivePolicy`, held by the T8 `compile_fail` doctests in
-    // `zero_migrate_backend::guard` - there is no `tests/trybuild_*` and never was.
 }
 
 // ---- Platform widening is correct AND bounded ----------------------

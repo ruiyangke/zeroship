@@ -259,35 +259,16 @@ impl ExecutorConfig {
         crate::guard::GuardConfig::from_policy(self.effective.clone(), dialect.clone())
     }
 
-    /// Build a **Platform** executor config. REQUIRES a
-    /// [`OperatorCapability`](zero_migrate_ir::capability::OperatorCapability) token, mintable
-    /// only through named in-crate seams, so neither the control plane
-    /// (external; cannot name `Platform` nor mint the token) nor any in-crate
-    /// module (`submit`/`engine`; cannot mint the token) can flip the executor
-    /// into Platform. The caller must supply the explicitly authored policy.
-    ///
-    /// # The operator-side production Platform seam
-    ///
-    /// This is the public, token-gated seam an operator-side host uses to build a
-    /// Platform-trust executor from an explicitly composed policy. An external
-    /// crate can name [`TrustProfile::Platform`](zero_migrate_ir::policy::TrustProfile::Platform)
-    /// (it is not fielded), but it can only reach this executor seam by holding
-    /// the token minted through the engine's named production seam
-    /// [`OperatorCapability::new`](zero_migrate_ir::capability::OperatorCapability::new).
-    ///
-    /// The napi host path is NOT the only legitimate Platform-apply producer: an
-    /// operator-side native host (e.g. the platform's own migrate binary) applies
-    /// its own trusted infra schema through this seam over an injected
-    /// [`SqlSession`](crate::driver::SqlSession).
-    #[must_use]
-    pub fn platform(
-        _cap: &zero_migrate_ir::capability::OperatorCapability,
-        project_id: impl Into<String>,
-        project_schema: impl Into<String>,
-        effective: zero_migrate_policy::EffectivePolicy,
-    ) -> Self {
-        Self::new(project_id, project_schema, effective)
-    }
+    // A `platform()` constructor stood here. It took an `OperatorCapability` token and
+    // its whole body was `Self::new(project_id, project_schema, effective)` — the token
+    // was bound as `_cap` and never read. Its doc claimed the token could be minted
+    // "only through named in-crate seams", which was false: the mint was public, so any
+    // dependent crate could reach this seam, and the config it produced was identical to
+    // the one `new` produces from the same arguments.
+    //
+    // An operator-side host builds a Platform-trust executor by calling `new` with an
+    // explicitly composed `EffectivePolicy` carrying `TrustProfile::Platform`. That
+    // policy argument is the boundary, and it always was.
 
     /// The caller-authored composed policy this config was built with.
     ///
