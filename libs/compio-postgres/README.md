@@ -22,6 +22,7 @@ rustls transport, four timeout clocks, an opt-in prepared-statement cache, and
 | `src/release.rs` | Synchronous, drop-safe socket release, so a dropped `Client` frees its backend promptly. |
 | `src/config.rs` | Every libpq connection parameter: implemented, or REFUSED BY NAME. Never accepted and ignored. |
 | `src/passfile.rs` | `~/.pgpass` lookup: the file consulted when no password is set. Its matching rules were derived by probing libpq, not read off the format description - see the note on `match_field`. |
+| `src/service.rs` | `pg_service.conf` lookup: a named section supplying connection parameters. Explicitly given parameters win over the service's, in any order. |
 
 ## Running the tests
 

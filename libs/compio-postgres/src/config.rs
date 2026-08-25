@@ -522,6 +522,8 @@ pub enum Host {
 /// * `password` - The password to authenticate with.
 /// * `passfile` - Path to a password file to read the password from when none is set. Falls back to `$PGPASSFILE`
 ///     and then `~/.pgpass`. Ignored if the file is group- or world-accessible, as libpq ignores it.
+/// * `service` - Name of a `pg_service.conf` section supplying connection parameters. Parameters given explicitly
+///     win over the service's, whatever order they appear in. A service that is not defined is an error.
 /// * `dbname` - The name of the database to connect to. Defaults to the username.
 /// * `options` - Command line options used to configure the server.
 /// * `application_name` - Sets the `application_name` parameter on the server.
@@ -681,6 +683,8 @@ pub struct Config {
     /// Path to a libpq password file. `None` means "not set here"; the
     /// lookup still falls back to `$PGPASSFILE` and `~/.pgpass`.
     pub(crate) passfile: Option<String>,
+    /// Name of a `pg_service.conf` section supplying connection parameters.
+    pub(crate) service: Option<String>,
     pub(crate) dbname: Option<String>,
     pub(crate) options: Option<String>,
     pub(crate) application_name: Option<String>,
@@ -731,6 +735,7 @@ impl Config {
             user: None,
             password: None,
             passfile: None,
+            service: None,
             dbname: None,
             options: None,
             application_name: None,
@@ -815,6 +820,61 @@ impl Config {
     /// to `$PGPASSFILE` and then `~/.pgpass`, as libpq does.
     pub fn get_passfile(&self) -> Option<&str> {
         self.passfile.as_deref()
+    }
+
+    /// Sets the `pg_service.conf` section to take connection parameters from.
+    ///
+    /// Setting this on an already-built `Config` records the name but does not
+    /// read the file; the service is expanded when a connection string naming
+    /// it is PARSED, because that is the only point at which "which parameters
+    /// did the caller give explicitly" is still known.
+    pub fn service(&mut self, service: impl Into<String>) -> &mut Config {
+        self.service = Some(service.into());
+        self
+    }
+
+    /// Gets the service name, if one was given.
+    pub fn get_service(&self) -> Option<&str> {
+        self.service.as_deref()
+    }
+
+    /// Fill parameters the caller did not give from the named service.
+    ///
+    /// `explicit` is every key the connection string itself supplied. Those
+    /// win REGARDLESS OF ORDER - measured against libpq, where
+    /// `dbname=x service=s` and `service=s dbname=x` both select `x` - which
+    /// is why this runs after the string is fully parsed rather than at the
+    /// point the `service` key is seen.
+    fn apply_service(&mut self, explicit: &[String]) -> Result<(), Error> {
+        let Some(service) = self.service.clone() else {
+            return Ok(());
+        };
+
+        let parameters =
+            crate::service::parameters(&service).map_err(|e| Error::config(Box::new(e)))?;
+
+        self.fill_unset(parameters, explicit)
+    }
+
+    /// Apply `parameters` for every key not already given explicitly.
+    ///
+    /// Split from [`Config::apply_service`] so the precedence rule can be
+    /// tested on its own: locating the service file reads process-wide
+    /// environment variables, and this half - the part with a rule in it -
+    /// does not.
+    fn fill_unset(
+        &mut self,
+        parameters: Vec<(String, String)>,
+        explicit: &[String],
+    ) -> Result<(), Error> {
+        for (key, value) in parameters {
+            if key == "service" || explicit.iter().any(|given| given == &key) {
+                continue;
+            }
+            self.param(&key, &value)?;
+        }
+
+        Ok(())
     }
 
     /// Sets the name of the database to connect to.
@@ -1523,6 +1583,12 @@ impl Config {
                 }
                 self.passfile(value);
             }
+            "service" => {
+                if value.is_empty() {
+                    return Err(Error::config_parse(Box::new(InvalidValue("service"))));
+                }
+                self.service(value);
+            }
             "sslcertmode" => {
                 let mode = match value {
                     "disable" => SslCertMode::Disable,
@@ -2101,10 +2167,16 @@ impl<'a> Parser<'a> {
         };
 
         let mut config = Config::new();
+        let mut explicit = Vec::new();
 
         while let Some((key, value)) = parser.parameter()? {
             config.param(key, &value)?;
+            explicit.push(key.to_owned());
         }
+
+        // A `service` names parameters to fall back on, so it is expanded once
+        // the string is fully read and every explicitly given key is known.
+        config.apply_service(&explicit)?;
 
         Ok(config)
     }
@@ -2288,6 +2360,8 @@ impl<'a> Parser<'a> {
 struct UrlParser<'a> {
     s: &'a str,
     config: Config,
+    /// Every key the URL itself supplied, so a `service` cannot override one.
+    explicit: Vec<String>,
 }
 
 impl<'a> UrlParser<'a> {
@@ -2300,12 +2374,16 @@ impl<'a> UrlParser<'a> {
         let mut parser = UrlParser {
             s,
             config: Config::new(),
+            explicit: Vec::new(),
         };
 
         parser.parse_credentials()?;
         parser.parse_host()?;
         parser.parse_path()?;
         parser.parse_params()?;
+
+        let explicit = std::mem::take(&mut parser.explicit);
+        parser.config.apply_service(&explicit)?;
 
         Ok(Some(parser.config))
     }
@@ -2380,12 +2458,14 @@ impl<'a> UrlParser<'a> {
         let user = self.decode(it.next().unwrap())?;
         if !user.is_empty() {
             self.config.user(user);
+            self.explicit.push("user".to_owned());
         }
 
         if let Some(password) = it.next().filter(|password| !password.is_empty()) {
             Self::validate_percent_escapes(password)?;
             let password = Cow::from(percent_encoding::percent_decode(password.as_bytes()));
             self.config.password(password);
+            self.explicit.push("password".to_owned());
         }
 
         Ok(())
@@ -2400,6 +2480,9 @@ impl<'a> UrlParser<'a> {
         if host.is_empty() {
             return Ok(());
         }
+        // The authority named hosts, so a service must not supply its own.
+        self.explicit.push("host".to_owned());
+        self.explicit.push("port".to_owned());
 
         for chunk in host.split(',') {
             let (host, port) = if chunk.starts_with('[') {
@@ -2465,6 +2548,7 @@ impl<'a> UrlParser<'a> {
 
         if !dbname.is_empty() {
             self.config.dbname(self.decode(dbname)?);
+            self.explicit.push("dbname".to_owned());
         }
 
         Ok(())
@@ -2490,6 +2574,8 @@ impl<'a> UrlParser<'a> {
                 }
                 None => self.take_all(),
             };
+
+            self.explicit.push(key.to_string());
 
             if key == "host" {
                 // A query-string `host=` REPLACES the authority's hosts, as
@@ -2586,6 +2672,80 @@ mod tests {
     use std::net::IpAddr;
     use std::num::NonZeroUsize;
     use std::time::Duration;
+
+    /// The service-precedence rule, measured against libpq: an explicitly
+    /// given key wins REGARDLESS OF ORDER, so these exercise
+    /// `Config::fill_unset` directly rather than going through the file
+    /// lookup, which reads process-wide environment variables.
+    mod service_precedence {
+        use crate::Config;
+
+        fn service_params() -> Vec<(String, String)> {
+            vec![
+                ("host".to_owned(), "service.example".to_owned()),
+                ("dbname".to_owned(), "service_db".to_owned()),
+                ("user".to_owned(), "service_user".to_owned()),
+            ]
+        }
+
+        #[test]
+        fn a_service_fills_every_key_the_caller_omitted() {
+            let mut config = Config::new();
+            config
+                .fill_unset(service_params(), &[])
+                .expect("the service parameters are valid");
+
+            assert_eq!(config.get_dbname(), Some("service_db"));
+            assert_eq!(config.get_user(), Some("service_user"));
+        }
+
+        /// The control for the test above: with the key named as explicit, the
+        /// service value must NOT land, whatever the config currently holds.
+        #[test]
+        fn an_explicit_key_is_not_overwritten_by_the_service() {
+            let mut config = Config::new();
+            config.dbname("explicit_db");
+            config
+                .fill_unset(service_params(), &["dbname".to_owned()])
+                .expect("the service parameters are valid");
+
+            assert_eq!(
+                config.get_dbname(),
+                Some("explicit_db"),
+                "the service overrode a parameter the caller gave"
+            );
+            // The keys that were NOT explicit still come from the service, or
+            // this test would pass for a `fill_unset` that does nothing at all.
+            assert_eq!(config.get_user(), Some("service_user"));
+        }
+
+        /// A `service` key inside a service section would otherwise recurse or
+        /// re-select; it is simply not a parameter the section can set.
+        #[test]
+        fn a_service_key_inside_a_service_is_ignored() {
+            let mut config = Config::new();
+            config
+                .fill_unset(vec![("service".to_owned(), "another".to_owned())], &[])
+                .expect("a nested service key is skipped, not rejected");
+            assert_eq!(config.get_service(), None);
+        }
+
+        #[test]
+        fn an_unknown_key_in_a_service_is_rejected_by_name() {
+            let mut config = Config::new();
+            let error = config
+                .fill_unset(vec![("notakey".to_owned(), "1".to_owned())], &[])
+                .expect_err("an unknown parameter is not silently ignored");
+            let names_the_key = std::iter::successors(std::error::Error::source(&error), |error| {
+                std::error::Error::source(*error)
+            })
+            .any(|cause| cause.to_string().contains("notakey"));
+            assert!(
+                names_the_key,
+                "the error does not name the offending key: {error:?}"
+            );
+        }
+    }
 
     use crate::config::{
         AuthMethod, AuthMethods, RequireAuth, SslCertMode, SslMode, SslNegotiation,
