@@ -326,7 +326,8 @@ pub fn validate_ir_authorized(
 ///
 /// # Only the TARGET's namespace is judged
 ///
-/// [`AttributeVocabulary::check`] skips keys belonging to another dialect, and that is the
+/// [`AttributeVocabulary::check`](zero_migrate_backend::attribute::AttributeVocabulary::check)
+/// skips keys belonging to another dialect, and that is the
 /// property that keeps a table portable: authoring `mysql: { engine: … }` alongside
 /// `postgres: { … }` must not fail a PostgreSQL migration. The cost is real and worth
 /// stating — a `mysql.engnie` typo is invisible until something actually targets MySQL.
