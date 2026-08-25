@@ -91,7 +91,21 @@ MEASURED 2026-08-24 on the configured pooler, twice: **1374/49** against
 PostgreSQL 16, and **1407/50** against 18 after the suite had grown by ~35
 tests. MEASURED AGAIN 2026-08-25 at suite size 1720: **1665/55** against 16,
 across 18 test binaries, and every one of the 55 fell inside the set below -
-nothing outside it. Do not read the residue as a fixed number - it tracks how
+nothing outside it. RE-MEASURED later the same day at suite size 1738, after
+`close_notify` landed: **1683/55**, and the failing set is IDENTICAL - the same
+50 test names, nothing added and nothing dropped, so all 18 tests added that
+day pass behind a pooler.
+
+Compare the SET, not the count. Two runs can both report 55 while failing
+different tests, and the count alone cannot see that; diffing the sorted
+`failures:` names can:
+
+```bash
+grep -aA40 '^failures:$' run.log | grep -aE '^    [a-z_:]+$' | sort -u > new.txt
+comm -13 old.txt new.txt   # anything here is the finding
+```
+
+Do not read the residue as a fixed number - it tracks how
 many session-dependent tests the suite contains, so it moves with the suite.
 What matters is that every failure is session state a transaction pooler does
 not preserve. Treat anything OUTSIDE this set as the finding:
