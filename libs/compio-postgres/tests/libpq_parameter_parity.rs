@@ -671,3 +671,86 @@ fn the_crl_paths_accept_an_empty_value_unlike_the_certificate_paths() {
             .expect_err("the certificate paths stay strict");
     }
 }
+
+/// Parameters this driver accepts that libpq does NOT.
+///
+/// The table above rules on libpq's surface. These are the keys we added, and
+/// they need their own list for two reasons. Nothing else enumerates them, so
+/// one can appear or vanish silently; and a reader looking at a DSN cannot
+/// otherwise tell which keys are the reference implementation's and which are
+/// ours, which is exactly the confusion the parity table exists to prevent in
+/// the other direction.
+///
+/// Each pairs with a value libpq would consider well formed, so what is being
+/// tested is the KEY and not the value parser.
+const CRATE_PARAMETERS: &[(&str, &str)] = &[
+    // The implicit raw-SQL prepared-statement cache; off by default.
+    ("statement_cache_capacity", "32"),
+    // Where a `service` is read from. libpq finds this file through the
+    // environment; this driver reads no environment, so the path is named.
+    ("servicefile", "/tmp/pg_service.conf"),
+    // The largest single backend message to accept. libpq imposes no such
+    // ceiling, so there is nothing upstream to match.
+    ("max_message_size", "134217728"),
+];
+
+#[test]
+fn every_crate_specific_parameter_is_accepted() {
+    let mut wrong = Vec::new();
+
+    for (key, value) in CRATE_PARAMETERS {
+        if let Err(error) = format!("host=h {key}={value}").parse::<Config>() {
+            wrong.push(format!("{key}: listed as ours but refused ({error})"));
+        }
+    }
+
+    assert!(
+        wrong.is_empty(),
+        "crate-specific parameters:\n  {}",
+        wrong.join("\n  ")
+    );
+
+    // THE CONTROL. "It parsed" is only evidence that the key is recognised if
+    // an unrecognised one would NOT have. Without this, a parser that accepted
+    // anything would pass the loop above.
+    let invented = "host=h definitely_not_a_parameter=1".parse::<Config>();
+    assert!(
+        invented.is_err(),
+        "an invented parameter was accepted, so accepting ours proves nothing"
+    );
+}
+
+/// None of ours may be a name libpq already uses. If upstream adopts one, it
+/// stops being ours and belongs in `LIBPQ_PARAMETERS` with a verdict - and
+/// leaving it in both lists would mean two tests disagreeing about who owns
+/// the key.
+#[test]
+fn no_crate_specific_parameter_collides_with_libpq() {
+    let collisions: Vec<&str> = CRATE_PARAMETERS
+        .iter()
+        .map(|(key, _)| *key)
+        .filter(|key| LIBPQ_PARAMETERS.iter().any(|(libpq, _, _)| libpq == key))
+        .collect();
+
+    assert!(
+        collisions.is_empty(),
+        "these are listed as crate-specific but libpq accepts them too: {collisions:?}"
+    );
+}
+
+/// Adding a fourth without ruling on it should fail here, the same way the
+/// libpq table's own count guards against a silent addition.
+#[test]
+fn the_crate_specific_set_is_the_one_that_was_ruled_on() {
+    let mut names: Vec<&str> = CRATE_PARAMETERS.iter().map(|(key, _)| *key).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        [
+            "max_message_size",
+            "servicefile",
+            "statement_cache_capacity"
+        ],
+        "the crate-specific parameter set changed without being re-ruled"
+    );
+}

@@ -6,8 +6,16 @@ publishable: it depends on nothing in this workspace.
 
 It is a SUPERSET of tokio-postgres's client surface. On top of that crate's API
 it adds a connection pool, logical replication with a pgoutput decoder, a
-rustls transport, four timeout clocks, an opt-in prepared-statement cache, and
+rustls transport, four timeout clocks, an opt-in prepared-statement cache, a
+password-file and `pg_service.conf` reader, TLS key logging, a configurable
+maximum message size, and
 `is_dirty` / `process_id` / `transaction_status` / `query_events`.
+
+It reads NO environment variables. libpq defaults most parameters from the
+environment; a published library takes resolved options from its caller
+instead, and the workspace enforces that (see the "The environment" section of
+`Config`'s documentation). The practical consequence is that `passfile` and
+`servicefile` want paths rather than finding their own.
 
 ## Important files
 
