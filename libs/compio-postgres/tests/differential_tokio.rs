@@ -54,44 +54,44 @@ enum Outcome {
 ///
 /// Each is paired with why it is here; a case nobody can explain is a case
 /// nobody will maintain.
-fn cases() -> Vec<(&'static str, &'static str)> {
+fn cases(table: &str) -> Vec<(String, &'static str)> {
     vec![
         (
-            "SELECT 1 WHERE false",
+            "SELECT 1 WHERE false".to_owned(),
             "an empty result still carries a command tag, and a driver that \
              reads no count from it must report zero rather than guess",
         ),
         (
-            "CREATE TEMPORARY TABLE cpg_diff (id int)",
+            format!("CREATE TEMPORARY TABLE {table} (id int)"),
             "DDL has a tag with no row count at all",
         ),
         (
-            "INSERT INTO cpg_diff VALUES (1), (2), (3)",
+            format!("INSERT INTO {table} VALUES (1), (2), (3)"),
             "INSERT reports its count in the SECOND field of its tag, not the \
              first - the field a naive parser reads is the oid",
         ),
         (
-            "UPDATE cpg_diff SET id = id + 1 WHERE id > 1",
+            format!("UPDATE {table} SET id = id + 1 WHERE id > 1"),
             "UPDATE reports a count in the usual place",
         ),
         (
-            "DELETE FROM cpg_diff WHERE id > 100",
+            format!("DELETE FROM {table} WHERE id > 100"),
             "a statement that matches nothing still succeeds, with zero",
         ),
         (
-            "SELECT 1/0",
+            "SELECT 1/0".to_owned(),
             "division by zero: SQLSTATE 22012, a server error mid-execution",
         ),
         (
-            "SELECT * FROM cpg_no_such_table_anywhere",
+            "SELECT * FROM cpg_no_such_table_anywhere".to_owned(),
             "an undefined table: SQLSTATE 42P01, raised at parse time",
         ),
         (
-            "INSERT INTO cpg_diff VALUES ('notanint')",
+            format!("INSERT INTO {table} VALUES ('notanint')"),
             "a bad literal: SQLSTATE 22P02, raised during parameter analysis",
         ),
         (
-            "SELECT 1; SELECT 2",
+            "SELECT 1; SELECT 2".to_owned(),
             "two statements in one execute: both drivers must agree on whether \
              this is allowed and what it reports",
         ),
@@ -99,7 +99,7 @@ fn cases() -> Vec<(&'static str, &'static str)> {
 }
 
 /// Run every case through tokio-postgres, on its own thread and runtime.
-fn tokio_outcomes(url: String, statements: Vec<&'static str>) -> Vec<Outcome> {
+fn tokio_outcomes(url: String, statements: Vec<String>) -> Vec<Outcome> {
     let (sender, receiver) = std::sync::mpsc::channel();
     let handle = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -116,7 +116,7 @@ fn tokio_outcomes(url: String, statements: Vec<&'static str>) -> Vec<Outcome> {
 
             let mut outcomes = Vec::new();
             for statement in statements {
-                outcomes.push(match client.execute(statement, &[]).await {
+                outcomes.push(match client.execute(&statement, &[]).await {
                     Ok(rows) => Outcome::Rows(rows),
                     Err(error) => match error.code() {
                         Some(code) => Outcome::SqlState(code.code().to_owned()),
@@ -134,7 +134,7 @@ fn tokio_outcomes(url: String, statements: Vec<&'static str>) -> Vec<Outcome> {
     receiver.recv().expect("no outcomes came back from tokio")
 }
 
-async fn compio_outcomes(url: &str, statements: &[&'static str]) -> Vec<Outcome> {
+async fn compio_outcomes(url: &str, statements: &[String]) -> Vec<Outcome> {
     let (client, connection) = compio_postgres::connect(url, common::suite_tls())
         .await
         .unwrap_or_else(|error| common::postgres_unreachable(url, &error));
@@ -145,7 +145,7 @@ async fn compio_outcomes(url: &str, statements: &[&'static str]) -> Vec<Outcome>
 
     let mut outcomes = Vec::new();
     for statement in statements {
-        outcomes.push(match client.execute(*statement, &[]).await {
+        outcomes.push(match client.execute(statement, &[]).await {
             Ok(rows) => Outcome::Rows(rows),
             Err(error) => match error.code() {
                 Some(code) => Outcome::SqlState(code.code().to_owned()),
@@ -160,12 +160,18 @@ async fn compio_outcomes(url: &str, statements: &[&'static str]) -> Vec<Outcome>
 #[compio::test]
 async fn both_drivers_agree_on_command_tags_and_sqlstates() {
     let url = common::test_url();
-    let cases = cases();
-    let statements: Vec<&'static str> = cases.iter().map(|(sql, _)| *sql).collect();
+    let ours_table = common::test_object_name("cpg_diff_ours");
+    let theirs_table = common::test_object_name("cpg_diff_theirs");
+    let theirs_statements: Vec<String> = cases(&theirs_table)
+        .into_iter()
+        .map(|(sql, _)| sql)
+        .collect();
+    let cases = cases(&ours_table);
+    let statements: Vec<String> = cases.iter().map(|(sql, _)| sql.clone()).collect();
 
-    // Separate sessions, so the TEMPORARY table is created independently in
-    // each and neither run depends on the other's leftovers.
-    let theirs = tokio_outcomes(common::plaintext_url(), statements.clone());
+    // A transaction pooler can route both logical sessions through one
+    // backend, so each driver needs its own process-scoped TEMPORARY table.
+    let theirs = tokio_outcomes(common::plaintext_url(), theirs_statements);
     let ours = compio_outcomes(&url, &statements).await;
 
     assert_eq!(
@@ -436,6 +442,19 @@ fn normalise_schema(schema: Option<&str>) -> Option<String> {
     })
 }
 
+/// Erase only the per-driver identity from an error field.
+///
+/// PostgreSQL quotes the physical relation name in some messages and also
+/// sends relation and constraint names as structured fields. Those names must
+/// differ when a transaction pooler routes both logical sessions through one
+/// backend, but their generated identity is not driver output. Mapping them
+/// back to the old logical names keeps every field in the comparison.
+fn normalise_error_fixture(value: &str, table: &str, constraint: &str) -> String {
+    value
+        .replace(table, "cpg_diff_err")
+        .replace(constraint, "cpg_diff_uq")
+}
+
 /// Every field of a server error, from both drivers.
 ///
 /// Rendered to strings so the comparison cannot compare two views of one
@@ -459,6 +478,30 @@ struct Fields {
     file_present: bool,
 }
 
+impl Fields {
+    fn normalise_fixture_names(mut self, table: &str, constraint: &str) -> Self {
+        self.message = normalise_error_fixture(&self.message, table, constraint);
+        self.table = self
+            .table
+            .map(|value| normalise_error_fixture(&value, table, constraint));
+        self.constraint = self
+            .constraint
+            .map(|value| normalise_error_fixture(&value, table, constraint));
+        self
+    }
+}
+
+fn normalise_fixture_fields(
+    fields: Vec<Option<Fields>>,
+    table: &str,
+    constraint: &str,
+) -> Vec<Option<Fields>> {
+    fields
+        .into_iter()
+        .map(|fields| fields.map(|fields| fields.normalise_fixture_names(table, constraint)))
+        .collect()
+}
+
 /// Failures chosen to populate DIFFERENT field sets.
 ///
 /// A single failing statement would compare one shape and call the parser
@@ -466,38 +509,43 @@ struct Fields {
 /// error carries a position; a bad column carries a column name; a domain
 /// violation carries a datatype. Between them nearly every optional field is
 /// exercised at least once.
-fn error_cases() -> Vec<(&'static str, &'static str)> {
+fn error_cases(table: &str) -> Vec<(String, &'static str)> {
     vec![
         (
-            "SELECT * FROM cpg_absent_relation",
+            "SELECT * FROM cpg_absent_relation".to_owned(),
             "undefined table - message and code only, so it pins the required fields",
         ),
         (
-            "SELECT 1 FROM WHERE",
+            "SELECT 1 FROM WHERE".to_owned(),
             "syntax error - carries a position, the field whose parse this crate got wrong once",
         ),
         (
-            "INSERT INTO cpg_diff_err VALUES (1)",
+            format!("INSERT INTO {table} VALUES (1)"),
             "not-null / constraint violation - carries schema, table and constraint",
         ),
         (
-            "SELECT cpg_absent_column FROM cpg_diff_err",
+            format!("SELECT cpg_absent_column FROM {table}"),
             "undefined column - carries a column-ish diagnostic",
         ),
         (
-            "SELECT 'x'::integer",
+            "SELECT 'x'::integer".to_owned(),
             "invalid text representation - carries a datatype-flavoured message",
         ),
         (
-            "DO $$ BEGIN RAISE EXCEPTION 'boom' USING HINT = 'try less', DETAIL = 'the detail'; END $$",
+            "DO $$ BEGIN RAISE EXCEPTION 'boom' USING HINT = 'try less', DETAIL = 'the detail'; END $$"
+                .to_owned(),
             "a raised exception - the only reliable way to force DETAIL and HINT together",
         ),
     ]
 }
 
-const ERROR_FIXTURE: &str = "CREATE TEMPORARY TABLE cpg_diff_err (id int, tag text NOT NULL, CONSTRAINT cpg_diff_uq UNIQUE (id))";
+fn error_fixture(table: &str, constraint: &str) -> String {
+    format!(
+        "CREATE TEMPORARY TABLE {table} (id int, tag text NOT NULL, CONSTRAINT {constraint} UNIQUE (id))"
+    )
+}
 
-fn tokio_fields(url: String, statements: Vec<&'static str>) -> Vec<Option<Fields>> {
+fn tokio_fields(url: String, fixture: String, statements: Vec<String>) -> Vec<Option<Fields>> {
     let (sender, receiver) = std::sync::mpsc::channel();
     let handle =
         std::thread::spawn(move || {
@@ -513,14 +561,11 @@ fn tokio_fields(url: String, statements: Vec<&'static str>) -> Vec<Option<Fields
                     let driver = tokio::spawn(async move {
                         let _ = connection.await;
                     });
-                    client
-                        .execute(ERROR_FIXTURE, &[])
-                        .await
-                        .expect("fixture table");
+                    client.execute(&fixture, &[]).await.expect("fixture table");
 
                     let mut collected = Vec::new();
                     for statement in statements {
-                        collected.push(client.execute(statement, &[]).await.err().and_then(
+                        collected.push(client.execute(&statement, &[]).await.err().and_then(
                             |error| {
                                 error.as_db_error().map(|db| Fields {
                                     severity: db.severity().to_owned(),
@@ -552,7 +597,7 @@ fn tokio_fields(url: String, statements: Vec<&'static str>) -> Vec<Option<Fields
     receiver.recv().expect("no fields came back from tokio")
 }
 
-async fn compio_fields(url: &str, statements: &[&'static str]) -> Vec<Option<Fields>> {
+async fn compio_fields(url: &str, fixture: &str, statements: &[String]) -> Vec<Option<Fields>> {
     let (client, connection) = compio_postgres::connect(url, common::suite_tls())
         .await
         .unwrap_or_else(|error| common::postgres_unreachable(url, &error));
@@ -560,16 +605,13 @@ async fn compio_fields(url: &str, statements: &[&'static str]) -> Vec<Option<Fie
         let _ = connection.run().await;
     })
     .detach();
-    client
-        .execute(ERROR_FIXTURE, &[])
-        .await
-        .expect("fixture table");
+    client.execute(fixture, &[]).await.expect("fixture table");
 
     let mut collected = Vec::new();
     for statement in statements {
         collected.push(
             client
-                .execute(*statement, &[])
+                .execute(statement, &[])
                 .await
                 .err()
                 .and_then(|error| {
@@ -601,11 +643,29 @@ async fn compio_fields(url: &str, statements: &[&'static str]) -> Vec<Option<Fie
 #[compio::test]
 async fn both_drivers_agree_on_every_error_field() {
     let url = common::test_url();
-    let cases = error_cases();
-    let statements: Vec<&'static str> = cases.iter().map(|(sql, _)| *sql).collect();
+    let ours_table = common::test_object_name("cpg_diff_err_ours");
+    let ours_constraint = common::test_object_name("cpg_diff_uq_ours");
+    let theirs_table = common::test_object_name("cpg_diff_err_theirs");
+    let theirs_constraint = common::test_object_name("cpg_diff_uq_theirs");
+    let theirs_statements: Vec<String> = error_cases(&theirs_table)
+        .into_iter()
+        .map(|(sql, _)| sql)
+        .collect();
+    let cases = error_cases(&ours_table);
+    let statements: Vec<String> = cases.iter().map(|(sql, _)| sql.clone()).collect();
+    let theirs_fixture = error_fixture(&theirs_table, &theirs_constraint);
+    let ours_fixture = error_fixture(&ours_table, &ours_constraint);
 
-    let theirs = tokio_fields(common::plaintext_url(), statements.clone());
-    let ours = compio_fields(&url, &statements).await;
+    let theirs = normalise_fixture_fields(
+        tokio_fields(common::plaintext_url(), theirs_fixture, theirs_statements),
+        &theirs_table,
+        &theirs_constraint,
+    );
+    let ours = normalise_fixture_fields(
+        compio_fields(&url, &ours_fixture, &statements).await,
+        &ours_table,
+        &ours_constraint,
+    );
 
     let mut divergences = Vec::new();
     for (index, (sql, why)) in cases.iter().enumerate() {
@@ -1906,31 +1966,31 @@ enum Flattened {
 
 /// Scripts whose response shape differs from "one description, some rows, one
 /// complete".
-fn simple_query_scripts() -> Vec<(&'static str, &'static str)> {
+fn simple_query_scripts(table: &str) -> Vec<(String, &'static str)> {
     vec![
         (
-            "SELECT 1::int4 AS a, 'x'::text AS b",
+            "SELECT 1::int4 AS a, 'x'::text AS b".to_owned(),
             "the ordinary shape, as the control",
         ),
         (
-            "SELECT 1; SELECT 2, 3",
+            "SELECT 1; SELECT 2, 3".to_owned(),
             "two statements on one stream, with no Sync between them - the \
              driver must not merge their descriptions",
         ),
         (
-            "SELECT 1 WHERE false",
+            "SELECT 1 WHERE false".to_owned(),
             "a description with no rows behind it",
         ),
         (
-            "CREATE TEMPORARY TABLE cpg_simple (id int); DROP TABLE cpg_simple",
+            format!("CREATE TEMPORARY TABLE {table} (id int); DROP TABLE {table}"),
             "two statements that describe nothing at all",
         ),
         (
-            "SELECT NULL::text AS nothing",
+            "SELECT NULL::text AS nothing".to_owned(),
             "a NULL is absent, not empty - the two are different values here",
         ),
         (
-            "",
+            String::new(),
             "the empty query: no description, no rows, and an EmptyQueryResponse \
              rather than a CommandComplete",
         ),
@@ -1987,7 +2047,7 @@ fn flatten_ours(messages: &[compio_postgres::SimpleQueryMessage]) -> Vec<Flatten
         .collect()
 }
 
-fn tokio_simple_queries(url: String, scripts: Vec<&'static str>) -> Vec<Vec<Flattened>> {
+fn tokio_simple_queries(url: String, scripts: Vec<String>) -> Vec<Vec<Flattened>> {
     let (sender, receiver) = std::sync::mpsc::channel();
     let handle = std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -2003,7 +2063,7 @@ fn tokio_simple_queries(url: String, scripts: Vec<&'static str>) -> Vec<Vec<Flat
             });
             let mut collected = Vec::new();
             for script in scripts {
-                collected.push(match client.simple_query(script).await {
+                collected.push(match client.simple_query(&script).await {
                     Ok(messages) => flatten_tokio(&messages),
                     Err(_) => Vec::new(),
                 });
@@ -2025,10 +2085,16 @@ fn tokio_simple_queries(url: String, scripts: Vec<&'static str>) -> Vec<Vec<Flat
 #[compio::test]
 async fn both_drivers_agree_on_simple_query_shapes() {
     let url = common::test_url();
-    let scripts = simple_query_scripts();
-    let sql: Vec<&'static str> = scripts.iter().map(|(script, _)| *script).collect();
+    let ours_table = common::test_object_name("cpg_simple_ours");
+    let theirs_table = common::test_object_name("cpg_simple_theirs");
+    let theirs_sql: Vec<String> = simple_query_scripts(&theirs_table)
+        .into_iter()
+        .map(|(script, _)| script)
+        .collect();
+    let scripts = simple_query_scripts(&ours_table);
+    let sql: Vec<String> = scripts.iter().map(|(script, _)| script.clone()).collect();
 
-    let theirs = tokio_simple_queries(common::plaintext_url(), sql.clone());
+    let theirs = tokio_simple_queries(common::plaintext_url(), theirs_sql);
 
     let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
         .await
