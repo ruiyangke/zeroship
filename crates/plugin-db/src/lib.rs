@@ -403,9 +403,8 @@ impl NativePlugin for DbPlugin {
 /// `#[doc(hidden)]` keeps this off the public docs surface; the function
 /// is still `pub` because Criterion benches link against the crate as an
 /// external dependency and cannot reach `pub(crate)` items.
-/// `compio_postgres::test_utils::row_for_test` (gated behind
-/// `compio-postgres`'s `test-utils` feature, enabled here under
-/// `[dev-dependencies]`) is the matching `Row` synthesiser — see
+/// `compio_postgres::test_utils::row_for_test` (doc-hidden there, and always
+/// compiled) is the matching `Row` synthesiser — see
 /// `crates/plugin-db/benches/bench_row_to_json.rs` for the wiring.
 #[doc(hidden)]
 #[must_use]

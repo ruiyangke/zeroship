@@ -80,13 +80,6 @@ suite-over-tls = ["tls"]
 # lets the common helper keep the crate-only parameter away from the
 # tokio-postgres oracle, which rejects it.
 suite-with-statement-cache = []
-# Test-only surface for downstream bench / unit-test crates that need to
-# synthesise `Row` / `Statement` / `Column` values without a live
-# Postgres. The feature is dev-only (consumers add it under
-# `[dev-dependencies]`); production builds never see the constructors.
-# Added for plugin-db's `bench_row_to_json`. See
-# `libs/compio-postgres/src/test_utils.rs`.
-test-utils = []
 
 [dependencies]
 async-trait = "0.1"
@@ -224,4 +217,3 @@ harness = false
 
 [[test]]
 name = "serialized_loop"
-required-features = ["test-utils"]

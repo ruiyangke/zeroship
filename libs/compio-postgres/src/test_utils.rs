@@ -2,9 +2,15 @@
 //! that need to synthesise [`Row`] / [`Statement`] / [`Column`] values
 //! without a live Postgres connection.
 //!
-//! Gated behind the `test-utils` Cargo feature so production builds
-//! never see this surface. Added to unblock plugin-db's
-//! `bench_row_to_json`; see `crates/plugin-db/benches/bench_row_to_json.rs`.
+//! `#[doc(hidden)]` rather than feature-gated. It WAS behind a `test-utils`
+//! feature, and that flag quietly split the suite: without it
+//! `tests/serialized_loop.rs` did not build, so the crate's own documented
+//! test command ran 24 fewer tests and covered neither the serialized
+//! transport nor the split refusal that routes onto it. Compiling a
+//! doc-hidden module into release builds is the smaller cost.
+//!
+//! Added to unblock plugin-db's `bench_row_to_json`; see
+//! `crates/plugin-db/benches/bench_row_to_json.rs`.
 //!
 //! ## Why a builder, not just `Row::new`
 //!

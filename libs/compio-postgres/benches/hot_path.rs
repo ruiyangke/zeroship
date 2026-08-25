@@ -89,7 +89,6 @@ mod simple_query;
 mod socket;
 #[path = "../src/statement.rs"]
 mod statement;
-#[cfg(feature = "test-utils")]
 #[path = "../src/test_utils.rs"]
 pub mod test_utils;
 #[path = "../src/tls.rs"]
