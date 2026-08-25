@@ -178,7 +178,16 @@ optional = true
 # strongest check available for a port. Permitted here and ONLY here: the
 # zero-tokio invariant bans a normal or build dependency, and dev is exempt by
 # the 2026-08-24 decision recorded in AGENTS.md.
-tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
+#
+# PINNED to the exact version this crate is a port OF, because an oracle is
+# only an oracle for the version it is. `version = "0.7"` resolved to 0.7.17,
+# one release behind - and 0.7.18's sole source change is a panic fix that this
+# crate already carries (`Row::new` / `SimpleQueryRow::new` reject a `DataRow`
+# whose field count disagrees with its `RowDescription`; see the guards in
+# src/row.rs and their tests). So the suite was comparing a fixed driver
+# against an unfixed one, and would have read OUR correct behaviour as the
+# divergence. Move this deliberately when the port moves, never by resolution.
+tokio-postgres = { version = "=0.7.18", default-features = false, features = ["runtime"] }
 tokio = { version = "1", features = ["rt", "macros"] }
 compio = { workspace = true }
 criterion = { workspace = true }
