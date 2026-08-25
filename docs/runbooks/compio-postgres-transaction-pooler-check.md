@@ -113,7 +113,7 @@ Run the suite through it:
 
 ```bash
 PG_TEST_URL=postgres://postgres:zeroship@127.0.0.1:6548/zeroship \
-  cargo test -p compio-postgres --features test-utils -- --test-threads=1
+  cargo test -p compio-postgres -- --test-threads=1
 ```
 
 Tear down when finished:
