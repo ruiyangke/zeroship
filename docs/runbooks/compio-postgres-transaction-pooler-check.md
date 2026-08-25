@@ -80,12 +80,21 @@ protocol question; a whole-suite run needs enough backends not to serialise
 
 ## What SHOULD still fail, and why
 
+`--no-fail-fast` IS LOAD-BEARING, and it is not in the command above by
+accident. Without it cargo abandons the whole run at the first test BINARY
+that fails, which behind a pooler is `backend_termination.rs` - measured
+2026-08-25, that reports `285 passed; 3 failed` and stops, having never built
+the other 60 targets. A fraction of the suite reads like a catastrophic result
+rather than a partial one.
+
 MEASURED 2026-08-24 on the configured pooler, twice: **1374/49** against
 PostgreSQL 16, and **1407/50** against 18 after the suite had grown by ~35
-tests. Do not read the residue as a fixed number - it tracks how many
-session-dependent tests the suite contains, so it moves with the suite. What
-matters is that every failure is session state a transaction pooler does not
-preserve. Treat anything OUTSIDE this set as the finding:
+tests. MEASURED AGAIN 2026-08-25 at suite size 1720: **1665/55** against 16,
+across 18 test binaries, and every one of the 55 fell inside the set below -
+nothing outside it. Do not read the residue as a fixed number - it tracks how
+many session-dependent tests the suite contains, so it moves with the suite.
+What matters is that every failure is session state a transaction pooler does
+not preserve. Treat anything OUTSIDE this set as the finding:
 
 - the implicit statement cache (`0A000` cached plan, `26000` prepared
   statement gone) - `Config::statement_cache_capacity` says in as many words
@@ -113,7 +122,7 @@ Run the suite through it:
 
 ```bash
 PG_TEST_URL=postgres://postgres:zeroship@127.0.0.1:6548/zeroship \
-  cargo test -p compio-postgres -- --test-threads=1
+  cargo test -p compio-postgres --no-fail-fast -- --test-threads=1
 ```
 
 Tear down when finished:
