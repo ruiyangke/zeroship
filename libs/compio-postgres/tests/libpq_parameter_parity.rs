@@ -367,15 +367,29 @@ fn the_value_lexer_matches_libpq() {
         wrong.join("\n  ")
     );
 
-    // The known divergence, pinned so it cannot change unnoticed in either
-    // direction. libpq yields the empty string for both of these.
-    for trailing in ["host=h application_name=", "host=h user="] {
-        assert!(
-            trailing.parse::<Config>().is_err(),
-            "a trailing empty value is refused here and accepted by libpq; if this \
-             now parses, the divergence was closed and this test should say so"
-        );
-    }
+    // This block pinned a KNOWN divergence -- a trailing empty value was
+    // refused here and accepted by libpq -- and said to update it if the
+    // divergence was ever closed. It was closed on 2026-08-25, so it now says
+    // so: both of these parse, and `Config::param` decides what an empty value
+    // MEANS per key.
+    let named = "host=h application_name="
+        .parse::<Config>()
+        .expect("libpq accepts a trailing empty value");
+    assert_eq!(
+        named.get_application_name(),
+        Some(""),
+        "an empty string option keeps the empty string, as libpq does"
+    );
+
+    let credential = "host=h user="
+        .parse::<Config>()
+        .expect("libpq accepts a trailing empty value");
+    assert_eq!(
+        credential.get_user(),
+        None,
+        "an empty CREDENTIAL is unset, so the whoami fallback still runs -- \
+         libpq likewise resolves `user=` to the operating-system user"
+    );
 }
 /// A URL authority keeps one port PER HOST, and the query string still
 /// overrides the whole list.
@@ -574,11 +588,23 @@ fn negative_keepalives_is_accepted_and_means_on() {
     );
 
     // The refusals stay refusals -- this must not become "parse anything".
-    for bad in ["yes", "", "1.5"] {
+    // NOT `""`: this list carried one until 2026-08-25, on the assumption that
+    // an empty value is as malformed as `yes`. Probed, libpq ACCEPTS
+    // `keepalives=` and keeps its default, the same as every other numeric
+    // option, so the entry was asserting a refusal libpq does not make.
+    for bad in ["yes", "1.5"] {
         format!("host=h keepalives={bad}")
             .parse::<Config>()
             .expect_err("libpq refuses this with `invalid integer value`");
     }
+
+    let defaulted = "host=h keepalives="
+        .parse::<Config>()
+        .expect("libpq accepts an empty numeric value and keeps the default");
+    assert!(
+        defaulted.get_keepalives(),
+        "an empty value leaves the default, which is on"
+    );
 }
 
 /// An EMPTY ssl file path is refused here and accepted by libpq.

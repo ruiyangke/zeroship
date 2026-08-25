@@ -1595,6 +1595,26 @@ impl Config {
     }
 
     fn param(&mut self, key: &str, value: &str) -> Result<(), Error> {
+        // libpq's treatment of `key=` is per-TYPE, not uniform. A NUMERIC
+        // option takes an empty value as "not given" and keeps its default; an
+        // ENUM refuses it (`invalid sslmode value: ""`), which the arms below
+        // already do by not matching it; a STRING keeps the empty string.
+        // Measured against 16.14 for every key listed here.
+        const EMPTY_MEANS_UNSET: &[&str] = &[
+            "port",
+            "connect_timeout",
+            "tcp_user_timeout",
+            "keepalives",
+            "keepalives_idle",
+            "keepalives_interval",
+            "keepalives_count",
+            "statement_cache_capacity",
+            "max_message_size",
+        ];
+        if value.is_empty() && EMPTY_MEANS_UNSET.contains(&key) {
+            return Ok(());
+        }
+
         match key {
             // An EMPTY credential means UNSET, not "a user whose name is the
             // empty string". libpq resolves `?user=` by falling back to the
@@ -2460,10 +2480,11 @@ impl<'a> Parser<'a> {
             }
         }
 
-        if value.is_empty() {
-            return Err(Error::config_parse("unexpected EOF".into()));
-        }
-
+        // An empty value is LEGAL: libpq accepts `dbname=x password=`. It can
+        // only arise at the end of the string, because after `=` the parser
+        // skips whitespace and takes whatever follows as the value - which is
+        // why `user= host=h` asks for a user named `host=h` rather than
+        // producing an empty one. Refusing it here rejected the whole DSN.
         Ok(value)
     }
 
@@ -2959,6 +2980,94 @@ mod tests {
         fn a_zero_timeout_is_left_unset_so_the_default_applies() {
             assert_eq!(parse("connect_timeout=0").get_connect_timeout(), None);
             assert_eq!(parse("tcp_user_timeout=0").get_tcp_user_timeout(), None);
+        }
+    }
+
+    /// What libpq does with `key=` - a keyword whose value is empty.
+    ///
+    /// Measured against libpq 16.14 with the `.invalid` host read-out
+    /// (`docs/runbooks/compio-postgres-libpq-parameter-probing.md` describes the
+    /// technique). The rule is per-TYPE, not uniform: every numeric option
+    /// takes empty as "not given" and uses its default, every enum option
+    /// REFUSES it, and string options keep the empty string.
+    mod empty_parameter_values {
+        use crate::Config;
+
+        /// The whole family reduces to this: a DSN whose LAST parameter has an
+        /// empty value. `dbname=x password=` is an ordinary way to say "no
+        /// password", and this crate refused the entire string.
+        #[test]
+        fn a_trailing_empty_value_is_accepted() {
+            let config: Config = "dbname=zs password="
+                .parse()
+                .expect("libpq accepts a trailing empty value");
+            assert_eq!(config.get_dbname(), Some("zs"));
+            assert_eq!(
+                config.get_password(),
+                None,
+                "an empty password is unset, not a password of length zero"
+            );
+        }
+
+        /// ONE trailing empty numeric - only the last parameter in a string can
+        /// actually be empty, for the swallowing reason below.
+        #[test]
+        fn an_empty_numeric_value_leaves_the_default() {
+            let config: Config = "host=x.invalid port="
+                .parse()
+                .expect("libpq accepts an empty numeric value");
+            assert!(config.get_ports().is_empty(), "port= must not set a port");
+
+            let config: Config = "host=x.invalid connect_timeout="
+                .parse()
+                .expect("libpq accepts an empty numeric value");
+            assert_eq!(config.get_connect_timeout(), None);
+        }
+
+        /// And so `port= connect_timeout=` is NOT two empty numerics: `port`
+        /// swallows the text after it and is asked to parse `connect_timeout=`
+        /// as an integer. libpq says `invalid integer value "connect_timeout="
+        /// for connection option "port"`, and refusing it is correct.
+        #[test]
+        fn a_swallowed_numeric_value_is_still_rejected() {
+            assert!(
+                "host=x.invalid port= connect_timeout="
+                    .parse::<Config>()
+                    .is_err(),
+                "port was handed the text `connect_timeout=` and must refuse it"
+            );
+        }
+
+        /// The control for the two above: empty is NOT universally accepted, so
+        /// a parser that simply stopped rejecting empty values would pass them
+        /// and fail this. libpq answers `invalid sslmode value: ""`.
+        #[test]
+        fn an_empty_enum_value_is_still_refused() {
+            for dsn in [
+                "host=x.invalid sslmode=",
+                "host=x.invalid channel_binding=",
+                "host=x.invalid target_session_attrs=",
+            ] {
+                assert!(
+                    dsn.parse::<Config>().is_err(),
+                    "an empty enum value must be refused, as libpq refuses it: {dsn}"
+                );
+            }
+        }
+
+        /// An empty value only ever arises at the END of the string: after
+        /// `=`, libpq skips whitespace and takes whatever comes next as the
+        /// value, so `user= host=h` asks for a USER NAMED `host=h` and leaves
+        /// no host at all. Measured - psql reports `role "host=x.invalid" does
+        /// not exist`. It reads like a bug in this crate and is not one.
+        #[test]
+        fn an_empty_value_mid_string_swallows_the_following_pair() {
+            let config: Config = "user= host=x.invalid".parse().expect("this parses");
+            assert_eq!(config.get_user(), Some("host=x.invalid"));
+            assert!(
+                config.get_hosts().is_empty(),
+                "the host was consumed as the user's value, exactly as libpq does"
+            );
         }
     }
 

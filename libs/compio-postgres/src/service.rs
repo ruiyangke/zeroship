@@ -226,7 +226,7 @@ mod tests {
     // The whitespace rules below are ASYMMETRIC in a way no reading of the
     // documentation suggests, and this file asserted the tidy symmetric
     // version until it was probed. Measured against libpq 16.14, one variable
-    // at a time (`docs/runbooks/compio-postgres-service-file-semantics.md`).
+    // at a time (`docs/runbooks/compio-postgres-libpq-parameter-probing.md`).
 
     #[test]
     fn whitespace_before_the_key_is_allowed() {
