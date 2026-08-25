@@ -155,6 +155,9 @@ struct QueryObservationState {
 }
 
 impl QueryObserver {
+    /// Used by this module's own tests. `cargo build` reports it dead because
+    /// it does not compile `cfg(test)`; `cargo test` does not.
+    #[cfg(test)]
     fn new(sender: mpsc::UnboundedSender<QueryEvent>, threshold: Option<Duration>) -> Self {
         Self::with_registry(sender, threshold, Arc::default())
     }
@@ -1298,10 +1301,6 @@ impl InnerClient {
         self.statement_cache_capacity
     }
 
-    pub(crate) const fn statement_cache_execution_threshold(&self) -> NonZeroUsize {
-        self.statement_cache_execution_threshold
-    }
-
     /// Choose the protocol path for this exact SQL execution.
     ///
     /// Candidate tracking is a bounded, separate admission cache. It evicts
@@ -1630,6 +1629,9 @@ impl StatementCacheSettings {
 }
 
 impl Client {
+    /// The cache-less constructor, used by this crate's own tests. `cargo
+    /// build` reports it dead because it does not compile `cfg(test)`.
+    #[cfg(test)]
     pub(crate) fn new(
         sender: mpsc::UnboundedSender<Request>,
         ssl_mode: SslMode,
@@ -1802,6 +1804,8 @@ impl Client {
         self.inner.parameters.lock().get(name).cloned()
     }
 
+    /// Used by this module's own tests; see the note on `Client::new`.
+    #[cfg(test)]
     pub(crate) fn has_in_flight_requests(&self) -> bool {
         self.inner.has_in_flight_requests()
     }

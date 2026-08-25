@@ -396,26 +396,15 @@ where
         Ok(())
     }
 
-    /// Read exactly one byte from the stream (used for SSL negotiation response).
-    pub async fn read_byte(&mut self) -> Result<u8, Error> {
-        self.fill(1).await?;
-        Ok(self.read_buf.split_to(1)[0])
-    }
-
     /// Append data to the write buffer (no I/O until flush).
     #[allow(dead_code)]
     pub fn write(&mut self, data: &[u8]) {
         self.write_buf.extend_from_slice(data);
     }
 
-    /// Append a BytesMut to the write buffer (no I/O until flush).
-    pub fn write_bytes(&mut self, data: &BytesMut) {
-        self.write_buf.extend_from_slice(data);
-    }
-
     /// Mutable access to the write buffer - used by the codec layer to
-    /// encode directly into the buffer (avoids a copy vs. building a
-    /// temporary BytesMut and calling `write_bytes`).
+    /// encode directly into the buffer, which is why there is no
+    /// `write_bytes` helper: every caller encodes in place instead.
     pub fn write_buf_mut(&mut self) -> &mut BytesMut {
         &mut self.write_buf
     }
