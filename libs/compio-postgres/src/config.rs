@@ -2725,6 +2725,46 @@ mod tests {
     use std::num::NonZeroUsize;
     use std::time::Duration;
 
+    /// What every parameter means when the caller says NOTHING.
+    ///
+    /// A wrong default is invisible in the same way a wrong unit is, and for
+    /// the same reasons: the parity table rules only on accept-vs-refuse, the
+    /// differential oracle compares query results, and every test that sets a
+    /// value explicitly is unaffected. It changes behaviour only for callers
+    /// who said nothing - which is most of them.
+    ///
+    /// `ssl_mode` is the one that matters most: defaulting to `Disable` rather
+    /// than `Prefer` would silently stop negotiating encryption at all, and
+    /// nothing else here would notice.
+    ///
+    /// Checked against the PostgreSQL 18 documentation on 2026-08-24; all ten
+    /// matched.
+    mod parameter_defaults {
+        use super::super::{
+            ChannelBinding, Config, LoadBalanceHosts, SslCertMode, SslMode, SslNegotiation,
+            TargetSessionAttrs,
+        };
+
+        #[test]
+        fn the_defaults_are_libpqs() {
+            let config = Config::new();
+
+            assert_eq!(config.get_ssl_mode(), SslMode::Prefer);
+            assert_eq!(config.get_ssl_negotiation(), SslNegotiation::Postgres);
+            assert_eq!(config.get_ssl_cert_mode(), SslCertMode::Allow);
+            assert!(config.get_ssl_sni());
+            assert!(config.get_keepalives());
+            assert_eq!(config.get_target_session_attrs(), TargetSessionAttrs::Any);
+            assert_eq!(config.get_channel_binding(), ChannelBinding::Prefer);
+            assert_eq!(config.get_load_balance_hosts(), LoadBalanceHosts::Disable);
+            // "Zero, negative, or not specified means wait indefinitely."
+            assert_eq!(config.get_connect_timeout(), None);
+            // Empty means "the port PostgreSQL was built with"; the connect
+            // path supplies 5432 rather than the config carrying it.
+            assert!(config.get_ports().is_empty());
+        }
+    }
+
     /// Every parameter whose value carries a UNIT or a value convention,
     /// pinned against what PostgreSQL documents it to mean.
     ///
