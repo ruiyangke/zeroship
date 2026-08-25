@@ -39,12 +39,20 @@ fn test_url() -> String {
     common::test_url()
 }
 
+fn with_query(base: &str, query: &str) -> String {
+    let separator = if base.contains('?') { '&' } else { '?' };
+    format!("{base}{separator}{query}")
+}
+
 /// A root cert is named, the connector cannot attest, and `prefer` connects
 /// anyway -- over plaintext, which is what the mode promises.
 #[compio::test]
 async fn prefer_with_a_root_cert_falls_back_when_the_connector_cannot_attest() {
     let base = test_url();
-    let dsn = format!("{base}?sslmode=prefer&sslrootcert=/etc/ssl/certs/ca-certificates.crt");
+    let dsn = with_query(
+        &base,
+        "sslmode=prefer&sslrootcert=/etc/ssl/certs/ca-certificates.crt",
+    );
 
     let (client, connection) = compio_postgres::connect(&dsn, common::suite_tls()).await.expect(
         "sslmode=prefer must fall back to plaintext when the connector cannot attest to the \
@@ -71,7 +79,7 @@ async fn prefer_with_a_root_cert_falls_back_when_the_connector_cannot_attest() {
 #[compio::test]
 async fn prefer_without_a_root_cert_still_connects() {
     let base = test_url();
-    let dsn = format!("{base}?sslmode=prefer");
+    let dsn = with_query(&base, "sslmode=prefer");
 
     let (client, connection) = compio_postgres::connect(&dsn, common::suite_tls())
         .await
@@ -97,7 +105,10 @@ async fn prefer_without_a_root_cert_still_connects() {
 #[compio::test]
 async fn verify_full_still_refuses_a_connector_that_cannot_attest() {
     let base = test_url();
-    let dsn = format!("{base}?sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt");
+    let dsn = with_query(
+        &base,
+        "sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt",
+    );
 
     let error = compio_postgres::connect(&dsn, common::suite_tls())
         .await
