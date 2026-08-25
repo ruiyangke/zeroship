@@ -1346,9 +1346,13 @@ async fn copy_in_error_does_not_deadlock_over_tls() {
 
     match outcome {
         Err(_) => panic!(
-            "COPY-1 is still live on TLS: copy_in deadlocked (15s) on the serialized \
-             loop, which never reads the server's ErrorResponse while CopyData is \
-             being streamed. The plaintext regression test cannot see this."
+            "copy_in deadlocked (15s) over TLS. TLS runs the MULTIPLEXED loop \
+             since 2026-08-24, so this is no longer the serialized loop's COPY-1 \
+             (never reading the server's ErrorResponse while CopyData streams); \
+             the first thing to check is whether the transport has regressed to \
+             the serialized loop, which `a_notification_reaches_an_idle_tls_\
+             connection` would also catch. The plaintext regression test cannot \
+             see either."
         ),
         Ok(Ok(rows)) => panic!("expected the COPY parse error, but it succeeded with {rows} rows"),
         Ok(Err(e)) => assert_eq!(
@@ -1456,9 +1460,12 @@ async fn a_notification_reaches_an_idle_tls_connection() {
          the idle claim below cannot be interpreted"
     );
     let idle = idle_delivery.expect(
-        "IO-2 is live on TLS: a NOTIFY sent while the connection was idle was never \
-         delivered (10s). TLS takes the serialized loop, which reads only while a \
-         request is outstanding, so LISTEN is silently useless between queries.",
+        "a NOTIFY sent while the connection was idle was never delivered (10s). \
+         That is IO-2, and it means TLS has regressed to the SERIALIZED loop, \
+         which reads only while a request is outstanding - so LISTEN is \
+         silently useless between queries. TLS took that loop until 2026-08-24 \
+         because the adapter owning the socket could not hand it back; check \
+         `RustlsStream`'s SplitStream impl first.",
     );
     assert_eq!(idle, "while idle");
 }
