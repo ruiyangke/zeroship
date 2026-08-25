@@ -739,6 +739,7 @@ mod tests {
         assert_partition_ownership_matrix(
             "CreatePartition",
             Op::CreatePartition {
+                attributes: crate::attribute::CreatePartitionAttributes::new(),
                 name: "child_tbl".to_string(),
                 of: "parent_tbl".to_string(),
                 bounds: PartitionBounds::Default,
@@ -791,6 +792,7 @@ mod tests {
     #[test]
     fn partition_ownership_create_partition_allows_fresh_child_but_refuses_collision() {
         let fresh = partition_ir(Op::CreatePartition {
+            attributes: crate::attribute::CreatePartitionAttributes::new(),
             name: "fresh_child".to_string(),
             of: "parent_tbl".to_string(),
             bounds: PartitionBounds::Default,
@@ -798,6 +800,7 @@ mod tests {
             existence_guard: None,
         });
         let collision = partition_ir(Op::CreatePartition {
+            attributes: crate::attribute::CreatePartitionAttributes::new(),
             name: "child_tbl".to_string(),
             of: "parent_tbl".to_string(),
             bounds: PartitionBounds::Default,

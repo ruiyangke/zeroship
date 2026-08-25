@@ -1,6 +1,10 @@
 //! MySQL DDL emission, moved verbatim from the engine.
 
+use std::fmt::Write as _;
+
 use std::collections::BTreeSet;
+use zero_migrate_ir::attribute::Attributes;
+use zero_migrate_ir::ir::IrScalar;
 
 use zero_migrate_backend::ddl::{
     constraint_supports_fk_columns, fk_local_columns, fk_policy_tail, fk_referenced_columns,
@@ -29,6 +33,53 @@ fn mysql_qualified(schema: &str, object: &str) -> String {
         mysql_quote_ident(schema),
         mysql_quote_ident(object)
     )
+}
+
+/// Render this backend's declared table attributes as MySQL table options.
+///
+/// MySQL's grammar is `CREATE TABLE … ( … ) NAME=value NAME=value`, space separated after
+/// the closing paren — NOT PostgreSQL's `WITH ( … )` list, which is a syntax error here.
+///
+/// The values are written UNQUOTED. That is not laziness: `ROW_FORMAT` and `ENGINE` take
+/// grammar keywords, and MySQL rejects `ROW_FORMAT='DYNAMIC'`. Every shape a vendor may
+/// declare reaches this as an identifier, a keyword or an integer, none of which needs
+/// quoting, so one unquoted form is correct for all of them.
+fn table_option_clause(attributes: &Attributes) -> String {
+    let mut options: Vec<String> = Vec::new();
+    for (key, value) in attributes.for_dialect(DIALECT.as_str()) {
+        // The option NAME is the declared key uppercased, with one exception: a table's
+        // default character set is spelled `DEFAULT CHARSET`, not `CHARSET`. That is
+        // MySQL's spelling, so the exception lives here rather than distorting the
+        // declared key, which stays the manual's own `charset`.
+        let name = match key.name() {
+            "charset" => "DEFAULT CHARSET".to_string(),
+            other => other.to_uppercase(),
+        };
+        options.push(format!("{name}={}", table_option_value(value)));
+    }
+    if options.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", options.join(" "))
+    }
+}
+
+/// One table-option value in MySQL's spelling.
+fn table_option_value(value: &IrScalar) -> String {
+    match value {
+        IrScalar::Bool(b) => b.to_string(),
+        IrScalar::Int(i) | IrScalar::Int64(i) => i.to_string(),
+        IrScalar::Str(s) => s.clone(),
+        IrScalar::Decimal(d) => d.clone(),
+        // Unreachable through a DECLARED attribute: `AttrShape` offers bool / int / enum /
+        // text only. Rendered rather than dropped so a hand-built value fails at the
+        // server instead of vanishing silently.
+        IrScalar::Null => "NULL".to_string(),
+        IrScalar::Bytes(bytes) => bytes.iter().fold(String::from("0x"), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        }),
+    }
 }
 
 pub(super) fn emitter(project_schema: &str) -> Box<dyn DdlEmitter> {
@@ -409,9 +460,10 @@ impl DdlEmitter for MysqlEmitter {
             }
         }
         vec![format!(
-            "CREATE TABLE {} ({})",
+            "CREATE TABLE {} ({}){}",
             self.qualified(table),
-            parts.join(", ")
+            parts.join(", "),
+            table_option_clause(&t.attributes),
         )]
     }
 

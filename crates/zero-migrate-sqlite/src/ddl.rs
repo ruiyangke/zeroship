@@ -9,7 +9,9 @@ use zero_migrate_backend::schema::SchemaRenderer;
 use zero_migrate_backend::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot,
 };
+use zero_migrate_ir::attribute::Attributes;
 use zero_migrate_ir::dialect::DialectId;
+use zero_migrate_ir::ir::IrScalar;
 
 // This module's vendor identity, read from the crate's ONE declaration of it.
 use crate::DIALECT;
@@ -33,6 +35,35 @@ fn null_clause(c: &ColumnSnapshot, inline_pk: bool) -> &'static str {
         ""
     } else {
         " NOT NULL"
+    }
+}
+
+/// Render this backend's declared table attributes as SQLite table options.
+///
+/// SQLite's table options are BARE KEYWORDS, comma separated after the closing paren:
+/// `CREATE TABLE t ( … ) STRICT, WITHOUT ROWID`. There is no `NAME=value` form here at
+/// all, so both declared options are booleans and the value decides whether the keyword
+/// appears — `false` emits nothing rather than emitting a negated clause, because SQLite
+/// has no way to spell "not strict".
+///
+/// The keyword is derived from the declared key (`without_rowid` -> `WITHOUT ROWID`)
+/// rather than matched name by name, so a third boolean option needs no branch here.
+fn table_option_clause(attributes: &Attributes) -> String {
+    let mut options: Vec<String> = Vec::new();
+    for (key, value) in attributes.for_dialect(DIALECT.as_str()) {
+        // Anything other than a literal `true` leaves the keyword off. A non-boolean is
+        // not reachable through a declared option today (both are `AttrShape::Bool`), and
+        // treating one as "absent" is the safe direction: SQLite would reject the
+        // alternative spellings outright.
+        if !matches!(value, IrScalar::Bool(true)) {
+            continue;
+        }
+        options.push(key.name().to_uppercase().replace('_', " "));
+    }
+    if options.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", options.join(", "))
     }
 }
 
@@ -233,9 +264,10 @@ impl DdlEmitter for SqliteEmitter {
             }
         }
         let mut statements = vec![format!(
-            "CREATE TABLE {} ({})",
+            "CREATE TABLE {} ({}){}",
             sqlite_ident(table),
-            parts.join(", ")
+            parts.join(", "),
+            table_option_clause(&t.attributes),
         )];
         // The policy-injected indexes ride INSIDE the create payload here, which is
         // why the differ's follow-on index loop skips them on this dialect. A caller

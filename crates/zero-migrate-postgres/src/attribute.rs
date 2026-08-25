@@ -4,7 +4,7 @@
 //! parameter or a table-level clause — that the neutral [`Op`](zero_migrate_ir::ir::Op)
 //! set does not model and should not.
 //!
-//! This is a STARTER SET at [`AttrScope::Table`], not the full grammar. The point of the
+//! This is a STARTER SET, not the full grammar. The point of the
 //! mechanism is that widening it is a change to this file alone: adding a knob here adds
 //! it to validation, to the refusal messages and to the generated TypeScript surface,
 //! and touches no neutral crate and no `match` anywhere.
@@ -14,52 +14,91 @@
 //! [`IndexStorageParams`](zero_migrate_ir::ir::IndexStorageParams) holds `fillfactor` and
 //! `pages_per_range` as named fields in `zero-migrate-ir` — PostgreSQL storage parameters
 //! living in the crate whose purpose is to name no vendor. They are the reason this
-//! mechanism exists. Moving them here is an [`AttrScope::Index`] change with a wire
-//! format to migrate, so it is deliberately NOT part of this first table-scoped slice;
-//! the table-level `fillfactor` below is a separate parameter that was never modelled.
+//! mechanism exists, and the `createIndex` declarations below are the first half of
+//! retiring them. The second half — moving every reader off `with` — reaches live drift,
+//! which already introspects `reloptions` and compares them, so it is a separate change.
 
 use zero_migrate_backend::attribute::{AttrDef, AttrShape, AttributeVocabulary};
-use zero_migrate_ir::attribute::{AttrKey, AttrScope};
+use zero_migrate_backend::declare_attributes;
+use zero_migrate_ir::attribute::{
+    CreateIndexAttributes, CreatePartitionAttributes, CreateTableAttributes,
+    SetTableOptionsAttributes,
+};
 
 /// PostgreSQL's declared attributes.
 pub static VOCABULARY: AttributeVocabulary = AttributeVocabulary::new(DEFS);
 
-static DEFS: &[AttrDef] = &[
-    AttrDef {
-        key: AttrKey::from_static("postgres.fillfactor"),
-        scope: AttrScope::Table,
-        shape: AttrShape::Int { min: 10, max: 100 },
-        docs: "Percentage of each page left free for later updates, so a row can be \
-               updated in place. 100 packs pages fully and suits an insert-only table.",
-    },
-    AttrDef {
-        key: AttrKey::from_static("postgres.tablespace"),
-        scope: AttrScope::Table,
-        shape: AttrShape::Text,
-        docs: "The tablespace the table is created in. Must already exist on the server.",
-    },
-    AttrDef {
-        key: AttrKey::from_static("postgres.autovacuum_enabled"),
-        scope: AttrScope::Table,
-        shape: AttrShape::Bool,
-        docs: "Whether autovacuum runs on this table. Disabling it makes vacuuming the \
-               operator's problem and is rarely right.",
-    },
-    AttrDef {
-        key: AttrKey::from_static("postgres.toast_tuple_target"),
-        scope: AttrScope::Table,
-        shape: AttrShape::Int {
+static DEFS: &[AttrDef] = declare_attributes! {
+    dialect: "postgres";
+
+    /// Percentage of each page left free for later updates, so a row can be
+    /// updated in place. 100 packs pages fully and suits an insert-only table.
+    fillfactor on [CreateTableAttributes, CreatePartitionAttributes, SetTableOptionsAttributes]
+        = AttrShape::Int { min: 10, max: 100 };
+
+    /// The tablespace the table is created in. Must already exist on the server.
+    tablespace on [CreateTableAttributes, CreatePartitionAttributes, SetTableOptionsAttributes]
+        = AttrShape::Text;
+
+    /// Whether autovacuum runs on this table. Disabling it makes vacuuming the
+    /// operator's problem and is rarely right.
+    autovacuum_enabled
+        on [CreateTableAttributes, CreatePartitionAttributes, SetTableOptionsAttributes]
+        = AttrShape::Bool;
+
+    /// Row length above which PostgreSQL tries to move columns out of line into
+    /// TOAST storage. The upper bound is the server's block size minus its header
+    /// (8160 on a default 8kB build); a larger block size accepts more than this
+    /// declaration allows.
+    toast_tuple_target
+        on [CreateTableAttributes, CreatePartitionAttributes, SetTableOptionsAttributes]
+        = AttrShape::Int {
             min: 128,
+            // CONSERVATIVE, and knowingly so. The manual says "between 128 bytes and the
+            // (block size - header), by default 8160 bytes" — the ceiling is derived from
+            // the server's BLOCK SIZE, which is a compile-time choice. On a server built
+            // with a 16kB or 32kB block this refuses values the server would accept.
+            // A declaration cannot ask the server, and refusing a legal value is the
+            // failure this errs toward deliberately: it is loud and correctable, whereas
+            // admitting an illegal one fails mid-apply.
             max: 8160,
-        },
-        docs: "Row length above which PostgreSQL tries to move columns out of line into \
-               TOAST storage.",
-    },
-    AttrDef {
-        key: AttrKey::from_static("postgres.parallel_workers"),
-        scope: AttrScope::Table,
-        shape: AttrShape::Int { min: 0, max: 1024 },
-        docs: "How many workers a parallel scan of this table should ask for. 0 disables \
-               parallel scans of it.",
-    },
-];
+        };
+
+    /// How many workers a parallel scan of this table should ask for. 0 disables
+    /// parallel scans of it. The server clamps the effective count against
+    /// max_parallel_workers, so a high value here is a request, not a guarantee.
+    parallel_workers
+        on [CreateTableAttributes, CreatePartitionAttributes, SetTableOptionsAttributes]
+        = AttrShape::Int {
+            min: 0,
+            // The manual states NO upper bound for this storage parameter, so neither
+            // does this declaration. An earlier version said 1024, which was invented
+            // rather than read — it would have refused a legal value with a bound
+            // PostgreSQL never imposed. `i32::MAX` is the storage parameter's own integer
+            // ceiling; the server clamps the effective count against `max_parallel_workers`
+            // at run time, which is not a plan-time fact.
+            max: i32::MAX as i64,
+        };
+
+    // ---- `createIndex`: the two knobs `IndexStorageParams` holds today --------------
+    //
+    // `fillfactor` appears TWICE in this file — once for the table ops above and once
+    // for `createIndex` here — and that is the point rather than an oversight. It is
+    // legal on both and means the same thing in each. On the op axis this needs no
+    // special machinery: a declaration lists the ops it is legal on, and two knobs that
+    // share a key but not an op list are simply two rows.
+
+    /// Percentage of each index page left free when the index is built, so a
+    /// later insert can go on the right page instead of splitting it.
+    // The manual gives the same 10..=100 percentage for an index as for a table. The
+    // DEFAULT differs (90 for a B-tree, 100 for a table), but a default is the
+    // server's business; only the accepted range is a declaration's.
+    fillfactor on [CreateIndexAttributes] = AttrShape::Int { min: 10, max: 100 };
+
+    /// BRIN only: how many table blocks each index entry summarises. A smaller
+    /// range makes a larger but more selective index.
+    // BRIN only. The manual states 1..=131072, so unlike `parallel_workers` — where
+    // an earlier version of this file invented a ceiling — this bound is read, not
+    // guessed.
+    pages_per_range on [CreateIndexAttributes] = AttrShape::Int { min: 1, max: 131_072 };
+};

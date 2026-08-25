@@ -264,43 +264,6 @@ impl From<AttrKey> for String {
     }
 }
 
-/// Which kind of IR node an attribute attaches to.
-///
-/// Attributes are scoped because the same leaf word means different things in different
-/// positions, and because a vendor must be able to say WHERE its knob is legal. MySQL's
-/// `row_format` is a table property; its `storage` is a column property; PostgreSQL's
-/// `fillfactor` is legal on both a table and an index and means the same thing in each.
-/// Without a scope, `mysql.storage` on a table would have to be either silently ignored
-/// or wrongly emitted.
-///
-/// The set is CLOSED, and deliberately so: it names IR node kinds, which are this crate's
-/// own neutral vocabulary, not anything a vendor contributes. A backend extends the
-/// attribute space by declaring new KEYS, never new scopes. Adding a variant here is a
-/// change to the IR's shape and should be as deliberate as adding an `Op`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AttrScope {
-    /// The table itself — storage engine, row format, fill factor, tablespace.
-    Table,
-    /// One column — per-column storage, compression, character set.
-    Column,
-    /// One index — method-specific storage parameters, index type.
-    Index,
-    /// One table constraint — deferrability and the like.
-    Constraint,
-}
-
-impl std::fmt::Display for AttrScope {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Table => "table",
-            Self::Column => "column",
-            Self::Index => "index",
-            Self::Constraint => "constraint",
-        })
-    }
-}
-
 /// The attributes carried by one IR node.
 ///
 /// A `BTreeMap` rather than a `HashMap` because the order is part of the CHECKSUM: the
@@ -381,80 +344,152 @@ impl FromIterator<(AttrKey, IrScalar)> for Attributes {
     }
 }
 
-/// An attribute set that KNOWS which kind of node it hangs off.
+/// One op's attribute set, typed so the op it belongs to is a compile-time fact.
 ///
-/// # Why the scope is a type and not an argument
+/// # Why the carrier is per-OP and not per-scope
 ///
-/// The obvious shape is `check(dialect, scope, attrs)` — the caller states the scope. That
-/// is a HAND-PLACED CLASSIFIER at every call site, and this codebase has already paid for
-/// one: `detachPartition` was the single drop-family emitter constructed with default
-/// migration flags, so it was silently ungated on the approval path while every sibling
-/// was correct. Nothing about that call site looked wrong; it just said the wrong thing.
+/// An earlier design keyed attributes by an `AttrScope` enum — `Table`, `Column`,
+/// `Index`, `Constraint` — with one wrapper per scope shared across every op at that
+/// scope. That axis was an INVENTION: a second taxonomy shadowing the op set, which then
+/// had to be kept honest against it by hand. It was not kept honest — `AttrScope::Index`
+/// shipped with no carrier at all, declarable and permanently unmatchable, and only a
+/// test written specially for the purpose caught it.
 ///
-/// A hand-passed `AttrScope` fails the same way and worse, because the failure is quiet in
-/// BOTH directions. Pass `Column` where the node is a table and a table attribute is
-/// checked against column declarations — refusing something legal. Pass `Table` at a
-/// column site and column attributes are validated against the table vocabulary — likely
-/// ACCEPTING something that will never be emitted.
+/// Ops are the taxonomy this crate already has, and [`Op`](crate::ir::Op) is already
+/// closed. Keying carriers to ops removes the shadow: there is nothing to keep in sync,
+/// because the thing being named already exists.
 ///
-/// So the scope travels with the value. [`TableAttributes`] is the only set an
-/// `Op::CreateTable` can hold, and its scope is a `const` on the type, which means a
-/// mismatched check is a COMPILE error rather than a wrong answer. There is no argument
-/// left to get wrong.
+/// # What `OP` is, and why it is a string
 ///
-/// Each further scope gets its own wrapper when the node that carries it gains attributes.
-/// That is deliberately not done in advance: an unused wrapper is a landing pad nobody has
-/// checked, and the point of this trait is that arriving at a new scope should make you
-/// stop and wire it.
-pub trait ScopedAttributes {
-    /// The kind of node this set attaches to.
-    const SCOPE: AttrScope;
+/// `OP` is the op's canonical wire kind — `"createTable"`, not a Rust path — because that
+/// is the spelling the vocabulary, the exported artifact and the TypeScript generator all
+/// share. It is also the spelling `dialect-support.toml` uses for its 56 rows, which is
+/// what makes a declared op name CHECKABLE: a vendor that writes `"createTabel"` is
+/// caught against that canonical list rather than silently declaring a knob no op will
+/// ever match. That check is a test, not a type, because the vocabulary is data.
+pub trait OpAttributes {
+    /// The canonical wire kind of the op this set hangs off.
+    const OP: &'static str;
 
     /// The attributes themselves.
     fn attributes(&self) -> &Attributes;
-}
-
-/// The attributes carried by a TABLE node.
-///
-/// A transparent wrapper: it serializes exactly as the bare map does, so it costs nothing
-/// on the wire. Its whole job is to make [`ScopedAttributes::SCOPE`] a fact the compiler
-/// carries rather than a claim a call site makes.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(transparent)]
-#[schemars(transparent)]
-pub struct TableAttributes(Attributes);
-
-impl TableAttributes {
-    /// An empty set.
-    #[must_use]
-    pub fn new() -> Self {
-        Self(Attributes::new())
-    }
-
-    /// True when nothing is carried. Drives `skip_serializing_if`.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
 
     /// Mutable access, for building a set up.
-    pub fn entries_mut(&mut self) -> &mut Attributes {
-        &mut self.0
-    }
+    fn attributes_mut(&mut self) -> &mut Attributes;
 }
 
-impl From<Attributes> for TableAttributes {
-    fn from(attrs: Attributes) -> Self {
-        Self(attrs)
-    }
+/// Mint one op-carrying wrapper.
+///
+/// The wrappers are identical but for their op and their prose, which is exactly why they
+/// are generated: a hand-copied one is free to differ in a way nothing checks. `OP` is the
+/// single line that varies, so it is the single thing the macro takes.
+///
+/// Each is a TRANSPARENT wrapper — it serializes exactly as the bare map does, so it costs
+/// nothing on the wire, and an empty one is skipped entirely by its field's
+/// `skip_serializing_if`.
+macro_rules! op_attributes {
+    ($(#[$meta:meta])* $name:ident => $op:literal) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+        #[serde(transparent)]
+        #[schemars(transparent)]
+        pub struct $name(Attributes);
+
+        impl $name {
+            /// An empty set.
+            #[must_use]
+            pub fn new() -> Self {
+                Self(Attributes::new())
+            }
+
+            /// True when nothing is carried. Drives `skip_serializing_if`.
+            #[must_use]
+            pub fn is_empty(&self) -> bool {
+                self.0.is_empty()
+            }
+
+            /// Mutable access, for building a set up.
+            pub fn entries_mut(&mut self) -> &mut Attributes {
+                &mut self.0
+            }
+        }
+
+        impl From<Attributes> for $name {
+            fn from(attrs: Attributes) -> Self {
+                Self(attrs)
+            }
+        }
+
+        impl OpAttributes for $name {
+            const OP: &'static str = $op;
+
+            fn attributes(&self) -> &Attributes {
+                &self.0
+            }
+
+            fn attributes_mut(&mut self) -> &mut Attributes {
+                &mut self.0
+            }
+        }
+    };
 }
 
-impl ScopedAttributes for TableAttributes {
-    const SCOPE: AttrScope = AttrScope::Table;
+op_attributes! {
+    /// Attributes on `Op::CreateTable` — the table's own storage options.
+    CreateTableAttributes => "createTable"
+}
 
-    fn attributes(&self) -> &Attributes {
-        &self.0
-    }
+op_attributes! {
+    /// Attributes on `Op::CreatePartition`.
+    ///
+    /// A partition IS a table and takes its own storage options; PostgreSQL lets one
+    /// override what its parent declared. Its own carrier rather than a shared
+    /// table-scoped one, because "same knob" is a property of the KEY, not of a shared
+    /// Rust type — and a vendor may legitimately permit a knob on `createTable` and not
+    /// on `createPartition`.
+    CreatePartitionAttributes => "createPartition"
+}
+
+op_attributes! {
+    /// Attributes on `Op::SetTableOptions` — how a table option is CHANGED after
+    /// creation.
+    ///
+    /// Without this carrier a knob could be set at create and never altered, which is a
+    /// limitation no server imposes.
+    SetTableOptionsAttributes => "setTableOptions"
+}
+
+op_attributes! {
+    /// Attributes on `Op::CreateIndex`.
+    ///
+    /// This is the position [`IndexStorageParams`](crate::ir::IndexStorageParams)
+    /// occupies today — `fillfactor` and `pages_per_range`, PostgreSQL storage parameters
+    /// living as named fields in this neutral crate and in the neutral CONTRACT crate's
+    /// `IndexSnapshot`. Retiring them into declared attributes is what this carrier is
+    /// for; the retirement itself also has to decide how an introspected value is
+    /// compared, which is why it has not happened yet.
+    CreateIndexAttributes => "createIndex"
+}
+
+op_attributes! {
+    /// Attributes on `Op::AddColumn` — per-column vendor options such as PostgreSQL's
+    /// `STORAGE` and `COMPRESSION`.
+    ///
+    /// `Op::AddColumn` is FLAT — it does not embed an `IrColumn`, and its own doc explains
+    /// that an added column deliberately has no `id_prefix` slot ("an added column is
+    /// NEVER the system PK"), also omitting `unique`, `references` and `collation`. The
+    /// carrier sits on the op because that is where the column's definition sits.
+    AddColumnAttributes => "addColumn"
+}
+
+op_attributes! {
+    /// Attributes on `Op::AddConstraint`.
+    ///
+    /// `IrConstraint` is `{name, kind}` and models no deferrability, so
+    /// `DEFERRABLE`/`INITIALLY DEFERRED` — which PostgreSQL and SQLite have and MySQL does
+    /// not — is a genuine vendor surface here rather than a duplicate of something already
+    /// carried.
+    AddConstraintAttributes => "addConstraint"
 }
 
 #[cfg(test)]

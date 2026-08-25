@@ -4,7 +4,11 @@
   "attributes": [
     {
       "key": "mysql.engine",
-      "scope": "table",
+      "ops": [
+        "createTable",
+        "createPartition",
+        "setTableOptions"
+      ],
       "shape": {
         "kind": "enum",
         "variants": [
@@ -12,14 +16,25 @@
           "MyISAM",
           "MEMORY",
           "CSV",
-          "ARCHIVE"
+          "ARCHIVE",
+          "EXAMPLE",
+          "FEDERATED",
+          "HEAP",
+          "MERGE",
+          "MRG_MyISAM",
+          "NDB",
+          "NDBCLUSTER"
         ]
       },
-      "docs": "The storage engine. Anything other than InnoDB gives up transactional DDL-adjacent guarantees this tool otherwise relies on."
+      "docs": "The storage engine. Anything other than InnoDB gives up transactional DDL-adjacent guarantees this tool otherwise relies on. HEAP is a synonym for MEMORY, MRG_MyISAM for MERGE, and NDBCLUSTER for NDB. Spell it as the manual does: the comparison is exact, while the server itself accepts any casing."
     },
     {
       "key": "mysql.row_format",
-      "scope": "table",
+      "ops": [
+        "createTable",
+        "createPartition",
+        "setTableOptions"
+      ],
       "shape": {
         "kind": "enum",
         "variants": [
@@ -35,17 +50,25 @@
     },
     {
       "key": "mysql.auto_increment",
-      "scope": "table",
+      "ops": [
+        "createTable",
+        "createPartition",
+        "setTableOptions"
+      ],
       "shape": {
         "kind": "int",
         "min": "0",
         "max": "9223372036854775807"
       },
-      "docs": "The next value the table's AUTO_INCREMENT column will hand out."
+      "docs": "The next value the table's AUTO_INCREMENT column will hand out. MySQL's own ceiling is an unsigned 64-bit integer, which is wider than this attribute can carry, so values above 2^63-1 are refused here despite being legal."
     },
     {
       "key": "mysql.charset",
-      "scope": "table",
+      "ops": [
+        "createTable",
+        "createPartition",
+        "setTableOptions"
+      ],
       "shape": {
         "kind": "text"
       },
@@ -53,7 +76,11 @@
     },
     {
       "key": "mysql.collate",
-      "scope": "table",
+      "ops": [
+        "createTable",
+        "createPartition",
+        "setTableOptions"
+      ],
       "shape": {
         "kind": "text"
       },

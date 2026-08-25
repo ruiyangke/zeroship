@@ -180,6 +180,11 @@ pub(crate) async fn snapshot_schema_for(
                 indexes: Vec::new(),
                 constraints: Vec::new(),
                 runtime_options: Default::default(),
+                // No introspector recovers vendor attributes yet. Empty here is what keeps
+                // the live snapshot comparable to a folded one: `TableSnapshot::eq` excludes
+                // this field precisely because filling it on one side only would report every
+                // attribute-carrying table as drifted.
+                attributes: zero_migrate_ir::attribute::Attributes::new(),
                 partition_by: None,
                 comment: None,
                 // carry the verbatim CREATE text so the DROP-COLUMN rebuild

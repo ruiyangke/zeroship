@@ -217,6 +217,7 @@ mod tests {
 
     fn add_column(schema: &str, table: &str) -> Op {
         Op::AddColumn {
+            attributes: crate::attribute::AddColumnAttributes::new(),
             table: table.to_string(),
             column: "c".to_string(),
             ty: crate::ir::ColType::Text,

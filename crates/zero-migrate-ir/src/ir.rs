@@ -54,7 +54,10 @@ use base64::Engine as _;
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::attribute::TableAttributes;
+use crate::attribute::{
+    AddColumnAttributes, AddConstraintAttributes, CreatePartitionAttributes, CreateTableAttributes,
+    SetTableOptionsAttributes,
+};
 use crate::expr::Expr;
 #[allow(unused_imports)]
 use crate::migration::{Checksum, MigrationFlags, OnlinePhase};
@@ -2908,8 +2911,8 @@ pub enum Op {
         /// entirely, so adding this field changed the wire form — and therefore the
         /// checksum — of NO migration that carries no attributes, which is every
         /// migration authored before it existed.
-        #[serde(default, skip_serializing_if = "TableAttributes::is_empty")]
-        attributes: TableAttributes,
+        #[serde(default, skip_serializing_if = "CreateTableAttributes::is_empty")]
+        attributes: CreateTableAttributes,
     },
     /// `CREATE TABLE <name> PARTITION OF <parent> FOR VALUES ...`.
     CreatePartition {
@@ -2925,6 +2928,15 @@ pub enum Op {
         /// the existence guard (`ifNotExists` legal here).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         existence_guard: Option<ExistenceGuard>,
+        /// Backend-specific options, keyed `<dialect>.<name>`.
+        ///
+        /// A partition IS a table and takes its own storage options; PostgreSQL lets a partition override what its parent declared.
+        ///
+        /// Which keys exist is declared by each vendor crate, not here. An empty set is
+        /// omitted entirely, so adding this field changed the wire form of no migration
+        /// that carries no attributes. See [`crate::attribute`].
+        #[serde(default, skip_serializing_if = "CreatePartitionAttributes::is_empty")]
+        attributes: CreatePartitionAttributes,
     },
     /// `ALTER TABLE <parent> ATTACH PARTITION <name> FOR VALUES ...`.
     AttachPartition {
@@ -2980,6 +2992,15 @@ pub enum Op {
         /// pinned/refused under Confined. Omitted-when-absent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<String>,
+        /// Backend-specific options, keyed `<dialect>.<name>`.
+        ///
+        /// This is how a table option is CHANGED after creation. Without it `postgres.fillfactor` could be set at create and never altered, which would make the knob write-once for no reason the server imposes.
+        ///
+        /// Which keys exist is declared by each vendor crate, not here. An empty set is
+        /// omitted entirely, so adding this field changed the wire form of no migration
+        /// that carries no attributes. See [`crate::attribute`].
+        #[serde(default, skip_serializing_if = "SetTableOptionsAttributes::is_empty")]
+        attributes: SetTableOptionsAttributes,
     },
     /// `DROP TABLE`.
     DropTable {
@@ -3084,6 +3105,15 @@ pub enum Op {
         /// the existence guard (`ifNotExists` legal here).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         existence_guard: Option<ExistenceGuard>,
+        /// Backend-specific options, keyed `<dialect>.<name>`.
+        ///
+        /// Per-column vendor options - PostgreSQL's STORAGE and COMPRESSION, MySQL's per-column character set.
+        ///
+        /// Which keys exist is declared by each vendor crate, not here. An empty set is
+        /// omitted entirely, so adding this field changed the wire form of no migration
+        /// that carries no attributes. See [`crate::attribute`].
+        #[serde(default, skip_serializing_if = "AddColumnAttributes::is_empty")]
+        attributes: AddColumnAttributes,
     },
     /// `ALTER TABLE … DROP COLUMN`.
     DropColumn {
@@ -3310,6 +3340,15 @@ pub enum Op {
         /// the existence guard (`ifNotExists` legal here).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         existence_guard: Option<ExistenceGuard>,
+        /// Backend-specific options, keyed `<dialect>.<name>`.
+        ///
+        /// `IrConstraint` is `{name, kind}` and models no deferrability, so DEFERRABLE / INITIALLY DEFERRED - which PostgreSQL and SQLite have and MySQL does not - is a genuine vendor surface here rather than a duplicate.
+        ///
+        /// Which keys exist is declared by each vendor crate, not here. An empty set is
+        /// omitted entirely, so adding this field changed the wire form of no migration
+        /// that carries no attributes. See [`crate::attribute`].
+        #[serde(default, skip_serializing_if = "AddConstraintAttributes::is_empty")]
+        attributes: AddConstraintAttributes,
     },
     /// `ALTER TABLE … VALIDATE CONSTRAINT …` — validate a previously
     /// `NOT VALID`-added FK/CHECK against existing rows under a weaker lock
@@ -5056,7 +5095,7 @@ mod tests {
             runtime_options: None,
             schema: None,
             existence_guard: None,
-            attributes: TableAttributes::new(),
+            attributes: CreateTableAttributes::new(),
         }
     }
 
@@ -5482,6 +5521,7 @@ mod tests {
     #[test]
     fn canonical_bytes_is_order_sensitive() {
         let a = Op::AddColumn {
+            attributes: crate::attribute::AddColumnAttributes::new(),
             table: "t".into(),
             column: "x".into(),
             ty: ColType::Int,
@@ -5497,6 +5537,7 @@ mod tests {
             existence_guard: None,
         };
         let b = Op::AddColumn {
+            attributes: crate::attribute::AddColumnAttributes::new(),
             table: "t".into(),
             column: "y".into(),
             ty: ColType::Int,
@@ -5528,6 +5569,7 @@ mod tests {
     #[test]
     fn rename_table_does_not_perturb_unrelated_op_checksum_bytes() {
         let unrelated = Op::AddColumn {
+            attributes: crate::attribute::AddColumnAttributes::new(),
             table: "t".into(),
             column: "x".into(),
             ty: ColType::Int,
@@ -5769,7 +5811,7 @@ mod tests {
             runtime_options: None,
             schema: None,
             existence_guard: None,
-            attributes: TableAttributes::new(),
+            attributes: CreateTableAttributes::new(),
         }
     }
 
@@ -5880,6 +5922,7 @@ mod tests {
     #[test]
     fn schema_qualifier_round_trips_and_omits_when_absent() {
         let with = Op::AddColumn {
+            attributes: crate::attribute::AddColumnAttributes::new(),
             table: "t".into(),
             column: "c".into(),
             ty: ColType::Int,
@@ -5904,6 +5947,7 @@ mod tests {
         assert_eq!(with, back);
 
         let without = Op::AddColumn {
+            attributes: crate::attribute::AddColumnAttributes::new(),
             table: "t".into(),
             column: "c".into(),
             ty: ColType::Int,
@@ -5941,7 +5985,7 @@ mod tests {
             runtime_options: None,
             schema: None,
             existence_guard: Some(ExistenceGuard::IfNotExists),
-            attributes: TableAttributes::new(),
+            attributes: CreateTableAttributes::new(),
         };
         let v = serde_json::to_value(&create).unwrap();
         assert_eq!(v["existenceGuard"], "ifNotExists");

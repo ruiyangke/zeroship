@@ -48,7 +48,7 @@
 use serde::Serialize;
 use std::fmt;
 
-use zero_migrate_ir::attribute::{AttrKey, AttrScope, ScopedAttributes};
+use zero_migrate_ir::attribute::{AttrKey, OpAttributes};
 use zero_migrate_ir::ir::IrScalar;
 
 /// The shape of a legal value for one attribute — the "verification" half of a
@@ -235,13 +235,101 @@ pub struct AttrDef {
     /// the vendor's own crate.
     pub key: AttrKey,
     /// Which kind of IR node this attribute may attach to.
-    pub scope: AttrScope,
+    pub ops: &'static [&'static str],
     /// What a legal value looks like.
     pub shape: AttrShape,
     /// What the knob does, in the vendor's own words. Reaches the user twice: in a
     /// refusal that lists what IS declared, and as the doc comment on the generated
     /// TypeScript field.
     pub docs: &'static str,
+}
+
+/// Declare a backend's attributes, naming each op by its CARRIER TYPE rather than by a
+/// string.
+///
+/// # The fail-open this closes
+///
+/// [`AttrDef::ops`] is `&[&str]`, so a hand-written declaration names its ops as bare
+/// literals. `"createTabel"` then compiles, passes the ownership walk, passes the
+/// duplicate-key walk, exports to the vocabulary artifact and generates a TypeScript
+/// field — and matches nothing, forever, because [`AttributeVocabulary::get`] looks a knob
+/// up by the op it was carried on. The knob is declared, typed, documented and dead.
+///
+/// Naming the op as a type moves that to the compiler: the misspelling is `E0425` in the
+/// vendor's own crate, alongside the `E0080` a malformed [`AttrKey`] already produces. The
+/// op STRING is then read back out of the carrier's own
+/// [`OpAttributes::OP`](zero_migrate_ir::attribute::OpAttributes::OP), so the declaration
+/// and the carrier cannot disagree about what op they mean.
+///
+/// This does not retire `every_declared_op_is_a_real_op` — the op string still originates
+/// in `op_attributes!` over in `zero-migrate-ir`, and a typo THERE is still just a string.
+/// It moves that test's exposed surface from every vendor declaration to the six carrier
+/// definitions in one file.
+///
+/// # What else it collapses
+///
+/// The dialect is written ONCE instead of being re-typed into every key, and the prose is
+/// a `///` doc comment instead of a `docs:` string literal — so one source feeds rustdoc
+/// AND the generated TypeScript comment. Note that `concat!` joins doc lines on their
+/// leading space: a blank `///` line vanishes, so declarations get no paragraph breaks.
+///
+/// # Example
+///
+/// ```
+/// use zero_migrate_backend::{attribute::{AttrDef, AttrShape}, declare_attributes};
+/// use zero_migrate_ir::attribute::{CreateIndexAttributes, CreateTableAttributes};
+///
+/// static DEFS: &[AttrDef] = declare_attributes! {
+///     dialect: "acme";
+///
+///     /// Percentage of each page left free for later updates.
+///     fillfactor on [CreateTableAttributes, CreateIndexAttributes]
+///         = AttrShape::Int { min: 10, max: 100 };
+/// };
+///
+/// assert_eq!(DEFS[0].key.to_string(), "acme.fillfactor");
+/// assert_eq!(DEFS[0].ops, &["createTable", "createIndex"]);
+/// ```
+///
+/// A misspelled op is a compile error rather than a knob that silently matches nothing:
+///
+/// ```compile_fail,E0425
+/// use zero_migrate_backend::{attribute::{AttrDef, AttrShape}, declare_attributes};
+/// use zero_migrate_ir::attribute::CreateTableAttributes;
+///
+/// static DEFS: &[AttrDef] = declare_attributes! {
+///     dialect: "acme";
+///
+///     /// A knob declared against an op that does not exist.
+///     fillfactor on [CreateTabelAttributes] = AttrShape::Int { min: 10, max: 100 };
+/// };
+/// ```
+#[macro_export]
+macro_rules! declare_attributes {
+    (dialect: $dialect:literal; $(
+        $(#[doc = $doc:literal])+
+        $name:ident on [$($carrier:ty),+ $(,)?] = $shape:expr;
+    )+) => {
+        &[$(
+            $crate::attribute::AttrDef {
+                key: ::zero_migrate_ir::attribute::AttrKey::from_static(
+                    concat!($dialect, ".", stringify!($name)),
+                ),
+                // Read out of the carrier, not retyped. `OpAttributes` is in the bound
+                // position deliberately: a type that is not an op carrier fails here
+                // rather than contributing some other associated `OP`.
+                ops: &[$(
+                    <$carrier as ::zero_migrate_ir::attribute::OpAttributes>::OP
+                ),+],
+                shape: $shape,
+                // Each `///` line arrives with its leading space, which is what joins the
+                // lines into one sentence — but it also puts one at the FRONT. `trim_ascii`
+                // is `const`, so the stored string is byte-identical to the hand-written
+                // `docs:` literal this replaced rather than merely close to it.
+                docs: concat!($($doc),+).trim_ascii(),
+            }
+        ),+]
+    };
 }
 
 /// Everything one backend declares about its attributes.
@@ -287,19 +375,50 @@ impl AttributeVocabulary {
         self.defs.is_empty()
     }
 
-    /// The declaration for one key, if this backend owns it.
+    /// The declaration for one key AT ONE SCOPE, if this backend owns it.
+    ///
+    /// # Declaration identity is the PAIR, not the key
+    ///
+    /// A leaf may legitimately be declared at more than one scope, meaning the same
+    /// thing in each. PostgreSQL's
+    /// `fillfactor` is legal on both a table and an index and means the same thing in
+    /// each." Until this method took a scope, the code could not do what that doc said —
+    /// lookup was key-unique, so the second declaration was unreachable and the
+    /// workspace census counted it a duplicate.
+    ///
+    /// That is not a nicety. It is the hard prerequisite for retiring
+    /// [`IndexStorageParams`](zero_migrate_ir::ir::IndexStorageParams), whose
+    /// `fillfactor` must be declared at Index scope alongside the Table-scoped one that
+    /// already ships.
     #[must_use]
-    pub fn get(&self, key: &AttrKey) -> Option<&'static AttrDef> {
-        self.defs.iter().find(|d| &d.key == key)
+    pub fn get(&self, key: &AttrKey, op: &str) -> Option<&'static AttrDef> {
+        self.defs
+            .iter()
+            .find(|d| &d.key == key && d.ops.contains(&op))
+    }
+
+    /// Every scope at which this backend declares `key`, in declaration order.
+    ///
+    /// Used to tell two refusals apart that would otherwise read alike: a key that is
+    /// declared but was written in the wrong position, versus a key nobody declares. A
+    /// lookup miss alone cannot distinguish them, and the difference is the difference
+    /// between "move this" and "you typo'd this".
+    #[must_use]
+    pub fn ops_declaring(&self, key: &AttrKey) -> Vec<&'static str> {
+        self.defs
+            .iter()
+            .filter(|d| &d.key == key)
+            .flat_map(|d| d.ops.iter().copied())
+            .collect()
     }
 
     /// Every key declared for one scope, in declaration order — what a refusal lists
     /// when it says "did you mean".
     #[must_use]
-    pub fn keys_in_scope(&self, scope: AttrScope) -> Vec<&'static AttrKey> {
+    pub fn keys_for_op(&self, op: &str) -> Vec<&'static AttrKey> {
         self.defs
             .iter()
-            .filter(|d| d.scope == scope)
+            .filter(|d| d.ops.contains(&op))
             .map(|d| &d.key)
             .collect()
     }
@@ -311,37 +430,42 @@ impl AttributeVocabulary {
     /// Keys that ARE this dialect's must be declared, in scope, and shaped correctly.
     ///
     /// The scope is taken from the VALUE's type, not from an argument — see
-    /// [`ScopedAttributes`] for why a hand-passed scope is the `detachPartition` failure
+    /// [`OpAttributes`] for why a hand-passed op is the `detachPartition` failure
     /// shape. A caller cannot check table attributes against column declarations, because
     /// there is no argument left to get wrong.
     ///
     /// # Errors
     /// The first failure, naming the key. One error rather than a list because these are
     /// authoring mistakes: a typo'd key is usually the only one.
-    pub fn check<A: ScopedAttributes>(&self, dialect: &str, scoped: &A) -> Result<(), AttrError> {
-        let scope = A::SCOPE;
-        let attrs = scoped.attributes();
+    pub fn check<A: OpAttributes>(&self, dialect: &str, carried: &A) -> Result<(), AttrError> {
+        let op = A::OP;
+        let attrs = carried.attributes();
         for (key, value) in attrs.iter() {
             if key.dialect() != dialect {
                 continue;
             }
-            let Some(def) = self.get(key) else {
-                return Err(AttrError::Undeclared {
-                    key: key.clone(),
-                    declared: self
-                        .keys_in_scope(scope)
-                        .into_iter()
-                        .map(ToString::to_string)
-                        .collect(),
+            let Some(def) = self.get(key, op) else {
+                // A miss on the PAIR has two very different causes, and collapsing them
+                // would turn "you put this in the wrong place" into "you typo'd this".
+                // Ask what scopes DO declare the key before deciding which refusal the
+                // author has earned.
+                let elsewhere = self.ops_declaring(key);
+                return Err(match elsewhere.first() {
+                    Some(_) => AttrError::NotLegalOnOp {
+                        key: key.clone(),
+                        declared_for: elsewhere.clone(),
+                        used_on: op,
+                    },
+                    None => AttrError::Undeclared {
+                        key: key.clone(),
+                        declared: self
+                            .keys_for_op(op)
+                            .into_iter()
+                            .map(ToString::to_string)
+                            .collect(),
+                    },
                 });
             };
-            if def.scope != scope {
-                return Err(AttrError::WrongScope {
-                    key: key.clone(),
-                    declared_for: def.scope,
-                    used_on: scope,
-                });
-            }
             def.shape
                 .check(value)
                 .map_err(|source| AttrError::BadValue {
@@ -365,13 +489,15 @@ pub enum AttrError {
         declared: Vec<String>,
     },
     /// The key is declared, but for a different kind of node.
-    WrongScope {
+    NotLegalOnOp {
         /// The key.
         key: AttrKey,
-        /// Where the vendor says it belongs.
-        declared_for: AttrScope,
-        /// Where it was written.
-        used_on: AttrScope,
+        /// Every op the vendor DOES permit it on. Plural because one knob is commonly
+        /// legal on several — `createTable` and `setTableOptions`, say — and naming only
+        /// the first would read as if the others were forbidden.
+        declared_for: Vec<&'static str>,
+        /// The op it was written on.
+        used_on: &'static str,
     },
     /// The key and scope are right; the value is not.
     BadValue {
@@ -397,13 +523,14 @@ impl fmt::Display for AttrError {
                     write!(f, " — it declares: {}", declared.join(", "))
                 }
             }
-            Self::WrongScope {
+            Self::NotLegalOnOp {
                 key,
                 declared_for,
                 used_on,
             } => write!(
                 f,
-                "`{key}` is a {declared_for} attribute and cannot be set on a {used_on}"
+                "`{key}` cannot be set on `{used_on}` — this backend declares it on {}",
+                declared_for.join(", ")
             ),
             Self::BadValue { key, source } => write!(f, "`{key}`: {source}"),
         }
@@ -467,7 +594,7 @@ pub const VOCABULARY_FORMAT_VERSION: u32 = 1;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zero_migrate_ir::attribute::{Attributes, TableAttributes};
+    use zero_migrate_ir::attribute::{Attributes, CreateTableAttributes};
 
     const FILLFACTOR: AttrKey = AttrKey::from_static("acme.fillfactor");
     const TABLESPACE: AttrKey = AttrKey::from_static("acme.tablespace");
@@ -477,19 +604,19 @@ mod tests {
     static DEFS: &[AttrDef] = &[
         AttrDef {
             key: AttrKey::from_static("acme.fillfactor"),
-            scope: AttrScope::Table,
+            ops: &["createTable"],
             shape: AttrShape::Int { min: 10, max: 100 },
             docs: "percentage of a page left free for later updates",
         },
         AttrDef {
             key: AttrKey::from_static("acme.tablespace"),
-            scope: AttrScope::Table,
+            ops: &["createTable"],
             shape: AttrShape::Text,
             docs: "the storage area the table is created in",
         },
         AttrDef {
             key: AttrKey::from_static("acme.storage"),
-            scope: AttrScope::Column,
+            ops: &["addColumn"],
             shape: AttrShape::Enum {
                 variants: &["PLAIN", "EXTERNAL", "EXTENDED", "MAIN"],
             },
@@ -503,13 +630,13 @@ mod tests {
 
     /// Build a TABLE-scoped set. There is no `column(...)` helper because no IR node
     /// carries column attributes yet, and inventing one would be a landing pad nobody
-    /// checks — see `ScopedAttributes`.
-    fn table(pairs: &[(&AttrKey, IrScalar)]) -> TableAttributes {
+    /// checks — see `OpAttributes`.
+    fn table(pairs: &[(&AttrKey, IrScalar)]) -> CreateTableAttributes {
         let mut a = Attributes::new();
         for (k, v) in pairs {
             a.insert((*k).clone(), v.clone());
         }
-        TableAttributes::from(a)
+        CreateTableAttributes::from(a)
     }
 
     #[test]
@@ -576,9 +703,8 @@ mod tests {
         assert!(
             matches!(
                 err,
-                AttrError::WrongScope {
-                    declared_for: AttrScope::Column,
-                    used_on: AttrScope::Table,
+                AttrError::NotLegalOnOp {
+                    used_on: "createTable",
                     ..
                 }
             ),
@@ -667,7 +793,9 @@ mod tests {
         let wrong = table(&[(&STORAGE, IrScalar::Str("COMPRESSED".into()))]);
         // Scope refuses first here, so exercise the enum check directly: it is the shape,
         // not the scope, that owns the variant list.
-        let def = vocab().get(&STORAGE).expect("declared");
+        let def = vocab()
+            .get(&STORAGE, "addColumn")
+            .expect("declared at column scope");
         let err = def
             .shape
             .check(&IrScalar::Str("COMPRESSED".into()))

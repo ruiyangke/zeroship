@@ -1,5 +1,6 @@
 //! PostgreSQL DDL emission, moved verbatim from the engine.
 
+use std::fmt::Write as _;
 use zero_migrate_backend::ddl::{
     default_clause, fk_local_columns, fk_policy_tail, fk_referenced_columns, fk_target_table,
     generated_clause, inline_checks_clause, inline_pk_for_column, render_index_order_suffix,
@@ -9,13 +10,74 @@ use zero_migrate_backend::schema::SchemaRenderer;
 use zero_migrate_backend::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot,
 };
+
+use zero_migrate_ir::attribute::Attributes;
 use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_ir::ir::{
-    IndexStorageParams, PartitionBoundValue, PartitionBounds, PartitionSpec,
+    IndexStorageParams, IrScalar, PartitionBoundValue, PartitionBounds, PartitionSpec,
 };
 
 // This module's vendor identity, read from the crate's ONE declaration of it.
 use crate::DIALECT;
+
+/// The value half of one storage parameter, in PostgreSQL's spelling.
+///
+/// Every reloption is written as a quoted string — `fillfactor='85'`, not `fillfactor=85`
+/// — which the server accepts for every type and which is already how this crate spells an
+/// index's `fillfactor`. One form for all four shapes means no per-shape branch and no
+/// chance of an unquoted value colliding with the grammar.
+fn attribute_value_pg(value: &IrScalar) -> String {
+    match value {
+        IrScalar::Bool(b) => b.to_string(),
+        IrScalar::Int(i) | IrScalar::Int64(i) => i.to_string(),
+        IrScalar::Str(s) => s.clone(),
+        IrScalar::Decimal(d) => d.clone(),
+        // `AttrShape` offers bool / int / enum / text only, so neither of these can be
+        // DECLARED. They are reachable only through a hand-built `Attributes`, and
+        // rendering nothing for them would silently drop an authored value — so they
+        // render their debug form and fail loudly at the server instead.
+        IrScalar::Null => "NULL".to_string(),
+        IrScalar::Bytes(bytes) => bytes.iter().fold(String::from("\\x"), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        }),
+    }
+}
+
+/// Split this backend's declared table attributes into the two clauses PostgreSQL spells
+/// them with.
+///
+/// `tablespace` is NOT a storage parameter: the grammar gives it its own `TABLESPACE
+/// name` clause, and putting it inside `WITH ( … )` is an error the server reports as an
+/// unrecognised parameter. Every other declared table attribute IS a reloption. That split
+/// is PostgreSQL's, which is why it lives here and not in any shared helper.
+///
+/// Keys belonging to another dialect are not merely skipped, they are never seen:
+/// [`Attributes::for_dialect`] filters to this backend's namespace, so a table authored
+/// for three backends renders on each of them without any of them knowing the others.
+fn table_attribute_clauses(attributes: &Attributes) -> (String, String) {
+    let mut reloptions: Vec<String> = Vec::new();
+    let mut tablespace = String::new();
+    for (key, value) in attributes.for_dialect(DIALECT.as_str()) {
+        match key.name() {
+            "tablespace" => {
+                tablespace = format!(" TABLESPACE {}", quote_ident(&attribute_value_pg(value)));
+            }
+            name => reloptions.push(format!(
+                "{name}='{}'",
+                attribute_value_pg(value).replace('\'', "''")
+            )),
+        }
+    }
+    let with = if reloptions.is_empty() {
+        // An empty `WITH ()` is a syntax error, and a create carrying no attributes is the
+        // overwhelmingly common case — so the clause is absent, not empty.
+        String::new()
+    } else {
+        format!(" WITH ({})", reloptions.join(", "))
+    };
+    (with, tablespace)
+}
 
 fn quote_ident(ident: &str) -> String {
     crate::schema::RENDERER.quote_ident(ident)
@@ -439,11 +501,17 @@ impl DdlEmitter for PgEmitter {
             .as_ref()
             .map(render_partition_spec_pg)
             .unwrap_or_default();
+        let (with, tablespace) = table_attribute_clauses(&t.attributes);
         let create = format!(
-            "CREATE TABLE {} ({}){}",
+            "CREATE TABLE {} ({}){}{}{}",
             self.qualified(table),
             parts.join(", "),
             partition,
+            // Clause ORDER is the grammar's, not ours: `CREATE TABLE … ( … ) [PARTITION BY
+            // …] [WITH ( … )] [TABLESPACE …]`. Emitting `WITH` before `PARTITION BY` is a
+            // syntax error, so the order here is fixed rather than incidental.
+            with,
+            tablespace,
         );
         let mut statements: Vec<String> = vec![create];
         // append `COMMENT ON COLUMN … '<sentinel>'` for every

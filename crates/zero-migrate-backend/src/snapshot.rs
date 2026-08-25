@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use zero_migrate_ir::attribute::Attributes;
 use zero_migrate_ir::expr::Expr;
 use zero_migrate_ir::ir::{
     ColType, ForEach, FuncArg, FuncArgMode, FuncLanguage, FuncVolatility, IdentityCol,
@@ -1108,6 +1109,23 @@ pub struct TableSnapshot {
     /// `sqlite_master.sql`). `None` on the Postgres path and on author-built
     /// desired snapshots. EXCLUDED from equality.
     pub stored_create_sql: Option<String>,
+    /// The vendor attributes the author declared on this table, keyed by their full
+    /// `<dialect>.<name>` wire spelling and carrying every dialect at once — a table
+    /// authored for three backends keeps all three namespaces, and each backend renders
+    /// only its own.
+    ///
+    /// EXCLUDED from equality, for the same reason [`Self::runtime_options`] is: no
+    /// introspector populates this field today, so comparing it would report every
+    /// attribute-carrying table as drifted against a live catalog that in fact matches.
+    /// That is a false POSITIVE, which is the loud direction, but it would be wrong every
+    /// time rather than occasionally.
+    ///
+    /// Including it is a real and separate decision, not an oversight: PostgreSQL's drift
+    /// path already reads `reloptions`, so wiring the comparison means first deciding what
+    /// an observed-but-undeclared reloption IS — drift the author must reconcile, a value
+    /// the tool carries forward, or a refusal. Until that is answered, an attribute is an
+    /// AUTHORED fact that reaches the create and nothing more.
+    pub attributes: Attributes,
 }
 
 impl PartialEq for TableSnapshot {

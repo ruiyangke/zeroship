@@ -4,7 +4,11 @@
   "attributes": [
     {
       "key": "sqlite.strict",
-      "scope": "table",
+      "ops": [
+        "createTable",
+        "createPartition",
+        "setTableOptions"
+      ],
       "shape": {
         "kind": "bool"
       },
@@ -12,7 +16,11 @@
     },
     {
       "key": "sqlite.without_rowid",
-      "scope": "table",
+      "ops": [
+        "createTable",
+        "createPartition",
+        "setTableOptions"
+      ],
       "shape": {
         "kind": "bool"
       },

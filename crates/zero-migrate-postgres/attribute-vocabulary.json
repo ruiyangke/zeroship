@@ -4,7 +4,11 @@
   "attributes": [
     {
       "key": "postgres.fillfactor",
-      "scope": "table",
+      "ops": [
+        "createTable",
+        "createPartition",
+        "setTableOptions"
+      ],
       "shape": {
         "kind": "int",
         "min": "10",
@@ -14,7 +18,11 @@
     },
     {
       "key": "postgres.tablespace",
-      "scope": "table",
+      "ops": [
+        "createTable",
+        "createPartition",
+        "setTableOptions"
+      ],
       "shape": {
         "kind": "text"
       },
@@ -22,7 +30,11 @@
     },
     {
       "key": "postgres.autovacuum_enabled",
-      "scope": "table",
+      "ops": [
+        "createTable",
+        "createPartition",
+        "setTableOptions"
+      ],
       "shape": {
         "kind": "bool"
       },
@@ -30,23 +42,55 @@
     },
     {
       "key": "postgres.toast_tuple_target",
-      "scope": "table",
+      "ops": [
+        "createTable",
+        "createPartition",
+        "setTableOptions"
+      ],
       "shape": {
         "kind": "int",
         "min": "128",
         "max": "8160"
       },
-      "docs": "Row length above which PostgreSQL tries to move columns out of line into TOAST storage."
+      "docs": "Row length above which PostgreSQL tries to move columns out of line into TOAST storage. The upper bound is the server's block size minus its header (8160 on a default 8kB build); a larger block size accepts more than this declaration allows."
     },
     {
       "key": "postgres.parallel_workers",
-      "scope": "table",
+      "ops": [
+        "createTable",
+        "createPartition",
+        "setTableOptions"
+      ],
       "shape": {
         "kind": "int",
         "min": "0",
-        "max": "1024"
+        "max": "2147483647"
       },
-      "docs": "How many workers a parallel scan of this table should ask for. 0 disables parallel scans of it."
+      "docs": "How many workers a parallel scan of this table should ask for. 0 disables parallel scans of it. The server clamps the effective count against max_parallel_workers, so a high value here is a request, not a guarantee."
+    },
+    {
+      "key": "postgres.fillfactor",
+      "ops": [
+        "createIndex"
+      ],
+      "shape": {
+        "kind": "int",
+        "min": "10",
+        "max": "100"
+      },
+      "docs": "Percentage of each index page left free when the index is built, so a later insert can go on the right page instead of splitting it."
+    },
+    {
+      "key": "postgres.pages_per_range",
+      "ops": [
+        "createIndex"
+      ],
+      "shape": {
+        "kind": "int",
+        "min": "1",
+        "max": "131072"
+      },
+      "docs": "BRIN only: how many table blocks each index entry summarises. A smaller range makes a larger but more selective index."
     }
   ]
 }

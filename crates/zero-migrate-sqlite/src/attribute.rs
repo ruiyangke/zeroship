@@ -23,25 +23,26 @@
 //! be rediscovered.
 
 use zero_migrate_backend::attribute::{AttrDef, AttrShape, AttributeVocabulary};
-use zero_migrate_ir::attribute::{AttrKey, AttrScope};
+use zero_migrate_backend::declare_attributes;
+use zero_migrate_ir::attribute::{
+    CreatePartitionAttributes, CreateTableAttributes, SetTableOptionsAttributes,
+};
 
 /// SQLite's declared attributes.
 pub static VOCABULARY: AttributeVocabulary = AttributeVocabulary::new(DEFS);
 
-static DEFS: &[AttrDef] = &[
-    AttrDef {
-        key: AttrKey::from_static("sqlite.strict"),
-        scope: AttrScope::Table,
-        shape: AttrShape::Bool,
-        docs: "SQLite's STRICT table clause: enforce each column's declared type on write \
-               rather than applying type affinity. Unrelated to zero-migrate's own \
-               deploy-time `strictness` option.",
-    },
-    AttrDef {
-        key: AttrKey::from_static("sqlite.without_rowid"),
-        scope: AttrScope::Table,
-        shape: AttrShape::Bool,
-        docs: "Store the table as an index over its PRIMARY KEY with no separate rowid. \
-               Requires a PRIMARY KEY, and changes what a rowid-dependent query sees.",
-    },
-];
+static DEFS: &[AttrDef] = declare_attributes! {
+    dialect: "sqlite";
+
+    /// SQLite's STRICT table clause: enforce each column's declared type on write
+    /// rather than applying type affinity. Unrelated to zero-migrate's own
+    /// deploy-time `strictness` option.
+    strict on [CreateTableAttributes, CreatePartitionAttributes, SetTableOptionsAttributes]
+        = AttrShape::Bool;
+
+    /// Store the table as an index over its PRIMARY KEY with no separate rowid.
+    /// Requires a PRIMARY KEY, and changes what a rowid-dependent query sees.
+    without_rowid
+        on [CreateTableAttributes, CreatePartitionAttributes, SetTableOptionsAttributes]
+        = AttrShape::Bool;
+};
