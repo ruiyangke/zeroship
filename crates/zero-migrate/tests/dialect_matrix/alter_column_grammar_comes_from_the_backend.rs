@@ -70,6 +70,7 @@ use std::sync::LazyLock;
 
 use zero_migrate::model::ir::{ColType, IrDefault, IrFlagsOverride, Op};
 use zero_migrate::{IrAuthor, LiveSchema, Migration, MigrationIr, CURRENT_IR_VERSION};
+use zero_migrate_backend::attribute::AttributeVocabulary;
 use zero_migrate_backend::ddl::{CreateTableRequest, DdlEmitter};
 use zero_migrate_backend::registry::{BackendVendor, VendorSet};
 use zero_migrate_backend::snapshot::{ColumnSnapshot, ConstraintSnapshot, IndexSnapshot};
@@ -262,6 +263,11 @@ static FOURTH_VENDOR: LazyLock<&'static BackendVendor> = LazyLock::new(|| {
         ddl: fourth_emitter,
         guard: borrowed.guard,
         advisor: borrowed.advisor,
+        // Written out, not borrowed from PostgreSQL: a vocabulary is the one field where
+        // inheriting another backend's answer would be actively wrong, since every key in
+        // it names that other backend's dialect. This fourth backend declares nothing,
+        // and says so.
+        attributes: AttributeVocabulary::empty(),
     }))
 });
 

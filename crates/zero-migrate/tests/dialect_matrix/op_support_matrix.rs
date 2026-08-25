@@ -393,6 +393,7 @@ fn idx_col(name: &str) -> IndexElement {
 
 fn partitioned_create_table() -> Op {
     Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "events".into(),
         columns: vec![IrColumn {
             name: "created_at".into(),
@@ -535,6 +536,7 @@ fn nextval_default_ops() -> Vec<Op> {
     };
     vec![
         Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: "events".into(),
             columns: vec![col.clone()],
             primary_key: None,
@@ -589,6 +591,7 @@ fn identity_always_ops() -> Vec<Op> {
     };
     vec![
         Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: "events".into(),
             columns: vec![col.clone()],
             primary_key: Some(vec!["id".into()]),

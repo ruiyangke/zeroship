@@ -197,6 +197,7 @@ async fn add_column_ifnotexists_absent_runs() {
     let be = backend(&p);
     // base table without the guarded column (unguarded createTable).
     for m in lower(Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "t".into(),
         columns: vec![col("n", ColType::Int)],
         primary_key: None,
@@ -248,6 +249,7 @@ async fn add_column_ifnotexists_present_text_affinity_match_is_noop() {
     let p = paths("sq_add_text_match");
     let be = backend(&p);
     for m in lower(Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "t".into(),
         columns: vec![col("n", ColType::Int)],
         primary_key: None,
@@ -316,6 +318,7 @@ async fn add_column_ifnotexists_present_integer_affinity_match_is_noop() {
     let p = paths("sq_add_int_match");
     let be = backend(&p);
     for m in lower(Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "t".into(),
         columns: vec![col("n", ColType::Int)],
         primary_key: None,
@@ -388,6 +391,7 @@ async fn add_column_ifnotexists_sqlite_ref_over_live_string_is_noop() {
     let p = paths("sq_add_ref_over_string");
     let be = backend(&p);
     for m in lower(Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "t".into(),
         columns: vec![col("n", ColType::Int)],
         primary_key: None,
@@ -463,6 +467,7 @@ async fn add_column_ifnotexists_present_divergent_type_fails_closed() {
     let be = backend(&p);
     // base table + an `email` column of INTEGER affinity (divergent from declared text).
     for m in lower(Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "t".into(),
         columns: vec![col("n", ColType::Int)],
         primary_key: None,
@@ -532,6 +537,7 @@ async fn create_table_ifnotexists_present_extra_column_fails_closed() {
     // Create the declared table via an unguarded apply, then add an EXTRA live
     // column out-of-band so the guarded re-create finds a WIDER live table.
     for m in lower(Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "t".into(),
         columns: vec![col("n", ColType::Int)],
         primary_key: None,
@@ -552,6 +558,7 @@ async fn create_table_ifnotexists_present_extra_column_fails_closed() {
         .expect("add extra live column");
 
     let migs = lower(Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "t".into(),
         columns: vec![col("n", ColType::Int)],
         primary_key: None,
@@ -587,6 +594,7 @@ async fn drop_column_ifexists_present_runs_absent_noops() {
     let p = paths("sq_drop_col");
     let be = backend(&p);
     for m in lower(Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "t".into(),
         columns: vec![col("legacy", ColType::Text)],
         primary_key: None,
@@ -655,6 +663,7 @@ async fn create_table_ifnotexists_reruns_idempotent_with_timestamp_and_text_colu
     // A table with a text column AND a timestamp column ON TOP of the always-present
     // system fields (id text, created_at/updated_at/deleted_at timestamps, …).
     let make_op = || Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "t".into(),
         columns: vec![
             col("title", ColType::Text),
@@ -745,6 +754,7 @@ async fn create_table_ifnotexists_fresh_creates_unique_secondary_index_and_rerun
     // a `unique:true` field → a `t_email_key` unique index unit, ON TOP of the
     // CREATE TABLE unit (which inlines the SQLite system-field indexes).
     let make_op = || Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "t".into(),
         columns: vec![IrColumn {
             name: "email".into(),
@@ -839,6 +849,7 @@ async fn add_column_ifnotexists_timestamp_rerun_is_noop() {
     let p = paths("sq_add_ts_rerun");
     let be = backend(&p);
     for m in lower(Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "t".into(),
         columns: vec![col("n", ColType::Int)],
         primary_key: None,
@@ -930,6 +941,7 @@ async fn drop_view_ifexists_present_runs_absent_noops() {
     let be = backend(&p);
 
     for m in lower(Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "t".into(),
         columns: vec![col("name", ColType::Text)],
         primary_key: None,
@@ -1030,6 +1042,7 @@ async fn create_index_ifnotexists_name_owned_by_another_table_fails_closed() {
     let be = backend(&p);
 
     let make_table = |name: &str| Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: name.into(),
         columns: vec![col("bucket", ColType::Int)],
         primary_key: None,
@@ -1137,6 +1150,7 @@ async fn create_index_unguarded_name_owned_by_another_table_fails_closed() {
     let be = backend(&p);
 
     let make_table = |name: &str| Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: name.into(),
         columns: vec![col("bucket", ColType::Int)],
         primary_key: None,
@@ -1255,6 +1269,7 @@ async fn create_table_unguarded_inline_index_name_owned_by_another_table_fails_c
     let be = backend(&p);
 
     let make_table = |name: &str, index: Option<&str>| Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: name.into(),
         columns: vec![col("bucket", ColType::Int)],
         primary_key: None,
@@ -1334,6 +1349,7 @@ async fn create_table_unguarded_inline_index_free_name_still_creates() {
     let be = backend(&p);
 
     for m in lower(Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "solo".into(),
         columns: vec![col("bucket", ColType::Int)],
         primary_key: None,

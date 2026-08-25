@@ -67,6 +67,7 @@ fn ir_with(ops: Vec<Op>) -> MigrationIr {
 
 fn create_table(schema: Option<&str>, name: &str) -> Op {
     Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: name.to_string(),
         columns: Vec::new(),
         primary_key: None,

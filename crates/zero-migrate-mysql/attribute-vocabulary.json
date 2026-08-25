@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "dialect": "mysql",
+  "attributes": [
+    {
+      "key": "mysql.engine",
+      "scope": "table",
+      "shape": {
+        "kind": "enum",
+        "variants": [
+          "InnoDB",
+          "MyISAM",
+          "MEMORY",
+          "CSV",
+          "ARCHIVE"
+        ]
+      },
+      "docs": "The storage engine. Anything other than InnoDB gives up transactional DDL-adjacent guarantees this tool otherwise relies on."
+    },
+    {
+      "key": "mysql.row_format",
+      "scope": "table",
+      "shape": {
+        "kind": "enum",
+        "variants": [
+          "DEFAULT",
+          "DYNAMIC",
+          "FIXED",
+          "COMPRESSED",
+          "REDUNDANT",
+          "COMPACT"
+        ]
+      },
+      "docs": "How rows are physically stored. DYNAMIC and COMPRESSED allow longer index keys over variable-length columns than REDUNDANT or COMPACT."
+    },
+    {
+      "key": "mysql.auto_increment",
+      "scope": "table",
+      "shape": {
+        "kind": "int",
+        "min": "0",
+        "max": "9223372036854775807"
+      },
+      "docs": "The next value the table's AUTO_INCREMENT column will hand out."
+    },
+    {
+      "key": "mysql.charset",
+      "scope": "table",
+      "shape": {
+        "kind": "text"
+      },
+      "docs": "The table's DEFAULT CHARACTER SET, inherited by character columns that do not name their own."
+    },
+    {
+      "key": "mysql.collate",
+      "scope": "table",
+      "shape": {
+        "kind": "text"
+      },
+      "docs": "The table's default collation. Decides comparison and sort order, and therefore whether a unique key treats two spellings as one value."
+    }
+  ]
+}

@@ -155,6 +155,7 @@ fn add_constraint(name: &str) -> Op {
 
 fn create_table(constraints: Vec<IrConstraint>, indexes: Vec<IrIndex>) -> Op {
     Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "t".into(),
         columns: vec![column()],
         primary_key: Some(vec!["c".into()]),

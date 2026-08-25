@@ -126,6 +126,7 @@ fn create_ir() -> MigrationIr {
     ir(
         "create_generated_body_rename",
         vec![Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: TABLE.to_string(),
             columns: vec![col(OLD_COLUMN, ColType::Int), generated],
             primary_key: None,

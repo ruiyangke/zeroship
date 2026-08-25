@@ -197,6 +197,7 @@ mod tests {
 
     fn create_table(name: &str) -> Op {
         Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: name.into(),
             columns: vec![IrColumn {
                 name: "first".into(),

@@ -851,6 +851,7 @@ mod tests {
             name: "m".into(),
             owner_app: "app".into(),
             ops: vec![Op::CreateTable {
+                attributes: zero_migrate_ir::attribute::TableAttributes::new(),
                 name: "widgets".into(),
                 columns,
                 primary_key,

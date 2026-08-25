@@ -29,6 +29,7 @@
 
 mod advisory;
 pub mod analysis;
+pub mod attribute;
 /// The `MigrationBackend` implementation: PostgreSQL's session/lock/transaction
 /// bracket, its journal, drift, backfill, identity, primary-key, baseline,
 /// precondition and status SQL.
@@ -140,6 +141,7 @@ const _: () = assert!(DialectId::is_well_formed_name(NAME));
 /// empty advisory report by omission. See
 /// `zero_migrate_backend::registry::BackendVendor`.
 pub static VENDOR: BackendVendor = BackendVendor {
+    attributes: attribute::VOCABULARY,
     descriptor: &descriptor::POSTGRES_DESCRIPTOR,
     dml: &dml::RENDERER,
     schema: &schema::RENDERER,

@@ -154,6 +154,7 @@ fn postgres_renders_create_alter_drop_sequence() {
 fn postgres_renders_nextval_default_with_and_without_schema() {
     let with_schema = lower(
         vec![Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: "invoices".into(),
             columns: vec![nextval_col("id", Some("app"))],
             primary_key: None,
@@ -177,6 +178,7 @@ fn postgres_renders_nextval_default_with_and_without_schema() {
 
     let without_schema = lower(
         vec![Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: "invoices".into(),
             columns: vec![nextval_col("id", None)],
             primary_key: None,
@@ -241,6 +243,7 @@ fn sqlite_and_mysql_fail_closed_on_sequences() {
 #[test]
 fn nextval_default_rejects_non_integer_and_non_postgres() {
     let text_nextval = Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "events".into(),
         columns: vec![IrColumn {
             ty: ColType::Text,

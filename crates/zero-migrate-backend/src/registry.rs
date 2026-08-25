@@ -40,6 +40,7 @@
 //! backend requires no contract edit. Engine callers pass that open id directly.
 
 use crate::advisory::OperationalAdvisor;
+use crate::attribute::AttributeVocabulary;
 use crate::ddl::DdlEmitter;
 use crate::existence_probe::ExistenceProbePolicy;
 use crate::fold::CatalogFoldPolicy;
@@ -158,6 +159,25 @@ pub struct BackendVendor {
     /// reads SQL and nothing else. `guard` is a `fn` pointer only because it carries
     /// the per-migration [`GuardConfig`] it decides against.
     pub advisor: &'static dyn OperationalAdvisor,
+    /// The vendor knobs this backend OWNS — which `<dialect>.<name>` keys exist, which
+    /// IR node each attaches to, and what a legal value is.
+    ///
+    /// Required, never defaulted, and for a sharper reason than the fields above. The
+    /// attribute space is the one part of the IR a backend extends WITHOUT editing a
+    /// neutral crate, so this field is the entire mechanism by which it does so. A
+    /// backend that declares nothing must say so with
+    /// [`AttributeVocabulary::empty()`](crate::attribute::AttributeVocabulary::empty) —
+    /// one visible line in its own crate — because "declares no attributes" and "forgot
+    /// to declare attributes" produce identical behaviour at every later layer, and only
+    /// the diff can tell them apart.
+    ///
+    /// Not an `Option`, and no `Default`: either would let a new backend acquire an empty
+    /// vocabulary by omission, and an empty vocabulary REFUSES every attribute of its own
+    /// dialect. That failure is at least loud. The dangerous direction is the reverse —
+    /// see [`crate::attribute`] for why a key belonging to an unasked dialect is skipped
+    /// rather than refused, which is what makes a missing declaration invisible on every
+    /// target except the vendor's own.
+    pub attributes: AttributeVocabulary,
 }
 
 /// The "a vendor that ships no guard does not compile" property, pinned as a

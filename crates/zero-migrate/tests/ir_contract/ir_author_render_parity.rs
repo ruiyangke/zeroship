@@ -198,6 +198,7 @@ fn create_table_render_is_byte_identical_pg() {
     };
 
     let ops = vec![Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "widgets".into(),
         columns: vec![
             IrColumn {
@@ -327,6 +328,7 @@ fn create_table_with_live_fk_render_is_byte_identical_pg() {
     let decl = sql_pairs(&plan.migrations);
 
     let ops = vec![Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "posts".into(),
         columns: vec![IrColumn {
             name: "author".into(),
@@ -404,6 +406,7 @@ fn create_table_with_encrypted_column_render_is_byte_identical_pg() {
         runtime_options: Default::default(),
     };
     let ops = vec![Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "vault".into(),
         columns: vec![IrColumn {
             // The IR carries an encrypted column wrapping a string.
@@ -491,6 +494,7 @@ fn create_table_with_explicit_masked_column_render_is_byte_identical_pg() {
         runtime_options: Default::default(),
     };
     let ops = vec![Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "people".into(),
         columns: vec![IrColumn {
             name: "ssn".into(),
@@ -1351,6 +1355,7 @@ fn create_table_render_is_byte_identical_sqlite() {
         runtime_options: Default::default(),
     };
     let ops = vec![Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "widgets".into(),
         columns: vec![
             IrColumn {
@@ -1447,6 +1452,7 @@ fn create_table_with_authored_index_is_byte_identical_sqlite() {
         runtime_options: Default::default(),
     };
     let ops = vec![Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "events".into(),
         columns: vec![IrColumn {
             name: "kind".into(),
@@ -1551,6 +1557,7 @@ fn create_table_with_live_fk_render_is_byte_identical_sqlite() {
     let decl = sql_pairs(&plan.migrations);
 
     let ops = vec![Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "posts".into(),
         columns: vec![IrColumn {
             name: "author".into(),
@@ -1623,6 +1630,7 @@ fn create_table_with_encrypted_column_render_is_byte_identical_sqlite() {
         runtime_options: Default::default(),
     };
     let ops = vec![Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "vault".into(),
         columns: vec![IrColumn {
             name: "secret".into(),
@@ -1701,6 +1709,7 @@ fn create_table_with_explicit_masked_column_render_is_byte_identical_sqlite() {
         runtime_options: Default::default(),
     };
     let ops = vec![Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "people".into(),
         columns: vec![IrColumn {
             name: "ssn".into(),

@@ -24,6 +24,7 @@ pub mod validate;
 // modules under their historical `crate::model::*` paths so the
 // engine's ~hundreds of `crate::model::{ir,expr,migration,precondition,probe}::…`
 // references (and the flattened root re-exports) keep resolving unchanged.
+pub use zero_migrate_ir::attribute;
 pub use zero_migrate_ir::capability;
 pub use zero_migrate_ir::expr;
 pub use zero_migrate_ir::ir;

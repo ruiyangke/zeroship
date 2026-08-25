@@ -70,6 +70,7 @@ fn column(
 
 fn plain_table(name: &str, columns: Vec<IrColumn>, primary_key: Option<Vec<String>>) -> Op {
     Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: name.into(),
         columns,
         primary_key,
@@ -693,6 +694,7 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
         "createTable",
         "partitioned",
         Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: "t".into(),
             columns: vec![column("id", ColType::BigInt, None, None)],
             primary_key: None,
@@ -711,6 +713,7 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
         "createTable",
         "partitionedCollapse",
         Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: "t".into(),
             columns: vec![column("id", ColType::BigInt, None, None)],
             primary_key: None,
@@ -729,6 +732,7 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
         "createTable",
         "pgOnlyIndexFeature",
         Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: "t".into(),
             columns: vec![column("created_at", ColType::Timestamp, None, None)],
             primary_key: None,

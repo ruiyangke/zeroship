@@ -103,6 +103,7 @@ fn int_bound(value: i64) -> PartitionBoundValue {
 
 fn create_events_parent() -> Op {
     Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "events".into(),
         columns: vec![
             not_null_col("bucket", ColType::Int),
@@ -316,6 +317,7 @@ fn create_index(
 #[test]
 fn render_partitioned_parent_create_table_pg() {
     let sql = pg_sql(Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "events".into(),
         columns: vec![col("created_at", ColType::Timestamp)],
         primary_key: None,

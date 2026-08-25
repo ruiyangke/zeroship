@@ -68,6 +68,7 @@ fn create_line_items() -> Op {
     let mut total = col("total_cents", ColType::Int);
     total.generated = Some(total_from_qty());
     Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "line_items".to_string(),
         columns: vec![
             col("qty", ColType::Int),
@@ -186,6 +187,7 @@ fn create_qualified_line_items() -> Op {
     let mut total = col("total_cents", ColType::Int);
     total.generated = Some(total_from_qualified_qty());
     Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "line_items".to_string(),
         columns: vec![
             col("qty", ColType::Int),
@@ -304,6 +306,7 @@ fn qty_between_0_and_100() -> Expr {
 
 fn create_bounded() -> Op {
     Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "line_items".to_string(),
         columns: vec![col("qty", ColType::Int)],
         primary_key: None,

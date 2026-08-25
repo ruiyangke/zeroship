@@ -406,6 +406,7 @@ fn create_table_primary_key_round_trips_and_schema_carries_field() {
     use zero_migrate::model::ir::{ColType, IrColumn};
 
     let op = Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "membership".into(),
         columns: vec![
             IrColumn {
@@ -466,6 +467,7 @@ fn create_table_primary_key_round_trips_and_schema_carries_field() {
     }
 
     let no_pk = Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "audit".into(),
         columns: vec![],
         primary_key: None,
@@ -1171,6 +1173,7 @@ fn partition_ops_round_trip_and_absent_fields_stay_omitted() {
     };
 
     let parent = Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "events".into(),
         columns: vec![IrColumn {
             name: "created_at".into(),
@@ -1220,6 +1223,7 @@ fn partition_ops_round_trip_and_absent_fields_stay_omitted() {
     assert_eq!(parent, back);
 
     let old_shape = Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "plain".into(),
         columns: vec![],
         primary_key: None,

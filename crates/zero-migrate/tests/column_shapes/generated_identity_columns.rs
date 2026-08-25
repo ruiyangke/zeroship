@@ -90,6 +90,7 @@ fn generated_total(stored: bool) -> GeneratedCol {
 
 fn create_table(columns: Vec<IrColumn>, primary_key: Option<Vec<String>>) -> Op {
     Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "line_items".to_string(),
         columns,
         primary_key,

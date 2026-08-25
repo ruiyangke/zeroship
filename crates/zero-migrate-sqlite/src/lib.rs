@@ -73,6 +73,7 @@
 //! (`*_for_dialect(.., DIALECT)`) is how this crate stays clear of it.
 
 mod advisory;
+pub mod attribute;
 /// The `MigrationBackend` implementation: SQLite's hardened single-writer actor,
 /// its prepare-time authorizer, and the journal / drift / rebuild / backfill /
 /// rollback SQL that runs on it.
@@ -156,6 +157,7 @@ const _: () = assert!(DialectId::is_well_formed_name(NAME));
 /// empty advisory report by omission. See
 /// `zero_migrate_backend::registry::BackendVendor`.
 pub static VENDOR: BackendVendor = BackendVendor {
+    attributes: attribute::VOCABULARY,
     descriptor: &descriptor::SQLITE_DESCRIPTOR,
     dml: &dml::RENDERER,
     schema: &schema::RENDERER,

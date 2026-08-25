@@ -54,6 +54,7 @@
 //! (`*_for_dialect(.., DIALECT)`) is how this crate stays clear of it.
 
 mod advisory;
+pub mod attribute;
 /// The `MigrationBackend` implementation: MySQL's lock, session, journal, drift,
 /// backfill and DDL-step execution over the dialect-neutral `SqlSession` seam.
 ///
@@ -142,6 +143,7 @@ const _: () = assert!(DialectId::is_well_formed_name(NAME));
 /// empty advisory report by omission. See
 /// `zero_migrate_backend::registry::BackendVendor`.
 pub static VENDOR: BackendVendor = BackendVendor {
+    attributes: attribute::VOCABULARY,
     descriptor: &descriptor::MYSQL_DESCRIPTOR,
     dml: &dml::RENDERER,
     schema: &schema::RENDERER,

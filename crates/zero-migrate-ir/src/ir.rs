@@ -54,6 +54,7 @@ use base64::Engine as _;
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::attribute::TableAttributes;
 use crate::expr::Expr;
 #[allow(unused_imports)]
 use crate::migration::{Checksum, MigrationFlags, OnlinePhase};
@@ -2896,6 +2897,19 @@ pub enum Op {
         /// synthesized via a catalog probe; never a native `IF NOT EXISTS`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         existence_guard: Option<ExistenceGuard>,
+        /// Backend-specific table options, keyed `<dialect>.<name>`.
+        ///
+        /// The extension point for knobs the closed `Op` set does not model and should
+        /// not: `postgres.fillfactor`, `mysql.row_format`, `sqlite.strict`. Which keys
+        /// exist is declared by each vendor crate, not here — this crate carries them
+        /// without interpreting them. See [`crate::attribute`].
+        ///
+        /// `skip_serializing_if` is load-bearing, not tidiness: an empty set is omitted
+        /// entirely, so adding this field changed the wire form — and therefore the
+        /// checksum — of NO migration that carries no attributes, which is every
+        /// migration authored before it existed.
+        #[serde(default, skip_serializing_if = "TableAttributes::is_empty")]
+        attributes: TableAttributes,
     },
     /// `CREATE TABLE <name> PARTITION OF <parent> FOR VALUES ...`.
     CreatePartition {
@@ -5042,6 +5056,7 @@ mod tests {
             runtime_options: None,
             schema: None,
             existence_guard: None,
+            attributes: TableAttributes::new(),
         }
     }
 
@@ -5754,6 +5769,7 @@ mod tests {
             runtime_options: None,
             schema: None,
             existence_guard: None,
+            attributes: TableAttributes::new(),
         }
     }
 
@@ -5925,6 +5941,7 @@ mod tests {
             runtime_options: None,
             schema: None,
             existence_guard: Some(ExistenceGuard::IfNotExists),
+            attributes: TableAttributes::new(),
         };
         let v = serde_json::to_value(&create).unwrap();
         assert_eq!(v["existenceGuard"], "ifNotExists");

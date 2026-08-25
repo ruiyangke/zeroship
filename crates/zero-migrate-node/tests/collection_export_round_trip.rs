@@ -257,6 +257,7 @@ fn width_and_generated_ops() -> Vec<Op> {
     });
 
     vec![Op::CreateTable {
+        attributes: zero_migrate::model::attribute::TableAttributes::new(),
         name: "widths".to_string(),
         columns: vec![
             column("id", ColType::Text),

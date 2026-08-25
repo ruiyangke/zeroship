@@ -28,6 +28,7 @@
 //!   validator, so it lives engine-side; the policy-free ownership/checksum
 //!   helpers of the load gate stay here in [`load`].
 
+pub mod attribute;
 pub mod backend;
 pub mod capability;
 pub mod dialect;

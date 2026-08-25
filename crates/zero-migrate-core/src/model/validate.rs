@@ -10602,6 +10602,7 @@ mod tests {
         // Postgres target. A createTable Check whose splitPart hides a ColRef to a
         // nonexistent column in the n slot must reject (rule c), not pass on PG.
         let ir = ir_with(vec![Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: "users".into(),
             columns: vec![IrColumn {
                 name: "first".into(),
@@ -10785,6 +10786,7 @@ mod tests {
 
     fn create_with_column(name: &str, ty: ColType) -> Op {
         Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: "typed_columns".into(),
             columns: vec![part_col(name, ty, true)],
             primary_key: None,
@@ -10841,6 +10843,7 @@ mod tests {
         indexes: Vec<IrIndex>,
     ) -> Op {
         Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: name.into(),
             columns,
             primary_key: primary_key.map(|cols| cols.iter().map(|col| (*col).into()).collect()),
@@ -11450,6 +11453,7 @@ mod tests {
     fn wrong_direction_existence_guard_is_an_authoring_error() {
         // ifExists on createTable — illegal.
         let bad_create = ir_with(vec![Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: "t".into(),
             columns: vec![],
             primary_key: None,
@@ -11479,6 +11483,7 @@ mod tests {
 
         // The LEGAL directions pass.
         let ok_create = ir_with(vec![Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: "t".into(),
             columns: vec![],
             primary_key: None,
@@ -11659,6 +11664,7 @@ mod tests {
         for dialect in [&POSTGRES, &SQLITE, &MYSQL] {
             for (primary_key, reason) in &invalid {
                 let ir = ir_with(vec![Op::CreateTable {
+                    attributes: zero_migrate_ir::attribute::TableAttributes::new(),
                     name: "memberships".into(),
                     columns: vec![
                         part_col("account_id", ColType::Uuid, false),
@@ -12028,6 +12034,7 @@ mod tests {
     fn validate_ir_passes_a_clean_migration() {
         let ir = ir_with(vec![
             Op::CreateTable {
+                attributes: zero_migrate_ir::attribute::TableAttributes::new(),
                 name: "users".into(),
                 columns: vec![
                     IrColumn {
@@ -12353,6 +12360,7 @@ mod tests {
         // `WHERE deleted_at IS NULL` references the resolved column and MUST
         // resolve in rule (c) scope, not be rejected.
         let ir = ir_with(vec![Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: "users".into(),
             columns: vec![IrColumn {
                 name: "first".into(),
@@ -12420,6 +12428,7 @@ mod tests {
         // The system-field union must NOT loosen the gate for a genuinely unknown
         // column — `ghost` is neither declared nor a system field.
         let ir = ir_with(vec![Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: "users".into(),
             columns: vec![IrColumn {
                 name: "first".into(),
@@ -12467,6 +12476,7 @@ mod tests {
         // A createTable whose Check references a column NOT on the table — rule
         // (c). The walker resolves the createTable's own columns, so this fails.
         let ir = ir_with(vec![Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: "users".into(),
             columns: vec![IrColumn {
                 name: "first".into(),
@@ -12954,6 +12964,7 @@ mod tests {
     /// Build a createTable Op with a single `id` column carrying `id_prefix`.
     fn create_with_id_prefix(prefix: &str) -> Op {
         Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: "things".into(),
             columns: vec![IrColumn {
                 name: "id".into(),
@@ -12985,6 +12996,7 @@ mod tests {
 
     fn create_with_reference_name(name: &str) -> Op {
         Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: "orders".into(),
             columns: vec![IrColumn {
                 name: "account_id".into(),
@@ -13020,6 +13032,7 @@ mod tests {
 
     fn create_with_type_id(prefix: &str, ty: ColType, case_sensitive: Option<bool>) -> Op {
         Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: "things".into(),
             columns: vec![IrColumn {
                 name: "id".into(),
@@ -13051,6 +13064,7 @@ mod tests {
 
     fn create_with_ulid(ty: ColType, case_sensitive: Option<bool>) -> Op {
         Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: "things".into(),
             columns: vec![IrColumn {
                 name: "id".into(),
@@ -13080,6 +13094,7 @@ mod tests {
 
     fn create_with_default(ty: ColType, default: crate::model::ir::IrDefault) -> Op {
         Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: "docs".into(),
             columns: vec![IrColumn {
                 name: "body".into(),
@@ -13412,6 +13427,7 @@ mod tests {
         // closed enum already bounds the metric token at deserialize; this catches a
         // dead metric a hand-crafted artifact rides in on a text column.
         let ir = ir_with(vec![Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: "docs".into(),
             columns: vec![IrColumn {
                 name: "body".into(),
@@ -13448,6 +13464,7 @@ mod tests {
     fn case_sensitive_false_rejects_non_text_columns() {
         for ty in [ColType::Int, ColType::Json] {
             let ir = ir_with(vec![Op::CreateTable {
+                attributes: zero_migrate_ir::attribute::TableAttributes::new(),
                 name: "docs".into(),
                 columns: vec![IrColumn {
                     name: "body".into(),
@@ -13554,6 +13571,7 @@ mod tests {
     #[test]
     fn p2a_create_table_accepts_vector_metric_on_a_vector_column() {
         let ir = ir_with(vec![Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: "docs".into(),
             columns: vec![IrColumn {
                 name: "embedding".into(),
@@ -13608,6 +13626,7 @@ mod tests {
             },
         ];
         Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: "per_row_values".into(),
             columns,
             primary_key: Some(vec!["cursor".into()]),
@@ -13853,6 +13872,7 @@ mod tests {
 
     fn typed_reference_table(name: &str, column: IrColumn) -> Op {
         Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: name.into(),
             columns: vec![column],
             primary_key: None,

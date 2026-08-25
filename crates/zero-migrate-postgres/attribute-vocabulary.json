@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "dialect": "postgres",
+  "attributes": [
+    {
+      "key": "postgres.fillfactor",
+      "scope": "table",
+      "shape": {
+        "kind": "int",
+        "min": "10",
+        "max": "100"
+      },
+      "docs": "Percentage of each page left free for later updates, so a row can be updated in place. 100 packs pages fully and suits an insert-only table."
+    },
+    {
+      "key": "postgres.tablespace",
+      "scope": "table",
+      "shape": {
+        "kind": "text"
+      },
+      "docs": "The tablespace the table is created in. Must already exist on the server."
+    },
+    {
+      "key": "postgres.autovacuum_enabled",
+      "scope": "table",
+      "shape": {
+        "kind": "bool"
+      },
+      "docs": "Whether autovacuum runs on this table. Disabling it makes vacuuming the operator's problem and is rarely right."
+    },
+    {
+      "key": "postgres.toast_tuple_target",
+      "scope": "table",
+      "shape": {
+        "kind": "int",
+        "min": "128",
+        "max": "8160"
+      },
+      "docs": "Row length above which PostgreSQL tries to move columns out of line into TOAST storage."
+    },
+    {
+      "key": "postgres.parallel_workers",
+      "scope": "table",
+      "shape": {
+        "kind": "int",
+        "min": "0",
+        "max": "1024"
+      },
+      "docs": "How many workers a parallel scan of this table should ask for. 0 disables parallel scans of it."
+    }
+  ]
+}

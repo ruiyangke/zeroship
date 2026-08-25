@@ -85,6 +85,7 @@ fn exclusion_over_an_expression() -> IrConstraint {
 
 fn create_stays(constraints: Vec<IrConstraint>) -> Op {
     Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "stays".to_string(),
         columns: vec![
             col("lo", ColType::Timestamp),

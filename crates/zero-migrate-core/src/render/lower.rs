@@ -11455,6 +11455,7 @@ mod tests {
             name: "m".into(),
             owner_app: "app_a".into(),
             ops: vec![Op::CreateTable {
+                attributes: zero_migrate_ir::attribute::TableAttributes::new(),
                 name: table.into(),
                 columns: cols,
                 primary_key: None,
@@ -12082,6 +12083,7 @@ mod tests {
             name: "m".into(),
             owner_app: "app_a".into(),
             ops: vec![Op::CreateTable {
+                attributes: zero_migrate_ir::attribute::TableAttributes::new(),
                 name: "widgets".into(),
                 columns: vec![TIrColumn {
                     name: "title".into(),
@@ -13822,6 +13824,7 @@ columns = [
             name: "m".into(),
             owner_app: "app_a".into(),
             ops: vec![Op::CreateTable {
+                attributes: zero_migrate_ir::attribute::TableAttributes::new(),
                 name: "events".into(),
                 columns: vec![
                     TIrColumn {
@@ -13968,6 +13971,7 @@ columns = [
             name: "m".into(),
             owner_app: "app_a".into(),
             ops: vec![Op::CreateTable {
+                attributes: zero_migrate_ir::attribute::TableAttributes::new(),
                 name: "limits".into(),
                 columns: vec![TIrColumn {
                     name: "net_policy_limits_json".into(),
@@ -14041,6 +14045,7 @@ columns = [
             name: "m".into(),
             owner_app: "app_a".into(),
             ops: vec![Op::CreateTable {
+                attributes: zero_migrate_ir::attribute::TableAttributes::new(),
                 name: "limits".into(),
                 columns: vec![TIrColumn {
                     name: "cfg".into(),
@@ -14110,6 +14115,7 @@ columns = [
             name: "m".into(),
             owner_app: "app_a".into(),
             ops: vec![Op::CreateTable {
+                attributes: zero_migrate_ir::attribute::TableAttributes::new(),
                 name: "events".into(),
                 columns: vec![TIrColumn {
                     name: "at".into(),

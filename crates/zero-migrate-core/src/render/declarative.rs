@@ -7633,6 +7633,7 @@ mod mysql_storage_agreement_tests {
         // dialect where breaking it costs the width rather than the facet.
         for dialect in [&MYSQL, &POSTGRES, &SQLITE] {
             let op = Op::CreateTable {
+                attributes: zero_migrate_ir::attribute::TableAttributes::new(),
                 name: "things".into(),
                 columns: vec![bounded_ci_column()],
                 primary_key: None,

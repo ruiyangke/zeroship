@@ -108,6 +108,7 @@ fn checksum_of_ir_byte_stable_golden() {
     };
     let ops = vec![
         Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: "accounts".into(),
             columns: vec![IrColumn {
                 name: "id".into(),
@@ -264,6 +265,7 @@ fn checksum_of_ir_deterministic_and_sensitive() {
 #[test]
 fn composite_primary_key_order_changes_canonical_ir_and_checksum() {
     let ordered = Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "memberships".into(),
         columns: vec![
             IrColumn {
@@ -349,6 +351,7 @@ fn composite_primary_key_order_changes_canonical_ir_and_checksum() {
 fn checksum_of_ir_includes_table_check_expr() {
     fn check_op(rhs: i64) -> Op {
         Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: "checked".into(),
             columns: vec![IrColumn {
                 name: "a".into(),
@@ -691,6 +694,7 @@ fn checksum_of_ir_jcs_is_key_sorted_stable() {
     let flags = MigrationFlags::default();
     let owner = "app_ir";
     let ct = Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
         name: "t".into(),
         columns: vec![IrColumn {
             name: "id".into(),

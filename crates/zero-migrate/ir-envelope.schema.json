@@ -172,6 +172,10 @@
                 }
               ]
             },
+            "attributes": {
+              "description": "Backend-specific table options, keyed `<dialect>.<name>`.\n\nThe extension point for knobs the closed `Op` set does not model and should\nnot: `postgres.fillfactor`, `mysql.row_format`, `sqlite.strict`. Which keys\nexist is declared by each vendor crate, not here — this crate carries them\nwithout interpreting them. See [`crate::attribute`].\n\n`skip_serializing_if` is load-bearing, not tidiness: an empty set is omitted\nentirely, so adding this field changed the wire form — and therefore the\nchecksum — of NO migration that carries no attributes, which is every\nmigration authored before it existed.",
+              "$ref": "#/$defs/TableAttributes"
+            },
             "op": {
               "type": "string",
               "const": "createTable"
@@ -5393,6 +5397,17 @@
           "const": "ifExists"
         }
       ]
+    },
+    "TableAttributes": {
+      "description": "The attributes carried by a TABLE node.\n\nA transparent wrapper: it serializes exactly as the bare map does, so it costs nothing\non the wire. Its whole job is to make [`ScopedAttributes::SCOPE`] a fact the compiler\ncarries rather than a claim a call site makes.",
+      "$ref": "#/$defs/Attributes"
+    },
+    "Attributes": {
+      "description": "The attributes carried by one IR node.\n\nA `BTreeMap` rather than a `HashMap` because the order is part of the CHECKSUM: the\ncanonical serialization must not depend on insertion order, or one authored migration\nhashes differently per run.\n\nEmpty is the overwhelmingly common case and serializes away entirely\n(`skip_serializing_if`), so adding this field to an op does not change the wire form\nof any migration that carries no attributes — which is every migration authored before\nthis existed.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/IrScalar"
+      }
     },
     "PartitionBounds": {
       "description": "Partition bounds for `CREATE TABLE child PARTITION OF parent`.",

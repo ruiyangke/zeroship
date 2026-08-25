@@ -5647,6 +5647,7 @@ pub fn descriptors_to_create_ops(
         // An empty `_indexes` yields `Vec::new()`, byte-identical to the pre-index shape.
         let indexes = d.indexes.iter().map(index_descriptor_to_ir).collect();
         let op = Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: d.name.clone(),
             columns,
             primary_key: None,
@@ -5954,6 +5955,7 @@ mod tests {
 
     fn create(name: &str, columns: Vec<IrColumn>) -> Op {
         let op = Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: name.to_string(),
             columns,
             primary_key: None,
@@ -6010,6 +6012,7 @@ mod tests {
     #[test]
     fn no_inject_fold_preserves_author_updated_at_shape() {
         let op = Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: "events".to_string(),
             columns: vec![col("updated_at", ColType::Text, true)],
             primary_key: None,
@@ -6040,6 +6043,7 @@ mod tests {
     #[test]
     fn no_inject_fold_preserves_uuid_columns_named_id() {
         let create_with_id = Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: "external_keys".to_string(),
             columns: vec![col("id", ColType::Uuid, true)],
             primary_key: None,
@@ -6051,6 +6055,7 @@ mod tests {
             existence_guard: None,
         };
         let create_then_add = Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: "imported_keys".to_string(),
             columns: vec![col("label", ColType::Text, true)],
             primary_key: None,
@@ -6121,6 +6126,7 @@ columns = [
             name: "scoped_create".to_string(),
             owner_app: "app_fold".to_string(),
             ops: vec![Op::CreateTable {
+                attributes: zero_migrate_ir::attribute::TableAttributes::new(),
                 name: "events".to_string(),
                 columns: vec![id, col("payload", ColType::Json, true)],
                 primary_key: Some(vec!["id".to_string()]),
@@ -7858,6 +7864,7 @@ columns = [
         let mut id = col("id", ColType::BigInt, false);
         id.identity = identity_id.then_some(crate::model::ir::IdentityCol { always: false });
         Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: "orders".to_string(),
             columns: vec![
                 id,
@@ -8324,6 +8331,7 @@ columns = [
         // single-`id` FK + an extra index) — proves they fold onto the snapshot.
         let teams = create("teams", vec![col("label", ColType::Text, false)]);
         let memberships = Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: "memberships".to_string(),
             columns: vec![
                 col("team_id", ColType::Text, false),
@@ -8385,6 +8393,7 @@ columns = [
     fn runtime_options_and_plain_indexes_fold_into_table_snapshot() {
         let ops = vec![
             Op::CreateTable {
+                attributes: zero_migrate_ir::attribute::TableAttributes::new(),
                 name: "posts".to_string(),
                 columns: vec![
                     col("author_id", ColType::Text, false),
@@ -8590,6 +8599,7 @@ columns = [
         indexes: Vec<IrIndex>,
     ) -> Op {
         Op::CreateTable {
+            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
             name: name.to_string(),
             columns,
             primary_key: None,
