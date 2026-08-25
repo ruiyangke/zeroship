@@ -975,11 +975,19 @@ impl Config {
         parameters: Vec<(String, String)>,
         explicit: &[String],
     ) -> Result<(), Error> {
-        for (key, value) in parameters {
-            if key == "service" || explicit.iter().any(|given| given == &key) {
+        // A section may name one key twice, and libpq takes the FIRST of them.
+        // Applying each pair as it arrives would take the last.
+        let mut applied: Vec<&str> = Vec::new();
+
+        for (key, value) in &parameters {
+            if key == "service"
+                || explicit.iter().any(|given| given == key)
+                || applied.contains(&key.as_str())
+            {
                 continue;
             }
-            self.param(&key, &value)?;
+            self.param(key, value)?;
+            applied.push(key);
         }
 
         Ok(())
@@ -2998,6 +3006,26 @@ mod tests {
             // The keys that were NOT explicit still come from the service, or
             // this test would pass for a `fill_unset` that does nothing at all.
             assert_eq!(config.get_user(), Some("service_user"));
+        }
+
+        /// A section may name one key twice, and libpq takes the FIRST. Probed
+        /// against 16.14 with two `host` lines: it resolved `first.invalid`.
+        /// Applying every pair in order takes the last instead, which is the
+        /// opposite, and silently connects somewhere the operator did not.
+        #[test]
+        fn the_first_of_two_values_for_one_key_wins() {
+            let mut config = Config::new();
+            config
+                .fill_unset(
+                    vec![
+                        ("dbname".to_owned(), "first_db".to_owned()),
+                        ("dbname".to_owned(), "second_db".to_owned()),
+                    ],
+                    &[],
+                )
+                .expect("a repeated key is not a parse error");
+
+            assert_eq!(config.get_dbname(), Some("first_db"));
         }
 
         /// A `service` key inside a service section would otherwise recurse or
