@@ -11,6 +11,7 @@
 mod support;
 
 mod collation_introspection;
+mod drift_check_body_pg;
 mod drift_column_physical_type;
 mod drift_function_body_pg;
 mod drift_id_facets_pg;

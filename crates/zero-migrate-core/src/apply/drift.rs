@@ -1280,6 +1280,15 @@ fn diff_attrs(
                 && constraint_definition_is_comparable(&ac.kind)
             {
                 push(&obj, "definition", &ec.definition, &ac.definition);
+            } else if let (Some(expected_refs), Some(actual_refs)) =
+                (check_referenced_columns(ec), check_referenced_columns(ac))
+            {
+                push(
+                    &obj,
+                    "referenced_columns",
+                    &expected_refs.join(","),
+                    &actual_refs.join(","),
+                );
             }
             push(
                 &obj,
@@ -1481,6 +1490,51 @@ fn index_referenced_columns(index: &IndexSnapshot) -> Option<Vec<&str>> {
 /// refusal reports the live definition so an operator can see what is actually
 /// installed, and collapsing that to `<present>` would remove the only text in the
 /// message that says anything specific.
+/// The columns a CHECK reads, as a canonical set, or `None` when this constraint has
+/// no comparable answer.
+///
+/// The structural replacement for the body [`constraint_definition_is_comparable`]
+/// exempts, and the direct analogue of [`index_referenced_columns`]: exempting the text
+/// left `kind` and `comment`, and `kind` is `CHECK` on both sides of any rewrite, so a
+/// constraint keeping its name could have its whole predicate replaced and the diff
+/// stayed clean. Measured on a live PostgreSQL 18.4: a CHECK moved from `qty > 0` to
+/// `price > 0` reported nothing at all.
+///
+/// # Why this is sound where comparing `definition` is not
+///
+/// `ConstraintSnapshot::cascade_columns` is documented as provenance rather than
+/// identity, and that warning is about the general case: the two producers legitimately
+/// differ for an `EXCLUDE`, where PostgreSQL records attnum `0` for an expression
+/// element while the offline side takes the plain column elements alone. So `EXCLUDE`
+/// is NOT admitted here.
+///
+/// For a `CHECK` they agree, because both derive the same thing from the same structure
+/// — the live side expands `conkey`, the offline side walks the closed `Expr` the
+/// renderer emitted. Verified on the same live server: an authored `qty > 0` yields
+/// `Some(["qty"])` on BOTH sides while the definitions read `CHECK (("qty" > 0))` and
+/// `CHECK ((qty > 0))`. The text is what diverges; the column set is not.
+///
+/// Sorted and deduplicated because the two producers arrive in different orders — AST
+/// walk order against `conkey` order — and order is not part of the claim.
+///
+/// `None` for any kind but `CHECK`, and for a producer that recorded nothing, which
+/// keeps the compare out of exactly the cases where the two sides are known to differ.
+///
+/// # What this still does not recover
+///
+/// Two predicates over the SAME columns with different logic — `qty > 0` against
+/// `qty > -2147483648` — still compare equal. That is the identical bound
+/// [`index_expression_bodies_are_comparable`] states about itself, and lifting it needs
+/// the catalog text parsed back to the closed AST rather than compared as text.
+fn check_referenced_columns(constraint: &ConstraintSnapshot) -> Option<Vec<&str>> {
+    if constraint.kind != "CHECK" {
+        return None;
+    }
+    let columns = constraint.cascade_columns.as_ref()?;
+    let set: std::collections::BTreeSet<&str> = columns.iter().map(String::as_str).collect();
+    Some(set.into_iter().collect())
+}
+
 fn constraint_definition_is_comparable(kind: &str) -> bool {
     !matches!(kind, "EXCLUDE" | "CHECK")
 }
