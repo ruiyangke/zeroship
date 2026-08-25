@@ -13,6 +13,7 @@ mod support;
 mod dialect_corpus;
 
 mod a_test_recorder_never_ships;
+mod a_vendor_answers_one_capability_row;
 mod alter_column_dialect_support;
 mod alter_column_grammar_comes_from_the_backend;
 mod backend_modules_name_one_dialect;
