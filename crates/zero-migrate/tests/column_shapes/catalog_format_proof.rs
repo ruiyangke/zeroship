@@ -122,6 +122,7 @@ fn live(dialect: &zero_migrate::DialectId, evidence: Evidence) -> LiveSchema {
                 cascade_columns: None,
             }],
             runtime_options: Default::default(),
+            attributes: Default::default(),
             partition_by: None,
             comment: None,
             stored_create_sql: None,

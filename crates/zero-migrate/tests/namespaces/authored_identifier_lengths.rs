@@ -141,6 +141,7 @@ fn column_element() -> IndexElement {
 
 fn add_constraint(name: &str) -> Op {
     Op::AddConstraint {
+        attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
         table: "t".into(),
         constraint: IrConstraint {
             name: Some(name.into()),
@@ -155,7 +156,7 @@ fn add_constraint(name: &str) -> Op {
 
 fn create_table(constraints: Vec<IrConstraint>, indexes: Vec<IrIndex>) -> Op {
     Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "t".into(),
         columns: vec![column()],
         primary_key: Some(vec!["c".into()]),
@@ -591,6 +592,7 @@ fn live_schema(
         indexes,
         constraints,
         runtime_options: Default::default(),
+        attributes: Default::default(),
         partition_by: None,
         comment: None,
         stored_create_sql: None,

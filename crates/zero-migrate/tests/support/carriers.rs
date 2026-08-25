@@ -121,10 +121,17 @@ pub fn walk_table(table: &TableSnapshot, set: &mut CarrierSet) {
         indexes,
         constraints,
         runtime_options,
+        attributes,
         partition_by,
         comment,
         stored_create_sql,
     } = table;
+
+    never_a_column_name(
+        "TableSnapshot::attributes",
+        attributes,
+        "a vendor attribute is a STORAGE option keyed by `<dialect>.<name>` - a fill          percentage, a tablespace, a storage engine. None of the declared set names a          column, and a knob that did would be spelling schema rather than storage, so          the rename walk has nothing here to follow.",
+    );
 
     never_a_column_name(
         "TableSnapshot::runtime_options",

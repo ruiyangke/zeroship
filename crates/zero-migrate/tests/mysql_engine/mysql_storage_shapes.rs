@@ -71,7 +71,7 @@ fn column(name: &str, ty: ColType) -> IrColumn {
 
 fn create_table(name: &str, columns: Vec<IrColumn>) -> Op {
     Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
         name: name.to_string(),
         columns,
         primary_key: None,
@@ -489,6 +489,7 @@ fn mysql_refuses_an_added_foreign_key_that_would_synthesize_a_text_key() {
         create_table("parents", vec![parent_id]),
         create_table("children", vec![column("parent_id", ColType::Text)]),
         Op::AddConstraint {
+            attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
             table: "children".to_string(),
             constraint: fk_constraint("children_parent_fkey", "parent_id", "parents", "id"),
             schema: None,

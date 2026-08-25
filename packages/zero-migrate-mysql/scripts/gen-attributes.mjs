@@ -8,8 +8,8 @@ import { fileURLToPath } from "node:url";
 import { generate } from "../../../scripts/vendor-attribute-codegen.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const { dialect, count } = await generate({
+const { dialect, count, byScope } = await generate({
   vocabularyPath: resolve(here, "../../../crates/zero-migrate-mysql/attribute-vocabulary.json"),
   outPath: resolve(here, "../src/generated/attributes.ts"),
 });
-console.log(`zero-migrate-${dialect}: ${count} table attribute(s)`);
+console.log(`zero-migrate-${dialect}: ${count} attribute(s) ${JSON.stringify(byScope)}`);

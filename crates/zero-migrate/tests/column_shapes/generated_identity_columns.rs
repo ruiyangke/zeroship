@@ -90,7 +90,7 @@ fn generated_total(stored: bool) -> GeneratedCol {
 
 fn create_table(columns: Vec<IrColumn>, primary_key: Option<Vec<String>>) -> Op {
     Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "line_items".to_string(),
         columns,
         primary_key,
@@ -376,6 +376,7 @@ fn identity_cannot_also_have_default_or_generated() {
 #[test]
 fn generated_and_identity_facets_render_on_add_column() {
     let add_generated = Op::AddColumn {
+        attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
         table: "line_items".to_string(),
         column: "total_cents".to_string(),
         ty: ColType::Int,
@@ -397,6 +398,7 @@ fn generated_and_identity_facets_render_on_add_column() {
     );
 
     let add_identity = Op::AddColumn {
+        attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
         table: "line_items".to_string(),
         column: "seq".to_string(),
         ty: ColType::BigInt,

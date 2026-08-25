@@ -294,6 +294,7 @@ fn model_table_probes() -> ProbeSet<schema_model::Table> {
         indexes,
         constraints,
         runtime_options,
+        attributes,
         partition_by,
         comment,
     } = schema_model::Table::default();
@@ -310,6 +311,13 @@ fn model_table_probes() -> ProbeSet<schema_model::Table> {
     set.probe("Table::runtime_options", runtime_options, |t| {
         t.runtime_options.soft_delete = true;
         t.runtime_options.strictness = TableStrictness::Off;
+    });
+    set.probe("Table::attributes", attributes, |t| {
+        t.attributes.insert(
+            zero_migrate_ir::attribute::AttrKey::parse("acme.fillfactor")
+                .expect("a well-formed key"),
+            zero_migrate::IrScalar::Int(70),
+        );
     });
     set.probe("Table::partition_by", partition_by, |t| {
         t.partition_by = Some(zero_migrate::PartitionSpec::Range {
@@ -420,25 +428,28 @@ fn every_field_of_the_neutral_index_constraint_and_table_is_compared_by_default(
     assert!(invisible.is_empty(), "`Constraint` ignored {invisible:?}");
 
     let table = model_table_probes();
-    assert_eq!(table.probes.len(), 6, "`Table` probe list drifted");
+    assert_eq!(table.probes.len(), 7, "`Table` probe list drifted");
     let invisible = fields_invisible_to_equality(&schema_model::Table::default(), &table);
     assert!(invisible.is_empty(), "`Table` ignored {invisible:?}");
 }
 
 /// The other three snapshot types, measured for the record.
 ///
-/// `TableSnapshot` ignores two of seven; `IndexSnapshot` ignores four of thirteen;
-/// `ConstraintSnapshot` ignores one of five. All seven shrink to ZERO in the model,
-/// because every one is either a vendor fact that moved into `VendorFacts` or an
-/// emission-only field that moved onto a named comparator.
+/// `TableSnapshot` ignores three of eight; `IndexSnapshot` ignores four of thirteen;
+/// `ConstraintSnapshot` ignores one of five. All eight shrink to ZERO in the model,
+/// because every one is either a vendor fact that moved into `VendorFacts`, an
+/// emission-only field that moved onto a named comparator, or - for `attributes` - a
+/// field the model DOES compare and only the snapshot's hand-written `eq` excludes.
 #[test]
 fn the_other_snapshot_types_ignore_seven_more_fields_between_them() {
     let table = field_probes::table_snapshot_probes();
-    assert_eq!(table.probes.len(), 7, "`TableSnapshot` probe list drifted");
+    assert_eq!(table.probes.len(), 8, "`TableSnapshot` probe list drifted");
     assert_eq!(
         fields_invisible_to_equality(&base_table_snapshot(), &table),
+        // In PROBE-DECLARATION order, which mirrors the struct's field order.
         [
             "TableSnapshot::runtime_options",
+            "TableSnapshot::attributes",
             "TableSnapshot::stored_create_sql"
         ],
         "`TableSnapshot::eq`'s exclusion list changed"

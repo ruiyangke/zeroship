@@ -120,3 +120,46 @@ fn every_exported_key_belongs_to_this_dialect() {
         "walked {checked} attribute(s) — a walk over an empty set proves nothing"
     );
 }
+
+/// A bound the manual does not state must not be re-invented.
+///
+/// `postgres.parallel_workers` was first declared `0..=1024`. That ceiling appears
+/// nowhere in PostgreSQL's documentation — it was invented — and it would have refused a
+/// legal value at plan time with a limit the server never imposes. An over-restrictive
+/// range is not the safe direction: it turns a working migration into a refusal.
+///
+/// This asserts the BEHAVIOUR (a large value is accepted) rather than the number, so it
+/// keeps biting if the ceiling is re-narrowed to any invented figure, not just to 1024.
+#[test]
+fn parallel_workers_does_not_carry_an_undocumented_ceiling() {
+    use zero_migrate_backend::attribute::AttrShape;
+    use zero_migrate_ir::ir::IrScalar;
+
+    let def = VENDOR
+        .attributes
+        .iter()
+        .find(|d| d.key.name() == "parallel_workers")
+        .expect("postgres declares parallel_workers");
+
+    // Comfortably past every plausible invented bound, and still a legal integer for the
+    // storage parameter.
+    assert_eq!(
+        def.shape.check(&IrScalar::Int(100_000)),
+        Ok(()),
+        "PostgreSQL documents no upper bound for parallel_workers; a declaration must not \
+         add one"
+    );
+
+    // The control: the range still REFUSES something, so this is not passing because the
+    // shape stopped checking. A negative worker count is meaningless.
+    assert!(
+        def.shape.check(&IrScalar::Int(-1)).is_err(),
+        "the shape must still reject a negative worker count"
+    );
+
+    // And it is still an Int, not silently widened to Text to dodge the question.
+    assert!(
+        matches!(def.shape, AttrShape::Int { .. }),
+        "parallel_workers must stay an integer shape"
+    );
+}

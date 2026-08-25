@@ -107,6 +107,7 @@ pub fn base_table_snapshot() -> TableSnapshot {
         indexes: Vec::new(),
         constraints: Vec::new(),
         runtime_options: zero_migrate::TableRuntimeOptions::default(),
+        attributes: zero_migrate_ir::attribute::Attributes::new(),
         partition_by: None,
         comment: None,
         stored_create_sql: None,
@@ -256,6 +257,7 @@ pub fn table_snapshot_probes() -> ProbeSet<TableSnapshot> {
         indexes,
         constraints,
         runtime_options,
+        attributes,
         partition_by,
         comment,
         stored_create_sql,
@@ -264,6 +266,7 @@ pub fn table_snapshot_probes() -> ProbeSet<TableSnapshot> {
         indexes: Vec::new(),
         constraints: Vec::new(),
         runtime_options: zero_migrate::TableRuntimeOptions::default(),
+        attributes: zero_migrate_ir::attribute::Attributes::new(),
         partition_by: None,
         comment: None,
         stored_create_sql: None,
@@ -289,6 +292,13 @@ pub fn table_snapshot_probes() -> ProbeSet<TableSnapshot> {
     });
     table.probe("TableSnapshot::runtime_options", runtime_options, |t| {
         t.runtime_options.soft_delete = true;
+    });
+    table.probe("TableSnapshot::attributes", attributes, |t| {
+        t.attributes.insert(
+            zero_migrate_ir::attribute::AttrKey::parse("acme.fillfactor")
+                .expect("a well-formed key"),
+            zero_migrate::IrScalar::Int(70),
+        );
     });
     table.probe("TableSnapshot::partition_by", partition_by, |t| {
         t.partition_by = Some(zero_migrate::PartitionSpec::Range {

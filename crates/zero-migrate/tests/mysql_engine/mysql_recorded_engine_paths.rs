@@ -660,7 +660,7 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
     let expected = zero_migrate::render::fold::fold_ops(
         zero_migrate::shipping_vendors(),
         &[Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "ids".to_string(),
             columns: vec![
                 auto_id,
@@ -1010,7 +1010,7 @@ async fn mysql_auto_increment_add_and_drop_are_recovered_from_catalog_extra() {
         zero_migrate::render::fold::fold_ops(
             zero_migrate::shipping_vendors(),
             &[Op::CreateTable {
-                attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+                attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
                 name: "identity_probe".to_string(),
                 columns: vec![column(identity)],
                 primary_key: Some(vec!["id".to_string()]),
@@ -1700,7 +1700,7 @@ async fn named_table_unique_candidate_and_composite_fk_have_clean_mysql_drift() 
     let child_fk_name = "children_parent_fkey";
     let ops = vec![
         Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "parents".to_string(),
             columns: vec![
                 bigint_column("tenant_id", false),
@@ -1720,7 +1720,7 @@ async fn named_table_unique_candidate_and_composite_fk_have_clean_mysql_drift() 
             existence_guard: None,
         },
         Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "children".to_string(),
             columns: vec![
                 bigint_column("parent_tenant", true),

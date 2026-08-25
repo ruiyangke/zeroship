@@ -92,6 +92,8 @@
 use std::collections::BTreeMap;
 use zero_migrate_backend::dialectal::{Dialectal, VendorColumnFacts};
 
+use zero_migrate_ir::attribute::Attributes;
+
 use crate::model::ir::{
     IdentityCol, IndexSortOrder, IndexStorageParams, PartitionSpec, TableRuntimeOptions,
     ValueFormat,
@@ -525,6 +527,10 @@ pub struct Table {
     pub constraints: Vec<Constraint>,
     /// Runtime-visible collection options.
     pub runtime_options: TableRuntimeOptions,
+    /// The vendor attributes authored on this table, every dialect's at once. Travels
+    /// with the model so the create that renders it reads the same value the fold stored;
+    /// see [`TableSnapshot::attributes`] for why it is not compared.
+    pub attributes: Attributes,
     /// Partitioning strategy for a partitioned table parent.
     pub partition_by: Option<PartitionSpec>,
     /// User-authored catalog comment on this table.
@@ -778,6 +784,7 @@ impl Table {
                 .map(Constraint::from_snapshot)
                 .collect(),
             runtime_options: snapshot.runtime_options.clone(),
+            attributes: snapshot.attributes.clone(),
             partition_by: snapshot.partition_by.clone(),
             comment: snapshot.comment.clone(),
         }
@@ -803,6 +810,7 @@ impl Table {
                 .map(Constraint::to_snapshot)
                 .collect(),
             runtime_options: self.runtime_options.clone(),
+            attributes: self.attributes.clone(),
             partition_by: self.partition_by.clone(),
             comment: self.comment.clone(),
             stored_create_sql: vendor.stored_create_sql.get(&TableKey::new(name)).cloned(),
@@ -1227,6 +1235,7 @@ pub fn table_shape_identity(left: &Table, right: &Table) -> bool {
         indexes,
         constraints,
         runtime_options: _ignored_runtime_options_not_introspectable,
+        attributes: _ignored_attributes_not_introspectable,
         partition_by,
         comment,
     } = left;

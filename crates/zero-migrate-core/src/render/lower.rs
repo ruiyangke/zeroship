@@ -29,6 +29,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use zero_migrate_backend::registry::VendorSet;
+use zero_migrate_ir::attribute::OpAttributes;
 
 use crate::guard::{GuardConfig, GuardError, MigrationGuard};
 use crate::model::backfill::{
@@ -4180,6 +4181,7 @@ impl IrAuthor {
                 indexes,
                 partition_by,
                 runtime_options,
+                attributes,
                 ..
             } => {
                 // An ENCRYPTED column's inner domain is resolved to its base type
@@ -4250,6 +4252,11 @@ impl IrAuthor {
                 // top-level `primary_key` field above; validation owns any policy
                 // decision about author primary keys.
                 self.fold_create_table_specs(name, &eff_schema, &mut snap, constraints, indexes)?;
+                // The authored vendor attributes, every dialect's at once. Stamped onto the
+                // SAME snapshot the create renders from, for the same reason the op's
+                // constraints and indexes are above: the descriptor bridge carries columns
+                // only, so anything not stamped here is silently dropped at apply.
+                snap.attributes = attributes.attributes().clone();
                 // SQLite lowers the already-resolved snapshot through the same
                 // structural renderer as the declarative differ. Policy injection
                 // has happened exactly once, in `ResolvedInject`; emission never
@@ -7690,6 +7697,8 @@ impl IrAuthor {
                     indexes: Vec::new(),
                     constraints: Vec::new(),
                     runtime_options: Default::default(),
+                    // A placeholder snapshot for a rename, carrying no shape at all.
+                    attributes: zero_migrate_ir::attribute::Attributes::new(),
                     partition_by: None,
                     comment: None,
                     stored_create_sql: None,
@@ -10521,6 +10530,7 @@ mod tests {
             indexes,
             constraints,
             runtime_options: Default::default(),
+            attributes: Default::default(),
             partition_by: None,
             comment: None,
             stored_create_sql: None,
@@ -11455,7 +11465,7 @@ mod tests {
             name: "m".into(),
             owner_app: "app_a".into(),
             ops: vec![Op::CreateTable {
-                attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+                attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
                 name: table.into(),
                 columns: cols,
                 primary_key: None,
@@ -11769,6 +11779,7 @@ mod tests {
             name: "m".into(),
             owner_app: "app_a".into(),
             ops: vec![Op::AddColumn {
+                attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
                 table: "events".into(),
                 column: "seq".into(),
                 ty: ColType::BigInt,
@@ -12083,7 +12094,7 @@ mod tests {
             name: "m".into(),
             owner_app: "app_a".into(),
             ops: vec![Op::CreateTable {
-                attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+                attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
                 name: "widgets".into(),
                 columns: vec![TIrColumn {
                     name: "title".into(),
@@ -12986,6 +12997,7 @@ mod tests {
                         indexes: Vec::new(),
                         constraints: Vec::new(),
                         runtime_options: Default::default(),
+                        attributes: Default::default(),
                         partition_by: None,
                         comment: None,
                         stored_create_sql: None,
@@ -13824,7 +13836,7 @@ columns = [
             name: "m".into(),
             owner_app: "app_a".into(),
             ops: vec![Op::CreateTable {
-                attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+                attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
                 name: "events".into(),
                 columns: vec![
                     TIrColumn {
@@ -13971,7 +13983,7 @@ columns = [
             name: "m".into(),
             owner_app: "app_a".into(),
             ops: vec![Op::CreateTable {
-                attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+                attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
                 name: "limits".into(),
                 columns: vec![TIrColumn {
                     name: "net_policy_limits_json".into(),
@@ -14045,7 +14057,7 @@ columns = [
             name: "m".into(),
             owner_app: "app_a".into(),
             ops: vec![Op::CreateTable {
-                attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+                attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
                 name: "limits".into(),
                 columns: vec![TIrColumn {
                     name: "cfg".into(),
@@ -14115,7 +14127,7 @@ columns = [
             name: "m".into(),
             owner_app: "app_a".into(),
             ops: vec![Op::CreateTable {
-                attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+                attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
                 name: "events".into(),
                 columns: vec![TIrColumn {
                     name: "at".into(),
@@ -14168,6 +14180,7 @@ columns = [
             name: "m".into(),
             owner_app: "app_a".into(),
             ops: vec![Op::AddColumn {
+                attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
                 table: "events".into(),
                 column: "token".into(),
                 ty: ColType::Uuid,
@@ -14208,6 +14221,7 @@ columns = [
             name: "m".into(),
             owner_app: "app_a".into(),
             ops: vec![Op::AddColumn {
+                attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
                 table: "events".into(),
                 column: "kind".into(),
                 ty: ColType::Text,
@@ -15093,6 +15107,7 @@ columns = [
             indexes,
             constraints,
             runtime_options: Default::default(),
+            attributes: Default::default(),
             partition_by: None,
             comment: None,
             stored_create_sql: Some(stored_create_sql.to_string()),
@@ -15776,6 +15791,7 @@ columns = [
                         indexes: Vec::new(),
                         constraints: Vec::new(),
                         runtime_options: Default::default(),
+                        attributes: Default::default(),
                         partition_by: None,
                         comment: None,
                         stored_create_sql: None,
@@ -15862,6 +15878,7 @@ columns = [
                         indexes: Vec::new(),
                         constraints: Vec::new(),
                         runtime_options: Default::default(),
+                        attributes: Default::default(),
                         partition_by: None,
                         comment: None,
                         stored_create_sql: None,

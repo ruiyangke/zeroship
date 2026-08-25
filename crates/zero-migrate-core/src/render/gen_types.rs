@@ -2005,7 +2005,7 @@ mod tests {
     fn runtime_json_no_inject_preserves_uuid_column_named_id() {
         let effective = crate::test_fixtures::no_inject("app");
         let ops = vec![Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "external_keys".to_string(),
             columns: vec![column("id", ColType::Uuid)],
             primary_key: None,

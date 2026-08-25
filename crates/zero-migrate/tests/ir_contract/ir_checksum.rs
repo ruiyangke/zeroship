@@ -108,7 +108,7 @@ fn checksum_of_ir_byte_stable_golden() {
     };
     let ops = vec![
         Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "accounts".into(),
             columns: vec![IrColumn {
                 name: "id".into(),
@@ -188,6 +188,7 @@ fn checksum_of_ir_deterministic_and_sensitive() {
     let owner = "app_ir";
 
     let add_a = Op::AddColumn {
+        attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
         table: "users".into(),
         column: "age".into(),
         ty: zero_migrate::model::ir::ColType::Int,
@@ -203,6 +204,7 @@ fn checksum_of_ir_deterministic_and_sensitive() {
         existence_guard: None,
     };
     let add_b = Op::AddColumn {
+        attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
         table: "users".into(),
         column: "name".into(),
         ty: zero_migrate::model::ir::ColType::Text,
@@ -265,7 +267,7 @@ fn checksum_of_ir_deterministic_and_sensitive() {
 #[test]
 fn composite_primary_key_order_changes_canonical_ir_and_checksum() {
     let ordered = Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "memberships".into(),
         columns: vec![
             IrColumn {
@@ -351,7 +353,7 @@ fn composite_primary_key_order_changes_canonical_ir_and_checksum() {
 fn checksum_of_ir_includes_table_check_expr() {
     fn check_op(rhs: i64) -> Op {
         Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "checked".into(),
             columns: vec![IrColumn {
                 name: "a".into(),
@@ -636,6 +638,7 @@ fn checksum_of_ir_fk_actions_are_additive_neutral_and_sensitive() {
 
     let mk_fk = |on_delete: Option<RefAction>, on_update: Option<RefAction>| {
         vec![Op::AddConstraint {
+            attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
             table: "orders".into(),
             constraint: IrConstraint {
                 name: Some("orders_customer_fk".into()),
@@ -694,7 +697,7 @@ fn checksum_of_ir_jcs_is_key_sorted_stable() {
     let flags = MigrationFlags::default();
     let owner = "app_ir";
     let ct = Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "t".into(),
         columns: vec![IrColumn {
             name: "id".into(),

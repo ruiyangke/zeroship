@@ -15,8 +15,8 @@
 // backend's DIALECT ID — there is no hand-picked alias anywhere in the chain.
 
 declare module "zero-migrate" {
-  /** Table-level options this backend accepts. */
-  interface SqliteTableAttributes {
+  /** CreateTable-level options this backend accepts. */
+  interface SqliteCreateTableAttributes {
     /**
      * SQLite's STRICT table clause: enforce each column's declared type on write rather
      * than applying type affinity. Unrelated to zero-migrate's own deploy-time
@@ -33,12 +33,12 @@ declare module "zero-migrate" {
 
   interface VendorAttributeNamespaces {
     /**
-     * Table options specific to the `sqlite` backend.
+     * CreateTable options specific to the `sqlite` backend.
      *
-     * Present because this package is installed. Every field is optional, and a table
+     * Present because this package is installed. Every field is optional, and an object
      * that also carries other backends' options stays portable to all of them.
      */
-    sqlite?: SqliteTableAttributes;
+    sqlite?: SqliteCreateTableAttributes;
   }
 }
 

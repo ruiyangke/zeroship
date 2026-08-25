@@ -406,7 +406,7 @@ fn create_table_primary_key_round_trips_and_schema_carries_field() {
     use zero_migrate::model::ir::{ColType, IrColumn};
 
     let op = Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "membership".into(),
         columns: vec![
             IrColumn {
@@ -467,7 +467,7 @@ fn create_table_primary_key_round_trips_and_schema_carries_field() {
     }
 
     let no_pk = Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "audit".into(),
         columns: vec![],
         primary_key: None,
@@ -1004,6 +1004,7 @@ fn add_column_omits_absent_optionals() {
     // nullable:None, default:None — both MUST be absent from the JSON object,
     // exactly as an idiomatic JS `op.addColumn("t","x","int")` (no opts) emits.
     let op = Op::AddColumn {
+        attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
         table: "t".into(),
         column: "x".into(),
         ty: zero_migrate::model::ir::ColType::Int,
@@ -1173,7 +1174,7 @@ fn partition_ops_round_trip_and_absent_fields_stay_omitted() {
     };
 
     let parent = Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "events".into(),
         columns: vec![IrColumn {
             name: "created_at".into(),
@@ -1223,7 +1224,7 @@ fn partition_ops_round_trip_and_absent_fields_stay_omitted() {
     assert_eq!(parent, back);
 
     let old_shape = Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "plain".into(),
         columns: vec![],
         primary_key: None,
@@ -1241,6 +1242,7 @@ fn partition_ops_round_trip_and_absent_fields_stay_omitted() {
     );
 
     let create_partition = Op::CreatePartition {
+        attributes: zero_migrate_ir::attribute::CreatePartitionAttributes::new(),
         name: "events_2026_05".into(),
         of: "events".into(),
         bounds: PartitionBounds::Range {
@@ -1322,6 +1324,7 @@ fn checksum_of_ir_matches_js_idiomatic_omitted_optionals() {
 
     // Rust-built op (None optionals).
     let rust_op = Op::AddColumn {
+        attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
         table: "t".into(),
         column: "x".into(),
         ty: ColType::Int,

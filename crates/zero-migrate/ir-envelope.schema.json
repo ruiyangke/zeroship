@@ -174,7 +174,7 @@
             },
             "attributes": {
               "description": "Backend-specific table options, keyed `<dialect>.<name>`.\n\nThe extension point for knobs the closed `Op` set does not model and should\nnot: `postgres.fillfactor`, `mysql.row_format`, `sqlite.strict`. Which keys\nexist is declared by each vendor crate, not here — this crate carries them\nwithout interpreting them. See [`crate::attribute`].\n\n`skip_serializing_if` is load-bearing, not tidiness: an empty set is omitted\nentirely, so adding this field changed the wire form — and therefore the\nchecksum — of NO migration that carries no attributes, which is every\nmigration authored before it existed.",
-              "$ref": "#/$defs/TableAttributes"
+              "$ref": "#/$defs/CreateTableAttributes"
             },
             "op": {
               "type": "string",
@@ -221,6 +221,10 @@
                   "type": "null"
                 }
               ]
+            },
+            "attributes": {
+              "description": "Backend-specific options, keyed `<dialect>.<name>`.\n\nA partition IS a table and takes its own storage options; PostgreSQL lets a partition override what its parent declared.\n\nWhich keys exist is declared by each vendor crate, not here. An empty set is\nomitted entirely, so adding this field changed the wire form of no migration\nthat carries no attributes. See [`crate::attribute`].",
+              "$ref": "#/$defs/CreatePartitionAttributes"
             },
             "op": {
               "type": "string",
@@ -376,6 +380,10 @@
                 "string",
                 "null"
               ]
+            },
+            "attributes": {
+              "description": "Backend-specific options, keyed `<dialect>.<name>`.\n\nThis is how a table option is CHANGED after creation. Without it `postgres.fillfactor` could be set at create and never altered, which would make the knob write-once for no reason the server imposes.\n\nWhich keys exist is declared by each vendor crate, not here. An empty set is\nomitted entirely, so adding this field changed the wire form of no migration\nthat carries no attributes. See [`crate::attribute`].",
+              "$ref": "#/$defs/SetTableOptionsAttributes"
             },
             "op": {
               "type": "string",
@@ -588,6 +596,10 @@
                   "type": "null"
                 }
               ]
+            },
+            "attributes": {
+              "description": "Backend-specific options, keyed `<dialect>.<name>`.\n\nPer-column vendor options - PostgreSQL's STORAGE and COMPRESSION, MySQL's per-column character set.\n\nWhich keys exist is declared by each vendor crate, not here. An empty set is\nomitted entirely, so adding this field changed the wire form of no migration\nthat carries no attributes. See [`crate::attribute`].",
+              "$ref": "#/$defs/AddColumnAttributes"
             },
             "op": {
               "type": "string",
@@ -1228,6 +1240,10 @@
                   "type": "null"
                 }
               ]
+            },
+            "attributes": {
+              "description": "Backend-specific options, keyed `<dialect>.<name>`.\n\n`IrConstraint` is `{name, kind}` and models no deferrability, so DEFERRABLE / INITIALLY DEFERRED - which PostgreSQL and SQLite have and MySQL does not - is a genuine vendor surface here rather than a duplicate.\n\nWhich keys exist is declared by each vendor crate, not here. An empty set is\nomitted entirely, so adding this field changed the wire form of no migration\nthat carries no attributes. See [`crate::attribute`].",
+              "$ref": "#/$defs/AddConstraintAttributes"
             },
             "op": {
               "type": "string",
@@ -5398,8 +5414,8 @@
         }
       ]
     },
-    "TableAttributes": {
-      "description": "The attributes carried by a TABLE node.\n\nA transparent wrapper: it serializes exactly as the bare map does, so it costs nothing\non the wire. Its whole job is to make [`ScopedAttributes::SCOPE`] a fact the compiler\ncarries rather than a claim a call site makes.",
+    "CreateTableAttributes": {
+      "description": "Attributes on `Op::CreateTable` — the table's own storage options.",
       "$ref": "#/$defs/Attributes"
     },
     "Attributes": {
@@ -5585,6 +5601,10 @@
       "minimum": -9007199254740991,
       "maximum": 9007199254740991
     },
+    "CreatePartitionAttributes": {
+      "description": "Attributes on `Op::CreatePartition`.\n\nA partition IS a table and takes its own storage options; PostgreSQL lets one\noverride what its parent declared. Its own carrier rather than a shared\ntable-scoped one, because \"same knob\" is a property of the KEY, not of a shared\nRust type — and a vendor may legitimately permit a knob on `createTable` and not\non `createPartition`.",
+      "$ref": "#/$defs/Attributes"
+    },
     "TableRuntimeOptionsPatch": {
       "description": "Patch form for `setTableOptions`: absent fields mean \"leave unchanged\".",
       "type": "object",
@@ -5616,6 +5636,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "SetTableOptionsAttributes": {
+      "description": "Attributes on `Op::SetTableOptions` — how a table option is CHANGED after\ncreation.\n\nWithout this carrier a knob could be set at create and never altered, which is a\nlimitation no server imposes.",
+      "$ref": "#/$defs/Attributes"
+    },
+    "AddColumnAttributes": {
+      "description": "Attributes on `Op::AddColumn` — per-column vendor options such as PostgreSQL's\n`STORAGE` and `COMPRESSION`.\n\n`Op::AddColumn` is FLAT — it does not embed an `IrColumn`, and its own doc explains\nthat an added column deliberately has no `id_prefix` slot (\"an added column is\nNEVER the system PK\"), also omitting `unique`, `references` and `collation`. The\ncarrier sits on the op because that is where the column's definition sits.",
+      "$ref": "#/$defs/Attributes"
     },
     "CommentTarget": {
       "description": "CLOSED target shape for `COMMENT ON`. Only object identifiers and a comment\nliteral are carried; `PostgreSQL`'s function comments normally require an\nargument-type signature for overloaded functions, but the IR intentionally\nmodels only the function name. Function comments are therefore rendered only\nfor unambiguous `FUNCTION name` references and are not folded into the\nsnapshot.",
@@ -5944,6 +5972,10 @@
           ]
         }
       ]
+    },
+    "AddConstraintAttributes": {
+      "description": "Attributes on `Op::AddConstraint`.\n\n`IrConstraint` is `{name, kind}` and models no deferrability, so\n`DEFERRABLE`/`INITIALLY DEFERRED` — which PostgreSQL and SQLite have and MySQL does\nnot — is a genuine vendor surface here rather than a duplicate of something already\ncarried.",
+      "$ref": "#/$defs/Attributes"
     },
     "IrValue": {
       "description": "A DML value in an insert row, `update.set`, `backfill.set`, trigger update\n`set`, or `onConflict.doUpdate`: either the existing typed scalar wire shape\nor a closed expression AST such as `FnSynth(now)`.",

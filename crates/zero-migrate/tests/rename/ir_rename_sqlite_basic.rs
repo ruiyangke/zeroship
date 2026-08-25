@@ -188,7 +188,7 @@ async fn first_deploy(be: &SqliteBackend, descriptors: &[CollectionDescriptor]) 
             name: format!("create_{}", d.name),
             owner_app: APP.into(),
             ops: vec![Op::CreateTable {
-                attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+                attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
                 name: d.name.clone(),
                 columns: cols,
                 primary_key: None,
@@ -428,7 +428,7 @@ async fn renamecolumn_sqlite_renders_neutral_type_as_affinity_not_pg_string() {
             name: "create_events".into(),
             owner_app: APP.into(),
             ops: vec![Op::CreateTable {
-                attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+                attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
                 name: "events".into(),
                 columns: vec![zero_migrate::model::ir::IrColumn {
                     name: "count".into(),
@@ -689,6 +689,7 @@ fn renamecolumn_sqlite_fails_closed_with_column_but_no_sqlite_schema() {
             indexes: vec![],
             constraints: vec![],
             runtime_options: Default::default(),
+            attributes: Default::default(),
 
             partition_by: None,
 

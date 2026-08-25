@@ -67,6 +67,7 @@ fn add_column_ir(default: IrDefault, ty: ColType) -> MigrationIr {
         name: "add_label".to_string(),
         owner_app: APP.to_string(),
         ops: vec![Op::AddColumn {
+            attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
             table: "accounts".to_string(),
             column: "label".to_string(),
             ty,

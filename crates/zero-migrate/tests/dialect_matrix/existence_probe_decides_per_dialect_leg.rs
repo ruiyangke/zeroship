@@ -114,6 +114,7 @@ fn empty_table() -> TableSnapshot {
         indexes: Vec::new(),
         constraints: Vec::new(),
         runtime_options: Default::default(),
+        attributes: Default::default(),
         partition_by: None,
         comment: None,
         stored_create_sql: None,

@@ -393,7 +393,7 @@ fn idx_col(name: &str) -> IndexElement {
 
 fn partitioned_create_table() -> Op {
     Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "events".into(),
         columns: vec![IrColumn {
             name: "created_at".into(),
@@ -427,6 +427,7 @@ fn partitioned_create_table() -> Op {
 fn partition_feature_ops() -> Vec<Op> {
     vec![
         Op::CreatePartition {
+            attributes: zero_migrate_ir::attribute::CreatePartitionAttributes::new(),
             name: "events_default".into(),
             of: "events".into(),
             bounds: PartitionBounds::Default,
@@ -536,7 +537,7 @@ fn nextval_default_ops() -> Vec<Op> {
     };
     vec![
         Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "events".into(),
             columns: vec![col.clone()],
             primary_key: None,
@@ -548,6 +549,7 @@ fn nextval_default_ops() -> Vec<Op> {
             existence_guard: None,
         },
         Op::AddColumn {
+            attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
             table: "events".into(),
             column: "id".into(),
             ty: ColType::BigInt,
@@ -591,7 +593,7 @@ fn identity_always_ops() -> Vec<Op> {
     };
     vec![
         Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "events".into(),
             columns: vec![col.clone()],
             primary_key: Some(vec!["id".into()]),
@@ -603,6 +605,7 @@ fn identity_always_ops() -> Vec<Op> {
             existence_guard: None,
         },
         Op::AddColumn {
+            attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
             table: "events".into(),
             column: "id".into(),
             ty: ColType::BigInt,

@@ -1449,6 +1449,7 @@ fn a_fourth_backend_names_its_own_implicit_primary_key() {
         )],
         constraints: Vec::new(),
         runtime_options: Default::default(),
+        attributes: zero_migrate_ir::attribute::Attributes::new(),
         partition_by: None,
         comment: None,
         stored_create_sql: None,

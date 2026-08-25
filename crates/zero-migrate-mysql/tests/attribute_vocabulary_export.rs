@@ -164,3 +164,50 @@ fn a_64_bit_bound_survives_the_export_without_precision_loss() {
          loss it exists for"
     );
 }
+
+/// Every storage engine the manual lists must be accepted.
+///
+/// The first declaration listed five engines. MySQL's own table lists ten plus documented
+/// aliases, so `FEDERATED`, `MERGE`, `NDB` and others were REFUSED at plan time despite
+/// being legal. An enum that is too narrow is a wrong answer, not a conservative one:
+/// unlike a missing key, which is refused loudly and obviously, a missing VARIANT looks
+/// like the user made a typo.
+#[test]
+fn every_documented_storage_engine_is_accepted() {
+    use zero_migrate_ir::ir::IrScalar;
+
+    let def = VENDOR
+        .attributes
+        .iter()
+        .find(|d| d.key.name() == "engine")
+        .expect("mysql declares engine");
+
+    // The five that the first declaration wrongly refused, plus the two most common, so
+    // the test covers both the regression and the ordinary case.
+    for engine in [
+        "InnoDB",
+        "MyISAM",
+        "FEDERATED",
+        "MERGE",
+        "MRG_MyISAM",
+        "NDB",
+        "NDBCLUSTER",
+        "EXAMPLE",
+        "HEAP",
+    ] {
+        assert_eq!(
+            def.shape.check(&IrScalar::Str(engine.to_string())),
+            Ok(()),
+            "`{engine}` is in MySQL's documented engine table and must be accepted"
+        );
+    }
+
+    // The control: the enum still refuses something, so this is not passing because the
+    // variant list became a free-for-all.
+    assert!(
+        def.shape
+            .check(&IrScalar::Str("NoSuchEngine".to_string()))
+            .is_err(),
+        "the enum must still reject an engine MySQL does not have"
+    );
+}

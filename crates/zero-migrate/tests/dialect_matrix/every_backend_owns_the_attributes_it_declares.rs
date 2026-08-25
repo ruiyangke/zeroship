@@ -22,7 +22,6 @@
 use std::collections::BTreeMap;
 
 use zero_migrate_backend::registry::BackendVendor;
-use zero_migrate_ir::attribute::AttrScope;
 
 /// The vendors this file reaches through their OWN statics — the one place naming a
 /// vendor crate is the design rather than a leak.
@@ -103,22 +102,30 @@ fn each_shipping_backend_declares_at_least_one_attribute() {
 /// The prefix claim, checked rather than reasoned about: no key is declared twice, across
 /// the whole workspace and not merely within one vendor.
 #[test]
-fn no_two_backends_declare_the_same_key() {
-    let mut seen: BTreeMap<String, &str> = BTreeMap::new();
+fn no_two_backends_declare_the_same_key_on_the_same_op() {
+    // The (key, OP) pair, not the key. One knob is commonly legal on several ops —
+    // PostgreSQL's `fillfactor` on `createTable`, `createPartition`, `setTableOptions`
+    // AND `createIndex` — so deduping on the key alone would call a legitimate second
+    // declaration a collision, which is how a census stops a correct change instead of a
+    // wrong one.
+    let mut seen: BTreeMap<(String, &'static str), &str> = BTreeMap::new();
     for vendor in shipping_vendors() {
         let owner = vendor.descriptor.id.as_str();
         for def in vendor.attributes.iter() {
-            if let Some(previous) = seen.insert(def.key.to_string(), owner) {
-                panic!(
-                    "`{}` is declared by both `{previous}` and `{owner}`",
-                    def.key
-                );
+            for op in def.ops {
+                if let Some(previous) = seen.insert((def.key.to_string(), *op), owner) {
+                    panic!(
+                        "`{}` is declared on `{op}` by both `{previous}` and `{owner}`",
+                        def.key
+                    );
+                }
             }
         }
     }
     assert!(
         seen.len() >= DECLARED_ATTRIBUTE_FLOOR,
-        "only {} distinct key(s) seen, expected at least {DECLARED_ATTRIBUTE_FLOOR}",
+        "only {} distinct (key, op) pair(s) seen, expected at least \
+         {DECLARED_ATTRIBUTE_FLOOR}",
         seen.len()
     );
 }
@@ -142,27 +149,62 @@ fn every_declared_attribute_carries_documentation() {
     assert!(checked >= DECLARED_ATTRIBUTE_FLOOR, "walked {checked}");
 }
 
-/// This first slice is table-scoped by intent. The assertion is not that other scopes are
-/// forbidden — [`AttrScope`] has four variants and the mechanism supports all of them —
-/// but that the CURRENT declarations are all at `Table`, so the moment a column- or
-/// index-scoped attribute is declared, whoever adds it is sent to the validate and lower
-/// paths that have not been taught to carry one yet.
+/// Every op a vendor declares against must be a REAL op.
+///
+/// This is the check the op axis costs, and it is not optional. An op is named by a
+/// STRING, so `"createTabel"` compiles, passes ownership, passes dedup — and matches
+/// nothing, forever, because `check` looks the knob up by the op it was carried on. The
+/// knob would be declared, exported, typed in TypeScript, and dead.
+///
+/// `dialect-support.toml` is the canonical list: one row per (op-kind, variant), already
+/// checked in, already gated, and already the source the dialect table is generated from.
+/// Using it rather than a hand-written list here means the two cannot disagree.
 #[test]
-fn the_first_slice_declares_table_scoped_attributes_only() {
+fn every_declared_op_is_a_real_op() {
+    let toml = std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("dialect-support.toml"),
+    )
+    .expect("dialect-support.toml is readable");
+
+    let known: std::collections::BTreeSet<&str> = toml
+        .lines()
+        .filter_map(|l| l.strip_prefix("kind = \""))
+        .filter_map(|l| l.split('"').next())
+        .collect();
+
+    // Floor: a parse that found nothing would make every assertion below vacuous, and the
+    // op set is 56 — measured, not guessed.
+    const OP_KIND_FLOOR: usize = 50;
+    assert!(
+        known.len() >= OP_KIND_FLOOR,
+        "parsed {} op kind(s) from dialect-support.toml, expected at least \
+         {OP_KIND_FLOOR} — the parse is broken and this census proves nothing",
+        known.len()
+    );
+
     let mut checked = 0_usize;
     for vendor in shipping_vendors() {
         for def in vendor.attributes.iter() {
-            assert_eq!(
-                def.scope,
-                AttrScope::Table,
-                "`{}` is declared at {} scope. That is a supported scope, but only the \
-                 TABLE path carries attributes so far — teach validate and lower to carry \
-                 this scope, then widen this test",
-                def.key,
-                def.scope
+            assert!(
+                !def.ops.is_empty(),
+                "`{}` is declared against NO op, so nothing can ever carry it",
+                def.key
             );
-            checked += 1;
+            for op in def.ops {
+                assert!(
+                    known.contains(op),
+                    "`{}` is declared on `{op}`, which is not an op kind. \
+                     dialect-support.toml knows {} kinds and this is not one of them — a \
+                     misspelled op declares a knob that matches nothing, forever.",
+                    def.key,
+                    known.len()
+                );
+                checked += 1;
+            }
         }
     }
-    assert!(checked >= DECLARED_ATTRIBUTE_FLOOR, "walked {checked}");
+    assert!(
+        checked >= DECLARED_ATTRIBUTE_FLOOR,
+        "walked {checked} (attribute, op) pair(s)"
+    );
 }

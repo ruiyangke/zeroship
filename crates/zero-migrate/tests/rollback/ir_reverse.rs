@@ -335,7 +335,7 @@ fn a_declared_reverse_makes_an_advisory_hint_refuse_rather_than_compare() {
 #[test]
 fn the_create_table_ownership_rule_still_applies_with_a_reverse_present() {
     let mut ir = envelope(vec![Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "fresh".to_string(),
         columns: vec![IrColumn {
             name: "id".to_string(),

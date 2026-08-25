@@ -1,3 +1,16 @@
+// src/vendor-attributes.ts
+function flattenVendorAttributes(args) {
+  const flat = {};
+  for (const [namespace, leaves] of Object.entries(args)) {
+    if (leaves === void 0 || leaves === null) continue;
+    for (const [leaf, value] of Object.entries(leaves)) {
+      if (value === void 0) continue;
+      flat[`${namespace}.${leaf}`] = value;
+    }
+  }
+  return flat;
+}
+
 // src/ops.ts
 if (typeof globalThis !== "undefined") {
   if (typeof globalThis.crypto === "undefined" || globalThis.crypto === null) {
@@ -2513,6 +2526,22 @@ function rejectUnknownKeys(args, accepted, what) {
     `${what} does not accept ${unknown.map((key) => JSON.stringify(key)).join(", ")}; accepted keys are ${accepted.map((key) => JSON.stringify(key)).join(", ")}`
   );
 }
+function splitVendorNamespaces(args, accepted, what) {
+  const namespaces = {};
+  const unknown = [];
+  for (const [key, value] of Object.entries(args)) {
+    if (accepted.includes(key)) continue;
+    if (isPlainObject(value)) namespaces[key] = value;
+    else unknown.push(key);
+  }
+  if (unknown.length > 0) {
+    throw structuredError(
+      "OP_INVALID",
+      `${what} does not accept ${unknown.map((key) => JSON.stringify(key)).join(", ")}; accepted keys are ${accepted.map((key) => JSON.stringify(key)).join(", ")}, plus a backend namespace such as \`postgres: { \u2026 }\` from an installed vendor package`
+    );
+  }
+  return namespaces;
+}
 var RENAME_TABLE_KEYS = ["to", "ifExists", "schema"];
 var ADD_COLUMN_KEYS = ["type", "ifNotExists", "schema"];
 var DROP_COLUMN_KEYS = ["ifExists", "schema"];
@@ -2578,7 +2607,9 @@ var CREATE_TABLE_KEYS = [
   "schema"
 ];
 function recordCreateTable(name, args, checkExprResolver = resolveTableCheckExpr) {
-  rejectUnknownKeys(args, CREATE_TABLE_KEYS, `table("${name}").create(...)`);
+  const vendorAttributes = flattenVendorAttributes(
+    splitVendorNamespaces(args, CREATE_TABLE_KEYS, `table("${name}").create(...)`)
+  );
   const cols = [];
   const constraints = [];
   const indexes = [];
@@ -2731,7 +2762,11 @@ function recordCreateTable(name, args, checkExprResolver = resolveTableCheckExpr
     partitionBy: partitionSpecToIr(args.partitionBy, "create({ partitionBy })"),
     runtimeOptions: runtimeOptionsFromCreateArgs(args),
     schema: args.schema,
-    existenceGuard: ifNotExistsGuard(args.ifNotExists)
+    existenceGuard: ifNotExistsGuard(args.ifNotExists),
+    // Omitted entirely when empty: the Rust field skips serializing an empty map, so a
+    // create with no vendor options is byte-identical on the wire to one authored before
+    // attributes existed — which is what keeps every pinned checksum stable.
+    attributes: Object.keys(vendorAttributes).length > 0 ? vendorAttributes : void 0
   });
 }
 function recordCreatePartition(name, parent, bounds, args) {

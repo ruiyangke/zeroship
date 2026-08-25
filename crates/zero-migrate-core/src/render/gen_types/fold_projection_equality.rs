@@ -718,6 +718,7 @@ fn table_field_differences(mine: &TableSnapshot, theirs: &TableSnapshot) -> Vec<
         indexes,
         constraints,
         runtime_options,
+        attributes,
         partition_by,
         comment,
         stored_create_sql,
@@ -749,6 +750,14 @@ fn table_field_differences(mine: &TableSnapshot, theirs: &TableSnapshot) -> Vec<
     }
     if *runtime_options != theirs.runtime_options {
         out.push("runtime_options".to_string());
+    }
+    // COMPARED, not ignored. This probe asks whether the neutral/vendor split loses
+    // anything on a fold-produced shape, and `attributes` is carried through that split
+    // by `Table`, so a projection that dropped it must be reported here. Excluding it —
+    // which is what `TableSnapshot::eq` does, for a different question — would make this
+    // measurement blind to the field it was just given.
+    if *attributes != theirs.attributes {
+        out.push("attributes".to_string());
     }
     if *partition_by != theirs.partition_by {
         out.push("partition_by".to_string());

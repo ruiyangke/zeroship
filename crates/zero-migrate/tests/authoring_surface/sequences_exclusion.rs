@@ -154,7 +154,7 @@ fn postgres_renders_create_alter_drop_sequence() {
 fn postgres_renders_nextval_default_with_and_without_schema() {
     let with_schema = lower(
         vec![Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "invoices".into(),
             columns: vec![nextval_col("id", Some("app"))],
             primary_key: None,
@@ -178,7 +178,7 @@ fn postgres_renders_nextval_default_with_and_without_schema() {
 
     let without_schema = lower(
         vec![Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "invoices".into(),
             columns: vec![nextval_col("id", None)],
             primary_key: None,
@@ -243,7 +243,7 @@ fn sqlite_and_mysql_fail_closed_on_sequences() {
 #[test]
 fn nextval_default_rejects_non_integer_and_non_postgres() {
     let text_nextval = Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "events".into(),
         columns: vec![IrColumn {
             ty: ColType::Text,
@@ -696,6 +696,7 @@ fn postgres_renders_exclusion_constraint() {
     live.insert("bookings".to_string());
     let migrations = lower(
         vec![Op::AddConstraint {
+            attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
             table: "bookings".into(),
             constraint: exclusion_constraint(),
             schema: None,
@@ -720,6 +721,7 @@ fn postgres_parenthesizes_expression_exclusion_targets_only() {
     live.insert("bookings".to_string());
     let migrations = lower(
         vec![Op::AddConstraint {
+            attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
             table: "bookings".into(),
             constraint: IrConstraint {
                 name: Some("bookings_room_lower_excl".into()),
@@ -767,6 +769,7 @@ fn sqlite_and_mysql_fail_closed_on_exclusion_constraints() {
         let err = validate_ir(
             zero_migrate::shipping_vendors(),
             &ir(vec![Op::AddConstraint {
+                attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
                 table: "bookings".into(),
                 constraint: exclusion_constraint(),
                 schema: None,

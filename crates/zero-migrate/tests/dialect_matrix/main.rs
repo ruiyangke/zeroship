@@ -14,8 +14,10 @@ mod dialect_corpus;
 
 mod a_test_recorder_never_ships;
 mod a_vendor_answers_one_capability_row;
+mod a_vendors_spelling_is_reachable_only_through_the_registry;
 mod alter_column_dialect_support;
 mod alter_column_grammar_comes_from_the_backend;
+mod an_authored_attribute_reaches_the_ddl;
 mod backend_modules_name_one_dialect;
 mod backend_snapshot_privates_stay_core_only;
 mod checksum_corpus_stability;

@@ -47,7 +47,7 @@ fn ir(ops: Vec<Op>) -> MigrationIr {
 
 fn create_table(name: &str, columns: Vec<IrColumn>) -> Op {
     Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
         name: name.to_string(),
         columns,
         primary_key: None,
@@ -196,6 +196,7 @@ fn pg_domain_over_enum_uses_the_materialized_enum_qname() {
 fn pg_named_type_column_operations_honor_explicit_reference_schema() {
     let ops = vec![
         Op::AddColumn {
+            attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
             table: "subscriptions".to_string(),
             column: "tier".to_string(),
             ty: ColType::Enum {
@@ -249,6 +250,7 @@ fn pg_named_type_column_operations_honor_explicit_reference_schema() {
                 indexes: Vec::new(),
                 constraints: Vec::new(),
                 runtime_options: Default::default(),
+                attributes: Default::default(),
                 partition_by: None,
                 comment: None,
                 stored_create_sql: None,

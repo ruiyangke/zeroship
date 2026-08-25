@@ -70,7 +70,7 @@ fn column(
 
 fn plain_table(name: &str, columns: Vec<IrColumn>, primary_key: Option<Vec<String>>) -> Op {
     Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
         name: name.into(),
         columns,
         primary_key,
@@ -94,6 +94,7 @@ fn nextval_default() -> IrDefault {
 
 fn add_constraint(kind: IrConstraintKind) -> Op {
     Op::AddConstraint {
+        attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
         table: "t".into(),
         constraint: IrConstraint { name: None, kind },
         schema: None,
@@ -246,6 +247,7 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
         "setTableOptions",
         "base",
         Op::SetTableOptions {
+            attributes: zero_migrate_ir::attribute::SetTableOptionsAttributes::new(),
             table: "t".into(),
             options: TableRuntimeOptionsPatch::default(),
             schema: None,
@@ -446,6 +448,7 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
         "createPartition",
         "base",
         Op::CreatePartition {
+            attributes: zero_migrate_ir::attribute::CreatePartitionAttributes::new(),
             name: "p".into(),
             of: "t".into(),
             bounds: PartitionBounds::Default,
@@ -694,7 +697,7 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
         "createTable",
         "partitioned",
         Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "t".into(),
             columns: vec![column("id", ColType::BigInt, None, None)],
             primary_key: None,
@@ -713,7 +716,7 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
         "createTable",
         "partitionedCollapse",
         Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "t".into(),
             columns: vec![column("id", ColType::BigInt, None, None)],
             primary_key: None,
@@ -732,7 +735,7 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
         "createTable",
         "pgOnlyIndexFeature",
         Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "t".into(),
             columns: vec![column("created_at", ColType::Timestamp, None, None)],
             primary_key: None,
@@ -798,6 +801,7 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
 
     // ── addColumn ────────────────────────────────────────────────────────────
     let add_column = |default: Option<IrDefault>, identity: Option<IdentityCol>| Op::AddColumn {
+        attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
         table: "t".into(),
         column: "a".into(),
         ty: ColType::BigInt,

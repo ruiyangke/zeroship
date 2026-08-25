@@ -197,7 +197,7 @@ mod tests {
 
     fn create_table(name: &str) -> Op {
         Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: name.into(),
             columns: vec![IrColumn {
                 name: "first".into(),
@@ -756,6 +756,7 @@ mod tests {
             ops: vec![
                 create_table("fresh"),
                 Op::AddColumn {
+                    attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
                     table: "fresh".into(),
                     column: "x".into(),
                     ty: ColType::Int,

@@ -2350,6 +2350,11 @@ fn build_table_snapshot_impl(
         indexes,
         constraints,
         runtime_options: d.runtime_options.clone(),
+        // The DECLARATIVE desired-state path. Vendor attributes arrive on an authored
+        // `Op::CreateTable`, which is the imperative surface; a schema DECLARATION has no
+        // attribute field yet, so there is nothing to carry here rather than something
+        // dropped.
+        attributes: zero_migrate_ir::attribute::Attributes::new(),
         partition_by: None,
         comment: None,
         stored_create_sql: None,
@@ -6921,6 +6926,7 @@ mod snapshot_builder_refactor_safety_tests {
             indexes: Vec::new(),
             constraints: Vec::new(),
             runtime_options: TableRuntimeOptions::default(),
+            attributes: Default::default(),
             partition_by: None,
             comment: None,
             stored_create_sql: None,
@@ -7633,7 +7639,7 @@ mod mysql_storage_agreement_tests {
         // dialect where breaking it costs the width rather than the facet.
         for dialect in [&MYSQL, &POSTGRES, &SQLITE] {
             let op = Op::CreateTable {
-                attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+                attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
                 name: "things".into(),
                 columns: vec![bounded_ci_column()],
                 primary_key: None,

@@ -419,6 +419,11 @@ export type PartitionBounds =
   | { kind: "hash"; modulus: number; remainder: number }
   | { kind: "default" };
 
+/** Vendor attributes on an attribute-carrying op, keyed by their full `<dialect>.<name>`
+ *  wire spelling. Written by `flattenVendorAttributes` from the authored namespaces; a
+ *  backend renders only the keys in its own namespace and carries the rest untouched. */
+export type Attributes = Record<string, boolean | number | string>;
+
 /** Complete collection-level runtime options stamped on `createTable`. */
 export interface TableRuntimeOptions {
   /** `schema(...).softDelete()`. */
@@ -554,14 +559,14 @@ export type AlterPrimaryKeyAction =
  *  `dropView` is GONE (the intentional wire break) — the guard is now the uniform
  *  `existenceGuard?` token. */
 export type Op =
-  | { op: "createTable"; name: string; columns: IrColumn[]; primaryKey: string[] | null; constraints?: IrConstraint[]; indexes?: IrIndex[]; partitionBy?: PartitionSpec | null; runtimeOptions?: TableRuntimeOptions | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
-  | { op: "createPartition"; name: string; of: string; bounds: PartitionBounds; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "createTable"; name: string; columns: IrColumn[]; primaryKey: string[] | null; constraints?: IrConstraint[]; indexes?: IrIndex[]; partitionBy?: PartitionSpec | null; runtimeOptions?: TableRuntimeOptions | null; schema?: string | null; existenceGuard?: ExistenceGuard | null; attributes?: Attributes }
+  | { op: "createPartition"; name: string; of: string; bounds: PartitionBounds; schema?: string | null; existenceGuard?: ExistenceGuard | null; attributes?: Attributes }
   | { op: "attachPartition"; parent: string; name: string; bound: PartitionBounds; schema?: string | null }
   | { op: "detachPartition"; parent: string; name: string; schema?: string | null; concurrently?: boolean | null }
   | { op: "dropPartition"; parent: string; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null; cascade?: boolean | null }
   | { op: "dropTable"; table: string; cascade?: boolean | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "renameTable"; table: string; to: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
-  | { op: "addColumn"; table: string; column: string; type: ColType; nullable?: boolean | null; default?: IrDefault | null; valueFormat?: ValueFormat | null; vectorMetric?: VectorMetric | null; caseSensitive?: boolean | null; mask?: IrMask | null; generated?: GeneratedCol | null; identity?: IdentityCol | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "addColumn"; table: string; column: string; type: ColType; nullable?: boolean | null; default?: IrDefault | null; valueFormat?: ValueFormat | null; vectorMetric?: VectorMetric | null; caseSensitive?: boolean | null; mask?: IrMask | null; generated?: GeneratedCol | null; identity?: IdentityCol | null; schema?: string | null; existenceGuard?: ExistenceGuard | null; attributes?: Attributes }
   | { op: "dropColumn"; table: string; column: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | {
       op: "createIndex";
@@ -588,8 +593,8 @@ export type Op =
   | { op: "renameColumn"; table: string; from: string; to: string; type: ColType; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "alterPrimaryKey"; table: string; action: AlterPrimaryKeyAction; schema?: string | null }
   | { op: "synchronizeIdentity"; table: string; column: string; writesQuiesced: string; schema?: string | null }
-  | { op: "setTableOptions"; table: string; options: TableRuntimeOptionsPatch; schema?: string | null }
-  | { op: "addConstraint"; table: string; constraint: IrConstraint; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "setTableOptions"; table: string; options: TableRuntimeOptionsPatch; schema?: string | null; attributes?: Attributes }
+  | { op: "addConstraint"; table: string; constraint: IrConstraint; schema?: string | null; existenceGuard?: ExistenceGuard | null; attributes?: Attributes }
   | { op: "dropConstraint"; table: string; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "validateConstraint"; table: string; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "insert"; table: string; columns: string[]; rows: IrValue[][]; onConflict?: IrOnConflict | null; schema?: string | null }

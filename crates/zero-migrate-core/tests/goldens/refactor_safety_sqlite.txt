@@ -430,4 +430,7 @@ TableSnapshot {
     partition_by: None,
     comment: None,
     stored_create_sql: None,
+    attributes: Attributes(
+        {},
+    ),
 }

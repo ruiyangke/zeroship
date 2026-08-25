@@ -103,7 +103,7 @@ fn int_bound(value: i64) -> PartitionBoundValue {
 
 fn create_events_parent() -> Op {
     Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "events".into(),
         columns: vec![
             not_null_col("bucket", ColType::Int),
@@ -124,6 +124,7 @@ fn create_events_parent() -> Op {
 
 fn create_range_partition(name: &str, from: PartitionBoundValue, to: PartitionBoundValue) -> Op {
     Op::CreatePartition {
+        attributes: zero_migrate_ir::attribute::CreatePartitionAttributes::new(),
         name: name.into(),
         of: "events".into(),
         bounds: PartitionBounds::Range {
@@ -149,6 +150,7 @@ fn attach_range_partition(name: &str, from: PartitionBoundValue, to: PartitionBo
 
 fn create_default_partition() -> Op {
     Op::CreatePartition {
+        attributes: zero_migrate_ir::attribute::CreatePartitionAttributes::new(),
         name: "events_default".into(),
         of: "events".into(),
         bounds: PartitionBounds::Default,
@@ -317,7 +319,7 @@ fn create_index(
 #[test]
 fn render_partitioned_parent_create_table_pg() {
     let sql = pg_sql(Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "events".into(),
         columns: vec![col("created_at", ColType::Timestamp)],
         primary_key: None,
@@ -635,6 +637,7 @@ async fn collapse_range_min_value_omits_lower_delete_bound_on_sqlite() {
 #[test]
 fn render_create_partition_range_pg_dump_timestamptz_bounds() {
     let sql = pg_sql(Op::CreatePartition {
+        attributes: zero_migrate_ir::attribute::CreatePartitionAttributes::new(),
         name: "events_2026_05".into(),
         of: "events".into(),
         bounds: PartitionBounds::Range {
@@ -817,6 +820,7 @@ fn pg_vendor_index_features_refused_fail_closed_off_pg() {
 #[test]
 fn render_create_partition_default_pg() {
     let sql = pg_sql(Op::CreatePartition {
+        attributes: zero_migrate_ir::attribute::CreatePartitionAttributes::new(),
         name: "events_default".into(),
         of: "events".into(),
         bounds: PartitionBounds::Default,

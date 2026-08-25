@@ -152,6 +152,7 @@ import type {
   ViewOptions,
   ViewQueryBuilder,
 } from "./types.js";
+import { flattenVendorAttributes, type VendorAttributeArgs } from "./vendor-attributes.js";
 
 import { TypeBuilder as DbTypeBuilder } from "./db-types.js";
 
@@ -3304,6 +3305,49 @@ function rejectUnknownKeys(
   );
 }
 
+/**
+ * Separate an authoring call's PORTABLE keys from its VENDOR NAMESPACES, rejecting
+ * anything that is neither.
+ *
+ * `rejectUnknownKeys` cannot be used directly here because the accepted set is no longer
+ * closed: a vendor namespace key IS a dialect id, contributed by whichever backend
+ * packages are installed, and this file must never learn one of their names. What it can
+ * check is SHAPE — a namespace is a plain object of leaf options — so a misspelled
+ * portable key that is not an object (`ifNotExist: true`) is still caught right here with
+ * the same message as before.
+ *
+ * A misspelled key that IS an object (`colums: { … }`) survives this check and becomes
+ * candidate attributes. It does not survive the migration: TypeScript rejects it at
+ * compile time against the generated namespace map, and if it reaches Rust anyway the
+ * vocabulary check refuses `colums.id` by name at plan time. The looser gate here buys
+ * the flat `create({ columns, postgres: { … } })` surface without giving up a refusal.
+ */
+function splitVendorNamespaces(
+  args: object,
+  accepted: readonly string[],
+  what: string,
+): VendorAttributeArgs {
+  const namespaces: Record<string, unknown> = {};
+  const unknown: string[] = [];
+  for (const [key, value] of Object.entries(args)) {
+    if (accepted.includes(key)) continue;
+    // `isPlainObject` is the file's existing predicate and is stricter than a bare
+    // `typeof === "object"`: it checks the PROTOTYPE, so an array or a class instance
+    // is not mistaken for a namespace of leaf options.
+    if (isPlainObject(value)) namespaces[key] = value;
+    else unknown.push(key);
+  }
+  if (unknown.length > 0) {
+    throw structuredError(
+      "OP_INVALID",
+      `${what} does not accept ${unknown.map((key) => JSON.stringify(key)).join(", ")}; ` +
+        `accepted keys are ${accepted.map((key) => JSON.stringify(key)).join(", ")}, ` +
+        `plus a backend namespace such as \`postgres: { … }\` from an installed vendor package`,
+    );
+  }
+  return namespaces as VendorAttributeArgs;
+}
+
 /** Key lists, each mirroring the interface of the same name in `types.ts`. */
 const RENAME_TABLE_KEYS = ["to", "ifExists", "schema"] as const;
 const ADD_COLUMN_KEYS = ["type", "ifNotExists", "schema"] as const;
@@ -3377,7 +3421,9 @@ function recordCreateTable(
   args: CreateTableArgs,
   checkExprResolver: CheckExprResolver = resolveTableCheckExpr,
 ): void {
-  rejectUnknownKeys(args, CREATE_TABLE_KEYS, `table("${name}").create(...)`);
+  const vendorAttributes = flattenVendorAttributes(
+    splitVendorNamespaces(args, CREATE_TABLE_KEYS, `table("${name}").create(...)`),
+  );
   const cols: Node[] = [];
   const constraints: Node[] = [];
   const indexes: Node[] = [];
@@ -3546,6 +3592,10 @@ function recordCreateTable(
     runtimeOptions: runtimeOptionsFromCreateArgs(args),
     schema: args.schema,
     existenceGuard: ifNotExistsGuard(args.ifNotExists),
+    // Omitted entirely when empty: the Rust field skips serializing an empty map, so a
+    // create with no vendor options is byte-identical on the wire to one authored before
+    // attributes existed — which is what keeps every pinned checksum stable.
+    attributes: Object.keys(vendorAttributes).length > 0 ? vendorAttributes : undefined,
   });
 }
 

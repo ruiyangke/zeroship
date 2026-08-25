@@ -1161,6 +1161,7 @@ fn synthetic_rename_source_column(
         existing_table.cloned().unwrap_or_else(empty_table_snapshot),
     );
     let add = Op::AddColumn {
+        attributes: zero_migrate::model::attribute::AddColumnAttributes::new(),
         table: table.to_string(),
         column: from.to_string(),
         ty: ty.clone(),

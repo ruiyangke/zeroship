@@ -10,6 +10,7 @@
 // and re-exported from `./generated/ir` AS ERGONOMICS — the goldens remain the
 // contract source of truth. This module imports the generated wire types
 // where a manual type wants to reference the exact serde shape.
+import type { VendorAttributeArgs } from "./vendor-attributes.js";
 
 import type {
   Classification,
@@ -1126,7 +1127,7 @@ export interface TableRuntimeOptions {
  *
  *  None of the above is ever a silent no-op — an unsupported spec fails closed at
  *  lower time. */
-export interface CreateTableArgs {
+export interface CreateTableArgs extends VendorAttributeArgs {
   columns: Record<string, ColumnDef>;
   /** Collection runtime metadata, carried into `schema.runtime.json`.
    *  `softDelete`, `versioning`, and `strictness` share the same named bag as

@@ -94,3 +94,25 @@ export function flattenVendorAttributes(
   }
   return flat;
 }
+
+/**
+ * Backend-specific option namespaces available on an INDEX.
+ *
+ * A second, separate map rather than a nested key inside
+ * {@link VendorAttributeNamespaces}, because the two are augmented independently and a
+ * vendor may declare index options without table options or the reverse. PostgreSQL is
+ * the first with both: `fillfactor` is legal on a table AND on an index, declared twice
+ * because declaration identity is the (key, scope) pair.
+ *
+ * Empty here by design, for the same reason as its table sibling — this package names no
+ * vendor.
+ */
+// eslint-disable-next-line @typescript-eslint/no-empty-interface
+export interface VendorIndexAttributeNamespaces {}
+
+/**
+ * The vendor-attribute half of an index-authoring call's arguments.
+ */
+export type VendorIndexAttributeArgs = {
+  [K in keyof VendorIndexAttributeNamespaces]?: VendorIndexAttributeNamespaces[K];
+};

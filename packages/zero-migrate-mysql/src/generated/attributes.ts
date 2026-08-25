@@ -15,13 +15,15 @@
 // backend's DIALECT ID — there is no hand-picked alias anywhere in the chain.
 
 declare module "zero-migrate" {
-  /** Table-level options this backend accepts. */
-  interface MysqlTableAttributes {
+  /** CreateTable-level options this backend accepts. */
+  interface MysqlCreateTableAttributes {
     /**
      * The storage engine. Anything other than InnoDB gives up transactional DDL-adjacent
-     * guarantees this tool otherwise relies on.
+     * guarantees this tool otherwise relies on. HEAP is a synonym for MEMORY, MRG_MyISAM
+     * for MERGE, and NDBCLUSTER for NDB. Spell it as the manual does: the comparison is
+     * exact, while the server itself accepts any casing.
      */
-    engine?: "InnoDB" | "MyISAM" | "MEMORY" | "CSV" | "ARCHIVE";
+    engine?: "InnoDB" | "MyISAM" | "MEMORY" | "CSV" | "ARCHIVE" | "EXAMPLE" | "FEDERATED" | "HEAP" | "MERGE" | "MRG_MyISAM" | "NDB" | "NDBCLUSTER";
 
     /**
      * How rows are physically stored. DYNAMIC and COMPRESSED allow longer index keys over
@@ -30,7 +32,9 @@ declare module "zero-migrate" {
     row_format?: "DEFAULT" | "DYNAMIC" | "FIXED" | "COMPRESSED" | "REDUNDANT" | "COMPACT";
 
     /**
-     * The next value the table's AUTO_INCREMENT column will hand out.
+     * The next value the table's AUTO_INCREMENT column will hand out. MySQL's own ceiling
+     * is an unsigned 64-bit integer, which is wider than this attribute can carry, so
+     * values above 2^63-1 are refused here despite being legal.
      *
      * Accepted range: 0..=9223372036854775807 (enforced when the migration is planned, not
      * by this type).
@@ -52,12 +56,12 @@ declare module "zero-migrate" {
 
   interface VendorAttributeNamespaces {
     /**
-     * Table options specific to the `mysql` backend.
+     * CreateTable options specific to the `mysql` backend.
      *
-     * Present because this package is installed. Every field is optional, and a table
+     * Present because this package is installed. Every field is optional, and an object
      * that also carries other backends' options stays portable to all of them.
      */
-    mysql?: MysqlTableAttributes;
+    mysql?: MysqlCreateTableAttributes;
   }
 }
 

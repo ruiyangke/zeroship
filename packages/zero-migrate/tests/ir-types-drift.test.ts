@@ -139,8 +139,8 @@ const TS = {
 // schema gains/loses a field on any op, THIS fails — forcing `ir.ts` to be
 // regenerated in lockstep. Sorted; the `op` discriminant is excluded.
 const TS_OP_FIELDS: Record<string, string[]> = {
-  createTable: ["columns", "constraints", "existenceGuard", "indexes", "name", "partitionBy", "primaryKey", "runtimeOptions", "schema"].sort(),
-  createPartition: ["bounds", "existenceGuard", "name", "of", "schema"].sort(),
+  createTable: ["attributes", "columns", "constraints", "existenceGuard", "indexes", "name", "partitionBy", "primaryKey", "runtimeOptions", "schema"].sort(),
+  createPartition: ["attributes", "bounds", "existenceGuard", "name", "of", "schema"].sort(),
   attachPartition: ["bound", "name", "parent", "schema"].sort(),
   detachPartition: ["concurrently", "name", "parent", "schema"].sort(),
   dropPartition: ["cascade", "existenceGuard", "name", "parent", "schema"].sort(),
@@ -148,7 +148,7 @@ const TS_OP_FIELDS: Record<string, string[]> = {
   renameTable: ["existenceGuard", "schema", "table", "to"].sort(),
   // column facets + generated/identity — addColumn carries the column facets that are
   // sound on an added column (NOT `idPrefix`: an added column is never the system PK).
-  addColumn: ["caseSensitive", "column", "default", "existenceGuard", "generated", "identity", "mask", "nullable", "schema", "table", "type", "valueFormat", "vectorMetric"].sort(),
+  addColumn: ["attributes", "caseSensitive", "column", "default", "existenceGuard", "generated", "identity", "mask", "nullable", "schema", "table", "type", "valueFormat", "vectorMetric"].sort(),
   dropColumn: ["column", "existenceGuard", "schema", "table"].sort(),
   createIndex: ["columns", "concurrently", "existenceGuard", "include", "name", "nullsNotDistinct", "only", "schema", "table", "unique", "using", "where", "with"].sort(),
   dropIndex: ["concurrently", "existenceGuard", "name", "schema", "table", "unique"].sort(),
@@ -158,10 +158,10 @@ const TS_OP_FIELDS: Record<string, string[]> = {
   setColumnDefault: ["column", "existenceGuard", "schema", "table", "value"].sort(),
   dropColumnDefault: ["column", "existenceGuard", "schema", "table"].sort(),
   renameColumn: ["existenceGuard", "from", "schema", "table", "to", "type"].sort(),
-  setTableOptions: ["options", "schema", "table"].sort(),
+  setTableOptions: ["attributes", "options", "schema", "table"].sort(),
   alterPrimaryKey: ["action", "schema", "table"].sort(),
   synchronizeIdentity: ["column", "schema", "table", "writesQuiesced"].sort(),
-  addConstraint: ["constraint", "existenceGuard", "schema", "table"].sort(),
+  addConstraint: ["attributes", "constraint", "existenceGuard", "schema", "table"].sort(),
   dropConstraint: ["existenceGuard", "name", "schema", "table"].sort(),
   validateConstraint: ["existenceGuard", "name", "schema", "table"].sort(),
   // DML ops carry `schema` but NO `existenceGuard`.

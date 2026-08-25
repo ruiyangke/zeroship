@@ -66,6 +66,7 @@ fn validates(op: Op, dialect: &DialectId) -> bool {
 
 fn fk_not_valid(not_valid: Option<bool>) -> Op {
     Op::AddConstraint {
+        attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
         table: "line_items".into(),
         constraint: IrConstraint {
             name: Some("line_items_order_fkey".into()),
@@ -87,6 +88,7 @@ fn fk_not_valid(not_valid: Option<bool>) -> Op {
 
 fn check_not_valid(not_valid: Option<bool>) -> Op {
     Op::AddConstraint {
+        attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
         table: "line_items".into(),
         constraint: IrConstraint {
             name: Some("line_items_qty_positive".into()),
@@ -226,7 +228,7 @@ fn validate_constraint_op_is_postgres_only() {
 fn not_valid_on_create_time_constraint_is_refused_everywhere() {
     // NOT VALID is meaningless at create-time; refused fail-closed on every dialect.
     let create = |not_valid: Option<bool>| Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "line_items".into(),
         columns: vec![],
         primary_key: None,
@@ -276,7 +278,7 @@ fn create_time_not_valid_is_refused_in_both_spellings_by_validate() {
     // reachable from the surface: the recorder's `requireOptionalBoolean` passes a
     // literal `false` through unchanged.
     let create = |not_valid: Option<bool>| Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "line_items".into(),
         columns: vec![IrColumn {
             name: "parent_id".into(),

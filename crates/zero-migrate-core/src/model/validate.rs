@@ -302,10 +302,105 @@ pub fn validate_ir_authorized(
     validate_online_rename_sequence(vendors, ir, target_dialect)?;
     validate_partition_recording(vendors, ir, target_dialect)?;
     validate_authored_identifier_lengths(vendors, ir, target_dialect)?;
+    validate_vendor_attributes(vendors, ir, target_dialect)?;
     // Last, so a reference/foreign-key contract error still reports itself
     // rather than being masked by the dialect-scoped storage refusal.
     validate_vendor_key_storage(vendors, ir, target_dialect)?;
     Ok(())
+}
+
+/// Refuse a vendor attribute the target backend does not declare, declares on a different
+/// op, or declares with a different shape.
+///
+/// # Why this must exist at PLAN time
+///
+/// An attribute is opaque to every layer between the author and the renderer: it travels
+/// as a `<dialect>.<name>` string key with a scalar value, and the fold, the snapshot and
+/// the checksum all carry it without inspecting it. The renderer then spells whatever it
+/// was handed. So without this pass a misspelled `postgres.filfactor` becomes a literal
+/// `WITH (filfactor='85')` and the FIRST thing that objects is the server, mid-apply —
+/// after any earlier unit in the same migration has already committed.
+///
+/// Refusing here turns that into an offline error naming the key, before a connection is
+/// opened. It is the same trade the key-storage and identifier-length passes above make.
+///
+/// # Only the TARGET's namespace is judged
+///
+/// [`AttributeVocabulary::check`] skips keys belonging to another dialect, and that is the
+/// property that keeps a table portable: authoring `mysql: { engine: … }` alongside
+/// `postgres: { … }` must not fail a PostgreSQL migration. The cost is real and worth
+/// stating — a `mysql.engnie` typo is invisible until something actually targets MySQL.
+/// The alternative, judging every namespace against every registered backend, would refuse
+/// a plan for a backend the author never deploys to.
+fn validate_vendor_attributes(
+    vendors: VendorSet,
+    ir: &crate::model::ir::MigrationIr,
+    target_dialect: &DialectId,
+) -> Result<(), AuthoringError> {
+    let Some(vendor) = vendors.get(target_dialect) else {
+        // `validate_ir_authorized` already refused an unregistered target before reaching
+        // here; returning quietly rather than panicking keeps that one refusal the only
+        // one an author sees.
+        return Ok(());
+    };
+    for (op_index, op) in ir.ops.iter().enumerate() {
+        let carried: Option<&dyn CarriedAttributes> = match op {
+            crate::model::ir::Op::CreateTable { attributes, .. } => Some(attributes),
+            crate::model::ir::Op::CreatePartition { attributes, .. } => Some(attributes),
+            crate::model::ir::Op::SetTableOptions { attributes, .. } => Some(attributes),
+            crate::model::ir::Op::AddColumn { attributes, .. } => Some(attributes),
+            crate::model::ir::Op::AddConstraint { attributes, .. } => Some(attributes),
+            // Every other op kind carries no attributes, so there is nothing to judge.
+            //
+            // NOT the same as "five of six carriers". `op_attributes!` mints SIX, and
+            // `CreateIndexAttributes` is the one with no field on its op: `Op::CreateIndex`
+            // still carries `IndexStorageParams` — named `fillfactor` / `pages_per_range`
+            // fields in the neutral IR — which is the mechanism the index declarations in
+            // the PostgreSQL crate exist to retire. Until that retirement lands, an index
+            // attribute cannot be authored, so there is nothing here for this pass to
+            // refuse rather than something it fails to.
+            _ => None,
+        };
+        let Some(carried) = carried else { continue };
+        carried
+            .check_against(&vendor.attributes, target_dialect.as_str())
+            .map_err(|error| {
+                partition_error(
+                    CODE_OP_INVALID,
+                    op_index,
+                    target_dialect,
+                    error.to_string(),
+                    "declare the option in the backend crate, or correct the key to one it \
+                     already declares"
+                        .to_string(),
+                )
+            })?;
+    }
+    Ok(())
+}
+
+/// One op's attribute carrier, behind a trait so the six of them can be judged by one
+/// loop.
+///
+/// `OpAttributes` is not object-safe — `const OP` cannot be read through a `dyn` — so the
+/// generic `AttributeVocabulary::check` is reached through this one-method shim rather
+/// than by matching each carrier into its own call.
+trait CarriedAttributes {
+    fn check_against(
+        &self,
+        vocabulary: &zero_migrate_backend::attribute::AttributeVocabulary,
+        dialect: &str,
+    ) -> Result<(), zero_migrate_backend::attribute::AttrError>;
+}
+
+impl<A: zero_migrate_ir::attribute::OpAttributes> CarriedAttributes for A {
+    fn check_against(
+        &self,
+        vocabulary: &zero_migrate_backend::attribute::AttributeVocabulary,
+        dialect: &str,
+    ) -> Result<(), zero_migrate_backend::attribute::AttrError> {
+        vocabulary.check(dialect, self)
+    }
 }
 
 /// Which side of an object's lifecycle an author-supplied identifier sits on. The two
@@ -10602,7 +10697,7 @@ mod tests {
         // Postgres target. A createTable Check whose splitPart hides a ColRef to a
         // nonexistent column in the n slot must reject (rule c), not pass on PG.
         let ir = ir_with(vec![Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "users".into(),
             columns: vec![IrColumn {
                 name: "first".into(),
@@ -10786,7 +10881,7 @@ mod tests {
 
     fn create_with_column(name: &str, ty: ColType) -> Op {
         Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "typed_columns".into(),
             columns: vec![part_col(name, ty, true)],
             primary_key: None,
@@ -10843,7 +10938,7 @@ mod tests {
         indexes: Vec<IrIndex>,
     ) -> Op {
         Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: name.into(),
             columns,
             primary_key: primary_key.map(|cols| cols.iter().map(|col| (*col).into()).collect()),
@@ -10858,6 +10953,7 @@ mod tests {
 
     fn create_part(name: &str, of: &str, bounds: PartitionBounds) -> Op {
         Op::CreatePartition {
+            attributes: zero_migrate_ir::attribute::CreatePartitionAttributes::new(),
             name: name.into(),
             of: of.into(),
             bounds,
@@ -11453,7 +11549,7 @@ mod tests {
     fn wrong_direction_existence_guard_is_an_authoring_error() {
         // ifExists on createTable — illegal.
         let bad_create = ir_with(vec![Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "t".into(),
             columns: vec![],
             primary_key: None,
@@ -11483,7 +11579,7 @@ mod tests {
 
         // The LEGAL directions pass.
         let ok_create = ir_with(vec![Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "t".into(),
             columns: vec![],
             primary_key: None,
@@ -11664,7 +11760,7 @@ mod tests {
         for dialect in [&POSTGRES, &SQLITE, &MYSQL] {
             for (primary_key, reason) in &invalid {
                 let ir = ir_with(vec![Op::CreateTable {
-                    attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+                    attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
                     name: "memberships".into(),
                     columns: vec![
                         part_col("account_id", ColType::Uuid, false),
@@ -12034,7 +12130,7 @@ mod tests {
     fn validate_ir_passes_a_clean_migration() {
         let ir = ir_with(vec![
             Op::CreateTable {
-                attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+                attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
                 name: "users".into(),
                 columns: vec![
                     IrColumn {
@@ -12360,7 +12456,7 @@ mod tests {
         // `WHERE deleted_at IS NULL` references the resolved column and MUST
         // resolve in rule (c) scope, not be rejected.
         let ir = ir_with(vec![Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "users".into(),
             columns: vec![IrColumn {
                 name: "first".into(),
@@ -12428,7 +12524,7 @@ mod tests {
         // The system-field union must NOT loosen the gate for a genuinely unknown
         // column — `ghost` is neither declared nor a system field.
         let ir = ir_with(vec![Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "users".into(),
             columns: vec![IrColumn {
                 name: "first".into(),
@@ -12476,7 +12572,7 @@ mod tests {
         // A createTable whose Check references a column NOT on the table — rule
         // (c). The walker resolves the createTable's own columns, so this fails.
         let ir = ir_with(vec![Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "users".into(),
             columns: vec![IrColumn {
                 name: "first".into(),
@@ -12964,7 +13060,7 @@ mod tests {
     /// Build a createTable Op with a single `id` column carrying `id_prefix`.
     fn create_with_id_prefix(prefix: &str) -> Op {
         Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "things".into(),
             columns: vec![IrColumn {
                 name: "id".into(),
@@ -12996,7 +13092,7 @@ mod tests {
 
     fn create_with_reference_name(name: &str) -> Op {
         Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "orders".into(),
             columns: vec![IrColumn {
                 name: "account_id".into(),
@@ -13032,7 +13128,7 @@ mod tests {
 
     fn create_with_type_id(prefix: &str, ty: ColType, case_sensitive: Option<bool>) -> Op {
         Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "things".into(),
             columns: vec![IrColumn {
                 name: "id".into(),
@@ -13064,7 +13160,7 @@ mod tests {
 
     fn create_with_ulid(ty: ColType, case_sensitive: Option<bool>) -> Op {
         Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "things".into(),
             columns: vec![IrColumn {
                 name: "id".into(),
@@ -13094,7 +13190,7 @@ mod tests {
 
     fn create_with_default(ty: ColType, default: crate::model::ir::IrDefault) -> Op {
         Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "docs".into(),
             columns: vec![IrColumn {
                 name: "body".into(),
@@ -13427,7 +13523,7 @@ mod tests {
         // closed enum already bounds the metric token at deserialize; this catches a
         // dead metric a hand-crafted artifact rides in on a text column.
         let ir = ir_with(vec![Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "docs".into(),
             columns: vec![IrColumn {
                 name: "body".into(),
@@ -13464,7 +13560,7 @@ mod tests {
     fn case_sensitive_false_rejects_non_text_columns() {
         for ty in [ColType::Int, ColType::Json] {
             let ir = ir_with(vec![Op::CreateTable {
-                attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+                attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
                 name: "docs".into(),
                 columns: vec![IrColumn {
                     name: "body".into(),
@@ -13571,7 +13667,7 @@ mod tests {
     #[test]
     fn p2a_create_table_accepts_vector_metric_on_a_vector_column() {
         let ir = ir_with(vec![Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "docs".into(),
             columns: vec![IrColumn {
                 name: "embedding".into(),
@@ -13626,7 +13722,7 @@ mod tests {
             },
         ];
         Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "per_row_values".into(),
             columns,
             primary_key: Some(vec!["cursor".into()]),
@@ -13872,7 +13968,7 @@ mod tests {
 
     fn typed_reference_table(name: &str, column: IrColumn) -> Op {
         Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::TableAttributes::new(),
+            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: name.into(),
             columns: vec![column],
             primary_key: None,
