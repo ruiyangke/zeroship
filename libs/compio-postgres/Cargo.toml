@@ -80,6 +80,14 @@ suite-over-tls = ["tls"]
 # lets the common helper keep the crate-only parameter away from the
 # tokio-postgres oracle, which rejects it.
 suite-with-statement-cache = []
+# Opt-in for `tests/unix_socket_live.rs`, which needs the server
+# `tests/unix_socket_setup.sh` stands up on a SHORT socket path.
+#
+# A feature for the reason `live-tls-tests` gives above: a runtime check for a
+# missing socket could only fail or return early, and an early return is
+# counted as a pass, so an absent fixture would be indistinguishable from a
+# working one.
+live-unix-socket = []
 
 [dependencies]
 async-trait = "0.1"
@@ -199,6 +207,10 @@ rcgen = "0.14"
 [[test]]
 name = "tls_live"
 required-features = ["tls", "live-tls-tests"]
+
+[[test]]
+name = "unix_socket_live"
+required-features = ["live-unix-socket"]
 
 [[bench]]
 name = "buf_fill"

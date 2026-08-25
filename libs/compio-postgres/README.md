@@ -84,6 +84,20 @@ names, so running it from a second worktree makes every TLS connection from the
 first fail `InvalidCertificate(BadSignature)` - which reads exactly like a
 driver defect. The script's own header says this at more length.
 
+```bash
+# A server whose Unix socket is reachable, for tests/unix_socket_live.rs.
+libs/compio-postgres/tests/unix_socket_setup.sh
+libs/compio-postgres/tests/unix_socket_setup.sh --down
+
+cargo test -p compio-postgres --features live-unix-socket --test unix_socket_live -- --test-threads=1
+```
+
+The socket directory has to be SHORT. `sun_path` is 108 bytes and the server
+appends `/.s.PGSQL.<port>`, so a fixture under an ordinary scratch path is
+unreachable - which is what the previous one was, 110 bytes deep, leaving
+`Host::Unix` reaching a real server asserted nowhere. The script refuses a
+directory that would not fit rather than creating another unusable fixture.
+
 Two more shapes have runbooks rather than scripts, because they answer a
 question rather than gate a change:
 
