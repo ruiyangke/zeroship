@@ -1,0 +1,121 @@
+# compio-postgres
+
+A native, asynchronous PostgreSQL client for compio/io_uring - a hand-written
+port of `tokio-postgres` 0.7.18 that runs no tokio reactor. Standalone and
+publishable: it depends on nothing in this workspace.
+
+It is a SUPERSET of tokio-postgres's client surface. On top of that crate's API
+it adds a connection pool, logical replication with a pgoutput decoder, a
+rustls transport, four timeout clocks, an opt-in prepared-statement cache, and
+`is_dirty` / `process_id` / `transaction_status` / `query_events`.
+
+## Important files
+
+| File | What it owns |
+| --- | --- |
+| `src/connection.rs` | The two run loops. `run_multiplexed` reads and writes concurrently on split socket halves; `run_serialized` is the fallback for a transport that refuses to split. |
+| `src/buf_stream.rs` | Buffered IO and the `SplitStream` trait that decides which loop runs. |
+| `src/tls_sansio.rs` | Drives rustls directly against a compio socket, so the socket stays ours and TLS can split. The crate's only `unsafe`. |
+| `src/tls_rustls.rs` | `MakeRustlsConnect`: builds a rustls config from `sslmode`/`sslcert`/`sslcrl`/... and attests to what it will honour. |
+| `src/pool.rs` | Pool, waiters, idle management, lifecycle hooks, `max_lifetime`. |
+| `src/replication.rs` | Replication protocol and the pgoutput decoder (stateful: a stream chunk adds an xid prefix nothing in the bytes advertises). |
+| `src/release.rs` | Synchronous, drop-safe socket release, so a dropped `Client` frees its backend promptly. |
+| `src/config.rs` | Every libpq connection parameter: implemented, or REFUSED BY NAME. Never accepted and ignored. |
+
+## Running the tests
+
+Everything needs a live server; nothing skips. A missing database is a FAILED
+run, not a green one - see the header of `tests/common/mod.rs` for why.
+
+```bash
+# The ordinary suite.
+PG_TEST_URL=postgres://postgres:zeroship@127.0.0.1:5455/zeroship \
+  cargo test -p compio-postgres --features test-utils -- --test-threads=1
+```
+
+`--test-threads=1` is not superstition: several tests measure server-visible
+state (backend counts, replication slots, prepared statements) that concurrent
+tests would perturb.
+
+### The suite MODES
+
+The same test bodies, run against a different shape. Each exists because a
+whole class of behaviour was otherwise measured on exactly one configuration.
+
+```bash
+# Over TLS. Needs tests/tls_live_setup.sh first (see below).
+cargo test -p compio-postgres --features test-utils,suite-over-tls -- --test-threads=1
+
+# With the implicit prepared-statement cache on (it is OFF by default, so its
+# eviction and stale-plan retry are otherwise barely exercised).
+PG_TEST_URL=... cargo test -p compio-postgres --features test-utils,suite-with-statement-cache -- --test-threads=1
+
+# The TLS-specific suite: negotiation, verification modes, CRLs, client
+# certificates, channel binding, direct SSL. Not built without the feature.
+cargo test -p compio-postgres --features tls,live-tls-tests --test tls_live -- --test-threads=1
+```
+
+`suite-over-tls` deliberately excludes `serialized_loop.rs` and
+`prefer_attestation_fallback.rs`: those files choose their own transport, so
+forcing them onto the encrypted server would measure the mode rather than the
+claim.
+
+### The fixtures
+
+```bash
+# Six PostgreSQL servers for the TLS suites, ports 5447-5452.
+libs/compio-postgres/tests/tls_live_setup.sh
+libs/compio-postgres/tests/tls_live_setup.sh --down
+```
+
+ONE CHECKOUT AT A TIME unless you pass different ports. The script generates a
+fresh CA into the tree it runs from and mounts it into containers with FIXED
+names, so running it from a second worktree makes every TLS connection from the
+first fail `InvalidCertificate(BadSignature)` - which reads exactly like a
+driver defect. The script's own header says this at more length.
+
+Two more shapes have runbooks rather than scripts, because they answer a
+question rather than gate a change:
+
+- `docs/runbooks/compio-postgres-transaction-pooler-check.md` - the suite
+  through PgBouncer in transaction mode. Read the `IGNORE_STARTUP_PARAMETERS`
+  note first, or you will measure pgbouncer refusing this suite's
+  schema-isolation `options` rather than measuring the driver.
+- `docs/runbooks/compio-postgres-cross-version-check.md` - a second server
+  version. PostgreSQL 16 and 18 are both known green; the runbook exists
+  because a protocol claim measured on one version is a claim about that
+  version.
+
+## The oracles
+
+Bugs in a port hide in the places where it is NOT a transcription, so the suite
+leans on things that can disagree with it:
+
+- `tests/differential_tokio.rs` runs `tokio-postgres` beside this crate against
+  the same server and compares observable results across fifteen tests.
+  tokio is a `[dev-dependencies]` exemption to the workspace zero-tokio rule
+  (AGENTS.md records the decision). Two divergences are DELIBERATE and pinned
+  in that file rather than left to drift.
+- `tests/frame_fuzz.rs` and `tests/pgoutput_fuzz.rs` feed seeded corpora to the
+  backend-frame and replication decoders. Both assert termination, no panic,
+  and a decoder that is still usable afterwards - plus FLOORS on what the
+  corpus actually reached, because a fuzzer rejected before it enters the
+  parser passes those assertions perfectly while testing nothing.
+- `tests/libpq_parameter_parity.rs` rules on every libpq connection parameter:
+  implemented, or refused with the key NAMED in the error's source chain. The
+  state it exists to prevent is a parameter accepted and silently ignored,
+  which is indistinguishable from support at the call site.
+- `tests/connection_churn.rs` opens ~90 connections including ones that end
+  badly, and requires both `live_connections()` and the server's backend count
+  back to baseline.
+
+## Before you push
+
+```bash
+./tests/clippy_gate.sh    # the workspace lint authority; a bare cargo clippy
+                          # stops at the first failing crate and prints what a
+                          # clean crate prints
+```
+
+Note it does NOT deny `unused_imports`; a plain `cargo build --tests` is the
+only thing that reports those.
