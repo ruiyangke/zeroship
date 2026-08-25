@@ -49,7 +49,7 @@ const MAX_DELAYED_HANDSHAKE_MESSAGES: usize = 256;
 ///
 /// The two caps are not redundant, and neither substitutes for the other. A
 /// count alone leaves the peer free to choose frame SIZE: a single frame may be
-/// [`MAX_MESSAGE_SIZE`](crate::buf_stream::MAX_MESSAGE_SIZE), 64 MiB, so 255 of
+/// [`DEFAULT_MAX_MESSAGE_SIZE`](crate::buf_stream::DEFAULT_MAX_MESSAGE_SIZE), 64 MiB, so 255 of
 /// them is about 16 GiB of retained `Bytes` per connection, times the pool's
 /// `max_size`. A byte budget alone would let a peer hold a slot open with
 /// unlimited tiny frames. Both, or neither is a bound.
@@ -283,6 +283,13 @@ where
     handshake
         .stream
         .set_read_timeout(config.get_read_timeout().copied());
+
+    // Applied after the handshake, like the read deadline above: startup
+    // frames are small and fixed, so a caller's limit governs the data phase
+    // and cannot make authentication unreachable.
+    if let Some(max) = config.get_max_message_size() {
+        handshake.stream.set_max_message_size(max);
+    }
 
     let (sender, receiver) = mpsc::unbounded();
     let drop_release = release.as_ref().map(|release| release.connection_guard());

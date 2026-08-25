@@ -278,7 +278,7 @@ where
             // whenever any message at the tail was partial - which is what
             // this did until it was measured - lets a dense run of small
             // messages accumulate untouched until `fill` refuses the request
-            // above `MAX_MESSAGE_SIZE`, failing a query whose largest single
+            // above `DEFAULT_MAX_MESSAGE_SIZE`, failing a query whose largest single
             // message was kilobytes. It also re-walked every buffered header
             // on each chunk, which is quadratic in the size of the run.
             let have = stream.buf().len();
@@ -375,7 +375,7 @@ mod tests {
     ///
     /// This is the whole of the bug that failed a 125 MiB result set. Refilling
     /// on a partial tail let a dense run of small `DataRow`s pile up in the read
-    /// buffer until `BufStream::fill` refused a request above `MAX_MESSAGE_SIZE`
+    /// buffer until `BufStream::fill` refused a request above `DEFAULT_MAX_MESSAGE_SIZE`
     /// - a query killed by an accumulation whose largest single message was
     /// 16 KiB. Here the script simply runs out, so a decoder that refills gets
     /// `UnexpectedEof` and one that returns its prefix gets both rows.

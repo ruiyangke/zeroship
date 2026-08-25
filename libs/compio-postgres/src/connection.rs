@@ -1144,7 +1144,7 @@ fn route_async(
             // UNBOUNDED ON PURPOSE. Both the name and the value come off the
             // wire, and nothing caps how many distinct keys a session may
             // accumulate; the only limit is the 64 MiB per-frame ceiling
-            // `buf_stream::MAX_MESSAGE_SIZE` enforces. That is deliberate, and
+            // `buf_stream::DEFAULT_MAX_MESSAGE_SIZE` enforces. That is deliberate, and
             // the reasoning is recorded here because "the pool should bound
             // server-controlled growth" reads as obviously correct and is not.
             //
