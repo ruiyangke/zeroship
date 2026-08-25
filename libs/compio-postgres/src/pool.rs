@@ -2415,9 +2415,14 @@ impl PooledClient<'_> {
                 Err(Error::command_timeout(Some(Box::new(io::Error::new(
                     io::ErrorKind::TimedOut,
                     format!(
-                        "CancelRequest recovery did not reach ReadyForQuery within {}s; \
+                        // `{:?}`, not `{}s` with `as_secs()`. It renders `5s`
+                        // identically for the current value, and keeps doing
+                        // so if the grace ever becomes sub-second - where
+                        // `as_secs()` would silently print `0s`, as the
+                        // acquire timeout did.
+                        "CancelRequest recovery did not reach ReadyForQuery within {:?}; \
                          the pooled session was discarded",
-                        COMMAND_TIMEOUT_RECOVERY_GRACE.as_secs()
+                        COMMAND_TIMEOUT_RECOVERY_GRACE
                     ),
                 )))))
             }
