@@ -18,13 +18,14 @@
 //! The operator asked for a capability-COMPOSITION model so the gate is
 //! orthogonal to the trust-profile machinery: the existing
 //! [`crate::policy::TrustProfile`] (`Confined`/`Platform`) MAPS onto
-//! NAMED PRESETS ([`VendorCapabilities::confined`] / [`operator`] / [`local`]),
+//! NAMED PRESETS ([`VendorCapabilities::confined`] / [`operator`]),
 //! but the gate keys on `caps.allow_role`, never on `trust == Confined`. A future
 //! "local dev" or "CI" posture can compose its own flag set without touching the
-//! gate. The profile mapping is [`VendorCapabilities::for_trust`].
+//! gate — and would compose it where it is used, which is why the speculative `local`
+//! preset that used to sit beside these two is gone.
+//! The profile mapping is [`VendorCapabilities::for_trust`].
 //!
 //! [`operator`]: VendorCapabilities::operator
-//! [`local`]: VendorCapabilities::local
 
 use crate::policy::{SchemaScope, TrustProfile};
 
@@ -126,8 +127,9 @@ impl VendorCapability {
 /// The active VENDOR capability set — a composition of boolean flags + a schema
 /// allowlist. The gate ([`grants`](Self::grants)) keys on the
 /// flags; the named presets ([`confined`](Self::confined) /
-/// [`operator`](Self::operator) / [`local`](Self::local)) are the compositions the
-/// trust profiles map onto.
+/// [`operator`](Self::operator)) are the compositions the trust profiles map onto —
+/// both of them, which is the whole list, because a preset no profile maps onto has
+/// nothing to keep it honest.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VendorCapabilities {
