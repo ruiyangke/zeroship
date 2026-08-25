@@ -267,6 +267,15 @@ async fn a_backend_killed_mid_row_stream_fails_the_stream_and_releases_the_conne
 /// This is the idle-then-explicitly-checked-out case. The two tests above kill
 /// live non-pooled connections while they are checked out and mid-operation;
 /// they do not cover a pooled connection killed while checked out.
+///
+/// IT DOES NOT REST ON THE ALIVE-CHECK, which is worth knowing because this
+/// test leaves `PoolConfig::validation_bypass` at its 500 ms default and a
+/// reader would reasonably suspect it only passes because the kill took longer
+/// than that. MEASURED 2026-08-24: re-run with the bypass set to 600 SECONDS -
+/// so every checkout skips validation - it still passes. A connection handed
+/// out dead under the bypass fails on first use and the pool evicts and
+/// retries, so recovery here is a property of the pool rather than of the
+/// timing this test happens to produce.
 #[compio::test]
 async fn all_idle_pool_backends_are_replaced_after_mass_termination() {
     compio::time::timeout(WATCHDOG, async {
