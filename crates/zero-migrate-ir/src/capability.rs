@@ -213,31 +213,15 @@ impl VendorCapabilities {
         }
     }
 
-    /// The **local** preset (an in-between dev/CI posture): structural vendor DDL
-    /// (extensions, schemas, grants, RLS, policies, functions) is
-    /// enabled, but ROLE management and the `raw` escape are NOT — a local
-    /// dev DB does not mint roles and never needs the last-resort raw escape. This
-    /// preset is not wired to a `TrustProfile` (there is no `Local` profile); it is
-    /// available for a caller composing a bespoke gate.
-    #[must_use]
-    pub const fn local() -> Self {
-        Self {
-            allow_extension: true,
-            allow_schema: true,
-            allow_role: false,
-            allow_grant: true,
-            allow_rls: true,
-            allow_partition: true,
-            allow_policy: true,
-            allow_function: true,
-            allow_trigger: true,
-            allow_raw_sql: false,
-            allow_raw_view_body: false,
-            allow_materialized_view: true,
-            allow_cross_schema: true,
-            schemas: Vec::new(),
-        }
-    }
+    // A third `local()` preset stood here, an in-between dev/CI posture. Its own doc
+    // recorded that it was "not wired to a `TrustProfile` (there is no `Local` profile)"
+    // and was "available for a caller composing a bespoke gate" — and no such caller was
+    // ever written: its only reference in the tree was the unit test that exercised it.
+    //
+    // Deleted because the preset list is not free to keep. Every capability field added
+    // to this struct has to be answered by each preset, so a preset nothing composes is
+    // a third answer that must be kept plausible forever with nothing to check it
+    // against. The two that a `TrustProfile` maps onto remain.
 
     /// Map a [`TrustProfile`] onto its named preset: Confined ⇒
     /// [`confined`](Self::confined); Platform ⇒ [`operator`](Self::operator).
@@ -352,27 +336,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn local_is_in_between_no_role_no_raw() {
-        let l = VendorCapabilities::local();
-        assert!(l.grants(VendorCapability::Function));
-        assert!(l.grants(VendorCapability::Trigger));
-        assert!(l.grants(VendorCapability::Policy));
-        assert!(l.grants(VendorCapability::Partition));
-        assert!(l.grants(VendorCapability::MaterializedView));
-        assert!(
-            !l.grants(VendorCapability::Role),
-            "local must not mint roles"
-        );
-        assert!(
-            !l.grants(VendorCapability::RawSql),
-            "local must not allow the raw escape"
-        );
-        assert!(
-            !l.grants(VendorCapability::RawViewBody),
-            "local must not allow raw view bodies"
-        );
-    }
+    // `local_is_in_between_no_role_no_raw` stood here. Despite the name it asserted no
+    // ordering between the presets — every assertion read `local()` alone — so it tested
+    // the deleted preset and nothing else, and went with it.
 
     #[test]
     fn for_trust_maps_profiles_onto_presets() {
