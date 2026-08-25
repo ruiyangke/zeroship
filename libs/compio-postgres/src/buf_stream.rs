@@ -5,8 +5,8 @@
 //! length + payload) doesn't translate into 3 separate io_uring SQEs.
 //!
 //! Two hardening properties are load-bearing and must survive any rewrite:
-//! the 64 MB length cap (which stops a malformed server from OOM-ing the
-//! driver) and the zero-copy `BytesMut::split` flush path.
+//! the length cap (which stops a malformed server from OOM-ing the driver;
+//! 64 MB by default, see `Config::max_message_size`) and the zero-copy `BytesMut::split` flush path.
 
 use crate::Error;
 use bytes::BytesMut;
@@ -35,7 +35,7 @@ pub(crate) trait ReadFramer {
     fn buf(&mut self) -> &mut BytesMut;
     /// Peek a big-endian u32 at `offset` without consuming.
     fn peek_u32_be(&self, offset: usize) -> Option<u32>;
-    /// Reject a frame whose declared length exceeds `MAX_MESSAGE_SIZE`.
+    /// Reject a frame whose declared length exceeds `DEFAULT_MAX_MESSAGE_SIZE`.
     fn validate_length(&self, length: u32) -> Result<(), Error>;
 }
 
@@ -58,13 +58,20 @@ const READ_BUF_CAPACITY: usize = 8192;
 /// satisfy `min_bytes`.
 const READ_CHUNK: usize = 16 * 1024;
 
-/// Maximum single-message size the driver will accept. PostgreSQL's own
-/// limit is 1 GB (`PG_LARGE_SEND_MAX`), but for a platform where apps
-/// execute structured CRUD queries (not bulk COPY), 64 MB is generous.
-/// A malformed or malicious server sending a message header with a
-/// multi-GB length field will be rejected here instead of OOM-ing the
-/// worker.
-pub(crate) const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
+/// Default maximum single-message size the driver accepts.
+///
+/// PostgreSQL's own limit is 1 GB (`PG_LARGE_SEND_MAX`), and this default sits
+/// well below it on purpose: a length field is read BEFORE the body it
+/// describes, so a malformed or malicious server claiming a multi-GB message
+/// would otherwise have this driver allocate for it. Rejecting on the header
+/// costs nothing and bounds that.
+///
+/// It is a DEFAULT rather than a ceiling, because a legal value the server
+/// will happily send - a `bytea` or `text` column up to 1 GB - would
+/// otherwise be permanently unreadable by this driver with no way to say
+/// otherwise. `Config::max_message_size` raises it for callers who know their
+/// rows are large and their server is not hostile.
+pub(crate) const DEFAULT_MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 
 /// Shared controller for one physical connection's socket-read inactivity
 /// clock.
@@ -262,6 +269,7 @@ pub(crate) struct BufStream<S> {
     read_scratch: Vec<u8>,
     write_buf: BytesMut,
     read_deadline: Option<ReadDeadline>,
+    max_message_size: usize,
 }
 
 impl<S> BufStream<S>
@@ -276,7 +284,15 @@ where
             read_scratch: vec![0u8; READ_CHUNK],
             write_buf: BytesMut::with_capacity(1024),
             read_deadline: None,
+            max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
         }
+    }
+
+    /// Raise or lower the largest single backend message this stream accepts.
+    ///
+    /// See [`DEFAULT_MAX_MESSAGE_SIZE`] for why there is a cap at all.
+    pub(crate) fn set_max_message_size(&mut self, max: usize) {
+        self.max_message_size = max;
     }
 
     /// Install a post-startup read deadline. Handshake reads remain owned by
@@ -317,14 +333,17 @@ where
     /// Ensure the read buffer has at least `min_bytes` available.
     /// Reads from the socket if needed. Returns error on EOF or I/O failure.
     ///
-    /// Rejects requests larger than `MAX_MESSAGE_SIZE` to prevent a
+    /// Rejects requests larger than `DEFAULT_MAX_MESSAGE_SIZE` to prevent a
     /// malformed/malicious server from OOM-ing the process with a
     /// crafted 4-byte length field (e.g., 0xFFFFFFFF = 4 GB).
     pub async fn fill(&mut self, min_bytes: usize) -> Result<(), Error> {
-        if min_bytes > MAX_MESSAGE_SIZE {
+        if min_bytes > self.max_message_size {
             return Err(Error::io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("message too large: {min_bytes} bytes (max {MAX_MESSAGE_SIZE})"),
+                format!(
+                    "message too large: {min_bytes} bytes (max {})",
+                    self.max_message_size
+                ),
             )));
         }
         while self.read_buf.len() < min_bytes {
@@ -360,15 +379,18 @@ where
 
     /// Reject a framed message whose declared length (from the 4-byte length
     /// field, which itself counts its own 4 bytes but not the 1-byte tag)
-    /// would exceed `MAX_MESSAGE_SIZE`. O(1) - called before we buffer the
+    /// would exceed `DEFAULT_MAX_MESSAGE_SIZE`. O(1) - called before we buffer the
     /// payload, so a malicious server can't coerce us to allocate up to
     /// 64 MB per connection.
     pub fn validate_length(&self, length: u32) -> Result<(), Error> {
         let total = 1u64 + u64::from(length);
-        if total > MAX_MESSAGE_SIZE as u64 {
+        if total > self.max_message_size as u64 {
             return Err(Error::io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("message too large: {total} bytes (max {MAX_MESSAGE_SIZE})"),
+                format!(
+                    "message too large: {total} bytes (max {})",
+                    self.max_message_size
+                ),
             )));
         }
         Ok(())
@@ -506,6 +528,7 @@ pub(crate) struct BufReadHalf<R> {
     read_buf: BytesMut,
     read_scratch: Vec<u8>,
     read_deadline: Option<ReadDeadline>,
+    max_message_size: usize,
 }
 
 impl<R> BufReadHalf<R>
@@ -525,10 +548,13 @@ where
     R: AsyncRead + Unpin,
 {
     async fn fill(&mut self, min_bytes: usize) -> Result<(), Error> {
-        if min_bytes > MAX_MESSAGE_SIZE {
+        if min_bytes > self.max_message_size {
             return Err(Error::io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("message too large: {min_bytes} bytes (max {MAX_MESSAGE_SIZE})"),
+                format!(
+                    "message too large: {min_bytes} bytes (max {})",
+                    self.max_message_size
+                ),
             )));
         }
         while self.read_buf.len() < min_bytes {
@@ -561,10 +587,13 @@ where
 
     fn validate_length(&self, length: u32) -> Result<(), Error> {
         let total = 1u64 + u64::from(length);
-        if total > MAX_MESSAGE_SIZE as u64 {
+        if total > self.max_message_size as u64 {
             return Err(Error::io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("message too large: {total} bytes (max {MAX_MESSAGE_SIZE})"),
+                format!(
+                    "message too large: {total} bytes (max {})",
+                    self.max_message_size
+                ),
             )));
         }
         Ok(())
@@ -651,6 +680,7 @@ where
             read_scratch,
             write_buf,
             read_deadline,
+            max_message_size,
         } = self;
         match inner.try_into_split() {
             Ok((r, w)) => Ok((
@@ -659,6 +689,7 @@ where
                     read_buf,
                     read_scratch,
                     read_deadline,
+                    max_message_size,
                 },
                 BufWriteHalf {
                     inner: w,
@@ -671,6 +702,7 @@ where
                 read_scratch,
                 write_buf,
                 read_deadline,
+                max_message_size,
             }),
         }
     }

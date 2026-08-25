@@ -720,6 +720,8 @@ pub struct Config {
     pub(crate) service_file: Option<String>,
     /// Path to write TLS secrets to, in NSS key-log format, for debugging.
     pub(crate) ssl_key_log_file: Option<String>,
+    /// Largest single backend message to accept, or `None` for the default.
+    pub(crate) max_message_size: Option<usize>,
     pub(crate) dbname: Option<String>,
     pub(crate) options: Option<String>,
     pub(crate) application_name: Option<String>,
@@ -773,6 +775,7 @@ impl Config {
             service: None,
             service_file: None,
             ssl_key_log_file: None,
+            max_message_size: None,
             dbname: None,
             options: None,
             application_name: None,
@@ -912,6 +915,29 @@ impl Config {
     /// Gets the TLS key-log file path, if one was set.
     pub fn get_ssl_key_log_file(&self) -> Option<&str> {
         self.ssl_key_log_file.as_deref()
+    }
+
+    /// Sets the largest single backend message this connection will accept.
+    ///
+    /// Defaults to 64 MB. The cap exists because a message's length field is
+    /// read BEFORE its body, so a server claiming a multi-GB message would
+    /// otherwise have the driver allocate for it; rejecting on the header
+    /// bounds that for nothing.
+    ///
+    /// Raise it when the rows are genuinely large - PostgreSQL will send a
+    /// single value of up to 1 GB, and at the default such a value cannot be
+    /// read at all. Raising it trades that ceiling for the memory a hostile or
+    /// broken server could make one connection reserve, so raise it to what
+    /// the data needs rather than to the maximum.
+    pub fn max_message_size(&mut self, max_message_size: usize) -> &mut Config {
+        self.max_message_size = Some(max_message_size);
+        self
+    }
+
+    /// Gets the configured maximum message size, if one was set. `None` means
+    /// the 64 MB default applies.
+    pub fn get_max_message_size(&self) -> Option<usize> {
+        self.max_message_size
     }
 
     /// Fill parameters the caller did not give from the named service.
@@ -1611,6 +1637,22 @@ impl Config {
                     Error::config_parse(Box::new(InvalidValue("statement_cache_capacity")))
                 })?;
                 self.statement_cache_capacity(capacity);
+            }
+            // NOT a libpq key; libpq imposes no such ceiling. See
+            // `Config::max_message_size`. Zero is refused rather than taken to
+            // mean "unlimited": every message carries a header, so a limit of
+            // zero would reject the connection's own first frame, and a caller
+            // writing it plainly means something else.
+            "max_message_size" => {
+                let max: usize = value
+                    .parse()
+                    .map_err(|_| Error::config_parse(Box::new(InvalidValue("max_message_size"))))?;
+                if max == 0 {
+                    return Err(Error::config_parse(Box::new(InvalidValue(
+                        "max_message_size",
+                    ))));
+                }
+                self.max_message_size(max);
             }
             "sslmode" => {
                 let mode = match value {

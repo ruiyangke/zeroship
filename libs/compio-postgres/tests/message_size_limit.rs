@@ -86,3 +86,43 @@ async fn a_message_over_the_limit_names_the_limit() {
          judge whether their value is unreasonable or the cap is: {chain}"
     );
 }
+
+/// Raising the limit makes a value the default refuses readable. Without this
+/// the cap is a ceiling rather than a default, and a legal 1 GB value the
+/// server will happily send is simply unreachable through this driver.
+#[compio::test]
+async fn raising_the_limit_admits_a_larger_message() {
+    let mut config: compio_postgres::Config = test_url().parse().expect("the suite DSN parses");
+    config.max_message_size(128 * MB);
+    let (client, connection) = config.connect(suite_tls()).await.expect("connect");
+    compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    })
+    .detach();
+
+    let len = select_value_of(&client, 70 * MB)
+        .await
+        .expect("70 MB is under the raised limit");
+    assert_eq!(len, 70 * MB);
+}
+
+/// The same size through the connection string, so the DSN key is wired to
+/// the same place the builder is.
+#[compio::test]
+async fn the_dsn_key_raises_the_limit_too() {
+    let url = test_url();
+    let separator = if url.contains('?') { '&' } else { '?' };
+    let dsn = format!("{url}{separator}max_message_size={}", 128 * MB);
+    let (client, connection) = compio_postgres::connect(&dsn, suite_tls())
+        .await
+        .expect("connect with a raised limit");
+    compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    })
+    .detach();
+
+    let len = select_value_of(&client, 70 * MB)
+        .await
+        .expect("70 MB is under the raised limit");
+    assert_eq!(len, 70 * MB);
+}
