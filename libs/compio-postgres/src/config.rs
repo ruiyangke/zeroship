@@ -606,7 +606,9 @@ pub enum Host {
 /// * `connect_timeout` - The time limit in seconds applied to each address tried, covering TLS negotiation, startup,
 ///     and authentication, and applied once more to each host entry's name resolution. Hostnames can resolve to
 ///     multiple IP addresses, and the limit restarts for each, as libpq's does. Defaults to no timeout.
-/// * `tcp_user_timeout` - The time limit that transmitted data may remain unacknowledged before a connection is forcibly closed.
+/// * `tcp_user_timeout` - The time limit that transmitted data may remain unacknowledged before a connection is
+///     forcibly closed, in MILLISECONDS. The one member of this family that is not seconds - `keepalives_idle`,
+///     `keepalives_interval` and `connect_timeout` are all seconds.
 ///     This is ignored for Unix domain socket connections. It is only supported on systems where TCP_USER_TIMEOUT is available
 ///     and will default to the system default if omitted or set to 0; on other systems, it has no effect.
 /// * `keepalives` - Controls the use of TCP keepalive. A value of 0 disables keepalive and nonzero integers enable it.
@@ -1731,7 +1733,24 @@ impl Config {
                     .parse::<i64>()
                     .map_err(|_| Error::config_parse(Box::new(InvalidValue("tcp_user_timeout"))))?;
                 if timeout > 0 {
-                    self.tcp_user_timeout(Duration::from_secs(timeout as u64));
+                    // MILLISECONDS, and it is the only member of this family
+                    // that is not seconds: libpq documents `keepalives_idle`,
+                    // `keepalives_interval` and `connect_timeout` in seconds
+                    // but this one as "the number of milliseconds that
+                    // transmitted data may remain unacknowledged". The kernel
+                    // option is milliseconds too, and socket2 converts the
+                    // `Duration` with `as_millis`.
+                    //
+                    // Reading it as seconds is a 1000x error that no
+                    // accept/reject test can see - the DSN parses, the socket
+                    // option is set, and the bound the caller asked for never
+                    // fires. `tcp_user_timeout=30000` means thirty seconds;
+                    // as seconds it would be eight hours.
+                    //
+                    // tokio-postgres 0.7.18 reads this as seconds. That is a
+                    // DELIBERATE divergence from the crate this one is a port
+                    // of, in favour of the parameter's documented meaning.
+                    self.tcp_user_timeout(Duration::from_millis(timeout as u64));
                 }
             }
             #[cfg(not(target_arch = "wasm32"))]

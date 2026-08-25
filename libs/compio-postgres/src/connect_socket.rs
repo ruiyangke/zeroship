@@ -309,4 +309,57 @@ mod tests {
             drop(listener);
         }
     }
+
+    /// A DSN's values must reach the kernel IN LIBPQ'S UNITS.
+    ///
+    /// The tests above build a `KeepaliveConfig` by hand, so they prove
+    /// `connect_socket` applies what it is given and nothing about what the
+    /// connection string turns into. That is where a unit is lost: libpq
+    /// documents `keepalives_idle` and `keepalives_interval` in SECONDS but
+    /// `tcp_user_timeout` in MILLISECONDS, and reading the whole family as
+    /// seconds is a mistake no accept/reject test can see - the DSN parses,
+    /// the option is set, and the value is a thousand times too large.
+    ///
+    /// The numbers below are chosen so the two units cannot be confused: a
+    /// `tcp_user_timeout` of 7000 is seven seconds, and would be just under two
+    /// hours if it were read as seconds.
+    #[compio::test]
+    async fn dsn_values_reach_the_kernel_in_libpq_units() {
+        let config: crate::Config = "host=127.0.0.1 keepalives=1 keepalives_idle=11 \
+             keepalives_interval=3 keepalives_count=5 tcp_user_timeout=7000"
+            .parse()
+            .expect("the DSN parses");
+
+        // Exactly what `connect.rs` hands to `connect_socket`.
+        let keepalive = config
+            .get_keepalives()
+            .then(|| config.keepalive_config.clone());
+        let (socket, _listener) =
+            dial(keepalive.as_ref(), config.get_tcp_user_timeout().copied()).await;
+
+        let fd = socket.borrowed_fd();
+        let sock_ref = SockRef::from(&fd);
+        assert_eq!(
+            sock_ref.keepalive_time().expect("read TCP_KEEPIDLE"),
+            Duration::from_secs(11),
+            "keepalives_idle is documented in seconds"
+        );
+        assert_eq!(
+            sock_ref.keepalive_interval().expect("read TCP_KEEPINTVL"),
+            Duration::from_secs(3),
+            "keepalives_interval is documented in seconds"
+        );
+        assert_eq!(
+            sock_ref.keepalive_retries().expect("read TCP_KEEPCNT"),
+            5,
+            "keepalives_count is a plain count"
+        );
+        assert_eq!(
+            sock_ref.tcp_user_timeout().expect("read TCP_USER_TIMEOUT"),
+            Some(Duration::from_millis(7000)),
+            "tcp_user_timeout is documented in MILLISECONDS, so 7000 means \
+             seven seconds; reading it as seconds sets a timeout 1000x too \
+             long and silently stops it ever firing"
+        );
+    }
 }
