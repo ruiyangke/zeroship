@@ -3189,6 +3189,22 @@ mod tests {
         assert!(parse_lsn("0/zz").is_none());
     }
 
+    // THE pgoutput TESTS BELOW FEED OUR OWN ENCODER TO OUR OWN DECODER, so on
+    // their own they would hold for a pair that is wrong in the same
+    // direction - pgoutput is PostgreSQL's format, not ours. They are
+    // supplementary, and that is only safe because every variant is also
+    // decoded from a real server somewhere in `tests/pgoutput_*.rs` /
+    // `tests/replication_*.rs`.
+    //
+    // AUDITED 2026-08-25: all 19 `PgOutputMessage` variants appear in a live
+    // assertion - the enum's variant list and the set of `PgOutputMessage::*`
+    // named across those suites were compared and are identical, including the
+    // two-phase (BeginPrepare, Prepare, CommitPrepared, RollbackPrepared,
+    // StreamPrepare) and streaming (StreamStart/Stop/Commit/Abort) arms.
+    //
+    // So: adding a variant means adding a LIVE test for it, not just a round
+    // trip here. `parse_lsn`/`format_lsn` above are the cautionary case - they
+    // had only the self-referential test until `tests/lsn_server_parity.rs`.
     #[test]
     fn pgoutput_decode_begin() {
         let bytes = pgoutput::encode::begin(0x16B3750, 700_000_000_000, 42);
