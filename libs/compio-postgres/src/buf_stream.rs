@@ -191,6 +191,12 @@ impl ReadDeadline {
     }
 
     fn register_reader(&self, waker: &Waker) {
+        // The clone stays inside the borrow below, deliberately: see the note in
+        // `pool.rs` `Waiter::poll`. MEASURED - a `Waker` from `Arc<W>` runs the
+        // user impl on `wake` and on `drop`, both carried outside here, but its
+        // `clone` is `Arc::clone` and reaches no user code without a hand-rolled
+        // `RawWakerVTable`, which needs `unsafe`. Hoisting it out was tried and
+        // reverted: it relocated the hazard rather than removing it.
         // Carry the REPLACED waker out and destroy it with no borrow held.
         // Assigning through the `RefMut` drops the previous `Waker` while
         // `reader_waker` is still borrowed, and a `Waker` is arbitrary caller
@@ -200,22 +206,12 @@ impl ReadDeadline {
         // `wake_reader` below already takes the waker OUT before waking, for
         // exactly this reason. The drop is the same hazard reached through the
         // destructor instead of the wake, and it was the half this file missed.
-        // Cloned before the borrow for the SAME reason the drop is carried out
-        // after it: a `RawWakerVTable` has three arbitrary-code entry points -
-        // wake, drop and clone - and all three must stay outside. Fixing only
-        // the drop here, as the first pass did, is the same half-applied
-        // invariant that let two earlier defects in this family survive a fix
-        // each; `pool.rs` had the identical miss and was corrected first.
-        //
-        // Unconditional, so it costs one refcount pair on the re-registration
-        // where `will_wake` matches and the clone goes unused.
-        let fresh = waker.clone();
         let replaced = {
             let mut slot = self.inner.reader_waker.borrow_mut();
             if slot.as_ref().is_some_and(|saved| saved.will_wake(waker)) {
                 None
             } else {
-                slot.replace(fresh)
+                slot.replace(waker.clone())
             }
         };
         drop(replaced);
