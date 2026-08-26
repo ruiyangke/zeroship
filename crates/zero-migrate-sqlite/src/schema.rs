@@ -1,4 +1,4 @@
-//! SQLite schema/DDL spelling. The future `zero-migrate-sqlite`.
+//! SQLite schema/DDL spelling.
 
 use zero_migrate_backend::ddl::ExclusionConstraintRequest;
 use zero_migrate_backend::renderer::DmlRenderer;
