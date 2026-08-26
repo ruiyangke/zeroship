@@ -9,8 +9,8 @@
 //! engine that composes it.
 //!
 //! The set is deliberately CLOSED and small. Each variant names a feature whose
-//! exact IR lowering the engine cannot render around — a generator function or an
-//! enforced constraint the target either has or has not — never a general
+//! exact IR lowering the engine cannot render around - a generator function or an
+//! enforced constraint the target either has or has not - never a general
 //! capability probe. The engine re-exports both types at
 //! `zero_migrate::render::plan`.
 
@@ -20,7 +20,7 @@
 /// `minimum_postgres_version_num` for a while: one backend's version-number scheme,
 /// one backend's release history, as a method on the neutral question. Its only
 /// production caller was that backend's own `verify_database_requirements`, which is
-/// exactly the seam the trait exists to route through — the engine asks WHAT a plan
+/// exactly the seam the trait exists to route through - the engine asks WHAT a plan
 /// needs, and each target answers whether it has it, in whatever terms its own
 /// server versions come in. It is `zero_migrate_postgres::backend::minimum_server_version_num`
 /// now, private to the crate that reads it.

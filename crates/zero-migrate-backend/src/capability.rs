@@ -2,8 +2,8 @@
 //! migration.
 //!
 //! [`OnlineSchemaChange`] is here in full. Everything its `run_online_backfill`
-//! names — the [`OnlineIntent`] it is handed, the [`OnlineError`] it refuses with,
-//! the `Migration`/`BackfillSpec`/`Approval`/`ExecutorConfig` it works from — now
+//! names - the [`OnlineIntent`] it is handed, the [`OnlineError`] it refuses with,
+//! the `Migration`/`BackfillSpec`/`Approval`/`ExecutorConfig` it works from - now
 //! sits at or below this crate, so a vendor can implement it without naming the
 //! engine. That last clause used to be false in the one way that mattered: the
 //! method took the whole expand sequence and called the ENGINE'S orchestrator to
@@ -15,7 +15,7 @@
 //! (which holds the engine's `MigrationPlan` and a private policy field) and a
 //! `DesiredSchema` (which holds the engine's `ResolvedInject`), and its
 //! `SeedError` carries the engine's whole `EngineError`. All three are
-//! ORCHESTRATION RESULTS — what the engine decided — not vocabulary a backend
+//! ORCHESTRATION RESULTS - what the engine decided - not vocabulary a backend
 //! speaks. Its neutral half is here anyway ([`ShadowConfig`] in,
 //! [`DryRunReport`]/[`MigrationResult`] out) because those parts are backend
 //! vocabulary and were never the obstacle.
@@ -39,7 +39,7 @@ use zero_migrate_ir::migration::{Migration, MigrationId};
 /// vendor's spelling of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OnlineIntent {
-    /// Rename column `from` → `to` (of type `ty`) on `table`, online, via the
+    /// Rename column `from` -> `to` (of type `ty`) on `table`, online, via the
     /// canonical expand-contract dual-write sequence.
     RenameColumn {
         /// The table the column lives on (bare; project-schema-qualified on emit).
@@ -53,7 +53,7 @@ pub enum OnlineIntent {
     },
 }
 
-/// A failure from an online expand — raised by the engine while it drives the
+/// A failure from an online expand - raised by the engine while it drives the
 /// expand's neutral phases, and by `OnlineSchemaChange::run_online_backfill` for
 /// the vendor phase.
 #[derive(Debug, thiserror::Error)]
@@ -65,7 +65,7 @@ pub enum OnlineError {
     /// **Per-version approval scope (executor-layer defense in depth).** The
     /// expand is approved ([`Approval::Approved`]) but the rename's PLAN-GROUP
     /// version is NOT in the operator's reviewed
-    /// [`ApprovalScope::Versions`] set — the
+    /// [`ApprovalScope::Versions`] set - the
     /// executor-layer mirror of the engine's EXPAND scope gate, so a direct
     /// `run_online_backfill` caller cannot mirror data for a rename the operator
     /// never individually reviewed. Nothing was applied.
@@ -80,7 +80,7 @@ pub enum OnlineError {
     /// Applying E1/E2 or the E3 backfill marker failed.
     #[error(transparent)]
     Apply(#[from] ApplyError),
-    /// The backfill step failed — E3 is NOT journaled, so the gate keeps the
+    /// The backfill step failed - E3 is NOT journaled, so the gate keeps the
     /// expand incomplete (the contract stays blocked) and the backfill is
     /// resumable on a re-run.
     #[error(transparent)]
@@ -124,7 +124,7 @@ pub struct DryRunReport {
     pub teardown_error: Option<String>,
 }
 
-/// The online schema-change capability — the dialect-neutral seam the generic
+/// The online schema-change capability - the dialect-neutral seam the generic
 /// declarative apply path uses to drive a zero-downtime online operation.
 ///
 /// # The engine drives the phases; this answers one of them
@@ -133,19 +133,19 @@ pub struct DryRunReport {
 /// expand sequence and drove it: it applied E1/E2 by calling the engine's
 /// orchestrator (`apply_with_lock_backend`) back across the layer boundary,
 /// tripped the engine's fault point, read the journal, and then ran the one thing
-/// only a vendor can run — the paged data mirror. That was mutual recursion across
+/// only a vendor can run - the paged data mirror. That was mutual recursion across
 /// the seam the crate split exists to create: a vendor crate cannot depend on the
 /// engine, so a vendor that calls the orchestrator can never leave it. Widening
 /// the contract could not fix it, because the callee WAS the orchestrator.
 ///
-/// The phases are inverted instead. The engine now owns every neutral phase —
+/// The phases are inverted instead. The engine now owns every neutral phase -
 /// the approval and scope gates, splitting the marker off the expand chain,
 /// applying E1/E2 through its own apply path, the fault point, and the journal
-/// read that decides resume-versus-skip — and calls DOWN here exactly once, for
+/// read that decides resume-versus-skip - and calls DOWN here exactly once, for
 /// the vendor-only phase. Nothing on this trait names the orchestrator.
 #[allow(clippy::module_name_repetitions)]
 pub trait OnlineSchemaChange {
-    /// Mirror the pre-existing rows for one online intent — the single phase of
+    /// Mirror the pre-existing rows for one online intent - the single phase of
     /// an online expand that only the vendor can perform.
     ///
     /// The engine calls this only after it has applied the intent's structural
@@ -157,12 +157,12 @@ pub trait OnlineSchemaChange {
     /// `marker` is the durable backfill step (E3) whose `version`/`checksum` key
     /// the progress row, so an interrupted run resumes from its last committed
     /// cursor rather than restarting. Completion is journaled by the backfill
-    /// runner, not by the caller — the returned
+    /// runner, not by the caller - the returned
     /// [`BackfillOutcome::complete`] tells the engine
     /// whether the cohort finished, and an incomplete run leaves the expand
     /// incomplete (so the contract stays blocked).
     ///
-    /// `approval_key` is the rename's PLAN-GROUP version — the id the operator
+    /// `approval_key` is the rename's PLAN-GROUP version - the id the operator
     /// actually reviewed and the id the engine's own scope gate uses. It is passed
     /// resolved rather than re-derived here so the two gates cannot drift, and so
     /// this executor-layer mirror keys on the same version even when the expand
@@ -172,7 +172,7 @@ pub trait OnlineSchemaChange {
     /// [`OnlineError::Approval`] when `approval` is not
     /// [`Approval::Approved`] (the mirror mutates data);
     /// [`OnlineError::ApprovalNotScoped`] when `scope` does not admit
-    /// `approval_key` — the executor-layer mirror of the engine's per-version
+    /// `approval_key` - the executor-layer mirror of the engine's per-version
     /// gate, so a direct seam caller cannot mirror data for a rename the operator
     /// never individually reviewed. Nothing is written on either path.
     /// [`OnlineError::Backfill`] / [`OnlineError::Apply`] when the mirror itself
@@ -193,13 +193,13 @@ pub trait OnlineSchemaChange {
     >;
 }
 
-/// The full ordered output of the engine's `ExpandContractAuthor::author` — the expand and
+/// The full ordered output of the engine's `ExpandContractAuthor::author` - the expand and
 /// contract migrations for one online intent, with the `depends_on` chain wired.
 ///
 /// The expand migrations ([`expand`](Self::expand)) and contract migrations
 /// ([`contract`](Self::contract)) are exposed separately so a caller (the
 /// control plane) can bundle the expand into deploy N and the contract into a
-/// later deploy N+1 — the cross-deploy partition the engine gate enforces. The
+/// later deploy N+1 - the cross-deploy partition the engine gate enforces. The
 /// flat [`all`](Self::all) view is the input to `MigrationEngine::plan`.
 #[derive(Debug, Clone)]
 pub struct ExpandContractPlan {
@@ -216,20 +216,20 @@ pub struct ExpandContractPlan {
     /// [`OnlineSchemaChange::run_online_backfill`]
     /// by the engine once it has applied the expand's structural steps.
     pub backfill: BackfillSpec,
-    /// The version of the E2 trigger migration — the dependency every contract
+    /// The version of the E2 trigger migration - the dependency every contract
     /// step and the gate keys on as "the expand". Carried out so the
     /// orchestrator / gate need not re-derive it.
     pub trigger_version: MigrationId,
     /// The neutral [`OnlineIntent`] this plan was authored from. Carried so the
     /// generic declarative apply path hands the **intent** (not the PG-DDL plan)
-    /// to the [`OnlineSchemaChange`] seam — the Postgres impl ignores it and
+    /// to the [`OnlineSchemaChange`] seam - the Postgres impl ignores it and
     /// runs the pre-authored [`expand`](Self::expand) steps verbatim, while a
     /// future engine lowers the intent to its own native online DDL.
     pub intent: OnlineIntent,
 }
 
 impl ExpandContractPlan {
-    /// All migrations (expand then contract) in apply order — the input to
+    /// All migrations (expand then contract) in apply order - the input to
     /// `MigrationEngine::plan`.
     #[must_use]
     pub fn all(&self) -> Vec<Migration> {
@@ -253,7 +253,7 @@ impl ExpandContractPlan {
     }
 }
 
-/// An OPTIONAL backend capability — something a plan step may need that a deploy
+/// An OPTIONAL backend capability - something a plan step may need that a deploy
 /// target is not obliged to provide.
 ///
 /// A plan says what it requires ([`PlanStep::required_capability`]) and a backend
@@ -267,7 +267,7 @@ impl ExpandContractPlan {
 /// [`MigrationBackend::provides`]: crate::backend::MigrationBackend::provides
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendCapability {
-    /// [`OnlineSchemaChange`] — driving a zero-downtime online schema operation.
+    /// [`OnlineSchemaChange`] - driving a zero-downtime online schema operation.
     /// A target without it has no expand-contract path at all; the equivalent
     /// change is lowered to some offline shape (a table rebuild) or refused at
     /// plan time.
@@ -290,13 +290,13 @@ impl std::fmt::Display for BackendCapability {
     }
 }
 
-// ── The dual-write trigger's derived identities and its function body ─────────
+// -- The dual-write trigger's derived identities and its function body ---------
 //
 // A cross-deploy online rename is authored by the engine and executed by a vendor,
 // and BOTH sides have to arrive at the same trigger. The executor deliberately
 // DERIVES the trigger identity from the same `OnlineIntent` the trigger was authored
-// from rather than accepting it from its caller — that is what stops a direct seam
-// caller from pointing the mirror at a trigger the engine never wrote — and its
+// from rather than accepting it from its caller - that is what stops a direct seam
+// caller from pointing the mirror at a trigger the engine never wrote - and its
 // backfill guard re-derives the function BODY to prove the live trigger is the one
 // the author emitted. A second copy of either derivation on the vendor side would be
 // two answers to one question, which is precisely the check being defeated.
@@ -308,9 +308,9 @@ impl std::fmt::Display for BackendCapability {
 // hard-codes 63 and neither has to resolve the other.
 
 /// Deterministically derive the dual-write function name for a rename, capped to
-/// `max_bytes` — the identifier byte budget the caller's own vendor declares. Stable across re-authoring (so the
+/// `max_bytes` - the identifier byte budget the caller's own vendor declares. Stable across re-authoring (so the
 /// `down` and the orchestrator target the same object), with a hash suffix to
-/// disambiguate over-long natural names — mirroring the authoring layer's
+/// disambiguate over-long natural names - mirroring the authoring layer's
 /// `index_name` discipline.
 pub fn dual_write_fn_name(table: &str, from: &str, to: &str, max_bytes: usize) -> String {
     capped_name(&format!("zsdw_{table}_{from}_{to}_fn"), max_bytes)
@@ -322,7 +322,7 @@ pub fn dual_write_trg_name(table: &str, from: &str, to: &str, max_bytes: usize) 
     capped_name(&format!("zsdw_{table}_{from}_{to}_trg"), max_bytes)
 }
 
-/// Cap a natural name to ≤ `max_bytes` deterministically: verbatim when it fits,
+/// Cap a natural name to <= `max_bytes` deterministically: verbatim when it fits,
 /// else a readable prefix + a 10-hex-char hash of the full natural name (so
 /// distinct long inputs stay distinct). Identical algorithm to the authoring layer's
 /// `index_name`, factored for the function/trigger names.
@@ -345,8 +345,8 @@ fn capped_name(natural: &str, max_bytes: usize) -> String {
 }
 
 // `pub fn dual_write_function_body(from_q, to_q) -> String` USED TO LIVE HERE, and it
-// was twenty lines of PL/pgSQL — `TG_OP`, `NEW`, `OLD`, `IS DISTINCT FROM`,
-// `RETURN NEW` — in the crate whose stated rule is that "nothing here spells a
+// was twenty lines of PL/pgSQL - `TG_OP`, `NEW`, `OLD`, `IS DISTINCT FROM`,
+// `RETURN NEW` - in the crate whose stated rule is that "nothing here spells a
 // keyword, quotes an identifier or names a dialect".
 //
 // It passed this crate's own neutrality census the whole time, because that census

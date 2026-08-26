@@ -8,8 +8,8 @@
 //!
 //! # Why the vocabulary is here and the analyzers are not
 //!
-//! [`crate::guard::GuardOutcome`] — the neutral seam every backend's
-//! [`crate::guard::MigrationGuard`] returns — carries `Vec<Advisory>`, so the TYPE
+//! [`crate::guard::GuardOutcome`] - the neutral seam every backend's
+//! [`crate::guard::MigrationGuard`] returns - carries `Vec<Advisory>`, so the TYPE
 //! has to sit below every vendor. The analyzers that PRODUCE advisories do not: they
 //! read a `libpg_query` parse tree and belong with the parser they depend on. A
 //! descriptor-only backend emits none and needs no analyzer.
@@ -17,7 +17,7 @@
 //! [`OperationalAdvisor`] is the seam that makes that true rather than merely
 //! stated. It is a REQUIRED [`crate::registry::BackendVendor`] field, so each
 //! backend files its own answer and the engine reaches an analysis by asking the
-//! registered vendor — never by naming one. PostgreSQL's implementation delegates to
+//! registered vendor - never by naming one. PostgreSQL's implementation delegates to
 //! its own `analysis::analyze` module, which holds the `libpg_query` analyzers. Those
 //! analyzers used to sit in a separate `zero-migrate-guard` crate that core depended
 //! on directly; this contract is what let them move into the vendor without core
@@ -35,17 +35,17 @@
 //!
 //! Before the split these constructors were private / `pub(crate)`, because the
 //! analyzers that call them shared a crate with the type. They no longer do, so they
-//! are `pub`. No invariant is lost: [`Advisory`]'s four fields are ALL `pub`, so any
+//! are `pub`. No invariant is lost: every [`Advisory`] field is `pub`, so any
 //! caller could always write the struct literal directly. The constructors are
 //! convenience, never a capability.
 
-/// The severity of an [`Advisory`]. Advisory-only — neither level denies or
+/// The severity of an [`Advisory`]. Advisory-only - neither level denies or
 /// gates; both are informational signals about an operational footgun.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Severity {
     /// A risky operation likely to cause downtime, data loss, or break running
     /// code (a lock-heavy rewrite, a destructive drop, a backward-incompatible
-    /// rename). The migration still applies — this is a heads-up, not a denial.
+    /// rename). The migration still applies - this is a heads-up, not a denial.
     Warning,
     /// A softer performance/footprint note (e.g. an FK column with no supporting
     /// index). Worth fixing, lower urgency than a [`Severity::Warning`].
@@ -62,7 +62,7 @@ pub enum Severity {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Advisory {
     /// The stable analyzer rule id (see [`rule`]). Distinct from the guard's
-    /// deny-list `rule` namespace — these never deny.
+    /// deny-list `rule` namespace - these never deny.
     pub rule: &'static str,
     /// How urgent the advisory is.
     pub severity: Severity,
@@ -125,49 +125,49 @@ impl Advisory {
     }
 }
 
-/// The stable advisory rule ids — **data, not logic**, mirroring the guard's
+/// The stable advisory rule ids - **data, not logic**, mirroring the guard's
 /// `denylist::rule` convention. These are NOT security rules; they never deny.
 pub mod rule {
     /// `data_security.destructive_ops = "warn"` surfaced a destructive operation.
     pub const DATA_SECURITY_DESTRUCTIVE_OPS_WARN: &str = "DATA_SECURITY_DESTRUCTIVE_OPS_WARN";
     /// `data_security.destructive_ops = "warn"` surfaced an unclassified operation.
     pub const DATA_SECURITY_UNCLASSIFIED_OPS_WARN: &str = "DATA_SECURITY_UNCLASSIFIED_OPS_WARN";
-    /// `DROP TABLE`/`DROP COLUMN`/`DROP CONSTRAINT` — irreversible data loss.
+    /// `DROP TABLE`/`DROP COLUMN`/`DROP CONSTRAINT` - irreversible data loss.
     pub const DESTRUCTIVE_DROP: &str = "DESTRUCTIVE_DROP";
-    /// `RENAME COLUMN`/`RENAME TABLE` — breaks code reading the old name.
+    /// `RENAME COLUMN`/`RENAME TABLE` - breaks code reading the old name.
     pub const BACKWARD_INCOMPATIBLE_RENAME: &str = "BACKWARD_INCOMPATIBLE_RENAME";
-    /// `ALTER COLUMN … TYPE` — may lose data / rewrites the table.
+    /// `ALTER COLUMN ... TYPE` - may lose data / rewrites the table.
     pub const LOSSY_TYPE_CHANGE: &str = "LOSSY_TYPE_CHANGE";
-    /// `ADD COLUMN NOT NULL` with no default — fails on a non-empty table.
+    /// `ADD COLUMN NOT NULL` with no default - fails on a non-empty table.
     pub const ADD_NOT_NULL_NO_DEFAULT: &str = "ADD_NOT_NULL_NO_DEFAULT";
-    /// `ALTER COLUMN … SET NOT NULL` — full table scan under lock.
+    /// `ALTER COLUMN ... SET NOT NULL` - full table scan under lock.
     pub const SET_NOT_NULL_FULL_SCAN: &str = "SET_NOT_NULL_FULL_SCAN";
-    /// `ADD CONSTRAINT` (FK/UNIQUE/CHECK) without `NOT VALID` — validates all
+    /// `ADD CONSTRAINT` (FK/UNIQUE/CHECK) without `NOT VALID` - validates all
     /// existing rows under lock.
     pub const CONSTRAINT_NOT_VALIDATED: &str = "CONSTRAINT_NOT_VALIDATED";
-    /// Plain `CREATE INDEX` (not `CONCURRENTLY`) — blocks writes for the build.
+    /// Plain `CREATE INDEX` (not `CONCURRENTLY`) - blocks writes for the build.
     pub const NON_CONCURRENT_INDEX: &str = "NON_CONCURRENT_INDEX";
     /// An `ACCESS EXCLUSIVE` table rewrite forced by a volatile-default
-    /// `ADD COLUMN` — the only statement that raises THIS rule.
+    /// `ADD COLUMN` - the only statement that raises THIS rule.
     ///
-    /// `ALTER COLUMN … TYPE` rewrites the table too, and says so, but reports it
+    /// `ALTER COLUMN ... TYPE` rewrites the table too, and says so, but reports it
     /// under [`LOSSY_TYPE_CHANGE`]: one statement, one advisory, carrying both
     /// the data-loss risk and the rewrite. Verified against live PostgreSQL by
-    /// comparing `pg_relation_filenode` before and after each statement — a
+    /// comparing `pg_relation_filenode` before and after each statement - a
     /// constant `DEFAULT` does not rewrite on PG11+ and correctly raises nothing,
     /// a volatile one does and raises this.
     pub const TABLE_REWRITE: &str = "TABLE_REWRITE";
     /// An FK referencing column with no supporting index in the same migration.
     pub const FK_WITHOUT_INDEX: &str = "FK_WITHOUT_INDEX";
-    /// `TRUNCATE` — deletes all rows; irreversible and not MVCC-rolled-back the
+    /// `TRUNCATE` - deletes all rows; irreversible and not MVCC-rolled-back the
     /// way a `DELETE` is (it resets storage; under some setups it cannot be
     /// rolled back cleanly).
     pub const TRUNCATE_DATA_LOSS: &str = "TRUNCATE_DATA_LOSS";
-    /// A lock-heavy maintenance op — `CLUSTER`, `VACUUM FULL`, or a non-concurrent
-    /// `REINDEX` — that takes an ACCESS EXCLUSIVE / heavy lock for its duration.
+    /// A lock-heavy maintenance op - `CLUSTER`, `VACUUM FULL`, or a non-concurrent
+    /// `REINDEX` - that takes an ACCESS EXCLUSIVE / heavy lock for its duration.
     pub const LOCK_HEAVY_MAINTENANCE: &str = "LOCK_HEAVY_MAINTENANCE";
     /// The backend that was asked ships NO operational analyzer, so nothing here
-    /// was evaluated. See [`super::AnalyzerAbsent`] — this is the one rule id in
+    /// was evaluated. See [`super::AnalyzerAbsent`] - this is the one rule id in
     /// this module that reports the ABSENCE of analysis rather than a finding.
     ///
     /// The lower-case spelling is deliberate and is pinned by a host test
@@ -188,7 +188,7 @@ pub mod rule {
 /// This is a MEASURED defect, not a hypothetical one. The analyzers parse
 /// PostgreSQL. MySQL renders identifiers with backticks, which is not valid
 /// PostgreSQL, so every statement failed to parse and the analyzer returned an
-/// empty vector — for SQL THIS ENGINE EMITS and was about to run. The result was a
+/// empty vector - for SQL THIS ENGINE EMITS and was about to run. The result was a
 /// clean advisory report on MySQL that meant "could not read any of this",
 /// indistinguishable from "looked and found nothing".
 ///
@@ -199,7 +199,7 @@ pub mod rule {
 ///
 /// # Why it carries a `DialectId`
 ///
-/// This is PROVENANCE — data recording WHICH backend has no analyzer — and it never
+/// This is PROVENANCE - data recording WHICH backend has no analyzer - and it never
 /// dispatches on the value. The same argument
 /// `crate::vendor::VendorError::VendorOpsUnsupported` records at length applies
 /// verbatim: typed as a closed enum, a fourth backend would have no variant to name
@@ -223,7 +223,7 @@ impl AnalyzerAbsent {
     /// Advisory-shaped on purpose: every consumer of this contract already has a
     /// channel for `Advisory`, and the absence has to travel down that SAME channel
     /// or it is not seen. `Notice` rather than `Warning` because nothing here says a
-    /// migration is dangerous — it says nobody looked.
+    /// migration is dangerous - it says nobody looked.
     #[must_use]
     pub fn advisory(&self) -> Advisory {
         Advisory {
@@ -248,10 +248,10 @@ impl AnalyzerAbsent {
 /// for the defect that made the distinction load-bearing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdvisoryVerdict {
-    /// The backend's analyzers ran. This is the complete finding — an empty vector
+    /// The backend's analyzers ran. This is the complete finding - an empty vector
     /// here genuinely means "clean".
     Analyzed(Vec<Advisory>),
-    /// The backend ships no analyzer for this input. NOT clean — unchecked.
+    /// The backend ships no analyzer for this input. NOT clean - unchecked.
     NotAnalyzed(AnalyzerAbsent),
 }
 
@@ -259,9 +259,11 @@ impl AdvisoryVerdict {
     /// The verdict flattened into the advisory list a report shows, with the
     /// absence rendered as its own [`Advisory`].
     ///
-    /// This is the ONLY way to get a bare `Vec<Advisory>` out of a verdict, and it
-    /// cannot lose the absence: the not-analyzed arm becomes a non-empty list
-    /// carrying [`rule::ANALYZER_DIALECT_UNSUPPORTED`].
+    /// This is the accessor a report path must use, because it cannot lose the
+    /// absence: the not-analyzed arm becomes a non-empty list carrying
+    /// [`rule::ANALYZER_DIALECT_UNSUPPORTED`]. The [`Analyzed`](Self::Analyzed)
+    /// payload is public, so destructuring the variant directly also yields a bare
+    /// `Vec<Advisory>` - and silently drops the distinction this enum exists for.
     #[must_use]
     pub fn into_report(self) -> Vec<Advisory> {
         match self {
@@ -289,11 +291,11 @@ impl AdvisoryVerdict {
 /// direction, so the ambiguity [`AnalyzerAbsent`] exists to prevent cannot arise.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IndexCoverage {
-    /// Every column that gains a covering index anywhere in the analyzed SQL — a
+    /// Every column that gains a covering index anywhere in the analyzed SQL - a
     /// leading `CREATE INDEX` column, an inline or table-level `PRIMARY KEY`/
-    /// `UNIQUE`, or an `ALTER TABLE … ADD CONSTRAINT`/`ADD INDEX`.
+    /// `UNIQUE`, or an `ALTER TABLE ... ADD CONSTRAINT`/`ADD INDEX`.
     pub indexed_columns: Vec<String>,
-    /// The FK **referencing** columns that want a supporting index — the
+    /// The FK **referencing** columns that want a supporting index - the
     /// [`rule::FK_WITHOUT_INDEX`] subjects.
     pub fk_columns_needing_index: Vec<String>,
 }
@@ -307,7 +309,7 @@ impl IndexCoverage {
     }
 }
 
-/// What a backend says about a migration's OPERATIONAL risk — the advisory half of
+/// What a backend says about a migration's OPERATIONAL risk - the advisory half of
 /// the backend contract, alongside [`crate::guard::MigrationGuard`]'s security half.
 ///
 /// # Why this is a contract and not a function in the engine
@@ -322,13 +324,13 @@ impl IndexCoverage {
 ///
 /// [`crate::registry::BackendVendor`]'s `advisor` field is not optional and neither
 /// method here has a default body, so a backend that ships no analyzer has to write
-/// that out — in its own crate, with its own reason, visible in the diff. Nothing
+/// that out - in its own crate, with its own reason, visible in the diff. Nothing
 /// can acquire the not-analyzed posture by omission, which is the same discipline
 /// `BackendVendor::guard` describes at length and for the same reason.
 pub trait OperationalAdvisor: std::fmt::Debug + Send + Sync {
     /// The operational advisories in one statement or one migration's `up`.
     ///
-    /// Never denies and never gates — see this module's header. A backend with no
+    /// Never denies and never gates - see this module's header. A backend with no
     /// analyzer returns [`AdvisoryVerdict::NotAnalyzed`] REGARDLESS of the input,
     /// including for the empty string, which is what makes
     /// [`Self::analyzer_absence`] answerable without SQL.
@@ -339,7 +341,7 @@ pub trait OperationalAdvisor: std::fmt::Debug + Send + Sync {
     ///
     /// Separate from [`Self::advise`] because a caller reporting on a SET of
     /// statements must be able to tell an operator the whole set is unchecked
-    /// BEFORE it renders the first statement — and must still say so when the set
+    /// BEFORE it renders the first statement - and must still say so when the set
     /// renders to nothing. Asking `advise("")` would answer the same question by
     /// accident rather than by name.
     ///

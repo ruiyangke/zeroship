@@ -8,12 +8,12 @@
 //! on transactional backends, the open per-step transaction. [`decide`] returns a
 //! [`GuardVerdict`]:
 //!
-//! - [`GuardVerdict::RunBare`] — the guard's precondition is met; run the op's `up`.
-//! - [`GuardVerdict::SatisfiedNoop`] — the object already has the declared shape
+//! - [`GuardVerdict::RunBare`] - the guard's precondition is met; run the op's `up`.
+//! - [`GuardVerdict::SatisfiedNoop`] - the object already has the declared shape
 //!   (`ifNotExists`) or is already absent (`ifExists`); SKIP the `up` but STILL
 //!   journal the `completed` row so the version lands (a re-deploy sees it
 //!   net-applied and skips it via normal pending computation).
-//! - [`GuardVerdict::FailDrift`] — the object EXISTS with a shape that DIVERGES
+//! - [`GuardVerdict::FailDrift`] - the object EXISTS with a shape that DIVERGES
 //!   from the declared one (`ifNotExists`) and cannot be proven equal. This is a
 //!   HARD error (`ApplyError::ExistenceGuardDrift`), never a silent skip. Nothing
 //!   is applied or journaled.
@@ -27,16 +27,16 @@
 //! A guard whose precondition CANNOT be fully proven from the catalog fails CLOSED
 //! (`FailDrift`), never optimistically `SatisfiedNoop`. The non-obvious cases:
 //!
-//! - **Constraint `ifNotExists`** — a present same-name constraint is `FailDrift`,
+//! - **Constraint `ifNotExists`** - a present same-name constraint is `FailDrift`,
 //!   NOT `SatisfiedNoop`, unless its KIND clashes (also `FailDrift`, with a clearer
 //!   `kind` field). The live `pg_get_constraintdef` definition cannot be
 //!   byte-compared against the IR's un-normalized constraint body, so a present
-//!   constraint's definitional equality cannot be PROVEN — and a same-name +
+//!   constraint's definitional equality cannot be PROVEN - and a same-name +
 //!   same-kind constraint with a DIFFERENT predicate (a rewritten CHECK / a
 //!   different FK target) is a real divergence the PG catalog DOES expose. We refuse
-//!   rather than skip. (The realistic `ifNotExists` use — the constraint is ABSENT —
+//!   rather than skip. (The realistic `ifNotExists` use - the constraint is ABSENT -
 //!   still `RunBare`.)
-//! - **Index `ifNotExists` over an expression / partial predicate** — `FailDrift`
+//! - **Index `ifNotExists` over an expression / partial predicate** - `FailDrift`
 //!   naming `expression`: the live index carries a non-empty `pg_get_expr`
 //!   predicate the IR `createIndex` (a column-list AST) cannot render to a
 //!   byte-comparable form, so equivalence cannot be proven.
@@ -56,26 +56,26 @@
 //!   this was rejected on purpose (review-log F48). This probe is the only
 //!   cross-table name-to-owner check that runs, and it reads ONE catalog snapshot
 //!   per unit.
-//! - **SQLite affinity compare (F1)** — the engine's declared snapshot data_type is
+//! - **SQLite affinity compare (F1)** - the engine's declared snapshot data_type is
 //!   ALWAYS the PG `information_schema` spelling (`field_data_type` maps via the PG
 //!   dialect, dialect-agnostically), but a REAL SQLite catalog reports the SQLite
 //!   *affinity* (`text`/`integer`/`real`/`numeric`/`blob`). A raw spelling compare
 //!   therefore false-drifts on EVERY non-text type on SQLite (a `timestamp with time
-//!   zone` / `jsonb` / `uuid`→`text` snapshot vs a `text` live affinity,
-//!   `double precision`→`real`, `bytea`→`blob`). The SQLite leg of [`decide`] folds
+//!   zone` / `jsonb` / `uuid`->`text` snapshot vs a `text` live affinity,
+//!   `double precision`->`real`, `bytea`->`blob`). The SQLite leg of [`decide`] folds
 //!   BOTH the declared and the live data_type through the selected backend's
 //!   [`SchemaRenderer::canonical_type`](crate::schema::SchemaRenderer::canonical_type)
-//!   — the SAME affinity fold the declarative DIFFER uses — so a clean guarded
+//!   - the SAME affinity fold the declarative DIFFER uses - so a clean guarded
 //!   `createTable`/`addColumn` re-run is
-//!   idempotent for every type, while a genuine affinity change (string→number, i.e.
+//!   idempotent for every type, while a genuine affinity change (string->number, i.e.
 //!   `text` vs `real`) still maps to two distinct canonical tokens and IS a
 //!   divergence. Several distinct SDK facets collapse to the `text` affinity on SQLite
 //!   (`string`/`ref`/`actor`/`id` + `date`/`json` + a string `literal`) and the live
 //!   catalog stores only the affinity, so a within-text-affinity facet change (live
-//!   `string` vs declared `ref`/`date`) is INVISIBLE — but we do NOT fail closed on
+//!   `string` vs declared `ref`/`date`) is INVISIBLE - but we do NOT fail closed on
 //!   it: an affinity-match is a `SatisfiedNoop`, exactly as the DIFFER treats it (a
 //!   documented SQLite divergence; on
-//!   SQLite a `ref` column adds no FK via `ALTER` — it is physically a plain `text`
+//!   SQLite a `ref` column adds no FK via `ALTER` - it is physically a plain `text`
 //!   column either way, so the blind spot carries no provable physical divergence).
 //!   On PG both sides are the `information_schema` spelling and the raw compare is
 //!   exact.
@@ -84,12 +84,12 @@
 //!   decision. A present `createTable` or `addColumn` is refused before [`decide`]
 //!   rather than comparing the lossy canonical column type.
 //!
-//! - **An over-long constraint / index name on PostgreSQL** — PostgreSQL truncates an
+//! - **An over-long constraint / index name on PostgreSQL** - PostgreSQL truncates an
 //!   identifier past 63 bytes with only a NOTICE, so the catalog holds a name the
 //!   authored one is never equal to. An `ifExists` miss on such a name is a lie
 //!   whenever the TRUNCATED spelling is present, and an `ifNotExists` `RunBare` would
 //!   create a truncated identity; both are refused. An `ifExists` name that is absent
-//!   in BOTH spellings still no-ops — that is what `ifExists` is for. PostgreSQL only:
+//!   in BOTH spellings still no-ops - that is what `ifExists` is for. PostgreSQL only:
 //!   SQLite has no cap and MySQL caps at 64 CHARACTERS, so the byte rule would strand
 //!   real objects there.
 //!
@@ -107,10 +107,10 @@ use crate::registry::BackendVendor;
 use crate::renderer::Capability;
 
 // `GuardProbe::schema()` now lives on the type itself in `zero_migrate_ir::probe`
-// (the type moved into the leaf wire-contract crate — an inherent `impl` here would
+// (the type moved into the leaf wire-contract crate - an inherent `impl` here would
 // be an orphan impl on a foreign type).
 
-/// A single same-name object whose shape DIVERGES from the declared one — the
+/// A single same-name object whose shape DIVERGES from the declared one - the
 /// payload of [`GuardVerdict::FailDrift`]. Names + values only, never DDL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Divergence {
@@ -127,7 +127,7 @@ pub struct Divergence {
 }
 
 /// The executor's decision for a guarded op, computed in Rust from the live
-/// catalog snapshot — NEVER a SQL-level conditional.
+/// catalog snapshot - NEVER a SQL-level conditional.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuardVerdict {
     /// Run the op's `up` bare (the guard's precondition is met).
@@ -135,7 +135,7 @@ pub enum GuardVerdict {
     /// Skip the `up` but journal the `completed` row (the declared shape is already
     /// present for `ifNotExists`, or the object is already absent for `ifExists`).
     SatisfiedNoop,
-    /// The object exists with a divergent / unprovable shape — fail closed.
+    /// The object exists with a divergent / unprovable shape - fail closed.
     FailDrift(Divergence),
 }
 
@@ -147,7 +147,7 @@ pub enum GuardVerdict {
 /// caller-known open identity used to resolve that backend's registered probe
 /// policy, NOT carried on the wire-serialized probe.
 ///
-/// **F1** — the declared probe `data_type` is ALWAYS the PG `information_schema`
+/// **F1** - the declared probe `data_type` is ALWAYS the PG `information_schema`
 /// spelling (the snapshot builder maps via the PG dialect, dialect-agnostically),
 /// but a REAL SQLite catalog reports the SQLite affinity (`text`/`integer`/`real`/
 /// `numeric`/`blob`). A raw `expect != live` compare therefore false-drifts on EVERY
@@ -155,7 +155,7 @@ pub enum GuardVerdict {
 /// `text` live affinity, etc.). On the SQLite leg we therefore canonicalize BOTH
 /// sides through the selected backend's
 /// [`SchemaRenderer::canonical_type`](crate::schema::SchemaRenderer::canonical_type)
-/// — the SAME affinity fold the differ uses (`declarative.rs`) — so a guarded
+/// - the SAME affinity fold the differ uses (`declarative.rs`) - so a guarded
 /// `createTable`/`addColumn` re-run is idempotent for every type, while a real
 /// affinity change still diverges.
 #[must_use]
@@ -226,7 +226,7 @@ pub fn decide(probe: &GuardProbe, live: &SchemaSnapshot, vendor: &BackendVendor)
             ..
         } => decide_named_type(name, kind, *direction, live),
         GuardProbe::ColumnPresence { table, column, .. } => {
-            // Always IfExists. Source column must EXIST → RunBare; absent → Noop.
+            // Always IfExists. Source column must EXIST -> RunBare; absent -> Noop.
             if column_present(live, table, column) {
                 GuardVerdict::RunBare
             } else {
@@ -433,12 +433,12 @@ fn decide_table(
         }
         GuardDir::IfNotExists => {
             let Some(t) = live.tables.get(table) else {
-                return GuardVerdict::RunBare; // absent → create it.
+                return GuardVerdict::RunBare; // absent -> create it.
             };
             // Present: prove EXACT shape equality of the declared columns. A missing
             // declared column, a `(data_type, nullable)` divergence, OR any EXTRA
-            // live column not in the declared set → FailDrift (a wider live table is
-            // not the declared shape — fail closed).
+            // live column not in the declared set -> FailDrift (a wider live table is
+            // not the declared shape - fail closed).
             for ec in expect_columns {
                 match t.columns.iter().find(|c| c.name == ec.name) {
                     None => {
@@ -464,7 +464,7 @@ fn decide_table(
                     }
                 }
             }
-            // Extra live column → FailDrift (the live table is wider than declared).
+            // Extra live column -> FailDrift (the live table is wider than declared).
             for live_col in &t.columns {
                 if !expect_columns.iter().any(|ec| ec.name == live_col.name) {
                     return drift(
@@ -500,11 +500,11 @@ fn decide_column(
         }
         GuardDir::IfNotExists => {
             if !present {
-                return GuardVerdict::RunBare; // absent → add it.
+                return GuardVerdict::RunBare; // absent -> add it.
             }
             // Present: verify (data_type, nullable). `expect` is always Some on the
             // addColumn ifNotExists path; if it is somehow None (a presence-only
-            // ifNotExists we never build), fail closed — we cannot prove the shape.
+            // ifNotExists we never build), fail closed - we cannot prove the shape.
             let Some((dtype, nullable)) = expect else {
                 return drift(
                     &format!("column {table}.{column}"),
@@ -518,7 +518,7 @@ fn decide_column(
                 .get(table)
                 .and_then(|t| t.columns.iter().find(|c| c.name == column));
             let Some(live_col) = live_col else {
-                // column_present said present but the column vanished — fail closed.
+                // column_present said present but the column vanished - fail closed.
                 return drift(
                     &format!("column {table}.{column}"),
                     "data_type",
@@ -541,9 +541,9 @@ fn decide_column(
 }
 
 /// The declared-vs-live column shape compare inputs, bundled so the comparison
-/// seam takes one argument instead of eight positional scalars (the two callers —
+/// seam takes one argument instead of eight positional scalars (the two callers -
 /// `decide_table` per declared column, `decide_column` for the stand-alone
-/// addColumn — build it inline). `expect_*` is the declared shape; `live_*` is the
+/// addColumn - build it inline). `expect_*` is the declared shape; `live_*` is the
 /// introspected catalog shape; `vendor` selects the registered catalog
 /// canonicalization policy.
 struct ExpectColumnShape<'a> {
@@ -559,33 +559,33 @@ struct ExpectColumnShape<'a> {
 /// Compare a declared column shape against the live one. Returns a `FailDrift`
 /// verdict on a divergence, or `None` if they match exactly.
 ///
-/// **F1 — dialect-aware data_type compare.** The declared `expect_dtype` is ALWAYS
+/// **F1 - dialect-aware data_type compare.** The declared `expect_dtype` is ALWAYS
 /// the PG `information_schema` spelling (the snapshot builder maps via the PG
-/// dialect regardless of backend — `declarative::field_data_type`). A REAL SQLite
+/// dialect regardless of backend - `declarative::field_data_type`). A REAL SQLite
 /// catalog reports the SQLite *affinity* (`text`/`integer`/`real`/`numeric`/`blob`),
 /// so a raw `expect_dtype != live_dtype` compare false-drifts on EVERY non-text
-/// type on SQLite (a `timestamp with time zone` / `jsonb` / `uuid`→`text` snapshot
-/// vs a `text` live affinity, `double precision`→`real`, `bytea`→`blob`, …). On the
+/// type on SQLite (a `timestamp with time zone` / `jsonb` / `uuid`->`text` snapshot
+/// vs a `text` live affinity, `double precision`->`real`, `bytea`->`blob`, ...). On the
 /// SQLite leg we therefore fold BOTH sides through the selected backend's
 /// [`SchemaRenderer::canonical_type`](crate::schema::SchemaRenderer::canonical_type)
-/// — the SAME affinity fold the declarative differ uses — so a clean guarded re-run is idempotent for every
-/// type, while a real affinity change (`text` vs `real`, i.e. string→number) still
+/// - the SAME affinity fold the declarative differ uses - so a clean guarded re-run is idempotent for every
+/// type, while a real affinity change (`text` vs `real`, i.e. string->number) still
 /// maps to two DIFFERENT canonical tokens and IS a divergence. On PG both sides are
 /// already the `information_schema` spelling and the raw compare is exact.
 ///
-/// **F1 — SQLite verifies the canonical AFFINITY, consistent with the differ.**
+/// **F1 - SQLite verifies the canonical AFFINITY, consistent with the differ.**
 /// After the fold, several distinct SDK facets collapse to the `text` affinity on
 /// SQLite (`string`/`ref`/`actor`/`id` + `date`/`json` + a string `literal`), and the
-/// live catalog stores only the affinity — the un-collapsed SDK facet is NOT
+/// live catalog stores only the affinity - the un-collapsed SDK facet is NOT
 /// recoverable. We do NOT fail closed on that blind spot: an affinity-match is a
 /// `SatisfiedNoop`, exactly as the declarative DIFFER treats it (it compares only
-/// the backend canonicalizer on SQLite — a within-affinity facet change is a
+/// the backend canonicalizer on SQLite - a within-affinity facet change is a
 /// documented SQLite divergence). This is what makes
 /// a guarded `createTable`/`addColumn ifNotExists` RE-RUN idempotent on SQLite (every
 /// table carries text-affinity system columns; a stand-alone `addColumn` of a `ref`
-/// over a live `string` is physically a no-op anyway — SQLite cannot add an FK via
+/// over a live `string` is physically a no-op anyway - SQLite cannot add an FK via
 /// `ALTER`, so both are plain `text` columns). A GENUINE affinity change
-/// (string→number, `text` vs `real`) still maps to two distinct canonical tokens and
+/// (string->number, `text` vs `real`) still maps to two distinct canonical tokens and
 /// IS a divergence. On PG both sides are the `information_schema` spelling and the raw
 /// compare is exact.
 fn column_shape_divergence(shape: &ExpectColumnShape<'_>) -> Option<GuardVerdict> {
@@ -598,7 +598,7 @@ fn column_shape_divergence(shape: &ExpectColumnShape<'_>) -> Option<GuardVerdict
         live_nullable,
         vendor,
     } = *shape;
-    // **F1** — on SQLite, compare the canonical AFFINITY (PG-spelled snapshot folded
+    // **F1** - on SQLite, compare the canonical AFFINITY (PG-spelled snapshot folded
     // to the SQLite affinity the emitter would have written, AND the already-SQLite
     // live token folded to the same canonical form). On PG, compare the raw
     // `information_schema` spellings unchanged.
@@ -742,7 +742,7 @@ fn decide_index(
                         &format!("{owner} (the name is already taken schema-wide)"),
                     );
                 }
-                return GuardVerdict::RunBare; // absent → create it.
+                return GuardVerdict::RunBare; // absent -> create it.
             };
             // Present: prove (unique, columns) equality. An expression / partial
             // index fails closed: this probe contract carries only a plain
@@ -852,7 +852,7 @@ fn decide_constraint(
         }
         GuardDir::IfNotExists => {
             let Some((live_kind, live_definition)) = live_con else {
-                return GuardVerdict::RunBare; // absent → add it.
+                return GuardVerdict::RunBare; // absent -> add it.
             };
             // Present. A kind clash is the clearest divergence.
             if let Some(kind) = expect_kind {
@@ -860,7 +860,7 @@ fn decide_constraint(
                     return drift(&format!("constraint {name}"), "kind", kind, live_kind);
                 }
             }
-            // **F2 — structural compare when a byte-comparable definition is
+            // **F2 - structural compare when a byte-comparable definition is
             // available.** The `createTable` deferred-FK unit stamps the declared FK
             // body in the EXACT `pg_get_constraintdef` spelling
             // (`declarative::fk_definition_pg`), so a present same-name + same-kind FK
@@ -873,7 +873,7 @@ fn decide_constraint(
             // policy: the
             // declared side is always `REFERENCES <schema>.<table>` but
             // `pg_get_constraintdef` OMITS the schema when the referenced table is in
-            // the live `search_path` (it is — same project schema, cross-app FKs are
+            // the live `search_path` (it is - same project schema, cross-app FKs are
             // rejected at author time), so the qualifier is search_path-sensitive noise.
             // Every MATERIAL divergence (target table, columns, ON DELETE/UPDATE,
             // DEFERRABLE) survives the normalization and is still caught.
@@ -924,18 +924,18 @@ fn decide_constraint(
 /// so the verdict can never be a no-op the journal then records as done work.
 ///
 /// A migration carrying a probe can reach the executor without lowering ever having run
-/// — `Migration::existence_guard` is a public field on a struct that is not
-/// `#[non_exhaustive]`, in a crate a consumer can depend on directly — so the bound the
+/// - `Migration::existence_guard` is a public field on a struct that is not
+/// `#[non_exhaustive]`, in a crate a consumer can depend on directly - so the bound the
 /// load gate and the lower seam enforce needs a last line here.
 ///
 /// The rule is deliberately narrow, because a blanket refusal would break migrations
 /// that are correct today:
 ///
-/// - `IfExists` — derive PostgreSQL's own truncated spelling and look THAT up in the
+/// - `IfExists` - derive PostgreSQL's own truncated spelling and look THAT up in the
 ///   same lookup scope. A present truncation means the miss on the authored name was a
 ///   lie: the object is there and the drop would be skipped. An absent truncation means
 ///   the drop's postcondition genuinely holds, so the ordinary satisfied no-op stands.
-/// - `IfNotExists` — refuse before the lookup, because `RunBare` would CREATE an object
+/// - `IfNotExists` - refuse before the lookup, because `RunBare` would CREATE an object
 ///   under the truncated name while the engine carries the authored one.
 ///
 /// Whether truncation occurs, and the catalog spelling it produces, are required

@@ -1,7 +1,7 @@
 //! The vocabulary the `MigrationBackend` dialect seam speaks.
 //!
 //! The trait itself is still `zero_migrate::apply::backend::MigrationBackend`.
-//! What lives here is the set of neutral VALUES its signatures name — the ones
+//! What lives here is the set of neutral VALUES its signatures name - the ones
 //! that reach nothing above this crate. They came down first because a vendor
 //! crate cannot implement a trait whose argument and return types live in the
 //! engine that already depends on it, and because these five reach no engine
@@ -33,7 +33,7 @@ use zero_migrate_ir::migration::{Checksum, Migration, MigrationId};
 ///
 /// The lock/journal/DML SQL a backend owns is Postgres-flavoured `$N` today
 /// ([`Numbered`](PlaceholderStyle::Numbered)). A MySQL backend renders the
-/// anonymous `?` ([`Question`](PlaceholderStyle::Question)) — the placeholder
+/// anonymous `?` ([`Question`](PlaceholderStyle::Question)) - the placeholder
 /// style is a **backend concern**, consulted BEFORE any SQL crosses the
 /// [`SqlSession`](crate::driver::SqlSession) seam, so the generic executor never
 /// bakes a dialect's placeholder into shared SQL.
@@ -44,7 +44,7 @@ use zero_migrate_ir::migration::{Checksum, Migration, MigrationId};
 /// and a cross-dialect helper can render positionally through this hook.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaceholderStyle {
-    /// Postgres: the 1-based numbered form `$1`, `$2`, … (also SQLite's `?1`
+    /// Postgres: the 1-based numbered form `$1`, `$2`, ... (also SQLite's `?1`
     /// numbered form is rendered elsewhere via `render::dml`).
     Numbered,
     /// MySQL: the anonymous positional `?` (order-of-appearance binding).
@@ -148,7 +148,7 @@ pub enum PlanPreconditionVerdict {
 /// structurally absent: reads are empty and writes are no-ops/unreachable routing
 /// for that backend.
 pub trait CrossDeployObligations {
-    /// Read the OUTSTANDING cross-deploy pending-contract obligations —
+    /// Read the OUTSTANDING cross-deploy pending-contract obligations -
     /// the apply-time interlock read-back + the `status` orphan/blocked source.
     /// No-op iff `MigrationBackend::pending_contracts` is `None`.
     fn outstanding_pending_contracts<'a>(
@@ -172,7 +172,7 @@ pub trait CrossDeployObligations {
 
     /// Open a `pending` cross-deploy obligation AND, when a
     /// [`journal::DeployRecoveryScope`] is supplied, its `in_progress`
-    /// deploy-scoped recovery marker — in ONE transaction. No-op iff
+    /// deploy-scoped recovery marker - in ONE transaction. No-op iff
     /// `MigrationBackend::pending_contracts` is `None`.
     fn record_pending_contract_with_recovery<'a>(
         &'a self,
@@ -181,7 +181,7 @@ pub trait CrossDeployObligations {
         scope: Option<journal::DeployRecoveryScope<'a>>,
     ) -> JournalFuture<'a, bool>;
 
-    /// Discharge an obligation by APPENDING a `resolved` row (never a delete —
+    /// Discharge an obligation by APPENDING a `resolved` row (never a delete -
     /// history is append-only). No-op iff `MigrationBackend::pending_contracts`
     /// is `None`.
     fn resolve_pending_contract<'a>(
@@ -233,7 +233,7 @@ fn legacy_debug_dialect_label(dialect: &DialectId) -> String {
 }
 
 // The PostgreSQL session snapshot is declared by the PostgreSQL backend, in
-// `postgres::PostgresSessionSnapshot` — not here. Its three fields are PostgreSQL
+// `postgres::PostgresSessionSnapshot` - not here. Its three fields are PostgreSQL
 // GUCs, so it is a vendor type, and MySQL's equivalent already lived in its own
 // module; this contract sees a snapshot only through the associated type
 // [`MigrationBackend::SessionSnapshot`] and never inspects it (SQLite's is `()`).
@@ -278,7 +278,7 @@ pub trait MigrationBackend {
 
     /// The positional bind placeholder style this backend's SQL uses (`$N` on
     /// Postgres, `?` on MySQL). Placeholder style is a **backend concern** so no
-    /// dialect placeholder is ever baked into the shared executor's SQL — a
+    /// dialect placeholder is ever baked into the shared executor's SQL - a
     /// backend renders its lock/journal/DML binds in its own style before the SQL
     /// crosses the [`SqlSession`](crate::driver::SqlSession) seam. Postgres backends
     /// keep the numbered `$N` form; a MySQL backend overrides to
@@ -399,11 +399,11 @@ pub trait MigrationBackend {
 
     /// Apply ONE migration. The backend owns the atomicity decision:
     ///
-    /// - transactional-DDL + `transactional:true`: `BEGIN; SET LOCAL …;
+    /// - transactional-DDL + `transactional:true`: `BEGIN; SET LOCAL ...;
     ///   SET LOCAL ROLE migrator; <up>; RESET ROLE; INSERT journal; (edges);
     ///   COMMIT`;
     /// - non-transactional-DDL OR `transactional:false`: two-phase `started`
-    ///   marker → run the confined `<up>` → immutable `completed` row + clear
+    ///   marker -> run the confined `<up>` -> immutable `completed` row + clear
     ///   marker. When `had_inflight`, the backend must either prove replay safe
     ///   and recover, or preserve the marker and fail closed for audited repair.
     ///
@@ -418,7 +418,7 @@ pub trait MigrationBackend {
         kind: &str,
     ) -> Result<bool, ApplyError>;
 
-    /// Roll back ONE migration transactionally: `BEGIN; SET LOCAL …;
+    /// Roll back ONE migration transactionally: `BEGIN; SET LOCAL ...;
     /// SET LOCAL ROLE migrator; <down>; RESET ROLE; INSERT rolled_back; COMMIT`.
     /// `down` + the `rolled_back` append commit atomically.
     async fn rollback_one_transactional(
@@ -448,7 +448,7 @@ pub trait MigrationBackend {
 
     /// Validate the recovery contract for a **non-transactional** migration's
     /// `up`. PG parses with `pg_query` and enforces
-    /// `IF NOT EXISTS` on `CREATE INDEX CONCURRENTLY` / `ALTER TYPE … ADD VALUE`
+    /// `IF NOT EXISTS` on `CREATE INDEX CONCURRENTLY` / `ALTER TYPE ... ADD VALUE`
     /// and forbids bare DML; MySQL preserves ambiguous inflight state and fails
     /// closed instead of replaying generated DDL; a SQLite backend rejects
     /// `transaction:false` outright (no non-txn DDL exists on SQLite).
@@ -499,11 +499,11 @@ pub trait MigrationBackend {
     /// The net-applied + lone-`started` journal entries (the drift/pending input).
     async fn applied(&self, cfg: &ExecutorConfig) -> Result<Vec<AppliedEntry>, JournalError>;
 
-    /// The FULL append-only event log in `event_seq` order — the audit trail.
+    /// The FULL append-only event log in `event_seq` order - the audit trail.
     ///
     /// The uncollapsed peer of [`applied`](Self::applied): where that returns NET
     /// state (one row per version), this returns every event, so a version applied
-    /// → rolled back → re-applied shows all three.
+    /// -> rolled back -> re-applied shows all three.
     ///
     /// REQUIRED, with no default body, because "this engine keeps no readable audit
     /// trail" is a POSTURE a backend must state rather than inherit. An empty
@@ -535,7 +535,7 @@ pub trait MigrationBackend {
     /// The versions covered by a net-applied squash (the supersession net-state).
     async fn superseded_versions(&self, cfg: &ExecutorConfig) -> Result<Vec<String>, JournalError>;
 
-    /// The latest journaled `completed` checksum per identity — the repeatable
+    /// The latest journaled `completed` checksum per identity - the repeatable
     /// re-run oracle.
     async fn latest_completed_checksums(
         &self,
@@ -636,7 +636,7 @@ pub trait MigrationBackend {
     }
 
     /// Describe what would make the database REFUSE an
-    /// `ALTER TABLE … ALTER COLUMN … TYPE` of `column` on `table`, or an empty list
+    /// `ALTER TABLE ... ALTER COLUMN ... TYPE` of `column` on `table`, or an empty list
     /// when the retype would be accepted.
     ///
     /// A SEPARATE question from [`Self::blocking_column_dependents`], and the two
@@ -669,7 +669,7 @@ pub trait MigrationBackend {
     // -- squash (DB-coupled supersession journal write) ---------------------
 
     /// Journal a **squash** as a `completed` `kind='squash'` event WITHOUT running
-    /// its `up`, plus the `S → v_i` supersession edges — the dialect-coupled write
+    /// its `up`, plus the `S -> v_i` supersession edges - the dialect-coupled write
     /// behind the generic the engine's `ops::squash::squash` (multi-engine abstraction).
     ///
     /// Called only after the generic body has verified, under the project lock,
@@ -680,8 +680,8 @@ pub trait MigrationBackend {
     ///
     /// **MySQL implements this method as a refusal**, and that is narrower than it
     /// sounds: it is the records-not-run primitive that is unwired there (it shares
-    /// the baseline machinery, which MySQL also refuses). The FRESH-path squash —
-    /// where the squash's own `up` DOES run — is handled inline by the MySQL
+    /// the baseline machinery, which MySQL also refuses). The FRESH-path squash -
+    /// where the squash's own `up` DOES run - is handled inline by the MySQL
     /// two-phase apply for a non-empty `supersedes`, edges included, so squashing a
     /// history forward works on all three targets and only adopting an
     /// already-applied history without running it does not.
@@ -703,10 +703,10 @@ pub trait MigrationBackend {
 
     /// Apply ONE structured SQLite 12-step table REBUILD atomically with
     /// confinement + journal it, the dialect-coupled drive behind the
-    /// generic declarative apply path. A rebuild is NOT a plain `up` statement — it
+    /// generic declarative apply path. A rebuild is NOT a plain `up` statement - it
     /// is an engine-mode structured operation (drop-stale-temp / CREATE new / copy /
     /// drop old / rename / replay captured dependents) with `foreign_keys` toggles
-    /// straddling the transaction — so it cannot flow through
+    /// straddling the transaction - so it cannot flow through
     /// [`apply_one`](Self::apply_one); the engine drives it
     /// here, after the destructive/approval gate it already runs for the rebuild's
     /// `destructive`-flagged journal migration.
@@ -722,7 +722,7 @@ pub trait MigrationBackend {
     /// **Per-version approval scope (executor-layer defense in depth).** A
     /// rebuild on a populated table is destructive (drop + recreate + copy), so when
     /// `m.flags.destructive` (always true for a `TableRebuild` by construction,
-    /// [`the engine's `render::declarative``]) the `scope` must admit `m.version` — mirroring
+    /// [`the engine's `render::declarative``]) the `scope` must admit `m.version` - mirroring
     /// [`PlanStep::approval_scope_version`](crate::step::PlanStep::approval_scope_version)'s
     /// rule. The engine's `apply_plan` gate runs first; this is the independent
     /// executor-layer check so a direct seam caller (driving `rebuild_one` without the
@@ -733,8 +733,8 @@ pub trait MigrationBackend {
     /// [`ApplyError::ApprovalNotScoped`] for a destructive rebuild whose version the
     /// `scope` does not admit; the dialect-neutral [`ApplyError::Backend`] on a rebuild
     /// failure (FK-check abort, confinement denial, DDL failure, or a poisoned
-    /// connection — the SQLite transaction is rolled back, leaving the original table
-    /// intact), or — on the PG backend — the unreachable-routing reject.
+    /// connection - the SQLite transaction is rolled back, leaving the original table
+    /// intact), or - on the PG backend - the unreachable-routing reject.
     async fn rebuild_one(
         &self,
         spec: &TableRebuildSpec,
@@ -767,7 +767,7 @@ pub trait MigrationBackend {
     /// whole column definition, reading that definition from the live server
     /// under the project lock.
     ///
-    /// Only MySQL needs this seam. PostgreSQL has `ALTER COLUMN … TYPE`, which
+    /// Only MySQL needs this seam. PostgreSQL has `ALTER COLUMN ... TYPE`, which
     /// carries one facet and leaves the rest alone, so its retype is ordinary
     /// rendered DDL; SQLite has no `ALTER COLUMN` at all and reconciles a retype
     /// through the differ's table rebuild. Both therefore keep the default
@@ -839,7 +839,7 @@ pub trait MigrationBackend {
     /// Drive a single **parameterized DML** step (`op.*` DSL,
     /// [`PlanStep::Dml`](crate::step::PlanStep::Dml)) through the dialect seam.
     /// The `template` is executed with `binds` bound NATIVELY (`$n` on PG, `?n`
-    /// on SQLite) — never string-interpolated, so a bind value can never alter
+    /// on SQLite) - never string-interpolated, so a bind value can never alter
     /// statement structure. The step is journaled under `version` (its
     /// sub-version), so a re-run is a net-applied-skip (idempotent).
     ///
@@ -855,12 +855,12 @@ pub trait MigrationBackend {
     ///
     /// **Per-version approval scope (executor-layer defense in depth).** On top
     /// of the coarse approval gate, a destructive DML runs ONLY if `scope` admits its
-    /// `version` — mirroring
+    /// `version` - mirroring
     /// [`PlanStep::approval_scope_version`](crate::step::PlanStep::approval_scope_version)'s
     /// rule for `Dml`. So a direct seam caller driving `run_dml_step` with blanket
     /// [`crate::approval::Approval::Approved`] but an [`crate::approval::ApprovalScope::Versions`] set that omits this
     /// `version` is refused with [`ApplyError::ApprovalNotScoped`] BEFORE the template
-    /// executes — the executor-layer mirror of the engine's per-version scope gate.
+    /// executes - the executor-layer mirror of the engine's per-version scope gate.
     ///
     /// `checksum` is the authoritative checksum of the complete IR artifact. It
     /// includes typed bind values, so a same-version edit is refused as drift.
@@ -897,7 +897,7 @@ pub trait MigrationBackend {
     /// The **online schema-change capability** (multi-engine abstraction).
     ///
     /// `Some(&dyn OnlineSchemaChange)` for an engine that drives zero-downtime
-    /// online operations (Postgres — expand-contract rename via dual-write trigger
+    /// online operations (Postgres - expand-contract rename via dual-write trigger
     /// plus paged backfill; a `PgOnline` impl would own its connection
     /// **internally**, so the connection NEVER appears on this
     /// neutral trait surface). `None` for an engine with no online path (SQLite,
@@ -922,7 +922,7 @@ pub trait MigrationBackend {
     /// The half of the capability question a BACKEND answers; the plan answers the
     /// other half ([`PlanStep::required_capability`]). Keeping both as one-line
     /// total functions is what lets the engine ask them for a whole plan up front,
-    /// rather than discovering the gap at the step that needs it — by which time
+    /// rather than discovering the gap at the step that needs it - by which time
     /// every earlier step has committed and the database is half-migrated.
     ///
     /// The default answers every capability from the accessor that already exists
@@ -939,29 +939,29 @@ pub trait MigrationBackend {
     // -- baseline / adoption ------------------------------------------------
 
     /// Adopt the LIVE schema as the project's **baseline**
-    /// (multi-engine abstraction) — a `kind='baseline'`, `completed` journal
+    /// (multi-engine abstraction) - a `kind='baseline'`, `completed` journal
     /// event recorded WITHOUT running `m`'s `up`. The single neutral baseline entry
     /// point that folds the two former dialect-specific baseline functions
-    /// (`baseline(&Client, …)` and `SqliteBackend::baseline_sqlite`) behind ONE
+    /// (`baseline(&Client, ...)` and `SqliteBackend::baseline_sqlite`) behind ONE
     /// trait method, so no PG-`&Client`-typed baseline remains on the abstraction
     /// surface.
     ///
     /// First-entry-only: idempotent for the SAME version
     /// ([`BaselineOutcome::already_present`]); refuses if the journal already
     /// records a DIFFERENT net-applied migration (the engine already manages this
-    /// DB) — fail-closed, nothing journaled. The Postgres impl additionally runs the
+    /// DB) - fail-closed, nothing journaled. The Postgres impl additionally runs the
     /// baseline `up` through the guard (defense in depth) and serializes under the
     /// project advisory lock; the SQLite impl serializes structurally on its single
     /// migration actor.
     ///
     /// # Errors
-    /// - [`BaselineError::Guard`] — the baseline SQL was denied (PG; held to the same
+    /// - [`BaselineError::Guard`] - the baseline SQL was denied (PG; held to the same
     ///   deny-list as any `up`).
-    /// - [`BaselineError::AlreadyManaged`] / [`BaselineError::ConflictingBaseline`] —
+    /// - [`BaselineError::AlreadyManaged`] / [`BaselineError::ConflictingBaseline`] -
     ///   not a first-entry DB.
-    /// - [`BaselineError::Db`] / [`BaselineError::Journal`] — PG infrastructure
+    /// - [`BaselineError::Db`] / [`BaselineError::Journal`] - PG infrastructure
     ///   failures.
-    /// - [`BaselineError::Backend`] — a non-PG (e.g. SQLite) backend's internal
+    /// - [`BaselineError::Backend`] - a non-PG (e.g. SQLite) backend's internal
     ///   failure, mapped onto the dialect-neutral arm. **MySQL also returns this
     ///   arm to say the operation is UNSUPPORTED**, not that it failed:
     ///   `"mysql backend: schema baseline/adoption is not supported on MySQL"`.
@@ -970,8 +970,8 @@ pub trait MigrationBackend {
     /// method because the trait requires it; MySQL's implementation is a refusal
     /// stub, since adoption relies on the guard, advisory-lock and record-not-run
     /// machinery that is PG-specific and has no MySQL equivalent. Reading the impl
-    /// list is therefore misleading — a trait impl existing is not the feature
-    /// working, and this one is three lines that always return `Err`.
+    /// list is therefore misleading - a trait impl existing is not the feature
+    /// working, and this one is a stub that always returns `Err`.
     async fn baseline_one(
         &self,
         cfg: &ExecutorConfig,

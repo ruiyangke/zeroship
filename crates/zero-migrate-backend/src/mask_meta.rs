@@ -1,14 +1,14 @@
 //! The mask / encryption COLUMN-METADATA vocabulary.
 //!
-//! Five pure-data types lifted out of `zero_migrate::schema::diff` — the only part
+//! Five pure-data types lifted out of `zero_migrate::schema::diff` - the only part
 //! of that 2540-line classifier a backend crate needs. They are re-exported from
 //! `zero_migrate::schema::diff`, the path every existing caller uses.
 //!
 //! WHY THEY HAD TO MOVE, measured. `SchemaRenderer::column_comment_statements` is
 //! the vendor's spelling of `COMMENT ON COLUMN`, and PostgreSQL's impl reaches
-//! [`crate::schema::build_mask_sentinel_comments`] →
-//! [`crate::schema::mask_sentinel_for_field`] → `MaskKind::from_sql` /
-//! `Classification::from_sql` → [`crate::mask_codec::build_mask_sentinel`]. Leaving
+//! [`crate::schema::build_mask_sentinel_comments`] ->
+//! [`crate::schema::mask_sentinel_for_field`] -> `MaskKind::from_sql` /
+//! `Classification::from_sql` -> [`crate::mask_codec::build_mask_sentinel`]. Leaving
 //! those two enums in `schema::diff` would have dragged `model::table_shape` and,
 //! through it, the rest of the engine into the leaf.
 //!
@@ -52,7 +52,7 @@ pub struct EncryptionMeta {
 /// The inner type wrapped by a `t.encrypted(...)` builder.
 ///
 /// Only string / number / bytes are supported. Arbitrary JSON
-/// (object / array) wraps are deferred — they add a serialisation round-trip
+/// (object / array) wraps are deferred - they add a serialisation round-trip
 /// on every read/write that isn't needed for the v1 surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WrappedType {
@@ -71,7 +71,7 @@ pub enum WrappedType {
 /// default reads pull the masked sibling and alias it back to the
 /// schema-declared name, and writes dual-bind both columns
 /// atomically. The sibling column is HIDDEN from the SDK
-/// surface — `Row<S>` only contains the parent column wrapped in
+/// surface - `Row<S>` only contains the parent column wrapped in
 /// `MaskedValue<T>`.
 ///
 /// Population path:
@@ -85,7 +85,7 @@ pub struct MaskMeta {
     /// Mask transform applied at write time to compute the sibling
     /// column's value from the plaintext. See [`MaskKind`].
     pub kind: MaskKind,
-    /// Classification of the source field — drives unmask
+    /// Classification of the source field - drives unmask
     /// authorization and audit-row tagging.
     pub classification: Classification,
     /// Name of the physical sibling column emitted alongside the
@@ -107,23 +107,23 @@ pub struct MaskMeta {
 ///
 /// **No raw user-defined JS functions for masking.** Creator-supplied
 /// mask functions are a security risk (an AI-generated `mask: v => v`
-/// defeats the purpose). Only named built-in strategies — adding a
+/// defeats the purpose). Only named built-in strategies - adding a
 /// new strategy is a platform change, not creator config.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MaskKind {
-    /// `"***"` — maximum redaction. Default for encrypted columns.
+    /// `"***"` - maximum redaction. Default for encrypted columns.
     Full,
-    /// `"***-**-6789"` — last 4 visible. SSN, card numbers, phone.
+    /// `"***-**-6789"` - last 4 visible. SSN, card numbers, phone.
     Last4,
-    /// `"4111-****-****-****"` — first 4 visible. BIN/IIN preservation.
+    /// `"4111-****-****-****"` - first 4 visible. BIN/IIN preservation.
     First4,
-    /// `"a****@example.com"` — preserve domain for sorting / analytics.
+    /// `"a****@example.com"` - preserve domain for sorting / analytics.
     Email,
-    /// `"A. A***"` — initials. Name fields.
+    /// `"A. A***"` - initials. Name fields.
     Name,
-    /// `"1985-**-**"` — preserve year. Age-bucket analytics.
+    /// `"1985-**-**"` - preserve year. Age-bucket analytics.
     DateYear,
-    /// `"198?-**-**"` — preserve decade. Coarser-grained analytics.
+    /// `"198?-**-**"` - preserve decade. Coarser-grained analytics.
     DateDecade,
     /// Explicit opt-out: no sibling emission, no mask wrap on read.
     /// Used by encrypted columns the creator wants plaintext-on-read
@@ -181,7 +181,7 @@ impl MaskKind {
 /// unmask authorization and audit-row tagging.
 ///
 /// Mirrors the SDK's `Classification` union. The taxonomy is
-/// deliberately small — six classes covering the standard regulatory
+/// deliberately small - six classes covering the standard regulatory
 /// boundaries (PII / SPI / PHI / PCI) plus `Public` (nothing to
 /// protect) and `Internal` (platform metadata).
 ///
@@ -191,19 +191,19 @@ impl MaskKind {
 /// collide with the classification taxonomy in their schemas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Classification {
-    /// Usernames, display names, public profile data — visible to all.
+    /// Usernames, display names, public profile data - visible to all.
     Public,
-    /// PII — full name, email, address, phone, IP, date of birth.
+    /// PII - full name, email, address, phone, IP, date of birth.
     /// Default classification for encrypted columns without explicit
     /// `.mask(...)`.
     Pii,
-    /// SPI — SSN, driver's license, biometric data (CPRA "sensitive PI").
+    /// SPI - SSN, driver's license, biometric data (CPRA "sensitive PI").
     Spi,
-    /// PHI — health records, medical IDs, diagnosis (HIPAA scope).
+    /// PHI - health records, medical IDs, diagnosis (HIPAA scope).
     Phi,
-    /// PCI — card numbers, CVV, magnetic stripe data (PCI-DSS scope).
+    /// PCI - card numbers, CVV, magnetic stripe data (PCI-DSS scope).
     Pci,
-    /// Internal — platform-internal metadata, system field overrides.
+    /// Internal - platform-internal metadata, system field overrides.
     Internal,
 }
 

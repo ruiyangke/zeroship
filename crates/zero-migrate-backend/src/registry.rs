@@ -5,7 +5,7 @@
 //! `zero-migrate-ir` already has a `BackendRegistry`, built fallibly, refusing
 //! duplicate and malformed ids and naming both registrants on a collision. It is
 //! reused verbatim by [`VendorSet::descriptors`] and it is the right thing for what
-//! it holds — but what it holds is `&'static BackendDescriptor`, i.e. a vendor's
+//! it holds - but what it holds is `&'static BackendDescriptor`, i.e. a vendor's
 //! CAPABILITY row. It cannot hold a renderer, and it cannot be made to: a renderer
 //! is a `&'static dyn` of a trait declared in THIS crate, and `-ir` is below this
 //! crate and may not name it.
@@ -22,7 +22,7 @@
 //!
 //! Before the split, `render::backends::renderer` was an exhaustive `match` over
 //! the former closed dialect enum, naming `postgres::RENDERER`, `sqlite::RENDERER`
-//! and `mysql::RENDERER` — three statics in the same crate as the trait. Extract the
+//! and `mysql::RENDERER` - three statics in the same crate as the trait. Extract the
 //! vendors and the engine names them for its registry while they name the engine for
 //! `DmlRenderer`, `IrLowerError` and `DmlError`. Cargo refuses.
 //!
@@ -73,22 +73,22 @@ pub type DdlFactory = fn(&str) -> Box<dyn DdlEmitter>;
 /// and its line-1 guard.
 ///
 /// A vendor crate declares exactly one of these as a `pub static` and the engine
-/// names it. Nothing else of a vendor crate's surface is public API — the renderer
+/// names it. Nothing else of a vendor crate's surface is public API - the renderer
 /// structs themselves stay crate-private, so a caller cannot reach past this
 /// descriptor to a vendor's spelling without going through a registry.
 ///
 /// # Every field is REQUIRED, and `guard` is why that matters
 ///
 /// This struct derives no `Default`, has no `Default` impl, and is not
-/// `#[non_exhaustive]`. All ten fields must be written out in a struct literal at the
+/// `#[non_exhaustive]`. Every field must be written out in a struct literal at the
 /// vendor's own definition site. A new backend that ships no DDL emitter, no guard or
-/// no advisor therefore fails to compile **in its own crate, named** — E0063 for the
-/// missing field — rather than picking one up by omission.
+/// no advisor therefore fails to compile **in its own crate, named** - E0063 for the
+/// missing field - rather than picking one up by omission.
 ///
 /// That is the whole point of the field. It replaced a `guard_for(cfg)` function whose
 /// match on the former closed dialect enum handed both descriptor-only dialects one shared
 /// trusting guard.
-/// The match was exhaustive, so a fourth dialect broke the build — but the obvious way
+/// The match was exhaustive, so a fourth dialect broke the build - but the obvious way
 /// to fix that break was a `_ =>` arm, which would have granted every future backend
 /// the trusting path in one line and in silence. There is no such arm to add now.
 ///
@@ -134,22 +134,22 @@ pub struct BackendVendor {
     /// Required, never defaulted. A vendor cannot silently inherit another backend's
     /// DDL or disappear behind a catch-all registry arm.
     pub ddl: DdlFactory,
-    /// What this vendor REFUSES to run — its line-1 defense.
+    /// What this vendor REFUSES to run - its line-1 defense.
     ///
     /// Required, never defaulted. A vendor that trusts its input must say so by
     /// writing a [`MigrationGuard`] whose `check` returns `Ok(GuardOutcome::default())`
-    /// — visible in the diff, attributable to the vendor, and impossible to acquire by
+    /// - visible in the diff, attributable to the vendor, and impossible to acquire by
     /// forgetting something.
     ///
     /// [`GuardOutcome`]: crate::guard::GuardOutcome
     pub guard: GuardFactory,
-    /// What this vendor says about a migration's OPERATIONAL risk — the advisory
+    /// What this vendor says about a migration's OPERATIONAL risk - the advisory
     /// half of the contract, next to `guard`'s security half.
     ///
     /// Required, never defaulted, for the same reason `guard` is. A backend that
     /// ships no analyzer must say so by returning
     /// [`AdvisoryVerdict::NotAnalyzed`](crate::advisory::AdvisoryVerdict::NotAnalyzed)
-    /// with its own reason — visible in the diff, attributable to the vendor, and
+    /// with its own reason - visible in the diff, attributable to the vendor, and
     /// impossible to acquire by forgetting something. An `Option` here, or a default
     /// body on either trait method, would hand a future backend a SILENTLY empty
     /// advisory report, which is exactly the "unchecked reads as clean" defect
@@ -159,21 +159,21 @@ pub struct BackendVendor {
     /// reads SQL and nothing else. `guard` is a `fn` pointer only because it carries
     /// the per-migration [`GuardConfig`] it decides against.
     pub advisor: &'static dyn OperationalAdvisor,
-    /// The vendor knobs this backend OWNS — which `<dialect>.<name>` keys exist, which
+    /// The vendor knobs this backend OWNS - which `<dialect>.<name>` keys exist, which
     /// IR node each attaches to, and what a legal value is.
     ///
     /// Required, never defaulted, and for a sharper reason than the fields above. The
     /// attribute space is the one part of the IR a backend extends WITHOUT editing a
     /// neutral crate, so this field is the entire mechanism by which it does so. A
     /// backend that declares nothing must say so with
-    /// [`AttributeVocabulary::empty()`](crate::attribute::AttributeVocabulary::empty) —
-    /// one visible line in its own crate — because "declares no attributes" and "forgot
+    /// [`AttributeVocabulary::empty()`](crate::attribute::AttributeVocabulary::empty) -
+    /// one visible line in its own crate - because "declares no attributes" and "forgot
     /// to declare attributes" produce identical behaviour at every later layer, and only
     /// the diff can tell them apart.
     ///
     /// Not an `Option`, and no `Default`: either would let a new backend acquire an empty
     /// vocabulary by omission, and an empty vocabulary REFUSES every attribute of its own
-    /// dialect. That failure is at least loud. The dangerous direction is the reverse —
+    /// dialect. That failure is at least loud. The dangerous direction is the reverse -
     /// see [`crate::attribute`] for why a key belonging to an unasked dialect is skipped
     /// rather than refused, which is what makes a missing declaration invisible on every
     /// target except the vendor's own.
@@ -189,7 +189,7 @@ pub struct BackendVendor {
 /// READ THIS BEFORE EDITING. A `compile_fail` doctest passes when the code fails to
 /// compile for ANY reason, so it silently stops testing anything the moment a name in
 /// it goes stale. Both blocks below are deliberately written to fail for exactly ONE
-/// reason, and both were verified BY INVERSION — supply the missing thing, drop the
+/// reason, and both were verified BY INVERSION - supply the missing thing, drop the
 /// `compile_fail`, and confirm the same code compiles.
 ///
 /// That check is not ceremony. The first draft of block (1) wrote the vendor as a
@@ -204,7 +204,7 @@ pub struct BackendVendor {
 /// `error[E0063]: missing field `guard` in initializer of `BackendVendor``, pointing
 /// at that vendor's own crate.
 ///
-/// (1) A `BackendVendor` without a guard MUST fail to compile — E0063:
+/// (1) A `BackendVendor` without a guard MUST fail to compile - E0063:
 ///
 /// ```compile_fail
 /// use zero_migrate_backend::registry::BackendVendor;
@@ -242,11 +242,11 @@ pub struct BackendVendor {
 /// }
 /// ```
 ///
-/// (2) And an EMPTY `MigrationGuard` impl MUST fail to compile — E0046. Not one of
+/// (2) And an EMPTY `MigrationGuard` impl MUST fail to compile - E0046. Not one of
 /// the trait's methods has a default body, so no part of a security posture can be
 /// inherited by omission; every one has to be written. That covers `check`, both raw
 /// island backstops, the `require_rls` raw-door question, and the SQL flag
-/// derivation — a vendor that stays silent on any of them does not build:
+/// derivation - a vendor that stays silent on any of them does not build:
 ///
 /// ```compile_fail
 /// struct TrustsEverything;
@@ -256,7 +256,7 @@ pub struct BackendVendor {
 /// (3) The same property for `advisor`, which is a SEPARATE block precisely because
 /// each of these must fail for exactly one reason. Here `guard` IS supplied and
 /// `advisor` is the only omission, so this block goes green the moment the advisor
-/// field acquires a `Default`, an `Option`, or a `#[non_exhaustive]` escape hatch —
+/// field acquires a `Default`, an `Option`, or a `#[non_exhaustive]` escape hatch -
 /// which is the failure mode it exists to catch:
 ///
 /// ```compile_fail
@@ -295,7 +295,7 @@ pub struct BackendVendor {
 /// ```
 ///
 /// (4) And an `OperationalAdvisor` impl that supplies no method MUST fail to
-/// compile — E0046, for the same reason as (2): no default body, so "this backend
+/// compile - E0046, for the same reason as (2): no default body, so "this backend
 /// ships no analyzer" cannot be inherited in silence.
 ///
 /// ```compile_fail
@@ -310,7 +310,7 @@ struct VendorWithoutAGuardCompileFail;
 ///
 /// Deliberately a slice of `&'static BackendVendor` rather than a map: the shipping
 /// set is a compile-time fact, and a set that could grow at run time would let a
-/// duplicate id in behind [`BackendRegistry`]'s check — which is the same reason
+/// duplicate id in behind [`BackendRegistry`]'s check - which is the same reason
 /// `-ir`'s registry has no `insert`.
 #[derive(Debug, Clone, Copy)]
 pub struct VendorSet {
@@ -364,7 +364,7 @@ impl VendorSet {
     /// Validate this set's descriptors into `-ir`'s [`BackendRegistry`].
     ///
     /// This is the composition the hard-coded `match` used to stand in for, and it
-    /// is where a duplicate or malformed id is caught — by the leaf crate's builder,
+    /// is where a duplicate or malformed id is caught - by the leaf crate's builder,
     /// which names BOTH registrants on a collision, rather than by a rule restated
     /// here.
     ///

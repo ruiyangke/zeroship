@@ -320,14 +320,14 @@ impl PerRowAssignment {
 /// key to page by ([`cursor_columns`](Self::cursor_columns)), the
 /// [`batch_size`](Self::batch_size), the per-row transform
 /// ([`set_clause`](Self::set_clause)), and an optional row
-/// [`filter`](Self::filter). The engine owns everything else — the cursor-window
-/// predicate, the parameter binding, the loop control — so the authored input
+/// [`filter`](Self::filter). The engine owns everything else - the cursor-window
+/// predicate, the parameter binding, the loop control - so the authored input
 /// can never escape the target table or inject into the loop control.
 #[derive(Debug, Clone)]
 pub struct BackfillSpec {
     /// The effective schema the backfill targets.
     pub schema: String,
-    /// The target table — a bare identifier in [`schema`](Self::schema).
+    /// The target table - a bare identifier in [`schema`](Self::schema).
     pub table: String,
     /// The ordered unique key tuple to page by.
     pub cursor_columns: Vec<String>,
@@ -339,7 +339,7 @@ pub struct BackfillSpec {
     pub cursor_contract: Option<CursorContract>,
     /// Rows per batch.
     pub batch_size: u32,
-    /// The authored per-row transform — the body of `UPDATE … SET <here>`.
+    /// The authored per-row transform - the body of `UPDATE ... SET <here>`.
     pub set_clause: String,
     /// Apply-engine assignments evaluated independently for every selected row.
     /// Kept separate from `set_clause` so no sampled literal can be rendered into
@@ -440,11 +440,11 @@ fn crockford_u128(mut value: u128, alphabet: &[u8; 32]) -> String {
     String::from_utf8(out.to_vec()).expect("Crockford alphabets are valid ASCII")
 }
 
-// ── The backfill EXECUTION vocabulary. `BackfillSpec` above is what a backfill
+// -- The backfill EXECUTION vocabulary. `BackfillSpec` above is what a backfill
 // IS; these are what running one produces, reports and refuses. They lived in the
 // engine's `apply::backend::capability` and `apply::backend`, whose only remaining
 // reason to hold them was that the three vendor backfill executors are still
-// in-crate. The engine re-exports them at `crate::apply::backend::{…}`.
+// in-crate. The engine re-exports them at `crate::apply::backend::{...}`.
 
 /// Read-only progress evidence for one resumable plan backfill.
 ///
@@ -563,7 +563,7 @@ pub enum BackfillError {
     /// caller does next: a failed batch leaves a usable session and a committed
     /// cursor to resume from, while this says the SESSION itself is unusable and a
     /// resume has to open a new one. Only a backend that can reach such a state
-    /// produces it — SQLite's single-connection actor thread poisons on a panic —
+    /// produces it - SQLite's single-connection actor thread poisons on a panic -
     /// and a backend whose sessions are pooled simply never returns this variant.
     ///
     /// The refusing target names itself from its own [`DialectId`] rather than being
@@ -790,7 +790,7 @@ mod backfill_error_message_tests {
     use super::BackfillError;
 
     /// "A paged batch failed after the last committed cursor" is engine-independent
-    /// — PostgreSQL reports the same condition as an unprefixed "batch failed after
+    /// - PostgreSQL reports the same condition as an unprefixed "batch failed after
     /// cursor ...". The variant name is compiler-checked, but this operator-facing
     /// string is not, and nothing else in the tree pins it, so a drift back to a
     /// vendor spelling would otherwise be silent.

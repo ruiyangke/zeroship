@@ -1,4 +1,4 @@
-//! The backend CONTRACT — the future `zero-migrate-backend`.
+//! The backend CONTRACT - the future `zero-migrate-backend`.
 //!
 //! This module holds the vocabulary and the traits, and it deliberately holds no
 //! SQL. Nothing here names a vendor, spells a keyword, or quotes an identifier;
@@ -7,7 +7,7 @@
 //! # SPELLING vs SEMANTICS
 //!
 //! A method belongs on [`DmlRenderer`] when the answer is "how does this vendor
-//! WRITE it" — `now()` vs `CURRENT_TIMESTAMP`, `bytea` vs `blob`. It does NOT
+//! WRITE it" - `now()` vs `CURRENT_TIMESTAMP`, `bytea` vs `blob`. It does NOT
 //! belong here when the question is catalog value-format normalization; that
 //! separate required surface is [`crate::value_format::ValueFormatRenderer`]. Core
 //! composes the comparison, while each backend owns the facts the comparison reads.
@@ -19,24 +19,23 @@
 //! was one: every impl read
 //! its own descriptor's `MaterializedView` answer and built a CORE error type
 //! from it, so resolving a renderer only to ask the vendor about ITSELF put a
-//! dispatch between a question core could already answer — core holds the
+//! dispatch between a question core could already answer - core holds the
 //! resolved vendor and reads the same descriptor the vendor read.
 //!
 //! It now lives in `render::lower` as a plain dialect-parameterized fn. The
-//! distinction matters for `docs/proposals/pluggable-backends.md` step 4 because
-//! this class is DELETED rather than inverted: a backend crate never has to
-//! export it, and core never has to reach a registry to run it. MEASURED at
-//! `30ca3b06`: exactly ONE of this contract's methods was in the class, and
-//! removing it changed no emitted byte — 1232 / 143 / 60 / 37 across `--lib`,
-//! `authoring_surface`, `dialect_matrix` and `fold_offline`, unchanged, with the
-//! control (an unconditional refusal in the moved fn) reddening 11 of them.
+//! distinction matters for `docs/proposals/pluggable-backends.md` because this
+//! class is DELETED rather than inverted: a backend crate never has to export it,
+//! and core never has to reach a registry to run it. MEASURED, not assumed: exactly
+//! ONE of this contract's methods was in the class, removing it changed no emitted
+//! byte across the `--lib`, `authoring_surface`, `dialect_matrix` and `fold_offline`
+//! suites, and the control (an unconditional refusal in the moved fn) reddened them.
 //!
 //! It is NOT a free win for the cycle, and that is the part worth carrying
 //! forward. Deleting the method removed two `renderer(dialect)` CALLS but zero
 //! `renderer(dialect)` LOOKUPS: both sites bind the renderer for sibling spelling
-//! methods on the next line, so `render::lower` holds the same seven lookups it
-//! held before. The unit that blocks the crate split is the LOOKUP, not the call
-//! site, and the two counts are not the same number.
+//! methods on the next line, so `render::lower` holds exactly the lookups it held
+//! before. The unit that blocks the crate split is the LOOKUP, not the call site,
+//! and the two counts are not the same number.
 
 use crate::dml::{BindCtx, DmlError, LimitedDeleteRenderRequest, OnConflictRenderRequest};
 use crate::error::IrLowerError;
@@ -95,9 +94,9 @@ pub enum MaterializedNamedTypeOp<'a> {
 
 /// The dialect feature predicates the migration lowerer asks.
 ///
-/// PROMOTED to public vocabulary in `zero_migrate_ir::backend` — unchanged in
+/// PROMOTED to public vocabulary in `zero_migrate_ir::backend` - unchanged in
 /// spirit and unchanged in membership (the same 25 predicates, the same
-/// spellings). It is re-exported here so the ~250 in-crate `Capability::…` uses
+/// spellings). It is re-exported here so the ~250 in-crate `Capability::...` uses
 /// keep naming it through `render::renderer`.
 pub use zero_migrate_ir::backend::Capability;
 
@@ -180,7 +179,7 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
     ///
     /// ADDED BY THE CRATE SPLIT, and it is the hinge the whole extraction turns on.
     /// The spelling helpers in [`crate::dml`] used to take `dialect` as the former
-    /// closed dialect enum and resolve a renderer from it through a registry in the engine — which is
+    /// closed dialect enum and resolve a renderer from it through a registry in the engine - which is
     /// exactly the edge that could not survive the split, because the registry has
     /// to be ABOVE the vendors and `dml` has to be BELOW them. They take a
     /// `&dyn DmlRenderer` now, and this method gives back the one thing the
@@ -198,8 +197,8 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
     /// produce a value of a closed enum it does not own, so the only body that
     /// type-checked outside this workspace's three vendors was `todo!()`: the crate
     /// compiled and panicked the first time anything asked it who it was. The
-    /// registry was never the blocker — a stub backend registers and is reached
-    /// through the real registry — this signature was.
+    /// registry was never the blocker - a stub backend registers and is reached
+    /// through the real registry - this signature was.
     ///
     /// [`DialectId`] is `const`-constructible from a `&'static str`, so an outsider
     /// writes `DialectId::new("duckdb")` at item scope and answers honestly. It is
@@ -216,7 +215,7 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
     ///
     /// The renderer used to hand back an identity ([`dialect`](Self::dialect)) and
     /// core turned that identity into capabilities through the former closed
-    /// enum's `descriptor` method — an exhaustive match in `zero-migrate-ir`, i.e. a
+    /// enum's `descriptor` method - an exhaustive match in `zero-migrate-ir`, i.e. a
     /// table core owns about vendors core does not. That is the same closed-set
     /// problem the identity had, one level up: an outsider's id has no arm in that
     /// match, so the honest answer for it was "no capabilities at all", and a
@@ -265,7 +264,7 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
     fn qualify_table(&self, project_schema: &str, table: &str) -> Result<String, DmlError>;
     fn cast_target(&self, target: CastTarget) -> &'static str;
 
-    /// The positional placeholder for the `n`-th (1-based) bind — `$n` / `?n` / `?`.
+    /// The positional placeholder for the `n`-th (1-based) bind - `$n` / `?n` / `?`.
     fn placeholder(&self, n: usize) -> String;
 
     /// An inline SQL string literal that does not depend on the server's
@@ -292,7 +291,7 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
     /// decode it inside the statement, in each vendor's own spelling.
     ///
     /// This was a three-way `match` on the former closed dialect enum inside
-    /// `BindCtx::push_scalar` — a spelling decision made in core, which is the shape this module exists
+    /// `BindCtx::push_scalar` - a spelling decision made in core, which is the shape this module exists
     /// to hold instead.
     fn bind_bytes(&self, bytes: &[u8], push: &mut dyn FnMut(BindValue) -> String) -> String;
 
@@ -350,8 +349,8 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
 
     /// The vendor's spelling of an interval literal for a structured
     /// [`Duration`], or a refusal if it has none. The DURATION is neutral data;
-    /// the syntax around it is not — PostgreSQL wants a quoted parts string,
-    /// MySQL an unquoted `INTERVAL <n> <UNIT>` — so the seam is here rather than
+    /// the syntax around it is not - PostgreSQL wants a quoted parts string,
+    /// MySQL an unquoted `INTERVAL <n> <UNIT>` - so the seam is here rather than
     /// a shared formatter with a capability check in front of it.
     fn render_interval(&self, duration: &Duration) -> Result<String, DmlError>;
 
@@ -360,7 +359,7 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
     ///
     /// Fallible because the field set is the WHOLE SQL one and no backend covers
     /// all of it. An infallible signature would make a backend invent SQL for a
-    /// part it does not have and lean on the validator having refused first —
+    /// part it does not have and lean on the validator having refused first -
     /// a correct answer held in place by something other than this method.
     fn render_extract(&self, field: ExtractField, expr: &str) -> Result<String, DmlError>;
 
@@ -429,14 +428,14 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
         eff_schema: &str,
     ) -> Result<crate::vendor::VendorStatement, IrLowerError>;
 
-    /// This vendor's rendering of the PRIVILEGED vendor ops — schemas, extensions,
+    /// This vendor's rendering of the PRIVILEGED vendor ops - schemas, extensions,
     /// roles, grants, RLS, policies, functions and the raw escape.
     ///
     /// # Why this is on the trait, and what it replaced
     ///
     /// The engine used to reach PostgreSQL's renderer BY NAME:
     /// `zero_migrate::render::vendor` re-exported `zero_migrate_postgres::render_vendor_op`
-    /// and `render::lower` called it at three sites covering sixteen op kinds. Those
+    /// and `render::lower` called it directly for the privileged vendor ops. Those
     /// op kinds never touch [`DmlRenderer::render_trigger_op`], which is exactly why
     /// they were left behind when the two renderers went behind the contract, and
     /// `render/vendor.rs` recorded the gap honestly rather than hiding it. This
@@ -452,7 +451,7 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
     /// seam refuses a target without `Capability::PrivilegedCatalogObjects` before it
     /// ever gets here.
     ///
-    /// So the obvious shape was an `Option` or a default body returning a refusal —
+    /// So the obvious shape was an `Option` or a default body returning a refusal -
     /// and it is the wrong one, for the reason
     /// [`crate::registry::BackendVendor::guard`] spells out at length. A default body
     /// is an answer a future backend acquires by OMITTING something. This method has

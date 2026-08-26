@@ -1,4 +1,4 @@
-//! The LINE-1 CONTRACT — what a backend crate's security guard must satisfy.
+//! The LINE-1 CONTRACT - what a backend crate's security guard must satisfy.
 //!
 //! This is the third per-vendor trait in this crate, alongside
 //! [`crate::renderer::DmlRenderer`] ("how does this vendor spell DML") and
@@ -11,7 +11,7 @@
 //! The engine (`zero-migrate`) depends on all three vendor crates, and each vendor
 //! crate depends on this one. Declaring [`MigrationGuard`] in the engine would force
 //! every vendor to depend on the engine in order to implement it, and the engine
-//! already depends on every vendor — a crate cycle Cargo refuses. The arrow only
+//! already depends on every vendor - a crate cycle Cargo refuses. The arrow only
 //! works one way: the contract sits BELOW every vendor, the vendors implement it,
 //! and the engine composes them. That is the same reason
 //! [`crate::registry::BackendVendor`] lives here.
@@ -46,7 +46,7 @@
 //! with a raw door answers from its parser, and a descriptor-only vendor answers "I
 //! have no raw door" without anyone parsing anything. Everything else the walk
 //! decides is read off a structured [`Op`], which needs no grammar. That is the
-//! general move — when neutral code seems to need a vendor's tool, find the single
+//! general move - when neutral code seems to need a vendor's tool, find the single
 //! question it is using the tool to answer and make THAT the vendor's method.
 //!
 //! # A vendor that ships no guard does not compile
@@ -60,11 +60,11 @@
 //!
 //! This is what replaces the old `guard_for(cfg) -> Box<dyn MigrationGuard>` dispatch,
 //! whose closed three-way match handed BOTH descriptor-only dialects one shared
-//! `SqliteDescriptorGuard`. That match was exhaustive, so a fourth dialect broke it —
+//! `SqliteDescriptorGuard`. That match was exhaustive, so a fourth dialect broke it -
 //! but a `_ =>` arm added in haste would have granted every future backend the
 //! trusting path silently. The required field removes the arm the mistake could be
 //! made in. `BackendVendor` therefore derives no `Default`, has no `Default` impl, is
-//! not `#[non_exhaustive]`, and its `guard` field is not an `Option` — each of those
+//! not `#[non_exhaustive]`, and its `guard` field is not an `Option` - each of those
 //! would reintroduce exactly the silent grant of trust this removes.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -86,7 +86,7 @@ use crate::advisory::Advisory;
 ///
 /// Neutral because [`GuardError::Parse`] carries it and [`GuardError`] is the
 /// vocabulary every vendor's guard reports in. The PARSER that raises it is not
-/// neutral — today only `zero-migrate-postgres` has one.
+/// neutral - today only `zero-migrate-postgres` has one.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ParseError {
     /// The vendor's parser rejected the SQL (syntax error, etc.).
@@ -112,8 +112,8 @@ pub mod data_security_rule {
 /// [`EffectivePolicy`] through [`GuardConfig::from_policy`]. The guard never selects
 /// or fabricates a policy from a named posture.
 ///
-/// There is no belt-off posture. The static parse-time guard belt — the deny-list,
-/// cross-schema confinement and body walks — runs for every config this type can
+/// There is no belt-off posture. The static parse-time guard belt - the deny-list,
+/// cross-schema confinement and body walks - runs for every config this type can
 /// build. The engine used to carry a root/host-set mode that skipped it for a
 /// dbmate-like Trusted operator, and removing that mode is what makes the belt
 /// unconditional here.
@@ -121,17 +121,17 @@ pub mod data_security_rule {
 pub struct GuardConfig {
     /// PRIVATE. The target SQL dialect this guard config is for.
     ///
-    /// - `postgres` — the `libpg_query` line-1 guard runs
+    /// - `postgres` - the `libpg_query` line-1 guard runs
     ///   (`SqlGuard::check` parses + deny-walks the SQL).
-    /// - every other id — a vendor-owned guard path. An untrusted raw SQL string
+    /// - every other id - a vendor-owned guard path. An untrusted raw SQL string
     ///   presented to PostgreSQL's `SqlGuard::check` is refused.
     dialect: DialectId,
-    /// PRIVATE. The unforgeable [`EffectivePolicy`] — the SINGLE source the guard's
+    /// PRIVATE. The unforgeable [`EffectivePolicy`] - the SINGLE source the guard's
     /// every composable decision queries. The capability gate asks `grants(key,
     /// object)` for the statement's builtin knob key; cross-schema confinement asks
     /// `grants(schema.cross_schema, schema)`; the data-security obligations read
     /// `obligations`/`grants` on the safety.* knobs. There is no separate posture/scope
-    /// state for the composable knobs — the policy IS the posture.
+    /// state for the composable knobs - the policy IS the posture.
     effective: EffectivePolicy,
 }
 
@@ -156,7 +156,7 @@ impl GuardConfig {
     ///
     /// This exists so the `effective` FIELD can stay private now that a vendor's
     /// guard lives one crate above the config it reads. It is a read-only borrow of a
-    /// policy the caller already holds — it grants nothing that
+    /// policy the caller already holds - it grants nothing that
     /// [`GuardConfig::with_effective_policy`] does not already allow, and it is what
     /// keeps the `compile_fail` struct-literal boundary below intact: an external
     /// crate still cannot NAME either field.
@@ -171,7 +171,7 @@ impl GuardConfig {
     /// PostgreSQL's and reset any host-selected belt-off mode to `Enforced` for every
     /// other id, so that a posture built for the one backend with a parser could not
     /// follow a config onto a backend with no belt to skip. There is no belt-off mode
-    /// to reset now, and the comparison went with it — which is also how this crate's
+    /// to reset now, and the comparison went with it - which is also how this crate's
     /// `the_contract_names_no_vendor.rs` ratchet reached zero for this file.
     #[must_use]
     pub fn for_dialect(mut self, dialect: DialectId) -> Self {
@@ -188,10 +188,10 @@ impl GuardConfig {
     /// The schema-confinement scope this guard config enforces, for the
     /// validate-time cross-schema gate. Derived from the effective policy's
     /// `schema.cross_schema` grant:
-    /// - a `⊤` (whole-universe) grant ⇒ `Unconfined` (the unconfined operator charter);
-    /// - a finite set of owned schemas ⇒ `Single(s)` for one, `Allowlist([…])` for
+    /// - a whole-universe grant => `Unconfined` (the unconfined operator charter);
+    /// - a finite set of owned schemas => `Single(s)` for one, `Allowlist([...])` for
     ///   several (Confined / Platform);
-    /// - no owned schema (empty) ⇒ `Single("")` (the degenerate default).
+    /// - no owned schema (empty) => `Single("")` (the degenerate default).
     ///
     /// This is the SINGLE source of truth that maps the policy to the validator's
     /// confinement scope, so the parse-guard cross-schema denial (line 1) and the
@@ -204,7 +204,7 @@ impl GuardConfig {
         }
         let owned = owned_schemas_from_effective(&self.effective);
         // The operator (Platform) posture is a schema ALLOWLIST even for a single
-        // owned schema — it grants the privileged vendor set (`access.role`); a Confined
+        // owned schema - it grants the privileged vendor set (`access.role`); a Confined
         // posture (no privileged caps) with one owned schema is a `Single` pin.
         let is_operator_posture = self.grants_global_bool(policy_registry::KEY_ACCESS_ROLE);
         Some(match owned.as_slice() {
@@ -229,7 +229,7 @@ impl GuardConfig {
 
     /// Does the effective policy GRANT the whole-DB (Global) capability `key` at
     /// `object`? A Global Bool grant resolves the same at every object; we pass a
-    /// stable global witness. Reproduces `caps.grants(cap)`: absent grant ⇒ the
+    /// stable global witness. Reproduces `caps.grants(cap)`: absent grant => the
     /// knob default (`false`, deny).
     pub fn grants_global_bool(&self, key: &str) -> bool {
         self.grants_bool_at(key, &self.global_witness_for(key))
@@ -297,7 +297,7 @@ impl GuardConfig {
         )
     }
 
-    /// The extension names the effective policy permits — the `code.extension` StrSet
+    /// The extension names the effective policy permits - the `code.extension` StrSet
     /// grant value at the global witness. Empty when no grant covers it
     /// (deny-by-default, so no `CREATE` and no `DROP`). The guard's hard deny still
     /// overrides this regardless of what a charter lists.
@@ -380,7 +380,7 @@ impl GuardConfig {
             .any(|v| matches!(v, KnobValue::Bool(true)))
     }
 
-    /// The effective destructive-op posture — the `safety.destructive_ops` OrderedEnum
+    /// The effective destructive-op posture - the `safety.destructive_ops` OrderedEnum
     /// grant value at the global witness, mapped back onto [`DestructiveOps`]. The
     /// deny-by-default value is `forbid`; an absent grant resolves to the knob
     /// default (`forbid`). This drives the destructive gating.
@@ -403,9 +403,10 @@ impl GuardConfig {
     // covering inject shapes, and cross-schema admission ----------------------
 
     /// The project schema an UNQUALIFIED relation resolves to under this config's
-    /// cross-schema pin — the sole schema owned by the effective policy's
+    /// cross-schema pin - the sole schema owned by the effective policy's
     /// `schema.cross_schema` grant. `None` when there is no unique owned schema (empty
-    /// confined default, multi-schema platform, or a `⊤` grant) — an unqualified name
+    /// confined default, multi-schema platform, or a whole-universe grant) - an
+    /// unqualified name
     /// is then not uniquely attributable by the guard.
     pub fn pinned_schema(&self) -> Option<String> {
         match owned_schemas_from_effective(&self.effective).as_slice() {
@@ -420,7 +421,7 @@ impl GuardConfig {
         self.grants_bool_at(key, object)
     }
 
-    /// The [`GrantRegion`] of `sql.raw` — the ⊤/Scoped/Ungranted posture the
+    /// The [`GrantRegion`] of `sql.raw` - the whole-universe / Scoped / Ungranted posture the
     /// scoped-raw-SQL rules (II.2.5) turn on.
     pub fn raw_sql_region(&self) -> GrantRegion {
         match KnobKey::parse(policy_registry::KEY_SQL_RAW) {
@@ -467,7 +468,7 @@ impl GuardConfig {
 
     /// Cross-schema confinement, decided directly on the PDP: is a reference to
     /// `schema` admitted? True iff the effective policy grants `schema.cross_schema`
-    /// at the (PG-normalized) schema object — the project schema(s) a confined/
+    /// at the (PG-normalized) schema object - the project schema(s) a confined/
     /// platform posture owns are granted; every other schema is a `CrossSchema`
     /// violation (default-deny). An un-normalizable schema name (empty / malformed)
     /// is NOT admitted (fail-closed). This replaces the derived-`SchemaScope`
@@ -486,7 +487,7 @@ impl GuardConfig {
     }
 }
 
-/// T8 — the EXTERNAL trust boundary, pinned as `compile_fail` doctests. A doctest
+/// T8 - the EXTERNAL trust boundary, pinned as `compile_fail` doctests. A doctest
 /// is compiled as a SEPARATE crate that `use`s `zero_migrate_backend`, so it
 /// exercises exactly the boundary an external consumer of this crate sits behind.
 ///
@@ -498,7 +499,7 @@ impl GuardConfig {
 /// re-check them the only way that means anything - make the fields `pub`, confirm
 /// the doctests FAIL, then put the visibility back.
 ///
-/// (1) An external crate cannot write a `GuardConfig { .. }` struct literal — the
+/// (1) An external crate cannot write a `GuardConfig { .. }` struct literal - the
 /// fields (`dialect`, `effective`) are private, so a privileged
 /// profile can never be forged by a literal (the `EffectivePolicy` is itself
 /// unforgeable). This MUST fail to compile:
@@ -512,7 +513,7 @@ impl GuardConfig {
 /// ```
 ///
 /// (2) The only unforgeable input to a privileged `GuardConfig` is a composed
-/// `EffectivePolicy` — an external crate cannot construct one by a literal (its
+/// `EffectivePolicy` - an external crate cannot construct one by a literal (its
 /// fields are private and it has no public constructor other than `deny_all`). This
 /// MUST fail to compile:
 ///
@@ -578,7 +579,7 @@ pub enum GuardError {
     /// three shipping guards raise it, each carrying its OWN id:
     ///
     /// * the parser-backed guard, when the config's target is not the dialect its
-    ///   parser reads — it cannot vet another grammar, so it declines;
+    ///   parser reads - it cannot vet another grammar, so it declines;
     /// * the other two, from `check_raw_island_sql` / `check_raw_island_body`,
     ///   because they have NO raw door at all. Answering `Ok` there would grant an
     ///   unchecked raw path no author of that dialect can even open.
@@ -603,7 +604,7 @@ pub enum GuardError {
 ///
 /// This is the line-1 output the core engine actually consumes: the engine's
 /// `plan()`/`apply` only read `destructive` (to drive the destructive/approval
-/// gate) and `advisories` (to surface operational footguns) — see
+/// gate) and `advisories` (to surface operational footguns) - see
 /// `MigrationEngine::plan`. Deliberately **does not** carry the
 /// PG-specific `classes: Vec<StatementClass>` (the `libpg_query` `DdlKind`
 /// vocabulary): that stays *inside* the PG guard (`SqlGuard`/`GuardReport`),
@@ -620,22 +621,22 @@ pub struct GuardOutcome {
     /// decides on approval; the guard only flags.
     pub destructive: bool,
     /// Operational [`Advisory`]s (lock-heavy ops,
-    /// backward-incompatible shapes, missing FK indexes, …). Advisory-only —
+    /// backward-incompatible shapes, missing FK indexes, ...). Advisory-only -
     /// never deny or gate. Empty for engines that emit none (e.g. `SQLite`'s
     /// descriptor path).
     pub advisories: Vec<Advisory>,
 }
 
-/// The **per-vendor line-1 defense** — the third thing a backend crate supplies,
+/// The **per-vendor line-1 defense** - the third thing a backend crate supplies,
 /// alongside its [`crate::renderer::DmlRenderer`] and [`crate::schema::SchemaRenderer`].
 ///
 /// The core engine never selects a guard by dialect (`if dialect == Sqlite`). It
 /// reads [`crate::registry::BackendVendor::guard`] and runs whatever line-1 that
 /// vendor brought.
 ///
-/// - **PostgreSQL** — the `libpg_query` parse + deny-list + classify + analyze
+/// - **PostgreSQL** - the `libpg_query` parse + deny-list + classify + analyze
 ///   (`SqlGuard`), mapped onto the neutral [`GuardOutcome`].
-/// - **`SQLite`** and **`MySQL`** — the descriptor-diff path is trusted by
+/// - **`SQLite`** and **`MySQL`** - the descriptor-diff path is trusted by
 ///   construction (validated at the author boundary, line-2 enforced by the backend's
 ///   runtime authorizer at apply), so `check` returns the **empty/clean** outcome.
 ///   Each vendor writes its OWN trusting impl; they no longer share one type named
@@ -647,7 +648,7 @@ pub struct GuardOutcome {
 /// # `check` is deliberately not defaulted
 ///
 /// Giving [`MigrationGuard::check`] a default `Ok(GuardOutcome::default())` body
-/// would make "ship no guard" compile into "trust everything" — the failure mode this
+/// would make "ship no guard" compile into "trust everything" - the failure mode this
 /// whole seam exists to prevent. Trust must be TYPED OUT to be granted.
 ///
 /// # What this trait does NOT cover
@@ -681,7 +682,7 @@ pub trait MigrationGuard {
     /// # This method currently has no caller on the lowering path
     ///
     /// It was reached from `render::lower`'s guarded lowering ONLY for a config whose
-    /// root/host-set mode had skipped the deny-list belt — the removed Trusted
+    /// root/host-set mode had skipped the deny-list belt - the removed Trusted
     /// posture. Every config the engine can build now runs the full belt through
     /// [`MigrationGuard::check`], so nothing calls this. It is kept as the declared
     /// vendor answer to "what survives a belt-skip", because reinstating an
@@ -716,7 +717,7 @@ pub trait MigrationGuard {
     /// second, EARLIER denial and change a refusal existing assertions pin, for no
     /// behavioural gain. For a guard that does NOT read it, the neutral walk is the
     /// only enforcement that knob has: a guard constructed without the policy cannot
-    /// see it at all, and before the walk existed the posture was silently inert —
+    /// see it at all, and before the walk existed the posture was silently inert -
     /// a `DROP TABLE` applied under the default `forbid` while the policy registry
     /// classified the knob as enforced.
     ///
@@ -726,7 +727,7 @@ pub trait MigrationGuard {
     ///
     /// # It replaced a vendor comparison, and that is the point
     ///
-    /// The walk's gate was literally `if cfg.dialect() != &POSTGRES` — core deciding a
+    /// The walk's gate was literally `if cfg.dialect() != &POSTGRES` - core deciding a
     /// SECURITY posture by naming one vendor, and a fourth backend inheriting the
     /// answer from not being that vendor rather than from anything about its guard.
     /// This module's own header states the general move it now follows: when neutral
@@ -734,7 +735,7 @@ pub trait MigrationGuard {
     /// tool to answer and make THAT the vendor's method.
     fn refuses_destructive_ops_itself(&self) -> bool;
 
-    /// Can this vendor NOT enumerate the net table state of a raw SQL island — i.e.
+    /// Can this vendor NOT enumerate the net table state of a raw SQL island - i.e.
     /// does the island escape [`check_ir_data_security_policy`]'s `safety.require_rls`
     /// net-state walk?
     ///
@@ -744,7 +745,7 @@ pub trait MigrationGuard {
     /// the vendor that owns the raw door can answer, and a vendor with NO raw door
     /// answers `false` without anyone parsing anything.
     ///
-    /// `true` means "refuse this island" — either because it reaches an obligated
+    /// `true` means "refuse this island" - either because it reaches an obligated
     /// relation or because the vendor cannot attribute it at all. Answering `false`
     /// unconditionally while the vendor DOES accept raw text would let raw SQL create
     /// an RLS-less table behind the obligation's back, so a vendor that answers
@@ -758,7 +759,7 @@ pub trait MigrationGuard {
     /// the text. Only a vendor that can classify its own statements can do that, and
     /// what "destructive" or "non-transactional" means is that vendor's grammar.
     ///
-    /// A *denial* is not this method's to raise — the engine's `plan()` re-runs the
+    /// A *denial* is not this method's to raise - the engine's `plan()` re-runs the
     /// guard and reports denials so a caller sees every problem at once. A vendor
     /// that cannot classify a denied-but-parseable statement should return
     /// conservative flags (`requires_approval: true`) rather than an error.
@@ -805,7 +806,7 @@ fn table_key_for_policy(
 ) -> (String, String) {
     let effective_schema = schema.clone().unwrap_or_else(|| {
         // An unqualified table resolves to the config's sole owned schema (the pinned
-        // project schema); no unique owned schema ⇒ empty.
+        // project schema); no unique owned schema => empty.
         match owned_schemas_from_effective(cfg.effective()).as_slice() {
             [one] => one.clone(),
             _ => String::new(),
@@ -830,8 +831,8 @@ fn table_key_for_policy(
 ///
 /// # Why this is neutral, and where the one vendor question went
 ///
-/// Every decision below is read off a structured [`Op`] — a create, a drop, a rename,
-/// a `setRls` — which every dialect emits and none of them needs a parser to
+/// Every decision below is read off a structured [`Op`] - a create, a drop, a rename,
+/// a `setRls` - which every dialect emits and none of them needs a parser to
 /// understand. The single exception is the raw island: `Op::Raw` carries text, and
 /// text's net table state is not derivable from the IR. That one question is asked of
 /// `guard` through [`MigrationGuard::raw_island_escapes_rls_net_state`], so the vendor
@@ -880,7 +881,7 @@ pub fn check_ir_data_security_policy(
     // assertions pin, for no behavioural gain. A guard constructed WITHOUT the policy
     // cannot read the knob at all, and for those this walk is the only enforcement it
     // has: before the walk existed the posture was silently inert on both such
-    // backends — a `DROP TABLE` applied under the default `forbid`, while the registry
+    // backends - a `DROP TABLE` applied under the default `forbid`, while the registry
     // classified the knob `Enforcement::Enforced` ("a guard, executor or validator
     // path reads them and they do what they say"). `Enforcement` has no dialect
     // dimension, so the load-time refusal that protects `DeclaredOnly` knobs could
@@ -888,7 +889,7 @@ pub fn check_ir_data_security_policy(
     //
     // WHICH of the two a guard is is the GUARD's answer
     // ([`MigrationGuard::refuses_destructive_ops_itself`]), not a dialect comparison.
-    // The gate here was `cfg.dialect() != &POSTGRES` — core deciding a security
+    // The gate here was `cfg.dialect() != &POSTGRES` - core deciding a security
     // posture by naming a vendor.
     //
     // `policy_ops` is used rather than `ir.ops` so a `Dialectal` op is judged by
@@ -1066,9 +1067,9 @@ pub fn check_ir_data_security_policy(
 }
 
 /// A stable concrete object for a Global-model capability query. Every Global grant
-/// (`⊤`-scope or absent) resolves the same at every object, so any witness decides
-/// it; `zsg` is an arbitrary fixed schema that never collides with a real target
-/// (the value is irrelevant for a ⊤-scope / default grant).
+/// (whole-universe scope, or absent) resolves the same at every object, so any
+/// witness decides it; `zsg` is an arbitrary fixed schema that never collides with a
+/// real target (the value is irrelevant for a whole-universe or default grant).
 ///
 /// The soundness condition, that the knob really is `ObjectModel::Global`, is checked
 /// against the registry by [`GuardConfig::global_witness_for`], which is how every
@@ -1080,9 +1081,9 @@ fn global_witness() -> ObjectName {
     ObjectName::schema(b"zsg".to_vec())
 }
 
-/// The literal schemas an effective policy OWNS — the `schema.cross_schema` grant's
+/// The literal schemas an effective policy OWNS - the `schema.cross_schema` grant's
 /// literal schema includes (the project schema(s) a confined/platform posture
-/// carries). Empty for a `⊤` / globbed / absent grant.
+/// carries). Empty for a whole-universe, globbed or absent grant.
 pub fn owned_schemas_from_effective(effective: &EffectivePolicy) -> Vec<String> {
     let Some(k) = KnobKey::parse(policy_registry::KEY_SCHEMA_CROSS_SCHEMA).ok() else {
         return Vec::new();
@@ -1139,7 +1140,7 @@ pub struct DeclaredCreateShape {
 impl DeclaredCreateShape {
     /// Build the declared shape a vendor's parser read out of a `CREATE TABLE`.
     ///
-    /// The SHAPE is neutral — a set of column-name bytes and an ordered key — but
+    /// The SHAPE is neutral - a set of column-name bytes and an ordered key - but
     /// reading it out of a statement is not, so the READER stays in the vendor crate
     /// that owns the parser and hands the result here.
     #[must_use]

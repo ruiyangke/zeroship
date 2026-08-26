@@ -7,15 +7,15 @@
 //! variant of a closed enum it does not own, so the only body that type-checked
 //! in a fourth backend was
 //! `todo!()`: the crate compiled and then panicked the first time anything asked
-//! it who it was. That is not a registry problem — a stub fourth backend already
-//! registers and is REACHED through the real registry — it is a signature
+//! it who it was. That is not a registry problem - a stub fourth backend already
+//! registers and is REACHED through the real registry - it is a signature
 //! problem, and it is the one thing that stopped a vendor crate from lowering a
 //! migration.
 //!
 //! Both methods return [`DialectId`] now. This file is the proof: `DuckDb` below
 //! is a complete outsider. It is declared in a test binary, while the contract
 //! crate owns no shipping-descriptor list at all, and the whole file contains no
-//! mention of that removed closed enum — the assertion at the bottom of the
+//! mention of that removed closed enum - the assertion at the bottom of the
 //! module enforces that by reading this source file back.
 //!
 //! The spelling bodies are deliberately thin. The claim under test is IDENTITY,
@@ -63,7 +63,7 @@ use zero_migrate_ir::validate::{
 /// which is what makes this line possible at all.
 const DUCKDB: DialectId = DialectId::new("duckdb");
 
-/// The outsider's own descriptor — the ONE thing it declares about itself, and
+/// The outsider's own descriptor - the ONE thing it declares about itself, and
 /// the value both its identity and its capability answers are read off. Every
 /// item on the right-hand side is `const`, so an out-of-tree crate writes this at
 /// item scope exactly as it appears here.
@@ -193,7 +193,7 @@ impl ValidationPolicy for DuckDbValidationPolicy {
     }
 
     /// The outsider states its own raw-view-body posture. It owns no parser, and
-    /// unlike the two shipping descriptor backends it declines rather than trusts —
+    /// unlike the two shipping descriptor backends it declines rather than trusts -
     /// which is the point of the method being required: BOTH answers are writable,
     /// and neither is inheritable. A fourth backend that supplied nothing would fail
     /// to compile here, in its own file, naming this method.
@@ -824,7 +824,7 @@ impl DmlRenderer for DuckDbDmlRenderer {
     /// default body would have let this backend inherit somebody else's answer
     /// silently; a required method makes the omission `E0046` in the newcomer's
     /// own crate, so the only way to compile is to state a position. DuckDb has no
-    /// vendor-op surface, so it refuses, naming ITSELF — exactly as the shipping
+    /// vendor-op surface, so it refuses, naming ITSELF - exactly as the shipping
     /// SQLite and MySQL renderers do.
     fn render_vendor_op(
         &self,
@@ -1231,7 +1231,7 @@ impl ValueFormatRenderer for DuckDbValueFormatRenderer {
 ///
 /// Before the signature change the only body that type-checked here was
 /// `todo!()`, so this call panicked. It returns a value now, and the value is
-/// the one the outsider declared — not one of the three the core enum knows.
+/// the one the outsider declared - not one of the three the core enum knows.
 #[test]
 fn a_fourth_backend_answers_dialect_with_its_own_id() {
     let dml: &dyn DmlRenderer = &DuckDbDmlRenderer;
@@ -1296,14 +1296,14 @@ fn a_fourth_backend_answers_dialect_with_its_own_id() {
     );
 
     // Capabilities come off the outsider's OWN descriptor, so the answers are the
-    // ones it declared — not the "no to everything" a core-owned id->capability
+    // ones it declared - not the "no to everything" a core-owned id->capability
     // table would have to give a name it does not recognise.
     assert!(dml.supports(Capability::CreateOrReplaceView));
     assert!(!dml.supports(Capability::PrivilegedCatalogObjects));
     assert!(!dml.supports(Capability::MaterializedView));
     // The outsider's PARTITION posture, stated in the same one place it states
     // everything else about itself. This used to be a required
-    // `ValidationPolicy::supports_native_partitioning` — a method the outsider had
+    // `ValidationPolicy::supports_native_partitioning` - a method the outsider had
     // to implement but whose answer nothing ever checked. It is a descriptor row
     // now, which means the outsider's NO is the ordinary consequence of not
     // claiming a capability rather than a separate contract to satisfy, and it
@@ -1395,7 +1395,7 @@ fn a_fourth_backend_writes_its_own_dml_policy() {
 /// refuses the mention, so the proof cannot rot into one by a later edit.
 ///
 /// The needle is assembled from two halves on purpose. Spelled whole, the
-/// detector's own line is the first thing it finds and the test fails on itself —
+/// detector's own line is the first thing it finds and the test fails on itself -
 /// which it did, on the first run. A scanner that matches its own source is the
 /// standard failure of this shape, and the fix has to be in the LITERAL rather
 /// than in an exclusion rule, because any "skip line N" carve-out would also skip
@@ -1427,7 +1427,7 @@ fn the_stub_never_names_the_closed_enum() {
 /// synthesizes one. There is no shared convention here to inherit, which is exactly
 /// why an outsider must be asked rather than assumed.
 ///
-/// `DuckDb` below answers `duck_pk_<table>` — a spelling no shipping backend uses,
+/// `DuckDb` below answers `duck_pk_<table>` - a spelling no shipping backend uses,
 /// chosen so that a predicate carrying any one vendor's convention cannot pass this
 /// by accident.
 #[test]

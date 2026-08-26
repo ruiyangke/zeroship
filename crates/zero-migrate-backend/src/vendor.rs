@@ -1,9 +1,9 @@
 //! The VENDOR-OP render VOCABULARY: what a `DmlRenderer::render_vendor_op` hands
 //! back, and how it refuses.
 //!
-//! The privileged catalog-object family — namespaces, server extensions, roles and
+//! The privileged catalog-object family - namespaces, server extensions, roles and
 //! their grants, row-level security and its policies, stored functions and triggers,
-//! plus the audited raw-statement escape — is rendered by whichever backend answers
+//! plus the audited raw-statement escape - is rendered by whichever backend answers
 //! yes to
 //! [`Capability::PrivilegedCatalogObjects`](zero_migrate_ir::backend::Capability::PrivilegedCatalogObjects).
 //! This module holds only the two types that crossing costs: the statement shape
@@ -16,7 +16,7 @@
 //! said "this module only renders Postgres". None of that has been true since the
 //! renderer moved to `zero_migrate_postgres::vendor`, which is where every sentence
 //! of it now applies. What was left behind was a vendor's module doc on a neutral
-//! vocabulary — a description that would have told a fourth backend it was reading
+//! vocabulary - a description that would have told a fourth backend it was reading
 //! PostgreSQL's code.
 //!
 //! # What is NOT here
@@ -33,7 +33,7 @@ use zero_migrate_ir::dialect::DialectId;
 /// forward SQL (no trailing `;`), and the reverse SQL (or `None` for an
 /// irreversible op). A vendor op renders to ONE OR MORE of these (e.g. a
 /// `createRole` with `setSearchPath` renders a `CREATE ROLE` + a follow-on
-/// `ALTER ROLE … SET search_path` statement).
+/// `ALTER ROLE ... SET search_path` statement).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VendorStatement {
     /// A stable, human-readable name for the journaled migration unit.
@@ -54,7 +54,7 @@ pub enum VendorError {
     /// rendered from its closed AST.
     #[error("vendor render: predicate not renderable: {0}")]
     Predicate(String),
-    /// A required list was empty (no privileges, no roles, no events, …).
+    /// A required list was empty (no privileges, no roles, no events, ...).
     #[error("vendor render: {what} must be non-empty")]
     EmptyList {
         /// What was empty.
@@ -104,8 +104,8 @@ pub enum VendorError {
     },
     /// This vendor renders NO vendor ops at all, and says so itself.
     ///
-    /// The privileged op kinds — roles, grants, RLS, policies, functions,
-    /// extensions, schemas and the raw escape — are every one of them pinned to a
+    /// The privileged op kinds - roles, grants, RLS, policies, functions,
+    /// extensions, schemas and the raw escape - are every one of them pinned to a
     /// single dialect by their artifact's
     /// [`DialectScope::Only`](crate::step::DialectScope::Only). Two of the three
     /// shipping vendors have no counterpart to render and never had one, so this is
@@ -124,7 +124,7 @@ pub enum VendorError {
     ///
     /// # Why this carries a `DialectId` and not the enum
     ///
-    /// This is PROVENANCE — data recording WHICH backend refused — and it never
+    /// This is PROVENANCE - data recording WHICH backend refused - and it never
     /// dispatches on the value. Typing it as the former closed dialect enum meant a
     /// fourth backend could not state its own refusal at all: it has no variant
     /// to name itself with, so the required method it must implement had no

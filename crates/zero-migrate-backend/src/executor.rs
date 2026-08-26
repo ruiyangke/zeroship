@@ -31,26 +31,26 @@ use crate::journal::JournalError;
 /// start and releases it on every exit path, serializing the whole apply against
 /// concurrent deploys for the same project.
 ///
-/// A **declarative** deploy is several sub-batches — the plain set plus one
-/// expand per rename — that must be serialized **as a whole** (to
+/// A **declarative** deploy is several sub-batches - the plain set plus one
+/// expand per rename - that must be serialized **as a whole** (to
 /// "serialize all migration activity"). The outer
 /// `MigrationEngine::apply_declarative`
 /// therefore acquires the lock ONCE up front and passes [`LockMode::AlreadyHeld`]
-/// into every inner sub-batch so they SKIP the per-batch acquire/release — the
+/// into every inner sub-batch so they SKIP the per-batch acquire/release - the
 /// lock is acquired exactly once and released exactly once for the entire
 /// declarative deploy, never freed between sub-batches (where a second deploy
 /// could otherwise interleave).
 ///
 /// `AlreadyHeld` gates ONLY the advisory-lock acquire/release. The per-sub-batch
 /// session hygiene (GUC snapshot/restore, unconditional `RESET ROLE`) still runs
-/// every sub-batch regardless of lock mode — those are session-leak guards,
+/// every sub-batch regardless of lock mode - those are session-leak guards,
 /// independent of who owns the lock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockMode {
     /// This call owns the lock: acquire at the start, release on every exit.
     Acquire,
     /// An outer caller already holds the project advisory lock for the whole
-    /// operation — skip the per-batch acquire and release.
+    /// operation - skip the per-batch acquire and release.
     AlreadyHeld,
 }
 
@@ -129,8 +129,8 @@ impl From<crate::driver::DbError> for BackendError {
 /// backend's own instruction for clearing it.
 ///
 /// The instruction travels with the marker because everything an operator needs to
-/// clear one — which table it lives in, which schema, how that backend quotes an
-/// identifier — is knowledge only the backend that wrote it has. The neutral apply
+/// clear one - which table it lives in, which schema, how that backend quotes an
+/// identifier - is knowledge only the backend that wrote it has. The neutral apply
 /// path prints it and nothing more.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RollbackMarker {
@@ -161,7 +161,7 @@ pub enum ApplyError {
     ///
     /// `clear_instruction` is the BACKEND'S OWN operator instruction for this exact
     /// marker, from [`RollbackMarker`]. It used to be a `DELETE FROM
-    /// \`{meta_schema}\`.schema_migrations_rollback_inflight` template written here —
+    /// \`{meta_schema}\`.schema_migrations_rollback_inflight` template written here -
     /// one backend's table name and one backend's quoting, in the neutral vocabulary,
     /// printed at whatever target reached the arm.
     #[error(
@@ -197,7 +197,7 @@ pub enum ApplyError {
     /// A plan step needs an optional backend capability
     /// ([`BackendCapability`](crate::capability::BackendCapability)) the deploy
     /// target does not provide. Raised by the plan-wide capability preflight, so
-    /// the whole plan is refused as a unit and NOTHING was applied — the step that
+    /// the whole plan is refused as a unit and NOTHING was applied - the step that
     /// needs the capability is typically not the first, and every step before it
     /// would otherwise have committed already.
     #[error(
@@ -215,7 +215,7 @@ pub enum ApplyError {
     },
     /// The pending batch contains a destructive migration (`flags.destructive`)
     /// but the caller passed [`Approval::None`](crate::approval::Approval::None). This is the executor's OWN
-    /// defense-in-depth approval gate — independent of (and additional to) the
+    /// defense-in-depth approval gate - independent of (and additional to) the
     /// engine's gate (`MigrationEngine::apply`), so a caller that
     /// drives `apply` directly, bypassing the engine, still cannot run a
     /// destructive batch without explicit approval. Nothing was applied.
@@ -237,7 +237,7 @@ pub enum ApplyError {
         /// The destructive migration version-id the scope refused.
         version: String,
     },
-    /// The SQL guard denied a pending migration's `up` SQL — the whole apply is
+    /// The SQL guard denied a pending migration's `up` SQL - the whole apply is
     /// aborted and the migration never executed.
     #[error("migration {version} denied by guard: {source}")]
     Guard {
@@ -248,8 +248,8 @@ pub enum ApplyError {
         source: GuardError,
     },
     /// A non-transactional migration's `up` contains a statement that is not
-    /// safe to re-run idempotently — e.g. `CREATE INDEX CONCURRENTLY` without
-    /// `IF NOT EXISTS`, or `ALTER TYPE … ADD VALUE` without `IF NOT EXISTS`.
+    /// safe to re-run idempotently - e.g. `CREATE INDEX CONCURRENTLY` without
+    /// `IF NOT EXISTS`, or `ALTER TYPE ... ADD VALUE` without `IF NOT EXISTS`.
     ///
     /// The two-phase non-txn path's crash-recovery re-runs `<up>` verbatim,
     /// so a non-idempotent op would wedge the migration permanently on
@@ -356,7 +356,7 @@ pub enum ApplyError {
         blockers: Vec<String>,
     },
     /// An already-applied migration's recorded checksum no longer matches the
-    /// migration in the set — drift / tamper. Hard abort.
+    /// migration in the set - drift / tamper. Hard abort.
     ///
     /// The recorded side is not always a completed event: an inflight marker
     /// records the checksum of the body that half-ran, so editing a
@@ -380,7 +380,7 @@ pub enum ApplyError {
         expected: String,
     },
     /// A pending migration's `depends_on` names a version that is neither already
-    /// applied nor present in the supplied set — the dependency graph is
+    /// applied nor present in the supplied set - the dependency graph is
     /// unsatisfiable, so no ordering exists. Hard abort before any execution.
     #[error(
         "migration {version} depends on unknown migration {missing} (not in the set or journal)"
@@ -399,7 +399,7 @@ pub enum ApplyError {
     /// while a depended-on `phase: Expand` migration is **not net-applied in the
     /// journal**. The contract (drop trigger/function, drop old column) must never
     /// land before its expand (add column, dual-write, backfill) is fully done and
-    /// recorded — otherwise old/new shapes stop coexisting and concurrent writes
+    /// recorded - otherwise old/new shapes stop coexisting and concurrent writes
     /// are lost. Refused before any execution; nothing is applied.
     ///
     /// The single source of truth is the JOURNAL: the gate reads net-applied
@@ -416,7 +416,7 @@ pub enum ApplyError {
         expand: String,
     },
     /// A pending squash migration (`supersedes = [v1..vN]`) was about to run its
-    /// `up`, but ALL of `[v1..vN]` are already net-applied — running `S.up` would
+    /// `up`, but ALL of `[v1..vN]` are already net-applied - running `S.up` would
     /// re-create existing objects (double-apply). On an existing DB the squash must
     /// be recorded WITHOUT running its `up` via `ops::squash`; apply refuses
     /// here before any execution. Nothing was applied.
@@ -447,7 +447,7 @@ pub enum ApplyError {
         total: usize,
     },
     /// Two distinct squash migrations IN THE SAME apply set both supersede the same
-    /// version — a malformed bundle (a version may be collapsed by at most one
+    /// version - a malformed bundle (a version may be collapsed by at most one
     /// squash). If both ran, the second's `up` would re-create what the first's
     /// already built (double-apply); the fresh-path all-or-none gate cannot catch
     /// this because neither squash is net-applied yet, so it is refused up-front,
@@ -476,10 +476,10 @@ pub enum ApplyError {
         /// The migration whose precondition failed.
         version: String,
         /// Which precondition failed and why (the unmet assertion, or the
-        /// evaluation error — e.g. a guard denial or invalid identifier).
+        /// evaluation error - e.g. a guard denial or invalid identifier).
         which: String,
     },
-    /// A `repeatable=true` migration ALSO carried a non-empty `supersedes` — a
+    /// A `repeatable=true` migration ALSO carried a non-empty `supersedes` - a
     /// repeatable cannot be a squash. A repeatable has a
     /// stable identity and re-applies on change; a squash collapses once-only
     /// history. The two are mutually exclusive. Refused in the pre-flight over the
@@ -509,7 +509,7 @@ pub enum ApplyError {
         dependency: String,
     },
     /// A `repeatable=true` migration declared a `down`.
-    /// A repeatable is replace-style (`CREATE OR REPLACE …`) with no true reverse,
+    /// A repeatable is replace-style (`CREATE OR REPLACE ...`) with no true reverse,
     /// so its `down` MUST be `None` (the stated invariant). Refused in the pre-flight
     /// before any execution; nothing was applied.
     #[error(
@@ -546,7 +546,7 @@ pub enum ApplyError {
         version: String,
         /// The diverging object (e.g. `column users.email`).
         object: String,
-        /// The attribute that diverged (`data_type`, `nullable`, `kind`, …).
+        /// The attribute that diverged (`data_type`, `nullable`, `kind`, ...).
         field: String,
         /// The DECLARED value.
         expected: String,
@@ -560,7 +560,7 @@ pub enum ApplyError {
     // The wording carries the REMEDY because the common cause is not an exclusion.
     // The scope is built only from `schema.cross_schema` grant includes
     // (`owned_schemas_from_effective`), so a policy that never grants that key
-    // yields `SchemaScope::Single("")` and permits NO schema — including the
+    // yields `SchemaScope::Single("")` and permits NO schema - including the
     // project's own. "Does not permit" alone sends an operator hunting for an
     // exclusion that was never authored.
     #[error(
@@ -577,7 +577,7 @@ pub enum ApplyError {
         probe_schema: String,
     },
     /// An engine-supplied identifier (project schema / migrator role / meta schema)
-    /// was not quotable (empty or NUL-bearing) at a render seam — fail-closed
+    /// was not quotable (empty or NUL-bearing) at a render seam - fail-closed
     /// rather than interpolate it. Maps [`crate::dml::IdentQuoteError`]; the
     /// meta-schema journal-write seams route the same byte-logic through
     /// [`JournalError`] (which also carries this `From`).
@@ -600,21 +600,21 @@ impl From<crate::driver::DbError> for ApplyError {
 ///
 /// `pub` because it is the return type of
 /// `MigrationBackend::evaluate_preconditions`
-/// — the preconditions seam rides through the (public) trait so the generic
+/// - the preconditions seam rides through the (public) trait so the generic
 /// apply body never holds a concrete connection. The variants carry no data; a
 /// consumer can only match on the apply/skip decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreconditionVerdict {
-    /// Every precondition held — apply the migration normally.
+    /// Every precondition held - apply the migration normally.
     AllMet,
-    /// An `OnUnmet::Skip` precondition was unmet — skip this migration this run
+    /// An `OnUnmet::Skip` precondition was unmet - skip this migration this run
     /// (leave it pending, do not journal). The batch continues.
     Skip,
 }
 /// How far a rollback should unwind the applied migrations.
 ///
-/// Every variant here is resolved in **apply order** — the journal's `event_seq`
-/// — and never by how version strings sort. The distinction is not cosmetic:
+/// Every variant here is resolved in **apply order** - the journal's `event_seq`
+/// - and never by how version strings sort. The distinction is not cosmetic:
 /// [`AppliedEntry::event_seq`](crate::journal::AppliedEntry::event_seq)
 /// records that `MigrationId::derive` stamps the high bits with an `0xFF` marker
 /// and fills the rest from a SHA-256, so derived ids sort in hash order among
@@ -624,13 +624,13 @@ pub enum PreconditionVerdict {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RollbackTarget {
     /// Roll back every net-applied migration applied **strictly after** this one
-    /// — i.e. unwind *down to* (and keeping) this version. The target itself is
+    /// - i.e. unwind *down to* (and keeping) this version. The target itself is
     /// NOT rolled back. "After" is by apply order; the target's own version
     /// string may sort above or below the migrations that come back.
     ToVersion(MigrationId),
-    /// Roll back the `n` most-recently-applied migrations — most recent by apply
+    /// Roll back the `n` most-recently-applied migrations - most recent by apply
     /// order, which is not the same as the `n` highest version strings.
-    /// `Steps(0)` is a no-op; `Steps(k)` with `k` ≥ the applied count behaves
+    /// `Steps(0)` is a no-op; `Steps(k)` with `k` >= the applied count behaves
     /// like [`RollbackTarget::All`].
     Steps(usize),
     /// Roll back **all** net-applied migrations.
@@ -679,7 +679,7 @@ pub struct RollbackOptions {
     /// [`backup_acknowledged`]: RollbackOptions::backup_acknowledged
     pub force: bool,
     /// The operator's acknowledgement that a backup exists. `force` is honored
-    /// ONLY when this is also set — forcing past an irreversible step is a
+    /// ONLY when this is also set - forcing past an irreversible step is a
     /// data-loss operation, so it requires both a deliberate force and a backup
     /// acknowledgement.
     pub backup_acknowledged: bool,
@@ -693,7 +693,7 @@ pub struct RollbackOutcome {
     /// migration's `down` ran before the downs of everything it `depends_on`). This
     /// is the transpose of apply's topo order and degrades to strict
     /// reverse-version order when there are no `depends_on` edges (the
-    /// version-aligned case), so it is ≈ reverse apply order.
+    /// version-aligned case), so it is approximately reverse apply order.
     pub rolled_back: Vec<String>,
     /// Versions skipped because they are irreversible (`down: None`) and `force`
     /// was given. Empty unless forcing.
@@ -718,7 +718,7 @@ pub enum RollbackError {
     #[error(transparent)]
     Journal(#[from] JournalError),
     /// An engine-supplied identifier (migrator role / project schema / meta schema)
-    /// was not quotable (empty or NUL-bearing) at a render seam — fail-closed
+    /// was not quotable (empty or NUL-bearing) at a render seam - fail-closed
     /// rather than interpolate it. Maps [`crate::dml::IdentQuoteError`].
     #[error("rollback: {0}")]
     IdentQuote(#[from] crate::dml::IdentQuoteError),
@@ -779,14 +779,14 @@ pub enum RollbackError {
     },
     /// A selected migration's `down` contains a statement that cannot run inside
     /// a transaction block (`CREATE INDEX CONCURRENTLY`, `DROP INDEX
-    /// CONCURRENTLY`, `ALTER TYPE … ADD VALUE`, `VACUUM`, …), but the rollback
+    /// CONCURRENTLY`, `ALTER TYPE ... ADD VALUE`, `VACUUM`, ...), but the rollback
     /// executor has ONLY a transactional down path (each `down` runs inside
-    /// `BEGIN … COMMIT` under `SET LOCAL ROLE migrator`). Such a `down` would
+    /// `BEGIN ... COMMIT` under `SET LOCAL ROLE migrator`). Such a `down` would
     /// otherwise fail LATE inside the transaction with Postgres `25001`
     /// ("cannot run inside a transaction block"), surfacing as a confusing
     /// [`DownFailed`](RollbackError::DownFailed). We detect it up-front (same
     /// classifier apply uses, `classify()`) and refuse the WHOLE rollback
-    /// before any `down` runs — nothing is rolled back. The safe path is
+    /// before any `down` runs - nothing is rolled back. The safe path is
     /// **roll-forward**: author a compensating migration (its own non-transactional
     /// `up` goes through apply's two-phase non-txn path).
     #[error(
@@ -855,7 +855,7 @@ pub enum RollbackError {
         /// How many versions it supersedes.
         superseded: usize,
     },
-    /// The SQL guard denied a `down`'s SQL — the down is SQL too and goes through
+    /// The SQL guard denied a `down`'s SQL - the down is SQL too and goes through
     /// the SAME defenses as an up. The whole rollback aborts before
     /// any down runs (all-up-front, mirroring apply).
     #[error("rollback of {version} denied by guard: {source}")]
@@ -867,7 +867,7 @@ pub enum RollbackError {
         source: GuardError,
     },
     /// An already-applied migration's recorded checksum no longer matches the
-    /// migration in the set — drift / tamper. Hard abort (mirrors apply).
+    /// migration in the set - drift / tamper. Hard abort (mirrors apply).
     ///
     /// Deliberately NOT worded like [`ApplyError::ChecksumDrift`]. That variant
     /// points at a possibly-stranded inflight marker, because apply can reach it
@@ -908,7 +908,7 @@ pub enum RollbackError {
     /// A force-skipped irreversible (`down: None`) migration `kept` `depends_on`
     /// `dependency` (directly or transitively), but `dependency` is selected for
     /// ACTUAL rollback. Tearing `dependency` down would leave `kept` (still applied,
-    /// because its down never runs) referencing a dropped object — a dangling FK or
+    /// because its down never runs) referencing a dropped object - a dangling FK or
     /// a mid-batch `DownFailed`. Refused even under `force`+`backup_acknowledged`;
     /// nothing was rolled back. Roll-forward instead (author a compensating
     /// migration).
@@ -925,9 +925,9 @@ pub enum RollbackError {
     },
     /// A net-applied migration `kept` is BELOW the rollback's version threshold
     /// (a [`RollbackTarget::ToVersion`]/[`RollbackTarget::Steps`] cut), so it is
-    /// kept applied — but it `depends_on` `dependency` (directly or transitively),
+    /// kept applied - but it `depends_on` `dependency` (directly or transitively),
     /// and `dependency` IS selected for rollback (above the cut). Tearing
-    /// `dependency` down would leave `kept` referencing a dropped object — a
+    /// `dependency` down would leave `kept` referencing a dropped object - a
     /// dangling FK or a mid-batch `DownFailed`. This is the same hazard as
     /// [`RollbackError::ForceSkipDependencyConflict`] reached via the
     /// version-threshold keep-path instead of force-skip. Refused before any
@@ -951,7 +951,7 @@ pub enum RollbackError {
     ///
     /// REFUSED before any statement runs rather than half-rebuilt: nothing was
     /// rolled back. A target that reverses everything natively never reaches here,
-    /// which is why the concept is stated once instead of once per backend — the
+    /// which is why the concept is stated once instead of once per backend - the
     /// refusing target names itself from its own
     /// [`DialectId`](zero_migrate_ir::dialect::DialectId), and `reason` is its
     /// own account of what specifically needs the rebuild.
@@ -981,9 +981,9 @@ impl From<crate::driver::DbError> for RollbackError {
 ///
 /// The guard names the schema; this decides whether the running policy lets the
 /// probe READ it. It sits with the vocabulary rather than with the orchestration
-/// because each backend's own session path is what calls it — the probe read happens
+/// because each backend's own session path is what calls it - the probe read happens
 /// under that backend's held lock, inside its own transaction, in its own catalog
-/// spelling — and a vendor crate cannot reach into the engine to ask.
+/// spelling - and a vendor crate cannot reach into the engine to ask.
 ///
 /// It takes the migration's `version` as a `&str` rather than the whole
 /// [`Migration`]: the version is the only
@@ -1012,7 +1012,7 @@ pub fn authorize_existence_guard_schema(
     })
 }
 
-// ── The migration-graph vocabulary ────────────────────────────────────────────
+// -- The migration-graph vocabulary --------------------------------------------
 //
 // Ordering a pending batch, ordering a whole set canonically, and computing which
 // versions a squash made redundant are DIALECT-BLIND: they read `depends_on` and
@@ -1023,7 +1023,7 @@ pub fn authorize_existence_guard_schema(
 //
 // A vendor journal reader needs them: `zero-migrate-postgres`'s `status_sql` reads
 // its own journal and then answers the same "what is pending?" question apply
-// answers, and its own comment says why it must reuse rather than re-derive — "so
+// answers, and its own comment says why it must reuse rather than re-derive - "so
 // the two views never diverge". A second implementation on the vendor side IS that
 // divergence. So the shared function moved down to where both callers can reach it,
 // rather than being copied to the caller that could not.
@@ -1049,7 +1049,7 @@ use crate::journal::AppliedEntry;
 /// PostgreSQL precondition evaluator: it formats a [`Precondition`] and a blocker
 /// list into an [`ApplyError`] and touches no database at all. It ended up there
 /// because it happened to sit in a file that moved wholesale, which is the general
-/// hazard — a whole-file move classifies by FILE BOUNDARY, and any neutral code the
+/// hazard - a whole-file move classifies by FILE BOUNDARY, and any neutral code the
 /// file happens to contain rides across the boundary silently and starts looking
 /// like the vendor's.
 pub fn unmet_halt_error(
@@ -1070,7 +1070,7 @@ pub fn unmet_halt_error(
 /// ordering) when set, falling back to pure version order otherwise.
 ///
 /// The default order is UUIDv7 version (time-ordered), but `depends_on` can pull a
-/// *higher*-version migration to run **after** a lower-version one it depends on —
+/// *higher*-version migration to run **after** a lower-version one it depends on -
 /// or, the converse the task calls out: a later-version migration whose
 /// `depends_on` is empty may still need to run *after* an earlier-version one
 /// because that earlier one depends on **it**. We therefore topologically sort the
@@ -1079,18 +1079,18 @@ pub fn unmet_halt_error(
 /// (among nodes with no outstanding deps, the lowest version goes first).
 ///
 /// Dependencies already satisfied by the journal (a `completed` version not in the
-/// pending set) are treated as pre-met edges — they impose no ordering on the
+/// pending set) are treated as pre-met edges - they impose no ordering on the
 /// pending batch but must still resolve to a real version (set or journal),
 /// otherwise the graph is unsatisfiable.
 ///
 /// # Errors
-/// - [`ApplyError::MissingDependency`] — a `depends_on` names a version absent
+/// - [`ApplyError::MissingDependency`] - a `depends_on` names a version absent
 ///   from both the supplied set and the journal.
-/// - [`ApplyError::DependencyCycle`] — the pending edges form a cycle.
+/// - [`ApplyError::DependencyCycle`] - the pending edges form a cycle.
 ///
 /// It lives here, not in the engine, so the read-only status API and every vendor
 /// journal reader compute their `pending` list in the
-/// **exact same topo order** apply uses — there is one
+/// **exact same topo order** apply uses - there is one
 /// pending-ordering implementation, never a re-derived one.
 pub fn order_pending<'a>(
     migrations: &'a [Migration],
@@ -1100,12 +1100,12 @@ pub fn order_pending<'a>(
     use std::collections::HashSet;
 
     // The pending set, indexed by version, plus the set of all known versions
-    // (pending ∪ completed) for dependency-existence checks.
+    // (pending plus completed) for dependency-existence checks.
     //
     // `satisfied` (squash) is the set of versions made redundant by a
-    // SUPERSESSION — a version `v_i` superseded by a squash `S` that is net-applied
+    // SUPERSESSION - a version `v_i` superseded by a squash `S` that is net-applied
     // OR being applied in this batch. Such a version is treated like a completed
-    // one: it is EXCLUDED from pending (its `up` must never run — `S` covers it),
+    // one: it is EXCLUDED from pending (its `up` must never run - `S` covers it),
     // and it counts as a pre-met dependency (a later migration `depends_on v_i` is
     // satisfied by `S`). `S` itself is NOT in `satisfied` (it is pending and runs).
     let pending: Vec<&Migration> = migrations
@@ -1143,9 +1143,9 @@ pub fn order_pending<'a>(
 /// degrades to pure ascending version order.
 ///
 /// # Errors
-/// - [`ApplyError::MissingDependency`] — an edge names a version absent from both
+/// - [`ApplyError::MissingDependency`] - an edge names a version absent from both
 ///   `nodes` and `pre_satisfied`.
-/// - [`ApplyError::DependencyCycle`] — the edges among `nodes` form a cycle.
+/// - [`ApplyError::DependencyCycle`] - the edges among `nodes` form a cycle.
 pub fn topo_order_version_tiebroken<'a>(
     nodes: &[&'a Migration],
     pre_satisfied: &std::collections::HashSet<&str>,
@@ -1212,7 +1212,7 @@ pub fn topo_order_version_tiebroken<'a>(
 
 /// The CANONICAL EXECUTED ORDER of a FULL supplied set, used by
 /// `zero_migrate::plan::manifest::compute_manifest` to fold the manifest over the order the
-/// executor will actually run — NOT the cosmetic slice order.
+/// executor will actually run - NOT the cosmetic slice order.
 ///
 /// This is [`topo_order_version_tiebroken`] over the WHOLE set with NO journal
 /// context (the control plane stamps the manifest before any apply, over the raw
@@ -1220,12 +1220,12 @@ pub fn topo_order_version_tiebroken<'a>(
 /// all-pending set. Two consequences the manifest relies on:
 ///
 /// - a pure **slice reorder** of an additive set (no `depends_on`) sorts back to
-///   the SAME version order ⇒ the SAME manifest (no false mismatch);
-/// - a `depends_on` change that REORDERS execution sorts differently ⇒ a DIFFERENT
+///   the SAME version order => the SAME manifest (no false mismatch);
+/// - a `depends_on` change that REORDERS execution sorts differently => a DIFFERENT
 ///   manifest (also independently caught by the checksum fold).
 ///
 /// On an unorderable set (a `depends_on` cycle, or a dangling dependency that
-/// names a version outside the set) there is no executed order — such a set never
+/// names a version outside the set) there is no executed order - such a set never
 /// applies (the executor refuses it at [`order_pending`]). For the manifest we
 /// fall back to a DETERMINISTIC ascending-version order so the hash is still a
 /// stable function of the set (identical when the control plane stamps and when
@@ -1247,11 +1247,11 @@ pub fn canonical_set_order(migrations: &[Migration]) -> Vec<&Migration> {
 /// Compute the set of versions made redundant by a SUPERSESSION (squash),
 /// for the supplied set + the journal's net state.
 ///
-/// A version `v_i` is satisfied-by-supersession when a squash `S` (with `v_i ∈
-/// S.supersedes`) is either:
+/// A version `v_i` is satisfied-by-supersession when a squash `S` that lists `v_i`
+/// in `S.supersedes` is either:
 /// - **net-applied in the journal** (`journal_superseded`, read via
 ///   [`MigrationBackend::superseded_versions`](crate::backend::MigrationBackend::superseded_versions)); or
-/// - **present in the supplied set** — whether already net-applied OR pending. A
+/// - **present in the supplied set** - whether already net-applied OR pending. A
 ///   pending `S` will run its `up` THIS batch, so its superseded versions must not
 ///   also run (`order_pending` excludes them); an already-applied `S` is also
 ///   covered by `journal_superseded`, so adding the in-set edges is at worst

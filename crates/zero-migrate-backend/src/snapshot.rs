@@ -27,7 +27,7 @@ pub fn quote_constraint_definition_ident(ident: &str) -> String {
 /// carries the column `DEFAULT` clause the declarative author wants emitted at
 /// CREATE / ADD COLUMN time (#4). It is deliberately EXCLUDED from `PartialEq` /
 /// `Eq` (see the manual impl below) because Postgres normalises a
-/// stored default (`'{}'` → `'{}'::jsonb`, `NOW()` → `now()`, …) so a byte
+/// stored default (`'{}'` -> `'{}'::jsonb`, `NOW()` -> `now()`, ...) so a byte
 /// compare of the authored default against the introspected one would
 /// phantom-drift, AND plugin-db itself never re-diffs column defaults (a default
 /// is set once at create time). Tracking it in equality would make the differ
@@ -67,7 +67,7 @@ pub struct ColumnSnapshot {
     /// and `render::declarative`'s SQLite rename rebuild, through the shared
     /// `rename_column_in_inline_checks`. This used to be a KNOWN GAP recorded here,
     /// and the gap was real - the rebuild emitted
-    /// `"state" TEXT NOT NULL CHECK ("status" IN (…))` over a table with no `status`.
+    /// `"state" TEXT NOT NULL CHECK ("status" IN (...))` over a table with no `status`.
     ///
     /// The rewrite is TEXT SURGERY, which nothing else in this crate does to an
     /// expression, and the reason is recorded in the paragraph below: there is no AST
@@ -255,7 +255,7 @@ pub struct ColumnSnapshot {
     ///
     /// Measured need, and the only backend that populates it today: MySQL refuses a
     /// character foreign key whose two sides have incompatible storage, and
-    /// `ascii_bin` and `utf8mb4_bin` are both case-sensitive — so the portable
+    /// `ascii_bin` and `utf8mb4_bin` are both case-sensitive - so the portable
     /// [`Self::case_sensitive`] cannot tell them apart.
     pub text_storage: Option<TextStorageSnapshot>,
     /// The catalog facts about this column that belong to the backend that read
@@ -277,8 +277,8 @@ pub struct ColumnSnapshot {
     /// one [`Self::text_storage`] gives. That is excluded because it is not part of
     /// the portable schema surface at all. This is excluded because folding a
     /// vendor's physical answer into the general equality would change what every
-    /// consumer of `ColumnSnapshot` equality means by "the same column" — including
-    /// the fold and the dedup paths — when only the vendor should be asked. The
+    /// consumer of `ColumnSnapshot` equality means by "the same column" - including
+    /// the fold and the dedup paths - when only the vendor should be asked. The
     /// comparison happens in one place that structural drift and the existence guard
     /// both call ([`Dialectal::physical_identity`]), so the two cannot disagree about
     /// one column.
@@ -295,18 +295,18 @@ pub struct ColumnSnapshot {
     /// attribute (introspection's `snapshot_schema` leaves it `None`; only
     /// `desired_snapshot` populates it), so it is EXCLUDED from `PartialEq` /
     /// `Eq`. The sentinel is built by the shared
-    /// `zero_migrate::schema::query` kernel — never re-spelled here.
+    /// `zero_migrate::schema::query` kernel - never re-spelled here.
     pub encryption_sentinel: Option<String>,
     /// The body of a `COMMENT ON COLUMN` sentinel to attach to
     /// THIS column in CREATE / ADD COLUMN DDL. Two sentinel families ride here:
-    ///   - `zero-migrate:mask:kind=…,classification=…` on a hidden `<col>_masked` sibling
+    ///   - `zero-migrate:mask:kind=...,classification=...` on a hidden `<col>_masked` sibling
     ///     (drives the runtime mask read-pass), and
-    ///   - `zero-migrate:enc:<mode>:<keyId>:<wraps>` on an encrypted column itself — the
+    ///   - `zero-migrate:enc:<mode>:<keyId>:<wraps>` on an encrypted column itself - the
     ///     PG-recoverable form of the `encryption_sentinel`, since PG discards
     ///     the inline `/* zero-migrate:enc */` comment at parse time, so plugin-db recovers
     ///     the encryption metadata from `pg_description` at runtime.
     ///
-    /// Built by the shared codecs ([`crate::mask_codec`]) — never
+    /// Built by the shared codecs ([`crate::mask_codec`]) - never
     /// re-spelled here. EXCLUDED from `PartialEq` / `Eq`: desired
     /// snapshots use it to emit runtime metadata, and PostgreSQL introspection
     /// classifies matching catalog comments back into this field instead of the
@@ -344,7 +344,7 @@ pub struct GeneratedColumnSnapshot {
     ///
     /// A generated expression NAMES OTHER COLUMNS, so a rename has to follow it or
     /// the body describes a column the table no longer has. Rendered SQL cannot be
-    /// repaired — substituting inside text turns `note <> 'qty'` into
+    /// repaired - substituting inside text turns `note <> 'qty'` into
     /// `note <> 'quantity'`, which is why every other rendered body in this module
     /// is left stale on a rename. Keeping the AST beside the rendering is the
     /// treatment `apply::drift::comparable_generated_column` prescribes and the one
@@ -353,12 +353,12 @@ pub struct GeneratedColumnSnapshot {
     ///
     /// `None` means THIS PRODUCER HAD NO AST. Only catalog introspection is in that
     /// position, and it does not populate [`ColumnSnapshot::generated`] at all, so a
-    /// `Some(GeneratedColumnSnapshot)` with `None` here is currently unreachable —
+    /// `Some(GeneratedColumnSnapshot)` with `None` here is currently unreachable -
     /// the arm exists so a future catalog reader that recovers only the deparsed
     /// text stays honest about what it can and cannot follow, rather than being
     /// forced to invent an AST.
     pub source: Option<Expr>,
-    /// `true` ⇒ STORED; `false` ⇒ VIRTUAL.
+    /// `true` => STORED; `false` => VIRTUAL.
     pub stored: bool,
 }
 
@@ -513,7 +513,7 @@ pub fn canonical_id_default_expression(expression: &str) -> String {
             if cursor > start + 1 && bytes.get(cursor) == Some(&b'\'') {
                 // MySQL deparsing may prefix string literals with `_latin1`,
                 // `_ascii`, `_utf8mb4`, or another connection charset. The
-                // literal bytes—not that catalog annotation—define the default.
+                // literal bytes-not that catalog annotation-define the default.
                 continue;
             }
             out.push('_');
@@ -582,7 +582,7 @@ pub struct TextStorageSnapshot {
 }
 
 // No `Hash`: this `PartialEq` deliberately ignores fields (`default`,
-// `vendor`, the sentinels, …), so a DERIVED `Hash` would hash fields
+// `vendor`, the sentinels, ...), so a DERIVED `Hash` would hash fields
 // equality does not read and break the `Eq`/`Hash` contract. Nothing in the crate
 // hashes a `ColumnSnapshot` - every keyed collection over one keys by `&str` name -
 // so the trait is simply absent rather than hand-written to stay in step. Anyone
@@ -717,7 +717,7 @@ pub fn index_elements_canonically_eq(
                 IndexElementSnapshot::Column {
                     name: a,
                     order: order_a,
-                    // opclass/collation are emission-only — never a drift attribute.
+                    // opclass/collation are emission-only - never a drift attribute.
                     ..
                 },
                 IndexElementSnapshot::Column {
@@ -753,7 +753,7 @@ pub fn index_predicates_canonically_eq(left: Option<&str>, right: Option<&str>) 
 /// `encryption_sentinel`): it is NOT recovered by `snapshot_schema` and NOT a
 /// drift attribute, so it is EXCLUDED from `PartialEq` / `Eq`. It rides
 /// on a desired snapshot so `render_create_index` can spell the per-column
-/// operator class (`vector_cosine_ops`, …) an `ivfflat` ANN index needs; live
+/// operator class (`vector_cosine_ops`, ...) an `ivfflat` ANN index needs; live
 /// introspection cannot recover it cheaply, so comparing it would make every
 /// freshly-built vector index phantom-drift against itself.
 #[derive(Debug, Clone)]
@@ -1046,7 +1046,7 @@ pub struct ConstraintSnapshot {
     ///
     /// The cost of getting it wrong was measured, and it is not the same failure a
     /// stale `inline_checks` produces. SQLite resolves a foreign key's CHILD column
-    /// list at CREATE TABLE time, so a stale local column is `unknown column "…" in
+    /// list at CREATE TABLE time, so a stale local column is `unknown column "..." in
     /// foreign key definition` at the rebuild's leading statement - loud, and NOT
     /// dependent on `SQLITE_DBCONFIG_DQS_DDL`, because a column list is not an
     /// expression. The REFERENCED list is the opposite: a parent column that does not
@@ -1118,7 +1118,7 @@ pub struct TableSnapshot {
     /// desired snapshots. EXCLUDED from equality.
     pub stored_create_sql: Option<String>,
     /// The vendor attributes the author declared on this table, keyed by their full
-    /// `<dialect>.<name>` wire spelling and carrying every dialect at once — a table
+    /// `<dialect>.<name>` wire spelling and carrying every dialect at once - a table
     /// authored for three backends keeps all three namespaces, and each backend renders
     /// only its own.
     ///
@@ -1130,7 +1130,7 @@ pub struct TableSnapshot {
     ///
     /// Including it is a real and separate decision, not an oversight: PostgreSQL's drift
     /// path already reads `reloptions`, so wiring the comparison means first deciding what
-    /// an observed-but-undeclared reloption IS — drift the author must reconcile, a value
+    /// an observed-but-undeclared reloption IS - drift the author must reconcile, a value
     /// the tool carries forward, or a refusal. Until that is answered, an attribute is an
     /// AUTHORED fact that reaches the create and nothing more.
     pub attributes: Attributes,
@@ -1152,9 +1152,9 @@ impl Eq for TableSnapshot {}
 pub struct ViewSnapshot {
     /// Whether this is a materialized view (Postgres only).
     pub materialized: bool,
-    /// Optional declared/output columns. Emission metadata for now.
+    /// Optional declared/output columns. Emission metadata; nothing reads it back.
     pub columns: Option<Vec<String>>,
-    /// Optional live/declared definition text. Diagnostic metadata for now.
+    /// Optional live/declared definition text. Diagnostic metadata.
     ///
     /// NOT a rollback source: the two backends fill this from different things.
     /// PostgreSQL stores a bare SELECT body from `pg_get_viewdef` and SQLite stores
@@ -1260,7 +1260,7 @@ impl SequenceDataTypeSnapshot {
     ///
     /// A SHARED NORMAL FORM, not a target's private business. Only one backend has
     /// standalone sequences today, so only one backend's catalog spelling reaches
-    /// this — but the DIALECT-BLIND differ compares a snapshot whose producer it does
+    /// this - but the DIALECT-BLIND differ compares a snapshot whose producer it does
     /// not know, so a second copy of this fold on either side would not report a
     /// difference, it would MANUFACTURE one. It was `from_pg_type_name`, which read
     /// as a target's private parser rather than as the one both sides must share.
@@ -1592,7 +1592,7 @@ pub struct FunctionIdentity {
     /// this side holds no comparable body at all.
     ///
     /// `None` means DECLINE, and it has exactly one cause: a SQL-standard-body
-    /// function (`BEGIN ATOMIC … END`) keeps its body as a PARSE TREE in
+    /// function (`BEGIN ATOMIC ... END`) keeps its body as a PARSE TREE in
     /// `pg_proc.prosqlbody` and leaves `prosrc` EMPTY. Measured on PostgreSQL 18.4:
     ///
     /// ```text
@@ -1612,7 +1612,7 @@ impl FunctionIdentity {
     /// keeps.
     ///
     /// Always `Some`: the IR cannot express a `BEGIN ATOMIC` body. The renderer
-    /// emits `AS $zsfn$ … $zsfn$` unconditionally, so every function this project
+    /// emits `AS $zsfn$ ... $zsfn$` unconditionally, so every function this project
     /// creates stores its body in `prosrc`.
     #[must_use]
     pub fn of(snapshot: &FunctionSnapshot) -> Self {
@@ -1661,7 +1661,7 @@ impl FunctionIdentity {
 ///
 /// SOUND BECAUSE IT IS APPLIED TO BOTH SIDES, and because the whitespace it removes
 /// is outside the body in both languages this DSL admits: a `LANGUAGE sql` body is a
-/// statement list and a `LANGUAGE plpgsql` body is a `BEGIN … END` block, and
+/// statement list and a `LANGUAGE plpgsql` body is a `BEGIN ... END` block, and
 /// neither can be changed by padding around it. Whitespace INSIDE the body is
 /// untouched - `BEGIN\n   RETURN   42;\nEND` compares with its odd spacing intact.
 ///
@@ -1894,7 +1894,7 @@ pub struct SchemaSnapshot {
     /// table name like the sibling maps.
     ///
     /// A MAP RATHER THAN A FIELD ON TableSnapshot: that struct is constructed
-    /// exhaustively in ~15 places, while this type is built through `Default` in
+    /// exhaustively at every construction site, while this type is built through `Default` in
     /// almost all of its own. It also makes the dialect question vanish - engines
     /// with no row-level security leave BOTH sides empty, so they cannot drift.
     pub table_rls: std::collections::BTreeMap<String, bool>,
@@ -2037,7 +2037,7 @@ pub fn canonical_arg_type(raw: &str) -> String {
     }
 }
 
-// ── The `nextval` default's ONE spelling, and its ONE parse ───────────────────
+// -- The `nextval` default's ONE spelling, and its ONE parse -------------------
 //
 // Only PostgreSQL writes `nextval('<seq>'::regclass)`, and both of these read
 // PostgreSQL's spelling. They are still SHARED vocabulary rather than that vendor's
@@ -2045,7 +2045,7 @@ pub fn canonical_arg_type(raw: &str) -> String {
 // DIALECT-BLIND differ compares a snapshot whose producer it does not know, so it
 // has to be able to read every producer's spelling, and the vendor that writes the
 // spelling has to render the identical bytes. Two copies of that pair is the defect
-// — a differ that stopped recognizing what one producer emits silently stops
+// - a differ that stopped recognizing what one producer emits silently stops
 // comparing that producer's defaults.
 //
 // They sat in `zero_migrate::apply::drift` and `zero_migrate::render::declarative`,
@@ -2070,7 +2070,7 @@ pub fn nextval_default_expr(sequence: &SequenceRef) -> String {
 /// SHARED rather than PostgreSQL-private, and the two callers are why. The PG
 /// introspector reaches it to recover an ID default from `pg_get_expr`
 /// (`backend::postgres::drift_sql::recover_nextval_default`), and the DIALECT-BLIND
-/// differ reaches it through `zero_migrate::apply::drift::comparable_column_default` —
+/// differ reaches it through `zero_migrate::apply::drift::comparable_column_default` -
 /// which runs for every
 /// dialect, because the snapshot it is handed may have been produced by any of them.
 /// A differ that could not read the spelling one producer emits would silently stop

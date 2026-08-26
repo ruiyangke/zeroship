@@ -9,7 +9,7 @@
 //!
 //! # What is here and what stayed in the engine
 //!
-//! `zero_migrate::schema::query` is 5973 lines and almost none of it is a vendor
+//! `zero_migrate::schema::query` is large and almost none of it is a vendor
 //! spelling. What lives here is exactly the neutral contract and the shared
 //! codecs its methods name:
 //!
@@ -47,7 +47,7 @@ pub enum ColumnRenameStrategy {
 
 /// The already-quoted names one dual-write trigger is built from.
 ///
-/// Every field arrives QUOTED, by the same renderer that is being asked for the SQL —
+/// Every field arrives QUOTED, by the same renderer that is being asked for the SQL -
 /// the engine composes the names (the generated function and trigger names are its
 /// own, bounded by the registry's generated-identifier budget) and the backend spells
 /// them. Passing
@@ -69,9 +69,9 @@ pub struct DualWriteTriggerSpec<'a> {
 
 /// The two statements a managed dual-write trigger needs over its lifetime.
 ///
-/// Both are returned together because the engine uses `remove` in three places — the
+/// Both are returned together because the engine uses `remove` in three places - the
 /// structural rollback of the install step, the contract step that tears the trigger
-/// down, and that contract step's own `down` — and a backend that spelled the install
+/// down, and that contract step's own `down` - and a backend that spelled the install
 /// without the matching removal would strand a trigger the contract's
 /// `DROP COLUMN <from>` then runs beside.
 #[derive(Debug, Clone)]
@@ -158,7 +158,7 @@ pub struct CreateIndexIfNotExistsRequest<'a> {
 /// its open [`DialectId`], so a backend cannot inherit another vendor's answer.
 ///
 /// IT LOST TWO METHODS, AND THE MEASUREMENT IS WHY. `encrypted_column_bind_placeholder`
-/// and `wrap_encrypted_param` had ZERO call sites anywhere in the workspace — four
+/// and `wrap_encrypted_param` had ZERO call sites anywhere in the workspace - four
 /// and five mentions respectively, every one of them the declaration, an impl, or a
 /// doc line. `wrap_encrypted_param`'s SQLite arm was the sole reader of a `pub const
 /// SQLITE_ENC_BLOB_PREFIX` whose own doc claimed "the SQLite session strips the
@@ -166,7 +166,7 @@ pub struct CreateIndexIfNotExistsRequest<'a> {
 /// once in the whole repository, in its own definition, so nothing stripped it and
 /// nothing ever had. A dead encryption seam that DOCUMENTS a decode step it does not
 /// perform is worse than no seam, because the next reader budgets for it. All three
-/// are deleted rather than kept warm: 10 methods to 8.
+/// are deleted rather than kept warm: the trait declares no method nothing calls.
 ///
 /// It then gained TWO required collation spellings. Pinning an engine-selected
 /// collation when a column is created and stripping that pin when a retype must
@@ -293,9 +293,9 @@ pub trait SchemaRenderer: std::fmt::Debug + Sync {
     /// # Why this is a method and not four `format!`s in the engine
     ///
     /// It was four `format!`s in the engine. `render::expand_contract` spelled
-    /// `CREATE OR REPLACE FUNCTION … LANGUAGE plpgsql`, `CREATE TRIGGER … BEFORE
-    /// INSERT OR UPDATE … EXECUTE FUNCTION`, and twice `DROP TRIGGER … ON … ; DROP
-    /// FUNCTION …` — one vendor's procedural language and one vendor's trigger
+    /// `CREATE OR REPLACE FUNCTION ... LANGUAGE plpgsql`, `CREATE TRIGGER ... BEFORE
+    /// INSERT OR UPDATE ... EXECUTE FUNCTION`, and twice `DROP TRIGGER ... ON ... ; DROP
+    /// FUNCTION ...` - one vendor's procedural language and one vendor's trigger
     /// grammar, emitted from the neutral engine. Only the `plpgsql` token was visible
     /// to a vendor-name census; the other three statements are just as much one
     /// backend's SQL, and `DROP TRIGGER <t> ON <table>` is not even syntactically
@@ -303,7 +303,7 @@ pub trait SchemaRenderer: std::fmt::Debug + Sync {
     ///
     /// The trigger BODY had the same problem one crate lower. It was
     /// `zero_migrate_backend::capability::dual_write_function_body`, twenty lines of
-    /// PL/pgSQL — `TG_OP`, `NEW`, `OLD`, `IS DISTINCT FROM`, `RETURN NEW` — in the
+    /// PL/pgSQL - `TG_OP`, `NEW`, `OLD`, `IS DISTINCT FROM`, `RETURN NEW` - in the
     /// crate whose rule is that nothing in it spells a vendor's grammar. It passed
     /// that crate's neutrality census because the census looks for vendor NAMES and
     /// PL/pgSQL contains none. It lives with its backend now, next to the backfill
@@ -447,8 +447,8 @@ pub trait SchemaRenderer: std::fmt::Debug + Sync {
 
     /// Render an exclusion-constraint body, or explicitly refuse with `None`.
     ///
-    /// The engine renders the parts it can render neutrally — each element's target is
-    /// quoted, or its expression lowered, through this same backend — and hands them
+    /// The engine renders the parts it can render neutrally - each element's target is
+    /// quoted, or its expression lowered, through this same backend - and hands them
     /// over as [`crate::ddl::ExclusionConstraintRequest`]. Everything that is GRAMMAR is
     /// spelled here: the `EXCLUDE USING` frame, the access-method token, the
     /// `WITH <operator>` pairing, the `WHERE` tail and the deferrability clause.
@@ -457,16 +457,16 @@ pub trait SchemaRenderer: std::fmt::Debug + Sync {
     /// moved before it. The engine used to assemble the whole body itself, including the
     /// access-method names `gist` and `spgist` and the `&&` overlap operator, none of
     /// which any other shipping vendor can execute. Nothing about that NAMED a vendor,
-    /// so the product-name census read it as clean — which is the hole the grammar
+    /// so the product-name census read it as clean - which is the hole the grammar
     /// census now covers.
     ///
     /// # Why here and not on `DdlEmitter`
     ///
-    /// A constraint body is a FRAGMENT, and this is the fragment trait — it sits beside
+    /// A constraint body is a FRAGMENT, and this is the fragment trait - it sits beside
     /// [`SchemaRenderer::column_type`] rather than beside a statement emitter. The
     /// practical half of the same point: a `DdlEmitter` is bound to a project schema at
     /// construction, and this body has no qualified name in it, so putting it there
-    /// would have meant threading a schema through five call sites purely to satisfy a
+    /// would have meant threading a schema through every caller purely to satisfy a
     /// constructor.
     ///
     /// Required with no default: a backend that cannot do this says `None` in its own
@@ -484,7 +484,7 @@ pub trait SchemaRenderer: std::fmt::Debug + Sync {
 /// schema-iteration loop reaches `validate_field_name` (otherwise
 /// the leading `_` would trip the reserved-prefix rule).
 ///
-/// The list is intentionally narrow — only keys the runtime
+/// The list is intentionally narrow - only keys the runtime
 /// actually reads. Adding a new metadata key here is a deliberate
 /// platform extension, not a creator-driven decision.
 pub fn is_schema_metadata_key(key: &str) -> bool {
@@ -506,7 +506,7 @@ pub fn string_enum_values(def: &serde_json::Value) -> Option<Vec<String>> {
     }
 }
 
-/// Render the `COMMENT ON COLUMN … 'zero-migrate:enc:<mode>:<keyId>:<wraps>'`
+/// Render the `COMMENT ON COLUMN ... 'zero-migrate:enc:<mode>:<keyId>:<wraps>'`
 /// statements for every `t.encrypted(...)` column in `schema` (PG only). The
 /// comment BODY is built by the shared codec
 /// ([`crate::mask_codec::build_encryption_sentinel`]) so it is byte-identical to
@@ -528,7 +528,7 @@ pub fn build_encryption_sentinel_comments(
         if is_schema_metadata_key(field) {
             continue;
         }
-        // Reuse the single-source-of-truth body builder — no re-spelling.
+        // Reuse the single-source-of-truth body builder - no re-spelling.
         let Some(body) = encryption_sentinel_body_for_field(def) else {
             continue;
         };
@@ -572,7 +572,7 @@ pub fn mask_sibling_column_for_field(field: &str, def: &serde_json::Value) -> Op
 /// sibling to attach a sentinel to.
 ///
 /// Reused by both backend introspectors (PG `COMMENT ON COLUMN` write
-/// + SQLite inline-comment parse on read) — keeps the wire shape
+/// + SQLite inline-comment parse on read) - keeps the wire shape
 /// consistent. The parser side lives in
 /// [`crate::mask_codec::parse_mask_sentinel`].
 pub fn mask_sentinel_for_field(def: &serde_json::Value) -> Option<String> {
@@ -599,14 +599,14 @@ pub fn mask_sentinel_for_field(def: &serde_json::Value) -> Option<String> {
 /// caller joins them onto the CREATE TABLE / ALTER TABLE SQL via
 /// `;` so they apply atomically.
 ///
-/// Only the PG arm executes these statements — SQLite doesn't support
+/// Only the PG arm executes these statements - SQLite doesn't support
 /// `COMMENT ON COLUMN`. The SQLite arm relies on the inline
 /// `/* zero-migrate:mask:... */` comment emitted by
 /// `build_create_table_with_fks_for_dialect`,
 /// preserved verbatim in `sqlite_master.sql`.
 ///
 /// Returns the empty vector when the schema declares no masked
-/// columns — the caller then emits no extra DDL.
+/// columns - the caller then emits no extra DDL.
 #[must_use]
 pub fn build_mask_sentinel_comments(
     app_id: &str,
@@ -648,7 +648,7 @@ pub fn build_mask_sentinel_comments(
 /// or `None` for a plain column. The SINGLE source of truth for the `zero-migrate:enc` wire
 /// grammar: `encryption_sentinel_for_field` wraps it in `/* */` for the inline
 /// DDL form, and [`build_encryption_sentinel_comments`] wraps it in a
-/// `COMMENT ON COLUMN … '…'` statement for the PG-recoverable form. The runtime
+/// `COMMENT ON COLUMN ... '...'` statement for the PG-recoverable form. The runtime
 /// parser is [`crate::mask_codec::parse_encryption_sentinel`].
 #[must_use]
 pub fn encryption_sentinel_body_for_field(def: &serde_json::Value) -> Option<String> {
@@ -719,7 +719,7 @@ pub fn max_length(def: &serde_json::Value) -> Option<u64> {
 /// `12345678901234.5678` across as `12345678901234.6`
 /// (`tests/fold_live/sqlite_decimal_rebuild_live.rs`).
 ///
-/// A zero or absent `precision` is NOT a decimal: `DECIMAL(0, …)` is not a type any
+/// A zero or absent `precision` is NOT a decimal: `DECIMAL(0, ...)` is not a type any
 /// dialect accepts, so a malformed facet falls back to the float spelling the column
 /// had before rather than emitting DDL no server will take.
 pub fn decimal_precision_scale(def: &serde_json::Value) -> Option<(u64, u64)> {

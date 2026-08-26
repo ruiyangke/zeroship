@@ -4,16 +4,16 @@
 //! They live here rather than in the engine for one measured reason: they are the
 //! `Err` halves of [`crate::renderer::DmlRenderer`]'s signatures, so a vendor crate
 //! cannot implement the trait without naming them. Leaving them in the engine is
-//! exactly the cycle `docs/proposals/pluggable-backends.md` step 4 hits - the engine
+//! exactly the cycle `docs/proposals/pluggable-backends.md` describes - the engine
 //! would name the vendors for its registry while the vendors name the engine for
 //! their error type, and Cargo refuses.
 //!
 //! MEASURED, not assumed. With these two enums, [`crate::step::BindValue`] and the
 //! `renderer` / `dml` / `vendor` modules moved out, the transitive core-module
-//! closure of the three DML vendor modules collapses from **54 modules / 113,216
-//! lines** to **7 modules / 7,733 lines**. `IrLowerError` alone was the bridge: it
-//! sat in the 16,868-line `render::lower`, which reaches `engine`, `apply::*`,
-//! `model::validate` and `render::fold` - effectively all of the engine.
+//! closure of the DML vendor modules collapses from effectively the whole engine to a
+//! small neighbourhood. `IrLowerError` alone was the bridge: it sat in
+//! `render::lower`, which reaches `engine`, `apply::*`, `model::validate` and
+//! `render::fold` - effectively all of the engine.
 //!
 //! Neither enum needed anything from the engine to come with it. Every
 //! `DeclarativeError` payload is a `String`, a `&'static str` or a `Vec<String>`;
@@ -65,8 +65,8 @@ pub enum DeclarativeError {
     /// An existing column needs a type or nullability change, on a backend whose
     /// [`ExistingColumnChangeStrategy`](crate::schema::SchemaRenderer) is `Refuse`.
     ///
-    /// Such a backend is not MISSING the capability — it has a statement that does
-    /// this work — but that statement requires the COMPLETE column specification
+    /// Such a backend is not MISSING the capability - it has a statement that does
+    /// this work - but that statement requires the COMPLETE column specification
     /// restated and silently drops every facet omitted. Emitting it from a diff that
     /// knows only the changed facet would discard the column's default, character set
     /// and comment, so the diff refuses and says which column it stopped on.
@@ -172,7 +172,7 @@ pub enum DeclarativeError {
     /// A declared field used a DSL type token the differ does not map. This
     /// covers both out-of-scope parameterised/extension types
     /// (`vector`/`geoPoint`/`encrypted`) AND typos / wrong spellings
-    /// (`bigint`, `uuid`, `int4`, `serial`, …). It is rejected at the author
+    /// (`bigint`, `uuid`, `int4`, `serial`, ...). It is rejected at the author
     /// boundary BEFORE any SQL is emitted, rather than silently degrading to a
     /// `text` column (the creator declared X, would have got `text`, with
     /// permanent divergence from what plugin-db materialises).
@@ -188,7 +188,7 @@ pub enum DeclarativeError {
     },
     /// Two or more apps declared the same table with DIFFERENT shapes. One table
     /// has exactly one owner; an identical re-declaration is
-    /// idempotent (merged) but a conflicting one is a hard deploy error — never a
+    /// idempotent (merged) but a conflicting one is a hard deploy error - never a
     /// silent last-writer-wins merge (this refines the blanket `DuplicateTable`).
     ///
     /// `apps` carries EVERY app that declared this table (sorted, deduplicated),
@@ -196,7 +196,7 @@ pub enum DeclarativeError {
     /// regardless of descriptor order** even with 3+ declarers: the merge no
     /// longer reports `order_pair(slot_owner, latecomer)` on the first mismatch
     /// (whose `slot_owner` flapped with input order when two identical twins
-    /// raced for the slot — 1b). The full sorted declarer set is the same for
+    /// raced for the slot - 1b). The full sorted declarer set is the same for
     /// every permutation of the same descriptors.
     #[error(
         "conflicting declaration of table '{table}': apps {apps:?} declare it with \
@@ -214,7 +214,7 @@ pub enum DeclarativeError {
     /// a table it does NOT own (ownership enforcement). The
     /// declaring app owns a table's migrations; a non-owner may USE the table's
     /// rows freely but may NOT migrate its structure. (An IDENTICAL re-declaration
-    /// by a non-owner produces no diff op and never trips this — only an actual
+    /// by a non-owner produces no diff op and never trips this - only an actual
     /// structural change to a non-owned table is refused.)
     #[error(
         "app '{deploying_app}' may not migrate table '{table}' (owned by \
@@ -232,7 +232,7 @@ pub enum DeclarativeError {
     /// but the differ **cannot confirm** the deploying app owns it: the caller's
     /// `live_ownership` map carries NO entry for that live table (2b). Rather than
     /// author a destructive drop of a table whose ownership it cannot verify, the
-    /// differ **fails closed** — refusing the drop. This is the defence against a
+    /// differ **fails closed** - refusing the drop. This is the defence against a
     /// PARTIAL-union deploy (a caller that passed only one app's descriptors, so
     /// every OTHER app's live table looks "absent from desired"): the omitted
     /// tenants' tables are refused, never mass-dropped under the deploying app's
@@ -255,13 +255,13 @@ pub enum DeclarativeError {
     ///
     /// A virtual table is not an ordinary table: it is the visible half of a
     /// module's storage. `fts5` and `vec0` both keep their real payload in
-    /// auto-created SHADOW tables (`<v>_data`, `<v>_idx`, …), and dropping the
-    /// vtable CASCADES those away — so a diff that "tidies up an undeclared table"
+    /// auto-created SHADOW tables (`<v>_data`, `<v>_idx`, ...), and dropping the
+    /// vtable CASCADES those away - so a diff that "tidies up an undeclared table"
     /// silently destroys a search or vector index that may be expensive or
     /// impossible to rebuild.
     ///
     /// This engine never AUTHORS a virtual table, so one found live was created by
-    /// something else — a data-plane runtime that manages its own indexes, or an
+    /// something else - a data-plane runtime that manages its own indexes, or an
     /// engine version that still emitted them. Either way it is not the schema
     /// differ's to remove.
     ///
@@ -274,7 +274,7 @@ pub enum DeclarativeError {
     /// **This is forward infrastructure, not only a safety net.** Full-text search
     /// is intended to return as something COMPOSED from primitives rather than a
     /// builtin, and a composed feature that expands to `CREATE VIRTUAL TABLE` needs
-    /// drift to tolerate virtual tables GENERALLY — which is why this is keyed on
+    /// drift to tolerate virtual tables GENERALLY - which is why this is keyed on
     /// the DDL shape instead of the `fts5` special case it replaced. Refusing to
     /// drop them is the first half; teaching drift to RECOGNISE a composed vtable as
     /// a declared object is the second half, and does not exist yet. See
@@ -290,7 +290,7 @@ pub enum DeclarativeError {
     DropOfVirtualTable {
         /// The live virtual table the drop pass refused.
         table: String,
-        /// The module from its `USING` clause (`fts5`, `vec0`, …).
+        /// The module from its `USING` clause (`fts5`, `vec0`, ...).
         module: String,
     },
     /// A `ref` field declared a cross-app FK whose **target table is not in the
@@ -312,7 +312,7 @@ pub enum DeclarativeError {
     /// column is not present in live as a dropped column, OR the `to` column is
     /// not present in desired as an added column, on the named table. The hint is
     /// the creator's signed statement of intent, so an un-matchable hint is a hard
-    /// error — never silently ignored (a silently-dropped hint would fall back to
+    /// error - never silently ignored (a silently-dropped hint would fall back to
     /// an unintended gated-drop + additive-add, losing the column's data).
     #[error(
         "rename hint {table}.{from} → {to} does not match a drop+add pair \
@@ -328,7 +328,7 @@ pub enum DeclarativeError {
     },
     /// A `RenameHint` matched a drop+add pair whose **types differ**: the
     /// live `from` column and the desired `to` column do not share a `data_type`.
-    /// A pure online rename (expand-contract dual-write) requires type identity —
+    /// A pure online rename (expand-contract dual-write) requires type identity -
     /// a simultaneous rename + type change is two distinct intents and is refused
     /// rather than silently mirrored across incompatible types (which the
     /// dual-write `NEW.<to> := NEW.<from>` assignment could corrupt or reject).
@@ -360,7 +360,7 @@ pub enum DeclarativeError {
     /// un-transformed old bytes (e.g. rebuild an `encrypted` column over plaintext,
     /// or stamp an `enum`/`check` the old values may violate). The live catalog read
     /// does NOT recover SDK-level facets for the `from` column, so the rebuild cannot
-    /// prove preservation — it FAILS CLOSED rather than silently rebuild under a
+    /// prove preservation - it FAILS CLOSED rather than silently rebuild under a
     /// changed facet. (The pre-rename-descriptor path keeps the `from` facets and is
     /// unaffected; only the post-rename catalog path hits this.) Rename + facet change
     /// is two intents: do the rename, then a separate facet-change deploy.
@@ -382,13 +382,13 @@ pub enum DeclarativeError {
         /// (`encrypted` / `mask` / `default` / `enum` / `check`).
         facet: &'static str,
     },
-    /// Two `RenameHint`s on the same table shared a `from` (e.g. `[a→c, a→d]`)
-    /// or a `to` (e.g. `[a→c, b→c]`) column. Each hint resolves INDEPENDENTLY, so
+    /// Two `RenameHint`s on the same table shared a `from` (e.g. `[a->c, a->d]`)
+    /// or a `to` (e.g. `[a->c, b->c]`) column. Each hint resolves INDEPENDENTLY, so
     /// a shared endpoint produces two colliding expand-contract sequences: a
     /// duplicated `ADD COLUMN <to>` (the second fails `already exists`), divergent
     /// dual-write triggers, or a double `DROP COLUMN <from>`. The cross-hint
     /// validation pass rejects it before any SQL is authored. `side` is
-    /// `"from"` or `"to"` — which endpoint was duplicated.
+    /// `"from"` or `"to"` - which endpoint was duplicated.
     #[error(
         "duplicate rename hint endpoint: column {table}.{column} appears as the \
          {side} of more than one hint; a column may be renamed at most once per \
@@ -403,7 +403,7 @@ pub enum DeclarativeError {
         side: &'static str,
     },
     /// A `RenameHint`'s `to` equals another hint's `from` on the same table
-    /// (e.g. `[a→b, b→c]`) — a rename CHAIN. Chains are not supported: the engine
+    /// (e.g. `[a->b, b->c]`) - a rename CHAIN. Chains are not supported: the engine
     /// resolves each hint against the single live/desired snapshot pair, where the
     /// intermediate name (`b`) cannot be simultaneously a live-only drop and a
     /// desired-only add. Reject it EXPLICITLY rather than leave it to surface
@@ -419,7 +419,7 @@ pub enum DeclarativeError {
         /// The intermediate column that is both a `to` and a `from`.
         column: String,
     },
-    /// A `RenameHint` had `from == to` — a no-op rename of a column to its own
+    /// A `RenameHint` had `from == to` - a no-op rename of a column to its own
     /// name. This is rejected with a PRECISE error rather than the misleading
     /// [`DeclarativeError::RenameHintUnmatched`] it would otherwise produce (the
     /// identical name is neither live-only nor desired-only).
@@ -439,7 +439,7 @@ pub enum DeclarativeError {
     /// than swallowed.
     #[error("failed to author rename expand-contract sequence: {0}")]
     Rename(#[from] ExpandContractError),
-    /// A `ref` field's target was a schema-qualified `<otherApp>.<table>` — a
+    /// A `ref` field's target was a schema-qualified `<otherApp>.<table>` - a
     /// CROSS-APP foreign key, forbidden fail-closed (the runtime plugin enforces
     /// the same rule). Every FK must stay inside the
     /// project schema; a reference to another member app's table is the BARE
@@ -459,14 +459,14 @@ pub enum DeclarativeError {
         /// The `<otherApp>` schema prefix that crossed the boundary.
         other_app: String,
     },
-    /// A foreign key had to be inlined at CREATE TABLE — because the target answers
+    /// A foreign key had to be inlined at CREATE TABLE - because the target answers
     /// no to [`Capability::AlterTableAddConstraint`](zero_migrate_ir::backend::Capability)
-    /// — but the FK's referenced table is neither already live nor created earlier in
+    /// - but the FK's referenced table is neither already live nor created earlier in
     /// THIS batch, so there is nothing to inline it against.
     ///
     /// Such a target can only add the constraint later by rebuilding the whole table,
     /// which this path does not author. Surfaced as a typed error rather than emitting
-    /// an `ALTER … ADD CONSTRAINT` the target would reject anyway, and never by
+    /// an `ALTER ... ADD CONSTRAINT` the target would reject anyway, and never by
     /// silently dropping the FK.
     #[error(
         "{dialect} cannot defer the foreign key on table '{table}' → '{target}': it \
@@ -484,9 +484,9 @@ pub enum DeclarativeError {
     /* `SqliteRebuildRequired { table, op }` USED TO LIVE HERE, and its doc called it
      * a "**Reserved fail-closed guard**" for a future existing-table op the rebuild
      * author cannot yet emit. It had ZERO constructors, workspace-wide, and the same
-     * doc explains why: every op it was reserved for — a column type change, a
+     * doc explains why: every op it was reserved for - a column type change, a
      * nullability change either way, a column rename, an add/drop constraint, an
-     * in-place FK redefinition — now flows through `DeclarativePlan::rebuilds`
+     * in-place FK redefinition - now flows through `DeclarativePlan::rebuilds`
      * instead. The reservation outlived the gap it reserved against.
      *
      * A variant nobody builds is not a fail-closed boundary; it is a `match` arm
@@ -572,7 +572,7 @@ pub enum IrLowerError {
     /// would drop the column's default, nullability, character set and comment rather
     /// than fail. It is refused instead. The engine's own alter-column renderers emit
     /// one in-place `ALTER COLUMN` shape, and a backend that cannot execute that shape
-    /// declares so through `CatalogFoldPolicy::alter_column_refusal` — which is where
+    /// declares so through `CatalogFoldPolicy::alter_column_refusal` - which is where
     /// this is constructed, in the backend's own crate, with its own id.
     ///
     /// `zero_migrate_backend::fold::CatalogFoldPolicy::restates_column_type_at_apply`
@@ -601,8 +601,8 @@ pub enum IrLowerError {
     ///
     /// The permitted set is exactly the server's three, and exactly them: a DOMAIN
     /// over `integer` is refused by PostgreSQL too, measured, so it is refused
-    /// here. Widening and narrowing WITHIN the set stay legal — `int → bigint` and
-    /// `int → smallint` both apply with `attidentity` intact — because a refusal
+    /// here. Widening and narrowing WITHIN the set stay legal - `int -> bigint` and
+    /// `int -> smallint` both apply with `attidentity` intact - because a refusal
     /// broader than the server's would deny a migration the database honours.
     #[error(
         "setColumnType on {table:?}.{column:?} names {to_type}, but that column is an \
@@ -700,8 +700,8 @@ pub enum IrLowerError {
     /// The emitters render `CREATE INDEX IF NOT EXISTS` whether or not the author
     /// asked, so the server SKIPS such a statement and reports success while
     /// keeping the live index. Measured: with `ix` live as a non-unique index on
-    /// `(v)`, `CREATE UNIQUE INDEX IF NOT EXISTS "ix" … ("w")` succeeds with a
-    /// NOTICE and leaves the old index — the author gets neither the uniqueness
+    /// `(v)`, `CREATE UNIQUE INDEX IF NOT EXISTS "ix" ... ("w")` succeeds with a
+    /// NOTICE and leaves the old index - the author gets neither the uniqueness
     /// they asked for nor an error.
     ///
     /// Refused here rather than in the guard probe: the unguarded probe is
@@ -761,7 +761,7 @@ pub enum IrLowerError {
     /// `!backend.supports(cap)` gate, so a fourth backend without
     /// `AlterTableAddConstraint` or `NativeAlterColumn` arrives here on its own
     /// capability answer. Named FK add/drop DOES lower to the structured rebuild when
-    /// full live structure is available — this is the refusal for when it is not.
+    /// full live structure is available - this is the refusal for when it is not.
     ///
     /// The message states its two reasons as alternatives because they ARE
     /// alternatives, and only one of them holds on any given refusal. The capability
@@ -790,7 +790,7 @@ pub enum IrLowerError {
     )]
     GuardProbeUnbuildable(&'static str),
     /// An op whose EFFECTIVE schema is not the bound project schema, on a target with
-    /// no cross-schema DDL — so it has exactly one namespace and renders every
+    /// no cross-schema DDL - so it has exactly one namespace and renders every
     /// statement UNqualified into it.
     ///
     /// Honouring the qualifier on such a target would need the operator to attach that
@@ -839,17 +839,17 @@ pub enum IrLowerError {
     /// EXPLICIT `schema()` qualifier that the active confinement
     /// scope does NOT permit. The friendly op-level cross-schema
     /// VALIDATE gate (`zero_migrate_ir::validate::validate_ir_scoped`) already refuses this
-    /// fail-closed on every PRODUCTION path (`load_and_lower[_guarded]` →
-    /// `load_ir_document` → `validate_ir_scoped` gates the explicit qualifier before
+    /// fail-closed on every PRODUCTION path (`load_and_lower[_guarded]` ->
+    /// `load_ir_document` -> `validate_ir_scoped` gates the explicit qualifier before
     /// lower). But the public `lower`/`lower_steps`
-    /// entries do NOT re-run validation — they assume the IR was pre-validated by the
+    /// entries do NOT re-run validation - they assume the IR was pre-validated by the
     /// load gate. A future INTERNAL caller invoking bare `lower()` with an op carrying
     /// an explicit FOREIGN `schema()` would otherwise render into that foreign schema,
     /// since the only lower-time scope check covered the `default_schema` case. This
     /// arm makes `lower()` self-defending regardless of whether validate ran: an
     /// explicit out-of-scope qualifier is refused fail-closed at lower, matching the
     /// SQLite/`default_schema` checks beside it. Carries the offending schema. (Not
-    /// creator-reachable — the load gate already refuses it; this is the latent-footgun
+    /// creator-reachable - the load gate already refuses it; this is the latent-footgun
     /// backstop for internal callers.)
     #[error(
         "IrAuthor::lower of an op explicitly qualified with schema {0:?}, which the \
@@ -865,7 +865,7 @@ pub enum IrLowerError {
     /// the live schema the lowerer was handed.
     ///
     /// Such a rebuild authors a post-rename CREATE plus a value copy, which needs the
-    /// WHOLE live table shape — every column, plus the live stored schema — not just
+    /// WHOLE live table shape - every column, plus the live stored schema - not just
     /// the `{from, to, ty}` the op carries. A target whose renames are native or
     /// expand-contract lowers from those three alone and never reaches this.
     ///
@@ -934,7 +934,7 @@ pub enum IrLowerError {
         /// The capability the op requires.
         capability: zero_migrate_ir::capability::VendorCapability,
     },
-    /// **VENDOR** — rendering a vendor op to its Postgres DDL failed (an invalid
+    /// **VENDOR** - rendering a vendor op to its Postgres DDL failed (an invalid
     /// identifier, an unrenderable policy/trigger predicate, an empty privilege/role
     /// list). Carries the underlying [`crate::vendor::VendorError`].
     #[error(transparent)]
@@ -944,7 +944,7 @@ pub enum IrLowerError {
     /// old whole-construct vendor gate.
     #[error("IrAuthor::lower of trigger facet/action {kind:?} is unsupported on {dialect}")]
     TriggerUnsupported {
-        /// Stable unsupported-kind token (`triggerBody`, `executeFunction`, …).
+        /// Stable unsupported-kind token (`triggerBody`, `executeFunction`, ...).
         kind: &'static str,
         /// The target dialect that cannot render the facet/action.
         dialect: DialectId,
@@ -953,7 +953,7 @@ pub enum IrLowerError {
     /// are cross-dialect core; materialized views are PostgreSQL-only.
     #[error("IrAuthor::lower of view facet {kind:?} is unsupported on {dialect}")]
     ViewUnsupported {
-        /// Stable unsupported-kind token (`materializedView`, …).
+        /// Stable unsupported-kind token (`materializedView`, ...).
         kind: &'static str,
         /// The target dialect that cannot render the facet.
         dialect: DialectId,
@@ -972,12 +972,12 @@ pub enum IrLowerError {
     ///
     /// The refusing target is CARRIED, for the reason
     /// [`Self::VendorUnsupported`] states: these three refusals were
-    /// `UnsupportedOp("attachPartition is PostgreSQL-only")` and its siblings —
+    /// `UnsupportedOp("attachPartition is PostgreSQL-only")` and its siblings -
     /// `&'static str` constants naming the one backend that declared the capability
     /// when they were written. The PREDICATE had already been moved to the
     /// capability; the two comments beside it in `render/lower.rs` said so, one of
     /// them promising that "a fourth backend with relation-valued partitions answers
-    /// for itself instead of inheriting PostgreSQL's yes" — which was true of the
+    /// for itself instead of inheriting PostgreSQL's yes" - which was true of the
     /// branch and false of the sentence the operator was shown.
     #[error("UNSUPPORTED {{ kind: {kind:?}, dialect: {dialect} }}")]
     PartitionRelationUnsupported {
@@ -999,7 +999,7 @@ pub enum IrLowerError {
     /// SQLite non-PK identity or Postgres virtual generated columns).
     #[error("IrAuthor::lower of column facet {kind:?} is unsupported on {dialect}: {reason:?}")]
     ColumnUnsupported {
-        /// Stable unsupported-kind token (`virtualColumn`, `identity`, …).
+        /// Stable unsupported-kind token (`virtualColumn`, `identity`, ...).
         kind: &'static str,
         /// The target dialect that cannot render the facet.
         dialect: DialectId,
@@ -1009,14 +1009,14 @@ pub enum IrLowerError {
     /// a `renameColumn` whose IR-carried `ColType` does not match the
     /// LIVE `from` column's actual `data_type`. A pure online rename mirrors values
     /// across the two columns (PG dual-write `NEW.<to> := NEW.<from>`; the SQLite
-    /// rebuild copies the column across) and CANNOT also change the type — a
+    /// rebuild copies the column across) and CANNOT also change the type - a
     /// simultaneous rename + retype is two distinct intents. The IR path is the
     /// higher-risk AI/creator-authored surface, so it must NOT silently trust an
     /// IR-carried type that disagrees with the live column: a wrong `ty` (e.g.
     /// `Int` over a live `text` column) would otherwise author a mismatched
     /// `ADD COLUMN` + a cross-type dual-write copy with no rejection. This is the
     /// IR-path mirror of the declarative differ's
-    /// `crate::render::declarative::DeclarativeError::RenameHintTypeMismatch` — enforced
+    /// `crate::render::declarative::DeclarativeError::RenameHintTypeMismatch` - enforced
     /// IDENTICALLY on BOTH dialects (the single authoritative type source is the
     /// LIVE column, reconciled against the IR `ty`; neither leg silently uses one
     /// over the other). Carries the table, the column, and the two `data_type`s.
@@ -1041,8 +1041,8 @@ pub enum IrLowerError {
     /// a `renameColumn` whose LIVE `from` column structure is absent from
     /// `LiveSchema::table_snapshots`, so the authoritative IR-vs-live type
     /// reconciliation (see [`Self::RenameTypeMismatch`]) cannot run. A rename must
-    /// NEVER lower from an IR-carried type alone — the live column type is the
-    /// authority on BOTH dialects — so an absent live `from` column fails closed
+    /// NEVER lower from an IR-carried type alone - the live column type is the
+    /// authority on BOTH dialects - so an absent live `from` column fails closed
     /// rather than trusting the IR `ty`. Carries the table + column.
     #[error(
         "IrAuthor::lower of renameColumn on {0:?}.{1:?} needs the live `{1}` column's \
@@ -1069,7 +1069,7 @@ pub enum IrLowerError {
     /// it cannot see: a column an EARLIER ordered migration created, or one of an
     /// unmanaged table. Validation reads only the migration in front of it, so
     /// the live catalog the apply path has already introspected is the only
-    /// witness — which is why the refusal lives here and not there.
+    /// witness - which is why the refusal lives here and not there.
     ///
     /// Boxed because the `AuthoringError` payload is large.
     #[error("{0}")]

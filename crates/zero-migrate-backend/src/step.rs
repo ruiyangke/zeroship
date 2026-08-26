@@ -1,15 +1,15 @@
 //! The lowered-plan step VALUES that cross the backend boundary.
 //!
 //! [`BindValue`] is here because it is the currency of
-//! [`DmlRenderer::bind_bytes`](crate::renderer::DmlRenderer::bind_bytes) — the
+//! [`DmlRenderer::bind_bytes`](crate::renderer::DmlRenderer::bind_bytes) - the
 //! vendors disagree about the CARRIER of a binary value, which is a spelling
 //! decision, so each one answers it.
 //!
 //! The three STRUCTURED steps are here because a backend is what executes them.
 //! [`AlterPrimaryKeyStep`], [`AlterColumnTypeStep`] and
-//! [`SynchronizeIdentityStep`] deliberately stay structured until apply — each
+//! [`SynchronizeIdentityStep`] deliberately stay structured until apply - each
 //! must read the live catalog under the migration lock before it can spell its
-//! statement — so they are `MigrationBackend` arguments, not rendered DDL. Each
+//! statement - so they are `MigrationBackend` arguments, not rendered DDL. Each
 //! carries a [`Migration`], an [`AlterPrimaryKeyAction`] and `String`s, and
 //! nothing else.
 //!
@@ -18,7 +18,7 @@
 //! `zero_migrate::render::step` keeps `PlanStep`, `RenameStep` and
 //! `DialectScope`. `PlanStep::OnlineRename` carries a `RenameStep`, which carries
 //! `render::declarative::TableRebuild`, which carries
-//! `render::plan::TableRebuildSpec` — and that spec's `sequence_policy` field is
+//! `render::plan::TableRebuildSpec` - and that spec's `sequence_policy` field is
 //! typed `zero_migrate_sqlite::SqliteSequencePolicy`. A vendor type cannot come
 //! DOWN into the contract crate the vendors sit above, so the chain stops there
 //! rather than at anything about `PlanStep` itself.
@@ -73,9 +73,9 @@ pub struct AlterPrimaryKeyStep {
 
 /// One column retype that the target dialect spells by RESTATING the column.
 ///
-/// MySQL has no `ALTER COLUMN … TYPE`. It has `MODIFY COLUMN`, which takes the
+/// MySQL has no `ALTER COLUMN ... TYPE`. It has `MODIFY COLUMN`, which takes the
 /// COMPLETE column definition and silently DISCARDS every facet the statement
-/// leaves out — measured in `tests/mysql_engine/mysql_setcolumntype_restate.rs`,
+/// leaves out - measured in `tests/mysql_engine/mysql_setcolumntype_restate.rs`,
 /// where a bare `MODIFY COLUMN label varchar(128)` destroys the column's
 /// `NOT NULL`, its `DEFAULT`, its `COLLATE` and its `COMMENT` in one statement,
 /// with no warning.
@@ -83,14 +83,14 @@ pub struct AlterPrimaryKeyStep {
 /// So the statement cannot be written until the current definition is known, and
 /// the current definition is not in the op: `Op::SetColumnType` carries one field.
 /// This step stays STRUCTURED until apply for exactly the reason
-/// [`AlterPrimaryKeyStep`] does — the backend reads `SHOW CREATE TABLE` under the
+/// [`AlterPrimaryKeyStep`] does - the backend reads `SHOW CREATE TABLE` under the
 /// migration lock and restates the clause the server itself reports, so the answer
 /// cannot go stale between the read and the `ALTER`.
 ///
 /// WHY NOT AT LOWER TIME, which would need no new step at all: the apply path DOES
 /// have the live column there (the engine's `LiveSchema::table_snapshots` is populated
 /// from a real catalog read by `engine.rs` before it lowers). But
-/// `ColumnSnapshot` is a LOSSY projection of a MySQL column — the same test
+/// `ColumnSnapshot` is a LOSSY projection of a MySQL column - the same test
 /// measures that `COLUMN_COMMENT` is never read, that `EXTRA` is read only for
 /// `auto_increment` / `DEFAULT_GENERATED` so `ON UPDATE CURRENT_TIMESTAMP` cannot
 /// be spelled, and that the generated-column facet is deliberately left `None`.
@@ -131,7 +131,7 @@ pub struct SynchronizeIdentityStep {
 }
 
 /// The dialect reach of an applied plan, MEASURED from its ops at lowering. A
-/// separate facet — **not** folded into the identity checksum, and not a wire field.
+/// separate facet - **not** folded into the identity checksum, and not a wire field.
 ///
 /// # Derived, never declared
 ///
@@ -145,9 +145,9 @@ pub struct SynchronizeIdentityStep {
 ///
 /// [`admits`](Self::admits) is consulted at APPLY, whole-plan, before the project
 /// lock is taken and before any step executes. That placement is the point: the
-/// per-target refusals that already exist — lowering declines a privileged op on a
+/// per-target refusals that already exist - lowering declines a privileged op on a
 /// backend without the capability, load declines a `dialect()` expression whose legs
-/// miss the target — are both checks a PRE-LOWERED plan never faces, and the engine
+/// miss the target - are both checks a PRE-LOWERED plan never faces, and the engine
 /// takes the lowering dialect and the apply backend as independent inputs.
 ///
 /// # Why the pinned arm carries a [`DialectId`]
@@ -159,13 +159,13 @@ pub struct SynchronizeIdentityStep {
 /// # The two arms are not the whole lattice
 ///
 /// A reach that is a proper subset of the registered backends with more than one
-/// member — a `dialect()` expression carrying two legs of three — has no arm here and
+/// member - a `dialect()` expression carrying two legs of three - has no arm here and
 /// is carried as `Portable`, which under-refuses. Closing that takes a third arm over
 /// a `DialectSet`; it is stated rather than hidden because a reader must not take
 /// `Portable` for "proven portable everywhere".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DialectScope {
-    /// Every registered backend renders this artifact's ops — or the reach could not
+    /// Every registered backend renders this artifact's ops - or the reach could not
     /// be narrowed to exactly one. See the caveat on the enum.
     Portable,
     /// Pinned to ONE dialect: exactly one registered backend can render these ops.
@@ -194,7 +194,7 @@ impl DialectScope {
 /// one-vendor guarantee the lowering does not enforce. The differ's only gate here
 /// is `is_sqlite`, so a MySQL rename fell through to the expand-contract author and
 /// was wrapped in a variant named for PostgreSQL. That is a MISSING PLAN-TIME
-/// REFUSAL, not MySQL support — `docs/dialects.md`, MySQL's registered validation
+/// REFUSAL, not MySQL support - `docs/dialects.md`, MySQL's registered validation
 /// policy, and `lower_ir_rename` all declare MySQL column rename unsupported, and the
 /// declarative differ is the lone dissenter. The strategy names are honest about
 /// what each arm IS without re-encoding a dialect claim the type cannot keep.
@@ -228,10 +228,10 @@ pub enum StepReversibility {
 /// One ordered step of the engine's `AppliedPlan`.
 #[derive(Debug, Clone)]
 pub enum PlanStep {
-    /// A transactional or non-txn DDL statement bundle — an existing
+    /// A transactional or non-txn DDL statement bundle - an existing
     /// [`Migration`] (single `up: String`, no parameter slot).
     Ddl(Migration),
-    /// A parameterized DML statement (insert/update/delete) — the net-new
+    /// A parameterized DML statement (insert/update/delete) - the net-new
     /// variant.
     Dml {
         /// The journal version this DML step records under (its sub-version).
@@ -262,14 +262,14 @@ pub enum PlanStep {
         /// Whether the statement mutates application data. Ordinary insert,
         /// update, and delete steps are true; read-only partition guards are false.
         mutates_data: bool,
-        /// `true` ⇒ the step's DDL/journal runs inside a transaction.
+        /// `true` => the step's DDL/journal runs inside a transaction.
         transactional: bool,
-        /// `true` ⇒ data loss (a `delete`); the gate decides.
+        /// `true` => data loss (a `delete`); the gate decides.
         destructive: bool,
-        /// `true` ⇒ explicit operator approval is required even when the
+        /// `true` => explicit operator approval is required even when the
         /// operation is not classified as data loss.
         requires_approval: bool,
-        /// The declaring app's `owner_app` — the journal-identity attribution.
+        /// The declaring app's `owner_app` - the journal-identity attribution.
         owner_app: String,
     },
     /// A crash-safe batched data backfill.

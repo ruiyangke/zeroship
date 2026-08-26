@@ -17,8 +17,8 @@
 //! [`ExecutorConfig::effective`], the builders) came with it, and the engine's
 //! one write site went through the public
 //! [`with_effective_policy`](ExecutorConfig::with_effective_policy) setter that
-//! already existed. The one member that WOULD have had to widen —
-//! `search_path_clause`, a PostgreSQL-only `search_path` builder — was relocated
+//! already existed. The one member that WOULD have had to widen -
+//! `search_path_clause`, a PostgreSQL-only `search_path` builder - was relocated
 //! to the PostgreSQL backend instead of being made `pub`.
 
 use std::time::Duration;
@@ -26,13 +26,13 @@ use zero_migrate_ir::dialect::DialectId;
 
 /// Error opening a migrator connection.
 ///
-/// Compiles as an (uninhabited) enum — the connection is now supplied by the
+/// Compiles as an (uninhabited) enum - the connection is now supplied by the
 /// host through the `SqlSession` seam, so no in-crate connect path exists to
 /// construct it.
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectError {}
 
-/// The **apply-confinement parameters** — the per-run inputs that bound what a
+/// The **apply-confinement parameters** - the per-run inputs that bound what a
 /// migration may touch and for how long.
 ///
 /// Every field here is read by **more than one dialect**, which is why the block
@@ -52,7 +52,7 @@ pub enum ConnectError {}
 ///
 /// The confinement STRATEGY still lives in each backend's apply leaf (PG's
 /// `SET ROLE`/`search_path`/timeout bracket; SQLite's two-mode authorizer
-/// `Arc<AtomicU8>` mode-flip), NOT in this neutral core — this struct carries
+/// `Arc<AtomicU8>` mode-flip), NOT in this neutral core - this struct carries
 /// only the inputs.
 #[derive(Debug, Clone)]
 pub struct ConfinementConfig {
@@ -74,7 +74,7 @@ pub struct ConfinementConfig {
     /// so named rather than linked) rather than clamped.
     pub statement_timeout: Duration,
     /// Mandatory, **separate, SHORT** lock-ACQUISITION timeout (the
-    /// safe-migration lock-safety envelope — strong_migrations / Atlas PG101 &
+    /// safe-migration lock-safety envelope - strong_migrations / Atlas PG101 &
     /// PG103). Maps to `SET lock_timeout` on PostgreSQL and to
     /// `innodb_lock_wait_timeout` on MySQL (rounded UP to whole seconds, MySQL's
     /// unit). This is NOT folded into
@@ -86,12 +86,12 @@ pub struct ConfinementConfig {
     /// bounds how long it **runs** once it holds the lock. On a populated, live
     /// multi-tenant table a blocking DDL (e.g. `ALTER TABLE`) takes an
     /// `ACCESS EXCLUSIVE` lock; if any long-running transaction holds a
-    /// conflicting lock, the DDL queues behind it — AND, because it is itself
+    /// conflicting lock, the DDL queues behind it - AND, because it is itself
     /// waiting on an `ACCESS EXCLUSIVE` lock, every subsequent query on that
     /// table queues behind the DDL. That is a tenant-wide availability outage
     /// for the lifetime of the wait. A long (statement-class) `lock_timeout`
     /// makes the outage last that long; a SHORT one makes the DDL fail fast
-    /// (`55P03`), roll back cleanly (the two-phase recovery handles the abort —
+    /// (`55P03`), roll back cleanly (the two-phase recovery handles the abort -
     /// a lock-timeout failure is retryable, never data-corrupting), and free the
     /// table immediately. The operator retries during a quieter window.
     ///
@@ -129,8 +129,8 @@ pub struct ConfinementConfig {
     /// The run-time confinement settings each BACKEND reads, keyed by the backend
     /// that reads them.
     ///
-    /// A backend whose confinement model needs per-project host input — a principal
-    /// to run as, a namespace to resolve through — records it here and reads it back
+    /// A backend whose confinement model needs per-project host input - a principal
+    /// to run as, a namespace to resolve through - records it here and reads it back
     /// by downcasting to a type declared in its own crate. That keeps a setting only
     /// one vendor has out of the neutral vocabulary WITHOUT pushing it into
     /// [`BackendVendor`](crate::registry::BackendVendor), which cannot hold it: that
@@ -179,7 +179,7 @@ impl ConfinementConfig {
 /// [`confinement.vendor`](ConfinementConfig::vendor), keyed by that backend.
 ///
 /// The `statement_timeout` + `lock_timeout` budgets are **mandatory** (no
-/// indefinite locks / `DoS`) and are applied per migration before its SQL runs —
+/// indefinite locks / `DoS`) and are applied per migration before its SQL runs -
 /// on PostgreSQL as `SET statement_timeout` / `SET lock_timeout`, on MySQL as
 /// `max_execution_time` / `innodb_lock_wait_timeout`. SQLite reads neither; it
 /// uses `project_lock_timeout` when acquiring its application-file lock, which
@@ -187,14 +187,14 @@ impl ConfinementConfig {
 /// not read (`pg_advisory_lock` takes no timeout).
 #[derive(Debug, Clone)]
 pub struct ExecutorConfig {
-    /// The project id (`prj_…`) — its bytes seed the apply-serializing advisory
+    /// The project id (`prj_...`) - its bytes seed the apply-serializing advisory
     /// lock (`pg_advisory_lock(hashtext(project_id))`).
     pub project_id: String,
     /// The one schema this project's migrations own and may touch. Pinned into
     /// `search_path` for every apply, and the registered line-1
     /// guard's confinement target.
     pub project_schema: String,
-    /// The **confinement parameters** — the journal's meta schema and the three
+    /// The **confinement parameters** - the journal's meta schema and the three
     /// timeout budgets, each read by more than one dialect, plus whatever
     /// single-engine settings a host supplied, keyed by their engine under
     /// [`vendor`](ConfinementConfig::vendor).
@@ -260,7 +260,7 @@ impl ExecutorConfig {
     }
 
     // A `platform()` constructor stood here. It took an `OperatorCapability` token and
-    // its whole body was `Self::new(project_id, project_schema, effective)` — the token
+    // its whole body was `Self::new(project_id, project_schema, effective)` - the token
     // was bound as `_cap` and never read. Its doc claimed the token could be minted
     // "only through named in-crate seams", which was false: the mint was public, so any
     // dependent crate could reach this seam, and the config it produced was identical to
@@ -273,13 +273,13 @@ impl ExecutorConfig {
     /// The caller-authored composed policy this config was built with.
     ///
     /// This exists so the `effective` FIELD can stay private now that the engine
-    /// paths that read a policy off a config live one crate above it — the same
+    /// paths that read a policy off a config live one crate above it - the same
     /// reason [`GuardConfig::effective`](crate::guard::GuardConfig::effective)
     /// exists, and it grants exactly as little. It is a read-only borrow of a
     /// policy the caller already holds: [`ExecutorConfig::new`] TOOK it,
     /// [`with_effective_policy`](Self::with_effective_policy) replaces it, and
     /// `self.guard_config_for(d).effective()` already returns it by a longer route.
-    /// The struct-literal boundary is unaffected — an external crate still cannot
+    /// The struct-literal boundary is unaffected - an external crate still cannot
     /// NAME `effective`.
     #[must_use]
     pub const fn effective(&self) -> &zero_migrate_policy::EffectivePolicy {
