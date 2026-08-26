@@ -2011,7 +2011,8 @@ impl Config {
                     let port = if port.is_empty() {
                         5432
                     } else {
-                        match port.parse() {
+                        let port = parse_libpq_integer(port, "port")?;
+                        match u16::try_from(port) {
                             Ok(0) | Err(_) => {
                                 return Err(Error::config_parse(Box::new(InvalidValue("port"))));
                             }
@@ -2022,26 +2023,18 @@ impl Config {
                 }
             }
             "connect_timeout" => {
-                let timeout = value
-                    .parse::<i64>()
-                    .map_err(|_| Error::config_parse(Box::new(InvalidValue("connect_timeout"))))?;
+                let timeout = parse_libpq_integer(value, "connect_timeout")?;
                 if timeout > 0 {
-                    // TAKEN LITERALLY, INCLUDING 1. libpq is widely described as
-                    // clamping this to a 2 second floor, so `from_secs(1)` reads
-                    // like a parity bug and invites a "fix" that would introduce
-                    // one. MEASURED 2026-08-26 against real libpq by dialling
-                    // 192.0.2.1:5432, which blackholes, so the client's own
-                    // timeout is the only thing that ends the wait: values 1/2/3/5
-                    // returned after 1.1/2.1/3.1/5.1s (the constant 0.1 is
-                    // `docker exec` startup). One second is honoured as one
-                    // second, on libpq 16.15 AND 18.4. There is no floor to match.
+                    // TAKEN LITERALLY, INCLUDING 1. PostgreSQL 16 and older
+                    // documented and implemented a two-second floor, but
+                    // PostgreSQL 18 removed it. This crate's parity oracle is
+                    // PostgreSQL 18, whose source uses the positive integer as
+                    // supplied.
                     self.connect_timeout(Duration::from_secs(timeout as u64));
                 }
             }
             "tcp_user_timeout" => {
-                let timeout = value
-                    .parse::<i64>()
-                    .map_err(|_| Error::config_parse(Box::new(InvalidValue("tcp_user_timeout"))))?;
+                let timeout = parse_libpq_integer(value, "tcp_user_timeout")?;
                 if timeout > 0 {
                     // MILLISECONDS, and it is the only member of this family
                     // that is not seconds: libpq documents `keepalives_idle`,
@@ -2077,9 +2070,7 @@ impl Config {
                 // ON. Parsing it as unsigned refuses a value the reference
                 // implementation accepts, which turns a DSN psql connects with
                 // into a config error here.
-                let keepalives = value
-                    .parse::<i64>()
-                    .map_err(|_| Error::config_parse(Box::new(InvalidValue("keepalives"))))?;
+                let keepalives = parse_libpq_integer(value, "keepalives")?;
                 self.keepalives(keepalives != 0);
             }
             // ZERO must reach `KeepaliveConfig`; a NEGATIVE must not get
@@ -2125,9 +2116,7 @@ impl Config {
             }
             #[cfg(not(target_arch = "wasm32"))]
             "keepalives_count" => {
-                let keepalives_count = value
-                    .parse::<u32>()
-                    .map_err(|_| Error::config_parse(Box::new(InvalidValue("keepalives_count"))))?;
+                let keepalives_count = parse_nonnegative_libpq_integer(value, "keepalives_count")?;
                 self.keepalives_count(keepalives_count);
             }
             "target_session_attrs" => {
@@ -2503,18 +2492,29 @@ impl fmt::Display for NestedService {
 
 impl error::Error for NestedService {}
 
+/// Parse libpq's integer grammar: a signed C `int`, surrounded only by C
+/// whitespace. Rust's integer parser has the right digit and sign grammar once
+/// those six whitespace bytes have been removed.
+fn parse_libpq_integer(value: &str, option: &'static str) -> Result<i32, Error> {
+    value
+        .trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{000b}' | '\u{000c}'))
+        .parse::<i32>()
+        .map_err(|_| Error::config_parse(Box::new(InvalidValue(option))))
+}
+
+fn parse_nonnegative_libpq_integer(value: &str, option: &'static str) -> Result<u32, Error> {
+    u32::try_from(parse_libpq_integer(value, option)?)
+        .map_err(|_| Error::config_parse(Box::new(InvalidValue(option))))
+}
+
 /// Parse a keepalive duration in seconds: zero allowed, negative refused.
 ///
-/// The unsigned parse IS the refusal - `"-1".parse::<u64>()` fails - and that
-/// is the point rather than an accident of the type. A zero survives because
-/// this crate reads it as "use the system default" and drops it in
-/// [`crate::keepalive`]'s `TcpKeepalive` conversion, so discarding it here
-/// would leave that conversion nothing to drop.
+/// A zero survives because this crate reads it as "use the system default" and
+/// drops it in [`crate::keepalive`]'s `TcpKeepalive` conversion, so discarding
+/// it here would leave that conversion nothing to drop.
 #[cfg(not(target_arch = "wasm32"))]
 fn keepalive_seconds(value: &str, option: &'static str) -> Result<u64, Error> {
-    value
-        .parse::<u64>()
-        .map_err(|_| Error::config_parse(Box::new(InvalidValue(option))))
+    parse_nonnegative_libpq_integer(value, option).map(u64::from)
 }
 
 /// Whether `value` names the only text encoding this driver can decode.
@@ -3250,6 +3250,37 @@ mod tests {
                 Some(Duration::from_secs(3))
             );
             assert_eq!(config.keepalive_config.retries, Some(5));
+        }
+
+        #[test]
+        fn socket_integers_use_libpqs_whitespace_and_i32_range() {
+            let mut whitespace_refused = Vec::new();
+            let mut out_of_range_accepted = Vec::new();
+            for key in [
+                "port",
+                "connect_timeout",
+                "tcp_user_timeout",
+                "keepalives",
+                "keepalives_idle",
+                "keepalives_interval",
+                "keepalives_count",
+            ] {
+                if format!("host=h {key}=' 1 '").parse::<Config>().is_err() {
+                    whitespace_refused.push(key);
+                }
+                for value in ["2147483648", "-2147483649"] {
+                    if format!("host=h {key}={value}").parse::<Config>().is_ok() {
+                        out_of_range_accepted.push(format!("{key}={value}"));
+                    }
+                }
+            }
+
+            assert!(
+                whitespace_refused.is_empty() && out_of_range_accepted.is_empty(),
+                "C whitespace refused: {}; values outside C int accepted: {}",
+                whitespace_refused.join(", "),
+                out_of_range_accepted.join(", ")
+            );
         }
 
         /// libpq reads `keepalives` with `strtol` and tests the result against
