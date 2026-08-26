@@ -1,14 +1,14 @@
 //! Migration-set **integrity manifest** (Atlas `migrate hash` /
 //! `atlas.sum` style).
 //!
-//! A single hash over the migration SET — folded in the **canonical executed
-//! order** — so a tampered / reordered / inserted / removed bundle is
+//! A single hash over the migration SET - folded in the **canonical executed
+//! order** - so a tampered / reordered / inserted / removed bundle is
 //! rejected BEFORE any apply.
 //!
 //! # What it adds on top of the per-migration checksum
 //!
 //! The per-migration [`Checksum`](crate::model::migration::Checksum) already covers a single migration's *content*
-//! (`up` + `down` + preconditions). It catches **drift** — an already-applied
+//! (`up` + `down` + preconditions). It catches **drift** - an already-applied
 //! migration whose definition was edited after the fact. What it does NOT catch
 //! is **set-level** tampering of the SUPPLIED bundle before anything is applied:
 //!
@@ -16,13 +16,13 @@
 //! - a **removal** of a migration from the set;
 //! - a **content edit** (which also changes that migration's per-migration
 //!   checksum, and therefore the manifest);
-//! - a **`depends_on` reorder** that changes the EXECUTED order — this also
+//! - a **`depends_on` reorder** that changes the EXECUTED order - this also
 //!   changes the migration's per-migration checksum (which folds `depends_on`)
 //!   and the canonical executed order the manifest folds.
 //!
 //! A pure **cosmetic SLICE reorder** of an additive set (no `depends_on`) is NOT
 //! tampering and is deliberately INVARIANT: the executor re-sorts by version,
-//! so both slice orders execute identically and yield the SAME manifest — the
+//! so both slice orders execute identically and yield the SAME manifest - the
 //! control plane stamping one slice order and the bundle arriving in another must
 //! not false-mismatch.
 //!
@@ -38,10 +38,10 @@
 //!
 //! ```text
 //! H( DOMAIN
-//!  ‖ u64_be(count)
-//!  ‖ for each migration in CANONICAL EXECUTED order:
-//!      u64_be(len(version))   ‖ version_utf8
-//!      u64_be(len(checksum))  ‖ checksum_hex_utf8 )
+//!  || u64_be(count)
+//!  || for each migration in CANONICAL EXECUTED order:
+//!      u64_be(len(version))   || version_utf8
+//!      u64_be(len(checksum))  || checksum_hex_utf8 )
 //! ```
 //!
 //! Every variable-length field is preceded by a fixed-width big-endian `u64`
@@ -56,20 +56,20 @@
 //!
 //! The result is DETERMINISTIC and folded over the CANONICAL EXECUTED order:
 //! the manifest is invariant to a cosmetic SLICE reorder (the same set
-//! executes the same way ⇒ the same hash, so the control plane stamping one slice
+//! executes the same way => the same hash, so the control plane stamping one slice
 //! order and the bundle arriving in another does NOT false-mismatch), and a
 //! `depends_on` change that reorders EXECUTION changes the hash (also caught by
 //! the per-migration checksum, which folds `depends_on`). The set-level
 //! mutations it still catches: an INSERTION, a REMOVAL, and a CONTENT edit (via
 //! the per-migration checksum).
 //!
-//! # Trust model — the expected hash MUST come from a trusted source
+//! # Trust model - the expected hash MUST come from a trusted source
 //!
 //! The manifest detects tampering BETWEEN authoring/review and apply: a creator,
 //! the AI author, or a build pipeline cannot reorder / edit / insert / remove
 //! migrations undetected. For that guarantee to hold, the `expected`
 //! [`ManifestHash`] passed to [`verify_manifest`] (and to the engine's
-//! `apply_verified` gate) MUST be supplied by a **trusted** source — the control
+//! `apply_verified` gate) MUST be supplied by a **trusted** source - the control
 //! plane, which stamps it at build / review time and stores it out-of-band.
 //!
 //! It MUST NOT be read from the same bundle the migrations themselves arrived in:
@@ -93,7 +93,7 @@ const MANIFEST_DOMAIN: &[u8] = b"zero-migrate/manifest/v1";
 /// A set-level integrity hash over an ORDERED migration set (hex SHA-256).
 ///
 /// Produced by [`compute_manifest`]; checked by [`verify_manifest`] and the
-/// engine's pre-apply gate. Order-sensitive and membership-sensitive — see the
+/// engine's pre-apply gate. Order-sensitive and membership-sensitive - see the
 /// module docs for the canonical serialization and the trust model.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ManifestHash(String);
@@ -101,7 +101,7 @@ pub struct ManifestHash(String);
 impl ManifestHash {
     /// Wrap an existing hex digest (e.g. one supplied by the control plane).
     ///
-    /// No validation beyond storing the string — the value is only ever compared
+    /// No validation beyond storing the string - the value is only ever compared
     /// for equality against a freshly [`compute_manifest`]ed hash, so a malformed
     /// expected value simply never matches (fail-closed).
     #[must_use]
@@ -122,20 +122,20 @@ impl ManifestHash {
 /// The manifest is over the order the executor will actually RUN, NOT the cosmetic
 /// slice order in which the migrations were supplied. Before folding, the set is
 /// sorted into the same order `order_pending`
-/// produces — a `depends_on` topological sort, UUIDv7-version-tiebroken — via the
+/// produces - a `depends_on` topological sort, UUIDv7-version-tiebroken - via the
 /// SHARED `canonical_set_order`, so the
 /// order the manifest blesses can never diverge from the order the executor runs.
 ///
 /// Two consequences:
 ///
 /// - a pure **slice reorder** of an additive set (no `depends_on`) sorts back to
-///   the SAME version order ⇒ the SAME manifest (no false mismatch when the
+///   the SAME version order => the SAME manifest (no false mismatch when the
 ///   control plane stamps one slice order and the bundle arrives in another);
-/// - a `depends_on` change that REORDERS execution sorts differently ⇒ a DIFFERENT
+/// - a `depends_on` change that REORDERS execution sorts differently => a DIFFERENT
 ///   manifest (the reorder is also independently caught by the per-migration
 ///   checksum fold, which covers `depends_on`).
 ///
-/// Deterministic: same set ⇒ same canonical order ⇒ same hash, regardless of slice
+/// Deterministic: same set => same canonical order => same hash, regardless of slice
 /// order. Each migration contributes its `(version, checksum)` length-prefixed;
 /// see the module docs for the exact canonical serialization.
 #[must_use]
@@ -168,10 +168,10 @@ pub fn compute_manifest(migrations: &[Migration]) -> ManifestHash {
 /// human/operator understand *what* differs.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ManifestError {
-    /// The recomputed manifest did not match the `expected` hash — the supplied
+    /// The recomputed manifest did not match the `expected` hash - the supplied
     /// set was tampered (reordered / edited / inserted / removed) relative to the
     /// trusted manifest. NOTHING should be applied. `kind` is a best-effort
-    /// classification of the difference (it does NOT widen the trust decision —
+    /// classification of the difference (it does NOT widen the trust decision -
     /// any mismatch refuses).
     #[error("migration-set manifest mismatch (expected {expected}, got {actual}): {kind}")]
     Mismatch {
@@ -186,14 +186,14 @@ pub enum ManifestError {
 
 /// A best-effort classification of a manifest mismatch (diagnostics only).
 ///
-/// This is computed CHEAPLY from the supplied set alone — the `expected`
+/// This is computed CHEAPLY from the supplied set alone - the `expected`
 /// [`ManifestHash`] is an opaque digest, so we cannot reconstruct the trusted
 /// set from it. We therefore cannot always pinpoint the exact mutation; when we
 /// cannot, we report [`MismatchKind::Differs`]. The classification NEVER changes
 /// the decision: any mismatch refuses the apply.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MismatchKind {
-    /// The supplied set contains a duplicate `version` — a malformed bundle
+    /// The supplied set contains a duplicate `version` - a malformed bundle
     /// (versions must be unique). Detected directly from the set; this would also
     /// make any expected hash impossible to satisfy meaningfully.
     DuplicateVersion {
@@ -202,7 +202,7 @@ pub enum MismatchKind {
     },
     /// We could classify nothing more specific from the supplied set alone (the
     /// `expected` hash is opaque). The set differs from the trusted manifest by a
-    /// reorder, a content edit, an insertion, and/or a removal — any of which is
+    /// reorder, a content edit, an insertion, and/or a removal - any of which is
     /// a refusal.
     Differs,
 }
@@ -232,7 +232,7 @@ impl std::fmt::Display for MismatchKind {
 /// with a best-effort [`MismatchKind`].
 ///
 /// `expected` MUST come from a TRUSTED source (the control plane), NOT from the
-/// same bundle the migrations arrived in — see the module-level trust model.
+/// same bundle the migrations arrived in - see the module-level trust model.
 ///
 /// # Errors
 /// [`ManifestError::Mismatch`] if the recomputed hash differs from `expected`.
@@ -335,24 +335,24 @@ mod tests {
             mig("a", "CREATE TABLE a()", Some("DROP TABLE a")),
             mig("b", "CREATE TABLE b()", Some("DROP TABLE b")),
         ];
-        // Same set, same order ⇒ identical hash, every time.
+        // Same set, same order => identical hash, every time.
         assert_eq!(compute_manifest(&set), compute_manifest(&set));
         // 64 hex chars (SHA-256).
         assert_eq!(compute_manifest(&set).as_str().len(), 64);
     }
 
     /// The manifest is folded over the CANONICAL EXECUTED order, so a pure
-    /// SLICE reorder of an ADDITIVE set (no `depends_on`) is INVARIANT — the same
+    /// SLICE reorder of an ADDITIVE set (no `depends_on`) is INVARIANT - the same
     /// set executes in the same version order, so the hash is unchanged. A
-    /// slice-order fold would make a reorder differ → a false mismatch.
+    /// slice-order fold would make a reorder differ -> a false mismatch.
     #[test]
     fn manifest_is_invariant_to_a_cosmetic_slice_reorder() {
         let a = mig("a", "CREATE TABLE a()", None);
         let b = mig("b", "CREATE TABLE b()", None);
         let forward = vec![a.clone(), b.clone()];
         let reversed = vec![b, a];
-        // No depends_on ⇒ canonical order is version order regardless of slice
-        // order ⇒ the SAME manifest. A cosmetic reorder must NOT false-mismatch.
+        // No depends_on => canonical order is version order regardless of slice
+        // order => the SAME manifest. A cosmetic reorder must NOT false-mismatch.
         assert_eq!(
             compute_manifest(&forward),
             compute_manifest(&reversed),
@@ -363,7 +363,7 @@ mod tests {
     /// A `depends_on` change that REORDERS execution changes the manifest. We
     /// build two additive migrations a, b (b sorts after a by version), then in a
     /// SECOND set add `a depends_on b`, which forces b BEFORE a in the canonical
-    /// executed order — a different executed order ⇒ a different manifest. (Also
+    /// executed order - a different executed order => a different manifest. (Also
     /// independently caught by the per-migration checksum: a's checksum folds its `depends_on`.)
     #[test]
     fn manifest_changes_when_depends_on_reorders_execution() {
@@ -371,9 +371,9 @@ mod tests {
         let a = mig("a", "CREATE TABLE a()", None);
         std::thread::sleep(std::time::Duration::from_millis(2));
         let b = mig("b", "CREATE TABLE b()", None);
-        // Baseline: no edges ⇒ executed order is [a, b] (version order).
+        // Baseline: no edges => executed order is [a, b] (version order).
         let baseline = vec![a.clone(), b.clone()];
-        // Now make a depend on b ⇒ executed order becomes [b, a]. a's version is
+        // Now make a depend on b => executed order becomes [b, a]. a's version is
         // unchanged, but its depends_on (and so its checksum) changes; the
         // canonical order also flips.
         let a_dep = mig_dep("a", "CREATE TABLE a()", None, vec![b.version.clone()]);
@@ -410,9 +410,9 @@ mod tests {
         let b = mig("b", "CREATE TABLE b()", None);
         let one = vec![a.clone()];
         let two = vec![a.clone(), b];
-        // Insertion (add b) ⇒ different.
+        // Insertion (add b) => different.
         assert_ne!(compute_manifest(&one), compute_manifest(&two));
-        // Removal (drop b from the two-set back to one) ⇒ different (symmetric).
+        // Removal (drop b from the two-set back to one) => different (symmetric).
         let removed = vec![a];
         assert_eq!(compute_manifest(&one), compute_manifest(&removed));
         assert_ne!(compute_manifest(&two), compute_manifest(&removed));
@@ -455,8 +455,8 @@ mod tests {
         let b = mig("b", "CREATE TABLE b()", None);
         let trusted = vec![a.clone(), b.clone()];
         let expected = compute_manifest(&trusted);
-        // A pure reorder of the SAME additive migrations — same execution, same
-        // hash ⇒ accepted.
+        // A pure reorder of the SAME additive migrations - same execution, same
+        // hash => accepted.
         let reordered = vec![b, a];
         assert!(
             verify_manifest(&reordered, &expected).is_ok(),
@@ -465,7 +465,7 @@ mod tests {
     }
 
     /// A `depends_on` change that reorders EXECUTION is REJECTED with a
-    /// best-effort `Differs` diagnostic — the executed order (and the per-migration
+    /// best-effort `Differs` diagnostic - the executed order (and the per-migration
     /// checksum) both changed.
     #[test]
     fn verify_rejects_a_depends_on_reorder_with_a_diagnostic() {
@@ -474,7 +474,7 @@ mod tests {
         let b = mig("b", "CREATE TABLE b()", None);
         let trusted = vec![a.clone(), b.clone()];
         let expected = compute_manifest(&trusted);
-        // Same versions, but a now depends_on b ⇒ executed order flips to [b, a].
+        // Same versions, but a now depends_on b => executed order flips to [b, a].
         let a_dep = mig_dep("a", "CREATE TABLE a()", None, vec![b.version.clone()]);
         let a_dep = Migration {
             version: a.version,

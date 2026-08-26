@@ -2,12 +2,12 @@
 //!
 //! This is the ONE injected runtime dependency the network-dialect backends
 //! (`PostgresBackend` and `MysqlBackend`) are generic over.
-//! **SQLite does NOT ride this seam** — it is an in-process `rusqlite` actor
+//! **SQLite does NOT ride this seam** - it is an in-process `rusqlite` actor
 //! (`zero_migrate_sqlite::backend`) with no session object. The seam is therefore an
 //! implementation detail of the network backends, not a bound on the shared
 //! `MigrationBackend` trait (`zero_migrate::apply::backend`). Plain code text
 //! rather than an intra-doc link: that trait lives in the engine, which depends
-//! on this crate, so the reference cannot point upward — the same reason
+//! on this crate, so the reference cannot point upward - the same reason
 //! `PostgresBackend` and `zero_migrate_sqlite::backend` above are unlinked.
 //!
 //! The trait is typed in DRIVER-NEUTRAL types ([`Bind`]/[`Value`]/[`Row`]/
@@ -20,13 +20,13 @@
 //! - [`Bind`]: the typed network-driver bind carrier. Binary DML is represented
 //!   as canonical base64 text at this seam and decoded by dialect SQL; SQLite
 //!   binds the byte vector directly through its separate in-process actor.
-//! - [`Value`] — the neutral decoded cell
+//! - [`Value`] - the neutral decoded cell
 //!   (`Null`/`Text`/`Int`/`Bool`/`Decimal`/`TextArray`), text-biased to match the
 //!   SQL the apply path already emits (every timestamp is `to_char`-cast to text,
 //!   every count is `bigint`, most arrays are `array_agg`).
-//! - [`Row`] — a driver-neutral row with `len()`/`try_get` (NO panicking `get`),
+//! - [`Row`] - a driver-neutral row with `len()`/`try_get` (NO panicking `get`),
 //!   so the decode sites resolve through [`FromValue`] instead of `FromSql`.
-//! - [`DbError`] — a neutral, opaque error (message + optional SQLSTATE), which
+//! - [`DbError`] - a neutral, opaque error (message + optional SQLSTATE), which
 //!   is exactly how every seam consumer treats the error (wrap as `#[source]`).
 //!
 //! Both [`Bind`] and [`Value`] carry a `Decimal(String)` variant. They are
@@ -37,7 +37,7 @@
 //! in-process driver) proves the generic PG apply path is genuinely
 //! driver-neutral before any dialect-specific SQL crosses the seam.
 
-/// The driver-neutral [`SqlSession`] conformance suite — the FIRST external
+/// The driver-neutral [`SqlSession`] conformance suite - the FIRST external
 /// consumer of the seam. A host driver (or the in-crate `PgDevSession`) runs
 /// [`conformance::run`] against a live session to prove it honours the seam
 /// invariants (session pinning, transaction visibility, `exec_text` semantics,
@@ -52,8 +52,8 @@ use std::fmt;
 ///
 /// Exactly the in-session verbs the engine issues on a live session: `batch`
 /// (DDL / txn control / multi-statement session setup), `exec` /
-/// [`exec_text`](SqlSession::exec_text) (parameterized DML → rows affected), and
-/// `query` / `query_one` (catalog / journal introspection → rows).
+/// [`exec_text`](SqlSession::exec_text) (parameterized DML -> rows affected), and
+/// `query` / `query_one` (catalog / journal introspection -> rows).
 ///
 /// Every verb's error is the neutral [`DbError`] (uniform across all verbs). The
 /// bind params are neutral [`Bind`] on `exec`/`query`/`query_one`; `exec_text`
@@ -61,7 +61,7 @@ use std::fmt;
 ///
 /// The seam carries no transaction-object or lock abstraction: transaction
 /// control (`BEGIN`/`COMMIT`/`ROLLBACK`), advisory locks, and confinement `SET`s
-/// are SQL strings issued through `batch`/`exec` by each dialect's `Backend` — they
+/// are SQL strings issued through `batch`/`exec` by each dialect's `Backend` - they
 /// are engine logic, not driver methods.
 #[allow(async_fn_in_trait)] // !Send is by design: the napi block_on worker + JS host are single-threaded
 pub trait SqlSession {
@@ -69,14 +69,14 @@ pub trait SqlSession {
     /// one `&str`, may contain `;`-separated statements, no params, no rows.
     async fn batch(&self, sql: &str) -> Result<(), DbError>;
 
-    /// Parameterized DML → rows affected.
+    /// Parameterized DML -> rows affected.
     async fn exec(&self, sql: &str, binds: &[Bind]) -> Result<u64, DbError>;
 
     /// Schema-blind DML: **all params as server-inferred text**.
     ///
     /// Load-bearing and deliberately distinct from [`exec`](SqlSession::exec): the
     /// executor runs lowered op.* DML through this to dodge PG's concrete-OID
-    /// binary-bind refusal of `text → timestamptz` (a concrete-OID binary bind
+    /// binary-bind refusal of `text -> timestamptz` (a concrete-OID binary bind
     /// makes Postgres refuse the coercion; the assembler needs text-format
     /// inference). Its BIND side is already neutral (`&[Option<String>]`); its
     /// ERROR side widens to [`DbError`] uniformly with the other verbs. A MySQL
@@ -84,10 +84,10 @@ pub trait SqlSession {
     /// (MySQL has no equivalent OID refusal). **Do not remove.**
     async fn exec_text(&self, sql: &str, params: &[Option<String>]) -> Result<u64, DbError>;
 
-    /// Parameterized SELECT → all rows.
+    /// Parameterized SELECT -> all rows.
     async fn query(&self, sql: &str, binds: &[Bind]) -> Result<Vec<Row>, DbError>;
 
-    /// Parameterized SELECT → exactly one row (errors otherwise).
+    /// Parameterized SELECT -> exactly one row (errors otherwise).
     async fn query_one(&self, sql: &str, binds: &[Bind]) -> Result<Row, DbError>;
 }
 
@@ -148,7 +148,7 @@ impl From<&i64> for Bind {
     }
 }
 
-/// A nullable text bind (`Option<String>`): `None → NULL`, `Some(s) → Text` —
+/// A nullable text bind (`Option<String>`): `None -> NULL`, `Some(s) -> Text` -
 /// mirrors standard `FromSql for Option<String>` NULL handling (`backfill.rs`'s
 /// `last_cursor` progress write).
 impl From<&Option<String>> for Bind {
@@ -175,7 +175,7 @@ impl From<Option<String>> for Bind {
 /// match the SQL that already exists. `i8`/"char", `i32`
 /// (`character_maximum_length`), and `to_char` timestamps all funnel into `Text`
 /// or `Int`. `Decimal` carries a canonical string (parity with [`Bind::Decimal`]
-/// — both cover the closed IR value universe). `#[non_exhaustive]`: a driver
+/// - both cover the closed IR value universe). `#[non_exhaustive]`: a driver
 /// author matches with a wildcard arm.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -201,7 +201,7 @@ pub enum Value {
 /// future retry/branch has a home without another widening.
 #[derive(Debug, Clone)]
 pub struct DbError {
-    /// Human-readable message — satisfies all seam consumers (`Display`/`#[source]`).
+    /// Human-readable message - satisfies all seam consumers (`Display`/`#[source]`).
     pub message: String,
     /// SQLSTATE if the driver surfaces one; no seam consumer reads it today.
     pub sqlstate: Option<String>,
@@ -238,7 +238,7 @@ impl Row {
     /// Build a row from parallel column-name / cell-value vectors.
     ///
     /// # Panics
-    /// Panics (debug) if the two vectors differ in length — a producer bug.
+    /// Panics (debug) if the two vectors differ in length - a producer bug.
     #[must_use]
     pub fn new(columns: Vec<String>, values: Vec<Value>) -> Self {
         debug_assert_eq!(
@@ -269,7 +269,7 @@ impl Row {
     ///
     /// The two type params `<I, T>` let the existing call sites
     /// (`r.try_get::<_, String>("v")`) read unchanged. There is deliberately NO
-    /// panicking `get` counterpart — a decode failure is always a `Result`.
+    /// panicking `get` counterpart - a decode failure is always a `Result`.
     pub fn try_get<I: ColIndex, T: FromValue>(&self, idx: I) -> Result<T, DbError> {
         let Some(cell) = self.cell(&idx) else {
             return Err(DbError::message("column not found in row"));
@@ -278,7 +278,7 @@ impl Row {
     }
 }
 
-/// Name (`&str`) or position (`usize`) column indexing — both access patterns in
+/// Name (`&str`) or position (`usize`) column indexing - both access patterns in
 /// the census (name for `r.try_get("relkind")`, position for
 /// `row.try_get::<_, bool>(0)`).
 pub trait ColIndex {
@@ -423,7 +423,7 @@ impl FromValue for char {
 
 /// `text[]` decoded to `Vec<String>`. Reproduces the standard `FromSql`
 /// outcome on an element-NULL: `FromSql for Vec<String>` cannot hold a NULL
-/// element (a non-nullable `String` element), so it **errors** — and every call
+/// element (a non-nullable `String` element), so it **errors** - and every call
 /// site coerces that error to `[]` via `.unwrap_or_default()`. This impl errors
 /// the same way so `.unwrap_or_default()` yields `[]`, keeping every driver's
 /// output byte-identical.
@@ -447,9 +447,9 @@ impl FromValue for Vec<String> {
 }
 
 /// Nullable `text[]` decoded to `Option<Vec<String>>` (e.g. `reloptions`). A SQL
-/// NULL array → `None`; a present array → `Some(...)`. Reproduces the standard
+/// NULL array -> `None`; a present array -> `Some(...)`. Reproduces the standard
 /// `FromSql` outcome on an element-NULL: the inner `Vec<String>` decode errors, so
-/// the caller's `.ok().flatten()` yields `None` — byte-identical across drivers.
+/// the caller's `.ok().flatten()` yields `None` - byte-identical across drivers.
 impl FromValue for Option<Vec<String>> {
     fn from_value(cell: &Value) -> Result<Self, DbError> {
         match cell {

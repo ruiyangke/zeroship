@@ -128,7 +128,7 @@ impl DialectSupport {
     /// The decision for one of the dialects this engine ships.
     ///
     /// Panics if this declaration states no cell for it. A missing cell is a
-    /// declaration defect, and both of the other answers hide it — treating it as
+    /// declaration defect, and both of the other answers hide it - treating it as
     /// supported fails open into a render that was never declared, and treating it
     /// as unsupported invents a refusal with no reason to show anyone.
     #[must_use]
@@ -161,8 +161,8 @@ impl DialectSupport {
     /// this and says "DialectSet must agree with per-dialect decisions", which
     /// reads like a cross-check of the membership. It is not, and that was
     /// MEASURED, not inferred: returning every registered dialect for each op that
-    /// supports anything — wrong members for `raw` and every other PG-only op,
-    /// right emptiness bit — leaves the lib suite and the whole `dialect_matrix`
+    /// supports anything - wrong members for `raw` and every other PG-only op,
+    /// right emptiness bit - leaves the lib suite and the whole `dialect_matrix`
     /// suite reporting clean. Predates this shape (the same hole existed when
     /// this was `from_bools` over three fields); recorded so the next reader does
     /// not take the message for the guarantee.
@@ -481,8 +481,8 @@ mod tests {
     /// Every hand-written [`FeatureSupport`] this module declares, labelled by
     /// the registry group and feature it came from.
     ///
-    /// This is a DISCOVERED set — it is only as wide as the registry and the
-    /// `*_FEATURES` arrays happen to be — so every test that scans it needs the
+    /// This is a DISCOVERED set - it is only as wide as the registry and the
+    /// `*_FEATURES` arrays happen to be - so every test that scans it needs the
     /// floor in [`every_declaration_covers_the_registered_census`].
     fn declarations() -> Vec<(String, &'static FeatureSupport)> {
         FEATURE_SUPPORT_REGISTRY

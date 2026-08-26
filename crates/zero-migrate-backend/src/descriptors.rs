@@ -3,9 +3,9 @@
 //!
 //! These were relocated verbatim out of the original data-plane `backend`
 //! module (the `VectorMetric` / `EncryptionMode` / `GeoPoint` triple): they are
-//! pure *shape* descriptors — no DB round-trip, no crypto, no runtime —
+//! pure *shape* descriptors - no DB round-trip, no crypto, no runtime -
 //! and the DDL builders in `crate::schema::query` consume them. The data plane's
-//! `backend` module re-exports them so existing `crate::backend::…`
+//! `backend` module re-exports them so existing `crate::backend::...`
 //! references keep resolving (the data-plane crypto/spatial impls that
 //! name them are unchanged).
 
@@ -17,18 +17,20 @@
 /// **Why an enum, not a string**: the SDK validates against
 /// a closed three-element set; carrying it through the Rust surface
 /// as an enum trips the rustc exhaustiveness checker if a future change
-/// adds a fourth metric — every match arm in the impl flags rather
+/// adds a fourth metric - every match arm in the impl flags rather
 /// than the new metric silently routing to a default branch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VectorMetric {
-    /// Cosine distance: `1 - (a · b) / (||a|| · ||b||)`. PG operator
+    /// Cosine distance: one minus the dot product of `a` and `b` divided by the
+    /// product of their magnitudes. PG operator
     /// `<=>`, opclass `vector_cosine_ops`. The default for embedding
     /// models that produce L2-normalised vectors.
     Cosine,
-    /// Euclidean (L2) distance: `sqrt(Σ (a_i - b_i)^2)`. PG operator
+    /// Euclidean (L2) distance: the square root of the sum over each dimension `i`
+    /// of `(a_i - b_i)` squared. PG operator
     /// `<->`, opclass `vector_l2_ops`.
     L2,
-    /// Negative inner product: `- (a · b)`. PG operator `<#>`,
+    /// Negative inner product: the negated dot product of `a` and `b`. PG operator `<#>`,
     /// opclass `vector_ip_ops`. The "negative" framing makes "smaller
     /// is better" hold across all three metrics, so a single ORDER BY
     /// clause works.
@@ -38,12 +40,12 @@ pub enum VectorMetric {
 /// A geographic point in WGS84 (EPSG:4326). Used by the spatial index
 /// surface for query input and by the `geoPoint` DDL emitter.
 ///
-/// **Field order**: `lat` then `lng` — matches the SDK shape
+/// **Field order**: `lat` then `lng` - matches the SDK shape
 /// (`{ lat: number, lng: number }`) and the GeoJSON convention.
 /// Note that PostGIS `ST_MakePoint` takes `(lng, lat)`; the PG impl
 /// reorders at the SQL boundary.
 ///
-/// `Copy` because it's two `f64`s — passing by value is cheaper than
+/// `Copy` because it's two `f64`s - passing by value is cheaper than
 /// borrowing.
 #[derive(Debug, Clone, Copy)]
 pub struct GeoPoint {
@@ -55,7 +57,7 @@ pub struct GeoPoint {
     pub lng: f64,
 }
 
-/// Encryption mode — chooses nonce derivation + AAD shape.
+/// Encryption mode - chooses nonce derivation + AAD shape.
 ///
 /// Two modes, chosen per column at declare time.
 /// The on-wire blob layout is identical between modes (the synthetic
@@ -65,18 +67,18 @@ pub struct GeoPoint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EncryptionMode {
     /// Per-row random nonce. AAD =
-    /// `(collection, column, row_pk_bytes)` — binds ciphertext to its
+    /// `(collection, column, row_pk_bytes)` - binds ciphertext to its
     /// row position. The runtime mints typed_id PKs **SDK-side** before INSERT,
     /// so `row_pk` is always available when `encrypt()` is called.
-    /// Single-phase INSERT — no chicken-and-egg vs Microsoft Always
+    /// Single-phase INSERT - no chicken-and-egg vs Microsoft Always
     /// Encrypted / MongoDB CSFLE. Defeats the ciphertext-oracle
     /// attack on randomised columns. Default (fail-safe).
     Randomised,
 
     /// Synthetic nonce = HMAC-SHA256(k_siv, plaintext)[..12]. AAD =
-    /// `(collection, column)` only — `row_pk_bytes` intentionally
+    /// `(collection, column)` only - `row_pk_bytes` intentionally
     /// omitted because deterministic mode's defining property is
-    /// "same plaintext → same ciphertext under (collection, column)",
+    /// "same plaintext -> same ciphertext under (collection, column)",
     /// which the B-tree-on-ciphertext equality index depends on.
     /// Inherits the standard deterministic-mode leak (equality
     /// across rows is observable to anyone with column read access).

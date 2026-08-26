@@ -6,18 +6,19 @@
 //!
 //! - a **literal** `lit` (no `*`): matches exactly the byte string `lit`;
 //! - a **star** `*` (empty prefix, empty suffix): matches every byte string;
-//! - a **prefix** glob `p*`: matches `w` iff `w` starts with `p` and `|w| ≥ |p|`;
-//! - a **suffix** glob `*s`: matches `w` iff `w` ends with `s` and `|w| ≥ |s|`;
+//! - a **prefix** glob `p*`: matches `w` iff `w` starts with `p` and `|w| >= |p|`;
+//! - a **suffix** glob `*s`: matches `w` iff `w` ends with `s` and `|w| >= |s|`;
 //! - an **infix** glob `p*s`: matches `w` iff `w` starts with `p`, ends with `s`,
-//!   and `|w| ≥ |p| + |s|` (the length floor is the H1 fix — see below).
+//!   and `|w| >= |p| + |s|` (the length floor is the H1 fix - see below).
 //!
-//! The exact per-segment intersection `∩seg : SegGlob × SegGlob → Set<SegGlob>`
-//! (a *set*, because shared-`*` corner cases are not expressible as one glob) is
-//! the load-bearing primitive of the whole scope lattice: the two-segment
-//! `pattern ∩ pattern` is the Cartesian product across segments, and the scope
-//! meet `⊓` unions those products. `∩seg` MUST be exact (`Objects(a ∩ b) =
-//! Objects(a) ∩ Objects(b)`); the brute-force oracle in `crate::scope::oracle`
-//! proves it over a bounded universe.
+//! The exact per-segment intersection [`intersect_seg`], of type
+//! `(SegGlob, SegGlob) -> Set<SegGlob>` (a *set*, because shared-`*` corner cases
+//! are not expressible as one glob), is the load-bearing primitive of the whole
+//! scope lattice: the two-segment pattern intersection is the Cartesian product
+//! across segments, and the scope meet unions those products. Per-segment
+//! intersection MUST be exact - the object set of the result is exactly the
+//! intersection of the two operands' object sets - and the brute-force oracle in
+//! `crate::scope::oracle` proves it over a bounded universe.
 
 use std::collections::BTreeSet;
 
@@ -26,7 +27,7 @@ use std::collections::BTreeSet;
 ///
 /// Canonicalisation invariant (upheld by every constructor and combinator here):
 /// the `(prefix, suffix, has_star)` triple is the unique representation of the
-/// object set it denotes. `has_star == false` ⇒ `suffix` is empty and `prefix`
+/// object set it denotes. `has_star == false` => `suffix` is empty and `prefix`
 /// is the literal. `*` is `prefix == [] && suffix == [] && has_star`.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SegGlob {
@@ -52,7 +53,7 @@ impl SegGlob {
         }
     }
 
-    /// The `*` glob — matches every byte string in this segment.
+    /// The `*` glob - matches every byte string in this segment.
     #[must_use]
     pub fn star() -> Self {
         Self {
@@ -130,7 +131,7 @@ impl SegGlob {
 
     /// Ground-truth matcher: does this glob match the concrete segment `w`?
     ///
-    /// This is the *direct* matcher the oracle uses as ground truth — it is NOT
+    /// This is the *direct* matcher the oracle uses as ground truth - it is NOT
     /// derived from the lattice ops. Every algebraic operation is verified against
     /// this.
     #[must_use]
@@ -144,10 +145,11 @@ impl SegGlob {
         }
     }
 
-    /// Does `self`'s object set cover `other`'s? (`Objects(other) ⊆ Objects(self)`)
+    /// Does `self`'s object set cover `other`'s? That is, is `Objects(other)`
+    /// contained in `Objects(self)`?
     ///
-    /// Sound and EXACT for single-`*` segment globs. Used by the scope-`⊑` cover
-    /// relation.
+    /// Sound and EXACT for single-`*` segment globs. Used by the scope containment
+    /// cover relation.
     #[must_use]
     pub fn covers(&self, other: &SegGlob) -> bool {
         match (self.has_star, other.has_star) {
@@ -161,11 +163,11 @@ impl SegGlob {
             // iff every string matching `other` also matches `self`. Since
             // `other` can be arbitrarily long in the middle, `self`'s prefix must
             // be a prefix of `other`'s prefix AND `self`'s suffix a suffix of
-            // `other`'s suffix — but ONLY when those pieces don't force an overlap
+            // `other`'s suffix - but ONLY when those pieces don't force an overlap
             // in short witnesses of `other`. Because both are single-`*` globs and
             // `other` admits arbitrarily long middles, the shortest such witnesses
             // still start with `other.prefix` and end with `other.suffix`; the
-            // cover holds iff `self.prefix ⊑ other.prefix` and `self.suffix` is a
+            // cover holds iff `self.prefix` is a prefix of `other.prefix` and `self.suffix` is a
             // suffix of `other.suffix`. (The length floor of `self` is then
             // automatically met by any witness long enough to satisfy `other`,
             // because a witness of `other` can be extended arbitrarily.)
@@ -176,28 +178,28 @@ impl SegGlob {
     }
 }
 
-/// Exact per-segment intersection `∩seg`.
+/// Exact per-segment intersection.
 ///
-/// Returns the *set* of globs whose union of object sets equals
-/// `Objects(a) ∩ Objects(b)`. EXACT: no over- or under-approximation.
+/// Returns the *set* of globs whose union of object sets equals the intersection
+/// of `Objects(a)` and `Objects(b)`. EXACT: no over- or under-approximation.
 ///
-/// The corner cases (prefix×suffix, infix×infix) enumerate every consistent
-/// overlap length. **[H1 FIX]** every emitted infix/literal witness is filtered by
-/// the joint length floor `|w| ≥ max(|p1|+|s1|, |p2|+|s2|)`, so e.g.
-/// `a*a ∩seg a*a` does NOT contain `"a"` — the doc's reduction dropped the
-/// per-input floors and over-approximated.
+/// The corner cases (prefix against suffix, infix against infix) enumerate every
+/// consistent overlap length. **[H1 FIX]** every emitted infix/literal witness is
+/// filtered by the joint length floor `|w| >= max(|p1|+|s1|, |p2|+|s2|)`, so
+/// intersecting `a*a` with itself does NOT yield `"a"` - the doc's reduction
+/// dropped the per-input floors and over-approximated.
 #[must_use]
 pub fn intersect_seg(a: &SegGlob, b: &SegGlob) -> BTreeSet<SegGlob> {
     let mut out = BTreeSet::new();
 
     match (a.has_star, b.has_star) {
-        // ── literal × literal ──────────────────────────────────────────────
+        // -- literal against literal ----------------------------------------
         (false, false) => {
             if a.prefix == b.prefix {
                 out.insert(a.clone());
             }
         }
-        // ── literal × glob (and symmetric) ─────────────────────────────────
+        // -- literal against glob (and symmetric) ---------------------------
         (false, true) => {
             if b.matches(&a.prefix) {
                 out.insert(a.clone());
@@ -208,18 +210,19 @@ pub fn intersect_seg(a: &SegGlob, b: &SegGlob) -> BTreeSet<SegGlob> {
                 out.insert(b.clone());
             }
         }
-        // ── glob × glob ────────────────────────────────────────────────────
+        // -- glob against glob ----------------------------------------------
         // Both `a = pa*sa`, `b = pb*sb`. A string matches both iff it starts
-        // with BOTH pa and pb (⇒ one prefix a prefix of the other; take the
-        // longer as p, else ∅), ends with BOTH sa and sb (⇒ one suffix a suffix
-        // of the other; take the longer as s, else ∅), AND is long enough to
-        // satisfy both length floors: |w| ≥ max(|pa|+|sa|, |pb|+|sb|).
+        // with BOTH pa and pb (=> one prefix a prefix of the other; take the
+        // longer as p, else the result is empty), ends with BOTH sa and sb (=> one
+        // suffix a suffix of the other; take the longer as s, else the result is
+        // empty), AND is long enough to
+        // satisfy both length floors: |w| >= max(|pa|+|sa|, |pb|+|sb|).
         (true, true) => {
             let (Some(p), Some(s)) = (
                 longer_prefix(&a.prefix, &b.prefix),
                 longer_suffix(&a.suffix, &b.suffix),
             ) else {
-                return out; // ∅: prefixes or suffixes contradict
+                return out; // empty: prefixes or suffixes contradict
             };
             let floor = (a.prefix.len() + a.suffix.len()).max(b.prefix.len() + b.suffix.len());
             enumerate_prefix_suffix(&p, &s, floor, &mut out);
@@ -251,34 +254,36 @@ fn longer_suffix(x: &[u8], y: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-/// Enumerate every glob in `Objects(p*) ∩ Objects(*s)` that also satisfies the
-/// joint length `floor` — i.e. the set whose union is exactly
-/// `{ w : w starts with p, w ends with s, |w| ≥ floor }`.
+/// Enumerate every glob in the intersection of `Objects(p*)` and `Objects(*s)`
+/// that also satisfies the
+/// joint length `floor` - i.e. the set whose union is exactly
+/// `{ w : w starts with p, w ends with s, |w| >= floor }`.
 ///
 /// A witness `w` starts with `p` and ends with `s`. Two sub-populations:
 ///
-/// - **`|w| ≥ |p|+|s|`** (prefix and suffix do not overlap): these are exactly
+/// - **`|w| >= |p|+|s|`** (prefix and suffix do not overlap): these are exactly
 ///   `Objects(p*s)`, the infix glob. Because `enumerate_prefix_suffix` is only
-///   ever called from the glob×glob arm with `p = longer(pa,pb)` and
-///   `s = longer(sa,sb)`, we always have `base = |p|+|s| ≥ floor` (each input's
-///   `|pi|+|si| ≤ base`), so the whole infix clears the floor and is emitted
-///   verbatim. The `floor ≤ base` guard makes that reliance explicit and total.
-/// - **`|w| < |p|+|s|`** (prefix and suffix must overlap by `o = |p|+|s|−|w|` ≥ 1
-///   characters): finite, and each is a LITERAL of length `base − o`. Such a
+///   ever called from the glob-against-glob arm with `p = longer(pa,pb)` and
+///   `s = longer(sa,sb)`, we always have `base = |p|+|s| >= floor` (each input's
+///   `|pi|+|si| <= base`), so the whole infix clears the floor and is emitted
+///   verbatim. The `floor <= base` guard makes that reliance explicit and total.
+/// - **`|w| < |p|+|s|`** (prefix and suffix must overlap by `o = |p|+|s|-|w|` >= 1
+///   characters): finite, and each is a LITERAL of length `base - o`. Such a
 ///   literal exists iff `p`'s last `o` bytes equal `s`'s first `o` bytes. This is
 ///   where the [H1 FIX] bites: an overlap literal shorter than `floor` denotes a
 ///   string too short for one of the two INPUT globs (e.g. `"a"` for
-///   `a*a ∩seg a*a`, whose inputs each require `|w| ≥ 2`) and MUST be dropped.
+///   `a*a` intersected with itself, whose inputs each require `|w| >= 2`) and
+///   MUST be dropped.
 ///
 /// The star-carrying member is the single infix `p*s`; every overlap witness is a
 /// literal. `subsume` (called by `intersect_seg`) then drops any literal the infix
-/// already covers — but a floor-clipped literal never reappears, because the infix
-/// only covers witnesses of length ≥ base > the clipped literal's length.
+/// already covers - but a floor-clipped literal never reappears, because the infix
+/// only covers witnesses of length >= base > the clipped literal's length.
 fn enumerate_prefix_suffix(p: &[u8], s: &[u8], floor: usize, out: &mut BTreeSet<SegGlob>) {
     let base = p.len() + s.len();
 
-    // Non-overlapping witnesses (|w| ≥ base): exactly Objects(p*s). Always clears
-    // the floor for the pairs this function receives (base ≥ floor); the guard
+    // Non-overlapping witnesses (|w| >= base): exactly Objects(p*s). Always clears
+    // the floor for the pairs this function receives (base >= floor); the guard
     // documents and enforces that invariant rather than silently over-emitting.
     debug_assert!(
         floor <= base,
@@ -288,9 +293,9 @@ fn enumerate_prefix_suffix(p: &[u8], s: &[u8], floor: usize, out: &mut BTreeSet<
         out.insert(SegGlob::infix(p.to_vec(), s.to_vec()));
     }
 
-    // Overlapping witnesses (|w| = base − o, o ≥ 1): finite literals, each valid
+    // Overlapping witnesses (|w| = base - o, o >= 1): finite literals, each valid
     // only when p's last o bytes equal s's first o bytes, and each subject to the
-    // joint length floor (the H1 fix — a too-short literal is dropped).
+    // joint length floor (the H1 fix - a too-short literal is dropped).
     let min = p.len().min(s.len());
     for o in 1..=min {
         if p[p.len() - o..] == s[..o] {
@@ -349,7 +354,7 @@ mod tests {
 
     #[test]
     fn h1_a_star_a_idempotent_excludes_a() {
-        // a*a ∩seg a*a must be {a*a}, and must NOT admit "a".
+        // Intersecting a*a with itself must be {a*a}, and must NOT admit "a".
         let g = SegGlob::infix(b"a".to_vec(), b"a".to_vec());
         let r = intersect_seg(&g, &g);
         assert_eq!(r, set(&["a*a"]));
@@ -360,7 +365,8 @@ mod tests {
 
     #[test]
     fn prefix_suffix_disjoint_chars() {
-        // a_* ∩seg *_x  →  { a_x, a_*_x }  (prefix a_, suffix _x, no shared char)
+        // a_* intersected with *_x  ->  { a_x, a_*_x }  (prefix a_, suffix _x,
+        // no shared char)
         let a = SegGlob::infix(b"a_".to_vec(), Vec::new());
         let b = SegGlob::infix(Vec::new(), b"_x".to_vec());
         let r = intersect_seg(&a, &b);
@@ -369,7 +375,7 @@ mod tests {
 
     #[test]
     fn prefix_suffix_shared_char_enumerates_all_overlaps() {
-        // a_a_* ∩seg *_a_a : the corrected H2 set (see the oracle for the full
+        // a_a_* intersected with *_a_a : the corrected H2 set (see the oracle for the full
         // derivation + exactness proof). o=3 gives a_a_a, o=1 gives a_a_a_a, plus
         // the infix a_a_*_a_a. The too-short "a_a" (< floor 4) is absent.
         let a = SegGlob::infix(b"a_a_".to_vec(), Vec::new());

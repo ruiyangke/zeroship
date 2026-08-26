@@ -2,7 +2,7 @@
 //! that owns them.
 //!
 //! [`crate::registry::BackendVendor`] already carries everything a vendor knows
-//! STATICALLY — its renderers and its policies, all `&'static dyn`. This module is
+//! STATICALLY - its renderers and its policies, all `&'static dyn`. This module is
 //! the other half: a place for values a vendor owns that are only known when a
 //! process is running, because they were read off a live catalog or handed in by
 //! the host. Those cannot be `&'static`, so they cannot live on `BackendVendor`,
@@ -13,9 +13,9 @@
 //! [`zero_migrate_ir::ir::Op::Dialectal`] is the precedent: a `BTreeMap` keyed by
 //! the open [`DialectId`], so a fourth backend selects its own key without any
 //! neutral crate naming it. A [`Dialectal`] is that same map, carrying an
-//! `Arc<dyn …>` instead of an `Op` sequence, so the VALUE's type stays inside the
+//! `Arc<dyn ...>` instead of an `Op` sequence, so the VALUE's type stays inside the
 //! vendor crate that defines it. Core can hold one, clone one, compare one and
-//! hand one back — and cannot read one, because reading takes a `downcast_ref` to
+//! hand one back - and cannot read one, because reading takes a `downcast_ref` to
 //! a concrete type only the owning vendor names.
 //!
 //! That is the point. A typed `Option<VendorThing>` field on a neutral struct puts
@@ -206,8 +206,8 @@ impl<T: DialectalValue + ?Sized> Eq for Dialectal<T> {}
 /// distinction it must still be able to compare records the exact identity here
 /// and answers the comparison itself.
 pub trait VendorColumnFacts: DialectalValue {
-    /// Do these facts and `other`'s — the same dialect's, on the other side of a
-    /// comparison — describe the same PHYSICAL column?
+    /// Do these facts and `other`'s - the same dialect's, on the other side of a
+    /// comparison - describe the same PHYSICAL column?
     ///
     /// A vendor that cannot ESTABLISH a difference must answer `true`: a differ's
     /// safe direction is to decline to report a difference it cannot prove, and
@@ -218,7 +218,7 @@ pub trait VendorColumnFacts: DialectalValue {
     /// own facts are what decided [`Self::physical_identity`].
     ///
     /// `None` keeps the caller's portable spelling. `Some` is used verbatim, so a
-    /// vendor that returns two equal strings has told the reader nothing — the
+    /// vendor that returns two equal strings has told the reader nothing - the
     /// caller keeps the portable pair in that case rather than printing a line
     /// that names no difference.
     fn type_drift_report(&self, other: &dyn VendorColumnFacts) -> Option<(String, String)>;

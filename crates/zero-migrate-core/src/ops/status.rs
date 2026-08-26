@@ -1,6 +1,6 @@
-//! Status + history read API — **read-only**.
+//! Status + history read API - **read-only**.
 //!
-//! [`status_via_backend`] answers "where is this project's schema?" — what's
+//! [`status_via_backend`] answers "where is this project's schema?" - what's
 //! applied, what's pending (in the exact order apply will run it), and the current
 //! version. [`history_via_backend`] returns the FULL append-only audit log (every
 //! apply + every rollback event, in order), the tamper-evident record of every
@@ -9,11 +9,11 @@
 //! Both go through [`MigrationBackend`](crate::apply::backend::MigrationBackend).
 //! Neither takes a connection plus a `dialect` argument any more: that shape is
 //! what let these verbs NAME a dialect and then read PostgreSQL's journal
-//! regardless. The one read the neutral trait cannot serve — full
-//! [`RolledBackEntry`](crate::apply::journal::RolledBackEntry) detail — stayed with the vendor that has it, in
+//! regardless. The one read the neutral trait cannot serve - full
+//! [`RolledBackEntry`](crate::apply::journal::RolledBackEntry) detail - stayed with the vendor that has it, in
 //! `zero_migrate_postgres::backend::status_sql`.
 //!
-//! This module emits NO DDL and mutates nothing — it surfaces journal state. It
+//! This module emits NO DDL and mutates nothing - it surfaces journal state. It
 //! reuses the journal's NET-state reader (the backend's
 //! [`applied`](crate::apply::backend::MigrationBackend::applied)) and the
 //! executor's pending-ordering (`crate::apply::executor::order_pending`) so status's
@@ -52,7 +52,7 @@ pub enum PlanStatusStepKind {
     OnlineExpand,
     /// One PostgreSQL deferred-contract migration of an online rename.
     OnlineContract,
-    /// The journal migration for an atomic table rebuild — the strategy a backend
+    /// The journal migration for an atomic table rebuild - the strategy a backend
     /// selects when it has no native online form for the change, not one backend's name.
     TableRebuild,
 }
@@ -406,11 +406,11 @@ pub struct ResolvedPendingContract {
 
 // The status VOCABULARY moved down to the backend contract: `MigrationStatus` and the
 // two derived cross-deploy views over it, plus the error the read API refuses with.
-// A vendor journal reader fills in the same struct the neutral verb below fills in —
+// A vendor journal reader fills in the same struct the neutral verb below fills in -
 // `zero-migrate-postgres`'s `status_sql` reads its own journal under a snapshot
 // isolation statement no other vendor accepts, and then answers this exact question.
 // Two copies of the vocabulary would be two answers that drift. Re-exported so every
-// `crate::ops::status::…` path (and the flattened root re-exports) resolves unchanged.
+// `crate::ops::status::...` path (and the flattened root re-exports) resolves unchanged.
 pub use zero_migrate_backend::status::{BlockedPlan, MigrationStatus, PendingContractStatus};
 
 /// What a status read produced: a reconciled verdict, or the report that a peer's
@@ -1071,7 +1071,7 @@ fn order_plan_manifests(manifests: &[PlanStatusManifest]) -> Result<Vec<usize>, 
 ///
 /// PostgreSQL additionally keeps a `REPEATABLE READ READ ONLY` snapshot read of the
 /// same net state in
-/// `zero_migrate_postgres::backend::status_sql` — the one path that can
+/// `zero_migrate_postgres::backend::status_sql` - the one path that can
 /// report full [`RolledBackEntry`](crate::apply::journal::RolledBackEntry) detail. It lives in that backend rather than
 /// here because the transaction it opens and the journal it reads are that vendor's.
 ///
@@ -1294,10 +1294,10 @@ fn derive_pending_contract_status_for_plans(
 }
 
 /// Read the FULL append-only event log (every apply + rollback event) in
-/// `event_seq` order — the audit trail.
+/// `event_seq` order - the audit trail.
 ///
 /// **Read-only.** Unlike [`status_via_backend`], this does NOT collapse to net
-/// state: a version applied → rolled back → re-applied shows all three events.
+/// state: a version applied -> rolled back -> re-applied shows all three events.
 /// Bootstraps the journal idempotently first so a fresh project returns an empty
 /// log.
 ///

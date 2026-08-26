@@ -3,19 +3,19 @@
 //!
 //! The design goal is fully-automatable migrations, so every
 //! stuck state in the online-rename lifecycle emits a STRUCTURED envelope an AI
-//! orchestrator can act on — not only a prose string. The human-readable
+//! orchestrator can act on - not only a prose string. The human-readable
 //! message is the **projection** of the structured payload (the `Display` impls
 //! here), and each payload carries enough to EXECUTE the remedy (an
-//! `apply_action` / `abort_action` naming the exact `zero-migrate …` command).
+//! `apply_action` / `abort_action` naming the exact `zero-migrate ...` command).
 //!
 //! The three payloads:
-//! - [`PendingContractRefusal`] (`TABLE_HAS_PENDING_CONTRACT`) — a new op touches
+//! - [`PendingContractRefusal`] (`TABLE_HAS_PENDING_CONTRACT`) - a new op touches
 //!   a table with an outstanding pending contract; the deploy is fail-closed
 //!   refused.
-//! - [`DependencyPendingContract`] (`DEPENDENCY_PENDING_CONTRACT`) — a plan B
+//! - [`DependencyPendingContract`] (`DEPENDENCY_PENDING_CONTRACT`) - a plan B
 //!   `depends_on`s a plan A whose online-rename contract is still pending, so A
 //!   is not fully satisfied and B is BLOCKED.
-//! - [`OrphanedPendingContract`] (`ORPHANED_PENDING_CONTRACT`) — a later bundle no
+//! - [`OrphanedPendingContract`] (`ORPHANED_PENDING_CONTRACT`) - a later bundle no
 //!   longer carries the rename whose contract is pending; the obligation is
 //!   orphaned, surfaced by `status` as a distinct state.
 //!
@@ -30,19 +30,19 @@ pub const CODE_DEPENDENCY_PENDING_CONTRACT: &str = "DEPENDENCY_PENDING_CONTRACT"
 /// The `code` literal for an [`OrphanedPendingContract`].
 pub const CODE_ORPHANED_PENDING_CONTRACT: &str = "ORPHANED_PENDING_CONTRACT";
 
-/// A remediation action — the command that discharges the obligation plus the
-/// version it targets — so an automated orchestrator can self-resolve where
+/// A remediation action - the command that discharges the obligation plus the
+/// version it targets - so an automated orchestrator can self-resolve where
 /// policy allows.
 ///
 /// The two audiences reach this by different routes, and the fields serve both.
 /// An EMBEDDER calls `resolvePending()` with `version` directly, which is why the
 /// version travels here at all. An OPERATOR runs `command`, which takes the
-/// authored migration NAME rather than a version — `zero-migrate status` maps one
+/// authored migration NAME rather than a version - `zero-migrate status` maps one
 /// to the other. So `command` and `version` do not concatenate into a shell line,
 /// and the `Display` impls below deliberately do not join them into one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionPayload {
-    /// The `zero-migrate …` command that discharges the obligation (e.g.
+    /// The `zero-migrate ...` command that discharges the obligation (e.g.
     /// `zero-migrate resolve --commit`). Takes a migration name, not `version`.
     pub command: String,
     /// The version the action targets (the pending/orphan `pending_version`).
@@ -50,7 +50,7 @@ pub struct ActionPayload {
     pub version: String,
 }
 
-/// `TABLE_HAS_PENDING_CONTRACT` — the fail-closed refusal payload.
+/// `TABLE_HAS_PENDING_CONTRACT` - the fail-closed refusal payload.
 ///
 /// Emitted when the current deploy's op list touches a table that still has an
 /// outstanding online-rename contract from a prior deploy. The deploy applies
@@ -61,7 +61,7 @@ pub struct PendingContractRefusal {
     pub code: String,
     /// The table with the outstanding pending contract (the refusal key).
     pub table: String,
-    /// The obligation key — the E2 trigger version of the pending rename.
+    /// The obligation key - the E2 trigger version of the pending rename.
     pub pending_version: String,
     /// The remediation tag (`"apply_pending"`).
     pub remediation: String,
@@ -105,10 +105,10 @@ impl std::fmt::Display for PendingContractRefusal {
     }
 }
 
-/// `DEPENDENCY_PENDING_CONTRACT` — the blocked-`depends_on` payload.
+/// `DEPENDENCY_PENDING_CONTRACT` - the blocked-`depends_on` payload.
 ///
 /// Emitted when plan `blocked` declares `depends_on: [dependency]` and the
-/// dependency is an online rename whose contract is still pending — so the
+/// dependency is an online rename whose contract is still pending - so the
 /// dependency is NOT fully satisfied and the blocked plan cannot apply yet. This
 /// is a DISTINCT, retained `blocked-awaiting-approval` state, NOT a failure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,7 +155,7 @@ impl std::fmt::Display for DependencyPendingContract {
     }
 }
 
-/// `ORPHANED_PENDING_CONTRACT` — the orphaned-obligation payload.
+/// `ORPHANED_PENDING_CONTRACT` - the orphaned-obligation payload.
 ///
 /// Emitted when a later bundle no longer carries the rename whose contract is
 /// pending: the obligation is orphaned. The engine neither silently drops it

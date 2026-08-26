@@ -9,7 +9,7 @@ use zero_migrate_policy::{
     ValidatePredicate,
 };
 
-// ── registry fixtures ────────────────────────────────────────────────────────────
+// -- registry fixtures ------------------------------------------------------------
 
 fn def(
     key: &str,
@@ -96,7 +96,7 @@ fn load_draft(toml: &str) -> Result<PolicyDoc, LoadError> {
     PolicyDoc::parse_toml(toml, &registry(), LoadContext::NonRootLayer)
 }
 
-// ── gate: policy_version ─────────────────────────────────────────────────────────
+// -- gate: policy_version ---------------------------------------------------------
 
 #[test]
 fn policy_version_known_accepts() {
@@ -111,7 +111,7 @@ fn policy_version_unknown_rejects() {
     assert_eq!(e, LoadError::UnknownPolicyVersion { found: 2 });
 }
 
-// ── gate: unknown / malformed knob key ───────────────────────────────────────────
+// -- gate: unknown / malformed knob key -------------------------------------------
 
 #[test]
 fn known_key_accepts() {
@@ -165,11 +165,11 @@ scope = "all"
     );
 }
 
-// ── gate: section ↔ polarity ─────────────────────────────────────────────────────
+// -- gate: section against polarity ------------------------------------------------
 
 #[test]
 fn grant_of_grant_polarity_accepts() {
-    // schema.create_table is Grant-polarity → legal under [[grant]].
+    // schema.create_table is Grant-polarity -> legal under [[grant]].
     assert!(load_root(
         r#"policy_version = 1
 [[grant]]
@@ -183,7 +183,7 @@ scope = { include = ["app_*"] }
 
 #[test]
 fn grant_of_require_polarity_rejects() {
-    // safety.require_rls is Require-polarity → illegal under [[grant]].
+    // safety.require_rls is Require-polarity -> illegal under [[grant]].
     let e = load_root(
         r#"policy_version = 1
 [[grant]]
@@ -221,7 +221,7 @@ scope = { include = ["app_*"] }
     ));
 }
 
-// ── gate: knob value validity (kind + hard floor) ────────────────────────────────
+// -- gate: knob value validity (kind + hard floor) --------------------------------
 
 #[test]
 fn valid_uint_charter_accepts() {
@@ -267,7 +267,7 @@ scope = { include = ["app_*"] }
     assert!(matches!(e, LoadError::InvalidKnobValue { .. }));
 }
 
-// ── gate: Global-knob scope legality ─────────────────────────────────────────────
+// -- gate: Global-knob scope legality ---------------------------------------------
 
 #[test]
 fn global_knob_scope_all_accepts() {
@@ -306,8 +306,8 @@ scope = { include = ["app_*"] }
 
 #[test]
 fn global_knob_of_star_scope_rejects_syntactically() {
-    // `Of{["*"]}` denotes the universe but is NOT the syntactic `All` token — a
-    // Global knob must be spelled `all` loudly (II.2.3 syntactic-⊤ decision).
+    // `Of{["*"]}` denotes the universe but is NOT the syntactic `All` token - a
+    // Global knob must be spelled `all` loudly (the II.2.3 syntactic-universe decision).
     let e = load_root(
         r#"policy_version = 1
 [[grant]]
@@ -327,7 +327,7 @@ scope = { include = ["*"] }
 
 #[test]
 fn global_knob_omitted_scope_rejects() {
-    // Omission would inherit the (narrow) default — a load error for a Global knob.
+    // Omission would inherit the (narrow) default - a load error for a Global knob.
     let e = load_root(
         r#"policy_version = 1
 [default_scope]
@@ -369,7 +369,7 @@ scope = "all"
     assert_eq!(g.scope, Scope::All);
 }
 
-// ── gate: PerSchema granularity ──────────────────────────────────────────────────
+// -- gate: PerSchema granularity --------------------------------------------------
 
 #[test]
 fn per_schema_knob_schema_scope_accepts() {
@@ -403,7 +403,7 @@ scope = { include = ["app_main.events"] }
     );
 }
 
-// ── gate: grant scope unbounded (A3) ─────────────────────────────────────────────
+// -- gate: grant scope unbounded (A3) ---------------------------------------------
 
 #[test]
 fn grant_with_default_scope_accepts() {
@@ -441,7 +441,7 @@ value = true
     );
 }
 
-// ── gate: mandatory inject on non-root layer ─────────────────────────────────────
+// -- gate: mandatory inject on non-root layer -------------------------------------
 
 const MANDATORY_INJECT_DOC: &str = r#"policy_version = 1
 [[inject]]
@@ -660,11 +660,11 @@ predicate = { kind = "forbidden_columns", names = ["secret"] }
     ));
 }
 
-// ── gate: self-contradictory inject + validate ───────────────────────────────────
+// -- gate: self-contradictory inject + validate -----------------------------------
 
 #[test]
 fn non_contradictory_inject_validate_accepts() {
-    // Inject created_at + forbid a DIFFERENT column → consistent.
+    // Inject created_at + forbid a DIFFERENT column -> consistent.
     assert!(load_root(
         r#"policy_version = 1
 [[inject]]
@@ -699,7 +699,7 @@ predicate = { kind = "forbidden_columns", names = ["created_at"] }
 
 #[test]
 fn contradiction_on_disjoint_scope_accepts() {
-    // Inject in app_*, forbid the same name in staging — disjoint scopes, no clash.
+    // Inject in app_*, forbid the same name in staging - disjoint scopes, no clash.
     assert!(load_root(
         r#"policy_version = 1
 [[inject]]
@@ -733,7 +733,7 @@ predicate = { kind = "forbidden_columns", names = ["created_at"] }
     ));
 }
 
-// ── gate: malformed scope / empty include ────────────────────────────────────────
+// -- gate: malformed scope / empty include ----------------------------------------
 
 #[test]
 fn empty_include_rejects() {
@@ -763,7 +763,7 @@ scope = { include = ["a.b.c"] }
     assert!(matches!(e, LoadError::MalformedScope { .. }));
 }
 
-// ── deny_unknown_fields ──────────────────────────────────────────────────────────
+// -- deny_unknown_fields ----------------------------------------------------------
 
 #[test]
 fn unknown_field_rejects() {
@@ -780,11 +780,11 @@ bogus = 3
     assert!(matches!(e, LoadError::Parse { .. }));
 }
 
-// ── dead rule → warning ──────────────────────────────────────────────────────────
+// -- dead rule -> warning ----------------------------------------------------------
 
 #[test]
 fn dead_rule_warns_not_errors() {
-    // default_scope app_* ⊓ own scope staging = disjoint = Nothing → dead rule.
+    // default_scope app_* meets own scope staging as disjoint = Nothing -> dead rule.
     let doc = load_root(
         r#"policy_version = 1
 [default_scope]
@@ -801,7 +801,7 @@ scope = { include = ["staging"] }
     assert_eq!(doc.warnings, vec![LoadWarning::DeadRule { index: 0 }]);
 }
 
-// ── registry digest stability ────────────────────────────────────────────────────
+// -- registry digest stability ----------------------------------------------------
 
 #[test]
 fn registry_digest_is_shuffle_stable() {
@@ -883,7 +883,7 @@ fn registry_digest_changes_on_object_model() {
     assert_ne!(r1.digest(), r2.digest());
 }
 
-// ── the doc's II.3 example TOML loads legally as a root charter ───────────────────
+// -- the doc's II.3 example TOML loads legally as a root charter -------------------
 
 #[test]
 fn doc_example_loads_as_root_charter() {
@@ -939,8 +939,8 @@ predicate = { kind = "forbidden_columns", names = ["card_number"] }
         .unwrap();
     assert_eq!(pg.scope, Scope::All);
 
-    // The raw_sql grant narrowed to app_* ⊓ staging. staging is disjoint from
-    // app_* → Nothing → a dead-rule warning (the example's staging is outside
+    // The raw_sql grant narrowed to app_* meet staging. staging is disjoint from
+    // app_* -> Nothing -> a dead-rule warning (the example's staging is outside
     // the app_* default; that is a legal-but-inert composition).
     let raw = doc
         .rules
@@ -959,7 +959,7 @@ predicate = { kind = "forbidden_columns", names = ["card_number"] }
     )));
 }
 
-// ── JSON front-end parity ────────────────────────────────────────────────────────
+// -- JSON front-end parity --------------------------------------------------------
 
 #[test]
 fn json_front_end_loads() {
@@ -973,11 +973,11 @@ fn json_front_end_loads() {
     assert_eq!(doc.rules.len(), 2);
 }
 
-// ── name normalization (II.2.7) through the loader ───────────────────────────────
+// -- name normalization (II.2.7) through the loader -------------------------------
 
 #[test]
 fn normalization_unquoted_folds_lowercase() {
-    // Scope pattern `App_*` folds to app_* — a proper Of, not a malformed scope.
+    // Scope pattern `App_*` folds to app_* - a proper Of, not a malformed scope.
     let doc = load_root(
         r#"policy_version = 1
 [[grant]]
@@ -998,7 +998,7 @@ scope = { include = ["App_*"] }
 
 #[test]
 fn normalization_quoted_verbatim() {
-    // A quoted `"App_x"` scope is byte-exact — matches App_x, not app_x.
+    // A quoted `"App_x"` scope is byte-exact - matches App_x, not app_x.
     let doc = load_root(
         r#"policy_version = 1
 [[grant]]
@@ -1044,9 +1044,9 @@ scope = { include = ["\"a.b\""] }
     }
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 // extends (II.7, H-1): draft-forbid + trusted catalog resolution + cycle detection
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 
 /// A trivial in-memory trusted catalog for the extends tests.
 struct MapCatalog(std::collections::BTreeMap<String, String>);
@@ -1142,7 +1142,7 @@ fn extends_unknown_base_is_error() {
 
 #[test]
 fn extends_cycle_is_detected() {
-    // a extends b, b extends a → cycle.
+    // a extends b, b extends a -> cycle.
     let cat = catalog(&[
         ("a", "policy_version = 1\nextends = \"b\"\n"),
         ("b", "policy_version = 1\nextends = \"a\"\n"),

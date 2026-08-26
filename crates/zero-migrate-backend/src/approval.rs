@@ -1,4 +1,4 @@
-//! The caller's approval decision — shared by the engine gate AND the executor's
+//! The caller's approval decision - shared by the engine gate AND the executor's
 //! own defense-in-depth gate.
 //!
 //! [`Approval`] lived in the engine's `engine` module originally, where it gated
@@ -9,20 +9,20 @@
 //! the least-privilege role rather than trusting the engine; the approval gate is
 //! the same pattern, so it must live at the executor layer too. Hoisting
 //! [`Approval`] into its own module lets both layers share the one type without an
-//! engine→executor dependency inversion.
+//! engine->executor dependency inversion.
 
 /// The caller's approval decision for a destructive migration batch.
 ///
 /// A destructive plan (a `DROP`/`TRUNCATE`/lossy-type-change `up`, or any
-/// rollback — a `down` is inherently destructive) needs [`Approval::Approved`] to
+/// rollback - a `down` is inherently destructive) needs [`Approval::Approved`] to
 /// run; a safe additive `up` runs with [`Approval::None`]. The AI never
-/// auto-applies destructive ops — it passes [`Approval::None`] and
+/// auto-applies destructive ops - it passes [`Approval::None`] and
 /// surfaces the approval-required error to a human.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Approval {
-    /// No approval given — runs only a non-destructive batch.
+    /// No approval given - runs only a non-destructive batch.
     None,
-    /// Explicitly approved — a destructive batch may run.
+    /// Explicitly approved - a destructive batch may run.
     Approved,
 }
 
@@ -36,16 +36,16 @@ pub enum Approval {
 /// gate threaded through every call site; this is a separate, narrow refinement
 /// carried only on the gated apply paths. The two compose: a destructive op runs
 /// iff `Approval::Approved` AND the scope admits its version-id. A NON-destructive
-/// op is never affected — scope only ever *further restricts* destruction, never
+/// op is never affected - scope only ever *further restricts* destruction, never
 /// widens it.
 ///
 /// **Fail-closed by construction.** [`ApprovalScope::Versions`] authorizes ONLY
 /// the listed version-ids; an empty set authorizes NOTHING destructive even under
-/// `Approval::Approved`. There is no "unrecognized scope ⇒ allow" arm.
+/// `Approval::Approved`. There is no "unrecognized scope => allow" arm.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApprovalScope {
     /// Blanket: any destructive op may run (today's behavior for the trusted
-    /// single-actor surfaces — dev CLI `--yes`, rollback, shadow dry-run,
+    /// single-actor surfaces - dev CLI `--yes`, rollback, shadow dry-run,
     /// resolve-pending). Fail-OPEN by *explicit operator intent* at a trusted
     /// vector; it is the default for every existing caller, preserving
     /// byte-identical behavior.
@@ -60,7 +60,7 @@ pub enum ApprovalScope {
 impl ApprovalScope {
     /// Does this scope admit a DESTRUCTIVE op stamped with `version`?
     ///
-    /// [`ApprovalScope::All`] admits every version (vacuously true — today's
+    /// [`ApprovalScope::All`] admits every version (vacuously true - today's
     /// blanket behavior). [`ApprovalScope::Versions`] admits ONLY a version
     /// present in the reviewed set (fail-closed: an empty set admits nothing).
     ///

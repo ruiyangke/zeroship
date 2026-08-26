@@ -1,4 +1,4 @@
-//! `zero-migrate-core` — the ENGINE of a versioned DB migration system for **creator
+//! `zero-migrate-core` - the ENGINE of a versioned DB migration system for **creator
 //! project databases**. The shipped design docs are under `docs/`; start at
 //! `docs/architecture.md`.
 //!
@@ -11,9 +11,9 @@
 //! [`zero_migrate_backend::registry::VendorSet`] and every carrier holds one.
 //!
 //! The crate that composes that value is `zero-migrate`. It depends on this one plus
-//! the three backends, re-exports this crate's whole root so `zero_migrate::…` paths
+//! the three backends, re-exports this crate's whole root so `zero_migrate::...` paths
 //! are unchanged, and is what a host actually depends on. `zero-migrate` also owns the
-//! integration suites — an integration test is a host, and a host composes.
+//! integration suites - an integration test is a host, and a host composes.
 //!
 //! The engine is runtime-free and V8-free. Authoring (the JS DSL to op-IR
 //! envelope) and live Postgres/MySQL execution run in the Node host and reach
@@ -26,9 +26,9 @@
 //! deny-list / cross-schema confinement), and the **Postgres executor**:
 //! the append-only journal ([`apply::journal`]),
 //! the project advisory lock, and the apply flow
-//! ([`MigrationEngine::apply`](crate::engine::MigrationEngine::apply)) — transactional + two-phase
+//! ([`MigrationEngine::apply`](crate::engine::MigrationEngine::apply)) - transactional + two-phase
 //! non-transactional with idempotent recovery, the guard wired in front of
-//! every `up`, and a drift/tamper checksum check — the least-privilege
+//! every `up`, and a drift/tamper checksum check - the least-privilege
 //! `migrator` role (this vendor's, so its derivation lives in the PostgreSQL
 //! backend crate rather than here), and the **public
 //! authoring pipeline + engine API** ([`plan::author`] +
@@ -43,7 +43,7 @@
 //! 1. an **author** ([`MigrationAuthor`]) produces versioned [`Migration`]s.
 //!    [`DeterministicAuthor`] handles the trivial additive set (create table,
 //!    add column, create index) with no AI; [`RawSqlAuthor`] is the **AI-author
-//!    hook** — the AI/builder generates complex migrations (renames, type
+//!    hook** - the AI/builder generates complex migrations (renames, type
 //!    changes, backfills, expand-contract) *externally* and this engine
 //!    validates + executes them. The engine never calls an LLM.
 //! 2. [`MigrationEngine::plan`] runs the registered [`guard::MigrationGuard`] read-only and
@@ -51,7 +51,7 @@
 //!    approval requirement, and guard *denials*.
 //! 3. [`MigrationEngine::apply`] is the **gate** ([`Approval`]): it refuses a
 //!    denied plan, refuses a destructive plan without approval, and otherwise
-//!    delegates to the executor's apply shell — which **independently re-runs the
+//!    delegates to the executor's apply shell - which **independently re-runs the
 //!    guard and the least-privilege `migrator` role** (defense in depth: the
 //!    engine gate is an additional check, not a replacement for lines 1 & 2).
 //!
@@ -64,32 +64,32 @@
 //!
 //! Defense is in depth:
 //!
-//! - **Line 1 — the registered backend's guard ([`guard::MigrationGuard`]).** Every statement is parsed
-//!   with the *real* Postgres parser (`pg_query`/`libpg_query` — chosen over a
+//! - **Line 1 - the registered backend's guard ([`guard::MigrationGuard`]).** Every statement is parsed
+//!   with the *real* Postgres parser (`pg_query`/`libpg_query` - chosen over a
 //!   pure-Rust parser precisely so a deny-list cannot be bypassed by exotic
 //!   syntax it would misparse) and checked against a hard deny-list. Dangerous
-//!   constructs nested inside `DO $$…$$` blocks and function bodies are
+//!   constructs nested inside `DO $$...$$` blocks and function bodies are
 //!   inspected too, not just top-level statements. Unparseable input is
 //!   denied. The guard **denies** RCE / priv-esc / cross-tenant / file /
 //!   network, and only **flags** data loss (`DROP`/`TRUNCATE`/lossy type
-//!   change) — the apply gate decides on destructive ops.
-//! - **Line 2 — the least-privilege `migrator` role.** The DB
+//!   change) - the apply gate decides on destructive ops.
+//! - **Line 2 - the least-privilege `migrator` role.** The DB
 //!   itself rejects the same ops even if SQL somehow slips past parse.
 //!
 //! The guard runs **out-of-band at deploy time** (not on the request hot path),
-//! so it is plain synchronous logic — no async runtime — and exhaustively
+//! so it is plain synchronous logic - no async runtime - and exhaustively
 //! unit-testable without a database (`tests/guard_security.rs`).
 
-// The NEUTRAL guard seam — `GuardConfig`, `GuardError`, `GuardOutcome`,
+// The NEUTRAL guard seam - `GuardConfig`, `GuardError`, `GuardOutcome`,
 // `MigrationGuard` and the structured-IR data-security walk. Re-exported under the
-// historical `crate::guard::…` path so the engine's dozens of references keep
+// historical `crate::guard::...` path so the engine's dozens of references keep
 // resolving unchanged.
 //
 // This used to read `pub use zero_migrate_guard::{analysis, guard};`, and that one
 // line was the engine's whole coupling to a PostgreSQL parser: `zero-migrate-guard`
 // was the `libpg_query` deny-list + classifier + analyzers, and re-exporting it here
 // put `SqlGuard`, `DdlKind` and `analyze` on the neutral engine's PUBLIC API. The
-// crate is gone — all of it needed `libpg_query`, so all of it was PostgreSQL's, and
+// crate is gone - all of it needed `libpg_query`, so all of it was PostgreSQL's, and
 // it now lives in `zero-migrate-postgres`. Core reaches a guard the same way it
 // reaches a renderer: `render::backends::guard_for`, through the registry, by open
 // dialect id.
@@ -101,14 +101,14 @@ pub mod apply;
 // `crate::approval::{Approval, ApprovalScope}` reference resolves unchanged.
 pub use zero_migrate_backend::approval;
 // The per-run executor configuration. `ExecutorConfig` is the single most-named
-// type in the backend contract — every one of `MigrationBackend`'s I/O methods
-// takes a `&ExecutorConfig` — so it moved down to sit with the trait it is an
-// argument of. Re-exported so every `crate::conn::…` and `zero_migrate::conn::…`
+// type in the backend contract - every one of `MigrationBackend`'s I/O methods
+// takes a `&ExecutorConfig` - so it moved down to sit with the trait it is an
+// argument of. Re-exported so every `crate::conn::...` and `zero_migrate::conn::...`
 // reference resolves unchanged.
 pub use zero_migrate_backend::conn;
 // `pub mod db_url` USED TO LIVE HERE. It held one function, `is_sqlite_url`, a DSN
 // classifier that decided which backend a URL selects by string-matching
-// `postgres://` / `sqlite:` / `file:` in core — the engine resolving a vendor without
+// `postgres://` / `sqlite:` / `file:` in core - the engine resolving a vendor without
 // asking the registry. It was also DEAD: a sweep of `crates` and `packages` found zero
 // callers, in this crate or any other. Its own module doc already recorded that the
 // upstream it was "copied byte-identically" from is not in this repository and that no
@@ -121,7 +121,7 @@ pub mod engine;
 // The crash-simulation seam moved down to the backend contract: all three
 // `MigrationBackend` implementations trip it on their own apply paths, so it has to
 // sit below the vendors rather than above them. Re-exported so every
-// `zero_migrate::fault::…` path resolves unchanged.
+// `zero_migrate::fault::...` path resolves unchanged.
 #[doc(hidden)]
 pub use zero_migrate_backend::fault;
 // The typed-id (base62/UUIDv7) machinery lives in the `zero-migrate-ir` leaf crate;
@@ -139,15 +139,15 @@ pub mod net_policy;
 pub mod ops;
 pub mod plan;
 pub mod render;
-// The dialect-neutral network driver seam (`SqlSession`) — the ONE injected
+// The dialect-neutral network driver seam (`SqlSession`) - the ONE injected
 // runtime dependency the network-dialect backends (`PostgresBackend` and
 // `MysqlBackend`) are generic over. SQLite does NOT ride it (it is an
 // in-process rusqlite actor). Its only current implementor is the host PG adapter.
 //
-// It LIVES in `zero-migrate-backend` — it is a contract, not engine logic, and its
+// It LIVES in `zero-migrate-backend` - it is a contract, not engine logic, and its
 // only dependency was `std`. Re-exported under its historical `crate::driver` path
 // (the same shim idiom `model/mod.rs` uses for `zero_migrate_ir::ir`) so every
-// `crate::driver::…` and `zero_migrate::driver::…` reference resolves unchanged.
+// `crate::driver::...` and `zero_migrate::driver::...` reference resolves unchanged.
 pub use zero_migrate_backend::driver;
 // The schema-authority core (DDL builders, diff classifier, sentinel codec,
 // schema-shape descriptors). The data-plane query language that used to ride
@@ -159,7 +159,7 @@ pub mod schema;
 pub(crate) mod test_fixtures;
 
 // ---------------------------------------------------------------------------
-// Public API surface — re-exports.
+// Public API surface - re-exports.
 // ---------------------------------------------------------------------------
 
 // `Advisory` and `Severity` are the NEUTRAL advisory vocabulary and come from the
@@ -167,7 +167,7 @@ pub(crate) mod test_fixtures;
 // `analyze_migration` free functions that used to sit beside them are GONE from this
 // root: they ran the `libpg_query` analyzers on whatever they were handed, so a MySQL
 // or SQLite statement came back as a parse failure reported as a clean, empty
-// advisory list. `advisories_for_sql` below is the replacement — it asks the
+// advisory list. `advisories_for_sql` below is the replacement - it asks the
 // REGISTERED backend, and a backend with no analyzer answers `NotAnalyzed` rather
 // than "nothing found". PostgreSQL's analyzers are still exactly where they were, at
 // `zero_migrate_postgres::analysis::analyze`.
@@ -187,7 +187,7 @@ pub use zero_migrate_backend::advisory::{
     AdvisoryVerdict, AnalyzerAbsent, IndexCoverage, OperationalAdvisor,
 };
 // V8-free, driver-neutral re-exports. Name no host-driver type and back the
-// SQLite path too — ungated.
+// SQLite path too - ungated.
 pub use apply::backend::{
     BackendCapability, BackfillError, BackfillOutcome, CrossDeployObligations, DryRunError,
     DryRunReport, MigrationBackend, MigrationResult, OnlineSchemaChange, ShadowConfig,
@@ -196,7 +196,7 @@ pub use apply::backend::{
 // `PostgresBackend` IS NOT RE-EXPORTED HERE, and neither is any other vendor's.
 // It lives in `zero-migrate-postgres` with the rest of the PostgreSQL execution
 // half, and a `pub use zero_migrate_postgres::PostgresBackend` at this root would be
-// core naming a vendor CRATE outside the registry — the thing
+// core naming a vendor CRATE outside the registry - the thing
 // `tests/dialect_matrix/core_names_no_vendor_crate.rs` exists to forbid. Closing one
 // coupling by opening the other would have been a wash. A host that wants a
 // PostgreSQL backend names `zero_migrate_postgres::PostgresBackend`, exactly as it
@@ -212,12 +212,12 @@ pub use apply::backend::{
 // `StatementClass`, `TouchedRelation`, `OwnershipNeed`, `DropIndexTarget`,
 // `relations_touched` and `drop_index_targets` are all `libpg_query` vocabulary that
 // only PostgreSQL can populate, so putting them on the neutral engine's public API
-// invited exactly one reading — that a `DdlKind` describes any backend's statement.
+// invited exactly one reading - that a `DdlKind` describes any backend's statement.
 // They live at `zero_migrate_postgres::analysis::classify`, which says whose they
 // are.
 //
-// ── `SqliteBackend`, `SqliteActorError` and `RebuildError` are NOT re-exported here
-// any more, and they did not move to another path in core — they left the crate.
+// -- `SqliteBackend`, `SqliteActorError` and `RebuildError` are NOT re-exported here
+// any more, and they did not move to another path in core - they left the crate.
 // The SQLite execution half is `zero_migrate_sqlite::backend` now, and a
 // `pub use zero_migrate_sqlite::SqliteBackend` here would be core naming a vendor
 // CRATE outside the registry, which is exactly what
@@ -271,25 +271,25 @@ pub use apply::executor::{
 // executor, which made this "neutral" entry PostgreSQL-only by construction; the
 // caller now supplies the backend. Its two vendor-constructing siblings
 // (`apply_with_lock`, `apply_with_lock_mysql`) were deleted rather than converted
-// — nothing called them.
+// - nothing called them.
 pub use apply::executor::apply;
-// The OFFLINE ops→snapshot fold. Pure, no
+// The OFFLINE ops->snapshot fold. Pure, no
 // DB: replay an ordered `Op` list into the EXISTING `SchemaSnapshot` (drift.rs),
 // the offline companion of `snapshot_schema`. The type-generation path emits the
 // `env.db` types + runtime descriptor from this. See `fold.rs`.
 // The NEUTRAL guard vocabulary only. `SqlGuard`, `GuardReport` and `flags_for` came
 // off this list when `zero-migrate-guard` dissolved: all three are `libpg_query`
 // machinery, and re-exporting them here made the neutral engine's public API hand out
-// PostgreSQL's parser to every downstream caller — the same shape, and the same
+// PostgreSQL's parser to every downstream caller - the same shape, and the same
 // mistake, as the `MysqlGuard`/`PgGuard`/`SqliteGuard` re-exports described below.
 // They are reachable at `zero_migrate_postgres::guard`, which says whose they are.
 // A caller that wants "this project's line-1" rather than "PostgreSQL's" asks the
 // registry through `render::backends::guard_for`.
 pub use guard::{GuardConfig, GuardError, GuardOutcome, MigrationGuard};
-// ── The three per-vendor guard TYPES are NOT re-exported here any more.
+// -- The three per-vendor guard TYPES are NOT re-exported here any more.
 //
 // `MysqlGuard`, `PgGuard` and `SqliteGuard` were `pub use`d at this crate root, and
-// that made the engine's PUBLIC API name three vendor crates by name — the widest
+// that made the engine's PUBLIC API name three vendor crates by name - the widest
 // possible form of the coupling, because a re-export is reachable by every downstream
 // caller and nothing tells that caller it is holding a vendor's type.
 //
@@ -303,7 +303,7 @@ pub use guard::{GuardConfig, GuardError, GuardOutcome, MigrationGuard};
 // (measured, not assumed): `MysqlGuard` had zero callers anywhere, and the eight
 // `PgGuard`/`SqliteGuard` sites were all in this crate's own integration tests,
 // which now build the same guard the same way the engine does. So no behaviour left
-// with the lines — the tests assert on the same guards, selected through the
+// with the lines - the tests assert on the same guards, selected through the
 // registry instead of constructed by name.
 //
 // The property is pinned by `tests/dialect_matrix/core_names_no_vendor_crate.rs`,
@@ -316,7 +316,7 @@ pub use guard::{GuardConfig, GuardError, GuardOutcome, MigrationGuard};
 /// Kept as a crate-root function because it is public API: the napi addon calls
 /// `zero_migrate::guard_for` across the crate boundary, and the vendor registry it now
 /// delegates to is `pub(crate)`. What changed is not the signature but the OWNER of
-/// the dispatch — it is no longer a second closed-identity match inside the guard crate,
+/// the dispatch - it is no longer a second closed-identity match inside the guard crate,
 /// able to disagree with the renderer registry, and it is no longer able to hand a
 /// dialect a guard that dialect did not write.
 ///
@@ -338,9 +338,9 @@ pub use zero_migrate_policy::{seal, SealError, SealedPolicy};
 // The composed policy-decision point the injection + guard share. Re-exported at
 // the crate root so the napi addon (`gen_artifacts_*`, the schema-emit path) can
 // name it without reaching into the `zero-migrate-policy` crate directly.
-// `fold_to_field_defs` is NOT in this list any more. Step 4 consumer 3 of
-// `docs/proposals/single-fold-and-effects.md` section G deleted it; the wire `FieldDef`
-// map it produced is now `single_fold::fold(…)?.project_field_defs()`, reached through
+// `fold_to_field_defs` is NOT in this list any more. It is deleted
+// (`docs/proposals/single-fold-and-effects.md` section G); the wire `FieldDef`
+// map it produced is now `single_fold::fold(...)?.project_field_defs()`, reached through
 // `render::fold::single_fold`. The replacement is deliberately not a renamed function:
 // one traversal decides what an op means and a projection READS the value, which is the
 // shape the proposal's decision 1 asks for and the shape a second walker would hide.
@@ -372,7 +372,7 @@ pub use zero_migrate_ir::backend::{
 // `{DialectId, DialectSet, MYSQL, POSTGRES, SQLITE}`, and those three were core
 // handing out identities it does not define, from a neutral crate that had no
 // business defining them either. A host names a backend through the crate that IS
-// that backend — `zero_migrate_postgres::DIALECT` — or builds one with
+// that backend - `zero_migrate_postgres::DIALECT` - or builds one with
 // `DialectId::new`, which is `const` and `pub` for exactly that. Re-adding them here
 // would put the engine back in the business of knowing which vendors exist.
 pub use zero_migrate_ir::dialect::{DialectId, DialectSet};
@@ -382,7 +382,7 @@ pub use zero_migrate_ir::dialect::{DialectId, DialectSet};
 //
 // Both returned the shipping list, so both are answers only a crate that knows which
 // vendors exist can give. They are `zero_migrate::shipping_vendors` and
-// `zero_migrate::shipping_backends` now — same names, same signatures, one crate up —
+// `zero_migrate::shipping_backends` now - same names, same signatures, one crate up -
 // and every host that called them through `zero_migrate::` is unaffected, because that
 // crate re-exports this one's whole root.
 //
@@ -397,7 +397,7 @@ pub use apply::journal::{
 };
 // The PG journal free functions are NOT re-exported here. They stood at the crate
 // root as if they were THE engine's journal, and most had no consumer outside this
-// crate at all — those are simply gone from the public surface. MySQL and SQLite
+// crate at all - those are simply gone from the public surface. MySQL and SQLite
 // have their own peer `journal_sql.rs` modules, and no caller reaching
 // `zero_migrate::applied` could ever have got one. The ones with real callers live
 // at `zero_migrate_postgres::backend::journal_sql`, reached by that name; the neutral
@@ -430,7 +430,7 @@ pub use model::migration::{
 // The NEUTRAL schema model of `docs/proposals/single-fold-and-effects.md` section D:
 // derived `PartialEq` on the model, vendor facts in a side table they cannot be reached
 // from, and one NAMED comparator per question instead of one hand-written `eq` every
-// consumer silently inherits. No consumer reads it yet - that is step 4.
+// consumer silently inherits. No consumer reads it.
 pub use model::schema_model;
 pub use model::schema_model::{
     column_shape_identity, constraint_shape_identity, drift_identity, index_pairing_identity,
@@ -463,8 +463,8 @@ pub use model::ir::{
     TableStrictness, ValueFormat, VectorMetric, CURRENT_IR_VERSION, EXPR_INVALID_NUMERIC,
     TYPE_ID_MAX_PREFIX_LEN,
 };
-// The fail-closed IR envelope load gate: deserialize →
-// `ir_version` → `validate_ir` → server-stamped ownership → advisory checksum-hint
+// The fail-closed IR envelope load gate: deserialize ->
+// `ir_version` -> `validate_ir` -> server-stamped ownership -> advisory checksum-hint
 // compare. The loader's IR branch ([`render::lower::IrAuthor::load_and_lower`]) runs
 // this gate and then lowers the validated, owned IR to migrations.
 pub use model::load::{
@@ -484,7 +484,7 @@ pub use model::expr::{
     BinaryOp, CaseBranch, CastTarget, Duration, Expr, ExtractField, ScalarFn, SynthFn, UnaryOp,
 };
 // The STRUCTURAL expression-AST validator + the structured-error envelope.
-// No parser, no fuzzer — a pure allow-list walk.
+// No parser, no fuzzer - a pure allow-list walk.
 pub use model::validate::{
     validate_expr, validate_ir, validate_ir_resolved, validate_op, validate_op_resolved,
     AuthoringError, LogicalColumnContract, LogicalColumnContracts, LogicalColumnKey, TargetScope,
@@ -525,11 +525,11 @@ pub use render::sql_preview::{
     render_plan_sql, render_set_sql, PreviewOpts, RUNTIME_RESOLVED,
 };
 
-// `EmbeddingGuideDocTests` — the `#[cfg(doctest)]` item that compiles the Rust fences
-// in `docs/embedding.md` — USED TO BE HERE, and it moved to `zero-migrate`.
+// `EmbeddingGuideDocTests` - the `#[cfg(doctest)]` item that compiles the Rust fences
+// in `docs/embedding.md` - USED TO BE HERE, and it moved to `zero-migrate`.
 //
 // It had to. Every example in that guide is a HOST embedding the product: it writes
-// `use zero_migrate::…` and calls `shipping_vendors()`, neither of which resolves in a
+// `use zero_migrate::...` and calls `shipping_vendors()`, neither of which resolves in a
 // crate that cannot see the composition. The guide is the Rust half of the PUBLIC
 // surface, and the public surface is the composing crate's.
 //

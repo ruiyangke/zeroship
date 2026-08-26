@@ -1,4 +1,4 @@
-//! The engine's DOOR into the value-format seam — and the ONE place a dialect
+//! The engine's DOOR into the value-format seam - and the ONE place a dialect
 //! becomes a vendor for a catalog comparison.
 //!
 //! A [`ValueFormat`] is logical schema metadata carried separately from the physical
@@ -16,8 +16,8 @@
 //! `&DialectId` and resolved a renderer out of the registry, which is a cycle a
 //! backend crate cannot participate in (the registry names every vendor, so it sits
 //! above them; the comparison sits below them). They take the renderers directly
-//! now, and the engine — which genuinely holds a dialect identity and not a renderer
-//! — resolves once, here.
+//! now, and the engine - which genuinely holds a dialect identity and not a renderer
+//! - resolves once, here.
 //!
 //! The second is [`AllRegisteredVendors`], and it is not a door. A snapshot with no
 //! backend provenance has to be normalized by every registered vendor's declared
@@ -52,10 +52,10 @@ pub(crate) use zero_migrate_backend::value_format::RecoveredFormatCheck;
 /// The answer for a legacy snapshot that does not record which backend produced it:
 /// no vendor can be ruled out, so each rule is the union (or the first vendor that
 /// claims the token) across the whole shipping set. This is the half of
-/// [`CatalogRules`] that cannot live in the contract crate — it needs the registry,
+/// [`CatalogRules`] that cannot live in the contract crate - it needs the registry,
 /// and the registry names every vendor.
 ///
-/// The per-method composition — `any` versus first-match versus apply-all — is a
+/// The per-method composition - `any` versus first-match versus apply-all - is a
 /// COMPARISON decision, which is why it is stated here rather than pushed down with
 /// the algorithm that consults it.
 struct AllRegisteredVendors(VendorSet);
@@ -363,8 +363,8 @@ pub(crate) fn catalog_id_default_for_expected(
     ))
 }
 
-/// The literal comparison key for catalog SQL, under one dialect's rules or —
-/// when the snapshot has no provenance — every registered vendor's, composed.
+/// The literal comparison key for catalog SQL, under one dialect's rules or -
+/// when the snapshot has no provenance - every registered vendor's, composed.
 fn sql_literal_fingerprint(
     vendors: VendorSet,
     expression: &str,
@@ -477,15 +477,15 @@ pub(crate) fn column_metadata(
 /// already decided.
 ///
 ///   * PostgreSQL: `COLLATE "C"`, and the same `pg_catalog."C"` catalog identity the
-///     value formats record — so a live introspection of either compares equal.
+///     value formats record - so a live introspection of either compares equal.
 ///   * SQLite: `COLLATE BINARY`. That is already SQLite's default, so the snapshot
 ///     collation stays `None` (introspection canonicalizes BINARY to `None`, and a
 ///     `Some` here would make every such table drift on the first read).
-///   * MySQL: `utf8mb4_0900_bin` — NO PAD and a memcmp of the encoded bytes, which
+///   * MySQL: `utf8mb4_0900_bin` - NO PAD and a memcmp of the encoded bytes, which
 ///     is what `C` and BINARY both mean. NOT the legacy `utf8mb4_bin`, which is PAD
 ///     SPACE and would make `'x'` and `'x '` the same key. NOT the value formats'
 ///     `CHARACTER SET ascii`: those earn ascii from a CHECK proving the content is
-///     ascii, and this facet has no such proof — narrowing the charset would turn a
+///     ascii, and this facet has no such proof - narrowing the charset would turn a
 ///     silent ordering bug into a loud rejected INSERT on a `created_by` holding a
 ///     non-ascii name.
 ///
@@ -619,8 +619,8 @@ mod tests {
         );
     }
 
-    /// A CHECK recovery is normalised by ONE dialect's rules — the dialect it was
-    /// read from — and not by every registered vendor's at once.
+    /// A CHECK recovery is normalised by ONE dialect's rules - the dialect it was
+    /// read from - and not by every registered vendor's at once.
     ///
     /// `canonical_check_sql` used to take no dialect, so it ran all three vendors'
     /// `normalize_catalog_tokens` over the same token stream in sequence. Only
@@ -628,7 +628,7 @@ mod tests {
     /// normalised by POSTGRESQL's catalog rules: `pg_catalog.` qualifiers and
     /// `::text` annotations were erased from a stream that can never contain them
     /// legitimately. An edit that injected either therefore normalised back onto the
-    /// pristine contract and was recovered as valid — the exact failure
+    /// pristine contract and was recovered as valid - the exact failure
     /// `any_contract_edit_is_not_recovered_as_the_original_format` forbids, reached
     /// through a foreign vendor's normaliser instead of through a weakened comparison.
     #[test]
@@ -1609,7 +1609,7 @@ mod tests {
     ///
     /// `catalog_id_default_for_expected` reaches its last arm only when `expected`
     /// is neither [`IdDefaultSnapshot::UuidLiteral`] nor [`IdDefaultSnapshot::Literal`]
-    /// — both are answered earlier — so the value it returns there can never make a
+    /// - both are answered earlier - so the value it returns there can never make a
     /// drift verdict flip: a `Literal` and an `Expression` are equally unequal to an
     /// `Absent` expectation. What it CAN do is decide what the operator reads. With
     /// no dialect the arm used to fall through to `Expression("literal:7")`, leaking
@@ -1618,7 +1618,7 @@ mod tests {
     ///
     /// The dialect-free answer already existed: [`sql_literal_fingerprint`] takes an
     /// `Option<&DialectId>` and routes a `None` through `AllRegisteredVendors`. The
-    /// arm simply never asked it. This pins that it does, and pins the agreement —
+    /// arm simply never asked it. This pins that it does, and pins the agreement -
     /// an unattributed snapshot and a claimed one must not spell one literal two
     /// ways, or a reader comparing two drift reports sees a difference that is not
     /// in the database.

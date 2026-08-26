@@ -1,4 +1,4 @@
-//! `zero-migrate-ir` — the zero-migrate WIRE CONTRACT.
+//! `zero-migrate-ir` - the zero-migrate WIRE CONTRACT.
 //!
 //! The pure-data core the whole engine (and any external validator/checksummer)
 //! agrees on: the migration document, the closed `op.*` IR, the closed expression
@@ -9,7 +9,7 @@
 //! # A true leaf
 //!
 //! This crate is deliberately I/O-free and dependency-thin: no `compio`, no
-//! `pg_query`, no database driver, and — crucially — **no dependency on the engine
+//! `pg_query`, no database driver, and - crucially - **no dependency on the engine
 //! (`zero-migrate`) or the schema layer.** It is the bottom of the crate graph.
 //! The engine re-exports every type here (`pub use zero_migrate_ir as ir;` plus
 //! the flattened re-exports at the engine root), so downstream code keeps naming

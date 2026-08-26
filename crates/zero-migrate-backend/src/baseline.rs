@@ -1,5 +1,5 @@
 //! Baseline an existing project DB (design "Baseline existing db", scenario
-//! 31) — the **adoption path**, and specifically its DIALECT-NEUTRAL vocabulary.
+//! 31) - the **adoption path**, and specifically its DIALECT-NEUTRAL vocabulary.
 //!
 //! [`BaselineOutcome`] and [`BaselineError`] are the `MigrationBackend::baseline_one`
 //! signature, so all three backends speak them. The IMPLEMENTATIONS do not live
@@ -16,7 +16,7 @@
 //! A project DB may already physically carry its schema (created outside the
 //! engine, or a legacy DB being adopted). `baseline` records a baseline
 //! migration as a `completed` event in the journal **WITHOUT running its `up`**:
-//! the schema already exists, so re-running `CREATE TABLE …` would error. The
+//! the schema already exists, so re-running `CREATE TABLE ...` would error. The
 //! baseline's `up` *documents* the current schema (a FRESH rebuild could run it),
 //! but on the existing DB it is recorded-not-run. Future migrations then apply on
 //! top normally (`MigrationEngine::apply`).
@@ -29,7 +29,7 @@
 //! real schema and must not carry a denied/cross-schema construct, even though
 //! it does not execute here.
 //! - **First-entry only.** Baseline refuses if the journal already records ANY
-//! net-applied migration — you cannot baseline a DB the engine already manages
+//! net-applied migration - you cannot baseline a DB the engine already manages
 //! ([`BaselineError::AlreadyManaged`]). Re-baselining the *same* baseline
 //! version is an idempotent no-op (so a retried deploy is safe); a *different*
 //! baseline once one exists is refused.
@@ -47,7 +47,7 @@ use crate::journal::JournalError;
 /// What `baseline` did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaselineOutcome {
-    /// The version recorded as the baseline (`mig_…`).
+    /// The version recorded as the baseline (`mig_...`).
     pub version: String,
     /// `true` if this was an idempotent re-baseline of the same version (nothing
     /// new was journaled); `false` if the baseline event was newly recorded.
@@ -85,7 +85,7 @@ pub enum BaselineError {
         #[source]
         source: GuardError,
     },
-    /// The journal already records at least one net-applied migration — the engine
+    /// The journal already records at least one net-applied migration - the engine
     /// already manages this DB, so it cannot be baselined. Baseline is a
     /// first-entry-only operation. Nothing was journaled.
     #[error(
@@ -116,7 +116,7 @@ pub enum BaselineError {
     },
     /// A dialect-neutral backend failure from a NON-Postgres
     /// `MigrationBackend::baseline_one`
-    /// impl (e.g. the SQLite actor). The Postgres impl never produces this arm —
+    /// impl (e.g. the SQLite actor). The Postgres impl never produces this arm -
     /// its errors flow through the typed [`Db`](Self::Db)/[`Journal`](Self::Journal)/
     /// guard/first-entry arms above; only an engine whose internals are not
     /// `compio_postgres`-typed maps its own error string into here, mirroring

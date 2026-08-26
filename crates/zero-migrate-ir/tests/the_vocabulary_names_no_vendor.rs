@@ -1,5 +1,5 @@
-//! The RATCHET on the owner's governing rule — *the core should be neutral, this is
-//! the hard limit* — applied to the VOCABULARY crate, the bottom of the stack.
+//! The RATCHET on the owner's governing rule - *the core should be neutral, this is
+//! the hard limit* - applied to the VOCABULARY crate, the bottom of the stack.
 //!
 //! # Why this file exists, and why it is the last one written
 //!
@@ -13,7 +13,7 @@
 //! all seven of it, in PRODUCTION code:
 //!
 //! * `IrDefault::Nextval`'s doc AND its hand-written `schemars` description called the
-//!   variant "a PostgreSQL `nextval('<sequence>'::regclass)` default" — a spelling, in
+//!   variant "a PostgreSQL `nextval('<sequence>'::regclass)` default" - a spelling, in
 //!   a carrier that holds a structured `SequenceRef` and no SQL at all. The second of
 //!   those two shipped in the published `ir-envelope.schema.json`.
 //! * `RaiseLevel::as_sqlite_sql` handed out four SQL tokens from the neutral enum. Its
@@ -21,12 +21,12 @@
 //!   discards it, and emits `SIGNAL SQLSTATE`. The tokens moved to the backend that
 //!   spells them.
 //! * `FuncLanguage::Plpgsql` was one server's product name used as a WIRE TAG. The
-//!   closed 2-set is the engine's own security decision — plain SQL, or the target's
-//!   procedural language, nothing installed — so the set stayed and the variant became
+//!   closed 2-set is the engine's own security decision - plain SQL, or the target's
+//!   procedural language, nothing installed - so the set stayed and the variant became
 //!   `Procedural`, with the `plpgsql` token it renders to moving to
 //!   `zero-migrate-postgres`.
 //! * `IrLoadError::IndefiniteTimeoutFlag`'s `#[error]` string told every author that
-//!   "PostgreSQL and MySQL both read 0 as no limit" — on a gate that runs with NO
+//!   "PostgreSQL and MySQL both read 0 as no limit" - on a gate that runs with NO
 //!   target resolved, so it said that to an author aimed at a third engine too. The
 //!   binding half of the same rule, one crate up, already said "the database".
 //! * `code.materialized_view`'s registry docs, and the `KEY_` const's doc above them,
@@ -42,14 +42,14 @@
 //! the valuable part and must not be deleted to green a census.
 //!
 //! A `#[error]` string is NOT prose. Neither is a `schemars` `"description"`: both are
-//! values this crate EMITS — one at whatever target reached the arm, the other into a
-//! published artifact — and between them they held four of the seven above.
+//! values this crate EMITS - one at whatever target reached the arm, the other into a
+//! published artifact - and between them they held four of the seven above.
 //!
 //! # What this census can and CANNOT see
 //!
 //! It matches vendor product NAMES. It does not see vendor GRAMMAR, and that limit has
-//! already been paid for once: a twenty-line PL/pgSQL dual-write trigger body —
-//! `TG_OP`, `NEW`, `OLD`, `RETURN NEW` — sat in `zero-migrate-backend` and passed that
+//! already been paid for once: a twenty-line PL/pgSQL dual-write trigger body -
+//! `TG_OP`, `NEW`, `OLD`, `RETURN NEW` - sat in `zero-migrate-backend` and passed that
 //! crate's identical census for its entire life there, because PL/pgSQL contains no
 //! product name. Read a green here as "the vocabulary writes no vendor's NAME", never
 //! as "the vocabulary holds no vendor".
@@ -57,8 +57,8 @@
 //! The nearest live instance of that limit is in this very crate: `TriggerStmt::Raise`
 //! carries an `errcode` validated as a five-character SQLSTATE, and `IrDefault::Nextval`
 //! is a shape only a sequence-having engine can satisfy. Neither spells a product and
-//! neither is caught here. The GRAMMAR question is answered by different instruments —
-//! `core_does_not_spell_a_vendors_bytes.rs` and the capability descriptors — not by
+//! neither is caught here. The GRAMMAR question is answered by different instruments -
+//! `core_does_not_spell_a_vendors_bytes.rs` and the capability descriptors - not by
 //! this one.
 //!
 //! # The TEST HALF is excluded, and that is 19 of 26 hits in this crate
@@ -75,7 +75,7 @@
 //! Two shapes make a line test code, and the splitter handles both because getting one
 //! wrong cost core's census a 3.5x miscount before it was instrumented:
 //! [`cfg_test_module_files`] resolves a PARENT's `#[cfg(test)] mod x;` to a whole file
-//! (this crate has none today — the instrument is dormant here and must still be alive,
+//! (this crate has none today - the instrument is dormant here and must still be alive,
 //! so it is controlled against a crate that does have one), and [`test_line_span`]
 //! brace-matches EVERY `#[cfg(test)]` in a file with a lexer that understands raw
 //! strings, char literals versus lifetimes, and block comments.
@@ -96,7 +96,7 @@
 //! One floor per matcher, not one shared floor over their `||`. That is not a
 //! precaution, it is a repair: core's census first asserted a single floor over the
 //! combined answer, and when the product-name needles were corrupted to prove the
-//! control fires, IT PASSED — `zero-migrate-postgres` is full of `PgRaw`/`PgDml`, so
+//! control fires, IT PASSED - `zero-migrate-postgres` is full of `PgRaw`/`PgDml`, so
 //! the camel matcher cleared the floor alone while every product needle was dead.
 //!
 //! The needle control is deliberately NOT the [`ALLOWED`] entries. Here that is not
@@ -117,22 +117,22 @@ const VENDOR_NEEDLES: &[&str] = &["mysql", "sqlite", "postgres", "pgsql", "pg_",
 /// The ratchet: which files in this crate may name a vendor in PRODUCTION code, and
 /// exactly how many times.
 ///
-/// **It is EMPTY, and that is the whole point of the crate.** Core's equivalent holds
-/// one entry at four (the registry composition, which has to name the crates it
-/// composes) and the contract's holds two. This crate composes nothing, resolves
+/// **It is EMPTY, and that is the whole point of the crate.** Core's equivalent is
+/// non-empty (the registry composition has to name the crates it composes), and so
+/// is the contract's. This crate composes nothing, resolves
 /// nothing and compares no security posture: it is the vocabulary every backend is
 /// written in, so there is no shape a vendor name here can take that is not a fact
 /// about one backend baked into what all of them share. Zero is the correct floor and
-/// the reachable one — the sweep this file lands with reached it.
+/// the reachable one - the sweep this file lands with reached it.
 ///
 /// An entry added here is not automatically wrong, but it is a claim that has to be
 /// argued in the same commit: the tuple carries its ARGUMENT, not just a number,
 /// because a bare count tells the next reader nothing about whether it may come off.
-/// One MORE than a recorded count is a red, and one FEWER is also a red — a count that
+/// One MORE than a recorded count is a red, and one FEWER is also a red - a count that
 /// silently drifts down is a count nobody is maintaining.
 const ALLOWED: &[(&str, usize, &str)] = &[];
 
-/// Files the walk MUST reach — the real defence against a census that fails open.
+/// Files the walk MUST reach - the real defence against a census that fails open.
 ///
 /// A floor over a discovered set bounds only HOW MANY files were found; these bound
 /// WHICH, and stay true at any crate size. `lib.rs` sits at the walk's root, so losing
@@ -143,19 +143,19 @@ const ALLOWED: &[(&str, usize, &str)] = &[];
 /// Pick replacements only from files that cannot move.
 const WALK_ANCHORS: &[&str] = &["lib.rs", "ir.rs", "dialect.rs"];
 
-/// The walk's COUNT floor — the weaker half of the anti-blindness pair. Check
+/// The walk's COUNT floor - the weaker half of the anti-blindness pair. Check
 /// [`WALK_ANCHORS`] first and trust it over this number.
 ///
 /// Measured at 17 `.rs` files under `src` when this landed. 14 sits under that with
 /// room for churn and nowhere near a walk that found nothing. Unlike core, this crate
-/// is not expected to shrink — nothing is being extracted OUT of the vocabulary — so a
+/// is not expected to shrink - nothing is being extracted OUT of the vocabulary - so a
 /// fall here is a walk to fix, not an extraction to record.
 const SRC_FILE_FLOOR: usize = 14;
 
 /// The liveness floor for the PRODUCT-NAME matcher: matches it must find in a crate
 /// where naming the vendor is the whole point.
 ///
-/// Corrupt `VENDOR_NEEDLES` — a typo, a dropped underscore, a case slip — and the walk
+/// Corrupt `VENDOR_NEEDLES` - a typo, a dropped underscore, a case slip - and the walk
 /// still visits every file, still reads every line, and still reports zero violations,
 /// because it finds zero of anything. Measured far above this in the control crate,
 /// which names its own vendor in nearly every file. Set low and blunt on purpose: the
@@ -165,7 +165,7 @@ const VENDOR_NEEDLE_MATCH_FLOOR: usize = 40;
 /// The liveness floor for the SECOND matcher, `Pg` followed by an uppercase letter.
 ///
 /// Separate from [`VENDOR_NEEDLE_MATCH_FLOOR`] because two matchers sharing one floor
-/// can satisfy it for each other — see this file's header for the run where exactly
+/// can satisfy it for each other - see this file's header for the run where exactly
 /// that happened. Measured well above this in the control crate, which names types
 /// `PgRaw`, `PgDml` and so on throughout.
 const PG_CAMEL_MATCH_FLOOR: usize = 20;
@@ -193,7 +193,7 @@ const MULTI_CFG_TEST_FILE_CONTROL: &str = "backend/journal_sql.rs";
 /// The oracle in [`the_test_half_splitter_is_still_seeing_the_test_half`] only applies
 /// to a file with exactly one `#[cfg(test)]`; nine of this crate's seventeen qualify.
 /// Without this floor, a scan that stopped finding attributes would check zero files
-/// and pass — the same fail-open shape the walk floor defends against, one level down.
+/// and pass - the same fail-open shape the walk floor defends against, one level down.
 const SINGLE_ATTRIBUTE_ORACLE_FLOOR: usize = 7;
 
 /// Whether a source line is CODE rather than a comment, and the code half of it.
@@ -253,7 +253,7 @@ enum Token {
 /// Hand-written rather than regex because all three of the things it must skip are
 /// things a naive scan gets wrong, and each has a concrete failure in this tree:
 ///
-/// * a raw string `r#"…{…"#` holds unbalanced braces in ordinary SQL fixtures — and
+/// * a raw string `r#"...{..."#` holds unbalanced braces in ordinary SQL fixtures - and
 ///   `expr.rs`'s test module has one carrying a whole JSON object;
 /// * `'` is a lifetime far more often than a char literal here, and treating `&'a str`
 ///   as opening a literal swallows every brace to the next apostrophe;
@@ -287,7 +287,7 @@ fn lex(text: &str) -> Vec<(usize, Token)> {
             }
             continue;
         }
-        // raw / byte-raw string: r"…", r#"…"#, br##"…"##
+        // raw / byte-raw string: r"...", r#"..."#, br##"..."##
         if byte == b'r' || byte == b'b' {
             let mut scan = i;
             if bytes[scan] == b'b' && scan + 1 < end && bytes[scan + 1] == b'r' {
@@ -479,7 +479,7 @@ fn declared_mods(text: &str) -> Vec<(String, bool)> {
             continue;
         };
         let Some(name) = rest.strip_suffix(';') else {
-            continue; // `mod x { … }`, an inline module, not a file
+            continue; // `mod x { ... }`, an inline module, not a file
         };
         let name = name.trim();
         if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
@@ -499,8 +499,8 @@ fn declared_mods(text: &str) -> Vec<(String, bool)> {
 /// This crate has none today. It is here anyway because its ABSENCE is what turned
 /// core's 154-line census into a 545-line one: there is nothing inside such a file that
 /// says it is a test, the fact lives one file away, and the day someone moves this
-/// crate's fixtures into `src/test_fixtures.rs` — the shape all three vendor crates
-/// already use — every line of it would otherwise be counted against the vocabulary.
+/// crate's fixtures into `src/test_fixtures.rs` - the shape all three vendor crates
+/// already use - every line of it would otherwise be counted against the vocabulary.
 fn cfg_test_module_files(root: &Path) -> BTreeSet<PathBuf> {
     let mut out = BTreeSet::new();
     let mut frontier: Vec<PathBuf> = Vec::new();
@@ -586,7 +586,7 @@ fn the_vocabulary_names_no_vendor_outside_its_recorded_exceptions() {
     let src = own_src();
     let (file_count, hits) = census(&src);
 
-    // FLOOR ONE, part one — the ANCHORS. These answer "did the walk reach the tree at
+    // FLOOR ONE, part one - the ANCHORS. These answer "did the walk reach the tree at
     // all", which is the failure a count is too blunt to see.
     let reached: BTreeSet<String> = rust_files(&src)
         .iter()
@@ -604,7 +604,7 @@ fn the_vocabulary_names_no_vendor_outside_its_recorded_exceptions() {
         );
     }
 
-    // FLOOR ONE, part two — the COUNT.
+    // FLOOR ONE, part two - the COUNT.
     assert!(
         file_count >= SRC_FILE_FLOOR,
         "the census walked only {file_count} files under {}, below the SRC_FILE_FLOOR \
@@ -672,7 +672,7 @@ fn the_needle_still_matches_where_a_vendor_name_is_the_point() {
     let src = crate_src(NEEDLE_CONTROL_CRATE);
 
     // EACH MATCHER SEPARATELY. One floor over the combined answer is not a control over
-    // either — see [`names_a_vendor`] and this file's header.
+    // either - see [`names_a_vendor`] and this file's header.
     for (label, matcher, floor) in [
         (
             "VENDOR_NEEDLES (the product names)",
@@ -715,7 +715,7 @@ fn the_needle_still_matches_where_a_vendor_name_is_the_point() {
 fn the_test_half_splitter_is_still_seeing_the_test_half() {
     let src = own_src();
 
-    // ── Half one: in-file spans, against an INDEPENDENT oracle ──────────────────────
+    // -- Half one: in-file spans, against an INDEPENDENT oracle ----------------------
     //
     // Every file in this crate carries at most ONE `#[cfg(test)]`, so where the test
     // half begins is knowable without the brace matcher: it is the line the attribute
@@ -786,11 +786,11 @@ fn the_test_half_splitter_is_still_seeing_the_test_half() {
          was about to pass by checking nothing."
     );
 
-    // ── Half two: MORE THAN ONE `#[cfg(test)]` in a file ────────────────────────────
+    // -- Half two: MORE THAN ONE `#[cfg(test)]` in a file ----------------------------
     //
-    // The shape a first-attribute-wins matcher gets wrong, and the one that put 68 test
-    // lines into core's production column. This crate has no instance, so the control
-    // runs over the crate that does.
+    // The shape a first-attribute-wins matcher gets wrong, and the one that once
+    // counted a block of test lines in core's production column. This crate has no
+    // instance, so the control runs over the crate that does.
     let multi = crate_src(NEEDLE_CONTROL_CRATE).join(MULTI_CFG_TEST_FILE_CONTROL);
     let text = std::fs::read_to_string(&multi)
         .unwrap_or_else(|error| panic!("read {}: {error}", multi.display()));
@@ -819,7 +819,7 @@ fn the_test_half_splitter_is_still_seeing_the_test_half() {
         last_attribute + 1
     );
 
-    // ── Half three: a whole FILE made test code by its parent's `mod` ───────────────
+    // -- Half three: a whole FILE made test code by its parent's `mod` ---------------
     //
     // Dormant in this crate (it has no such declaration) and controlled anyway, because
     // an instrument nobody exercises is an instrument nobody notices breaking.

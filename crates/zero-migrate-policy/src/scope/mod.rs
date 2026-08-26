@@ -1,22 +1,26 @@
-//! The scope lattice — the security-core primitive of the policy system.
+//! The scope lattice - the security-core primitive of the policy system.
 //!
 //! Every policy rule (grant / require / inject / validate) carries a name
-//! [`Scope`]: `Nothing` (⊥, matches no object), `All` (⊤, matches every object),
-//! or a proper `Of { include, exclude }` over schema and schema-qualified-table
-//! [`Pattern`]s. The lattice operations — [`Scope::subset`] (`⊑`),
-//! [`Scope::meet`] (`⊓`), [`Scope::join`] (`⊔`), [`Scope::difference`] (`∖`) —
+//! [`Scope`]: `Nothing` (the bottom of the lattice, matches no object), `All`
+//! (the top, matches every object), or a proper `Of { include, exclude }` over
+//! schema and schema-qualified-table [`Pattern`]s. The lattice operations -
+//! [`Scope::subset`] (containment), [`Scope::meet`] (greatest lower bound),
+//! [`Scope::join`] (least upper bound), [`Scope::difference`] (set subtraction) -
 //! are the mechanism the composition algebra (II.3.2) uses to prove no-escalation.
 //!
-//! **The single most dangerous bug in a scope model is conflating ∅ with 𝒰.** So
-//! ⊥ and ⊤ are distinguished *values*, and `Of{include}` is NEVER empty: the
+//! **The single most dangerous bug in a scope model is conflating the empty set
+//! with the universe.** So bottom and top are distinguished *values*, and
+//! `Of{include}` is NEVER empty: the
 //! [`Scope::of`] constructor errors on empty include and normalizes an
 //! exclude-covers-include scope to `Nothing`. A disjoint meet therefore produces
 //! `Nothing`, never the universe.
 //!
 //! Correctness is proven by the brute-force oracle in `oracle`: over a bounded
 //! universe of names and globs it asserts every lattice op against a direct
-//! ground-truth matcher — `⊓` EXACT, `⊑ ⟺ ⊆`, `⊔ ⊇ ∪`, and `∖ ⊇ ∖`-or-reject
-//! (never a strict subset — the escalation direction is provably impossible).
+//! ground-truth matcher: the meet is EXACT, [`Scope::subset`] holds exactly when
+//! one object set is contained in the other, the join covers at least the union,
+//! and the difference covers at least the set subtraction or is rejected outright
+//! (never a strict subset - the escalation direction is provably impossible).
 
 pub mod glob;
 pub mod pattern;
@@ -31,21 +35,23 @@ pub use pattern::{normalize_object_name, Pattern};
 
 use pattern::{intersect_pattern, pattern_covers, ObjectName};
 
-/// A name scope: `Nothing` (⊥), `All` (⊤), or a proper `Of{include, exclude}`.
+/// A name scope: `Nothing` (bottom), `All` (top), or a proper `Of{include, exclude}`.
 ///
-/// `include` is a NON-EMPTY union of patterns (empty include is illegal — use
+/// `include` is a NON-EMPTY union of patterns (empty include is illegal - use
 /// `Nothing`). `exclude` subtracts; **exclude wins on overlap**.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Scope {
-    /// ⊥ — the empty scope. Matches NO object. Identity of `⊔`, annihilator of `⊓`.
+    /// Bottom - the empty scope. Matches NO object. The identity of the join and
+    /// the annihilator of the meet.
     Nothing,
-    /// ⊤ — every object. Identity of `⊓`, annihilator of `⊔`. The canonical loud
+    /// Top - every object. The identity of the meet and the annihilator of the
+    /// join. The canonical loud
     /// token for "everything"; `Of{include:["*"]}` is *semantically* equal but is
     /// NOT this token (the two loud legality gates in II.2.5 use the syntactic
     /// `== All` test, which this lattice does not model).
     All,
     /// A proper scope: `include` non-empty, `exclude` subtracts (exclude-wins).
-    /// Patterns are stored in NORMALIZED two-segment form (schema→`P.*`).
+    /// Patterns are stored in NORMALIZED two-segment form (schema->`P.*`).
     Of {
         include: Vec<Pattern>,
         exclude: Vec<Pattern>,
@@ -56,16 +62,17 @@ pub enum Scope {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ScopeError {
     /// `Of` was constructed with an empty `include`. The author must write
-    /// `Nothing` (deny) or `All` (universe) explicitly — there is no empty-vector
-    /// spelling of either extreme, so the ⊥/⊤ collision is unrepresentable.
+    /// `Nothing` (deny) or `All` (universe) explicitly - there is no empty-vector
+    /// spelling of either extreme, so the bottom/top collision is unrepresentable.
     EmptyInclude,
 }
 
-/// The result of a difference `∖` that the caller MUST treat as fail-closed.
+/// The result of a difference that the caller MUST treat as fail-closed.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Difference {
-    /// The exact-or-over-approximated difference, safe to consume. `Objects(this)
-    /// ⊇ Objects(A) \ Objects(B)` is guaranteed (never a strict subset).
+    /// The exact-or-over-approximated difference, safe to consume. `Objects(this)`
+    /// is guaranteed to contain every object in `Objects(A)` but not in
+    /// `Objects(B)` (never a strict subset of that set).
     Scope(Scope),
     /// The difference is not cleanly representable within the `Scope` type; the
     /// caller REJECTS (`UncoveredRegionNotRepresentable`). Fail-closed: the engine
@@ -90,12 +97,12 @@ impl Scope {
         Self::of(include, Vec::new())
     }
 
-    // ── ground truth (testing only) ───────────────────────────────────────────
+    // -- ground truth (testing only) -------------------------------------------
 
-    /// `objects_membership` — does this scope match the concrete object `n`?
+    /// `objects_membership` - does this scope match the concrete object `n`?
     ///
     /// This is the direct membership function used as ground truth by the oracle
-    /// (`n ∈ Objects(scope)`) and by enforcement-time matching. It is NOT derived
+    /// (is `n` a member of `Objects(scope)`) and by enforcement-time matching. It is NOT derived
     /// from the lattice ops. Exclude wins: an object excluded by any exclude
     /// pattern is out, regardless of includes.
     #[must_use]
@@ -109,11 +116,12 @@ impl Scope {
         }
     }
 
-    /// Does this scope denote the whole universe 𝒰 (`Objects(self) = 𝒰`)?
+    /// Does this scope denote the whole universe (is `Objects(self)` every object)?
     ///
     /// True for `All` and for an `Of` whose includes cover `*.*` with no clipping
     /// exclude. SOUND: a `true` guarantees universality (used only where a false
-    /// negative conservative-rejects — the `All ⊑ C` biconditional). We recognise
+    /// negative conservative-rejects - the "`All` is a subset of `C`"
+    /// biconditional). We recognise
     /// the canonical universe-include: some include pattern is `*.*` (covers every
     /// object) and no exclude overlaps it.
     #[must_use]
@@ -131,13 +139,13 @@ impl Scope {
         }
     }
 
-    // ── normalize ─────────────────────────────────────────────────────────────
+    // -- normalize -------------------------------------------------------------
 
-    /// Fold to canonical form: an `Of` with empty include → `Nothing`; an `Of`
-    /// whose excludes cover every included object → `Nothing`. Idempotent.
+    /// Fold to canonical form: an `Of` with empty include -> `Nothing`; an `Of`
+    /// whose excludes cover every included object -> `Nothing`. Idempotent.
     ///
     /// Note: we deliberately do NOT canonicalize `Of{include:["*"], exclude:[]}`
-    /// to `All` — the two are semantically equal but the security legality gates
+    /// to `All` - the two are semantically equal but the security legality gates
     /// (II.2.5) distinguish them syntactically. Keeping `Of{["*"]}` as-is is
     /// correct for the lattice (which is defined over `Objects`).
     #[must_use]
@@ -150,7 +158,8 @@ impl Scope {
                     return Scope::Nothing;
                 }
                 // Drop any include pattern wholly covered by some exclude pattern
-                // (that include contributes nothing). If ALL includes vanish, ⊥.
+                // (that include contributes nothing). If ALL includes vanish,
+                // the scope is empty.
                 let live: Vec<Pattern> = include
                     .iter()
                     .filter(|inc| !exclude.iter().any(|exc| pattern_covers(exc, inc)))
@@ -175,9 +184,9 @@ impl Scope {
         }
     }
 
-    // ── ⊑ subset (SOUND: may conservative-reject) ─────────────────────────────
+    // -- subset (SOUND: may conservative-reject) -------------------------------
 
-    /// `self ⊑ other` — is every object `self` denotes also denoted by `other`?
+    /// Is every object `self` denotes also denoted by `other`?
     ///
     /// SOUND: a `true` result guarantees containment; a `false` may be a
     /// conservative reject (the sanctioned direction for `admit`). The
@@ -190,14 +199,16 @@ impl Scope {
         match (self, other) {
             (Scope::Nothing, _) => true,
             (_, Scope::All) => true,
-            // `All ⊑ C` iff C denotes the universe. `Of{include:["*"]}` is
-            // semantically `All` (II.2.3), so the lattice `⊑` — defined over
-            // `Objects` — must accept it, even though the security legality gates
+            // `All` is a subset of C iff C denotes the universe.
+            // `Of{include:["*"]}` is semantically `All` (II.2.3), so the lattice
+            // containment - defined over `Objects` - must accept it, even though
+            // the security legality gates
             // (which this lattice does not model) use the syntactic `== All` test.
             (Scope::All, _) => other.denotes_universe(),
-            // `self ⊑ Nothing` iff `Objects(self) = ∅`. Every normalized scope
-            // with an empty object set IS `Nothing` (the constructor/normalize
-            // fold empty-object `Of` to `Nothing`), so only `Nothing ⊑ Nothing`.
+            // `self` is a subset of `Nothing` iff `Objects(self)` is empty. Every
+            // normalized scope with an empty object set IS `Nothing` (the
+            // constructor/normalize fold empty-object `Of` to `Nothing`), so the
+            // only pair that holds is `Nothing` against `Nothing`.
             (_, Scope::Nothing) => matches!(self, Scope::Nothing),
             (
                 Scope::Of {
@@ -222,10 +233,10 @@ impl Scope {
         }
     }
 
-    // ── ⊓ meet (EXACT) ────────────────────────────────────────────────────────
+    // -- meet (EXACT) ----------------------------------------------------------
 
-    /// `self ⊓ other` — the greatest lower bound (EXACT):
-    /// `Objects(result) = Objects(self) ∩ Objects(other)`.
+    /// The greatest lower bound of `self` and `other` (EXACT): `Objects(result)`
+    /// is exactly the intersection of `Objects(self)` and `Objects(other)`.
     #[must_use]
     pub fn meet(&self, other: &Scope) -> Scope {
         match (self, other) {
@@ -241,14 +252,15 @@ impl Scope {
                     exclude: be,
                 },
             ) => {
-                // include = ⋃_{a∈ai, b∈bi} (a ∩ b)  (pairwise pattern∩, flattened)
+                // include = the union over every a in ai and b in bi of their
+                // pairwise pattern intersection, flattened.
                 let mut include: Vec<Pattern> = Vec::new();
                 for a in ai {
                     for b in bi {
                         include.extend(intersect_pattern(a, b));
                     }
                 }
-                // exclude = ae ∪ be  (exclude-wins: unioning excludes only shrinks)
+                // exclude = ae union be (exclude-wins: unioning excludes only shrinks)
                 let mut exclude = ae.clone();
                 exclude.extend(be.iter().cloned());
                 Scope::Of {
@@ -260,13 +272,16 @@ impl Scope {
         }
     }
 
-    // ── ⊔ join (⊒-conservative: may over-approximate) ─────────────────────────
+    // -- join (conservative upwards: may over-approximate) ---------------------
 
-    /// `self ⊔ other` — least upper bound, allowed to OVER-approximate (⊒):
-    /// `Objects(result) ⊇ Objects(self) ∪ Objects(other)`.
+    /// The least upper bound of `self` and `other`, allowed to OVER-approximate:
+    /// `Objects(result)` contains at least the union of `Objects(self)` and
+    /// `Objects(other)`.
     ///
-    /// Its only consumer is the `grantedScope` aggregation (II.3.2), where "cover
-    /// at least the union" is the safe direction. Naive `exclude = ea ∩ eb`
+    /// Every consumer aggregates scopes UPWARD, where "cover at least the union"
+    /// is the safe direction: the `grantedScope` and `coveredScope` accumulations
+    /// and the effective creatable region in `crate::compose` (II.3.2), plus the
+    /// two-term construction in [`Scope::difference`]. Naive `exclude = ea intersect eb`
     /// over-includes; we then subtract from the joined excludes any exclude region
     /// now re-admitted by the other side's include, keeping the result a sound
     /// upper bound.
@@ -286,11 +301,11 @@ impl Scope {
                 },
             ) => {
                 let include = dedup([ai.clone(), bi.clone()].concat());
-                // Start from ea ∩ eb (only objects BOTH sides exclude can stay
+                // Start from ea intersect eb (only objects BOTH sides exclude can stay
                 // excluded), then drop any exclude that overlaps the OTHER side's
                 // include (that side re-admits it). Keeping an exclude that still
-                // overlaps a live include would UNDER-include → unsafe; dropping it
-                // OVER-includes → the sanctioned ⊒ direction.
+                // overlaps a live include would UNDER-include -> unsafe; dropping it
+                // OVER-includes -> the sanctioned upward direction.
                 let mut exclude: Vec<Pattern> = Vec::new();
                 for ea_p in ae {
                     for eb_p in be {
@@ -298,7 +313,8 @@ impl Scope {
                     }
                 }
                 // Conservative repair: if any surviving exclude still overlaps a
-                // live include from either side, drop it (over-include, safe for ⊒).
+                // live include from either side, drop it (over-include, which is
+                // the safe upward direction).
                 let exclude: Vec<Pattern> = dedup(exclude)
                     .into_iter()
                     .filter(|exc| {
@@ -312,38 +328,42 @@ impl Scope {
         }
     }
 
-    // ── ∖ difference (OVER-approx or reject — NEVER under-approx) [C1 FIX] ─────
+    // -- difference (OVER-approx or reject - NEVER under-approx) [C1 FIX] ------
 
-    /// `self ∖ other` — the objects `self` grants that `other` does NOT cover.
+    /// The objects `self` grants that `other` does NOT cover.
     ///
-    /// **[C1 FIX]** The result MUST over-approximate or reject — NEVER
-    /// under-approximate. `Objects(result) ⊇ Objects(self) \ Objects(other)` (an
+    /// **[C1 FIX]** The result MUST over-approximate or reject - NEVER
+    /// under-approximate. `Objects(result)` contains at least every object in
+    /// `Objects(self)` but not in `Objects(other)` (an
     /// over-approx can only turn an accept into a reject; an under-approx would let
-    /// a genuinely-uncovered region compute empty → wrongly ACCEPT an escalation).
+    /// a genuinely-uncovered region compute empty -> wrongly ACCEPT an escalation).
     ///
-    /// The doc's original `A∖B = Of{A.include, A.exclude ∪ B.include}` silently
-    /// drops `B.exclude`, under-approximating (it carves out `B.exclude`'s holes
-    /// that A\B must KEEP). We restore them: the difference is
+    /// The doc's original "A minus B is `Of{A.include, A.exclude union B.include}`"
+    /// silently drops `B.exclude`, under-approximating (it carves out
+    /// `B.exclude`'s holes that A-minus-B must KEEP). We restore them: the
+    /// difference is the join of two terms:
     ///
     /// ```text
-    /// A ∖ B  =  (A with B.include unioned into excludes)   [the doc's term]
-    ///        ⊔ (A ⊓ Of{ include: B.exclude })              [the dropped holes]
+    /// A minus B  =  join( A with B.include unioned into excludes,  [the doc's term]
+    ///                     meet(A, Of{ include: B.exclude }) )      [the dropped holes]
     /// ```
     ///
-    /// The first term is `Objects(A) \ Objects(B.include)`. The second is
-    /// `Objects(A) ∩ Objects(B.exclude)` = the part of A that B excluded and so
-    /// still belongs to A\B. Their union is `⊇ Objects(A) \ Objects(B)`, exact when
-    /// B has no excludes. `⊔` may over-approximate (safe). If the construction is
+    /// The first term is `Objects(A)` minus `Objects(B.include)`. The second is
+    /// the intersection of `Objects(A)` and `Objects(B.exclude)`, the part of A
+    /// that B excluded and so still belongs to A-minus-B. Their union contains at
+    /// least `Objects(A)` minus `Objects(B)`, and equals it when B has no
+    /// excludes. The join may over-approximate (safe). If the construction is
     /// not cleanly representable, we return [`Difference::NotRepresentable`].
     #[must_use]
     pub fn difference(&self, other: &Scope) -> Difference {
         match (self, other) {
-            // A ∖ ⊤ = ∅.
+            // Subtracting the universe leaves nothing.
             (_, Scope::All) => Difference::Scope(Scope::Nothing),
-            // A ∖ ∅ = A.
+            // Subtracting the empty scope leaves A unchanged.
             (_, Scope::Nothing) => Difference::Scope(self.clone()),
-            // ∅ ∖ B = ∅ ; ⊤ ∖ B is not representable in general (complement of a
-            // glob is not a glob) unless B is ∅/⊤ (handled above) — reject.
+            // The empty scope minus anything is empty. The universe minus B is not
+            // representable in general (the complement of a glob is not a glob)
+            // unless B is empty or the universe, both handled above - so reject.
             (Scope::Nothing, _) => Difference::Scope(Scope::Nothing),
             (Scope::All, _) => Difference::NotRepresentable,
             (
@@ -363,14 +383,14 @@ impl Scope {
                 }
                 .normalize();
 
-                // Term 2: A ⊓ Of{include: B.exclude} — the holes B carved out.
+                // Term 2: meet(A, Of{include: B.exclude}) - the holes B carved out.
                 let term2 = if be.is_empty() {
                     Scope::Nothing
                 } else {
                     // Build Of{include: be} without excludes; meet with A.
                     match Scope::include(be.clone()) {
                         Ok(b_holes) => self.meet(&b_holes),
-                        Err(_) => Scope::Nothing, // be empty ⇒ no holes
+                        Err(_) => Scope::Nothing, // be empty => no holes
                     }
                 };
 
@@ -389,16 +409,16 @@ fn dedup(patterns: Vec<Pattern>) -> Vec<Pattern> {
         .collect()
 }
 
-/// The exclude-aware `⊑` per-include-region check (II.3.1 steps 2 & 3), SOUND.
+/// The exclude-aware containment check per include-region (II.3.1 steps 2 & 3), SOUND.
 ///
 /// For a self include-pattern `d` (whose kept region is `d` minus self's excludes
 /// `de`): return true iff every part of that kept region is covered by some single
-/// `other` include `c ∈ ci` AND avoids every `other` exclude `e ∈ ce` (or the
-/// overlap is already carved out by `de`).
+/// `other` include drawn from `ci` AND avoids every `other` exclude drawn from
+/// `ce` (or the overlap is already carved out by `de`).
 fn region_covered_and_clear(d: &Pattern, de: &[Pattern], ci: &[Pattern], ce: &[Pattern]) -> bool {
     // Step 2: coverage. The whole of `d` must be covered by SOME single c
     // (conservative: no union-cover proof). If `d` is fully carved by de, it is
-    // vacuously fine — but we approximate "carved" conservatively: only when some
+    // vacuously fine - but we approximate "carved" conservatively: only when some
     // single de pattern covers d. Otherwise require a covering c.
     let d_fully_carved = de.iter().any(|e| pattern_covers(e, d));
     if d_fully_carved {
@@ -413,7 +433,7 @@ fn region_covered_and_clear(d: &Pattern, de: &[Pattern], ci: &[Pattern], ce: &[P
     for e in ce {
         let overlap = intersect_pattern(d, e);
         if overlap.is_empty() {
-            continue; // ce disjoint from d — fine.
+            continue; // ce disjoint from d - fine.
         }
         // The overlap objects are clipped by `other`. self keeps them unless de
         // covers the overlap. Conservative-sound: require that EVERY overlap

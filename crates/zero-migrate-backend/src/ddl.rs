@@ -12,27 +12,27 @@
 //! in the differ; both are still true, and the only thing that changed is which
 //! crate the words live in.
 //!
-//! DdlEmitter — the per-dialect EMISSION seam.
+//! DdlEmitter - the per-dialect EMISSION seam.
 //!
 //! The differ's diff-COMPARISON is dialect-neutral; only the final DDL spelling
-//! differs by dialect. This trait isolates exactly those emission concerns — the
+//! differs by dialect. This trait isolates exactly those emission concerns - the
 //! ADD COLUMN statement (incl. mask/encrypted sentinel spelling), the CREATE INDEX
 //! up/down (access-method + WITH + qualification), and the DROP table/column/index
-//! qualification — so `DeclarativeAuthor`'s render methods are thin callers and the
+//! qualification - so `DeclarativeAuthor`'s render methods are thin callers and the
 //! dialect choice is made ONCE (via `DeclarativeAuthor::emitter`).
 //!
-//! Three impls — PostgreSQL (schema-qualified DDL: access methods, WITH storage
+//! Three impls - PostgreSQL (schema-qualified DDL: access methods, WITH storage
 //! params, `COMMENT ON COLUMN` sentinels), SQLite (unqualified `main` DDL: inline
-//! `/* … */` sentinels, plain B-tree indexes), and MySQL (backtick-qualified DDL,
+//! `/* ... */` sentinels, plain B-tree indexes), and MySQL (backtick-qualified DDL,
 //! native enum folding, and inline foreign-key-supporting indexes). Each method body is
-//! the EXACT former `if is_sqlite { … } else { … }` arm, moved VERBATIM — code
+//! the EXACT former `if is_sqlite { ... } else { ... }` arm, moved VERBATIM - code
 //! motion, not a rewrite, so the bytes are unchanged (the goldens prove
 //! it). The ROUTING branches (FK inline-vs-defer, rebuild-vs-ALTER, policy-injected
-//! index skip, the unreachable guard) stay in `diff()` — they are diff-logic.
+//! index skip, the unreachable guard) stay in `diff()` - they are diff-logic.
 //!
 //! The CREATE TABLE renderers ARE extracted, as of [`DdlEmitter::create_table`].
 //! The header used to say they were not, on the grounds that "column/constraint
-//! spelling is large enough to remain dialect-specific" — which is true of the
+//! spelling is large enough to remain dialect-specific" - which is true of the
 //! BODIES and says nothing about the seam. What actually blocked it was that the
 //! three renderers took three DIFFERENT parameter lists; see
 //! [`CreateTableRequest`] for why that divergence was apparent rather than real.
@@ -41,7 +41,7 @@
 //! that method are gone: every caller now builds its own [`CreateTableRequest`]
 //! and asks an emitter directly. The adapters had been the last place where a
 //! caller's dialect was inferred from WHICH function it called rather than stated,
-//! and the `lower_create_table` site shows what that bought — one request, built
+//! and the `lower_create_table` site shows what that bought - one request, built
 
 use crate::fold::CatalogFoldPolicy;
 use crate::snapshot::{
@@ -62,7 +62,7 @@ use zero_migrate_ir::ir::{ExclusionMethod, ExclusionOperator};
 /// shipping vendor's `<table>_pkey` here, in the crate whose whole purpose is to
 /// name no vendor, and the cost was paid by the other backends. A server that calls
 /// every primary key `PRIMARY` had to report `<table>_pkey` instead so this
-/// comparison kept matching — a backend impersonating another to satisfy a shared
+/// comparison kept matching - a backend impersonating another to satisfy a shared
 /// check. Asking the backend is what removes the need to impersonate one.
 #[must_use]
 pub fn is_pk_index(policy: &dyn CatalogFoldPolicy, table: &str, index_name: &str) -> bool {
@@ -74,7 +74,7 @@ pub fn is_pk_index(policy: &dyn CatalogFoldPolicy, table: &str, index_name: &str
 /// Everything a backend needs to spell ONE `CREATE TABLE`, and nothing about which
 /// backend is spelling it.
 ///
-/// The three renderers this unifies did not differ in what they NEEDED — they
+/// The three renderers this unifies did not differ in what they NEEDED - they
 /// differed in what each had been handed. PostgreSQL and MySQL took an
 /// `inline_fks` slice; SQLite took a `&ResolvedInject` and no FK slice at all.
 /// That reads like three incompatible contracts and is not: BOTH are decisions
@@ -87,7 +87,7 @@ pub fn is_pk_index(policy: &dyn CatalogFoldPolicy, table: &str, index_name: &str
 // apply; it is public API here, where it does. It carries no behaviour.
 #[derive(Debug)]
 pub struct CreateTableRequest<'a> {
-    /// The UNQUALIFIED table name. Each backend qualifies it its own way — with a
+    /// The UNQUALIFIED table name. Each backend qualifies it its own way - with a
     /// project schema on PostgreSQL and MySQL, not at all on SQLite, where the
     /// app file IS `main`.
     pub table: &'a str,
@@ -97,7 +97,7 @@ pub struct CreateTableRequest<'a> {
     ///
     /// SQLite ignores this and inlines every `FOREIGN KEY` straight off
     /// `snapshot.constraints`, because it has no late `ADD CONSTRAINT` to defer
-    /// TO — the routing decision that produces this slice is made in the engine's
+    /// TO - the routing decision that produces this slice is made in the engine's
     /// `DeclarativeAuthor::lower_create_table`, gated on
     /// `Capability::AlterTableAddConstraint`.
     ///
@@ -113,13 +113,13 @@ pub struct CreateTableRequest<'a> {
     /// payload instead of as follow-on `CREATE INDEX` units, which is why the
     /// differ skips re-emitting them on that dialect. An EMPTY slice means "the
     /// caller had no inject to give", which today is only ever a PostgreSQL or
-    /// MySQL caller — neither of which looks at this field.
+    /// MySQL caller - neither of which looks at this field.
     ///
     /// # Why this is a name list and not the `ResolvedInject` it used to be
     ///
     /// The field was `Option<&ResolvedInject>` and SQLite read it through exactly
     /// one expression: `is_injected_index(table, &idx.name, inj)`. That predicate
-    /// lives in the engine and cannot leave it — it resolves an inject spec's
+    /// lives in the engine and cannot leave it - it resolves an inject spec's
     /// columns through `zero_migrate::schema::query::index_name`, i.e. the ENGINE's
     /// index-naming convention, which is a decision core makes and not a spelling a
     /// vendor is asked for.
@@ -130,7 +130,7 @@ pub struct CreateTableRequest<'a> {
     /// within one `create_table` call `table` and the inject are LOOP-INVARIANT, so
     /// the predicate is a pure function of `idx.name` alone. Selecting the matching
     /// names up front and testing membership therefore admits exactly the same
-    /// indexes for every input — including the degenerate case of two entries in
+    /// indexes for every input - including the degenerate case of two entries in
     /// `snapshot.indexes` sharing a name, where a name-keyed predicate necessarily
     /// returns the same answer for both.
     pub injected_indexes: &'a [String],
@@ -162,7 +162,7 @@ pub trait DdlEmitter {
     /// pair its descriptor with another backend's DDL factory.
     fn dialect(&self) -> DialectId;
 
-    /// Render a `CREATE TABLE` as its STRUCTURAL statement list — the create
+    /// Render a `CREATE TABLE` as its STRUCTURAL statement list - the create
     /// itself plus whatever the dialect attaches to it. `join(";\n")` over the
     /// list is the canonical `up`, and the list (not the joined string) is what
     /// the guard-per-statement lower consumes, so a string-literal DEFAULT
@@ -197,7 +197,7 @@ pub trait DdlEmitter {
     /// `cast_value` is CORE's answer to a question core owns: whether the column's
     /// generation contract permits the existing value to be cast into the new type.
     /// It is carried as an answer rather than as the snapshot the predicate reads
-    /// for the same reason [`CreateTableRequest::injected_indexes`] is a name list —
+    /// for the same reason [`CreateTableRequest::injected_indexes`] is a name list -
     /// the predicate lives above this contract and must not be copied into a vendor.
     /// A backend whose retype takes no cast clause ignores it.
     ///
@@ -206,7 +206,7 @@ pub trait DdlEmitter {
     /// The same thing it means on [`Self::drop_foreign_key_up`] and the partition
     /// family: *this backend does not spell this operation here*. A backend that
     /// restates the whole column definition at APPLY, from the definition the server
-    /// itself reports, cannot write the statement offline — the definition is not in
+    /// itself reports, cannot write the statement offline - the definition is not in
     /// the op. It says so by declaring
     /// [`CatalogFoldPolicy::restates_column_type_at_apply`]
     /// and returning `None` here, and the render layer never arrives.
@@ -227,8 +227,8 @@ pub trait DdlEmitter {
     ///
     /// `nullable` is the DESIRED state, so `true` relaxes and `false` tightens; the
     /// `down` is the inverse statement. Which of the two directions is gated is not
-    /// asked here — that is a safety judgement core makes about the operation, not a
-    /// spelling — so a backend states only the two statements.
+    /// asked here - that is a safety judgement core makes about the operation, not a
+    /// spelling - so a backend states only the two statements.
     ///
     /// Required, with no default body.
     fn alter_column_nullability(
@@ -244,7 +244,7 @@ pub trait DdlEmitter {
     /// one method because they are one statement with two tails, which is why the
     /// `down` of a set and the `up` of a drop come out byte-identical.
     ///
-    /// Required, with no default body — and this is the member of the family a
+    /// Required, with no default body - and this is the member of the family a
     /// SHIPPING backend other than the one whose grammar core used to write already
     /// reaches, so the seam is not a precaution here.
     fn alter_column_default(
@@ -263,7 +263,7 @@ pub trait DdlEmitter {
     /// encode any vendor's rule.
     fn indexes_inlined_by_create(&self, req: &CreateTableRequest<'_>) -> Vec<String>;
 
-    /// Render an `ALTER TABLE … ADD COLUMN …` as `(up_statements, down)`. The mask
+    /// Render an `ALTER TABLE ... ADD COLUMN ...` as `(up_statements, down)`. The mask
     /// / encrypted sentinel spelling differs by dialect: PG appends a trailing
     /// `COMMENT ON COLUMN` as a SEPARATE structural statement; `SQLite` rides the
     /// sentinel inline in the column clause (a single statement). Returning the
@@ -272,8 +272,8 @@ pub trait DdlEmitter {
     /// `join(";\n")` over the list is the canonical `up`.
     fn add_column(&self, table: &str, c: &ColumnSnapshot) -> (Vec<String>, Option<String>);
 
-    /// Render a `CREATE … INDEX …` as `(up, down)`. PG emits the access-method
-    /// (`USING …`), the `WITH (lists=…)` storage param, and qualifies; `SQLite`
+    /// Render a `CREATE ... INDEX ...` as `(up, down)`. PG emits the access-method
+    /// (`USING ...`), the `WITH (lists=...)` storage param, and qualifies; `SQLite`
     /// emits a plain unqualified b-tree index.
     fn create_index(&self, table: &str, idx: &IndexSnapshot) -> (String, String);
 
@@ -281,19 +281,19 @@ pub trait DdlEmitter {
     fn drop_table_up(&self, table: &str) -> String;
 
     /// Render an `ALTER TABLE <old> RENAME TO <new>` as `(up, down)`. The `down`
-    /// is the inverse rename (`new` → `old`). On PG the table-ref is
-    /// schema-qualified, but the RENAME TARGET is a BARE name — Postgres rejects a
-    /// schema-qualified target (`… RENAME TO "schema"."t"` is a syntax error); the
+    /// is the inverse rename (`new` -> `old`). On PG the table-ref is
+    /// schema-qualified, but the RENAME TARGET is a BARE name - Postgres rejects a
+    /// schema-qualified target (`... RENAME TO "schema"."t"` is a syntax error); the
     /// renamed table stays in the same schema. On SQLite both are unqualified
     /// `main` names.
     fn rename_table(&self, table: &str, to: &str) -> (String, String);
 
-    /// Render the `up` of an `ALTER TABLE … DROP COLUMN …` (qualification differs).
+    /// Render the `up` of an `ALTER TABLE ... DROP COLUMN ...` (qualification differs).
     fn drop_column_up(&self, table: &str, col: &str) -> String;
 
-    /// Render the `up` of a `DROP INDEX …`. PG qualifies the index name; `SQLite`
+    /// Render the `up` of a `DROP INDEX ...`. PG qualifies the index name; `SQLite`
     /// must emit it unqualified (a qualified `DROP INDEX "schema"."ix"` silently
-    /// no-ops on `SQLite` — the dangerous silent-drift mode).
+    /// no-ops on `SQLite` - the dangerous silent-drift mode).
     fn drop_index_up(&self, table: Option<&str>, idx_name: &str) -> String;
 
     /// Render native CREATE PARTITION relation DDL as `(up, down)`, or explicitly
@@ -318,9 +318,9 @@ pub trait DdlEmitter {
 
     /// Render native DROP PARTITION relation DDL, or explicitly refuse.
     ///
-    /// All four methods are required with no default so a future backend must
-    /// state the complete boundary instead of silently borrowing another
-    /// vendor's partition grammar.
+    /// Every partition method on this trait is required with no default, so a
+    /// backend must state the complete boundary instead of silently borrowing
+    /// another vendor's partition grammar.
     fn drop_partition(&self, name: &str, cascade: bool) -> Option<String>;
 }
 
@@ -347,7 +347,7 @@ pub struct ExclusionElementParts<'a> {
 pub struct ExclusionConstraintRequest<'a> {
     /// The index access method the constraint is built on, unspelled.
     pub method: ExclusionMethod,
-    /// The elements, in authored order. Never empty — the engine refuses that earlier.
+    /// The elements, in authored order. Never empty - the engine refuses that earlier.
     pub elements: &'a [ExclusionElementParts<'a>],
     /// An already-rendered `WHERE` predicate, without the keyword.
     pub where_predicate: Option<&'a str>,
@@ -548,12 +548,12 @@ pub fn fk_referenced_columns(definition: &str) -> Vec<String> {
 // Moved here from `zero_migrate::render::declarative`, where they were private
 // siblings of the three `DdlEmitter` impls. All three impls call every one of
 // them, from BOTH `create_table` and `add_column`, so a helper the vendors share
-// cannot stay above the vendors — that is the same arrow the trait itself moved
+// cannot stay above the vendors - that is the same arrow the trait itself moved
 // to satisfy.
 //
 // They are dialect-neutral: every helper left here has one spelling shared by all
 // three backends. Nothing here resolves a vendor or names one it was not handed,
-// so the boundary rule in `zero_migrate::render::backends`'s header is unchanged —
+// so the boundary rule in `zero_migrate::render::backends`'s header is unchanged -
 // the caller has already decided which vendor it is.
 //
 // Moved VERBATIM: same bodies, same names, same order of tests over the same
@@ -647,7 +647,7 @@ pub fn inline_pk_for_column(
     matches!(primary_key_columns(policy, table, t), Some(cols) if cols == [column])
 }
 
-/// Whether a PRIMARY KEY constraint must be rendered as a TABLE-level clause —
+/// Whether a PRIMARY KEY constraint must be rendered as a TABLE-level clause -
 /// true for a composite PK, false for the single-column case
 /// [`inline_pk_for_column`] already inlined.
 #[must_use]

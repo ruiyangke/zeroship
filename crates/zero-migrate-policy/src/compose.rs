@@ -1,4 +1,4 @@
-//! The composition algebra (II.3.2) — the SECURITY CROWN JEWEL. This module turns
+//! The composition algebra (II.3.2) - the SECURITY CROWN JEWEL. This module turns
 //! validated [`PolicyDoc`] layers into an UNFORGEABLE [`EffectivePolicy`] through
 //! two operators, and exposes the decision-query API the guard/engine (the PEP)
 //! call. All scope resolution and value ordering live here; the PEP holds no
@@ -7,33 +7,36 @@
 //! # The two lattices
 //!
 //! Composition rides on two independent lattices, both proven by oracles:
-//! - the **scope lattice** (`crate::scope`) — `⊑`/`⊓`/`⊔`/`∖` over object sets;
-//! - the **value order** (`crate::value_order`) — `⊑_value`/`⊔_value`/`⊓_value`
-//!   per `KnobKind`.
+//! - the **scope lattice** (`crate::scope`) - containment, meet, join and
+//!   difference over object sets;
+//! - the **value order** (`crate::value_order`) - the no-looser-than relation with
+//!   its join and meet, per `KnobKind`.
 //!
 //! # The grant model is POINTWISE and SYMBOLIC (II.3.2)
 //!
-//! A grant for key `k` is a partial function `Object → Value`, NOT a scope plus a
+//! A grant for key `k` is a partial function `Object -> Value`, NOT a scope plus a
 //! scalar. We represent it symbolically as the set of `(effective_scope, value)`
 //! grant rules on `k`; the value at an object `o` is
 //!
 //! ```text
-//! value(P, k, o) = ⨆_value { r.value : r ∈ grants(k), o ∈ Objects(r.scope) }
+//! value(P, k, o) = the value-join over every rule r in grants(k)
+//!                  whose scope covers o, of r.value
 //!                  (the LOOSEST covering value; the knob default if none covers o)
 //! ```
 //!
-//! and `grantedScope(P,k) = ⊔ { r.scope : r ∈ grants(k), r.value ≠ default }`. We
-//! never enumerate objects: the `admit` grant check partitions the draft's
-//! granted scope by the charter's covering rules (via `⊓`) and compares values on
-//! each region, plus the uncovered region via `∖` (where the charter value is
-//! `default`). See [`crate::boundary::admit`].
+//! and `grantedScope(P, k)` is the scope-join of `r.scope` over every rule in
+//! `grants(k)` whose value is not the default. We never enumerate objects: the
+//! `admit` grant check partitions the draft's granted scope by the charter's
+//! covering rules (via the meet) and compares values on each region, plus the
+//! uncovered region via the difference (where the charter value is `default`).
+//! See [`crate::boundary::admit`].
 //!
 //! # `admit` vs `restrict`
 //!
 //! - [`crate::boundary::admit`] ingests an UNTRUSTED draft against a trusted charter:
-//!   grants must be pointwise `⊑`; require/inject/validate union-up; collisions blamed
-//!   on the draft; the creatable-scope lint runs. NO clipping — strict reject.
-//! - [`restrict`] meets two TRUSTED charters (host→org→project): grants meet
+//!   grants must be pointwise no looser; require/inject/validate union-up; collisions blamed
+//!   on the draft; the creatable-scope lint runs. NO clipping - strict reject.
+//! - [`restrict`] meets two TRUSTED charters (host->org->project): grants meet
 //!   pointwise; rule-sets union; charter-vs-charter collisions are a loud operator
 //!   error. Associative + total. Chains compose with `restrict`; the final untrusted
 //!   draft lands via `admit`.
@@ -50,16 +53,16 @@ use crate::value_order::{join_value, leq_value, meet_value, ValueOrderError};
 use crate::{LoadContext, LoadError, PolicyDoc};
 
 /// The knob key of the scoped creation-gating grant that anchors mandatory injects
-/// (II.2.6a). The creatable-scope lint requires this grant's scope `⊑` every
-/// mandatory charter inject's scope.
+/// (II.2.6a). The creatable-scope lint requires this grant's scope to be contained
+/// in every mandatory charter inject's scope.
 pub(crate) const CREATE_TABLE_KEY: &str = "schema.create_table";
 
-// ══════════════════════════════════════════════════════════════════════════════
-// TrustedDoc — provenance newtype (H-1)
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
+// TrustedDoc - provenance newtype (H-1)
+// ==============================================================================
 
 /// A policy document of HOST provenance (H-1). Constructible ONLY inside this crate,
-/// from a host-injected source — the [`RootCharter`] and catalog entries registered
+/// from a host-injected source - the [`RootCharter`] and catalog entries registered
 /// at engine construction. There is **no** `PolicyDoc -> TrustedDoc` conversion and
 /// **no** public constructor: a creator-supplied `PolicyDoc` (a *draft*) can never
 /// become a `TrustedDoc`.
@@ -69,19 +72,20 @@ pub(crate) const CREATE_TABLE_KEY: &str = "schema.create_table";
 /// The `extends`-laundering hole (a draft inheriting a trusted base into `overlay`)
 /// is closed by construction, not by a runtime provenance check.
 ///
-/// The single public mint site outside `RootCharter::parse_*` is
-/// [`TrustedDoc::register_catalog_entry`] — the `ProfileCatalog`-registration wrapper
-/// a host uses to turn a document IT authored into a catalog `TrustedDoc`. Passing a
+/// The public mint sites outside `RootCharter::parse_*` are the
+/// [`TrustedDoc::register_catalog_entry`] family (plus its `_json` and
+/// `_with_catalog` forms) - the `ProfileCatalog`-registration wrappers a host uses
+/// to turn a document IT authored into a catalog `TrustedDoc`. Passing a
 /// creator-editable file here would defeat H-1; that is construction-site discipline
-/// (the doc IS host-authored) the type cannot police, but the mint site is named so
-/// no one wires an untrusted source into it.
+/// (the doc IS host-authored) the type cannot police, but the mint sites are named so
+/// no one wires an untrusted source into them.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TrustedDoc(PolicyDoc);
 
 impl TrustedDoc {
     /// Mint a catalog-entry `TrustedDoc` from a document the HOST authored
     /// (`ProfileCatalog` registration, II.5). Parses + validates as a NON-root layer
-    /// (a catalog `env` fragment may not carry `mandatory = true` injects — that is
+    /// (a catalog `env` fragment may not carry `mandatory = true` injects - that is
     /// `RootCharter`-only, M-5). The caller MUST supply a host-authored source; a
     /// creator-editable document wired here would launder untrusted content into the
     /// trusted combinators (H-1 guidance).
@@ -121,7 +125,7 @@ impl TrustedDoc {
     }
 
     /// Crate-internal mint from an already-validated document (the `RootCharter`
-    /// constructors, extends-resolution). No provenance is conferred by this call —
+    /// constructors, extends-resolution). No provenance is conferred by this call -
     /// the caller is responsible for the document being host-authored.
     pub(crate) fn from_validated(doc: PolicyDoc) -> Self {
         Self(doc)
@@ -133,11 +137,11 @@ impl TrustedDoc {
     }
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// RootCharter — the ONLY trust anchor
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
+// RootCharter - the ONLY trust anchor
+// ==============================================================================
 
-/// The host's ROOT CHARTER — the single trust anchor of the whole policy system
+/// The host's ROOT CHARTER - the single trust anchor of the whole policy system
 /// (II.5), and the outermost layer of every assembled charter (M-5). Wraps a
 /// [`TrustedDoc`] loaded with [`LoadContext::RootCharter`] (the only layer allowed
 /// `mandatory = true` injects). Every [`EffectivePolicy`] descends from a
@@ -153,7 +157,7 @@ pub struct RootCharter {
 impl RootCharter {
     /// Parse + validate a root-charter policy document from TOML. This is a thin
     /// wrapper over [`PolicyDoc::parse_toml`] pinned to [`LoadContext::RootCharter`]
-    /// — the only context under which a `mandatory` inject rule loads.
+    /// - the only context under which a `mandatory` inject rule loads.
     pub fn parse_toml(src: &str, registry: &PolicyRegistry) -> Result<Self, LoadError> {
         let doc = PolicyDoc::parse_toml(src, registry, LoadContext::RootCharter)?;
         Ok(Self {
@@ -189,7 +193,7 @@ impl RootCharter {
         self.doc.doc()
     }
 
-    /// This root as a [`TrustedDoc`] — so it may be an `overlay`/`restrict` operand
+    /// This root as a [`TrustedDoc`] - so it may be an `overlay`/`restrict` operand
     /// (the root is `base`, the outermost layer, M-5).
     #[must_use]
     pub fn as_trusted(&self) -> &TrustedDoc {
@@ -197,9 +201,9 @@ impl RootCharter {
     }
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 // Composition errors
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 
 /// A `admit` / `restrict` failure. `admit` errors blame the
 /// UNTRUSTED draft; `restrict` errors are loud OPERATOR misconfigurations of
@@ -207,23 +211,24 @@ impl RootCharter {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ComposeError {
     /// A draft grant on `key` is LOOSER than the charter permits somewhere in the
-    /// draft's granted scope — the value-blind / scope-blind escalation guard
+    /// draft's granted scope - the value-blind / scope-blind escalation guard
     /// (II.3.2). `offending_pattern` renders the region the draft over-grants over.
     GrantExceedsCharter {
         /// The knob key whose grant escalated.
         key: KnobKey,
         /// A human-readable render of the offending object region (the uncovered
-        /// region, or a covered region where `draft_value ⋢ charter_value`).
+        /// region, or a covered region where `draft_value` is LOOSER than
+        /// `charter_value`).
         offending_pattern: String,
     },
     /// A region `admit` had to reason about for `key` is not cleanly representable by
-    /// `∖` (II.3.1) — the sanctioned fail-closed conservative deny.
+    /// the scope difference (II.3.1) - the sanctioned fail-closed conservative deny.
     ///
     /// TWO causes reach here, and the variant deliberately does not distinguish them,
     /// because the whole point is that the region could not be named:
     ///
     /// - the draft's grant reaches OUTSIDE everything the charter raises, and the
-    ///   difference has no glob form (`All ∖ app_*` is the common one); or
+    ///   difference has no glob form (`All` minus `app_*` is the common one); or
     /// - the charter DOES cover the draft, and the algebra could not prove it -
     ///   subtracting the scopes that would discharge the obligation was not
     ///   representable.
@@ -238,7 +243,7 @@ pub enum ComposeError {
     },
     /// A draft `Inject` collides with a charter `Inject` on scope-overlapping
     /// objects (same column name, conflicting PK pin, `author_primary_key`
-    /// Allow-vs-Forbid, or same index name) — blamed on the draft (II.4.4).
+    /// Allow-vs-Forbid, or same index name) - blamed on the draft (II.4.4).
     DraftInjectCollidesCharter {
         /// What collided (column/index name, or the pinned-PK conflict).
         detail: String,
@@ -249,14 +254,14 @@ pub enum ComposeError {
         /// What contradicts (the forbidden column / table name vs the injected one).
         detail: String,
     },
-    /// The draft's `core.create_table` granted scope is NOT `⊑` a mandatory charter
-    /// inject's scope — a tenant could create an in-scope table escaping the
+    /// The draft's `core.create_table` granted scope is NOT contained in a mandatory
+    /// charter inject's scope - a tenant could create an in-scope table escaping the
     /// mandatory injection (II.2.6a).
     CreatableEscapesMandatoryInject {
         /// A render of the mandatory inject scope the creatable grant escaped.
         inject_scope: String,
     },
-    /// Two TRUSTED charters inject conflicting shape on overlapping scope — a loud
+    /// Two TRUSTED charters inject conflicting shape on overlapping scope - a loud
     /// operator misconfiguration surfaced at `restrict` (II.4.4).
     CharterInjectCollision {
         /// What collided across the two charters.
@@ -280,11 +285,11 @@ impl From<ValueOrderError> for ComposeError {
     }
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 // The pointwise grant map
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 
-/// One resolved grant rule: a scope and the value it grants there. `value ≠ default`
+/// One resolved grant rule: a scope and the value it grants there. `value != default`
 /// is NOT assumed here (the loader keeps default-valued and dead rules); the
 /// `granted_scope`/`value_at` accessors filter appropriately.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -305,7 +310,7 @@ pub struct GrantKeyMap {
 }
 
 impl GrantKeyMap {
-    /// `value(P, k, o)` — the LOOSEST covering rule's value, else the default.
+    /// `value(P, k, o)` - the LOOSEST covering rule's value, else the default.
     pub(crate) fn value_at(&self, o: &ObjectName) -> Result<KnobValue, ComposeError> {
         let mut acc = self.default.clone();
         for r in &self.rules {
@@ -316,16 +321,16 @@ impl GrantKeyMap {
         Ok(acc)
     }
 
-    /// `grantedScope(P, k)` — the `⊔` of the scopes of exactly the rules that raise
+    /// `grantedScope(P, k)` - the join of the scopes of exactly the rules that raise
     /// the value ABOVE default (a default-valued rule contributes nothing). This is
-    /// precisely the region where `value ≠ default` (II.3.2).
+    /// precisely the region where `value != default` (II.3.2).
     pub(crate) fn granted_scope(&self) -> Result<Scope, ComposeError> {
         let mut acc = Scope::Nothing;
         for r in &self.rules {
             // A rule whose value equals default does not raise the grant.
             if leq_value(&self.kind, &r.value, &self.default)? {
-                // value ⊑ default ⟺ value == default (default is the tightest), so
-                // this rule grants nothing above default — skip it.
+                // A value no looser than the default IS the default (the default is
+                // the tightest), so this rule grants nothing above default - skip it.
                 continue;
             }
             acc = acc.join(&r.scope);
@@ -333,7 +338,7 @@ impl GrantKeyMap {
         Ok(acc)
     }
 
-    /// `coveredScope(P, k)` — the `⊔` of the scopes of ALL grant rules on this key,
+    /// `coveredScope(P, k)` - the join of the scopes of ALL grant rules on this key,
     /// regardless of value (presence, incl. default-valued rules) (II.3.2 (a)). This
     /// is the OVERRIDE/MASKING set: where this layer's value WINS over an inherited
     /// one, even when it narrows the knob DOWN to its default.
@@ -345,7 +350,7 @@ impl GrantKeyMap {
         acc
     }
 
-    /// `P.covers(k, o)` — does ANY grant rule on this key cover `o` (presence, any
+    /// `P.covers(k, o)` - does ANY grant rule on this key cover `o` (presence, any
     /// value)? The masking test: a layer's value WINS at `o` iff it covers `o`.
     pub(crate) fn covers(&self, o: &ObjectName) -> bool {
         self.rules.iter().any(|r| r.scope.objects_membership(o))
@@ -356,7 +361,7 @@ impl GrantKeyMap {
 /// A key with no grant rules is absent (its value is the knob default everywhere).
 ///
 /// Exposed (hidden) because the sealed [`Charter`] trait returns it; not part of the
-/// stable API — construct/inspect only through the composition entry points.
+/// stable API - construct/inspect only through the composition entry points.
 #[derive(Clone, PartialEq, Eq, Debug)]
 #[doc(hidden)]
 pub struct GrantModel {
@@ -404,20 +409,20 @@ impl GrantModel {
     }
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// Layer — one resolved policy layer (H-4: the layered charter / effective policy)
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
+// Layer - one resolved policy layer (H-4: the layered charter / effective policy)
+// ==============================================================================
 
 /// Which layer a resolved rule set occupies in a composed stack (H-4). The tag is
-/// bound into the seal (II.7) so two stacks with the same *flattened* rule set — but
-/// different layer boundaries — encode differently and a re-flatten fails the MAC.
+/// bound into the seal (II.7) so two stacks with the same *flattened* rule set - but
+/// different layer boundaries - encode differently and a re-flatten fails the MAC.
 ///
-/// The cross-layer order, outermost → innermost, is `Base → Env → Draft`. `restrict`
+/// The cross-layer order, outermost -> innermost, is `Base -> Env -> Draft`. `restrict`
 /// flattens a trusted meet into ONE `Base` layer; `overlay` produces `[Env] over
 /// [Base]`; `admit` places the untrusted `[Draft]` innermost over the charter layers.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum LayerTag {
-    /// The outermost trusted layer — a `RootCharter`/`restrict`-meet/`overlay` base.
+    /// The outermost trusted layer - a `RootCharter`/`restrict`-meet/`overlay` base.
     Base,
     /// A trusted `env` overlay layer (from [`overlay`]`(base, env)`), inside `Base`.
     Env,
@@ -430,7 +435,7 @@ pub(crate) enum LayerTag {
 /// top-first (innermost-first) with fall-through (II.3.2 / H-4).
 ///
 /// Exposed (hidden) because the sealed [`AdmitCharter`] trait returns it; not part of
-/// the stable API — construct/inspect only through the composition entry points.
+/// the stable API - construct/inspect only through the composition entry points.
 #[derive(Clone, PartialEq, Eq, Debug)]
 #[doc(hidden)]
 pub struct Layer {
@@ -459,13 +464,13 @@ impl Layer {
 }
 
 /// Pin `key` in `layer` so a SILENT region gets the knob DEFAULT, not an inherited
-/// charter value — by appending a synthetic default-valued grant rule over the whole
+/// charter value - by appending a synthetic default-valued grant rule over the whole
 /// universe (`Scope::All`) to the layer's grant map for `key`. Presence-override
 /// (II.3.2) then makes this layer WIN the top-down grant fall-through EVERYWHERE for
 /// `key`: at an object the draft covered with an EXPLICIT rule, the loosest-covering
 /// join within the layer keeps the draft's own (higher) value; at an object the draft
 /// left silent, only the synthetic default-valued rule covers, so the value is the
-/// knob default — the charter's grant below is never seen. Used by
+/// knob default - the charter's grant below is never seen. Used by
 /// [`admit`](crate::boundary::admit) to realize a `KnobDef.inherit == false` power
 /// grant: it is conferred only where the draft ASKED, never by inheritance-by-omission.
 /// `pub(crate)`: the boundary module is its sole caller.
@@ -490,15 +495,18 @@ pub(crate) fn pin_layer_key_to_default(
     });
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// EffectivePolicy — UNFORGEABLE
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
+// EffectivePolicy - UNFORGEABLE
+// ==============================================================================
 
-/// The composed, UNFORGEABLE effective policy — the PDP surface the guard/engine
+/// The composed, UNFORGEABLE effective policy - the PDP surface the guard/engine
 /// query (II.3.2). Its fields are PRIVATE, it has NO `Deserialize` and NO public
-/// constructor: the ONLY ways to obtain one are [`crate::admit`] / [`restrict`]
-/// from a [`RootCharter`] (or [`EffectivePolicy::deny_all`], the engine-derived
-/// floor). Holding one is proof it was composed under the host's root charter — this
+/// constructor: the ONLY ways to obtain one are [`crate::admit`], which ingests a
+/// draft against a finalized charter, and [`EffectivePolicy::deny_all`], the
+/// engine-derived floor. [`restrict`] and [`overlay`] compose TRUSTED documents into
+/// an [`AssembledCharter`], which must clear [`finalize_charter`] and then be
+/// `admit`'s charter before any `EffectivePolicy` exists. Holding one is proof it was
+/// composed under the host's root charter - this
 /// is the type-level boundary that replaces the old forgeable `OperatorCapability`
 /// token (E6).
 ///
@@ -513,15 +521,15 @@ pub(crate) fn pin_layer_key_to_default(
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct EffectivePolicy {
     registry: PolicyRegistry,
-    /// The layer stack, TOP (innermost) first — `[draft]` over the charter layers
+    /// The layer stack, TOP (innermost) first - `[draft]` over the charter layers
     /// (`[env] over [base]` or a single flattened `restrict`/root `base`) (H-4). The
-    /// grant query falls through top→down; obligations/injects/validates union across
+    /// grant query falls through top->down; obligations/injects/validates union across
     /// ALL layers (union-up). The seal binds the layer boundaries (II.7).
     layers: Vec<Layer>,
 }
 
 impl EffectivePolicy {
-    /// The engine-derived FLOOR (II.7): the empty rule list — every Grant at its
+    /// The engine-derived FLOOR (II.7): the empty rule list - every Grant at its
     /// default-deny, no Require/Inject/Validate rules. A host that wants a fallback
     /// opts into this explicitly; it grants nothing and injects nothing. This is the
     /// one non-compose constructor, and it is still unforgeable content (it produces
@@ -575,18 +583,18 @@ impl EffectivePolicy {
         Self { registry, layers }
     }
 
-    // ── decision-query API (the PDP surface the guard/engine call) ─────────────
+    // -- decision-query API (the PDP surface the guard/engine call) -------------
 
-    /// `grants(key, object)` — the effective grant value at `object`, or `None` if the
+    /// `grants(key, object)` - the effective grant value at `object`, or `None` if the
     /// key is unknown to the registry. LAYERED (H-4): query the TOP layer's covering
     /// rules first (loosest-covering WITHIN that layer); if the top layer has ANY grant
-    /// rule on `key` covering `object` (presence — even one at the default), its value
+    /// rule on `key` covering `object` (presence - even one at the default), its value
     /// WINS; otherwise fall through to the next layer down. The knob default (tightest)
     /// if no layer covers `object`. `None` means "no such knob"; a default value means
     /// "granted nothing above deny here". All scope resolution happens inside.
     #[must_use]
     pub fn grants(&self, key: &KnobKey, object: &ObjectName) -> Option<KnobValue> {
-        // Fall through the layer stack top→down; the first layer that COVERS `object`
+        // Fall through the layer stack top->down; the first layer that COVERS `object`
         // for `key` (presence) decides the value (its loosest-covering value there).
         for layer in &self.layers {
             if let Some(km) = layer.grants.keys.get(key) {
@@ -599,21 +607,23 @@ impl EffectivePolicy {
         self.registry.get(key).map(|d| d.default.clone())
     }
 
-    /// `grant_is_top(key)` — is `key` granted (above its default) over the WHOLE
-    /// universe (`Scope::All`, ⊤)? True iff the region where `value ≠ default` is
+    /// `grant_is_top(key)` - is `key` granted (above its default) over the WHOLE
+    /// universe (`Scope::All`)? True iff the region where `value != default` is
     /// `Scope::All`. This is the distinction the guard's II.2.5 scoped-raw-SQL rules
     /// hinge on: an unqualified name / `SET search_path` / opaque body is admitted
-    /// **only** under a ⊤-scoped `core.raw_sql` grant; a merely-scoped grant (any
-    /// `Of{…}` region) is "non-⊤" and refuses them. `false` for an unknown key, a key
-    /// with no grant above default, or a strictly-narrower-than-⊤ grant.
+    /// **only** under a universe-scoped `core.raw_sql` grant; a merely-scoped grant
+    /// (any `Of{...}` region) is not universal and refuses them. `false` for an
+    /// unknown key, a key with no grant above default, or a grant strictly narrower
+    /// than the universe.
     #[must_use]
     pub fn grant_is_top(&self, key: &KnobKey) -> bool {
         matches!(self.grant_region(key), GrantRegion::Top)
     }
 
-    /// `grant_region(key)` — the shape of the EFFECTIVE region where `key` is granted
+    /// `grant_region(key)` - the shape of the EFFECTIVE region where `key` is granted
     /// above its default: `Ungranted` (nowhere / unknown key), `Top` (the whole
-    /// universe, ⊤), or `Scoped` (a proper, strictly-narrower-than-⊤ region). This is
+    /// universe), or `Scoped` (a proper region strictly narrower than the universe).
+    /// This is
     /// the three-way distinction the guard's II.2.5 scoped-raw-SQL rules turn on:
     /// unqualified names / `SET search_path` / opaque bodies are admitted under a `Top`
     /// `core.raw_sql` grant, DENIED under a `Scoped` one, and simply not raw-SQL-gated
@@ -622,10 +632,11 @@ impl EffectivePolicy {
     /// The effective granted region is derived from the LAYERED value (H-4): it is
     /// `All` only when the effective value is above default over the whole universe.
     /// Because `grants` falls through, an effective grant can differ from any single
-    /// layer's — a narrow-to-default draft over a ⊤ charter grant narrows the region.
-    /// We compute it as the join of each layer's effective-above-default contribution,
-    /// masked by the layers above (presence-override), which is a `⊒`-conservative
-    /// estimate — sound for the ⊤ test (a false `Top` cannot arise: `Top` is only
+    /// layer's - a narrow-to-default draft over a universe-wide charter grant narrows
+    /// the region. We compute it as the join of each layer's effective-above-default
+    /// contribution, masked by the layers above (presence-override), which is an
+    /// estimate that may only widen - sound for the universality test (a false `Top`
+    /// cannot arise: `Top` is only
     /// reported when the effective grant truly covers the universe).
     #[must_use]
     pub fn grant_region(&self, key: &KnobKey) -> GrantRegion {
@@ -645,8 +656,8 @@ impl EffectivePolicy {
     /// where the effective, fall-through value is above default). Computed
     /// layer-by-layer: an upper layer's granted region is its own `grantedScope`; a
     /// lower layer contributes its `grantedScope` MINUS the region already COVERED
-    /// (presence) by any layer above it — a lower grant only shows through where no
-    /// upper layer masks it. Joins (⊒-conservative) the per-layer contributions.
+    /// (presence) by any layer above it - a lower grant only shows through where no
+    /// upper layer masks it. Joins the per-layer contributions, which may only widen.
     fn effective_granted_scope(&self, key: &KnobKey) -> Result<(Scope, Exactness), ComposeError> {
         let mut acc = Scope::Nothing;
         let mut exactness = Exactness::Exact;
@@ -721,9 +732,9 @@ impl EffectivePolicy {
         }
     }
 
-    /// `obligations(object)` — every covering require rule's `(key, value)` at
+    /// `obligations(object)` - every covering require rule's `(key, value)` at
     /// `object`, across ALL layers (union-up, II.3.2). The guard unions valued requires
-    /// per object. Charter obligations are never masked by the draft — they accumulate.
+    /// per object. Charter obligations are never masked by the draft - they accumulate.
     #[must_use]
     pub fn obligations(&self, object: &ObjectName) -> Vec<(KnobKey, KnobValue)> {
         self.layers
@@ -760,9 +771,9 @@ impl EffectivePolicy {
             .collect()
     }
 
-    /// `injects_for(object)` — every covering inject rule's [`InjectSpec`] at
+    /// `injects_for(object)` - every covering inject rule's [`InjectSpec`] at
     /// `object`, across ALL layers in the SEALED cross-layer inject total order
-    /// (outermost/base first, innermost/draft last — union-up, II.4.4).
+    /// (outermost/base first, innermost/draft last - union-up, II.4.4).
     #[must_use]
     pub fn injects_for(&self, object: &ObjectName) -> Vec<&InjectSpec> {
         // Outermost-first order: the stack is top(=innermost)-first, so reverse.
@@ -778,7 +789,7 @@ impl EffectivePolicy {
             .collect()
     }
 
-    /// `validates_for(object)` — every covering validate predicate at `object`, across
+    /// `validates_for(object)` - every covering validate predicate at `object`, across
     /// ALL layers (union-up). A draft can add but never drop a charter predicate.
     #[must_use]
     pub fn validates_for(&self, object: &ObjectName) -> Vec<&ValidatePredicate> {
@@ -794,7 +805,7 @@ impl EffectivePolicy {
             .collect()
     }
 
-    /// `is_injected_shape(object, element)` — is `element` (a column name, an index
+    /// `is_injected_shape(object, element)` - is `element` (a column name, an index
     /// name, or the primary-key constraint) contributed by SOME covering inject rule
     /// at `object`? Name-match-at-op-time (II.2.6b): normalize + gather covering
     /// injects + test whether a covering `InjectSpec` contributes a name-matching
@@ -802,7 +813,7 @@ impl EffectivePolicy {
     ///
     /// **Scope:** this is the NAME-MATCH immutability decision (whom to forbid
     /// altering). The full-`InjectSpec`-conformance re-evaluation on rename-into
-    /// (II.2.6b H3) is the engine/guard's job over the IR — not this pure query.
+    /// (II.2.6b H3) is the engine/guard's job over the IR - not this pure query.
     #[must_use]
     pub fn is_injected_shape(&self, object: &ObjectName, element: &ShapeElement) -> bool {
         for spec in self.injects_for(object) {
@@ -833,12 +844,12 @@ impl EffectivePolicy {
         &self.registry
     }
 
-    // ── seal support (crate-internal; consumed by the seal module) ─────────────
+    // -- seal support (crate-internal; consumed by the seal module) -------------
     // These expose the canonical resolved rule set WITH ITS LAYER BOUNDARIES (H-4)
     // for the seal MAC. Kept here (not in the seal module) because they read private
     // fields; the seal cut is their sole consumer. The layer tag is bound into the
     // MAC so two stacks with the same flattened rule set but different layer
-    // boundaries encode differently — a re-flatten fails the MAC (II.7).
+    // boundaries encode differently - a re-flatten fails the MAC (II.7).
 
     /// The seal payload: for each layer (in stack order, TOP/innermost first), its
     /// [`LayerTag`] paired with its four canonical rule collections. The seal encodes
@@ -887,14 +898,14 @@ impl LayerTag {
     }
 }
 
-// ── layered charter grant queries (crate-internal; consumed by boundary::admit) ──
+// -- layered charter grant queries (crate-internal; consumed by boundary::admit) --
 
 /// Every grant rule scope of a LAYER STACK for `key` whose value RISES above default,
 /// each at its own `effective_scope` (excludes intact) (H-4).
 ///
 /// The grant-bearing subset, deliberately. `admit` subtracts these to find the region
 /// no charter rule lifts, and a rule at or below default lifts nothing - counting it
-/// would treat its region as charter-granted. It would also make `All ∖ <mask>`
+/// would treat its region as charter-granted. It would also make `All` minus the mask
 /// unrepresentable and turn a precise escalation report into a fail-closed "not
 /// representable", which is safe but says nothing useful about what the draft did
 /// wrong.
@@ -944,9 +955,9 @@ enum Exactness {
 pub enum GrantRegion {
     /// Granted nowhere above default (or unknown key).
     Ungranted,
-    /// Granted over the whole universe (`Scope::All`, ⊤).
+    /// Granted over the whole universe (`Scope::All`).
     Top,
-    /// Granted over a proper, strictly-narrower-than-⊤ region.
+    /// Granted over a proper region strictly narrower than the universe.
     Scoped,
 }
 
@@ -961,13 +972,13 @@ pub enum ShapeElement<'a> {
     PrimaryKey,
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// AdmitCharter — the FINALIZED charters a draft may be admitted against
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
+// AdmitCharter - the FINALIZED charters a draft may be admitted against
+// ==============================================================================
 
 mod sealed {
     /// Seals [`super::AdmitCharter`]: only the finalized in-crate charter types
-    /// implement it, so no external crate can forge a charter — and, crucially, an
+    /// implement it, so no external crate can forge a charter - and, crucially, an
     /// [`super::AssembledCharter`] does NOT implement it, so an un-finalized charter
     /// cannot reach `admit` at the type level (MED).
     pub trait Sealed {}
@@ -982,8 +993,8 @@ mod sealed {
 /// [`EffectivePolicy`] used as a charter. Each yields its LAYER STACK (top/innermost
 /// first) to `admit`, which prepends the untrusted draft over it (H-4).
 ///
-/// SEALED. An [`AssembledCharter`] — the un-finalized output of [`overlay`] /
-/// [`restrict`] — deliberately does **not** implement this trait: it must pass
+/// SEALED. An [`AssembledCharter`] - the un-finalized output of [`overlay`] /
+/// [`restrict`] - deliberately does **not** implement this trait: it must pass
 /// [`finalize_charter`] first, so "un-finalized charter reaches admit" is a TYPE
 /// ERROR, not a runtime hazard (MED).
 ///
@@ -1028,15 +1039,15 @@ impl AdmitCharter for EffectivePolicy {
     }
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// AssembledCharter / Charter — un-finalized vs finalized trusted charters (H-3)
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
+// AssembledCharter / Charter - un-finalized vs finalized trusted charters (H-3)
+// ==============================================================================
 
-/// An UN-FINALIZED trusted charter — the output of the total trusted combinators
+/// An UN-FINALIZED trusted charter - the output of the total trusted combinators
 /// [`overlay`] and [`restrict`] (II.3.2). It is a LAYER STACK (top/innermost first)
 /// that has NOT yet passed the conflict lints, so it deliberately does **not**
 /// implement [`AdmitCharter`]: it cannot be `admit`'s charter until it clears
-/// [`finalize_charter`], which returns a [`Charter`] (MED — the un-finalized/finalized
+/// [`finalize_charter`], which returns a [`Charter`] (MED - the un-finalized/finalized
 /// split is type-encoded). `overlay`/`restrict` are TOTAL (never reject); every
 /// charter *misconfiguration* (colliding injects, PK conflicts, creatable-escape)
 /// surfaces at the explicit `finalize_charter` gate (H-3).
@@ -1046,9 +1057,9 @@ pub struct AssembledCharter {
     layers: Vec<Layer>,
 }
 
-/// A FINALIZED trusted charter — an [`AssembledCharter`] (or a `RootCharter`) that has
+/// A FINALIZED trusted charter - an [`AssembledCharter`] (or a `RootCharter`) that has
 /// PASSED [`finalize_charter`]'s conflict lints (H-3). It implements [`AdmitCharter`],
-/// so it — and only it, never an [`AssembledCharter`] — may be `admit`'s charter
+/// so it - and only it, never an [`AssembledCharter`] - may be `admit`'s charter
 /// argument. It carries the same layer stack, now proven collision-free.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Charter {
@@ -1064,7 +1075,7 @@ impl Charter {
     }
 }
 
-/// The `finalize_charter` conflict-lint failure (H-3) — a loud TRUSTED-SIDE operator
+/// The `finalize_charter` conflict-lint failure (H-3) - a loud TRUSTED-SIDE operator
 /// misconfiguration of an assembled charter (NOT a trust crossing). Distinct from
 /// [`ComposeError`] (the draft-blame / admit errors) so the two failure classes never
 /// mix.
@@ -1094,8 +1105,8 @@ pub enum FinalizeError {
         /// The contradiction detail.
         detail: String,
     },
-    /// The charter's own `core.create_table` granted scope is NOT `⊑` a mandatory
-    /// charter inject's scope — the charter would let an in-scope table be created
+    /// The charter's own `core.create_table` granted scope is NOT contained in a mandatory
+    /// charter inject's scope - the charter would let an in-scope table be created
     /// escaping the mandatory injection (II.2.6a). Surfaced here (charter-side) so the
     /// misconfiguration is caught before any draft (MED).
     CreatableEscapesMandatoryInject {
@@ -1108,11 +1119,11 @@ pub enum FinalizeError {
 /// stays lawful; a trusted charter they assemble can still contain a
 /// *misconfiguration* (colliding injects, PK conflicts, a duplicate index name, an
 /// inject-vs-validate self-contradiction, OR a creatable-escape). Those must surface
-/// **loudly** before enforcement — so they live here, in one explicit, fallible step,
+/// **loudly** before enforcement - so they live here, in one explicit, fallible step,
 /// not inside the total combinators.
 ///
 /// Every [`AssembledCharter`] MUST pass `finalize_charter` before it may be `admit`'s
-/// `charter` argument — and because `admit`'s charter type is the finalized
+/// `charter` argument - and because `admit`'s charter type is the finalized
 /// [`Charter`] (or a `RootCharter`), the type system discharges the "already
 /// collision-free" assumption. `finalize_charter` is idempotent and, being a pure
 /// lint pass, does not change the rule set on success.
@@ -1184,9 +1195,10 @@ pub fn finalize_charter(assembled: AssembledCharter) -> Result<Charter, Finalize
         }
     }
 
-    // (3) creatable-escape: the charter's own create_table granted scope must be ⊑
-    //     every MANDATORY charter inject's scope (MED — moved here from admit). Because
-    //     admit later proves draft.create_table ⊑ charter.create_table, this charter-
+    // (3) creatable-escape: the charter's own create_table granted scope must be
+    //     contained in every MANDATORY charter inject's scope (MED - moved here from
+    //     admit). Because admit later proves the draft's create_table scope is within
+    //     the charter's, this charter-
     //     side bound transitively bounds every admitted draft's creatable region.
     check_charter_creatable_lint(&assembled)?;
 
@@ -1197,8 +1209,8 @@ pub fn finalize_charter(assembled: AssembledCharter) -> Result<Charter, Finalize
 }
 
 /// The charter-side creatable-escape lint (II.2.6a, run at finalize). The charter's
-/// EFFECTIVE `core.create_table` granted scope (across its layers) must be `⊑` every
-/// mandatory charter inject's scope.
+/// EFFECTIVE `core.create_table` granted scope (across its layers) must be contained
+/// in every mandatory charter inject's scope.
 fn check_charter_creatable_lint(assembled: &AssembledCharter) -> Result<(), FinalizeError> {
     creatable_escape_scope(&assembled.layers).map_or(Ok(()), |inject_scope| {
         Err(FinalizeError::CreatableEscapesMandatoryInject { inject_scope })
@@ -1259,9 +1271,9 @@ fn creatable_escape_scope(layers: &[Layer]) -> Option<String> {
     let Ok(create_key) = KnobKey::parse(CREATE_TABLE_KEY) else {
         return None;
     };
-    // The effective creatable scope: the ⊒-conservative join of each layer's granted
-    // create_table scope (over-approx is the fail-closed direction for a ⊑ containment
-    // check — it can only turn a pass into a reject).
+    // The effective creatable scope: the join of each layer's granted create_table
+    // scope, which may only widen (over-approx is the fail-closed direction for a
+    // containment check - it can only turn a pass into a reject).
     let mut creatable = Scope::Nothing;
     for layer in layers {
         if let Some(km) = layer.grants.keys.get(&create_key) {
@@ -1290,22 +1302,22 @@ fn creatable_escape_scope(layers: &[Layer]) -> Option<String> {
     None
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// overlay — trusted config cascade (last-wins), TOTAL (H-1: TrustedDoc operands)
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
+// overlay - trusted config cascade (last-wins), TOTAL (H-1: TrustedDoc operands)
+// ==============================================================================
 
 /// Assemble ONE operator's own charter from co-authored profile fragments
 /// (`base + env`, II.5) into an [`AssembledCharter`]. Both operands are [`TrustedDoc`]
-/// (H-1: a creator draft cannot be an `overlay` operand — the type forbids it), so
+/// (H-1: a creator draft cannot be an `overlay` operand - the type forbids it), so
 /// `overlay` is **total** and **never rejects**.
 ///
 /// Semantics: **presence-based last-wins** for scalar grant/obligation values (where
-/// `over` has ANY covering rule on a key at an object, `over` wins — it may loosen OR
+/// `over` has ANY covering rule on a key at an object, `over` wins - it may loosen OR
 /// tighten, and may narrow to default), and **rule-list accumulation** (base-then-over)
 /// for inject/validate. This is realized by producing a 2-layer stack `[Env=over] over
-/// [Base=base]` (H-4): the query falls through top→down, so `over`'s presence masks
+/// [Base=base]` (H-4): the query falls through top->down, so `over`'s presence masks
 /// `base` exactly where `over` covers, and inherits `base` elsewhere; inject/validate
-/// lists union with `Base` (outermost) first, then `Env` — the M-3 base-then-over order.
+/// lists union with `Base` (outermost) first, then `Env` - the M-3 base-then-over order.
 ///
 /// Charter misconfigurations (colliding injects across `base`/`env`, PK conflicts) are
 /// NOT rejected here (that would break totality); they surface at [`finalize_charter`]
@@ -1317,25 +1329,26 @@ pub fn overlay(
 ) -> Result<AssembledCharter, ComposeError> {
     let base_layer = Layer::from_doc(LayerTag::Base, base.doc(), registry)?;
     let over_layer = Layer::from_doc(LayerTag::Env, over.doc(), registry)?;
-    // Stack: TOP (innermost query-precedence) first → `[Env=over] over [Base=base]`.
+    // Stack: TOP (innermost query-precedence) first -> `[Env=over] over [Base=base]`.
     Ok(AssembledCharter {
         registry: registry.clone(),
         layers: vec![over_layer, base_layer],
     })
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// restrict — meet of two TRUSTED docs (H-1: TrustedDoc operands, TOTAL)
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
+// restrict - meet of two TRUSTED docs (H-1: TrustedDoc operands, TOTAL)
+// ==============================================================================
 
-/// Meet two TRUSTED documents pointwise into an [`AssembledCharter`] (II.3.2) — the
-/// trusted tightening gradient (host ⊒ org ⊒ project). Both operands are
-/// [`TrustedDoc`] (H-1: an untrusted draft cannot be a `restrict` operand — the type
+/// Meet two TRUSTED documents pointwise into an [`AssembledCharter`] (II.3.2) - the
+/// trusted tightening gradient, where host is at least as loose as org, and org at
+/// least as loose as project. Both operands are
+/// [`TrustedDoc`] (H-1: an untrusted draft cannot be a `restrict` operand - the type
 /// forbids it), so `restrict` is **total** and **never rejects**. It is a genuine
-/// lattice MEET (⊓): grants meet pointwise (per key: scope `⊓`, value `⊓_value` at
-/// overlap); require/inject/validate rule-sets UNION (each at its own scope).
+/// lattice MEET: grants meet pointwise (per key: the scope meet, and the value meet
+/// at overlap); require/inject/validate rule-sets UNION (each at its own scope).
 ///
-/// The result is a SINGLE flattened `Base` layer — `restrict` flattens a trusted meet
+/// The result is a SINGLE flattened `Base` layer - `restrict` flattens a trusted meet
 /// into one meet-layer (H-4). Charter-vs-charter inject/PK/index collisions are NOT
 /// rejected here (that would break the meet's associativity); they surface at
 /// [`finalize_charter`] (H-3), which every assembled charter passes before it can be
@@ -1348,7 +1361,7 @@ pub fn restrict(
     let og = GrantModel::build(&outer.doc().rules, registry)?;
     let ig = GrantModel::build(&inner.doc().rules, registry)?;
 
-    // ── grants: pointwise meet, represented as rule-scope ⊓ products ───────────
+    // -- grants: pointwise meet, represented as rule-scope meet products --------
     let mut clamped_grants = GrantModel {
         keys: BTreeMap::new(),
     };
@@ -1359,7 +1372,7 @@ pub fn restrict(
         }
     }
 
-    // ── require/inject/validate: UNION, each at its own scope (outer first) ──────
+    // -- require/inject/validate: UNION, each at its own scope (outer first) ------
     let mut injects = rules_of(&outer.doc().rules, |k| matches!(k, RuleKind::Inject { .. }));
     injects.extend(rules_of(&inner.doc().rules, |k| {
         matches!(k, RuleKind::Inject { .. })
@@ -1393,10 +1406,10 @@ pub fn restrict(
 
 /// Per-key grant clamp (II.3.2): the pointwise meet, materialized as the finite set of
 /// grant rules obtained by intersecting each outer rule's scope with each inner rule's
-/// scope (via `⊓`) and meeting their values; empty-scope products drop out.
+/// scope (via the meet) and meeting their values; empty-scope products drop out.
 ///
 /// A key present in only ONE charter meets against the OTHER's default (deny): the
-/// meet of any value with the tightest default is the default → the clamped grant is
+/// meet of any value with the tightest default is the default -> the clamped grant is
 /// empty on that key. So a one-sided key contributes NO grant rules (correct: the
 /// clamp of "granted" with "not granted" is "not granted").
 fn clamp_grant_key(
@@ -1412,7 +1425,7 @@ fn clamp_grant_key(
         rules: Vec::new(),
     };
     let (Some(ok), Some(ik)) = (outer.keys.get(key), inner.keys.get(key)) else {
-        // One-sided: meet with the other side's default (deny) ⇒ empty grant.
+        // One-sided: meet with the other side's default (deny) => empty grant.
         return Ok(empty);
     };
     let mut rules = Vec::new();
@@ -1433,15 +1446,15 @@ fn clamp_grant_key(
     })
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 // collision detection (compose-time blame)
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 
 /// Compose-time DRAFT-vs-CHARTER inject-collision check (`admit`). A charter inject
-/// colliding with a draft inject on scope-overlapping objects — same column name with
+/// colliding with a draft inject on scope-overlapping objects - same column name with
 /// divergent shape, conflicting `primary_key` pin, `author_primary_key`
-/// Allow-vs-Forbid, or same index name with divergent columns — is blamed on the
-/// draft. (Charter-vs-charter collisions are NOT checked here — they surface at
+/// Allow-vs-Forbid, or same index name with divergent columns - is blamed on the
+/// draft. (Charter-vs-charter collisions are NOT checked here - they surface at
 /// [`finalize_charter`], H-3.)
 pub(crate) fn check_inject_collisions(
     charter_injects: &[Rule],
@@ -1510,7 +1523,7 @@ fn inject_specs_collide(a: &InjectSpec, b: &InjectSpec) -> Option<String> {
                 "primary key pinned to divergent columns {pa:?} vs {pb:?}"
             ));
         }
-        // Both pin the SAME PK but disagree on author-PK policy → conflict.
+        // Both pin the SAME PK but disagree on author-PK policy -> conflict.
         if a.author_primary_key != b.author_primary_key {
             return Some("primary key pinned with divergent author_primary_key policy".to_string());
         }
@@ -1609,9 +1622,9 @@ pub(crate) fn check_validate_vs_inject(
     Ok(())
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 // helpers
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 
 /// Look up a knob def, mapping a miss to a fail-closed compose error.
 pub(crate) fn lookup<'r>(
@@ -1667,8 +1680,8 @@ fn render_pattern(p: &crate::Pattern) -> String {
 }
 
 /// A concrete WITNESS object of a non-empty scope: some `ObjectName` the scope
-/// denotes. Used by the covered-region value comparison — value() is constant across
-/// a region carved by ⊓, so one witness decides the whole region. Returns `None` for
+/// denotes. Used by the covered-region value comparison - value() is constant across
+/// a region carved by the meet, so one witness decides the whole region. Returns `None` for
 /// `Nothing` (or an un-witnessable proper scope, treated fail-closed by the caller).
 pub(crate) fn witness_of(s: &Scope) -> Option<ObjectName> {
     match s {
@@ -1696,7 +1709,7 @@ pub(crate) fn witness_of(s: &Scope) -> Option<ObjectName> {
 }
 
 /// A canonical concrete object a pattern denotes: the schema/table globs filled with
-/// a fixed byte (`a`), stars → `a`. This is a WITNESS constructor, not a matcher.
+/// a fixed byte (`a`), stars -> `a`. This is a WITNESS constructor, not a matcher.
 fn pattern_witness(p: &crate::Pattern) -> ObjectName {
     let schema = seg_witness(&p.schema);
     if p.table.is_star() {
@@ -1706,14 +1719,15 @@ fn pattern_witness(p: &crate::Pattern) -> ObjectName {
     }
 }
 
-/// A concrete segment a glob matches: its literal if a literal; else prefix·suffix
-/// (which the glob always matches — `p*s` matches `ps`).
+/// A concrete segment a glob matches: its literal if a literal; else the prefix
+/// followed by the suffix
+/// (which the glob always matches - `p*s` matches `ps`).
 fn seg_witness(g: &crate::SegGlob) -> Vec<u8> {
     // render() gives `p*s` (or the literal). Replace a single `*` with nothing so the
     // witness is `ps`, which every infix/prefix/suffix/star glob matches at its floor.
     let rendered = g.render();
     let w: Vec<u8> = rendered.bytes().filter(|&b| b != b'*').collect();
-    // A pure `*` glob renders to `*` → empty witness; use `a` for a non-empty name.
+    // A pure `*` glob renders to `*` -> empty witness; use `a` for a non-empty name.
     if w.is_empty() {
         b"a".to_vec()
     } else {

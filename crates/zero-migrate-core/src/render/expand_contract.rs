@@ -1,9 +1,9 @@
-//! The `ExpandContractAuthor` — zero-downtime **online column RENAME** via
+//! The `ExpandContractAuthor` - zero-downtime **online column RENAME** via
 //! trigger dual-write (the zero-downtime expand-contract pattern).
 //!
-//! A column rename cannot be done as a single `ALTER TABLE … RENAME COLUMN`
+//! A column rename cannot be done as a single `ALTER TABLE ... RENAME COLUMN`
 //! without breaking every running deploy that still reads/writes the old name:
-//! the rename is atomic, but the *fleet* is not — old code and new code run
+//! the rename is atomic, but the *fleet* is not - old code and new code run
 //! concurrently across a rolling deploy. The expand-contract pattern makes the
 //! two shapes **coexist** so neither generation of code ever sees a missing
 //! column:
@@ -12,7 +12,7 @@
 //! EXPAND  (deploy N, lands BEFORE code switches to the new name)
 //!   E1  ADD COLUMN <to> <ty>            -- nullable, transactional, additive
 //!   E2  CREATE FUNCTION + TRIGGER        -- BEFORE INSERT/UPDATE dual-write
-//!       (mirror <from> ⇄ <to>)             depends_on [E1]
+//!       (mirror <from> and <to> both ways)  depends_on [E1]
 //!   E3  BACKFILL <to> := <from>          -- cursor on the PRIMARY KEY
 //!       WHERE <to> IS NULL                 depends_on [E2]
 //!
@@ -24,15 +24,15 @@
 //!
 //! # Why each piece is shaped the way it is
 //!
-//! - **E1 is nullable + transactional.** A bare `ADD COLUMN … NOT NULL` over a
+//! - **E1 is nullable + transactional.** A bare `ADD COLUMN ... NOT NULL` over a
 //!   populated table rewrites the whole table under `ACCESS EXCLUSIVE`; the
 //!   online author MUST NOT emit it (and MUST NOT emit a bare `SET NOT NULL`
-//!   either — see [`ExpandContractAuthor`] for the `CHECK … NOT VALID` →
+//!   either - see [`ExpandContractAuthor`] for the `CHECK ... NOT VALID` ->
 //!   `VALIDATE` lint). This stops at the nullable column + dual-write + backfill;
 //!   tightening to `NOT NULL` is a separate authored step.
 //! - **E2 is `SECURITY INVOKER` (the plpgsql default), NOT `SECURITY DEFINER`.**
 //!   A `DEFINER` trigger would run with the *function owner's* (the migrator's)
-//!   privileges for every app write — an escalation primitive, and guard-denied
+//!   privileges for every app write - an escalation primitive, and guard-denied
 //!   anyway. `INVOKER` runs the trigger body with the **writing app role's**
 //!   privileges; the dual-write is just an in-row `NEW.* :=` assignment in a
 //!   `BEFORE` trigger, which needs no privilege beyond writing the row the app
@@ -50,7 +50,7 @@
 //!   being populated): the backfill engine requires a UNIQUE/NOT-NULL cursor and
 //!   forbids paging on the column it mutates (see
 //!   [`OnlineSchemaChange::run_online_backfill`](crate::apply::backend::OnlineSchemaChange::run_online_backfill)). E3
-//!   depends on E2 so the trigger is live before the backfill runs — otherwise a
+//!   depends on E2 so the trigger is live before the backfill runs - otherwise a
 //!   concurrent write between backfill batches could land in `<from>` only and
 //!   be lost.
 //! - **C1/C2 are gated.** Dropping the trigger and the old column is
@@ -61,7 +61,7 @@
 //! All emitted SQL is **project-schema-qualified** and **byte-stable** across
 //! re-authoring (the function/trigger/index names are deterministic functions of
 //! the table + column names), so re-authoring the same intent yields identical
-//! `Expand` checksums — exactly like [`crate::plan::author`]'s index-name determinism.
+//! `Expand` checksums - exactly like [`crate::plan::author`]'s index-name determinism.
 
 use crate::model::backfill::BackfillSpec;
 use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId, OnlinePhase};
@@ -72,8 +72,8 @@ use zero_migrate_ir::dialect::DialectId;
 /// [`Migration`] sequence.
 ///
 /// MOVED to `zero-migrate-backend` and re-exported here. It is what
-/// `OnlineSchemaChange::run_online_backfill` is handed — the rename's MEANING rather than
-/// this module's PostgreSQL spelling of it — so a vendor crate cannot implement
+/// `OnlineSchemaChange::run_online_backfill` is handed - the rename's MEANING rather than
+/// this module's PostgreSQL spelling of it - so a vendor crate cannot implement
 /// the capability without naming it. It carries four `String`s, so it travelled
 /// alone; the [`ExpandContractPlan`] that holds it stayed, because it also holds
 /// the authored `Migration` sequence and the `BackfillSpec`.
@@ -93,8 +93,8 @@ pub use zero_migrate_backend::error::ExpandContractError;
 /// `PlanStep::OnlineRename` carries through `RenameStep::ExpandContract`, so it had
 /// to travel with the lowered-plan vocabulary. Nothing came with it: the authored
 /// `Migration`s and the `MigrationId`s are `zero-migrate-ir`'s, the `BackfillSpec`
-/// and the [`OnlineIntent`] were already in the contract crate. The AUTHOR — every
-/// line of PostgreSQL trigger and function DDL below — stayed here.
+/// and the [`OnlineIntent`] were already in the contract crate. The AUTHOR - every
+/// line of PostgreSQL trigger and function DDL below - stayed here.
 pub use zero_migrate_backend::capability::ExpandContractPlan;
 
 /// Quote an identifier through the explicitly selected registered backend.
@@ -106,9 +106,9 @@ pub(crate) fn quote_ident(vendors: VendorSet, ident: &str, dialect: &DialectId) 
 /// and contains only `[A-Za-z0-9_]`. Mirrors the `validate_ident` in the
 /// module-private `crate::zero_migrate_postgres::backend::backfill_sql` (named in plain
 /// text because a private module is not a linkable doc target)
-/// so `table`/`from`/`to` are safe-by-construction at the AUTHOR boundary — not
+/// so `table`/`from`/`to` are safe-by-construction at the AUTHOR boundary - not
 /// only safe-by-quoting downstream. Rejects schema-qualified names
-/// (`control.users`), quote-injection (`t"; DROP …`), whitespace, punctuation.
+/// (`control.users`), quote-injection (`t"; DROP ...`), whitespace, punctuation.
 ///
 /// # Errors
 /// [`ExpandContractError::Invalid`] when `value` is not a bare identifier.
@@ -127,7 +127,7 @@ fn validate_ident(what: &str, value: &str) -> Result<(), ExpandContractError> {
 /// Validate a Postgres type name spliced verbatim into `ADD COLUMN <to> <ty>`.
 /// The author defends in depth (the downstream guard is the second line): a real
 /// Postgres type never contains a statement separator `;` and always has balanced
-/// parentheses, so we reject a `ty` that has either — closing
+/// parentheses, so we reject a `ty` that has either - closing
 /// `text; CREATE TABLE control.evil(...)` and truncated `numeric(10` at the
 /// author boundary while still accepting `numeric(10,2)`, `varchar(255)`, etc.
 ///
@@ -176,7 +176,7 @@ pub(crate) fn qualified(
     )
 }
 
-/// Sub-step indices for the online-rename sequence — folded into the
+/// Sub-step indices for the online-rename sequence - folded into the
 /// rename's stable seed so each of E1..C2 derives a DISTINCT, reproducible id.
 /// These are the `step_index` half of `step_id = derive(rename_seed, step_index)`.
 const EC_STEP_E1: u8 = 1;
@@ -209,12 +209,12 @@ pub(crate) fn resolve_pending_abort_atomic_version(pending_version: &str) -> Mig
 }
 
 /// Build the rename's STABLE identity seed: a length-prefixed image of
-/// every fact that identifies the logical rename — `schema`, `owner`, `table`,
+/// every fact that identifies the logical rename - `schema`, `owner`, `table`,
 /// `from`, `to`, `ty`. Length-prefixing each field makes the encoding injective
 /// (so `("a","bc")` and `("ab","c")` never collide). NOTHING per-run is folded
 /// (no time, no random), so re-lowering the identical IR envelope reproduces the
-/// SAME seed → the SAME E1..C2 ids. A semantically different rename (different
-/// `to`/`ty`) produces a different seed → fresh ids.
+/// SAME seed -> the SAME E1..C2 ids. A semantically different rename (different
+/// `to`/`ty`) produces a different seed -> fresh ids.
 fn rename_id_seed(
     schema: &str,
     owner: &str,
@@ -233,8 +233,8 @@ fn rename_id_seed(
 
 // The three dual-write derivations moved down to the backend contract, beside the
 // `OnlineIntent` they are derived FROM. The PostgreSQL executor re-derives all three
-// — the trigger identity it is allowed to mirror beneath, and the function body it
-// proves the live trigger against — and a vendor crate cannot reach into the engine.
+// - the trigger identity it is allowed to mirror beneath, and the function body it
+// proves the live trigger against - and a vendor crate cannot reach into the engine.
 // These doors keep the engine's own call sites and its byte budget unchanged: the cap
 // is still read once, from the registered backend that imposes it.
 pub(crate) fn dual_write_fn_name(vendors: VendorSet, table: &str, from: &str, to: &str) -> String {
@@ -260,25 +260,25 @@ pub(crate) fn dual_write_trg_name(vendors: VendorSet, table: &str, from: &str, t
 /// expand-contract sequence.
 ///
 /// Like [`crate::plan::author::DeterministicAuthor`], it emits provably-shaped,
-/// project-schema-qualified SQL with correct [`MigrationFlags`] — but for the
+/// project-schema-qualified SQL with correct [`MigrationFlags`] - but for the
 /// *multi-deploy phased* online pattern, not the trivial additive set. The SQL
 /// is byte-stable across re-authoring so the `Expand` checksums are reproducible.
 ///
 /// # The `SET NOT NULL` lint
 ///
-/// The author **never** emits a bare `ALTER TABLE … ALTER COLUMN … SET NOT NULL`
+/// The author **never** emits a bare `ALTER TABLE ... ALTER COLUMN ... SET NOT NULL`
 /// on a populated table: that takes an `ACCESS EXCLUSIVE` lock and full-scans to
 /// validate, blocking writes. This rename leaves `<to>` nullable; a caller that
 /// wants to tighten it to `NOT NULL` online authors the
-/// `ADD CONSTRAINT … CHECK (<to> IS NOT NULL) NOT VALID` → `VALIDATE CONSTRAINT`
+/// `ADD CONSTRAINT ... CHECK (<to> IS NOT NULL) NOT VALID` -> `VALIDATE CONSTRAINT`
 /// pair (a separate intent, not part of the rename). This author's output
-/// therefore contains no `SET NOT NULL` by construction — the lint is "we don't
+/// therefore contains no `SET NOT NULL` by construction - the lint is "we don't
 /// emit the dangerous form", enforced by tests (no `SET NOT NULL` substring).
 #[derive(Debug, Clone)]
 pub struct ExpandContractAuthor {
     /// The project schema every emitted statement is qualified into.
     project_schema: String,
-    /// The declaring app (`app_…`) recorded on each migration.
+    /// The declaring app (`app_...`) recorded on each migration.
     owner_app: String,
     /// The registered backend whose identifier spelling this author uses.
     dialect: DialectId,
@@ -432,8 +432,8 @@ impl ExpandContractAuthor {
         // `MigrationId::derive("ec", seed || step_index)`, so a re-lower of the
         // identical IR envelope (the production path re-lowers on EVERY deploy,
         // `deploy_migrate.rs`) reproduces byte-identical ids. The seed folds the
-        // schema + owner + table + from + to + ty — every fact that identifies the
-        // logical rename — and NOTHING per-run (no time, no random). A changed
+        // schema + owner + table + from + to + ty - every fact that identifies the
+        // logical rename - and NOTHING per-run (no time, no random). A changed
         // rename (different to/ty) gets fresh ids; the same rename always maps to
         // the same obligation key (the E2 id), idempotent-skip key, contract ids,
         // and self-EXPAND exemption key. This is the determinism the cross-deploy
@@ -494,7 +494,7 @@ impl ExpandContractAuthor {
         // ---- E3: BACKFILL <to> := <from> WHERE <to> IS NULL ----
         //
         // Cursor on the PRIMARY KEY (resolved by the orchestrator / caller as the
-        // backfill's cursor_columns tuple), NOT on <to> (the column being populated —
+        // backfill's cursor_columns tuple), NOT on <to> (the column being populated -
         // backfill.rs forbids paging on the mutated column). The backfill is a
         // data-mutation STEP driven by run_backfill during orchestration (v1.3),
         // not raw `up` SQL; we still mint a journaled marker migration for it so
@@ -565,9 +565,9 @@ impl ExpandContractAuthor {
         // ---- C2: DROP COLUMN <from> (destructive, gated) ----
         //
         // depends_on [E1, E3, C1]: E1 is the column it reverses; E3 (the backfill)
-        // MUST be net-applied first — dropping <from> before every pre-existing
+        // MUST be net-applied first - dropping <from> before every pre-existing
         // row's value is mirrored into <to> would lose un-backfilled data; and C1
-        // (DROP TRIGGER + DROP FUNCTION) MUST run before C2 — the dual-write
+        // (DROP TRIGGER + DROP FUNCTION) MUST run before C2 - the dual-write
         // trigger references <from>, so dropping the column while the trigger is
         // still live errors / leaves a dangling reference. In a contract-only
         // deploy both C1 and C2 are indegree-0 and would otherwise order only by
@@ -576,7 +576,7 @@ impl ExpandContractAuthor {
         // trigger only covers rows written DURING the transition; the backfill
         // covers the rows that predate it. So the destructive drop is gated on the
         // backfill's journaled completion (the backfill step records
-        // completion in the journal → the gate reads one timeline).
+        // completion in the journal -> the gate reads one timeline).
         // Deliberately NO CASCADE. A column another object depends on - a generated
         // column reading it, a view, an EXCLUDE constraint - makes PostgreSQL refuse
         // this drop, and the refusal names the dependent:
@@ -627,7 +627,7 @@ impl ExpandContractAuthor {
     /// Build a [`Migration`] from rendered `up`/`down` SQL + flags + deps.
     ///
     /// `id_seed` is the rename's stable identity image (see [`rename_id_seed`]) and
-    /// `step_index` is one of the `EC_STEP_*` constants — together they
+    /// `step_index` is one of the `EC_STEP_*` constants - together they
     /// DETERMINISTICALLY derive the sub-step's `version` via [`MigrationId::derive`]
     /// A re-lower of the identical rename reproduces the SAME id, which is
     /// what the cross-deploy obligation key + idempotent-skip + auto-discharge +
@@ -681,9 +681,9 @@ impl ExpandContractAuthor {
 
 // `pub(crate) use zero_migrate_backend::capability::dual_write_function_body;` and
 // `fn build_dual_write_sql(..)` USED TO LIVE HERE, and between them they made the
-// neutral engine spell four PostgreSQL statements: `CREATE OR REPLACE FUNCTION …
-// LANGUAGE plpgsql`, `CREATE TRIGGER … BEFORE INSERT OR UPDATE … EXECUTE FUNCTION`,
-// and twice `DROP TRIGGER <t> ON <table>; DROP FUNCTION <f>()` — the last of which is
+// neutral engine spell four PostgreSQL statements: `CREATE OR REPLACE FUNCTION ...
+// LANGUAGE plpgsql`, `CREATE TRIGGER ... BEFORE INSERT OR UPDATE ... EXECUTE FUNCTION`,
+// and twice `DROP TRIGGER <t> ON <table>; DROP FUNCTION <f>()` - the last of which is
 // not portable syntax in either direction.
 //
 // Only `plpgsql` was a name a census could see. The engine asks
@@ -711,7 +711,7 @@ fn dual_write_sql(
         })
         .ok_or_else(|| {
             // Reachable only from a backend that answered `ExpandContract` for
-            // `column_rename_strategy` and `None` here — one decision contradicting
+            // `column_rename_strategy` and `None` here - one decision contradicting
             // itself. Fail closed rather than author an expand step with no trigger,
             // which would leave the contract's `DROP COLUMN <from>` destroying writes
             // that never got mirrored.
@@ -860,9 +860,9 @@ mod tests {
         assert_eq!(e3.depends_on, vec![e2.version.clone()]);
         // C1 depends on E2 (the trigger it drops).
         assert_eq!(c1.depends_on, vec![e2.version.clone()]);
-        // C2 depends on E1 (the column add it reverses), E3 (the backfill —
+        // C2 depends on E1 (the column add it reverses), E3 (the backfill -
         // dropping <from> before the backfill mirrors pre-existing rows loses
-        // data), AND C1 (the trigger drop MUST run before the column it reads —
+        // data), AND C1 (the trigger drop MUST run before the column it reads -
         // a structural guarantee, not incidental UUIDv7 ordering).
         assert_eq!(
             c2.depends_on,
@@ -954,7 +954,7 @@ mod tests {
         // versions are now DETERMINISTICALLY derived from the rename's stable seed
         // (schema+owner+table+from+to+ty) plus the step index, not minted fresh
         // per run. Because the checksum folds `depends_on` and `depends_on` now
-        // holds deterministic sibling ids, the FULL checksum is stable too — the
+        // holds deterministic sibling ids, the FULL checksum is stable too - the
         // pre-fix "dependency-free only" carve-out is gone. This is the property a
         // re-lower of the identical IR envelope on every deploy relies on.
         let p1 = author().author(&rename()).expect("author 1");
@@ -1076,7 +1076,7 @@ mod tests {
     #[test]
     fn rejects_type_with_injected_statement_separator() {
         // A `ty` carrying a second statement is rejected by the AUTHOR (before
-        // the downstream guard ever sees it) — safe by construction.
+        // the downstream guard ever sees it) - safe by construction.
         let a = author();
         let err = a
             .author(&OnlineIntent::RenameColumn {
@@ -1166,7 +1166,7 @@ mod tests {
         };
         let plan = author().author(&intent).expect("author");
         let e2 = &plan.expand[1];
-        // The fn/trg names embedded in E2's up must be ≤63 bytes and appear in
+        // The fn/trg names embedded in E2's up must be <=63 bytes and appear in
         // both E2.up (CREATE) and E2.down (DROP) identically.
         let vendors = crate::test_fixtures::VENDORS;
         let max = crate::render::backends::generated_ident_max_bytes(vendors);
@@ -1181,12 +1181,12 @@ mod tests {
         assert!(e2.down.as_ref().unwrap().contains(&trg_name));
     }
 
-    // REGRESSION — the executor-layer scope gate in `run_expand_pg` is now
+    // REGRESSION - the executor-layer scope gate in `run_expand_pg` is now
     // UNCONDITIONAL. A direct seam caller with an EMPTY `expand` vec under
     // `ApprovalScope::Versions({})` MUST be refused with `ApprovalNotScoped` (keyed on
     // the E2 `trigger_version`, the resolved scope-version when the expand chain is
     // empty). Pre-fix the gate was `if let Some(v) = expand.first().or_else(|| expand.get(1))`
-    // — an empty `expand` yielded `None`, SKIPPED the gate entirely, and fell through to
+    // - an empty `expand` yielded `None`, SKIPPED the gate entirely, and fell through to
     // an `Ok(empty)` return: a fail-OPEN a malicious/buggy direct caller could ride.
     // This test FAILS RED pre-fix (the old code returned `Ok`, never the refusal).
     //

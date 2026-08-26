@@ -145,7 +145,7 @@ fn support_cell(
 /// The render mode a SUPPORTED cell of this op reports on `dialect`. This is a
 /// render-strategy detail of the current engine (does the op lower fully
 /// offline, or only once the live schema is resolved), NOT a dialect-support
-/// decision — so it is derived here, not from the generated dialect table.
+/// decision - so it is derived here, not from the generated dialect table.
 fn render_mode(
     vendors: VendorSet,
     op: &Op,
@@ -336,9 +336,9 @@ pub fn rendered_vendor_capabilities(op: &Op) -> Vec<crate::model::capability::Ve
 }
 
 /// The support TIER (core vs vendor + its capabilities) for this op shape.
-/// Tier cannot be read off the generated table's dispositions — a vendor op
+/// Tier cannot be read off the generated table's dispositions - a vendor op
 /// can be unsupported on every dialect (e.g. `createRole` superuser+ifNotExists,
-/// `createView` materialized+replace) — so it stays a per-op declaration, kept
+/// `createView` materialized+replace) - so it stays a per-op declaration, kept
 /// in lock-step with [`vendor_capabilities`] by `op_support_matrix`.
 fn support_tier(op: &Op) -> crate::model::support::SupportTier {
     use crate::model::support::{
@@ -710,7 +710,7 @@ pub(crate) fn op_kind_and_variant(op: &Op) -> (&'static str, &'static str) {
 /// branch its support decision turns on; `"base"` for payload-independent ops).
 /// This is the ONE variant derivation, shared by `support()` (which looks the
 /// disposition up in the table) and the `dialect_table_faithfulness` corpus
-/// (which pins each representative op to its labelled variant) — so the two can
+/// (which pins each representative op to its labelled variant) - so the two can
 /// never drift.
 #[must_use]
 pub fn op_variant(op: &Op) -> &'static str {
@@ -805,7 +805,7 @@ fn add_constraint_variant(kind: &IrConstraintKind) -> &'static str {
         IrConstraintKind::Exclusion { .. } => "exclusion",
         // `NOT VALID` online adoption is PostgreSQL-only. It takes precedence
         // over the composite/non-id FK sub-shapes (all likewise PG-only), so a
-        // `notValid` FK reports the single PG-only `fkNotValid` variant — keeping
+        // `notValid` FK reports the single PG-only `fkNotValid` variant - keeping
         // the op-level `Support::decision()` PG-only (and thus == validate, like
         // `fkComposite`), robust regardless of corpus sampling order.
         IrConstraintKind::Fk {
@@ -881,7 +881,7 @@ fn create_trigger_variant(
 pub fn vendor_capabilities(op: &Op) -> Vec<crate::model::capability::VendorCapability> {
     use crate::model::capability::VendorCapability as C;
     match op {
-        // Portable core — no capability required.
+        // Portable core - no capability required.
         Op::CreateTable { .. }
         | Op::CreatePartition { .. }
         | Op::DetachPartition { .. }
@@ -943,7 +943,7 @@ pub fn vendor_capabilities(op: &Op) -> Vec<crate::model::capability::VendorCapab
                 Vec::new()
             }
         }
-        // Vendor — each maps to its capability flag.
+        // Vendor - each maps to its capability flag.
         Op::CreateSchema { .. } | Op::DropSchema { .. } => vec![C::Schema],
         Op::CreateExtension { .. } | Op::DropExtension { .. } => vec![C::Extension],
         Op::CreateRole { .. }

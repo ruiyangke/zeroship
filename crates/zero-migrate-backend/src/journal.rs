@@ -1,15 +1,15 @@
-//! The migration journal's dialect-neutral vocabulary — `schema_migrations`.
+//! The migration journal's dialect-neutral vocabulary - `schema_migrations`.
 //!
 //! This module names the journal's shared CONCEPTS and nothing else: the wire
 //! enums ([`Phase`], [`EventKind`], [`JournaledKind`], [`PendingState`],
 //! [`Resolution`]), the row/record shapes ([`AppliedEntry`], [`HistoryEvent`],
-//! [`CompletedRecord`], [`PendingContract`], [`BaselineRecord`], …) and the
+//! [`CompletedRecord`], [`PendingContract`], [`BaselineRecord`], ...) and the
 //! shared [`JournalError`]. It emits NO SQL and names NO vendor. Each backend
 //! writes its own journal in its own dialect:
 //!
-//! - PostgreSQL — `zero_migrate_postgres::backend::journal_sql`
-//! - MySQL — `zero_migrate_mysql::backend::journal_sql`
-//! - SQLite — `zero_migrate_sqlite::backend::journal_sql`
+//! - PostgreSQL - `zero_migrate_postgres::backend::journal_sql`
+//! - MySQL - `zero_migrate_mysql::backend::journal_sql`
+//! - SQLite - `zero_migrate_sqlite::backend::journal_sql`
 //!
 //! The wire strings the enums below carry are the CONTRACT between those three
 //! implementations: every backend's `CHECK` constraints, INSERTs and net-state
@@ -20,12 +20,12 @@
 //!
 //! Append-only + tamper-evident. The journal of record,
 //! `<meta>.schema_migrations`, is the SINGLE events table: one row per migration
-//! **event** — an `applied` (forward) event or a `rolled_back` event,
+//! **event** - an `applied` (forward) event or a `rolled_back` event,
 //! discriminated by the `event_kind` column. It carries (version, name,
 //! checksum, actor, timestamp, exec time) for every event, plus the
 //! applied-only fields (kind, phase, outcome) which are NULL on a `rolled_back`
 //! row. It is guarded by an **immutability trigger** that rejects UPDATE and
-//! DELETE outright — the billing-ledger pattern (`db/changelog/changesets/
+//! DELETE outright - the billing-ledger pattern (`db/changelog/changesets/
 //! 0048_credit_ledger.sql`): a correction is a *new* row, never an edit.
 //!
 //! The total event order is each engine's NATIVE auto-increment key
@@ -34,11 +34,11 @@
 //! `event_seq` that never ties (even across two events in one transaction), and
 //! the net state of a version is its **latest event** on that scale.
 //!
-//! Non-transactional migrations (`CREATE INDEX CONCURRENTLY`, …) cannot wrap
+//! Non-transactional migrations (`CREATE INDEX CONCURRENTLY`, ...) cannot wrap
 //! their DDL + journal write in one transaction, so they use a **two-phase**
 //! protocol around a *separate* mutable side-table,
-//! `<meta>.schema_migrations_inflight`: write a `started` marker → run the DDL
-//! → insert the immutable `completed` row → drop the marker. A crash leaves a
+//! `<meta>.schema_migrations_inflight`: write a `started` marker -> run the DDL
+//! -> insert the immutable `completed` row -> drop the marker. A crash leaves a
 //! lone `started` marker, which the executor's recovery path detects on the
 //! next apply. The inflight table is deliberately NOT immutable (the marker
 //! must be deletable on completion); only the journal of record is.
@@ -85,8 +85,8 @@ impl Phase {
 ///
 /// This is the migration's recorded IDENTITY-class, not anything the caller
 /// supplies at apply time. The tamper guard decides the
-/// repeatable drift exemption on THIS journaled value — never on the
-/// attacker-suppliable `flags.repeatable` — so a once-only migration cannot be
+/// repeatable drift exemption on THIS journaled value - never on the
+/// attacker-suppliable `flags.repeatable` - so a once-only migration cannot be
 /// reclassified into a repeatable (or vice-versa) by flipping the flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JournaledKind {
@@ -125,7 +125,7 @@ impl JournaledKind {
         }
     }
 
-    /// True if this journaled kind is a REPEATABLE re-apply — the only kind whose
+    /// True if this journaled kind is a REPEATABLE re-apply - the only kind whose
     /// changed checksum is a legitimate re-run rather than tamper.
     #[must_use]
     pub const fn is_repeatable(self) -> bool {
@@ -173,7 +173,7 @@ impl EventKind {
 /// The lifecycle state of a cross-deploy online-rename pending-contract
 /// obligation. An obligation is born `pending` when an `ExpandContract`
 /// EXPAND completes (its C1/C2 contract is deferred to a later deploy); it is
-/// discharged by appending a `resolved` row (history is append-only — a discharge
+/// discharged by appending a `resolved` row (history is append-only - a discharge
 /// is NEVER a DELETE, exactly like the journal of record). The NET state of an
 /// obligation is the latest event for its `pending_version` key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -213,7 +213,7 @@ impl PendingState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resolution {
     /// The deferred contract (C1 drop trigger + C2 drop old column) was applied
-    /// under [`Approval::Approved`](crate::approval::Approval::Approved) — the rename
+    /// under [`Approval::Approved`](crate::approval::Approval::Approved) - the rename
     /// completed.
     Applied,
     /// The pending contract was aborted: the shadow (`to`) column + the dual-write
@@ -265,13 +265,13 @@ pub struct PendingContract {
     /// "expand" id the partition keys on), deterministic per rename
     /// The engine interlock's idempotent-skip + self-EXPAND exemption +
     /// the `resolve-pending` lookup key on this. It is a deep sub-step id that the
-    /// plan-level supplied set never exposes — so orphan/blocked do NOT key on it.
+    /// plan-level supplied set never exposes - so orphan/blocked do NOT key on it.
     pub pending_version: String,
     /// The rename's PLAN-GROUP version (the `ExpandContract` plan's E1-anchored
     /// id, `render::lower::plan_step_version`). This is the STABLE identity the SUPPLIED
     /// migration set carries (a re-lowered IR's `lower_plan.version`) and an
     /// author's `depends_on` references, so `status`'s orphan and
-    /// blocked surfacing keys on THIS — not the deep E2 `pending_version`
+    /// blocked surfacing keys on THIS - not the deep E2 `pending_version`
     /// no plan-level set ever exposes.
     pub plan_version: String,
     /// The C1/C2 contract migration versions (so resolve can journal them and the
@@ -314,9 +314,9 @@ pub struct PendingContractRecord<'a> {
     pub to_col: &'a str,
     /// The Postgres type of the column.
     pub ty: &'a str,
-    /// The apply-time obligation key — the E2 trigger version.
+    /// The apply-time obligation key - the E2 trigger version.
     pub pending_version: &'a str,
-    /// The rename's plan-group version (E1-anchored) — the stable identity the
+    /// The rename's plan-group version (E1-anchored) - the stable identity the
     /// supplied set / `depends_on` key on for orphan/blocked.
     pub plan_version: &'a str,
     /// The C1/C2 contract version ids, comma-separated-free (serialized as a JSON
@@ -329,8 +329,8 @@ pub struct PendingContractRecord<'a> {
 /// The deploy-scoped recovery SCOPE threaded into the EXPAND obligation write so
 /// the obligation row and its recovery marker are committed in ONE transaction
 /// When present, `record_pending_contract_with_recovery` appends a
-/// `state='in_progress'` row to `schema_deploy_recovery` in the SAME `BEGIN … COMMIT`
-/// as the `pending` obligation row — so every outstanding obligation ALWAYS has a
+/// `state='in_progress'` row to `schema_deploy_recovery` in the SAME `BEGIN ... COMMIT`
+/// as the `pending` obligation row - so every outstanding obligation ALWAYS has a
 /// marker (closing the obligation-vs-marker crash window: the two
 /// rows commit atomically or not at all).
 ///
@@ -338,12 +338,12 @@ pub struct PendingContractRecord<'a> {
 /// not yet durably reached a terminal outcome." The deploy's success arm later
 /// promotes it to `committed` (the legit-pending go-live signal; never recovered);
 /// a same-deploy / crash abort closes it `aborted` / `reconciled`. The
-/// crash-recovery leg recovers ONLY net-`in_progress` markers — so a phase-1
+/// crash-recovery leg recovers ONLY net-`in_progress` markers - so a phase-1
 /// promotion FAILURE leaves the marker in the *recoverable* (fail-safe) state, never
 /// the *protected* state (the inversion that closes the false-abort).
 #[derive(Debug, Clone, Copy)]
 pub struct DeployRecoveryScope<'a> {
-    /// The per-deploy id (UUIDv7) the marker is keyed on — generated once per deploy
+    /// The per-deploy id (UUIDv7) the marker is keyed on - generated once per deploy
     /// by the control loop and threaded into the engine apply path so the marker is
     /// engine-stamped in the obligation's transaction.
     pub deploy_id: &'a str,
@@ -353,7 +353,7 @@ pub struct DeployRecoveryScope<'a> {
 /// the drift check + pending computation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppliedEntry {
-    /// The migration version (`mig_…`).
+    /// The migration version (`mig_...`).
     pub version: String,
     /// The recorded checksum (hex SHA-256). Empty for an inflight `started`
     /// marker only if the marker predates a checksum (we always write it).
@@ -399,18 +399,18 @@ pub enum JournalError {
     /// A journal row carried an unrecognized `phase` value.
     #[error("unrecognized journal phase '{0}'")]
     BadPhase(String),
-    /// A `completed` journal row carried an unrecognized `kind` value — a
+    /// A `completed` journal row carried an unrecognized `kind` value - a
     /// corrupted / tampered row (the CHECK constraint forbids it on write, so
     /// seeing one means out-of-band mutation).
     #[error("unrecognized journal kind '{0}'")]
     BadKind(String),
-    /// A journal row carried an unrecognized `event_kind` value — a corrupted /
+    /// A journal row carried an unrecognized `event_kind` value - a corrupted /
     /// tampered row (the CHECK constraint forbids it on write, so seeing one
     /// means out-of-band mutation).
     #[error("unrecognized journal event_kind '{0}'")]
     BadEventKind(String),
     /// An engine-supplied identifier (the meta schema or a derived trigger name)
-    /// was not quotable (empty or NUL-bearing) at a render seam — fail-closed
+    /// was not quotable (empty or NUL-bearing) at a render seam - fail-closed
     /// rather than interpolate it. Maps [`crate::dml::IdentQuoteError`].
     #[error("journal render: {0}")]
     IdentQuote(#[from] crate::dml::IdentQuoteError),
@@ -431,7 +431,7 @@ impl From<crate::driver::DbError> for JournalError {
 /// again and re-appliable; the status API surfaces it distinctly from net-applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RolledBackEntry {
-    /// The version (`mig_…`).
+    /// The version (`mig_...`).
     pub version: String,
     /// The migration name recorded on the rollback event.
     pub name: String,
@@ -445,7 +445,7 @@ pub struct RolledBackEntry {
     pub at: String,
 }
 
-/// The kind of a [`HistoryEvent`] — a forward apply or a rollback.
+/// The kind of a [`HistoryEvent`] - a forward apply or a rollback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistoryKind {
     /// An `applied` (forward) event (`event_kind='applied'`).
@@ -464,7 +464,7 @@ pub enum HistoryKind {
 pub struct HistoryEvent {
     /// The shared monotonic sequence number (the total event order).
     pub event_seq: i64,
-    /// The migration version (`mig_…`).
+    /// The migration version (`mig_...`).
     pub version: String,
     /// The migration name recorded on the event.
     pub name: String,
@@ -484,7 +484,7 @@ pub struct HistoryEvent {
 /// `record_completed` takes one descriptor (keeping the arg count in check).
 #[derive(Debug, Clone, Copy)]
 pub struct CompletedRecord<'a> {
-    /// The migration version (`mig_…`).
+    /// The migration version (`mig_...`).
     pub version: &'a str,
     /// The migration name.
     pub name: &'a str,
@@ -517,7 +517,7 @@ pub struct DeployRecovery {
     /// The per-deploy id (UUIDv7) the EXPAND was opened under.
     pub deploy_id: String,
     /// The obligation key (the EXPAND's E2 trigger version) this row marks for
-    /// recovery — the join key into `schema_pending_contracts`.
+    /// recovery - the join key into `schema_pending_contracts`.
     pub pending_version: String,
 }
 
@@ -525,7 +525,7 @@ pub struct DeployRecovery {
 /// `up`, bundled so `record_baseline` takes one descriptor.
 #[derive(Debug, Clone, Copy)]
 pub struct BaselineRecord<'a> {
-    /// The migration version (`mig_…`).
+    /// The migration version (`mig_...`).
     pub version: &'a str,
     /// The migration name.
     pub name: &'a str,
@@ -568,7 +568,7 @@ mod tests {
     }
 
     /// A read site (e.g. `history`) maps an unparseable `event_kind` to the
-    /// dedicated `BadEventKind` arm — NOT `BadPhase` (the pre-fix misuse) — so a
+    /// dedicated `BadEventKind` arm - NOT `BadPhase` (the pre-fix misuse) - so a
     /// tampered row surfaces a faithful, type-distinct error.
     #[test]
     fn unparseable_event_kind_is_bad_event_kind_not_bad_phase() {

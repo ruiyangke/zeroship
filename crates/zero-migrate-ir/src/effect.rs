@@ -1,6 +1,6 @@
 //! What ONE lowered step does to the catalog facts an assertion can read.
 //!
-//! Step 5 of `docs/proposals/single-fold-and-effects.md` section G. The governing
+//! Specified by `docs/proposals/single-fold-and-effects.md` section G. The governing
 //! identity is `state_at(N) = live_at_0 (+) fold(effects[0..N])`, and the proposal's
 //! point is that THE TWO TERMS ARE NOT EQUALLY KNOWABLE.
 //!

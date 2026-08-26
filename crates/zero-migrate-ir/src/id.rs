@@ -11,17 +11,17 @@
 //! The guard lives where the condition holds. zeroship vendors this crate alongside
 //! its own `crates/core/src/typed_id.rs`, so both copies coexist there, and its
 //! `crates/migrated/tests/typed_id_parity.rs` cross-decodes the two encodings.
-//! Reported agreeing over 200,003 ids including all-zero, all-ones and low-bit
-//! edges, with the harness proven to fail on a planted alphabet swap.
+//! Reported agreeing across a sweep that includes the all-zero, all-ones and
+//! low-bit edges, with the harness proven to fail on a planted alphabet swap.
 //!
 //! Does NOT cover the parse/validate prefix helpers - that guard is encode/decode
 //! only, and nothing covers the rest on either side.
 
-/// Base62 alphabet — sorted so lexicographic order matches numeric order
+/// Base62 alphabet - sorted so lexicographic order matches numeric order
 /// for the high bits (timestamp), preserving `UUIDv7` sort order.
 const BASE62: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
-/// Reverse lookup table: ASCII byte → base62 digit (255 = invalid)
+/// Reverse lookup table: ASCII byte -> base62 digit (255 = invalid)
 const fn build_decode_table() -> [u8; 128] {
     let mut table = [255u8; 128];
     let mut i = 0;
@@ -141,7 +141,7 @@ pub enum ParseError {
     /// path-traversal-hardening boundary check: a caller that asked for one
     /// entity type must never receive an id minted for another.
     WrongPrefix { expected: String, got: String },
-    /// The id failed to parse — wrong shape, invalid base62, missing
+    /// The id failed to parse - wrong shape, invalid base62, missing
     /// underscore, etc. Carries the same string the underlying [`parse`]
     /// would have returned.
     Malformed(String),

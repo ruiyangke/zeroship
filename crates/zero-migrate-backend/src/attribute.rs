@@ -1,6 +1,6 @@
 //! The vendor-facing half of vendor attributes: what a backend DECLARES.
 //!
-//! [`zero_migrate_ir::attribute`] holds the neutral vocabulary — the key, the value
+//! [`zero_migrate_ir::attribute`] holds the neutral vocabulary - the key, the value
 //! carrier, the map, the scope. It knows no dialect ids and no attribute names, on
 //! purpose. This module is where a backend says which keys it actually owns.
 //!
@@ -11,8 +11,8 @@
 //! vendor adds a knob by adding one `AttrDef` to its own [`AttributeVocabulary`]; nothing
 //! in the neutral crates changes, and no `match` anywhere gains an arm.
 //!
-//! That is the whole point of the design. The alternative — the one the tree already has
-//! in `IndexStorageParams`, now retired — was a vendor's
+//! That is the whole point of the design. The alternative - the one the tree already has
+//! in `IndexStorageParams`, now retired - was a vendor's
 //! knobs as named fields in the neutral IR, which requires editing the neutral crate to
 //! add one backend's storage parameter.
 //!
@@ -22,9 +22,9 @@
 //! engine must treat differently. Writing `acme` and `borealis` for two backends, since
 //! this crate is the contract every backend shares and must name none of them:
 //!
-//! * `acme.fillfactor` heading for a `borealis` target — `acme` was never asked. SKIPPED,
+//! * `acme.fillfactor` heading for a `borealis` target - `acme` was never asked. SKIPPED,
 //!   silently and correctly; the node stays portable.
-//! * `acme.filfactor` heading for an `acme` target — `acme` IS the owner and declares no
+//! * `acme.filfactor` heading for an `acme` target - `acme` IS the owner and declares no
 //!   such leaf. REFUSED, naming the typo.
 //!
 //! A carrier that did not name the dialect could express the first but not the second.
@@ -32,7 +32,7 @@
 //! # Why the examples here are fictional
 //!
 //! Every dialect id in this module's docs and tests is invented. That is not squeamishness
-//! about the neutrality census — it is a stronger test. A contract exercised only against
+//! about the neutrality census - it is a stronger test. A contract exercised only against
 //! the ids that happen to ship could pass while special-casing one of them; a contract
 //! exercised against `acme` cannot, because no such backend exists to special-case. Real
 //! examples belong in each vendor's own `attribute` module, which is the one place naming
@@ -51,34 +51,34 @@ use std::fmt;
 use zero_migrate_ir::attribute::{AttrKey, OpAttributes};
 use zero_migrate_ir::ir::IrScalar;
 
-/// The shape of a legal value for one attribute — the "verification" half of a
+/// The shape of a legal value for one attribute - the "verification" half of a
 /// declaration.
 ///
 /// Closed, and small on purpose. A vendor knob is a scalar with a domain; anything
 /// needing more structure than this is an [`Op`](zero_migrate_ir::ir::Op) field, not an
 /// attribute. Keeping the set closed is also what lets the TypeScript generator emit a
-/// precise type per attribute — an `Enum` becomes a union of string literals, an `Int`
+/// precise type per attribute - an `Enum` becomes a union of string literals, an `Int`
 /// becomes `number` with its range in the doc comment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum AttrShape {
-    /// A boolean flag — `acme.strict`, `acme.without_rowid`.
+    /// A boolean flag - `acme.strict`, `acme.without_rowid`.
     Bool,
     /// An integer with an INCLUSIVE range. The range is part of the declaration because
-    /// most vendor knobs have one the server enforces anyway — a fill-factor percentage
-    /// is 10..=100 — and finding that out at apply time rather than at plan time is the
+    /// most vendor knobs have one the server enforces anyway - a fill-factor percentage
+    /// is 10..=100 - and finding that out at apply time rather than at plan time is the
     /// difference between a refusal and a failed migration.
     Int {
         /// Smallest accepted value, inclusive.
         ///
-        /// Exported as a decimal STRING, not a JSON number — see the note on `max`.
+        /// Exported as a decimal STRING, not a JSON number - see the note on `max`.
         #[serde(serialize_with = "i64_as_decimal_string")]
         min: i64,
         /// Largest accepted value, inclusive.
         ///
         /// Exported as a decimal STRING because the consumer is JavaScript, whose numbers
         /// are `f64`: an `i64` beyond 2^53 does not survive `JSON.parse`. This is not
-        /// hypothetical — MySQL's `auto_increment` declares `i64::MAX`, and the first
+        /// hypothetical - MySQL's `auto_increment` declares `i64::MAX`, and the first
         /// generated typings documented its bound as `9223372036854776000`, a number that
         /// is simply not the one declared.
         ///
@@ -89,7 +89,7 @@ pub enum AttrShape {
         #[serde(serialize_with = "i64_as_decimal_string")]
         max: i64,
     },
-    /// One of a fixed set of spellings — `acme.row_format` might accept
+    /// One of a fixed set of spellings - `acme.row_format` might accept
     /// `DEFAULT`, `DYNAMIC` or `COMPRESSED`.
     ///
     /// The variants are stored exactly as the vendor spells them on the wire, and the
@@ -99,7 +99,7 @@ pub enum AttrShape {
         /// The accepted spellings, in the vendor's own casing.
         variants: &'static [&'static str],
     },
-    /// Free text — an identifier-shaped value the vendor validates itself, such as a
+    /// Free text - an identifier-shaped value the vendor validates itself, such as a
     /// tablespace or character-set name.
     Text,
 }
@@ -221,7 +221,7 @@ impl std::error::Error for AttrValueError {}
 
 /// One vendor attribute, declared once by the backend that owns it.
 ///
-/// Every field is REQUIRED — the struct derives no `Default` and is not
+/// Every field is REQUIRED - the struct derives no `Default` and is not
 /// `#[non_exhaustive]`, for the same reason
 /// [`BackendVendor`](crate::registry::BackendVendor)'s fields are: a knob that acquired a
 /// scope or a shape by omission would be a knob nobody decided.
@@ -252,7 +252,7 @@ pub struct AttrDef {
 /// [`AttrDef::ops`] is `&[&str]`, so a hand-written declaration names its ops as bare
 /// literals. `"createTabel"` then compiles, passes the ownership walk, passes the
 /// duplicate-key walk, exports to the vocabulary artifact and generates a TypeScript
-/// field — and matches nothing, forever, because [`AttributeVocabulary::get`] looks a knob
+/// field - and matches nothing, forever, because [`AttributeVocabulary::get`] looks a knob
 /// up by the op it was carried on. The knob is declared, typed, documented and dead.
 ///
 /// Naming the op as a type moves that to the compiler: the misspelling is `E0425` in the
@@ -261,7 +261,7 @@ pub struct AttrDef {
 /// [`OpAttributes::OP`](zero_migrate_ir::attribute::OpAttributes), so the declaration
 /// and the carrier cannot disagree about what op they mean.
 ///
-/// This does not retire `every_declared_op_is_a_real_op` — the op string still originates
+/// This does not retire `every_declared_op_is_a_real_op` - the op string still originates
 /// in `op_attributes!` over in `zero-migrate-ir`, and a typo THERE is still just a string.
 /// It moves that test's exposed surface from every vendor declaration to the six carrier
 /// definitions in one file.
@@ -269,7 +269,7 @@ pub struct AttrDef {
 /// # What else it collapses
 ///
 /// The dialect is written ONCE instead of being re-typed into every key, and the prose is
-/// a `///` doc comment instead of a `docs:` string literal — so one source feeds rustdoc
+/// a `///` doc comment instead of a `docs:` string literal - so one source feeds rustdoc
 /// AND the generated TypeScript comment. Note that `concat!` joins doc lines on their
 /// leading space: a blank `///` line vanishes, so declarations get no paragraph breaks.
 ///
@@ -323,7 +323,7 @@ macro_rules! declare_attributes {
                 ),+],
                 shape: $shape,
                 // Each `///` line arrives with its leading space, which is what joins the
-                // lines into one sentence — but it also puts one at the FRONT. `trim_ascii`
+                // lines into one sentence - but it also puts one at the FRONT. `trim_ascii`
                 // is `const`, so the stored string is byte-identical to the hand-written
                 // `docs:` literal this replaced rather than merely close to it.
                 docs: concat!($($doc),+).trim_ascii(),
@@ -336,7 +336,7 @@ macro_rules! declare_attributes {
 ///
 /// A vendor builds this as a `const` from a `&'static [AttrDef]` and hands it to its
 /// [`BackendVendor`](crate::registry::BackendVendor). A backend with no attributes at all
-/// declares an EMPTY vocabulary explicitly — visible in the diff — rather than omitting
+/// declares an EMPTY vocabulary explicitly - visible in the diff - rather than omitting
 /// the field.
 #[derive(Debug, Clone, Copy)]
 pub struct AttributeVocabulary {
@@ -382,7 +382,7 @@ impl AttributeVocabulary {
     /// A leaf may legitimately be declared at more than one scope, meaning the same
     /// thing in each. PostgreSQL's
     /// `fillfactor` is legal on both a table and an index and means the same thing in
-    /// each." Until this method took a scope, the code could not do what that doc said —
+    /// each." Until this method took a scope, the code could not do what that doc said -
     /// lookup was key-unique, so the second declaration was unreachable and the
     /// workspace census counted it a duplicate.
     ///
@@ -412,7 +412,7 @@ impl AttributeVocabulary {
             .collect()
     }
 
-    /// Every key declared for one scope, in declaration order — what a refusal lists
+    /// Every key declared for one scope, in declaration order - what a refusal lists
     /// when it says "did you mean".
     #[must_use]
     pub fn keys_for_op(&self, op: &str) -> Vec<&'static AttrKey> {
@@ -426,10 +426,10 @@ impl AttributeVocabulary {
     /// Check every attribute in `attrs` that belongs to `dialect`, at `scope`.
     ///
     /// Keys belonging to OTHER dialects are not this vocabulary's business and are left
-    /// alone — that is the skip half of the two-failures rule in this module's header.
+    /// alone - that is the skip half of the two-failures rule in this module's header.
     /// Keys that ARE this dialect's must be declared, in scope, and shaped correctly.
     ///
-    /// The scope is taken from the VALUE's type, not from an argument — see
+    /// The scope is taken from the VALUE's type, not from an argument - see
     /// [`OpAttributes`] for why a hand-passed op is the `detachPartition` failure
     /// shape. A caller cannot check table attributes against column declarations, because
     /// there is no argument left to get wrong.
@@ -480,7 +480,7 @@ impl AttributeVocabulary {
 /// Why one attribute was refused against a vendor's declared vocabulary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttrError {
-    /// The owning dialect is registered but declares no such leaf — a typo, or a knob
+    /// The owning dialect is registered but declares no such leaf - a typo, or a knob
     /// from a newer version of this backend.
     Undeclared {
         /// The key that was not found.
@@ -493,7 +493,7 @@ pub enum AttrError {
         /// The key.
         key: AttrKey,
         /// Every op the vendor DOES permit it on. Plural because one knob is commonly
-        /// legal on several — `createTable` and `setTableOptions`, say — and naming only
+        /// legal on several - `createTable` and `setTableOptions`, say - and naming only
         /// the first would read as if the others were forbidden.
         declared_for: Vec<&'static str>,
         /// The op it was written on.
@@ -545,14 +545,14 @@ impl std::error::Error for AttrError {}
 /// # Why this lives in the contract crate
 ///
 /// Three vendors need byte-identical export logic, and a copy per vendor is three
-/// chances for the artifacts to disagree in shape — at which point one npm package's
+/// chances for the artifacts to disagree in shape - at which point one npm package's
 /// generator reads a field another vendor never wrote. The function names no vendor: it
 /// takes the dialect id and the vocabulary, so it is the same kind of thing as the
 /// traits beside it.
 ///
 /// # Why an artifact exists at all
 ///
-/// The route `generated/ir.ts` takes — derive a JSON Schema from the Rust type — CANNOT
+/// The route `generated/ir.ts` takes - derive a JSON Schema from the Rust type - CANNOT
 /// type attributes. `schemars` derives from the TYPE, and the type is an open
 /// `BTreeMap<AttrKey, IrScalar>`; the vocabulary is `static` DATA, invisible to it. That
 /// route yields `Record<string, IrScalar>`: no key names, no autocomplete, and a typo
@@ -584,7 +584,7 @@ pub fn vocabulary_json(
     Ok(s)
 }
 
-/// Wire-shape version of the exported vocabulary artifact — NOT of the IR.
+/// Wire-shape version of the exported vocabulary artifact - NOT of the IR.
 ///
 /// Bump when the artifact's shape changes in a way a generator must notice. Each
 /// vendor's generator refuses a version it does not understand, so a bump is a loud
@@ -630,7 +630,7 @@ mod tests {
 
     /// Build a TABLE-scoped set. There is no `column(...)` helper because no IR node
     /// carries column attributes yet, and inventing one would be a landing pad nobody
-    /// checks — see `OpAttributes`.
+    /// checks - see `OpAttributes`.
     fn table(pairs: &[(&AttrKey, IrScalar)]) -> CreateTableAttributes {
         let mut a = Attributes::new();
         for (k, v) in pairs {
@@ -692,7 +692,7 @@ mod tests {
         );
     }
 
-    /// A column knob written on a table is refused BY SCOPE — and note what the call
+    /// A column knob written on a table is refused BY SCOPE - and note what the call
     /// looks like: the scope is never named, it comes from `TableAttributes`.
     #[test]
     fn a_column_attribute_written_on_a_table_is_refused_by_scope() {

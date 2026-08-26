@@ -1,9 +1,9 @@
 pub(crate) mod backends;
 pub mod declarative;
 pub mod dml;
-// ── The existence-guard DECIDER moved into `zero-migrate-backend`. It had to: the
+// -- The existence-guard DECIDER moved into `zero-migrate-backend`. It had to: the
 // only production callers are the three backends' session paths, and a backend in
-// its own crate cannot reach an engine module. Nothing about it was engine-shaped —
+// its own crate cannot reach an engine module. Nothing about it was engine-shaped -
 // every private helper below `decide` was already parameterized by
 // `&BackendVendor`, and `decide` itself resolved one from a `DialectId`, which was
 // the single line that had to change.
@@ -29,7 +29,7 @@ pub mod existence_probe {
     ///
     /// The engine's entry point. A backend that already knows which vendor it is
     /// calls [`zero_migrate_backend::existence_probe::decide`] with its own
-    /// `BackendVendor` instead — see that function for the per-variant fail-closed
+    /// `BackendVendor` instead - see that function for the per-variant fail-closed
     /// rules, which is where all of them now live.
     #[must_use]
     pub fn decide(
@@ -55,13 +55,13 @@ pub mod step;
 pub(crate) mod value_format;
 pub mod vendor;
 
-// ── The backend CONTRACT moved into `zero-migrate-backend` and is re-exported under
-// its historical `crate::render::*` paths, so every in-crate `render::dml::…`,
-// `render::renderer::…` and `render::vendor::…` reference resolves unchanged.
+// -- The backend CONTRACT moved into `zero-migrate-backend` and is re-exported under
+// its historical `crate::render::*` paths, so every in-crate `render::dml::...`,
+// `render::renderer::...` and `render::vendor::...` reference resolves unchanged.
 //
 // The three modules had to go because the two renderer TRAITS are in `renderer`, and
 // a vendor crate cannot implement a trait it may not name. `dml` and `vendor` went
-// with them because the vendors CALL them — the identifier seam, the inline
+// with them because the vendors CALL them - the identifier seam, the inline
 // expression renderer, `render_vendor_op` and `VendorStatement` (the return type of
 // `DmlRenderer::render_trigger_op`).
 pub(crate) mod renderer {

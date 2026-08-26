@@ -1,4 +1,4 @@
-//! Drift detection — **read-only**.
+//! Drift detection - **read-only**.
 //!
 //! Drift is any divergence between what the journal says happened and either
 //! (a) the migration set the operator now ships, or (b) the live database
@@ -8,7 +8,7 @@
 //! # What is here and what is next door
 //!
 //! This module is the DIALECT-BLIND half: the report types, the pure
-//! [`diff_snapshots`], and [`compare_applied_to_set`] — the one tamper/orphan
+//! [`diff_snapshots`], and [`compare_applied_to_set`] - the one tamper/orphan
 //! comparison every backend runs over its own journal read. It issues no catalog
 //! query and names no vendor's catalog.
 //!
@@ -22,25 +22,25 @@
 //!
 //! Two independent axes:
 //!
-//! - **B1 — checksum / tamper / orphan drift** ([`check_checksum_drift`](crate::apply::backend::MigrationBackend::check_checksum_drift)):
+//! - **B1 - checksum / tamper / orphan drift** ([`check_checksum_drift`](crate::apply::backend::MigrationBackend::check_checksum_drift)):
 //! compares the journal's recorded checksum for each NET-applied version
 //! against the checksum of the same version in the supplied set. A mismatch
 //! means the migration SQL was edited after it applied, or the journal row was
 //! tampered. A net-applied version with NO matching
-//! migration in the supplied set is an **orphan** ([`OrphanJournal`]) — the
+//! migration in the supplied set is an **orphan** ([`OrphanJournal`]) - the
 //! bundle is missing a migration the database already has. This is the exact
 //! comparison the executor's apply flow does as its abort-on-drift pre-check;
 //! [`apply`](crate::engine::MigrationEngine::apply) calls this function and aborts
 //! if it returns any [`ChecksumDrift`], so the report and the gate share one
 //! implementation.
 //!
-//! - **B2 — structural introspection** ([`snapshot_schema`](crate::apply::backend::MigrationBackend::snapshot_schema) +
+//! - **B2 - structural introspection** ([`snapshot_schema`](crate::apply::backend::MigrationBackend::snapshot_schema) +
 //! [`diff_snapshots`]):
 //! introspect the LIVE project schema into a deterministic [`SchemaSnapshot`]
 //! and `diff` it against an **expected** snapshot the CALLER supplies. The
 //! expected snapshot is owned by the control-plane / authoring layer (it holds
 //! the declared/union schema, design); this module does NOT rebuild a schema
-//! model by replaying DDL — that is the authoring layer's job. `diff_snapshots`
+//! model by replaying DDL - that is the authoring layer's job. `diff_snapshots`
 //! is a pure function returning a [`StructuralDrift`] report; it never returns
 //! DDL.
 
@@ -61,42 +61,42 @@ use crate::render::value_format::{
     catalog_id_default, catalog_id_default_for_expected, catalog_text_id_default,
 };
 
-// ── The drift REPORT shapes moved down to the backend contract, whose drift
+// -- The drift REPORT shapes moved down to the backend contract, whose drift
 // queries return them, and `compare_applied_to_set` has now followed them: it is the
 // checksum/tamper/orphan comparison EVERY backend runs over its own journal read, so
 // it belongs below the vendors with the shapes it produces. The STRUCTURAL
-// comparisons — `diff_snapshots` and every per-vendor catalog normalization below —
+// comparisons - `diff_snapshots` and every per-vendor catalog normalization below -
 // stay here, because they read the engine's dialect-resolving value-format helpers.
-// Re-exported so each `crate::apply::drift::…` path resolves unchanged.
+// Re-exported so each `crate::apply::drift::...` path resolves unchanged.
 pub use zero_migrate_backend::drift::{
     compare_applied_to_set, AlteredObject, ChecksumDrift, ChecksumDriftReport, DriftError,
     DriftReport, OrphanJournal, StructuralDrift,
 };
 // The one-partition declared-vs-live comparison followed the existence-guard decider
 // down. Both this module's structural differ and that decider read it, and they must
-// read the SAME one — a second, drifting copy in the probe is exactly how a guard and
-// a drift report come to disagree about the same catalog — so it now sits beside the
+// read the SAME one - a second, drifting copy in the probe is exactly how a guard and
+// a drift report come to disagree about the same catalog - so it now sits beside the
 // decider rather than one crate above it.
 pub(crate) use zero_migrate_backend::drift::partition_divergences;
 
 // ---------------------------------------------------------------------------
-// B2 — structural introspection + pure diff
+// B2 - structural introspection + pure diff
 // ---------------------------------------------------------------------------
 
-/// Diff an **expected** snapshot against the **actual** (live) snapshot — a PURE
+/// Diff an **expected** snapshot against the **actual** (live) snapshot - a PURE
 /// function, no I/O, no DDL.
 ///
-/// The expected snapshot is **supplied by the caller** — the control-plane /
+/// The expected snapshot is **supplied by the caller** - the control-plane /
 /// authoring layer owns the declared/union schema and is the only
 /// component that knows the intended shape. This function does NOT rebuild that
 /// model by replaying the migration DDL; that is deliberately the authoring
 /// layer's responsibility, and this seam keeps the two concerns separate.
 ///
 /// Returns:
-/// - `missing_objects` — present in `expected`, absent in `actual` (a declared
+/// - `missing_objects` - present in `expected`, absent in `actual` (a declared
 /// table/column/index/constraint the DB never got).
-/// - `unexpected_objects` — present in `actual`, absent in `expected` (an
-/// out-of-band object created outside the journal — scenario 35).
+/// - `unexpected_objects` - present in `actual`, absent in `expected` (an
+/// out-of-band object created outside the journal - scenario 35).
 ///
 /// Object names are qualified for legibility: a table as `"users"`, a column as
 /// `"users.email"`, an index as `"users index orders_email_idx"`, a constraint
@@ -110,7 +110,7 @@ pub(crate) use zero_migrate_backend::drift::partition_divergences;
 /// are canonical structured identities (target schema/table, ordered local and
 /// referenced tuples, actions, match behavior, and deferrability), while ordinary
 /// CHECK/PK/UNIQUE bodies use the catalog-author comparison spelling. Any
-/// divergence becomes an [`AlteredObject`] — closing the out-of-band-`ALTER`
+/// divergence becomes an [`AlteredObject`] - closing the out-of-band-`ALTER`
 /// blind spot that pure name diffing left open.
 ///
 /// # This comparison is dialect-blind, and partitions are where that shows
@@ -166,9 +166,9 @@ pub fn diff_snapshots_with_index_aliases(
     // A table with no derived index names borrows this instead of allocating.
     let empty_index_aliases: BTreeMap<String, String> = BTreeMap::new();
 
-    // Tables present in expected but not actual → missing (whole table + its
+    // Tables present in expected but not actual -> missing (whole table + its
     // children fold into the single table name; the table is the unit of
-    // missing-ness). Tables in actual but not expected → unexpected.
+    // missing-ness). Tables in actual but not expected -> unexpected.
     for name in expected.tables.keys() {
         if !actual.tables.contains_key(name) {
             missing.push(name.clone());
@@ -408,8 +408,8 @@ pub fn diff_snapshots_with_index_aliases(
     }
 
     // For tables present on BOTH sides, diff their columns / indexes / constraints
-    // by name (added/removed → missing/unexpected) AND, for same-name children,
-    // by attribute (→ altered).
+    // by name (added/removed -> missing/unexpected) AND, for same-name children,
+    // by attribute (-> altered).
     for (name, exp_t) in &expected.tables {
         let Some(act_t) = actual.tables.get(name) else {
             continue;
@@ -1170,7 +1170,7 @@ fn diff_attrs(
 
     // Indexes: unique + elements + predicate + comments. A same-name index whose covered columns changed
     // out-of-band (REINDEX over a different column set, or a name reused for a
-    // different shape) is surfaced by the `columns` compare — the name-only diff
+    // different shape) is surfaced by the `columns` compare - the name-only diff
     // cannot see it (1a).
     let act_idx: BTreeMap<&str, &IndexSnapshot> =
         act_t.indexes.iter().map(|i| (i.name.as_str(), i)).collect();
@@ -1204,10 +1204,10 @@ fn diff_attrs(
                 );
             }
             // Access-method drift (#index-method-drift): a same-name index whose
-            // `pg_am` kind changed out-of-band — e.g. someone dropped the ANN
+            // `pg_am` kind changed out-of-band - e.g. someone dropped the ANN
             // ivfflat and re-created a plain btree under the same name, or vice
             // versa. Name + columns can match while the method silently differs,
-            // so this compare is the only thing that catches a btree→ivfflat
+            // so this compare is the only thing that catches a btree->ivfflat
             // flip. An expected snapshot built without a method (`""`) opts out of
             // the compare (it never asserts a method it didn't intend to model).
             if !ei.access_method.is_empty() {
@@ -1494,7 +1494,7 @@ fn index_referenced_columns(index: &IndexSnapshot) -> Option<Vec<&str>> {
 ///
 /// Kept separate from `constraint_definition_is_retained` (private to
 /// `zero_migrate_postgres::backend::drift_sql`, so it is named here rather than linked)
-/// on purpose — it is the PostgreSQL introspector's own rule about what to STORE and
+/// on purpose - it is the PostgreSQL introspector's own rule about what to STORE and
 /// now lives with the reader that applies it. Not
 /// comparing a body is not a reason to stop recording it: the guard's fail-closed
 /// refusal reports the live definition so an operator can see what is actually
@@ -1519,21 +1519,21 @@ fn index_referenced_columns(index: &IndexSnapshot) -> Option<Vec<&str>> {
 /// is NOT admitted here.
 ///
 /// For a `CHECK` they agree, because both derive the same thing from the same structure
-/// — the live side expands `conkey`, the offline side walks the closed `Expr` the
+/// - the live side expands `conkey`, the offline side walks the closed `Expr` the
 /// renderer emitted. Verified on the same live server: an authored `qty > 0` yields
 /// `Some(["qty"])` on BOTH sides while the definitions read `CHECK (("qty" > 0))` and
 /// `CHECK ((qty > 0))`. The text is what diverges; the column set is not.
 ///
-/// Sorted and deduplicated because the two producers arrive in different orders — AST
-/// walk order against `conkey` order — and order is not part of the claim.
+/// Sorted and deduplicated because the two producers arrive in different orders - AST
+/// walk order against `conkey` order - and order is not part of the claim.
 ///
 /// `None` for any kind but `CHECK`, and for a producer that recorded nothing, which
 /// keeps the compare out of exactly the cases where the two sides are known to differ.
 ///
 /// # What this still does not recover
 ///
-/// Two predicates over the SAME columns with different logic — `qty > 0` against
-/// `qty > -2147483648` — still compare equal. That is the identical bound
+/// Two predicates over the SAME columns with different logic - `qty > 0` against
+/// `qty > -2147483648` - still compare equal. That is the identical bound
 /// [`index_expression_bodies_are_comparable`] states about itself, and lifting it needs
 /// the catalog text parsed back to the closed AST rather than compared as text.
 fn check_referenced_columns(constraint: &ConstraintSnapshot) -> Option<Vec<&str>> {
@@ -1668,13 +1668,13 @@ fn trigger_label(key: &TriggerKey) -> String {
 ///
 /// The one reduction both sides do go through is [`comparable_function_body`], and
 /// it is forced by this project's own renderer rather than by PostgreSQL: the body
-/// is emitted inside `$zsfn$\n … \n$zsfn$`, so the stored `prosrc` carries a newline
+/// is emitted inside `$zsfn$\n ... \n$zsfn$`, so the stored `prosrc` carries a newline
 /// at each end that the authored string does not. That predicate documents the trim
 /// and what it costs.
 ///
 /// WHEN THE COMPARISON IS SKIPPED, and why the skip is not an oversight: `None` on
 /// either side, which has exactly one cause - a SQL-standard-body
-/// (`BEGIN ATOMIC … END`) function. Measured on PostgreSQL 18.4, `CREATE FUNCTION
+/// (`BEGIN ATOMIC ... END`) function. Measured on PostgreSQL 18.4, `CREATE FUNCTION
 /// f2(x int) RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT x+1; END` stores its body
 /// as a PARSE TREE in `prosqlbody` and leaves `prosrc` EMPTY. Comparing an authored
 /// body against `""` would report every such function as drifted on every run, so
@@ -2168,8 +2168,8 @@ mod constraint_definition_tests {
 /// **A snapshot no backend claims must not be read in any backend's dialect.**
 ///
 /// [`introspected_table_vendor`] recognises a live catalog read by the evidence only
-/// introspection leaves — a `ddl_type_override`, a `text_storage`, a
-/// `stored_create_sql` — and a table carrying none of the three matches no vendor. The
+/// introspection leaves - a `ddl_type_override`, a `text_storage`, a
+/// `stored_create_sql` - and a table carrying none of the three matches no vendor. The
 /// ID-default comparison below it then reaches
 /// [`catalog_id_default_for_expected`](crate::render::value_format::catalog_id_default_for_expected)
 /// with `None` for the dialect, which is the only entry point that takes an optional
@@ -2183,8 +2183,8 @@ mod constraint_definition_tests {
 ///   unconditionally, so a MySQL table whose columns are all numeric leaves nothing any
 ///   vendor claims.
 /// * These two cover the case that server cannot reach. A UUID generator default needs
-///   a UUID column, and on MySQL that is character-typed — which hands MySQL its marker
-///   back — while PostgreSQL stamps `ddl_type_override` on EVERY column it reads. The
+///   a UUID column, and on MySQL that is character-typed - which hands MySQL its marker
+///   back - while PostgreSQL stamps `ddl_type_override` on EVERY column it reads. The
 ///   route in is [`diff_snapshots`] itself, which is `pub` and takes whatever actual
 ///   snapshot the caller holds, including one restored from storage that predates the
 ///   markers.
@@ -2192,7 +2192,7 @@ mod constraint_definition_tests {
 /// The contract: an unattributed snapshot is never granted a vendor's SEMANTIC
 /// identity. `gen_random_uuid()` is PostgreSQL's UUIDv4 generator and nothing else's,
 /// so reading it as [`IdDefaultSnapshot::UuidV4`] would be core resolving a vendor out
-/// of a snapshot that names none — and it would silently accept a column whose default
+/// of a snapshot that names none - and it would silently accept a column whose default
 /// is the literal STRING `gen_random_uuid()` as satisfying an authored UUIDv4. The
 /// answer degrades to the vendor-neutral textual key instead, which still NAMES what
 /// the catalog holds, so the operator gets a line they can act on rather than silence.
@@ -2236,7 +2236,7 @@ mod unattributed_snapshot_tests {
     }
 
     /// The live side holding the generator as catalog text, with `ddl_type_override`
-    /// as the ONLY difference between the two runs — it is PostgreSQL's provenance
+    /// as the ONLY difference between the two runs - it is PostgreSQL's provenance
     /// marker, and it is excluded from `ColumnSnapshot`'s equality, so it moves nothing
     /// else the differ looks at.
     fn actual(ddl_type_override: Option<&str>) -> SchemaSnapshot {

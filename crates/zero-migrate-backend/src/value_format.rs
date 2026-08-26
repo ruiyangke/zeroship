@@ -18,7 +18,7 @@
 //! compressed cycle `crate::dml`'s header describes: the registry sits ABOVE the
 //! vendors and the comparison sits BELOW them, so no crate can hold both, and a
 //! backend crate calling the engine's resolver is a vendor asking a registry to hand
-//! the vendor back to itself. They take the renderers directly now — a backend passes
+//! the vendor back to itself. They take the renderers directly now - a backend passes
 //! its own, and the engine, which holds a dialect identity rather than a renderer,
 //! resolves once at its own door.
 //!
@@ -133,7 +133,7 @@ pub trait ValueFormatRenderer: std::fmt::Debug + Sync {
 ///
 /// Every method answers a vendor FACT, and the two shapes differ only in whose.
 /// [`VendorRules`] is one backend's, which is what a snapshot carrying its backend's
-/// provenance gets. The other shape — every registered vendor's, composed — belongs
+/// provenance gets. The other shape - every registered vendor's, composed - belongs
 /// to the engine and is why this is a trait rather than a `&dyn ValueFormatRenderer`:
 /// a backend crate holds exactly one renderer and cannot express it.
 ///
@@ -160,7 +160,7 @@ pub trait CatalogRules {
     fn canonical_catalog_function_name<'a>(&self, name: &'a str) -> &'a str;
 }
 
-/// One backend's rules — the arm a vendor crate builds for its own snapshots.
+/// One backend's rules - the arm a vendor crate builds for its own snapshots.
 #[derive(Debug, Clone, Copy)]
 pub struct VendorRules<'a>(pub &'a dyn ValueFormatRenderer);
 

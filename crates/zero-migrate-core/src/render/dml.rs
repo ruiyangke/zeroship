@@ -1,8 +1,8 @@
-//! The engine's view of the DML render seam — and the ONE place a dialect becomes a
+//! The engine's view of the DML render seam - and the ONE place a dialect becomes a
 //! vendor.
 //!
 //! The seam itself is `zero_migrate_backend::dml`, glob-re-exported below so every
-//! existing `render::dml::…` path in this crate resolves unchanged. What lives HERE
+//! existing `render::dml::...` path in this crate resolves unchanged. What lives HERE
 //! is the handful of doors that used to take a closed dialect identity and resolve a
 //! renderer from it.
 //!
@@ -13,12 +13,12 @@
 //! naming the three vendor statics. That single line is the whole crate cycle: the
 //! registry has to sit ABOVE the vendors (it names all three) and the spelling seam
 //! has to sit BELOW them (they call it), so no crate can hold both. It is the
-//! "identifier seam" in its most compressed form — a vendor asking a registry to
+//! "identifier seam" in its most compressed form - a vendor asking a registry to
 //! hand the vendor back to itself.
 //!
 //! The contract crate's copies take a `&dyn DmlRenderer` instead. A vendor passes
 //! `self` and the round trip disappears; the engine, which genuinely holds a
-//! dialect identity and not a renderer, resolves once — here.
+//! dialect identity and not a renderer, resolves once - here.
 //!
 //! # What this buys, beyond compiling
 //!
@@ -307,7 +307,7 @@ mod tests {
     ///
     /// `role` USED TO BE A LEG HERE and is not one any more, because the migrator
     /// role name derivation left this crate for the PostgreSQL backend. The leg
-    /// went WITH it — `zero_migrate_postgres::role::tests::
+    /// went WITH it - `zero_migrate_postgres::role::tests::
     /// the_role_seam_renders_uniformly_and_fails_closed` asserts the same two
     /// facts (byte-identical escape-and-quote, fail-closed on empty/NUL) against
     /// the same shared helper. The invariant did not get dropped; it got a home
@@ -318,18 +318,18 @@ mod tests {
     /// `zero_migrate_postgres::backend::journal_sql`'s
     /// `the_journal_seam_renders_uniformly_and_fails_closed` is that leg now. What
     /// is left here is the ENGINE's own seam, which is the only one this crate can
-    /// still see — and that is why this file no longer names a vendor backend
+    /// still see - and that is why this file no longer names a vendor backend
     /// module at all.
     #[test]
     fn all_engine_seams_render_uniformly() {
         let schema = "ap\"p"; // a quote-bearing engine schema
         let canonical = quote_ident_checked(schema).unwrap();
-        // author (infallible-on-valid wrapper) — maps to its own error on failure.
+        // author (infallible-on-valid wrapper) - maps to its own error on failure.
         assert_eq!(
             crate::plan::author::quote_ident_for_test(schema).unwrap(),
             canonical
         );
-        // …and it fails closed uniformly on a NUL too.
+        // ...and it fails closed uniformly on a NUL too.
         assert!(crate::plan::author::quote_ident_for_test("a\0b").is_err());
     }
 
@@ -345,7 +345,7 @@ mod tests {
     /// WHY THIS TEST EXISTS AT ALL, given that nothing was mis-emitted before it.
     /// The backtick spelling used to live in `schema::query::mysql_quote_ident`,
     /// which was `pub` and in CORE, with `backends::mysql` reaching INTO core to
-    /// get its own spelling — the exact mirror image of the ANSI arrangement. No
+    /// get its own spelling - the exact mirror image of the ANSI arrangement. No
     /// emitted byte was wrong, because every call site named MySQL in the callee's
     /// name, and the one-dialect-literal test passed because the reach was by
     /// function name rather than a `DialectId` constant. The defect was
@@ -364,17 +364,17 @@ mod tests {
     /// exactly one sanctioned occurrence: `zero-migrate-mysql::ddl::mysql_requote_sql`, the
     /// documented single translation point from the `pg_get_constraintdef` normal
     /// form into MySQL spelling. That function is a character-stream TRANSLATOR, not
-    /// a spelling primitive — the MySQL counterpart of the constraint-definition
+    /// a spelling primitive - the MySQL counterpart of the constraint-definition
     /// codec's
-    /// normal-form role rather than of `ansi_double_quote_ident`'s spelling role —
+    /// normal-form role rather than of `ansi_double_quote_ident`'s spelling role -
     /// and it is now owned by the backend whose constraint DDL it translates. It is
     /// exempted BY FILE rather than left unscanned, so
     /// a second hand-rolled re-quoter appearing anywhere else goes red.
     ///
     /// WHAT NEITHER NEEDLE CATCHES, and the limitation is the same shape as the ANSI
-    /// scan's. Both are byte-patterns, so a bare wrap with no doubling at all —
+    /// scan's. Both are byte-patterns, so a bare wrap with no doubling at all -
     /// ``format!("`{ident}`")`` after a strict bare-identifier gate, which is what
-    /// `zero_migrate_mysql::backend::backfill_sql::quote_bare` used to be — passes both
+    /// `zero_migrate_mysql::backend::backfill_sql::quote_bare` used to be - passes both
     /// while being an unrouted spelling. That site was routed by hand; only the
     /// compile-time half (the primitive being unnameable outside its backend module)
     /// generalises. The in-crate test expectations that build a backtick literal to
@@ -471,23 +471,24 @@ mod tests {
     }
 
     /// STRUCTURAL enforcement of the "no remaining bare
-    /// `format!`/`replace` escape seam" claim. The raw `"` → `""` escape logic
-    /// (`replace('"', "\"\"")`) must live in EXACTLY one physical home — and
+    /// `format!`/`replace` escape seam" claim. The raw `"` -> `""` escape logic
+    /// (`replace('"', "\"\"")`) must live in EXACTLY one physical home - and
     /// nowhere else in the crate source. Every other quoting seam routes through
     /// it (via one of the two `dml` doors for author-validated helpers, or via
     /// [`quote_ident_checked_for_dialect`] for the fail-closed engine-identifier
     /// surfaces).
     ///
-    /// THE HOME MOVED, AND THE INVARIANT DID NOT WEAKEN. It used to be `dml.rs`.
-    /// It is now `render/backends/mod.rs::ansi_double_quote_ident`, which is
-    /// `pub(in crate::render::backends)` — so the new home is strictly STRONGER
-    /// than the old one: "exactly one file contains these bytes" is now backed by
-    /// "and no module outside `render::backends` can even name the function". This
-    /// test going red on the move was expected and the fix was to retarget the
-    /// exemption, not to relax the scan.
+    /// THE HOME MOVED TWICE, AND THE INVARIANT DID NOT WEAKEN. It used to be
+    /// `dml.rs`, then `render/backends/mod.rs::ansi_double_quote_ident` as a
+    /// `pub(in crate::render::backends)` item, and it now lives in another crate
+    /// entirely as `zero_migrate_backend::spelling::ansi_double_quote_ident`. Each
+    /// move made the home narrower rather than wider: no core module performs the
+    /// escape at all, so this scan over core's own `src` finds it nowhere.
     ///
-    /// `dml.rs` keeps its exemption only because this test's own needle strings and
-    /// the prose above spell the pattern; no `dml.rs` code performs the escape.
+    /// The scan's two exemptions reflect that history rather than a live escape.
+    /// `render/backends/mod.rs` no longer holds the primitive, and `dml.rs` matches
+    /// only because this test's own needle strings and the prose above spell the
+    /// pattern; no code in either file performs the escape.
     ///
     /// THE `schema/` EXEMPTION IS GONE, AND IT WAS LOAD-BEARING WHILE IT LASTED. The
     /// scan used to skip the whole `schema/` subtree on the grounds that the
@@ -496,21 +497,21 @@ mod tests {
     /// seam. That reasoning is exactly the shape of the defect this test exists to
     /// catch: `schema::query::quote_ident` was `pub`, took no dialect, and both
     /// `PostgresSchemaRenderer::foreign_key_target` AND
-    /// `SqliteSchemaRenderer::foreign_key_target` spelled identifiers through it — so
+    /// `SqliteSchemaRenderer::foreign_key_target` spelled identifiers through it - so
     /// SQLite's schema renderer emitted through a `format!` in core that named no
     /// vendor, and was byte-correct only because two of the three shipping dialects
     /// agree on `"x"`.
     ///
-    /// MEASURED, on the `--lib` binary, by neutering
-    /// `render::backends::ansi_double_quote_ident` with one appended token: 125 red,
-    /// of which exactly ONE was under `schema::`. Neutering
-    /// `schema::query::quote_ident` instead reddened 39, and those 39 were DISJOINT
-    /// from the 125 — a whole test population that could not observe the crate's
-    /// single quoting home. After routing, the same one-token neuter reddens 164.
+    /// MEASURED, on the `--lib` binary, by neutering the ANSI quoting primitive with
+    /// one appended token: it reddened a large population of which almost none was
+    /// under `schema::`. Neutering `schema::query::quote_ident` instead reddened a
+    /// SECOND population that was DISJOINT from the first - a whole set of tests that
+    /// could not observe the crate's single quoting home. After routing, the one-token
+    /// neuter on the single primitive reddens both populations together.
     ///
     /// The exemption is deleted rather than retargeted, so `schema/` is now scanned
     /// like every other subtree. `schema::query::mysql_quote_ident` used to survive
-    /// this scan legitimately — it spells backticks, not `"` — and an earlier version
+    /// this scan legitimately - it spells backticks, not `"` - and an earlier version
     /// of this note added that it was "the MySQL backend's own primitive
     /// (`backends::mysql` delegates to it) rather than a second home for anything".
     /// The delegation was real and the conclusion did not follow: a backend
@@ -519,13 +520,13 @@ mod tests {
     /// spelling has its own scan, `no_bare_backtick_escape_seam_outside_the_mysql_backend`
     /// above.
     ///
-    /// The `"` → `""` escape logic must NOT recur inline across sites such as
+    /// The `"` -> `""` escape logic must NOT recur inline across sites such as
     /// `executor` / `precondition` / `baseline` / `expand_contract` / `shadow` /
     /// `declarative` / `db` / `render::lower` / `zero_migrate_sqlite::backend`.
     ///
     /// WHAT IT DOES NOT CATCH, MEASURED: the scan is a byte-pattern, so a
-    /// re-implementation that spells the quote differently — `char::from(34)`,
-    /// `'\u{22}'`, a `&str` const — passes it while being the identical defect.
+    /// re-implementation that spells the quote differently - `char::from(34)`,
+    /// `'\u{22}'`, a `&str` const - passes it while being the identical defect.
     /// That is not hypothetical: the spike behind this seam wrote `char::from(34)`
     /// in a probe and evaded this guard by accident. The compile-time half (the
     /// primitive being unnameable outside `render::backends`) is what closes that
@@ -552,9 +553,10 @@ mod tests {
                 if path.extension().and_then(|e| e.to_str()) != Some("rs") {
                     continue;
                 }
-                // The single sanctioned home is `render/backends/mod.rs` (the
-                // primitive itself). `render/dml.rs` stays exempt for this test's
-                // own needle strings and the prose that names the seam.
+                // Neither exempted file performs the escape any more: the primitive
+                // moved to `zero_migrate_backend::spelling`. `render/backends/mod.rs`
+                // is the primitive's former home and `render/dml.rs` matches only on
+                // this test's own needle strings and the prose that names the seam.
                 let rel = path.strip_prefix(&src_root).unwrap().display().to_string();
                 if rel == "render/backends/mod.rs" || rel == "render/dml.rs" {
                     continue;
@@ -579,31 +581,31 @@ mod tests {
     /// five seams (`dml`/`role`/`author`/`backfill`/`journal`) that first adopted
     /// the wrapper. The infallible doors must NEVER be handed an
     /// **engine-supplied** identifier (project schema / migrator role / meta
-    /// schema) — those must route through [`quote_ident_checked_for_dialect`] so they fail
+    /// schema) - those must route through [`quote_ident_checked_for_dialect`] so they fail
     /// closed on empty / NUL. We scan the crate source for the give-away
-    /// byte-patterns (`…(&cfg.confinement.meta_schema)`, `…(&cfg.project_schema)`,
-    /// `…(role)`, `…(&exec_cfg.confinement.meta_schema)`) — every such site is an
+    /// byte-patterns (`...(&cfg.confinement.meta_schema)`, `...(&cfg.project_schema)`,
+    /// `...(role)`, `...(&exec_cfg.confinement.meta_schema)`) - every such site is an
     /// engine-identifier seam that must NOT use an infallible escaper.
     ///
     /// RETARGETED WITH THE SEAM. The infallible primitive used to be
     /// `dml::escape_quote_ident`, and these needles named it. That symbol no
-    /// longer exists — the raw spelling moved into `render::backends` and became
-    /// private to it — so needles built on the old name would have matched nothing
+    /// longer exists - the raw spelling moved into `render::backends` and became
+    /// private to it - so needles built on the old name would have matched nothing
     /// forever after and this pin would have gone quietly dead while still passing.
     /// The needles now name the two doors that replaced it,
     /// [`escape_quote_ident_for_dialect`] and the constraint-definition codec, which is
     /// where an engine identifier could actually land today.
     ///
     /// Engine-identifier sites such as `precondition.rs` (project_schema + role),
-    /// `executor.rs` (role + meta_schema ×4 + project_schema + recovery index),
+    /// `executor.rs` (role + meta_schema x4 + project_schema + recovery index),
     /// `baseline.rs` (meta_schema), and
     /// `db.rs::search_path_clause` (project/platform/extension schemas) must NOT
     /// feed an engine identifier to either door.
     ///
-    /// **SCOPE — this is a PER-SITE regression pin, NOT a general invariant.** It
+    /// **SCOPE - this is a PER-SITE regression pin, NOT a general invariant.** It
     /// only catches the exact call-site *spellings* in `needles` below (the give-away
-    /// `(&cfg.…)` / `(role)` argument byte-patterns). A future engine-identifier
-    /// seam bound to a *differently-named* variable — e.g.
+    /// `(&cfg....)` / `(role)` argument byte-patterns). A future engine-identifier
+    /// seam bound to a *differently-named* variable - e.g.
     /// an indirect constraint-definition codec call would slip past this scan
     /// undetected. The broader, spelling-independent guarantee that NO bare `"`-escape
     /// seam exists outside `render/backends/mod.rs` is held by
@@ -705,7 +707,7 @@ mod tests {
         );
     }
 
-    // ── Concat is dialect-specific (regression: MySQL `||` is logical OR) ─────
+    // -- Concat is dialect-specific (regression: MySQL `||` is logical OR) -----
 
     #[test]
     fn concat_renders_per_dialect_pg_sqlite_mysql() {
@@ -782,7 +784,7 @@ mod tests {
         }
     }
 
-    // ── Qualified column refs (the join-ON fix) ──────────────────────────────
+    // -- Qualified column refs (the join-ON fix) ------------------------------
 
     /// A qualified `ColRef { table, name }` renders `<table>.<col>` with the SAME
     /// per-dialect identifier quoting as an unqualified ref: PG/SQLite double-quote
@@ -806,7 +808,7 @@ mod tests {
             "MySQL qualifies with backtick-quoted table.col"
         );
 
-        // Unqualified stays exactly as today — no table segment, no dot.
+        // Unqualified stays exactly as today - no table segment, no dot.
         let plain = Expr::col("id");
         assert_eq!(
             render_expr_inline(crate::test_fixtures::VENDORS, &plain, &POSTGRES).unwrap(),
@@ -1076,7 +1078,7 @@ mod tests {
         );
     }
 
-    /// `c.fn.mod(a, b)` renders as the `%` OPERATOR — NOT `mod(...)` — on all three
+    /// `c.fn.mod(a, b)` renders as the `%` OPERATOR - NOT `mod(...)` - on all three
     /// dialects. This is the one portable arithmetic fn whose spelling is an
     /// operator (SQLite has no `mod()` SQL function; `%` is universal).
     #[test]
@@ -1138,7 +1140,7 @@ mod tests {
 
     #[test]
     fn is_true_is_false_rewritten_for_sqlite() {
-        // SQLite has no IS TRUE / IS FALSE (no boolean type) — render as = 1 / = 0.
+        // SQLite has no IS TRUE / IS FALSE (no boolean type) - render as = 1 / = 0.
         // PG + MySQL keep the standard spelling.
         for (op, sqlite_expect, std_frag) in [
             (UnaryOp::IsTrue, "= 1", "IS TRUE"),
@@ -1165,11 +1167,11 @@ mod tests {
         }
     }
 
-    // ── portable predicate nodes: between / like / distinctFrom ──────────────
+    // -- portable predicate nodes: between / like / distinctFrom --------------
 
     #[test]
     fn between_renders_identically_on_all_three_dialects() {
-        // `(operand BETWEEN low AND high)` is standard SQL — IDENTICAL on PG,
+        // `(operand BETWEEN low AND high)` is standard SQL - IDENTICAL on PG,
         // SQLite, and MySQL. The inline path binds no placeholders.
         let expr = Expr::Between {
             operand: Box::new(Expr::col("age")),
@@ -1209,7 +1211,7 @@ mod tests {
 
     #[test]
     fn like_renders_same_syntax_on_all_three_dialects() {
-        // `(operand LIKE pattern)` — same syntax on PG, SQLite, MySQL. (Per-dialect
+        // `(operand LIKE pattern)` - same syntax on PG, SQLite, MySQL. (Per-dialect
         // case-sensitivity semantics differ; this test proves the rendered SYNTAX
         // only, not semantic parity; see the Expr::Like doc comment.)
         let expr = Expr::Like {
@@ -1471,12 +1473,12 @@ mod tests {
         );
     }
 
-    // ── the Layer-2 dialect() per-dialect value escape ───────────────────────
+    // -- the Layer-2 dialect() per-dialect value escape -----------------------
 
     #[test]
     fn dialectal_renders_the_target_dialects_own_leg() {
         // dialect({ postgres: A, sqlite: B, mysql: C }) renders A on PostgreSQL,
-        // B on SQLite, and C on MySQL — each target picks its OWN leg.
+        // B on SQLite, and C on MySQL - each target picks its OWN leg.
         let expr = Expr::Dialectal {
             legs: [
                 (crate::test_fixtures::POSTGRES, Box::new(lit_str("A"))),
@@ -1500,7 +1502,7 @@ mod tests {
             "_utf8mb4 X'43'"
         );
 
-        // Bound path: each leg's literal becomes exactly ONE placeholder — the
+        // Bound path: each leg's literal becomes exactly ONE placeholder - the
         // shape is fixed by the chosen leg, not by the other legs.
         for (dialect, ph) in [(&POSTGRES, "$1"), (&SQLITE, "?1"), (&MYSQL, "?")] {
             let mut ctx = BindCtx::new(renderer(crate::test_fixtures::VENDORS, dialect));
@@ -1516,7 +1518,7 @@ mod tests {
 
     #[test]
     fn dialectal_recurses_into_the_chosen_leg_expression() {
-        // A leg is a full Expr, not just a literal — the chosen leg renders
+        // A leg is a full Expr, not just a literal - the chosen leg renders
         // recursively (here a BETWEEN on PostgreSQL vs a bare column on SQLite).
         let expr = Expr::Dialectal {
             legs: [
@@ -1545,7 +1547,7 @@ mod tests {
 
     #[test]
     fn dialectal_with_no_leg_for_target_is_a_fail_closed_render_backstop() {
-        // A dialect({ postgres: A }) has no SQLite leg — validate refuses
+        // A dialect({ postgres: A }) has no SQLite leg - validate refuses
         // this per-target BEFORE assembly, but the renderer is defensively
         // fail-closed rather than silently dropping the value.
         let expr = Expr::Dialectal {
@@ -1561,13 +1563,13 @@ mod tests {
         );
     }
 
-    // ── portable aggregate node: c.agg.count/sum/avg/min/max + DISTINCT ──────
+    // -- portable aggregate node: c.agg.count/sum/avg/min/max + DISTINCT ------
 
     #[test]
     fn agg_renders_identically_on_all_three_dialects() {
         use zero_migrate_ir::expr::AggFunc;
 
-        // count(*) — no arg — is byte-identical everywhere (no identifier at all).
+        // count(*) - no arg - is byte-identical everywhere (no identifier at all).
         let count_star = Expr::Agg {
             func: AggFunc::Count,
             arg: None,
@@ -1582,7 +1584,7 @@ mod tests {
             );
         }
 
-        // count(DISTINCT <col>) — only the identifier quoting differs (MySQL backticks).
+        // count(DISTINCT <col>) - only the identifier quoting differs (MySQL backticks).
         let count_distinct = Expr::Agg {
             func: AggFunc::Count,
             arg: Some(Box::new(Expr::col("x"))),
@@ -1602,7 +1604,7 @@ mod tests {
             "count(DISTINCT `x`)"
         );
 
-        // sum/avg/min/max(<col>) — identical spelling, only quoting differs.
+        // sum/avg/min/max(<col>) - identical spelling, only quoting differs.
         for (func, name) in [
             (AggFunc::Sum, "sum"),
             (AggFunc::Avg, "avg"),
@@ -1696,7 +1698,7 @@ mod tests {
         }
     }
 
-    // ── identifier safety ───────────────────────────────────────────────────
+    // -- identifier safety ---------------------------------------------------
 
     #[test]
     fn rejects_schema_qualified_table() {
@@ -1717,8 +1719,8 @@ mod tests {
     }
 
     /// L1 self-defense: the PG `qualify_table` arm must not blindly trust
-    /// the engine-supplied `project_schema`. A NUL byte — the one char that
-    /// `"`-doubling cannot neutralise (PG rejects it inside an identifier) — is
+    /// the engine-supplied `project_schema`. A NUL byte - the one char that
+    /// `"`-doubling cannot neutralise (PG rejects it inside an identifier) - is
     /// refused fail-closed with `DmlError::InvalidIdentifier { what: "schema" }`,
     /// not interpolated. RED before the `quote_schema` assertion landed (the old
     /// `format!` would have emitted a statement carrying the raw NUL).
@@ -1740,7 +1742,7 @@ mod tests {
         );
     }
 
-    /// An empty schema is likewise refused fail-closed — `""` cannot name a real
+    /// An empty schema is likewise refused fail-closed - `""` cannot name a real
     /// relation and an empty quoted ident (`""`) is degenerate.
     #[test]
     fn rejects_empty_project_schema_pg() {
@@ -1760,8 +1762,8 @@ mod tests {
         );
     }
 
-    /// The real Confined project schema is the app id — a UUIDv7 carrying `-`,
-    /// which is NOT a bare `[A-Za-z_]…` ident. It MUST render (not be rejected):
+    /// The real Confined project schema is the app id - a UUIDv7 carrying `-`,
+    /// which is NOT a bare `[A-Za-z_]...` ident. It MUST render (not be rejected):
     /// the prior over-strict `quote_ident` predicate would have broken every real
     /// deploy. `-` is render-safe, emitted verbatim inside the quoted schema.
     #[test]
@@ -1785,7 +1787,7 @@ mod tests {
 
     /// A hostile `"`-bearing schema cannot break out of the quoted identifier:
     /// it is SAFELY escaped (doubled `""`), not raw-interpolated and not
-    /// (wrongly) rejected — the statement shape is unaltered, matching how every
+    /// (wrongly) rejected - the statement shape is unaltered, matching how every
     /// other engine seam quotes the schema.
     #[test]
     fn quote_bearing_project_schema_is_escaped_not_broken_out_pg() {
@@ -1823,7 +1825,7 @@ mod tests {
         );
     }
 
-    // ── insert: native binds, never interpolated ────────────────────────────
+    // -- insert: native binds, never interpolated ----------------------------
 
     #[test]
     fn insert_binds_all_values_pg() {
@@ -2114,7 +2116,7 @@ mod tests {
     }
 
     /// Bind-safety: a value full of SQL metacharacters cannot alter the statement
-    /// shape — it is a single bind, the template is unchanged.
+    /// shape - it is a single bind, the template is unchanged.
     #[test]
     fn insert_metacharacter_value_cannot_alter_shape() {
         let hostile = "x'); DROP TABLE users; --";
@@ -2142,7 +2144,7 @@ mod tests {
 
     #[test]
     fn insert_over_the_bind_param_ceiling_is_rejected() {
-        // One column × (MAX_BIND_PARAMS + 1) rows assembles one bind per row,
+        // One column x (MAX_BIND_PARAMS + 1) rows assembles one bind per row,
         // overflowing the protocol parameter ceiling. Reject with a bounded error.
         let rows: Vec<Vec<IrValue>> = (0..=MAX_BIND_PARAMS as i64)
             .map(|i| vec![val(IrScalar::Int(i))])
@@ -2501,7 +2503,7 @@ mod tests {
         );
     }
 
-    // ── update: bound set + where, both dialects ─────────────────────────────
+    // -- update: bound set + where, both dialects -----------------------------
 
     #[test]
     fn update_binds_literal_in_set_and_where() {
@@ -2620,7 +2622,7 @@ mod tests {
         );
     }
 
-    // ── delete: mandatory where, both dialects ───────────────────────────────
+    // -- delete: mandatory where, both dialects -------------------------------
 
     #[test]
     fn delete_binds_where_pg() {
@@ -2794,7 +2796,7 @@ mod tests {
         assert_eq!(a.binds, vec![BindValue::Int(0), BindValue::Int(100)]);
     }
 
-    // ── backfill: inline strings (PG path) ───────────────────────────────────
+    // -- backfill: inline strings (PG path) -----------------------------------
 
     #[test]
     fn backfill_renders_inline_set_and_filter() {
@@ -2888,7 +2890,7 @@ mod tests {
         );
     }
 
-    // ── splitPart lowering (pinned helper) ───────────────────────────────────
+    // -- splitPart lowering (pinned helper) -----------------------------------
 
     fn split(col: &str, delim: &str, n: i64) -> Expr {
         Expr::FnSynth {
@@ -2901,7 +2903,7 @@ mod tests {
         }
     }
 
-    /// PG lowers splitPart to the native `split_part(col, 'd', n)` — verbatim.
+    /// PG lowers splitPart to the native `split_part(col, 'd', n)` - verbatim.
     #[test]
     fn split_part_pg_native() {
         let set = BTreeMap::from([("first".to_string(), dml_expr(split("name", " ", 1)))]);
@@ -2924,7 +2926,7 @@ mod tests {
         );
     }
 
-    /// SQLite n=2 unrolls one boundary walk — pinned to the reference exhibit.
+    /// SQLite n=2 unrolls one boundary walk - pinned to the reference exhibit.
     #[test]
     fn split_part_sqlite_n2_unroll() {
         let set = BTreeMap::from([("last".to_string(), dml_expr(split("name", " ", 2)))]);
@@ -2939,7 +2941,7 @@ mod tests {
         );
     }
 
-    /// splitPart works in the one-shot (bound) path too — the column arg renders
+    /// splitPart works in the one-shot (bound) path too - the column arg renders
     /// (binding nested literals); the delim/n are engine-pinned constants, NOT binds.
     #[test]
     fn split_part_one_shot_bound_pg() {
@@ -3031,21 +3033,21 @@ mod tests {
     /// `out_of_envelope_split_part_pg_loads_sqlite_rejected`.
     #[test]
     fn split_part_out_of_envelope_renders_native_on_pg() {
-        // multi-char delimiter — PG's split_part is multi-char-capable.
+        // multi-char delimiter - PG's split_part is multi-char-capable.
         let set = BTreeMap::from([("a".to_string(), dml_expr(split("name", ", ", 1)))]);
         let c =
             assemble_backfill_clauses(crate::test_fixtures::VENDORS, &POSTGRES, "t", &set, None)
                 .unwrap();
         assert_eq!(c.set_clause, "\"a\" = split_part(\"name\", ', ', 1)");
 
-        // n beyond the SQLite unroll bound (9) — PG takes any positive n.
+        // n beyond the SQLite unroll bound (9) - PG takes any positive n.
         let set = BTreeMap::from([("a".to_string(), dml_expr(split("name", ",", 9)))]);
         let c =
             assemble_backfill_clauses(crate::test_fixtures::VENDORS, &POSTGRES, "t", &set, None)
                 .unwrap();
         assert_eq!(c.set_clause, "\"a\" = split_part(\"name\", ',', 9)");
 
-        // and the one-shot (bound) PG path too — delim/n stay pinned constants.
+        // and the one-shot (bound) PG path too - delim/n stay pinned constants.
         let set = BTreeMap::from([("a".to_string(), dml_expr(split("name", ", ", 1)))]);
         let a = assemble_update(
             crate::test_fixtures::VENDORS,
@@ -3075,7 +3077,7 @@ mod tests {
             assemble_backfill_clauses(crate::test_fixtures::VENDORS, &POSTGRES, "t", &set, None)
                 .unwrap();
         assert_eq!(c.set_clause, "\"a\" = split_part(\"name\", '→', 2)");
-        // …but rejected on the SQLite leg (out of the byte-wise envelope).
+        // ...but rejected on the SQLite leg (out of the byte-wise envelope).
         let err =
             assemble_backfill_clauses(crate::test_fixtures::VENDORS, &SQLITE, "t", &set, None)
                 .unwrap_err();
@@ -3083,17 +3085,17 @@ mod tests {
     }
 
     /// PG still rejects a structurally-malformed splitPart (non-literal delim, a
-    /// non-positive n, a non-string delim) — the PG path widens the ENVELOPE, not
+    /// non-positive n, a non-string delim) - the PG path widens the ENVELOPE, not
     /// the grammar. These remain unrenderable on both dialects.
     #[test]
     fn split_part_pg_still_rejects_malformed() {
-        // n = 0 (not a positive part index) — invalid on PG too.
+        // n = 0 (not a positive part index) - invalid on PG too.
         let set = BTreeMap::from([("a".to_string(), dml_expr(split("name", ",", 0)))]);
         let err =
             assemble_backfill_clauses(crate::test_fixtures::VENDORS, &POSTGRES, "t", &set, None)
                 .unwrap_err();
         assert!(matches!(err, DmlError::UnrenderableExpr(_)), "{err:?}");
-        // non-literal delim (a ColRef) — never renderable.
+        // non-literal delim (a ColRef) - never renderable.
         let bad = Expr::FnSynth {
             r#fn: SynthFn::SplitPart,
             args: vec![

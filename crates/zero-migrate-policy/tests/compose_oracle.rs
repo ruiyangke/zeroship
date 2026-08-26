@@ -1,4 +1,4 @@
-//! The COMPOSITION ORACLE — the correctness proof for the security crown jewel.
+//! The COMPOSITION ORACLE - the correctness proof for the security crown jewel.
 //!
 //! The composition algebra (`admit`/`restrict`/`overlay`/`finalize_charter`) is what
 //! prevents privilege escalation. Prose review of it cannot be trusted (exactly as
@@ -10,9 +10,9 @@
 //! - **`overlay`** is total, per-scalar-knob presence-based last-wins, rule-lists
 //!   union (base-then-over).
 //! - **`admit`** is CHARTER-INHERITED: `Ok` IFF every draft grant that raises above
-//!   default is `⊑` the charter pointwise; the effective grant = presence-override +
-//!   inherit; and — the no-escalation invariant — **`effective ⊑ charter` for EVERY
-//!   key/object** over the whole universe (all three arms: silent-inherit,
+//!   default is pointwise no looser than the charter; the effective grant =
+//!   presence-override + inherit; and - the no-escalation invariant - **the
+//!   effective value is no looser than the charter's at EVERY key/object** over the whole universe (all three arms: silent-inherit,
 //!   narrow-to-default, narrow-above-default). Obligations union-up survive.
 //! - It PINS the critic's C-1 escalation counterexample (must REJECT), the layered
 //!   override, narrow-to-default, and the seal re-flatten hard-fail.
@@ -25,9 +25,9 @@ use zero_migrate_policy::{
     RuleKind, TrustedDoc,
 };
 
-// ══════════════════════════════════════════════════════════════════════════════
-// Registry — a small, deliberately-chosen set of grant knobs
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
+// Registry - a small, deliberately-chosen set of grant knobs
+// ==============================================================================
 
 const BOOL_KEY: &str = "sql.raw"; // Bool grant, PerTable, default false
 const UINT_KEY: &str = "runtime.lock_timeout_ms"; // UintCharter grant, PerTable, default 1
@@ -72,13 +72,14 @@ fn registry() -> PolicyRegistry {
         .unwrap()
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 // Bounded universe of concrete object names
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 
-/// A small universe: a handful of schemas (matching the pattern pool) × a couple of
-/// tables each, plus the schema objects. Kept tight so the O(pairs · |𝒰|) sweep is
-/// fast, but rich enough to distinguish `app_*` / `app_tmp_*` / `staging` regions.
+/// A small universe: a handful of schemas (matching the pattern pool) x a couple of
+/// tables each, plus the schema objects. Kept tight so the sweep - one pass per
+/// scope pair over the whole universe - stays fast, but rich enough to distinguish
+/// `app_*` / `app_tmp_*` / `staging` regions.
 fn universe() -> Vec<ObjectName> {
     let schemas: &[&[u8]] = &[b"app_main", b"app_tmp_x", b"staging", b"other"];
     let tables: &[&[u8]] = &[b"t", b"u"];
@@ -92,14 +93,14 @@ fn universe() -> Vec<ObjectName> {
     out
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 // Ground truth: value(policy, k, o) computed DIRECTLY from the rule list
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 
 /// The GROUND-TRUTH grant value at `o` for key `k` in `doc`: the loosest value among
 /// grant rules on `k` whose scope covers `o`, else the knob default. Computed here
 /// from `doc.rules` using ONLY the public scope-membership + a hand-rolled value
-/// join — deliberately NOT the composer, so this is an independent oracle.
+/// join - deliberately NOT the composer, so this is an independent oracle.
 fn value_gt(
     doc: &PolicyDoc,
     kind: &KnobKind,
@@ -137,7 +138,7 @@ fn join_gt(kind: &KnobKind, a: &KnobValue, b: &KnobValue) -> KnobValue {
     }
 }
 
-/// The ground-truth value order (⊑): Bool implication, Uint ≤.
+/// The ground-truth value order (no looser than): Bool implication, Uint `<=`.
 fn leq_gt(a: &KnobValue, b: &KnobValue) -> bool {
     match (a, b) {
         (KnobValue::Bool(x), KnobValue::Bool(y)) => !x || *y,
@@ -170,8 +171,8 @@ fn materialized_keys() -> Vec<(&'static str, KnobKind, KnobValue)> {
 }
 
 /// Ground-truth ACCEPT predicate for `admit(charter, draft)`: for every materialized
-/// key and object where the DRAFT raises above default, the draft's value ⊑ the
-/// charter's effective value. (Grants only — the generated docs carry no
+/// key and object where the DRAFT raises above default, the draft's value is no
+/// looser than the charter's effective value. (Grants only - the generated docs carry no
 /// require/inject/validate.) `charter_value` computes the charter's EFFECTIVE value at
 /// `(k,o)`.
 fn gt_admissible(
@@ -196,7 +197,7 @@ fn gt_admissible(
 }
 
 /// Ground-truth EFFECTIVE value of `admit(charter, draft)` at `(k,o)`: presence-based
-/// override — the draft's value if the draft covers `(k,o)`, else the charter's
+/// override - the draft's value if the draft covers `(k,o)`, else the charter's
 /// effective value (inherit).
 fn gt_effective(
     charter_value: &dyn Fn(&str, &KnobKind, &KnobValue, &ObjectName) -> KnobValue,
@@ -213,11 +214,11 @@ fn gt_effective(
     }
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// Generators — small grant docs over a bounded pattern × value pool
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
+// Generators - small grant docs over a bounded pattern x value pool
+// ==============================================================================
 
-/// The pattern pool for generated grant scopes — chosen to exercise the escalation
+/// The pattern pool for generated grant scopes - chosen to exercise the escalation
 /// corners: `app_*` (covers app_main AND app_tmp_x), `staging`, and the exclude form
 /// `app_* \ app_tmp_*`.
 #[derive(Clone, Copy)]
@@ -288,9 +289,10 @@ fn parse_trusted(gens: &[Gen]) -> TrustedDoc {
         .unwrap_or_else(|e| panic!("trusted parse failed: {e:?}\n{}", doc_toml(gens)))
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// THE CORE PROPERTY (admit): Ok ⟺ pointwise draft ⊑ charter + effective ⊑ charter
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
+// THE CORE PROPERTY (admit): Ok exactly when the draft is pointwise no looser than
+// the charter AND the effective value is no looser than the charter's
+// ==============================================================================
 
 #[test]
 fn oracle_admit_ok_iff_pointwise_leq_and_effective_below_charter() {
@@ -377,7 +379,9 @@ fn oracle_admit_ok_iff_pointwise_leq_and_effective_below_charter() {
                                                     "effective value mismatch at {o:?} key {key}"
                                                 );
                                                 // (b) THE NO-ESCALATION INVARIANT:
-                                                //     effective ⊑ charter everywhere.
+                                                //     the effective value is no
+                                                //     looser than the charter's
+                                                //     everywhere.
                                                 let cv = cval(key, &kind, &default, o);
                                                 assert!(
                                                     leq_gt(&got_v, &cv),
@@ -411,14 +415,14 @@ impl std::fmt::Debug for Gen {
     }
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 // PINNED escalation cases (the critic's counterexamples)
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 
 #[test]
 fn pinned_value_blind_escalation_rejects() {
     // Charter: { timeout 60s @ app_* , 600s @ staging }.  Draft: { timeout 600s @ app_* }.
-    // At app_main.t: value(charter)=60, value(draft)=600 → REJECT.
+    // At app_main.t: value(charter)=60, value(draft)=600 -> REJECT.
     let reg = registry();
     let root = parse_root(&[
         Gen {
@@ -447,7 +451,7 @@ fn pinned_value_blind_escalation_rejects() {
 #[test]
 fn pinned_exclude_escalation_rejects() {
     // Charter grant @ { app_* exclude app_tmp_* } = true. Draft grant @ { app_* } = true.
-    // The draft grants at app_tmp_x, which the charter excludes → REJECT.
+    // The draft grants at app_tmp_x, which the charter excludes -> REJECT.
     let reg = registry();
     let root = parse_root(&[Gen {
         key: BOOL_KEY,
@@ -472,7 +476,7 @@ fn pinned_exclude_escalation_rejects() {
 
 #[test]
 fn pinned_strictly_inside_accepts() {
-    // Charter grant @ app_* = true, timeout 600 @ app_*. Draft same bool, timeout 60 → ACCEPT.
+    // Charter grant @ app_* = true, timeout 600 @ app_*. Draft same bool, timeout 60 -> ACCEPT.
     let reg = registry();
     let root = parse_root(&[
         Gen {
@@ -506,9 +510,9 @@ fn pinned_strictly_inside_accepts() {
 
 /// **THE C-1 COUNTEREXAMPLE.** Charter grants `raw_sql` on `Of{[app_*],
 /// exclude=[app_secret]}` PLUS a disjoint `Of{[reports]}`; draft `raw_sql@app_secret`
-/// → admit REJECTS. A `⊔`-materialized charter side would DROP the `app_secret`
+/// -> admit REJECTS. A join-materialized charter side would DROP the `app_secret`
 /// exclude (folding the two charter rules), compute `app_secret` as covered, and
-/// wrongly ACCEPT. The iterated-per-rule-∖ path keeps the exclude → reject.
+/// wrongly ACCEPT. Subtracting one rule at a time keeps the exclude -> reject.
 #[test]
 fn pinned_c1_disjoint_exclude_escalation_rejects() {
     let reg = registry();
@@ -526,7 +530,7 @@ scope = { include = ["reports"] }
         &reg,
     )
     .unwrap();
-    // Draft grants raw_sql on app_secret — the excluded region.
+    // Draft grants raw_sql on app_secret - the excluded region.
     let draft = PolicyDoc::parse_toml(
         r#"policy_version = 1
 [[grant]]
@@ -549,11 +553,12 @@ scope = { include = ["app_secret"] }
          have wrongly ACCEPTED), got {got:?}"
     );
 
-    // Sanity: the OLD ⊔-materialized formula (fold the two charter rules into one
+    // Sanity: the OLD join-materialized formula (fold the two charter rules into one
     // scope via join, dropping the exclude) WOULD compute app_secret as covered.
     // We assert the ground truth is a reject: at app_secret.t the charter's effective
     // raw_sql is FALSE (app_* grants it but the exclude removes app_secret; reports is
-    // disjoint), while the draft raises it to TRUE → true ⋢ false → escalation.
+    // disjoint), while the draft raises it to TRUE, and TRUE is looser than FALSE,
+    // so this is an escalation.
     let secret = ObjectName::table(b"app_secret".to_vec(), b"t".to_vec());
     let charter_doc = root.doc();
     let cv = value_gt(
@@ -571,7 +576,7 @@ scope = { include = ["app_secret"] }
 }
 
 /// **PIN the layered override.** Draft `timeout=10000@app_*` over charter
-/// `timeout=30000@All` → `grants(timeout, app_main.t) == 10000` (draft narrows),
+/// `timeout=30000@All` -> `grants(timeout, app_main.t) == 10000` (draft narrows),
 /// `grants(timeout, other.t) == 30000` (inherited from the charter). The flat
 /// loosest-covering formula could not represent this (it would return 30000 at
 /// app_main.t, discarding the narrower draft value).
@@ -617,7 +622,7 @@ scope = { include = ["app_*"] }
 }
 
 /// **PIN narrow-to-default.** Draft `raw_sql=false@app_*` over charter `raw_sql=true@All`
-/// → effective false in app_* (the creator asked for less and gets less; presence, not
+/// -> effective false in app_* (the creator asked for less and gets less; presence, not
 /// raises-above-default, is the override trigger). Inherited true elsewhere.
 #[test]
 fn pinned_narrow_to_default_wins() {
@@ -688,9 +693,9 @@ fn pinned_silent_draft_inherits_charter_grant() {
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 // restrict: exact pointwise MEET + associativity
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 
 #[test]
 fn oracle_restrict_is_exact_pointwise_meet() {
@@ -721,7 +726,7 @@ fn oracle_restrict_is_exact_pointwise_meet() {
                     let a_doc = parse_draft(&a_gens);
                     let b_doc = parse_draft(&b_gens);
 
-                    // restrict → finalize → admit(empty draft) to read the charter value.
+                    // restrict -> finalize -> admit(empty draft) to read the charter value.
                     let restricted = restrict(&a, &b, &reg).unwrap();
                     let charter = finalize_charter(restricted).unwrap();
                     let empty = PolicyDoc::parse_toml(
@@ -754,7 +759,7 @@ fn oracle_restrict_is_exact_pointwise_meet() {
 fn oracle_restrict_commutative() {
     // `restrict` is a lattice MEET, hence commutative: restrict(a,b) and restrict(b,a)
     // denote the same effective grants. (True 3-way associativity is not expressible
-    // with the 2-ary `TrustedDoc` signature — the meet output is not a `TrustedDoc` —
+    // with the 2-ary `TrustedDoc` signature - the meet output is not a `TrustedDoc` -
     // and the exact-meet property is already proven by `oracle_restrict_is_exact_meet`,
     // from which associativity follows by the meet laws.)
     let univ = universe();
@@ -809,9 +814,9 @@ fn oracle_restrict_commutative() {
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 // overlay: total, presence-based last-wins, rule-lists union
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 
 #[test]
 fn oracle_overlay_is_presence_last_wins() {
@@ -950,9 +955,9 @@ columns = [ { name = "updated_at", type = "timestamptz", nullable = false } ]
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 // Union-up: every charter require/inject/validate survives admit
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 
 fn registry_with_require() -> PolicyRegistry {
     registry()
@@ -1020,7 +1025,8 @@ scope = { include = ["staging"] }
 }
 
 /// An `OrderedEnum` `Require` obligation modelled on `safety.require_approval`
-/// (`never ⊑ on_destructive ⊑ always`), for the union-up composition test.
+/// (`never` is no looser than `on_destructive`, which is no looser than `always`),
+/// for the union-up composition test.
 fn registry_with_require_approval() -> PolicyRegistry {
     registry()
         .with([def(
@@ -1089,9 +1095,9 @@ scope = { include = ["app_*"] }
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 // Compose-time collision blame (admit: draft-vs-charter)
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 
 #[test]
 fn draft_inject_colliding_charter_inject_rejects_at_compose() {
@@ -1154,9 +1160,9 @@ predicate = { kind = "forbidden_columns", names = ["created_at"] }
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 // finalize_charter: charter-vs-charter conflicts + creatable-escape
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 
 #[test]
 fn charter_vs_charter_inject_collision_rejects_at_finalize() {
@@ -1180,7 +1186,7 @@ columns = [ { name = "created_at", type = "text", nullable = true } ]
         &reg,
     )
     .unwrap();
-    let assembled = restrict(&a, &b, &reg).unwrap(); // TOTAL — does NOT reject.
+    let assembled = restrict(&a, &b, &reg).unwrap(); // TOTAL - does NOT reject.
     let got = finalize_charter(assembled);
     assert!(
         matches!(got, Err(FinalizeError::CharterInjectColumnConflict { .. })),
@@ -1257,9 +1263,9 @@ scope = { include = ["app_*"] }
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 // is_injected_shape (name-match-at-op-time)
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 
 #[test]
 fn is_injected_shape_name_matches_covering_inject() {
@@ -1297,9 +1303,9 @@ author_primary_key = "allow"
     assert!(!ep.is_injected_shape(&other, &ShapeElement::PrimaryKey));
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 // Unforgeability
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 
 #[test]
 fn effective_policy_only_via_admit_or_deny_all() {
@@ -1343,13 +1349,13 @@ fn effective_policy_only_via_admit_or_deny_all() {
     let _ep2 = admit(&charter, &draft, &reg).unwrap();
 
     // There is deliberately NO other constructor: no Default, no Deserialize, no
-    // public `new`. And an AssembledCharter is NOT an AdmitCharter — it cannot reach
+    // public `new`. And an AssembledCharter is NOT an AdmitCharter - it cannot reach
     // admit until finalized. This test compiling is the proof the surface is closed.
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// inherit = false — a SILENT draft does NOT inherit a power-grant from the charter
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
+// inherit = false - a SILENT draft does NOT inherit a power-grant from the charter
+// ==============================================================================
 
 /// A registry whose one grant knob is a POWER GRANT (`inherit = false`), plus an
 /// ordinary inheritable knob for contrast.
@@ -1411,14 +1417,14 @@ scope = { include = ["app_*"] }
 
     let app_t = ObjectName::table(b"app_main".to_vec(), b"t".to_vec());
 
-    // The power grant is NOT inherited by the silent draft → it reads the DEFAULT
+    // The power grant is NOT inherited by the silent draft -> it reads the DEFAULT
     // (deny), NOT the charter's granted `true`.
     assert_eq!(
         ep.grants(&power_key, &app_t),
         Some(KnobValue::Bool(false)),
         "an inherit=false grant must NOT flow to a silent draft"
     );
-    // The ordinary (inheritable) grant IS inherited — the charter's `true` shows through.
+    // The ordinary (inheritable) grant IS inherited - the charter's `true` shows through.
     assert_eq!(
         ep.grants(&bool_key, &app_t),
         Some(KnobValue::Bool(true)),
@@ -1429,7 +1435,7 @@ scope = { include = ["app_*"] }
 #[test]
 fn explicit_draft_may_still_earn_a_noninherit_grant_within_charter() {
     // inherit=false only blocks INHERITANCE-BY-OMISSION; a draft that EXPLICITLY
-    // grants the power knob (⊑ the charter) still gets it — the normal escalation
+    // grants the power knob (no looser than the charter) still gets it - the normal escalation
     // check governs.
     let reg = registry_with_noninherit();
     let power_key = KnobKey::parse("schema.alter_injected").unwrap();
@@ -1466,7 +1472,7 @@ scope = { include = ["app_main"] }
         Some(KnobValue::Bool(true))
     );
     // Where it stayed silent (app_tmp_x, still under the charter's app_*), it does
-    // NOT inherit — default deny.
+    // NOT inherit - default deny.
     assert_eq!(
         ep.grants(&power_key, &app_other_t),
         Some(KnobValue::Bool(false))

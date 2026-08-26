@@ -12,28 +12,28 @@
 //!    RecordingSession smoke test yet corrupt a real apply (the `BEGIN` lands on one
 //!    backend, the `COMMIT` on another). This suite proves the driver holds one
 //!    backend across verbs.
-//! 2. **Transaction visibility.** `batch("BEGIN")` → `exec(INSERT …)` →
-//!    `query(SELECT …)` sees the row *inside* the txn; a subsequent
+//! 2. **Transaction visibility.** `batch("BEGIN")` -> `exec(INSERT ...)` ->
+//!    `query(SELECT ...)` sees the row *inside* the txn; a subsequent
 //!    `batch("ROLLBACK")` discards it. This is the exact discipline
 //!    `apply_transactional` depends on.
 //! 3. **`exec` vs `exec_text` param semantics.** `exec` binds neutral [`Bind`]s;
 //!    `exec_text` sends every param as server-inferred TEXT (the load-bearing
-//!    `text → timestamptz` coercion path, `executor.rs`'s `apply_dml_transactional`).
+//!    `text -> timestamptz` coercion path, `executor.rs`'s `apply_dml_transactional`).
 //!    A `None` text param is a SQL NULL. This suite proves both param sides.
 //! 4. **Error + SQLSTATE mapping.** A failing statement surfaces a [`DbError`] whose
 //!    `message` is non-empty and whose `sqlstate` (when the driver has one) is the
-//!    real Postgres SQLSTATE — not a stringified panic. Every `#[source]` wrap
+//!    real Postgres SQLSTATE - not a stringified panic. Every `#[source]` wrap
 //!    reads this.
 //!
 //! This is the FIRST external consumer of the seam beyond the engine itself: a
 //! driver author (or the `PgDevSession` test harness) runs
 //! [`crate::driver::conformance::run`] against a live,
 //! empty session and gets a single pass/fail verdict with a precise reason. It is
-//! deliberately **schema-agnostic** — it creates and drops its own scratch objects
+//! deliberately **schema-agnostic** - it creates and drops its own scratch objects
 //! in a caller-provided scratch schema, touching nothing the engine journals.
 //!
 //! Postgres-flavoured by design (it issues `BEGIN`/`ROLLBACK`, a `TEMP TABLE`, and a
-//! text→timestamptz coercion). A MySQL conformance profile would render the dialect
+//! text->timestamptz coercion). A MySQL conformance profile would render the dialect
 //! equivalents; the shape (four checks, one verdict) is the same.
 
 use super::{Bind, DbError, SqlSession};
@@ -69,7 +69,7 @@ fn fail(check: &'static str, reason: impl Into<String>) -> ConformanceFailure {
 
 /// Run the full [`SqlSession`] conformance suite against a live `session`, using
 /// `scratch_table` as a caller-owned temp-table name (must be a bare, unqualified
-/// identifier — the check creates it `TEMP` so it never touches a real schema).
+/// identifier - the check creates it `TEMP` so it never touches a real schema).
 ///
 /// Returns `Ok(())` if the driver honours all four seam invariants, or the FIRST
 /// failing [`ConformanceFailure`]. The suite leaves no residue: the temp table is
@@ -89,7 +89,7 @@ pub async fn run<S: SqlSession>(
     Ok(())
 }
 
-/// Check 1 — session pinning: a `TEMP TABLE` created by one verb is visible to a
+/// Check 1 - session pinning: a `TEMP TABLE` created by one verb is visible to a
 /// later verb on the SAME session. A pooled/round-robin driver fails here (the
 /// second verb's backend cannot see the first's temp object).
 async fn check_session_pinning<S: SqlSession>(
@@ -111,7 +111,7 @@ async fn check_session_pinning<S: SqlSession>(
         )
         .await
         .map_err(|e| fail(CHECK, format!("INSERT into scratch temp table failed: {e}")))?;
-    // The read MUST see the row — proving the same backend serviced all three verbs.
+    // The read MUST see the row - proving the same backend serviced all three verbs.
     let rows = session
         .query(
             &format!("SELECT id, note FROM {scratch_table} WHERE id = $1"),
@@ -149,7 +149,7 @@ async fn check_session_pinning<S: SqlSession>(
     Ok(())
 }
 
-/// Check 2 — transaction visibility: a row written inside an explicit `BEGIN` is
+/// Check 2 - transaction visibility: a row written inside an explicit `BEGIN` is
 /// visible to a `query` on the same session BEFORE commit, and a `ROLLBACK`
 /// discards it. This is the exact `apply_transactional` discipline.
 async fn check_transaction_visibility<S: SqlSession>(
@@ -225,21 +225,21 @@ async fn check_transaction_visibility<S: SqlSession>(
     Ok(())
 }
 
-/// Check 3 — `exec_text` semantics: a text param with NO explicit OID is coerced by
-/// the server to the target column type (the `text → timestamptz` path), and a
+/// Check 3 - `exec_text` semantics: a text param with NO explicit OID is coerced by
+/// the server to the target column type (the `text -> timestamptz` path), and a
 /// `None` text param is a SQL NULL. This is the load-bearing distinction between
 /// `exec` (typed binds) and `exec_text` (all-text, server-inferred).
 async fn check_exec_text_semantics<S: SqlSession>(session: &S) -> Result<(), ConformanceFailure> {
     const CHECK: &str = "exec-text-semantics";
     // A scratch temp table with a timestamptz column: the coercion the engine's
-    // op.* DML path relies on (a text `'2026-01-02T03:04:05Z'` → timestamptz).
+    // op.* DML path relies on (a text `'2026-01-02T03:04:05Z'` -> timestamptz).
     session
         .batch("CREATE TEMP TABLE zm_conf_text (id int8, ts timestamptz, tag text)")
         .await
         .map_err(|e| fail(CHECK, format!("create text-coercion scratch table: {e}")))?;
-    // exec_text: every param crosses as server-inferred TEXT. `'7'` → int8,
-    // `'2026-01-02T03:04:05Z'` → timestamptz, `None` → SQL NULL. A concrete-OID
-    // binary bind of a text value against timestamptz would be REFUSED — this path
+    // exec_text: every param crosses as server-inferred TEXT. `'7'` -> int8,
+    // `'2026-01-02T03:04:05Z'` -> timestamptz, `None` -> SQL NULL. A concrete-OID
+    // binary bind of a text value against timestamptz would be REFUSED - this path
     // must not be.
     let affected = session
         .exec_text(
@@ -297,7 +297,7 @@ async fn check_exec_text_semantics<S: SqlSession>(session: &S) -> Result<(), Con
             "the text `ts` param did not coerce to the expected timestamptz value",
         ));
     }
-    // Also assert `exec` (typed binds) round-trips a NULL Bind on a text column —
+    // Also assert `exec` (typed binds) round-trips a NULL Bind on a text column -
     // the exact shape the shipped `exec` path binds a NULL (a nullable text
     // `last_cursor`, `backfill.rs`), never against a timestamptz (that path is
     // `exec_text`). A `Bind::Null` must land as a SQL NULL and read back as
@@ -338,7 +338,7 @@ async fn check_exec_text_semantics<S: SqlSession>(session: &S) -> Result<(), Con
     Ok(())
 }
 
-/// Check 4 — error + SQLSTATE mapping: a statement that fails at the server
+/// Check 4 - error + SQLSTATE mapping: a statement that fails at the server
 /// surfaces a [`DbError`] with a non-empty message and (when the driver carries it)
 /// the real Postgres SQLSTATE. A driver that swallows the error, or stringifies a
 /// panic, fails here.
@@ -367,7 +367,7 @@ async fn check_error_sqlstate_mapping<S: SqlSession>(
     // The SQLSTATE is optional in the seam, but a Postgres driver that surfaces one
     // MUST surface the real code. 42P01 = undefined_table. We accept either "the
     // driver carries no sqlstate" (message-only is a valid seam contract) or "it
-    // carries the correct one" — but a WRONG non-empty sqlstate is a bug.
+    // carries the correct one" - but a WRONG non-empty sqlstate is a bug.
     if let Some(state) = &err.sqlstate {
         if state != "42P01" {
             return Err(fail(

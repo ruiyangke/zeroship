@@ -2,7 +2,7 @@
 //!
 //! A migration is an **immutable, ordered** artifact shipped in the `.zship`
 //! bundle and recorded in the journal on apply. The version is a `UUIDv7` typed
-//! id (`mig_…`) so concurrent multi-app authoring produces collision-free,
+//! id (`mig_...`) so concurrent multi-app authoring produces collision-free,
 //! time-ordered versions (sequential ints collide; raw timestamps skew).
 
 use crate::id as typed_id;
@@ -34,7 +34,7 @@ pub enum IdError {
 ///
 /// Time-ordered (the `UUIDv7` timestamp is in the high bits, and base62 here
 /// preserves that order lexicographically), so string-sorting a set of
-/// versions yields apply order — see [`MigrationId::timestamp_ms`].
+/// versions yields apply order - see [`MigrationId::timestamp_ms`].
 #[derive(
     Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
@@ -49,8 +49,8 @@ impl MigrationId {
 
     /// Mint a DETERMINISTIC, STABLE migration id from a domain `tag` + a content
     /// `seed` (sub-step versioning). The id is `SHA-256(tag || seed)` laid
-    /// out with the SAME high-48-bit `0xFF…FF` MARKER the IR author's
-    /// derived DML/backfill ids use — so a
+    /// out with the SAME high-48-bit `0xFF...FF` MARKER the IR author's
+    /// derived DML/backfill ids use - so a
     /// derived sub-step id can **never** collide with a versioned migration id
     /// (whose high 48 bits hold a small numeric file version) and two distinct
     /// seeds collide only on an 80-bit SHA-256 prefix collision (negligible).
@@ -59,17 +59,17 @@ impl MigrationId {
     /// `PlanStep` sub-version (`step_id = uuidv7_derive(plan.version, step_index)`):
     /// the `ExpandContractAuthor`'s E1..C2 ids are derived from the rename's stable
     /// identity (`schema + owner + table + from + to + ty`) plus the step index, so
-    /// **re-lowering the identical IR envelope reproduces byte-identical ids** — the
+    /// **re-lowering the identical IR envelope reproduces byte-identical ids** - the
     /// property the cross-deploy obligation key, the idempotent re-run skip, the
     /// auto-discharge recognition, and the self-EXPAND exemption all depend on. A
     /// fresh `generate()` per lower (the bug this replaces) gives each deploy a
     /// different obligation key for the same logical rename, breaking all four.
     ///
-    /// Deterministic (same `tag`+`seed` ⇒ same id); no OS/random/time input.
+    /// Deterministic (same `tag`+`seed` => same id); no OS/random/time input.
     ///
     /// # Panics
     /// Never in practice: the derived 16-byte UUID always base62-encodes to a valid
-    /// `mig_…` id that [`MigrationId::parse`] accepts.
+    /// `mig_...` id that [`MigrationId::parse`] accepts.
     #[must_use]
     pub fn derive(tag: &str, seed: &[u8]) -> Self {
         let mut h = Sha256::new();
@@ -78,7 +78,7 @@ impl MigrationId {
         h.update(seed);
         let digest = h.finalize();
         let mut bytes = [0u8; 16];
-        // High 48 bits = the derived/repeatable MARKER (never a real file version) ⇒
+        // High 48 bits = the derived/repeatable MARKER (never a real file version) =>
         // never collides with a versioned id.
         bytes[0..6].copy_from_slice(&[0xFFu8; 6]);
         bytes[6..16].copy_from_slice(&digest[0..10]);
@@ -87,7 +87,7 @@ impl MigrationId {
             .expect("derived migration id is a valid mig_ typed id")
     }
 
-    /// Borrow the wire string (`mig_…`).
+    /// Borrow the wire string (`mig_...`).
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -113,7 +113,7 @@ impl MigrationId {
     /// their lexicographic string order.
     ///
     /// # Panics
-    /// Never in practice — `self.0` is only ever a valid `mig_…` id (every
+    /// Never in practice - `self.0` is only ever a valid `mig_...` id (every
     /// constructor goes through `generate`/`parse`).
     #[must_use]
     pub fn timestamp_ms(&self) -> u64 {
@@ -148,16 +148,16 @@ pub fn migration_id_for_version(version: u64) -> MigrationId {
 ///
 /// An online column RENAME (or type change) is split across **two deploys**:
 ///
-/// - **`Expand`** — additively grow the schema so old and new shapes coexist
+/// - **`Expand`** - additively grow the schema so old and new shapes coexist
 ///   (add the new nullable column, install a dual-write trigger, backfill).
 ///   Lands *before* dependent code switches over.
-/// - **`Contract`** — drop the old shape once no code uses it (drop the
+/// - **`Contract`** - drop the old shape once no code uses it (drop the
 ///   trigger + function, drop the old column). Lands *after* code switches over.
 ///
 /// The engine enforces the split via a gate: a `Contract`
 /// migration is refused unless every `Expand` migration it `depends_on` is
 /// **net-applied in the journal**. This makes the journal the single source of
-/// truth for the expand→contract timeline and gives cross-deploy partitioning
+/// truth for the expand->contract timeline and gives cross-deploy partitioning
 /// for free (a separate, later deploy can apply the contract).
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
@@ -181,16 +181,16 @@ pub enum OnlinePhase {
 /// long migration (a large backfill, an `INDEX CONCURRENTLY` over a huge table)
 /// raise its own `statement_timeout` ceiling above the executor-wide default. A
 /// sixth, optional `phase` ([`OnlinePhase`]) tags an `online` expand-contract
-/// step as its expand or contract half — kept as a *separate optional facet*
+/// step as its expand or contract half - kept as a *separate optional facet*
 /// (not a fifth bool) so the bools stay orthogonal.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MigrationFlags {
-    /// Run inside a single `BEGIN; … COMMIT` (DDL + journal atomic). Default.
+    /// Run inside a single `BEGIN; ... COMMIT` (DDL + journal atomic). Default.
     /// `false` opts into the two-phase non-transactional path (e.g.
     /// `CREATE INDEX CONCURRENTLY`).
     pub transactional: bool,
-    /// Drops/truncates/lossy-type-changes — data loss. The gate (built later)
+    /// Drops/truncates/lossy-type-changes - data loss. The gate (built later)
     /// decides; the guard only flags.
     pub destructive: bool,
     /// Authored as a zero-downtime expand-contract step (multi-deploy sequence).
@@ -204,7 +204,7 @@ pub struct MigrationFlags {
     pub timeout_ms: Option<u64>,
     /// Optional per-migration `lock_timeout`, in **milliseconds**. `None` falls
     /// back to the SHORT executor-wide default
-    /// (`ConfinementConfig::lock_timeout`, 3s — the lock-safety
+    /// (`ConfinementConfig::lock_timeout`, 3s - the lock-safety
     /// envelope). This is the per-deploy maintenance-window knob: a planned
     /// migration that legitimately needs to wait longer to acquire its lock
     /// (run during a quiet window where a brief stall is acceptable) raises ONLY
@@ -224,22 +224,22 @@ pub struct MigrationFlags {
     /// a *replace-style* migration whose identity is its stable `version`/name
     /// (it is NEVER re-versioned per edit), and which **re-applies whenever its
     /// definition checksum changes** instead of running exactly once. Used for
-    /// objects edited over time — views, functions, triggers — whose `up` is a
-    /// `CREATE OR REPLACE …` re-run each deploy it changed.
+    /// objects edited over time - views, functions, triggers - whose `up` is a
+    /// `CREATE OR REPLACE ...` re-run each deploy it changed.
     ///
     /// Semantics the executor enforces:
     /// - repeatables run AFTER all versioned pending migrations, ordered among
     ///   themselves by `depends_on` topo (else version order);
     /// - per repeatable, the engine reads the LATEST journaled `completed`
-    ///   checksum for its identity: never-applied OR checksum-DIFFERS ⇒ re-apply
-    ///   `up` + append a new `completed` event; checksum-MATCHES ⇒ SKIP;
+    ///   checksum for its identity: never-applied OR checksum-DIFFERS => re-apply
+    ///   `up` + append a new `completed` event; checksum-MATCHES => SKIP;
     /// - a repeatable's *changed* checksum is **exempt** from the once-only
     ///   checksum-drift tamper-abort (a changed checksum means re-run, not abort);
     ///   a once-only migration's changed checksum STILL aborts.
     ///
     /// A repeatable's `down` is always `None` (replace-style; no true reverse).
     pub repeatable: bool,
-    /// **Engine-emitted goodie DDL** — the `up` is descriptor-derived,
+    /// **Engine-emitted goodie DDL** - the `up` is descriptor-derived,
     /// engine-AUTHORED DDL (NOT raw creator/AI SQL) that must run under the `SQLite`
     /// **`EngineJournal`** authorizer mode rather than the confined **`CreatorUp`** mode.
     ///
@@ -249,9 +249,9 @@ pub struct MigrationFlags {
     /// authored value outright. The flag is therefore a constant `false` in the
     /// current tree. It is retained rather than deleted because it is covered by the
     /// canonical checksum image below, so removing it would invalidate every
-    /// recorded migration's checksum — a strictly larger change than the removal
+    /// recorded migration's checksum - a strictly larger change than the removal
     /// that stranded it, and one that belongs with the IR-version question. See
-    /// `docs/proposals/fts-macro.md`. `false` (default) ⇒ the historical
+    /// `docs/proposals/fts-macro.md`. `false` (default) => the historical
     /// CreatorUp-confined `up` (every ordinary CREATE TABLE / ADD COLUMN / CREATE
     /// INDEX), byte-identical to before this flag existed; the **Postgres** path never
     /// sets it (PG has no confined-creator-mode split).
@@ -279,11 +279,11 @@ impl Default for MigrationFlags {
 /// [`Checksum::of`].
 ///
 /// The per-migration checksum must cover the WHOLE unit the executor uses to
-/// **order / partition / supersede / gate** a migration — not just its SQL
+/// **order / partition / supersede / gate** a migration - not just its SQL
 /// content. If only `(up, down, preconditions)` were hashed, a tampered bundle
 /// could flip `depends_on` (reorder execution), inject `supersedes` (skip a
 /// migration), flip `repeatable` (re-phase), clear `requires_approval` (un-gate),
-/// or change `timeout_ms` — and still verify CLEAN against the integrity manifest
+/// or change `timeout_ms` - and still verify CLEAN against the integrity manifest
 /// (which folds the per-migration checksum) AND escape the per-migration drift
 /// check (which compares this checksum). So the checksum folds every field that
 /// changes the effective applied set or its order.
@@ -297,7 +297,7 @@ pub struct ChecksumInput<'a> {
     pub up: &'a str,
     /// The reverse SQL, or `None` = explicitly irreversible.
     pub down: Option<&'a str>,
-    /// Apply-time flags — all fold in. The six bools `transactional` /
+    /// Apply-time flags - all fold in. The six bools `transactional` /
     /// `destructive` / `online` / `requires_approval` / `repeatable` /
     /// `engine_goodie_ddl`, plus the OPTIONAL FACETS `timeout_ms`
     /// (`Option<u64>`), `lock_timeout_ms` (`Option<u64>`) and `phase`
@@ -347,7 +347,7 @@ impl<'a> ChecksumInput<'a> {
 /// supersedes by `supersedes`, gates by `flags.requires_approval` /
 /// `flags.destructive` / `flags.phase`, and times out by `flags.timeout_ms`.
 /// Folding them all in means a tampered bundle that flips any of them changes
-/// this checksum — so the set-level integrity manifest (which folds this
+/// this checksum - so the set-level integrity manifest (which folds this
 /// checksum) refuses it, and the per-migration drift check (which compares this
 /// checksum on already-applied versions) flags it. Preconditions are part of the
 /// migration's identity: two migrations with the same SQL but
@@ -356,9 +356,9 @@ impl<'a> ChecksumInput<'a> {
 /// # Canonical serialization
 ///
 /// `flags` and each `precondition` are serialized to canonical JSON
-/// (`serde_json`, deterministic for these plain enums/structs — no maps) and
+/// (`serde_json`, deterministic for these plain enums/structs - no maps) and
 /// length-prefixed. `depends_on` and `supersedes` are folded as ORDERED lists of
-/// length-prefixed version strings, IN THE GIVEN ORDER — order is semantically
+/// length-prefixed version strings, IN THE GIVEN ORDER - order is semantically
 /// meaningful (a dependency list `[a, b]` is the same constraint as `[b, a]`, but
 /// the manifest's canonical-executed-order fold makes any reorder of the
 /// effective execution visible regardless; we keep `depends_on`/`supersedes`
@@ -368,7 +368,7 @@ impl<'a> ChecksumInput<'a> {
 /// What a migration declared about reversing itself, as the checksum sees it.
 ///
 /// A schema migration and a data migration authored before the reverse fields
-/// existed are both [`Self::None`], and fold nothing — see
+/// existed are both [`Self::None`], and fold nothing - see
 /// the reverse-aware checksum fold (crate-private).
 #[derive(Debug, Clone, Copy)]
 pub enum ReverseDomain<'a> {
@@ -388,19 +388,19 @@ impl Checksum {
     ///
     /// # Panics
     /// Panics only if [`MigrationFlags`] or a [`PreconditionCheck`] fails to
-    /// JSON-serialize — infallible for these plain structs/enums (no maps, no
+    /// JSON-serialize - infallible for these plain structs/enums (no maps, no
     /// non-string keys), so in practice it never panics. We `.expect` rather than
     /// swallow a failure to a default, because a silent empty serialization would
     /// collide two distinct inputs into the same security checksum.
     #[must_use]
     pub fn of(input: &ChecksumInput<'_>) -> Self {
         let mut hasher = Sha256::new();
-        // up — length-prefixed with a fixed-width big-endian u64 so no
+        // up - length-prefixed with a fixed-width big-endian u64 so no
         // concatenation collision is possible (e.g. up="ab",down="c" vs
         // up="a",down="bc").
         hasher.update((input.up.len() as u64).to_be_bytes());
         hasher.update(input.up.as_bytes());
-        // down — `down: None` (sentinel u64::MAX) is distinct from
+        // down - `down: None` (sentinel u64::MAX) is distinct from
         // `down: Some("")` (length 0).
         match input.down {
             Some(d) => {
@@ -412,7 +412,7 @@ impl Checksum {
             }
         }
         // The common tail (flags + owner_app + depends_on + supersedes +
-        // preconditions) is folded identically to `of_ir` — extracted into
+        // preconditions) is folded identically to `of_ir` - extracted into
         // `fold_common` so the two front doors cannot drift.
         fold_common(
             &mut hasher,
@@ -425,12 +425,12 @@ impl Checksum {
         Self(hex::encode(hasher.finalize()))
     }
 
-    /// Compute the checksum over a migration authored in the `op.*` IR — the
+    /// Compute the checksum over a migration authored in the `op.*` IR - the
     /// canonical op-list region in PLACE OF the `up`/`down`
     /// region, then the SAME `fold_common` tail as [`Checksum::of`].
     ///
     /// The op-list region is [`crate::ir::CanonicalOpList::canonical_bytes`]: an op count,
-    /// then each `Op`'s RFC 8785 (JCS) bytes length-prefixed in op order — so a
+    /// then each `Op`'s RFC 8785 (JCS) bytes length-prefixed in op order - so a
     /// reorder/insert, an `Insert` row scalar change, or a change to an embedded
     /// expression-AST `Literal` (all fold, since they live inside the op value)
     /// is drift. The region is folded as ONE length-prefixed blob so it is
@@ -442,14 +442,14 @@ impl Checksum {
     ///
     /// # The `flags` argument MUST be dialect-NEUTRAL
     ///
-    /// `of_ir` is dialect-neutral BY CONSTRUCTION — it takes no dialect parameter
+    /// `of_ir` is dialect-neutral BY CONSTRUCTION - it takes no dialect parameter
     /// and hashes only the neutral op list + the derived+overridden flags +
     /// owner + deps + preconditions. A single portable migration therefore has
     /// ONE checksum across the PG and `SQLite` renders (the single-artifact /
     /// single-checksum invariant).
     ///
-    /// A future `IrAuthor` MUST pass the **dialect-neutral derived-then-overridden**
-    /// flags here — NEVER the per-dialect *lowered* flags. The lowering legitimately
+    /// Every `IrAuthor` MUST pass the **dialect-neutral derived-then-overridden**
+    /// flags here - NEVER the per-dialect *lowered* flags. The lowering legitimately
     /// diverges per dialect (e.g. `SQLite` forces `transactional: true` and drops
     /// `concurrently` for a concurrent index while PG keeps `transactional: false`).
     /// Folding those POST-lowering per-dialect flags into the
@@ -532,7 +532,7 @@ impl Checksum {
         reverse: &ReverseDomain<'_>,
     ) -> Self {
         let mut hasher = Sha256::new();
-        // Explicit domain tag — an IR migration's checksum is provably
+        // Explicit domain tag - an IR migration's checksum is provably
         // non-colliding with a rendered-SQL migration's (`Checksum::of`)
         // REGARDLESS of any future field addition to either front door. `of`
         // carries NO tag (its byte output is frozen by a golden fixture and by
@@ -543,12 +543,12 @@ impl Checksum {
         const IR_DOMAIN_TAG: &[u8] = b"zero-migrate/of_ir/v1";
         hasher.update((IR_DOMAIN_TAG.len() as u64).to_be_bytes());
         hasher.update(IR_DOMAIN_TAG);
-        // op-list region — the canonical bytes folded as one length-prefixed
+        // op-list region - the canonical bytes folded as one length-prefixed
         // blob (domain-separated from the up/down region of `of`).
         let region = ops.canonical_bytes();
         hasher.update((region.len() as u64).to_be_bytes());
         hasher.update(&region);
-        // …then the SAME common tail.
+        // ...then the SAME common tail.
         fold_common_strings(
             &mut hasher,
             flags,
@@ -561,7 +561,7 @@ impl Checksum {
         // absent reverse folds nothing at all, which is what keeps every digest
         // computed before this field existed byte-identical. A DECLARED but empty
         // inverse still folds its tag and a zero length, so `Some(vec![])` and
-        // `None` cannot collide — an author who wrote an empty `inverse()` said
+        // `None` cannot collide - an author who wrote an empty `inverse()` said
         // something different from an author who wrote no reverse at all.
         match reverse {
             ReverseDomain::None => {}
@@ -602,7 +602,7 @@ impl Checksum {
 ///
 /// # Panics
 /// Panics only if [`MigrationFlags`] or a [`PreconditionCheck`] fails to
-/// JSON-serialize — infallible for these plain structs/enums (no maps), so in
+/// JSON-serialize - infallible for these plain structs/enums (no maps), so in
 /// practice never. We `.expect` rather than swallow to a default: a silent empty
 /// serialization would collide two distinct inputs into the same checksum.
 fn fold_common(
@@ -639,7 +639,7 @@ fn fold_common_strings(
     supersedes: &[&str],
     preconditions: &[PreconditionCheck],
 ) {
-    // flags — canonical JSON, length-prefixed. Covers transactional /
+    // flags - canonical JSON, length-prefixed. Covers transactional /
     // destructive / online / requires_approval / timeout_ms / lock_timeout_ms /
     // phase / repeatable / engine_goodie_ddl in one deterministic image, so any
     // flip changes the hash (an attacker cannot silently inflate the
@@ -649,16 +649,16 @@ fn fold_common_strings(
         serde_json::to_string(flags).expect("MigrationFlags is infallibly serializable");
     hasher.update((flags_json.len() as u64).to_be_bytes());
     hasher.update(flags_json.as_bytes());
-    // owner_app — length-prefixed.
+    // owner_app - length-prefixed.
     hasher.update((owner_app.len() as u64).to_be_bytes());
     hasher.update(owner_app.as_bytes());
-    // depends_on — ordered list: count, then each version string length-prefixed
+    // depends_on - ordered list: count, then each version string length-prefixed
     // in the GIVEN order (a reorder or set change shifts the hash). Domain-
     // separated from supersedes by being folded first with its own count word,
     // so a dep `[a]` + supersedes `[]` can never collide with a dep `[]` +
     // supersedes `[a]`.
     fold_version_list(hasher, depends_on);
-    // supersedes — same ordered-list discipline.
+    // supersedes - same ordered-list discipline.
     fold_version_list(hasher, supersedes);
     // preconditions: count, then each canonical-JSON-serialized + length-
     // prefixed. An empty list folds a 0 count and contributes nothing else.
@@ -689,7 +689,7 @@ fn fold_version_list(hasher: &mut Sha256, versions: &[&str]) {
 /// An immutable, ordered migration artifact.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Migration {
-    /// `UUIDv7` version (`mig_…`) — time-ordered, collision-free.
+    /// `UUIDv7` version (`mig_...`) - time-ordered, collision-free.
     pub version: MigrationId,
     /// Human-readable name, e.g. `"add_orders_table"`.
     pub name: String,
@@ -701,7 +701,7 @@ pub struct Migration {
     pub checksum: Checksum,
     /// Apply-time flags.
     pub flags: MigrationFlags,
-    /// The declaring app (per-table ownership) — an `app_…` typed id.
+    /// The declaring app (per-table ownership) - an `app_...` typed id.
     pub owner_app: String,
     /// Optional cross-slice ordering dependencies.
     pub depends_on: Vec<MigrationId>,
@@ -725,7 +725,7 @@ pub struct Migration {
     /// Empty (the default) = unconditional apply. Each [`PreconditionCheck`]
     /// carries an assertion ([`Precondition`](crate::precondition::Precondition))
     /// and an unmet policy ([`OnUnmet`](crate::precondition::OnUnmet)): `Halt`
-    /// (fail-closed — abort the apply, nothing applied) or `Skip` (leave this
+    /// (fail-closed - abort the apply, nothing applied) or `Skip` (leave this
     /// migration pending, re-evaluate next deploy). Folded into [`checksum`] so a
     /// precondition change is drift, exactly like an SQL change.
     ///
@@ -840,7 +840,7 @@ mod tests {
     }
 
     /// A content-only checksum input (default flags, no deps/supersedes,
-    /// `owner_app` `app_test`) — the common shape the older 3-arg `Checksum::of`
+    /// `owner_app` `app_test`) - the common shape the older 3-arg `Checksum::of`
     /// covered. Field-specific tests below override one field at a time.
     fn input<'a>(
         up: &'a str,
@@ -1073,7 +1073,7 @@ mod tests {
             Checksum::of(&input(up, None, &f_to, owner, &[], &[], &[])),
             "timeout_ms change must change the checksum"
         );
-        // lock_timeout_ms change — the per-deploy maintenance-window override
+        // lock_timeout_ms change - the per-deploy maintenance-window override
         // folds into the tamper-evident checksum exactly like timeout_ms, so an
         // attacker cannot silently inflate the lock-acquisition budget past the
         // SHORT fail-fast default without tripping the drift check.

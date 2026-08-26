@@ -1,23 +1,24 @@
-//! The trust boundary (II.1 `boundary`, II.3.2) — the SOLE untrusted crossing.
+//! The trust boundary (II.1 `boundary`, II.3.2) - the SOLE untrusted crossing.
 //!
 //! [`admit`]`(charter, draft)` is the *only* place an UNTRUSTED creator [`PolicyDoc`]
 //! meets a TRUSTED, FINALIZED charter, so it is the *only* place **escalation** is
-//! checked. It lives in its own module — apart from the trusted, total combinators
+//! checked. It lives in its own module - apart from the trusted, total combinators
 //! [`overlay`](crate::compose::overlay) / [`restrict`](crate::compose::restrict) and
 //! the trusted-side conflict gate
-//! [`finalize_charter`](crate::compose::finalize_charter) — precisely so the one
+//! [`finalize_charter`](crate::compose::finalize_charter) - precisely so the one
 //! security-bearing operator is unmissable when reading or auditing the crate.
 //!
-//! `admit` produces a LAYERED [`EffectivePolicy`] — `[draft] over [charter]` (H-4) —
-//! whose grant query falls through top→down. Grants are **charter-inherited,
+//! `admit` produces a LAYERED [`EffectivePolicy`] - `[draft] over [charter]` (H-4) -
+//! whose grant query falls through top->down. Grants are **charter-inherited,
 //! narrow-only, presence-overridden**: a silent draft inherits the charter's grant; a
-//! draft that NARROWS wins by presence (admitted because a narrow is `⊑` the charter);
-//! a draft that RAISES above default is admitted only where its value is `⊑` the
-//! charter's (II.3.2). Obligations/injects/validates union-up (un-droppable).
+//! draft that NARROWS wins by presence (admitted because a narrow is within the
+//! charter); a draft that RAISES above default is admitted only where its value is
+//! no looser than the charter's (II.3.2). Obligations/injects/validates union-up
+//! (un-droppable).
 //!
 //! The escalation check proves each raising draft rule against the layer stack
 //! SYMBOLICALLY - it never samples an object. Region arithmetic is ITERATED per rule
-//! (never a `⊔`-materialized charter - the C-1 fix), and a difference the scope algebra
+//! (never a join-materialized charter - the C-1 fix), and a difference the scope algebra
 //! cannot represent is a refusal, not a pass.
 //!
 //! `admit`'s `charter` is a finalized [`AdmitCharter`] (a [`crate::RootCharter`], a
@@ -40,28 +41,29 @@ use crate::PolicyDoc;
 
 /// Ingress of an UNTRUSTED `draft` against a trusted, FINALIZED `charter` (II.3.2).
 /// Returns a LAYERED [`EffectivePolicy`] (`[draft] over [charter]`, H-4) iff the draft
-/// escalates nowhere; otherwise a [`ComposeError`] blaming the draft. NO clipping —
+/// escalates nowhere; otherwise a [`ComposeError`] blaming the draft. NO clipping -
 /// strict reject only.
 ///
 /// The algorithm, pointwise per (key, object) but decided SYMBOLICALLY:
-/// - **Grants — charter-inherited, narrow-only, presence-overridden.** For each grant
+/// - **Grants - charter-inherited, narrow-only, presence-overridden.** For each grant
 ///   key the draft is admissible iff at every object where the draft RAISES `k` above
-///   default the draft value is `⊑` the charter's LAYERED effective value. Proved one
+///   default the draft value is no looser than the charter's LAYERED effective
+///   value. Proved one
 ///   RAISING DRAFT RULE at a time against the layer stack, because a join is a least
 ///   upper bound and so the join of the covering draft rules is within the charter
 ///   exactly when each of them is. Each rule walks the layers top-first: a layer must
 ///   lift the rule's value wherever it covers, and everything that layer covers -
 ///   including rules at or below default, which grant nothing but still decide - is
 ///   retired before falling through. Whatever no layer raises sits at the knob default
-///   and escalates. A not-representable `∖` fails closed.
+///   and escalates. A not-representable difference fails closed.
 /// - **Require/Inject/Validate:** union-up across all layers; a charter rule is never
 ///   dropped or narrowed.
 /// - **Collisions:** a draft inject colliding with a charter inject, or a draft
 ///   validate contradicting a charter inject, rejects at compose time.
 ///
-/// The creatable-scope lint is NOT here — it is a charter-side misconfiguration lint
+/// The creatable-scope lint is NOT here - it is a charter-side misconfiguration lint
 /// run at [`finalize_charter`](crate::compose::finalize_charter) (MED), and admit's
-/// per-key `draft ⊑ charter` grant check transitively bounds the draft's creatable
+/// per-key draft-within-charter grant check transitively bounds the draft's creatable
 /// region below the charter's.
 ///
 /// # Precondition: `registry` must be the definition the charter was loaded under
@@ -93,14 +95,14 @@ pub fn admit(
     let charter_layers = charter.charter_layers(registry)?;
     let draft_grants = GrantModel::build(&draft.rules, registry)?;
 
-    // ── grant check: pointwise draft ⊑ charter (charter-inherited), per key ─────
+    // -- grant check: pointwise draft within charter (charter-inherited), per key --
     // The keys to check = every key the DRAFT grants (a key the draft is silent on
-    // simply inherits the charter — no escalation possible).
+    // simply inherits the charter - no escalation possible).
     for key in draft_grants.keys() {
         check_grant_key(key, &draft_grants, &charter_layers, registry)?;
     }
 
-    // ── require/inject/validate collision blame (draft vs charter) ──────────────
+    // -- require/inject/validate collision blame (draft vs charter) --------------
     let charter_injects =
         flatten_charter(&charter_layers, |k| matches!(k, RuleKind::Inject { .. }));
     let draft_injects = rules_of(&draft.rules, |k| matches!(k, RuleKind::Inject { .. }));
@@ -108,10 +110,10 @@ pub fn admit(
     let draft_validates = rules_of(&draft.rules, |k| matches!(k, RuleKind::Validate { .. }));
     check_validate_vs_inject(&charter_injects, &draft_validates)?;
 
-    // ── build the layered result: [draft] over [charter layers] (H-4) ───────────
+    // -- build the layered result: [draft] over [charter layers] (H-4) -----------
     let mut draft_layer = Layer::from_doc(LayerTag::Draft, draft, registry)?;
 
-    // ── non-inheritable POWER GRANTS (KnobDef.inherit == false) ─────────────────
+    // -- non-inheritable POWER GRANTS (KnobDef.inherit == false) -----------------
     // A knob marked `inherit = false` must NOT flow to a SILENT draft from the
     // charter: "override the platform's injected columns" is a grant a creator earns
     // only by asking for it EXPLICITLY, never by inheritance-by-omission. Since the
@@ -119,10 +121,10 @@ pub fn admit(
     // pin by giving the draft layer a synthetic DEFAULT-valued grant rule over the
     // whole universe (`Scope::All`) for every `inherit = false` key. Presence-override
     // (II.3.2) then makes the draft layer WIN the fall-through EVERYWHERE for that key:
-    // where the draft EXPLICITLY granted it (already bounded ⊑ the charter by the check
+    // where the draft EXPLICITLY granted it (already bounded by the charter via the check
     // above), the loosest-covering join within the draft layer keeps the draft's own
     // value; where the draft is SILENT, only the synthetic default rule covers, so the
-    // value is the knob default — never the inherited charter value.
+    // value is the knob default - never the inherited charter value.
     for def in registry.iter() {
         if def.inherit {
             continue;
@@ -138,8 +140,8 @@ pub fn admit(
 }
 
 /// The per-key CHARTER-INHERITED grant admissibility check (II.3.2): at every object
-/// where the draft raises `k` above default, the draft value `⊑` the charter's layered
-/// effective value.
+/// where the draft raises `k` above default, the draft value is no looser than the
+/// charter's layered effective value.
 ///
 /// Proved PER DRAFT RULE, symbolically, never by sampling a point.
 ///
@@ -147,10 +149,11 @@ pub fn admit(
 /// is the JOIN of every draft rule covering it, and a join is a least upper bound, so
 ///
 /// ```text
-/// join(v_i) ⊑ c(o)   ⟺   every covering v_i ⊑ c(o)
+/// join(v_i) is no looser than c(o)   if and only if   every covering v_i is no looser than c(o)
 /// ```
 ///
-/// Forward because each `v_i ⊑ join(v_i)`; backward because a `c(o)` above every `v_i`
+/// Forward because each `v_i` is no looser than `join(v_i)`; backward because a
+/// `c(o)` above every `v_i`
 /// is above their least upper bound. So overlapping draft rules need no reconciling:
 /// prove each rule's own value against the charter over its own scope and the join
 /// follows.
@@ -276,11 +279,12 @@ fn prove_rule_within_charter(
     Ok(())
 }
 
-/// `region ∖ s` for every `s`, one at a time, never against a `⊔`-materialized union
-/// (C-1). `None` when a step cannot be represented and the residual is still non-empty.
+/// Subtract each `s` from `region` one at a time, never against a join-materialized
+/// union (C-1). `None` when a step cannot be represented and the residual is still
+/// non-empty.
 ///
 /// A step the scope algebra cannot express is DEFERRED rather than fatal, because
-/// subtraction order matters: `All ∖ app_*` has no glob form, but a later subtrahend of
+/// subtraction order matters: `All` minus `app_*` has no glob form, but a later subtrahend of
 /// `All` empties the region anyway. Failing on the first unrepresentable step made the
 /// answer depend on the order rules happen to sit in, and refused charters that are
 /// plainly admissible. Retry until a pass makes no progress, then fail closed.

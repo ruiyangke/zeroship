@@ -1,4 +1,4 @@
-//! The canonical constraint `definition` body — the ONE normal form a desired
+//! The canonical constraint `definition` body - the ONE normal form a desired
 //! snapshot's UNIQUE / PRIMARY KEY / FOREIGN KEY text is written in, on every
 //! dialect.
 //!
@@ -7,8 +7,8 @@
 //! It was `pub(crate)` in `zero_migrate::render::declarative` until the vendor
 //! crates became separately linkable. `crates/zero-migrate-mysql/src/backend/`
 //! is being extracted into `zero-migrate-mysql`, and its `drift_sql.rs` BUILDS this
-//! body: MySQL's `information_schema` stores no rendered constraint text — there is
-//! no `pg_get_constraintdef` there — so the drift path has to synthesize the
+//! body: MySQL's `information_schema` stores no rendered constraint text - there is
+//! no `pg_get_constraintdef` there - so the drift path has to synthesize the
 //! comparison form itself. A vendor crate cannot depend on the engine (the engine
 //! depends on all three vendors, so the edge back is a cycle Cargo refuses), so an
 //! item its drift path reaches has to live at or below this crate.
@@ -16,9 +16,9 @@
 //! # Comparison text, NEVER an emitted identifier route
 //!
 //! Read that twice, because the bytes look like DDL and are not. Every constraint
-//! body is built ONCE in the `pg_get_constraintdef` normal form — conditional
+//! body is built ONCE in the `pg_get_constraintdef` normal form - conditional
 //! double quotes, `ON UPDATE` before `ON DELETE`, the canonical default action
-//! omitted — so that a desired snapshot and a live introspected one compare equal
+//! omitted - so that a desired snapshot and a live introspected one compare equal
 //! without a per-dialect special case. It is a COMPARISON codec.
 //!
 //! A vendor that reaches for [`quote_ident_if_needed`] to spell an identifier it is
@@ -32,7 +32,7 @@
 //! # What resolves a vendor, and what does not
 //!
 //! [`quote_ident_if_needed`], [`constraintdef_cols`], [`normalize_fk_action`] and
-//! [`NOT_VALID_DEFINITION_SUFFIX`] name no dialect at all — they are the neutral
+//! [`NOT_VALID_DEFINITION_SUFFIX`] name no dialect at all - they are the neutral
 //! half, and they moved unchanged.
 //!
 //! [`fk_definition`] and [`fk_constraint_snapshot`] do need one vendor fact apiece
@@ -52,14 +52,14 @@ use crate::registry::BackendVendor;
 use crate::snapshot::{quote_constraint_definition_ident, ConstraintSnapshot};
 
 /// The PG keywords whose category is NOT `UNRESERVED` (i.e. reserved,
-/// type/function-name, or column-name keywords). `quote_identifier` — and thus
-/// `pg_get_constraintdef` — wraps an identifier in double quotes iff it is not a
+/// type/function-name, or column-name keywords). `quote_identifier` - and thus
+/// `pg_get_constraintdef` - wraps an identifier in double quotes iff it is not a
 /// "safe" bare identifier OR it collides with one of THESE keywords (an unreserved
 /// keyword is rendered bare). Sourced from `pg_get_keywords() WHERE catcode<>'U'`
 /// on PG 17. Used by [`quote_ident_if_needed`] so the FK referenced-table body we
 /// build matches the live catalog byte-for-byte: a table/schema named
 /// `order`/`user`/`select` (each passes `validate_collection`/`is_safe_schema_ident`
-/// but is reserved) renders QUOTED in the catalog — and now here too — so the
+/// but is reserved) renders QUOTED in the catalog - and now here too - so the
 /// desired-vs-live FK body re-diffs clean instead of phantom-dropping.
 ///
 /// NOT A DEFECT WHEN A SQLITE PATH READS THIS CODEC. [`quote_ident_if_needed`] and
@@ -225,19 +225,19 @@ const CONSTRAINT_DEFINITION_KEYWORDS_REQUIRING_QUOTES: &[&str] = &[
     "xmltable",
 ];
 
-/// Quote an identifier ONLY when Postgres' own `quote_identifier` would — i.e.
+/// Quote an identifier ONLY when Postgres' own `quote_identifier` would - i.e.
 /// mirror what `pg_get_constraintdef` emits. An identifier is left BARE iff it is a
 /// "safe" lowercase identifier (starts with `[a-z_]`, all chars `[a-z0-9_]`) AND is
 /// not a keyword requiring quotes (the module-private
-/// `CONSTRAINT_DEFINITION_KEYWORDS_REQUIRING_QUOTES` table above — deliberately not
+/// `CONSTRAINT_DEFINITION_KEYWORDS_REQUIRING_QUOTES` table above - deliberately not
 /// linked, and deliberately not `pub`: it is this codec's input, not a keyword list
 /// any caller should be reading); otherwise it is double-quoted (mixed-case,
-/// leading digit, reserved word, …).
+/// leading digit, reserved word, ...).
 ///
 /// This is the seam the FK referenced-table body uses so the desired snapshot
 /// round-trips byte-for-byte against the live `pg_get_constraintdef` output
 /// (an unconditional `quote_ident` would over-quote a normal lowercase name like
-/// `parent` → `"parent"`, which the catalog renders bare → a phantom FK re-create on
+/// `parent` -> `"parent"`, which the catalog renders bare -> a phantom FK re-create on
 /// every diff). It also closes the latent injection/wrong-resolution seam: a
 /// reserved-word or mixed-case schema/target now renders quoted (correct
 /// resolution), not as a bare keyword.
@@ -257,7 +257,7 @@ pub fn quote_ident_if_needed(ident: &str) -> String {
 }
 
 /// Spell a `pg_get_constraintdef`-matching column list for a UNIQUE / PRIMARY KEY
-/// constraint `definition` body — `<col>, <col>, …` with CONDITIONAL per-column
+/// constraint `definition` body - `<col>, <col>, ...` with CONDITIONAL per-column
 /// quoting ([`quote_ident_if_needed`]: bare for a safe lowercase ident, double-
 /// quoted for reserved/mixed-case). This is the SINGLE source of the constraintdef
 /// body spelling: the engine's offline fold (`zero_migrate::render::fold`), the IR
@@ -281,9 +281,9 @@ pub const NOT_VALID_DEFINITION_SUFFIX: &str = " NOT VALID";
 /// Normalise an FK action to the SQL keyword form Postgres accepts.
 ///
 /// The DIALECT-NEUTRAL half: it maps the author's spelling (`set_null`, `setNull`,
-/// `SET NULL`, …) onto one keyword, and stops there. Folding that keyword into a
-/// vendor's canonical catalog form — InnoDB collapsing `RESTRICT` into `NO ACTION`,
-/// say — is the vendor's answer, asked for by [`normalize_fk_action_for_vendor`].
+/// `SET NULL`, ...) onto one keyword, and stops there. Folding that keyword into a
+/// vendor's canonical catalog form - InnoDB collapsing `RESTRICT` into `NO ACTION`,
+/// say - is the vendor's answer, asked for by [`normalize_fk_action_for_vendor`].
 ///
 /// `zero_migrate::schema::query::normalize_fk_action` is the engine's re-export of
 /// this, kept so the out-of-repo data plane's import path is unchanged.
@@ -323,7 +323,7 @@ pub fn normalize_fk_action_for_vendor(s: Option<&str>, vendor: &BackendVendor) -
 /// - **`ON UPDATE` precedes `ON DELETE`** (the reverse of plugin-db's emitted
 ///   DDL, which writes `ON DELETE <d> ON UPDATE <u>`); and
 /// - a **`NO ACTION`** action clause is **OMITTED entirely** (it is the catalog
-///   default — `confdeltype`/`confupdtype` = `'a'`), so a FK with both actions
+///   default - `confdeltype`/`confupdtype` = `'a'`), so a FK with both actions
 ///   `NO ACTION` renders with no action clauses at all.
 ///
 /// On Postgres, `RESTRICT`, `CASCADE`, and `SET NULL` are rendered explicitly.
@@ -360,7 +360,7 @@ pub fn fk_definition(
     // raw `FOREIGN KEY (order)` would phantom-diff the FK `definition` (the fold
     // reuses it, and `ConstraintSnapshot` has FULL Eq) AND mis-resolve `order` as
     // the keyword. Over-quoting a safe lowercase column would equally phantom-diff
-    // the catalog's bare body — hence conditional (`quote_ident_if_needed`).
+    // the catalog's bare body - hence conditional (`quote_ident_if_needed`).
     let ref_cols = if references_columns.is_empty() {
         vec!["id".to_string()]
     } else {
@@ -415,7 +415,7 @@ pub fn fk_definition(
     def
 }
 
-/// The whole FOREIGN KEY [`ConstraintSnapshot`] — [`fk_definition`]'s body under an
+/// The whole FOREIGN KEY [`ConstraintSnapshot`] - [`fk_definition`]'s body under an
 /// already-decided `name`.
 ///
 /// The name is a PARAMETER rather than something derived here, and that is the one

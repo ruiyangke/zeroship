@@ -6,21 +6,21 @@ use crate::engine::DeclarativeDeployPlan;
 use crate::model::migration::Migration;
 use crate::render::declarative::DesiredSchema;
 
-// ── What a backfill IS, what running one produces, and how one refuses: all four
+// -- What a backfill IS, what running one produces, and how one refuses: all four
 // now live with the backend contract, beside the `BackfillSpec` a vendor executor
 // is handed. Re-exported so `capability::{BackfillSpec, BackfillOutcome,
 // BackfillError}` still resolve.
 pub use zero_migrate_backend::backfill::{BackfillError, BackfillOutcome, BackfillSpec};
-// ── The online capability, whole: the trait, the `OnlineIntent` it is handed and
+// -- The online capability, whole: the trait, the `OnlineIntent` it is handed and
 // the `OnlineError` it refuses with. Nothing in `run_online_backfill`'s signature
-// reaches the engine any more, and — since the phases were inverted and the engine
-// drives them — neither does its body, so the vendor that implements it no longer
+// reaches the engine any more, and - since the phases were inverted and the engine
+// drives them - neither does its body, so the vendor that implements it no longer
 // has to name the orchestrator.
-// ── The shadow dry-run's neutral half travelled too: `ShadowConfig` in,
+// -- The shadow dry-run's neutral half travelled too: `ShadowConfig` in,
 // `DryRunReport`/`MigrationResult` out. The `ShadowDryRun` TRAIT stayed, because
 // `dry_run_declarative` takes a `DeclarativeDeployPlan` and a `DesiredSchema` and
-// `SeedError` carries an `EngineError` — three engine orchestration results.
-// Re-exported so every historical `capability::…` path still resolves.
+// `SeedError` carries an `EngineError` - three engine orchestration results.
+// Re-exported so every historical `capability::...` path still resolves.
 pub use zero_migrate_backend::capability::{
     BackendCapability, DryRunReport, MigrationResult, OnlineError, OnlineSchemaChange, ShadowConfig,
 };

@@ -1,32 +1,34 @@
-//! The per-knob VALUE order — the second lattice the composition algebra rides on
+//! The per-knob VALUE order - the second lattice the composition algebra rides on
 //! (the first being the scope lattice). Every grant/require value composes by its
 //! knob's declared [`KnobKind`], not by hand-written per-facet meets (E2/E3): the
 //! order is *derived* from the kind, uniformly, so no facet can drift.
 //!
-//! For a grant key the security-relevant relation is **`⊑_value`** ("the draft's
+//! For a grant key the security-relevant relation is [`leq_value`] ("the draft's
 //! value is no looser than the charter's"): the composer accepts a draft grant at an
-//! object only when `draft_value ⊑_value charter_value` there (II.3.2). The dual
-//! operations are:
+//! object only when the draft value is no looser than the charter value there
+//! (II.3.2). The dual operations are:
 //!
-//! - **`join_value` (`⊔_value`, the LOOSEST):** aggregates several covering grant
-//!   rules within ONE layer — more rules on a key can only loosen (II.3.2). Bool OR,
-//!   StrSet ∪, Uint max, OrderedEnum rank-max.
-//! - **`meet_value` (`⊓_value`, the TIGHTEST):** clamps two trusted charters
-//!   pointwise (`restrict`, II.3.2). Bool AND, StrSet ∩, Uint min,
+//! - **[`join_value`], the LOOSEST:** aggregates several covering grant rules
+//!   within ONE layer - more rules on a key can only loosen (II.3.2). Bool OR,
+//!   StrSet union, Uint max, OrderedEnum rank-max.
+//! - **[`meet_value`], the TIGHTEST:** clamps two trusted charters pointwise
+//!   (`restrict`, II.3.2). Bool AND, StrSet intersection, Uint min,
 //!   OrderedEnum rank-min.
-//! - **`leq_value` (`⊑_value`):** the polarity order — Bool implication
-//!   (`false ⊑ true`), StrSet ⊆, Uint ≤, OrderedEnum rank ≤. `a ⊑ b ⟺ join(a,b)=b`
-//!   (equivalently `meet(a,b)=a`), the standard lattice identity.
+//! - **[`leq_value`]:** the polarity order - Bool implication (`false` is no
+//!   looser than `true`), StrSet containment, Uint `<=`, OrderedEnum rank `<=`.
+//!   `a` is no looser than `b` exactly when `join(a, b) == b` (equivalently
+//!   `meet(a, b) == a`), the standard lattice identity.
 //!
-//! `Digest`/`Pinned` values are OPAQUE: no order, only equality — `⊑` is `==`, and
+//! `Digest`/`Pinned` values are OPAQUE: no order, only equality - the order
+//! collapses to `==`, and
 //! `join`/`meet` are only defined (and only ever asked) when the two are equal. The
 //! `Pinned` polarity's delegable/non-delegable handling lives in the composer, not
 //! here; this module gives the pure value algebra.
 //!
 //! Every operation here is defined RELATIVE to a [`KnobKind`] (the value's declared
-//! shape). A value whose runtime shape does not match its kind is a caller bug — the
+//! shape). A value whose runtime shape does not match its kind is a caller bug - the
 //! loader validated every authored value against its kind (`KnobValue::validate_for`)
-//! before it ever reached composition — so a mismatch is reported as a structured
+//! before it ever reached composition - so a mismatch is reported as a structured
 //! [`ValueOrderError`] rather than silently mis-ordering (fail-closed).
 
 use std::collections::BTreeSet;
@@ -41,24 +43,25 @@ use crate::knob::{KnobKind, KnobValue};
 pub enum ValueOrderError {
     /// The value's shape does not match the kind (e.g. a `Bool` under a `UintCharter`).
     ShapeMismatch,
-    /// An `OrderedEnum` value naming a variant the kind does not declare — it has no
+    /// An `OrderedEnum` value naming a variant the kind does not declare - it has no
     /// rank, so it cannot be ordered.
     UnknownVariant,
 }
 
-/// `a ⊑_value b` under `kind` — is `a` no LOOSER than `b`? (The security direction:
-/// a draft value `a` is admissible against a charter value `b` iff `a ⊑ b`.)
+/// Is `a` no LOOSER than `b` under `kind`? (The security direction: a draft value
+/// `a` is admissible against a charter value `b` exactly when this holds.)
 ///
-/// - `Bool`: `false ⊑ true` and reflexive; `true ⊑ false` is false (implication).
+/// - `Bool`: `false` is no looser than `true`, and the relation is reflexive;
+///   `true` is NOT no-looser-than `false` (implication).
 /// - `StrSet`: subset.
-/// - `UintCharter`: `≤`.
-/// - `OrderedEnum`: rank `≤` (tightest→loosest variant order).
+/// - `UintCharter`: `<=`.
+/// - `OrderedEnum`: rank `<=` (tightest->loosest variant order).
 /// - `Digest`: equality (opaque, no order).
 pub fn leq_value(kind: &KnobKind, a: &KnobValue, b: &KnobValue) -> Result<bool, ValueOrderError> {
     match kind {
         KnobKind::Bool => {
             let (x, y) = (as_bool(a)?, as_bool(b)?);
-            // false ⊑ false, false ⊑ true, true ⊑ true, NOT (true ⊑ false).
+            // Holds for false/false, false/true and true/true; NOT for true/false.
             Ok(!x || y)
         }
         KnobKind::StrSet => {
@@ -77,9 +80,10 @@ pub fn leq_value(kind: &KnobKind, a: &KnobValue, b: &KnobValue) -> Result<bool, 
     }
 }
 
-/// `a ⊔_value b` under `kind` — the LOOSEST (least upper bound): the within-layer
-/// grant aggregation (II.3.2). Bool OR, StrSet ∪, Uint max, OrderedEnum rank-max.
-/// For `Digest`, only defined when equal (opaque) — a mismatch is an error the
+/// The LOOSEST of `a` and `b` under `kind` (their least upper bound): the
+/// within-layer grant aggregation (II.3.2). Bool OR, StrSet union, Uint max,
+/// OrderedEnum rank-max.
+/// For `Digest`, only defined when equal (opaque) - a mismatch is an error the
 /// composer never triggers on the grant path (digests are `Pinned`, not aggregated).
 pub fn join_value(
     kind: &KnobKind,
@@ -108,9 +112,9 @@ pub fn join_value(
     }
 }
 
-/// `a ⊓_value b` under `kind` — the TIGHTEST (greatest lower bound): the charter
-/// clamp (`restrict`, II.3.2). Bool AND, StrSet ∩, Uint min, OrderedEnum
-/// rank-min. `Digest` only when equal (opaque).
+/// The TIGHTEST of `a` and `b` under `kind` (their greatest lower bound): the
+/// charter clamp (`restrict`, II.3.2). Bool AND, StrSet intersection, Uint min,
+/// OrderedEnum rank-min. `Digest` only when equal (opaque).
 pub fn meet_value(
     kind: &KnobKind,
     a: &KnobValue,
@@ -139,7 +143,7 @@ pub fn meet_value(
     }
 }
 
-// ── shape accessors (fail-closed) ─────────────────────────────────────────────────
+// -- shape accessors (fail-closed) -------------------------------------------------
 
 fn as_bool(v: &KnobValue) -> Result<bool, ValueOrderError> {
     match v {
@@ -169,7 +173,7 @@ fn as_strset(v: &KnobValue) -> Result<BTreeSet<String>, ValueOrderError> {
     }
 }
 
-/// The 0-based rank of an `OrderedEnum` value in its tightest→loosest `variants`
+/// The 0-based rank of an `OrderedEnum` value in its tightest->loosest `variants`
 /// list. `Err(UnknownVariant)` if the value names no declared variant.
 fn rank(variants: &[String], v: &KnobValue) -> Result<usize, ValueOrderError> {
     let s = as_str(v)?;
@@ -284,7 +288,8 @@ mod tests {
 
     #[test]
     fn leq_agrees_with_join_meet_identities() {
-        // a ⊑ b ⟺ join(a,b) == b ⟺ meet(a,b) == a, over a small Uint domain.
+        // `a` is no looser than `b` exactly when join(a,b) == b, equivalently when
+        // meet(a,b) == a. Checked over a small Uint domain.
         let k = KnobKind::UintCharter { hard_floor: 1 };
         for a in 1u64..=6 {
             for b in 1u64..=6 {

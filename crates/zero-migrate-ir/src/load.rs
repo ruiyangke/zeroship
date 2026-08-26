@@ -1,24 +1,24 @@
 //! The fail-closed **IR envelope load gate**.
 //!
-//! This is the SINGLE production seam every creator-authored IR envelope passes
-//! through before the engine lowers it (`IrAuthor::lower`, the per-dialect DDL
-//! compiler — a later wave) or checksums it. The gate is fail-closed and ordered
+//! These are the checks a creator-authored IR envelope clears before the engine
+//! lowers it (`IrAuthor::lower`, the per-dialect DDL compiler) or checksums it.
+//! The gate is fail-closed and ordered
 //! so a hostile / newer-engine / cross-tenant artifact is rejected BEFORE any
 //! checksum or lowering runs:
 //!
-//! 1. **deserialize** the bytes into the typed [`MigrationIr`] — the closed `Op`/
+//! 1. **deserialize** the bytes into the typed [`MigrationIr`] - the closed `Op`/
 //!    `Expr` AST + the constrained [`IrScalar`](crate::ir::IrScalar) numeric
 //!    domain reject a malformed/lossy/unknown-node artifact at this step.
 //! 2. **`ir_version` fail-closed** ([`MigrationIr::check_ir_version`]): a FUTURE
 //!    wire-format version this engine build does not understand is refused.
 //! 3. **structural validation** (`the structural validator`): the authoritative
 //!    structural gate over EVERY embedded `Expr` slot for the deploy-target
-//!    dialect — out-of-envelope `splitPart`, an unresolved `ColRef` in
+//!    dialect - out-of-envelope `splitPart`, an unresolved `ColRef` in
 //!    a self-contained `createTable`, a non-portable shape.
 //! 4. **server-stamped ownership** ([`enforce_ir_ownership`]): `owner_app` is
 //!    overwritten with the deploying app's id (a spoofed value is discarded), and
 //!    every op targeting a table must resolve to the deploying app in the project
-//!    ownership registry — a table absent from the registry FAILS CLOSED
+//!    ownership registry - a table absent from the registry FAILS CLOSED
 //!    (mirroring the declarative drop-ownership check in `declarative.rs`).
 //!    A `createTable` establishes ownership for its NEW table (the deploying app),
 //!    exactly as the declarative union does.
@@ -48,7 +48,7 @@ use crate::validate::AuthoringError;
 /// fail-closed step.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum IrLoadError {
-    /// The bytes did not deserialize into a well-formed [`MigrationIr`] — a
+    /// The bytes did not deserialize into a well-formed [`MigrationIr`] - a
     /// malformed JSON document, an unknown op/expr node tag, an out-of-domain
     /// numeric scalar, or a non-nullary synth default. Carries the
     /// serde message (which embeds the structured code, e.g.
@@ -81,7 +81,7 @@ pub enum IrLoadError {
         deploying_app: String,
     },
     /// The artifact's advisory `checksum` hint did not match the engine's
-    /// recomputed hint-domain checksum — genuine drift / tamper.
+    /// recomputed hint-domain checksum - genuine drift / tamper.
     #[error(
         "checksum hint mismatch: the IR envelope advisory hint {hint:?} does not match the \
          engine-recomputed hint-domain checksum {recomputed:?} (the op list / flags / deps \
@@ -98,7 +98,7 @@ pub enum IrLoadError {
     /// (a non-empty `depends_on`/`supersedes`, or a non-default `flags`
     /// override). The hint domain is
     /// `ops + flags + depends_on + supersedes + preconditions`, but the
-    /// `IrFlagsOverride`→`MigrationFlags` + `String`→`MigrationId` merge is a
+    /// `IrFlagsOverride`->`MigrationFlags` + `String`->`MigrationId` merge is a
     /// later wave, so the engine refuses fail-closed rather than compare a
     /// PARTIAL domain (which would both false-reject a spec-correct hint and
     /// false-accept tampering of the un-folded fields). Authoring those fields
@@ -251,7 +251,7 @@ pub fn ir_created_tables(ops: &[Op]) -> Vec<&str> {
 /// ownership-checkable, so it would let a migration drop another app's index by
 /// name). So by the time this function runs, every `DropIndex` reaching the
 /// ownership pass carries a `table` hint and IS ownership-checked. The `None` arm
-/// below is retained as defense-in-depth — if a future caller invokes the
+/// below is retained as defense-in-depth - if a future caller invokes the
 /// ownership pass without the validator, a bare-name `DropIndex` still finds no
 /// checkable target rather than silently passing as an owned op.
 #[must_use]
@@ -263,7 +263,7 @@ fn op_target_table(op: &Op) -> Option<&str> {
         | Op::DetachPartition { parent: of, .. }
         | Op::DropPartition { parent: of, .. } => Some(of),
         Op::SetTableOptions { table, .. } => Some(table),
-        // The ownership gate checks the EXISTING (old) table — a rename of a table
+        // The ownership gate checks the EXISTING (old) table - a rename of a table
         // the deploying app does not own is refused on the source name.
         Op::DropTable { table, .. }
         | Op::RenameTable { table, .. }
@@ -287,7 +287,7 @@ fn op_target_table(op: &Op) -> Option<&str> {
         | Op::Backfill { table, .. } => Some(table),
         Op::DropIndex { table, .. } => table.as_deref(),
         Op::Comment { target, .. } => target.touched_table(),
-        // VENDOR — table-scoped vendor ops (RLS/policy/trigger) are ownership-checked
+        // VENDOR - table-scoped vendor ops (RLS/policy/trigger) are ownership-checked
         // against their table; the database-/role-/schema-level vendor ops have no
         // table to check (they are operator-gated by the capability gate, not the
         // per-table ownership pass).
@@ -344,10 +344,10 @@ fn collect_target_tables<'a>(op: &'a Op, out: &mut Vec<&'a str>) {
     } = op
     {
         // A view READS from its FROM/JOIN source tables, so those source tables
-        // are the ownership-checkable targets — `op_target_table` returns `None`
+        // are the ownership-checkable targets - `op_target_table` returns `None`
         // for `CreateView` (the view NAME is a created object, not a touched
         // table). Without this, a confined creator could author a view SELECTing
-        // ANOTHER app's tables in the same permitted schema — a read-only
+        // ANOTHER app's tables in the same permitted schema - a read-only
         // cross-tenant disclosure the ownership gate otherwise closes. A source
         // table the deploying app does not own (or that is unregistered) fails
         // closed, exactly like any other targeted table.
@@ -364,10 +364,10 @@ fn collect_target_tables<'a>(op: &'a Op, out: &mut Vec<&'a str>) {
     }
 }
 
-/// IR-path per-table ownership enforcement — the IR mirror of the
+/// IR-path per-table ownership enforcement - the IR mirror of the
 /// declarative path's two-part ownership check (in `declarative.rs`).
 ///
-/// `registry` is the project's CURRENT table→owner map. This pass:
+/// `registry` is the project's CURRENT table->owner map. This pass:
 /// 1. First registers every `createTable`'s NEW table as owned by `deploying_app`
 ///    (a freshly declared table is owned by its declarer, exactly as the
 ///    declarative union assigns ownership to the declaring app), into a working
@@ -375,7 +375,7 @@ fn collect_target_tables<'a>(op: &'a Op, out: &mut Vec<&'a str>) {
 /// 2. Then, for EVERY op that targets a table, looks the table up in the
 ///    (augmented) registry and refuses the migration if the owner is not
 ///    `deploying_app`. **A table absent from the registry FAILS CLOSED**
-///    ([`IrLoadError::NotTableOwner`] with [`UNKNOWN_OWNER`]) — a DML/DDL op on a
+///    ([`IrLoadError::NotTableOwner`] with [`UNKNOWN_OWNER`]) - a DML/DDL op on a
 ///    never-declared table is refused, exactly as the declarative drop path
 ///    refuses an unknown-owner drop.
 ///
@@ -384,7 +384,7 @@ fn collect_target_tables<'a>(op: &'a Op, out: &mut Vec<&'a str>) {
 /// check, a DML/alter op that appears *positionally before* its `createTable` in
 /// the op list still passes ownership (the table is already pre-registered to the
 /// deploying app). This is deliberate: ownership is a WHO-MAY-TOUCH question, not
-/// an apply-ORDER-VALIDITY question — and it mirrors the declarative/snapshot
+/// an apply-ORDER-VALIDITY question - and it mirrors the declarative/snapshot
 /// path, whose set-semantics union has no op order at all. Apply-order
 /// correctness (you cannot INSERT into a table the same migration has not yet
 /// created at execution time) is the EXECUTOR's concern and surfaces there; it is
@@ -401,7 +401,7 @@ pub fn enforce_ir_ownership(
     // declarations (owned by the deploying app). A createTable for a table that
     // ALREADY has a different owner is still caught by the per-op check below
     // (we only insert when absent, so an existing owner is not silently
-    // overwritten — a createTable colliding with another app's table is refused).
+    // overwritten - a createTable colliding with another app's table is refused).
     let mut owners: BTreeMap<&str, &str> = registry
         .iter()
         .map(|(t, o)| (t.as_str(), o.as_str()))
@@ -462,15 +462,15 @@ pub fn enforce_ir_finite_timeouts(ir: &MigrationIr) -> Result<(), IrLoadError> {
 ///
 /// The hint domain (see the [`MigrationIr::checksum`] doc) is
 /// `ops + flags + depends_on + supersedes + preconditions`, with `owner_app = ""`
-/// (server-stamped and so unpredictable to the builder — excluded).
+/// (server-stamped and so unpredictable to the builder - excluded).
 ///
 /// This only folds the SUBSET it can compute faithfully: the op region (which
 /// fully determines the artifact's logical content) + preconditions + the
 /// dialect-neutral DEFAULT flags + EMPTY deps/supersedes. The
-/// [`IrFlagsOverride`](crate::ir::IrFlagsOverride)→[`MigrationFlags`] and
-/// `String`→`MigrationId` merges are a later wave, so this recompute is ONLY
+/// [`IrFlagsOverride`](crate::ir::IrFlagsOverride)->[`MigrationFlags`] and
+/// `String`->`MigrationId` merges are not implemented, so this recompute is ONLY
 /// valid for an IR whose `flags`/`depends_on`/`supersedes` are at their
-/// defaults — the caller MUST gate on that ([`hint_domain_uncomputable_field`])
+/// defaults - the caller MUST gate on that ([`hint_domain_uncomputable_field`])
 /// and refuse a hint over a wider domain rather than compare a partial one (a
 /// partial compare both false-rejects a spec-correct hint and false-accepts
 /// tampering of the un-folded fields). The result is what
@@ -494,7 +494,7 @@ pub fn recompute_hint_domain_checksum(ir: &MigrationIr) -> Checksum {
 }
 
 /// The **authoritative, dialect-neutral plan checksum** over a loaded
-/// [`MigrationIr`] — the drift anchor the deploy path journals.
+/// [`MigrationIr`] - the drift anchor the deploy path journals.
 ///
 /// This is `Checksum::of_ir` over every apply-relevant typed field: the canonical
 /// op list, the effective flag overrides, the server-stamped `owner_app`, exact
@@ -503,12 +503,12 @@ pub fn recompute_hint_domain_checksum(ir: &MigrationIr) -> Checksum {
 /// to its historical default-metadata domain and excludes `owner_app`.
 ///
 /// **Why this is the drift anchor and the rendered SQL is NOT.** The anchor is
-/// the checksum over the canonical op list — one plan checksum over the canonical
+/// the checksum over the canonical op list - one plan checksum over the canonical
 /// op list, not the rendered SQL. Because the op list
 /// is dialect-NEUTRAL, the SAME IR envelope re-deployed on PG or `SQLite` re-derives
-/// the SAME anchor — so a re-deploy detects drift against the logical artifact, not
-/// a PG-specific SQL spelling. Editing the authoring `.ts` changes the op list ⇒
-/// changes this checksum ⇒ the executor's net-applied drift gate aborts
+/// the SAME anchor - so a re-deploy detects drift against the logical artifact, not
+/// a PG-specific SQL spelling. Editing the authoring `.ts` changes the op list =>
+/// changes this checksum => the executor's net-applied drift gate aborts
 /// (`drift.rs` compares the journaled checksum to the lowered `Migration.checksum`,
 /// which the IR Lower stamps with THIS value - see
 /// `zero_migrate::render::lower::IrAuthor::lower_plan`).
@@ -563,14 +563,14 @@ pub fn authoritative_ir_checksum(ir: &MigrationIr) -> Checksum {
     )
 }
 
-/// Return the hint-domain field this engine build cannot yet fold for `ir`,
+/// Return the hint-domain field this engine build cannot fold for `ir`,
 /// or `None` when the hint domain IS fully computable (flags at default + no
 /// deps/supersedes). Used to fail closed on a hint over a not-yet-foldable
-/// domain (the `IrFlagsOverride`/`MigrationId` merges are a later wave).
+/// domain (the `IrFlagsOverride`/`MigrationId` merges are not implemented).
 ///
 /// Public so the build-time checksum fold (the JS builder's
 /// `typed_checksum`/`checksum_of_committed`) can gate on the SAME domain as the
-/// engine's load gate — refusing to anchor a partial checksum over an IR carrying
+/// engine's load gate - refusing to anchor a partial checksum over an IR carrying
 /// non-default flags/deps/supersedes rather than silently folding a partial domain
 /// the engine's load gate would later refuse.
 #[must_use]
@@ -607,7 +607,7 @@ pub fn hint_domain_uncomputable_field(ir: &MigrationIr) -> Option<(&'static str,
 /// ends up with a reverse that was explicitly disclaimed.
 ///
 /// The TypeScript recorder refuses this at authoring time. This gate exists
-/// because the engine must not depend on its only current caller being honest —
+/// because the engine must not depend on its only current caller being honest -
 /// any host can hand it an envelope.
 ///
 /// # Errors

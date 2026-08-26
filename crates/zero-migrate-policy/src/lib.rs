@@ -1,4 +1,4 @@
-//! `zero-migrate-policy` — the Policy Decision Point (PDP): the *mechanism* half
+//! `zero-migrate-policy` - the Policy Decision Point (PDP): the *mechanism* half
 //! of the zero-migrate policy system.
 //!
 //! This crate is a true LEAF: pure data + algebra, zero I/O, **no SQL deps**, no
@@ -9,8 +9,8 @@
 //!
 //! The first module is [`scope`]: the security-core primitive. `Scope { Nothing |
 //! All | Of{include, exclude} }` over one/two-segment identifier globs, with the
-//! full lattice — `normalize`, `⊑` (subset), `⊓` (meet), `⊔` (join), `∖`
-//! (difference) — verified EXHAUSTIVELY by a brute-force oracle
+//! full lattice - `normalize`, `subset` (containment), `meet`, `join` and
+//! `difference` - verified EXHAUSTIVELY by a brute-force oracle
 //! (`scope::oracle`, `#[cfg(test)]`) against a direct ground-truth matcher. The
 //! oracle is the correctness proof: where prose review of the glob algebra could
 //! not be trusted, the oracle-green code is authoritative.
@@ -20,15 +20,15 @@
 //! On top of the scope lattice the crate layers the policy *content model* and
 //! its strict loader:
 //!
-//! - [`knob`] — [`KnobDef`], [`KnobKey`], [`KnobKind`], [`KnobValue`], [`Polarity`],
+//! - [`knob`] - [`KnobDef`], [`KnobKey`], [`KnobKind`], [`KnobValue`], [`Polarity`],
 //!   [`Enforcement`], [`ObjectModel`], and the canonical byte encoding the registry
 //!   digest hashes.
-//! - [`registry`] — [`PolicyRegistry`]: an OPEN registry (engine builtins +
+//! - [`registry`] - [`PolicyRegistry`]: an OPEN registry (engine builtins +
 //!   consumer `with(...)` extensions) with an insertion-order-independent
 //!   sha256 [`digest`](PolicyRegistry::digest).
-//! - [`rule`] — [`Rule`] / [`RuleKind`] (the four scoped kinds), [`InjectSpec`],
+//! - [`rule`] - [`Rule`] / [`RuleKind`] (the four scoped kinds), [`InjectSpec`],
 //!   and the FIXED [`ValidatePredicate`] set.
-//! - [`document`] — [`PolicyDoc`] + the strict TOML/JSON loader with every
+//! - [`document`] - [`PolicyDoc`] + the strict TOML/JSON loader with every
 //!   load-time legality gate (`deny_unknown_fields`, registry-validated,
 //!   fail-closed, name-normalized).
 //!
@@ -36,25 +36,27 @@
 //!
 //! On top of the value order sits the SECURITY CROWN JEWEL:
 //!
-//! - [`value_order`] — the per-knob VALUE lattice (`⊑_value`/`⊔_value`/`⊓_value`),
-//!   derived from each [`knob::KnobKind`] so no facet-specific meet can drift.
-//! - [`compose`] — [`RootCharter`] (the only trust anchor), [`restrict`] (meet of two
-//!   trusted charters — associative, total), and the UNFORGEABLE [`EffectivePolicy`]
+//! - [`value_order`] - the per-knob VALUE lattice (the no-looser-than relation with
+//!   its join and meet), derived from each [`knob::KnobKind`] so no facet-specific
+//!   meet can drift.
+//! - [`compose`] - [`RootCharter`] (the only trust anchor), [`restrict`] (meet of two
+//!   trusted charters - associative, total), and the UNFORGEABLE [`EffectivePolicy`]
 //!   with its decision-query API
 //!   (`grants`/`obligations`/`injects_for`/`validates_for`/`is_injected_shape`). All
 //!   scope resolution lives here; the guard holds no `Scope`.
-//! - [`boundary`] — [`admit`] (untrusted-draft ingress: pointwise `draft ⊑ charter`
-//!   grants + union-up require/inject/validate + compose-time collision blame + the
+//! - [`boundary`] - [`admit`] (untrusted-draft ingress: grants pointwise no looser
+//!   than the charter + union-up require/inject/validate + compose-time collision blame + the
 //!   creatable-scope lint), the SOLE untrusted trust-boundary crossing, deliberately
 //!   apart from the trusted combinators.
 //! - [`mod@seal`] - [`SealedPolicy`]: an HMAC over the canonical resolved rule set (in
-//!   the sealed inject total order) ‖ registry digest ‖ `(dialect, matcher_version)`
-//!   ‖ `charter_version`, plus a nonce. [`SealedPolicy::verify`] HARD-FAILS on any
+//!   the sealed inject total order) concatenated with the registry digest, the
+//!   `(dialect, matcher_version)` pair and `charter_version`, plus a nonce.
+//!   [`SealedPolicy::verify`] HARD-FAILS on any
 //!   tamper or binding mismatch.
 //!
 //! The pointwise-grant admissibility check is proven by a brute-force COMPOSITION
 //! ORACLE (`tests/compose_oracle.rs`): `admit` is `Ok` IFF the draft is
-//! pointwise `⊑` the charter at every object and key. Where prose review of the
+//! pointwise no looser than the charter at every object and key. Where prose review of the
 //! escalation check could not be trusted, the oracle-green code is authoritative.
 
 pub mod boundary;

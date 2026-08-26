@@ -198,7 +198,7 @@ pub enum GuardProbe {
 }
 
 impl GuardProbe {
-    /// The effective schema this probe reads — the `snapshot_schema` argument the
+    /// The effective schema this probe reads - the `snapshot_schema` argument the
     /// executor passes so the catalog read targets the op's schema.
     #[must_use]
     pub fn schema(&self) -> &str {

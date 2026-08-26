@@ -2,13 +2,13 @@
 //!
 //! # What this is for
 //!
-//! The `Op` enum is closed — 56 variants, `deny_unknown_fields` — and that closedness is
+//! The `Op` enum is closed - a fixed variant set under `deny_unknown_fields` - and that closedness is
 //! load-bearing: it makes every `match` in the fold, the lower, validate and `op_support`
 //! total, and a `_ =>` arm is where fail-open lives.
 //!
 //! But a backend has knobs the closed set does not model, and today they arrive by being
 //! hand-added to THIS crate. `IndexStorageParams` USED TO hold `pages_per_range`
-//! (BRIN) and `fillfactor` — two PostgreSQL storage parameters, in the crate whose whole
+//! (BRIN) and `fillfactor` - two PostgreSQL storage parameters, in the crate whose whole
 //! purpose is to name no vendor. They survived every naming census because they are a
 //! FIELD, not a name.
 //!
@@ -17,7 +17,7 @@
 //!
 //! # Why the key carries its dialect
 //!
-//! An [`AttrKey`] is `<dialect>.<name>` — `postgres.fillfactor`, `mysql.row_format` —
+//! An [`AttrKey`] is `<dialect>.<name>` - `postgres.fillfactor`, `mysql.row_format` -
 //! parsed exactly like `KnobKey` (in `zero-migrate-policy`) parses a charter knob,
 //! because it is the same problem and the charter solved it first.
 //!
@@ -25,7 +25,7 @@
 //! `map<DialectId, map<name, value>>` does not:
 //!
 //! * **One map**, so one sort order and one canonical serialization for the checksum.
-//! * **A key is self-describing wherever it lands** — a refusal message, a drift row, a
+//! * **A key is self-describing wherever it lands** - a refusal message, a drift row, a
 //!   JSON diff. Nesting loses the dialect the moment the inner key is quoted alone.
 //! * **An unprefixed attribute is unrepresentable.** With nesting you can hold an inner
 //!   map and lose which outer key it came from; here the dialect is inside the name.
@@ -35,8 +35,8 @@
 //! It also makes the two "this key is not mine" cases distinguishable, which is the
 //! difference between a skip and a refusal:
 //!
-//! * `postgres.fillfactor` on a SQLite target — SQLite was never asked. SKIPPED.
-//! * `postgres.filfactor` on any target — PostgreSQL IS registered and does not declare
+//! * `postgres.fillfactor` on a SQLite target - SQLite was never asked. SKIPPED.
+//! * `postgres.filfactor` on any target - PostgreSQL IS registered and does not declare
 //!   that leaf. REFUSED.
 //!
 //! A nested carrier can express the first but not the second, because the typo is
@@ -47,7 +47,7 @@
 //! This module is the neutral VOCABULARY only: the key, the value carrier, and the map.
 //! It knows no dialect ids and no attribute names. Which keys exist, what shapes their
 //! values take and whether they survive a catalog round-trip are declared by each vendor
-//! crate through the backend contract — see `zero_migrate_backend::attribute`.
+//! crate through the backend contract - see `zero_migrate_backend::attribute`.
 //!
 //! Values are [`IrScalar`], not a new type: it already exists, is closed, is
 //! checksum-stable and normalizes non-canonical encodings, so an attribute cannot carry
@@ -64,13 +64,13 @@ use crate::ir::IrScalar;
 /// A namespaced attribute key: `<dialect>.<name>`.
 ///
 /// The namespace is a backend's [`DialectId`](crate::dialect::DialectId) and the leaf is
-/// that backend's own name for the knob. Neither is interpreted here — this type only
+/// that backend's own name for the knob. Neither is interpreted here - this type only
 /// guarantees the SHAPE, so that a key can always be split back into the pair.
 ///
 /// # Two constructors, and why the const one exists
 ///
 /// [`AttrKey::parse`] is the runtime door, taken by anything arriving from outside the
-/// process — a deserialized migration, a user's DSL call.
+/// process - a deserialized migration, a user's DSL call.
 ///
 /// [`AttrKey::from_static`] is a `const fn` for the DECLARATION side. A vendor crate
 /// declares its attribute vocabulary as a `static`, which is const-evaluated, so a
@@ -91,7 +91,7 @@ pub struct AttrKey(Cow<'static, str>);
 /// Why an attribute key was rejected. Structured, because it reaches a user.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttrKeyError {
-    /// Not exactly `namespace.name` — no dot, more than one, or an empty part.
+    /// Not exactly `namespace.name` - no dot, more than one, or an empty part.
     Malformed,
     /// A byte outside `[a-z0-9_]` in one of the two segments.
     IllegalChar,
@@ -118,7 +118,7 @@ impl AttrKey {
     /// Parse and validate `<dialect>.<name>`.
     ///
     /// Deliberately the same rule as
-    /// `KnobKey::parse` in `zero-migrate-policy` applies to charter keys —
+    /// `KnobKey::parse` in `zero-migrate-policy` applies to charter keys -
     /// one dot, both parts non-empty, `[a-z0-9_]` only. Not a shared implementation
     /// because that type lives in the policy crate, which this leaf does not depend on;
     /// the RULE is shared and this doc is the link between them.
@@ -150,7 +150,7 @@ impl AttrKey {
     /// a `static` is const-evaluated, a typo in a declared key fails the BUILD, points at
     /// the vendor's own source, and can never reach a user as a runtime refusal.
     ///
-    /// The rule enforced here is byte-for-byte the rule [`AttrKey::parse`] enforces — it
+    /// The rule enforced here is byte-for-byte the rule [`AttrKey::parse`] enforces - it
     /// is written twice because a `const fn` cannot call the iterator-and-closure form.
     /// That duplication is a real drift risk, so it is not left to inspection: a test
     /// runs BOTH constructors over one shared corpus and asserts they agree on every
@@ -167,7 +167,7 @@ impl AttrKey {
     /// assert_eq!(FILLFACTOR.dialect(), "postgres");
     /// ```
     ///
-    /// A malformed one does NOT — `error[E0080]: evaluation panicked`, pointing at the
+    /// A malformed one does NOT - `error[E0080]: evaluation panicked`, pointing at the
     /// declaring `static`:
     ///
     /// ```compile_fail
@@ -180,7 +180,7 @@ impl AttrKey {
     /// in it goes stale. This one was verified BY INVERSION against the real tree:
     /// appending the same `static` with a VALID key built clean, and with `"nodot"`
     /// produced exactly `evaluation of `attribute::SCRATCH_BAD` failed inside this call`.
-    /// The passing block above is the standing half of that inversion — if `from_static`
+    /// The passing block above is the standing half of that inversion - if `from_static`
     /// or `dialect` is renamed, it goes red instead of leaving the `compile_fail` to
     /// pass for the wrong reason.
     ///
@@ -224,7 +224,7 @@ impl AttrKey {
         &self.0
     }
 
-    /// The namespace — the id of the backend that owns this attribute.
+    /// The namespace - the id of the backend that owns this attribute.
     ///
     /// Returned as `&str` rather than a `DialectId` on purpose: this type promises only
     /// that the namespace is well-SHAPED. Whether any backend is registered under it is
@@ -236,7 +236,7 @@ impl AttrKey {
         dialect
     }
 
-    /// The leaf — the owning backend's own name for the knob.
+    /// The leaf - the owning backend's own name for the knob.
     #[must_use]
     pub fn name(&self) -> &str {
         let (_, name) = self.0.split_once('.').expect("parsed key holds one dot");
@@ -272,7 +272,7 @@ impl From<AttrKey> for String {
 ///
 /// Empty is the overwhelmingly common case and serializes away entirely
 /// (`skip_serializing_if`), so adding this field to an op does not change the wire form
-/// of any migration that carries no attributes — which is every migration authored before
+/// of any migration that carries no attributes - which is every migration authored before
 /// this existed.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
@@ -348,10 +348,10 @@ impl FromIterator<(AttrKey, IrScalar)> for Attributes {
 ///
 /// # Why the carrier is per-OP and not per-scope
 ///
-/// An earlier design keyed attributes by an `AttrScope` enum — `Table`, `Column`,
-/// `Index`, `Constraint` — with one wrapper per scope shared across every op at that
+/// An earlier design keyed attributes by an `AttrScope` enum - `Table`, `Column`,
+/// `Index`, `Constraint` - with one wrapper per scope shared across every op at that
 /// scope. That axis was an INVENTION: a second taxonomy shadowing the op set, which then
-/// had to be kept honest against it by hand. It was not kept honest — `AttrScope::Index`
+/// had to be kept honest against it by hand. It was not kept honest - `AttrScope::Index`
 /// shipped with no carrier at all, declarable and permanently unmatchable, and only a
 /// test written specially for the purpose caught it.
 ///
@@ -361,7 +361,7 @@ impl FromIterator<(AttrKey, IrScalar)> for Attributes {
 ///
 /// # What `OP` is, and why it is a string
 ///
-/// `OP` is the op's canonical wire kind — `"createTable"`, not a Rust path — because that
+/// `OP` is the op's canonical wire kind - `"createTable"`, not a Rust path - because that
 /// is the spelling the vocabulary, the exported artifact and the TypeScript generator all
 /// share. It is also the spelling `dialect-support.toml` uses for its 56 rows, which is
 /// what makes a declared op name CHECKABLE: a vendor that writes `"createTabel"` is
@@ -384,7 +384,7 @@ pub trait OpAttributes {
 /// are generated: a hand-copied one is free to differ in a way nothing checks. `OP` is the
 /// single line that varies, so it is the single thing the macro takes.
 ///
-/// Each is a TRANSPARENT wrapper — it serializes exactly as the bare map does, so it costs
+/// Each is a TRANSPARENT wrapper - it serializes exactly as the bare map does, so it costs
 /// nothing on the wire, and an empty one is skipped entirely by its field's
 /// `skip_serializing_if`.
 macro_rules! op_attributes {
@@ -435,7 +435,7 @@ macro_rules! op_attributes {
 }
 
 op_attributes! {
-    /// Attributes on `Op::CreateTable` — the table's own storage options.
+    /// Attributes on `Op::CreateTable` - the table's own storage options.
     CreateTableAttributes => "createTable"
 }
 
@@ -445,13 +445,13 @@ op_attributes! {
     /// A partition IS a table and takes its own storage options; PostgreSQL lets one
     /// override what its parent declared. Its own carrier rather than a shared
     /// table-scoped one, because "same knob" is a property of the KEY, not of a shared
-    /// Rust type — and a vendor may legitimately permit a knob on `createTable` and not
+    /// Rust type - and a vendor may legitimately permit a knob on `createTable` and not
     /// on `createPartition`.
     CreatePartitionAttributes => "createPartition"
 }
 
 op_attributes! {
-    /// Attributes on `Op::SetTableOptions` — how a table option is CHANGED after
+    /// Attributes on `Op::SetTableOptions` - how a table option is CHANGED after
     /// creation.
     ///
     /// Without this carrier a knob could be set at create and never altered, which is a
@@ -472,10 +472,10 @@ op_attributes! {
 }
 
 op_attributes! {
-    /// Attributes on `Op::AddColumn` — per-column vendor options such as PostgreSQL's
+    /// Attributes on `Op::AddColumn` - per-column vendor options such as PostgreSQL's
     /// `STORAGE` and `COMPRESSION`.
     ///
-    /// `Op::AddColumn` is FLAT — it does not embed an `IrColumn`, and its own doc explains
+    /// `Op::AddColumn` is FLAT - it does not embed an `IrColumn`, and its own doc explains
     /// that an added column deliberately has no `id_prefix` slot ("an added column is
     /// NEVER the system PK"), also omitting `unique`, `references` and `collation`. The
     /// carrier sits on the op because that is where the column's definition sits.
@@ -486,8 +486,8 @@ op_attributes! {
     /// Attributes on `Op::AddConstraint`.
     ///
     /// `IrConstraint` is `{name, kind}` and models no deferrability, so
-    /// `DEFERRABLE`/`INITIALLY DEFERRED` — which PostgreSQL and SQLite have and MySQL does
-    /// not — is a genuine vendor surface here rather than a duplicate of something already
+    /// `DEFERRABLE`/`INITIALLY DEFERRED` - which PostgreSQL and SQLite have and MySQL does
+    /// not - is a genuine vendor surface here rather than a duplicate of something already
     /// carried.
     AddConstraintAttributes => "addConstraint"
 }
@@ -528,8 +528,8 @@ mod tests {
 
     /// THE ONE PLACE a new key-rule case gets added.
     ///
-    /// `AttrKey` has two constructors enforcing one rule — `parse` for runtime input and
-    /// the `const fn` `from_static` for vendor declarations — and a `const fn` cannot
+    /// `AttrKey` has two constructors enforcing one rule - `parse` for runtime input and
+    /// the `const fn` `from_static` for vendor declarations - and a `const fn` cannot
     /// call the iterator-and-closure form the first is written in. So the rule IS
     /// implemented twice, and the guard against them drifting is that every case below
     /// is run through BOTH.

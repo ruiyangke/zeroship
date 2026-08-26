@@ -1,4 +1,4 @@
-//! The mask-sentinel CODEC — the contract between the schema layer
+//! The mask-sentinel CODEC - the contract between the schema layer
 //! (which *writes* the sentinel into DDL) and the data plane (which
 //! *reads* it back at runtime to drive the mask read-pass).
 //!
@@ -29,7 +29,7 @@ pub const DEFAULT_ENC_SENTINEL_PREFIX: &str = "zero-migrate:enc:";
 /// The standalone-default mask-sentinel prefix. See [`DEFAULT_ENC_SENTINEL_PREFIX`].
 pub const DEFAULT_MASK_SENTINEL_PREFIX: &str = "zero-migrate:mask:";
 
-/// The persisted enc/mask sentinel prefixes — an engine-config knob so a host
+/// The persisted enc/mask sentinel prefixes - an engine-config knob so a host
 /// can inject a legacy writer's prefix while the standalone default carries this
 /// crate's own brand. Both codec directions
 /// ([`build_encryption_sentinel_with`] / [`parse_encryption_sentinel_with`] and
@@ -107,11 +107,11 @@ fn wrapped_type_from_sql(s: &str) -> Option<WrappedType> {
 /// ENCRYPTED column itself, so PG (which discards the inline `/* zero-migrate:enc */`
 /// comment at parse time) can still recover the metadata from `pg_description`.
 /// On SQLite the inline form (`query::encryption_sentinel_for_field`, which
-/// wraps this same `zero-migrate:enc:…` body in `/* */`) survives in `sqlite_master.sql`.
+/// wraps this same `zero-migrate:enc:...` body in `/* */`) survives in `sqlite_master.sql`.
 ///
 /// The two emitters share the SAME `zero-migrate:enc:<mode>:<keyId>:<wraps>` body, so the
 /// metadata a `generate`d migration carries is byte-identical to the one
-/// `registerModel` writes — the verify-bricking guard. The parser side is
+/// `registerModel` writes - the verify-bricking guard. The parser side is
 /// [`parse_encryption_sentinel`].
 #[must_use]
 pub fn build_encryption_sentinel(meta: &EncryptionMeta) -> String {
@@ -137,12 +137,12 @@ pub fn build_encryption_sentinel_with(prefix: &str, meta: &EncryptionMeta) -> St
 /// Accepts either the bare comment body (`zero-migrate:enc:randomised:default:string`, the
 /// PG `pg_description` form) or the inline-comment form wrapping it
 /// (`/* zero-migrate:enc:randomised:default:string */`, the SQLite `sqlite_master.sql`
-/// form) — the leading/trailing `/* */` and whitespace are stripped first, so
+/// form) - the leading/trailing `/* */` and whitespace are stripped first, so
 /// both introspectors feed the SAME parser.
 ///
 /// Returns `Err(MaskSentinelError)` (the shared sentinel-error type) carrying an
-/// `enc_sentinel_malformed` discriminator for any parse failure — wrong prefix,
-/// wrong arity, unknown mode/wraps, empty keyId — so a hand-edited or
+/// `enc_sentinel_malformed` discriminator for any parse failure - wrong prefix,
+/// wrong arity, unknown mode/wraps, empty keyId - so a hand-edited or
 /// future-version sentinel produces a typed error rather than silently routing
 /// through a default codec (the fail-closed contract).
 pub fn parse_encryption_sentinel(s: &str) -> Result<EncryptionMeta, MaskSentinelError> {
@@ -155,7 +155,7 @@ pub fn parse_encryption_sentinel_with(
     prefix: &str,
     s: &str,
 ) -> Result<EncryptionMeta, MaskSentinelError> {
-    // Strip an optional inline `/* … */` wrapper (the SQLite form) so both
+    // Strip an optional inline `/* ... */` wrapper (the SQLite form) so both
     // the PG comment body and the SQLite inline comment parse identically.
     let trimmed = s.trim();
     let body = trimmed
@@ -227,11 +227,11 @@ pub fn build_mask_sentinel_with(
     )
 }
 
-/// Parse a `zero-migrate:mask:kind=…,classification=…`
+/// Parse a `zero-migrate:mask:kind=...,classification=...`
 /// sentinel string back into a `(MaskKind, Classification)` pair.
 ///
 /// Returns `Err(MaskSentinelError)` whose `.message` carries the
-/// `mask_sentinel_malformed` code-discriminator for any parse failure —
+/// `mask_sentinel_malformed` code-discriminator for any parse failure -
 /// unknown kind, unknown classification, missing field, extra trailing
 /// junk. plugin-db's `From<MaskSentinelError> for DbError` lifts it back
 /// into `DbError::Internal { message }` verbatim, so the typed error the
@@ -290,19 +290,19 @@ mod tests {
     use super::*;
 
     // JUSTIFIED grep-gate exception: this is the ONE place the retired `zsenc:` /
-    // `__zsmask:` prefixes appear in code — deliberately, to prove the
+    // `__zsmask:` prefixes appear in code - deliberately, to prove the
     // `SentinelPrefix` knob lets a host inject a legacy writer's prefix so the
     // build and parse sides round-trip against a foreign brand. The STANDALONE
     // DEFAULT (asserted in every other test here) is the `zero-migrate:` brand;
     // the legacy strings live only inside this compat test, never in a default.
     #[test]
     fn sentinel_prefix_knob_accepts_an_injected_legacy_prefix() {
-        // Default carries this crate's own brand — no foreign string in the default.
+        // Default carries this crate's own brand - no foreign string in the default.
         assert_eq!(SentinelPrefix::default().enc, "zero-migrate:enc:");
         assert_eq!(SentinelPrefix::default().mask, "zero-migrate:mask:");
 
-        // A host injecting a legacy writer's prefix round-trips build↔parse.
-        let legacy_enc = "zsenc:"; // legacy interop prefix — compat-only
+        // A host injecting a legacy writer's prefix round-trips from build to parse.
+        let legacy_enc = "zsenc:"; // legacy interop prefix - compat-only
         let meta = EncryptionMeta {
             mode: EncryptionMode::Randomised,
             key_id: "default".to_string(),
@@ -317,7 +317,7 @@ mod tests {
         // The DEFAULT parser rejects the foreign prefix (fail-closed).
         assert!(parse_encryption_sentinel(&s).is_err());
 
-        let legacy_mask = "__zsmask:"; // legacy interop prefix — compat-only
+        let legacy_mask = "__zsmask:"; // legacy interop prefix - compat-only
         let m = build_mask_sentinel_with(legacy_mask, MaskKind::Last4, Classification::Spi);
         assert_eq!(m, "__zsmask:kind=last4,classification=spi");
         assert_eq!(
@@ -441,7 +441,7 @@ mod tests {
     #[test]
     fn parse_encryption_sentinel_accepts_inline_comment_form() {
         // The SQLite-surviving inline form parses to the same meta as the bare
-        // PG comment body — both introspectors feed one parser.
+        // PG comment body - both introspectors feed one parser.
         let bare = parse_encryption_sentinel("zero-migrate:enc:randomised:default:string").unwrap();
         let inline =
             parse_encryption_sentinel("/* zero-migrate:enc:randomised:default:string */").unwrap();

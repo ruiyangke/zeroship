@@ -24,7 +24,7 @@ pub enum Disposition {
 }
 
 impl Disposition {
-    /// Whether this disposition admits the token on its backend — everything
+    /// Whether this disposition admits the token on its backend - everything
     /// except an explicit `Unsupported` refusal renders and validates.
     #[must_use]
     pub const fn is_supported(self) -> bool {
@@ -71,8 +71,8 @@ pub trait ValidationPolicy: std::fmt::Debug + Sync {
     // spelling of a fact this contract already carried twice: `DdlEmitter`'s four
     // required partition methods answer it by `Option`, and the render layer asked
     // it as `dialect != POSTGRES`. It is now one question in the vocabulary both
-    // layers share — `Capability::PartitionRelationDdl`, off the backend's own
-    // descriptor — and the shipping census in
+    // layers share - `Capability::PartitionRelationDdl`, off the backend's own
+    // descriptor - and the shipping census in
     // `crates/zero-migrate/tests/dialect_matrix/vendor_registry_owns_shipping_descriptors.rs`
     // holds that answer against the emitters, which this method never did.
     /// A fail-closed backend refusal before the operator-capability gate.
@@ -104,8 +104,8 @@ pub trait ValidationPolicy: std::fmt::Debug + Sync {
 
     /// Vet a `ViewQuery::Raw` body in THIS backend's grammar. `None` admits it.
     ///
-    /// The engine holds the authoring envelope — which op, which dialect, which
-    /// error code — but it must not hold a parser. Until this method existed it
+    /// The engine holds the authoring envelope - which op, which dialect, which
+    /// error code - but it must not hold a parser. Until this method existed it
     /// did: `validate_raw_view_body_sql` called `pg_query::parse` directly, so a
     /// MySQL or SQLite raw view body was vetted against PostgreSQL's grammar and a
     /// backtick- or bracket-quoted identifier was refused on its own dialect with a
@@ -119,7 +119,7 @@ pub trait ValidationPolicy: std::fmt::Debug + Sync {
     /// Like every other method here, this one has no default body. A backend with
     /// no parser must WRITE `None`, which is a visible grant of trust attributable
     /// to that vendor, rather than inherit one by omission. Returning `None` means
-    /// the body is admitted with no shape gate and no deny-list scan at all — see
+    /// the body is admitted with no shape gate and no deny-list scan at all - see
     /// each vendor's impl for what that specifically costs there.
     fn raw_view_body_refusal(
         &self,

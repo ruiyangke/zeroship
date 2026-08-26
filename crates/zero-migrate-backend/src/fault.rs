@@ -2,9 +2,9 @@
 //!
 //! The migration executor is two-phase + idempotent by design: a crash at any
 //! point must leave the journal in a state a resume can converge from. To PROVE
-//! that at *sub-step* granularity — mid-step, after a DDL/data statement but
+//! that at *sub-step* granularity - mid-step, after a DDL/data statement but
 //! before/after its journal row, between an online rename's E1/E2/E3 phases,
-//! mid-backfill-batch — the executor consults this seam at named boundaries and
+//! mid-backfill-batch - the executor consults this seam at named boundaries and
 //! aborts the in-flight step (returning [`crate::executor::ApplyError`]) when a fault is armed for
 //! that boundary. Aborting mid-transaction is behaviorally identical to a process
 //! crash there: the open transaction rolls back, exactly as it would on a real
@@ -158,19 +158,19 @@ pub fn trip(point: &str) -> Result<(), crate::executor::ApplyError> {
 /// and the executor agree on the exact set (the journal-state-machine model).
 pub mod points {
     /// In `apply_dml_transactional`: AFTER the DML statement ran, BEFORE the
-    /// journal INSERT (a crash here must leave NO journal row — the txn rolls
+    /// journal INSERT (a crash here must leave NO journal row - the txn rolls
     /// back the data write too).
     pub const DML_AFTER_STMT_BEFORE_JOURNAL: &str = "dml.after_stmt.before_journal";
     /// In `apply_dml_transactional`: AFTER the journal INSERT, BEFORE COMMIT (a
-    /// crash here must ALSO leave no row — the INSERT is inside the uncommitted
+    /// crash here must ALSO leave no row - the INSERT is inside the uncommitted
     /// txn).
     pub const DML_AFTER_JOURNAL_BEFORE_COMMIT: &str = "dml.after_journal.before_commit";
     /// In the backfill loop: AFTER a batch's UPDATE COMMITted, before the next
     /// batch (a crash here leaves the cursor partway; resume continues the
-    /// remaining rows — the WHERE-filter idempotency).
+    /// remaining rows - the WHERE-filter idempotency).
     pub const BACKFILL_MID_BATCHES: &str = "backfill.mid_batches";
     /// In the online expand: BETWEEN the E1+E2 apply and the E3 backfill (a crash
-    /// here leaves E1/E2 journaled but E3 not — resume re-runs the backfill).
+    /// here leaves E1/E2 journaled but E3 not - resume re-runs the backfill).
     pub const EXPAND_BETWEEN_E2_AND_BACKFILL: &str = "expand.between_e2_and_backfill";
     /// In the apply of ONE migration: AFTER its `up` ran, BEFORE the `completed`
     /// journal row lands.

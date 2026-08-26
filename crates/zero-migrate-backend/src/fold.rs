@@ -123,7 +123,7 @@ pub trait CatalogFoldPolicy: std::fmt::Debug + Sync {
     ) -> Option<SnapshotProvenanceStrength>;
 
     /// The name this backend's catalog gives `table`'s IMPLICIT PRIMARY KEY
-    /// relation — the constraint and index a PK clause materialises without the
+    /// relation - the constraint and index a PK clause materialises without the
     /// author ever spelling a name.
     ///
     /// There is no shared convention to inherit, and the three shipping backends
@@ -136,7 +136,7 @@ pub trait CatalogFoldPolicy: std::fmt::Debug + Sync {
     /// This is the SUPPLIER for [`Self::allocate_implicit_relation_name`], not a
     /// second copy of it. This answers what the relation is CALLED; that one takes a
     /// name and dodges collisions in a namespace. They have different lifetimes
-    /// too — the allocator runs once against the modeled relation set at fold time,
+    /// too - the allocator runs once against the modeled relation set at fold time,
     /// while this answer is asked per index by the differ, which holds no namespace
     /// and must recognise the primary key whether or not a collision was dodged.
     fn implicit_primary_key_name(&self, table: &str) -> String;

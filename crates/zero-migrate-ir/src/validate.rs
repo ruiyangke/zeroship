@@ -1,33 +1,33 @@
 //! The STRUCTURAL expression-AST validator + the structured-error envelope.
 //!
 //! The closed expression AST ([`crate::expr::Expr`]) is **constructed in JS and
-//! serialized to IR — never parsed from text**. So validation is a
+//! serialized to IR - never parsed from text**. So validation is a
 //! purely STRUCTURAL allow-list walk over the deserialized tree:
 //!
-//! - **(a)** every node is in the allow-listed set — the serde deserializer
+//! - **(a)** every node is in the allow-listed set - the serde deserializer
 //!   already rejects an unknown node *tag* (`UNSUPPORTED { kind: "expr" }` at
 //!   load); this walk additionally rejects the structural shapes that *are*
 //!   well-typed nodes but out of policy (an out-of-envelope `FnSynth(splitPart)`,
 //!   a non-portable cast target).
-//! - **(b)** `c.fn.splitPart` has dialect-neutral grammar — `delim` is a non-empty
+//! - **(b)** `c.fn.splitPart` has dialect-neutral grammar - `delim` is a non-empty
 //!   string `Literal`, `n` is a positive integer `Literal`, and the column arg is
 //!   a `ColRef` / in-AST sub-expression. Each registered backend owns any narrower
 //!   portability envelope required by its lowering.
-//! - **(c)** every `ColRef` resolves to a column on the ENCLOSING target table —
+//! - **(c)** every `ColRef` resolves to a column on the ENCLOSING target table -
 //!   an apply/render-time check scoped to the single target table of the
 //!   enclosing op. A cross-table reference is impossible by
 //!   construction (`c` is single-table-scoped), and any reference to a
 //!   column not on the target table is a hard error (injection defense + the
 //!   capability boundary).
-//! - **(d)** a `Cast` target is a portable type — guaranteed by the closed
+//! - **(d)** a `Cast` target is a portable type - guaranteed by the closed
 //!   [`crate::expr::CastTarget`] enum, so this is structurally total.
 //!
 //! There is **NO lexer, NO Pratt/precedence parser, NO `libpg_query`, NO
-//! differential fuzzer** — the parser-drift risk is dissolved, not mitigated. The
+//! differential fuzzer** - the parser-drift risk is dissolved, not mitigated. The
 //! Rust validator here is the authoritative STRUCTURAL gate (checks (a), (b),
-//! (d) — node allow-list, `FnSynth` arity/envelope, portable cast target); the
+//! (d) - node allow-list, `FnSynth` arity/envelope, portable cast target); the
 //! JS side runs an optional best-effort structural hint over the SAME schemars
-//! schema. Rule (c) — `ColRef` resolution against the live target table — runs
+//! schema. Rule (c) - `ColRef` resolution against the live target table - runs
 //! at the apply/render seam (an apply-time check): at IR load the
 //! live column set is generally unknown for the DML ops, `setColumnType`,
 //! `addConstraint` and `createIndex`, so those positions validate
@@ -47,21 +47,21 @@ use crate::dialect::DialectId;
 use crate::expr::{AggFunc, CaseBranch, Duration, Expr, ExtractField, ScalarFn, SynthFn};
 use crate::ir::AlterPrimaryKeyAction;
 
-// ── Canonical authoring-time error codes ────────────────────────────────────
+// -- Canonical authoring-time error codes ------------------------------------
 // The taxonomy new validators add their code to. The op-vs-expr distinction is
 // carried as the `kind` field on `UNSUPPORTED`, not two top-level codes.
 
-/// An op or expression node the engine cannot render on EITHER dialect — carries
+/// An op or expression node the engine cannot render on EITHER dialect - carries
 /// `kind: "op" | "expr"`. The validator emits the `"expr"` kind.
 pub const CODE_UNSUPPORTED: &str = "UNSUPPORTED";
 /// An expression that is *expressible* but out of its portable envelope (e.g. an
-/// out-of-envelope `c.fn.splitPart`) — kept distinct from `UNSUPPORTED` because
+/// out-of-envelope `c.fn.splitPart`) - kept distinct from `UNSUPPORTED` because
 /// the remedy differs ("stay in-envelope, or give the expression its own
 /// `dialect({ ... })` leg and accept the narrower reach that pins").
 pub const CODE_EXPR_NOT_PORTABLE: &str = "EXPR_NOT_PORTABLE";
 // There is deliberately no code here for "this artifact's dialect reach is one
-// backend and the target is another". That question is not an authoring one — a plan
-// reaching a single dialect is perfectly valid to author — so it has no place in a
+// backend and the target is another". That question is not an authoring one - a plan
+// reaching a single dialect is perfectly valid to author - so it has no place in a
 // taxonomy of authoring-time codes. It is answered at APPLY, by the typed
 // `zero_migrate::engine::EngineError::DialectScopeRefused`, which carries both
 // `DialectId`s as data.
@@ -71,14 +71,14 @@ pub const CODE_EXPR_NOT_PORTABLE: &str = "EXPR_NOT_PORTABLE";
 // on a facet no author can write, since the reach is derived from the op list. The
 // vendor-name censuses could not see it either: `PgOnly` lowercases to `pgonly`, which
 // contains no product needle. Do not reintroduce it.
-/// An op-function called outside an active recorder — emitted JS-side.
+/// An op-function called outside an active recorder - emitted JS-side.
 pub const CODE_OP_OUTSIDE_RECORDER: &str = "OP_OUTSIDE_RECORDER";
 /// An op is structurally valid JSON but carries an internally inconsistent shape.
 pub const CODE_OP_INVALID: &str = "OP_INVALID";
 /// An op naming a `schema` the active [`SchemaScope`](crate::policy::SchemaScope)
 /// does not permit. The Confined creator profile pins the project schema:
 /// an explicit `schema != project_schema` is REFUSED at validate-time, fail-closed,
-/// BEFORE lower — additional and EARLIER than the migrator-role 42501 + the
+/// BEFORE lower - additional and EARLIER than the migrator-role 42501 + the
 /// parse-guard cross-schema denial (which stay unchanged). The Platform profile
 /// permits only its allow-list. The friendly remedy is "drop the qualifier or name
 /// the project schema".
@@ -86,7 +86,7 @@ pub const CODE_CROSS_SCHEMA: &str = "CROSS_SCHEMA";
 /// A `schema` qualifier that is not a safe bare SQL identifier:
 /// empty, not alpha/`_`-leading, or carrying a non-`[A-Za-z0-9_]` char. The schema
 /// is an author-controlled identifier the engine double-quotes; this rejects an
-/// injection-shaped value (`"; DROP …`, embedded quote) at validate-time, before
+/// injection-shaped value (`"; DROP ...`, embedded quote) at validate-time, before
 /// it can reach the render seam.
 pub const CODE_INVALID_SCHEMA_IDENT: &str = "INVALID_SCHEMA_IDENT";
 /// An existence guard whose DIRECTION is illegal for the op variant:
@@ -95,9 +95,9 @@ pub const CODE_INVALID_SCHEMA_IDENT: &str = "INVALID_SCHEMA_IDENT";
 pub const CODE_GUARD_DIRECTION: &str = "GUARD_DIRECTION";
 /// A legacy internal platform `id_prefix` that is not a valid base62-UUIDv7 ID
 /// prefix (charset / length) or is in the reserved-prefix
-/// deny-list (`usr`, …). The IR's threat model is a hand-crafted IR envelope, so a
+/// deny-list (`usr`, ...). The IR's threat model is a hand-crafted IR envelope, so a
 /// malformed/reserved prefix is a fail-closed VALIDATE error, not a render-time
-/// surprise (it would otherwise mint ids colliding with platform `usr_…` ids).
+/// surprise (it would otherwise mint ids colliding with platform `usr_...` ids).
 pub const CODE_INVALID_ID_PREFIX: &str = "INVALID_ID_PREFIX";
 /// A TypeID value format carries a prefix that violates the TypeID 0.3 prefix
 /// grammar or its 63-byte bound.
@@ -123,12 +123,12 @@ pub const CODE_AGGREGATE_IN_SCALAR_CONTEXT: &str = "AGGREGATE_IN_SCALAR_CONTEXT"
 /// A sequence carries a semantically invalid option (`increment = 0`,
 /// `cache < 1`, or `minValue > maxValue`).
 pub const CODE_SEQUENCE_OPTION_INVALID: &str = "SEQUENCE_OPTION_INVALID";
-/// **VENDOR (`zero-migrate`)** — a privileged op (role/grant/RLS/
+/// **VENDOR (`zero-migrate`)** - a privileged op (role/grant/RLS/
 /// policy/trigger/function/extension/schema/`raw`) whose required
 /// [`VendorCapability`](crate::capability::VendorCapability) is NOT granted by the
 /// active capability set. The Confined creator/AI posture
 /// grants NO vendor capability, so EVERY such op is refused fail-closed at
-/// validate, BEFORE lower — the first gate. The redundant lower gate
+/// validate, BEFORE lower - the first gate. The redundant lower gate
 /// (the rendered SQL hits the Confined deny-list) means a future refactor
 /// that drops this gate still fails closed.
 ///
@@ -363,7 +363,7 @@ mod alter_primary_key_tests {
     }
 }
 
-/// The `UNSUPPORTED { kind }` discriminant — an internal op-vs-expr
+/// The `UNSUPPORTED { kind }` discriminant - an internal op-vs-expr
 /// distinction carried as a field, not two top-level codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnsupportedKind {
@@ -557,10 +557,10 @@ pub trait ExprDialectValidatorSet: Sync {
 ///
 /// Carries the target table name + its valid column set. The caller (the
 /// validator / `IrAuthor` render seam) supplies the columns it resolved for the
-/// enclosing op's table (from the op's own `createTable` columns, or — at
-/// apply/render time — from the live table). When `columns` is `None`, the
+/// enclosing op's table (from the op's own `createTable` columns, or - at
+/// apply/render time - from the live table). When `columns` is `None`, the
 /// `ColRef`-resolution check (c) is SKIPPED (the caller could not resolve the
-/// live schema yet — structural checks (a),(b),(d) still run).
+/// live schema yet - structural checks (a),(b),(d) still run).
 #[derive(Debug, Clone)]
 pub struct TargetScope<'a> {
     /// The enclosing op's single target table.
@@ -627,7 +627,7 @@ impl<'a> TargetScope<'a> {
 ///
 /// # Errors
 /// Returns an [`AuthoringError`] for an out-of-envelope `splitPart` (b), a
-/// `ColRef` to a column not on the target table (c), or — defensively — a node
+/// `ColRef` to a column not on the target table (c), or - defensively - a node
 /// the structural policy rejects (a). Allow-listed in-policy nodes validate.
 pub fn validate_expr(
     expr: &Expr,
@@ -880,7 +880,7 @@ pub fn validate_no_aggregate_expr_context(
     })
 }
 
-// ── The structural expression-AST walker (policy-free) ─────────────────────
+// -- The structural expression-AST walker (policy-free) ---------------------
 
 /// The maximum expression-AST nesting [`validate_expr`]'s walker will descend
 /// before refusing the tree as a [`CODE_UNSUPPORTED`] `DoS` guard. The bound is
@@ -1004,7 +1004,7 @@ impl Ctx<'_> {
             // two members are PG-only VENDOR scalars:
             // `current_setting` / `current_user` render as PG built-ins with no
             // faithful SQLite/MySQL form, so they must be gated off the portable
-            // core exactly like the other PG-only expr nodes below — otherwise a
+            // core exactly like the other PG-only expr nodes below - otherwise a
             // portable op carrying them validates clean and breaks at apply.
             Expr::FnCall { r#fn, args } => {
                 self.validate_feature(ExprDialectFeature::ScalarFunction(*r#fn))?;
@@ -1019,7 +1019,7 @@ impl Ctx<'_> {
             Expr::Cast { operand, .. } => self.walk_depth(operand, d),
             // Portable predicate nodes: between/like/distinctFrom render on
             // ALL three dialects (the engine owns distinctFrom's per-dialect
-            // lowering), so there is NO dialect gate — just recurse structurally.
+            // lowering), so there is NO dialect gate - just recurse structurally.
             Expr::Between { operand, low, high } => {
                 self.walk_depth(operand, d)?;
                 self.walk_depth(low, d)?;
@@ -1069,18 +1069,18 @@ impl Ctx<'_> {
         }
     }
 
-    /// Validate an [`Expr::Dialectal`] — the
+    /// Validate an [`Expr::Dialectal`] - the
     /// `dialect({ [backendId]: value })` Layer-2 escape. Three checks,
     /// in order:
     ///
-    /// 1. **At least one leg** — a legless `dialect({})` is malformed on EVERY
+    /// 1. **At least one leg** - a legless `dialect({})` is malformed on EVERY
     ///    target (dialect-neutral [`CODE_UNSUPPORTED`]).
     /// 2. **Recurse into every present leg** structurally, regardless of the
-    ///    target dialect — an unresolved `ColRef` / malformed nested node in ANY
+    ///    target dialect - an unresolved `ColRef` / malformed nested node in ANY
     ///    leg must reject (dialect-neutral, mirroring `check_synth`). Runs before
     ///    the scope check so a precise per-node error surfaces rather than being
     ///    masked by the coverage refusal.
-    /// 3. **Scope check, per-TARGET** — the target must have its OWN leg; else
+    /// 3. **Scope check, per-TARGET** - the target must have its OWN leg; else
     ///    refuse fail-closed with
     ///    [`CODE_EXPR_NOT_PORTABLE`]. This is per-target: a `dialect()` carrying
     ///    only a postgres leg is accepted targeting PostgreSQL, refused targeting
@@ -1178,15 +1178,15 @@ impl Ctx<'_> {
 
     /// Rule (b): the `FnSynth` arity/shape backstop. Each synth helper has a
     /// pinned argument shape; an out-of-shape call is rejected STRUCTURALLY here
-    /// — independent of the (per-dialect) render seam — so a hostile/buggy
-    /// IR envelope carrying e.g. `FnSynth{fn:now, args:[…]}` or a zero-arg
+    /// - independent of the (per-dialect) render seam - so a hostile/buggy
+    /// IR envelope carrying e.g. `FnSynth{fn:now, args:[...]}` or a zero-arg
     /// `concatWs` cannot pass the structural gate and defer the blow-up to
     /// rendering. After the shape check each variant recurses into its args.
     fn check_synth(&self, f: SynthFn, args: &[Expr], depth: u32) -> Result<(), AuthoringError> {
         match f {
             SynthFn::SplitPart => {
-                // (1) ARITY first — the grammar/envelope checks index args[1]/args[2].
-                //     Wrong arity is malformed on BOTH dialects → CODE_UNSUPPORTED.
+                // (1) ARITY first - the grammar/envelope checks index args[1]/args[2].
+                //     Wrong arity is malformed on BOTH dialects -> CODE_UNSUPPORTED.
                 if args.len() != 3 {
                     return Err(self.malformed_synth_err(format!(
                         "c.fn.splitPart takes exactly (column, delim, n); got {} args",
@@ -1225,8 +1225,8 @@ impl Ctx<'_> {
                 }
                 Ok(())
             }
-            // concatWs(delim, value, …): a delimiter + at least one value. Fewer
-            // than two args is a genuinely-malformed join on EITHER dialect →
+            // concatWs(delim, value, ...): a delimiter + at least one value. Fewer
+            // than two args is a genuinely-malformed join on EITHER dialect ->
             // unconditional CODE_UNSUPPORTED.
             SynthFn::ConcatWs => {
                 if args.len() < 2 {
@@ -1240,9 +1240,9 @@ impl Ctx<'_> {
                 // a `substr(fold, length(delim)+1)` head-trim that strips the leading
                 // delimiter (`render_concat_ws`). That head-trim is only correct when
                 // the delimiter is a FIXED Literal; a computed/runtime delimiter (a
-                // ColRef, a nested synth, …) would make the prefix length unknowable
+                // ColRef, a nested synth, ...) would make the prefix length unknowable
                 // and silently corrupt the result. PG's `concat_ws` takes any
-                // expression delimiter, so — exactly like the splitPart delim gate —
+                // expression delimiter, so - exactly like the splitPart delim gate -
                 // a non-literal delimiter loads on PG and is a HARD reject only on a
                 // SQLite target. Mirror the splitPart structural gate so a hand-crafted
                 // IR cannot slip a non-literal delimiter past and defer the corruption
@@ -1258,7 +1258,7 @@ impl Ctx<'_> {
         }
     }
 
-    /// A genuinely-MALFORMED synth-helper call — a shape broken on BOTH dialects
+    /// A genuinely-MALFORMED synth-helper call - a shape broken on BOTH dialects
     /// (`now(arg)`, `concatWs` with <2 args, `splitPart`
     /// with the wrong arity). This is NOT a portability boundary: there is no
     /// dialect on which it renders, so it is an unconditional
@@ -1281,12 +1281,12 @@ impl Ctx<'_> {
     }
 
     /// A splitPart **grammar** reject: the call's argument SHAPE is broken on EVERY
-    /// dialect — the delimiter is not a string literal, or the part index is not a
+    /// dialect - the delimiter is not a string literal, or the part index is not a
     /// positive integer literal. Unlike the out-of-envelope rejection a backend
     /// returns for [`ExprDialectFeature::SplitPart`] (the
     /// PG-renderable-but-SQLite-out-of-envelope verdict, SQLite-only), the renderer
     /// enforces this same grammar fail-closed on BOTH dialects, so the validator
-    /// rejects it regardless of `target_dialect` — and stamps the *current* target so
+    /// rejects it regardless of `target_dialect` - and stamps the *current* target so
     /// the payload's `dialect` is faithful to the deploy. `CODE_EXPR_NOT_PORTABLE` (the
     /// structured envelope), the AI loop's primary structured-feedback signal.
     fn split_part_grammar_err(&self, reason: String) -> AuthoringError {
@@ -1445,7 +1445,7 @@ impl Ctx<'_> {
     }
 
     fn check_split_part(&self, args: &[Expr]) -> Result<(), AuthoringError> {
-        // Shape: splitPart(col, delim, n) — exactly three args. The WRONG ARITY is
+        // Shape: splitPart(col, delim, n) - exactly three args. The WRONG ARITY is
         // broken on BOTH dialects (`split_part` is ternary on PG too), so it is an
         // unconditional CODE_UNSUPPORTED, NOT a dialect-gated envelope reject.
         // The caller (`check_synth`) already checks arity before the arg
@@ -1457,7 +1457,7 @@ impl Ctx<'_> {
                 args.len()
             )));
         }
-        // ── GRAMMAR (dialect-NEUTRAL) — enforced on EVERY target, BEFORE the
+        // -- GRAMMAR (dialect-NEUTRAL) - enforced on EVERY target, BEFORE the
         //    dialect early-return. The renderer (dml.rs render_split_part) requires a
         //    STRING-LITERAL delim and a POSITIVE-INTEGER-LITERAL n fail-closed on BOTH
         //    dialects, so a grammar-broken node is renderable on neither; the

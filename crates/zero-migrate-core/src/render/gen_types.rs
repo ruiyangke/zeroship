@@ -1,8 +1,8 @@
-//! **`gen-types` — the schema-artifact emitter.** Emit a typed authoring-schema
+//! **`gen-types` - the schema-artifact emitter.** Emit a typed authoring-schema
 //! artifact FROM the schema source (op.* migrations OR a declared
 //! `CollectionDescriptor` set). The runtime projection consumes the fold-and-recover
-//! seam - `FoldedSchema::project_field_defs`, which replaced the `fold_to_field_defs`
-//! walker in step 4 consumer 3 of `docs/proposals/single-fold-and-effects.md` and reads
+//! seam - `FoldedSchema::project_field_defs`, which replaced the deleted
+//! `fold_to_field_defs` walker (`docs/proposals/single-fold-and-effects.md`) and reads
 //! the same value the other two projections are read from; the TypeScript projection
 //! replays the richer IR so physical types, defaults, value formats, and keys are
 //! not collapsed by the runtime `FieldDef` vocabulary.
@@ -15,12 +15,12 @@
 //!
 //! Two projections are produced from ONE snapshot, in ONE pass ([`render_artifacts`]):
 //!
-//! - **`schema.runtime.json`** — the v1 `RuntimeSchemaDescriptor`:
+//! - **`schema.runtime.json`** - the v1 `RuntimeSchemaDescriptor`:
 //!   `{ version: 1, collections: { [collection]: { fields, options, indexes }}}`.
 //!   The `fields` map is snake_case columns, including exactly the fields injected
 //!   by the caller's effective policy, as the fold recovers them. The runtime
 //!   validates this shape.
-//! - **`env.db.ts`** — a GENERATED, passive `CreateTableArgs` schema map using the
+//! - **`env.db.ts`** - a GENERATED, passive `CreateTableArgs` schema map using the
 //!   current `zero-migrate` authoring builders. It contains no lifecycle calls;
 //!   `satisfies Record<string, CreateTableArgs>` makes `tsc` validate every emitted
 //!   column/constraint against the real public package.
@@ -33,12 +33,12 @@
 //! portable: the fold selects `Op::Dialectal` legs, so one history legitimately
 //! yields different column sets on Postgres and MySQL.
 //!
-//! [`check_artifacts`] DIFFS already-generated artifacts against the committed ones —
+//! [`check_artifacts`] DIFFS already-generated artifacts against the committed ones -
 //! the CI drift gate, no DB write and no IO. It does NOT regenerate: it takes a
 //! `&GeneratedArtifacts` the CALLER produced and delegates to [`diff_artifacts`]. The
 //! distinction is not pedantry. This line used to say "regenerates", and a reviewer
 //! reasoning about what a change to the renderer could reach repeated it and had to be
-//! corrected by reading the signature — which is the cost of a doc that describes a
+//! corrected by reading the signature - which is the cost of a doc that describes a
 //! function's job rather than its inputs.
 //!
 //! Alongside them, [`render_schema_export`] returns the same two artifacts PLUS the
@@ -101,7 +101,7 @@ pub enum GenTypesError {
 /// irrelevant to the recovered FieldDef map but required by the seam).
 pub const DEFAULT_PROJECT_SCHEMA: &str = "public";
 
-/// The two rendered artifacts (in-memory) — written by a host / diffed by
+/// The two rendered artifacts (in-memory) - written by a host / diffed by
 /// [`check_artifacts`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneratedArtifacts {
@@ -213,7 +213,7 @@ pub(crate) fn derived_unique_index_name(vendors: VendorSet, table: &str, field: 
 
 /// Render the v1 runtime descriptor from an ALREADY-FOLDED `FieldDef` map.
 ///
-/// Takes the map rather than the op stream since step 4 consumer 3: the map is
+/// Takes the map rather than the op stream: the map is
 /// `FoldedSchema::project_field_defs`, read off the same fold the other two projections
 /// come from, so this function no longer folds anything and cannot fail.
 fn render_runtime_descriptor_v1(
@@ -284,11 +284,11 @@ pub fn render_artifacts(
 /// [`check_artifacts`] keeps taking exactly the value it takes today.
 #[derive(Debug, Clone)]
 pub struct SchemaExport {
-    /// The two artifact strings — byte-identical to what [`render_artifacts`] returns.
+    /// The two artifact strings - byte-identical to what [`render_artifacts`] returns.
     pub artifacts: GeneratedArtifacts,
     /// The folded schema as TYPED descriptors, keyed by collection name.
     ///
-    /// This is `FoldedSchema::project_collection_descriptors` — the same recovery
+    /// This is `FoldedSchema::project_collection_descriptors` - the same recovery
     /// `runtime_json` is serialized from, stopped before the flattening. It is NOT
     /// enough to reconstruct `env_db_ts`; that projection replays the richer authoring
     /// IR for exactly the facets this vocabulary collapses.
@@ -329,16 +329,16 @@ pub fn render_schema_export(
     )
     .map_err(|error| GenTypesError::Fold(crate::FoldError::Render(error.to_string())))?;
     let ops = resolved.ops.as_slice();
-    // Step 4 of `docs/proposals/single-fold-and-effects.md` section G, consumers 1, 2
-    // and 3: EVERY value both artifacts are rendered from is a PROJECTION of ONE
-    // traversal, not a private replay of the op stream. `runtime_metadata_from_ops`,
-    // `authoring_tables_from_ops` and `fold_to_field_defs` are all gone.
+    // Per `docs/proposals/single-fold-and-effects.md` section G: EVERY value both
+    // artifacts are rendered from is a PROJECTION of ONE traversal, not a private
+    // replay of the op stream. `runtime_metadata_from_ops`, `authoring_tables_from_ops`
+    // and `fold_to_field_defs` are all gone.
     //
-    // Consumer 3 changed no refusal. `fold_to_field_defs` ran `fold_ops` itself as its
-    // fail-closed gate and `single_fold::fold` runs the same catalog rules, so the two
-    // refusal sets are equal — measured over 702 prefix/dialect pairs, of which 486 were
-    // answered by both and 216 refused by both, with none on which one refused and the
-    // other did not. Pinned as a biconditional by
+    // Retiring the `FieldDef` walker changed no refusal. `fold_to_field_defs` ran
+    // `fold_ops` itself as its fail-closed gate and `single_fold::fold` runs the same
+    // catalog rules, so the two refusal sets are equal - measured over every
+    // prefix/dialect pair in the corpus, with none on which one refused and the other
+    // did not. Pinned as a biconditional by
     // `tests/gen_types_field_defs_from_the_fold.rs`.
     //
     // "By construction" no longer holds as the REASON, and the change that broke it is
@@ -363,14 +363,14 @@ pub fn render_schema_export(
     let collections = folded.project_collection_descriptors(vendors);
     let field_defs = crate::render::fold::single_fold::field_defs_from_collections(&collections);
 
-    // (a) RuntimeSchemaDescriptor v1 — fields plus runtime-visible collection
+    // (a) RuntimeSchemaDescriptor v1 - fields plus runtime-visible collection
     // options and plain indexes.
     let runtime_value = render_runtime_descriptor_v1(&field_defs, &metadata);
     let mut runtime_json =
         serde_json::to_string_pretty(&runtime_value).expect("serialize FieldDef map");
     runtime_json.push('\n');
 
-    // (b) env.db.ts — reconstructed current-authoring-API schema.
+    // (b) env.db.ts - reconstructed current-authoring-API schema.
     let env_db_ts = render_env_db_ts(vendors, &authoring_tables, &metadata);
 
     Ok(SchemaExport {
@@ -384,9 +384,9 @@ pub fn render_schema_export(
 
 /// Render both artifacts from a DECLARED `CollectionDescriptor` set (the MANUAL
 /// source). This turns the descriptors into `createTable` ops via
-/// [`crate::descriptors_to_create_ops`] — which resolves each descriptor's
+/// [`crate::descriptors_to_create_ops`] - which resolves each descriptor's
 /// table shape under the supplied `effective` policy (injecting the confined
-/// system columns/indexes/PK the caller's charter declares) — and then routes
+/// system columns/indexes/PK the caller's charter declares) - and then routes
 /// through the SAME [`render_artifacts`] tail. So the manual and generated paths
 /// are byte-identical for equivalent schemas, PROVIDED both are driven by an
 /// `EffectivePolicy` that injects the same shape (the generated path resolves the
@@ -442,7 +442,7 @@ pub fn render_schema_export_from_descriptors(
 /// declaration order and the exact public-authoring facets the TypeScript emitter
 /// needs. `render_env_db_ts` is its only reader.
 ///
-/// Since step 4 consumer 2 this is a PROJECTION TARGET, not a walker's accumulator:
+/// This is a PROJECTION TARGET, not a walker's accumulator:
 /// `FoldedSchema::project_authoring_tables` produces it and
 /// `authoring_tables_from_ops` - the private replay that used to - is deleted.
 /// `AuthoredState::advance` owns the op semantics, so the dialect that selects an
@@ -1553,7 +1553,7 @@ pub struct CheckDiff {
 /// file as a [`GenTypesError::Drift`].
 ///
 /// This is DB-free and IO-free (the caller reads the committed files and passes
-/// their bytes) — the pure in-memory diff the CI gate runs.
+/// their bytes) - the pure in-memory diff the CI gate runs.
 ///
 /// # Errors
 /// [`GenTypesError::Drift`] on the first drifted file.
@@ -1572,7 +1572,7 @@ pub fn check_artifacts(
 }
 
 /// Like [`check_artifacts`] but returns the structured diff (or `None` when clean)
-/// rather than an error — for a caller that wants to inspect the drift.
+/// rather than an error - for a caller that wants to inspect the drift.
 #[must_use]
 pub fn diff_artifacts(
     generated: &GeneratedArtifacts,
@@ -2132,8 +2132,8 @@ mod tests {
 // The differential corpus over the four op-stream answers -- an in-crate test
 // module because the items it drives are crate-private: `AuthoringTable` and
 // `RuntimeCollectionMetadata` here, `single_fold::fold` next door. It was
-// `authoring_tables_from_ops` and `runtime_metadata_from_ops` until step 4 of
-// `docs/proposals/single-fold-and-effects.md` deleted both. The alternative to a
+// `authoring_tables_from_ops` and `runtime_metadata_from_ops` until both were deleted
+// (`docs/proposals/single-fold-and-effects.md`). The alternative to a
 // child module is widening a production item so a test can reach it.
 #[cfg(test)]
 mod differential_corpus;

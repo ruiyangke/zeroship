@@ -1,5 +1,5 @@
-//! The RATCHET on the owner's governing rule — *the core should be neutral, this is
-//! the hard limit* — applied to the CONTRACT crate, which is the one place the rule
+//! The RATCHET on the owner's governing rule - *the core should be neutral, this is
+//! the hard limit* - applied to the CONTRACT crate, which is the one place the rule
 //! had never been measured.
 //!
 //! # Why this file exists, and it is not a hypothetical
@@ -11,7 +11,7 @@
 //! `zero-migrate-backend`, and the cost of that gap was measured rather than guessed:
 //! the brief that commissioned the neutrality pass this file lands with recorded
 //! **28** code-level vendor names in this crate, taken by hand. A non-comment sweep
-//! found **72**. The 44 it missed were not obscure — they included a `POSTGRES`
+//! found **72**. The 44 it missed were not obscure - they included a `POSTGRES`
 //! comparison deciding a security posture, a version-floor table for one server on a
 //! neutral enum, and four references to a `DialectScope::PgOnly` variant that had
 //! been deleted, one of them inside a message an operator could be shown.
@@ -26,13 +26,13 @@
 //! A vendor's product name, or an identifier prefixed with one, appearing in CODE.
 //! `is_code` strips whole-line comments and the trailing half of a line comment
 //! first, for the reason its siblings state at length: this crate's prose is dense
-//! with vendor names ON PURPOSE — a doc that says WHICH engine a shared normal form
+//! with vendor names ON PURPOSE - a doc that says WHICH engine a shared normal form
 //! encodes, or which server answered what when a refusal was measured, is the
 //! valuable part and must not be deleted to green a census. The MEASURED effect of
 //! the filter on this crate is a drop from 801 raw occurrences to the handful below.
 //!
 //! Prose is not a name. A `#[error]` STRING is, because it is a value this crate
-//! emits at whatever target reached the arm — and it is where three of the worst
+//! emits at whatever target reached the arm - and it is where three of the worst
 //! instances lived.
 //!
 //! # The floors, because a scan over a DISCOVERED set fails OPEN
@@ -61,7 +61,7 @@ const VENDOR_NEEDLES: &[&str] = &["mysql", "sqlite", "postgres", "pgsql", "pg_",
 /// The ratchet: which files in this crate may name a vendor in code, and EXACTLY how
 /// many times.
 ///
-/// One more is a red, and one FEWER is also a red — a count that silently drifts down
+/// One more is a red, and one FEWER is also a red - a count that silently drifts down
 /// is a count nobody is maintaining. A file NOT listed here may not name a vendor at
 /// all. Lowering an entry is the point of this file and is expected; RAISING one, or
 /// adding a file, is the thing it exists to make loud.
@@ -103,8 +103,8 @@ const SRC_FILE_FLOOR: usize = 32;
 /// The NEEDLE-LIVENESS floor: matches the identical matcher must find in a crate
 /// where vendor names are the whole point.
 ///
-/// Change `VENDOR_NEEDLES` to something that no longer matches — a typo, a dropped
-/// underscore, a case slip — and the walk above still visits every file, still reads
+/// Change `VENDOR_NEEDLES` to something that no longer matches - a typo, a dropped
+/// underscore, a case slip - and the walk above still visits every file, still reads
 /// every line, and still reports zero violations, because it finds zero of anything.
 /// A census with no positive control cannot tell "clean" from "blind".
 ///

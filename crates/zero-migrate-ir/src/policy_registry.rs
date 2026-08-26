@@ -1,29 +1,29 @@
-//! The zero-migrate ENGINE BUILTIN policy registry + the statement-class → knob-key
+//! The zero-migrate ENGINE BUILTIN policy registry + the statement-class -> knob-key
 //! map.
 //!
 //! `zero-migrate-policy` ships the PDP *mechanism* (the knob/rule/document model,
 //! the composition algebra, the unforgeable
 //! [`EffectivePolicy`](zero_migrate_policy::EffectivePolicy)). It is content-free
 //! by design. THIS module is the engine's *content*: it declares zero-migrate's
-//! knobs — the vendor capabilities as grant keys, the op-timeout upper bounds, the
-//! index/table-rewrite postures, and the data-security obligations — as a builtin
+//! knobs - the vendor capabilities as grant keys, the op-timeout upper bounds, the
+//! index/table-rewrite postures, and the data-security obligations - as a builtin
 //! [`PolicyRegistry`], and maps the guard's statement classes onto those keys.
 //!
 //! # The six knob DOMAINS
 //!
 //! One axis is the namespace: the DOMAIN the knob governs (what it protects), never a
-//! dialect or a category/polarity bucket. Everything else — polarity, kind, object
-//! model, enforcement, default, inherit — is a declared [`KnobDef`] field.
+//! dialect or a category/polarity bucket. Everything else - polarity, kind, object
+//! model, enforcement, default, inherit - is a declared [`KnobDef`] field.
 //!
-//! - **`sql`** — the raw-text escape hatch.
-//! - **`schema`** — structural DDL (tables, schemas, columns, partitions, renames).
-//! - **`access`** — access control (roles, grants, RLS, policies).
-//! - **`code`** — programmable / installed objects (functions, matviews, extensions).
-//! - **`runtime`** — execution & resource behavior (timeouts, index creation, rewrite).
-//! - **`safety`** — data protection (limits AND obligations; polarity is the field).
+//! - **`sql`** - the raw-text escape hatch.
+//! - **`schema`** - structural DDL (tables, schemas, columns, partitions, renames).
+//! - **`access`** - access control (roles, grants, RLS, policies).
+//! - **`code`** - programmable / installed objects (functions, matviews, extensions).
+//! - **`runtime`** - execution & resource behavior (timeouts, index creation, rewrite).
+//! - **`safety`** - data protection (limits AND obligations; polarity is the field).
 //!
 //! Two of the old operator-posture toggles do NOT live here. "Skip the static guard
-//! belt" was a host/root POSTURE rather than a composable per-app grant — the single
+//! belt" was a host/root POSTURE rather than a composable per-app grant - the single
 //! most dangerous switch, quarantined OUT of the composable registry, and since
 //! removed outright: no config can select it. The raw-island role-needle relaxation is
 //! an INTERNAL guard vendor-lower rule, not an operator-authorable knob; it survives,
@@ -40,12 +40,12 @@
 //!
 //! Each knob's [`ObjectModel`] mirrors the granularity at which today's guard makes
 //! the decision:
-//! - **Global** — `access.role`/`access.grant`/`code.extension`/`code.function` (+ the
+//! - **Global** - `access.role`/`access.grant`/`code.extension`/`code.function` (+ the
 //!   other whole-DB vendor caps): today's guard reads a single `allow_*` bit with no
 //!   object attribution, so the grant is database-global.
-//! - **PerSchema** — `schema.create_schema`/`schema.cross_schema`: schema creation /
+//! - **PerSchema** - `schema.create_schema`/`schema.cross_schema`: schema creation /
 //!   reference is attributed to the schema.
-//! - **PerTable** — `access.rls`/`access.policy`: RLS enable/force + row-security
+//! - **PerTable** - `access.rls`/`access.policy`: RLS enable/force + row-security
 //!   policies are attributed to the table they protect.
 //!
 //! # Polarities
@@ -53,8 +53,9 @@
 //! Vendor capabilities + op upper bounds + the index/table-rewrite postures are
 //! `Grant` (compose DOWN, deny-by-default). The `safety.require_rls`/
 //! `safety.no_hard_delete` obligations are `Require` (compose UP, un-droppable).
-//! `safety.destructive_ops` is a rank-ordered `Grant` (forbid ⊑ warn ⊑ allow — the
-//! tighter posture is the default).
+//! `safety.destructive_ops` is a rank-ordered `Grant` over `forbid`, `warn` and
+//! `allow`, each no more restrictive than the next - and the tighter posture is the
+//! default.
 //!
 //! # Enforcement, and the knobs the engine does not implement
 //!
@@ -98,7 +99,7 @@ use crate::capability::VendorCapability;
 /// an `EffectivePolicy` by hand.
 ///
 /// It lives HERE, beside the registry it composes against, rather than in the
-/// engine, because it needs only that registry plus the PDP mechanism — and a
+/// engine, because it needs only that registry plus the PDP mechanism - and a
 /// BACKEND crate sits below the engine and so could never call it there. A vendor
 /// crate that needs a real composed policy for its tests would otherwise have to
 /// hand-roll a second implementation of a security-critical composition, which is
@@ -146,11 +147,11 @@ fn grant_only_draft_toml(charter_toml: &str) -> Result<String, String> {
         .map_err(|e| format!("grant-only policy draft failed to serialize: {e}"))
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// Knob-key constants — the stable identifiers the guard/validator query by.
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
+// Knob-key constants - the stable identifiers the guard/validator query by.
+// ==============================================================================
 
-// ── sql — the raw-text escape hatch ─────────────────────────────────────────────
+// -- sql - the raw-text escape hatch ---------------------------------------------
 
 /// The gated raw-statement escape (`raw`) (object-scoped Bool grant; still
 /// deny-list-guarded). Object set = all referenced objects (II.2.5).
@@ -158,26 +159,26 @@ pub const KEY_SQL_RAW: &str = "sql.raw";
 /// The gated raw view-body SELECT escape (Global Bool grant).
 pub const KEY_SQL_RAW_VIEW_BODY: &str = "sql.raw_view_body";
 
-// ── schema — structural DDL ─────────────────────────────────────────────────────
+// -- schema - structural DDL -----------------------------------------------------
 
 /// Namespace-authority: may CREATE a table matching this scope (PerTable Bool
 /// grant, default-deny). The per-op anchor of the II.2.6a creation-gating: an
 /// object comes into existence ONLY where this grants (structured `createTable`
 /// AND a classified raw `CREATE TABLE` both check it). The compose-time
-/// `creatable ⊑ mandatory-inject` lint lives in the policy crate; the guard
+/// creatable-within-mandatory-inject lint lives in the policy crate; the guard
 /// enforces the per-op grant.
 pub const KEY_SCHEMA_CREATE_TABLE: &str = "schema.create_table";
 /// `CREATE SCHEMA` (PerSchema Bool grant). Absorbs the former Postgres-spelled and
 /// engine-neutral schema-create capabilities into one engine-neutral key.
 pub const KEY_SCHEMA_CREATE_SCHEMA: &str = "schema.create_schema";
-/// Namespace-authority: may name/move a table INTO this scope — the TARGET of a
+/// Namespace-authority: may name/move a table INTO this scope - the TARGET of a
 /// `RENAME` / `SET SCHEMA` / create-as (PerTable Bool grant, default-deny,
 /// II.2.6a). Closes the rename-TOCTOU: a cross-scope move needs this grant on the
-/// target scope. (The namespace-authority CHECK — rename-into-inject-scope — stays a
+/// target scope. (The namespace-authority CHECK - rename-into-inject-scope - stays a
 /// guard rule.)
 pub const KEY_SCHEMA_RENAME: &str = "schema.rename";
 /// Which schemas this migration may reference (PerSchema Bool grant, default-deny)
-/// — the capability-model replacement for the schema-scope confinement. A reference
+/// - the capability-model replacement for the schema-scope confinement. A reference
 /// to schema `s` is admitted iff `grants(schema.cross_schema, s)` is `Bool(true)`; the
 /// project schema(s) a confined/platform posture owns are granted here, everything
 /// else is a `CrossSchema` violation. Object-scoped so the grant can name exactly
@@ -188,12 +189,12 @@ pub const KEY_SCHEMA_PARTITION: &str = "schema.partition";
 /// Namespace-authority: may `ALTER`/`DROP`/`RENAME` an INJECTED shape element
 /// (column, pinned PK, or index) of a table (PerTable Bool grant, default-deny,
 /// II.2.6b). Injected shape is the operator's floor and immutable by default; only
-/// this grant waves the injected-shape-immutability denial. **`inherit = false`** —
+/// this grant waves the injected-shape-immutability denial. **`inherit = false`** -
 /// this is a POWER GRANT: a SILENT creator draft must NOT inherit "override the
 /// platform's injected columns"; it gets the default (deny) unless it asks explicitly.
 pub const KEY_SCHEMA_ALTER_INJECTED: &str = "schema.alter_injected";
 
-// ── access — access control ─────────────────────────────────────────────────────
+// -- access - access control -----------------------------------------------------
 
 /// `CREATE/ALTER/DROP ROLE` / `DROP OWNED BY` (Global Bool grant). SUPERUSER stays a
 /// hard-deny regardless of grant.
@@ -202,12 +203,12 @@ pub const KEY_ACCESS_ROLE: &str = "access.role";
 pub const KEY_ACCESS_GRANT: &str = "access.grant";
 /// RLS `ENABLE/FORCE/DISABLE/NO FORCE` (PerTable Bool grant).
 pub const KEY_ACCESS_RLS: &str = "access.rls";
-/// `CREATE/DROP POLICY` — row-security policy (PerTable Bool grant).
+/// `CREATE/DROP POLICY` - row-security policy (PerTable Bool grant).
 pub const KEY_ACCESS_POLICY: &str = "access.policy";
 
-// ── code — programmable / installed objects ─────────────────────────────────────
+// -- code - programmable / installed objects -------------------------------------
 
-/// The extension name allowlist (Global **StrSet** grant) — the `StrSet` value
+/// The extension name allowlist (Global **StrSet** grant) - the `StrSet` value
 /// carries the permitted extension names, and it decides `CREATE` and `DROP` alike:
 /// the guard matches the name the statement spells against this list in BOTH
 /// directions, so a charter permitting one extension has no authority over another.
@@ -219,7 +220,7 @@ pub const KEY_CODE_FUNCTION: &str = "code.function";
 /// `CREATE/DROP TRIGGER` (PerTable Bool grant). Object-scoped like `access.policy`
 /// and `access.rls`, and for the same reason: a trigger is attached to one table, so
 /// "may hang triggers on the staging tables" is a statement this grant must be able
-/// to make. Unlike its `code.*` neighbours the knob is not one product's — every
+/// to make. Unlike its `code.*` neighbours the knob is not one product's - every
 /// registered backend renders triggers, so the grant governs AUTHORITY rather than
 /// which dialects the artifact reaches.
 pub const KEY_CODE_TRIGGER: &str = "code.trigger";
@@ -227,12 +228,12 @@ pub const KEY_CODE_TRIGGER: &str = "code.trigger";
 /// backend declares `Capability::MaterializedView`; it is not one product's knob.
 pub const KEY_CODE_MATERIALIZED_VIEW: &str = "code.materialized_view";
 
-// ── runtime — execution & resource behavior ─────────────────────────────────────
+// -- runtime - execution & resource behavior -------------------------------------
 //
 // Every knob in this domain is `Enforcement::DeclaredOnly`: no execution path applies
 // any of them, so each may be stated at its default and nowhere above it.
 
-/// Per-op `lock_timeout` upper bound in ms (UintCharter, hard floor 1 — the
+/// Per-op `lock_timeout` upper bound in ms (UintCharter, hard floor 1 - the
 /// no-indefinite-lock invariant, II.5). **`DeclaredOnly`** - no execution path sets a
 /// lock timeout from this knob, so a charter raising it is refused at load.
 pub const KEY_RUNTIME_LOCK_TIMEOUT_MS: &str = "runtime.lock_timeout_ms";
@@ -240,18 +241,21 @@ pub const KEY_RUNTIME_LOCK_TIMEOUT_MS: &str = "runtime.lock_timeout_ms";
 /// **`DeclaredOnly`** - no execution path sets a statement timeout from this knob, so
 /// a charter raising it is refused at load.
 pub const KEY_RUNTIME_STATEMENT_TIMEOUT_MS: &str = "runtime.statement_timeout_ms";
-/// Index-creation posture: `forbid` ⊑ `warn` ⊑ `allow` (OrderedEnum grant).
+/// Index-creation posture over `forbid`, `warn` and `allow`, each no more
+/// restrictive than the next (OrderedEnum grant).
 /// **`DeclaredOnly`** - no guard or executor path gates index creation on it, so a
 /// charter loosening it is refused at load.
 pub const KEY_RUNTIME_INDEX_CREATION: &str = "runtime.index_creation";
-/// Table-rewrite posture: `forbid` ⊑ `warn` ⊑ `allow` (OrderedEnum grant).
+/// Table-rewrite posture over `forbid`, `warn` and `allow`, each no more
+/// restrictive than the next (OrderedEnum grant).
 /// **`DeclaredOnly`** - no guard or executor path gates a table rewrite on it, so a
 /// charter loosening it is refused at load.
 pub const KEY_RUNTIME_TABLE_REWRITE: &str = "runtime.table_rewrite";
 
-// ── safety — data protection (limits AND obligations) ───────────────────────────
+// -- safety - data protection (limits AND obligations) ---------------------------
 
-/// Data-security destructive posture: `forbid` ⊑ `warn` ⊑ `allow` (OrderedEnum grant).
+/// Data-security destructive posture over `forbid`, `warn` and `allow`, each no
+/// more restrictive than the next (OrderedEnum grant).
 pub const KEY_SAFETY_DESTRUCTIVE_OPS: &str = "safety.destructive_ops";
 /// Data-security: every created table must end RLS-enabled (Require Bool obligation).
 pub const KEY_SAFETY_REQUIRE_RLS: &str = "safety.require_rls";
@@ -260,29 +264,31 @@ pub const KEY_SAFETY_REQUIRE_RLS: &str = "safety.require_rls";
 /// it is refused at load rather than sealed into a policy that advertises it. The
 /// enforced neighbour is `safety.destructive_ops`, which the guard does read.
 pub const KEY_SAFETY_NO_HARD_DELETE: &str = "safety.no_hard_delete";
-/// Data-security approval OBLIGATION: `never` ⊑ `on_destructive` ⊑ `always`
-/// (OrderedEnum, `Require` polarity — composes UP, un-lowerable). This is a SEALED
+/// Data-security approval OBLIGATION over `never`, `on_destructive` and `always`,
+/// each obliging at least as much as the one before it
+/// (OrderedEnum, `Require` polarity - composes UP, un-lowerable). This is a SEALED
 /// obligation the engine does not enforce but a HOST does: it is
 /// `Enforcement::HostEnforced`, so the engine's own guard/apply never gate on it, YET
-/// — unlike a `DeclaredOnly` knob — it MAY be sealed at a non-default value (M-2,
+/// - unlike a `DeclaredOnly` knob - it MAY be sealed at a non-default value (M-2,
 /// II.6). The HOST (`migrated`) reads it via
 /// [`crate::policy_approval::migration_requires_approval`] and enforces approval as a
-/// state machine — the engine `apply` stays dumb. Object-scoped like every other
+/// state machine - the engine `apply` stays dumb. Object-scoped like every other
 /// knob (the level resolves per target object; the host ORs across a migration's ops).
 pub const KEY_SAFETY_REQUIRE_APPROVAL: &str = "safety.require_approval";
 
-/// The tightest→loosest variant order shared by the posture OrderedEnum knobs.
+/// The tightest->loosest variant order shared by the posture OrderedEnum knobs.
 const POSTURE_VARIANTS: &[&str] = &["forbid", "warn", "allow"];
 
-/// The tightest→loosest variant order for the `safety.require_approval` obligation:
-/// `never` ⊑ `on_destructive` ⊑ `always`. `never` is the tightest (no obligation);
+/// The tightest->loosest variant order for the `safety.require_approval` obligation:
+/// `never`, then `on_destructive`, then `always`. `never` is the tightest (no
+/// obligation);
 /// composition UNIONS up toward `always` (the operator raises, the creator cannot
 /// lower). This is the value order the OrderedEnum kind imposes.
 pub const REQUIRE_APPROVAL_VARIANTS: &[&str] = &["never", "on_destructive", "always"];
 
-// ══════════════════════════════════════════════════════════════════════════════
-// VendorCapability → KnobKey
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
+// VendorCapability -> KnobKey
+// ==============================================================================
 
 /// The knob key each closed [`VendorCapability`] gates on. This reproduces today's
 /// gate: the guard reads `caps.grants(cap)`; the PDP path reads `grants(key, object)`
@@ -305,7 +311,7 @@ pub const fn knob_key_for_capability(cap: VendorCapability) -> &'static str {
     }
 }
 
-/// The parsed [`KnobKey`] for a capability (never fails — the key literals are
+/// The parsed [`KnobKey`] for a capability (never fails - the key literals are
 /// well-formed; `expect` is a compile-checked invariant covered by a unit test).
 #[must_use]
 pub fn capability_knob_key(cap: VendorCapability) -> KnobKey {
@@ -313,9 +319,9 @@ pub fn capability_knob_key(cap: VendorCapability) -> KnobKey {
         .expect("builtin capability knob keys are well-formed")
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 // The builtin registry
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 
 /// A Global/PerSchema/PerTable `Grant`-polarity Bool knob (deny-by-default).
 fn bool_grant(
@@ -353,7 +359,7 @@ fn bool_require(key: &str, object_model: ObjectModel, docs: &str) -> KnobDef {
 }
 
 /// A `UintCharter` grant (a monotone ms upper bound; `hard_floor = 1` forbids the
-/// indefinite-lock value 0). Default is the loosest legal upper bound — but an
+/// indefinite-lock value 0). Default is the loosest legal upper bound - but an
 /// upper-bound knob's DEFAULT must itself be the tightest value composition allows, and for a
 /// UintCharter the tightest is the hard floor. We default to `1` (the floor).
 fn uint_charter(key: &str, docs: &str) -> KnobDef {
@@ -370,8 +376,9 @@ fn uint_charter(key: &str, docs: &str) -> KnobDef {
     }
 }
 
-/// A rank-ordered `forbid ⊑ warn ⊑ allow` posture grant. Default is `forbid` (the
-/// tightest variant — the deny-by-default the value order requires).
+/// A rank-ordered posture grant over `forbid`, `warn` and `allow`, each no more
+/// restrictive than the next. Default is `forbid` (the
+/// tightest variant - the deny-by-default the value order requires).
 fn posture_grant(key: &str, docs: &str) -> KnobDef {
     KnobDef {
         key: KnobKey::parse(key).expect("builtin knob key well-formed"),
@@ -410,14 +417,14 @@ fn declared_only(def: KnobDef) -> KnobDef {
     }
 }
 
-/// The `safety.require_approval` obligation: a `never ⊑ on_destructive ⊑ always`
+/// The `safety.require_approval` obligation: a `never`/`on_destructive`/`always`
 /// OrderedEnum, `Require` polarity (composes UP), **`HostEnforced`** enforcement,
 /// default `never` (no obligation). Object-scoped so an operator can require approval
 /// on exactly the objects it names.
 ///
 /// It is `HostEnforced`, NOT `DeclaredOnly`: the engine's own guard/apply never gate
-/// on it (the HOST — `migrated` — reads it via the sealed decision query and enforces
-/// approval as a state machine), but — unlike a `DeclaredOnly` knob — it MAY be sealed
+/// on it (the HOST - `migrated` - reads it via the sealed decision query and enforces
+/// approval as a state machine), but - unlike a `DeclaredOnly` knob - it MAY be sealed
 /// at a NON-DEFAULT value, because a host enforces it (M-2, II.6). The II.6 "can't set
 /// non-default on an enforced path" restriction scopes to `DeclaredOnly` only, so a
 /// sealed `safety.require_approval = always` obligation is legal.
@@ -447,23 +454,23 @@ fn require_approval_knob(key: &str, docs: &str) -> KnobDef {
 /// knob's default (deny) when no covering grant rule raises it.
 ///
 /// # Panics
-/// Never in practice — the key literals are distinct and well-formed; a duplicate or
+/// Never in practice - the key literals are distinct and well-formed; a duplicate or
 /// malformed key is a programming error caught by [`builtin_registry`]'s unit test.
 #[must_use]
 pub fn builtin_registry() -> PolicyRegistry {
     PolicyRegistry::empty()
         .with([
-            // ── access — access control (Global unless object-attributed) ───────
+            // -- access - access control (Global unless object-attributed) -------
             bool_grant(KEY_ACCESS_ROLE, ObjectModel::Global, true, "CREATE/ALTER/DROP ROLE, DROP OWNED BY."),
             bool_grant(KEY_ACCESS_GRANT, ObjectModel::Global, true, "GRANT/REVOKE, ALTER DEFAULT PRIVILEGES."),
             bool_grant(KEY_ACCESS_POLICY, ObjectModel::PerTable, true, "CREATE/DROP POLICY (row-security policy)."),
             bool_grant(KEY_ACCESS_RLS, ObjectModel::PerTable, true, "ALTER TABLE … ROW LEVEL SECURITY."),
-            // ── schema — structural DDL ─────────────────────────────────────────
+            // -- schema - structural DDL -----------------------------------------
             bool_grant(KEY_SCHEMA_CREATE_SCHEMA, ObjectModel::PerSchema, true, "CREATE SCHEMA (engine-neutral)."),
             // namespace-authority creation/movement/immutability grants (II.2.6)
             bool_grant(KEY_SCHEMA_CREATE_TABLE, ObjectModel::PerTable, false, "May CREATE a table matching this scope (default-deny namespace anchor)."),
             bool_grant(KEY_SCHEMA_RENAME, ObjectModel::PerTable, false, "May name/move a table INTO this scope (RENAME / SET SCHEMA target)."),
-            // `schema.alter_injected` is a POWER GRANT — inherit = false.
+            // `schema.alter_injected` is a POWER GRANT - inherit = false.
             KnobDef {
                 key: KnobKey::parse(KEY_SCHEMA_ALTER_INJECTED).expect("well-formed"),
                 kind: KnobKind::Bool,
@@ -480,11 +487,11 @@ pub fn builtin_registry() -> PolicyRegistry {
             // schemas); a reference to a schema it does not grant is a CrossSchema
             // violation.
             bool_grant(KEY_SCHEMA_CROSS_SCHEMA, ObjectModel::PerSchema, false, "Which schemas this migration may reference (default-deny)."),
-            // ── code — programmable / installed objects ─────────────────────────
+            // -- code - programmable / installed objects -------------------------
             bool_grant(KEY_CODE_FUNCTION, ObjectModel::Global, true, "CREATE/DROP FUNCTION."),
             bool_grant(KEY_CODE_TRIGGER, ObjectModel::PerTable, true, "CREATE/DROP TRIGGER on this table."),
             bool_grant(KEY_CODE_MATERIALIZED_VIEW, ObjectModel::Global, false, "CREATE/DROP MATERIALIZED VIEW."),
-            // the CREATE EXTENSION name allowlist (StrSet, Global) — the allowlist IS
+            // the CREATE EXTENSION name allowlist (StrSet, Global) - the allowlist IS
             // the knob (empty = deny all); FORBIDDEN_EXTENSIONS still overrides.
             KnobDef {
                 key: KnobKey::parse(KEY_CODE_EXTENSION).expect("well-formed"),
@@ -497,25 +504,26 @@ pub fn builtin_registry() -> PolicyRegistry {
                 inherit: true,
                 docs: "The permitted extension names, for CREATE and DROP alike (empty = deny all; FORBIDDEN_EXTENSIONS still override).".to_string(),
             },
-            // ── sql — the raw-text escape hatch ─────────────────────────────────
+            // -- sql - the raw-text escape hatch ---------------------------------
             // `sql.raw` is OBJECT-scoped (II.2.5): "raw only in staging" is a
             // statement-level referenced-object containment guarantee, and the guard's
             // scoped-raw-SQL rules (unqualified name / SET search_path / opaque body)
-            // hinge on ⊤ vs a narrower grant — so it is PerTable, not Global.
+            // hinge on a universe-wide grant versus a narrower one - so it is
+            // PerTable, not Global.
             bool_grant(KEY_SQL_RAW, ObjectModel::PerTable, false, "The gated raw-statement escape (raw); object-scoped (II.2.5)."),
             bool_grant(KEY_SQL_RAW_VIEW_BODY, ObjectModel::Global, false, "The gated raw view-body SELECT escape."),
-            // ── runtime — op-timeout upper bounds + index/rewrite postures ──────
+            // -- runtime - op-timeout upper bounds + index/rewrite postures ------
             // Every `runtime` knob is DECLARED ONLY: no guard, executor or validator
             // path reads one, so raising one is refused at load rather than sealed.
             declared_only(uint_charter(KEY_RUNTIME_LOCK_TIMEOUT_MS, "Per-op lock_timeout upper bound (ms; no indefinite lock). Declared only - no execution path applies it.")),
             declared_only(uint_charter(KEY_RUNTIME_STATEMENT_TIMEOUT_MS, "Per-op statement_timeout upper bound (ms). Declared only - no execution path applies it.")),
             declared_only(posture_grant(KEY_RUNTIME_INDEX_CREATION, "Index-creation posture: forbid ⊑ warn ⊑ allow. Declared only - no execution path applies it.")),
             declared_only(posture_grant(KEY_RUNTIME_TABLE_REWRITE, "Table-rewrite posture: forbid ⊑ warn ⊑ allow. Declared only - no execution path applies it.")),
-            // ── safety — data protection (limits AND obligations) ───────────────
+            // -- safety - data protection (limits AND obligations) ---------------
             bool_require(KEY_SAFETY_REQUIRE_RLS, ObjectModel::PerTable, "Every created table must end RLS-enabled."),
             declared_only(bool_require(KEY_SAFETY_NO_HARD_DELETE, ObjectModel::Global, "No hard DELETE/TRUNCATE/DROP. Declared only - no guard path enforces it.")),
             posture_grant(KEY_SAFETY_DESTRUCTIVE_OPS, "Destructive-op posture: forbid ⊑ warn ⊑ allow."),
-            // The approval obligation — DECLARED by the engine, ENFORCED by the host.
+            // The approval obligation - DECLARED by the engine, ENFORCED by the host.
             require_approval_knob(
                 KEY_SAFETY_REQUIRE_APPROVAL,
                 "Approval obligation: never ⊑ on_destructive ⊑ always (host-enforced state machine).",
@@ -847,10 +855,10 @@ scope = "all"
         let def = reg
             .get(&KnobKey::parse(KEY_SAFETY_REQUIRE_APPROVAL).unwrap())
             .expect("safety.require_approval is registered");
-        // Require polarity (composes UP — operator raises, creator cannot lower).
+        // Require polarity (composes UP - operator raises, creator cannot lower).
         assert_eq!(def.polarity, Polarity::Require);
-        // HostEnforced — the engine never enforces it (the host does), but — unlike a
-        // DeclaredOnly knob — it MAY be sealed at a non-default value (M-2, II.6).
+        // HostEnforced - the engine never enforces it (the host does), but - unlike a
+        // DeclaredOnly knob - it MAY be sealed at a non-default value (M-2, II.6).
         assert_eq!(def.enforcement, Enforcement::HostEnforced);
         // The II.6 "can't set non-default on an enforced path" restriction does NOT
         // apply to a HostEnforced knob (only DeclaredOnly).
@@ -859,7 +867,7 @@ scope = "all"
         assert_eq!(def.object_model, ObjectModel::PerTable);
         // Default is the tightest variant, `never` (no obligation).
         assert_eq!(def.default, KnobValue::Str("never".to_string()));
-        // The three-variant never ⊑ on_destructive ⊑ always order.
+        // The three-variant never/on_destructive/always order, tightest first.
         assert_eq!(
             def.kind,
             KnobKind::OrderedEnum {

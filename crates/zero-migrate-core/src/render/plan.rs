@@ -1,17 +1,17 @@
 //! The applied-execution plan model (`op.*` DSL) and the single
 //! shared plan orchestrator's data types.
 //!
-//! One authored migration artifact — a `.sql` file *or* an
-//! IR envelope — lowers to an [`AppliedPlan`]: an ordered sequence of
+//! One authored migration artifact - a `.sql` file *or* an
+//! IR envelope - lowers to an [`AppliedPlan`]: an ordered sequence of
 //! [`PlanStep`]s the engine's single shared `apply_plan`
 //! ([`MigrationEngine::apply_plan`](crate::engine::MigrationEngine::apply_plan))
 //! runs in order. The step *types* reuse the engine's existing phase artifacts
 //! ([`Migration`], [`BackfillSpec`](crate::model::backfill::BackfillSpec),
 //! [`ExpandContractPlan`](crate::render::expand_contract::ExpandContractPlan), and the
-//! existing [`declarative::TableRebuild`](crate::render::declarative::TableRebuild)) —
+//! existing [`declarative::TableRebuild`](crate::render::declarative::TableRebuild)) -
 //! this introduces **no** new rebuild struct and **no** change to [`Migration`].
 //!
-//! # Naming — a deliberate collision avoidance
+//! # Naming - a deliberate collision avoidance
 //!
 //! This is **`AppliedPlan`**, NOT `MigrationPlan`. `MigrationPlan`
 //! ([`engine::MigrationPlan`](crate::engine::MigrationPlan)) is the read-only
@@ -22,7 +22,7 @@
 //! # The single-`Migration` case is the degenerate one-step plan
 //!
 //! A pure-DDL `.sql` (or IR envelope with no DML/backfill/online op) lowers to a
-//! plan whose `steps == [Ddl(one Migration)]` — the overwhelming common case,
+//! plan whose `steps == [Ddl(one Migration)]` - the overwhelming common case,
 //! and the only shape the legacy Flyway/dbmate loader ever produces. The
 //! [`AppliedPlan::single_step`] facade builds exactly that, and
 //! [`AppliedPlan::single_step_migration`] reads it back out (fail-closed on a
@@ -37,15 +37,15 @@ use zero_migrate_ir::dialect::DialectId;
 // down to the backend contract, beside the
 // `MigrationBackend::verify_database_requirements` signature that is the only
 // thing that ASKS the question; the engine only collects the answer while
-// lowering. They travelled alone — `DatabaseFeature` is a closed enum of
+// lowering. They travelled alone - `DatabaseFeature` is a closed enum of
 // `&'static str` descriptions and version floors, and `DatabaseRequirements` is a
 // `BTreeSet` of it. Re-exported so `crate::render::plan::{DatabaseFeature,
 // DatabaseRequirements}` resolve unchanged.
 pub use zero_migrate_backend::requirements::{DatabaseFeature, DatabaseRequirements};
 // The fully-resolved specification for ONE table rebuild, and the neutral
 // high-water policy that finally let it travel. Its `sequence_policy` used to be
-// typed `zero_migrate_sqlite::SqliteSequencePolicy` — a type from a crate ABOVE
-// the contract — which stranded this spec, `TableRebuild`, `RenameStep` and
+// typed `zero_migrate_sqlite::SqliteSequencePolicy` - a type from a crate ABOVE
+// the contract - which stranded this spec, `TableRebuild`, `RenameStep` and
 // `PlanStep` in the engine for want of one field. Re-exported so
 // `crate::render::plan::TableRebuildSpec` resolves unchanged.
 pub use zero_migrate_backend::table_rebuild::{SequenceHighWaterPolicy, TableRebuildSpec};
@@ -75,7 +75,7 @@ pub struct RollbackAssessment {
 }
 
 /// What one authored artifact (`.sql` or IR envelope) becomes after
-/// lowering — an ordered execution plan. NOT a single [`Migration`]; NOT
+/// lowering - an ordered execution plan. NOT a single [`Migration`]; NOT
 /// the dry-run [`MigrationPlan`](crate::engine::MigrationPlan).
 #[derive(Debug, Clone)]
 pub struct AppliedPlan {
@@ -93,16 +93,16 @@ pub struct AppliedPlan {
     /// single step's `Migration.checksum`; for an IR envelope it is
     /// `Checksum::of_ir` over the op list).
     pub checksum: Checksum,
-    /// Flags derived ∪ overridden from the artifact.
+    /// Flags derived from the artifact, unioned with those it overrides.
     pub flags: MigrationFlags,
-    /// The plan's dialect reach, MEASURED from the op list at lowering — never
+    /// The plan's dialect reach, MEASURED from the op list at lowering - never
     /// authored, and not folded into the checksum.
     ///
     /// Apply consults it whole-plan before the project lock and before any step runs:
     /// a plan whose ops one registered backend alone can render is refused against
     /// every other target with
     /// [`EngineError::DialectScopeRefused`](crate::engine::EngineError::DialectScopeRefused).
-    /// A `.sql` plan is always [`DialectScope::Portable`] — its text is opaque to the
+    /// A `.sql` plan is always [`DialectScope::Portable`] - its text is opaque to the
     /// engine, so there is nothing to measure.
     pub dialect_scope: DialectScope,
     /// The backend that RENDERED these steps, when the engine rendered them.
@@ -110,13 +110,13 @@ pub struct AppliedPlan {
     /// [`Self::dialect_scope`] answers which backends COULD render this plan's ops;
     /// this answers which one DID. They are different questions and only the first was
     /// ever compared against the deploy target. For a bare `createTable` the reach is
-    /// honestly `Portable`, so the reach gate admits every target — while the SQL in
+    /// honestly `Portable`, so the reach gate admits every target - while the SQL in
     /// the plan is one vendor's spelling: PostgreSQL lowers the op to
     /// `"main"."notes"`, SQLite to `main.notes`.
     ///
     /// The gap was not theoretical and not loud. SQLite accepts double-quoted
     /// identifiers and calls its own database `main`, so a PostgreSQL-rendered plan
-    /// APPLIED CLEANLY against a SQLite target rather than failing — measured, not
+    /// APPLIED CLEANLY against a SQLite target rather than failing - measured, not
     /// predicted. A MySQL target would have rejected the quoting and made it obvious;
     /// the quiet direction is the one that needed the gate.
     ///
@@ -154,7 +154,7 @@ pub struct AppliedPlan {
 /// The fail-closed error of [`AppliedPlan::single_step_migration`]: the
 /// plan is not a single `Ddl` step, so a `Migration`-only consumer (the platform
 /// Flyway-mode runner) cannot operate on it. This arm is provably unreachable on
-/// the platform path (a Flyway `.sql` always lowers to one `Ddl` step) — it
+/// the platform path (a Flyway `.sql` always lowers to one `Ddl` step) - it
 /// exists for defense in depth.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
@@ -170,7 +170,7 @@ pub struct NotSingleStep {
 
 impl AppliedPlan {
     /// Build the **degenerate one-step plan** for a single pure-DDL [`Migration`]
-    /// — the loader facade for a `.sql` file. The plan's identity
+    /// - the loader facade for a `.sql` file. The plan's identity
     /// fields mirror the migration; `dialect_scope` is
     /// [`DialectScope::Portable`] and `rollbackable` follows the migration's `down`.
     ///

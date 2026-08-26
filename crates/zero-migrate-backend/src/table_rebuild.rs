@@ -113,8 +113,8 @@ pub trait TableRebuildPolicy: std::fmt::Debug + Sync {
 /// How a table rebuild treats the table's AUTOINCREMENT-style high-water mark.
 ///
 /// NEUTRAL on purpose, and it did not used to be. This field on
-/// [`TableRebuildSpec`] was typed `zero_migrate_sqlite::SqliteSequencePolicy` —
-/// a type from a crate that sits ABOVE this one — which is what kept the whole
+/// [`TableRebuildSpec`] was typed `zero_migrate_sqlite::SqliteSequencePolicy` -
+/// a type from a crate that sits ABOVE this one - which is what kept the whole
 /// lowered-plan vocabulary (`TableRebuildSpec`, `TableRebuild`, `RenameStep`,
 /// `PlanStep`) stranded in the engine. One field inverted the dependency for all
 /// four.

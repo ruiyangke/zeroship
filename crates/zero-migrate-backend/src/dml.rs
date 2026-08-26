@@ -1,9 +1,9 @@
 //! The creator-**DML assembler** + the closed-AST **expression renderer**.
 //!
-//! `IrAuthor::lower` compiles the DDL ops (`createTable`/`alter*`/…) into the
+//! `IrAuthor::lower` compiles the DDL ops (`createTable`/`alter*`/...) into the
 //! same `Migration` shape the declarative differ
-//! emits. This module is the peer for the **DML** ops — `insert` / `update` /
-//! `del` / `backfill` — and for the closed expression AST ([`zero_migrate_ir::expr::Expr`])
+//! emits. This module is the peer for the **DML** ops - `insert` / `update` /
+//! `del` / `backfill` - and for the closed expression AST ([`zero_migrate_ir::expr::Expr`])
 //! they carry in their `set` / `where` / `filter` positions.
 //!
 //! # Two rendering modes, one source of truth
@@ -12,8 +12,8 @@
 //! this module owns both:
 //!
 //! 1. **Parameterized one-shot DML** ([`assemble_insert_for_backend`] / [`assemble_update_for_backend`] /
-//!    [`assemble_delete_for_backend`]). Every authored VALUE — an `insert` row scalar, an
-//!    `update SET` literal, a `where`-predicate literal — is emitted as a NATIVE
+//!    [`assemble_delete_for_backend`]). Every authored VALUE - an `insert` row scalar, an
+//!    `update SET` literal, a `where`-predicate literal - is emitted as a NATIVE
 //!    placeholder (`$n` on Postgres, `?n` on SQLite) carried on a
 //!    `PlanStep::Dml` `binds` vector, NEVER
 //!    string-interpolated. So a value containing a quote / semicolon / comment
@@ -24,12 +24,12 @@
 //! 2. **Batched backfill** (`assemble_backfill`). The existing
 //!    `BackfillSpec` executor (PG `backfill.rs`)
 //!    consumes a `set_clause` / `filter` SQL *string* (it assembles a windowed
-//!    `UPDATE … WHERE cursor > $last … AND (<filter>)` and guard-checks the WHOLE
+//!    `UPDATE ... WHERE cursor > $last ... AND (<filter>)` and guard-checks the WHOLE
 //!    statement). A backfill expression references the row's own columns and is
 //!    paged, so it cannot carry positional binds the way a one-shot statement can.
 //!    Here the renderer (`render_expr_inline_for_backend`) emits a SQL string in which a
 //!    `Literal` is an INLINE SQL literal (numeric verbatim; a string single-quoted
-//!    with `''` doubling — the canonical escape the guard's real-parser deny-list
+//!    with `''` doubling - the canonical escape the guard's real-parser deny-list
 //!    then re-validates). The assembled `UPDATE` is guard-checked by the executor
 //!    before any batch runs, so the inline path inherits the same parse-time
 //!    confinement the rest of the engine relies on.
@@ -39,7 +39,7 @@
 //! Every identifier (table, column) is validated as a bare
 //! `[A-Za-z_][A-Za-z0-9_]*` identifier and double-quoted with `"` doubling
 //! (`quote_ident`). A schema-qualified or otherwise malformed identifier is
-//! rejected at assemble time — an injection attempt through an identifier slot
+//! rejected at assemble time - an injection attempt through an identifier slot
 //! cannot reach the database. On **Postgres** the table is qualified to the project
 //! schema (`"schema"."table"`) so the resolved relation is always the project's
 //! own; on **SQLite** the table lives in the connection's `main` database (the app
@@ -66,7 +66,7 @@
 //!
 //! # What is SPELLING here, and what deliberately is not
 //!
-//! Under `docs/proposals/pluggable-backends.md` step 3 the SQL SPELLING in this
+//! Per `docs/proposals/pluggable-backends.md`, the SQL SPELLING in this
 //! module has moved to `render::backends`, reached through the `DmlRenderer`
 //! trait: placeholders, inline string / decimal / bytes literals, `IN`-list
 //! shape, regex match, date extraction, concatenation, `IS DISTINCT FROM`, the
@@ -92,7 +92,7 @@
 //! one-shot assembler and a vendor's batched-backfill executor supposedly both called.
 //! They never did: that function had zero callers anywhere and was deleted, and the
 //! two paths agree because both end at the SAME resolved `DmlRenderer`, not because a
-//! common function routes them. The distinction matters — the old wording made a
+//! common function routes them. The distinction matters - the old wording made a
 //! `renderer(dialect)` lookup nothing performed look like a dialect boundary, and it
 //! was counted as one. See the tombstone above its old home below.
 //!
@@ -122,7 +122,7 @@ use zero_migrate_ir::ir::{IrScalar, IrValue};
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DmlError {
     /// An identifier (table / column) is not a bare `[A-Za-z_][A-Za-z0-9_]*`
-    /// identifier — empty, schema-qualified, or containing characters outside the
+    /// identifier - empty, schema-qualified, or containing characters outside the
     /// safe set. Rejected before any SQL is assembled.
     #[error(
         "invalid identifier for {what}: {value:?} (must be a bare [A-Za-z_][A-Za-z0-9_]* identifier)"
@@ -142,7 +142,7 @@ pub enum DmlError {
         /// What was wrong.
         reason: String,
     },
-    /// An `update` / `backfill` whose `set` map is empty — nothing to assign.
+    /// An `update` / `backfill` whose `set` map is empty - nothing to assign.
     #[error(
         "malformed {op} into {table:?}: empty `set` (a transform must assign at least one column)"
     )]
@@ -171,7 +171,7 @@ pub enum DmlError {
     },
     /// The closed-AST expression renderer cannot lower a node (an unsupported /
     /// out-of-policy shape that the structural validator should have rejected
-    /// first — this is the assembler's fail-closed backstop, never a silent
+    /// first - this is the assembler's fail-closed backstop, never a silent
     /// emission). Carries a description of the offending node.
     #[error(
         "cannot render expression node ({0}); the structural validator must reject it before assembly"
@@ -279,8 +279,8 @@ pub enum DmlError {
 /// (PostgreSQL `Bind` parameter count is a `u16`).
 pub const MAX_BIND_PARAMS: usize = 65535;
 
-/// Validate a bare SQL identifier and double-quote it for `dialect` (`"` → `""` on
-/// both shipping spellings). The ONLY identifier-emission path the assembler uses —
+/// Validate a bare SQL identifier and double-quote it for `dialect` (`"` -> `""` on
+/// both shipping spellings). The ONLY identifier-emission path the assembler uses -
 /// a schema-qualified / malformed name is rejected, so an injection through an
 /// identifier slot cannot reach the DB. Bare-identifier validation mirrors
 /// `crate::model::backfill::BackfillSpec`.
@@ -293,12 +293,12 @@ pub const MAX_BIND_PARAMS: usize = 65535;
 /// for callers that were THEMSELVES
 /// PostgreSQL-specific, and twice they were not: `render::backends::sqlite` quoted
 /// all four of its identifier emissions with them, and after that was fixed
-/// `render_sqlite_trigger_op` — then still in `render::lower`, since moved into
-/// `render::backends::sqlite` by step 3 — quoted all six of its trigger
+/// `render_sqlite_trigger_op` - then still in `render::lower`, since moved into
+/// `render::backends::sqlite` - quoted all six of its trigger
 /// identifiers with them. Both were correct SQL only because the two vendors spell
 /// an identifier `"x"`, and both were hard blockers on extracting a
 /// `zero-migrate-sqlite` crate that does not need `zero-migrate-postgres` AT
-/// RUNTIME — a crate-extraction spike demonstrated the second one by rendering a
+/// RUNTIME - a crate-extraction spike demonstrated the second one by rendering a
 /// `createTrigger` from inside the extracted crate and getting PostgreSQL's marker
 /// back.
 ///
@@ -332,7 +332,7 @@ pub fn quote_ident_for_backend(
 
 /// Public-in-crate wrapper for author-supplied bare identifiers. Trigger-body
 /// rendering needs the same strict table/column/name gate as the DML assembler, and
-/// must name the dialect it is rendering for — see [`quote_ident_for_backend`] for
+/// must name the dialect it is rendering for - see [`quote_ident_for_backend`] for
 /// why the dialect-free spelling of this was deleted rather than left unused.
 pub fn quote_bare_ident_for_backend(
     what: &'static str,
@@ -343,7 +343,7 @@ pub fn quote_bare_ident_for_backend(
 }
 
 /// A render-seam rejection of an **engine-supplied identifier** (project schema,
-/// migrator role, meta schema, …) — the single fail-closed gate every engine
+/// migrator role, meta schema, ...) - the single fail-closed gate every engine
 /// quoting seam routes through. Distinct from
 /// [`DmlError::InvalidIdentifier`], which gates *author-supplied* bare
 /// identifiers with the strict `[A-Za-z_][A-Za-z0-9_]*` rule; this gate is for
@@ -360,20 +360,20 @@ pub struct IdentQuoteError {
     pub value: String,
 }
 
-/// The ONE canonical render seam for an **engine-supplied identifier** — the
+/// The ONE canonical render seam for an **engine-supplied identifier** - the
 /// project schema, the migrator role, the meta schema, a derived trigger name,
 /// etc. Every engine quoting helper (`author` / `backfill` / `role` / `journal`
 /// / `dml`) routes through this so all seams are **byte-identical** AND
 /// **uniformly self-defending**.
 ///
 /// Unlike a bare authored identifier ([`quote_ident_for_backend`]), an engine-supplied name
-/// is NOT a bare `[A-Za-z_][A-Za-z0-9_]*` ident — under the Confined posture the
+/// is NOT a bare `[A-Za-z_][A-Za-z0-9_]*` ident - under the Confined posture the
 /// project schema is the app id (a `UUIDv7` carrying `-`). So it is emitted
 /// escape-and-quote: double an embedded `"`, wrap in `"`.
 ///
 /// The name is never author-supplied, but this seam still fails closed rather
 /// than trust the caller: it refuses an empty string and any value carrying a
-/// NUL byte — the one byte that `"`-doubling cannot neutralise (PG rejects NUL
+/// NUL byte - the one byte that `"`-doubling cannot neutralise (PG rejects NUL
 /// inside an identifier outright). Everything else (including `"`) is rendered
 /// safely by escaping, **byte-identically** to a bare
 /// `format!("\"{}\"", x.replace('"', "\"\""))`.
@@ -407,7 +407,7 @@ pub fn quote_ident_checked_for_backend(
  * three shipping dialects agree on that spelling, so such a call is BYTE-CORRECT
  * AND SILENT: no assertion about emitted SQL can distinguish "SQLite quoted this"
  * from "nobody quoted this and it happened to look right". That is the whole
- * defect class — an emission that reaches NO renderer at all.
+ * defect class - an emission that reaches NO renderer at all.
  *
  * The bytes now live in `render::backends::ansi_double_quote_ident`, which is
  * `pub(in crate::render::backends)`. Core cannot name it, so core must pick a
@@ -434,11 +434,11 @@ pub fn escape_quote_ident_for_backend(ident: &str, backend: &dyn DmlRenderer) ->
 
 /// Qualify a validated bare table name for the target dialect.
 ///
-/// - **Postgres**: `"schema"."table"` — the project schema is engine-supplied
+/// - **Postgres**: `"schema"."table"` - the project schema is engine-supplied
 ///   (never author-supplied) and the migrator's `search_path` is pinned to it, but
 ///   we qualify explicitly so the resolved relation is unambiguously the project's.
 /// - **SQLite**: the table lives in the connection's `main` database (the app
-///   file is `main`) — there is NO schema namespace, and a
+///   file is `main`) - there is NO schema namespace, and a
 ///   `"schema"."table"` reference would resolve to a non-existent attached DB. So
 ///   the SQLite form is the BARE quoted table, matching the engine's UNqualified
 ///   SQLite DDL emission (the same property the createTable lowering relies on).
@@ -450,7 +450,7 @@ fn qualify_table(
     backend.qualify_table(project_schema, table)
 }
 
-/// Map an [`IrScalar`] to a [`BindValue`] for native parameter binding — the
+/// Map an [`IrScalar`] to a [`BindValue`] for native parameter binding - the
 /// one-shot DML path. Safe `Int` and tagged `Int64` values become exact i64
 /// binds; decimal strings carry through verbatim. Binary values stay binary on
 /// SQLite; PostgreSQL and MySQL wrap a base64 text bind in a dialect decoder at
@@ -476,11 +476,11 @@ fn scalar_to_bind(s: &IrScalar) -> BindValue {
  *
  * It was `pub`, so the compiler could not report it unused, and it was counted as
  * one of the crate's dialect boundaries on the strength of that doc comment. It was
- * neither a boundary nor reachable — just a `renderer(dialect)` lookup that nothing
+ * neither a boundary nor reachable - just a `renderer(dialect)` lookup that nothing
  * performed. 0.1.0 was never published and nothing outside this repo consumes the
  * crate, so deleting it costs nothing and stops the miscount recurring.
  *
- * `sqlite_placeholder` sat here too and its callers WERE real — both of them inside
+ * `sqlite_placeholder` sat here too and its callers WERE real - both of them inside
  * `zero-migrate-sqlite`, one the `DmlRenderer::placeholder` impl and one the batched
  * backfill executor. Two callers in one vendor crate is that crate's shared helper,
  * not the contract's, so it is `crate::dml::placeholder` there now.
@@ -535,7 +535,7 @@ pub fn inline_literal_for_backend(
 /// caller is a backend rendering for itself:
 /// `backends/mysql.rs::render_regex_match` and
 /// [`render_in_list_elem_portable`] below. Taking a dialect here meant core
-/// resolving the registry to reach the vendor that had just called in — see
+/// resolving the registry to reach the vendor that had just called in - see
 /// [`render_in_list_elem_portable`] for the whole shape. Core owns whether the
 /// operand is LEGAL (non-empty, no NUL); the vendor owns how it is WRITTEN.
 pub fn in_list_text_literal(
@@ -601,11 +601,12 @@ fn homogeneous_in_list_kind(elems: &[IrScalar]) -> Result<Option<InListScalarKin
 ///
 /// # It takes a BACKEND, and that is the whole point
 ///
-/// This used to take `dialect` as the former closed dialect enum, and its only two callers —
-/// `backends/sqlite.rs::render_in_list` and `backends/mysql.rs::render_in_list` —
+/// This used to take `dialect` as the former closed dialect enum, and its only two callers -
+/// `backends/sqlite.rs::render_in_list` and `backends/mysql.rs::render_in_list` -
 /// handed it their own `DIALECT` const. Core then resolved that dialect back
 /// through `crate::render::backends::renderer` to reach the very backend that had
-/// called in. Under `docs/proposals/pluggable-backends.md` step 4 that reads
+/// called in. In the crate layout `docs/proposals/pluggable-backends.md` describes,
+/// that reads
 /// `zero-migrate-sqlite` -> core -> `zero-migrate-sqlite`: a dependency cycle in the
 /// exact shape the crate split exists to remove, and one that emits byte-identical
 /// SQL either way, so no behaviour test can see it. The backends now pass `self`,
@@ -614,7 +615,7 @@ fn homogeneous_in_list_kind(elems: &[IrScalar]) -> Result<Option<InListScalarKin
 /// # Why one backend keeps its own lookup-free helper instead of calling this
 ///
 /// Not because it is exempt from the rule. PostgreSQL's in-list spellings are all
-/// FIXED — `'x'::text` for a string, the decimal verbatim — so its element renderer
+/// FIXED - `'x'::text` for a string, the decimal verbatim - so its element renderer
 /// needs no vendor at all, and it is a private function in its own crate rather than
 /// a `_pg`-suffixed one here. SQLite quotes decimals to match its lossless TEXT
 /// storage and MySQL emits strings as a UTF-8 hex literal, so this helper genuinely
@@ -696,8 +697,8 @@ pub fn extract_field_name(field: ExtractField) -> &'static str {
     }
 }
 
-/// The SQL spelling of a binary operator (the method↔node table). `Concat` is
-/// `||` — the one place PG/SQLite NULL semantics agree.
+/// The SQL spelling of a binary operator (the method-to-node table). `Concat` is
+/// `||` - the one place PG/SQLite NULL semantics agree.
 fn binary_op_sql(op: BinaryOp) -> &'static str {
     match op {
         BinaryOp::Eq => "=",
@@ -733,7 +734,7 @@ fn render_binop(op: BinaryOp, l: &str, r: &str, backend: &dyn DmlRenderer) -> St
 /// Render the portable `distinctFrom` NULL-safe inequality node, **dialect-aware**.
 /// PG and SQLite both support the standard `IS DISTINCT FROM` operator directly.
 /// MySQL has NO `IS DISTINCT FROM`, so the engine owns the lowering to
-/// `NOT (<l> <=> <r>)` — `<=>` is MySQL's NULL-safe equality operator, so its
+/// `NOT (<l> <=> <r>)` - `<=>` is MySQL's NULL-safe equality operator, so its
 /// negation is exactly the "distinct from" (NULL-aware inequality) predicate.
 fn render_distinct_from(l: &str, r: &str, backend: &dyn DmlRenderer) -> String {
     backend.render_distinct_from(l, r)
@@ -751,7 +752,7 @@ fn scalar_fn_sql(f: ScalarFn) -> &'static str {
         ScalarFn::Trim => "trim",
         ScalarFn::Length => "length",
         ScalarFn::Abs => "abs",
-        // Portable scalar fns — identical spelling on PG/SQLite/MySQL.
+        // Portable scalar fns - identical spelling on PG/SQLite/MySQL.
         // `Mod` renders as the `%` OPERATOR, special-cased in `render_scalar_fn_call`
         // (SQLite has no `mod()` fn); this fallback name is never reached for it.
         ScalarFn::Mod => "mod",
@@ -761,7 +762,7 @@ fn scalar_fn_sql(f: ScalarFn) -> &'static str {
         ScalarFn::Substr => "substr",
         ScalarFn::Replace => "replace",
         // VENDOR scalars. `current_user` is a reserved keyword
-        // rendered WITHOUT parens — the FnCall render arms special-case it; this
+        // rendered WITHOUT parens - the FnCall render arms special-case it; this
         // spelling is the fallback name.
         ScalarFn::CurrentSetting => "current_setting",
         ScalarFn::CurrentUser => "current_user",
@@ -774,7 +775,7 @@ fn scalar_fn_sql(f: ScalarFn) -> &'static str {
 fn render_scalar_fn_call(f: ScalarFn, args: &[String], backend: &dyn DmlRenderer) -> String {
     match f {
         ScalarFn::CurrentUser => "current_user".to_string(),
-        // `mod` renders as the `%` OPERATOR — NOT a `mod(...)` call — because
+        // `mod` renders as the `%` OPERATOR - NOT a `mod(...)` call - because
         // SQLite has no `mod()` SQL function (`%` is universal on PG/SQLite/MySQL).
         // `args.join(" % ")` wrapped in parens is byte-identical to `(<a> % <b>)`
         // for the 2-arg case the builder produces, and never index-panics on a
@@ -804,7 +805,7 @@ fn agg_fn_sql(f: AggFunc) -> &'static str {
 }
 
 /// Render an aggregate application from already-rendered argument fragments.
-/// `arg = None` (only `Count`) → `count(*)`; `StringAgg` renders its
+/// `arg = None` (only `Count`) -> `count(*)`; `StringAgg` renders its
 /// required delimiter as the second argument.
 fn render_agg(
     f: AggFunc,
@@ -846,7 +847,7 @@ fn cast_target_sql(
     backend.cast_target(target)
 }
 
-/// Render a `c.fn.concatWs(delim, a, b, …)` per dialect: PG `concat_ws`;
+/// Render a `c.fn.concatWs(delim, a, b, ...)` per dialect: PG `concat_ws`;
 /// SQLite has no `concat_ws`, so it lowers to a NULL-skipping fold over `||` using
 /// the pinned, portable shape. The args are already rendered fragments.
 fn render_concat_ws(rendered: &[String], backend: &dyn DmlRenderer) -> String {
@@ -860,7 +861,7 @@ fn render_concat_ws(rendered: &[String], backend: &dyn DmlRenderer) -> String {
 /// grammar as a fail-closed rendering backstop:
 ///
 /// the delimiter must be a non-empty string literal and `n` a positive integer
-/// literal — a non-literal delim/n, a non-string delim, an empty delim, or `n ≤ 0`
+/// literal - a non-literal delim/n, a non-string delim, an empty delim, or `n <= 0`
 /// is unrenderable on every backend. Backend-specific lowering constraints stay
 /// behind [`DmlRenderer::render_split_part`].
 fn render_split_part(
@@ -917,7 +918,7 @@ fn render_split_part(
 ///
 /// A `Dialectal` with no own leg for the target is
 /// UNREACHABLE here because the engine's structural validator refuses it
-/// per-target (`EXPR_NOT_PORTABLE`) before assembly — but the seam is fail-closed
+/// per-target (`EXPR_NOT_PORTABLE`) before assembly - but the seam is fail-closed
 /// defensively: it returns [`DmlError::UnrenderableExpr`] rather than silently
 /// dropping the value.
 ///
@@ -1042,11 +1043,11 @@ pub struct BindCtx<'a> {
     ///
     /// It used to carry `dialect` as the former closed dialect enum ALONGSIDE the
     /// backend, with a note saying `dialect` survived only because the sibling doors
-    /// (`quote_ident_for_backend`, `inline_literal_for_backend`, …) still took one and had
+    /// (`quote_ident_for_backend`, `inline_literal_for_backend`, ...) still took one and had
     /// callers outside `render::`. The crate split is the "later step" that note
     /// anticipated: those doors take a `&dyn DmlRenderer` now, so the second field
     /// had nothing left to answer and is gone. Where the walk genuinely needs the
-    /// dialect — a capability question, a dialectal-leg selection — it reads
+    /// dialect - a capability question, a dialectal-leg selection - it reads
     /// [`DmlRenderer::dialect`].
     pub backend: &'a dyn DmlRenderer,
     /// The ordered binds accumulated by the walk.
@@ -1069,8 +1070,8 @@ impl<'a> BindCtx<'a> {
 
     /// Bind one typed IR scalar without losing binary values.
     ///
-    /// The binary case is the VENDOR's to answer — which carrier the value
-    /// travels in, and what (if anything) wraps the placeholder — so it goes
+    /// The binary case is the VENDOR's to answer - which carrier the value
+    /// travels in, and what (if anything) wraps the placeholder - so it goes
     /// through [`DmlRenderer::bind_bytes`]. This method used to make that choice
     /// itself, with a three-way `match` on `self.backend.dialect()` spelling
     /// `decode(.., 'base64')` / `FROM_BASE64(..)` / raw bytes in core.
@@ -1214,7 +1215,7 @@ fn render_synth_bound(f: SynthFn, args: &[Expr], ctx: &mut BindCtx) -> Result<St
         SynthFn::Now => Ok(ctx.backend.synth_now()),
         SynthFn::SplitPart => {
             // splitPart(col, delim, n): the column arg may itself be a ColRef or an
-            // in-AST sub-expression — render it (binding any nested Literals), then
+            // in-AST sub-expression - render it (binding any nested Literals), then
             // extract the dialect-neutral literal grammar. The delim/n are
             // engine-pinned constants of the lowering, NOT binds.
             if args.len() != 3 {
@@ -1256,7 +1257,7 @@ fn render_unary(op: UnaryOp, operand: &str, backend: &dyn DmlRenderer) -> String
 /// Render a closed-AST [`Expr`] to an INLINE SQL string (the backfill path). A
 /// `ColRef` is its quoted identifier; a `Literal` is an inline SQL literal
 /// ([`inline_literal_for_backend`], guard-revalidated downstream); operators / functions /
-/// casts render the same SQL spelling as the bound path. NO binds — the backfill
+/// casts render the same SQL spelling as the bound path. NO binds - the backfill
 /// executor pages the statement and cannot carry positional binds.
 pub fn render_expr_inline_for_backend(
     expr: &Expr,
@@ -1280,8 +1281,8 @@ pub fn render_value_inline_for_backend(
 /// The DOOR into the inline walk: it RESOLVES the backend once and hands it to
 /// the recursive worker.
 ///
-/// Its callers — in `render::lower`, `render::declarative`, `model::` and
-/// `apply::` — hold an open [`DialectId`] and
+/// Its callers - in `render::lower`, `render::declarative`, `model::` and
+/// `apply::` - hold an open [`DialectId`] and
 /// resolve their backend from it. What the split buys is that the RECURSION
 /// carries a resolved backend instead of re-deriving it from the dialect at each
 /// node, which is the same arrangement [`BindCtx`] gives the bound walk.
@@ -1472,7 +1473,7 @@ pub fn render_predicate(expr: &Expr, backend: &dyn DmlRenderer) -> Result<String
 pub struct OnConflict {
     /// The conflict-target columns (`ON CONFLICT (cols)`).
     pub columns: Vec<String>,
-    /// `Some` SET assignments ⇒ `DO UPDATE SET …`; `None` ⇒ `DO NOTHING`.
+    /// `Some` SET assignments => `DO UPDATE SET ...`; `None` => `DO NOTHING`.
     pub do_update: Option<BTreeMap<String, IrValue>>,
 }
 
@@ -1510,7 +1511,7 @@ pub struct LimitedDeleteRenderRequest<'a> {
 /// Fed straight into `PlanStep::Dml`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssembledDml {
-    /// The placeholder SQL (`$n`/`?n` — never an inlined value).
+    /// The placeholder SQL (`$n`/`?n` - never an inlined value).
     pub template: String,
     /// The ordered native binds.
     pub binds: Vec<BindValue>,
@@ -1645,7 +1646,7 @@ pub fn assemble_update_for_backend(
     let mut ctx = BindCtx::new(backend);
     let qtable = qualify_table(project_schema, ctx.backend, table)?;
     backend.validate_assignment_semantics("update", table, set)?;
-    // BTreeMap ⇒ deterministic, canonical assignment order.
+    // BTreeMap => deterministic, canonical assignment order.
     let mut assigns = Vec::with_capacity(set.len());
     for (col, rhs) in set {
         let qc = quote_ident_for_backend("column", col, backend)?;
@@ -1776,7 +1777,7 @@ fn assemble_backfill_clauses_inner_for_backend(
         });
     }
     backend.validate_assignment_semantics("backfill", table, set)?;
-    // BTreeMap ⇒ canonical order.
+    // BTreeMap => canonical order.
     let mut assigns = Vec::with_capacity(set.len());
     for (col, rhs) in set {
         let qc = quote_ident_for_backend("column", col, backend)?;

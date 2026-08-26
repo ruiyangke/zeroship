@@ -1,7 +1,7 @@
 //! The portable `op.*` migration **IR**.
 //!
 //! A migration authored in the JS `op.*` DSL is compiled (in the JS builder) to
-//! a small, dialect-NEUTRAL JSON document — the **IR envelope** — whose Rust
+//! a small, dialect-NEUTRAL JSON document - the **IR envelope** - whose Rust
 //! mirror is [`MigrationIr`]. The engine loads it, lowers each [`Op`] to dialect
 //! SQL, and checksums the canonical op-list
 //! ([`crate::migration::Checksum::of_ir`]).
@@ -10,7 +10,7 @@
 //!
 //! - **Closed `Op` enum, internally tagged on `"op"`** (`#[serde(tag = "op")]`,
 //!   NO `untagged`, NO `flatten`). The discriminant is a stable top-level
-//!   `"op"` key — a discriminated union schemars can express and the JS builder
+//!   `"op"` key - a discriminated union schemars can express and the JS builder
 //!   emits directly. The serde attributes here ARE the contract; the generated
 //!   `ir-envelope.schema.json` is gated against them by
 //!   `crates/zero-migrate/tests/ir_envelope_schema.rs`, so a representation
@@ -26,17 +26,17 @@
 //!   parser/deny-list scanned before apply.
 //! - **[`IrScalar`] enforces the constrained numeric domain at DESERIALIZE
 //!   time**: a fractional / exponential JS number, or an integer with
-//!   magnitude ≥ 2^53, is REJECTED with an `EXPR_INVALID_NUMERIC` error BEFORE
-//!   any checksum runs — so a hand-crafted malicious IR envelope cannot smuggle a
+//!   magnitude >= 2^53, is REJECTED with an `EXPR_INVALID_NUMERIC` error BEFORE
+//!   any checksum runs - so a hand-crafted malicious IR envelope cannot smuggle a
 //!   lossy float past the loader.
-//! - **An absent optional is OMITTED on the wire, NEVER `"field":null`** — every
+//! - **An absent optional is OMITTED on the wire, NEVER `"field":null`** - every
 //!   `Option` field carries `#[serde(skip_serializing_if = "Option::is_none")]`.
 //!   This is the cross-impl-determinism contract behind the single-checksum
 //!   invariant: an idiomatic JS `op.*` builder drops an
 //!   unset key (`JSON.stringify` omits `undefined`), so the Rust serialization
 //!   that [`CanonicalOpList::canonical_bytes`] folds into
 //!   [`crate::migration::Checksum::of_ir`]
-//!   must produce the SAME omitted-key image — otherwise the identical logical
+//!   must produce the SAME omitted-key image - otherwise the identical logical
 //!   migration would hash differently on the two sides. Deserialize still ACCEPTS
 //!   an explicit `null` for an optional (a tolerant input), and it canonicalizes
 //!   back to the omitted form, so a null-bearing IR envelope and an omitted one
@@ -67,8 +67,8 @@ use crate::precondition::PreconditionCheck;
 #[doc(hidden)]
 fn deny_unknown_fields() {}
 
-/// 2^53 — the boundary of exact integer representation in an IEEE-754 double
-/// (the JS `number` type). An integer with magnitude ≥ this can be silently
+/// 2^53 - the boundary of exact integer representation in an IEEE-754 double
+/// (the JS `number` type). An integer with magnitude >= this can be silently
 /// rounded by a JS author, so the IR rejects it at deserialize and demands an
 /// explicit tagged `int64` decimal string instead.
 const MAX_EXACT_INT: i64 = 1 << 53; // 9_007_199_254_740_992
@@ -148,7 +148,7 @@ where
 }
 
 /// A [`MigrationIr`] declared an `ir_version` this engine build does not
-/// understand — a FUTURE version `> CURRENT_IR_VERSION`.
+/// understand - a FUTURE version `> CURRENT_IR_VERSION`.
 /// The loader's IR envelope branch raises this BEFORE checksum/lower, fail-closed:
 /// a newer-engine artifact is never silently mis-interpreted by an older engine.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -165,8 +165,8 @@ pub struct IrVersionError {
 }
 
 /// A non-negative author-supplied STRUCTURAL integer (`batchSize`, `limit`,
-/// `timeout_ms`, …) constrained to the JS safe-integer range `< 2^53` at
-/// DESERIALIZE — the same numeric domain [`IrScalar::Int`] enforces for typed
+/// `timeout_ms`, ...) constrained to the JS safe-integer range `< 2^53` at
+/// DESERIALIZE - the same numeric domain [`IrScalar::Int`] enforces for typed
 /// binds.
 ///
 /// A JS author carries these as a `number`; `JSON.stringify` of an integer
@@ -179,7 +179,7 @@ pub struct IrVersionError {
     not(doc),
     doc = "different typed value (and a different [`Checksum::of_ir`](crate::migration::Checksum::of_ir))"
 )]
-/// on the two sides. Bounding them here closes that cross-impl divergence — and
+/// on the two sides. Bounding them here closes that cross-impl divergence - and
 /// rejects a hostile IR envelope that smuggles an out-of-range count past the
 /// loader BEFORE any checksum runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -217,7 +217,7 @@ impl JsonSchema for SafeU64 {
         // carries the SAME `< 2^53` upper bound the Deserialize impl enforces.
         // The derive would emit only `{type:integer, format:uint64,
         // minimum:0}`, and a schema-driven JS hint would then accept a `2^53`
-        // count the Rust loader rejects — a schema/loader divergence on the very
+        // count the Rust loader rejects - a schema/loader divergence on the very
         // cross-impl determinism boundary `SafeU64` exists for. `maximum` mirrors
         // [`IrScalar`]'s hand-written bound.
         schemars::json_schema!({
@@ -245,7 +245,7 @@ impl<'de> Deserialize<'de> for SafeU64 {
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
         use serde::de::Error as _;
         // Funnel through serde_json::Value so a fractional/exponential token is
-        // caught the same way IrScalar catches it — a JS author MUST NOT pass a
+        // caught the same way IrScalar catches it - a JS author MUST NOT pass a
         // float where a count is expected.
         let v = serde_json::Value::deserialize(de)?;
         let n = v.as_u64().ok_or_else(|| {
@@ -329,8 +329,8 @@ impl<'de> Deserialize<'de> for SafeI64 {
 
 /// The portable migration IR document (IR envelope).
 ///
-/// Deserialized from the JS builder's output. `owner_app` is a HINT — the server
-/// overrides it at submit time (per-table ownership is server-authoritative) —
+/// Deserialized from the JS builder's output. `owner_app` is a HINT - the server
+/// overrides it at submit time (per-table ownership is server-authoritative) -
 /// but the field is carried so the local/dev path and the checksum see it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -339,11 +339,11 @@ pub struct MigrationIr {
     pub ir_version: u32,
     /// Human-readable migration name (no apply effect; mirrors `Migration::name`).
     pub name: String,
-    /// The declaring app (a HINT — server overrides at submit). Kept so the
+    /// The declaring app (a HINT - server overrides at submit). Kept so the
     /// checksum and the dev path see an owner.
     #[serde(default)]
     pub owner_app: String,
-    /// The ordered op list — the heart of the migration.
+    /// The ordered op list - the heart of the migration.
     pub ops: Vec<Op>,
     /// The recorded REVERSE of a data migration: the ops that undo `ops`, as the
     /// author wrote them in `inverse()`.
@@ -378,12 +378,12 @@ pub struct MigrationIr {
     pub preconditions: Vec<PreconditionCheck>,
     /// An ADVISORY integrity hint: the hex `Checksum::of_ir` the
     /// builder computed over the hint-domain (`ops` + `flags` + `depends_on` +
-    /// `supersedes` + `preconditions` — NEVER `owner_app`, which is server-stamped
+    /// `supersedes` + `preconditions` - NEVER `owner_app`, which is server-stamped
     /// and so unpredictable to the builder). The engine RECOMPUTES and is
     /// authoritative; when this hint is present the loader compares its
     /// recomputed hint-domain checksum to it (a mismatch is genuine drift). The
     /// hint is **EXCLUDED from [`Checksum::of_ir`]** (exactly like `owner_app` is
-    /// excluded from the hint domain) — folding the artifact's own checksum into
+    /// excluded from the hint domain) - folding the artifact's own checksum into
     /// the artifact's checksum would be circular. `deny_unknown_fields` would
     /// otherwise reject an IR envelope carrying this advisory hint at
     /// deserialize, so the field is modelled explicitly here.
@@ -396,7 +396,7 @@ impl MigrationIr {
     /// FUTURE `ir_version` (`> CURRENT_IR_VERSION`) this engine build cannot
     /// faithfully interpret. The loader's IR envelope branch MUST call this AFTER
     /// deserialize and BEFORE [`Checksum::of_ir`](crate::migration::Checksum::of_ir)
-    /// and `IrAuthor::lower` — a newer-engine artifact is never silently
+    /// and `IrAuthor::lower` - a newer-engine artifact is never silently
     /// mis-applied by an older engine.
     ///
     /// A PAST/equal version validates (the field is the evolution knob; a bump is
@@ -416,7 +416,7 @@ impl MigrationIr {
     }
 }
 
-/// All-`Option` mirror of [`MigrationFlags`] — the override carrier in the IR.
+/// All-`Option` mirror of [`MigrationFlags`] - the override carrier in the IR.
 ///
 /// An absent key and an explicit `null` both mean "no override" here;
 /// the derive-then-override MERGE happens elsewhere, NOT this type's job.
@@ -446,7 +446,7 @@ pub struct IrFlagsOverride {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<SafeU64>,
     /// Override for the optional `lock_timeout_ms` facet (JS-safe-integer
-    /// bounded) — the per-deploy maintenance-window lock-acquisition budget.
+    /// bounded) - the per-deploy maintenance-window lock-acquisition budget.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lock_timeout_ms: Option<SafeU64>,
     /// Override for the optional `phase` facet.
@@ -562,7 +562,7 @@ pub enum CursorStability {
 
 /// Dialect-NEUTRAL column type lexicon. A CLOSED enum so the schema
 /// enumerates exactly the supported types and the lowering is a total
-/// match. Camel-cased on the wire (`"int"`, `"bigInt"`, `"geoPoint"`, …).
+/// match. Camel-cased on the wire (`"int"`, `"bigInt"`, `"geoPoint"`, ...).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum ColType {
@@ -817,7 +817,7 @@ pub struct SequenceRef {
     pub schema: Option<String>,
 }
 
-/// A column DEFAULT (`t.*` `.default(value | (c) => Expr)`). A CLOSED carrier —
+/// A column DEFAULT (`t.*` `.default(value | (c) => Expr)`). A CLOSED carrier -
 /// either a typed scalar literal, a closed expression AST, an EMPTY container
 /// default for JSON/text-array columns, a non-empty JSON value default for JSON
 /// columns, or a reference to a named SEQUENCE the column draws from. NEVER a raw
@@ -1015,8 +1015,8 @@ impl JsonSchema for IrDefault {
 
 /// The CLOSED pgvector distance-metric lexicon. A `t.vector(n, { metric })`
 /// column carries one of these; it drives the ivfflat/hnsw operator class
-/// (`vector_cosine_ops` / `vector_l2_ops` / `vector_ip_ops`). A CLOSED enum — like
-/// every other IR token-set — so serde REJECTS an out-of-set metric at DESERIALIZE
+/// (`vector_cosine_ops` / `vector_l2_ops` / `vector_ip_ops`). A CLOSED enum - like
+/// every other IR token-set - so serde REJECTS an out-of-set metric at DESERIALIZE
 /// (a hand-crafted IR envelope cannot smuggle an arbitrary metric string into the
 /// opclass render seam). Camel-cased on the wire (`"cosine"`, `"l2"`,
 /// `"innerProduct"`), matching the SDK `vectorMetric` spelling
@@ -1025,7 +1025,7 @@ impl JsonSchema for IrDefault {
 /// **Migration-first:** the search metric is a DECLARED-ONLY hint DB
 /// introspection cannot recover (pgvector encodes dims, not the search metric; the
 /// opclass is an index choice not reliably reversible to the declared metric), so
-/// — unlike every recoverable facet — it is CARRIED on the column.
+/// - unlike every recoverable facet - it is CARRIED on the column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum VectorMetric {
@@ -1039,8 +1039,8 @@ pub enum VectorMetric {
 
 /// The CLOSED per-column collation-INTENT lexicon.
 ///
-/// A collation NAME is dialect-private — `C` means nothing to SQLite, `BINARY`
-/// means nothing to PostgreSQL, and MySQL spells the same idea a third way — so
+/// A collation NAME is dialect-private - `C` means nothing to SQLite, `BINARY`
+/// means nothing to PostgreSQL, and MySQL spells the same idea a third way - so
 /// this carries the INTENT and lets the render seam spell it. That is the same
 /// treatment [`IrColumn::case_sensitive`] already gets, and the reason it is a
 /// closed enum rather than a string: an author-supplied collation name would land
@@ -1094,35 +1094,35 @@ impl VectorMetric {
 
 /// The CLOSED column-masking transform lexicon (`.mask({ kind })`), mirroring the
 /// db SDK's `MaskKind` union (not vendored here) and the runtime/diff
-/// `zero_migrate::schema::diff::MaskKind` EXACTLY. A CLOSED enum — like every other IR
-/// token-set — so serde REJECTS an out-of-set kind at DESERIALIZE (a hand-crafted
+/// `zero_migrate::schema::diff::MaskKind` EXACTLY. A CLOSED enum - like every other IR
+/// token-set - so serde REJECTS an out-of-set kind at DESERIALIZE (a hand-crafted
 /// IR envelope cannot smuggle an arbitrary mask-kind string into the `zero-migrate:mask`
 /// sentinel render seam).
 ///
-/// **Wire spelling.** Most variants are camelCase (`full`, `last4`, `name`, …); the
+/// **Wire spelling.** Most variants are camelCase (`full`, `last4`, `name`, ...); the
 /// two date forms are KEBAB (`date-year`, `date-decade`) to match the SDK wire form
 /// that `t.string().mask()` emits and that
 /// `zero_migrate::schema::query::mask_sentinel_for_field` reads via
 /// `zero_migrate::schema::diff::MaskKind::from_sql` (which accepts the kebab form). The
 /// on-DB sentinel itself uses the camelCase `as_sql` (`dateYear`/`dateDecade`); that
-/// spelling lives in the codec, NOT here — this enum carries the SDK/IR wire form.
+/// spelling lives in the codec, NOT here - this enum carries the SDK/IR wire form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum IrMaskKind {
-    /// `"***"` — maximum redaction. The kernel default for an encrypted column.
+    /// `"***"` - maximum redaction. The kernel default for an encrypted column.
     Full,
-    /// `"***-**-6789"` — last 4 visible (SSN, card, phone).
+    /// `"***-**-6789"` - last 4 visible (SSN, card, phone).
     Last4,
-    /// `"4111-****-…"` — first 4 visible (BIN/IIN preservation).
+    /// `"4111-****-..."` - first 4 visible (BIN/IIN preservation).
     First4,
-    /// `"a****@example.com"` — preserve domain for analytics.
+    /// `"a****@example.com"` - preserve domain for analytics.
     Email,
-    /// `"A. A***"` — initials (name fields).
+    /// `"A. A***"` - initials (name fields).
     Name,
-    /// `"1985-**-**"` — preserve year (age-bucket analytics).
+    /// `"1985-**-**"` - preserve year (age-bucket analytics).
     #[serde(rename = "date-year")]
     DateYear,
-    /// `"198?-**-**"` — preserve decade (coarser analytics).
+    /// `"198?-**-**"` - preserve decade (coarser analytics).
     #[serde(rename = "date-decade")]
     DateDecade,
     /// Explicit opt-out: no sibling, no mask wrap on read.
@@ -1156,7 +1156,7 @@ impl IrMaskKind {
 pub enum IrClassification {
     /// Usernames, display names, public profile data.
     Public,
-    /// Full name, email, address, phone, IP, DOB — the encrypted-column default.
+    /// Full name, email, address, phone, IP, DOB - the encrypted-column default.
     Pii,
     /// SSN, driver's license, biometric (CPRA "sensitive PI").
     Spi,
@@ -1189,12 +1189,12 @@ impl IrClassification {
 /// mask from the LIVE `zero-migrate:mask` COMMENT sentinel on the `_masked` sibling
 /// (`crates/plugin-db .../introspect_schema.rs`). But the OFFLINE op fold - the wire
 /// `FieldDef` map, produced by `zero_migrate`'s single-fold `project_field_defs`
-/// projection since step 4 consumer 3 of `docs/proposals/single-fold-and-effects.md`
-/// deleted the `fold_to_field_defs` walker - and `gen-types` have NO live DB, so there
+/// projection that replaced the deleted `fold_to_field_defs` walker
+/// (`docs/proposals/single-fold-and-effects.md`) - and `gen-types` have NO live DB, so there
 /// is no sentinel to read. So a STANDALONE `.mask()` on a plaintext column must be carried
-/// on the IR or it is DROPPED through author→generate→fold (the creator's
-/// `MaskedValue<T>` silently downgrades to `T`, and the runtime — which DOES read the
-/// sentinel — never gets a sentinel emitted because the op lower had no mask to emit).
+/// on the IR or it is DROPPED through author->generate->fold (the creator's
+/// `MaskedValue<T>` silently downgrades to `T`, and the runtime - which DOES read the
+/// sentinel - never gets a sentinel emitted because the op lower had no mask to emit).
 /// Carrying it closes BOTH the gen-types type-fidelity gap and the runtime
 /// masking-fidelity gap in one move (the lower stamps the `zero-migrate:mask` sentinel from
 /// this facet).
@@ -1243,7 +1243,7 @@ impl IrMask {
 pub struct GeneratedCol {
     /// The generated-column expression.
     pub expr: Expr,
-    /// `true` ⇒ STORED; `false` ⇒ VIRTUAL (`SQLite` only).
+    /// `true` => STORED; `false` => VIRTUAL (`SQLite` only).
     pub stored: bool,
 }
 
@@ -1254,7 +1254,7 @@ pub struct GeneratedCol {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct IdentityCol {
-    /// `true` ⇒ ALWAYS; `false` ⇒ BY DEFAULT.
+    /// `true` => ALWAYS; `false` => BY DEFAULT.
     pub always: bool,
 }
 
@@ -1356,7 +1356,7 @@ pub struct IrColumn {
     /// Nullability (default dialect behaviour if absent).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nullable: Option<bool>,
-    /// Structured default (a typed literal or a synth scalar) — never raw SQL.
+    /// Structured default (a typed literal or a synth scalar) - never raw SQL.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<IrDefault>,
     /// Whether the column carries a single-column UNIQUE.
@@ -1389,8 +1389,8 @@ pub struct IrColumn {
     /// introspection cannot recover (the minted value is opaque text in the
     /// catalog; the prefix is a mint-time input, not a stored column attribute).
     /// It is retained for internal platform descriptors and old data only; it is
-    /// neither TypeID nor public migration authoring. Carried so gen-types — and
-    /// the runtime, once it deletes the declared-schema cache — keep that legacy
+    /// neither TypeID nor public migration authoring. Carried so gen-types - and
+    /// the runtime, once it deletes the declared-schema cache - keep that legacy
     /// internal brand.
     /// Default-absent + `skip_serializing_if` so a column that declares no prefix is
     /// BYTE-IDENTICAL on the wire and in the checksum to the pre-facet image.
@@ -1408,21 +1408,21 @@ pub struct IrColumn {
     )]
     /// reserved-prefix deny-list (a hand-crafted IR envelope is the threat model).
     ///
-    /// Camel-cased on the wire (`"idPrefix"`) — the op-region nested-field
+    /// Camel-cased on the wire (`"idPrefix"`) - the op-region nested-field
     /// convention (`ir_wire_contract`, asserted by
     /// `ir_column_facet_fields_are_camel_case`); this aligns the spelling with the
     /// `FieldDescriptor.id_prefix` (`#[serde(rename = "idPrefix")]`, `declarative.rs`)
-    ///, so the same concept is spelled ONE way across IR↔descriptor.
+    ///, so the same concept is spelled ONE way across the IR and the descriptor.
     #[serde(rename = "idPrefix", skip_serializing_if = "Option::is_none")]
     pub id_prefix: Option<String>,
-    /// **Migration-first** — the `t.vector(n, { metric })` distance
+    /// **Migration-first** - the `t.vector(n, { metric })` distance
     /// metric, the other DECLARED-ONLY hint introspection cannot recover. Bounded
     /// STRUCTURALLY by the closed [`VectorMetric`] enum (serde rejects an out-of-set
     /// metric at deserialize); the validator additionally asserts it co-occurs only
     /// with a [`ColType::Vector`] column. Default-absent + `skip_serializing_if`, so
     /// checksum-neutral for a non-vector / metric-less column.
     ///
-    /// Camel-cased on the wire (`"vectorMetric"`) — same op-region convention as
+    /// Camel-cased on the wire (`"vectorMetric"`) - same op-region convention as
     /// `idPrefix`, aligning with `FieldDescriptor.vector_metric`
     /// (`#[serde(rename = "vectorMetric")]`).
     #[serde(rename = "vectorMetric", skip_serializing_if = "Option::is_none")]
@@ -1452,12 +1452,12 @@ pub struct IrColumn {
     pub collation: Option<ColumnCollation>,
     /// A STANDALONE column mask (`t.string().mask({ kind, classification })`). Unlike
     /// `id_prefix`/`vector_metric` (declared-only), a mask IS recoverable from the live
-    /// `zero-migrate:mask` sentinel by the RUNTIME — but the OFFLINE op fold + gen-types have no
-    /// live DB, so the facet is carried here to keep it through author→generate→fold
+    /// `zero-migrate:mask` sentinel by the RUNTIME - but the OFFLINE op fold + gen-types have no
+    /// live DB, so the facet is carried here to keep it through author->generate->fold
     /// (and so the op lower emits the `zero-migrate:mask` sentinel the runtime later reads). An
     /// encrypted column's auto-mask `{ full, pii }` is IMPLIED by the carrier and NOT
     /// carried here; an explicit mask OVERRIDES it. Default-absent + `skip_serializing_if`
-    /// ⇒ a mask-less column is BYTE-IDENTICAL on the wire/checksum to the pre-mask image.
+    /// => a mask-less column is BYTE-IDENTICAL on the wire/checksum to the pre-mask image.
     /// Bounded STRUCTURALLY by the closed [`IrMask`]/[`IrMaskKind`]/[`IrClassification`]
     /// enums (serde rejects an out-of-set kind/classification at deserialize).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1475,10 +1475,10 @@ pub struct IrColumn {
 /// The CLOSED referential-action lexicon for a FOREIGN KEY's `ON DELETE` /
 /// `ON UPDATE` clause. A CLOSED enum so the schema enumerates
 /// exactly the supported actions and serde REJECTS any out-of-set token at
-/// DESERIALIZE — a hand-crafted IR envelope cannot smuggle an arbitrary /
+/// DESERIALIZE - a hand-crafted IR envelope cannot smuggle an arbitrary /
 /// injection-shaped action string into the FK render seam. Camel-cased on the
-/// wire (`"cascade"`, `"setNull"`, `"noAction"`, …); the per-dialect SQL spelling
-/// (`SET NULL`, `NO ACTION`, …) is the render seam's job via
+/// wire (`"cascade"`, `"setNull"`, `"noAction"`, ...); the per-dialect SQL spelling
+/// (`SET NULL`, `NO ACTION`, ...) is the render seam's job via
 /// `zero_migrate::schema::query::normalize_fk_action`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -1535,7 +1535,7 @@ pub struct ColumnReference {
     /// Optional `ON UPDATE` behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_update: Option<RefAction>,
-    /// Optional explicit foreign-key constraint name. Absent ⇒ the name is
+    /// Optional explicit foreign-key constraint name. Absent => the name is
     /// derived (`<table>_<column>_fkey`). Lets authors override the portable
     /// table-qualified default without dropping to table-level `foreignKeys`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1721,7 +1721,7 @@ pub enum IrConstraintKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         initially_deferred: Option<bool>,
         /// Optional `NOT VALID` flag (PostgreSQL-only online constraint adoption).
-        /// When `Some(true)`, the ADD CONSTRAINT body is rendered ` … NOT VALID`
+        /// When `Some(true)`, the ADD CONSTRAINT body is rendered ` ... NOT VALID`
         /// so existing rows are NOT scanned at add time; a later
         /// [`Op::ValidateConstraint`] validates them under a weaker lock.
         /// Additive-optional: absent is checksum-neutral (`skip_serializing_if`),
@@ -1745,7 +1745,7 @@ pub enum IrConstraintKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         not_valid: Option<bool>,
     },
-    /// `PostgreSQL` exclusion constraint (`EXCLUDE USING …`). Operators and
+    /// `PostgreSQL` exclusion constraint (`EXCLUDE USING ...`). Operators and
     /// expression targets are closed tokens/ASTs, never raw SQL.
     Exclusion {
         /// Access method. Defaults to `GiST` on the wire when omitted.
@@ -1767,8 +1767,8 @@ pub enum IrConstraintKind {
 
 /// A named table constraint.
 ///
-/// `kind` is a NESTED object (`{"name":…,"kind":{"kind":"fk",…}}`), NOT a
-/// flattened sibling — un-flattening makes `deny_unknown_fields` sound (serde
+/// `kind` is a NESTED object (`{"name":...,"kind":{"kind":"fk",...}}`), NOT a
+/// flattened sibling - un-flattening makes `deny_unknown_fields` sound (serde
 /// forbids `flatten` + `deny_unknown_fields` together) and removes the
 /// flatten-merge ambiguity that made the generated JSON Schema lossy.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1791,12 +1791,12 @@ pub struct SequenceOwnedBy {
     pub column: String,
 }
 
-/// The CLOSED index-method lexicon (`createIndex` `using` union). A CLOSED enum — serde rejects any out-of-set token at DESERIALIZE,
+/// The CLOSED index-method lexicon (`createIndex` `using` union). A CLOSED enum - serde rejects any out-of-set token at DESERIALIZE,
 /// so a hand-crafted IR envelope cannot smuggle an arbitrary / injection-shaped
 /// method string into an unvalidated position that would reach the render seam.
 /// `gin`/`gist`/`ivfflat`/`hnsw` are Postgres-only logical hints (per-dialect
 /// lowering is the render seam's job).
-/// Camel/lower-cased on the wire (`"btree"`, `"ivfflat"`, …).
+/// Camel/lower-cased on the wire (`"btree"`, `"ivfflat"`, ...).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum IndexMethod {
@@ -1838,7 +1838,7 @@ pub struct IrIndex {
     /// Whether the index is UNIQUE.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unique: Option<bool>,
-    /// Index method (a CLOSED [`IndexMethod`] — never a raw SQL string).
+    /// Index method (a CLOSED [`IndexMethod`] - never a raw SQL string).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub using: Option<IndexMethod>,
     /// Partial-index predicate (a closed-AST node, never raw SQL).
@@ -2119,7 +2119,7 @@ impl CommentTarget {
 
 /// the optional `insert { onConflict }` upsert clause. A
 /// CLOSED carrier: the conflict-target columns + an optional `doUpdate` map of
-/// `column → DML value` assignment (absent `doUpdate` ⇒ `DO NOTHING`). NEVER a
+/// `column -> DML value` assignment (absent `doUpdate` => `DO NOTHING`). NEVER a
 /// raw SQL string. PostgreSQL and SQLite render an exact conflict target. MySQL
 /// uses its native duplicate-key clause for non-empty `doUpdate`, guards updates
 /// with the authored target columns, and errors on a different unique-key
@@ -2132,7 +2132,7 @@ impl CommentTarget {
 pub struct IrOnConflict {
     /// The conflict-target columns (`ON CONFLICT (cols)`).
     pub columns: Vec<String>,
-    /// `Some` ⇒ `DO UPDATE SET <col = value, …>`; absent ⇒ `DO NOTHING`. Scalar
+    /// `Some` => `DO UPDATE SET <col = value, ...>`; absent => `DO NOTHING`. Scalar
     /// assignments are native binds; expression assignments are closed ASTs rendered
     /// through the shared DML renderer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2142,8 +2142,8 @@ pub struct IrOnConflict {
 /// the uniform existence-guard modifier. Carried on a guarded
 /// DDL op as `existence_guard: Option<ExistenceGuard>` (omitted-when-absent on
 /// the wire). The engine SYNTHESIZES the guard via an executor-side CATALOG PROBE
-/// (decide-in-Rust: probe → run-or-skip), NEVER by lowering to a native
-/// `IF [NOT] EXISTS` clause — native support is patchy and asymmetric across PG /
+/// (decide-in-Rust: probe -> run-or-skip), NEVER by lowering to a native
+/// `IF [NOT] EXISTS` clause - native support is patchy and asymmetric across PG /
 /// `SQLite` (PG has no `ADD CONSTRAINT IF NOT EXISTS` / none on alter/rename;
 /// `SQLite` has no `ADD COLUMN IF NOT EXISTS` / none on drop-column/rename). A
 /// CLOSED 2-variant enum so serde rejects any other token at deserialize and the
@@ -2159,15 +2159,15 @@ pub enum ExistenceGuard {
     /// create*/add* family (`createTable`/`addColumn`/`createIndex`/`addConstraint`).
     IfNotExists,
     /// Run the drop/alter only if the target object is PRESENT; if ABSENT it is a
-    /// journaled satisfied no-op (a drop has no shape to verify — presence alone
+    /// journaled satisfied no-op (a drop has no shape to verify - presence alone
     /// governs). Legal on the drop*/rename/alter family
     /// (`dropTable`/`dropColumn`/`dropIndex`/`dropConstraint`/`renameColumn`/`alterColumn*`).
     IfExists,
 }
 
-/// **VENDOR (`zero-migrate/pg`)** — the CLOSED privilege lexicon for
+/// **VENDOR (`zero-migrate/pg`)** - the CLOSED privilege lexicon for
 /// `Op::Grant`/`Op::Revoke`. A CLOSED enum, so serde REJECTS an
-/// out-of-set token at DESERIALIZE — a hand-crafted IR envelope cannot smuggle an
+/// out-of-set token at DESERIALIZE - a hand-crafted IR envelope cannot smuggle an
 /// injection-shaped privilege string into the GRANT render seam (the
 /// `RefAction`/`IndexMethod` precedent). `All` renders `ALL PRIVILEGES`; the rest
 /// render their SQL keyword. Camel/lower-cased on the wire.
@@ -2203,7 +2203,7 @@ pub enum Privilege {
 }
 
 impl Privilege {
-    /// The SQL keyword for this privilege (`All` ⇒ `ALL PRIVILEGES`).
+    /// The SQL keyword for this privilege (`All` => `ALL PRIVILEGES`).
     #[must_use]
     pub const fn as_sql(self) -> &'static str {
         match self {
@@ -2224,7 +2224,7 @@ impl Privilege {
     }
 }
 
-/// **VENDOR** — the CLOSED, internally-tagged GRANT/REVOKE target. Tagged on `"kind"`; each shape is closed + `deny_unknown_fields` so a
+/// **VENDOR** - the CLOSED, internally-tagged GRANT/REVOKE target. Tagged on `"kind"`; each shape is closed + `deny_unknown_fields` so a
 /// hand-crafted artifact cannot smuggle an arbitrary object class.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(
@@ -2234,7 +2234,7 @@ impl Privilege {
     deny_unknown_fields
 )]
 pub enum GrantTarget {
-    /// `… ON [schema.]<name>, …` (tables). The optional `schema` qualifies all
+    /// `... ON [schema.]<name>, ...` (tables). The optional `schema` qualifies all
     /// named tables.
     Table {
         /// The table names.
@@ -2243,17 +2243,17 @@ pub enum GrantTarget {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<String>,
     },
-    /// `… ON SCHEMA <name>, …`.
+    /// `... ON SCHEMA <name>, ...`.
     Schema {
         /// The schema names.
         names: Vec<String>,
     },
-    /// `… ON ALL SEQUENCES IN SCHEMA <in>`.
+    /// `... ON ALL SEQUENCES IN SCHEMA <in>`.
     Sequence {
         /// The schema whose sequences are targeted.
         r#in: String,
     },
-    /// `… ON DATABASE <name>, …`.
+    /// `... ON DATABASE <name>, ...`.
     Database {
         /// The database names.
         names: Vec<String>,
@@ -2285,7 +2285,7 @@ impl TriggerTiming {
 }
 
 /// The CLOSED trigger-event lexicon (`INSERT`/`UPDATE`/`DELETE`/`TRUNCATE`),
-/// joined by `OR` in `CREATE TRIGGER … BEFORE UPDATE OR DELETE`. `TRUNCATE`
+/// joined by `OR` in `CREATE TRIGGER ... BEFORE UPDATE OR DELETE`. `TRUNCATE`
 /// renders on Postgres and is refused on `SQLite` as a per-facet unsupported shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -2368,7 +2368,7 @@ pub enum TriggerAction {
     deny_unknown_fields
 )]
 pub enum TriggerStmt {
-    /// `INSERT INTO … VALUES …` with typed scalar/closed-expression rows.
+    /// `INSERT INTO ... VALUES ...` with typed scalar/closed-expression rows.
     Insert {
         /// Target table.
         table: String,
@@ -2381,11 +2381,11 @@ pub enum TriggerStmt {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<String>,
     },
-    /// `UPDATE … SET … WHERE …`.
+    /// `UPDATE ... SET ... WHERE ...`.
     Update {
         /// Target table.
         table: String,
-        /// Column → typed scalar or closed-AST assignment.
+        /// Column -> typed scalar or closed-AST assignment.
         set: BTreeMap<String, IrValue>,
         /// Optional WHERE predicate.
         #[serde(rename = "where", skip_serializing_if = "Option::is_none")]
@@ -2394,7 +2394,7 @@ pub enum TriggerStmt {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<String>,
     },
-    /// `DELETE FROM … WHERE …`.
+    /// `DELETE FROM ... WHERE ...`.
     Delete {
         /// Target table.
         table: String,
@@ -2430,25 +2430,25 @@ pub enum TriggerStmt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum RaiseLevel {
-    /// `SQLite` `RAISE(ABORT, …)`.
+    /// `SQLite` `RAISE(ABORT, ...)`.
     Abort,
-    /// `SQLite` `RAISE(FAIL, …)`.
+    /// `SQLite` `RAISE(FAIL, ...)`.
     Fail,
     /// `SQLite` `RAISE(IGNORE)`.
     Ignore,
-    /// `SQLite` `RAISE(ROLLBACK, …)`.
+    /// `SQLite` `RAISE(ROLLBACK, ...)`.
     Rollback,
 }
 
 // `RaiseLevel` carries no `as_*_sql`. The four SQL TOKENS it used to hand out
-// belong to the one backend whose `RAISE(<level>, …)` grammar spells them, and
-// they live there now, beside the renderer that writes them —
+// belong to the one backend whose `RAISE(<level>, ...)` grammar spells them, and
+// they live there now, beside the renderer that writes them -
 // `raise_level_sql` in `zero-migrate-sqlite`'s `dml`. A target with a different
 // grammar reads the same level and answers differently: the MySQL renderer
 // discards it entirely and emits `SIGNAL SQLSTATE`, which is why the enum stays
 // here and only the spelling left.
 
-/// **VENDOR** — the CLOSED `CREATE POLICY … FOR <cmd>` lexicon.
+/// **VENDOR** - the CLOSED `CREATE POLICY ... FOR <cmd>` lexicon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum PolicyCmd {
@@ -2478,8 +2478,8 @@ impl PolicyCmd {
     }
 }
 
-/// **VENDOR** — the CLOSED `CREATE FUNCTION … LANGUAGE` lexicon. A deliberately
-/// 2-set: the plain SQL body language, or the TARGET'S OWN procedural language —
+/// **VENDOR** - the CLOSED `CREATE FUNCTION ... LANGUAGE` lexicon. A deliberately
+/// 2-set: the plain SQL body language, or the TARGET'S OWN procedural language -
 /// nothing else. An externally installed PL (`plpythonu`/`plperlu`/`c`) has no
 /// spelling here at all, so it is REJECTED at DESERIALIZE (serde
 /// unknown-variant) BEFORE the body deny-list scan even runs.
@@ -2487,19 +2487,19 @@ impl PolicyCmd {
 /// The 2-set is the ENGINE's security decision, not one server's language
 /// namespace: a target may trust several installed PLs and this vocabulary still
 /// offers exactly two. That is why the set stays closed HERE while the token each
-/// member renders to stays with the backend that renders it — the one place that
+/// member renders to stays with the backend that renders it - the one place that
 /// knows what its procedural language is called.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum FuncLanguage {
-    /// The target's own procedural language — the one it accepts a `BEGIN … END`
+    /// The target's own procedural language - the one it accepts a `BEGIN ... END`
     /// body in, whatever that language is named on that server.
     Procedural,
     /// The plain SQL body language (`LANGUAGE sql`).
     Sql,
 }
 
-/// **VENDOR** — the CLOSED function-volatility lexicon.
+/// **VENDOR** - the CLOSED function-volatility lexicon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum FuncVolatility {
@@ -2523,7 +2523,7 @@ impl FuncVolatility {
     }
 }
 
-/// **VENDOR** — the CLOSED function-argument mode lexicon.
+/// **VENDOR** - the CLOSED function-argument mode lexicon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum FuncArgMode {
@@ -2547,8 +2547,8 @@ impl FuncArgMode {
     }
 }
 
-/// **VENDOR** — one `CREATE FUNCTION` argument (`{ name?, type, mode? }`). The
-/// `r#type` is a PG type NAME (a plain string, like `CreateFunction.returns`) — it
+/// **VENDOR** - one `CREATE FUNCTION` argument (`{ name?, type, mode? }`). The
+/// `r#type` is a PG type NAME (a plain string, like `CreateFunction.returns`) - it
 /// is rendered into the signature verbatim and the WHOLE statement is then
 /// `pg_query`-parsed by the guard.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -2572,7 +2572,7 @@ pub struct FuncArg {
 ///
 /// It was `is_valid_pg_type_ref`, and the name was the only thing about it that named
 /// a vendor. The grammar it accepts is an identifier, at most one schema qualifier, an
-/// optional `(n)` / `(n,m)` precision and any number of `[]` suffixes — no keyword, no
+/// optional `(n)` / `(n,m)` precision and any number of `[]` suffixes - no keyword, no
 /// spelling and no catalog of any backend appears in it, which is why the PostgreSQL
 /// vendor crate and the neutral engine both call it. What made it look vendor-specific
 /// is that `CREATE FUNCTION` is currently a PostgreSQL-only op; the CHECK is not.
@@ -2817,11 +2817,11 @@ pub enum OrderItem {
 }
 
 /// The CLOSED `op.*` operation enum, internally tagged on `"op"` and
-/// camel-cased (`{"op":"createTable", …}`). NO `untagged`, NO `flatten` on the
-/// enum itself — see the module-level note + the ADR.
+/// camel-cased (`{"op":"createTable", ...}`). NO `untagged`, NO `flatten` on the
+/// enum itself - see the module-level note + the ADR.
 ///
 /// every table-targeting variant carries an optional
-/// `schema: Option<String>` (the schema-qualifier — honored under a widened schema scope,
+/// `schema: Option<String>` (the schema-qualifier - honored under a widened schema scope,
 /// pinned/refused under Confined) and, where guardable, an optional
 /// `existence_guard: Option<ExistenceGuard>`. Both are omitted-when-absent on the
 /// wire (`skip_serializing_if = "Option::is_none"`), so they fold into
@@ -2833,7 +2833,7 @@ pub enum OrderItem {
     not(doc),
     doc = "[`Checksum::of_ir`](crate::migration::Checksum::of_ir) ONLY when present and are"
 )]
-/// checksum-neutral when unset — preserving the cross-impl single-checksum invariant.
+/// checksum-neutral when unset - preserving the cross-impl single-checksum invariant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(
     tag = "op",
@@ -2885,12 +2885,12 @@ pub enum Op {
         ///
         /// The extension point for knobs the closed `Op` set does not model and should
         /// not: `postgres.fillfactor`, `mysql.row_format`, `sqlite.strict`. Which keys
-        /// exist is declared by each vendor crate, not here — this crate carries them
+        /// exist is declared by each vendor crate, not here - this crate carries them
         /// without interpreting them. See [`crate::attribute`].
         ///
         /// `skip_serializing_if` is load-bearing, not tidiness: an empty set is omitted
-        /// entirely, so adding this field changed the wire form — and therefore the
-        /// checksum — of NO migration that carries no attributes, which is every
+        /// entirely, so adding this field changed the wire form - and therefore the
+        /// checksum - of NO migration that carries no attributes, which is every
         /// migration authored before it existed.
         #[serde(default, skip_serializing_if = "CreateTableAttributes::is_empty")]
         attributes: CreateTableAttributes,
@@ -3001,14 +3001,14 @@ pub enum Op {
     /// `ALTER TABLE <old> RENAME TO <new>`.
     ///
     /// A whole-table rename is a FAST catalog-metadata operation (`pg_class`
-    /// relname swap on PG; a `sqlite_master` rewrite on `SQLite`) — NOT the
+    /// relname swap on PG; a `sqlite_master` rewrite on `SQLite`) - NOT the
     /// online expand-contract shape an `Op::RenameColumn` lowers to. The
     /// expand-contract machinery exists to let old + new COLUMN names coexist
     /// across a rolling deploy via trigger dual-write (a missing column breaks
     /// running code); there is no column-level dual-write that makes a renamed
     /// TABLE coexist under its old + new name, so a table rename is a single
-    /// direct `ALTER TABLE … RENAME TO …`. The down-migration is the inverse
-    /// rename (`to` → `table`). Both names pass the identifier gate; `schema`
+    /// direct `ALTER TABLE ... RENAME TO ...`. The down-migration is the inverse
+    /// rename (`to` -> `table`). Both names pass the identifier gate; `schema`
     /// schema-qualifies per the schema-qualifier rules; `ifExists` guards the SOURCE table.
     RenameTable {
         /// The existing table being renamed (the OLD name).
@@ -3023,7 +3023,7 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         existence_guard: Option<ExistenceGuard>,
     },
-    /// `ALTER TABLE … ADD COLUMN`.
+    /// `ALTER TABLE ... ADD COLUMN`.
     AddColumn {
         /// Target table.
         table: String,
@@ -3035,7 +3035,7 @@ pub enum Op {
         /// Nullability.
         #[serde(skip_serializing_if = "Option::is_none")]
         nullable: Option<bool>,
-        /// Structured default (typed literal or synth scalar) — never raw SQL.
+        /// Structured default (typed literal or synth scalar) - never raw SQL.
         #[serde(skip_serializing_if = "Option::is_none")]
         default: Option<IrDefault>,
         /// Canonical value-level format metadata for the added column.
@@ -3045,13 +3045,13 @@ pub enum Op {
             skip_serializing_if = "Option::is_none"
         )]
         value_format: Option<ValueFormat>,
-        /// **#173** — the pgvector distance metric for a `t.vector(n, { metric })` added
+        /// **#173** - the pgvector distance metric for a `t.vector(n, { metric })` added
         /// column (the same DECLARED-ONLY facet `IrColumn` carries on createTable).
         /// Meaningful on an added column (a vector ADD COLUMN renders the metric opclass),
         /// so it is carried here. Validated to co-occur ONLY with a [`ColType::Vector`]
-        /// type (`validate_column_facets`). Default-absent + `skip_serializing_if` ⇒
+        /// type (`validate_column_facets`). Default-absent + `skip_serializing_if` =>
         /// byte-identical when absent. (No `id_prefix` slot: an added column is NEVER the
-        /// system PK, so the legacy internal platform-ID prefix is meaningless — the
+        /// system PK, so the legacy internal platform-ID prefix is meaningless - the
         /// recorder keeps that fail-closed.)
         #[serde(
             rename = "vectorMetric",
@@ -3067,10 +3067,10 @@ pub enum Op {
             skip_serializing_if = "Option::is_none"
         )]
         case_sensitive: Option<bool>,
-        /// **#173** — a STANDALONE column mask for a masked added column (the same facet
+        /// **#173** - a STANDALONE column mask for a masked added column (the same facet
         /// `IrColumn` carries). Meaningful on an added column (a masked ADD COLUMN emits
         /// the `zero-migrate:mask` sentinel + `_masked` sibling). Default-absent +
-        /// `skip_serializing_if` ⇒ byte-identical when absent.
+        /// `skip_serializing_if` => byte-identical when absent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mask: Option<IrMask>,
         /// A generated/computed added column facet.
@@ -3096,7 +3096,7 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "AddColumnAttributes::is_empty")]
         attributes: AddColumnAttributes,
     },
-    /// `ALTER TABLE … DROP COLUMN`.
+    /// `ALTER TABLE ... DROP COLUMN`.
     DropColumn {
         /// Target table.
         table: String,
@@ -3121,10 +3121,10 @@ pub enum Op {
         /// UNIQUE.
         #[serde(skip_serializing_if = "Option::is_none")]
         unique: Option<bool>,
-        /// Index method (a CLOSED [`IndexMethod`] — never a raw SQL string).
+        /// Index method (a CLOSED [`IndexMethod`] - never a raw SQL string).
         #[serde(skip_serializing_if = "Option::is_none")]
         using: Option<IndexMethod>,
-        /// Partial-index predicate (a closed-AST node, never raw SQL — property A).
+        /// Partial-index predicate (a closed-AST node, never raw SQL - property A).
         #[serde(rename = "where", skip_serializing_if = "Option::is_none")]
         r#where: Option<Expr>,
         /// `CONCURRENTLY`.
@@ -3174,12 +3174,12 @@ pub enum Op {
         ///
         /// **Drives the destructive/approval gating at lower** (drop-index gating):
         /// dropping a plain index is reversible (re-`CREATE INDEX`), but dropping a
-        /// UNIQUE index silently removes a data-integrity guarantee — duplicate rows
+        /// UNIQUE index silently removes a data-integrity guarantee - duplicate rows
         /// become possible and a later re-add fails on the dirtied data. So a
         /// `unique: true` drop lowers `destructive + requires_approval` (refused
         /// under `Approval::None`), matching the declarative differ's
         /// `render_drop_index`. The JS `op.dropIndex` builder stamps this from the
-        /// authored index's declared uniqueness; absent/false ⇒ a plain drop.
+        /// authored index's declared uniqueness; absent/false => a plain drop.
         #[serde(skip_serializing_if = "Option::is_none")]
         unique: Option<bool>,
         /// `CONCURRENTLY`.
@@ -3192,7 +3192,7 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         existence_guard: Option<ExistenceGuard>,
     },
-    /// `ALTER TABLE … ALTER COLUMN … TYPE …`.
+    /// `ALTER TABLE ... ALTER COLUMN ... TYPE ...`.
     SetColumnType {
         /// Target table.
         table: String,
@@ -3201,7 +3201,7 @@ pub enum Op {
         /// New type.
         #[serde(rename = "toType")]
         to_type: ColType,
-        /// `USING` cast expression (a closed-AST node, never raw SQL — property A).
+        /// `USING` cast expression (a closed-AST node, never raw SQL - property A).
         #[serde(skip_serializing_if = "Option::is_none")]
         using: Option<Expr>,
         /// the schema qualifier.
@@ -3211,7 +3211,7 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         existence_guard: Option<ExistenceGuard>,
     },
-    /// `ALTER TABLE … ALTER COLUMN … SET NOT NULL`.
+    /// `ALTER TABLE ... ALTER COLUMN ... SET NOT NULL`.
     SetColumnNotNull {
         /// Target table.
         table: String,
@@ -3224,7 +3224,7 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         existence_guard: Option<ExistenceGuard>,
     },
-    /// `ALTER TABLE … ALTER COLUMN … DROP NOT NULL`.
+    /// `ALTER TABLE ... ALTER COLUMN ... DROP NOT NULL`.
     DropColumnNotNull {
         /// Target table.
         table: String,
@@ -3237,14 +3237,14 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         existence_guard: Option<ExistenceGuard>,
     },
-    /// `ALTER TABLE … ALTER COLUMN … SET DEFAULT …`.
+    /// `ALTER TABLE ... ALTER COLUMN ... SET DEFAULT ...`.
     SetColumnDefault {
         /// Target table.
         table: String,
         /// Target column.
         column: String,
-        /// Structured default (typed literal only for now; synth defaults are
-        /// validate-refused until the expression/default renderer lands).
+        /// Structured default. A typed literal only: a synth default is
+        /// validate-refused, because no expression/default renderer reads one here.
         value: IrDefault,
         /// the schema qualifier.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3253,7 +3253,7 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         existence_guard: Option<ExistenceGuard>,
     },
-    /// `ALTER TABLE … ALTER COLUMN … DROP DEFAULT`.
+    /// `ALTER TABLE ... ALTER COLUMN ... DROP DEFAULT`.
     DropColumnDefault {
         /// Target table.
         table: String,
@@ -3266,7 +3266,7 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         existence_guard: Option<ExistenceGuard>,
     },
-    /// `ALTER TABLE … RENAME COLUMN …` (the new type carried for re-derivation).
+    /// `ALTER TABLE ... RENAME COLUMN ...` (the new type carried for re-derivation).
     RenameColumn {
         /// Target table.
         table: String,
@@ -3315,7 +3315,7 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<String>,
     },
-    /// `ALTER TABLE … ADD CONSTRAINT …`.
+    /// `ALTER TABLE ... ADD CONSTRAINT ...`.
     AddConstraint {
         /// Target table.
         table: String,
@@ -3337,7 +3337,7 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "AddConstraintAttributes::is_empty")]
         attributes: AddConstraintAttributes,
     },
-    /// `ALTER TABLE … VALIDATE CONSTRAINT …` — validate a previously
+    /// `ALTER TABLE ... VALIDATE CONSTRAINT ...` - validate a previously
     /// `NOT VALID`-added FK/CHECK against existing rows under a weaker lock
     /// (PostgreSQL-only online constraint adoption). Refused fail-closed off
     /// `PostgreSQL`.
@@ -3353,7 +3353,7 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         existence_guard: Option<ExistenceGuard>,
     },
-    /// `ALTER TABLE … DROP CONSTRAINT …`.
+    /// `ALTER TABLE ... DROP CONSTRAINT ...`.
     DropConstraint {
         /// Target table.
         table: String,
@@ -3366,7 +3366,7 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         existence_guard: Option<ExistenceGuard>,
     },
-    /// `INSERT INTO … VALUES …` with typed scalar/closed-expression rows.
+    /// `INSERT INTO ... VALUES ...` with typed scalar/closed-expression rows.
     Insert {
         /// Target table.
         table: String,
@@ -3385,11 +3385,11 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<String>,
     },
-    /// `UPDATE … SET … WHERE …`.
+    /// `UPDATE ... SET ... WHERE ...`.
     Update {
         /// Target table.
         table: String,
-        /// Column → typed scalar or closed-AST assignment (sorted map for canonicality).
+        /// Column -> typed scalar or closed-AST assignment (sorted map for canonicality).
         set: BTreeMap<String, IrValue>,
         /// Optional WHERE predicate (closed AST).
         #[serde(rename = "where", skip_serializing_if = "Option::is_none")]
@@ -3398,7 +3398,7 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<String>,
     },
-    /// `DELETE FROM … WHERE …`.
+    /// `DELETE FROM ... WHERE ...`.
     ///
     /// WIRE TAG: the JS DSL's `del()` op-function records this variant as
     /// `{"op":"delete"}` (the camelCased variant name), NOT `{"op":"del"}`. The
@@ -3410,7 +3410,7 @@ pub enum Op {
     Delete {
         /// Target table.
         table: String,
-        /// The WHERE predicate (mandatory — no unfiltered delete).
+        /// The WHERE predicate (mandatory - no unfiltered delete).
         #[serde(rename = "where")]
         r#where: Expr,
         /// Optional LIMIT (JS-safe-integer bounded).
@@ -3431,7 +3431,7 @@ pub enum Op {
         cursor_stability: CursorStability,
         /// Rows per batch (JS-safe-integer bounded).
         batch_size: SafeU64,
-        /// Column → ordinary DML value or apply-engine per-row generator.
+        /// Column -> ordinary DML value or apply-engine per-row generator.
         set: BTreeMap<String, BackfillSetValue>,
         /// Optional row filter (closed AST).
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -3587,7 +3587,7 @@ pub enum Op {
         /// Optional cache size.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache: Option<SafeU64>,
-        /// Optional cycle flag (`true` → `CYCLE`, `false` → `NO CYCLE`).
+        /// Optional cycle flag (`true` -> `CYCLE`, `false` -> `NO CYCLE`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cycle: Option<bool>,
         /// Optional ownership. `null` means `OWNED BY NONE`; absent omits the
@@ -3636,7 +3636,7 @@ pub enum Op {
         /// Optional cache size.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache: Option<SafeU64>,
-        /// Optional cycle flag (`true` → `CYCLE`, `false` → `NO CYCLE`).
+        /// Optional cycle flag (`true` -> `CYCLE`, `false` -> `NO CYCLE`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cycle: Option<bool>,
         /// Optional ownership. `null` means `OWNED BY NONE`; absent omits the
@@ -3660,8 +3660,8 @@ pub enum Op {
         existence_guard: Option<ExistenceGuard>,
     },
 
-    // ──────────────────────────────────────────────────────────────────────
-    // VENDOR (`zero-migrate/pg`) — Postgres-ONLY privileged primitives.
+    // ----------------------------------------------------------------------
+    // VENDOR (`zero-migrate/pg`) - Postgres-ONLY privileged primitives.
     // Each is REFUSED fail-closed under a Confined capability
     // set at validate AND at lower (gate 1 = capability gate; gate 2 = the
     // rendered SQL hits the Confined deny-list). Exactly one registered backend
@@ -3669,10 +3669,10 @@ pub enum Op {
     // `DialectScope::Only` reach naming that backend: a deploy against any other
     // target is refused at load AND, for an already-lowered plan, whole-plan at apply
     // before a step runs. `password`,
-    // `body`, and `sql` are the only free `String` fields — the operator-gated raw
+    // `body`, and `sql` are the only free `String` fields - the operator-gated raw
     // surface, still parse-scanned by the guard deny-list.
-    // ──────────────────────────────────────────────────────────────────────
-    /// **VENDOR** — `CREATE SCHEMA [IF NOT EXISTS] <name> [AUTHORIZATION <role>]`.
+    // ----------------------------------------------------------------------
+    /// **VENDOR** - `CREATE SCHEMA [IF NOT EXISTS] <name> [AUTHORIZATION <role>]`.
     CreateSchema {
         /// The schema name to create.
         name: String,
@@ -3683,7 +3683,7 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         authorization: Option<String>,
     },
-    /// **VENDOR** — `DROP SCHEMA [IF EXISTS] <name> [CASCADE]`.
+    /// **VENDOR** - `DROP SCHEMA [IF EXISTS] <name> [CASCADE]`.
     DropSchema {
         /// The schema name to drop.
         name: String,
@@ -3694,7 +3694,7 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cascade: Option<bool>,
     },
-    /// **VENDOR** — `CREATE EXTENSION [IF NOT EXISTS] <name> [WITH SCHEMA <schema>]`.
+    /// **VENDOR** - `CREATE EXTENSION [IF NOT EXISTS] <name> [WITH SCHEMA <schema>]`.
     /// Still allowlist-gated at the guard (`FORBIDDEN_EXTENSIONS` overrides in all
     /// profiles).
     CreateExtension {
@@ -3707,7 +3707,7 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<String>,
     },
-    /// **VENDOR** — `DROP EXTENSION [IF EXISTS] <name>`.
+    /// **VENDOR** - `DROP EXTENSION [IF EXISTS] <name>`.
     DropExtension {
         /// The extension name.
         name: String,
@@ -3715,7 +3715,7 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         if_exists: Option<bool>,
     },
-    /// **VENDOR** — `CREATE ROLE <name> [LOGIN] [PASSWORD '…'] [BYPASSRLS] …`. The
+    /// **VENDOR** - `CREATE ROLE <name> [LOGIN] [PASSWORD '...'] [BYPASSRLS] ...`. The
     /// `if_not_exists` is engine-synthesized (a `pg_roles` probe; there is no
     /// native `CREATE ROLE IF NOT EXISTS`). `superuser: true` lowers `SUPERUSER`,
     /// which the deny-list STILL refuses in all profiles (privilege within the DB
@@ -3726,7 +3726,7 @@ pub enum Op {
         /// `LOGIN`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         login: Option<bool>,
-        /// `PASSWORD '…'` (a dev secret).
+        /// `PASSWORD '...'` (a dev secret).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         password: Option<String>,
         /// `BYPASSRLS`.
@@ -3741,10 +3741,10 @@ pub enum Op {
         /// `SUPERUSER` (DENIED at render in all profiles).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         superuser: Option<bool>,
-        /// `IN ROLE <r>, …`.
+        /// `IN ROLE <r>, ...`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         in_role: Option<Vec<String>>,
-        /// The `ALTER ROLE … SET search_path = …` the platform needs (synthesized
+        /// The `ALTER ROLE ... SET search_path = ...` the platform needs (synthesized
         /// as a follow-on statement).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         set_search_path: Option<Vec<String>>,
@@ -3752,18 +3752,18 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         if_not_exists: Option<bool>,
     },
-    /// **VENDOR** — `ALTER ROLE <name> SET search_path = …` / `RESET search_path`.
+    /// **VENDOR** - `ALTER ROLE <name> SET search_path = ...` / `RESET search_path`.
     AlterRole {
         /// The role name.
         name: String,
-        /// `SET search_path = …`.
+        /// `SET search_path = ...`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         set_search_path: Option<Vec<String>>,
         /// `RESET search_path`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reset_search_path: Option<bool>,
     },
-    /// **VENDOR** — `DROP ROLE [IF EXISTS] <name>`.
+    /// **VENDOR** - `DROP ROLE [IF EXISTS] <name>`.
     DropRole {
         /// The role name.
         name: String,
@@ -3771,14 +3771,14 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         if_exists: Option<bool>,
     },
-    /// **VENDOR** — `DROP OWNED BY <role>, …` (the `0025` rollback construct).
+    /// **VENDOR** - `DROP OWNED BY <role>, ...` (the `0025` rollback construct).
     DropOwnedBy {
         /// The roles whose owned objects are dropped.
         roles: Vec<String>,
     },
-    /// **VENDOR** — `GRANT <privs> ON <target> TO <roles> [WITH GRANT OPTION]`.
+    /// **VENDOR** - `GRANT <privs> ON <target> TO <roles> [WITH GRANT OPTION]`.
     Grant {
-        /// The privileges (a closed [`Privilege`] set; `All` ⇒ `ALL PRIVILEGES`).
+        /// The privileges (a closed [`Privilege`] set; `All` => `ALL PRIVILEGES`).
         privileges: Vec<Privilege>,
         /// The grant target (closed, tagged).
         on: GrantTarget,
@@ -3788,7 +3788,7 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         with_grant_option: Option<bool>,
     },
-    /// **VENDOR** — `REVOKE <privs> ON <target> FROM <roles>`.
+    /// **VENDOR** - `REVOKE <privs> ON <target> FROM <roles>`.
     Revoke {
         /// The privileges (closed [`Privilege`] set).
         privileges: Vec<Privilege>,
@@ -3797,7 +3797,7 @@ pub enum Op {
         /// The roles to revoke from (`"public"` is the reserved `PUBLIC` sentinel).
         from: Vec<String>,
     },
-    /// **VENDOR** — `ALTER TABLE … {ENABLE|DISABLE|FORCE|NO FORCE} ROW LEVEL SECURITY`.
+    /// **VENDOR** - `ALTER TABLE ... {ENABLE|DISABLE|FORCE|NO FORCE} ROW LEVEL SECURITY`.
     SetRls {
         /// The target table.
         table: String,
@@ -3811,9 +3811,9 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         forced: Option<bool>,
     },
-    /// **VENDOR** — `CREATE POLICY <name> ON <table> FOR <cmd> TO <roles> USING
+    /// **VENDOR** - `CREATE POLICY <name> ON <table> FOR <cmd> TO <roles> USING
     /// (<using>) [WITH CHECK (<with_check>)]`. The predicate is a CLOSED `Expr`
-    /// AST, NOT a string — rendered via the Expr renderer.
+    /// AST, NOT a string - rendered via the Expr renderer.
     CreatePolicy {
         /// The policy name.
         name: String,
@@ -3827,13 +3827,13 @@ pub enum Op {
         /// `TO <roles>` (default `PUBLIC` when absent).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         to: Option<Vec<String>>,
-        /// `USING (<predicate>)` — the closed-AST predicate.
+        /// `USING (<predicate>)` - the closed-AST predicate.
         using: Expr,
-        /// `WITH CHECK (<predicate>)` — the closed-AST predicate.
+        /// `WITH CHECK (<predicate>)` - the closed-AST predicate.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         with_check: Option<Expr>,
     },
-    /// **VENDOR** — `DROP POLICY [IF EXISTS] <name> ON <table>`.
+    /// **VENDOR** - `DROP POLICY [IF EXISTS] <name> ON <table>`.
     DropPolicy {
         /// The policy name.
         name: String,
@@ -3865,7 +3865,7 @@ pub enum Op {
         for_each: ForEach,
         /// The per-dialect action.
         action: TriggerAction,
-        /// `WHEN (<predicate>)` — the closed-AST condition.
+        /// `WHEN (<predicate>)` - the closed-AST condition.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         when: Option<Expr>,
     },
@@ -3883,12 +3883,12 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         if_exists: Option<bool>,
     },
-    /// **VENDOR** — `CREATE [OR REPLACE] FUNCTION <name>(<args>) RETURNS <returns>
+    /// **VENDOR** - `CREATE [OR REPLACE] FUNCTION <name>(<args>) RETURNS <returns>
     /// LANGUAGE <language> [VOLATILE|STABLE|IMMUTABLE] AS $$ <body> $$`. The `body`
-    /// is the SINGLE raw-string escape in the whole DSL: a
-    /// PL/pgSQL body is irreducibly arbitrary code, so it is operator-only and
+    /// is a raw-string escape, alongside the DSL's top-level `raw({ sql, reason })`
+    /// op: a PL/pgSQL body is irreducibly arbitrary code, so it is operator-only and
     /// STILL parse-scanned by the guard deny-list at lower. `language` is a closed
-    /// 2-set so an untrusted PL is rejected at deserialize.
+    /// token set so an untrusted PL is rejected at deserialize.
     CreateFunction {
         /// The function name.
         name: String,
@@ -3908,10 +3908,10 @@ pub enum Op {
         /// Volatility (closed [`FuncVolatility`]).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         volatility: Option<FuncVolatility>,
-        /// The RAW PL/pgSQL / SQL body — the one genuine escape.
+        /// The RAW PL/pgSQL / SQL body - the one genuine escape.
         body: String,
     },
-    /// **VENDOR** — `DROP FUNCTION [IF EXISTS] <name>(<argTypes>)`.
+    /// **VENDOR** - `DROP FUNCTION [IF EXISTS] <name>(<argTypes>)`.
     DropFunction {
         /// The function name.
         name: String,
@@ -3925,7 +3925,7 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         if_exists: Option<bool>,
     },
-    /// **VENDOR** — the gated raw-statement escape. Records
+    /// **VENDOR** - the gated raw-statement escape. Records
     /// the verbatim SQL plus required audit metadata. Operator-only and STILL
     /// parse-scanned by the guard deny-list at lower.
     ///
@@ -3945,7 +3945,7 @@ pub enum Op {
 }
 
 impl Op {
-    /// The table this op TARGETS — for the cross-deploy pending-contract
+    /// The table this op TARGETS - for the cross-deploy pending-contract
     /// interlock's touched-set. EXHAUSTIVE over the closed [`Op`] set so a new op
     /// variant must consciously declare its table here (a missing arm is a compile
     /// error, not a silent un-gate). `DropIndex`'s table is an OPTIONAL dialect
@@ -3954,7 +3954,7 @@ impl Op {
     /// Both DDL and DML ops contribute ("any op (DDL or DML)"). This
     /// is the authoritative DDL/DML touched-set the deploy loop threads into
     /// `MigrationEngine::apply_plan_with_touched`
-    /// — the interlock does NOT parse tables from rendered SQL.
+    /// - the interlock does NOT parse tables from rendered SQL.
     #[must_use]
     pub fn touched_table(&self) -> Option<&str> {
         match self {
@@ -3964,7 +3964,7 @@ impl Op {
             | Self::DetachPartition { name, .. }
             | Self::DropPartition { name, .. } => Some(name.as_str()),
             Self::SetTableOptions { table, .. } => Some(table.as_str()),
-            // A table rename TOUCHES the existing (OLD) table — the interlock
+            // A table rename TOUCHES the existing (OLD) table - the interlock
             // gates the table the op operates ON, which is the source name.
             Self::DropTable { table, .. }
             | Self::RenameTable { table, .. }
@@ -4001,7 +4001,7 @@ impl Op {
             // present it is the touched table, otherwise the op names only the
             // index (resolved against the live schema downstream).
             Self::DropIndex { table, .. } => table.as_deref(),
-            // VENDOR — table-scoped vendor ops (RLS / policy / trigger) touch their
+            // VENDOR - table-scoped vendor ops (RLS / policy / trigger) touch their
             // table; the database-/role-/schema-level ones touch no table.
             Self::SetRls { table, .. }
             | Self::CreatePolicy { table, .. }
@@ -4024,14 +4024,14 @@ impl Op {
         }
     }
 
-    /// Is this op DESTRUCTIVE / data-lossy — the SAME notion the guard's
+    /// Is this op DESTRUCTIVE / data-lossy - the SAME notion the guard's
     /// `data_security_class` classifies (`safety.destructive_ops` consumes) at the SQL
     /// level, mapped onto the closed [`Op`] vocabulary.
     ///
     /// The guard is the authoritative classifier over rendered SQL; this is its
     /// Op-level mirror for callers that must decide destructiveness BEFORE lowering
     /// (the host's `safety.require_approval` `on_destructive` query). It is EXHAUSTIVE
-    /// over the closed [`Op`] set — a new variant is a compile error until it
+    /// over the closed [`Op`] set - a new variant is a compile error until it
     /// declares its data-security class, so the two classifiers cannot silently
     /// drift.
     ///
@@ -4039,21 +4039,21 @@ impl Op {
     /// - every `DROP` of a durable object (table/column/schema/view/sequence/enum
     ///   =`DROP TYPE`/domain/function/constraint) + `DROP OWNED BY`;
     /// - a partition `DROP` (`DROP TABLE <partition>`) and `DETACH PARTITION`;
-    /// - a column TYPE change (`ALTER COLUMN TYPE` — potentially lossy);
+    /// - a column TYPE change (`ALTER COLUMN TYPE` - potentially lossy);
     /// - the row-affecting DML (`UPDATE`/`DELETE`, and `Backfill`, whose assembled
     ///   `UPDATE` is the same shape).
     ///
     /// Deliberately NON-destructive (matching the guard): `DROP INDEX` (index drops
-    /// are reversible structure at the SQL level — a UNIQUE-index drop is gated
+    /// are reversible structure at the SQL level - a UNIQUE-index drop is gated
     /// separately via [`crate::migration::MigrationFlags`], not here), `DROP ROLE`,
     /// `DROP EXTENSION`, `DROP POLICY`, `DROP TRIGGER`, `REVOKE`, and every additive
     /// op. `Dialectal` is destructive iff ANY present leg has a destructive op; a
     /// `Raw` island carries opaque SQL the guard classifies at parse time, so at
-    /// the Op level it is treated as destructive (fail-closed — it may drop/delete).
+    /// the Op level it is treated as destructive (fail-closed - it may drop/delete).
     #[must_use]
     pub fn is_destructive(&self) -> bool {
         match self {
-            // ── durable-object drops (guard: DROP <object>) ────────────────────
+            // -- durable-object drops (guard: DROP <object>) --------------------
             Self::DropTable { .. }
             | Self::DropColumn { .. }
             | Self::DropSchema { .. }
@@ -4070,23 +4070,23 @@ impl Op {
                 ..
             }
             | Self::DropOwnedBy { .. }
-            // ── partition drop / detach ────────────────────────────────────────
+            // -- partition drop / detach ----------------------------------------
             | Self::DropPartition { .. }
             | Self::DetachPartition { .. }
-            // ── potentially-lossy column type change ───────────────────────────
+            // -- potentially-lossy column type change ---------------------------
             | Self::SetColumnType { .. }
-            // ── row-affecting DML ──────────────────────────────────────────────
+            // -- row-affecting DML ----------------------------------------------
             | Self::Update { .. }
             | Self::Delete { .. }
             | Self::Backfill { .. }
-            // ── opaque raw SQL — fail closed ───────────────────────────────────
+            // -- opaque raw SQL - fail closed -----------------------------------
             | Self::Raw { .. } => true,
             // `Dialectal` is destructive iff any present leg is.
             Self::Dialectal { legs } => legs
                 .values()
                 .flatten()
                 .any(Op::is_destructive),
-            // ── additive / non-lossy — NOT destructive (guard: NonDestructive) ─
+            // -- additive / non-lossy - NOT destructive (guard: NonDestructive) -
             Self::CreateTable { .. }
             | Self::CreatePartition { .. }
             | Self::AttachPartition { .. }
@@ -4191,7 +4191,7 @@ impl Op {
             | Self::AlterSequence { schema, .. }
             | Self::DropSequence { schema, .. } => schema.as_deref(),
             Self::Comment { target, .. } => target.schema(),
-            // VENDOR — ops carrying a schema QUALIFIER expose it for cross-schema
+            // VENDOR - ops carrying a schema QUALIFIER expose it for cross-schema
             // confinement + effective-schema resolution.
             Self::CreateExtension { schema, .. }
             | Self::SetRls { schema, .. }
@@ -4201,7 +4201,7 @@ impl Op {
             | Self::DropTrigger { schema, .. }
             | Self::CreateFunction { schema, .. }
             | Self::DropFunction { schema, .. } => schema.as_deref(),
-            // VENDOR — these operate on the schema/role/database NAMESPACE itself
+            // VENDOR - these operate on the schema/role/database NAMESPACE itself
             // (the `name`/`roles` is NOT a schema qualifier), so no qualifier.
             //
             // `GrantTarget::Table { schema }` carries an INNER target schema rather
@@ -4309,7 +4309,7 @@ impl Op {
             | Self::CreateDomain { .. }
             | Self::CreateSequence { .. }
             | Self::AlterSequence { .. } => None,
-            // VENDOR — the existence guard is a NATIVE clause (`IF [NOT] EXISTS`) or
+            // VENDOR - the existence guard is a NATIVE clause (`IF [NOT] EXISTS`) or
             // an engine-synthesized `pg_roles` probe rendered inline by the vendor
             // lowering, NOT the catalog-probe `ExistenceGuard` mechanism. None here.
             Self::CreateSchema { .. }
@@ -4379,7 +4379,7 @@ impl Op {
             | Self::CreateDomain { .. }
             | Self::CreateSequence { .. }
             | Self::AlterSequence { .. } => None,
-            // VENDOR — vendor ops carry no `ExistenceGuard` (native clause instead).
+            // VENDOR - vendor ops carry no `ExistenceGuard` (native clause instead).
             Self::CreateSchema { .. }
             | Self::DropSchema { .. }
             | Self::CreateExtension { .. }
@@ -4403,11 +4403,11 @@ impl Op {
 }
 
 impl MigrationIr {
-    /// The set of tables this migration's op list TOUCHES — the
+    /// The set of tables this migration's op list TOUCHES - the
     /// union of every op's [`Op::touched_table`]. This is the authoritative DDL/DML
     /// touched-set the production deploy path threads into the engine's
     /// pending-contract read-back, so the refusal catches ANY op touching a table
-    /// with an outstanding pending contract — not just the structurally-typed
+    /// with an outstanding pending contract - not just the structurally-typed
     /// `OnlineRename` plan steps.
     #[must_use]
     pub fn touched_tables(&self) -> Vec<String> {
@@ -4423,11 +4423,11 @@ impl MigrationIr {
 ///
 /// The numeric domain is the security-relevant part: on DESERIALIZE this type
 /// REJECTS a fractional / exponential JSON number and any integer with magnitude
-/// ≥ 2^53, so a malicious IR envelope cannot smuggle a lossy float through the
+/// >= 2^53, so a malicious IR envelope cannot smuggle a lossy float through the
 /// loader. Exact integers `|v| < 2^53` become [`IrScalar::Int`]; arbitrary-
-/// precision decimal numbers must be sent as `{ "decimal": "…" }` strings.
+/// precision decimal numbers must be sent as `{ "decimal": "..." }` strings.
 /// Exact signed 64-bit integers outside the JavaScript safe-integer range use
-/// the distinct `{ "int64": "…" }` carrier.
+/// the distinct `{ "int64": "..." }` carrier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IrScalar {
     /// JSON `null`.
@@ -4437,15 +4437,15 @@ pub enum IrScalar {
     /// An exact 64-bit integer (`|v| < 2^53` on deserialize).
     Int(i64),
     /// An exact signed 64-bit integer carried on the wire as its canonical
-    /// decimal string (`{"int64":"…"}`).
+    /// decimal string (`{"int64":"..."}`).
     Int64(i64),
     /// An arbitrary-precision decimal carried as its canonical string.
     Decimal(String),
     /// A UTF-8 string.
     Str(String),
     /// Raw bytes. Carried on the wire as a canonical base64 string
-    /// (`{"bytes":"…"}`), but stored DECODED so two non-canonical encodings of
-    /// the same payload normalize to one value (and thus one checksum) — the
+    /// (`{"bytes":"..."}`), but stored DECODED so two non-canonical encodings of
+    /// the same payload normalize to one value (and thus one checksum) - the
     /// cross-impl determinism the numeric-domain contract needs. Re-encoded with the
     /// canonical STANDARD (padded) alphabet on serialize.
     Bytes(Vec<u8>),
@@ -4472,7 +4472,7 @@ impl Serialize for IrScalar {
                 m.end()
             }
             Self::Bytes(b) => {
-                // Canonical STANDARD (padded) base64 — one encoding per payload.
+                // Canonical STANDARD (padded) base64 - one encoding per payload.
                 let encoded = BASE64_STANDARD.encode(b);
                 let mut m = ser.serialize_map(Some(1))?;
                 m.serialize_entry("bytes", &encoded)?;
@@ -4485,7 +4485,7 @@ impl Serialize for IrScalar {
 /// Is `s` a syntactically valid decimal STRING (optional sign, digits, optional
 /// single fractional part)? No exponent, no whitespace, at least one digit.
 /// (Arbitrary precision is the whole point of the decimal-string carrier, so we
-/// do not parse it into a float — we only shape-check it.)
+/// do not parse it into a float - we only shape-check it.)
 #[must_use]
 pub fn is_decimal_string(s: &str) -> bool {
     let body = s
@@ -4538,7 +4538,7 @@ impl<'de> Deserialize<'de> for IrScalar {
                     // u < 2^53 < i64::MAX, so the cast is exact.
                     Ok(Self::Int(u as i64))
                 } else {
-                    // Fractional or exponential — rejected outright.
+                    // Fractional or exponential - rejected outright.
                     Err(D::Error::custom(format!(
                         "{EXPR_INVALID_NUMERIC}: number {n} is fractional or exponential; \
                          use a decimal string ({{\"decimal\":\"…\"}}) for non-integers"
@@ -4714,7 +4714,7 @@ impl From<Expr> for IrValue {
 /// Its [`canonical_bytes`](CanonicalOpList::canonical_bytes) method produces the
 /// canonical byte image: each `Op` is serialized to `serde_json::Value`,
 /// RFC 8785 (JCS) canonicalized (object keys sorted recursively), and folded
-/// LENGTH-PREFIXED in op order — so a reorder, insert, or any field change
+/// LENGTH-PREFIXED in op order - so a reorder, insert, or any field change
 /// (including an embedded expression-AST `Literal`, which lives inside the op
 /// value) shifts the bytes.
 #[derive(Debug, Clone, Copy)]
@@ -4727,7 +4727,7 @@ impl CanonicalOpList<'_> {
     /// up/down region.
     ///
     /// # Panics
-    /// Panics only if an `Op` fails to serialize to `serde_json::Value` —
+    /// Panics only if an `Op` fails to serialize to `serde_json::Value` -
     /// infallible for these plain structs/enums (no non-string map keys), so in
     /// practice never. We do not swallow a failure: a silent empty image would
     /// collide two distinct op-lists into the same security checksum.
@@ -4750,7 +4750,7 @@ impl CanonicalOpList<'_> {
 ///
 /// Scope here is the IR op-list region only. The numeric domain is already
 /// constrained ([`IrScalar`] is safe integer / tagged i64 / decimal-string), so
-/// no float formatting is needed — integers print without exponent and tagged
+/// no float formatting is needed - integers print without exponent and tagged
 /// numeric strings stay inside their single-key objects. The two rules that
 /// matter for canonicality:
 ///
@@ -4775,7 +4775,7 @@ fn jcs_write(value: &serde_json::Value, out: &mut String) {
             // Display for an integer Number is already canonical (no exponent,
             // no leading zeros). Floats cannot appear in a well-formed IR op
             // value, but if one ever did we still emit its serde_json form
-            // rather than panic — canonicality of the op region is preserved
+            // rather than panic - canonicality of the op region is preserved
             // because IrScalar forbids floats upstream.
             out.push_str(&n.to_string());
         }
@@ -4791,9 +4791,9 @@ fn jcs_write(value: &serde_json::Value, out: &mut String) {
             out.push(']');
         }
         serde_json::Value::Object(map) => {
-            // RFC 8785 §3.2.3 mandates object keys are sorted by their UTF-16
+            // RFC 8785 section 3.2.3 mandates object keys are sorted by their UTF-16
             // code-unit sequence. For the ASCII serde field names the closed IR
-            // schema uses this equals byte order — but an author-supplied map key
+            // schema uses this equals byte order - but an author-supplied map key
             // (an `Update`/`Backfill` `set` COLUMN name) MAY be non-ASCII, and
             // Rust's `str` Ord is UTF-8-scalar order, which diverges from UTF-16
             // for supplementary-plane (U+10000+) code points. We sort by the
@@ -4815,9 +4815,9 @@ fn jcs_write(value: &serde_json::Value, out: &mut String) {
     }
 }
 
-/// Compare two strings by their UTF-16 code-unit sequence (RFC 8785 §3.2.3
+/// Compare two strings by their UTF-16 code-unit sequence (RFC 8785 section 3.2.3
 /// object-key ordering). Lexicographic over the `u16` code units `encode_utf16`
-/// yields — which for BMP characters equals scalar order, but for supplementary-
+/// yields - which for BMP characters equals scalar order, but for supplementary-
 /// plane characters (U+10000+) differs from Rust's UTF-8-scalar `str` Ord
 /// (their surrogate-pair lead unit `0xD800..` sorts BELOW BMP code points above
 /// `0xE000`). This is the exact comparison a conformant JS JCS serializer uses.
@@ -4825,7 +4825,7 @@ fn utf16_code_unit_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     a.encode_utf16().cmp(b.encode_utf16())
 }
 
-/// JSON-escape a string per RFC 8785 §3.2.2.2 (minimal escaping: the two-char
+/// JSON-escape a string per RFC 8785 section 3.2.2.2 (minimal escaping: the two-char
 /// escapes for the named control chars, `\uXXXX` for the rest of C0, and the
 /// mandatory `"` and `\` escapes; everything else verbatim UTF-8).
 fn jcs_write_string(s: &str, out: &mut String) {
@@ -4958,7 +4958,7 @@ mod tests {
         assert!(validate_type_id_prefix(&"a".repeat(TYPE_ID_MAX_PREFIX_LEN + 1)).is_err());
     }
 
-    // ---- IrScalar numeric-domain — RED before the custom Deserialize ----
+    // ---- IrScalar numeric-domain - RED before the custom Deserialize ----
 
     #[test]
     fn ir_scalar_rejects_fractional_number() {
@@ -4980,20 +4980,20 @@ mod tests {
 
     #[test]
     fn ir_scalar_rejects_integer_at_2_pow_53() {
-        // 2^53 == 9_007_199_254_740_992 — first inexact-in-f64 integer.
+        // 2^53 == 9_007_199_254_740_992 - first inexact-in-f64 integer.
         let err = serde_json::from_str::<IrScalar>("9007199254740992").unwrap_err();
         assert!(
             err.to_string().contains(EXPR_INVALID_NUMERIC),
             "2^53 must be rejected, got: {err}"
         );
-        // …and the negative side.
+        // ...and the negative side.
         let err_neg = serde_json::from_str::<IrScalar>("-9007199254740992").unwrap_err();
         assert!(err_neg.to_string().contains(EXPR_INVALID_NUMERIC));
     }
 
     #[test]
     fn ir_scalar_accepts_integer_below_2_pow_53() {
-        // 2^53 - 1 == 9_007_199_254_740_991 — last exact integer.
+        // 2^53 - 1 == 9_007_199_254_740_991 - last exact integer.
         let v: IrScalar = serde_json::from_str("9007199254740991").unwrap();
         assert_eq!(v, IrScalar::Int(9_007_199_254_740_991));
         let small: IrScalar = serde_json::from_str("42").unwrap();
@@ -5186,7 +5186,7 @@ mod tests {
     #[test]
     fn ir_scalar_decimal_object_keeps_string_verbatim() {
         // {"decimal":"1e10"} is ACCEPTED as a Decimal carrying the string
-        // verbatim — the exponent restriction is on JSON NUMBERS, not on the
+        // verbatim - the exponent restriction is on JSON NUMBERS, not on the
         // decimal-string carrier... but our shape-check forbids 'e', so this
         // particular string is rejected; verify a plain decimal is kept.
         let v: IrScalar = serde_json::from_str(r#"{"decimal":"123.45"}"#).unwrap();
@@ -5547,7 +5547,7 @@ mod tests {
     /// CHECKSUM STABILITY for an UNRELATED op across the table-rename addition: a
     /// pre-existing op's canonical encoding must be IDENTICAL whether or not the new
     /// `Op::RenameTable` variant follows it in the list. The op-list image is a
-    /// u64-BE op COUNT, then per op a u64-BE-length-prefixed JCS segment — so the
+    /// u64-BE op COUNT, then per op a u64-BE-length-prefixed JCS segment - so the
     /// COUNT header differs between a 1-op and 2-op list, but the unrelated op's own
     /// length-prefixed SEGMENT (the bytes after the 8-byte count header) must be
     /// byte-identical. This proves appending a `renameTable` neither perturbs the
@@ -5705,7 +5705,7 @@ mod tests {
     fn advisory_checksum_hint_is_excluded_from_of_ir() {
         use crate::migration::{Checksum, MigrationFlags};
         // DOCUMENTATION TEST (LOW): the hint's exclusion from the IR checksum is
-        // guaranteed STRUCTURALLY by `Checksum::of_ir`'s SIGNATURE — it takes
+        // guaranteed STRUCTURALLY by `Checksum::of_ir`'s SIGNATURE - it takes
         // `ops`/`flags`/`owner`/`deps`/`supersedes`/`preconditions` and has NO
         // checksum/hint parameter, so `MigrationIr.checksum` is unreachable from
         // it by construction. This test cannot fail for the reason it documents
@@ -5741,10 +5741,10 @@ mod tests {
 
         // The hint-domain recompute (the half the loader compares to the hint):
         // ops + dialect-neutral flags + owner "" + deps/supersedes/preconditions.
-        // The IR `flags`/`depends_on`/`supersedes` → MigrationFlags/MigrationId
-        // merge is a later wave; the hint-domain checksum here uses the neutral defaults,
+        // The IR `flags`/`depends_on`/`supersedes` -> MigrationFlags/MigrationId
+        // merge is not implemented; the hint-domain checksum here uses the neutral defaults,
         // and crucially derives the OP region (the only IR-sourced of_ir input
-        // today) from each value — so a hint that leaked into of_ir would show.
+        // today) from each value - so a hint that leaked into of_ir would show.
         let of_ir_for = |ir: &MigrationIr| {
             Checksum::of_ir(
                 &CanonicalOpList(&ir.ops),
@@ -5762,7 +5762,7 @@ mod tests {
         );
     }
 
-    // ── Migration-first — the new optional IrColumn facets are checksum-NEUTRAL
+    // -- Migration-first - the new optional IrColumn facets are checksum-NEUTRAL
     //    for a column that declares neither. An absent `id_prefix` /
     //    `vector_metric` must contribute ZERO bytes (`skip_serializing_if`), so a
     //    plain `t.text()` column's canonical bytes + of_ir are BYTE-IDENTICAL to the
@@ -5804,7 +5804,7 @@ mod tests {
 
     #[test]
     fn p2a_absent_facets_serialize_to_zero_bytes() {
-        // The serialized column carries NEITHER key — an absent optional is OMITTED
+        // The serialized column carries NEITHER key - an absent optional is OMITTED
         // (not `null`), the precondition the byte-identity rests on.
         let op = text_create_table_op();
         let json = serde_json::to_string(&op).unwrap();
@@ -5820,7 +5820,7 @@ mod tests {
             !json.contains("caseSensitive"),
             "an absent case_sensitive facet must NOT appear on the wire: {json}"
         );
-        // #174 — the same byte-identity guarantee extends to the standalone `mask`
+        // #174 - the same byte-identity guarantee extends to the standalone `mask`
         // facet: a mask-less column must NOT emit a `mask` key (skip_serializing_if),
         // so the `t.text()` column stays byte-identical to the pre-mask image.
         assert!(
@@ -5834,7 +5834,7 @@ mod tests {
         use crate::migration::{Checksum, MigrationFlags};
         // BYTE-IDENTITY: the canonical image of the typed `IrColumn`-with-None-facets
         // createTable must equal the canonical image of an INDEPENDENTLY hand-built
-        // JSON Op that has NO idPrefix/vectorMetric keys at all — the "pre-facet" wire
+        // JSON Op that has NO idPrefix/vectorMetric keys at all - the "pre-facet" wire
         // shape. Because each new field is `skip_serializing_if`, the two serialize
         // identically; this fails the day the fields lose that attribute (they would
         // then add `"idPrefix":null`, breaking byte-identity).
@@ -5842,7 +5842,7 @@ mod tests {
         let typed_bytes = CanonicalOpList(&ops).canonical_bytes();
 
         // The pre-facet wire image: a createTable whose column object has exactly
-        // `{ name, type }` — no facet keys. Round-trip it through the SAME serde Op
+        // `{ name, type }` - no facet keys. Round-trip it through the SAME serde Op
         // so the JCS encoding path is identical.
         let pre_p2a_op: Op = serde_json::from_value(serde_json::json!({
             "op": "createTable",
@@ -5879,7 +5879,7 @@ mod tests {
     // ---- schema qualifier + existence guard (wire shape) ----
 
     /// The legacy native `if_exists` field is GONE (folded into `existence_guard`).
-    /// `deny_unknown_fields` rejects an IR envelope still carrying it — the intentional
+    /// `deny_unknown_fields` rejects an IR envelope still carrying it - the intentional
     /// wire break. RED before the field removal (it deserialized fine before the field existed).
     #[test]
     fn legacy_if_exists_field_is_rejected() {

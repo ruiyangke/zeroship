@@ -8,14 +8,14 @@
 //! The journal is **append-only / immutable**, so squash does NOT delete the
 //! `v1..vN` events. It models squash as a **supersession**:
 //!
-//! - **Existing DB** (already applied `[v1..vN]`) — [`squash`] (this module)
+//! - **Existing DB** (already applied `[v1..vN]`) - [`squash`] (this module)
 //!   journals `S` as a `completed` event WITHOUT running its `up` (baseline-style;
-//!   the effect is already present) and records the `S → v_i` supersession edges.
+//!   the effect is already present) and records the `S -> v_i` supersession edges.
 //!   The old `v1..vN` events remain (immutable); `S` supersedes them.
-//! - **Fresh DB** (none of `[v1..vN]` applied) — an ordinary
+//! - **Fresh DB** (none of `[v1..vN]` applied) - an ordinary
 //!   [`apply`](crate::engine::MigrationEngine::apply) of a set containing `S` runs `S.up` once and
 //!   SKIPS `v1..vN` (the executor's pending computation treats a version superseded
-//!   by an applied/being-applied squash as satisfied — see
+//!   by an applied/being-applied squash as satisfied - see
 //!   `crate::apply::executor::compute_superseded`). `v1..vN` are never double-applied,
 //!   and a later migration that `depends_on` a superseded version is satisfied by
 //!   `S`.
@@ -23,13 +23,13 @@
 //! # The all-or-none rule
 //!
 //! A squash is consistent only at the two extremes of its superseded set:
-//! - **ALL** of `[v1..vN]` net-applied ⇒ [`squash`] records the supersession
+//! - **ALL** of `[v1..vN]` net-applied => [`squash`] records the supersession
 //!   (baseline-style, no `up` run);
-//! - **NONE** applied ⇒ the fresh path through [`apply`](crate::engine::MigrationEngine::apply)
+//! - **NONE** applied => the fresh path through [`apply`](crate::engine::MigrationEngine::apply)
 //!   runs `S.up`.
 //!
 //! A **partial** overlap (some but not all of `[v1..vN]` applied) is an
-//! inconsistent state and is refused — both here ([`SquashError::PartialOverlap`])
+//! inconsistent state and is refused - both here ([`SquashError::PartialOverlap`])
 //! and in the executor ([`crate::apply::executor::ApplyError::SquashPartialOverlap`]).
 //!
 //! # Safety
@@ -53,7 +53,7 @@ use crate::render::backends::guard_for;
 /// What [`squash`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SquashOutcome {
-    /// The squash version recorded (`mig_…`).
+    /// The squash version recorded (`mig_...`).
     pub version: String,
     /// The versions it now supersedes (`[v1..vN]`).
     pub superseded: Vec<String>,
@@ -65,16 +65,16 @@ pub struct SquashOutcome {
 /// Error from [`squash`].
 #[derive(Debug, thiserror::Error)]
 pub enum SquashError {
-    /// A **dialect-neutral** backend error — the project lock acquire/release or
+    /// A **dialect-neutral** backend error - the project lock acquire/release or
     /// the supersession journal write failed behind the
     /// [`MigrationBackend`] seam. The payload is
-    /// the backend's own error rendered to a string (PG `db error: …` / a non-PG
-    /// `backend error: …`), so squash never leaks a concrete driver error type on
+    /// the backend's own error rendered to a string (PG `db error: ...` / a non-PG
+    /// `backend error: ...`), so squash never leaks a concrete driver error type on
     /// its public surface. The PG lock/write path routes through the backend's
     /// [`ApplyError`], surfaced here.
     #[error("backend error: {0}")]
     Backend(String),
-    /// A journal operation failed (a journal read — `ensure_journal`/`applied` —
+    /// A journal operation failed (a journal read - `ensure_journal`/`applied` -
     /// behind the backend seam).
     #[error(transparent)]
     Journal(#[from] JournalError),
@@ -90,14 +90,14 @@ pub enum SquashError {
         #[source]
         source: GuardError,
     },
-    /// The squash declares no `supersedes` set — a squash that supersedes nothing
+    /// The squash declares no `supersedes` set - a squash that supersedes nothing
     /// is malformed (it would be an ordinary migration). Nothing was journaled.
     #[error("squash {version} declares an empty `supersedes` set; a squash must supersede at least one version")]
     NoSupersedes {
         /// The squash version.
         version: String,
     },
-    /// Not every version in `supersedes` is net-applied — this is the existing-DB
+    /// Not every version in `supersedes` is net-applied - this is the existing-DB
     /// path, which records the supersession only when ALL `[v1..vN]` are already
     /// applied. NONE applied is the FRESH path (use
     /// [`apply`](crate::engine::MigrationEngine::apply), which runs `S.up`); a partial set is the
@@ -116,7 +116,7 @@ pub enum SquashError {
         /// The total number it supersedes.
         total: usize,
     },
-    /// A PARTIAL overlap: some but not all of `[v1..vN]` are net-applied — an
+    /// A PARTIAL overlap: some but not all of `[v1..vN]` are net-applied - an
     /// inconsistent state (a squash spans a clean prefix; a partial application of
     /// that prefix means history is not at a squashable boundary). Nothing was
     /// journaled. (Distinguished from [`NotAllApplied`](SquashError::NotAllApplied)
@@ -139,8 +139,8 @@ pub enum SquashError {
 /// applied all of `squash_migration.supersedes`.
 ///
 /// Journals `S` as a `completed` event stamped `kind = 'squash'` WITHOUT running
-/// its `up` (the effect of `[v1..vN]` is already present), and records the `S →
-/// v_i` supersession edges — all as ADMIN, under the project advisory lock.
+/// its `up` (the effect of `[v1..vN]` is already present), and records the `S ->
+/// v_i` supersession edges - all as ADMIN, under the project advisory lock.
 /// Idempotent if `S` is already net-applied. Refuses unless ALL of
 /// `S.supersedes` are net-applied (NONE = use [`apply`](crate::engine::MigrationEngine::apply);
 /// partial = inconsistent).
@@ -148,11 +148,11 @@ pub enum SquashError {
 /// `applied_by` is the actor recorded in the journal (operator / admin).
 ///
 /// # Errors
-/// - [`SquashError::Guard`] — `S.up` was denied.
-/// - [`SquashError::NoSupersedes`] — `S` supersedes nothing.
-/// - [`SquashError::NotAllApplied`] / [`SquashError::PartialOverlap`] — the
+/// - [`SquashError::Guard`] - `S.up` was denied.
+/// - [`SquashError::NoSupersedes`] - `S` supersedes nothing.
+/// - [`SquashError::NotAllApplied`] / [`SquashError::PartialOverlap`] - the
 ///   superseded set is not fully net-applied.
-/// - [`SquashError::Backend`] / [`SquashError::Journal`] — infrastructure failures
+/// - [`SquashError::Backend`] / [`SquashError::Journal`] - infrastructure failures
 ///   behind the [`MigrationBackend`] seam (the
 ///   project lock, the journal reads, the supersession write).
 ///
@@ -186,7 +186,7 @@ pub async fn squash<B: MigrationBackend>(
         });
     }
 
-    // GUARD (defense in depth) — BEFORE the lock, no DB needed. `S.up` is held to
+    // GUARD (defense in depth) - BEFORE the lock, no DB needed. `S.up` is held to
     // the same deny-list as any up, even though it is recorded-not-run here. The
     // dialect-correct guard is selected from the backend's dialect: PG runs
     // the libpg_query deny-list (`SqlGuard::new(confined(project_schema))`); a
@@ -279,8 +279,8 @@ async fn squash_locked<B: MigrationBackend>(
     }
 
     // ALL applied: journal the squash as a `completed` 'squash' event WITHOUT
-    // running its `up`, plus the supersession edges — ADMIN, append-only. The
-    // dialect-coupled write (PG `record_baseline` row+edges in one `BEGIN … COMMIT`)
+    // running its `up`, plus the supersession edges - ADMIN, append-only. The
+    // dialect-coupled write (PG `record_baseline` row+edges in one `BEGIN ... COMMIT`)
     // lives behind the backend; the `&Client` never crosses this generic body.
     backend
         .record_squash(cfg, squash_migration, applied_by, &supersedes)
