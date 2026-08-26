@@ -1,62 +1,49 @@
 //! Stage 4 — Apply.
 //!
-//! Executes the [`ApprovedPlan`] in two passes:
+//! Executes the [`ApprovedPlan`] in ONE pass, under the advisory lock from
+//! [`bootstrap`](super::bootstrap), releasing the lock on every exit path.
 //!
-//! 1. **Pass 1** — transactional ops (CREATE TABLE / ADD COLUMN /
-//!    ADD/DROP FK) run while the advisory lock from
-//!    [`bootstrap`](super::bootstrap) is still held. These serialise
-//!    per-app.
-//! 2. **Pass 2** — `CREATE INDEX CONCURRENTLY` ops run AFTER the
-//!    advisory lock is released ([`LockGuard::release`] issues
-//!    `pg_advisory_unlock` then returns the client). Holding the lock
-//!    through CIC would deadlock: a second waiter blocked on
-//!    `pg_advisory_lock` pins a snapshot that CIC waits on. CIC is
-//!    idempotent via `IF NOT EXISTS` so it's safe to run unlocked.
+//! # It applies no schema change
 //!
-//! Every op writes a `running` row to `__zeroship_migrations` before
-//! execution and a `applied` / `failed` terminal row after. The audited
-//! CIC recovery loop (extra rows for retry / invalid-index /
-//! data-violation paths) lives in
-//! [`crate::backend::IndexBuilder::create_index_with_recovery`].
+//! registerModel does not own schema; a separate migration process does
+//! (`crates/zeroship-migrated` at deploy, the vite plugin's dev apply locally).
+//! [`super::validate`] refuses every op that changes shape, so exactly one kind
+//! reaches this stage: `MaskRewrite`, an UPDATE recomputing a `_masked` sibling
+//! whose column already exists. Everything else hits the invariant arm and
+//! fails loudly.
+//!
+//! THIS USED TO BE A TWO-PASS STAGE and the shape is worth recording, because
+//! the second pass looked load-bearing right up until it wasn't. Pass 1 ran
+//! transactional DDL under the lock; pass 2 ran `CREATE INDEX CONCURRENTLY`
+//! after releasing it, because holding the lock through CIC deadlocks - a
+//! second waiter blocked on `pg_advisory_lock` pins a snapshot CIC waits on.
+//! When the DDL left, pass 2's only selector (`AddIndex`) became something
+//! validate refuses, so the pass could never select an op and the release-then-
+//! continue dance guarded a hazard that could not arise. Both are deleted.
+//!
+//! Every op still writes a `running` row to `__zeroship_migrations` before
+//! execution and an `applied` / `failed` terminal row after: that table is an
+//! operator-facing record, not scaffolding for the DDL that left.
 
 use serde_json::Value;
 
 use super::bootstrap::RegisterContext;
 use super::validate::ApprovedPlan;
-use crate::backend::EncryptedColumn;
-use crate::backend::{FullTextIndex, IndexBuilder, LockGuard, PgSqlExecutor, SpatialIndex, VectorIndex};
-use crate::diff::{ChangeClass, ChangeKind, DiffOp};
+use crate::backend::{EncryptedColumn, LockGuard, PgSqlExecutor};
+use crate::diff::{ChangeKind, DiffOp};
 use crate::error::DbError;
-use crate::query::IndexKind;
 
 /// Run stage 4.
 ///
-/// Takes the [`LockGuard`] separately so the lock can be released
-/// between passes without dragging the `'p` borrow through every
-/// upstream type. The guard is consumed by the explicit
-/// `release().await` between Pass 1 and Pass 2.
+/// Takes the [`LockGuard`] separately so the lock can be released without
+/// dragging the `'p` borrow through every upstream type. The guard is consumed
+/// by the explicit `release().await` after the loop, on success and failure
+/// alike.
 ///
-/// The bound is narrowed to [`PgSqlExecutor`] + [`IndexBuilder`]
-/// (was `Backend`). `PgSqlExecutor` gives us pool access for the
-/// free-function audit helpers (Open Q1 resolution) plus `pool_exec`
-/// for Pass-1 DDL via its [`crate::backend::SqlExecutor`] super-bound;
-/// `IndexBuilder` carries the `create_index_with_recovery` call used
-/// by Pass 2. See `docs/archive/p0-implementation-plan.md` §"PR 2"
-/// and `docs/archive/db-system-design.md` §7.
-/// The `EncryptedColumn` super-bound lets the
-/// `MaskBackfill` / `MaskRewrite` dispatch decrypt encrypted columns
-/// before applying the mask transform. Inside `run_op` the
-/// mask-backfill arms call the helpers `dispatch_mask_backfill_op` /
-/// `dispatch_mask_rewrite_op`.
-pub(crate) async fn apply<
-    'p,
-    B: PgSqlExecutor
-        + IndexBuilder
-        + VectorIndex
-        + FullTextIndex
-        + SpatialIndex
-        + EncryptedColumn,
->(
+/// `PgSqlExecutor` gives pool access for the free-function audit helpers.
+/// `EncryptedColumn` lets the `MaskRewrite` dispatch decrypt an encrypted
+/// column before recomputing its mask, via `dispatch_mask_rewrite_op`.
+pub(crate) async fn apply<'p, B: PgSqlExecutor + EncryptedColumn>(
     backend: &B,
     ctx: RegisterContext,
     lock_guard: LockGuard<'p>,
@@ -66,25 +53,13 @@ pub(crate) async fn apply<
         app_id,
         deploy_id,
         schema_version,
-        strictness,
-        declared_indexes,
+        strictness: _,
+        declared_indexes: _,
         collection: _ctx_collection,
         schema_json,
     } = ctx;
 
     let run_op = async |op: &DiffOp| -> Result<(), DbError> {
-        // Contract gate — see `check_destructive_invariant`.
-        //
-        // The pass1/pass2 loops filter `ChangeClass::Destructive` out
-        // BEFORE calling `run_op`, so any `DropColumn`/`DropIndex` that
-        // reaches here has lost (or never had) its destructive tag.
-        // Surface that as `DbError::Internal` instead of silently
-        // succeeding — the previous catch-all `Ok(())` would write a
-        // bogus `Applied` audit row for a no-op. We perform the check
-        // BEFORE the `write_audit_row` call so no orphan `Running`
-        // row is emitted for a contract violation.
-        check_destructive_invariant(op)?;
-
         let audit_id = match crate::audit::write_audit_row(
             backend.pool_handle().as_ref(),
             &app_id,
@@ -119,172 +94,42 @@ pub(crate) async fn apply<
                 None
             }
         };
-
         let result: Result<(), DbError> = match &op.change_kind {
+            // ---------------------------------------------------------------
+            // registerModel APPLIES NO SCHEMA CHANGE, so every schema-changing
+            // kind is a contract violation by the time it reaches apply.
+            //
+            // `validate::changes_schema` refuses these before an ApprovedPlan
+            // is ever built, which is what makes this arm unreachable. It is
+            // NOT a second gate that could disagree with the first: there is no
+            // DDL code left here to run, so the failure mode a drifting pair of
+            // classifiers would produce - one allows, the other silently
+            // no-ops - cannot occur. What it does is fail LOUDLY if an op ever
+            // bypasses validate, instead of returning Ok and reporting a
+            // deploy that changed nothing.
+            //
+            // Two of these look like data ops. `MaskBackfill` ends with
+            // `ALTER COLUMN ... SET NOT NULL` and `MaskRemove` is an
+            // `ALTER TABLE ... DROP COLUMN`; both are DDL. See
+            // `validate::changes_schema`, which is the one place that judgement
+            // is written down.
+            // ---------------------------------------------------------------
             ChangeKind::CreateTable
             | ChangeKind::AddColumn
+            | ChangeKind::AddIndex
             | ChangeKind::AddForeignKey
-            | ChangeKind::DropForeignKey => {
-                if let Some(sql) = &op.sql {
-                    // DDL apply uses the simple query protocol
-                    // (`pool_exec_ddl`): CREATE TABLE bundles the table
-                    // body with its implicit system-field CREATE INDEXes
-                    // (and PG `COMMENT ON COLUMN` mask sentinels) into one
-                    // `;`-separated script, which the extended/prepared
-                    // protocol used by `pool_exec` rejects with `cannot
-                    // insert multiple commands into a prepared statement`.
-                    // ADD COLUMN / ADD/DROP FK are single statements but
-                    // ride the same parameterless path.
-                    backend
-                        .pool_exec_ddl(sql)
-                        .await
-                        .map_err(|e| match e {
-                            // Preserve the operator-facing prefix
-                            // ("db: ADD COLUMN failed: ...") only for
-                            // the catch-all Internal arm; SQLSTATE-coded
-                            // variants (unique_violation, fk_violation,
-                            // lock_not_available, …) reach JS verbatim
-                            // so the SDK can branch on `.code`.
-                            DbError::Internal { message } => DbError::Internal {
-                                message: format!(
-                                    "db: {} failed: {}",
-                                    op.change_kind.as_sql(),
-                                    message
-                                ),
-                            },
-                            other => other,
-                        })
-                } else {
-                    Ok(())
-                }
-            }
-            ChangeKind::AddIndex => {
-                let spec_owned = declared_indexes
-                    .iter()
-                    .find(|s| {
-                        op.details.get("index_name").and_then(Value::as_str)
-                            == Some(s.name.as_str())
-                    })
-                    .cloned();
-                if let Some(spec) = spec_owned {
-                    // Dispatch on `IndexKind`. The default
-                    // BTree branch routes through the existing audited
-                    // CIC retry loop; the Vector branch calls into the
-                    // pgvector adapter, which builds its own
-                    // metric-appropriate DDL and reuses the same retry
-                    // machinery internally.
-                    match &spec.kind {
-                        IndexKind::BTree => {
-                            // `create_index_with_recovery` returns a typed
-                            // `DbError`. `SchemaRefused` carries the JSON
-                            // envelope the SDK already consumes via
-                            // `JSON.parse`, `UniqueViolation`/`Transient`/…
-                            // flow through the standard SQLSTATE
-                            // classification, and `Configuration`
-                            // surfaces invariant breaches. No wrapping
-                            // or string-rail bridging required.
-                            backend
-                                .create_index_with_recovery(
-                                    &app_id,
-                                    &op.collection,
-                                    &spec,
-                                    &deploy_id,
-                                    schema_version,
-                                )
-                                .await
-                        }
-                        IndexKind::Vector { dims, metric } => {
-                            // The Vector branch calls into the pgvector
-                            // adapter, which builds the metric-specific
-                            // `USING ivfflat (col vector_<m>_ops)` DDL
-                            // itself. `column` is derivable from
-                            // `spec.columns[0]` (vector indexes are
-                            // always single-column).
-                            let column = spec.columns.first().map(String::as_str).unwrap_or("");
-                            backend
-                                .ensure_vector_index(
-                                    &app_id,
-                                    &op.collection,
-                                    column,
-                                    *dims,
-                                    *metric,
-                                )
-                                .await
-                        }
-                        IndexKind::Fts { language } => {
-                            // Composite FTS index. The
-                            // builder accumulated every `.fts()`-marked
-                            // column in `spec.columns`; the PG impl
-                            // materialises `__fts tsvector` + GIN +
-                            // trigger.
-                            backend
-                                .ensure_fts_index(
-                                    &app_id,
-                                    &op.collection,
-                                    &spec.columns,
-                                    language,
-                                )
-                                .await
-                        }
-                        IndexKind::Spatial => {
-                            // Spatial index over a
-                            // `geography(POINT, 4326)` column. The PG
-                            // impl probes PostGIS and routes through
-                            // the audited CIC retry loop.
-                            let column = spec.columns.first().map(String::as_str).unwrap_or("");
-                            backend
-                                .ensure_spatial_index(
-                                    &app_id,
-                                    &op.collection,
-                                    column,
-                                )
-                                .await
-                        }
-                    }
-                } else {
-                    Ok(())
-                }
-            }
-            // Unreachable in practice — `check_destructive_invariant`
-            // above turns any `DropColumn`/`DropIndex` that survives
-            // the upstream destructive-class filter into an error
-            // BEFORE we reach this match. The arm is kept (returning
-            // the same error) so the compiler enforces exhaustive
-            // matching: a future variant added to `ChangeKind` will
-            // fail to compile here, forcing an explicit decision.
-            ChangeKind::DropColumn | ChangeKind::DropIndex => {
-                Err(destructive_invariant_error(op))
-            }
-
-            // ----- Backfill the sibling column ---------
-            //
-            // The accompanying `ALTER ADD COLUMN <col>_masked NULL`
-            // op runs earlier in pass 1 (the diff emits the ADD before
-            // the MaskBackfill). Once the sibling exists,
-            // `run_mask_backfill` walks every row, computes the mask
-            // (decrypting first on encrypted columns), writes the
-            // sibling, then flips the column to NOT NULL on completion.
-            ChangeKind::MaskBackfill {
-                collection: ref coll,
-                column,
-                kind,
-                classification,
-            } => {
-                dispatch_mask_backfill_op(
-                    backend,
-                    &app_id,
-                    coll,
-                    column,
-                    *kind,
-                    *classification,
-                    &schema_json,
-                )
-                .await
-            }
+            | ChangeKind::DropForeignKey
+            | ChangeKind::DropColumn
+            | ChangeKind::DropIndex
+            | ChangeKind::RewriteColumnType { .. }
+            | ChangeKind::MaskBackfill { .. }
+            | ChangeKind::MaskRemove { .. } => Err(schema_change_invariant_error(op)),
 
             // ----- Rewrite the sibling column ---------
             //
-            // Touches every row under the NEW kind. No schema mutation.
+            // Touches every row under the NEW kind. No schema mutation - the
+            // only op in the family that changes data without changing shape,
+            // and therefore the only one apply still performs.
             ChangeKind::MaskRewrite {
                 collection: ref coll,
                 column,
@@ -302,45 +147,6 @@ pub(crate) async fn apply<
                     &schema_json,
                 )
                 .await
-            }
-
-            // ----- Drop the sibling column -----------
-            //
-            // Only invoked under `strictness == "off"` — validate
-            // refuses the op under strict + lenient. The pool_exec
-            // path issues `ALTER TABLE … DROP COLUMN IF EXISTS`.
-            ChangeKind::MaskRemove {
-                collection: ref coll,
-                column,
-            } => {
-                if strictness != "off" {
-                    return Err(DbError::Internal {
-                        message: format!(
-                            "db: mask_remove reached apply under strictness={strictness:?} \
-                             — validate stage should have refused it"
-                        ),
-                    });
-                }
-                crate::crud::mask_backfill::run_mask_remove(
-                    &app_id,
-                    coll,
-                    column,
-                    backend.pool_handle().as_ref(),
-                )
-                .await
-            }
-
-            // A `RewriteColumnType` op (e.g. the encryption TEXT↔BYTEA
-            // toggle) is `ChangeClass::Destructive`, so both apply passes
-            // `continue` past it before reaching `run_op` — it is surfaced
-            // to the operator / authoring pipeline, never auto-applied
-            // in-place (an in-place ALTER would corrupt every stored
-            // value). This arm is therefore unreachable in practice; it
-            // returns the same destructive-invariant error so the compiler
-            // enforces exhaustive matching and a stray op that bypasses the
-            // skip filter fails loudly instead of silently no-oping.
-            ChangeKind::RewriteColumnType { .. } => {
-                Err(destructive_invariant_error(op))
             }
         };
 
@@ -409,101 +215,42 @@ pub(crate) async fn apply<
         result
     };
 
-    // Pass 1: transactional ops under advisory lock.
+    // ONE PASS. There used to be two.
     //
-    // Run the loop inside an async block so we can capture its Result
-    // and ALWAYS release the advisory lock — even on early `?`
-    // propagation. Without this, an error path returns directly to the
-    // caller and `PooledClient::Drop` parks the connection back in the
-    // pool with its session-scoped lock still held, blocking every
-    // subsequent caller (cross-app stall).
-    let pass1: Result<(), DbError> = async {
+    // Pass 2 existed for `CREATE INDEX CONCURRENTLY`, and the advisory lock was
+    // released between the passes because holding it through CIC deadlocks: a
+    // second waiter blocked on `pg_advisory_lock` pins a snapshot CIC waits on.
+    // registerModel no longer issues CIC - or any other DDL - so pass 2 had no
+    // op it could ever select and the release-then-continue dance guarded a
+    // hazard that cannot arise. Both are gone.
+    //
+    // No class filter either. `validate` refuses every op that changes shape,
+    // whatever its `ChangeClass`, so the only op reaching this loop is a
+    // `MaskRewrite`: an UPDATE over rows in a column that already exists. One
+    // decision point, in validate, rather than a second partial one here.
+    //
+    // The loop still runs inside an async block so the lock is released on
+    // EVERY path, early `?` included. Without that, `PooledClient::Drop` parks
+    // the connection back in the pool with its session-scoped lock still held
+    // and stalls every subsequent caller across apps.
+    let ran: Result<(), DbError> = async {
         for op in &approved.ops {
-            if op.class == ChangeClass::Destructive {
-                // `MaskRemove` under
-                // `strictness == "off"` must actually run — validate
-                // didn't refuse it (only `strict` + `lenient` do). The
-                // other destructive variants (DropColumn / DropIndex)
-                // stay on the skip path: under `off` they'd reach apply
-                // and trip `check_destructive_invariant`, which is
-                // explicitly the original behaviour.
-                if matches!(op.change_kind, ChangeKind::MaskRemove { .. })
-                    && strictness == "off"
-                {
-                    // fall through to run_op
-                } else {
-                    continue;
-                }
-            }
-            if matches!(op.change_kind, ChangeKind::AddIndex) {
-                continue;
-            }
             run_op(op).await?;
         }
         Ok(())
     }
     .await;
 
-    // Release advisory lock BEFORE CIC, **regardless of Pass 1 outcome**.
-    // Two orchestrators racing on CIC is safe (IF NOT EXISTS), but
-    // holding the lock through CIC deadlocks: a second waiter blocked on
-    // pg_advisory_lock pins a snapshot that CIC waits on. And if Pass 1
-    // errored, we MUST still unlock — otherwise the pooled connection
-    // returns to the pool with the session-scoped lock held.
-    //
-    // The guard's `release()` issues `pg_advisory_unlock` then returns
-    // the now-unlocked client back to the pool on drop. Best-effort:
-    // any SQL error is swallowed inside the guard (matches the
-    // pre-refactor inline behaviour).
+    // Best-effort: `release()` issues `pg_advisory_unlock` then returns the
+    // now-unlocked client to the pool on drop, swallowing any SQL error. It
+    // must run even when the loop above failed.
     let _ = lock_guard.release().await;
 
-    // Propagate Pass 1 error after the lock has been released.
-    pass1?;
-
-    // Pass 2: CIC ops, unlocked.
-    for op in &approved.ops {
-        if op.class == ChangeClass::Destructive {
-            continue;
-        }
-        if !matches!(op.change_kind, ChangeKind::AddIndex) {
-            continue;
-        }
-        run_op(op).await?;
-    }
+    ran?;
 
     Ok(())
 }
 
-/// Dispatcher for `MaskBackfill`. Pulls encryption
-/// metadata for the field (if any) and runs the decrypt-aware mask
-/// backfill; plaintext columns take the no-decrypt branch inside
-/// `run_mask_backfill`.
-async fn dispatch_mask_backfill_op<B>(
-    backend: &B,
-    app_id: &str,
-    collection: &str,
-    column: &str,
-    kind: crate::diff::MaskKind,
-    classification: crate::diff::Classification,
-    schema_json: &Value,
-) -> Result<(), DbError>
-where
-    B: PgSqlExecutor + EncryptedColumn,
-{
-    let enc_meta = encryption_meta_for_field(schema_json, column);
-    crate::crud::mask_backfill::run_mask_backfill(
-        backend,
-        app_id,
-        collection,
-        column,
-        kind,
-        classification,
-        enc_meta.as_ref(),
-        backend.pool_handle().as_ref(),
-    )
-    .await
-    .map(|_| ())
-}
 
 async fn dispatch_mask_rewrite_op<B>(
     backend: &B,
@@ -532,44 +279,6 @@ where
     .map(|_| ())
 }
 
-/// Enforce the contract that any `DropColumn` / `DropIndex` op reaching
-/// the apply layer must carry `ChangeClass::Destructive` — the upstream
-/// pass1 / pass2 loops filter destructive ops out before they ever
-/// reach `run_op`, so a `Drop*` op that gets here has slipped past
-/// that filter (or never had its class set correctly by the diff
-/// engine).
-///
-/// Silently returning `Ok(())` for this case — as the pre-fix code
-/// did — would write a bogus `Applied` audit row, masking a real bug
-/// in either the diff classifier or the destructive-skip loop. The
-/// fix surfaces an `Internal` error naming the breached contract so
-/// the operator sees the issue at the next deploy instead of
-/// discovering a silently-skipped drop weeks later.
-///
-/// Non-`Drop*` change kinds pass through with `Ok(())` — they have
-/// their own SQL paths in the `match` block above and don't share
-/// this contract.
-fn check_destructive_invariant(op: &DiffOp) -> Result<(), DbError> {
-    if matches!(
-        op.change_kind,
-        ChangeKind::DropColumn | ChangeKind::DropIndex
-    ) && op.class != ChangeClass::Destructive
-    {
-        return Err(destructive_invariant_error(op));
-    }
-    // A `MaskRemove` op tagged anything other than
-    // `Destructive` is a misclassification — the diff classifier emits
-    // it with `ChangeClass::Destructive` unconditionally so we can
-    // route it through the strictness gate before reaching apply. A
-    // `MaskRemove` that arrives here without that class has bypassed
-    // the gate.
-    if matches!(op.change_kind, ChangeKind::MaskRemove { .. })
-        && op.class != ChangeClass::Destructive
-    {
-        return Err(destructive_invariant_error(op));
-    }
-    Ok(())
-}
 
 /// Pull the encryption metadata for a field out of the
 /// declared schema JSON, IFF the field is `t.encrypted(...)`-tagged.
@@ -612,11 +321,21 @@ fn encryption_meta_for_field(
 /// Named so the unreachable `DropColumn | DropIndex` arm inside the
 /// `match` block can produce an identical error without duplicating
 /// the message string.
-fn destructive_invariant_error(op: &DiffOp) -> DbError {
+/// A schema-changing op reached apply, which `validate` should have refused.
+///
+/// This replaces the older destructive-only invariant guard, which covered a
+/// narrower rule: apply used to perform ADDITIVE DDL and only the destructive
+/// family was a contract violation. Now NO op that changes shape may reach here,
+/// so the guard covers the whole family and its message names the real
+/// invariant.
+///
+/// It refuses rather than no-ops for the reason the old one did: returning `Ok`
+/// would report a deploy that silently changed nothing.
+fn schema_change_invariant_error(op: &DiffOp) -> DbError {
     let msg = format!(
-        "db: apply received a {} op outside ChangeClass::Destructive \
-         (class={:?}); upstream destructive-class filter \
-         (register_model::apply pass1/pass2) should have skipped it. \
+        "db: apply received a {} op, which changes schema (class={:?}). \
+         registerModel applies no schema change; validate::changes_schema \
+         should have refused this before an ApprovedPlan was built. \
          This is a contract violation — refusing to silently no-op.",
         op.change_kind.as_sql(),
         op.class,
@@ -625,22 +344,26 @@ fn destructive_invariant_error(op: &DiffOp) -> DbError {
         change_kind = op.change_kind.as_sql(),
         class = ?op.class,
         collection = %op.collection,
-        "apply: destructive-invariant violation"
+        "apply: schema-change invariant violation"
     );
     DbError::Internal { message: msg }
 }
 
 #[cfg(test)]
 mod tests {
-    //! Unit tests for the destructive-invariant contract gate.
+    //! Unit tests for the schema-change invariant and the audit warn shapes.
     //!
-    //! These exercise `check_destructive_invariant` directly rather than
-    //! the full `apply()` function — `apply` takes a
-    //! `compio_postgres::PooledClient<'p>` and issues a
-    //! `pg_advisory_unlock` against it, so end-to-end coverage requires
-    //! a live Postgres listener and lives in
-    //! `crates/plugin-db/tests/integration.rs`. The gate itself is a
-    //! pure predicate over `DiffOp`, which is what these tests pin.
+    //! SIX TESTS WERE DELETED HERE, not moved. They pinned a gate that checked
+    //! whether a `DropColumn` / `DropIndex` / `MaskRemove` op carried
+    //! `ChangeClass::Destructive` before apply skipped it. That gate is gone
+    //! because its premise is: apply no longer performs any schema change under
+    //! any class, so there is no skip-path for a misclassified op to slip past.
+    //! The tests were asserting a distinction that no longer decides anything.
+    //!
+    //! These exercise pure helpers rather than `apply()` itself, which takes a
+    //! `compio_postgres::PooledClient<'p>` and issues `pg_advisory_unlock`
+    //! against it - end-to-end coverage needs a live Postgres and lives in
+    //! `crates/zeroship-plugin-db/tests/integration.rs`.
     use super::*;
     use crate::diff::{ChangeClass, ChangeKind, DiffOp};
 
@@ -659,181 +382,12 @@ mod tests {
     /// `Destructive`. The validate stage classifies it that way; this
     /// gate refuses any misclassified `MaskRemove`.
     #[test]
-    fn mask_remove_without_destructive_class_returns_internal_error() {
-        let op = diff_op(
-            ChangeKind::MaskRemove {
-                collection: "users".into(),
-                column: "ssn".into(),
-            },
-            ChangeClass::Additive,
-        );
-        let result = check_destructive_invariant(&op);
-        match result {
-            Err(DbError::Internal { message }) => {
-                assert!(
-                    message.contains("mask_remove"),
-                    "must name change_kind: {message}"
-                );
-                assert!(
-                    message.contains("Destructive"),
-                    "must name invariant: {message}"
-                );
-            }
-            other => panic!("expected DbError::Internal, got {other:?}"),
-        }
-    }
-
-    /// `MaskRemove` tagged `Destructive` passes the
-    /// gate — apply's strictness branch decides whether to actually run
-    /// the DROP COLUMN.
-    #[test]
-    fn mask_remove_with_destructive_class_passes_gate() {
-        let op = diff_op(
-            ChangeKind::MaskRemove {
-                collection: "users".into(),
-                column: "ssn".into(),
-            },
-            ChangeClass::Destructive,
-        );
-        assert!(check_destructive_invariant(&op).is_ok());
-    }
-
-    /// `MaskBackfill` / `MaskRewrite` are NOT
-    /// destructive — the gate must let them through with any
-    /// classification (the apply match arm handles their semantics).
-    #[test]
-    fn mask_backfill_and_rewrite_pass_gate_regardless_of_class() {
-        for kind in [
-            ChangeKind::MaskBackfill {
-                collection: "u".into(),
-                column: "s".into(),
-                kind: crate::diff::MaskKind::Last4,
-                classification: crate::diff::Classification::Spi,
-            },
-            ChangeKind::MaskRewrite {
-                collection: "u".into(),
-                column: "s".into(),
-                old_kind: crate::diff::MaskKind::Full,
-                new_kind: crate::diff::MaskKind::Last4,
-                classification: crate::diff::Classification::Spi,
-            },
-        ] {
-            for class in [ChangeClass::Additive, ChangeClass::Compatible, ChangeClass::Destructive] {
-                let op = diff_op(kind.clone(), class);
-                assert!(
-                    check_destructive_invariant(&op).is_ok(),
-                    "gate must not fire on {:?} / {class:?}",
-                    op.change_kind
-                );
-            }
-        }
-    }
-
-    /// A `DropColumn` op reaching apply without `ChangeClass::Destructive`
-    /// means the destructive-class filter above failed (or the diff
-    /// engine emitted a misclassified op). The gate MUST return
-    /// `DbError::Internal` so the failure is visible — silent `Ok(())`
-    /// would write a fake `Applied` audit row.
-    #[test]
-    fn drop_column_without_destructive_class_returns_internal_error() {
-        let op = diff_op(ChangeKind::DropColumn, ChangeClass::Additive);
-        let result = check_destructive_invariant(&op);
-        match result {
-            Err(DbError::Internal { message }) => {
-                // The message must name the contract that was breached
-                // so the operator can locate the upstream regression.
-                assert!(
-                    message.contains("drop_column"),
-                    "message should name the change_kind: {message}"
-                );
-                assert!(
-                    message.contains("Destructive"),
-                    "message should name the breached invariant: {message}"
-                );
-                assert!(
-                    message.contains("contract violation"),
-                    "message should mark this as a contract violation: {message}"
-                );
-            }
-            other => panic!("expected DbError::Internal, got {other:?}"),
-        }
-    }
-
-    /// A `DropColumn` op tagged `ChangeClass::Destructive` is the
-    /// canonical path — the pass1/pass2 loops in `apply()` skip it
-    /// BEFORE `run_op` is invoked, so the gate never sees it during
-    /// real applies. We assert the gate is permissive here so a future
-    /// refactor that routes destructive ops THROUGH the gate (e.g.
-    /// for an audited "refused" trail) doesn't get mis-flagged. No
-    /// audit row, no error.
-    #[test]
-    fn drop_column_with_destructive_class_is_skipped_cleanly() {
-        let op = diff_op(ChangeKind::DropColumn, ChangeClass::Destructive);
-        assert!(
-            check_destructive_invariant(&op).is_ok(),
-            "destructive-class drops must pass the gate (the upstream filter \
-             is the canonical skip; the gate only fires on misclassified ops)"
-        );
-
-        // Same for DropIndex — the gate is shape-symmetric.
-        let op = diff_op(ChangeKind::DropIndex, ChangeClass::Destructive);
-        assert!(check_destructive_invariant(&op).is_ok());
-    }
-
-    /// Non-`Drop*` change kinds are out of scope for this invariant —
-    /// they have their own SQL paths in `run_op`'s match block. The
-    /// gate must not interfere.
-    #[test]
-    fn non_drop_change_kinds_pass_the_gate_regardless_of_class() {
-        for kind in [
-            ChangeKind::CreateTable,
-            ChangeKind::AddColumn,
-            ChangeKind::AddIndex,
-            ChangeKind::AddForeignKey,
-            ChangeKind::DropForeignKey,
-        ] {
-            for class in [
-                ChangeClass::Additive,
-                ChangeClass::Compatible,
-                ChangeClass::Destructive,
-            ] {
-                let op = diff_op(kind.clone(), class);
-                assert!(
-                    check_destructive_invariant(&op).is_ok(),
-                    "gate must not fire on {kind:?} / {class:?}",
-                );
-            }
-        }
-    }
-
-    // ----- destructive-invariant ERROR-shape contract ------------------
-    //
-    // `destructive_invariant_error` emits a `tracing::error!` whose
-    // field shape (`change_kind`, `class`, `collection`) is part of
-    // the operator-grep contract — a runbook search for
-    // `change_kind=drop_column` should match this site. Pin the shape
-    // so a future refactor that renames `change_kind` → `kind` (or
-    // similar) fails at unit-test time.
-    //
-    // Note: this test exercises the function end-to-end (calls
-    // `destructive_invariant_error` directly and asserts what came
-    // out of the capture layer). Drift in the source IS caught at
-    // unit-test time. Contrast with the F1 warn-half sites
-    // (`update_audit_status failed; row stays in 'running' until
-    // reset`), which can only be driven via a Backend trait failure
-    // path; for those sites see
-    // [`f1_warn_shape_documentation_test`] below — a snapshot test
-    // that documents the contract field set but does not drive the
-    // source. The integration suite in `tests/integration.rs`
-    // exercises the F1 sites end-to-end with real Postgres.
-
-    #[test]
-    fn destructive_invariant_error_emits_named_fields_at_error_level() {
+    fn schema_change_invariant_error_emits_named_fields_at_error_level() {
         use crate::test_support::capture;
         use tracing::Level;
 
         let op = diff_op(ChangeKind::DropColumn, ChangeClass::Additive);
-        let (_err, events) = capture(|| destructive_invariant_error(&op));
+        let (_err, events) = capture(|| schema_change_invariant_error(&op));
 
         assert_eq!(events.len(), 1, "expected exactly one tracing event");
         let ev = &events[0];
@@ -867,7 +421,7 @@ mod tests {
             "collection field must carry the user-visible name",
         );
         assert!(
-            ev.message.contains("destructive-invariant violation"),
+            ev.message.contains("schema-change invariant violation"),
             "message must name the contract for log-grep: {}",
             ev.message,
         );

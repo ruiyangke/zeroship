@@ -12,7 +12,6 @@ use super::bootstrap::RegisterContext;
 use crate::backend::{DialectBuilder, SchemaIntrospect};
 use crate::diff::{DiffOp, LiveSchema};
 use crate::error::DbError;
-use crate::query;
 
 /// Output of stage 2.
 pub(crate) struct Plan {
@@ -57,16 +56,18 @@ pub(crate) async fn compute_plan<B: SchemaIntrospect<LiveSchema = LiveSchema> + 
     // `registerModel("users")` / `registerModel("todos")` calls serialise
     // on the advisory lock; whichever runs second sees the first table in
     // `live` and can inline the FK, or defers it to its own apply phase.
-    let existing_tables: std::collections::HashSet<String> =
-        live.tables.keys().cloned().collect();
-    let create_table = query::build_create_table_with_fks_for_dialect(
-        &ctx.app_id,
-        collection,
-        schema,
-        &query::FkEmission::Deferred(&existing_tables),
-        backend.sql_dialect(),
-    )
-    .map_err(DbError::from)?;
+    // NO CREATE TABLE IS RENDERED HERE ANY MORE.
+    //
+    // `compute_diff` takes the DDL only to hang it on the `CreateTable` op's
+    // `sql` field, and nothing executes that field now that registerModel
+    // applies no schema change (`validate::changes_schema`). Rendering it would
+    // produce a statement whose only destination is an audit row describing a
+    // migration this process is not going to run - a plausible-looking artifact
+    // that no longer corresponds to anything, which is worse than an empty one.
+    //
+    // The op itself is KEPT. It is the signal that the table is missing, which
+    // is what validate turns into the refusal the operator sees.
+    let create_table = String::new();
 
     let ops = crate::diff::compute_diff(
         &live,

@@ -1,16 +1,25 @@
 //! Stage 3 — Validate.
 //!
-//! Applies safety rules to the [`Plan`] from stage 2:
+//! Decides what, if anything, the apply stage may do to the [`Plan`] from
+//! stage 2. In practice it refuses nearly everything, and that is the design.
 //!
-//! - `strictness == "strict"` (default): destructive ops produce a
-//!   `validation_refused` envelope and short-circuit the pipeline.
-//!   Every refused destructive op is INSERTed terminal as
-//!   `validation_refused` so operators can see what was refused (no
-//!   orphan-Pending row).
-//! - `strictness == "lenient"`: destructive ops are INSERTed terminal
-//!   as `validation_refused` and silently dropped from the apply set.
-//! - `strictness == "off"`: destructive ops fall through into apply
-//!   (this is the test/CI mode — proposal A2 line 122).
+//! # The one rule that matters
+//!
+//! registerModel applies NO schema change. Any op for which
+//! [`changes_schema`] is true is refused, under every strictness, with an
+//! envelope naming the refused change. What survives is `MaskRewrite` - an
+//! UPDATE recomputing a `_masked` sibling on a column that already exists.
+//!
+//! STRICTNESS NO LONGER GATES THIS. It used to: `strict` refused destructive
+//! ops, `lenient` refused-but-continued, and `off` let them through into apply.
+//! Those three answered "may we apply a risky change?", and there is no longer
+//! a code path that applies one - so an escape hatch would only produce a deploy
+//! that reports success and changes nothing. Strictness still governs the
+//! separate destructive-class check below, which now only sees ops that change
+//! no shape.
+//!
+//! Refused ops are still INSERTed terminal as `validation_refused` so operators
+//! can see what was refused with no orphan-Pending row.
 //!
 //! Returns an [`ApprovedPlan`] the apply stage executes.
 //!
@@ -37,13 +46,48 @@ use serde_json::Value;
 use super::bootstrap::RegisterContext;
 use super::plan::Plan;
 use crate::backend::AuditWriter;
-use crate::diff::{ChangeClass, DiffOp};
+use crate::diff::{ChangeClass, ChangeKind, DiffOp};
+
+/// Does this op CHANGE THE SCHEMA, as opposed to only rewriting stored data?
+///
+/// registerModel does not own schema. It registers metadata; the schema
+/// authority is a separate process (`crates/zeroship-migrated` at deploy, the
+/// vite plugin's dev apply locally). Every op this returns `true` for is
+/// therefore refused by [`validate`] rather than applied - see its doc for why
+/// that is structural and not a strictness setting.
+///
+/// The match is EXHAUSTIVE on purpose. A new `ChangeKind` must not default into
+/// either bucket: defaulting to `false` would silently hand plugin-db a new way
+/// to mutate a creator's database, which is the exact failure this classifier
+/// exists to prevent.
+///
+/// TWO ENTRIES LOOK LIKE DATA OPS AND ARE NOT. `MaskBackfill` walks rows writing
+/// the sibling column, then finishes with `ALTER COLUMN ... SET NOT NULL`, and
+/// `MaskRemove` is an `ALTER TABLE ... DROP COLUMN` outright (both in
+/// `crud::mask_backfill`). Only `MaskRewrite` is genuinely DDL-free: it is an
+/// UPDATE over an existing column and changes no shape.
+fn changes_schema(kind: &ChangeKind) -> bool {
+    match kind {
+        ChangeKind::CreateTable
+        | ChangeKind::AddColumn
+        | ChangeKind::DropColumn
+        | ChangeKind::AddIndex
+        | ChangeKind::DropIndex
+        | ChangeKind::AddForeignKey
+        | ChangeKind::DropForeignKey
+        | ChangeKind::RewriteColumnType { .. }
+        | ChangeKind::MaskBackfill { .. }
+        | ChangeKind::MaskRemove { .. } => true,
+        ChangeKind::MaskRewrite { .. } => false,
+    }
+}
 
 /// Output of stage 3. Apply still receives the destructive ops (kept
 /// in `ops` so the loop's `if op.class == Destructive { continue; }`
 /// gate is the single source of truth for "never apply destructive"),
 /// but a `strict` deploy never reaches this branch — validate returns
 /// `Err(envelope)` before constructing the `ApprovedPlan`.
+#[derive(Debug)]
 pub(crate) struct ApprovedPlan {
     pub ops: Vec<DiffOp>,
 }
@@ -76,6 +120,56 @@ pub(crate) async fn validate<B: AuditWriter>(
         return Err(build_reserved_prefix_refused_envelope(
             &ctx.deploy_id,
             &reserved_collections,
+        ));
+    }
+
+    // ---------------------------------------------------------------------
+    // registerModel APPLIES NO SCHEMA CHANGE. Refused before anything else.
+    //
+    // This is STRUCTURAL, not a safety judgement, which is why it does not
+    // consult `strictness`. Strictness answered "may we apply a risky change?";
+    // there is no longer a change to apply, because plugin-db has no DDL path
+    // at all. A `lenient` deploy that fell through here would reach an apply
+    // stage with nothing to execute it.
+    //
+    // The refusal is the point. Silently reconciling a creator's table on
+    // deploy is the black box this replaces: the declared schema and the live
+    // table drifted apart and the operator was never told. Now the deploy stops
+    // and names the process that owns the change.
+    // ---------------------------------------------------------------------
+    let schema_changes: Vec<&DiffOp> = plan
+        .ops
+        .iter()
+        .filter(|op| changes_schema(&op.change_kind))
+        .collect();
+
+    if !schema_changes.is_empty() {
+        for op in &schema_changes {
+            let row = crate::audit::AuditRow {
+                collection: op.collection.clone(),
+                phase: crate::audit::Phase::Ddl,
+                change_class: crate::audit::ChangeClass::from(op.class),
+                change_kind: op.change_kind.as_sql().to_string(),
+                details: op.details.clone(),
+                ddl_sql: op.sql.clone(),
+                status: crate::audit::InitialStatus::ValidationRefused,
+                deploy_id: ctx.deploy_id.clone(),
+                schema_version: ctx.schema_version,
+                actor: crate::audit::ActorKind::Auto,
+            };
+            if let Err(audit_err) = backend.write_audit_row(&ctx.app_id, &row).await {
+                tracing::warn!(
+                    app_id = %ctx.app_id,
+                    collection = %op.collection,
+                    transition = "ValidationRefused/insert_failed",
+                    audit_err = %audit_err,
+                    "audit: failed to log a refused schema change",
+                );
+            }
+        }
+        return Err(build_schema_change_refused_envelope(
+            &ctx.deploy_id,
+            &schema_changes,
         ));
     }
 
@@ -174,6 +268,42 @@ fn build_validation_refused_envelope(
         "deploy_id": deploy_id,
         "violations": [],
         "destructive_pending": pending,
+    })
+    .to_string()
+}
+
+/// The envelope for "your declared schema needs a change registerModel cannot
+/// make".
+///
+/// It keeps `code: "validation_refused"` so the SDK's existing
+/// `JSON.parse(err.message)` contract and its `err.code` discriminator keep
+/// working unchanged; a new code would break every creator handling the old one.
+/// The `reason` field is what tells them apart, and `pending` lists exactly which
+/// changes were refused - naming them is the whole point, since the failure this
+/// replaces was silence.
+fn build_schema_change_refused_envelope(deploy_id: &str, ops: &[&DiffOp]) -> String {
+    let pending: Vec<Value> = ops
+        .iter()
+        .map(|op| {
+            serde_json::json!({
+                "collection": op.collection,
+                "change_kind": op.change_kind.as_sql(),
+                "field": op.field,
+                "details": op.details,
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "code": "validation_refused",
+        "reason": "schema_change_requires_migration",
+        "deploy_id": deploy_id,
+        "message": "registerModel does not apply schema changes. The declared \
+                    schema differs from the live table; run the migration \
+                    process that owns this database and deploy again.",
+        "violations": [],
+        "schema_changes_refused": pending,
+        "destructive_pending": [],
     })
     .to_string()
 }
@@ -288,24 +418,75 @@ mod tests {
         }
     }
 
+    /// A schema change is refused under EVERY strictness, `lenient` included.
+    ///
+    /// THIS TEST ASSERTED THE OPPOSITE until registerModel stopped applying
+    /// schema. It pinned that a lenient deploy returned Ok and carried the op
+    /// forward for apply to skip. That behaviour is the black box this replaces:
+    /// the creator's declared schema and the live table disagreed, the deploy
+    /// reported success, and nobody was told.
+    ///
+    /// Strictness is not consulted any more, and cannot be: it used to answer
+    /// "may we apply a risky change?", and there is no longer a code path that
+    /// applies one. A `lenient` escape hatch here would return Ok for a deploy
+    /// whose table never changes.
     #[test]
-    fn lenient_validation_terminalises_refused_destructive_ops() {
+    fn lenient_is_refused_too_because_the_refusal_is_structural() {
         let rt = compio::runtime::Runtime::new().expect("compio runtime");
         rt.block_on(async {
             let backend = RecordingAuditWriter::default();
-            let approved = validate(&backend, &ctx("lenient"), destructive_plan())
+            let envelope = validate(&backend, &ctx("lenient"), destructive_plan())
                 .await
-                .expect("lenient deploy should not return a refusal envelope");
+                .expect_err("lenient must NOT be an escape hatch for a schema change");
 
-            assert_eq!(approved.ops.len(), 1, "lenient keeps the op for apply-time skipping");
+            assert!(
+                envelope.contains("schema_change_requires_migration"),
+                "the envelope must say WHY, not just that it refused: {envelope}"
+            );
+            assert!(
+                envelope.contains("drop_column"),
+                "the envelope must name the refused change so the operator can act: {envelope}"
+            );
+            // The audit row is still written terminal rather than left pending -
+            // the operator-facing record survives the contract change.
             assert_eq!(
                 backend.statuses.borrow().as_slice(),
                 &["validation_refused".to_string()],
-                "lenient destructive ops must be written terminal, not left pending"
+                "refused ops must be written terminal, not left pending"
             );
             assert_eq!(
                 backend.kinds.borrow().as_slice(),
                 &["drop_column".to_string()]
+            );
+        });
+    }
+
+    /// The same refusal for an ADDITIVE op, which used to be applied silently.
+    ///
+    /// `CreateTable` was the most common case: a first deploy found no table and
+    /// registerModel created one. Additive ops never reached the old destructive
+    /// filter at all, so nothing refused them and nothing logged them.
+    #[test]
+    fn an_additive_create_table_is_refused_and_named() {
+        let rt = compio::runtime::Runtime::new().expect("compio runtime");
+        rt.block_on(async {
+            let backend = RecordingAuditWriter::default();
+            let envelope = validate(&backend, &ctx("strict"), additive_plan("posts"))
+                .await
+                .expect_err("an additive CreateTable changes schema, so it is refused");
+
+            assert!(
+                envelope.contains("schema_change_requires_migration"),
+                "additive refusals carry the same reason as destructive ones: {envelope}"
+            );
+            assert!(
+                envelope.contains("create_table"),
+                "the refused kind must be named: {envelope}"
+            );
+            assert_eq!(
+                backend.kinds.borrow().as_slice(),
+                &["create_table".to_string()],
+                "an additive schema change is audited, which it never used to be"
             );
         });
     }
