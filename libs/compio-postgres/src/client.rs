@@ -1308,7 +1308,12 @@ impl InnerClient {
     }
 
     pub(crate) fn set_typeinfo(&self, statement: &Statement) {
-        self.cached_typeinfo.lock().typeinfo = Some(statement.clone());
+        let replaced = self
+            .cached_typeinfo
+            .lock()
+            .typeinfo
+            .replace(statement.clone());
+        drop(replaced);
     }
 
     pub(crate) fn typeinfo_composite(&self) -> Option<Statement> {
@@ -1316,7 +1321,12 @@ impl InnerClient {
     }
 
     pub(crate) fn set_typeinfo_composite(&self, statement: &Statement) {
-        self.cached_typeinfo.lock().typeinfo_composite = Some(statement.clone());
+        let replaced = self
+            .cached_typeinfo
+            .lock()
+            .typeinfo_composite
+            .replace(statement.clone());
+        drop(replaced);
     }
 
     pub(crate) fn typeinfo_enum(&self) -> Option<Statement> {
@@ -1324,7 +1334,12 @@ impl InnerClient {
     }
 
     pub(crate) fn set_typeinfo_enum(&self, statement: &Statement) {
-        self.cached_typeinfo.lock().typeinfo_enum = Some(statement.clone());
+        let replaced = self
+            .cached_typeinfo
+            .lock()
+            .typeinfo_enum
+            .replace(statement.clone());
+        drop(replaced);
     }
 
     pub(crate) fn cached_type(&self, oid: Oid) -> (Option<Type>, u64) {
@@ -2846,5 +2861,103 @@ mod query_observer_reentrancy_tests {
             "the replaced observer was destroyed while its mutex was still held \
              (None means the waker never ran at all)"
         );
+    }
+}
+
+#[cfg(test)]
+mod cached_typeinfo_reentrancy_tests {
+    use super::{Client, InnerClient, StatementCacheSettings};
+    use crate::Statement;
+    use crate::config::{ProtocolVersion, SslMode, SslNegotiation};
+    use crate::connection::Request;
+    use futures_channel::mpsc;
+    use futures_util::Stream;
+    use std::cell::{Cell, RefCell};
+    use std::num::NonZeroUsize;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::{Context, Wake, Waker};
+
+    thread_local! {
+        static PROBE_CLIENT: RefCell<Option<Arc<InnerClient>>> = const { RefCell::new(None) };
+        static PROBE_LOCKED: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+
+    struct CachedStatementDropProbe;
+
+    impl CachedStatementDropProbe {
+        fn record() {
+            PROBE_CLIENT.with(|client| {
+                if let Some(inner) = client.borrow().as_ref() {
+                    PROBE_LOCKED
+                        .with(|flag| flag.set(Some(inner.cached_typeinfo.try_lock().is_none())));
+                }
+            });
+        }
+    }
+
+    impl Wake for CachedStatementDropProbe {
+        fn wake(self: Arc<Self>) {
+            Self::record();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            Self::record();
+        }
+    }
+
+    fn client() -> (Client, mpsc::UnboundedReceiver<Request>) {
+        let (sender, receiver) = mpsc::unbounded();
+        (
+            Client::new_with_statement_cache(
+                sender,
+                SslMode::Disable,
+                SslNegotiation::Postgres,
+                0,
+                Some(0.into()),
+                None,
+                ProtocolVersion::V3_0,
+                StatementCacheSettings::new(1, NonZeroUsize::MIN),
+            ),
+            receiver,
+        )
+    }
+
+    fn replacement_observes_locked_cache(setter: fn(&InnerClient, &Statement)) -> Option<bool> {
+        let (client, mut requests) = client();
+        let inner = Arc::clone(client.inner());
+        let cached = Statement::new(&inner, "cached".to_string(), Vec::new(), Vec::new(), false);
+        setter(&inner, &cached);
+        drop(cached);
+
+        let waker = Waker::from(Arc::new(CachedStatementDropProbe));
+        let mut cx = Context::from_waker(&waker);
+        assert!(Pin::new(&mut requests).poll_next(&mut cx).is_pending());
+        PROBE_CLIENT.with(|slot| *slot.borrow_mut() = Some(Arc::clone(&inner)));
+        PROBE_LOCKED.with(|flag| flag.set(None));
+
+        let replacement = Statement::new(&inner, "new".to_string(), Vec::new(), Vec::new(), false);
+        setter(&inner, &replacement);
+
+        let observed = PROBE_LOCKED.with(Cell::get);
+        PROBE_CLIENT.with(|slot| *slot.borrow_mut() = None);
+        observed
+    }
+
+    #[test]
+    fn replacing_cached_typeinfo_does_not_destroy_a_statement_under_the_cache_lock() {
+        let setters: [(&str, fn(&InnerClient, &Statement)); 3] = [
+            ("typeinfo", InnerClient::set_typeinfo),
+            ("typeinfo_composite", InnerClient::set_typeinfo_composite),
+            ("typeinfo_enum", InnerClient::set_typeinfo_enum),
+        ];
+
+        for (slot, setter) in setters {
+            assert_eq!(
+                replacement_observes_locked_cache(setter),
+                Some(false),
+                "replacing {slot} destroyed its old Statement while cached_typeinfo was locked"
+            );
+        }
     }
 }
