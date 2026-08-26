@@ -68,7 +68,7 @@ ed25519-dalek = { workspace = true, features = ["pkcs8"] }
 # zeroship-config-contract depends on zeroship-core. Cargo supports this - a
 # dev-dependency does not participate in the library build graph - and the
 # alternative was to move the gate away from the module it protects.
-zeroship-config-contract = { path = "../config-contract" }
+zeroship-config-contract = { path = "../zeroship-config-contract" }
 
 [lints]
 workspace = true

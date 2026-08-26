@@ -1519,9 +1519,17 @@ impl Pool {
             return;
         }
         let slot = self.waiters.borrow().front().cloned();
-        if let Some(slot) = slot
-            && let Some(w) = slot.waker.borrow_mut().take()
-        {
+        // Take the waker OUT of the borrow before waking. As the scrutinee of an
+        // `if let` the `RefMut` would still be live inside the body: Rust 2024
+        // moved that drop ahead of the `else` block, not ahead of the `then`
+        // block. A waker that synchronously re-enters the pool and reaches this
+        // slot would then hit `BorrowMutError`, and the unwind escapes before
+        // `return_client` disarms its permit, so `total` is decremented for a
+        // connection that is still alive. Closing over the take keeps the
+        // temporary inside the closure, which matches `wake_all` collecting into
+        // a `Vec` and `return_client` taking the waker as a return value.
+        let waker = slot.and_then(|slot| slot.waker.borrow_mut().take());
+        if let Some(w) = waker {
             w.wake();
         }
     }
@@ -3375,6 +3383,91 @@ mod tests {
     fn poll_with_waker<F: Future>(future: Pin<&mut F>, waker: &Waker) -> Poll<F::Output> {
         let mut cx = Context::from_waker(waker);
         future.poll(&mut cx)
+    }
+
+    thread_local! {
+        /// The slot whose waker is being invoked, so the probe below can ask
+        /// whether the pool still holds it borrowed.
+        static PROBE_SLOT: RefCell<Option<Rc<WaiterSlot>>> = const { RefCell::new(None) };
+        /// `Some(true)` means the pool was STILL holding the borrow during
+        /// `wake()`. `None` means the waker never ran, which must not read as
+        /// success.
+        static PROBE_BORROWED: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+
+    struct BorrowProbeWake;
+
+    impl BorrowProbeWake {
+        fn record() {
+            PROBE_SLOT.with(|slot| {
+                if let Some(slot) = slot.borrow().as_ref() {
+                    PROBE_BORROWED.with(|flag| flag.set(Some(slot.waker.try_borrow_mut().is_err())));
+                }
+            });
+        }
+    }
+
+    impl Wake for BorrowProbeWake {
+        fn wake(self: Arc<Self>) {
+            Self::record();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            Self::record();
+        }
+    }
+
+    /// A waiter's `Waker` must not run while the pool still holds that waiter's
+    /// `waker` slot borrowed.
+    ///
+    /// `wake_one_waiter` took the waker through `slot.waker.borrow_mut().take()`
+    /// as the scrutinee of an `if let`, then called `wake()` in the body. The
+    /// scrutinee temporary is NOT dropped before the body - Rust 2024 moved that
+    /// drop ahead of the `else` block only - so the `RefMut` was live across the
+    /// wake. Any waker that synchronously re-enters the pool and reaches this
+    /// slot then hits `BorrowMutError`, and because the unwind escapes before
+    /// `permit.disarm()`, the return permit still fires and decrements `total`
+    /// for a connection that is still alive, leaving `total < active`.
+    ///
+    /// Everywhere else in this file wakes OUTSIDE the borrow - `wake_all`
+    /// collects into a `Vec` first, and `return_client` takes the waker as a
+    /// return value - so this was the one site out of step.
+    ///
+    /// The assertion is on the BORROW rather than on a panic, so it states the
+    /// invariant instead of one caller's way of tripping over it, and it needs no
+    /// re-entrant waker to do it. `None` is failed deliberately: a probe that
+    /// never ran proves nothing.
+    #[test]
+    fn waking_a_waiter_does_not_hold_its_waker_slot_borrowed() {
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            ..PoolConfig::default()
+        };
+        let pool = test_pool(config, Vec::new(), 0, 1);
+        let waker = Waker::from(Arc::new(BorrowProbeWake));
+        let mut waiter = Box::pin(Waiter::new(&pool));
+        assert!(poll_with_waker(waiter.as_mut(), &waker).is_pending());
+
+        let slot = pool
+            .waiters
+            .borrow()
+            .front()
+            .cloned()
+            .expect("the parked waiter registered a queue slot");
+        PROBE_SLOT.with(|cell| *cell.borrow_mut() = Some(slot));
+        PROBE_BORROWED.with(|flag| flag.set(None));
+
+        pool.wake_one_waiter();
+
+        let observed = PROBE_BORROWED.with(Cell::get);
+        PROBE_SLOT.with(|cell| *cell.borrow_mut() = None);
+        assert_eq!(
+            observed,
+            Some(false),
+            "the waker ran while the pool still held its slot borrowed \
+             (None means the probe never ran at all)"
+        );
     }
 
     #[test]

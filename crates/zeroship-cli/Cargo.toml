@@ -1,5 +1,5 @@
 [package]
-name = "zeroship"
+name = "zeroship-cli"
 version = "0.1.0"
 edition = "2021"
 description = "zeroship CLI — build, serve, deploy, inspect"
