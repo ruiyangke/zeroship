@@ -111,6 +111,73 @@ fn a_cause_names(error: &compio_postgres::Error, key: &str) -> bool {
     .any(|cause| cause.to_string().contains(key))
 }
 
+/// The table above rules on every libpq KEY, probing exactly ONE value each.
+/// A key can therefore be implemented while some of its values are missing and
+/// nothing goes red - a DSN libpq accepts would simply fail here, which is the
+/// same shape as the `gssencmode=disable` defect.
+///
+/// These sets were enumerated by probing libpq 18 on 2026-08-25, value by
+/// value, not copied from documentation. Each list is exactly what libpq
+/// ACCEPTED; each `bogus` control is what it REJECTED.
+#[test]
+fn every_enum_parameter_accepts_exactly_the_values_libpq_does() {
+    const ENUMS: &[(&str, &[&str])] = &[
+        (
+            "target_session_attrs",
+            &[
+                "any",
+                "read-write",
+                "read-only",
+                "primary",
+                "standby",
+                "prefer-standby",
+            ],
+        ),
+        (
+            "sslmode",
+            &[
+                "disable",
+                "allow",
+                "prefer",
+                "require",
+                "verify-ca",
+                "verify-full",
+            ],
+        ),
+        ("sslnegotiation", &["postgres", "direct"]),
+        ("sslcertmode", &["disable", "allow", "require"]),
+        ("channel_binding", &["disable", "prefer", "require"]),
+        ("load_balance_hosts", &["disable", "random"]),
+    ];
+
+    let mut wrong = Vec::new();
+    for (key, values) in ENUMS {
+        for value in *values {
+            let dsn = format!("host=h {key}={value}");
+            if let Err(error) = dsn.parse::<Config>() {
+                wrong.push(format!(
+                    "{key}={value}: libpq accepts it, this refuses it ({error})"
+                ));
+            }
+        }
+        // The control. Without it a parser that accepted ANY value would pass
+        // every line above.
+        let bogus = format!("host=h {key}=zz_not_a_value");
+        if bogus.parse::<Config>().is_ok() {
+            wrong.push(format!(
+                "{key}: an unknown value was accepted, so the value space is not \
+                 being checked at all"
+            ));
+        }
+    }
+
+    assert!(
+        wrong.is_empty(),
+        "enum value spaces diverge from libpq:\n  {}",
+        wrong.join("\n  ")
+    );
+}
+
 #[test]
 fn every_libpq_parameter_is_implemented_or_refused_by_name() {
     let mut wrong = Vec::new();
