@@ -1,8 +1,9 @@
-//! MySQL SQL spelling. The future `zero-migrate-mysql`.
+//! MySQL SQL spelling.
 //!
-//! This was the only backend module whose trigger spelling actually lived here, and
-//! it is therefore the worked example step 3 followed: SQLite's now sits in
-//! `backends/sqlite.rs` in the same shape. PostgreSQL's is still in `render::vendor`.
+//! This was the only backend module whose trigger spelling already lived beside the
+//! rest of its vendor's SQL rather than in the engine's lowerer, so it was the
+//! worked example the other two backends were moved into the shape of. Each vendor
+//! crate now carries its own trigger spelling.
 
 use std::collections::BTreeMap;
 
@@ -531,44 +532,31 @@ impl DmlRenderer for MysqlDmlRenderer {
     /// NOTHING WAS EMITTED WRONGLY BEFORE THE MOVE, and that is the point. Every
     /// call site named MySQL in the callee's name, so no vendor was unnamed, and
     /// `backend_modules_name_one_dialect` passed because the reach was by function
-    /// name rather than by a dialect-enum literal. What it blocked was step 4: the
-    /// future `zero-migrate-mysql` would have needed core at RUNTIME to spell its
-    /// own identifier - the core-to-backend cycle the backend split exists to
-    /// break, and the same shape as the extraction spike's finding that `-sqlite`
-    /// needed `-postgres` to quote a trigger name.
+    /// name rather than by a dialect-enum literal. What it blocked was the crate
+    /// split: this crate would have needed core at RUNTIME to spell its own
+    /// identifier - the core-to-backend cycle the split exists to break, and the
+    /// same shape as the extraction spike's finding that one vendor crate needed
+    /// another to quote a trigger name.
     ///
-    /// (This doc may not spell the dialect-enum literal, even in prose.
-    /// `backend_modules_name_one_dialect`'s second half collects EVERY line in this
-    /// file mentioning that path and demands the list be exactly the `DIALECT`
-    /// const, so a comment is a carrier like any other line. An earlier draft of
-    /// this paragraph named it and turned that test red, which is the rule working
-    /// as intended.)
+    /// (This doc may not spell a FOREIGN vendor crate's ident, even in prose.
+    /// `backend_modules_name_one_dialect` reads the vendor crates as TEXT, so a
+    /// comment is a carrier like any other line. An earlier draft of this paragraph
+    /// named one and turned that test red, which is the rule working as intended.)
     ///
-    /// MEASURED on the 1231-test `--lib` binary by neutering each candidate with a
-    /// single appended token:
+    /// The move was checked by neutering each candidate spelling with a single
+    /// appended token and reading which tests went red. The two before-sets NEST
+    /// rather than being disjoint - the inverse of the ANSI case, and exactly what
+    /// "the backend delegates into core" means operationally: NOTHING reddened by
+    /// neutering this method was missed by neutering core. The tests in the
+    /// difference are the ones whose MySQL identifier bytes this backend had NO say
+    /// in.
     ///
-    /// | tree | neutered | red |
-    /// |------|----------|-----|
-    /// | before | this method | 21 |
-    /// | before | `schema::query::mysql_quote_ident` | 30 |
-    /// | after | this method | 54 |
-    ///
-    /// The two before-sets NEST rather than being disjoint - the inverse of the
-    /// ANSI case, and exactly what "the backend delegates into core" means
-    /// operationally: NOTHING reddened by neutering this method was missed by
-    /// neutering core. The 9 in the difference (`render::lower::tests` x5,
-    /// `schema::query::hostile_identifier_quoting` x3, and
-    /// `policy_keyword_and_quoted_identifiers_are_quoted_in_injected_sql`) are the
-    /// tests whose MySQL identifier bytes this backend had NO say in.
-    ///
-    /// AND THE 54 IS NOT A TYPO FOR THE 30 THAT WAS PREDICTED. Routing the two
-    /// SECOND homes found during the change - `zero_migrate_mysql::backend::journal_sql`
-    /// and `::backfill_sql`, each of which carried its own copy of the spelling and
-    /// so could not be reached by the core neuter at all - added 24
-    /// `zero_migrate_mysql::backend` tests on top of the 30. Nothing was lost at any
-    /// step: the 54 is a strict superset of the 30, and the binary held at 1232
-    /// tests throughout. The prediction was wrong because it was formed from the
-    /// two sets measured FIRST, before those homes were known to exist.
+    /// Neutering this method AFTER the move reddens strictly more than neutering
+    /// core did before it, because the change also routed two SECOND homes found
+    /// during it - `zero_migrate_mysql::backend::journal_sql` and `::backfill_sql`,
+    /// each carrying its own copy of the spelling, and so unreachable by the core
+    /// neuter at all. Nothing was lost at any step: the after-set is a strict
+    /// superset of the before-set, and the binary's test total did not move.
     ///
     /// Like the two ANSI impls, this spells the bytes DIRECTLY rather than through
     /// the `*_for_dialect` seam its sibling methods use: it IS this dialect's

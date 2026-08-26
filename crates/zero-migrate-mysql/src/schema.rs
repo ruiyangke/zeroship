@@ -1,4 +1,4 @@
-//! MySQL schema/DDL spelling. The future `zero-migrate-mysql`.
+//! MySQL schema/DDL spelling.
 
 use crate::collation::{mysql_pin_collation, mysql_type_without_collation};
 use crate::physical_type::{self, MysqlPhysicalType};

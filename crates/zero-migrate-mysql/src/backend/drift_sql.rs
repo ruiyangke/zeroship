@@ -742,7 +742,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
     // empty, with a comment here claiming nothing read it. The fold reads it: a
     // `dropView` naming a view an ALREADY-APPLIED migration created found nothing in the
     // projection and failed the deploy with `fold: view <name> does not exist`
-    // (`render/fold.rs:2348`), because an applied migration's create carries journal
+    // (`FoldError::MissingView`), because an applied migration's create carries journal
     // evidence and so is absent from `pending_ops` too. PostgreSQL and SQLite never had
     // it because both populate their views.
     Ok(SchemaSnapshot {

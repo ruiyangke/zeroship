@@ -1,5 +1,4 @@
-//! What the MySQL EXECUTION half must be able to name from here, written BEFORE
-//! the code that needs it arrives.
+//! What the MySQL EXECUTION half must be able to name from here.
 //!
 //! # The invariant
 //!
@@ -11,8 +10,7 @@
 //!
 //! # Why this is a compile-time assertion and not a behaviour test
 //!
-//! `crates/zero-migrate/src/apply/backend/mysql/` - eight files, 16,262 lines, of
-//! which 8,490 are production - HAS now been extracted into this crate, as
+//! The engine's `apply/backend/mysql/` HAS been extracted into this crate, as
 //! `src/backend/`. The extraction was blocked by exactly one thing: the items its
 //! production half reached through `crate::...` that lived in the engine rather than
 //! in `zero-migrate-backend`.
@@ -26,7 +24,7 @@
 //!
 //! It is a `tests/` file rather than a `src/` one on purpose: an integration test
 //! links this crate from outside, so it proves the items are reachable through the
-//! same public surface the executor will use and not through an in-crate shortcut.
+//! same public surface the executor uses and not through an in-crate shortcut.
 //!
 //! # Reachability, and where a cheap behavioural check is available
 //!

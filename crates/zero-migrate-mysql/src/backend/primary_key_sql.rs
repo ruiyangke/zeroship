@@ -651,7 +651,7 @@ fn pk_error(step: &AlterPrimaryKeyStep, detail: impl std::fmt::Display) -> Apply
 /// The `SHOW CREATE TABLE` body for one table.
 ///
 /// `pub(super)` because the column-restate path reads the SAME text for the SAME
-/// reason: it is the only place a MySQL column definition exists in the server`s own
+/// reason: it is the only place a MySQL column definition exists in the server's own
 /// spelling, facets included.
 pub(super) async fn show_create_table<D: SqlSession>(
     conn: &D,

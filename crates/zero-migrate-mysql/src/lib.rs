@@ -106,15 +106,21 @@ use zero_migrate_ir::dialect::DialectId;
 /// readers, and no way for the declaration and the check to drift apart.
 const NAME: &str = "mysql";
 
-/// This backend's identity, declared HERE and nowhere else in the workspace.
+/// This backend's identity, declared HERE for every shipping path.
 ///
 /// `zero-migrate-ir` is the neutral vocabulary crate and its own module doc says a
 /// backend "declares its own - `DialectId::new(\"duckdb\")` - without editing this
 /// crate". It used to declare three anyway, and core re-exported them, so every
 /// consumer that wanted to name `MySQL` reached a neutral crate to get it. This is
 /// the declaration that ended that: the `NAME` const above is the workspace's only
-/// spelling of it, and [`VENDOR`]'s descriptor, this crate's own modules,
-/// the engine's tests and the Node host all read it from here.
+/// non-test spelling of it, and [`VENDOR`]'s descriptor, this crate's own modules,
+/// the composition's `tests/` binaries and the Node host all read it from here.
+///
+/// The neutral crates' own `#[cfg(test)]` modules do rebuild the string, because a
+/// crate that must not depend on a vendor cannot import the id it needs to write a
+/// test. `DialectId` compares by content, so those rebuilds ARE this id rather than
+/// a second one. Measure the non-test set with
+/// `git grep -n 'DialectId::new(\"mysql\")' -- crates`.
 ///
 /// A fourth backend adds its own `DIALECT` in its own crate and edits neither the
 /// contract crate nor any other vendor.
