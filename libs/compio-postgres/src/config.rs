@@ -659,7 +659,7 @@ pub enum Host {
 /// * `keepalives` - Controls the use of TCP keepalive. A value of 0 disables keepalive and nonzero integers enable it.
 ///     This option is ignored when connecting with Unix sockets. Defaults to on.
 /// * `keepalives_idle` - The number of seconds of inactivity after which a keepalive message is sent to the server.
-///     This option is ignored when connecting with Unix sockets. Defaults to 2 hours.
+///     This option is ignored when connecting with Unix sockets. By default the operating-system setting is left unchanged.
 /// * `keepalives_interval` - The time interval between TCP keepalive probes.
 ///     This option is ignored when connecting with Unix sockets.
 /// * `keepalives_count` - The maximum number of TCP keepalive probes that will be sent before dropping a connection.
@@ -850,7 +850,7 @@ impl Config {
             keepalives: true,
             #[cfg(not(target_arch = "wasm32"))]
             keepalive_config: KeepaliveConfig {
-                idle: Duration::from_secs(2 * 60 * 60),
+                idle: Duration::ZERO,
                 interval: None,
                 retries: None,
             },
@@ -1562,7 +1562,8 @@ impl Config {
 
     /// Sets the amount of idle time before a keepalive packet is sent on the connection.
     ///
-    /// This is ignored for Unix domain sockets, or if the `keepalives` option is disabled. Defaults to 2 hours.
+    /// This is ignored for Unix domain sockets, or if the `keepalives` option is disabled.
+    /// By default the operating-system setting is left unchanged.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn keepalives_idle(&mut self, keepalives_idle: Duration) -> &mut Config {
         self.keepalive_config.idle = keepalives_idle;
@@ -3162,7 +3163,7 @@ mod tests {
     /// than `Prefer` would silently stop negotiating encryption at all, and
     /// nothing else here would notice.
     ///
-    /// Checked against the PostgreSQL 18 documentation on 2026-08-24; all ten
+    /// Checked against the PostgreSQL 18 documentation on 2026-08-26; all eleven
     /// matched.
     mod parameter_defaults {
         use super::super::{
@@ -3182,6 +3183,9 @@ mod tests {
             assert_eq!(config.get_target_session_attrs(), TargetSessionAttrs::Any);
             assert_eq!(config.get_channel_binding(), ChannelBinding::Prefer);
             assert_eq!(config.get_load_balance_hosts(), LoadBalanceHosts::Disable);
+            // An omitted keepalives_idle leaves the operating-system default
+            // untouched. Zero is how this Config represents that absence.
+            assert_eq!(config.get_keepalives_idle(), std::time::Duration::ZERO);
             // "Zero, negative, or not specified means wait indefinitely."
             assert_eq!(config.get_connect_timeout(), None);
             // Empty means "the port PostgreSQL was built with"; the connect
