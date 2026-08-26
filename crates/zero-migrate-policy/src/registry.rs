@@ -1,4 +1,4 @@
-//! The policy registry (II.2.1) — an OPEN set of [`KnobDef`]s: the engine builtins
+//! The policy registry (II.2.1) - an OPEN set of [`KnobDef`]s: the engine builtins
 //! plus consumer extensions registered at engine construction. Every `Grant`/
 //! `Require` rule references a knob here by [`KnobKey`]; a document key unknown to
 //! the registry is a hard load error (`deny_unknown_fields` against a
@@ -7,7 +7,7 @@
 //! The registry has a canonical [`digest`](PolicyRegistry::digest): a stable
 //! sha256 over the [`KnobDef::canonical_encoding`] of every knob, sorted by key so
 //! the digest is insertion-order-independent. The digest binds into the seal (II.7)
-//! — a `key` string means nothing without the whole def it resolves to.
+//! - a `key` string means nothing without the whole def it resolves to.
 
 use std::collections::BTreeMap;
 
@@ -32,7 +32,7 @@ pub enum RegistryError {
 impl PolicyRegistry {
     /// An empty registry (no knobs). The engine's builtins are added by the
     /// consumer via [`with`](PolicyRegistry::with); this leaf crate ships no
-    /// content — only the mechanism.
+    /// content - only the mechanism.
     #[must_use]
     pub fn empty() -> Self {
         Self {
@@ -41,7 +41,7 @@ impl PolicyRegistry {
     }
 
     /// Extend the registry with additional knob defs (engine builtins or consumer
-    /// extensions). A duplicate key is a hard error — one def per key.
+    /// extensions). A duplicate key is a hard error - one def per key.
     pub fn with(mut self, defs: impl IntoIterator<Item = KnobDef>) -> Result<Self, RegistryError> {
         for def in defs {
             if self.defs.contains_key(&def.key) {

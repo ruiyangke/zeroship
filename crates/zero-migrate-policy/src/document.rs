@@ -1,6 +1,6 @@
 //! The strict document loader (II.3). Parses a policy document from TOML or JSON
 //! into the resolved in-memory model (`crate::rule`), validating against the
-//! [`PolicyRegistry`] and enforcing every load-time legality gate (II.2.4–II.2.7,
+//! [`PolicyRegistry`] and enforcing every load-time legality gate (II.2.4-II.2.7,
 //! II.4.2). This is a SECURITY CORE: strict parsing (`deny_unknown_fields`),
 //! fail-closed, registry-validated, name-normalized at the scope boundary.
 //!
@@ -21,7 +21,7 @@ use crate::value_order::leq_value;
 use crate::{Pattern, Scope, ScopeError};
 
 /// The highest `policy_version` MAJOR this loader understands. An unknown major is
-/// a hard error (E7 — versioned for code-evolution discipline).
+/// a hard error (E7 - versioned for code-evolution discipline).
 pub const SUPPORTED_POLICY_VERSION: u32 = 1;
 
 /// The layer a document is being loaded AS. Two axes it governs:
@@ -32,7 +32,7 @@ pub const SUPPORTED_POLICY_VERSION: u32 = 1;
 ///   `extends` is a hard load error (`ExtendsForbiddenInDraft`, II.7).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LoadContext {
-    /// The host's root charter — the only layer allowed a mandatory inject; trusted,
+    /// The host's root charter - the only layer allowed a mandatory inject; trusted,
     /// so `extends` is permitted.
     RootCharter,
     /// A TRUSTED, non-root catalog entry (a `ProfileCatalog` `env` fragment): no
@@ -55,7 +55,7 @@ impl LoadContext {
     }
 }
 
-/// A resolved, validated policy document — one layer (II.3). Produced by the
+/// A resolved, validated policy document - one layer (II.3). Produced by the
 /// loader after all legality gates pass. Dead rules (effective scope `Nothing`)
 /// are surfaced as [`warnings`](PolicyDoc::warnings), not dropped silently.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -73,7 +73,7 @@ pub struct PolicyDoc {
     /// meet the loader already performed.
     pub default_scope: Option<Scope>,
     /// The resolved rules, in document order (grants, requires, injects,
-    /// validates — preserving each section's authored order).
+    /// validates - preserving each section's authored order).
     pub rules: Vec<Rule>,
     /// Non-fatal load diagnostics (dead rules, II.3.1).
     pub warnings: Vec<LoadWarning>,
@@ -82,16 +82,17 @@ pub struct PolicyDoc {
 /// A non-fatal load diagnostic.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum LoadWarning {
-    /// A rule's effective scope is `Nothing` — it can never match any object, so it
+    /// A rule's effective scope is `Nothing` - it can never match any object, so it
     /// is inert. We WARN rather than error: a dead rule is not a security hazard
     /// (it grants/requires/injects nothing), and erroring would make an otherwise
-    /// legal `default_scope ⊓ rule.scope = ∅` composition un-loadable. The rule is
+    /// legal composition whose `default_scope` and `rule.scope` meet to the empty
+    /// scope un-loadable. The rule is
     /// retained in `rules` so the composer sees the same list the author wrote.
     DeadRule { index: usize },
 }
 
-/// Every load-time legality failure. Each maps to a named gate (II.2.4–II.2.7,
-/// II.4.2); the loader is fail-closed — any one of these rejects the whole document.
+/// Every load-time legality failure. Each maps to a named gate (II.2.4-II.2.7,
+/// II.4.2); the loader is fail-closed - any one of these rejects the whole document.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum LoadError {
     /// The serde/format parse failed (bad TOML/JSON, unknown field via
@@ -105,7 +106,7 @@ pub enum LoadError {
     /// against the runtime-extensible known set, II.2.1).
     UnknownKnobKey { key: String },
     /// A `[[grant]]` names a non-Grant-polarity knob, or a `[[require]]` a
-    /// non-Require-polarity knob (section↔polarity lint, II.3).
+    /// non-Require-polarity knob (the section-against-polarity lint, II.3).
     SectionPolarityMismatch {
         key: String,
         expected: Polarity,
@@ -115,7 +116,7 @@ pub enum LoadError {
     /// hard floor) (II.2.1).
     InvalidKnobValue { key: String, detail: String },
     /// A rule sets a `DeclaredOnly` knob to a NON-DEFAULT value (II.6). A
-    /// `DeclaredOnly` knob is declared metadata only — the engine neither enforces
+    /// `DeclaredOnly` knob is declared metadata only - the engine neither enforces
     /// it nor lets it be sealed above its default on the enforced path, so raising
     /// it would advertise authority the engine lacks. Rejected fail-closed at load.
     DeclaredOnlyNonDefault { key: String },
@@ -141,15 +142,17 @@ pub enum LoadError {
     },
     /// A scope pattern literal is malformed (bad glob, >2 segments, bad quoting).
     MalformedScope { pattern: String },
-    /// A scope was authored with an empty include (the ⊥/⊤ collision guard).
+    /// A scope was authored with an empty include (the empty-scope/universe
+    /// collision guard).
     EmptyInclude,
-    /// A Global-`object_model` knob carries a non-⊤ scope (II.2.5). Global knobs
+    /// A Global-`object_model` knob carries a scope narrower than the universe
+    /// (II.2.5). Global knobs
     /// must be authored `scope = All` and are exempt from the default-scope meet.
     ScopeIllegalForGlobalKnob { key: String },
     /// A `PerSchema` knob carries a table-granular (two-segment) scope (II.2.5).
     ScopeTooGranularForKnob { key: String },
-    /// A Grant-kind rule has neither its own scope nor a `default_scope` — it would
-    /// acquire ⊤ by omission (A3 foot-gun, II.3).
+    /// A Grant-kind rule has neither its own scope nor a `default_scope` - it would
+    /// acquire the universe by omission (A3 foot-gun, II.3).
     GrantScopeUnbounded { key: String },
     /// An `[[inject]]` rule pins a `primary_key` but omits `author_primary_key`, so it
     /// would acquire the permissive `allow` by omission (II.4.3). Under a pin the two
@@ -187,7 +190,7 @@ pub enum LoadError {
     /// inject's own required table name) on overlapping scope (II.4.4).
     SelfContradictoryInjectValidate { detail: String },
     /// An UNTRUSTED creator draft carries an `extends` field (H-1, II.7). A draft may
-    /// never inherit a catalog base — the charter it is admitted against already
+    /// never inherit a catalog base - the charter it is admitted against already
     /// carries the operator floor. Forbidding it removes the untrusted-`extends`
     /// laundering hazard outright.
     ExtendsForbiddenInDraft,
@@ -195,7 +198,7 @@ pub enum LoadError {
     /// catalog (II.7). Resolution is fail-closed: an unknown base is an error, never a
     /// silent skip.
     ExtendsUnknownBase { base: String },
-    /// A trusted `extends` chain revisits a base name — a cycle (II.7). Fail-closed.
+    /// A trusted `extends` chain revisits a base name - a cycle (II.7). Fail-closed.
     ExtendsCycle { base: String },
 }
 
@@ -208,7 +211,7 @@ impl From<ScopeError> for LoadError {
 }
 
 /// II.6 gate: a `DeclaredOnly` knob advertises no engine authority, so a rule may
-/// not raise it above its default on the enforced path — every loaded document is
+/// not raise it above its default on the enforced path - every loaded document is
 /// composed toward sealing/enforcement. Rejects fail-closed when the rule's value
 /// is above the knob's default; a rule whose value EQUALS the default (a no-op) is
 /// admissible. Uses the composer's own "raises above default" test
@@ -236,7 +239,7 @@ fn reject_declared_only_nondefault(
     Ok(())
 }
 
-// ── wire (serde) types ──────────────────────────────────────────────────────────
+// -- wire (serde) types ----------------------------------------------------------
 //
 // The on-wire document is deliberately separate from the resolved model: it holds
 // the *authored* (pre-normalization, pre-registry-validation) shape. Every struct
@@ -443,7 +446,7 @@ impl PolicyDoc {
     /// Parse + validate a TRUSTED document that may `extends` a base, resolving the
     /// base chain against the injected trusted `catalog` (II.7, H-1) with cycle
     /// detection. `ctx` MUST be a trusted context (`RootCharter`/`TrustedCatalogEntry`)
-    /// — an untrusted-draft context with `extends` is `ExtendsForbiddenInDraft`. The
+    /// - an untrusted-draft context with `extends` is `ExtendsForbiddenInDraft`. The
     /// base document's rules ACCUMULATE into this document's, and its `default_scope` is
     /// inherited when this document omits its own.
     ///
@@ -503,10 +506,10 @@ impl PolicyDoc {
 
         let mut rules: Vec<Rule> = Vec::new();
 
-        // ── grants ──────────────────────────────────────────────────────────────
+        // -- grants --------------------------------------------------------------
         for g in wire.grant {
             let (key, def) = lookup_knob(registry, &g.key)?;
-            // Section↔polarity lint: [[grant]] must name a Grant-polarity knob.
+            // Section-against-polarity lint: [[grant]] must name a Grant-polarity knob.
             if !matches!(def.polarity, Polarity::Grant) {
                 return Err(LoadError::SectionPolarityMismatch {
                     key: g.key,
@@ -524,7 +527,7 @@ impl PolicyDoc {
             });
         }
 
-        // ── requires ─────────────────────────────────────────────────────────────
+        // -- requires -------------------------------------------------------------
         for r in wire.require {
             let (key, def) = lookup_knob(registry, &r.key)?;
             if !matches!(def.polarity, Polarity::Require) {
@@ -538,7 +541,7 @@ impl PolicyDoc {
             validate_value(&r.key, &value, &def.kind)?;
             reject_declared_only_nondefault(&r.key, def, &value)?;
             // Require rules are object-filterable (never Global-key by
-            // section↔polarity + object_model contract), and are NOT subject to the
+            // section-against-polarity + object_model contract), and are NOT subject to the
             // A3 grant-unbounded gate (that is Grant-kind only).
             let scope =
                 resolve_rule_scope(r.scope, def, &default_scope, RuleClass::Require, &r.key)?;
@@ -548,7 +551,7 @@ impl PolicyDoc {
             });
         }
 
-        // ── injects ──────────────────────────────────────────────────────────────
+        // -- injects --------------------------------------------------------------
         for mut inj in wire.inject {
             // mandatory-on-non-root gate.
             if inj.mandatory && ctx != LoadContext::RootCharter {
@@ -562,7 +565,7 @@ impl PolicyDoc {
             });
         }
 
-        // ── validates ─────────────────────────────────────────────────────────────
+        // -- validates -------------------------------------------------------------
         for val in wire.validate {
             let scope = resolve_content_scope(val.scope, &default_scope)?;
             let pred = resolve_predicate(val.predicate)?;
@@ -579,11 +582,11 @@ impl PolicyDoc {
             warnings: Vec::new(),
         };
 
-        // ── extends resolution (trusted-only, catalog-resolved, cycle-detected) ────
+        // -- extends resolution (trusted-only, catalog-resolved, cycle-detected) ----
         if let Some(base_name) = extends {
             // Reachable only in a trusted context (the untrusted-draft case errored
             // above). A trusted `extends` REQUIRES a catalog; without one it is an
-            // unknown base (fail-closed — never a silent skip).
+            // unknown base (fail-closed - never a silent skip).
             let Some(catalog) = catalog else {
                 return Err(LoadError::ExtendsUnknownBase { base: base_name });
             };
@@ -629,7 +632,7 @@ impl PolicyDoc {
         // draft.
         check_self_contradiction(&this.rules)?;
 
-        // Dead-rule detection (warn, not error) — computed AFTER extends merge.
+        // Dead-rule detection (warn, not error) - computed AFTER extends merge.
         this.warnings = this
             .rules
             .iter()
@@ -643,7 +646,7 @@ impl PolicyDoc {
 }
 
 /// A trusted PROFILE CATALOG (II.5): resolves a base NAME to its host-authored source
-/// document. Every entry is host-injected — a `TrustedDoc` provenance (H-1). Used by
+/// document. Every entry is host-injected - a `TrustedDoc` provenance (H-1). Used by
 /// the loader to resolve a trusted `extends`. Returning the SOURCE (not a parsed doc)
 /// lets the loader re-resolve a base's own `extends` chain with shared cycle tracking.
 pub trait ProfileCatalog {
@@ -751,7 +754,7 @@ fn check_extends_grant_direction(
     Ok(())
 }
 
-/// Which section a rule came from — drives the A3 grant-unbounded gate.
+/// Which section a rule came from - drives the A3 grant-unbounded gate.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RuleClass {
     Grant,
@@ -796,7 +799,7 @@ fn resolve_rule_scope(
     match def.object_model {
         ObjectModel::Global => {
             // A Global knob's scope is a legality marker: only the syntactic `All`
-            // token is admissible; anything else (incl. omission → inherit narrow
+            // token is admissible; anything else (incl. omission -> inherit narrow
             // default) is a hard error. Global rules are EXEMPT from the meet.
             match authored {
                 Some(ws) => {
@@ -809,7 +812,7 @@ fn resolve_rule_scope(
                         })
                     }
                 }
-                // Omission would inherit the (possibly narrow) default — illegal for
+                // Omission would inherit the (possibly narrow) default - illegal for
                 // a Global knob, which must be spelled `All` loudly.
                 None => Err(LoadError::ScopeIllegalForGlobalKnob {
                     key: key.to_string(),
@@ -834,7 +837,7 @@ fn resolve_rule_scope(
             }
 
             // A3: a Grant-kind rule with neither its own scope nor a default_scope
-            // would acquire ⊤ by omission → hard error.
+            // would acquire the universe by omission -> hard error.
             if class == RuleClass::Grant && own.is_none() && default_scope.is_none() {
                 return Err(LoadError::GrantScopeUnbounded {
                     key: key.to_string(),
@@ -859,12 +862,14 @@ fn resolve_content_scope(
     Ok(effective_meet(own, default_scope))
 }
 
-/// `effective_scope = default_scope ⊓ rule.scope` with the omission rules:
-/// - no own scope, no default → `All` (⊤; the only path to ⊤, and only reached by
-///   non-Grant rules — the Grant A3 gate rejects this case before we get here).
-/// - own scope, no default → own scope.
-/// - no own scope, default → default.
-/// - both → the meet.
+/// The effective scope is the meet of `default_scope` and `rule.scope`, with the
+/// omission rules:
+/// - no own scope, no default -> `All` (the universe; the only path to it, and
+///   only reached by
+///   non-Grant rules - the Grant A3 gate rejects this case before we get here).
+/// - own scope, no default -> own scope.
+/// - no own scope, default -> default.
+/// - both -> the meet.
 fn effective_meet(own: Option<Scope>, default_scope: &Option<Scope>) -> Scope {
     match (own, default_scope) {
         (None, None) => Scope::All,
@@ -886,7 +891,7 @@ fn scope_has_table_granular_pattern(scope: &Scope) -> bool {
     }
 }
 
-/// A pattern is table-granular iff its table segment is not the wildcard `*` — i.e.
+/// A pattern is table-granular iff its table segment is not the wildcard `*` - i.e.
 /// it names a specific table (or table glob), not a whole schema. A schema-only
 /// authored pattern normalizes to `P.*`, whose table glob IS `*`, so it is
 /// schema-granular (legal on PerSchema).
@@ -908,7 +913,7 @@ fn resolve_scope(ws: WireScope) -> Result<Scope, LoadError> {
             (Some(true), None) => Ok(Scope::All),
             (None, Some(true)) => Ok(Scope::Nothing),
             // `all = false` / `nothing = false` / both-set are not a valid extreme
-            // spelling — reject fail-closed rather than guess an intended scope.
+            // spelling - reject fail-closed rather than guess an intended scope.
             _ => Err(LoadError::MalformedScope {
                 pattern: "ambiguous all/nothing".into(),
             }),
@@ -934,7 +939,7 @@ fn normalize_patterns(lits: &[String]) -> Result<Vec<Pattern>, LoadError> {
 }
 
 /// Resolve a wire inject into an [`InjectSpec`] (names are used verbatim by the
-/// future resolver; the leaf crate does not fold column names — that is the
+/// future resolver; the leaf crate does not fold column names - that is the
 /// resolver's II.2.7 responsibility over the IR, matching author declarations).
 fn resolve_inject(inj: WireInject) -> Result<InjectSpec, LoadError> {
     let columns = inj
@@ -1065,7 +1070,7 @@ fn name_globs(lits: &[String]) -> Result<Vec<NameGlob>, LoadError> {
         .map(|lit| {
             // Reuse the pattern normalizer, then require a schema-only (single-seg)
             // result whose schema glob is the folded name. A dotted name-glob is
-            // rejected — a column/table-name predicate matches ONE identifier.
+            // rejected - a column/table-name predicate matches ONE identifier.
             let pat = Pattern::parse_normalized(lit).ok_or_else(|| LoadError::MalformedScope {
                 pattern: lit.clone(),
             })?;
@@ -1083,10 +1088,11 @@ fn name_globs(lits: &[String]) -> Result<Vec<NameGlob>, LoadError> {
 
 /// Single-document self-contradiction gate (II.4.4): an inject of column X on some
 /// scope S, plus a validate `ForbiddenColumns[X]` (or a `TableNameForbidden` that
-/// matches the inject's own required table name — not modeled here, injects carry
-/// no table name) on a scope overlapping S, is internally inconsistent → error.
+/// matches the inject's own required table name - not modeled here, injects carry
+/// no table name) on a scope overlapping S, is internally inconsistent -> error.
 ///
-/// Overlap is decided by the scope lattice meet (`S ⊓ T != Nothing`). Column-name
+/// Overlap is decided by the scope lattice meet (the meet of `S` and `T` is not
+/// `Nothing`). Column-name
 /// comparison is by folded byte equality (II.2.7): a `ForbiddenColumns` name is stored
 /// as the author wrote it, so BOTH sides go through `fold_name` here, not just the
 /// inject side.

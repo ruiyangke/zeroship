@@ -1,4 +1,4 @@
-//! The knob model (II.2.1) — a policy knob declared once. *The declaration IS the
+//! The knob model (II.2.1) - a policy knob declared once. *The declaration IS the
 //! machine.* Every `Grant`/`Require` rule references a [`KnobDef`] by [`KnobKey`];
 //! the def supplies the knob's kind, polarity, default, enforcement, and object
 //! attribution. The registry (`crate::registry`) is the open set of these defs.
@@ -11,7 +11,7 @@
 use serde::{Deserialize, Serialize};
 
 /// A namespaced knob key: `core.raw_sql`, `pg.extension`, `op.lock_timeout_ms`,
-/// `acme.hypertable`. Exactly `namespace.name` — one dot, both parts non-empty,
+/// `acme.hypertable`. Exactly `namespace.name` - one dot, both parts non-empty,
 /// lowercase-ASCII + `_` + digits. Blunt on purpose (a security identifier).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -20,7 +20,7 @@ pub struct KnobKey(String);
 /// A knob-key parse error (kept structured for the loader's diagnostics).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum KnobKeyError {
-    /// Not exactly `namespace.name` (zero or ≥2 dots, or an empty part).
+    /// Not exactly `namespace.name` (zero or >=2 dots, or an empty part).
     Malformed,
     /// A byte outside `[a-z0-9_]` in a segment.
     IllegalChar,
@@ -69,9 +69,9 @@ pub enum KnobKind {
     /// A set of strings (e.g. an allow-list of roles). Values: any string set.
     StrSet,
     /// A monotone charter: a `u64` with a hard floor the value may not go below
-    /// (the engine's no-indefinite-lock invariant is `hard_floor: 1` — II.5).
+    /// (the engine's no-indefinite-lock invariant is `hard_floor: 1` - II.5).
     UintCharter { hard_floor: u64 },
-    /// A rank-ordered enum: the legal variants in tightest→loosest order (e.g.
+    /// A rank-ordered enum: the legal variants in tightest->loosest order (e.g.
     /// `["forbid", "warn", "allow"]`). A value must be one of the variants.
     OrderedEnum { variants: Vec<String> },
     /// An opaque content digest (hex string). Used for `Pinned` transform digests.
@@ -137,7 +137,7 @@ impl KnobValue {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Polarity {
-    /// Grants tighten DOWNWARD: effective must satisfy `draft ⊑ charter`.
+    /// Grants tighten DOWNWARD: the effective draft must be no looser than the charter.
     Grant,
     /// Obligations tighten UPWARD: `effective = join(charter, draft)`; charter
     /// requirements can never be removed.
@@ -158,16 +158,16 @@ pub enum Enforcement {
     /// The knob flows into the engine's own guard/executor and does what it says.
     Enforced,
     /// The knob is declared metadata ONLY: the engine neither enforces it NOR lets it
-    /// be sealed at a non-default value on an enforced path — setting it to a
+    /// be sealed at a non-default value on an enforced path - setting it to a
     /// non-default value in a document composed toward an enforced path is rejected
     /// (II.6). It advertises no authority the engine lacks.
     DeclaredOnly,
     /// The knob the ENGINE does not enforce, but a HOST (e.g. the migration service)
-    /// does — so it MAY be sealed at a non-default value, even though the engine's own
+    /// does - so it MAY be sealed at a non-default value, even though the engine's own
     /// guard/apply ignores it (II.6, M-2). Distinct from `DeclaredOnly`: the II.6
     /// "can't set non-default on an enforced path" restriction applies to
     /// `DeclaredOnly` ONLY, never to `HostEnforced`. `safety.require_approval` is the
-    /// canonical `HostEnforced` knob — the host reads it via the sealed decision
+    /// canonical `HostEnforced` knob - the host reads it via the sealed decision
     /// query; the engine's guard/apply never gates on it.
     HostEnforced,
 }
@@ -177,7 +177,7 @@ impl Enforcement {
     /// document composed toward an enforced path" applies to this class. TRUE only for
     /// [`Enforcement::DeclaredOnly`]: an `Enforced` knob does what it says (so a
     /// non-default value is honored), and a `HostEnforced` knob is enforced by a host
-    /// (so a non-default value MUST be sealable — M-2). This is the sole predicate the
+    /// (so a non-default value MUST be sealable - M-2). This is the sole predicate the
     /// composer/sealer should consult for the II.6 gate.
     #[must_use]
     pub fn forbids_nondefault_on_enforced_path(self) -> bool {
@@ -208,14 +208,14 @@ pub struct KnobDef {
     pub kind: KnobKind,
     /// How values compose across layers.
     pub polarity: Polarity,
-    /// The deny/none value — ALWAYS the tightest, and itself valid for `kind`.
+    /// The deny/none value - ALWAYS the tightest, and itself valid for `kind`.
     pub default: KnobValue,
     /// Whether the knob reaches enforcement or is declared metadata.
     pub enforcement: Enforcement,
     /// How values attribute to database objects; governs legal scopes.
     pub object_model: ObjectModel,
     /// Whether granting this knob presupposes a matching DB-role privilege (drives
-    /// the least-privilege backing check, II.10.5). Enforcement-affecting → part of
+    /// the least-privilege backing check, II.10.5). Enforcement-affecting -> part of
     /// the sealed registry digest.
     pub requires_db_privilege: bool,
     /// Whether a SILENT draft INHERITS this knob's grant from the charter at
@@ -223,8 +223,8 @@ pub struct KnobDef {
     /// (`false`). A `false` marks a POWER GRANT that must never be conferred by
     /// omission: a silent creator draft gets the tightest (default) value, not the
     /// charter's. It changes ONLY the inheritance of a draft that is *silent* on the
-    /// knob — a draft that EXPLICITLY grants it is still bounded by the ordinary
-    /// `draft ⊑ charter` escalation check. Enforcement-affecting → part of the sealed
+    /// knob - a draft that EXPLICITLY grants it is still bounded by the ordinary
+    /// draft-no-looser-than-charter escalation check. Enforcement-affecting -> part of the sealed
     /// registry digest.
     pub inherit: bool,
     /// Human-facing documentation for the knob.
@@ -232,7 +232,7 @@ pub struct KnobDef {
 }
 
 impl KnobDef {
-    /// The CANONICAL byte encoding of this def — the stable input the registry
+    /// The CANONICAL byte encoding of this def - the stable input the registry
     /// digest (II.2.1 / II.7) hashes. It covers EVERY enforcement-affecting field
     /// (key, kind, polarity, default, enforcement, object_model,
     /// requires_db_privilege, inherit) but NOT `docs` (prose, non-enforcing). The encoding
@@ -398,7 +398,7 @@ mod tests {
         assert!(!Enforcement::Enforced.forbids_nondefault_on_enforced_path());
         assert!(!Enforcement::HostEnforced.forbids_nondefault_on_enforced_path());
 
-        // HostEnforced has a distinct canonical encoding → a distinct registry digest.
+        // HostEnforced has a distinct canonical encoding -> a distinct registry digest.
         let base = KnobDef {
             key: KnobKey::parse("safety.require_approval").unwrap(),
             kind: KnobKind::OrderedEnum {

@@ -4,10 +4,10 @@
 //! or a **schema-qualified table** (two segments: `app_main.events`,
 //! `tenant_*.audit`). Before any lattice operation a bare schema pattern `P` is
 //! normalized to `P.*` (the schema plus every table in it) so every pattern is a
-//! `⟨schemaGlob⟩.⟨tableGlob⟩` pair — the cross-arity rule (II.3.1).
+//! `<schemaGlob>.<tableGlob>` pair - the cross-arity rule (II.3.1).
 //!
 //! An [`ObjectName`] is a concrete normalized name (schema-only or
-//! schema.table) — the ground-truth universe element the oracle enumerates and
+//! schema.table) - the ground-truth universe element the oracle enumerates and
 //! the direct matcher tests membership against.
 
 use std::collections::BTreeSet;
@@ -15,7 +15,7 @@ use std::collections::BTreeSet;
 use super::glob::{intersect_seg, SegGlob};
 
 /// A concrete, already-normalized object name: a schema, or a schema-qualified
-/// table. This is a UNIVERSE element for the oracle — never a pattern.
+/// table. This is a UNIVERSE element for the oracle - never a pattern.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct ObjectName {
     pub schema: Vec<u8>,
@@ -65,12 +65,12 @@ impl Pattern {
         Self { schema, table }
     }
 
-    /// Parse `"app_*"` (schema→`app_*.*`) or `"app_*.events"` (two segments).
+    /// Parse `"app_*"` (schema->`app_*.*`) or `"app_*.events"` (two segments).
     /// Returns `None` if the text has more than two dot-segments or a bad glob.
     ///
     /// NOTE: this is the blunt parser over the alphabet the scope oracle uses;
     /// it splits on EVERY `.` and applies no identifier folding. The oracle proves
-    /// the lattice over globs built by this parser, so it stays byte-exact — do not
+    /// the lattice over globs built by this parser, so it stays byte-exact - do not
     /// route it through [`normalize_object_name`]. The document loader uses
     /// [`Pattern::parse_normalized`] for the II.2.7 quote/fold semantics.
     #[must_use]
@@ -84,12 +84,12 @@ impl Pattern {
     }
 
     /// Parse + NORMALIZE a scope pattern per PostgreSQL identifier semantics
-    /// (II.2.7) — the constructor the document loader (the PDP) MUST use so that a
+    /// (II.2.7) - the constructor the document loader (the PDP) MUST use so that a
     /// pattern literal and a concrete op name fold to the same canonical bytes.
     ///
     /// Segmenting: the text is split into segments on **unquoted dots only**. A
-    /// double-quoted run `"…"` is one *quoted* segment whose inner dots (and glob
-    /// `*`) are literal — `"a.b"` is a single segment (a table literally named
+    /// double-quoted run `"..."` is one *quoted* segment whose inner dots (and glob
+    /// `*`) are literal - `"a.b"` is a single segment (a table literally named
     /// `a.b`), NOT `a`-schema/`b`-table. `""` inside a quoted run is an escaped
     /// quote (PG doubling). At most two segments (schema[.table]).
     ///
@@ -113,7 +113,7 @@ impl Pattern {
         }
     }
 
-    /// The `*.*` pattern — matches every object (schema and table alike). This is
+    /// The `*.*` pattern - matches every object (schema and table alike). This is
     /// the pattern spelling of `Objects(All)`; used by `Scope::All` legality/
     /// membership reasoning and as the include of a universe `Of{["*"]}`.
     #[must_use]
@@ -127,10 +127,10 @@ impl Pattern {
     /// Ground-truth matcher: does this pattern match the concrete name `n`?
     ///
     /// A schema-only object `schema` matches a pattern iff the pattern's table
-    /// glob accepts the empty table AND the schema glob matches — i.e. the
+    /// glob accepts the empty table AND the schema glob matches - i.e. the
     /// pattern's table segment covers "no table". We model a schema object as the
     /// table segment being ABSENT; a pattern matches it iff `table == *` (the
-    /// normalized `P.*` form) — `P.*` covers "the schema itself" as well as its
+    /// normalized `P.*` form) - `P.*` covers "the schema itself" as well as its
     /// tables. A pattern with a NON-`*` table glob matches only tables.
     #[must_use]
     pub fn matches(&self, n: &ObjectName) -> bool {
@@ -149,15 +149,15 @@ impl Pattern {
 }
 
 /// One segment of a normalized scope pattern: its post-fold bytes and whether it
-/// was authored QUOTED (a pure literal — `*` is not a glob) or UNQUOTED (glob).
+/// was authored QUOTED (a pure literal - `*` is not a glob) or UNQUOTED (glob).
 struct NormalizedSegment {
     bytes: Vec<u8>,
     quoted: bool,
 }
 
-/// Split `s` into 1–2 segments on **unquoted dots only** and fold each per II.2.7.
+/// Split `s` into 1-2 segments on **unquoted dots only** and fold each per II.2.7.
 ///
-/// A double-quoted run `"…"` is a single quoted segment; its inner bytes are taken
+/// A double-quoted run `"..."` is a single quoted segment; its inner bytes are taken
 /// verbatim with `""` collapsing to one `"` (PG quote-doubling). Dots and `*`
 /// inside quotes are literal. Returns `None` on an unterminated quote, an empty
 /// segment, quoted-and-unquoted mixing within a single segment, or more than two
@@ -221,13 +221,13 @@ fn split_normalize_segments(s: &str) -> Option<Vec<NormalizedSegment>> {
 }
 
 /// Finalize one accumulated segment: reject the empty segment and the mixed
-/// quoted+unquoted case (`a"b"` — never a real identifier and never safe to fold).
+/// quoted+unquoted case (`a"b"` - never a real identifier and never safe to fold).
 fn finish_segment(bytes: &[u8], quoted: bool, unquoted: bool) -> Option<NormalizedSegment> {
     if bytes.is_empty() {
         return None; // empty segment (e.g. `a.`, `.b`, ``)
     }
     if quoted && unquoted {
-        return None; // `a"b"` mixing — reject fail-closed
+        return None; // `a"b"` mixing - reject fail-closed
     }
     Some(NormalizedSegment {
         bytes: bytes.to_vec(),
@@ -239,7 +239,7 @@ fn finish_segment(bytes: &[u8], quoted: bool, unquoted: bool) -> Option<Normaliz
 /// literal (its `*` is a literal byte); an unquoted segment's single `*` is a glob.
 fn seg_from_normalized(seg: &NormalizedSegment) -> Option<SegGlob> {
     if seg.quoted {
-        // Verbatim literal — even a `*` is the byte `*`, never a glob.
+        // Verbatim literal - even a `*` is the byte `*`, never a glob.
         Some(SegGlob::literal(seg.bytes.clone()))
     } else {
         // Reuse the single-`*` glob parser over the already-folded bytes.
@@ -249,7 +249,7 @@ fn seg_from_normalized(seg: &NormalizedSegment) -> Option<SegGlob> {
 }
 
 /// Normalize a CONCRETE object name (schema or `schema.table`) per II.2.7 for
-/// enforcement-time / predicate matching — the same fold [`Pattern::parse_normalized`]
+/// enforcement-time / predicate matching - the same fold [`Pattern::parse_normalized`]
 /// applies to pattern literals. A concrete name carries no globs, so an unquoted
 /// `*` would be a nonsensical identifier byte; we fold it verbatim (lowercased)
 /// rather than treating it as a glob (a name never globs). Returns `None` on the
@@ -257,8 +257,8 @@ fn seg_from_normalized(seg: &NormalizedSegment) -> Option<SegGlob> {
 ///
 /// # It is ONE fold, and it is the CHARTER's, not a target's
 ///
-/// The fold this applies — an unquoted segment lowercases, a quoted one is verbatim
-/// — is spelled the way PostgreSQL spells identifier resolution, and it was called
+/// The fold this applies - an unquoted segment lowercases, a quoted one is verbatim
+/// - is spelled the way PostgreSQL spells identifier resolution, and it was called
 /// `normalize_pg_identifier` for that reason. The name was doing real harm: this
 /// function is not a target's, it is the CHARTER's, and both sides of every scope
 /// comparison go through it precisely so a charter written for one project matches
@@ -280,7 +280,8 @@ pub fn normalize_object_name(s: &str) -> Option<ObjectName> {
 }
 
 /// Exact two-segment pattern intersection: the Cartesian product of the
-/// per-segment `∩seg` sets, flattened (II.3.1). `∅` if either segment set is `∅`.
+/// per-segment intersection sets, flattened (II.3.1). Empty if either segment
+/// set is empty.
 #[must_use]
 pub fn intersect_pattern(a: &Pattern, b: &Pattern) -> BTreeSet<Pattern> {
     let schemas = intersect_seg(&a.schema, &b.schema);
@@ -303,8 +304,8 @@ pub fn intersect_pattern(a: &Pattern, b: &Pattern) -> BTreeSet<Pattern> {
     out
 }
 
-/// Does pattern `a` cover pattern `b`? (`Objects(b) ⊆ Objects(a)`) — per-segment
-/// cover, sound and exact for single-`*` globs.
+/// Does pattern `a` cover pattern `b`? That is, is `Objects(b)` contained in
+/// `Objects(a)`? Per-segment cover, sound and exact for single-`*` globs.
 #[must_use]
 pub fn pattern_covers(a: &Pattern, b: &Pattern) -> bool {
     a.schema.covers(&b.schema) && a.table.covers(&b.table)
@@ -339,7 +340,7 @@ mod tests {
 
     #[test]
     fn normalize_unquoted_folds_lowercase() {
-        // `App_*` → glob `app_*` (schema), matches the folded catalog name `app_x`.
+        // `App_*` -> glob `app_*` (schema), matches the folded catalog name `app_x`.
         let p = Pattern::parse_normalized("App_*").unwrap();
         assert_eq!(p, Pattern::parse("app_*").unwrap());
         assert!(p.matches(&ObjectName::schema(b"app_x".to_vec())));
@@ -392,7 +393,7 @@ mod tests {
 
     #[test]
     fn cross_arity_intersection() {
-        // app_* (→ app_*.*) ∩ *.events  →  app_*.events
+        // app_* (-> app_*.*) intersected with *.events  ->  app_*.events
         let a = Pattern::parse("app_*").unwrap();
         let b = Pattern::parse("*.events").unwrap();
         let r = intersect_pattern(&a, &b);

@@ -1,16 +1,16 @@
-//! The policy SEAL (§II.7) — an HMAC that binds an [`EffectivePolicy`] to the exact
+//! The policy SEAL (section II.7) - an HMAC that binds an [`EffectivePolicy`] to the exact
 //! registry + matcher semantics + charter version that minted it. A seal is a
 //! tamper-evidence + identity boundary: a verifier hard-fails a seal replayed against
 //! a different registry (a `key` string means nothing without the whole def it
-//! resolves to — II.2.1), a different dialect, a different matcher algorithm, or a
+//! resolves to - II.2.1), a different dialect, a different matcher algorithm, or a
 //! reordered/mutated rule set.
 //!
 //! # The MAC'd payload
 //!
 //! `HMAC-SHA256( mac_key , canonical(resolved rule set)
-//!                       ‖ registry.digest()
-//!                       ‖ (dialect, matcher_version)
-//!                       ‖ charter_version )`
+//!                       || registry.digest()
+//!                       || (dialect, matcher_version)
+//!                       || charter_version )`
 //!
 //! plus the `nonce` (carried in the clear alongside the tag, and mixed into the MAC
 //! so a nonce swap invalidates it).
@@ -72,11 +72,11 @@ pub struct SealedPolicy {
     registry_digest: [u8; 32],
 }
 
-/// Why a [`SealedPolicy::verify`] failed. Any variant is a HARD failure — the seal is
+/// Why a [`SealedPolicy::verify`] failed. Any variant is a HARD failure - the seal is
 /// invalid against the presented policy + binding.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum SealError {
-    /// The recomputed MAC tag does not match — the rule set, scope, nonce, or a bound
+    /// The recomputed MAC tag does not match - the rule set, scope, nonce, or a bound
     /// field was tampered, or the mac_key differs.
     TagMismatch,
     /// The presented registry digest differs from the sealed one (a seal minted under
@@ -194,9 +194,10 @@ impl SealedPolicy {
     }
 }
 
-/// Seal a composed `policy` (§II.7): compute the HMAC over the canonical resolved
-/// rule set (in the sealed inject total order) ‖ registry digest ‖
-/// `(dialect, matcher_version)` ‖ `charter_version`, mixing in `nonce`. The
+/// Seal a composed `policy` (section II.7): compute the HMAC over the canonical
+/// resolved rule set (in the sealed inject total order) concatenated with the
+/// registry digest, the `(dialect, matcher_version)` pair and `charter_version`,
+/// mixing in `nonce`. The
 /// `registry_digest` is taken from the policy's own registry so the seal is
 /// self-consistent; [`SealedPolicy::verify`] re-derives it the same way from the
 /// policy it is handed, and separately checks the digest a verifier pins out of band.
@@ -293,7 +294,7 @@ fn seal_mac(
     // (4) charter_version.
     mac.update(&charter_version.to_be_bytes());
 
-    // nonce (freshness) — mixed so a nonce swap invalidates the tag.
+    // nonce (freshness) - mixed so a nonce swap invalidates the tag.
     mac.update(nonce);
 
     mac
@@ -302,10 +303,10 @@ fn seal_mac(
 /// The CANONICAL byte encoding of the resolved rule set WITH ITS LAYER BOUNDARIES
 /// (H-4): each layer, in stack order (TOP/innermost first), is emitted with its
 /// [`crate::compose::LayerTag`] byte, then its grants (key-sorted, each rule's scope+value), requires,
-/// injects (sealed doc order), and validates — each rule length-prefixed and
+/// injects (sealed doc order), and validates - each rule length-prefixed and
 /// field-tagged so no two distinct rule sets collide and no boundary is ambiguous (the
 /// 1b-i discipline). Because the layer boundaries are ENCODED, two stacks with the same
-/// flattened rule set but different layering produce different bytes — a re-flatten
+/// flattened rule set but different layering produce different bytes - a re-flatten
 /// (or reorder) tamper fails the MAC (II.7).
 fn canonical_rule_set(policy: &EffectivePolicy) -> Vec<u8> {
     let mut b = Vec::new();
@@ -316,11 +317,11 @@ fn canonical_rule_set(policy: &EffectivePolicy) -> Vec<u8> {
     b.extend_from_slice(&(layers.len() as u32).to_be_bytes());
 
     for layer in &layers {
-        // ── layer tag (binds the layer boundary) ──
+        // -- layer tag (binds the layer boundary) --
         b.push(0x0e);
         b.push(layer.tag.seal_byte());
 
-        // ── grants ── (key-sorted then rule-ordered)
+        // -- grants -- (key-sorted then rule-ordered)
         b.push(0x10);
         b.extend_from_slice(&(layer.grants.len() as u32).to_be_bytes());
         for (key, scope, value) in &layer.grants {
@@ -329,7 +330,7 @@ fn canonical_rule_set(policy: &EffectivePolicy) -> Vec<u8> {
             write_value(&mut b, value);
         }
 
-        // ── requires ── (composition order)
+        // -- requires -- (composition order)
         b.push(0x11);
         let reqs: Vec<&Rule> = layer
             .requires
@@ -345,7 +346,7 @@ fn canonical_rule_set(policy: &EffectivePolicy) -> Vec<u8> {
             }
         }
 
-        // ── injects ── (sealed doc order within the layer)
+        // -- injects -- (sealed doc order within the layer)
         b.push(0x12);
         let injs: Vec<&Rule> = layer
             .injects
@@ -360,7 +361,7 @@ fn canonical_rule_set(policy: &EffectivePolicy) -> Vec<u8> {
             }
         }
 
-        // ── validates ── (composition order)
+        // -- validates -- (composition order)
         b.push(0x13);
         let vals: Vec<&Rule> = layer
             .validates
@@ -379,7 +380,7 @@ fn canonical_rule_set(policy: &EffectivePolicy) -> Vec<u8> {
     b
 }
 
-// ── canonical field encoders (self-delimiting, 1b-i discipline) ───────────────────
+// -- canonical field encoders (self-delimiting, 1b-i discipline) -------------------
 
 fn write_len_prefixed(mac: &mut HmacSha256, bytes: &[u8]) {
     mac.update(&(bytes.len() as u32).to_be_bytes());
@@ -403,7 +404,7 @@ fn write_str_vec(b: &mut Vec<u8>, v: &[String]) {
     }
 }
 
-/// Canonical value encoding (mirrors `knob::write_value` — tagged + self-delimiting).
+/// Canonical value encoding (mirrors `knob::write_value` - tagged + self-delimiting).
 fn write_value(b: &mut Vec<u8>, v: &KnobValue) {
     match v {
         KnobValue::Bool(x) => {
@@ -429,7 +430,8 @@ fn write_value(b: &mut Vec<u8>, v: &KnobValue) {
     }
 }
 
-/// Canonical scope encoding: the ⊥/⊤ tokens, or a proper `Of` with its normalized
+/// Canonical scope encoding: the empty-scope and universe tokens, or a proper `Of`
+/// with its normalized
 /// include/exclude pattern lists (each a `schema.table` glob pair). The include and
 /// exclude vectors are sorted so an authored reordering (they are sets) does not
 /// perturb the seal.
@@ -482,7 +484,7 @@ fn write_seg(b: &mut Vec<u8>, g: &SegGlob) {
 
 /// Canonical inject-spec encoding: columns (name/ty/nullable/default/collation) in
 /// doc order, indexes (name/columns), the pinned PK, the author-PK policy, and the
-/// mandatory flag. Column/index ORDER is preserved (it is load-bearing — the sealed
+/// mandatory flag. Column/index ORDER is preserved (it is load-bearing - the sealed
 /// layout order, II.4.4), unlike the set-valued scope/StrSet fields.
 ///
 /// EVERY field of an injected column belongs here, and the collation is the reason

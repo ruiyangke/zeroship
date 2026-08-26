@@ -1,11 +1,11 @@
-//! Seal round-trip + tamper-detection suite (§II.7). Proves the seal binds the
+//! Seal round-trip + tamper-detection suite (section II.7). Proves the seal binds the
 //! resolved rule set, the registry digest, the `(dialect, matcher_version)` matcher
-//! semantics, and the charter version — and HARD-FAILS on any mismatch.
+//! semantics, and the charter version - and HARD-FAILS on any mismatch.
 //!
 //! The seal MACs a FRESHLY-composed [`EffectivePolicy`]; "tampering" means presenting
 //! a DIFFERENT composed policy (a mutated rule/scope) to `verify`, which must fail
 //! the tag. Because `EffectivePolicy` is unforgeable, we tamper by composing a
-//! different document — exactly what an attacker who swapped the sealed policy would
+//! different document - exactly what an attacker who swapped the sealed policy would
 //! present.
 
 use zero_migrate_policy::{
@@ -57,7 +57,7 @@ fn registry() -> PolicyRegistry {
         .unwrap()
 }
 
-/// A registry that differs only in a knob's `requires_db_privilege` — same keys, so
+/// A registry that differs only in a knob's `requires_db_privilege` - same keys, so
 /// a document loads identically, but the digest differs (II.2.1).
 fn registry_flipped_privilege() -> PolicyRegistry {
     PolicyRegistry::empty()
@@ -122,9 +122,9 @@ fn reference_policy(reg: &PolicyRegistry) -> zero_migrate_policy::EffectivePolic
     admit(&root, &draft, reg).unwrap()
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 // round-trip
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 
 #[test]
 fn good_seal_round_trips() {
@@ -166,9 +166,9 @@ fn wrong_mac_key_fails() {
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 // tamper: a mutated rule / scope fails the tag
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 
 #[test]
 fn tampered_grant_value_fails() {
@@ -177,7 +177,7 @@ fn tampered_grant_value_fails() {
     let reg = registry();
     let root = RootCharter::parse_toml(ROOT_TOML, &reg).unwrap();
 
-    // Draft grants timeout 600 @ app_* (within the charter's 600 @ app_*) → seal it.
+    // Draft grants timeout 600 @ app_* (within the charter's 600 @ app_*) -> seal it.
     let draft_600 = PolicyDoc::parse_toml(
         r#"policy_version = 1
 [[grant]]
@@ -199,7 +199,7 @@ scope = { include = ["app_*"] }
         CHARTER_VER,
     );
 
-    // A tightened tamper: draft 60 @ app_* — a DIFFERENT effective grant map.
+    // A tightened tamper: draft 60 @ app_* - a DIFFERENT effective grant map.
     let draft_60 = PolicyDoc::parse_toml(
         r#"policy_version = 1
 [[grant]]
@@ -240,7 +240,7 @@ fn tampered_scope_fails() {
         CHARTER_VER,
     );
 
-    // Narrow ONLY the inject scope (app_* → app_main). The [[inject]] block is the
+    // Narrow ONLY the inject scope (app_* -> app_main). The [[inject]] block is the
     // only one whose `include` we rewrite here.
     let tampered_root = ROOT_TOML.replace(
         "[[inject]]\nscope = { include = [\"app_*\"] }",
@@ -284,7 +284,7 @@ fn tampered_inject_column_fails() {
         CHARTER_VER,
     );
 
-    // Inject a differently-typed column — a different rule set.
+    // Inject a differently-typed column - a different rule set.
     let tampered_root = ROOT_TOML.replace("timestamptz", "text");
     let root = RootCharter::parse_toml(&tampered_root, &reg).unwrap();
     let draft = PolicyDoc::parse_toml(
@@ -308,9 +308,9 @@ fn tampered_inject_column_fails() {
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 // binding: registry digest / dialect / matcher / charter version
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
 
 #[test]
 fn wrong_registry_digest_fails() {
@@ -325,7 +325,7 @@ fn wrong_registry_digest_fails() {
     );
 
     // Verify presenting a DIFFERENT registry digest (a flipped requires_db_privilege
-    // — same keys, different enforcement semantics) → hard fail (II.2.1).
+    // - same keys, different enforcement semantics) -> hard fail (II.2.1).
     let flipped = registry_flipped_privilege();
     let fresh = reference_policy(&reg);
     assert_eq!(
@@ -465,13 +465,13 @@ fn nonce_swap_invalidates_tag() {
     let policy = reference_policy(&reg);
     let s1 = seal(&policy, MAC_KEY, [1u8; 16], DIALECT, MATCHER, CHARTER_VER);
     let s2 = seal(&policy, MAC_KEY, [2u8; 16], DIALECT, MATCHER, CHARTER_VER);
-    // Same policy + binding, different nonce → different tags (nonce is MAC'd).
+    // Same policy + binding, different nonce -> different tags (nonce is MAC'd).
     assert_ne!(s1, s2);
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// inject total order is sealed (reorder → tag mismatch)
-// ══════════════════════════════════════════════════════════════════════════════
+// ==============================================================================
+// inject total order is sealed (reorder -> tag mismatch)
+// ==============================================================================
 
 #[test]
 fn inject_reorder_changes_tag() {
@@ -485,7 +485,7 @@ columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
 scope = { include = ["app_*"] }
 columns = [ { name = "updated_at", type = "timestamptz", nullable = false } ]
 "#;
-    // The reversed order — a different sealed total order.
+    // The reversed order - a different sealed total order.
     let b_toml = r#"policy_version = 1
 [[inject]]
 scope = { include = ["app_*"] }
@@ -525,16 +525,16 @@ columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
 /// **The seal binds LAYER BOUNDARIES (H-4 / II.7).** Two policies with the SAME
 /// flattened grant set but DIFFERENT layer stacks encode differently, so a re-flatten
 /// tamper fails the MAC. Policy A is a 2-layer charter `overlay(base, env)` (env grants
-/// raw_sql@staging, base grants raw_sql@app_*) admitted with an empty draft → a stack
+/// raw_sql@staging, base grants raw_sql@app_*) admitted with an empty draft -> a stack
 /// `[draft(empty)] over [env] over [base]`. Policy B is a SINGLE-layer root charter
-/// carrying the SAME two grant rules flattened into one layer → `[draft(empty)] over
+/// carrying the SAME two grant rules flattened into one layer -> `[draft(empty)] over
 /// [base(both rules)]`. Their flattened grant sets are identical; only the layering
 /// differs. The seal from A must NOT verify against B.
 #[test]
 fn layer_reflatten_changes_tag() {
     let reg = registry();
 
-    // Policy A: overlay(base, env) — two trusted layers.
+    // Policy A: overlay(base, env) - two trusted layers.
     let base = TrustedDoc::register_catalog_entry(
         r#"policy_version = 1
 [[grant]]
@@ -564,7 +564,7 @@ scope = { include = ["staging"] }
     .unwrap();
     let pa = admit(&charter_a, &empty, &reg).unwrap();
 
-    // Policy B: a SINGLE root layer carrying BOTH grant rules — same flattened set.
+    // Policy B: a SINGLE root layer carrying BOTH grant rules - same flattened set.
     let flat_root = RootCharter::parse_toml(
         r#"policy_version = 1
 [[grant]]

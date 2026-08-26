@@ -24,12 +24,12 @@ pub struct Rule {
 /// One of the four scoped rule kinds (II.2.2).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum RuleKind {
-    /// Capability permission — references a `Grant`-polarity knob. Composes DOWN.
+    /// Capability permission - references a `Grant`-polarity knob. Composes DOWN.
     Grant { key: KnobKey, value: KnobValue },
-    /// Obligation — references a `Require`-polarity knob. Composes UP (un-droppable).
+    /// Obligation - references a `Require`-polarity knob. Composes UP (un-droppable).
     Require { key: KnobKey, value: KnobValue },
     /// Content rule: columns/indexes/PK to add to matching `createTable` ops.
-    /// Composes UP (obligation polarity) — a charter injection is un-droppable.
+    /// Composes UP (obligation polarity) - a charter injection is un-droppable.
     Inject { spec: InjectSpec },
     /// Content rule: a declared structural predicate. Nothing evaluates one against a
     /// table - see [`ValidatePredicate`] for what the class does and does not do.
@@ -39,7 +39,7 @@ pub enum RuleKind {
 
 impl RuleKind {
     /// The knob key a `Grant`/`Require` rule references, if any (`Inject`/`Validate`
-    /// carry no key — they are content, not knob-valued).
+    /// carry no key - they are content, not knob-valued).
     #[must_use]
     pub fn key(&self) -> Option<&KnobKey> {
         match self {
@@ -62,7 +62,8 @@ pub struct InjectSpec {
     pub primary_key: Option<Vec<String>>,
     /// How an author-declared PK interacts with a pinned PK (II.4.3).
     pub author_primary_key: AuthorPkPolicy,
-    /// Root-charter-only: when true the composer enforces creatable ⊑ inject
+    /// Root-charter-only: when true the composer enforces that the creatable scope
+    /// is contained in the inject
     /// (II.2.6a). `mandatory = true` on a NON-root layer is a hard load error
     /// (`MandatoryInjectOnNonRootLayer`).
     pub mandatory: bool,
@@ -133,8 +134,8 @@ pub enum AuthorPkPolicy {
 /// NONE of these is checked against a table. [`ForbiddenColumns`](Self::ForbiddenColumns)
 /// is the only variant a document may still declare, and what it constrains is the
 /// POLICY rather than a schema: it rejects an `[[inject]]` that contributes a name it
-/// forbids. The other five are declared, composed and sealed and then read by nothing,
-/// so the loader refuses them (`LoadError::ValidatePredicateNotEnforced`) instead of
+/// forbids. Every other variant is declared, composed and sealed and then read by
+/// nothing, so the loader refuses them (`LoadError::ValidatePredicateNotEnforced`) instead of
 /// sealing a control the engine does not apply. They stay declared here because the
 /// seal encoding and the composer's union-up are defined over the whole set, and
 /// because enforcing a predicate against a live table is a separate piece of work with
@@ -183,7 +184,7 @@ pub enum ValidatePredicate {
     /// The table must carry an index over exactly these columns.
     RequireIndex { columns: Vec<String> },
     /// The created/renamed table's NORMALIZED name must NOT match any pattern
-    /// (II.2.6c — journal-lookalike defense). Patterns are full schema-qualified
+    /// (II.2.6c - journal-lookalike defense). Patterns are full schema-qualified
     /// scope [`Pattern`]s (`*.journal`, `public.schema_migrations`), not bare
     /// column-name globs.
     TableNameForbidden { patterns: Vec<Pattern> },
