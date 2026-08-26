@@ -21,7 +21,7 @@
 //! NAMED PRESETS ([`VendorCapabilities::confined`] / [`operator`]),
 //! but the gate keys on `caps.allow_role`, never on `trust == Confined`. A future
 //! "local dev" or "CI" posture can compose its own flag set without touching the
-//! gate — and would compose it where it is used, which is why the speculative `local`
+//! gate - and would compose it where it is used, which is why the speculative `local`
 //! preset that used to sit beside these two is gone.
 //! The profile mapping is [`VendorCapabilities::for_trust`].
 //!
@@ -33,14 +33,14 @@ use crate::policy::{SchemaScope, TrustProfile};
 // `ExecutorConfig::platform` seam that took one. Both are deleted.
 //
 // The token was a zero-sized struct with a private field, which blocks only the
-// struct-literal form — `new`, `Default` and `for_test` were all public, all the same
+// struct-literal form - `new`, `Default` and `for_test` were all public, all the same
 // mint, and reachable from any dependent crate. So holding one proved nothing about
 // the holder, and the one function that took it bound it as `_cap` and never read it,
 // returning exactly what the public `ExecutorConfig::new` returns.
 //
 // Its own doc said so ("It authorises nothing... Do NOT hang a real check on holding
 // one of these") while two other docs described it as a seam that "neither the control
-// plane nor any in-crate module" could pass — a shape that reads as a security boundary
+// plane nor any in-crate module" could pass - a shape that reads as a security boundary
 // to anyone who does not read all three. Privilege comes from the composed
 // `EffectivePolicy` argument and from nowhere else; that is the unforgeable type.
 
@@ -70,7 +70,7 @@ pub enum VendorCapability {
     /// Unlike the rest of this enum, a trigger is NOT confined to the one backend
     /// that renders the privileged catalog-object family: every registered backend
     /// renders triggers, in its own action shape. The capability is therefore about
-    /// AUTHORITY, not about reach — the op's support tier stays
+    /// AUTHORITY, not about reach - the op's support tier stays
     /// `SupportTier::Core` and an artifact carrying a trigger still measures a
     /// portable reach. What the grant governs is that a trigger arranges for work to
     /// happen on every affected row without any later statement naming it.
@@ -124,10 +124,10 @@ impl VendorCapability {
     }
 }
 
-/// The active VENDOR capability set — a composition of boolean flags + a schema
+/// The active VENDOR capability set - a composition of boolean flags + a schema
 /// allowlist. The gate ([`grants`](Self::grants)) keys on the
 /// flags; the named presets ([`confined`](Self::confined) /
-/// [`operator`](Self::operator)) are the compositions the trust profiles map onto —
+/// [`operator`](Self::operator)) are the compositions the trust profiles map onto -
 /// both of them, which is the whole list, because a preset no profile maps onto has
 /// nothing to keep it honest.
 #[allow(clippy::struct_excessive_bools)]
@@ -162,7 +162,7 @@ pub struct VendorCapabilities {
     /// ALSO enforced by [`SchemaScope`] at the existing schema-scope gate; this flag is the
     /// capability-model mirror so the policy is self-describing.
     pub allow_cross_schema: bool,
-    /// The schema allowlist this capability set permits (empty ⇒ no widening; the
+    /// The schema allowlist this capability set permits (empty => no widening; the
     /// project schema is always implicitly permitted by the schema-scope gate).
     pub schemas: Vec<String>,
 }
@@ -217,7 +217,7 @@ impl VendorCapabilities {
 
     // A third `local()` preset stood here, an in-between dev/CI posture. Its own doc
     // recorded that it was "not wired to a `TrustProfile` (there is no `Local` profile)"
-    // and was "available for a caller composing a bespoke gate" — and no such caller was
+    // and was "available for a caller composing a bespoke gate" - and no such caller was
     // ever written: its only reference in the tree was the unit test that exercised it.
     //
     // Deleted because the preset list is not free to keep. Every capability field added
@@ -225,8 +225,8 @@ impl VendorCapabilities {
     // a third answer that must be kept plausible forever with nothing to check it
     // against. The two that a `TrustProfile` maps onto remain.
 
-    /// Map a [`TrustProfile`] onto its named preset: Confined ⇒
-    /// [`confined`](Self::confined); Platform ⇒ [`operator`](Self::operator).
+    /// Map a [`TrustProfile`] onto its named preset: Confined =>
+    /// [`confined`](Self::confined); Platform => [`operator`](Self::operator).
     /// The `TrustProfile` is the EXISTING operator-gated machinery; this is the
     /// single bridge from it to the capability composition.
     #[must_use]
@@ -240,12 +240,12 @@ impl VendorCapabilities {
     /// Derive the capability set from the validate-layer
     /// [`SchemaScope`] the loader threads. Guarded paths
     /// derive this scope from the caller-supplied effective policy:
-    /// - `None` ⇒ omitted/default public capability ⇒ [`confined`](Self::confined).
-    /// - `Some(Single(_))` ⇒ **Confined** (the creator/AI posture) ⇒ [`confined`](Self::confined).
-    /// - `Some(Allowlist(list))` ⇒ **Platform** ⇒ [`operator`](Self::operator) with
+    /// - `None` => omitted/default public capability => [`confined`](Self::confined).
+    /// - `Some(Single(_))` => **Confined** (the creator/AI posture) => [`confined`](Self::confined).
+    /// - `Some(Allowlist(list))` => **Platform** => [`operator`](Self::operator) with
     ///   `schemas = list`.
-    /// - `Some(Unconfined)` ⇒ an operator charter granting `schema.cross_schema` over the
-    ///   whole universe ⇒ [`operator`](Self::operator) with no validate-time
+    /// - `Some(Unconfined)` => an operator charter granting `schema.cross_schema` over the
+    ///   whole universe => [`operator`](Self::operator) with no validate-time
     ///   cross-schema confinement.
     ///
     /// `None` is intentionally least-privilege so future public callers cannot
@@ -339,7 +339,7 @@ mod tests {
     }
 
     // `local_is_in_between_no_role_no_raw` stood here. Despite the name it asserted no
-    // ordering between the presets — every assertion read `local()` alone — so it tested
+    // ordering between the presets - every assertion read `local()` alone - so it tested
     // the deleted preset and nothing else, and went with it.
 
     #[test]
@@ -358,10 +358,10 @@ mod tests {
 
     #[test]
     fn from_scope_distinguishes_the_schema_scopes() {
-        // Confined (Single) → no vendor caps.
+        // Confined (Single) -> no vendor caps.
         let confined = VendorCapabilities::from_scope(Some(&SchemaScope::Single("app1".into())));
         assert!(!confined.grants(VendorCapability::Role));
-        // Platform (Allowlist) → all caps + the schemas carried.
+        // Platform (Allowlist) -> all caps + the schemas carried.
         let platform = VendorCapabilities::from_scope(Some(&SchemaScope::Allowlist(vec![
             "zero_migrate".into(),
             "public".into(),
@@ -371,11 +371,11 @@ mod tests {
             platform.schemas,
             vec!["zero_migrate".to_string(), "public".to_string()]
         );
-        // Omitted/default public capability (None) → confined, not operator.
+        // Omitted/default public capability (None) -> confined, not operator.
         let defaulted = VendorCapabilities::from_scope(None);
         assert!(!defaulted.grants(VendorCapability::RawSql));
         assert!(!defaulted.grants(VendorCapability::RawViewBody));
-        // An unconfined scope (a whole-universe cross-schema grant) → all caps.
+        // An unconfined scope (a whole-universe cross-schema grant) -> all caps.
         let unconfined = VendorCapabilities::from_scope(Some(&SchemaScope::Unconfined));
         assert!(unconfined.grants(VendorCapability::RawSql));
         assert!(unconfined.grants(VendorCapability::RawViewBody));

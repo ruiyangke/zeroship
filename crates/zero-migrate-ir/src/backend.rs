@@ -7,20 +7,19 @@
 //!
 //! # Why this lives in the leaf crate
 //!
-//! `docs/proposals/pluggable-backends.md` places this contract in a future
-//! `zero-migrate-backend` crate. Until the backend crates are extracted (steps 3
-//! and 4 of that proposal) a separate contract crate would have exactly one
-//! consumer and one implementor, so the contract lives here instead: this is
-//! already the bottom of the crate graph, already the crate the engine, the
-//! guard, and the N-API addon all name, and moving these items later is a
-//! `pub use` away.
+//! `docs/proposals/pluggable-backends.md` puts this contract in a separate
+//! `zero-migrate-backend` crate. While the backend crates sit in-tree, a separate
+//! contract crate would have exactly one consumer and one implementor, so the
+//! contract lives here instead: this is already the bottom of the crate graph,
+//! already the crate the engine, the guard, and the N-API addon all name, and
+//! relocating these items is a `pub use` away.
 //!
 //! # What is NOT here
 //!
 //! The `Backend` trait itself (`introspect` / `render` / `execute`). Those
 //! signatures name `SchemaModel`, `ChangeSet` and `ExecutionPlan`, which are
-//! engine types; naming them here would invert the crate graph. Step 2 promotes
-//! IDENTITY and CAPABILITY to public vocabulary and nothing else.
+//! engine types; naming them here would invert the crate graph. This module
+//! promotes IDENTITY and CAPABILITY to public vocabulary and nothing else.
 
 use core::fmt;
 
@@ -37,12 +36,12 @@ use crate::dialect::{DialectId, DialectSet};
 /// carried over; membership has grown since, which is what the paragraph below
 /// is about. (This doc used to pin a count of the promoted predicates. The count
 /// was already wrong by four before this variant was added, and a stale number
-/// in prose reads as authoritative — so the invariant is stated instead:
+/// in prose reads as authoritative - so the invariant is stated instead:
 /// `ALL` is the membership, and the shipping census asserts against its length.)
 ///
 /// Keep this enum CLOSED. Adding a capability is a core change and should be
 /// rare; adding a BACKEND is not a core change at all. A backend that needs a
-/// predicate nobody else has does not add one here — it keeps that fact private
+/// predicate nobody else has does not add one here - it keeps that fact private
 /// to its own rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Capability {
@@ -73,7 +72,7 @@ pub enum Capability {
     /// The privileged catalog-object family a backend renders through its own
     /// vendor-op renderer: namespaces, server extensions, roles and the grants
     /// over them, row-level security and its policies, stored functions and
-    /// triggers — plus the audited raw-statement escape, which is gated with them
+    /// triggers - plus the audited raw-statement escape, which is gated with them
     /// because it is equally privileged rather than because it is an object.
     ///
     /// One question rather than eight because it is answered all-or-nothing: a
@@ -135,7 +134,7 @@ pub enum Capability {
     /// such a primary key, because the generation it turns on was never
     /// authored.
     IntegerPrimaryKeyRowidAlias,
-    /// A partition is a RELATION IN ITS OWN RIGHT — it has a name the catalog
+    /// A partition is a RELATION IN ITS OWN RIGHT - it has a name the catalog
     /// resolves, it is created against a declared parent with declared bounds,
     /// and it can be attached to and detached from that parent as an
     /// independent table.
@@ -147,16 +146,16 @@ pub enum Capability {
     /// HASH/KEY` is first-class, server-enforced, and older than PostgreSQL's
     /// declarative model. What MySQL does not have is a partition that is a
     /// RELATION: its partitions are storage divisions of one table, unnamed in
-    /// the relation namespace, with no `CREATE TABLE … PARTITION OF`, no
+    /// the relation namespace, with no `CREATE TABLE ... PARTITION OF`, no
     /// `ATTACH PARTITION`, and no `DETACH` that yields a standalone table.
     /// `EXCHANGE PARTITION` swaps rows between a partition and a
     /// structurally-identical table; it is not the same operation and does not
     /// leave the partition behind as its own object.
     ///
     /// So MySQL answers NO here, and the NO is true rather than merely
-    /// convenient: the engine's whole partition surface — `createPartition`,
+    /// convenient: the engine's whole partition surface - `createPartition`,
     /// `attachPartition`, `detachPartition`, `dropPartition`, and a parent
-    /// created by `createTable { partitionBy }` — is written in relations, and
+    /// created by `createTable { partitionBy }` - is written in relations, and
     /// MySQL has nowhere to put one.
     ///
     /// # What answering YES commits a backend to
@@ -164,7 +163,7 @@ pub enum Capability {
     /// All four `DdlEmitter` partition methods returning `Some`. Those methods
     /// are required with no default precisely so a backend states the complete
     /// boundary, and the render layer `expect`s them once this capability says
-    /// yes — so a backend that claims the capability and refuses an emitter
+    /// yes - so a backend that claims the capability and refuses an emitter
     /// would panic mid-render rather than refuse cleanly. The shipping registry
     /// census
     /// (`crates/zero-migrate/tests/dialect_matrix/vendor_registry_owns_shipping_descriptors.rs`)
@@ -175,8 +174,8 @@ pub enum Capability {
     /// Not "partitions are refused". A backend that says NO still honours an
     /// author's affirmed `partitionBy.whenUnsupported = "collapse"`, which folds
     /// the children into the parent and mirrors the bounds as row predicates;
-    /// only the unaffirmed case, and `attachPartition`/`detachPartition` — which
-    /// have no collapsed spelling because there is no second relation to move —
+    /// only the unaffirmed case, and `attachPartition`/`detachPartition` - which
+    /// have no collapsed spelling because there is no second relation to move -
     /// are refused.
     PartitionRelationDdl,
 }
@@ -227,7 +226,7 @@ impl Capability {
 /// The capabilities one backend answers YES to.
 ///
 /// A `u64` bitset over the CLOSED [`Capability`] enum. This is a fixed-width set
-/// over a fixed vocabulary and is NOT the thing the eight-backend cap lived in —
+/// over a fixed vocabulary and is NOT the thing the eight-backend cap lived in -
 /// that was [`DialectSet`], which is now unbounded. A static assertion below
 /// keeps the vocabulary inside 64 bits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -310,7 +309,7 @@ pub struct Limits {
     /// fourth backend's reservation with nowhere to go.
     ///
     /// Core checks a declared name against the union across every REGISTERED
-    /// backend, not just the selected one — the same portability argument as the
+    /// backend, not just the selected one - the same portability argument as the
     /// generated-identifier budget. A name that is legal on today's target and
     /// reserved on another is a re-targeting hazard, and it is cheaper to refuse it
     /// at declaration than to discover it at deploy.
@@ -348,7 +347,7 @@ pub struct BackendDescriptor {
 /// Why a set of descriptors is not a registry.
 ///
 /// Both arms name the offending registrant(s). A registry that resolved a
-/// collision silently — last-one-wins — would let two backends quietly share
+/// collision silently - last-one-wins - would let two backends quietly share
 /// capability rows and dialect-table entries, which is strictly worse than the
 /// closed enum this replaces.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -424,7 +423,7 @@ impl BackendRegistry {
     /// # Errors
     ///
     /// [`RegistryError::MalformedId`] if any id breaks the id rule, and
-    /// [`RegistryError::DuplicateId`] — naming BOTH registrants — if two
+    /// [`RegistryError::DuplicateId`] - naming BOTH registrants - if two
     /// descriptors claim one id. Never last-one-wins.
     pub fn build(descriptors: &[&'static BackendDescriptor]) -> Result<Self, RegistryError> {
         for (index, descriptor) in descriptors.iter().enumerate() {

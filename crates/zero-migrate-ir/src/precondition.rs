@@ -112,7 +112,7 @@ pub enum Precondition {
     /// behind the guard + migrator role + shape gate. The escape hatch for
     /// assertions the structured checks cannot express.
     SqlBoolean {
-        /// The read-only `SELECT … ` returning exactly one boolean.
+        /// The read-only `SELECT ... ` returning exactly one boolean.
         sql: String,
     },
 }
@@ -148,7 +148,7 @@ pub enum OnUnmet {
     /// from here.
     #[default]
     Halt,
-    /// Skip THIS migration this run (do not apply it, do not journal it — it
+    /// Skip THIS migration this run (do not apply it, do not journal it - it
     /// stays pending and is re-evaluated on the next deploy), and continue with
     /// the rest of the batch. The "apply this once the DB reaches shape X"
     /// idempotent-deploy primitive. A skipped migration's dependents do not run
@@ -157,7 +157,7 @@ pub enum OnUnmet {
     ///
     /// **Skip relies on COMPLETE `depends_on`.** The transitive-skip above only
     /// follows DECLARED dependencies: a later migration that actually depends on
-    /// the skipped one but does NOT declare it in `depends_on` is NOT held back —
+    /// the skipped one but does NOT declare it in `depends_on` is NOT held back -
     /// it will still run, against a schema the skipped migration was supposed to
     /// shape first, and will either fail or (worse) succeed against a stale
     /// shape. This makes `Skip` MORE dangerous than [`OnUnmet::Halt`] when deps

@@ -7,7 +7,7 @@
 //!    `DialectSet(u8)` could not represent them: three bits were spoken for and
 //!    the other five had no ids to be spoken for BY, so nine registrants
 //!    collapsed to three. This is a REPRESENTATION failure, not a compile
-//!    failure — the registry builds, it just cannot say what it holds.
+//!    failure - the registry builds, it just cannot say what it holds.
 //! 2. **A duplicate id is refused, naming both registrants.** Never
 //!    last-one-wins: two backends silently sharing capability rows is worse than
 //!    the closed enum this replaces.
@@ -77,7 +77,7 @@ fn a_registry_holds_more_than_eight_backends() {
     }
 }
 
-/// The set must not merely COUNT nine — it must distinguish them. A set that
+/// The set must not merely COUNT nine - it must distinguish them. A set that
 /// answered "yes" to everything would pass the count assertion above.
 #[test]
 fn an_unregistered_id_is_not_a_member() {

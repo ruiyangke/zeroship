@@ -1,23 +1,23 @@
-//! The `safety.require_approval` decision query — the host-facing side of the SEALED
+//! The `safety.require_approval` decision query - the host-facing side of the SEALED
 //! approval obligation.
 //!
 //! Approval is a **sealed policy obligation the engine does not enforce but a HOST
 //! does** ([`crate::policy_registry::KEY_SAFETY_REQUIRE_APPROVAL`],
-//! `Enforcement::HostEnforced` — so it may be sealed at a non-default value, M-2).
+//! `Enforcement::HostEnforced` - so it may be sealed at a non-default value, M-2).
 //! The engine `apply` stays a dumb executor; it never gates on this knob. Instead the
 //! HOST (`migrated`) composes the effective policy, asks
 //! [`migration_requires_approval`] whether the migration's ops require approval, and
 //! enforces the answer as a state machine (a status column + `approved_checksum`).
 //!
 //! This module is the bridge between the two crates that must both be in scope for the
-//! query — the PDP [`EffectivePolicy`] (from `zero-migrate-policy`) and the [`Op`]
+//! query - the PDP [`EffectivePolicy`] (from `zero-migrate-policy`) and the [`Op`]
 //! vocabulary (from this crate). It resolves the `safety.require_approval` LEVEL per
 //! target object (the knob is object-scoped) and ORs the per-op requirement across the
 //! whole migration:
 //!
-//! - `never` → never requires approval;
-//! - `always` → always requires approval;
-//! - `on_destructive` → requires approval iff the op is [`Op::is_destructive`] (the
+//! - `never` -> never requires approval;
+//! - `always` -> always requires approval;
+//! - `on_destructive` -> requires approval iff the op is [`Op::is_destructive`] (the
 //!   same destructive notion the guard's `safety.destructive_ops` classifier uses).
 
 use zero_migrate_policy::{normalize_object_name, EffectivePolicy, KnobKey, KnobValue, ObjectName};
@@ -25,8 +25,9 @@ use zero_migrate_policy::{normalize_object_name, EffectivePolicy, KnobKey, KnobV
 use crate::ir::Op;
 use crate::policy_registry::{KEY_SAFETY_REQUIRE_APPROVAL, REQUIRE_APPROVAL_VARIANTS};
 
-/// The resolved `safety.require_approval` obligation level at one object, tightest→
-/// loosest: `never` ⊑ `on_destructive` ⊑ `always`.
+/// The resolved `safety.require_approval` obligation level at one object, ordered
+/// tightest to loosest: `never`, then `on_destructive`, then `always`, each
+/// obliging at least as much as the one before it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalLevel {
     /// No approval obligation (the default / tightest).
@@ -39,8 +40,8 @@ pub enum ApprovalLevel {
 
 impl ApprovalLevel {
     /// Parse one `safety.require_approval` variant string. An unknown variant fails
-    /// CLOSED to the safest interpretation for an obligation — `Always` (require
-    /// approval) — so a policy shape the host does not understand never silently
+    /// CLOSED to the safest interpretation for an obligation - `Always` (require
+    /// approval) - so a policy shape the host does not understand never silently
     /// un-gates a migration.
     fn from_variant(v: &str) -> Self {
         match v {
@@ -51,7 +52,7 @@ impl ApprovalLevel {
         }
     }
 
-    /// The 0-based rank in the tightest→loosest order (the `Require` value order:
+    /// The 0-based rank in the tightest->loosest order (the `Require` value order:
     /// composition unions UP toward the loosest, so a higher rank wins).
     const fn rank(self) -> u8 {
         match self {
@@ -61,7 +62,7 @@ impl ApprovalLevel {
         }
     }
 
-    /// The LOOSER (higher-obligation) of two levels — the `Require` union-up meet used
+    /// The LOOSER (higher-obligation) of two levels - the `Require` union-up meet used
     /// to fold the multiple covering obligation rules at one object into one level.
     #[must_use]
     fn loosest(self, other: Self) -> Self {
@@ -135,8 +136,8 @@ pub fn require_approval_level(effective: &EffectivePolicy, object: &ObjectName) 
 ///
 /// The per-op requirement is the object-scoped `safety.require_approval` level resolved
 /// at the op's target object, applied to the op's destructiveness:
-/// `never`→false, `always`→true, `on_destructive`→[`Op::is_destructive`]. The
-/// migration requires approval iff ANY op does (OR across ops). Empty ops → false.
+/// `never`->false, `always`->true, `on_destructive`->[`Op::is_destructive`]. The
+/// migration requires approval iff ANY op does (OR across ops). Empty ops -> false.
 #[must_use]
 pub fn migration_requires_approval(
     effective: &EffectivePolicy,
@@ -236,7 +237,7 @@ mod tests {
 
     #[test]
     fn never_requires_no_approval() {
-        // No require_approval rule at all → default `never`.
+        // No require_approval rule at all -> default `never`.
         let ep = effective_from_charter("policy_version = 1\n");
         assert!(!migration_requires_approval(
             &ep,
@@ -263,13 +264,13 @@ mod tests {
         let ep = effective_from_charter(
             "policy_version = 1\n[[require]]\nkey = \"safety.require_approval\"\nvalue = \"on_destructive\"\nscope = \"all\"\n",
         );
-        // Additive-only migration → no approval.
+        // Additive-only migration -> no approval.
         assert!(!migration_requires_approval(
             &ep,
             &[add_column("app_main", "t")],
             "app_main"
         ));
-        // A destructive op in the mix → approval required.
+        // A destructive op in the mix -> approval required.
         assert!(migration_requires_approval(
             &ep,
             &[add_column("app_main", "t"), drop_table("app_main", "old")],
@@ -283,13 +284,13 @@ mod tests {
         let ep = effective_from_charter(
             "policy_version = 1\n[[require]]\nkey = \"safety.require_approval\"\nvalue = \"always\"\nscope = { include = [\"app_secret\"] }\n",
         );
-        // An additive op on the unscoped schema → no approval.
+        // An additive op on the unscoped schema -> no approval.
         assert!(!migration_requires_approval(
             &ep,
             &[add_column("app_main", "t")],
             "app_main"
         ));
-        // The same op on the scoped schema → approval (always).
+        // The same op on the scoped schema -> approval (always).
         assert!(migration_requires_approval(
             &ep,
             &[add_column("app_secret", "t")],

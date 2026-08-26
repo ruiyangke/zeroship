@@ -1,23 +1,23 @@
 //! Open SQL backend identity.
 //!
 //! [`DialectId`] is the stable wire, registry, set, and map key. A backend crate
-//! declares its own — `DialectId::new("duckdb")` — without editing this crate.
+//! declares its own - `DialectId::new("duckdb")` - without editing this crate.
 //! Backend spellings, capabilities, validation, guards, and refusal policy live
 //! behind the registered backend contracts rather than an identity match here.
 //!
 //! # This module declares NO ids
 //!
-//! It used to declare three — `POSTGRES`, `SQLITE`, `MYSQL` — directly above the
+//! It used to declare three - `POSTGRES`, `SQLITE`, `MYSQL` - directly above the
 //! sentence promising that a backend declares its own without editing this crate,
 //! and the engine re-exported all three. So the neutral vocabulary crate at the
-//! bottom of the stack named three vendors it does not own, and 2,583 references
-//! across 287 files reached a vendor's identity through a crate that had no business
-//! knowing it.
+//! bottom of the stack named vendors it does not own, and every reference to a
+//! vendor's identity anywhere in the tree resolved through a crate that had no
+//! business knowing it.
 //!
 //! They live in the vendors now: `zero_migrate_postgres::DIALECT`,
 //! `zero_migrate_sqlite::DIALECT`, `zero_migrate_mysql::DIALECT`, each beside the
 //! `BackendVendor` it identifies. Nothing in this crate resolves a dialect by name,
-//! and nothing in it can — [`DialectId::new`] is `const` and `pub`, so a crate that
+//! and nothing in it can - [`DialectId::new`] is `const` and `pub`, so a crate that
 //! must name one and cannot depend on a vendor (this one, and
 //! `zero-migrate-backend`, which all three vendors depend on) builds it. Equality is
 //! by CONTENT, so an id built that way IS the vendor's.
@@ -41,15 +41,15 @@ use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 /// structurally prevents two backends from claiming the same name, the way a
 /// closed enum did by construction. The rule that covers it is
 /// [`crate::backend::BackendRegistry`], which refuses to build over a duplicate
-/// id and names both registrants — it is never last-one-wins.
+/// id and names both registrants - it is never last-one-wins.
 ///
 /// # Validity
 ///
 /// A well-formed id is lowercase ASCII matching `[a-z][a-z0-9_]*`. There are no
 /// aliases and no display names in the id; a human-facing name is a separate
 /// field on [`crate::backend::BackendDescriptor`]. [`DialectId::new`] is `const`
-/// and does NOT check — a `const` constructor cannot return a `Result` usefully
-/// — so the check is enforced at REGISTRATION rather than trusted. See
+/// and does NOT check - a `const` constructor cannot return a `Result` usefully
+/// - so the check is enforced at REGISTRATION rather than trusted. See
 /// [`DialectId::is_well_formed`].
 /// Backend declarations use the borrowed form through [`DialectId::new`]. Wire
 /// data uses the owned form: a deserialized migration must be able to name a
@@ -86,8 +86,8 @@ impl DialectId {
     /// dashes, and any non-ASCII byte. The registry asserts the same rule at build
     /// time because a backend is not trusted about its own declaration.
     ///
-    /// To assert it at COMPILE time — which is what a backend crate wants for its
-    /// own declaration — use [`DialectId::is_well_formed_name`]. This method cannot
+    /// To assert it at COMPILE time - which is what a backend crate wants for its
+    /// own declaration - use [`DialectId::is_well_formed_name`]. This method cannot
     /// do that job: reading a `DialectId` const inside a `const` item copies it, and
     /// const evaluation refuses to run the `Cow`'s destructor (E0493).
     #[must_use]
@@ -162,7 +162,7 @@ impl fmt::Display for DialectId {
 /// This replaces `DialectSet(u8)`, whose three used bits and five spare ones put
 /// a hard ceiling of EIGHT backends on the engine. The ceiling was never the
 /// bits alone: the set was keyed by a closed three-variant enum, so an id with
-/// no variant had no bit to occupy and vanished on insertion. Both are gone —
+/// no variant had no bit to occupy and vanished on insertion. Both are gone -
 /// membership is now the id itself.
 ///
 /// Members are kept sorted and deduplicated, so `PartialEq` is SET equality
@@ -234,7 +234,7 @@ mod tests {
     //   offending line rather than a test failure naming a value.
     //
     // A fourth backend gets the same check by writing the same line, which the old
-    // test could never have given it — it enumerated three names it had to be
+    // test could never have given it - it enumerated three names it had to be
     // edited to extend.
 
     #[test]

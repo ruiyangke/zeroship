@@ -8,8 +8,8 @@
 ///
 /// There was a third label, `Trusted`: the dbmate-like posture with no untrusted
 /// boundary at all, whose documented meaning was that the deny-list, cross-schema and
-/// body walks were SKIPPED entirely. Nothing can skip them now — the root/host-set
-/// guard mode that did has been removed — so the label described a posture no config
+/// body walks were SKIPPED entirely. Nothing can skip them now - the root/host-set
+/// guard mode that did has been removed - so the label described a posture no config
 /// could be put into, and it went with the posture rather than staying as a name for
 /// something that does not happen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,7 +25,7 @@ pub enum TrustProfile {
 
 /// The schemas a guard permits references to.
 ///
-/// `Single` is the **Confined** shape — the `project_schema: String` semantics
+/// `Single` is the **Confined** shape - the `project_schema: String` semantics
 /// (one allowed schema; everything else is a `CrossSchema` violation), matched
 /// CASE-INSENSITIVELY. A case-variant qualifier (`'APP1'` under `'app1'`) is
 /// admitted, then canonicalized to `project_schema` at render
@@ -49,8 +49,8 @@ pub enum SchemaScope {
 impl SchemaScope {
     /// True if `schema` is permitted by this scope (CASE-INSENSITIVE, ASCII).
     ///
-    /// - `Single(s)` ⇒ `schema.eq_ignore_ascii_case(s)`.
-    /// - `Allowlist(v)` ⇒ `schema` case-folds to a member of `v`.
+    /// - `Single(s)` => `schema.eq_ignore_ascii_case(s)`.
+    /// - `Allowlist(v)` => `schema` case-folds to a member of `v`.
     ///
     /// **Gate/render agreement.** The match is case-INsensitive, but
     /// the render seam (`quote_ident`) is byte-verbatim. So a
@@ -59,7 +59,7 @@ impl SchemaScope {
     /// in a DIFFERENT case-sensitive Postgres schema than the one the gate blessed.
     /// That canonicalization lives in
     /// `zero_migrate::render::lower::IrAuthor::effective_schema`
-    /// — this `permits` only decides admission, never the rendered casing.
+    /// - this `permits` only decides admission, never the rendered casing.
     #[must_use]
     pub fn permits(&self, schema: &str) -> bool {
         match self {
@@ -71,8 +71,9 @@ impl SchemaScope {
 }
 
 /// Destructive operation posture. Ordered from more restrictive to less
-/// restrictive: `forbid` ⊑ `warn` ⊑ `allow`. This is the enforceable
-/// `safety.destructive_ops` guard posture ONLY — the guard denies/warns/allows a
+/// restrictive - `forbid`, then `warn`, then `allow` - so each admits everything
+/// the one before it does and possibly more. This is the enforceable
+/// `safety.destructive_ops` guard posture ONLY - the guard denies/warns/allows a
 /// destructive statement by it.
 ///
 /// Approval is NOT one of these states. It is the separate, host-enforced
