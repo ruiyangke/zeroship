@@ -13,8 +13,10 @@ This soak keeps mixed work in flight for a bounded duration and then rules on
 what the process and PostgreSQL actually report. It is deliberately opt-in. It
 is a `harness = false` bench target driven by a script, so the ordinary
 `cargo test -p compio-postgres` suite neither builds nor runs it.
-The harness adds no dependency or feature and uses the crate's existing compio
-runtime; it contains no tokio code.
+The wrapper enables the crate's existing optional `tls` feature, and the DSN's
+`sslmode` selects the transport. The harness adds no dependency, uses the
+crate's existing compio runtime, and contains no tokio code. Building the bench
+without `tls` remains supported for plaintext-only use.
 
 ## Prerequisites and safety
 
@@ -23,6 +25,9 @@ runtime; it contains no tokio code.
 - `cargo` and GNU `timeout` must be on `PATH`.
 - PostgreSQL must already be accepting the fixed test credentials at
   `postgres://postgres:zeroship@127.0.0.1:5455/zeroship`.
+- A TLS run needs an already-running TLS server and a DSN whose `sslmode`
+  permits TLS. A verifying mode also needs the matching seeded root
+  certificate.
 - The server role must be able to inspect `pg_stat_activity` and run the
   harness's self-termination probe. The fixed `postgres` role has both
   capabilities.
@@ -32,8 +37,9 @@ runtime; it contains no tokio code.
 
 NEVER run `libs/compio-postgres/tests/tls_live_setup.sh` for this soak. That
 script regenerates a CA used by shared containers. Running it from this
-worktree can invalidate the main worktree's live TLS fixtures. The soak uses
-the existing plaintext server on port 5455 and needs no TLS fixture.
+worktree can invalidate the main worktree's live TLS fixtures. Use only an
+already-running TLS fixture and its seeded certificate. The default plaintext
+run uses the existing server on port 5455.
 
 The harness does not create or drop a database, schema, table, or other
 persistent PostgreSQL object. Its scope is a unique `application_name` and
@@ -58,6 +64,17 @@ The script defaults to those same three values. It also accepts
 `SOAK_BUILD_WATCHDOG_SECS`, whose default is 600 seconds. These are environment
 settings for the opt-in script; the driver library itself still reads no
 environment variables.
+
+To run the same workload over TLS, supply a TLS-permitting DSN. There is no
+separate transport flag; the wrapper uses the same configuration policy as the
+pool and direct driver connections:
+
+```bash
+PG_TEST_URL="host=localhost port=5447 user=postgres password=PASSWORD dbname=postgres sslmode=require sslrootcert=/path/to/ca.crt" \
+SOAK_DURATION_SECS=180 \
+SOAK_SAMPLE_INTERVAL_SECS=5 \
+  libs/compio-postgres/tests/soak.sh
+```
 
 For a short wiring and server-availability check, run the minimum 30-second
 window:

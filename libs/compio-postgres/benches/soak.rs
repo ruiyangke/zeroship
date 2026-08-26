@@ -11,11 +11,14 @@ use std::any::Any;
 use std::cell::Cell;
 use std::env;
 use std::future::Future;
+use std::pin::Pin;
 use std::process::ExitCode;
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use compio::runtime::JoinHandle;
+#[cfg(feature = "tls")]
+use compio_postgres::MakeRustlsConnect;
 use compio_postgres::{Client, Config, Error, NoTls, Pool, PoolConfig};
 
 const DEFAULT_URL: &str = "postgres://postgres:zeroship@127.0.0.1:5455/zeroship";
@@ -219,6 +222,47 @@ fn tagged_config(url: &str, application_name: &str) -> Result<Config, String> {
     Ok(config)
 }
 
+type ConnectionDriver = Pin<Box<dyn Future<Output = Result<(), Error>>>>;
+
+/// A direct-connection recipe resolved once, matching the pool's transport policy.
+#[derive(Clone)]
+struct DirectTransport {
+    config: Config,
+    #[cfg(feature = "tls")]
+    tls: Option<MakeRustlsConnect>,
+}
+
+impl DirectTransport {
+    fn resolve(config: Config) -> Result<Self, String> {
+        #[cfg(feature = "tls")]
+        let tls = if config.get_ssl_mode().permits_tls() {
+            Some(
+                MakeRustlsConnect::from_config(&config)
+                    .map_err(|error| format!("resolve direct TLS connector: {error}"))?,
+            )
+        } else {
+            None
+        };
+
+        Ok(Self {
+            config,
+            #[cfg(feature = "tls")]
+            tls,
+        })
+    }
+
+    async fn connect(&self, label: &str) -> Result<(Client, ConnectionDriver), String> {
+        #[cfg(feature = "tls")]
+        if let Some(tls) = &self.tls {
+            let (client, connection) = watched_db(label, self.config.connect(tls.clone())).await?;
+            return Ok((client, Box::pin(async move { connection.run().await })));
+        }
+
+        let (client, connection) = watched_db(label, self.config.connect(NoTls)).await?;
+        Ok((client, Box::pin(async move { connection.run().await })))
+    }
+}
+
 async fn watched_db<T, F>(label: &str, future: F) -> Result<T, String>
 where
     F: Future<Output = Result<T, Error>>,
@@ -232,10 +276,10 @@ where
     }
 }
 
-async fn open_client(config: &Config, label: &str) -> Result<Client, String> {
-    let (client, connection) = watched_db(label, config.connect(NoTls)).await?;
+async fn open_client(transport: &DirectTransport, label: &str) -> Result<Client, String> {
+    let (client, driver) = transport.connect(label).await?;
     compio::runtime::spawn(async move {
-        if let Err(error) = connection.run().await {
+        if let Err(error) = driver.await {
             eprintln!("detached connection ended with an error: {error}");
         }
     })
@@ -389,14 +433,14 @@ async fn query_worker(
 }
 
 async fn clean_connection_worker(
-    config: Config,
+    transport: DirectTransport,
     counts: Rc<Counts>,
     stop: Rc<Cell<bool>>,
     deadline: Instant,
 ) -> Result<(), String> {
     let mut iteration = 0_i64;
     while Instant::now() < deadline && !stop.get() {
-        let client = open_client(&config, "open clean churn connection").await?;
+        let client = open_client(&transport, "open clean churn connection").await?;
         let returned: i64 = watched_db(
             "query clean churn connection",
             client.query_one_scalar("SELECT $1::int8", &[&iteration]),
@@ -418,17 +462,18 @@ async fn clean_connection_worker(
 }
 
 async fn bad_connection_worker(
-    config: Config,
+    transport: DirectTransport,
     observer: Rc<Client>,
     counts: Rc<Counts>,
     stop: Rc<Cell<bool>>,
     deadline: Instant,
 ) -> Result<(), String> {
     while Instant::now() < deadline && !stop.get() {
-        let (client, connection) =
-            watched_db("open deliberately bad connection", config.connect(NoTls)).await?;
+        let (client, connection_driver) = transport
+            .connect("open deliberately bad connection")
+            .await?;
         let process_id = client.process_id();
-        let driver = compio::runtime::spawn(async move { connection.run().await });
+        let driver = compio::runtime::spawn(connection_driver);
 
         match compio::time::timeout(OPERATION_WATCHDOG, client.simple_query(BAD_CONNECTION_SQL))
             .await
@@ -572,7 +617,7 @@ fn panic_text(panic: Box<dyn Any + Send>) -> String {
 async fn run_load(
     duration: Duration,
     pool: Rc<Pool>,
-    config: Config,
+    direct_transport: DirectTransport,
     observer: Rc<Client>,
     counts: Rc<Counts>,
 ) -> Result<(), String> {
@@ -594,8 +639,12 @@ async fn run_load(
     {
         let counts = Rc::clone(&counts);
         let worker_stop = Rc::clone(&stop);
-        let future =
-            clean_connection_worker(config.clone(), counts, Rc::clone(&worker_stop), deadline);
+        let future = clean_connection_worker(
+            direct_transport.clone(),
+            counts,
+            Rc::clone(&worker_stop),
+            deadline,
+        );
         workers.push((
             "clean connection worker",
             spawn_worker("clean connection worker", worker_stop, future),
@@ -604,8 +653,13 @@ async fn run_load(
     {
         let counts = Rc::clone(&counts);
         let worker_stop = Rc::clone(&stop);
-        let future =
-            bad_connection_worker(config, observer, counts, Rc::clone(&worker_stop), deadline);
+        let future = bad_connection_worker(
+            direct_transport,
+            observer,
+            counts,
+            Rc::clone(&worker_stop),
+            deadline,
+        );
         workers.push((
             "bad connection worker",
             spawn_worker("bad connection worker", worker_stop, future),
@@ -833,7 +887,8 @@ async fn run(args: Args) -> Result<(), String> {
     println!("phase=setup status=started watchdog={SETUP_WATCHDOG:?}");
     let setup = compio::time::timeout(SETUP_WATCHDOG, async {
         let observer_config = tagged_config(&args.url, &observer_name)?;
-        let observer = Rc::new(open_client(&observer_config, "open soak observer").await?);
+        let observer_transport = DirectTransport::resolve(observer_config)?;
+        let observer = Rc::new(open_client(&observer_transport, "open soak observer").await?);
         let observer_live = compio_postgres::live_connections();
         if observer_live != initial_live + 1 {
             return Err(format!(
@@ -865,6 +920,7 @@ async fn run(args: Args) -> Result<(), String> {
 
         let server_baseline = server_snapshot(&observer, &application_name).await?.backends;
         let connection_config = tagged_config(&args.url, &application_name)?;
+        let direct_transport = DirectTransport::resolve(connection_config.clone())?;
         let mut pool_config = PoolConfig::new();
         pool_config
             .max_size(POOL_MAX_SIZE)
@@ -879,11 +935,11 @@ async fn run(args: Args) -> Result<(), String> {
         .await?;
         let pool = Rc::new(pool);
         pool.start_housekeeper();
-        Ok::<_, String>((observer, observer_live, server_baseline, connection_config, pool))
+        Ok::<_, String>((observer, observer_live, server_baseline, direct_transport, pool))
     })
     .await
     .map_err(|_| format!("setup exceeded its {SETUP_WATCHDOG:?} watchdog"))??;
-    let (observer, observer_live_baseline, server_baseline, connection_config, pool) = setup;
+    let (observer, observer_live_baseline, server_baseline, direct_transport, pool) = setup;
     println!(
         "phase=setup status=complete server_baseline={} driver_initial={} \
          driver_observer_baseline={} pool_total={}",
@@ -904,7 +960,7 @@ async fn run(args: Args) -> Result<(), String> {
         run_load(
             WARMUP,
             Rc::clone(&pool),
-            connection_config.clone(),
+            direct_transport.clone(),
             Rc::clone(&observer),
             Rc::clone(&warmup_counts),
         ),
@@ -971,7 +1027,7 @@ async fn run(args: Args) -> Result<(), String> {
         run_load(
             duration,
             Rc::clone(&pool),
-            connection_config,
+            direct_transport,
             Rc::clone(&observer),
             Rc::clone(&counts),
         ),
