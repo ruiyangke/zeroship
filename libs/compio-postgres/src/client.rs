@@ -182,8 +182,17 @@ impl QueryObserver {
         let FrontendMessage::Raw(bytes) = message else {
             return;
         };
-        let mut registry = self.0.registry.lock();
-        inspect_frontend_frames(bytes, &mut registry, observation);
+        let execution = {
+            let mut registry = self.0.registry.lock();
+            inspect_frontend_frames(bytes, &mut registry)
+        };
+        // `set_execution` can complete an observation and wake the public
+        // query-events receiver. Run it only after releasing `registry`, since
+        // that caller waker may synchronously start another observed query and
+        // re-enter this same mutex.
+        if let Some((sql, protocol)) = execution {
+            observation.set_execution(sql, protocol);
+        }
     }
 
     fn emit(&self, event: QueryEvent) {
@@ -399,15 +408,15 @@ fn cstr(input: &[u8]) -> Option<(&str, &[u8])> {
 fn inspect_frontend_frames(
     mut bytes: &[u8],
     registry: &mut FrontendRegistry,
-    observation: &QueryObservation,
-) {
+) -> Option<(Arc<str>, QueryProtocol)> {
+    let mut execution = None;
     while bytes.len() >= 5 {
         let length = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
         let Some(frame_len) = length.checked_add(1) else {
-            return;
+            return execution;
         };
         if length < 4 || frame_len > bytes.len() {
-            return;
+            return execution;
         }
         let tag = bytes[0];
         let body = &bytes[5..frame_len];
@@ -434,14 +443,17 @@ fn inspect_frontend_frames(
             }
             b'E' => {
                 if let Some((portal, _)) = cstr(body)
+                    && execution.is_none()
                     && let Some(sql) = registry.portals.get(portal).cloned()
                 {
-                    observation.set_execution(sql, QueryProtocol::Extended);
+                    execution = Some((sql, QueryProtocol::Extended));
                 }
             }
             b'Q' => {
-                if let Some((sql, _)) = cstr(body) {
-                    observation.set_execution(Arc::<str>::from(sql), QueryProtocol::Simple);
+                if execution.is_none()
+                    && let Some((sql, _)) = cstr(body)
+                {
+                    execution = Some((Arc::<str>::from(sql), QueryProtocol::Simple));
                 }
             }
             b'C' if !body.is_empty() => {
@@ -461,6 +473,7 @@ fn inspect_frontend_frames(
         }
         bytes = &bytes[frame_len..];
     }
+    execution
 }
 
 #[cfg(test)]
@@ -2767,10 +2780,13 @@ impl fmt::Debug for Client {
 
 #[cfg(test)]
 mod query_observer_reentrancy_tests {
-    use super::{Client, InnerClient, StatementCacheSettings};
+    use super::{Client, InnerClient, QueryObservation, QueryObserver, StatementCacheSettings};
+    use crate::codec::FrontendMessage;
     use crate::config::{ProtocolVersion, SslMode, SslNegotiation};
+    use bytes::BytesMut;
     use futures_channel::mpsc;
     use futures_util::Stream;
+    use postgres_protocol::message::frontend;
     use std::cell::{Cell, RefCell};
     use std::num::NonZeroUsize;
     use std::pin::Pin;
@@ -2784,6 +2800,11 @@ mod query_observer_reentrancy_tests {
         /// observer was destroyed. `None` means the waker never ran, which must
         /// not read as success.
         static PROBE_LOCKED: Cell<Option<bool>> = const { Cell::new(None) };
+        /// The observer whose frontend registry the event waker interrogates.
+        static PROBE_OBSERVER: RefCell<Option<QueryObserver>> = const { RefCell::new(None) };
+        /// `Some(true)` means query event delivery ran with the frontend registry
+        /// mutex still held. `None` means no event waker ran.
+        static PROBE_REGISTRY_LOCKED: Cell<Option<bool>> = const { Cell::new(None) };
     }
 
     struct ObserverDropProbe;
@@ -2800,6 +2821,30 @@ mod query_observer_reentrancy_tests {
     }
 
     impl Wake for ObserverDropProbe {
+        fn wake(self: Arc<Self>) {
+            Self::record();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            Self::record();
+        }
+    }
+
+    struct FrontendRegistryWakeProbe;
+
+    impl FrontendRegistryWakeProbe {
+        fn record() {
+            PROBE_OBSERVER.with(|observer| {
+                if let Some(observer) = observer.borrow().as_ref() {
+                    PROBE_REGISTRY_LOCKED.with(|flag| {
+                        flag.set(Some(observer.0.registry.try_lock().is_none()));
+                    });
+                }
+            });
+        }
+    }
+
+    impl Wake for FrontendRegistryWakeProbe {
         fn wake(self: Arc<Self>) {
             Self::record();
         }
@@ -2860,6 +2905,40 @@ mod query_observer_reentrancy_tests {
             Some(false),
             "the replaced observer was destroyed while its mutex was still held \
              (None means the waker never ran at all)"
+        );
+    }
+
+    /// Frontend inspection must finish mutating the statement/portal registry
+    /// before it can emit an event. The state below models a COPY request whose
+    /// consumer was cancelled and whose terminal response arrived before its
+    /// queued initial frontend frame was selected. Recording that frame supplies
+    /// the last missing field and wakes the public query-events receiver.
+    #[test]
+    fn completing_frontend_inspection_wakes_events_after_unlocking_the_registry() {
+        let (sender, mut events) = mpsc::unbounded();
+        let observer = QueryObserver::new(sender, None);
+        let observation = QueryObservation::new(observer.clone());
+        observation.mark_enqueued();
+        observation.cancel_consumer();
+        observation.server_complete(std::time::Instant::now());
+
+        let waker = Waker::from(Arc::new(FrontendRegistryWakeProbe));
+        let mut cx = Context::from_waker(&waker);
+        assert!(Pin::new(&mut events).poll_next(&mut cx).is_pending());
+        PROBE_OBSERVER.with(|slot| *slot.borrow_mut() = Some(observer.clone()));
+        PROBE_REGISTRY_LOCKED.with(|flag| flag.set(None));
+
+        let mut bytes = BytesMut::new();
+        frontend::query("SELECT 1", &mut bytes).expect("the test query encodes");
+        observer.inspect_frontend(&FrontendMessage::Raw(bytes.freeze()), &observation);
+
+        let observed = PROBE_REGISTRY_LOCKED.with(Cell::get);
+        PROBE_OBSERVER.with(|slot| *slot.borrow_mut() = None);
+        assert_eq!(
+            observed,
+            Some(false),
+            "query event delivery ran while the frontend registry was locked \
+             (None means the event waker never ran at all)"
         );
     }
 }
