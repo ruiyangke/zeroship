@@ -1497,9 +1497,9 @@ impl Config {
     /// Hostnames can resolve to multiple IP addresses, and this timeout
     /// restarts for each one, as libpq's does. It is also applied once to each
     /// host entry's name resolution, which libpq leaves unbounded. Defaults to
-    /// no limit.
+    /// no limit. A zero duration likewise clears the limit.
     pub fn connect_timeout(&mut self, connect_timeout: Duration) -> &mut Config {
-        self.connect_timeout = Some(connect_timeout);
+        self.connect_timeout = (!connect_timeout.is_zero()).then_some(connect_timeout);
         self
     }
 
@@ -3320,6 +3320,13 @@ mod tests {
         fn a_zero_timeout_is_left_unset_so_the_default_applies() {
             assert_eq!(parse("connect_timeout=0").get_connect_timeout(), None);
             assert_eq!(parse("tcp_user_timeout=0").get_tcp_user_timeout(), None);
+        }
+
+        #[test]
+        fn a_programmatic_zero_connect_timeout_is_indefinite() {
+            let mut config = Config::new();
+            config.connect_timeout(Duration::ZERO);
+            assert_eq!(config.get_connect_timeout(), None);
         }
     }
 
