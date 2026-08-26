@@ -5,7 +5,7 @@
 //! `runtimeJson` back out of the reply that had just serialized it. `collections` is
 //! that metadata, typed, in the same vocabulary the MANUAL source accepts.
 //!
-//! This binary measures the REPLY WIRING — that the verb actually populates the new
+//! This binary measures the REPLY WIRING - that the verb actually populates the new
 //! fields, and that it withholds them on a refusal. `collection_export_round_trip.rs`
 //! measures the CONVERSION. They are separate binaries on purpose: the round trip
 //! calls `field_to_dto` directly and would pass unchanged if `gen_artifacts_*` never
@@ -13,7 +13,7 @@
 //!
 //! # What this does NOT prove
 //!
-//! * NOT that a JS caller sees the fields — this is the napi-free build. The `.node`
+//! * NOT that a JS caller sees the fields - this is the napi-free build. The `.node`
 //!   surface is `index.d.ts` plus the host suite.
 //! * NOT that `collections` and `runtimeJson` agree field-for-field. They are read off
 //!   ONE recovery in the engine (`project_collection_descriptors`, which
@@ -109,7 +109,7 @@ fn the_reply_names_the_dialect_it_folded_under() {
     }
 }
 
-/// A refusal reports NEITHER field — the `has_dialectal_ops` discipline, extended.
+/// A refusal reports NEITHER field - the `has_dialectal_ops` discipline, extended.
 ///
 /// `None` rather than an empty list or an echoed input string, so a consumer cannot
 /// read "this schema declares no collections" off a call that never folded one, and
@@ -159,8 +159,8 @@ fn an_empty_schema_reports_an_empty_list_not_an_absent_one() {
 
 /// The MANUAL source exports too, and reports the same dialect discipline.
 ///
-/// It cannot carry a `dialect()` wrapper — `has_dialectal_ops` is `false` by
-/// construction there — but it is still folded under a target, so it still has one to
+/// It cannot carry a `dialect()` wrapper - `has_dialectal_ops` is `false` by
+/// construction there - but it is still folded under a target, so it still has one to
 /// name.
 #[test]
 fn the_manual_source_exports_collections_as_well() {
@@ -194,7 +194,7 @@ fn the_manual_source_exports_collections_as_well() {
 ///
 /// They are the reason `project_collection_descriptors` reads
 /// `project_runtime_metadata` instead of leaving the intermediate's empty `indexes` /
-/// default options in place — the shape `project_field_defs` discarded them from. A
+/// default options in place - the shape `project_field_defs` discarded them from. A
 /// consumer rendering its own `schema.runtime.json` needs all three parts, and without
 /// this arm the merge would be entirely unmeasured: `descriptor_to_sdk_schema` reads
 /// only `fields`, so dropping the merge moves no artifact byte and no drift gate.

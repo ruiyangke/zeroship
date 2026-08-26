@@ -8,7 +8,7 @@
 //!   fires a `ThreadsafeFunction` at the JS host driver and resolves the oneshot
 //!   from the Rust-supplied `done` callback;
 //! - a **mock dispatcher** (the integration test) returns canned rows synchronously
-//!   and asserts the recorded SQL sequence — proving the bridge drives a real apply
+//!   and asserts the recorded SQL sequence - proving the bridge drives a real apply
 //!   without a Node host.
 //!
 //! Either way, [`NapiHostSession`] carries the **one-in-flight `AtomicBool` guard**:
@@ -45,7 +45,7 @@ pub type VerbReply = Result<JsReply, JsError>;
 /// eventually produce a [`VerbReply`]. The napi impl fires a `ThreadsafeFunction`
 /// and parks the engine future on a oneshot the host's `done` callback fires; the
 /// mock impl answers inline. `dispatch` is `async` in the trait but its body never
-/// awaits a JS `Promise` — only a `oneshot::Receiver`, so the engine's
+/// awaits a JS `Promise` - only a `oneshot::Receiver`, so the engine's
 /// reactor-less `block_on` stays sufficient.
 #[allow(async_fn_in_trait)] // !Send single-thread engine, by design (mirrors SqlSession)
 pub trait VerbDispatch {
@@ -78,7 +78,7 @@ impl<D: VerbDispatch> NapiHostSession<D> {
     }
 
     /// Consume the session and return the underlying transport (for a mock/test to
-    /// read back its recording after an apply — the transport is otherwise fully
+    /// read back its recording after an apply - the transport is otherwise fully
     /// owned by the session).
     pub fn into_dispatch(self) -> D {
         self.dispatch
@@ -137,8 +137,8 @@ impl<D: VerbDispatch> SqlSession for NapiHostSession<D> {
 
     async fn exec_text(&self, sql: &str, params: &[Option<String>]) -> Result<u64, DbError> {
         let _g = self.enter();
-        // Text-format params: cross verbatim as `(string | null)[]` — NO
-        // type coercion, NO explicit OID. `None → null → PG NULL`.
+        // Text-format params: cross verbatim as `(string | null)[]` - NO
+        // type coercion, NO explicit OID. `None -> null -> PG NULL`.
         let req = JsRequest {
             kind: KIND_EXECUTE_TEXT.to_string(),
             sql: sql.to_string(),
@@ -178,7 +178,7 @@ const fn affected(reply: &JsReply) -> u64 {
     }
 }
 
-/// The one-in-flight guard — the exact discipline the `MySQL` `JsDriverBackend`
+/// The one-in-flight guard - the exact discipline the `MySQL` `JsDriverBackend`
 /// uses (`transport.rs` `in_flight`), lifted to `AtomicBool` because the seam is
 /// `&self`.
 struct InFlightGuard<'a>(&'a AtomicBool);

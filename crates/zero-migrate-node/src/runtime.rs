@@ -13,7 +13,7 @@
 //! it runs `block_on` on a fresh worker thread, delivering the result to a
 //! completion callback. The napi entrypoints (`bridge.rs`) wrap it with a
 //! `JsDeferred` so the JS side gets a `Promise` resolved cross-thread when
-//! `block_on` completes (fire-and-resolve — the JS thread is NEVER blocked on a
+//! `block_on` completes (fire-and-resolve - the JS thread is NEVER blocked on a
 //! `join()`, which would deadlock libuv/Bun).
 //!
 //! That worker thread is also where the engine's diagnostics are collected. The
@@ -180,7 +180,7 @@ where
         .spawn(move || {
             // The ONE future, driven with NO reactor. Every suspension inside it is
             // a channel receiver woken out-of-thread by the host `done` callback
-            // — audited strictly-sequential (no join!/select!/spawn) in the
+            // - audited strictly-sequential (no join!/select!/spawn) in the
             // core apply path.
             let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 with_diagnostics(|| futures::executor::block_on(make_future()))
@@ -250,7 +250,7 @@ mod tests {
         );
 
         // Fire the oneshot from THIS (a different) thread after the worker has
-        // parked — the cross-thread unpark is the whole feasibility hinge.
+        // parked - the cross-thread unpark is the whole feasibility hinge.
         thread::sleep(std::time::Duration::from_millis(20));
         fire_tx.send(42).unwrap();
 

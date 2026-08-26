@@ -1,24 +1,24 @@
-//! The N-API transport — compiled only with the `napi` feature.
+//! The N-API transport - compiled only with the `napi` feature.
 //!
 //! It holds the Node ABI and the argument decoding around it. What each verb then
 //! does with its decoded arguments lives in [`crate::verbs`], which carries no napi
 //! type and is therefore tested in the napi-free build.
 //!
 //! ## Sync, DB-free entrypoints (run inline, no bridge)
-//! `irVersion`, `loadVerify` — pure functions ([`crate::api`]). `loadVerify` returns
+//! `irVersion`, `loadVerify` - pure functions ([`crate::api`]). `loadVerify` returns
 //! a typed [`LoadVerifyReply`] on the napi call thread (no JSON string).
 //!
 //! ## Async, host-driven entrypoints (fire-and-resolve)
-//! `applyIr`, `apply`, `status`, `history` — each goes through the ONE generic
+//! `applyIr`, `apply`, `status`, `history` - each goes through the ONE generic
 //! private `run_verb` helper: it builds a [`TsfnDispatch`] from the JS host-driver
 //! callback, opens
 //! a `create_deferred` promise, spawns the engine on its OWN std::thread
 //! ([`crate::runtime::run_engine_blocking`]) running a reactor-less
 //! `futures::executor::block_on`, and resolves/rejects the promise cross-thread with
 //! a TYPED reply (`ApplyReply`/`StatusReply`/`HistoryReply`) when `block_on`
-//! completes — NO `Promise<string>`, NO per-verb copy-pasted plumbing.
+//! completes - NO `Promise<string>`, NO per-verb copy-pasted plumbing.
 //!
-//! The JS thread is **never** `join()`ed on the worker — that would deadlock
+//! The JS thread is **never** `join()`ed on the worker - that would deadlock
 //! libuv/Bun (the host-driver TSFN callback can't run while the JS thread is parked
 //! in the napi call). This is the fire-and-resolve topology.
 //!
@@ -97,7 +97,7 @@ use crate::wire::{
 };
 
 // ---------------------------------------------------------------------------
-// Sync, DB-free entrypoints — inline on the napi call thread.
+// Sync, DB-free entrypoints - inline on the napi call thread.
 // ---------------------------------------------------------------------------
 
 /// The IR-format version this addon was built against (fail-closed floor).
@@ -138,11 +138,11 @@ pub fn load_verify(
     )
 }
 
-/// `genArtifacts` — the sync, DB-free schema-artifact emitter. Fold a schema SOURCE
-/// (EITHER a set of IR envelopes — the generated source — OR a declared
-/// `CollectionDescriptor` set — the manual source) into the two co-emitted
+/// `genArtifacts` - the sync, DB-free schema-artifact emitter. Fold a schema SOURCE
+/// (EITHER a set of IR envelopes - the generated source - OR a declared
+/// `CollectionDescriptor` set - the manual source) into the two co-emitted
 /// artifacts `{ envDbTs, runtimeJson }`. Both sources funnel through the SAME Rust
-/// renderer, so their output is byte-identical for equivalent schemas — PROVIDED the
+/// renderer, so their output is byte-identical for equivalent schemas - PROVIDED the
 /// same ordered `charterLayers` stack drives both (the confined system-shape injection is
 /// policy-driven, not a baked-in engine preset; the caller supplies the confined
 /// charter).
@@ -306,11 +306,11 @@ type HostDriverFn = Function<'static, (JsRequest, DoneFn), ()>;
 /// The TSFN's `CallJsBackArgs`: the JS host driver is invoked as
 /// `hostDriver(request, done)`.
 type HostTsfn = ThreadsafeFunction<
-    VerbCall,            // T — payload crossing to the JS thread
-    (),                  // Return — the host callback returns void; it calls `done` instead
+    VerbCall,            // T - payload crossing to the JS thread
+    (),                  // Return - the host callback returns void; it calls `done` instead
     (JsRequest, DoneFn), // CallJsBackArgs
     Status,
-    false, // CalleeHandled = false: we surface driver errors via `done(err, …)`
+    false, // CalleeHandled = false: we surface driver errors via `done(err, ...)`
 >;
 
 /// A [`VerbDispatch`] that fires the host-driver `ThreadsafeFunction` and parks on a
@@ -342,8 +342,8 @@ impl VerbDispatch for TsfnDispatch {
             });
         }
         // Park the (single-threaded) engine future on the oneshot the `done`
-        // callback fires from the JS thread. Awaiting a `oneshot::Receiver` — NEVER
-        // a JS Promise — keeps the reactor-less block_on sufficient.
+        // callback fires from the JS thread. Awaiting a `oneshot::Receiver` - NEVER
+        // a JS Promise - keeps the reactor-less block_on sufficient.
         rx.await.unwrap_or_else(|_| {
             Err(JsError {
                 message: "host driver dropped the `done` callback without replying".to_string(),
@@ -388,7 +388,7 @@ fn build_host_dispatch(host_driver: HostDriverFn) -> Result<TsfnDispatch> {
                         }),
                     };
                     if let Some(tx) = sender_cell.borrow_mut().take() {
-                        // Fire the oneshot — this is the cross-thread Waker::wake
+                        // Fire the oneshot - this is the cross-thread Waker::wake
                         // that unparks the engine worker's block_on. A
                         // dropped receiver (engine gone) is not an error here.
                         let _ = tx.send(outcome);
@@ -398,7 +398,7 @@ fn build_host_dispatch(host_driver: HostDriverFn) -> Result<TsfnDispatch> {
             )?;
             // Detach `done`'s borrow of the per-call `Env` so it satisfies the
             // `'static` `CallJsBackArgs` bound (the underlying napi_value outlives
-            // the call — it is passed to the host driver).
+            // the call - it is passed to the host driver).
             let done = detach_function::<(Option<JsError>, Option<JsReply>), ()>(env, done_local)?;
 
             Ok((request, done))
@@ -408,7 +408,7 @@ fn build_host_dispatch(host_driver: HostDriverFn) -> Result<TsfnDispatch> {
 
 /// Detach a `Function<'_>`'s borrow of a per-call `Env` into a `Function<'static>`
 /// via a raw `napi_value` round-trip. Sound because the `napi_value` outlives the
-/// native call boundary (it is handed to JS / stored in the TSFN payload) — the same
+/// native call boundary (it is handed to JS / stored in the TSFN payload) - the same
 /// round-trip napi's own return codegen performs.
 fn detach_function<Args, Ret>(
     env: Env,
@@ -426,13 +426,13 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Async, host-driven entrypoints — the ONE generic driver.
+// Async, host-driven entrypoints - the ONE generic driver.
 // ---------------------------------------------------------------------------
 
 /// Detach the borrow of a `create_deferred` promise `Object<'_>` (which borrows the
 /// by-value `Env` local) so it can be returned from a `#[napi]` fn. The underlying
 /// `napi_value` outlives the native call (it is handed to JS), so re-wrapping it as
-/// an owned `Object<'static>` via the raw round-trip is sound — it is the same
+/// an owned `Object<'static>` via the raw round-trip is sound - it is the same
 /// `napi_value` napi's own return codegen would forward.
 fn detach_promise(env: Env, promise: Object<'_>) -> Result<Object<'static>> {
     let raw = unsafe { <Object as ToNapiValue>::to_napi_value(env.raw(), promise)? };
@@ -440,11 +440,11 @@ fn detach_promise(env: Env, promise: Object<'_>) -> Result<Object<'static>> {
     Ok(detached)
 }
 
-/// The ONE generic host-verb driver — the single home of the
-/// build-dispatch → create-deferred → spawn-engine → resolve/reject plumbing every
+/// The ONE generic host-verb driver - the single home of the
+/// build-dispatch -> create-deferred -> spawn-engine -> resolve/reject plumbing every
 /// async verb shares.
 ///
-/// - `T` is the verb's TYPED reply (`ApplyReply`/`StatusReply`/`HistoryReply`) — it
+/// - `T` is the verb's TYPED reply (`ApplyReply`/`StatusReply`/`HistoryReply`) - it
 ///   crosses to JS via `deferred.resolve`, so it must be `ToNapiValue + Send`.
 /// - `engine` runs on the worker thread; it is handed the host [`NapiHostSession`]
 ///   and returns `Result<T, String>` (the projected typed reply, or an engine-error
@@ -505,7 +505,7 @@ where
 // data and lives in `crate::verbs`.
 // ---------------------------------------------------------------------------
 
-/// The wire spelling of a [`HistoryKind`] — the single home of the mapping (was a
+/// The wire spelling of a [`HistoryKind`] - the single home of the mapping (was a
 /// closure-local `match` in the `history` entrypoint).
 const fn history_kind_str(kind: HistoryKind) -> &'static str {
     match kind {
@@ -536,13 +536,13 @@ fn history_reply(events: &[HistoryEvent]) -> HistoryReply {
 }
 
 // ---------------------------------------------------------------------------
-// The typed verbs — each is a thin `run_verb` closure over the engine.
+// The typed verbs - each is a thin `run_verb` closure over the engine.
 // ---------------------------------------------------------------------------
 
-/// `applyIr` — the HOST-AUTHORING apply entry: take a pure-JS IR envelope
+/// `applyIr` - the HOST-AUTHORING apply entry: take a pure-JS IR envelope
 /// ENVELOPE (`{ ir_version, name, ops }`) as a typed [`ApplyRequest`], run the
 /// fail-closed LOAD GATE + LOWER **in Rust** (stamping `owner_app` + folding the
-/// authoritative `Checksum::of_ir` — the checksum is NEVER computed in JS), then
+/// authoritative `Checksum::of_ir` - the checksum is NEVER computed in JS), then
 /// drive the complete ordered plan over the host driver. The envelope must NOT carry
 /// `owner_app`; it is stamped from `req.owner_app` (provenance).
 ///
@@ -655,7 +655,7 @@ pub fn apply_ir(
     })
 }
 
-/// `applyIrSqlite` — deploy an ordered migration-IR sequence through the bundled
+/// `applyIrSqlite` - deploy an ordered migration-IR sequence through the bundled
 /// in-process SQLite backend. There is no host-driver callback: the hardened app
 /// and journal connections are opened on the engine worker thread, and the same
 /// high-level library deploy loop used by Rust callers owns lowering, idempotent
@@ -1170,7 +1170,7 @@ pub fn status_ir_sqlite(
     })
 }
 
-/// `status` — the generic `ops::status::status` over the host driver.
+/// `status` - the generic `ops::status::status` over the host driver.
 /// Migrations cross as a typed `Vec<JsonValue>` (each a `Migration`). Resolves to a
 /// typed [`StatusReply`](crate::wire::StatusReply).
 #[napi(ts_return_type = "Promise<StatusReply>", catch_unwind)]
@@ -1214,7 +1214,7 @@ pub fn status(
     })
 }
 
-/// `history` — the generic `ops::status::history` over the host driver.
+/// `history` - the generic `ops::status::history` over the host driver.
 /// Resolves to a typed [`HistoryReply`].
 #[napi(ts_return_type = "Promise<HistoryReply>", catch_unwind)]
 pub fn history(
@@ -1238,7 +1238,7 @@ pub fn history(
         // Through the backend, like every other verb in this file. The old call
         // handed `ops::status::history` a raw session plus a `POSTGRES` dialect
         // argument that the function then ignored in favour of PostgreSQL's journal
-        // module — naming the dialect and resolving it were two different things.
+        // module - naming the dialect and resolving it were two different things.
         let backend = zero_migrate_postgres::PostgresBackend::new_generic(&session);
         zero_migrate::ops::status::history_via_backend(&backend, &cfg)
             .await
@@ -1251,7 +1251,7 @@ pub fn history(
 /// DDL, attributed to the statement that raised each one.
 ///
 /// F650. The engine already computed these and threw them away: `analyze`
-/// produces an ACCESS EXCLUSIVE warning for `ALTER TABLE … ADD CONSTRAINT …
+/// produces an ACCESS EXCLUSIVE warning for `ALTER TABLE ... ADD CONSTRAINT ...
 /// UNIQUE`, the declarative differ exposes them, and no CLI verb ever read one.
 /// An operator adding a unique column to a populated table took a table-wide
 /// lock with nothing anywhere telling them it was coming.

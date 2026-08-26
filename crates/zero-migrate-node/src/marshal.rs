@@ -1,14 +1,14 @@
-//! napi ⇄ `zero_migrate` driver-type marshaling.
+//! napi <-> `zero_migrate` driver-type marshaling.
 //!
 //! The host driver (`pg`/`mysql2` in JS) speaks JS cells; the engine speaks the
 //! driver-neutral [`Bind`]/[`Value`]/[`Row`]/[`DbError`] types. This module is the
 //! ONLY place those two representations meet. The DTOs the fold operates over
 //! ([`JsCell`]/[`JsRow`]/[`JsReply`]/[`JsError`]/[`JsRequest`]) live in
-//! [`crate::wire`] — the single source of truth for every N-API boundary type — and
+//! [`crate::wire`] - the single source of truth for every N-API boundary type - and
 //! are re-exported here for the fold + the mock-apply test.
 //!
 //! Value union (verified exhaustively): `Null | Text | Int | Bool | TextArray`.
-//! Ints cross as JS strings when they exceed the safe-integer domain? — NO: the
+//! Ints cross as JS strings when they exceed the safe-integer domain? - NO: the
 //! engine's int domain is `i64`, but the ONLY ints the seam reads are small
 //! catalog/count values (`character_maximum_length`, `relkind`-as-char, row
 //! counts). We carry `Int` as an `f64` on the JS side (a JS `number`) for the
@@ -22,14 +22,14 @@ use zero_migrate::driver::{Bind, DbError, Row, Value};
 pub use crate::wire::{JsCell, JsError, JsReply, JsRequest, JsRow};
 
 // ---------------------------------------------------------------------------
-// Conversions — the neutral ↔ JS-cell fold. Pure functions, no napi types, so
+// Conversions - the neutral <-> JS-cell fold. Pure functions, no napi types, so
 // this whole module compiles WITHOUT the `napi` feature and the mock-apply
 // integration test exercises the folds directly.
 // ---------------------------------------------------------------------------
 
-/// `Bind → JsCell` (Rust → JS bind fold). `Int→int`, `Text→text`,
-/// `Bool→bool`, `Null→null`, `Decimal→text` (PG infers the numeric target from
-/// context — the same fold the `MySQL` `bind_to_json` proves).
+/// `Bind -> JsCell` (Rust -> JS bind fold). `Int->int`, `Text->text`,
+/// `Bool->bool`, `Null->null`, `Decimal->text` (PG infers the numeric target from
+/// context - the same fold the `MySQL` `bind_to_json` proves).
 #[must_use]
 pub fn bind_to_cell(bind: &Bind) -> JsCell {
     match bind {
@@ -42,13 +42,13 @@ pub fn bind_to_cell(bind: &Bind) -> JsCell {
         Bind::Text(s) => cell_text(s.clone()),
         // `Bind` is `#[non_exhaustive]` (it covers the closed IR value universe; a
         // future variant would be added engine-side). Fold any unknown bind to a
-        // JSON null rather than fail — the recorder never emits a variant the
+        // JSON null rather than fail - the recorder never emits a variant the
         // engine's IR does not define, so this arm is unreachable in practice.
         _ => cell_null(),
     }
 }
 
-/// `JsCell → Value` (JS → Rust return fold). The `int`/`intStr` split:
+/// `JsCell -> Value` (JS -> Rust return fold). The `int`/`intStr` split:
 /// `intStr` is preferred (exact int8/numeric), falling back to the `f64` `int`
 /// narrowed to `i64`.
 ///
@@ -93,7 +93,7 @@ pub fn cell_to_value(cell: &JsCell) -> Result<Value, String> {
     }
 }
 
-/// `JsRow → Row`.
+/// `JsRow -> Row`.
 ///
 /// # Errors
 /// Returns a message if any cell is malformed or columns/cells length-mismatch.
@@ -113,7 +113,7 @@ pub fn row_to_seam(row: &JsRow) -> Result<Row, String> {
     Ok(Row::new(row.columns.clone(), values))
 }
 
-/// `JsError → DbError`.
+/// `JsError -> DbError`.
 #[must_use]
 pub fn js_error_to_seam(e: &JsError) -> DbError {
     DbError {

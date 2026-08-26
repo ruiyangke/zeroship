@@ -1,6 +1,6 @@
 //! Behavioral integration test: drive ONE real
 //! `executor::apply` through the addon's [`NapiHostSession`] over a MOCK
-//! [`VerbDispatch`] that answers with canned `driver::Row`s — NO Node host, NO DB.
+//! [`VerbDispatch`] that answers with canned `driver::Row`s - NO Node host, NO DB.
 //!
 //! This is the addon's analogue of the in-crate `RecordingSession` proof
 //! (`crates/zero-migrate-postgres/src/backend/mod.rs`), but exercised through
@@ -8,22 +8,22 @@
 //!
 //! 1. `executor::apply::<PostgresBackend<NapiHostSession<MockDispatch>>>`
 //!    monomorphizes and runs the whole DDL + lock + journal flow generically over
-//!    the host bridge (the convergence point) — a real behavioral assertion, not
+//!    the host bridge (the convergence point) - a real behavioral assertion, not
 //!    just "no error". The backend wrapper is explicit at the call site because
 //!    `executor::apply` takes a `MigrationBackend`; it used to take the session and
 //!    build the PostgreSQL backend internally, which is the vendor choice that no
 //!    longer lives in the executor;
 //! 2. the recorded verb sequence contains the expected structural landmarks
-//!    (advisory lock acquire → confinement SET → the migration's `up` DDL →
-//!    journal write-back → advisory unlock), in order;
-//! 3. the one-in-flight guard never trips across the whole apply — proving
+//!    (advisory lock acquire -> confinement SET -> the migration's `up` DDL ->
+//!    journal write-back -> advisory unlock), in order;
+//! 3. the one-in-flight guard never trips across the whole apply - proving
 //!    the engine is strictly one-verb-at-a-time over a pinned host connection;
 //! 4. the reactor-less `futures::executor::block_on` drives the whole engine future
 //!    to completion when every I/O leaf is answered inline (the executor).
 //!
 //! The mock answers the journal net-state read with an EMPTY rowset (nothing
 //! applied yet), so the supplied migration is pending and IS applied; its version
-//! then appears in the `ApplyOutcome.applied` list — the journal outcome assertion.
+//! then appears in the `ApplyOutcome.applied` list - the journal outcome assertion.
 
 mod support;
 
@@ -44,7 +44,7 @@ use zero_migrate_node::session::{NapiHostSession, VerbDispatch, VerbReply};
 
 /// A recording mock host driver: logs the `{kind, sql}` of every verb and answers
 /// read verbs with canned rows routed by SQL shape. This stands in for the JS
-/// host `pg` driver — the addon's `TsfnDispatch` fires the real `pg` over a TSFN;
+/// host `pg` driver - the addon's `TsfnDispatch` fires the real `pg` over a TSFN;
 /// this mock answers inline so the whole apply runs without a Node host or DB.
 struct MockDispatch {
     log: RefCell<Vec<String>>,
@@ -59,9 +59,9 @@ impl MockDispatch {
 
     /// Route a read to canned rows by SQL shape. ONLY the journal net-state read
     /// (recognisable by the `union_all` CTE + the `schema_migrations_inflight` UNION
-    /// leg) gets rows — and we return NONE (nothing applied yet), so the supplied
+    /// leg) gets rows - and we return NONE (nothing applied yet), so the supplied
     /// migration is pending and gets applied. Every other read (introspection,
-    /// squash, drift) gets an empty rowset — a valid empty decode.
+    /// squash, drift) gets an empty rowset - a valid empty decode.
     fn rows_for(&self, sql: &str) -> Vec<JsRow> {
         if sql.contains("current_setting('statement_timeout')") {
             return vec![JsRow {
@@ -367,7 +367,7 @@ fn the_recorded_verb_sequence_has_the_expected_landmarks_in_order() {
         session.into_dispatch().log.into_inner()
     });
 
-    // Structural landmarks — the exact SQL the executor emits, in order:
+    // Structural landmarks - the exact SQL the executor emits, in order:
     let idx = |needle: &str| {
         log.iter()
             .position(|s| s.contains(needle))

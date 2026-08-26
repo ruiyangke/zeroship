@@ -4,14 +4,14 @@
 //!
 //! ## Why the addon lowers (not the facade)
 //! The pure-JS host recorder can only produce the dialect-neutral IR op envelope. The
-//! ops→SQL LOWER (`IrAuthor::load_and_lower`) is a Rust-only engine step (it routes
+//! ops->SQL LOWER (`IrAuthor::load_and_lower`) is a Rust-only engine step (it routes
 //! every op through the shared snapshot-builder + DDL emitter, `render/lower.rs`). So
 //! the facade hands the envelope + provenance here; this module runs the SAME
 //! fail-closed LOAD GATE + LOWER the IR envelope deploy path runs
 //! (`IrAuthor::new(schema, app, dialect, effective).load_and_lower(bytes, app, &registry, &live,
 //! None)`), and the resulting `Migration.checksum` is `Checksum::of_ir` folded by
 //! Rust over the canonical op list + the server-stamped `owner_app`. The JS side emits
-//! ops; Rust owns the checksum — exactly the invariant the pure-JS recorder
+//! ops; Rust owns the checksum - exactly the invariant the pure-JS recorder
 //! (`packages/zero-migrate/src/internal/recorder.ts`) preserves.
 //!
 //! ## Live catalog input
@@ -35,7 +35,7 @@ use zero_migrate::{
 use zero_migrate_mysql::DIALECT as MYSQL;
 use zero_migrate_postgres::DIALECT as POSTGRES;
 
-/// Map the wire dialect spelling to its open [`DialectId`]. Unknown → `Err`.
+/// Map the wire dialect spelling to its open [`DialectId`]. Unknown -> `Err`.
 fn parse_sql_dialect(s: &str) -> Result<DialectId, String> {
     crate::verbs::preview_dialect(s)
 }
@@ -164,14 +164,14 @@ pub(crate) fn require_applied_prefix(
 /// complete guarded artifact. Its [`AppliedPlan`](zero_migrate::AppliedPlan) retains
 /// every ordered `Ddl`, `Dml`, `Backfill`, and `OnlineRename` step.
 ///
-/// - `envelope_json` — the pure-JS IR envelope bytes (`{ ir_version, name,
+/// - `envelope_json` - the pure-JS IR envelope bytes (`{ ir_version, name,
 ///   ops }`). The envelope MUST NOT carry `owner_app` (a provenance field the
 ///   builder can't be trusted to set); it is stamped from `owner_app` here.
-/// - `owner_app` — the deploying app id (`app_…`); the ownership check + the
+/// - `owner_app` - the deploying app id (`app_...`); the ownership check + the
 ///   `owner_app` stamped onto every emitted `Migration` + folded into its checksum.
-/// - `project_schema` — the confined project schema the lower pins ops to.
-/// - `dialect` — `"postgres" | "sqlite" | "mysql"`.
-/// - `registry_json` — the project's `{ "table": "owner_app", … }` map (drives the
+/// - `project_schema` - the confined project schema the lower pins ops to.
+/// - `dialect` - `"postgres" | "sqlite" | "mysql"`.
+/// - `registry_json` - the project's `{ "table": "owner_app", ... }` map (drives the
 ///   ownership check); an empty object `{}` on a fresh single-app project.
 /// - `charter_layers` - the **policy input**: ordered charter documents (TOML)
 ///   that drive table-shape injection. The first document is the root bound and
@@ -183,7 +183,7 @@ pub(crate) fn require_applied_prefix(
 /// A JSON `Err(message)` on: an unknown dialect, a malformed registry, a malformed
 /// policy charter document, the load gate refusing the artifact (malformed / future
 /// `ir_version` / structural reject / ownership violation / checksum-hint mismatch),
-/// or a lower failure — never a panic.
+/// or a lower failure - never a panic.
 pub fn lower_envelope_to_plan(
     envelope_json: &str,
     owner_app: &str,
@@ -248,7 +248,7 @@ fn lower_envelope_to_plan_with_live_and_resolved_ir(
     // `EffectivePolicy`'s `injects_for`), NOT by the
     // JS DSL. The engine hardcodes no charter: the host passes its explicitly authored
     // charter. The native IR envelope on disk is post-fold (the recorder folds before
-    // writing); the host path folds here so the addon lowers the SAME resolved shape —
+    // writing); the host path folds here so the addon lowers the SAME resolved shape -
     // otherwise the table-shape guard rejects a createTable missing policy-owned
     // columns (TABLE_SHAPE_POLICY). This is a pure structural resolve; the JS side never
     // sees those injected columns.
@@ -271,14 +271,14 @@ fn lower_envelope_to_plan_with_live_and_resolved_ir(
         &effective,
     );
 
-    // Use the GUARDED lower — the SAME entry the IR envelope deploy path uses
+    // Use the GUARDED lower - the SAME entry the IR envelope deploy path uses
     // (`load_and_lower_guarded` in `render/lower.rs`). This matters for JOURNAL
     // IDENTITY: `load_and_lower_guarded` assembles an `AppliedPlan` and stamps the
     // dialect-neutral `authoritative_ir_checksum` (the `Checksum::of_ir` ANCHOR)
     // onto EVERY DDL step's `Migration.checksum`. The non-guarded `load_and_lower`
-    // → `lower()` skips `assemble_plan`, so its steps carry per-step checksums
-    // instead of the shared anchor — which diverges from the reference journal
-    // (the DB-backed oracle caught exactly this). Guarded here ⇒ the host journal's
+    // -> `lower()` skips `assemble_plan`, so its steps carry per-step checksums
+    // instead of the shared anchor - which diverges from the reference journal
+    // (the DB-backed oracle caught exactly this). Guarded here => the host journal's
     // checksum column is byte-identical to the reference path's.
     let guard_cfg = GuardConfig::from_policy(effective, dialect);
     let artifact = author
@@ -3173,7 +3173,7 @@ scope = "all"
                 );
             }
             Err(msg) => {
-                // Fail-closed is acceptable here (op-schema mismatch) — the load gate
+                // Fail-closed is acceptable here (op-schema mismatch) - the load gate
                 // never panics. The DB oracle uses a build-verified envelope.
                 assert!(!msg.is_empty());
             }

@@ -9,11 +9,11 @@
 //! # Why this is a module and not two halves in two places
 //!
 //! The inbound half used to live in [`crate::bridge`], which is `napi`-gated. That was
-//! right while the conversion was inbound-only — nothing but the N-API entrypoint
+//! right while the conversion was inbound-only - nothing but the N-API entrypoint
 //! needed it. It stops being right the moment an EXPORT exists, for a reason about
 //! measurement rather than tidiness: the only oracle that can catch a facet the wire
 //! drops is `engine -> dto -> engine`, and a test that cannot see
-//! [`crate::descriptors::field_dto_to_engine`] would have to re-implement it — at which
+//! [`crate::descriptors::field_dto_to_engine`] would have to re-implement it - at which
 //! point the test measures its own copy and the addon's real conversion stays
 //! unmeasured. (The ABSOLUTE path is load-bearing: a `//!` block resolves in the
 //! PARENT module's scope, so a bare `[`field_dto_to_engine`]` here does not resolve to
@@ -28,13 +28,13 @@
 //! `tests/collection_export_round_trip.rs` pins `engine -> dto -> engine` as the
 //! IDENTITY over a folded corpus. That is a claim about the WIRE: every facet the fold
 //! recovered survives the crossing. It is NOT a claim that re-importing the export
-//! reproduces the original schema — the descriptor-to-ops producer has its own
-//! vocabulary and every facet outside it is still dropped there — and it is NOT a
+//! reproduces the original schema - the descriptor-to-ops producer has its own
+//! vocabulary and every facet outside it is still dropped there - and it is NOT a
 //! claim that the exported values are CORRECT, only that they are preserved.
 //!
 //! The `VARCHAR(n)` width used to be the standing example of that gap:
 //! `token_to_col_type` mapped every `"string"` to `ColType::Text`, so a width crossed
-//! this wire intact and died one layer down. It no longer does — the producer reads
+//! this wire intact and died one layer down. It no longer does - the producer reads
 //! `max_length` to choose between `ColType::String { length }` and `ColType::Text`,
 //! and `zero-migrate/tests/fold_live/pg_bounded_string_producer_live.rs` is the live
 //! PostgreSQL oracle for the difference that made.
@@ -46,7 +46,7 @@ use crate::wire::{
 };
 
 // ---------------------------------------------------------------------------
-// INBOUND — boundary DTO to engine descriptor.
+// INBOUND - boundary DTO to engine descriptor.
 // ---------------------------------------------------------------------------
 
 /// Convert a boundary [`CollectionDescriptorDto`] into the engine's declarative
@@ -123,10 +123,10 @@ pub fn field_dto_to_engine(
         deferrable: dto.deferrable,
         // NOT on the wire, and unlike `unbounded_text` this one is not a derivation
         // but a dead end: no `ColType` carries a literal, so the fold never recovers
-        // one, and the producer refuses the `"literal"` token outright — a wire slot
+        // one, and the producer refuses the `"literal"` token outright - a wire slot
         // for it would be surface neither `genArtifacts` source can populate. Both
         // halves of that are measured by
-        // `tests/collection_export_round_trip.rs::a_literal_field_is_unreachable_…`,
+        // `tests/collection_export_round_trip.rs::a_literal_field_is_unreachable_...`,
         // which turns red if either stops holding.
         literal_value: None,
         default: dto.default,
@@ -182,7 +182,7 @@ fn runtime_options_dto_to_engine(
 }
 
 // ---------------------------------------------------------------------------
-// OUTBOUND — engine descriptor to boundary DTO.
+// OUTBOUND - engine descriptor to boundary DTO.
 // ---------------------------------------------------------------------------
 
 /// Project an engine `CollectionDescriptor` onto the boundary DTO for export.
@@ -229,7 +229,7 @@ pub fn descriptor_to_dto(descriptor: &CollectionDescriptor) -> CollectionDescrip
 ///
 /// The `Option<bool>` slots are emitted EXPLICITLY (`Some(false)`, not `None`) where
 /// the engine holds a plain `bool`. Collapsing a false to absent would be lossless for
-/// the inbound direction — which reads absent as false — but an export is read by a
+/// the inbound direction - which reads absent as false - but an export is read by a
 /// consumer that has no such rule, and `required: undefined` invites the reading
 /// "unknown" for a column the fold knows is nullable.
 #[must_use]

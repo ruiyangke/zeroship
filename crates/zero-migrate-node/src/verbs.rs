@@ -53,7 +53,7 @@ impl ApplyDialect {
     ///
     /// A spelling must first name a REGISTERED backend; only then is it asked
     /// whether it has a host-driver path. `"sqlite"` names a registered backend
-    /// and is still refused, because it runs in-process via rusqlite — that is a
+    /// and is still refused, because it runs in-process via rusqlite - that is a
     /// posture, not an unknown dialect, and the two get different diagnostics.
     pub fn parse(s: &str) -> std::result::Result<Self, String> {
         let registry = shipping_backends();
@@ -524,7 +524,7 @@ struct RollbackSet {
     /// Logical PLAN version to the journaled STEP version it lowered to, for the
     /// single-step plans above.
     ///
-    /// The two are different `mig_…` values for the same migration, and `status`
+    /// The two are different `mig_...` values for the same migration, and `status`
     /// reports the plan one while the journal, `apply` and `rollback` speak the
     /// step one. Without this map every version `status` listed as applied was
     /// rejected by `--to` as "not currently applied", which made the obvious
@@ -581,7 +581,7 @@ fn rollback_migration_set(
         //
         // On MySQL an interrupted unwind leaves a marker in
         // `schema_migrations_rollback_inflight`, and `apply` deliberately does NOT
-        // consult that marker — it sees the migration still journaled `applied`
+        // consult that marker - it sees the migration still journaled `applied`
         // and skips it. That is correct ONLY because everything reachable here
         // lowers to exactly one journaled step, and a single DDL statement either
         // ran or did not: there is no half-reverted shape for `apply` to mistake
@@ -837,8 +837,8 @@ pub async fn rollback_with_locked_backend<B: MigrationBackend>(
 /// to a per-step identity it can no longer match.
 ///
 /// The second message REPLACES the engine's rather than appending to it. It used to
-/// append, which produced "migration mig_… is applied but absent from the supplied
-/// set … That version is `<name>`" - a sentence that denies the migration was
+/// append, which produced "migration mig_... is applied but absent from the supplied
+/// set ... That version is `<name>`" - a sentence that denies the migration was
 /// supplied and then names it from the supplied set two clauses later. An operator
 /// reading the first half goes looking for a migration file that is not missing.
 fn describe_rollback_error(error: &zero_migrate::RollbackError, set: &RollbackSet) -> String {

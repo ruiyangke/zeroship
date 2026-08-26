@@ -1,10 +1,10 @@
 //! Sync, DB-free API surface: load + verify an IR document.
 //!
-//! These functions run inline on the napi call thread — they touch NO database, so
+//! These functions run inline on the napi call thread - they touch NO database, so
 //! there is no host bridge and no worker thread. They build the typed
 //! [`LoadVerifyReply`] (the single source-of-truth DTO in [`crate::wire`]) directly;
 //! `bridge.rs` returns it as the `loadVerify` `#[napi]` entrypoint (no JSON string).
-//! The core of this module is pure Rust (no napi types) — the fold + the tests
+//! The core of this module is pure Rust (no napi types) - the fold + the tests
 //! compile without the Node ABI.
 //!
 //! The load-verify path is `zero_migrate::model::load::load_ir_document`, which
@@ -52,18 +52,18 @@ pub fn build_info() -> BuildInfo {
     }
 }
 
-/// Map the wire dialect spelling to its open [`DialectId`]. Unknown → `Err`.
+/// Map the wire dialect spelling to its open [`DialectId`]. Unknown -> `Err`.
 fn parse_dialect(s: &str) -> Result<DialectId, String> {
     crate::verbs::preview_dialect(s)
 }
 
 /// Load + verify an IR document (the sync, DB-free deploy gate).
 ///
-/// - `envelope_json` — the IR envelope document bytes (UTF-8).
-/// - `deploying_app` — the app id claiming the deploy (ownership is checked against
+/// - `envelope_json` - the IR envelope document bytes (UTF-8).
+/// - `deploying_app` - the app id claiming the deploy (ownership is checked against
 ///   `registry`, not the artifact's self-claim).
-/// - `dialect` — `"postgres" | "sqlite" | "mysql"`.
-/// - `registry` — the already-parsed `{ "owner_app": "project_id", ... }` map (it
+/// - `dialect` - `"postgres" | "sqlite" | "mysql"`.
+/// - `registry` - the already-parsed `{ "owner_app": "project_id", ... }` map (it
 ///   crosses the napi boundary typed as a `Record<string,string>`, not a JSON
 ///   string): the project registry ownership is enforced against.
 /// - `project_schema` - the single schema this creator migration may target.
@@ -132,7 +132,7 @@ fn schema_emit_policy(charter_layers: &[&str]) -> Result<EffectivePolicy, String
 /// `project_schema` defaults to [`DEFAULT_PROJECT_SCHEMA`] when `None`.
 ///
 /// # System-shape resolution (mirrors `lower.rs`)
-/// The pure-JS recorder emits RAW, author-only `createTable` ops — it drains ONLY
+/// The pure-JS recorder emits RAW, author-only `createTable` ops - it drains ONLY
 /// the author-declared columns; every policy-managed column, primary key, and
 /// index is injected by the shared [`render_schema_export`] tail under the
 /// caller-supplied **confined policy charter**, not by the JS DSL (the same policy
@@ -191,7 +191,7 @@ pub fn gen_artifacts_from_envelopes(
 
 /// Render the two schema artifacts from the MANUAL source: a declared
 /// `CollectionDescriptor` set. The descriptors are turned into `createTable` ops via
-/// the producer — which injects the policy-selected shape under the caller-supplied
+/// the producer - which injects the policy-selected shape under the caller-supplied
 /// `charter_layers` stack, then folded through the SAME renderer tail, so the
 /// manual output is byte-identical to the generated output for an equivalent schema
 /// (both driven by the SAME charter).
@@ -261,8 +261,8 @@ fn gen_ok(
         // The RESOLVED target, read back off the value the fold ran under rather than
         // echoed from the caller's string. The export is only interpretable against
         // the registered identity that was actually used. Named directly by the open
-        // dialect identity — the
-        // engine's canonical name, and what a fourth backend would be registered under —
+        // dialect identity - the
+        // engine's canonical name, and what a fourth backend would be registered under -
         // rather than a local three-arm match, which would be a second naming authority
         // that nothing keeps in step with the first.
         dialect: Some(dialect.as_str().to_string()),
@@ -396,7 +396,7 @@ mod tests {
     #[test]
     fn gen_artifacts_from_envelopes_renders_both_files() {
         // A minimal generated source: one create-table envelope carrying ONLY the
-        // author column — exactly the RAW shape the pure-JS recorder emits (no system
+        // author column - exactly the RAW shape the pure-JS recorder emits (no system
         // columns). `gen_artifacts_from_envelopes` resolves the confined system shape
         // before folding.
         let envelope = serde_json::json!({
@@ -432,7 +432,7 @@ mod tests {
     fn gen_artifacts_from_raw_author_only_envelope_injects_system_fields_and_indexes() {
         // WALL 1 regression: the pure-JS recorder emits RAW author-only createTable ops
         // (NO system columns). `gen_artifacts_from_envelopes` MUST resolve the confined
-        // policy shape before folding — otherwise the generated descriptor is
+        // policy shape before folding - otherwise the generated descriptor is
         // missing it entirely. Pre-fix this path fed the raw ops straight to
         // `render_artifacts`, so the injected fields and indexes disappeared. Model
         // the envelope EXACTLY as the
@@ -530,7 +530,7 @@ mod tests {
     #[test]
     fn a_populated_registry_is_accepted_typed_not_a_json_string() {
         // The registry crosses the boundary TYPED (a `Record<string,string>`), so a
-        // populated map is a plain `HashMap` — no JSON string, no parse step. A
+        // populated map is a plain `HashMap` - no JSON string, no parse step. A
         // malformed IR envelope still fails closed with a message (never a panic).
         let mut reg = HashMap::new();
         reg.insert("widgets".to_string(), "app_x".to_string());

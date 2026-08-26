@@ -9,8 +9,8 @@
 //! consumer reading the export cannot tell an absent facet from an undeclared one.
 //!
 //! The oracle is therefore a ROUND TRIP rather than a shape assertion. Both directions
-//! are hand-written conversions in [`zero_migrate_node::descriptors`] — the same
-//! functions the addon calls, not test copies of them — so this is a genuine
+//! are hand-written conversions in [`zero_migrate_node::descriptors`] - the same
+//! functions the addon calls, not test copies of them - so this is a genuine
 //! discovery instrument for the wire, not a serde tautology: a serde round trip would
 //! only prove the derive is symmetric with itself, while this compares an INDEPENDENT
 //! outbound projection against an INDEPENDENT inbound one and fails whenever one of
@@ -19,8 +19,8 @@
 //! WHEN THIS WAS WRITTEN IT WAS RED, on four facets, and each is a real export loss
 //! rather than a test artefact: `refColumn`, `refName`, `charLen` and `maxLength` had
 //! no DTO slot at all. They were absent for a reason that was correct while the DTO
-//! was INBOUND-ONLY — `bridge.rs` even documented the width pair as unread by
-//! `gen_types` — and stopped being correct the moment the same type had to carry an
+//! was INBOUND-ONLY - `bridge.rs` even documented the width pair as unread by
+//! `gen_types` - and stopped being correct the moment the same type had to carry an
 //! export outward, because the fold's `ir_column_to_field` populates all four.
 //!
 //! # What this does NOT prove
@@ -32,7 +32,7 @@
 //! * NOT that re-importing the export reproduces the schema. It cannot in general: the
 //!   descriptor-to-ops producer speaks its own vocabulary and drops what falls outside
 //!   it. One facet HAS been carried all the way through and is measured below by
-//!   [`a_varchar_width_survives_the_wire_and_the_producer`] — the `VARCHAR(n)` width,
+//!   [`a_varchar_width_survives_the_wire_and_the_producer`] - the `VARCHAR(n)` width,
 //!   which used to reach `token_to_col_type` and die there. That case is the whole
 //!   extent of the end-to-end claim; nothing here generalises it.
 //! * NOT anything about `env.db.ts`. That artifact is rendered from the richer
@@ -196,7 +196,7 @@ fn seed_descriptors() -> Vec<CollectionDescriptor> {
                 id_prefix: Some("ten".to_string()),
                 ..Default::default()
             },
-            // A genuine unbounded text column — the one facet the wire deliberately
+            // A genuine unbounded text column - the one facet the wire deliberately
             // does not carry, measured on its own below.
             //
             // The token is `"string"`, not `"text"`: the descriptor lexicon has no
@@ -222,7 +222,7 @@ fn seed_descriptors() -> Vec<CollectionDescriptor> {
 
 /// A hand-built typed `createTable` for the facets the DESCRIPTOR producer cannot
 /// express: `ColType::String { length }` (a `VARCHAR(n)` width) and a generated
-/// column. Authored as ops because that is the only source that can reach them —
+/// column. Authored as ops because that is the only source that can reach them -
 /// which is itself the reason a descriptor round trip alone would have measured
 /// neither.
 fn width_and_generated_ops() -> Vec<Op> {
@@ -281,7 +281,7 @@ fn width_and_generated_ops() -> Vec<Op> {
 ///
 /// Postgres-only, and not by preference. The seed set's `min`/`max`/`enum` facets lower
 /// to table-level CHECK constraints, which the fold refuses outside PostgreSQL
-/// (`createTable table-level CHECK is PostgreSQL-only`) — so a corpus carrying them
+/// (`createTable table-level CHECK is PostgreSQL-only`) - so a corpus carrying them
 /// simply cannot be folded under MySQL or SQLite. Discovered by writing the round trip
 /// as a three-dialect loop and watching it refuse; `the_wire_is_dialect_independent`
 /// below carries the portable arm across all three instead of pretending this one does.
@@ -393,7 +393,7 @@ fn facets_present(field: &FieldDescriptor) -> Vec<&'static str> {
 /// without anyone deciding the round trip should carry it.
 ///
 /// The numbers below were measured against the UNCHANGED tree first, on the folded
-/// output rather than on the seeds — `mask`, `generated` and `identity` are asserted
+/// output rather than on the seeds - `mask`, `generated` and `identity` are asserted
 /// separately because the fold synthesises them (an encrypted column gains the
 /// fail-safe `{ full, pii }` auto-mask it was never given) and a census would report
 /// coverage this corpus did not author.
@@ -460,7 +460,7 @@ fn the_corpus_exercises_every_facet_it_claims_to() {
 /// instead of assuming it.
 ///
 /// The comparison is `FieldDescriptor`'s `PartialEq`, which its own definition
-/// reserves for tests ("the differ compares SNAPSHOTS, not descriptors") — this is
+/// reserves for tests ("the differ compares SNAPSHOTS, not descriptors") - this is
 /// that use, and it is why no gate anywhere is built on descriptor equality.
 fn assert_round_trips(label: &str, original: &FieldDescriptor) {
     let mut back = field_dto_to_engine(field_to_dto(original))
@@ -481,13 +481,13 @@ fn every_folded_field_survives_the_export_round_trip() {
     }
 }
 
-/// The COLLECTION level round-trips too — name, owner, indexes and runtime options.
+/// The COLLECTION level round-trips too - name, owner, indexes and runtime options.
 ///
 /// A separate assertion because `assert_round_trips` is per-FIELD and would pass with
 /// every collection-level facet dropped. The strictness token in particular crosses as
 /// a STRING through a hand-written pair of match arms in
 /// [`zero_migrate_node::descriptors`], one per direction, and only one of its three
-/// values is exercised anywhere else — so all three are driven here.
+/// values is exercised anywhere else - so all three are driven here.
 #[test]
 fn a_whole_collection_survives_the_export_round_trip() {
     use zero_migrate::TableStrictness;
@@ -538,7 +538,7 @@ fn a_whole_collection_survives_the_export_round_trip() {
 ///
 /// A weaker claim than the one above and deliberately so: leg selection changes WHICH
 /// COLUMNS EXIST, so there is no dialect-independent schema to compare. What is
-/// dialect-independent is the CROSSING — whatever a dialect's fold recovered must
+/// dialect-independent is the CROSSING - whatever a dialect's fold recovered must
 /// survive it. This runs the portable corpus arm under all three targets and asserts
 /// exactly that.
 #[test]
@@ -644,7 +644,7 @@ fn unbounded_text_is_re_derived_rather_than_carried() {
 /// not that it seemed unimportant: it is UNREACHABLE from both `genArtifacts` sources.
 /// The fold never writes `literal_value` (`ir_column_to_field` leaves it at its
 /// default, and no `ColType` carries a literal), and the producer refuses a `literal`
-/// field outright — so a wire slot for it would be surface no call can populate.
+/// field outright - so a wire slot for it would be surface no call can populate.
 ///
 /// If either half of that changes this test fails, and the slot becomes worth adding.
 #[test]
@@ -691,7 +691,7 @@ fn a_literal_field_is_unreachable_from_both_gen_artifacts_sources() {
 /// and it asserted the opposite of its last line: `token_to_col_type` mapped every
 /// `"string"` token to `ColType::Text` without consulting `max_length`, so re-importing
 /// an exported `VARCHAR(64)` produced an unbounded `TEXT`. It was written as a sighted
-/// pin — "fixing the producer is announced by this test turning red" — and that is
+/// pin - "fixing the producer is announced by this test turning red" - and that is
 /// exactly how it went: the producer now reads the facet, and this file's failure was
 /// the notice.
 ///
@@ -699,7 +699,7 @@ fn a_literal_field_is_unreachable_from_both_gen_artifacts_sources() {
 /// three links in a row: the fold recovers the width, the DTO carries it across, and
 /// re-folding the crossed descriptor gets it back. The consequence of the middle link
 /// having been broken was measured against a live PostgreSQL in
-/// `zero-migrate/tests/fold_live/pg_bounded_string_producer_live.rs` — the server
+/// `zero-migrate/tests/fold_live/pg_bounded_string_producer_live.rs` - the server
 /// stored a 200-character value in a column the author bounded at 64.
 #[test]
 fn a_varchar_width_survives_the_wire_and_the_producer() {
@@ -721,7 +721,7 @@ fn a_varchar_width_survives_the_wire_and_the_producer() {
         .clone();
     assert_eq!(first.max_length, Some(64), "the fold recovers the width");
 
-    // The WIRE keeps it — that is what this change bought.
+    // The WIRE keeps it - that is what this change bought.
     let crossed = field_dto_to_engine(field_to_dto(&first)).expect("the dto converts back");
     assert_eq!(
         crossed.max_length,

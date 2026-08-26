@@ -4,7 +4,7 @@
 //! the TS host imports (no hand-copied interfaces):
 //!
 //! 1. **Driver cell transport** ([`JsCell`]/[`JsRow`]/[`JsReply`]/[`JsError`]/
-//!    [`JsRequest`]) — the neutral `{ kind, sql, binds, textParams }` verb the engine
+//!    [`JsRequest`]) - the neutral `{ kind, sql, binds, textParams }` verb the engine
 //!    hands the host `pg`/`mysql2` driver and the `{ rows, rowCount }` reply it gets
 //!    back. Plain owned data (`String`/`i64`/`Vec`/`bool`), all
 //!    `Send + 'static`, so they ride a `ThreadsafeFunction` call + a `done` callback
@@ -14,7 +14,7 @@
 //!
 //! 2. **Typed verb request/response envelopes** ([`ApplyRequest`]/[`StatusRequest`]/
 //!    [`StatusIrRequest`]/[`HistoryRequest`]/[`ApplyReply`]/[`StatusReply`]/[`HistoryReply`]/
-//!    [`LoadVerifyReply`]) — the strongly-typed shape each `#[napi]` verb TAKES and
+//!    [`LoadVerifyReply`]) - the strongly-typed shape each `#[napi]` verb TAKES and
 //!    RETURNS. The IR `ops` AST and a lowered `Migration` cross as REAL JS
 //!    values (`serde-json` feature, [`JsonValue`]); the exact-integer audit fields
 //!    (`event_seq`) cross as JS `bigint` (napi6 [`BigInt`]). The request envelopes
@@ -22,7 +22,7 @@
 //!    the projected engine result.
 //!
 //! ## The exact-integer story (napi6)
-//! - DB *cell values* keep the [`JsCell`] `int`/`intStr` split — that is the
+//! - DB *cell values* keep the [`JsCell`] `int`/`intStr` split - that is the
 //!   contract for column values (a poisoned global `pg` type-parser must not truncate
 //!   an `int8` below the seam). It is orthogonal to the count/sequence question.
 //! - A driver's affected-/returned-row *count* is an honest [`i64`]: node-pg/mysql2
@@ -53,8 +53,8 @@ use napi::bindgen_prelude::BigInt;
 #[cfg(feature = "napi")]
 use napi_derive::napi;
 
-/// A `serde_json::Value` crossing the boundary as a REAL JS value (object/array/…),
-/// enabled by napi's `serde-json` feature — the IR `ops` AST and a lowered
+/// A `serde_json::Value` crossing the boundary as a REAL JS value (object/array/...),
+/// enabled by napi's `serde-json` feature - the IR `ops` AST and a lowered
 /// `Migration` ride this instead of a re-serialized JSON string.
 ///
 /// The ALIAS is napi-neutral even though the crossing it names is not: it is
@@ -76,7 +76,7 @@ pub type JsonValue = serde_json::Value;
 /// linted clean and died at deploy.
 ///
 /// Whole integers below 2^53 are converted back; anything at or beyond it is left
-/// alone so the engine's own refusal — which names the `{"int64":"…"}` carrier —
+/// alone so the engine's own refusal - which names the `{"int64":"..."}` carrier -
 /// still fires. `f as i64` is exact in that range, and a value like
 /// `9007199254740993` is not representable as `f64` at all, so it never reaches the
 /// conversion.
@@ -112,10 +112,10 @@ pub(crate) fn restore_exact_integers(value: &mut JsonValue) {
 }
 
 // ===========================================================================
-// 1. Driver cell transport DTOs (napi-neutral — the mock test builds them).
+// 1. Driver cell transport DTOs (napi-neutral - the mock test builds them).
 // ===========================================================================
 
-/// The kind tag of a driver-neutral scalar cell — mirrors the engine `Value`'s
+/// The kind tag of a driver-neutral scalar cell - mirrors the engine `Value`'s
 /// variants.
 ///
 /// A `#[napi(object)]` cannot be a Rust enum with data, so a cell crosses as a
@@ -159,7 +159,7 @@ pub struct JsRow {
 pub struct JsReply {
     /// Rows for `query`/`queryOne` (empty for pure DML).
     pub rows: Vec<JsRow>,
-    /// `result.rowCount` — affected/returned rows. An honest [`i64`] (a JS `number`);
+    /// `result.rowCount` - affected/returned rows. An honest [`i64`] (a JS `number`);
     /// `None` when the driver reports no count (e.g. `batch`). A count is an integer,
     /// not a float.
     pub row_count: Option<i64>,
@@ -191,7 +191,7 @@ pub struct JsRequest {
     pub sql: String,
     /// Neutral binds for `execute`/`query`/`queryOne` (as [`JsCell`]s).
     pub binds: Vec<JsCell>,
-    /// Text-format params for `executeTextParams` (`None` element → SQL NULL bind).
+    /// Text-format params for `executeTextParams` (`None` element -> SQL NULL bind).
     pub text_params: Vec<Option<String>>,
 }
 
@@ -206,21 +206,21 @@ pub struct JsRequest {
 /// The typed request for the host-authoring `applyIr` verb.
 ///
 /// The `envelope` (`{ ir_version, name, ops }`) crosses as a REAL JS value
-/// ([`JsonValue`]) — the recorder builds a JS object, no JSON string round-trip. The
-/// envelope MUST NOT carry `owner_app` (it is stamped from `owner_app` here —
+/// ([`JsonValue`]) - the recorder builds a JS object, no JSON string round-trip. The
+/// envelope MUST NOT carry `owner_app` (it is stamped from `owner_app` here -
 /// provenance).
 #[cfg(feature = "napi")]
 #[napi(object)]
 #[derive(Debug, Clone)]
 pub struct ApplyRequest {
-    /// The deploying app id (`app_…`) — stamped as `owner_app` + folded into the
+    /// The deploying app id (`app_...`) - stamped as `owner_app` + folded into the
     /// authoritative `Checksum::of_ir` in Rust.
     pub owner_app: String,
     /// The confined project schema the lower pins ops to.
     pub project_schema: String,
     /// The migrator role to `SET ROLE` under (least-privilege apply). Optional.
     pub migrator_role: Option<String>,
-    /// `"postgres" | "mysql"` — selects the dialect backend (`SQLite` is in-process).
+    /// `"postgres" | "mysql"` - selects the dialect backend (`SQLite` is in-process).
     pub dialect: String,
     /// The project's `{ table: owner_app }` ownership registry. Empty on a
     /// fresh single-app project.
@@ -250,7 +250,7 @@ pub struct ApplyRequest {
 #[napi(object)]
 #[derive(Debug, Clone)]
 pub struct ApplyIrSqliteRequest {
-    /// The deploying app id (`app_…`) stamped onto every lowered migration.
+    /// The deploying app id (`app_...`) stamped onto every lowered migration.
     pub owner_app: String,
     /// The logical project/schema name used by lowering and executor confinement.
     pub project_schema: String,
@@ -475,9 +475,9 @@ pub struct ApplyPendingContractDto {
 
 /// The typed reply for `status` (the projected `MigrationStatus`).
 ///
-/// **The `mig_…` ids below are LOGICAL PLAN ids, and they are a different namespace
+/// **The `mig_...` ids below are LOGICAL PLAN ids, and they are a different namespace
 /// from the journal versions [`ApplyReply::applied`] returns.** Both are spelled
-/// `mig_…`, so a consumer that correlates the two gets no matches and no error.
+/// `mig_...`, so a consumer that correlates the two gets no matches and no error.
 /// Measured on live PostgreSQL: one `createTable` applied through the host path put
 /// `mig_7n42DGM5RSBfCGYlS39M1y` in the journal and returned it from `apply`, while
 /// `status` reported `applied: ["mig_7n42DGM5SrG4j3FrNuIVBe"]` and the same id as
@@ -496,7 +496,7 @@ pub struct StatusReply {
     /// clean project while they refuse is a contradiction the operator has to
     /// resolve with no information, so the versions travel here (F661).
     pub interrupted_unwinds: Vec<String>,
-    /// The highest net-applied LOGICAL PLAN id (`mig_…`), or `None` when nothing is
+    /// The highest net-applied LOGICAL PLAN id (`mig_...`), or `None` when nothing is
     /// applied. NOT the journal version - see the type doc.
     pub current_version: Option<String>,
     /// Net-applied logical plan ids, in order. NOT journal versions - see the type
@@ -632,14 +632,14 @@ pub struct PlanStatusStepDto {
 #[napi(object)]
 #[derive(Debug, Clone)]
 pub struct HistoryEventDto {
-    /// The shared monotonic sequence number — an `int8` audit key, so it crosses as
+    /// The shared monotonic sequence number - an `int8` audit key, so it crosses as
     /// a JS `bigint` (napi6) to survive a large sequence without float rounding.
     pub event_seq: BigInt,
-    /// The migration version (`mig_…`).
+    /// The migration version (`mig_...`).
     pub version: String,
     /// The migration name recorded on the event.
     pub name: String,
-    /// `"applied" | "rolled_back"` — the projected `HistoryKind`.
+    /// `"applied" | "rolled_back"` - the projected `HistoryKind`.
     pub kind: String,
     /// The event timestamp (RFC-3339 / ISO-8601).
     pub at: String,
@@ -659,7 +659,7 @@ pub struct HistoryReply {
 }
 
 // ---------------------------------------------------------------------------
-// `genArtifacts` — the sync, DB-free schema-artifact emitter verb.
+// `genArtifacts` - the sync, DB-free schema-artifact emitter verb.
 // ---------------------------------------------------------------------------
 
 /// The typed reply for `genArtifacts`: the two CO-EMITTED artifact strings.
@@ -705,7 +705,7 @@ pub struct GenArtifactsReply {
     /// answers one narrow question and promises nothing wider.
     pub has_dialectal_ops: Option<bool>,
     /// **The structured export.** The folded schema as TYPED collections, in the same
-    /// `CollectionDescriptorDto` vocabulary the manual source accepts — so a host can
+    /// `CollectionDescriptorDto` vocabulary the manual source accepts - so a host can
     /// render its own artifacts instead of re-parsing `runtime_json` back out of the
     /// string this reply also carries.
     ///
@@ -714,7 +714,7 @@ pub struct GenArtifactsReply {
     ///
     /// ABSENT (`undefined` / `None`) when `ok == false`, for the reason
     /// `has_dialectal_ops` documents: a refused call folded nothing and has no answer.
-    /// A consumer must therefore test for presence rather than for an empty array — a
+    /// A consumer must therefore test for presence rather than for an empty array - a
     /// schema with no collections is a legitimate `[]`, and an older addon that
     /// predates this field is `undefined`, and those two must not read alike.
     ///
@@ -733,13 +733,13 @@ pub struct GenArtifactsReply {
     /// normalises dialect spellings (`preview_dialect` accepts more than one name per
     /// target), so this is the resolved target, not the string that was passed in.
     ///
-    /// ABSENT when `ok == false` — a refusal never reached a fold, and an unknown
+    /// ABSENT when `ok == false` - a refusal never reached a fold, and an unknown
     /// dialect spelling is one of the ways to be refused, so echoing the input there
     /// would report a target that was rejected.
     pub dialect: Option<String>,
 }
 
-/// One field of a collection — the `FieldDescriptor` mirror, in BOTH directions.
+/// One field of a collection - the `FieldDescriptor` mirror, in BOTH directions.
 ///
 /// Mirrors the `@zeroship/db` wire `FieldDef` shape the manual evaluator produces.
 /// The common facets are typed scalars; the rich sub-object facets (`encrypted`,
@@ -750,7 +750,7 @@ pub struct GenArtifactsReply {
 /// while nothing ever CONSTRUCTED one, a slot the producer defaults or ignores is
 /// indistinguishable from a slot nothing needs. Carrying an export outward is what
 /// told `reference_column`, `reference_name`, `char_len` and `max_length` apart from
-/// the facets genuinely absent by design — see
+/// the facets genuinely absent by design - see
 /// `tests/collection_export_round_trip.rs`, which was RED on all four.
 ///
 /// napi-NEUTRAL (`cfg_attr`), like the reply envelopes and for the same reason: it is
@@ -762,12 +762,12 @@ pub struct FieldDescriptorDto {
     /// The field (column) name.
     pub name: String,
     /// The DSL type token (`string` | `number` | `boolean` | `date` |
-    /// `calendarDate` | `json` | `ref` | `bytes` | `id` | `vector` | …).
+    /// `calendarDate` | `json` | `ref` | `bytes` | `id` | `vector` | ...).
     #[cfg_attr(feature = "napi", napi(js_name = "type"))]
     pub ty: String,
-    /// `true` ⇒ `NOT NULL`.
+    /// `true` => `NOT NULL`.
     pub required: Option<bool>,
-    /// `true` ⇒ a unique index over this column.
+    /// `true` => a unique index over this column.
     pub unique: Option<bool>,
     /// For a `ref` field, the referenced collection (FK target table).
     pub references: Option<String>,
@@ -775,7 +775,7 @@ pub struct FieldDescriptorDto {
     /// historical `id` target; a typed migration reference always records it.
     ///
     /// Added when this type stopped being inbound-only. It was absent while the DTO
-    /// only ever fed the producer — which defaults it to `id` — and that absence
+    /// only ever fed the producer - which defaults it to `id` - and that absence
     /// became an export loss the moment the fold, which recovers the REAL target
     /// column from the FK it holds, had to hand its answer outward.
     pub reference_column: Option<String>,
@@ -801,22 +801,22 @@ pub struct FieldDescriptorDto {
     pub enum_values: Option<Vec<JsonValue>>,
     /// A legacy internal `<prefix>_<22 base62 UUIDv7>` platform-ID prefix.
     pub id_prefix: Option<String>,
-    /// A `t.vector(dims, …)` dimensionality.
+    /// A `t.vector(dims, ...)` dimensionality.
     pub vector_dims: Option<i64>,
-    /// `t.char(len)` — the FIXED width of a `CHAR(N)` column.
+    /// `t.char(len)` - the FIXED width of a `CHAR(N)` column.
     pub char_len: Option<i64>,
-    /// `t.string({ length })` — the BOUND on a `VARCHAR(N)` column.
+    /// `t.string({ length })` - the BOUND on a `VARCHAR(N)` column.
     ///
     /// Crosses in BOTH directions, and the inbound half is load-bearing rather than
     /// decorative: `string` is a TWO-type token (`ColType::String { length }` and
     /// `ColType::Text` both spell it), so `token_to_col_type` reads this value to pick
     /// between them. It used to ignore it, and a consumer that exported a
-    /// `VARCHAR(64)` and fed it back as a manual source got an unbounded `TEXT` — a
+    /// `VARCHAR(64)` and fed it back as a manual source got an unbounded `TEXT` - a
     /// column PostgreSQL then stored a 200-character value in
     /// (`zero-migrate/tests/fold_live/pg_bounded_string_producer_live.rs`).
     /// Pinned end to end by `tests/collection_export_round_trip.rs`.
     pub max_length: Option<i64>,
-    /// `t.numeric({ precision, scale })` — total digits of a FIXED-PRECISION decimal,
+    /// `t.numeric({ precision, scale })` - total digits of a FIXED-PRECISION decimal,
     /// with [`Self::scale`] beside it.
     ///
     /// Unlike the three widths above, this pair does not merely PARAMETERISE the type
@@ -827,12 +827,12 @@ pub struct FieldDescriptorDto {
     /// (`token_to_col_type` reads `precision` to pick the `ColType`), exactly as
     /// `max_length` does for the other two-type token, `string`.
     pub precision: Option<i64>,
-    /// `t.numeric({ precision, scale })` — digits after the point. See
+    /// `t.numeric({ precision, scale })` - digits after the point. See
     /// [`Self::precision`].
     pub scale: Option<i64>,
     /// A `t.vector(_, { metric })` distance metric (`cosine`|`l2`|`innerProduct`).
     pub vector_metric: Option<String>,
-    /// `t.string({ caseSensitive: false })` — only `Some(false)` is meaningful.
+    /// `t.string({ caseSensitive: false })` - only `Some(false)` is meaningful.
     pub case_sensitive: Option<bool>,
     /// The `t.encrypted({ mode, keyId, wraps })` sub-object (verbatim).
     pub encrypted: Option<JsonValue>,
@@ -852,7 +852,7 @@ pub struct IndexDescriptorDto {
     pub name: String,
     /// The columns the index covers, in order.
     pub columns: Vec<String>,
-    /// `true` ⇒ a unique index.
+    /// `true` => a unique index.
     pub unique: Option<bool>,
 }
 
@@ -864,12 +864,12 @@ pub struct RuntimeOptionsDto {
     pub soft_delete: Option<bool>,
     /// `schema(...).withVersioning()`.
     pub versioning: Option<bool>,
-    /// `schema(...).strictness(...)` — `"strict"` | `"lenient"` | `"off"`. Default
+    /// `schema(...).strictness(...)` - `"strict"` | `"lenient"` | `"off"`. Default
     /// (absent) is `"strict"`.
     pub strictness: Option<String>,
 }
 
-/// One collection (table) — the `CollectionDescriptor` mirror, in BOTH directions.
+/// One collection (table) - the `CollectionDescriptor` mirror, in BOTH directions.
 ///
 /// INBOUND it is the manual `genArtifacts` source. OUTBOUND it is what
 /// [`GenArtifactsReply::collections`] carries, so a host can read the folded schema as
@@ -880,7 +880,7 @@ pub struct RuntimeOptionsDto {
 pub struct CollectionDescriptorDto {
     /// The collection (table) name.
     pub name: String,
-    /// The declaring app id (`app_…`). The migrate producer stamps ownership from it.
+    /// The declaring app id (`app_...`). The migrate producer stamps ownership from it.
     pub owner_app: String,
     /// The author-declared fields. Columns owned by the active policy are supplied
     /// by the producer's explicit policy-resolution pass.
@@ -891,7 +891,7 @@ pub struct CollectionDescriptorDto {
     pub runtime_options: Option<RuntimeOptionsDto>,
 }
 
-/// The tagged SOURCE for `genArtifacts` — EITHER IR envelopes (the generated
+/// The tagged SOURCE for `genArtifacts` - EITHER IR envelopes (the generated
 /// source) OR a declared descriptor set (the manual source). A `#[napi(object)]`
 /// cannot be a Rust enum with data, so the two arms are optional fields; exactly one
 /// must be populated. Both arms funnel through the SAME Rust renderer, so their
@@ -1032,7 +1032,7 @@ pub struct AdvisoryDto {
     pub migration: String,
     /// The stable analyzer rule id.
     pub rule: String,
-    /// `"notice" | "warning" | ...` — the analyzer's severity, lowercased.
+    /// `"notice" | "warning" | ...` - the analyzer's severity, lowercased.
     pub severity: String,
     /// What the operational risk is.
     pub message: String,
