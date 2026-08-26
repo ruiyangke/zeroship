@@ -233,3 +233,9 @@ harness = false
 
 [[test]]
 name = "serialized_loop"
+
+# Its own binary because it installs a process-global `log::set_logger`, and so
+# does `transaction_claims` inside the consolidated suite. Only the first call
+# in a process succeeds; separate binaries are what keep both able to run.
+[[test]]
+name = "socket_release"

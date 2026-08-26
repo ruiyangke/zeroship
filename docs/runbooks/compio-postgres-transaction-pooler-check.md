@@ -108,6 +108,11 @@ failed, 52 distinct names**, every one inside the set below. The same tree ran
 1779/0 against the direct server and against 18.4 the same day, so the whole
 residue is the pooler and none of it is the driver.
 
+Those figures are from the OLD test layout. The consolidation later the same
+day took the crate from 79 test binaries to 5 and the reported count from 1779
+to 895 without changing a case, so re-measure here before comparing - the
+residue SET is what carries across, not the totals.
+
 Compare the SET, not the count. Two runs can both report 55 while failing
 different tests, and the count alone cannot see that; diffing the sorted
 `failures:` names can:

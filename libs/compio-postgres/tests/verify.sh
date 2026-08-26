@@ -19,7 +19,7 @@
 #    was still running. So every mode here compares the number of result lines
 #    against cargo's OWN inventory for that same mode.
 #
-# 2. THE INVENTORY BECOMES A CENSUS THAT ROTS. Hardcoding "expect 79 binaries"
+# 2. THE INVENTORY BECOMES A CENSUS THAT ROTS. Hardcoding "expect 5 binaries"
 #    turns every added test file into a red build, and the repair - bumping the
 #    number - is indistinguishable from bumping it to hide a loss. The expected
 #    count is therefore derived per run from `cargo test --list` in the same
@@ -32,7 +32,8 @@
 # machine is shared, and a `cargo` running in another checkout can make
 # `--list` here produce nothing while it holds a build lock - observed
 # 2026-08-26 against a concurrent `cargo test -p zero-migrate` in a sibling
-# repository, where the same command that had just answered `79 1779` answered
+# repository, where the same command that had just answered `79 1779` (the
+# pre-consolidation shape; it answers `5 895` now) answered
 # nothing. That is why the empty case refuses instead of treating zero as an
 # expectation and reporting a green run of nothing. Check for other cargo
 # processes, then re-run.
