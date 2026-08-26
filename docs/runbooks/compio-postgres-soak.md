@@ -274,6 +274,19 @@ machine and the workload mix.
 | acquire timeouts | 0 | 0 |
 | bad connections / cancellations | 233 / 198 | 3,488 / 2,961 |
 
+### Over TLS, where the teardown changed most
+
+MEASURED 2026-08-25 against the encrypted fixture on 5447, 120s: **26,507
+operations**, 391 cancellations, 13 RSS samples with rises 3 and falls 2 for a
+net **0 KiB**, and both baselines back to zero. That is the close_notify
+teardown and the Arc<Mutex> rustls session under sustained load, which no
+plaintext run touches at all.
+
+CHECK THE CONTROL when reading a green TLS run: point the same
+`sslmode=require` DSN at the PLAINTEXT server on 5448 and it must FAIL with
+`TLS could not be negotiated`. Without that, a run that silently fell back to
+plaintext looks exactly like a run that used TLS.
+
 ### Against PostgreSQL 18, where protocol 3.2 is actually negotiated
 
 Every run above used the 16.14 fixture, where the driver requests 3.2 and the
