@@ -227,5 +227,9 @@ harness = false
 name = "hot_path"
 harness = false
 
+[[bench]]
+name = "soak"
+harness = false
+
 [[test]]
 name = "serialized_loop"
