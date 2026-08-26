@@ -93,9 +93,12 @@
 //! every `cargo test`, and the four COPY tests were re-checked by substitution:
 //! all four fail, each at its own `expect_err`.
 //!
-//! The `close_notify` regression below is the sole TLS case. NOT covered here:
-//! TLS policy, authentication, replication framing, or a peer that trickles
-//! bytes slowly rather than sending wrong ones.
+//! The `close_notify` regressions below are the TLS cases. A peer that sends
+//! the RIGHT bytes one at a time is covered too, since "wrong bytes, promptly"
+//! and "right bytes, slowly" break different things: the first tests framing
+//! validation, the second tests reassembly across short reads.
+//!
+//! NOT covered here: TLS policy, authentication, or replication framing.
 
 use compio_postgres::Config;
 use compio_postgres::config::SslMode;
@@ -422,6 +425,80 @@ fn row_description(columns: &[&str]) -> Vec<u8> {
 /// This peer inspects rustls' processed record state. A bare EOF, a reset, or
 /// arbitrary bytes cannot set `peer_has_closed`, so the assertion observes the
 /// real encrypted `close_notify` rather than a teardown helper being called.
+/// A peer that sends the RIGHT bytes, one at a time.
+///
+/// Every other case in this file sends wrong bytes promptly. This one is the
+/// mirror: nothing is malformed, the frames simply arrive in as many pieces as
+/// they have bytes, so each socket read returns a fragment of a frame and
+/// several reads land mid-header. The header of this file named it as the gap.
+///
+/// What it rules out is a read loop that treats a short read as a framing
+/// error, or that only makes progress when a whole frame arrives at once. The
+/// value is asserted, not merely the absence of an error, so a driver that
+/// reassembles the bytes in the wrong order fails here too.
+#[compio::test]
+async fn a_peer_that_trickles_a_frame_one_byte_at_a_time_is_understood() {
+    let mut response = Vec::new();
+    let mut row = Vec::new();
+    row.extend_from_slice(&1u16.to_be_bytes());
+    row.extend_from_slice(&1u32.to_be_bytes());
+    row.push(b'7');
+    response.extend_from_slice(&backend_frame(b'T', &row_description(&["?column?"])));
+    response.extend_from_slice(&backend_frame(b'D', &row));
+    response.extend_from_slice(&backend_frame(b'C', b"SELECT 1\0"));
+    response.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+    let server = StubServer::spawn(move |listener| {
+        let mut stream = accept_bounded(&listener);
+        complete_startup(&mut stream, 217);
+        let query = expect_simple_query(&mut stream);
+        assert_eq!(query, b"SELECT 7\0");
+
+        // One byte per write, each flushed, so the client cannot receive two
+        // together through this side's buffering. A sleep every few bytes
+        // keeps the total well inside OPERATION_WATCHDOG while still forcing
+        // the reads to be genuinely separate.
+        for (index, byte) in response.iter().enumerate() {
+            stream
+                .write_all(std::slice::from_ref(byte))
+                .expect("trickle one byte");
+            stream.flush().expect("flush one byte");
+            if index % 8 == 0 {
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+
+        // Stay open, so a hang is the driver's doing rather than an EOF it
+        // could read as "the session ended".
+        thread::sleep(Duration::from_millis(200));
+    });
+
+    let (client, connection) = stub_config(server.addr)
+        .connect(common::suite_tls())
+        .await
+        .expect("connect to scripted PostgreSQL peer");
+    let driver = compio::runtime::spawn(async move { connection.run().await });
+
+    let messages = compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 7"))
+        .await
+        .expect("a trickled response hung the driver")
+        .expect("a trickled but well-formed response was rejected");
+
+    let value = messages.iter().find_map(|message| match message {
+        compio_postgres::SimpleQueryMessage::Row(row) => row.get(0).map(str::to_owned),
+        _ => None,
+    });
+    assert_eq!(
+        value.as_deref(),
+        Some("7"),
+        "the reassembled row does not carry the value the peer sent"
+    );
+
+    drop(client);
+    server.finish();
+    let _ = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
+}
+
 /// A self-signed TLS server configuration for the scripted peers below.
 #[cfg(feature = "tls")]
 fn scripted_tls_server_config() -> std::sync::Arc<rustls::ServerConfig> {
