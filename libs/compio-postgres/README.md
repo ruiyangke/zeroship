@@ -27,7 +27,7 @@ instead, and the workspace enforces that (see the "The environment" section of
 | `src/tls_rustls.rs` | `MakeRustlsConnect`: builds a rustls config from `sslmode`/`sslcert`/`sslcrl`/... and attests to what it will honour. |
 | `src/pool.rs` | Pool, waiters, idle management, lifecycle hooks, `max_lifetime`. |
 | `src/replication.rs` | Replication protocol and the pgoutput decoder (stateful: a stream chunk adds an xid prefix nothing in the bytes advertises). |
-| `src/release.rs` | Synchronous, drop-safe socket release, so a dropped `Client` frees its backend promptly. |
+| `src/release.rs` | Synchronous, drop-safe socket release, so a dropped `Client` frees its backend promptly. Also where a TLS session's `close_notify` is serialized and sent, because the alert has to leave before the socket is shut down. Both guards route through one `shutdown()` for that reason: the alert lived in `Drop` alone until 2026-08-25, and the six sites that call `shutdown()` without dropping ended every TLS session with a reset. |
 | `src/config.rs` | Every libpq connection parameter: implemented, or REFUSED BY NAME. Never accepted and ignored. |
 | `src/passfile.rs` | `~/.pgpass` lookup: the file consulted when no password is set. Its matching rules were derived by probing libpq, not read off the format description - see the note on `match_field`. |
 | `src/service.rs` | `pg_service.conf` lookup: a named section supplying connection parameters. Explicitly given parameters win over the service's, in any order. Its whitespace, comment, header and duplicate-key rules were probed out of libpq rather than read off the format description, which describes none of them - `docs/runbooks/compio-postgres-libpq-parameter-probing.md`. |
