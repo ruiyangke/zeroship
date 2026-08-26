@@ -5,6 +5,8 @@
 //! change. The workload creates no database objects: a unique
 //! `application_name` scopes every server-side observation to this process.
 
+#![recursion_limit = "256"]
+
 use std::any::Any;
 use std::cell::Cell;
 use std::env;
