@@ -1457,9 +1457,10 @@ where
 /// [`DmlError::UnrenderableExpr`] for an expression node that has no inline form
 /// (e.g. a `bytes` literal).
 /// THE TWO PINNED SPELLINGS COLLAPSED INTO ONE PARAMETERIZED DOOR, and that is a
-/// simplification the split forced rather than a loss. `render_predicate_pg` and
-/// `render_predicate_sqlite` had identical bodies apart from the dialect literal, so
-/// each was a vendor writing its own name into a helper it then called on itself.
+/// simplification the split forced rather than a loss. The two vendor-named
+/// predicate renderers this replaced had identical bodies apart from the dialect
+/// literal, so each was a vendor writing its own name into a helper it then called
+/// on itself.
 /// A vendor now passes `self`: `zero-migrate-postgres` for the vendor
 /// `CREATE POLICY` / `CREATE TRIGGER` clauses, `zero-migrate-sqlite` for its trigger
 /// bodies. Neither can reach the other's spelling any more, which is the property

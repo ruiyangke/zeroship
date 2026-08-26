@@ -211,10 +211,10 @@ impl IndexElementKey {
 ///
 /// # The families are named for the FACT, not for the backend that answers
 ///
-/// Six of them used to carry a vendor prefix - `sqlite_stored_create_sql` and five
-/// `pg_index_*` - while the other five already used the contract's own spelling. That
-/// was not a distinction, it was an inconsistency inside one struct: every family here
-/// is a straight split of a field the neutral
+/// Six of them used to carry a vendor prefix - one for the stored `CREATE TABLE`
+/// text and five for index facets - while the other five already used the contract's
+/// own spelling. That was not a distinction, it was an inconsistency inside one
+/// struct: every family here is a straight split of a field the neutral
 /// [`zero_migrate_backend::snapshot`] surface ALREADY names neutrally
 /// (`TableSnapshot::stored_create_sql`, `IndexSnapshot::only` / `opclass` /
 /// `nulls_not_distinct`, `IndexElementSnapshot::Column::opclass` / `collation`), and

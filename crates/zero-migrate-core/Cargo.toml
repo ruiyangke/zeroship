@@ -91,7 +91,7 @@ zero-migrate-backend = { workspace = true }
 # The Policy Decision Point (PDP): the scope lattice + composition algebra +
 # unforgeable `EffectivePolicy`. `resolve_create_table_policy` drives its
 # column/index/PK injection off `EffectivePolicy::injects_for(object)` (the
-# injection-as-rule model), replacing the old `PolicyProfile.system_shape`. This
+# injection-as-rule model), replacing a monolithic policy-profile shape field. This
 # crate is a pure LEAF (no SQL deps) — the engine maps its opaque inject `ty`
 # tokens to `ColType`.
 zero-migrate-policy = { workspace = true }

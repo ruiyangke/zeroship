@@ -1181,16 +1181,14 @@ mod tests {
         assert!(e2.down.as_ref().unwrap().contains(&trg_name));
     }
 
-    // REGRESSION - the executor-layer scope gate in `run_expand_pg` is now
-    // UNCONDITIONAL. A direct seam caller with an EMPTY `expand` vec under
-    // `ApprovalScope::Versions({})` MUST be refused with `ApprovalNotScoped` (keyed on
-    // the E2 `trigger_version`, the resolved scope-version when the expand chain is
-    // empty). Pre-fix the gate was `if let Some(v) = expand.first().or_else(|| expand.get(1))`
-    // - an empty `expand` yielded `None`, SKIPPED the gate entirely, and fell through to
-    // an `Ok(empty)` return: a fail-OPEN a malicious/buggy direct caller could ride.
-    // This test FAILS RED pre-fix (the old code returned `Ok`, never the refusal).
-    //
-    // The refusal fires BEFORE any DDL/backfill, so the connection is never used on this
-    // path, but `run_expand_pg` needs a `&Client`, so we open one and skip when the DSN in
-    // `ZERO_MIGRATE_TEST_PG_URL` is unreachable.
+    // The scope gate over the sequence authored here is UNCONDITIONAL, and it does
+    // not live in this module. The engine resolves the scope version through
+    // `PlanStep::approval_scope_version` - the rename's plan-group version, falling
+    // back to the E2 `trigger_version` when the expand chain is empty - and
+    // `enforce_online_scope_if_pending` refuses with `ApprovalNotScoped` under
+    // `ApprovalScope::Versions({})`. That fallback is the whole point: the gate it
+    // replaced keyed on the FIRST entry of the expand chain, so an EMPTY chain
+    // yielded no key, skipped the gate entirely, and fell through to an `Ok(empty)`
+    // return - a fail-OPEN a direct seam caller could ride. The refusal fires before
+    // any DDL or backfill, so it needs no connection and `engine.rs` owns its test.
 }

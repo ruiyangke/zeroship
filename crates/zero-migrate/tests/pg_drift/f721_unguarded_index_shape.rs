@@ -152,7 +152,7 @@ fn an_empty_live_snapshot_still_lowers() {
 /// The fix must fire on the PRODUCTION construction path, not only on a
 /// hand-built `LiveSchema`.
 ///
-/// This is the F731 trap applied to my own fix: the since-deleted `ts_location`
+/// This is the F731 trap applied to my own fix: a since-deleted location parameter
 /// was threaded through dozens of sites and was always `None` because nothing
 /// ever produced one. A check that reads `table_snapshots` would be worth exactly
 /// as much if the production path left that map empty - it would pass its unit

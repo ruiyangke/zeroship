@@ -7212,8 +7212,8 @@ fn validate_create_table_primary_key_policy(
     // mandatory-inject scope whose author declares its own PK is refused there with
     // `AuthorPrimaryKeyForbidden`. The generic engine no longer bakes zeroship's
     // shape into validate-time; only the PURE primaryKey validation (empty / dup /
-    // absent-column, above) stays. See the design doc section "7-column
-    // system_shape -> one inject rule".
+    // absent-column, above) stays. See the design doc's injection-as-rule section
+    // (II.4), where a single monolithic profile field became one inject rule.
     Ok(())
 }
 

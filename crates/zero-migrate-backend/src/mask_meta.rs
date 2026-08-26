@@ -31,7 +31,8 @@ use crate::descriptors::EncryptionMode;
 /// - **SQLite**: from a sentinel CHECK comment
 ///   `/* zero-migrate:enc:{mode}:{keyId}:{wraps} */` parsed out of
 ///   `sqlite_master.sql` (same regex-on-DDL pattern used for
-///   vector dims; sidecar `__zero_migrate_schema_meta` is the upgrade path).
+///   vector dims; a sidecar `__zero_migrate_schema_meta` would be the upgrade path
+///   and does not exist).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncryptionMeta {
     /// Encryption mode declared by the SDK.

@@ -2551,8 +2551,9 @@ impl<'a> CatalogFold<'a> {
                 // The remaining TYPE-BOUND facets, taken from `new_col` rather than
                 // left behind. Each one is `None`/empty on `new_col` unless `to_type`
                 // itself produces it, so this is "re-derive from the target type", not
-                // "clear" - the same rule `retype_field_descriptor` states in
-                // descriptor terms, and the reasons are recorded there.
+                // "clear" - the same rule the single-fold traversal's
+                // `Op::SetColumnType` arm states in descriptor terms, and the
+                // reasons are recorded there.
                 //
                 //   * `inline_checks` - the enum / domain / UUID / format CHECKs of the
                 //     type the column HAD. Emission-only but it is DDL: the SQLite

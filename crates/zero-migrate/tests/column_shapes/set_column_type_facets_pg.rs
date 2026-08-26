@@ -1,8 +1,8 @@
 //! Live PostgreSQL oracle for what a `setColumnType` does to a column's OTHER
 //! facets, and the false-drift control for the ones drift compares.
 //!
-//! The offline verdict lives on `render::lower::retype_field_descriptor` and in
-//! `fold_ops`'s `Op::SetColumnType` arm. This file is where the two claims that
+//! The offline verdict lives on the single-fold traversal's `Op::SetColumnType` arm
+//! and on `fold_ops`'s. This file is where the two claims that
 //! decided it are held to the SERVER rather than to a doc comment:
 //!
 //!   1. a retype off a VALUE-FORMAT column is refused by the fold because

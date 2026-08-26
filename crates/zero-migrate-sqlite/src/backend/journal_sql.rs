@@ -12,8 +12,8 @@
 //! total order: SQLite assigns a strictly-increasing rowid on every INSERT (the
 //! INSERTs never supply it). AUTOINCREMENT (not bare rowid) is REQUIRED so the
 //! order is strictly monotonic and never reused - a deleted row's seq can never be
-//! recycled. There is NO standalone `event_seq` counter table and NO separate
-//! `_rolled_back` table (both removed in the "go native seq" consolidation).
+//! recycled. There is NO standalone `event_seq` counter table and NO separate table
+//! of rollback events (both removed in the "go native seq" consolidation).
 //!
 //! # Immutability
 //!
@@ -64,11 +64,11 @@ pub(crate) async fn ensure_journal(actor: &MigrationActor) -> Result<(), SqliteA
     // total order. One row per migration EVENT: an `applied` (forward) event or a
     // `rolled_back` event, discriminated by `event_kind`. version is NOT unique
     // (rollback <-> re-apply appends multiple rows). TEXT CURRENT_TIMESTAMP replaces
-    // PG's TIMESTAMPTZ DEFAULT now; `at`/`by` unify the old
-    // applied_at/rolled_back_at and applied_by/rolled_back_by. The applied-only
+    // PG's TIMESTAMPTZ DEFAULT now; `at`/`by` unify the separate timestamp and
+    // actor columns the two event kinds used to carry. The applied-only
     // columns (kind/phase/outcome) are NULL on a `rolled_back` row; a CHECK
     // documents the per-event_kind shape (mirrors the PG side). There is NO
-    // `event_seq` counter table and NO separate `_rolled_back` table any more.
+    // `event_seq` counter table and NO separate rollback-events table any more.
     actor
         .exec(
             "CREATE TABLE IF NOT EXISTS \"_mig\".schema_migrations (\

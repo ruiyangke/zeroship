@@ -239,8 +239,8 @@ pub struct ColumnInfo {
     /// (SQLite); `None` otherwise (the default - every existing
     /// non-vector column). Populated from
     /// `information_schema` / `sqlite_master.sql` introspection
-    /// (regex on DDL today, sidecar `__zero_migrate_schema_meta` is
-    /// the upgrade path).
+    /// (regex on DDL today; a sidecar `__zero_migrate_schema_meta`
+    /// would be the upgrade path and does not exist).
     #[allow(
         dead_code,
         reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path."

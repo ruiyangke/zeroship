@@ -129,7 +129,7 @@ pub struct DryRunReport {
 ///
 /// # The engine drives the phases; this answers one of them
 ///
-/// This seam used to expose a single `run_online` that took the WHOLE authored
+/// This seam used to expose a single method that took the WHOLE authored
 /// expand sequence and drove it: it applied E1/E2 by calling the engine's
 /// orchestrator (`apply_with_lock_backend`) back across the layer boundary,
 /// tripped the engine's fault point, read the journal, and then ran the one thing

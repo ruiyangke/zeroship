@@ -6834,8 +6834,8 @@ mod snapshot_builder_refactor_safety_tests {
     /// `false` default (the NOT NULL comes from the resolved inject shape). So a
     /// folded `id` field with `required:false` and no `unique`/`default` must STILL
     /// fold cleanly - the reject must NOT over-fire on nullability. (Guards the fix
-    /// against the regression that briefly broke
-    /// `re_declaring_id_with_prefix_folds_into_the_system_pk_no_second_column`.)
+    /// against the regression that briefly broke a re-declared prefixed `id`
+    /// folding into the system PK without emitting a second column.)
     #[test]
     fn id_field_with_default_required_flag_still_folds() {
         let d = id_descriptor(/* required */ false, false, None);

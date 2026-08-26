@@ -122,8 +122,8 @@ pub async fn ensure_journal<D: SqlSession>(
     // a kind mismatch => tamper. The applied-only columns (`kind`/`phase`/
     // `outcome`) are NULL on a `rolled_back` row; a CHECK documents the
     // per-`event_kind` shape (`applied` => all three NOT NULL; `rolled_back` => all
-    // three NULL). `by`/`at` unify the old `applied_by`/`rolled_back_by` and
-    // `applied_at`/`rolled_back_at`.
+    // three NULL). `by`/`at` unify the separate actor and timestamp columns the two
+    // event kinds used to carry.
     conn.batch(&format!(
         "CREATE TABLE IF NOT EXISTS {meta}.schema_migrations (
             event_seq   BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

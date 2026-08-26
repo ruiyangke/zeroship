@@ -3,9 +3,9 @@
 // A gated suite used to have three outcomes, and a skip and a pass print the same
 // exit code. That is the whole problem: a run with no database reported exactly
 // like a run with one, so a machine that never started Docker and a machine that
-// exercised every verb produced the same green summary. `ZERO_MIGRATE_REQUIRE_LIVE_DB`
-// existed to turn the skip into a failure, but it was opt-IN, so the DEFAULT was a
-// suite that passed while testing nothing.
+// exercised every verb produced the same green summary. An opt-in environment
+// variable existed to turn the skip into a failure, but opt-IN meant the DEFAULT
+// was a suite that passed while testing nothing.
 //
 // There are two outcomes now:
 //

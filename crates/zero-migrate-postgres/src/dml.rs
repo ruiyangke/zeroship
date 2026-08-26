@@ -59,9 +59,10 @@ fn text_literal(s: &str, what: &'static str) -> Result<String, DmlError> {
 /// resolve. The two backends whose in-list needs one (a quoted decimal, a hex string)
 /// call the portable helper and hand it `self`.
 ///
-/// It lived in the contract crate as `render_in_list_elem_pg`, and its only caller was
-/// [`PostgresDmlRenderer::render_in_list`] below. The `inList` NODE is portable; this
-/// backend's SPELLING of one is not, and that is the distinction the old home lost.
+/// It lived in the contract crate under a PostgreSQL-named spelling, and its only
+/// caller was [`PostgresDmlRenderer::render_in_list`] below. The `inList` NODE is
+/// portable; this backend's SPELLING of one is not, and that is the distinction the
+/// old home lost.
 fn in_list_elem(elem: &IrScalar) -> Result<String, DmlError> {
     Ok(match elem {
         IrScalar::Str(s) => text_literal(s, "inList element")?,

@@ -62,11 +62,12 @@ pub(crate) fn placeholder(n: usize) -> String {
 // in the SQLite trigger SQL.
 //
 // Routing those six through `quote_bare_ident_for_backend` was the fix; folding the
-// other thirteen into a single name is what made it stay fixed. That name was
-// `SQLITE_TRIGGER_DIALECT`, a `lower.rs`-local stand-in for the rule this file
-// already obeyed, and its whole purpose was to make the eventual move of those three
-// functions a RELOCATION rather than an edit. It worked: the move renamed one
-// identifier and touched nothing else, and `DIALECT` is what it was renamed to.
+// other thirteen into a single name is what made it stay fixed. That name was a
+// `lower.rs`-local stand-in for the rule this file already obeyed, and its whole
+// purpose was to make the eventual move of those three functions a RELOCATION
+// rather than an edit. It worked: the move renamed one identifier and touched
+// nothing else, and the name those thirteen sites read now is this crate's
+// `DIALECT`.
 //
 // Pinned by `tests/dialect_matrix/sqlite_trigger_quoting_reaches_postgres.rs`, whose
 // count went 6 -> 0 when the fix landed and whose subject-anchor followed the three

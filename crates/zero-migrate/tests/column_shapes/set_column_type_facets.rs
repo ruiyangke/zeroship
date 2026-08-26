@@ -18,7 +18,7 @@
 //! and - the point of the proposal - they are two READS of ONE traversal, so the top two
 //! rows of that table are no longer two replays that can disagree. The retype verdict
 //! they must agree on lives on that traversal's `Op::SetColumnType` arm; it lived on
-//! `render::lower::retype_field_descriptor` until consumer 3 deleted it, the walker
+//! a retype helper in `render::lower` until consumer 3 deleted it, the walker
 //! having been its only caller.
 //!
 //! This file drives `render_artifacts`, so it measures whichever producer is wired in
@@ -56,8 +56,8 @@
 //! `case_sensitive` is DRIFT-COMPARED. So is `collation`, `value_format` and
 //! `id_default`, and `fold_ops` left all four behind.
 //!
-//! THE VERDICT PER FACET is written where it is enforced -
-//! [`zero_migrate::render::lower::retype_field_descriptor`] holds the table and the
+//! THE VERDICT PER FACET is written where it is enforced - the `Op::SetColumnType`
+//! arm of [`zero_migrate::render::fold::single_fold`] holds the table and the
 //! reason for each entry, measured against live PostgreSQL 18.4. This fixture
 //! pins the OBSERVABLE half of it, and pins the three replays to each other so a
 //! future divergence is a test failure rather than a discovery.

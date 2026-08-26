@@ -2646,7 +2646,7 @@ impl MigrationEngine {
                     // **Per-version scope (anti-bypass).** A pending PG online rename's
                     // EXPAND mutates data (the dual-write backfill mirrors every
                     // pre-existing row into the new column), so it is an
-                    // approval-gated op (`run_expand_pg` already requires
+                    // approval-gated op (the expand path already requires
                     // `Approval::Approved`). Under `ApprovalScope::Versions` it runs
                     // ONLY if the operator individually reviewed THIS rename - keyed on
                     // the rename's PLAN-GROUP version (E1's deterministic id, the same
@@ -2680,8 +2680,8 @@ impl MigrationEngine {
                         scope
                     };
                     // **Drive the expand's phases HERE.** This used to be one call
-                    // to the backend's `run_online`, which drove the whole
-                    // sequence - and applied E1/E2 by calling
+                    // down to the backend, which took the whole authored expand
+                    // sequence and drove it - and applied E1/E2 by calling
                     // `apply_with_lock_backend`, this crate's orchestrator, back
                     // across the backend boundary. That is mutual recursion across
                     // the layer boundary the crate split exists to create: a vendor

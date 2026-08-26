@@ -205,8 +205,8 @@ async fn live_column_types(
 /// A `varchar(255) -> varchar(64)` retype DEPLOYS on MySQL, and the fold describes
 /// what the server then holds.
 ///
-/// Both halves are the finding. The first half used to be the opposite claim -
-/// `refuse_mysql_alter_column` refused every alter-column op on MySQL, so a retype
+/// Both halves are the finding. The first half used to be the opposite claim - the
+/// engine refused every alter-column op on MySQL unconditionally, so a retype
 /// could not be applied and this test pinned the refusal. That is gone:
 /// `setColumnType` lowers to a restate step that reads the live column definition
 /// from `SHOW CREATE TABLE` at apply, so the retype runs and the server is now

@@ -593,8 +593,8 @@ impl AuthoredState<'_> {
                 {
                     // THE PER-FACET VERDICT for `Op::SetColumnType`: what a change of
                     // base type does to every OTHER facet the column carries. It lived
-                    // on `render::lower::retype_field_descriptor` until that function
-                    // was deleted, because the walker was its only caller - so the
+                    // on a retype helper in `render::lower` until that helper was
+                    // deleted, because the walker was its only caller - so the
                     // verdict lives HERE now, in the one traversal, and
                     // `set_column_type_facets` pins it.
                     //

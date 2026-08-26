@@ -97,7 +97,7 @@ pub use zero_migrate_backend::guard;
 use zero_migrate_backend::registry::VendorSet;
 pub mod apply;
 // The caller's approval decision now lives with the backend contract, whose
-// `OnlineSchemaChange::run_online` names it. Re-exported here so every
+// `OnlineSchemaChange::run_online_backfill` names it. Re-exported here so every
 // `crate::approval::{Approval, ApprovalScope}` reference resolves unchanged.
 pub use zero_migrate_backend::approval;
 // The per-run executor configuration. `ExecutorConfig` is the single most-named

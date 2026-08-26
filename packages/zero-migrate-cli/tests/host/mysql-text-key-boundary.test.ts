@@ -4,10 +4,10 @@
 // TWO gates refuse that shape before the deploy starts, and this file pins the
 // boundary between them:
 //
-//   - `validate_mysql_key_storage` (offline) covers a column DECLARED IN THE SAME
+//   - `validate_vendor_key_storage` (offline) covers a column DECLARED IN THE SAME
 //     migration as the key. It needs no connection, so it turns `lint` red in CI.
 //     First arm.
-//   - `validate_mysql_key_storage_for_lower` (lower time) covers a column an
+//   - `validate_vendor_key_storage_for_lower` (lower time) covers a column an
 //     EARLIER migration created, or one of an unmanaged table. Validation is
 //     offline and reads only the migration in front of it, so those columns carry
 //     no authored type; the live catalog the apply path has already introspected

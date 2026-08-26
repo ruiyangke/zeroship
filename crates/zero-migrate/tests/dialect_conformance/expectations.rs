@@ -327,9 +327,9 @@ const ALLOWANCES: &[Allowance] = &[
     },
     // WHAT USED TO BE HERE, and why its removal is the finding rather than a
     // relaxation. `setColumnType/base [mysql]` was the ONE (B) DECLARATION ERROR this
-    // column found: the sidecar said `portable`, `refuse_mysql_alter_column` refused
-    // unconditionally, and the recommended repair was to flip the cell to
-    // `unsupported`.
+    // column found: the sidecar said `portable`, the engine refused every
+    // alter-column op on MySQL unconditionally, and the recommended repair was to
+    // flip the cell to `unsupported`.
     //
     // The declaration was right and the engine was wrong. MySQL's `MODIFY COLUMN`
     // does restate the whole definition, but the definition is RECOVERABLE - the

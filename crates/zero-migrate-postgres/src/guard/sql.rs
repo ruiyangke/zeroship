@@ -584,7 +584,7 @@ impl GuardDecisions for BodyScopeDecisions<'_> {
     /// it.
     ///
     /// `check_raw_view_body_text` is the sole constructor of this adapter, and it DOES
-    /// have a production caller: `validate_raw_view_body`, in
+    /// have a production caller: `validate_raw_view_body_sql`, in
     /// `zero-migrate-core`'s `model::validate`, on every raw `viewBody`.
     ///
     /// What bounds the damage is the gate directly above that call, not the caller's

@@ -3,7 +3,7 @@
 //! # Injection-as-rule (section II.4)
 //!
 //! System columns, indexes, and the pinned primary key are no longer read from a
-//! monolithic `PolicyProfile.system_shape`. They are driven by the composed,
+//! single monolithic shape field on a policy profile. They are driven by the composed,
 //! unforgeable [`EffectivePolicy`]: for each `createTable` op we build the
 //! [`ObjectName`] the op names and ask `effective.injects_for(&object)` for the
 //! covering [`zero_migrate_policy::InjectSpec`]s (in the sealed cross-layer inject total order). Each
@@ -12,7 +12,7 @@
 //! type token) lives in the policy crate; this module only MAPS the opaque type
 //! tokens to [`ColType`] and lays the resolved shape into the IR.
 //!
-//! The semantics are byte-for-byte those of the retired `system_shape` path: system
+//! The semantics are byte-for-byte those of the retired monolithic-profile path: system
 //! columns prepend, [`SystemColumnCollision`](TableShapeError::SystemColumnCollision)
 //! on an author collision (except the `id`-folding cases), an
 //! [`AuthorPrimaryKeyForbidden`](TableShapeError::AuthorPrimaryKeyForbidden) when a
@@ -436,7 +436,7 @@ fn resolve_create_table(
 }
 
 /// Map an [`InjectColumn`]'s opaque type token to a native [`IrColumn`]. The token
-/// spellings the engine understands mirror the retired `system_shape` mapping
+/// spellings the engine understands mirror the retired monolithic-profile mapping
 /// (`text`, `timestamptz`/`timestamp with time zone`, `integer`/`int`).
 fn inject_column_to_ir(column: &InjectColumn) -> Result<IrColumn, TableShapeError> {
     let name = canonical_inject_identifier(&column.name, "column")?;
@@ -679,8 +679,8 @@ fn validate_folded_id_identity(table: &str, column: &IrColumn) -> Result<(), Tab
 
 /// Is this resolved `createTable` ALREADY the injected shape (an idempotent re-run)?
 ///
-/// The old `resolved_create_table_matches_profile` re-derived the expected columns
-/// from the profile; this peer re-derives them from the covering
+/// The predicate this replaced re-derived the expected columns from a policy
+/// profile's own shape field; this peer re-derives them from the covering
 /// [`zero_migrate_policy::InjectSpec`]s (`inject`). Beyond the leading-prefix name/shape match it adds
 /// the II.2.6b conformance check: a resolved column occupying an injected slot must
 /// match the [`InjectColumn`]'s type + nullability + default (a rename-into or a

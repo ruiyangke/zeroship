@@ -1,8 +1,8 @@
 //! The shipping vendor registry is the only authority for shipping descriptors.
 //!
 //! Capability rows used to be copied into the leaf IR crate, reached through both
-//! the closed dialect enum's `descriptor()` method and a second `SHIPPING_DESCRIPTORS`
-//! list. A fourth backend could not extend that closed bridge. The rows now live in their vendor
+//! the closed dialect enum's `descriptor()` method and a second hardcoded list of
+//! them. A fourth backend could not extend that closed bridge. The rows now live in their vendor
 //! crates and this integration test checks the composition that can see all three.
 
 use zero_migrate::{shipping_backends, Capability};

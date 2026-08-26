@@ -9621,7 +9621,7 @@ pub(crate) fn ir_column_to_field_resolved_create(c: &IrColumn) -> FieldDescripto
 /// drift. Its one caller today is the fold's named-domain lift
 /// (`render::fold::lift_named_domain_base_type` - a column whose declared type NAMES
 /// a domain whose base type is `T`). The `setColumnType` side was the second, through
-/// `render::lower::retype_field_descriptor`; that function is gone and the fold
+/// a retype helper in this module; that helper is gone and the fold
 /// traversal's `Op::SetColumnType` arm states the same rule in snapshot terms
 /// instead. The difference between them is what they additionally CLEAR, not what
 /// they derive, so only the retype clears.

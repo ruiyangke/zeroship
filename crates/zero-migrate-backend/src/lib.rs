@@ -112,7 +112,7 @@ pub mod advisory;
 // the map, the scope - is `zero_migrate_ir::attribute`; this is the vendor-facing half,
 // so it sits with the other things a `BackendVendor` hands over.
 pub mod attribute;
-// The caller's approval decision. Named by `OnlineSchemaChange::run_online` and by
+// The caller's approval decision. Named by `OnlineSchemaChange::run_online_backfill` and by
 // every gated apply/rollback entry point, so it sits with the traits rather than
 // above them. Zero dependencies of its own. The engine re-exports it at
 // `zero_migrate::approval`.
