@@ -1685,19 +1685,11 @@ impl Config {
     }
 
     fn param(&mut self, key: &str, value: &str) -> Result<(), Error> {
-        // libpq's treatment of `key=` is per-TYPE, not uniform. A NUMERIC
-        // option takes an empty value as "not given" and keeps its default; an
-        // ENUM refuses it (`invalid sslmode value: ""`), which the arms below
-        // already do by not matching it; a STRING keeps the empty string.
-        // Measured against 16.14 for every key listed here.
+        // libpq's treatment of `key=` is per-OPTION, not uniform. `port=` uses
+        // the compiled default, while the six socket integer options reject an
+        // empty value. Enums reject it too; strings generally keep it.
         const EMPTY_MEANS_UNSET: &[&str] = &[
             "port",
-            "connect_timeout",
-            "tcp_user_timeout",
-            "keepalives",
-            "keepalives_idle",
-            "keepalives_interval",
-            "keepalives_count",
             "statement_cache_capacity",
             "max_message_size",
         ];
@@ -3522,19 +3514,54 @@ mod tests {
             );
         }
 
-        /// ONE trailing empty numeric - only the last parameter in a string can
-        /// actually be empty, for the swallowing reason below.
+        /// Port is the one integer option whose documented empty value selects
+        /// the compiled default.
         #[test]
-        fn an_empty_numeric_value_leaves_the_default() {
+        fn an_empty_port_value_leaves_the_default() {
             let config: Config = "host=x.invalid port="
                 .parse()
-                .expect("libpq accepts an empty numeric value");
+                .expect("libpq documents an empty port as the compiled default");
             assert!(config.get_ports().is_empty(), "port= must not set a port");
+        }
 
-            let config: Config = "host=x.invalid connect_timeout="
-                .parse()
-                .expect("libpq accepts an empty numeric value");
-            assert_eq!(config.get_connect_timeout(), None);
+        #[test]
+        fn empty_libpq_integer_values_are_refused_by_name() {
+            let mut accepted = Vec::new();
+            let mut unnamed = Vec::new();
+            for key in [
+                "connect_timeout",
+                "tcp_user_timeout",
+                "keepalives",
+                "keepalives_idle",
+                "keepalives_interval",
+                "keepalives_count",
+            ] {
+                let dsn = format!("host=x.invalid {key}=");
+                match dsn.parse::<Config>() {
+                    Ok(_) => accepted.push(key),
+                    Err(error) => {
+                        let mut names_key = error.to_string().contains(key);
+                        let mut source = std::error::Error::source(&error);
+                        while let Some(cause) = source {
+                            names_key |= cause.to_string().contains(key);
+                            source = std::error::Error::source(cause);
+                        }
+                        if !names_key {
+                            unnamed.push(key);
+                        }
+                    }
+                }
+            }
+            assert!(
+                accepted.is_empty(),
+                "empty integer values were silently accepted: {}",
+                accepted.join(", ")
+            );
+            assert!(
+                unnamed.is_empty(),
+                "empty integer values were refused without naming: {}",
+                unnamed.join(", ")
+            );
         }
 
         /// And so `port= connect_timeout=` is NOT two empty numerics: `port`
