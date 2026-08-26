@@ -354,6 +354,40 @@ So the shape to look for is: errors surface, `live_connections_at_failure=0`,
 no watchdog message. A hang, a panic, or a non-zero live count would each be a
 defect, and each looks different from the ordinary failure above.
 
+## Chaos: freezing the server without closing anything
+
+A restart makes the server CLOSE, which surfaces as an error at once. The
+harder failure is a server that stops responding and closes NOTHING - no RST,
+no FIN, the socket stays open and a naive client waits forever. That is what a
+network partition or a frozen host looks like, and it is what `read_timeout`
+exists for. `docker pause` reproduces it exactly, which a scripted peer cannot:
+that peer is still a live local socket choosing to withhold bytes.
+
+```bash
+docker pause zs-cpg-review-5455     # freeze mid-query
+# ... observe ...
+docker unpause zs-cpg-review-5455   # ALWAYS, including on failure
+```
+
+MEASURED 2026-08-26, with `Config::read_timeout` at 5s and a query issued
+against the frozen server:
+
+```text
+BH query ended after 5.000468796s: is_closed=true err=socket read timeout expired
+BH live_connections=0
+```
+
+The clock fired within half a millisecond of its bound, the session was RETIRED
+rather than left in limbo, and the connection was released. Read all three: a
+timeout that fires but leaves `is_closed=false` would hand a poisoned session to
+the next caller, and a non-zero live count would mean the descriptor outlived
+the failure.
+
+Set a read timeout before trying this. WITHOUT one there is no clock at all on
+this path and the query waits for as long as the freeze lasts - which is the
+correct behaviour for a driver told to wait indefinitely, and is why the
+parameter exists.
+
 ## Limits of the measurement
 
 **The RSS rule fails only on a MONOTONIC climb** - the check is
