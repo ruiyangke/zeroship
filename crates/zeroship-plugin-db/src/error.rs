@@ -9,12 +9,12 @@
 //! `Result<_, String>` is now confined to a small set of deliberate
 //! hold-outs across three categories:
 //!
-//! 1. **Wire-contract envelopes**: `crate::register_model::validate`
-//!    whose `Err` IS the `validation_refused` JSON envelope (a
-//!    documented SDK wire contract — `JSON.parse(err.message)`
-//!    recovers the payload). `run_pipeline` wraps it in
-//!    [`DbError::SchemaRefused`] at the boundary; the static `.code`
-//!    is stamped from the variant.
+//! 1. **Wire-contract envelopes**: the constraint-violation paths, whose
+//!    `Err` IS a JSON envelope rather than a message (a documented SDK wire
+//!    contract — `JSON.parse(err.message)` recovers the payload). The backends
+//!    build it in `backend/postgres.rs` and `backend/sqlite/error.rs` and
+//!    return [`DbError::SchemaRefused`]; the static `.code` is stamped from
+//!    the variant.
 //!
 //! 2. **Pure parsers** internal to `auth/session.rs`: `hex_decode` /
 //!    `hex_nibble` ASCII-only decoders that never cross an isolate
@@ -51,7 +51,7 @@
 //!
 //! | Variant | Cause | Example |
 //! |---|---|---|
-//! | [`DbError::SchemaRefused`] | DDL deploy rejected before any rows touched | `validation_refused` envelope |
+//! | [`DbError::SchemaRefused`] | a write violated a schema constraint | envelope, `.code` names the constraint |
 //! | [`DbError::ValidationFailed`] | User-supplied input failed a guardrail | bad isolation level, filter too deep |
 //! | [`DbError::UniqueViolation`] | Postgres 23505 | INSERT into UNIQUE index |
 //! | [`DbError::FkViolation`] | Postgres 23503 | INSERT references missing parent |

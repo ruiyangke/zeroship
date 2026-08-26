@@ -20,18 +20,14 @@
 //! ownership of the still-locked client to the next stage that will
 //! release it.
 //!
-//! Before this guard existed, that invariant was plugged in inline at
-//! three different stages of the pipeline:
-//!
-//! - `bootstrap.rs` — release on Err, hand off the locked client on Ok
-//!   to `apply()`.
-//! - `apply.rs` — release between Pass 1 and Pass 2 regardless of Pass 1
-//!   outcome (CIC can't run under the lock).
-//! - `run_pipeline` (`register_model/mod.rs`) — release on Err from
-//!   plan / validate, hand off to `apply` on Ok.
-//!
-//! Three sites, one invariant, three open-coded `pg_advisory_unlock`
-//! sequences. This module centralises the pattern.
+//! Before this guard existed, that invariant was plugged in inline at three
+//! different sites. Those sites were the stages of the register-model DDL
+//! pipeline, which
+//! is deleted. What remains is `backend/postgres.rs`, which acquires around
+//! its schema-pending work and releases on every exit arm, and `lib.rs`'s
+//! probe. One invariant, open-coded `pg_advisory_unlock` sequences at each
+//! exit: this module centralises the pattern so an early return cannot skip
+//! the unlock.
 //!
 //! # Why not full RAII?
 //!

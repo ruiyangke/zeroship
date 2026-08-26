@@ -195,7 +195,7 @@ impl SqliteBackend {
     /// **CDC arming**: the control session installs the
     /// `preupdate_hook`/`commit_hook`/`rollback_hook` triplet on its
     /// `rusqlite::Connection`. Writes against ATTACH-ed per-app
-    /// aliases (the `ensure_app_schema` path) fire the same hooks with
+    /// aliases (the `attach_app_file` path) fire the same hooks with
     /// the alias as `db_name`, so a single dispatcher serves all apps
     /// the backend hosts - no per-app session needed. The
     /// per-event `app_id` is derived from `db_name` inside the
@@ -246,8 +246,9 @@ impl SqliteBackend {
     /// dispatcher.
     ///
     /// `path` names the control database file for the backend. Per-app
-    /// files still live beside it as `zs-<app_id>.sqlite` and are
-    /// ATTACHed lazily by `ensure_app_schema`.
+    /// files still live beside it as `zs-<app_id>.sqlite` and are bound into
+    /// the session by `attach_app_file`, which registerModel calls. It is
+    /// idempotent but NOT lazy: nothing attaches an app file on first use.
     ///
     /// If `path` points at an existing directory we place the control
     /// session at `<dir>/zs-control.sqlite`. `:memory:` opens the
@@ -657,7 +658,7 @@ impl SqliteBackend {
     /// UTF-8 absolute path) joined with `zs-<app_id>.sqlite`. The
     /// `app_id` is constrained to ASCII alphanumeric + `_` + `-` by
     /// `audit::validate_app_id` before any consumer reaches
-    /// `ensure_app_schema`, so the suffix is always UTF-8 safe. If
+    /// `attach_app_file`, so the suffix is always UTF-8 safe. If
     /// `db_dir` itself contains non-UTF-8 bytes (rare on the Linux
     /// targets we ship to), `to_string_lossy` substitutes U+FFFD —
     /// SQLite then fails to open the resulting path and surfaces a
@@ -2654,7 +2655,7 @@ mod backup_sqlite {
         //    `run_vacuum_into` constructs the literal-quoted SQL and
         //    runs `VACUUM "<app>" INTO '<dest>'` against the per-app
         //    ATTACH alias on the control connection (which is where
-        //    the ensure_app_schema path attached the per-app file).
+        //    the attach_app_file path attached the per-app file).
         //
         //    Busy-policy retry: 3 attempts at 0/100/500ms when
         //    `opts.if_busy == Retry`. SQLite's bootstrap PRAGMA

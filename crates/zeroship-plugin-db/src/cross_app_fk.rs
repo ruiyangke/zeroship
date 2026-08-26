@@ -40,7 +40,7 @@
 //! `register_model::exec_register_model`: the PG arm returns `Ok(())`
 //! with no DDL and no validation (the migration engine is the PG schema
 //! authority, applying at deploy), and the SQLite dev arm only calls
-//! `ensure_app_schema`. Neither passes through here.
+//! `attach_app_file`. Neither passes through here.
 //!
 //! **So do not read this module as the thing that keeps foreign keys
 //! inside an app.** That property does hold, but it is owned by the
