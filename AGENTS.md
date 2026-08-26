@@ -406,6 +406,18 @@ cargo test -p zeroship-core
 cargo test -p zeroship-gateway
 cargo test -p zeroship-runtime --lib
 cargo test -p compio-postgres -- --test-threads=1   # needs DB
+# compio-postgres declares `default = []`, so THAT LINE IS FEATURE-BLIND: it
+# skips every `tls`-gated test and reports a green that never compiled them.
+# Measured 2026-08-26: 316 lib tests on defaults, 337 under --all-features, and
+# a fix to the rustls key-log path was verified against a run whose filter
+# matched 0 tests and still printed "test result: ok". Add --all-features when a
+# change touches anything feature-gated:
+cargo test -p compio-postgres --all-features -- --test-threads=1
+# That also pulls in the suite-over-tls binaries, which need
+# libs/compio-postgres/tests/tls_live_setup.sh to have run. In a FRESH worktree
+# they fail with "suite-over-tls needs the TLS servers" - do not fix that by
+# re-running the setup script, which regenerates the shared CA and invalidates
+# every other worktree's certs. Run those from a tree that already has them.
 
 # Lint the workspace. NONE of the per-crate runs above invoke clippy, which is
 # why main went red twice in a week without anyone noticing. Run this before you
