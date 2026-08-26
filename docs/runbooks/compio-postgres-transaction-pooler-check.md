@@ -114,19 +114,42 @@ to 895 without changing a case, so re-measure here before comparing - the
 residue SET is what carries across, not the totals.
 
 RE-MEASURED 2026-08-26 after that consolidation: **5 binaries, 840 passed, 55
-failed, 50 distinct names**. Diffed against the 52 from the run above with the
+failed, 55 distinct names**. Diffed against the 52 from the run above with the
 new module prefix stripped: NOTHING newly fails, and the set lost exactly two -
 the assignment-dependent temp-table case below, and
 `replacing_observer_preserves_the_in_flight_requests_receiver`. A name leaving
 the residue is not a regression; a name ENTERING it is the finding.
+
+THAT LINE READ "50 distinct names" UNTIL 2026-08-26, and the 50 was the recipe
+below under-reporting, not a smaller set. Re-measured the same day at 55 failed
+/ 55 distinct: the count was always the number of `FAILED` lines, and every one
+of them is a distinct name. Both defects were in the extraction, and they partly
+cancelled, which is why the wrong number looked plausible:
+
+* `[a-z_:]` admits no DIGIT, so it dropped every SQLSTATE-named test -
+  `..._returns_57014_...`, `..._retry_0a000_...`, `..._consecutive_26000`,
+  `..._once_after_0a000`, `..._announces_utf8_...`. It captured ZERO
+  digit-bearing names, and those are the tests most likely to move when error
+  handling changes - exactly what this diff exists to catch.
+* `-A40` truncates, and the suite binary's block holds 55 names in one run.
+
+Measured against the same log: the original recipe yields 50, fixing only the
+character class yields 40 (the truncation then dominates), and fixing both
+yields 55, which equals the `FAILED` lines. Prove any replacement against that
+last number rather than against this paragraph.
 
 Compare the SET, not the count. Two runs can both report 55 while failing
 different tests, and the count alone cannot see that; diffing the sorted
 `failures:` names can:
 
 ```bash
-grep -aA40 '^failures:$' run.log | grep -aE '^    [a-z_:]+$' | sort -u > new.txt
+grep -aA200 '^failures:$' run.log | grep -aE '^    [a-z0-9_:]+$' | sort -u > new.txt
 comm -13 old.txt new.txt   # anything here is the finding
+
+# Cross-check the extraction against the count libtest reports, every time.
+# These two MUST agree; if they do not, fix the recipe before reading the diff.
+grep -acE '^test .* FAILED$' run.log
+wc -l < new.txt
 ```
 
 Do not read the residue as a fixed number - it tracks how
