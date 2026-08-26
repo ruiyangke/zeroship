@@ -1035,10 +1035,12 @@ impl Config {
             if key == "service" {
                 return Err(Error::config(Box::new(NestedService)));
             }
-            if key == "requiressl" {
-                return Err(Error::config(Box::new(InvalidServiceOption(
-                    "requiressl",
-                ))));
+            if let Some(key) = match key.as_str() {
+                "requiressl" => Some("requiressl"),
+                "servicefile" => Some("servicefile"),
+                _ => None,
+            } {
+                return Err(Error::config(Box::new(InvalidServiceOption(key))));
             }
             if explicit.iter().any(|given| given == key) || applied.contains(&key.as_str()) {
                 continue;
@@ -3830,6 +3832,25 @@ mod tests {
             assert!(
                 error_chain_contains(&error, "requiressl"),
                 "the rejection must name the invalid service key: {error:?}"
+            );
+        }
+
+        /// `servicefile` is this driver's explicit replacement for libpq's
+        /// process-environment search. Once a service is being expanded it is
+        /// too late for the value to select that service's source file.
+        #[test]
+        fn servicefile_is_not_accepted_from_a_service() {
+            let mut config = Config::new();
+            let error = config
+                .fill_unset(
+                    vec![("servicefile".to_owned(), "/ignored".to_owned())],
+                    &[],
+                )
+                .expect_err("servicefile inside a service would be ignored");
+
+            assert!(
+                error_chain_contains(&error, "servicefile"),
+                "the rejection must name the ineffective service key: {error:?}"
             );
         }
 
