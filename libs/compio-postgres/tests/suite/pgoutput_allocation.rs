@@ -61,6 +61,14 @@ fn vm_peak_kb() -> u64 {
 /// reservation. Without the second half the first would pass equally if
 /// `vm_peak_kb` never moved for any reason -- an instrument that cannot
 /// register a positive reads exactly like a well-behaved decoder.
+/// THIS SURVIVES SHARING A PROCESS WITH THE WHOLE SUITE, which it now does:
+/// these files became modules of one test binary on 2026-08-26, so `VmPeak`
+/// arrives here already raised by 74 other modules. That only moves the
+/// baseline UP, which shrinks the first delta - the direction that would let
+/// the decode assertion pass without proving anything. The probe below is what
+/// makes that safe: if earlier work had consumed the headroom, its own delta
+/// would be zero and the test FAILS rather than passing empty. So a pass here
+/// still means the instrument was live when the verdict was taken.
 #[test]
 fn a_hostile_truncate_count_does_not_reserve_for_the_claim() {
     // tag, count = u32::MAX, options = 0, and no relation ids at all.

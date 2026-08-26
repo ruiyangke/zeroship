@@ -79,10 +79,16 @@ worth holding is "the same as the primary server on the same day", not any
 particular figure. It read 1738 on 2026-08-25 and 1720 earlier that day, before
 three commits added 18 tests.
 
-NOTE: the test-file consolidation later on 2026-08-26 took the crate from 79
-test binaries to 5 and the reported test count from 1779 to 895, WITHOUT
-changing any case - `common`s 13 tests had been re-executed in 70 binaries.
-Figures above this line are from the old layout; compare like with like.
+THE LAYOUT CHANGED LATER THAT DAY, so read the figures above as the old shape.
+Folding the test files into one binary took the crate from 79 test targets to 5
+and the reported count from 1779 to 895 WITHOUT changing a case: `common`'s 13
+tests had been re-executed in 70 separate binaries. Compare like with like.
+
+RE-MEASURED 2026-08-26 after that consolidation: **5 binaries, 895 passed,
+0 failed on 18.4**, again the same totals as the primary server the same day.
+The SUMMED in-test time barely moved, 270.6s before and 268.8s after - folding
+the files saves linking and disk, NOT execution, because the same tests do the
+same I/O either way. Do not expect this run to get faster.
 
 Count BINARIES as well as tests. Both numbers come from the same log and only
 the pair is evidence: every test passing across HALF the binaries would print a
