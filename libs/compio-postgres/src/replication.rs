@@ -1962,7 +1962,26 @@ pub mod pgoutput {
     /// `(format_byte, [u32 len + bytes])`.
     fn read_tuple(buf: &mut &[u8]) -> Result<TupleData, DecodeError> {
         let n = read_u16(buf)? as usize;
-        let mut columns = Vec::with_capacity(n);
+        // Reserve for what the frame can still CONTAIN, not for what it
+        // claims. Every column costs at least its one format byte, so the
+        // remaining length is a sound cap that can never refuse valid input -
+        // the same shape as the `nrelations.min(cur.len() / 4)` clamp on
+        // Truncate below. Unclamped, an eight-byte Insert claiming 65535
+        // columns reserved about 2.6 MB before the first column byte was even
+        // read, which is a ~300000x amplification a peer can repeat per frame.
+        //
+        // NO TEST DISCRIMINATES THIS, and that is measured rather than assumed.
+        // A `u16` count caps the over-reservation at ~2.6 MB where Truncate's
+        // `u32` reaches ~17 GB, and 2.6 MB is below what the only instrument
+        // available here can see: `tests/suite/pgoutput_allocation.rs` reads
+        // `VmPeak`, which its own header says "distinguishes gigabytes from
+        // nothing", and a counting `#[global_allocator]` is ruled out because
+        // the workspace sets `unsafe_code = "deny"`. A VmPeak assertion written
+        // for these two sites PASSES with the clamps deleted - checked
+        // 2026-08-26 - so shipping one would have claimed cover it does not
+        // give. This is defence in depth on the same argument as Truncate's
+        // clamp, not a fix with a regression test behind it.
+        let mut columns = Vec::with_capacity(n.min(buf.len()));
         for _ in 0..n {
             let fmt = read_u8(buf)?;
             match fmt {
@@ -2139,7 +2158,10 @@ pub mod pgoutput {
                 let name = read_cstr(&mut cur)?;
                 let replica_identity = read_u8(&mut cur)?;
                 let ncols = read_u16(&mut cur)? as usize;
-                let mut columns = Vec::with_capacity(ncols);
+                // Same clamp as `read_tuple`: a Relation column costs at least
+                // its flags byte, so the remaining length bounds how many can
+                // really follow.
+                let mut columns = Vec::with_capacity(ncols.min(cur.len()));
                 for _ in 0..ncols {
                     let flags = read_u8(&mut cur)?;
                     let col_name = read_cstr(&mut cur)?;
