@@ -1026,10 +1026,10 @@ impl Config {
         let mut applied: Vec<&str> = Vec::new();
 
         for (key, value) in &parameters {
-            if key == "service"
-                || explicit.iter().any(|given| given == key)
-                || applied.contains(&key.as_str())
-            {
+            if key == "service" {
+                return Err(Error::config(Box::new(NestedService)));
+            }
+            if explicit.iter().any(|given| given == key) || applied.contains(&key.as_str()) {
                 continue;
             }
             self.param(key, value)?;
@@ -2500,6 +2500,17 @@ impl fmt::Display for UnsupportedOption {
 
 impl error::Error for UnsupportedOption {}
 
+#[derive(Debug)]
+struct NestedService;
+
+impl fmt::Display for NestedService {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt.write_str("nested service specifications are not supported: option `service`")
+    }
+}
+
+impl error::Error for NestedService {}
+
 /// Parse a keepalive duration in seconds: zero allowed, negative refused.
 ///
 /// The unsigned parse IS the refusal - `"-1".parse::<u64>()` fails - and that
@@ -3639,15 +3650,25 @@ mod tests {
             assert_eq!(config.get_dbname(), Some("first_db"));
         }
 
-        /// A `service` key inside a service section would otherwise recurse or
-        /// re-select; it is simply not a parameter the section can set.
+        /// Libpq rejects a service that selects another service instead of
+        /// silently dropping the nested selection.
         #[test]
-        fn a_service_key_inside_a_service_is_ignored() {
+        fn a_service_key_inside_a_service_is_rejected() {
             let mut config = Config::new();
-            config
+            let error = config
                 .fill_unset(vec![("service".to_owned(), "another".to_owned())], &[])
-                .expect("a nested service key is skipped, not rejected");
-            assert_eq!(config.get_service(), None);
+                .expect_err("a nested service specification must be rejected");
+            let mut text = error.to_string();
+            let mut source = std::error::Error::source(&error);
+            while let Some(cause) = source {
+                text.push_str(" | ");
+                text.push_str(&cause.to_string());
+                source = std::error::Error::source(cause);
+            }
+            assert!(
+                text.contains("nested service") && text.contains("service"),
+                "the rejection must explain and name the nested key: {text}"
+            );
         }
 
         #[test]
