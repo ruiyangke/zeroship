@@ -1978,16 +1978,20 @@ impl Drop for WeakPermitGuard {
 
 impl std::fmt::Debug for Pool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let idle = self.idle.borrow().len();
+        let waiters = self.waiters.borrow().len();
+        let handoffs = self.handoffs.borrow().len();
+        let close_waiters = self.close_waiters.borrow().len();
         f.debug_struct("Pool")
             .field("connection_config", &"***")
-            .field("idle", &self.idle.borrow().len())
+            .field("idle", &idle)
             .field("active", &self.active.get())
             .field("total", &self.total.get())
             .field("max_size", &self.config.max_size)
-            .field("waiters", &self.waiters.borrow().len())
-            .field("handoffs", &self.handoffs.borrow().len())
+            .field("waiters", &waiters)
+            .field("handoffs", &handoffs)
             .field("closed", &self.closed.get())
-            .field("close_waiters", &self.close_waiters.borrow().len())
+            .field("close_waiters", &close_waiters)
             .field("pool_config", &self.config)
             .finish()
     }
@@ -2753,6 +2757,47 @@ mod tests {
                 HOUSEKEEPER_DROP_BORROWED.with(|observed| observed.set(borrowed));
             });
         }
+    }
+
+    struct PoolDebugBorrowProbe<'a> {
+        pool: &'a Pool,
+        wrote: bool,
+        borrowed: [bool; 4],
+    }
+
+    impl std::fmt::Write for PoolDebugBorrowProbe<'_> {
+        fn write_str(&mut self, _text: &str) -> std::fmt::Result {
+            self.wrote = true;
+            let borrowed = [
+                self.pool.idle.try_borrow_mut().is_err(),
+                self.pool.waiters.try_borrow_mut().is_err(),
+                self.pool.handoffs.try_borrow_mut().is_err(),
+                self.pool.close_waiters.try_borrow_mut().is_err(),
+            ];
+            for (observed, now) in self.borrowed.iter_mut().zip(borrowed) {
+                *observed |= now;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn formatting_a_pool_does_not_borrow_its_state_while_the_caller_writer_runs() {
+        let pool = test_pool(PoolConfig::default(), Vec::new(), 0, 0);
+        let mut probe = PoolDebugBorrowProbe {
+            pool: &pool,
+            wrote: false,
+            borrowed: [false; 4],
+        };
+
+        std::fmt::write(&mut probe, format_args!("{pool:?}"))
+            .expect("formatting the pool into the probe failed");
+
+        assert!(probe.wrote, "the formatter never invoked the caller writer");
+        assert_eq!(
+            probe.borrowed, [false; 4],
+            "Pool::fmt held [idle, waiters, handoffs, close_waiters] borrows while the caller writer ran"
+        );
     }
 
     #[test]
