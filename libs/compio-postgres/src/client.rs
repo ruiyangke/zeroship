@@ -2471,8 +2471,8 @@ impl Client {
 
     /// The wire protocol version this session SETTLED ON.
     ///
-    /// Not the same as [`Config::max_protocol_version`], which is only what was
-    /// requested: a server that cannot speak it answers
+    /// Not the same as [`crate::Config::max_protocol_version`], which is only
+    /// what was requested: a server that cannot speak it answers
     /// `NegotiateProtocolVersion` and the session continues one version down,
     /// so a connection asking for 3.2 reports 3.0 against PostgreSQL 15 or 16.
     ///
