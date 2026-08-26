@@ -1,7 +1,7 @@
 //! Live-MySQL conformance for the `MysqlDevSession` driver.
 //!
 //! The seam's invariants - session pinning, transaction visibility, `exec` versus
-//! `exec_text` param semantics, error surfacing - are things the apply path RELIES
+//! bind-inference semantics, error surfacing - are things the apply path RELIES
 //! on and never re-checks. `driver::conformance` exists to prove a driver honours
 //! them, and until this file it was run against PostgreSQL alone, even though its
 //! own module doc named the `mysql2` shell among the drivers it covers.

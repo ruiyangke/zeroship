@@ -2,7 +2,7 @@
 //!
 //! Proves the in-crate `PgDevSession` — the TEST-ONLY [`SqlSession`] over the blocking
 //! `postgres` crate that every resurrected `*_pg` scenario drives — passes the engine's
-//! `driver::conformance` suite (session-pinning, transaction-visibility, `exec_text`
+//! `driver::conformance` suite (session-pinning, transaction-visibility, bind-inference
 //! semantics, error+SQLSTATE mapping). It is the FIRST external consumer of the seam's
 //! conformance surface, so a driver that silently pools connections, swallows errors, or
 //! sends the wrong param format is caught here BEFORE any scenario relies on it.
