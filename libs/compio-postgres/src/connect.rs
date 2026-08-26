@@ -31,7 +31,7 @@ use rand::seq::SliceRandom;
 use std::borrow::Cow;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 #[cfg(unix)]
@@ -83,12 +83,15 @@ impl Endpoint {
     ///
     /// An explicitly named Unix socket matches its path. A bare `hostaddr`
     /// with no name matches as the ADDRESS.
-    fn passfile_host(&self) -> String {
+    fn passfile_host(&self) -> Vec<u8> {
         match &self.target {
             #[cfg(unix)]
             EndpointTarget::Unix(path) => unix_passfile_host(path),
-            EndpointTarget::Name(host) => host.clone(),
-            EndpointTarget::Ip(ip) => self.hostname.clone().unwrap_or_else(|| ip.to_string()),
+            EndpointTarget::Name(host) => host.as_bytes().to_vec(),
+            EndpointTarget::Ip(ip) => self.hostname.as_ref().map_or_else(
+                || ip.to_string().into_bytes(),
+                |host| host.as_bytes().to_vec(),
+            ),
         }
     }
 
@@ -130,13 +133,16 @@ impl Endpoint {
 }
 
 #[cfg(unix)]
-fn unix_passfile_host(path: &Path) -> String {
+fn unix_passfile_host(path: &Path) -> Vec<u8> {
     #[cfg(target_os = "linux")]
     if let Some(name) = path.as_os_str().as_bytes().strip_prefix(&[0]) {
-        return format!("@{}", String::from_utf8_lossy(name));
+        let mut host = Vec::with_capacity(name.len() + 1);
+        host.push(b'@');
+        host.extend_from_slice(name);
+        return host;
     }
 
-    path.to_string_lossy().into_owned()
+    path.as_os_str().as_bytes().to_vec()
 }
 
 /// Validate and enumerate the configured host entries once for every
@@ -826,8 +832,29 @@ mod tests {
 
         assert_eq!(
             endpoint.passfile_host(),
-            "/custom/postgresql-sockets",
+            b"/custom/postgresql-sockets",
             "only libpq's compiled-default socket directory maps to localhost"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn passfile_preserves_non_utf8_unix_socket_host_bytes() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let raw_host = b"/custom/postgresql-\xff";
+        let mut config = Config::new();
+        config.host_path(OsString::from_vec(raw_host.to_vec()));
+        let endpoint = endpoints(&config)
+            .expect("a non-UTF-8 Unix socket is an endpoint")
+            .pop()
+            .expect("one Unix endpoint");
+
+        assert_eq!(
+            endpoint.passfile_host(),
+            raw_host,
+            "passfile matching must use the original Unix socket path bytes"
         );
     }
 
@@ -842,7 +869,7 @@ mod tests {
             .pop()
             .expect("one abstract endpoint");
 
-        assert_eq!(endpoint.passfile_host(), "@passfile-cluster");
+        assert_eq!(endpoint.passfile_host(), b"@passfile-cluster");
     }
 
     #[test]
@@ -917,7 +944,7 @@ mod tests {
             EndpointTarget::Ip(ip) if *ip == "127.0.0.3".parse::<IpAddr>().unwrap()
         ));
         assert_eq!(endpoint.hostname(), None);
-        assert_eq!(endpoint.passfile_host(), "127.0.0.3");
+        assert_eq!(endpoint.passfile_host(), b"127.0.0.3");
     }
 
     #[test]

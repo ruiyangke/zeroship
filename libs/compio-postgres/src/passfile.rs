@@ -19,11 +19,12 @@ use std::path::Path;
 /// `host` is the hostname as the passfile spells it. An explicitly configured
 /// Unix socket uses its directory (or `@name` on Linux); `localhost` is only
 /// libpq's spelling for an implicit or compiled-default socket directory,
-/// neither of which this driver infers. `port` is stringified because the file
+/// neither of which this driver infers. It remains bytes because Unix socket
+/// paths are not required to be UTF-8. `port` is stringified because the file
 /// matches it as text.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PassfileKey<'a> {
-    pub(crate) host: &'a str,
+    pub(crate) host: &'a [u8],
     pub(crate) port: &'a str,
     pub(crate) dbname: &'a str,
     pub(crate) user: &'a str,
@@ -155,7 +156,7 @@ pub(crate) fn lookup_in_contents(contents: &[u8], key: PassfileKey<'_>) -> Optio
             continue;
         }
 
-        let Some(after_host) = match_field(line, key.host.as_bytes()) else {
+        let Some(after_host) = match_field(line, key.host) else {
             continue;
         };
         let Some(after_port) = match_field(&line[after_host..], key.port.as_bytes()) else {
@@ -197,7 +198,7 @@ mod tests {
 
     fn key<'a>(host: &'a str, port: &'a str, dbname: &'a str, user: &'a str) -> PassfileKey<'a> {
         PassfileKey {
-            host,
+            host: host.as_bytes(),
             port,
             dbname,
             user,
