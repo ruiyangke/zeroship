@@ -1,6 +1,6 @@
 //! PostgreSQL's operational analyzers, behind the contract.
 //!
-//! This is the vendor half of `zero_migrate_backend::advisory::OperationalAdvisor`.
+//! This is the vendor half of `zeroship_migrate_backend::advisory::OperationalAdvisor`.
 //! The analyzers themselves - the Atlas-style advisory lint suite that reads a
 //! `libpg_query` parse tree - live in [`crate::analysis::analyze`], alongside the
 //! parser they depend on. What lives HERE is the adapter that files them under this
@@ -28,7 +28,7 @@
 //! provenance.
 
 use crate::analysis::analyze::{analyze, fk_columns_needing_index, indexed_columns};
-use zero_migrate_backend::advisory::{
+use zeroship_migrate_backend::advisory::{
     AdvisoryVerdict, AnalyzerAbsent, IndexCoverage, OperationalAdvisor,
 };
 
@@ -68,7 +68,7 @@ pub static ADVISOR: PgAdvisor = PgAdvisor;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zero_migrate_backend::advisory::rule;
+    use zeroship_migrate_backend::advisory::rule;
 
     #[test]
     fn a_destructive_drop_is_analyzed_and_reported() {

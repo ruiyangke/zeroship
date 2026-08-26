@@ -1,11 +1,11 @@
 //! `zeroship-migrate-adapter` — the monorepo's native-PG producer for the
 //! published `zero-migrate` engine's driver seam.
 //!
-//! The standalone [`zero_migrate`] engine is runtime-free and driver-free: its
-//! Postgres apply path (the generic [`PostgresBackend`](zero_migrate::PostgresBackend),
+//! The standalone [`zeroship_migrate`] engine is runtime-free and driver-free: its
+//! Postgres apply path (the generic [`PostgresBackend`](zeroship_migrate::PostgresBackend),
 //! the `<D: SqlSession>` journal/drift/precondition/baseline free functions, and
 //! the `<D: SqlSession>` executor) is generic over the driver-neutral
-//! [`zero_migrate::driver::SqlSession`] seam. The engine ships NO native Rust
+//! [`zeroship_migrate::driver::SqlSession`] seam. The engine ships NO native Rust
 //! network Postgres driver — the production producer is the napi/Node `pg` host.
 //!
 //! This crate supplies the MONOREPO's producer: [`CompioPgSession`], a newtype
@@ -110,7 +110,7 @@
 
 use compio_postgres::types::{Kind, ToSql, Type};
 use compio_postgres::{Client, Error as PgError, Row as PgRow};
-use zero_migrate::driver::{Bind, DbError, Row, SqlSession, Value};
+use zeroship_migrate::driver::{Bind, DbError, Row, SqlSession, Value};
 
 /// The `zeroship-platform-migrate` one-shot's generated configuration.
 ///

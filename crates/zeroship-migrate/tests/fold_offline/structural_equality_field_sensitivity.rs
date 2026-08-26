@@ -40,8 +40,8 @@
 use crate::support::field_probes::{
     self, base_constraint_snapshot, base_index_snapshot, base_table_snapshot, ProbeSet,
 };
-use zero_migrate::model::schema_model;
-use zero_migrate::{
+use zeroship_migrate::model::schema_model;
+use zeroship_migrate::{
     ColumnCollationSnapshot, ColumnSnapshot, GeneratedColumnSnapshot, GeneratedKindSnapshot,
     IdDefaultSnapshot, IdentityCol, IndexSortOrder, TableStrictness, ValueFormat,
 };
@@ -242,9 +242,9 @@ fn model_index_probes() -> ProbeSet<schema_model::Index> {
     });
     set.probe("Index::attributes", attributes, |i| {
         i.attributes.insert(
-            zero_migrate_ir::attribute::AttrKey::parse("acme.fillfactor")
+            zeroship_migrate_ir::attribute::AttrKey::parse("acme.fillfactor")
                 .expect("a well-formed key"),
-            zero_migrate::IrScalar::Int(70),
+            zeroship_migrate::IrScalar::Int(70),
         );
     });
     set.probe("Index::comment", comment, |i| {
@@ -314,13 +314,13 @@ fn model_table_probes() -> ProbeSet<schema_model::Table> {
     });
     set.probe("Table::attributes", attributes, |t| {
         t.attributes.insert(
-            zero_migrate_ir::attribute::AttrKey::parse("acme.fillfactor")
+            zeroship_migrate_ir::attribute::AttrKey::parse("acme.fillfactor")
                 .expect("a well-formed key"),
-            zero_migrate::IrScalar::Int(70),
+            zeroship_migrate::IrScalar::Int(70),
         );
     });
     set.probe("Table::partition_by", partition_by, |t| {
-        t.partition_by = Some(zero_migrate::PartitionSpec::Range {
+        t.partition_by = Some(zeroship_migrate::PartitionSpec::Range {
             columns: vec!["a".to_string()],
             collapse: false,
         });

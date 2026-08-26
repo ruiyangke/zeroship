@@ -22,7 +22,7 @@
 //! The live schema used here is the one `engine::refresh_historical_live` builds for
 //! SQLite - table snapshots from `fold_ops`, SDK schemas from the `FieldDef` projection -
 //! which is the shape whose `inline_checks` are populated at all. A SQLite CATALOG
-//! read leaves the field EMPTY (`zero_migrate_sqlite::backend::drift_sql`), so the
+//! read leaves the field EMPTY (`zeroship_migrate_sqlite::backend::drift_sql`), so the
 //! catalog-sourced rebuild renders from the SDK descriptor or replays the stored
 //! body; the last test here pins that leg so the fix cannot start rewriting a body
 //! it is meant to leave alone.
@@ -37,16 +37,16 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::apply::executor::LockMode;
-use zero_migrate::model::ir::IrFlagsOverride;
-use zero_migrate::render::fold::single_fold;
-use zero_migrate::render::lower::{IrAuthor, LiveSchema};
-use zero_migrate::{
+use zeroship_migrate::apply::executor::LockMode;
+use zeroship_migrate::model::ir::IrFlagsOverride;
+use zeroship_migrate::render::fold::single_fold;
+use zeroship_migrate::render::lower::{IrAuthor, LiveSchema};
+use zeroship_migrate::{
     fold_ops, resolve_create_table_policy, Approval, ColType, ExecutorConfig, MigrationEngine,
     MigrationIr, Op, PlanStep, RenameStep,
 };
-use zero_migrate_sqlite::backend::Mode;
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate_sqlite::backend::Mode;
+use zeroship_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_inline_check";
 const APP: &str = "app_inline_check";
@@ -143,21 +143,21 @@ fn exec_cfg() -> ExecutorConfig {
 fn folded_live_schema(history: &[Op]) -> LiveSchema {
     let effective = support::confined_charter();
     let snapshot = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         history,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         PROJECT,
         &effective,
     )
     .expect("the history folds");
     let sdk_schemas = single_fold::fold(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         history,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         PROJECT,
         &effective,
     )
-    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
+    .map(|folded| folded.project_field_defs(zeroship_migrate::shipping_vendors()))
     .expect("the history folds to field defs");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     live.sdk_schemas = sdk_schemas;
@@ -178,12 +178,12 @@ async fn a_sqlite_rename_rebuild_emits_a_check_body_over_the_new_column_name() {
     let effective = support::confined_charter();
     let p = paths("inline_check");
     let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &effective,
     );
 
@@ -339,12 +339,12 @@ async fn a_catalog_sourced_rename_still_replays_the_stored_body() {
     let effective = support::confined_charter();
     let p = paths("inline_check_catalog");
     let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &effective,
     );
 
@@ -392,13 +392,13 @@ async fn a_catalog_sourced_rename_still_replays_the_stored_body() {
 
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     live.sdk_schemas = single_fold::fold(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &create.ops,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         PROJECT,
         &effective,
     )
-    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
+    .map(|folded| folded.project_field_defs(zeroship_migrate::shipping_vendors()))
     .expect("the history folds to field defs");
 
     let steps = author
@@ -462,12 +462,12 @@ async fn a_second_rename_starts_from_a_folded_body_the_first_rename_already_move
     let effective = support::confined_charter();
     let p = paths("inline_check_twice");
     let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &effective,
     );
 
@@ -510,9 +510,9 @@ async fn a_second_rename_starts_from_a_folded_body_the_first_rename_already_move
 
     // The FOLD's own output, before any rebuild touches it.
     let folded = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &history,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         PROJECT,
         &effective,
     )

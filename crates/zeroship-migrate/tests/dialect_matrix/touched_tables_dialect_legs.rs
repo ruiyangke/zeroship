@@ -25,8 +25,8 @@
 //! two halves disagree is the shape that later gets copied, not because a user is
 //! currently reaching it.
 
-use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::{IrAuthor, LiveSchema};
+use zeroship_migrate::model::ir::MigrationIr;
+use zeroship_migrate::{IrAuthor, LiveSchema};
 
 fn touched(ops_json: &str) -> Vec<String> {
     let raw = format!(r#"{{"ir_version":1,"name":"touched","ops":{ops_json}}}"#);

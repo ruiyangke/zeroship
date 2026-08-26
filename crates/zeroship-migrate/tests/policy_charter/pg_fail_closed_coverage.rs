@@ -2,17 +2,17 @@ use crate::support;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use zero_migrate::model::expr::{Expr, ExtractField, ScalarFn};
-use zero_migrate::model::ir::{
+use zeroship_migrate::model::expr::{Expr, ExtractField, ScalarFn};
+use zeroship_migrate::model::ir::{
     FuncLanguage, GrantTarget, IrScalar, IrValue, MigrationIr, Op, PartitionBounds, PolicyCmd,
     Privilege, SelectAst, TableRef, ViewQuery, CURRENT_IR_VERSION,
 };
-use zero_migrate::model::validate::{
+use zeroship_migrate::model::validate::{
     validate_expr, validate_ir_scoped, TargetScope, CODE_DIALECT_UNSUPPORTED,
     CODE_EXPR_NOT_PORTABLE, CODE_UNSUPPORTED, CODE_VENDOR_OP_DENIED,
 };
-use zero_migrate::render::dml::assemble_backfill_clauses;
-use zero_migrate::{IrAuthor, LiveSchema, SchemaScope};
+use zeroship_migrate::render::dml::assemble_backfill_clauses;
+use zeroship_migrate::{IrAuthor, LiveSchema, SchemaScope};
 
 const EXPECTED_PG_ONLY_EXPR_NODES: &[&str] = &[
     "FnCall::CurrentSetting",
@@ -138,7 +138,7 @@ fn pg_only_expr_samples() -> Vec<Expr> {
             from: Box::new(Expr::col("ts")),
         },
         Expr::Interval {
-            duration: zero_migrate::Duration {
+            duration: zeroship_migrate::Duration {
                 years: None,
                 months: None,
                 days: None,
@@ -166,9 +166,9 @@ fn pg_only_expr_nodes_render_on_pg_and_refuse_off_pg_at_validate() {
         assert!(seen.insert(kind), "{kind} sampled twice");
 
         validate_expr(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &expr,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &scope,
             0,
         )
@@ -176,8 +176,8 @@ fn pg_only_expr_nodes_render_on_pg_and_refuse_off_pg_at_validate() {
         let mut set = BTreeMap::new();
         set.insert("out".to_string(), IrValue::Expr(expr.clone()));
         let rendered = assemble_backfill_clauses(
-            zero_migrate::shipping_vendors(),
-            &zero_migrate_postgres::DIALECT,
+            zeroship_migrate::shipping_vendors(),
+            &zeroship_migrate_postgres::DIALECT,
             "t",
             &set,
             Some(&expr),
@@ -188,8 +188,8 @@ fn pg_only_expr_nodes_render_on_pg_and_refuse_off_pg_at_validate() {
             "{kind} PG render is empty"
         );
 
-        for dialect in [&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT] {
-            let err = validate_expr(zero_migrate::shipping_vendors(), &expr, dialect, &scope, 0)
+        for dialect in [&zeroship_migrate_sqlite::DIALECT, &zeroship_migrate_mysql::DIALECT] {
+            let err = validate_expr(zeroship_migrate::shipping_vendors(), &expr, dialect, &scope, 0)
                 .expect_err("PG-only expression must refuse off Postgres");
             let expected_code = if kind == "UuidV7" {
                 CODE_EXPR_NOT_PORTABLE
@@ -215,13 +215,13 @@ fn regex_match_renders_on_pg_and_mysql_and_refuses_sqlite_at_validate() {
 
     for (validator_dialect, sql_dialect) in [
         (
-            &zero_migrate_postgres::DIALECT,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
         ),
-        (&zero_migrate_mysql::DIALECT, &zero_migrate_mysql::DIALECT),
+        (&zeroship_migrate_mysql::DIALECT, &zeroship_migrate_mysql::DIALECT),
     ] {
         validate_expr(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &expr,
             validator_dialect,
             &scope,
@@ -231,7 +231,7 @@ fn regex_match_renders_on_pg_and_mysql_and_refuses_sqlite_at_validate() {
         let mut set = BTreeMap::new();
         set.insert("out".to_string(), IrValue::Expr(expr.clone()));
         let rendered = assemble_backfill_clauses(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             sql_dialect,
             "t",
             &set,
@@ -245,15 +245,15 @@ fn regex_match_renders_on_pg_and_mysql_and_refuses_sqlite_at_validate() {
     }
 
     let err = validate_expr(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &expr,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &scope,
         0,
     )
     .expect_err("regex must fail closed on SQLite");
     assert_eq!(err.code, CODE_DIALECT_UNSUPPORTED);
-    assert_eq!(err.dialect, zero_migrate_sqlite::DIALECT);
+    assert_eq!(err.dialect, zeroship_migrate_sqlite::DIALECT);
     assert!(err.reason.contains("SQLite"), "got: {err}");
 }
 
@@ -511,9 +511,9 @@ fn pg_vendor_ops_render_on_pg_and_refuse_off_pg_at_validate() {
 
         let ir = ir_with(op.clone());
         validate_ir_scoped(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &ir,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             Some(&platform_scope),
         )
         .unwrap_or_else(|err| panic!("{kind} must validate on PG under platform scope: {err:?}"));
@@ -521,10 +521,10 @@ fn pg_vendor_ops_render_on_pg_and_refuse_off_pg_at_validate() {
         // The operator charter GRANTS the vendor capability each sample needs; the
         // platform scope beside it only says which schemas are in bounds.
         let migrations = IrAuthor::new(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             "app",
             "app_test",
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &support::operator_charter("app"),
         )
         .with_schema_scope(platform_scope.clone())
@@ -538,9 +538,9 @@ fn pg_vendor_ops_render_on_pg_and_refuse_off_pg_at_validate() {
         );
 
         let confined_err = validate_ir_scoped(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &ir,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             Some(&confined_scope),
         )
         .expect_err("confined PG scope must refuse vendor ops by capability");
@@ -549,9 +549,9 @@ fn pg_vendor_ops_render_on_pg_and_refuse_off_pg_at_validate() {
             "{kind} under confined PG must fail as VENDOR_OP_DENIED, got {confined_err:?}"
         );
 
-        for dialect in [&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT] {
+        for dialect in [&zeroship_migrate_sqlite::DIALECT, &zeroship_migrate_mysql::DIALECT] {
             let err = validate_ir_scoped(
-                zero_migrate::shipping_vendors(),
+                zeroship_migrate::shipping_vendors(),
                 &ir,
                 dialect,
                 Some(&platform_scope),

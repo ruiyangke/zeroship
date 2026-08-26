@@ -3,12 +3,12 @@ use crate::support;
 use std::collections::BTreeSet;
 
 use serde_json::json;
-use zero_migrate::model::ir::ExistenceGuard;
-use zero_migrate::model::validate::{
+use zeroship_migrate::model::ir::ExistenceGuard;
+use zeroship_migrate::model::validate::{
     validate_ir, validate_ir_scoped, UnsupportedKind, CODE_UNSUPPORTED,
 };
-use zero_migrate::render::lower::IrAuthor;
-use zero_migrate::{
+use zeroship_migrate::render::lower::IrAuthor;
+use zeroship_migrate::{
     fold_ops, BinaryOp, ColType, ColumnOrExpr, CommentTarget, ExclusionElement, ExclusionMethod,
     ExclusionOperator, Expr, IndexElement, IrColumn, IrConstraint, IrConstraintKind, IrDefault,
     IrScalar, LiveSchema, MigrationIr, Op, SafeI64, SafeU64, ScalarFn, SequenceOwnedBy,
@@ -36,11 +36,11 @@ fn ir(ops: Vec<Op>) -> MigrationIr {
 
 fn lower(
     ops: Vec<Op>,
-    dialect: &zero_migrate::DialectId,
+    dialect: &zeroship_migrate::DialectId,
     live: &BTreeSet<String>,
-) -> Vec<zero_migrate::Migration> {
+) -> Vec<zeroship_migrate::Migration> {
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         OWNER,
         dialect,
@@ -105,7 +105,7 @@ fn nextval_col(name: &str, schema: Option<&str>) -> IrColumn {
 fn postgres_renders_create_alter_drop_sequence() {
     let create = lower(
         vec![create_sequence_op()],
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &BTreeSet::new(),
     );
     assert_eq!(
@@ -129,7 +129,7 @@ fn postgres_renders_create_alter_drop_sequence() {
             cycle: Some(false),
             owned_by: Some(None),
         }],
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &BTreeSet::new(),
     );
     assert_eq!(
@@ -144,7 +144,7 @@ fn postgres_renders_create_alter_drop_sequence() {
             schema: None,
             existence_guard: Some(ExistenceGuard::IfExists),
         }],
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &BTreeSet::new(),
     );
     assert_eq!(drop[0].up, r#"DROP SEQUENCE IF EXISTS "app"."invoice_seq""#);
@@ -154,7 +154,7 @@ fn postgres_renders_create_alter_drop_sequence() {
 fn postgres_renders_nextval_default_with_and_without_schema() {
     let with_schema = lower(
         vec![Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "invoices".into(),
             columns: vec![nextval_col("id", Some("app"))],
             primary_key: None,
@@ -165,7 +165,7 @@ fn postgres_renders_nextval_default_with_and_without_schema() {
             schema: None,
             existence_guard: None,
         }],
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &BTreeSet::new(),
     );
     assert!(
@@ -178,7 +178,7 @@ fn postgres_renders_nextval_default_with_and_without_schema() {
 
     let without_schema = lower(
         vec![Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "invoices".into(),
             columns: vec![nextval_col("id", None)],
             primary_key: None,
@@ -189,7 +189,7 @@ fn postgres_renders_nextval_default_with_and_without_schema() {
             schema: None,
             existence_guard: None,
         }],
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &BTreeSet::new(),
     );
     assert!(
@@ -216,7 +216,7 @@ fn postgres_renders_valid_descending_sequence() {
             cycle: Some(false),
             owned_by: None,
         }],
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &BTreeSet::new(),
     );
     assert_eq!(
@@ -227,9 +227,9 @@ fn postgres_renders_valid_descending_sequence() {
 
 #[test]
 fn sqlite_and_mysql_fail_closed_on_sequences() {
-    for dialect in [&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT] {
+    for dialect in [&zeroship_migrate_sqlite::DIALECT, &zeroship_migrate_mysql::DIALECT] {
         let err = validate_ir(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &ir(vec![create_sequence_op()]),
             dialect,
         )
@@ -243,7 +243,7 @@ fn sqlite_and_mysql_fail_closed_on_sequences() {
 #[test]
 fn nextval_default_rejects_non_integer_and_non_postgres() {
     let text_nextval = Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "events".into(),
         columns: vec![IrColumn {
             ty: ColType::Text,
@@ -261,25 +261,25 @@ fn nextval_default_rejects_non_integer_and_non_postgres() {
     // table-shape gate returns Ok), so validation reaches the column-default-type
     // check — the realistic profile, since nextval defaults are used on the platform.
     let err = validate_ir_scoped(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir(vec![text_nextval.clone()]),
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         None,
     )
     .unwrap_err();
     assert_eq!(
         err.code,
-        zero_migrate::model::validate::CODE_COLUMN_DEFAULT_TYPE
+        zeroship_migrate::model::validate::CODE_COLUMN_DEFAULT_TYPE
     );
     assert!(err
         .reason
         .contains("nextval defaults require an integer column"));
 
-    for dialect in [&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT] {
+    for dialect in [&zeroship_migrate_sqlite::DIALECT, &zeroship_migrate_mysql::DIALECT] {
         // Platform profile so the createTable table-shape gate does not pre-empt the
         // dialect-level unsupported check (nextval defaults are PostgreSQL-only).
         let err = validate_ir_scoped(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &ir(vec![text_nextval.clone()]),
             dialect,
             None,
@@ -294,9 +294,9 @@ fn nextval_default_rejects_non_integer_and_non_postgres() {
 #[test]
 fn fold_tracks_sequence_existence_and_drop() {
     let created = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &[create_sequence_op()],
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &support::no_inject("app"),
     )
@@ -304,7 +304,7 @@ fn fold_tracks_sequence_existence_and_drop() {
     assert!(created.sequences.contains_key("invoice_seq"));
 
     let dropped = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &[
             create_sequence_op(),
             Op::DropSequence {
@@ -313,7 +313,7 @@ fn fold_tracks_sequence_existence_and_drop() {
                 existence_guard: None,
             },
         ],
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &support::no_inject("app"),
     )
@@ -384,7 +384,7 @@ fn postgres_renders_comment_on_all_structured_targets() {
                 comment: Some("Normalize email".into()),
             },
         ],
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &BTreeSet::new(),
     );
     let up: Vec<&str> = migrations.iter().map(|m| m.up.as_str()).collect();
@@ -406,9 +406,9 @@ fn postgres_renders_comment_on_all_structured_targets() {
 
 #[test]
 fn sqlite_and_mysql_fail_closed_on_comment_on() {
-    for dialect in [&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT] {
+    for dialect in [&zeroship_migrate_sqlite::DIALECT, &zeroship_migrate_mysql::DIALECT] {
         let err = validate_ir(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &ir(vec![Op::Comment {
                 target: CommentTarget::Table {
                     schema: None,
@@ -454,9 +454,9 @@ fn fold_tracks_and_clears_table_and_column_comments() {
     });
 
     let folded = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &set_ops,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &support::no_inject("app"),
     )
@@ -489,9 +489,9 @@ fn fold_tracks_and_clears_table_and_column_comments() {
         comment: None,
     });
     let cleared = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &cleared_ops,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &support::no_inject("app"),
     )
@@ -551,13 +551,13 @@ fn postgres_and_sqlite_render_partial_index_where() {
     };
     let live = BTreeSet::from(["users".to_string()]);
 
-    let pg = lower(vec![op.clone()], &zero_migrate_postgres::DIALECT, &live);
+    let pg = lower(vec![op.clone()], &zeroship_migrate_postgres::DIALECT, &live);
     assert_eq!(
         pg[0].up,
         r#"CREATE INDEX IF NOT EXISTS "users_active_idx" ON "app"."users" ("active") WHERE ("active" IS TRUE)"#
     );
 
-    let sqlite = lower(vec![op], &zero_migrate_sqlite::DIALECT, &live);
+    let sqlite = lower(vec![op], &zeroship_migrate_sqlite::DIALECT, &live);
     assert_eq!(
         sqlite[0].up,
         r#"CREATE INDEX IF NOT EXISTS "users_active_idx" ON "users" ("active") WHERE ("active" = 1)"#
@@ -589,13 +589,13 @@ fn postgres_and_sqlite_render_expression_index_elements() {
     };
     let live = BTreeSet::from(["users".to_string()]);
 
-    let pg = lower(vec![op.clone()], &zero_migrate_postgres::DIALECT, &live);
+    let pg = lower(vec![op.clone()], &zeroship_migrate_postgres::DIALECT, &live);
     assert_eq!(
         pg[0].up,
         r#"CREATE INDEX IF NOT EXISTS "users_email_lower_idx" ON "app"."users" ("email", (lower("email"))) WHERE ("active" IS TRUE)"#
     );
 
-    let sqlite = lower(vec![op], &zero_migrate_sqlite::DIALECT, &live);
+    let sqlite = lower(vec![op], &zeroship_migrate_sqlite::DIALECT, &live);
     assert_eq!(
         sqlite[0].up,
         r#"CREATE INDEX IF NOT EXISTS "users_email_lower_idx" ON "users" ("email", (lower("email"))) WHERE ("active" = 1)"#
@@ -605,7 +605,7 @@ fn postgres_and_sqlite_render_expression_index_elements() {
 #[test]
 fn mysql_fail_closes_on_expression_index_elements() {
     let err = validate_ir(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir(vec![Op::CreateIndex {
             table: "users".into(),
             columns: vec![IndexElement::Expr {
@@ -624,7 +624,7 @@ fn mysql_fail_closes_on_expression_index_elements() {
             existence_guard: None,
             nulls_not_distinct: None,
         }]),
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
     )
     .unwrap_err();
     assert_eq!(err.code, CODE_UNSUPPORTED);
@@ -635,7 +635,7 @@ fn mysql_fail_closes_on_expression_index_elements() {
 #[test]
 fn mysql_fail_closes_on_partial_index_predicate() {
     let err = validate_ir(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir(vec![Op::CreateIndex {
             table: "users".into(),
             columns: vec![idx_col("active")],
@@ -652,7 +652,7 @@ fn mysql_fail_closes_on_partial_index_predicate() {
             existence_guard: None,
             nulls_not_distinct: None,
         }]),
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
     )
     .unwrap_err();
     assert_eq!(err.code, CODE_UNSUPPORTED);
@@ -696,13 +696,13 @@ fn postgres_renders_exclusion_constraint() {
     live.insert("bookings".to_string());
     let migrations = lower(
         vec![Op::AddConstraint {
-            attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
             table: "bookings".into(),
             constraint: exclusion_constraint(),
             schema: None,
             existence_guard: None,
         }],
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &live,
     );
     assert_eq!(
@@ -721,7 +721,7 @@ fn postgres_parenthesizes_expression_exclusion_targets_only() {
     live.insert("bookings".to_string());
     let migrations = lower(
         vec![Op::AddConstraint {
-            attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
             table: "bookings".into(),
             constraint: IrConstraint {
                 name: Some("bookings_room_lower_excl".into()),
@@ -752,7 +752,7 @@ fn postgres_parenthesizes_expression_exclusion_targets_only() {
             schema: None,
             existence_guard: None,
         }],
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &live,
     );
 
@@ -765,11 +765,11 @@ fn postgres_parenthesizes_expression_exclusion_targets_only() {
 
 #[test]
 fn sqlite_and_mysql_fail_closed_on_exclusion_constraints() {
-    for dialect in [&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT] {
+    for dialect in [&zeroship_migrate_sqlite::DIALECT, &zeroship_migrate_mysql::DIALECT] {
         let err = validate_ir(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &ir(vec![Op::AddConstraint {
-                attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
                 table: "bookings".into(),
                 constraint: exclusion_constraint(),
                 schema: None,
@@ -840,9 +840,9 @@ fn an_over_long_index_name_is_refused() {
         existence_guard: None,
     };
     let err = validate_ir(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir(vec![op]),
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
     )
     .expect_err("an index name past the identifier cap must be refused");
     assert!(
@@ -856,7 +856,7 @@ fn an_over_long_index_name_is_refused() {
     // answer `existence_probe.truncated_identifier` gave for this backend, so the
     // dialect appearing here is the one under test rather than a coincidence.
     assert!(
-        err.reason.contains(zero_migrate_postgres::DIALECT.as_str()),
+        err.reason.contains(zeroship_migrate_postgres::DIALECT.as_str()),
         "the truncation reason must name the target that truncates, got {:?}",
         err.reason
     );
@@ -891,9 +891,9 @@ fn an_over_long_index_name_is_refused() {
         existence_guard: None,
     };
     validate_ir(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir(vec![op_ok]),
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
     )
     .expect("an index name within the cap stays valid");
 }

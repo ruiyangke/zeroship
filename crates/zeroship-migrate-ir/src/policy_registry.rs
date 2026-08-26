@@ -3,7 +3,7 @@
 //!
 //! `zero-migrate-policy` ships the PDP *mechanism* (the knob/rule/document model,
 //! the composition algebra, the unforgeable
-//! [`EffectivePolicy`](zero_migrate_policy::EffectivePolicy)). It is content-free
+//! [`EffectivePolicy`](zeroship_migrate_policy::EffectivePolicy)). It is content-free
 //! by design. THIS module is the engine's *content*: it declares zero-migrate's
 //! knobs - the vendor capabilities as grant keys, the op-timeout upper bounds, the
 //! index/table-rewrite postures, and the data-security obligations - as a builtin
@@ -30,7 +30,7 @@
 //! keyed off the `access.role` grant alone now that there is no posture to key off.
 //!
 //! This is the Step-0 prep for moving the guard's capability gate onto the PDP: the
-//! guard, given an [`EffectivePolicy`](zero_migrate_policy::EffectivePolicy) composed
+//! guard, given an [`EffectivePolicy`](zeroship_migrate_policy::EffectivePolicy) composed
 //! over [`builtin_registry`], queries
 //! `grants(key, object)` for the statement's capability key instead of reading a
 //! `VendorCapabilities` bit. The registry here is what makes those queries meaningful
@@ -80,13 +80,13 @@
 //! Wiring one of the five into the guard or executor is what promotes it to
 //! `Enforced`; the classification tracks the implementation, not the key.
 
-use zero_migrate_policy::{
+use zeroship_migrate_policy::{
     Enforcement, KnobDef, KnobKey, KnobKind, KnobValue, ObjectModel, Polarity, PolicyRegistry,
 };
 
 use crate::capability::VendorCapability;
 
-/// Build an [`EffectivePolicy`](zero_migrate_policy::EffectivePolicy) from a
+/// Build an [`EffectivePolicy`](zeroship_migrate_policy::EffectivePolicy) from a
 /// `RootCharter` document (TOML). The charter
 /// is parsed against [`builtin_registry`], then composes against a grant-only
 /// draft extracted from the same charter. Inject/require/validate rules survive
@@ -110,18 +110,18 @@ use crate::capability::VendorCapability;
 /// draft (unreachable), or a composition failure.
 pub fn effective_policy_from_charter_toml(
     charter_toml: &str,
-) -> Result<zero_migrate_policy::EffectivePolicy, String> {
+) -> Result<zeroship_migrate_policy::EffectivePolicy, String> {
     let registry = builtin_registry();
-    let charter = zero_migrate_policy::RootCharter::parse_toml(charter_toml, &registry)
+    let charter = zeroship_migrate_policy::RootCharter::parse_toml(charter_toml, &registry)
         .map_err(|e| format!("policy charter failed to load: {e:?}"))?;
     let draft_toml = grant_only_draft_toml(charter_toml)?;
-    let draft = zero_migrate_policy::PolicyDoc::parse_toml(
+    let draft = zeroship_migrate_policy::PolicyDoc::parse_toml(
         &draft_toml,
         &registry,
-        zero_migrate_policy::LoadContext::NonRootLayer,
+        zeroship_migrate_policy::LoadContext::NonRootLayer,
     )
     .map_err(|e| format!("empty policy draft failed to load: {e:?}"))?;
-    zero_migrate_policy::admit(&charter, &draft, &registry)
+    zeroship_migrate_policy::admit(&charter, &draft, &registry)
         .map_err(|e| format!("policy composition failed: {e:?}"))
 }
 
@@ -449,7 +449,7 @@ fn require_approval_knob(key: &str, docs: &str) -> KnobDef {
 
 /// The engine's BUILTIN [`PolicyRegistry`]: every zero-migrate knob the guard and
 /// validator gate on, as PDP knob defs. An
-/// [`EffectivePolicy`](zero_migrate_policy::EffectivePolicy) the guard queries is
+/// [`EffectivePolicy`](zeroship_migrate_policy::EffectivePolicy) the guard queries is
 /// composed over exactly this registry, so `grants(key, object)` resolves to the
 /// knob's default (deny) when no covering grant rule raises it.
 ///
@@ -536,7 +536,7 @@ pub fn builtin_registry() -> PolicyRegistry {
 mod tests {
     use std::collections::BTreeSet;
 
-    use zero_migrate_policy::{LoadError, RootCharter};
+    use zeroship_migrate_policy::{LoadError, RootCharter};
 
     use super::*;
 

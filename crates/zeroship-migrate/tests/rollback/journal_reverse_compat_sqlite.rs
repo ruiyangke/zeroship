@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate_sqlite::backend::Mode;
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate_sqlite::backend::Mode;
+use zeroship_migrate_sqlite::SqliteBackend;
 
 struct Paths {
     _dir: TempDir,

@@ -1,7 +1,7 @@
 //! The vendor attributes PostgreSQL declares.
 //!
 //! Each entry is one knob from PostgreSQL's own `CREATE TABLE` grammar - a storage
-//! parameter or a table-level clause - that the neutral [`Op`](zero_migrate_ir::ir::Op)
+//! parameter or a table-level clause - that the neutral [`Op`](zeroship_migrate_ir::ir::Op)
 //! set does not model and should not.
 //!
 //! This is a STARTER SET, not the full grammar. The point of the
@@ -23,9 +23,9 @@
 //! field names and is now the vocabulary, so a third index storage parameter is a change
 //! to this file and to nothing else.
 
-use zero_migrate_backend::attribute::{AttrDef, AttrShape, AttributeVocabulary};
-use zero_migrate_backend::declare_attributes;
-use zero_migrate_ir::attribute::{
+use zeroship_migrate_backend::attribute::{AttrDef, AttrShape, AttributeVocabulary};
+use zeroship_migrate_backend::declare_attributes;
+use zeroship_migrate_ir::attribute::{
     CreateIndexAttributes, CreatePartitionAttributes, CreateTableAttributes,
     SetTableOptionsAttributes,
 };

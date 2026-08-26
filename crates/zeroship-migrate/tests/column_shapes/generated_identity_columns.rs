@@ -1,6 +1,6 @@
 use crate::support;
 
-use zero_migrate::{
+use zeroship_migrate::{
     fold_ops, resolve_create_table_policy, validate_ir, BinaryOp, ColType, Expr, GeneratedCol,
     IdentityCol, IrAuthor, IrColumn, IrDefault, IrFlagsOverride, IrLowerError, IrScalar,
     LiveSchema, MigrationIr, Op, SchemaScope, UnsupportedKind, CODE_COLUMN_FACET_CONFLICT,
@@ -48,10 +48,10 @@ fn ir_platform(op: Op) -> MigrationIr {
 
 fn validate_platform(
     ir: &MigrationIr,
-    dialect: &zero_migrate::DialectId,
-) -> Result<(), zero_migrate::AuthoringError> {
-    zero_migrate::model::validate::validate_ir_scoped(
-        zero_migrate::shipping_vendors(),
+    dialect: &zeroship_migrate::DialectId,
+) -> Result<(), zeroship_migrate::AuthoringError> {
+    zeroship_migrate::model::validate::validate_ir_scoped(
+        zeroship_migrate::shipping_vendors(),
         ir,
         dialect,
         Some(&SchemaScope::Unconfined),
@@ -90,7 +90,7 @@ fn generated_total(stored: bool) -> GeneratedCol {
 
 fn create_table(columns: Vec<IrColumn>, primary_key: Option<Vec<String>>) -> Op {
     Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "line_items".to_string(),
         columns,
         primary_key,
@@ -111,9 +111,9 @@ fn pk(columns: &[&str]) -> Option<Vec<String>> {
     Some(columns.iter().map(|c| (*c).to_string()).collect())
 }
 
-fn lower_create(dialect: &zero_migrate::DialectId, op: Op) -> LowerResult {
+fn lower_create(dialect: &zeroship_migrate::DialectId, op: Op) -> LowerResult {
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         OWNER,
         dialect,
@@ -129,9 +129,9 @@ fn lower_create(dialect: &zero_migrate::DialectId, op: Op) -> LowerResult {
         .up)
 }
 
-fn lower_first(dialect: &zero_migrate::DialectId, op: Op) -> LowerResult {
+fn lower_first(dialect: &zeroship_migrate::DialectId, op: Op) -> LowerResult {
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         OWNER,
         dialect,
@@ -159,7 +159,7 @@ fn generated_create(stored: bool) -> Op {
 
 #[test]
 fn pg_generated_stored_column_renders_exact_create_table_ddl() {
-    let up = lower_create(&zero_migrate_postgres::DIALECT, generated_create(true)).unwrap();
+    let up = lower_create(&zeroship_migrate_postgres::DIALECT, generated_create(true)).unwrap();
     assert_eq!(
         up,
         r#"CREATE TABLE "app"."line_items" ("created_at" timestamptz NOT NULL, "created_by" character varying(255), "deleted_at" timestamptz, "id" character varying(255) PRIMARY KEY NOT NULL, "qty" integer, "total_cents" integer GENERATED ALWAYS AS (("qty" * "unit_cents")) STORED NOT NULL, "unit_cents" integer, "updated_at" timestamptz NOT NULL, "updated_by" character varying(255), "version" integer NOT NULL)"#,
@@ -168,7 +168,7 @@ fn pg_generated_stored_column_renders_exact_create_table_ddl() {
 
 #[test]
 fn sqlite_generated_stored_and_virtual_columns_render_exact_create_table_ddl() {
-    let stored = lower_create(&zero_migrate_sqlite::DIALECT, generated_create(true)).unwrap();
+    let stored = lower_create(&zeroship_migrate_sqlite::DIALECT, generated_create(true)).unwrap();
     assert_eq!(
         stored,
         format!(
@@ -176,7 +176,7 @@ fn sqlite_generated_stored_and_virtual_columns_render_exact_create_table_ddl() {
         ),
     );
 
-    let virtual_col = lower_create(&zero_migrate_sqlite::DIALECT, generated_create(false)).unwrap();
+    let virtual_col = lower_create(&zeroship_migrate_sqlite::DIALECT, generated_create(false)).unwrap();
     assert_eq!(
         virtual_col,
         format!(
@@ -188,9 +188,9 @@ fn sqlite_generated_stored_and_virtual_columns_render_exact_create_table_ddl() {
 #[test]
 fn pg_virtual_generated_column_is_unsupported() {
     let err = validate_ir(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir(generated_create(false)),
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
     )
     .expect_err("Postgres supports generated columns only as STORED");
     assert_eq!(err.code, CODE_UNSUPPORTED, "got: {err}");
@@ -206,7 +206,7 @@ fn generated_column_cannot_also_have_default() {
     });
 
     let err = validate_ir(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir(create_table(
             vec![
                 col("qty", ColType::Int),
@@ -215,7 +215,7 @@ fn generated_column_cannot_also_have_default() {
             ],
             None,
         )),
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
     )
     .expect_err("generated + default is a column-facet conflict");
     assert_eq!(err.code, CODE_COLUMN_FACET_CONFLICT, "got: {err}");
@@ -227,7 +227,7 @@ fn pg_identity_always_and_by_default_render_exact_create_table_ddl() {
     id.nullable = Some(false);
     id.identity = Some(IdentityCol { always: true });
     let always = lower_create(
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         create_table(vec![id], pk_id()),
     )
     .unwrap();
@@ -240,7 +240,7 @@ fn pg_identity_always_and_by_default_render_exact_create_table_ddl() {
     id.nullable = Some(false);
     id.identity = Some(IdentityCol { always: false });
     let by_default = lower_create(
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         create_table(vec![id], pk_id()),
     )
     .unwrap();
@@ -257,7 +257,7 @@ fn auto_increment_identity_by_default_renders_per_dialect() {
     id.identity = Some(IdentityCol { always: false });
 
     let pg = lower_create(
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         create_table(vec![id.clone()], pk_id()),
     )
     .unwrap();
@@ -267,7 +267,7 @@ fn auto_increment_identity_by_default_renders_per_dialect() {
     );
 
     let up = lower_create(
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         create_table(vec![id.clone()], pk_id()),
     )
     .unwrap();
@@ -283,7 +283,7 @@ fn auto_increment_identity_by_default_renders_per_dialect() {
     );
 
     let mysql = lower_create(
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         create_table(vec![id], pk_id()),
     )
     .unwrap();
@@ -301,13 +301,13 @@ fn identity_always_is_postgres_only() {
     let op = create_table(vec![id], pk_id());
 
     validate_ir(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir(op.clone()),
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
     )
     .expect("Postgres supports identity({ always:true })");
-    for dialect in [&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT] {
-        let err = validate_ir(zero_migrate::shipping_vendors(), &ir(op.clone()), dialect)
+    for dialect in [&zeroship_migrate_sqlite::DIALECT, &zeroship_migrate_mysql::DIALECT] {
+        let err = validate_ir(zeroship_migrate::shipping_vendors(), &ir(op.clone()), dialect)
             .expect_err("identity({ always:true }) must be PostgreSQL-only");
         assert_eq!(err.code, CODE_UNSUPPORTED, "got: {err}");
         assert_eq!(err.kind, Some(UnsupportedKind::Identity), "got: {err}");
@@ -320,10 +320,10 @@ fn auto_increment_requires_single_column_primary_key_on_sqlite_and_mysql() {
     seq.identity = Some(IdentityCol { always: false });
     validate_platform(
         &ir_platform(create_table(vec![seq.clone()], None)),
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
     )
     .expect("Postgres permits BY DEFAULT identity outside a primary key");
-    for dialect in [&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT] {
+    for dialect in [&zeroship_migrate_sqlite::DIALECT, &zeroship_migrate_mysql::DIALECT] {
         let err = validate_platform(&ir_platform(create_table(vec![seq.clone()], None)), dialect)
             .expect_err("autoIncrement on a non-PK column has no sound emulation");
         assert_eq!(err.code, CODE_UNSUPPORTED, "got: {err}");
@@ -335,9 +335,9 @@ fn auto_increment_requires_single_column_primary_key_on_sqlite_and_mysql() {
     id.identity = Some(IdentityCol { always: false });
     let tenant = col("tenant_id", ColType::Text);
     let composite = ir_platform(create_table(vec![id, tenant], pk(&["id", "tenant_id"])));
-    validate_platform(&composite, &zero_migrate_postgres::DIALECT)
+    validate_platform(&composite, &zeroship_migrate_postgres::DIALECT)
         .expect("a PostgreSQL-targeted BY DEFAULT identity may be one composite-PK component");
-    for dialect in [&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT] {
+    for dialect in [&zeroship_migrate_sqlite::DIALECT, &zeroship_migrate_mysql::DIALECT] {
         let err = validate_platform(&composite, dialect)
             .expect_err("autoIncrement on a composite-PK column has no sound emulation");
         assert_eq!(err.code, CODE_UNSUPPORTED, "got: {err}");
@@ -354,7 +354,7 @@ fn identity_cannot_also_have_default_or_generated() {
     });
     let err = validate_platform(
         &raw_ir(create_table(vec![id_with_default], pk_id())),
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
     )
     .expect_err("identity + default is a conflict");
     assert_eq!(err.code, CODE_COLUMN_FACET_CONFLICT, "got: {err}");
@@ -367,7 +367,7 @@ fn identity_cannot_also_have_default_or_generated() {
     });
     let err = validate_platform(
         &raw_ir(create_table(vec![id_with_generated], pk_id())),
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
     )
     .expect_err("identity + generated is a conflict");
     assert_eq!(err.code, CODE_COLUMN_FACET_CONFLICT, "got: {err}");
@@ -376,7 +376,7 @@ fn identity_cannot_also_have_default_or_generated() {
 #[test]
 fn generated_and_identity_facets_render_on_add_column() {
     let add_generated = Op::AddColumn {
-        attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
         table: "line_items".to_string(),
         column: "total_cents".to_string(),
         ty: ColType::Int,
@@ -391,14 +391,14 @@ fn generated_and_identity_facets_render_on_add_column() {
         schema: None,
         existence_guard: None,
     };
-    let up = lower_first(&zero_migrate_postgres::DIALECT, add_generated).unwrap();
+    let up = lower_first(&zeroship_migrate_postgres::DIALECT, add_generated).unwrap();
     assert_eq!(
         up,
         r#"ALTER TABLE "app"."line_items" ADD COLUMN "total_cents" integer GENERATED ALWAYS AS (("qty" * "unit_cents")) STORED NOT NULL"#,
     );
 
     let add_identity = Op::AddColumn {
-        attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
         table: "line_items".to_string(),
         column: "seq".to_string(),
         ty: ColType::BigInt,
@@ -413,7 +413,7 @@ fn generated_and_identity_facets_render_on_add_column() {
         schema: None,
         existence_guard: None,
     };
-    let up = lower_first(&zero_migrate_postgres::DIALECT, add_identity).unwrap();
+    let up = lower_first(&zeroship_migrate_postgres::DIALECT, add_identity).unwrap();
     assert_eq!(
         up,
         r#"ALTER TABLE "app"."line_items" ADD COLUMN "seq" bigint GENERATED BY DEFAULT AS IDENTITY NOT NULL"#,
@@ -423,9 +423,9 @@ fn generated_and_identity_facets_render_on_add_column() {
 #[test]
 fn fold_carries_generated_and_identity_column_facets() {
     let snap = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &[generated_create(true)],
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &support::no_inject("app"),
     )
@@ -447,9 +447,9 @@ fn fold_carries_generated_and_identity_column_facets() {
     let mut id = col("id", ColType::BigInt);
     id.identity = Some(IdentityCol { always: false });
     let snap = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &[create_table(vec![id], pk_id())],
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &support::no_inject("app"),
     )
@@ -471,7 +471,7 @@ fn fold_carries_generated_and_identity_column_facets() {
 #[test]
 fn mysql_renders_the_injected_system_columns_as_bounded_varchar() {
     let up = lower_create(
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         create_table(vec![col("qty", ColType::Int)], None),
     )
     .unwrap();

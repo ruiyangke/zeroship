@@ -7,7 +7,7 @@
 //! The core of this module is pure Rust (no napi types) - the fold + the tests
 //! compile without the Node ABI.
 //!
-//! The load-verify path is `zero_migrate::model::load::load_ir_document`, which
+//! The load-verify path is `zeroship_migrate::model::load::load_ir_document`, which
 //! deserializes the closed IR AST, fails closed on an unknown `ir_version`, runs the
 //! authoritative structural + schema-confinement validation, enforces ownership
 //! against the project registry, and compares the advisory checksum hint.
@@ -17,10 +17,10 @@
 
 use std::collections::HashMap;
 
-use zero_migrate::model::ir::{MigrationIr, Op, CURRENT_IR_VERSION};
-use zero_migrate::model::load::load_ir_document;
-use zero_migrate::render::declarative::CollectionDescriptor;
-use zero_migrate::{
+use zeroship_migrate::model::ir::{MigrationIr, Op, CURRENT_IR_VERSION};
+use zeroship_migrate::model::load::load_ir_document;
+use zeroship_migrate::render::declarative::CollectionDescriptor;
+use zeroship_migrate::{
     effective_policy_from_charter_layers, render_schema_export,
     render_schema_export_from_descriptors, DialectId, EffectivePolicy, SchemaScope,
     DEFAULT_PROJECT_SCHEMA,
@@ -92,7 +92,7 @@ pub fn load_verify(
 
     let schema_scope = SchemaScope::Single(project_schema.to_string());
     match load_ir_document(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         envelope_json,
         deploying_app,
         &dialect,
@@ -176,9 +176,9 @@ pub fn gen_artifacts_from_envelopes(
     // Read the wrapper count off the RAW concatenated stream, before the fold
     // consumes it: the fold's output no longer distinguishes an op that came from a
     // leg from one authored at the top level.
-    let has_dialectal_ops = zero_migrate::history_carries_dialectal_ops(&ops);
+    let has_dialectal_ops = zeroship_migrate::history_carries_dialectal_ops(&ops);
     match render_schema_export(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ops,
         &dialect,
         schema,
@@ -223,7 +223,7 @@ pub fn gen_artifacts_from_descriptors(
         Err(e) => return gen_err(format!("schema-emit policy charter failed to load: {e}")),
     };
     match render_schema_export_from_descriptors(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         descriptors,
         &dialect,
         schema,
@@ -238,7 +238,7 @@ pub fn gen_artifacts_from_descriptors(
 }
 
 fn gen_ok(
-    export: zero_migrate::SchemaExport,
+    export: zeroship_migrate::SchemaExport,
     dialect: &DialectId,
     has_dialectal_ops: bool,
 ) -> GenArtifactsReply {
@@ -456,7 +456,7 @@ mod tests {
 
         let effective = confined_charter();
         let inject =
-            zero_migrate::ResolvedInject::for_table(&effective, DEFAULT_PROJECT_SCHEMA, "widgets")
+            zeroship_migrate::ResolvedInject::for_table(&effective, DEFAULT_PROJECT_SCHEMA, "widgets")
                 .expect("confined inject shape");
 
         // Every policy-injected field is present in the folded descriptor.
@@ -481,7 +481,7 @@ mod tests {
             .collect();
         for index in inject.indexes() {
             for element in &index.columns {
-                let zero_migrate::model::ir::IndexElement::Column { name, .. } = element else {
+                let zeroship_migrate::model::ir::IndexElement::Column { name, .. } = element else {
                     panic!("test charter inject index must use columns: {element:?}");
                 };
                 assert!(
@@ -504,7 +504,7 @@ mod tests {
 
     #[test]
     fn gen_artifacts_from_descriptors_renders_both_files() {
-        use zero_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor};
+        use zeroship_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor};
         let descriptor = CollectionDescriptor {
             name: "widgets".to_string(),
             owner_app: "app_x".to_string(),

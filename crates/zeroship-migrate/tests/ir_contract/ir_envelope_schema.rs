@@ -12,7 +12,7 @@
 
 use std::path::PathBuf;
 
-use zero_migrate::MigrationIr;
+use zeroship_migrate::MigrationIr;
 
 fn schema_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ir-envelope.schema.json")
@@ -203,7 +203,7 @@ fn precondition_variant_names_from_schema() {
     // tagged, it emits a bare `const` with no `required` key - and it is NOT the
     // way this fires, which was measured rather than assumed. Adding one to
     // `Precondition` does not reach any test:
-    // `zero_migrate_postgres::backend::precondition::evaluate`
+    // `zeroship_migrate_postgres::backend::precondition::evaluate`
     // matches the enum exhaustively, so the build stops first with E0004
     // "non-exhaustive patterns". The compiler is the earlier gate for any variant
     // an evaluator must handle.

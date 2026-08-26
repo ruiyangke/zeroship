@@ -1,6 +1,6 @@
 //! What a BACKEND CRATE hands the engine, and the shape the engine composes them in.
 //!
-//! # Why this exists and `zero_migrate_ir::backend::BackendRegistry` does not suffice
+//! # Why this exists and `zeroship_migrate_ir::backend::BackendRegistry` does not suffice
 //!
 //! `zero-migrate-ir` already has a `BackendRegistry`, built fallibly, refusing
 //! duplicate and malformed ids and naming both registrants on a collision. It is
@@ -35,7 +35,7 @@
 //! # What did NOT change
 //!
 //! [`VendorSet`] remains a compile-time shipping slice, not a lazily populated
-//! global. Dispatch now looks up the open [`DialectId`](zero_migrate_ir::dialect::DialectId)
+//! global. Dispatch now looks up the open [`DialectId`](zeroship_migrate_ir::dialect::DialectId)
 //! filed by each descriptor, so the contract contains no enum match and a fourth
 //! backend requires no contract edit. Engine callers pass that open id directly.
 
@@ -49,7 +49,7 @@ use crate::renderer::DmlRenderer;
 use crate::schema::SchemaRenderer;
 use crate::validation::ValidationPolicy;
 use crate::value_format::ValueFormatRenderer;
-use zero_migrate_ir::backend::{BackendDescriptor, BackendRegistry, RegistryError};
+use zeroship_migrate_ir::backend::{BackendDescriptor, BackendRegistry, RegistryError};
 
 /// Build this vendor's line-1 guard for a config.
 ///
@@ -183,7 +183,7 @@ pub struct BackendVendor {
 /// The "a vendor that ships no guard does not compile" property, pinned as a
 /// `compile_fail` doctest so it is checked rather than asserted in prose.
 ///
-/// A doctest compiles as a SEPARATE crate that `use`s `zero_migrate_backend`, which is
+/// A doctest compiles as a SEPARATE crate that `use`s `zeroship_migrate_backend`, which is
 /// exactly the position a new backend crate sits in.
 ///
 /// READ THIS BEFORE EDITING. A `compile_fail` doctest passes when the code fails to
@@ -207,16 +207,16 @@ pub struct BackendVendor {
 /// (1) A `BackendVendor` without a guard MUST fail to compile - E0063:
 ///
 /// ```compile_fail
-/// use zero_migrate_backend::registry::BackendVendor;
-/// use zero_migrate_backend::registry::DdlFactory;
-/// use zero_migrate_backend::renderer::DmlRenderer;
-/// use zero_migrate_backend::advisory::OperationalAdvisor;
-/// use zero_migrate_backend::existence_probe::ExistenceProbePolicy;
-/// use zero_migrate_backend::fold::CatalogFoldPolicy;
-/// use zero_migrate_backend::schema::SchemaRenderer;
-/// use zero_migrate_backend::value_format::ValueFormatRenderer;
-/// use zero_migrate_backend::validation::ValidationPolicy;
-/// use zero_migrate_ir::backend::BackendDescriptor;
+/// use zeroship_migrate_backend::registry::BackendVendor;
+/// use zeroship_migrate_backend::registry::DdlFactory;
+/// use zeroship_migrate_backend::renderer::DmlRenderer;
+/// use zeroship_migrate_backend::advisory::OperationalAdvisor;
+/// use zeroship_migrate_backend::existence_probe::ExistenceProbePolicy;
+/// use zeroship_migrate_backend::fold::CatalogFoldPolicy;
+/// use zeroship_migrate_backend::schema::SchemaRenderer;
+/// use zeroship_migrate_backend::value_format::ValueFormatRenderer;
+/// use zeroship_migrate_backend::validation::ValidationPolicy;
+/// use zeroship_migrate_ir::backend::BackendDescriptor;
 /// fn vendor(
 ///     descriptor: &'static BackendDescriptor,
 ///     dml: &'static dyn DmlRenderer,
@@ -250,7 +250,7 @@ pub struct BackendVendor {
 ///
 /// ```compile_fail
 /// struct TrustsEverything;
-/// impl zero_migrate_backend::guard::MigrationGuard for TrustsEverything {}
+/// impl zeroship_migrate_backend::guard::MigrationGuard for TrustsEverything {}
 /// ```
 ///
 /// (3) The same property for `advisor`, which is a SEPARATE block precisely because
@@ -260,15 +260,15 @@ pub struct BackendVendor {
 /// which is the failure mode it exists to catch:
 ///
 /// ```compile_fail
-/// use zero_migrate_backend::registry::BackendVendor;
-/// use zero_migrate_backend::registry::{DdlFactory, GuardFactory};
-/// use zero_migrate_backend::renderer::DmlRenderer;
-/// use zero_migrate_backend::existence_probe::ExistenceProbePolicy;
-/// use zero_migrate_backend::fold::CatalogFoldPolicy;
-/// use zero_migrate_backend::schema::SchemaRenderer;
-/// use zero_migrate_backend::value_format::ValueFormatRenderer;
-/// use zero_migrate_backend::validation::ValidationPolicy;
-/// use zero_migrate_ir::backend::BackendDescriptor;
+/// use zeroship_migrate_backend::registry::BackendVendor;
+/// use zeroship_migrate_backend::registry::{DdlFactory, GuardFactory};
+/// use zeroship_migrate_backend::renderer::DmlRenderer;
+/// use zeroship_migrate_backend::existence_probe::ExistenceProbePolicy;
+/// use zeroship_migrate_backend::fold::CatalogFoldPolicy;
+/// use zeroship_migrate_backend::schema::SchemaRenderer;
+/// use zeroship_migrate_backend::value_format::ValueFormatRenderer;
+/// use zeroship_migrate_backend::validation::ValidationPolicy;
+/// use zeroship_migrate_ir::backend::BackendDescriptor;
 /// fn vendor(
 ///     descriptor: &'static BackendDescriptor,
 ///     dml: &'static dyn DmlRenderer,
@@ -301,7 +301,7 @@ pub struct BackendVendor {
 /// ```compile_fail
 /// #[derive(Debug)]
 /// struct AnalyzesNothing;
-/// impl zero_migrate_backend::advisory::OperationalAdvisor for AnalyzesNothing {}
+/// impl zeroship_migrate_backend::advisory::OperationalAdvisor for AnalyzesNothing {}
 /// ```
 #[cfg(doctest)]
 struct VendorWithoutAGuardCompileFail;
@@ -334,7 +334,7 @@ impl VendorSet {
     ///
     /// Consumers that need the shipping census derive it from this iterator;
     /// they never restate a second vendor list in core.
-    pub fn dialects(self) -> impl Iterator<Item = zero_migrate_ir::dialect::DialectId> {
+    pub fn dialects(self) -> impl Iterator<Item = zeroship_migrate_ir::dialect::DialectId> {
         self.vendors
             .iter()
             .map(|vendor| vendor.descriptor.id.clone())
@@ -354,7 +354,7 @@ impl VendorSet {
 
     /// The vendor filed under `descriptor.id`, if this build has one.
     #[must_use]
-    pub fn get(self, id: &zero_migrate_ir::dialect::DialectId) -> Option<&'static BackendVendor> {
+    pub fn get(self, id: &zeroship_migrate_ir::dialect::DialectId) -> Option<&'static BackendVendor> {
         self.vendors
             .iter()
             .copied()
@@ -378,11 +378,11 @@ impl VendorSet {
     }
 }
 
-impl zero_migrate_ir::validate::ExprDialectValidatorSet for VendorSet {
+impl zeroship_migrate_ir::validate::ExprDialectValidatorSet for VendorSet {
     fn get(
         &self,
-        dialect: &zero_migrate_ir::dialect::DialectId,
-    ) -> Option<&dyn zero_migrate_ir::validate::ExprDialectValidator> {
+        dialect: &zeroship_migrate_ir::dialect::DialectId,
+    ) -> Option<&dyn zeroship_migrate_ir::validate::ExprDialectValidator> {
         VendorSet::get(*self, dialect).map(|vendor| vendor.dml.expr_validator())
     }
 }

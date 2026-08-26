@@ -1,4 +1,4 @@
-use zero_migrate_backend::table_rebuild::SequenceHighWaterPolicy;
+use zeroship_migrate_backend::table_rebuild::SequenceHighWaterPolicy;
 
 /// How a SQLite table rebuild handles the table's `sqlite_sequence` row.
 ///

@@ -26,26 +26,26 @@ use std::collections::HashMap;
 
 use crate::support::PgDevSession;
 
-use zero_migrate::{
+use zeroship_migrate::{
     diff_snapshots, diff_snapshots_with_index_aliases, AcceptedIndexAlias, Approval,
     CollectionDescriptor, DeclarativeAuthor, EffectivePolicy, ExecutorConfig, FieldDescriptor,
     GuardConfig, IndexDescriptor, MigrationEngine,
 };
 
-use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zeroship_migrate_postgres::backend::drift_sql::snapshot_schema;
 
-use zero_migrate_postgres::PostgresBackend;
+use zeroship_migrate_postgres::PostgresBackend;
 
 fn desired_snapshot(
     project_schema: &str,
     descriptors: &[CollectionDescriptor],
     effective: &EffectivePolicy,
-) -> Result<zero_migrate::DesiredSchema, zero_migrate::DeclarativeError> {
-    zero_migrate::desired_snapshot_for_dialect(
-        zero_migrate::shipping_vendors(),
+) -> Result<zeroship_migrate::DesiredSchema, zeroship_migrate::DeclarativeError> {
+    zeroship_migrate::desired_snapshot_for_dialect(
+        zeroship_migrate::shipping_vendors(),
         project_schema,
         descriptors,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         effective,
     )
 }
@@ -89,7 +89,7 @@ async fn ensure_project_schema<'a>(
     session: &'a PgDevSession,
     cfg: &ExecutorConfig,
 ) -> support::SchemaGuard<'a> {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
     let guard = support::SchemaGuard::arm(
         session,
         [
@@ -108,7 +108,7 @@ async fn ensure_project_schema<'a>(
 }
 
 async fn drop_schemas(session: &PgDevSession, cfg: &ExecutorConfig) {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
     let _ = session
         .batch(&format!(
             "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
@@ -120,16 +120,16 @@ async fn drop_schemas(session: &PgDevSession, cfg: &ExecutorConfig) {
 fn guard_cfg(cfg: &ExecutorConfig) -> GuardConfig {
     GuardConfig::from_policy(
         support::no_inject(&cfg.project_schema),
-        zero_migrate_postgres::DIALECT,
+        zeroship_migrate_postgres::DIALECT,
     )
 }
 
 fn author_for(cfg: &ExecutorConfig) -> DeclarativeAuthor {
     DeclarativeAuthor::new_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         cfg.project_schema.clone(),
         "app_test",
-        zero_migrate_postgres::DIALECT,
+        zeroship_migrate_postgres::DIALECT,
     )
 }
 
@@ -186,7 +186,7 @@ fn named_index_descriptor(table: &str, field: &str, index: &str) -> CollectionDe
 /// Every index name the catalog holds on `schema.table`, excluding the PK's implicit
 /// index (created by the PRIMARY KEY clause, never by a standalone CREATE INDEX).
 async fn index_names(session: &PgDevSession, schema: &str, table: &str) -> Vec<String> {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
     session
         .query(
             "SELECT ic.relname AS name FROM pg_index x \
@@ -210,7 +210,7 @@ async fn deploy(
     cfg: &ExecutorConfig,
     engine: &MigrationEngine,
     descs: &[CollectionDescriptor],
-) -> zero_migrate::SchemaSnapshot {
+) -> zeroship_migrate::SchemaSnapshot {
     let author = author_for(cfg);
     let desired = desired_snapshot(&cfg.project_schema, descs, &effective_policy(cfg))
         .expect("desired_snapshot");
@@ -271,7 +271,7 @@ async fn a_data_plane_named_index_re_diffs_clean() {
     );
 
     // The data plane's spelling, from the REAL function the data plane calls.
-    let data_plane_name = zero_migrate::schema::query::index_name(TABLE, &[field.as_str()], true);
+    let data_plane_name = zeroship_migrate::schema::query::index_name(TABLE, &[field.as_str()], true);
     assert_ne!(
         data_plane_name, natural,
         "above 60 bytes the data plane replaces the tail with its base32 hash"
@@ -281,7 +281,7 @@ async fn a_data_plane_named_index_re_diffs_clean() {
         "the data plane's name must be live-legal, not server-truncated"
     );
 
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let desc = unique_descriptor(TABLE, &field);
 
     // Deploy once so the table and its columns exist and match desired. The engine
@@ -299,7 +299,7 @@ async fn a_data_plane_named_index_re_diffs_clean() {
     // This is the live shape a project gets when `registerModel` built the index
     // before any migration ran.
     {
-        use zero_migrate::driver::SqlSession;
+        use zeroship_migrate::driver::SqlSession;
         session
             .batch(&format!(
                 "DROP INDEX \"{}\".\"{}\"; \
@@ -349,7 +349,7 @@ async fn a_data_plane_named_index_re_diffs_clean() {
     // BOTH missing and unexpected while the migration plan says there is nothing to
     // do. Both surfaces are asserted together so a failure reports each one.
     let drift = diff_snapshots_with_index_aliases(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &desired.snapshot,
         &live_after,
         &desired.derived_index_aliases,
@@ -379,7 +379,7 @@ async fn a_data_plane_named_index_re_diffs_clean() {
     // comparator: name-only diffing still sees two different names.
     assert!(
         !diff_snapshots(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &desired.snapshot,
             &live_after
         )
@@ -407,7 +407,7 @@ async fn b_engine_named_index_still_round_trips_clean() {
 
     let field = long_unique_field();
     let natural = format!("{TABLE}_{field}_key");
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let desc = unique_descriptor(TABLE, &field);
 
     deploy(&session, &cfg, &engine, std::slice::from_ref(&desc)).await;
@@ -450,7 +450,7 @@ async fn b_engine_named_index_still_round_trips_clean() {
          {statements:#?}"
     );
     let drift = diff_snapshots(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &desired.snapshot,
         &live_after,
     );
@@ -485,7 +485,7 @@ async fn c_author_supplied_rename_still_creates_and_drops() {
     let field = "body";
     let old_name = "zz_alias_author_one_idx";
     let new_name = "zz_alias_author_two_idx";
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
 
     deploy(
         &session,
@@ -568,15 +568,15 @@ async fn d_alias_accepted_no_op_does_not_trip_ownership() {
 
     let field = long_unique_field();
     let natural = format!("{TABLE}_{field}_key");
-    let data_plane_name = zero_migrate::schema::query::index_name(TABLE, &[field.as_str()], true);
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let data_plane_name = zeroship_migrate::schema::query::index_name(TABLE, &[field.as_str()], true);
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
 
     let mut owner_desc = unique_descriptor(TABLE, &field);
     owner_desc.owner_app = "app_test".into();
     deploy(&session, &cfg, &engine, std::slice::from_ref(&owner_desc)).await;
 
     {
-        use zero_migrate::driver::SqlSession;
+        use zeroship_migrate::driver::SqlSession;
         session
             .batch(&format!(
                 "DROP INDEX \"{}\".\"{}\"; \
@@ -607,10 +607,10 @@ async fn d_alias_accepted_no_op_does_not_trip_ownership() {
         .await
         .expect("snapshot live (after)");
     let non_owner = DeclarativeAuthor::new_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         cfg.project_schema.clone(),
         "app_zzz",
-        zero_migrate_postgres::DIALECT,
+        zeroship_migrate_postgres::DIALECT,
     );
     let planned = engine.plan_declarative(
         &desired,

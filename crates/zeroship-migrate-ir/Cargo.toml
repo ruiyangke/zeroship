@@ -1,9 +1,9 @@
 [package]
-name = "zero-migrate-ir"
+name = "zeroship-migrate-ir"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The zero-migrate wire contract: MigrationIr, the closed Op enum, the closed Expr AST, IrScalar, typed-id + precondition vocabulary, the STRUCTURAL (policy-free) validator, the canonical checksum, the fail-closed IR load gate, and the schemars emit of ir-envelope.schema.json. A true LEAF: pure data, zero I/O, no compio, no pg_query, no dependency on the engine. Consumed alone by CI TS-codegen and by hosts that validate/checksum envelopes without applying."
+description = "The zeroship-migrate wire contract: MigrationIr, the closed Op enum, the closed Expr AST, IrScalar, typed-id + precondition vocabulary, the STRUCTURAL (policy-free) validator, the canonical checksum, the fail-closed IR load gate, and the schemars emit of ir-envelope.schema.json. A true LEAF: pure data, zero I/O, no compio, no pg_query, no dependency on the engine. Consumed alone by CI TS-codegen and by hosts that validate/checksum envelopes without applying."
 
 [dependencies]
 # The IR document, the closed Op enum, the closed Expr AST, IrScalar, and every
@@ -26,14 +26,14 @@ thiserror = { workspace = true }
 # UUIDv7-shaped migration ids (base62-encoded via the vendored typed-id module).
 uuid = { workspace = true }
 # The Policy Decision Point machine (KnobDef/KnobKey/KnobKind/PolicyRegistry). The
-# builtin registry (`policy_registry`) declares zero-migrate's engine knobs — the
+# builtin registry (`policy_registry`) declares zeroship-migrate's engine knobs — the
 # vendor capabilities as grant keys + the op/security knobs — as the CONTENT the
-# PDP mechanism enforces. `zero-migrate-policy` is itself a pure-data leaf with no
+# PDP mechanism enforces. `zeroship-migrate-policy` is itself a pure-data leaf with no
 # dep on this crate, so `ir → policy` introduces no cycle and keeps ir a leaf.
-zero-migrate-policy = { workspace = true }
+zeroship-migrate-policy = { workspace = true }
 # `effective_policy_from_charter_toml` composes a TOML RootCharter against the
 # builtin registry above, and extracts its grant-only draft by re-serializing the
-# parsed document rather than scraping lines. `zero-migrate-policy` already parses
+# parsed document rather than scraping lines. `zeroship-migrate-policy` already parses
 # charter TOML, so this is a direct declaration of a dep the graph already had, not
 # a new third-party crate — and it stays pure data, so the leaf keeps its zero-I/O
 # property.

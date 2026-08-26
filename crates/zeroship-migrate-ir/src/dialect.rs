@@ -14,8 +14,8 @@
 //! vendor's identity anywhere in the tree resolved through a crate that had no
 //! business knowing it.
 //!
-//! They live in the vendors now: `zero_migrate_postgres::DIALECT`,
-//! `zero_migrate_sqlite::DIALECT`, `zero_migrate_mysql::DIALECT`, each beside the
+//! They live in the vendors now: `zeroship_migrate_postgres::DIALECT`,
+//! `zeroship_migrate_sqlite::DIALECT`, `zeroship_migrate_mysql::DIALECT`, each beside the
 //! `BackendVendor` it identifies. Nothing in this crate resolves a dialect by name,
 //! and nothing in it can - [`DialectId::new`] is `const` and `pub`, so a crate that
 //! must name one and cannot depend on a vendor (this one, and
@@ -101,7 +101,7 @@ impl DialectId {
     /// diagnostic is a compile error naming its own line:
     ///
     /// ```
-    /// use zero_migrate_ir::dialect::DialectId;
+    /// use zeroship_migrate_ir::dialect::DialectId;
     /// pub const DIALECT: DialectId = DialectId::new("duckdb");
     /// const _: () = assert!(DialectId::is_well_formed_name("duckdb"));
     /// ```
@@ -168,7 +168,7 @@ impl fmt::Display for DialectId {
 /// Members are kept sorted and deduplicated, so `PartialEq` is SET equality
 /// (insertion order does not matter) and lookup is a binary search.
 ///
-/// Lifted here from `zero_migrate::model::support` (which re-exports it
+/// Lifted here from `zeroship_migrate::model::support` (which re-exports it
 /// unchanged) so the [`crate::backend::BackendRegistry`] can key on the same set
 /// type the support matrix uses, rather than growing a second one.
 #[derive(Debug, Clone, PartialEq, Eq)]

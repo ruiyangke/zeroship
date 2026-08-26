@@ -60,14 +60,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::support::carriers::{carriers_of_schema, REQUIRED_CARRIER_FIELDS};
 use crate::support::PgDevSession;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::driver::SqlSession;
-use zero_migrate::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::{
     fold_ops, resolve_create_table_policy, Approval, EffectivePolicy, ExecutorConfig, GuardConfig,
     IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr, SchemaSnapshot,
 };
-use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
-use zero_migrate_postgres::PostgresBackend;
+use zeroship_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zeroship_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_rename_carrier_sweep_pg";
 
@@ -337,9 +337,9 @@ fn fold(
     let resolved = resolve_create_table_policy(&authored, policy, project_schema)
         .map_err(|error| format!("resolve create-table policy: {error}"))?;
     fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &resolved.ops,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         project_schema,
         policy,
     )
@@ -360,13 +360,13 @@ async fn apply_through_engine(
     let resolved_source = serde_json::to_string(&resolved)
         .map_err(|error| format!("serialize resolved IR: {error}"))?;
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         policy,
     );
-    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT);
+    let guard = GuardConfig::from_policy(policy.clone(), zeroship_migrate_postgres::DIALECT);
     let artifact = author
         .load_and_lower_guarded(
             &resolved_source,
@@ -376,7 +376,7 @@ async fn apply_through_engine(
             &guard,
         )
         .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,

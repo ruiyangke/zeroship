@@ -18,7 +18,7 @@
 //! report drift on a facet they do not have. It also covers a live snapshot that
 //! simply did not reach a table.
 
-use zero_migrate::model::snapshot::SchemaSnapshot;
+use zeroship_migrate::model::snapshot::SchemaSnapshot;
 
 fn snapshot_with(rls: &[(&str, bool)]) -> SchemaSnapshot {
     let mut snap = SchemaSnapshot::default();
@@ -32,7 +32,7 @@ fn snapshot_with(rls: &[(&str, bool)]) -> SchemaSnapshot {
 fn an_rls_difference_is_reported_as_drift() {
     let expected = snapshot_with(&[("orders", true)]);
     let actual = snapshot_with(&[("orders", false)]);
-    let drift = zero_migrate::diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
+    let drift = zeroship_migrate::diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual);
     assert!(
         !drift.is_clean(),
         "RLS turned off out of band must not read as a clean schema"
@@ -50,8 +50,8 @@ fn an_rls_difference_is_reported_as_drift() {
 #[test]
 fn matching_rls_state_is_clean() {
     // The control that stops the test above passing because EVERYTHING drifts.
-    let drift = zero_migrate::diff_snapshots(
-        zero_migrate::shipping_vendors(),
+    let drift = zeroship_migrate::diff_snapshots(
+        zeroship_migrate::shipping_vendors(),
         &snapshot_with(&[("orders", true)]),
         &snapshot_with(&[("orders", true)]),
     );
@@ -67,7 +67,7 @@ fn a_dialect_without_row_level_security_cannot_drift_on_it() {
     let expected = snapshot_with(&[("orders", true)]);
     let actual = SchemaSnapshot::default();
     assert!(
-        zero_migrate::diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual)
+        zeroship_migrate::diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual)
             .is_clean(),
         "an engine with no row-level security must not report RLS drift"
     );

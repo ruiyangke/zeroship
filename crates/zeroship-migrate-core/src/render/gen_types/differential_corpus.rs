@@ -87,12 +87,12 @@
 //! corpus into a mirror of whatever the code emits today.
 
 use std::collections::{BTreeMap, BTreeSet};
-use zero_migrate_backend::registry::VendorSet;
+use zeroship_migrate_backend::registry::VendorSet;
 
 use crate::model::ir::{MigrationIr, Op};
 use crate::render::fold::fold_ops;
 use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
-use zero_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::dialect::DialectId;
 
 /// The schema unqualified objects resolve under.
 pub(super) const SCHEMA: &str = "public";

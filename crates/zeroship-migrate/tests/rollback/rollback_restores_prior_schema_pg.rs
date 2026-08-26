@@ -24,14 +24,14 @@ use crate::support;
 use std::collections::BTreeMap;
 
 use crate::support::PgDevSession;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::apply::executor::{rollback, LockMode, RollbackRequest, RollbackTarget};
-use zero_migrate::driver::SqlSession;
-use zero_migrate::render::step::PlanStep;
-use zero_migrate::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::apply::executor::{rollback, LockMode, RollbackRequest, RollbackTarget};
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::render::step::PlanStep;
+use zeroship_migrate::{
     guard_for, Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine,
 };
-use zero_migrate_postgres::PostgresBackend;
+use zeroship_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_rollback_pg";
 
@@ -121,15 +121,15 @@ async fn an_engine_rendered_down_restores_the_catalog_on_postgres() {
             .expect("ensure the migration journal");
 
         let author = IrAuthor::new(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &cfg.project_schema,
             OWNER,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &support::confined_charter(),
         );
         let guard_cfg = GuardConfig::from_policy(
             support::no_inject(&cfg.project_schema),
-            zero_migrate_postgres::DIALECT,
+            zeroship_migrate_postgres::DIALECT,
         );
         let registry: BTreeMap<String, String> = [("t1".to_string(), OWNER.to_string())]
             .into_iter()
@@ -140,7 +140,7 @@ async fn an_engine_rendered_down_restores_the_catalog_on_postgres() {
         let seeded = author
             .load_and_lower_guarded(seed, OWNER, &registry, &LiveSchema::default(), &guard_cfg)
             .expect("the seed lowers");
-        MigrationEngine::new(zero_migrate::shipping_vendors())
+        MigrationEngine::new(zeroship_migrate::shipping_vendors())
             .apply_plan(
                 &seeded.plan.steps,
                 Approval::Approved,
@@ -175,7 +175,7 @@ async fn an_engine_rendered_down_restores_the_catalog_on_postgres() {
             "{label}: rendered no DDL to roll back"
         );
 
-        MigrationEngine::new(zero_migrate::shipping_vendors())
+        MigrationEngine::new(zeroship_migrate::shipping_vendors())
             .apply_plan(
                 &artifact.plan.steps,
                 Approval::Approved,
@@ -202,7 +202,7 @@ async fn an_engine_rendered_down_restores_the_catalog_on_postgres() {
             &migrations,
             Approval::Approved,
             OWNER,
-            guard_for(zero_migrate::shipping_vendors(), &guard_cfg).as_ref(),
+            guard_for(zeroship_migrate::shipping_vendors(), &guard_cfg).as_ref(),
         )
         .await
         .unwrap_or_else(|e| panic!("{label}: the rollback must succeed: {e}"));

@@ -53,7 +53,7 @@
 //! The same spike found these six are the ONLY live callers of the pinned wrapper
 //! left in the crate: with the SQLite modules removed, rustc reported both
 //! `quote_ident` and `quote_bare_ident` as `never used`. Every other identifier seam
-//! (`apply::role`, `apply::journal`, `zero_migrate_postgres::backend`, `render::vendor`,
+//! (`apply::role`, `apply::journal`, `zeroship_migrate_postgres::backend`, `render::vendor`,
 //! `conn`, `plan::author`) goes through `quote_ident_checked`, a different wrapper.
 //!
 //! # Why this test is TEXTUAL and not a render assertion

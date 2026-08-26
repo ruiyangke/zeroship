@@ -37,9 +37,9 @@
 use crate::support;
 
 use std::collections::BTreeMap;
-use zero_migrate::model::snapshot::{IndexSnapshot, TableSnapshot};
-use zero_migrate::render::lower::{IrAuthor, LiveSchema};
-use zero_migrate::MigrationIr;
+use zeroship_migrate::model::snapshot::{IndexSnapshot, TableSnapshot};
+use zeroship_migrate::render::lower::{IrAuthor, LiveSchema};
+use zeroship_migrate::MigrationIr;
 
 fn index(name: &str, unique: bool, columns: &[&str]) -> IndexSnapshot {
     IndexSnapshot {
@@ -84,10 +84,10 @@ fn lower(op: &str, live: &LiveSchema) -> Result<(), String> {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{op}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         "public",
         "f721",
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &support::confined_charter(),
     );
     author
@@ -165,7 +165,7 @@ fn an_empty_live_snapshot_still_lowers() {
 /// constructor rather than trusting the field copy.
 #[test]
 fn the_check_fires_through_the_production_live_schema_constructor() {
-    use zero_migrate::model::snapshot::SchemaSnapshot;
+    use zeroship_migrate::model::snapshot::SchemaSnapshot;
 
     let mut tables = BTreeMap::new();
     tables.insert(

@@ -1,12 +1,12 @@
-//! Postgres [`MigrationBackend`](zero_migrate_backend::backend::MigrationBackend)
+//! Postgres [`MigrationBackend`](zeroship_migrate_backend::backend::MigrationBackend)
 //! implementation.
 //!
 //! Generic over the dialect-neutral
-//! [`SqlSession`](zero_migrate_backend::driver::SqlSession) seam - a host driver (the
+//! [`SqlSession`](zeroship_migrate_backend::driver::SqlSession) seam - a host driver (the
 //! napi `pg` shell) supplies the impl. SQLite does NOT ride this seam (it is an
 //! in-process rusqlite actor).
 
-use zero_migrate_backend::driver::SqlSession;
+use zeroship_migrate_backend::driver::SqlSession;
 
 mod backfill_sql;
 /// The PostgreSQL adoption baseline (record-not-run), relocated out of the neutral
@@ -23,7 +23,7 @@ pub mod journal_sql;
 /// The Postgres precondition evaluator: the `pg_query` shape gate that proves a
 /// `SqlBoolean` cannot mutate state, and the `information_schema` catalog reads the
 /// structured checks run. `pub(crate)` because the crate root re-exports its two
-/// public entry points at their historical `zero_migrate::...` paths.
+/// public entry points at their historical `zeroship_migrate::...` paths.
 pub(crate) mod precondition;
 mod primary_key_sql;
 /// The Postgres dialect SQL leaves (session/lock/txn/journal/DML/rollback) this
@@ -31,8 +31,8 @@ mod primary_key_sql;
 /// dialect-specific SQL lives in the shared executor.
 pub(crate) mod session;
 /// The PostgreSQL `REPEATABLE READ READ ONLY` status snapshot, relocated out of
-/// the neutral `zero_migrate::ops::status` module, whose remaining verbs go through
-/// [`MigrationBackend`](zero_migrate_backend::backend::MigrationBackend).
+/// the neutral `zeroship_migrate::ops::status` module, whose remaining verbs go through
+/// [`MigrationBackend`](zeroship_migrate_backend::backend::MigrationBackend).
 pub mod status_sql;
 
 /// The canned `SqlSession` this backend's tests drive, shared with the engine's
@@ -41,24 +41,24 @@ pub mod status_sql;
 #[cfg(any(test, feature = "testing"))]
 pub mod recording;
 
-use zero_migrate_backend::backend::{
+use zeroship_migrate_backend::backend::{
     CrossDeployObligations, JournalFuture, MigrationBackend, ProjectLockAcquisition,
     PROJECT_LOCK_TRY_ATTEMPTS, PROJECT_LOCK_TRY_BACKOFF,
 };
-use zero_migrate_backend::backfill::BackfillSpec;
-use zero_migrate_backend::baseline::{BaselineError, BaselineOutcome};
-use zero_migrate_backend::capability::OnlineSchemaChange;
-use zero_migrate_backend::conn::ExecutorConfig;
-use zero_migrate_backend::drift::DriftError;
-use zero_migrate_backend::executor::{ApplyError, RollbackError};
-use zero_migrate_backend::journal::{self, AppliedEntry, JournalError};
-use zero_migrate_backend::requirements::{DatabaseFeature, DatabaseRequirements};
-use zero_migrate_backend::snapshot::SchemaSnapshot;
-use zero_migrate_backend::step::BindValue;
-use zero_migrate_backend::step::{AlterPrimaryKeyStep, SynchronizeIdentityStep};
-use zero_migrate_backend::table_rebuild::TableRebuildSpec;
-use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_ir::migration::{Migration, MigrationId};
+use zeroship_migrate_backend::backfill::BackfillSpec;
+use zeroship_migrate_backend::baseline::{BaselineError, BaselineOutcome};
+use zeroship_migrate_backend::capability::OnlineSchemaChange;
+use zeroship_migrate_backend::conn::ExecutorConfig;
+use zeroship_migrate_backend::drift::DriftError;
+use zeroship_migrate_backend::executor::{ApplyError, RollbackError};
+use zeroship_migrate_backend::journal::{self, AppliedEntry, JournalError};
+use zeroship_migrate_backend::requirements::{DatabaseFeature, DatabaseRequirements};
+use zeroship_migrate_backend::snapshot::SchemaSnapshot;
+use zeroship_migrate_backend::step::BindValue;
+use zeroship_migrate_backend::step::{AlterPrimaryKeyStep, SynchronizeIdentityStep};
+use zeroship_migrate_backend::table_rebuild::TableRebuildSpec;
+use zeroship_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::migration::{Migration, MigrationId};
 
 pub(crate) use crate::DIALECT;
 
@@ -69,9 +69,9 @@ pub(crate) use crate::DIALECT;
 /// number.
 pub(crate) const IDENT_MAX_BYTES: usize =
     match crate::descriptor::POSTGRES_DESCRIPTOR.limits.identifier {
-        zero_migrate_ir::backend::IdentifierLimit::Bytes(n) => n,
-        zero_migrate_ir::backend::IdentifierLimit::Unbounded
-        | zero_migrate_ir::backend::IdentifierLimit::Characters(_) => {
+        zeroship_migrate_ir::backend::IdentifierLimit::Bytes(n) => n,
+        zeroship_migrate_ir::backend::IdentifierLimit::Unbounded
+        | zeroship_migrate_ir::backend::IdentifierLimit::Characters(_) => {
             panic!("PostgreSQL declares a BYTE identifier cap")
         }
     };
@@ -261,8 +261,8 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         &self,
         cfg: &ExecutorConfig,
         step: &AlterPrimaryKeyStep,
-        approval: zero_migrate_backend::approval::Approval,
-        scope: &zero_migrate_backend::approval::ApprovalScope,
+        approval: zeroship_migrate_backend::approval::Approval,
+        scope: &zeroship_migrate_backend::approval::ApprovalScope,
         applied_by: &str,
     ) -> Result<bool, ApplyError> {
         primary_key_sql::apply(self.conn, cfg, step, approval, scope, applied_by).await
@@ -290,7 +290,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         &self,
         cfg: &ExecutorConfig,
         forward: &Migration,
-        inverse_steps: &[zero_migrate_backend::step::PlanStep],
+        inverse_steps: &[zeroship_migrate_backend::step::PlanStep],
         applied_by: &str,
     ) -> Result<(), RollbackError> {
         session::rollback_dml_plan_transactional(self.conn, cfg, forward, inverse_steps, applied_by)
@@ -333,7 +333,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
     async fn history(
         &self,
         cfg: &ExecutorConfig,
-    ) -> Result<Vec<zero_migrate_backend::journal::HistoryEvent>, JournalError> {
+    ) -> Result<Vec<zeroship_migrate_backend::journal::HistoryEvent>, JournalError> {
         journal_sql::history(self.conn, cfg).await
     }
 
@@ -349,7 +349,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
     async fn backfill_progress(
         &self,
         cfg: &ExecutorConfig,
-    ) -> Result<Vec<zero_migrate_backend::backfill::BackfillProgressEntry>, JournalError> {
+    ) -> Result<Vec<zeroship_migrate_backend::backfill::BackfillProgressEntry>, JournalError> {
         backfill_sql::read_progress_entries(self.conn, cfg).await
     }
 
@@ -368,7 +368,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         &self,
         cfg: &ExecutorConfig,
         migrations: &[Migration],
-    ) -> Result<zero_migrate_backend::drift::ChecksumDriftReport, DriftError> {
+    ) -> Result<zeroship_migrate_backend::drift::ChecksumDriftReport, DriftError> {
         drift_sql::check_checksum_drift(self.conn, cfg, migrations).await
     }
 
@@ -380,7 +380,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         &self,
         cfg: &ExecutorConfig,
         m: &Migration,
-    ) -> Result<zero_migrate_backend::executor::PreconditionVerdict, ApplyError> {
+    ) -> Result<zeroship_migrate_backend::executor::PreconditionVerdict, ApplyError> {
         precondition::evaluate_all(self.conn, cfg, &DIALECT, m).await
     }
 
@@ -424,15 +424,15 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         &self,
         cfg: &ExecutorConfig,
         version: &str,
-        check: &zero_migrate_ir::precondition::Precondition,
-    ) -> Result<zero_migrate_backend::backend::PlanPreconditionVerdict, ApplyError> {
+        check: &zeroship_migrate_ir::precondition::Precondition,
+    ) -> Result<zeroship_migrate_backend::backend::PlanPreconditionVerdict, ApplyError> {
         let (met, blockers) =
             precondition::evaluate_one(self.conn, cfg, &DIALECT, version, check).await?;
         if met {
-            return Ok(zero_migrate_backend::backend::PlanPreconditionVerdict::Met);
+            return Ok(zeroship_migrate_backend::backend::PlanPreconditionVerdict::Met);
         }
         Ok(
-            zero_migrate_backend::backend::PlanPreconditionVerdict::Unmet {
+            zeroship_migrate_backend::backend::PlanPreconditionVerdict::Unmet {
                 blockers: blockers.unwrap_or_default(),
             },
         )
@@ -614,7 +614,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         journal_sql::record_baseline(
             self.conn,
             cfg,
-            zero_migrate_backend::journal::BaselineRecord {
+            zeroship_migrate_backend::journal::BaselineRecord {
                 version: squash_migration.version.as_str(),
                 name: &squash_migration.name,
                 checksum: squash_migration.checksum.as_str(),
@@ -631,7 +631,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         &self,
         spec: &TableRebuildSpec,
         _m: &Migration,
-        _scope: &zero_migrate_backend::approval::ApprovalScope,
+        _scope: &zeroship_migrate_backend::approval::ApprovalScope,
         _applied_by: &str,
     ) -> Result<(), ApplyError> {
         Err(ApplyError::Backend(format!(
@@ -645,19 +645,19 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         &self,
         cfg: &ExecutorConfig,
         version: &MigrationId,
-        checksum: &zero_migrate_ir::migration::Checksum,
+        checksum: &zeroship_migrate_ir::migration::Checksum,
         spec: &BackfillSpec,
-        approval: zero_migrate_backend::approval::Approval,
-        scope: &zero_migrate_backend::approval::ApprovalScope,
+        approval: zeroship_migrate_backend::approval::Approval,
+        scope: &zeroship_migrate_backend::approval::ApprovalScope,
         applied_by: &str,
-        _lock_mode: zero_migrate_backend::executor::LockMode,
-    ) -> Result<zero_migrate_backend::executor::ApplyOutcome, ApplyError> {
+        _lock_mode: zeroship_migrate_backend::executor::LockMode,
+    ) -> Result<zeroship_migrate_backend::executor::ApplyOutcome, ApplyError> {
         if let Some(entry) = self
             .applied(cfg)
             .await
             .map_err(ApplyError::Journal)?
             .into_iter()
-            .filter(|entry| matches!(entry.phase, zero_migrate_backend::journal::Phase::Completed))
+            .filter(|entry| matches!(entry.phase, zeroship_migrate_backend::journal::Phase::Completed))
             .find(|entry| entry.version == version.as_str())
         {
             if entry.checksum != checksum.as_str() {
@@ -667,13 +667,13 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
                     expected: checksum.as_str().to_string(),
                 });
             }
-            return Ok(zero_migrate_backend::executor::ApplyOutcome {
+            return Ok(zeroship_migrate_backend::executor::ApplyOutcome {
                 applied: Vec::new(),
                 skipped: vec![version.as_str().to_string()],
                 recovered: Vec::new(),
             });
         }
-        if approval != zero_migrate_backend::approval::Approval::Approved {
+        if approval != zeroship_migrate_backend::approval::Approval::Approved {
             return Err(ApplyError::ApprovalRequired);
         }
         if !scope.admits(version.as_str()) {
@@ -685,7 +685,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
             self.conn, cfg, version, checksum, spec, approval, None, applied_by,
         )
         .await?;
-        Ok(zero_migrate_backend::executor::ApplyOutcome {
+        Ok(zeroship_migrate_backend::executor::ApplyOutcome {
             applied: outcome
                 .complete
                 .then(|| version.as_str().to_string())
@@ -700,7 +700,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         &self,
         cfg: &ExecutorConfig,
         version: &MigrationId,
-        checksum: &zero_migrate_ir::migration::Checksum,
+        checksum: &zeroship_migrate_ir::migration::Checksum,
         name: &str,
         template: &str,
         binds: &[BindValue],
@@ -710,17 +710,17 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         _mutates_data: bool,
         destructive: bool,
         _owner_app: &str,
-        approval: zero_migrate_backend::approval::Approval,
-        scope: &zero_migrate_backend::approval::ApprovalScope,
+        approval: zeroship_migrate_backend::approval::Approval,
+        scope: &zeroship_migrate_backend::approval::ApprovalScope,
         applied_by: &str,
-        _lock_mode: zero_migrate_backend::executor::LockMode,
+        _lock_mode: zeroship_migrate_backend::executor::LockMode,
     ) -> Result<bool, ApplyError> {
         let completed = self
             .applied(cfg)
             .await
             .map_err(ApplyError::Journal)?
             .into_iter()
-            .filter(|e| matches!(e.phase, zero_migrate_backend::journal::Phase::Completed))
+            .filter(|e| matches!(e.phase, zeroship_migrate_backend::journal::Phase::Completed))
             .find(|e| e.version == version.as_str());
         if let Some(entry) = completed {
             if entry.checksum != checksum.as_str() {
@@ -732,7 +732,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
             }
             return Ok(false);
         }
-        if destructive && approval != zero_migrate_backend::approval::Approval::Approved {
+        if destructive && approval != zeroship_migrate_backend::approval::Approval::Approved {
             return Err(ApplyError::ApprovalRequired);
         }
         if destructive && !scope.admits(version.as_str()) {
@@ -791,11 +791,11 @@ impl<D: SqlSession> OnlineSchemaChange for PostgresBackend<'_, D> {
     /// trigger the engine never wrote.
     fn run_online_backfill<'a>(
         &'a self,
-        intent: &'a zero_migrate_backend::capability::OnlineIntent,
+        intent: &'a zeroship_migrate_backend::capability::OnlineIntent,
         marker: &'a Migration,
         backfill: &'a BackfillSpec,
-        approval: zero_migrate_backend::approval::Approval,
-        scope: &'a zero_migrate_backend::approval::ApprovalScope,
+        approval: zeroship_migrate_backend::approval::Approval,
+        scope: &'a zeroship_migrate_backend::approval::ApprovalScope,
         approval_key: &'a MigrationId,
         cfg: &'a ExecutorConfig,
         applied_by: &'a str,
@@ -803,8 +803,8 @@ impl<D: SqlSession> OnlineSchemaChange for PostgresBackend<'_, D> {
         Box<
             dyn std::future::Future<
                     Output = Result<
-                        zero_migrate_backend::backfill::BackfillOutcome,
-                        zero_migrate_backend::capability::OnlineError,
+                        zeroship_migrate_backend::backfill::BackfillOutcome,
+                        zeroship_migrate_backend::capability::OnlineError,
                     >,
                 > + 'a,
         >,
@@ -814,30 +814,30 @@ impl<D: SqlSession> OnlineSchemaChange for PostgresBackend<'_, D> {
             // same `approval_key` before it applied E1/E2; these are the
             // independent checks that stop a DIRECT seam caller from mirroring data
             // for a rename that was never approved, or never individually reviewed.
-            if approval != zero_migrate_backend::approval::Approval::Approved {
-                return Err(zero_migrate_backend::capability::OnlineError::Approval);
+            if approval != zeroship_migrate_backend::approval::Approval::Approved {
+                return Err(zeroship_migrate_backend::capability::OnlineError::Approval);
             }
             if !scope.admits(approval_key.as_str()) {
                 return Err(
-                    zero_migrate_backend::capability::OnlineError::ApprovalNotScoped {
+                    zeroship_migrate_backend::capability::OnlineError::ApprovalNotScoped {
                         version: approval_key.as_str().to_string(),
                     },
                 );
             }
-            let zero_migrate_backend::capability::OnlineIntent::RenameColumn {
+            let zeroship_migrate_backend::capability::OnlineIntent::RenameColumn {
                 table,
                 from,
                 to,
                 ..
             } = intent;
             let allowed_engine_trigger = backfill_sql::AllowedOnlineRenameTrigger::new(
-                zero_migrate_backend::capability::dual_write_trg_name(
+                zeroship_migrate_backend::capability::dual_write_trg_name(
                     table,
                     from,
                     to,
                     IDENT_MAX_BYTES,
                 ),
-                zero_migrate_backend::capability::dual_write_fn_name(
+                zeroship_migrate_backend::capability::dual_write_fn_name(
                     table,
                     from,
                     to,
@@ -970,10 +970,10 @@ mod recording_session_genericity {
     use crate::backend::recording::{canned_journal_row, InFlightGuard, RecordingSession};
     use std::sync::atomic::AtomicBool;
 
-    use zero_migrate_backend::driver::{Bind, Row, Value};
-    use zero_migrate_backend::requirements::{DatabaseFeature, DatabaseRequirements};
-    use zero_migrate_ir::migration::{Checksum, ChecksumInput, Migration, MigrationFlags};
-    use zero_migrate_ir::probe::{GuardDir, GuardProbe};
+    use zeroship_migrate_backend::driver::{Bind, Row, Value};
+    use zeroship_migrate_backend::requirements::{DatabaseFeature, DatabaseRequirements};
+    use zeroship_migrate_ir::migration::{Checksum, ChecksumInput, Migration, MigrationFlags};
+    use zeroship_migrate_ir::probe::{GuardDir, GuardProbe};
 
     fn migration_with_guard_schema(schema: &str) -> Migration {
         let flags = MigrationFlags::default();
@@ -1042,7 +1042,7 @@ mod recording_session_genericity {
             &["proj_x", "reporting"],
             &[],
             false,
-            zero_migrate_ir::policy::DestructiveOps::Allow,
+            zeroship_migrate_ir::policy::DestructiveOps::Allow,
         );
         let cfg = ExecutorConfig::new("prj_x", "proj_x", effective);
         let migration = migration_with_guard_schema("reporting");
@@ -1243,7 +1243,7 @@ mod recording_session_genericity {
 
         assert_eq!(
             progress,
-            vec![zero_migrate_backend::backfill::BackfillProgressEntry {
+            vec![zeroship_migrate_backend::backfill::BackfillProgressEntry {
                 version: "mig_progress".into(),
                 checksum: Some("checksum_a".into()),
                 complete: false,

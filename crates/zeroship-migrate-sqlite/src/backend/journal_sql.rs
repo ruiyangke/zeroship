@@ -36,8 +36,8 @@
 //! them and is read at each prepare. All on the single migration connection,
 //! strictly sequential - race-free by construction.
 
-use zero_migrate_backend::journal::{AppliedEntry, EventKind, JournaledKind, Phase};
-use zero_migrate_ir::migration::Migration;
+use zeroship_migrate_backend::journal::{AppliedEntry, EventKind, JournaledKind, Phase};
+use zeroship_migrate_ir::migration::Migration;
 
 use super::actor::{MigrationActor, SqliteActorError};
 use super::authorizer::Mode;
@@ -186,7 +186,7 @@ pub(crate) async fn apply_one_additive(
 
 /// Journal `m` as a `completed`, `kind='apply'` event WITHOUT
 /// running its `up` DDL: the SQLite arm of an existence-guard
-/// [`SatisfiedNoop`](zero_migrate_backend::existence_probe::GuardVerdict::SatisfiedNoop). The guarded
+/// [`SatisfiedNoop`](zeroship_migrate_backend::existence_probe::GuardVerdict::SatisfiedNoop). The guarded
 /// object already has the declared shape (`ifNotExists`) or is already absent
 /// (`ifExists`), so the `up` is a no-op, but the version must still LAND so a
 /// re-deploy sees it net-applied and skips it via normal pending computation.
@@ -264,9 +264,9 @@ pub(crate) async fn journal_satisfied_noop(
 /// Record `m` as the SQLite project's **baseline** - a `kind='baseline'`,
 /// `completed` journal event WITHOUT running its `up` (the adoption path).
 /// This is the SQLite arm behind the single neutral
-/// [`MigrationBackend::baseline_one`](zero_migrate_backend::backend::MigrationBackend::baseline_one)
+/// [`MigrationBackend::baseline_one`](zeroship_migrate_backend::backend::MigrationBackend::baseline_one)
 /// (multi-engine abstraction); it returns the dialect-neutral
-/// [`BaselineOutcome`](zero_migrate_backend::baseline::BaselineOutcome), the same shape the PG arm
+/// [`BaselineOutcome`](zeroship_migrate_backend::baseline::BaselineOutcome), the same shape the PG arm
 /// returns, so no SQLite-specific outcome type crosses the trait.
 ///
 /// The motivating case: a dev developer who ran the OLD `run_sqlite_pipeline`
@@ -288,7 +288,7 @@ pub(crate) async fn baseline(
     actor: &MigrationActor,
     m: &Migration,
     applied_by: &str,
-) -> Result<zero_migrate_backend::baseline::BaselineOutcome, SqliteActorError> {
+) -> Result<zeroship_migrate_backend::baseline::BaselineOutcome, SqliteActorError> {
     ensure_journal(actor).await?;
 
     let version = m.version.as_str().to_string();
@@ -303,7 +303,7 @@ pub(crate) async fn baseline(
         .map(|e| e.version)
         .collect();
     if net_completed.iter().any(|v| v == &version) {
-        return Ok(zero_migrate_backend::baseline::BaselineOutcome {
+        return Ok(zeroship_migrate_backend::baseline::BaselineOutcome {
             version,
             already_present: true,
         });
@@ -345,7 +345,7 @@ pub(crate) async fn baseline(
     match result {
         Ok(()) => {
             actor.commit_or_cleanup("baseline journal write").await?;
-            Ok(zero_migrate_backend::baseline::BaselineOutcome {
+            Ok(zeroship_migrate_backend::baseline::BaselineOutcome {
                 version,
                 already_present: false,
             })
@@ -485,7 +485,7 @@ pub(crate) async fn record_loaded_versions(
 pub(crate) async fn run_dml(
     actor: &MigrationActor,
     version: &str,
-    checksum: &zero_migrate_ir::migration::Checksum,
+    checksum: &zeroship_migrate_ir::migration::Checksum,
     name: &str,
     template: &str,
     binds: &[crate::backend::actor::SqliteBind],

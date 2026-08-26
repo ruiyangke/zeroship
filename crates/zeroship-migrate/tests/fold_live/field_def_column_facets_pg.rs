@@ -55,7 +55,7 @@
 use crate::support;
 
 use serde_json::json;
-use zero_migrate::schema::query::{
+use zeroship_migrate::schema::query::{
     build_create_table_with_fks_for_dialect_scoped_statements, FkEmission,
 };
 
@@ -100,12 +100,12 @@ fn field_defs() -> serde_json::Value {
 /// Render the `CREATE TABLE` for `field_defs()` through the real emitter.
 fn create_table_sql(schema: &str) -> Vec<String> {
     build_create_table_with_fks_for_dialect_scoped_statements(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         schema,
         "facets",
         &field_defs(),
         &FkEmission::Inline,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         false,
         &support::no_inject(schema),
     )

@@ -7,7 +7,7 @@
 //! `MysqlSchemaRenderer::column_type` pin that calls it - states the engine's
 //! promise: *"every character type pins an explicit collation so string comparison is
 //! case-SENSITIVE by default (matching Postgres/SQLite)"*. That renderer answers from
-//! a [`FieldDescriptor`](zero_migrate::render::declarative::FieldDescriptor) and a
+//! a [`FieldDescriptor`](zeroship_migrate::render::declarative::FieldDescriptor) and a
 //! PostgreSQL-spelled `data_type`, and it keeps the promise.
 //!
 //! `schema::query::renderer(&MYSQL).column_type` answers the SAME question
@@ -47,7 +47,7 @@
 //! whether `'Active' = 'active'` in that column, and whether a UNIQUE index over it
 //! accepts both spellings. The catalog is read too, from
 //! `information_schema.COLUMNS` - the relation the SHIPPED drift path reads
-//! (`zero_migrate_mysql::backend::drift_sql`) - with a missing row treated as an ERROR
+//! (`zeroship_migrate_mysql::backend::drift_sql`) - with a missing row treated as an ERROR
 //! rather than as "no collation", because that view is privilege-filtered and an
 //! absent row and an invisible one are the same thing. `SHOW CREATE TABLE` is the
 //! corroborating witness: only its text distinguishes a collation the engine PINNED
@@ -61,8 +61,8 @@
 use crate::support;
 
 use crate::support::mysql::{quote_ident, DatabaseGuard, MysqlDevSession};
-use zero_migrate::driver::{Bind, SqlSession};
-use zero_migrate::schema::query::{
+use zeroship_migrate::driver::{Bind, SqlSession};
+use zeroship_migrate::schema::query::{
     build_create_table_with_fks_for_dialect_scoped_statements, FkEmission,
 };
 
@@ -108,7 +108,7 @@ const BARE_COLUMNS: [&str; 3] = ["id", "payload", "ratio"];
 /// This is the arm under test. Nothing in production calls it with `Mysql` (see the
 /// module header); this function IS the route.
 fn render_create(
-    dialect: &zero_migrate::DialectId,
+    dialect: &zeroship_migrate::DialectId,
     schema_name: &str,
     table: &str,
 ) -> Result<String, String> {
@@ -122,7 +122,7 @@ fn render_create(
     );
     let policy = support::no_inject(schema_name);
     build_create_table_with_fks_for_dialect_scoped_statements(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         schema_name,
         table,
         &schema,
@@ -159,7 +159,7 @@ async fn database_collation(session: &MysqlDevSession, database: &str) -> Result
 }
 
 /// The collation the SERVER gave `column`, read from the relation the shipped drift
-/// path reads (`zero_migrate_mysql::backend::drift_sql` reads
+/// path reads (`zeroship_migrate_mysql::backend::drift_sql` reads
 /// `information_schema.COLUMNS`), so this measures the same surface the engine
 /// measures.
 ///
@@ -220,7 +220,7 @@ async fn show_create_table(
 /// Create the probe database and the probe table in it.
 async fn deploy_probe(session: &MysqlDevSession, database: &str) -> Result<(), String> {
     fresh_database(session, database).await?;
-    let create = render_create(&zero_migrate_mysql::DIALECT, database, "probe")?;
+    let create = render_create(&zeroship_migrate_mysql::DIALECT, database, "probe")?;
     session
         .batch(&create)
         .await
@@ -403,7 +403,7 @@ async fn postgres_keeps_the_same_two_cases_apart() {
             .batch(&format!("CREATE SCHEMA \"{schema}\""))
             .await
             .map_err(|e| format!("create the probe schema: {e}"))?;
-        let create = render_create(&zero_migrate_postgres::DIALECT, &schema, "probe")?;
+        let create = render_create(&zeroship_migrate_postgres::DIALECT, &schema, "probe")?;
         session
             .batch(&create)
             .await
@@ -504,12 +504,12 @@ async fn a_case_insensitive_field_gets_the_case_insensitive_collation() {
             "label": { "type": "string", "maxLength": 64, "caseSensitive": false },
         });
         let create = build_create_table_with_fks_for_dialect_scoped_statements(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &database,
             "ci_probe",
             &schema,
             &FkEmission::Inline,
-            &zero_migrate_mysql::DIALECT,
+            &zeroship_migrate_mysql::DIALECT,
             false,
             &support::no_inject(&database),
         )

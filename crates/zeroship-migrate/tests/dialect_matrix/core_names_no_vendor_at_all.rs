@@ -5,7 +5,7 @@
 //! # Why this file exists beside three siblings that already guard core
 //!
 //! `core_names_no_vendor_crate.rs` measures whether core writes
-//! `zero_migrate_postgres` / `_sqlite` / `_mysql` — whether core RESOLVES a vendor
+//! `zeroship_migrate_postgres` / `_sqlite` / `_mysql` — whether core RESOLVES a vendor
 //! outside the registry. `core_does_not_spell_a_vendors_bytes.rs` measures whether it
 //! calls a raw spelling primitive. `core_names_no_vendor_backend_module.rs` measures
 //! the module paths. All three were green while the engine still said "PostgreSQL" in
@@ -138,7 +138,7 @@ const ALLOWED: &[(&str, usize, &str)] = &[];
 
 // `lib.rs` USED TO BE THE SECOND ENTRY, at one, and it is GONE rather than lowered.
 //
-// The line was `pub use zero_migrate_ir::dialect::{DialectId, DialectSet, MYSQL,
+// The line was `pub use zeroship_migrate_ir::dialect::{DialectId, DialectSet, MYSQL,
 // POSTGRES, SQLITE}` — core re-exporting three id constants it does not define. The
 // violation was UPSTREAM of core and that line was its symptom: the constants lived
 // in `zero-migrate-ir/src/dialect.rs`, a crate whose own doc says a backend "declares
@@ -146,8 +146,8 @@ const ALLOWED: &[(&str, usize, &str)] = &[];
 // declaring three.
 //
 // The end state that entry named is the one that landed: each VENDOR crate exports
-// its own id and the IR crate exports none. `zero_migrate_postgres::DIALECT`,
-// `zero_migrate_sqlite::DIALECT` and `zero_migrate_mysql::DIALECT` are the
+// its own id and the IR crate exports none. `zeroship_migrate_postgres::DIALECT`,
+// `zeroship_migrate_sqlite::DIALECT` and `zeroship_migrate_mysql::DIALECT` are the
 // declarations; core re-exports `DialectId` and `DialectSet` from that module and
 // nothing else.
 //

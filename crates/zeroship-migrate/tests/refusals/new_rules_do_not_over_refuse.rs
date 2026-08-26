@@ -19,17 +19,17 @@
 
 use crate::support;
 
-use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::model::validate::{validate_ir, validate_ir_authorized, VendorAuthority};
+use zeroship_migrate::model::ir::MigrationIr;
+use zeroship_migrate::model::validate::{validate_ir, validate_ir_authorized, VendorAuthority};
 
 #[track_caller]
 fn must_pass(what: &str, ops: &str) {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{ops}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
     if let Err(e) = validate_ir(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
     ) {
         panic!(
             "{what} is an ordinary migration and must pass: [{}] {}",
@@ -55,9 +55,9 @@ fn must_pass_authorized(what: &str, ops: &str) {
         default_schema: "public",
     };
     if let Err(e) = validate_ir_authorized(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         None,
         Some(authority),
     ) {

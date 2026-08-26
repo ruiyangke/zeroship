@@ -10,11 +10,11 @@
 //! against the PRE-`fold_common`-extraction code and MUST stay equal after the
 //! pure refactor — proving the `fold_common` lift is byte-preserving.
 
-use zero_migrate::model::ir::{
+use zeroship_migrate::model::ir::{
     CanonicalOpList, ColType, IndexElement, IrColumn, IrConstraint, IrConstraintKind, IrScalar,
     IrValue, Op,
 };
-use zero_migrate::{
+use zeroship_migrate::{
     BinaryOp, Checksum, ChecksumInput, Expr, MigrationFlags, MigrationId, OnlinePhase,
 };
 
@@ -108,11 +108,11 @@ fn checksum_of_ir_byte_stable_golden() {
     };
     let ops = vec![
         Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "accounts".into(),
             columns: vec![IrColumn {
                 name: "id".into(),
-                ty: zero_migrate::model::ir::ColType::Int,
+                ty: zeroship_migrate::model::ir::ColType::Int,
                 nullable: Some(false),
                 default: None,
                 unique: Some(true),
@@ -189,10 +189,10 @@ fn checksum_of_ir_deterministic_and_sensitive() {
     let owner = "app_ir";
 
     let add_a = Op::AddColumn {
-        attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
         table: "users".into(),
         column: "age".into(),
-        ty: zero_migrate::model::ir::ColType::Int,
+        ty: zeroship_migrate::model::ir::ColType::Int,
         nullable: Some(true),
         default: None,
         value_format: None,
@@ -205,10 +205,10 @@ fn checksum_of_ir_deterministic_and_sensitive() {
         existence_guard: None,
     };
     let add_b = Op::AddColumn {
-        attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
         table: "users".into(),
         column: "name".into(),
-        ty: zero_migrate::model::ir::ColType::Text,
+        ty: zeroship_migrate::model::ir::ColType::Text,
         nullable: Some(true),
         default: None,
         value_format: None,
@@ -268,7 +268,7 @@ fn checksum_of_ir_deterministic_and_sensitive() {
 #[test]
 fn composite_primary_key_order_changes_canonical_ir_and_checksum() {
     let ordered = Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "memberships".into(),
         columns: vec![
             IrColumn {
@@ -354,7 +354,7 @@ fn composite_primary_key_order_changes_canonical_ir_and_checksum() {
 fn checksum_of_ir_includes_table_check_expr() {
     fn check_op(rhs: i64) -> Op {
         Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "checked".into(),
             columns: vec![IrColumn {
                 name: "a".into(),
@@ -416,7 +416,7 @@ fn checksum_of_ir_includes_table_check_expr() {
 #[test]
 fn checksum_of_ir_folds_scalars_and_ast_literals() {
     use std::collections::BTreeMap;
-    use zero_migrate::model::expr::{BinaryOp, Expr};
+    use zeroship_migrate::model::expr::{BinaryOp, Expr};
 
     let flags = MigrationFlags::default();
     let owner = "app_ir";
@@ -632,14 +632,14 @@ fn checksum_of_ir_is_identical_across_dialect_renders() {
 ///    unbuildable), so the new bytes are correct.
 #[test]
 fn checksum_of_ir_fk_actions_are_additive_neutral_and_sensitive() {
-    use zero_migrate::model::ir::{IrConstraint, IrConstraintKind, RefAction};
+    use zeroship_migrate::model::ir::{IrConstraint, IrConstraintKind, RefAction};
 
     let flags = MigrationFlags::default();
     let owner = "app_fk";
 
     let mk_fk = |on_delete: Option<RefAction>, on_update: Option<RefAction>| {
         vec![Op::AddConstraint {
-            attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
             table: "orders".into(),
             constraint: IrConstraint {
                 name: Some("orders_customer_fk".into()),
@@ -698,11 +698,11 @@ fn checksum_of_ir_jcs_is_key_sorted_stable() {
     let flags = MigrationFlags::default();
     let owner = "app_ir";
     let ct = Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "t".into(),
         columns: vec![IrColumn {
             name: "id".into(),
-            ty: zero_migrate::model::ir::ColType::Int,
+            ty: zeroship_migrate::model::ir::ColType::Int,
             nullable: Some(false),
             default: None,
             unique: None,
@@ -743,7 +743,7 @@ fn checksum_of_ir_jcs_is_key_sorted_stable() {
 /// decides whether an op runs, journals a satisfied no-op, or fails closed on drift.
 #[test]
 fn ir_checksum_covers_the_existence_guard() {
-    use zero_migrate::model::ir::ExistenceGuard;
+    use zeroship_migrate::model::ir::ExistenceGuard;
 
     let flags = MigrationFlags::default();
     let owner = "app_alpha";

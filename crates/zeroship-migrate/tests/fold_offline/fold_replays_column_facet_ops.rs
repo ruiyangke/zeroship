@@ -15,7 +15,7 @@
 //!
 //! THE CONSUMER IS CODEGEN, which is what makes it user-facing rather than
 //! internal. The IR schema records it directly: "the OFFLINE op fold ... and
-//! `gen-types` have NO live DB". (That sentence named a standalone `zero_migrate`
+//! `gen-types` have NO live DB". (That sentence named a standalone `zeroship_migrate`
 //! walker until step 4 consumer 3 of `docs/proposals/single-fold-and-effects.md`
 //! deleted it; the map is a
 //! projection of the single fold now and the claim is unchanged - still no live DB.) So a
@@ -44,8 +44,8 @@
 
 use crate::support;
 
-use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::render::fold::single_fold;
+use zeroship_migrate::model::ir::MigrationIr;
+use zeroship_migrate::render::fold::single_fold;
 
 /// The folded FieldDescriptor map for table `a`, as JSON.
 fn folded(ops_after_create: &str) -> serde_json::Value {
@@ -55,13 +55,13 @@ fn folded(ops_after_create: &str) -> serde_json::Value {
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
     let effective = support::operator_charter("public");
     let map = single_fold::fold(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir.ops,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         "public",
         &effective,
     )
-    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
+    .map(|folded| folded.project_field_defs(zeroship_migrate::shipping_vendors()))
     .expect("the fold succeeds");
     map.get("a").cloned().expect("table a is in the fold")
 }
@@ -149,13 +149,13 @@ fn folded_with_default(ops_after_create: &str) -> serde_json::Value {
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
     let effective = support::operator_charter("public");
     let map = single_fold::fold(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir.ops,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         "public",
         &effective,
     )
-    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
+    .map(|folded| folded.project_field_defs(zeroship_migrate::shipping_vendors()))
     .expect("the fold succeeds");
     map.get("a").cloned().expect("table a is in the fold")
 }
@@ -220,13 +220,13 @@ fn folded_ref(a_table: &str, rest: &str) -> serde_json::Value {
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
     let effective = support::operator_charter("public");
     let map = single_fold::fold(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir.ops,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         "public",
         &effective,
     )
-    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
+    .map(|folded| folded.project_field_defs(zeroship_migrate::shipping_vendors()))
     .expect("the fold succeeds");
     map.get("a").cloned().expect("table a is in the fold")
 }
@@ -300,13 +300,13 @@ fn folded_table(a_table: &str, rest: &str) -> serde_json::Value {
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
     let effective = support::operator_charter("public");
     let map = single_fold::fold(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir.ops,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         "public",
         &effective,
     )
-    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
+    .map(|folded| folded.project_field_defs(zeroship_migrate::shipping_vendors()))
     .expect("the fold succeeds");
     map.get("a").cloned().expect("table a is in the fold")
 }

@@ -22,8 +22,8 @@
 
 use crate::support;
 
-use zero_migrate::model::ir::ViewQuery;
-use zero_migrate::{fold_ops, FoldError, Op};
+use zeroship_migrate::model::ir::ViewQuery;
+use zeroship_migrate::{fold_ops, FoldError, Op};
 
 const SCHEMA: &str = "app";
 
@@ -45,12 +45,12 @@ fn a_plain_replace_over_a_materialized_view_is_refused_at_the_fold() {
     let effective = support::confined_charter();
 
     let error = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &[
             create_view("totals", Some(true), None),
             create_view("totals", None, Some(true)),
         ],
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )
@@ -71,12 +71,12 @@ fn a_plain_replace_over_a_plain_view_still_applies() {
     let effective = support::confined_charter();
 
     let folded = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &[
             create_view("totals", None, None),
             create_view("totals", None, Some(true)),
         ],
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )
@@ -95,12 +95,12 @@ fn a_materialized_replace_over_a_materialized_view_is_not_refused_by_this_check(
     let effective = support::confined_charter();
 
     let folded = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &[
             create_view("totals", Some(true), None),
             create_view("totals", Some(true), Some(true)),
         ],
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )

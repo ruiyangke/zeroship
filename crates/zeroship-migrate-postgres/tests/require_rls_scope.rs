@@ -11,12 +11,12 @@
 
 mod support;
 
-use zero_migrate_backend::guard::{
+use zeroship_migrate_backend::guard::{
     check_ir_data_security_policy, data_security_rule, GuardConfig, GuardError,
 };
-use zero_migrate_ir::ir::{MigrationIr, Op};
-use zero_migrate_postgres::guard::PgGuard;
-use zero_migrate_postgres::DIALECT as POSTGRES;
+use zeroship_migrate_ir::ir::{MigrationIr, Op};
+use zeroship_migrate_postgres::guard::PgGuard;
+use zeroship_migrate_postgres::DIALECT as POSTGRES;
 
 /// A charter granting the `app` schema everything the data-security walk needs, plus
 /// whatever `require`/`default_scope` text an arm supplies.
@@ -53,7 +53,7 @@ fn ir_with(ops: Vec<Op>) -> MigrationIr {
     MigrationIr {
         inverse_ops: None,
         irreversible: None,
-        ir_version: zero_migrate_ir::ir::CURRENT_IR_VERSION,
+        ir_version: zeroship_migrate_ir::ir::CURRENT_IR_VERSION,
         name: "require_rls_scope".into(),
         owner_app: "app_corpus".into(),
         ops,
@@ -67,7 +67,7 @@ fn ir_with(ops: Vec<Op>) -> MigrationIr {
 
 fn create_table(schema: Option<&str>, name: &str) -> Op {
     Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: name.to_string(),
         columns: Vec::new(),
         primary_key: None,

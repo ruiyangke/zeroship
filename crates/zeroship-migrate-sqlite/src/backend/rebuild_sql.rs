@@ -104,9 +104,9 @@
 use std::time::Instant;
 
 use crate::plan::SqliteSequencePolicy;
-use zero_migrate_backend::table_rebuild::TableRebuildSpec;
-use zero_migrate_ir::ir::AlterPrimaryKeyAction;
-use zero_migrate_ir::migration::Migration;
+use zeroship_migrate_backend::table_rebuild::TableRebuildSpec;
+use zeroship_migrate_ir::ir::AlterPrimaryKeyAction;
+use zeroship_migrate_ir::migration::Migration;
 
 use super::actor::{MigrationActor, SqliteActorError};
 use super::authorizer::Mode;
@@ -179,7 +179,7 @@ pub enum RebuildError {
 /// Double-quote a SQLite identifier (escaping embedded quotes). Engine-controlled
 /// identifiers, quoted defensively.
 fn quote_ident(s: &str) -> String {
-    zero_migrate_backend::dml::escape_quote_ident_for_backend(s, &crate::dml::RENDERER)
+    zeroship_migrate_backend::dml::escape_quote_ident_for_backend(s, &crate::dml::RENDERER)
 }
 
 /// Execute ONE 12-step table rebuild atomically with confinement + journal it
@@ -629,7 +629,7 @@ async fn run_rebuild_steps(
              (event_kind, version, name, checksum, \"by\", exec_ms, phase, outcome, kind) \
              VALUES ('{applied}', {version}, {name}, {checksum}, {by}, {exec_ms}, \
                      'completed', 'success', 'apply')",
-            applied = zero_migrate_backend::journal::EventKind::Applied.as_str()
+            applied = zeroship_migrate_backend::journal::EventKind::Applied.as_str()
         ))
         .await
         .map_err(|e| step_err(table, e))?;
@@ -942,7 +942,7 @@ fn step_err(table: &str, source: SqliteActorError) -> RebuildError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zero_migrate_backend::table_rebuild::SequenceHighWaterPolicy;
+    use zeroship_migrate_backend::table_rebuild::SequenceHighWaterPolicy;
 
     #[test]
     fn tmp_name_is_engine_chosen_suffix() {

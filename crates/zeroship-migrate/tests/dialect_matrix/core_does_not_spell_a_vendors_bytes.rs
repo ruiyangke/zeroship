@@ -70,7 +70,7 @@ use std::path::PathBuf;
 /// therefore the exact things core must not reach un-named.
 ///
 /// The needle is the bare function name plus `(`, so it matches the bare call a `use`
-/// would produce AND the fully-qualified `zero_migrate_backend::spelling::…(` form
+/// would produce AND the fully-qualified `zeroship_migrate_backend::spelling::…(` form
 /// the vendors currently write. Anything that reaches the primitive has to spell its
 /// name somewhere; a name with no `(` after it is prose, and prose is not a call.
 /// That distinction is load-bearing and is measured, not assumed: `zero-migrate-core/src`
@@ -351,9 +351,9 @@ fn core_does_not_spell_a_vendors_bytes() {
          NAMING A VENDOR is. Use a door instead:\n\
          \n\
            - EMIT for a named dialect -> \
-         `zero_migrate_backend::dml::escape_quote_ident_for_backend(x, backend)`\n\
+         `zeroship_migrate_backend::dml::escape_quote_ident_for_backend(x, backend)`\n\
            - the PG-shaped NORMAL FORM -> \
-         `zero_migrate_backend::dml::pg_canonical_ident(x)`\n\
+         `zeroship_migrate_backend::dml::pg_canonical_ident(x)`\n\
          \n\
          Both resolve back to {SPELLING_HOME} through the registry, so the bytes are \
          unchanged and the vendor is on the record."

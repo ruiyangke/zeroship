@@ -29,18 +29,18 @@ mod support;
 
 use std::cell::RefCell;
 
-use zero_migrate::apply::executor::{apply, LockMode};
-use zero_migrate::approval::Approval;
-use zero_migrate::conn::ExecutorConfig;
-use zero_migrate::model::migration::{
+use zeroship_migrate::apply::executor::{apply, LockMode};
+use zeroship_migrate::approval::Approval;
+use zeroship_migrate::conn::ExecutorConfig;
+use zeroship_migrate::model::migration::{
     Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
 };
-use zero_migrate::{BindValue, MigrationEngine, PlanStep};
-use zero_migrate_postgres::confinement::PostgresConfinementExt;
-use zero_migrate_postgres::PostgresBackend;
+use zeroship_migrate::{BindValue, MigrationEngine, PlanStep};
+use zeroship_migrate_postgres::confinement::PostgresConfinementExt;
+use zeroship_migrate_postgres::PostgresBackend;
 
-use zero_migrate_node::marshal::{JsCell, JsReply, JsRequest, JsRow};
-use zero_migrate_node::session::{NapiHostSession, VerbDispatch, VerbReply};
+use zeroship_migrate_node::marshal::{JsCell, JsReply, JsRequest, JsRow};
+use zeroship_migrate_node::session::{NapiHostSession, VerbDispatch, VerbReply};
 
 /// A recording mock host driver: logs the `{kind, sql}` of every verb and answers
 /// read verbs with canned rows routed by SQL shape. This stands in for the JS
@@ -95,7 +95,7 @@ impl MockDispatch {
         {
             // The engine's own list, not a copy: a journal table added there must not
             // be able to go unanswered here.
-            return zero_migrate_mysql::BINARY_IDENTITY_COLUMNS
+            return zeroship_migrate_mysql::BINARY_IDENTITY_COLUMNS
                 .into_iter()
                 .map(|(table, column)| JsRow {
                     columns: vec![
@@ -255,7 +255,7 @@ fn one_apply_runs_through_the_host_bridge_and_records_the_sql_sequence() {
         let version_str = migration.version.as_str().to_string();
 
         let result = apply(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &PostgresBackend::new_generic(&session),
             &cfg,
             std::slice::from_ref(&migration),
@@ -296,9 +296,9 @@ fn mysql_journal_only_status_uses_only_mysql_sql() {
             "proj_mysql_status",
             support::no_inject("proj_mysql_status"),
         );
-        let backend = zero_migrate_mysql::MysqlBackend::new_generic(&session);
+        let backend = zeroship_migrate_mysql::MysqlBackend::new_generic(&session);
 
-        let status = zero_migrate::ops::status::status_via_backend(&backend, &cfg, &[])
+        let status = zeroship_migrate::ops::status::status_via_backend(&backend, &cfg, &[])
             .await
             .expect("empty MySQL journal status succeeds through the host bridge")
             .expect_ready("the canned MySQL host driver grants the project lock");
@@ -354,7 +354,7 @@ fn the_recorded_verb_sequence_has_the_expected_landmarks_in_order() {
         let migration = trivial_migration();
 
         apply(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &PostgresBackend::new_generic(&session),
             &cfg,
             std::slice::from_ref(&migration),
@@ -413,7 +413,7 @@ fn data_only_plan_executes_and_journals_through_the_host_bridge() {
         let (step, dml_version) = update_step();
         let backend = PostgresBackend::new_generic(&session);
 
-        let outcome = MigrationEngine::new(zero_migrate::shipping_vendors())
+        let outcome = MigrationEngine::new(zeroship_migrate::shipping_vendors())
             .apply_plan_with_touched_and_depends(
                 &[step],
                 &["mock_t".into()],
@@ -463,7 +463,7 @@ fn mixed_ddl_and_dml_plan_preserves_authored_execution_order() {
         let steps = vec![PlanStep::Ddl(create), update, PlanStep::Ddl(alter)];
         let backend = PostgresBackend::new_generic(&session);
 
-        let outcome = MigrationEngine::new(zero_migrate::shipping_vendors())
+        let outcome = MigrationEngine::new(zeroship_migrate::shipping_vendors())
             .apply_plan_with_touched_and_depends(
                 &steps,
                 &["mock_t".into()],

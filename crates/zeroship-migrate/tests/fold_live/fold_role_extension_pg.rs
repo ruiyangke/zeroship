@@ -31,14 +31,14 @@ use crate::support;
 use std::collections::BTreeMap;
 
 use crate::support::PgDevSession;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::driver::SqlSession;
-use zero_migrate::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::{
     diff_snapshots, effective_policy_from_charter_toml, fold_ops, Approval, EffectivePolicy,
     ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr,
 };
-use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
-use zero_migrate_postgres::PostgresBackend;
+use zeroship_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zeroship_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_fold_role_extension";
 /// Available on the test image, and not installed by default - so creating it is
@@ -173,17 +173,17 @@ async fn a_role_and_an_extension_fold_to_what_live_introspection_reports() {
         .to_string();
 
         let author = IrAuthor::new(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &cfg.project_schema,
             OWNER,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &policy,
         );
-        let guard_cfg = GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT);
+        let guard_cfg = GuardConfig::from_policy(policy.clone(), zeroship_migrate_postgres::DIALECT);
         let base = fold_ops(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &[],
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &cfg.project_schema,
             &policy,
         )
@@ -192,7 +192,7 @@ async fn a_role_and_an_extension_fold_to_what_live_introspection_reports() {
         let artifact = author
             .load_and_lower_guarded(&doc, OWNER, &BTreeMap::new(), &live, &guard_cfg)
             .map_err(|error| format!("lower: {error}"))?;
-        MigrationEngine::new(zero_migrate::shipping_vendors())
+        MigrationEngine::new(zeroship_migrate::shipping_vendors())
             .apply_plan(
                 &artifact.plan.steps,
                 Approval::Approved,
@@ -207,9 +207,9 @@ async fn a_role_and_an_extension_fold_to_what_live_introspection_reports() {
         let authored: MigrationIr =
             serde_json::from_str(&doc).map_err(|error| format!("parse the IR: {error}"))?;
         let expected = fold_ops(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &authored.ops,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &cfg.project_schema,
             &policy,
         )
@@ -231,7 +231,7 @@ async fn a_role_and_an_extension_fold_to_what_live_introspection_reports() {
         let actual = snapshot_schema(&session, &cfg.project_schema)
             .await
             .map_err(|error| format!("snapshot: {error}"))?;
-        let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
+        let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual);
         assert!(
             drift.is_clean(),
             "a role and an extension must round-trip: missing={:?} altered={:?}",
@@ -249,7 +249,7 @@ async fn a_role_and_an_extension_fold_to_what_live_introspection_reports() {
             .await
             .map_err(|error| format!("snapshot after dropping the role: {error}"))?;
         assert_eq!(
-            diff_snapshots(zero_migrate::shipping_vendors(), &expected, &after_role)
+            diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &after_role)
                 .missing_objects,
             vec![format!("role {role}")],
             "dropping the role out of band must be reported"
@@ -262,7 +262,7 @@ async fn a_role_and_an_extension_fold_to_what_live_introspection_reports() {
         let after_both = snapshot_schema(&session, &cfg.project_schema)
             .await
             .map_err(|error| format!("snapshot after dropping the extension: {error}"))?;
-        let mut both = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &after_both)
+        let mut both = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &after_both)
             .missing_objects;
         both.sort();
         assert_eq!(
@@ -357,15 +357,15 @@ async fn role_attributes_round_trip_and_drift_is_named() {
         })
         .to_string();
 
-        let author = IrAuthor::new(zero_migrate::shipping_vendors(), &cfg.project_schema, OWNER, &zero_migrate_postgres::DIALECT, &policy);
-        let guard_cfg = GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT);
-        let base = fold_ops(zero_migrate::shipping_vendors(), &[], &zero_migrate_postgres::DIALECT, &cfg.project_schema, &policy)
+        let author = IrAuthor::new(zeroship_migrate::shipping_vendors(), &cfg.project_schema, OWNER, &zeroship_migrate_postgres::DIALECT, &policy);
+        let guard_cfg = GuardConfig::from_policy(policy.clone(), zeroship_migrate_postgres::DIALECT);
+        let base = fold_ops(zeroship_migrate::shipping_vendors(), &[], &zeroship_migrate_postgres::DIALECT, &cfg.project_schema, &policy)
             .map_err(|error| format!("fold the empty base: {error}"))?;
         let live = LiveSchema::from_catalog_snapshot(base, OWNER);
         let artifact = author
             .load_and_lower_guarded(&doc, OWNER, &BTreeMap::new(), &live, &guard_cfg)
             .map_err(|error| format!("lower: {error}"))?;
-        MigrationEngine::new(zero_migrate::shipping_vendors())
+        MigrationEngine::new(zeroship_migrate::shipping_vendors())
             .apply_plan(
                 &artifact.plan.steps,
                 Approval::Approved,
@@ -379,9 +379,9 @@ async fn role_attributes_round_trip_and_drift_is_named() {
 
         let authored: MigrationIr =
             serde_json::from_str(&doc).map_err(|error| format!("parse the IR: {error}"))?;
-        let expected = fold_ops(zero_migrate::shipping_vendors(),
+        let expected = fold_ops(zeroship_migrate::shipping_vendors(),
             &authored.ops,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &cfg.project_schema,
             &policy,
         )
@@ -402,7 +402,7 @@ async fn role_attributes_round_trip_and_drift_is_named() {
         let actual = snapshot_schema(&session, &cfg.project_schema)
             .await
             .map_err(|error| format!("snapshot: {error}"))?;
-        let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
+        let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual);
         assert!(
             drift.is_clean(),
             "an attributed role must round-trip: missing={:?} altered={:?}",
@@ -419,7 +419,7 @@ async fn role_attributes_round_trip_and_drift_is_named() {
         let after = snapshot_schema(&session, &cfg.project_schema)
             .await
             .map_err(|error| format!("snapshot after the alter: {error}"))?;
-        let drifted = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &after);
+        let drifted = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &after);
         assert!(
             drifted.missing_objects.is_empty(),
             "the role still exists, so nothing may be reported missing: {:?}",
@@ -532,17 +532,17 @@ async fn drop_owned_by_removes_the_role_s_objects_and_spares_everyone_else_s() {
         .to_string();
 
         let author = IrAuthor::new(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &cfg.project_schema,
             OWNER,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &policy,
         );
-        let guard_cfg = GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT);
+        let guard_cfg = GuardConfig::from_policy(policy.clone(), zeroship_migrate_postgres::DIALECT);
         let base = fold_ops(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &[],
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &cfg.project_schema,
             &policy,
         )
@@ -551,7 +551,7 @@ async fn drop_owned_by_removes_the_role_s_objects_and_spares_everyone_else_s() {
         let artifact = author
             .load_and_lower_guarded(&doc, OWNER, &BTreeMap::new(), &live, &guard_cfg)
             .map_err(|error| format!("lower: {error}"))?;
-        MigrationEngine::new(zero_migrate::shipping_vendors())
+        MigrationEngine::new(zeroship_migrate::shipping_vendors())
             .apply_plan(
                 &artifact.plan.steps,
                 Approval::Approved,
@@ -690,18 +690,18 @@ async fn drop_role_succeeds_refuses_while_owning_and_no_ops_under_if_exists() {
                 })
                 .to_string();
                 let author = IrAuthor::new(
-                    zero_migrate::shipping_vendors(),
+                    zeroship_migrate::shipping_vendors(),
                     &cfg.project_schema,
                     OWNER,
-                    &zero_migrate_postgres::DIALECT,
+                    &zeroship_migrate_postgres::DIALECT,
                     &policy,
                 );
                 let guard_cfg =
-                    GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT);
+                    GuardConfig::from_policy(policy.clone(), zeroship_migrate_postgres::DIALECT);
                 let base = fold_ops(
-                    zero_migrate::shipping_vendors(),
+                    zeroship_migrate::shipping_vendors(),
                     &[],
-                    &zero_migrate_postgres::DIALECT,
+                    &zeroship_migrate_postgres::DIALECT,
                     &cfg.project_schema,
                     &policy,
                 )
@@ -710,7 +710,7 @@ async fn drop_role_succeeds_refuses_while_owning_and_no_ops_under_if_exists() {
                 let artifact = author
                     .load_and_lower_guarded(&doc, OWNER, &BTreeMap::new(), &live, &guard_cfg)
                     .map_err(|error| format!("lower: {error}"))?;
-                MigrationEngine::new(zero_migrate::shipping_vendors())
+                MigrationEngine::new(zeroship_migrate::shipping_vendors())
                     .apply_plan(
                         &artifact.plan.steps,
                         Approval::Approved,
@@ -890,18 +890,18 @@ async fn grant_and_revoke_move_exactly_the_named_privilege() {
                 })
                 .to_string();
                 let author = IrAuthor::new(
-                    zero_migrate::shipping_vendors(),
+                    zeroship_migrate::shipping_vendors(),
                     &cfg.project_schema,
                     OWNER,
-                    &zero_migrate_postgres::DIALECT,
+                    &zeroship_migrate_postgres::DIALECT,
                     &policy,
                 );
                 let guard_cfg =
-                    GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT);
+                    GuardConfig::from_policy(policy.clone(), zeroship_migrate_postgres::DIALECT);
                 let base = fold_ops(
-                    zero_migrate::shipping_vendors(),
+                    zeroship_migrate::shipping_vendors(),
                     &[],
-                    &zero_migrate_postgres::DIALECT,
+                    &zeroship_migrate_postgres::DIALECT,
                     &cfg.project_schema,
                     &policy,
                 )
@@ -910,7 +910,7 @@ async fn grant_and_revoke_move_exactly_the_named_privilege() {
                 let artifact = author
                     .load_and_lower_guarded(&doc, OWNER, &BTreeMap::new(), &live, &guard_cfg)
                     .map_err(|error| format!("lower: {error}"))?;
-                MigrationEngine::new(zero_migrate::shipping_vendors())
+                MigrationEngine::new(zeroship_migrate::shipping_vendors())
                     .apply_plan(
                         &artifact.plan.steps,
                         Approval::Approved,

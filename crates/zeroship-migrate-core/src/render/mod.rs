@@ -15,20 +15,20 @@ pub mod dml;
 // vendor-taking `decide` on the engine's surface under the name its dialect-taking
 // callers use.
 pub mod existence_probe {
-    pub use zero_migrate_backend::existence_probe::{
+    pub use zeroship_migrate_backend::existence_probe::{
         Divergence, ExistenceProbePolicy, GuardVerdict,
     };
 
-    use zero_migrate_backend::registry::VendorSet;
-    use zero_migrate_backend::snapshot::SchemaSnapshot;
-    use zero_migrate_ir::dialect::DialectId;
-    use zero_migrate_ir::probe::GuardProbe;
+    use zeroship_migrate_backend::registry::VendorSet;
+    use zeroship_migrate_backend::snapshot::SchemaSnapshot;
+    use zeroship_migrate_ir::dialect::DialectId;
+    use zeroship_migrate_ir::probe::GuardProbe;
 
     /// Decide the verdict for `probe` against the LIVE catalog `live`, resolving
     /// `dialect`'s registered backend through the build's vendor registry.
     ///
     /// The engine's entry point. A backend that already knows which vendor it is
-    /// calls [`zero_migrate_backend::existence_probe::decide`] with its own
+    /// calls [`zeroship_migrate_backend::existence_probe::decide`] with its own
     /// `BackendVendor` instead - see that function for the per-variant fail-closed
     /// rules, which is where all of them now live.
     #[must_use]
@@ -38,7 +38,7 @@ pub mod existence_probe {
         live: &SchemaSnapshot,
         dialect: &DialectId,
     ) -> GuardVerdict {
-        zero_migrate_backend::existence_probe::decide(
+        zeroship_migrate_backend::existence_probe::decide(
             probe,
             live,
             crate::render::backends::vendor(vendors, dialect),
@@ -65,10 +65,10 @@ pub mod vendor;
 // expression renderer, `render_vendor_op` and `VendorStatement` (the return type of
 // `DmlRenderer::render_trigger_op`).
 pub(crate) mod renderer {
-    pub(crate) use zero_migrate_backend::renderer::*;
+    pub(crate) use zeroship_migrate_backend::renderer::*;
 
-    use zero_migrate_backend::registry::VendorSet;
-    use zero_migrate_ir::dialect::DialectId;
+    use zeroship_migrate_backend::registry::VendorSet;
+    use zeroship_migrate_ir::dialect::DialectId;
 
     /// Resolve one capability through the build's open vendor registry.
     pub(crate) trait DialectSupports {

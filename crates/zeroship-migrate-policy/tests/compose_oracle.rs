@@ -19,7 +19,7 @@
 //!
 //! The value maps are the ground truth; the composer is the code under test.
 
-use zero_migrate_policy::{
+use zeroship_migrate_policy::{
     admit, finalize_charter, overlay, restrict, ComposeError, Enforcement, GrantRegion, KnobDef,
     KnobKey, KnobKind, KnobValue, ObjectName, Polarity, PolicyDoc, PolicyRegistry, RootCharter,
     RuleKind, TrustedDoc,
@@ -40,7 +40,7 @@ fn def(key: &str, kind: KnobKind, polarity: Polarity, default: KnobValue) -> Kno
         polarity,
         default,
         enforcement: Enforcement::Enforced,
-        object_model: zero_migrate_policy::ObjectModel::PerTable,
+        object_model: zeroship_migrate_policy::ObjectModel::PerTable,
         requires_db_privilege: false,
         inherit: true,
         docs: String::new(),
@@ -272,7 +272,7 @@ fn parse_draft(gens: &[Gen]) -> PolicyDoc {
     PolicyDoc::parse_toml(
         &doc_toml(gens),
         &registry(),
-        zero_migrate_policy::LoadContext::NonRootLayer,
+        zeroship_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap_or_else(|e| panic!("draft parse failed: {e:?}\n{}", doc_toml(gens)))
 }
@@ -539,7 +539,7 @@ value = true
 scope = { include = ["app_secret"] }
 "#,
         &reg,
-        zero_migrate_policy::LoadContext::NonRootLayer,
+        zeroship_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
     let got = admit(&root, &draft, &reg);
@@ -601,7 +601,7 @@ value = 10000
 scope = { include = ["app_*"] }
 "#,
         &reg,
-        zero_migrate_policy::LoadContext::NonRootLayer,
+        zeroship_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
     let ep = admit(&root, &draft, &reg).expect("narrowing draft is admissible");
@@ -645,7 +645,7 @@ value = false
 scope = { include = ["app_*"] }
 "#,
         &reg,
-        zero_migrate_policy::LoadContext::NonRootLayer,
+        zeroship_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
     let ep = admit(&root, &draft, &reg).expect("narrow-to-default is admissible");
@@ -680,7 +680,7 @@ fn pinned_silent_draft_inherits_charter_grant() {
     let draft = PolicyDoc::parse_toml(
         "policy_version = 1\n",
         &reg,
-        zero_migrate_policy::LoadContext::NonRootLayer,
+        zeroship_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
     let ep = admit(&root, &draft, &reg).unwrap();
@@ -732,7 +732,7 @@ fn oracle_restrict_is_exact_pointwise_meet() {
                     let empty = PolicyDoc::parse_toml(
                         "policy_version = 1\n",
                         &reg,
-                        zero_migrate_policy::LoadContext::NonRootLayer,
+                        zeroship_migrate_policy::LoadContext::NonRootLayer,
                     )
                     .unwrap();
                     let ep = admit(&charter, &empty, &reg).unwrap();
@@ -771,7 +771,7 @@ fn oracle_restrict_commutative() {
     let empty = PolicyDoc::parse_toml(
         "policy_version = 1\n",
         &reg,
-        zero_migrate_policy::LoadContext::NonRootLayer,
+        zeroship_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
 
@@ -854,7 +854,7 @@ fn oracle_overlay_is_presence_last_wins() {
                     let empty = PolicyDoc::parse_toml(
                         "policy_version = 1\n",
                         &reg,
-                        zero_migrate_policy::LoadContext::NonRootLayer,
+                        zeroship_migrate_policy::LoadContext::NonRootLayer,
                     )
                     .unwrap();
                     let ep = admit(&charter, &empty, &reg).unwrap();
@@ -916,7 +916,7 @@ columns = [ { name = "updated_at", type = "timestamptz", nullable = false } ]
     let empty = PolicyDoc::parse_toml(
         "policy_version = 1\n",
         &reg,
-        zero_migrate_policy::LoadContext::NonRootLayer,
+        zeroship_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
     let ep = admit(&charter, &empty, &reg).unwrap();
@@ -1005,7 +1005,7 @@ value = true
 scope = { include = ["staging"] }
 "#,
         &reg,
-        zero_migrate_policy::LoadContext::NonRootLayer,
+        zeroship_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
 
@@ -1062,7 +1062,7 @@ value = "never"
 scope = { include = ["app_*"] }
 "#,
         &reg,
-        zero_migrate_policy::LoadContext::NonRootLayer,
+        zeroship_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
 
@@ -1119,7 +1119,7 @@ scope = { include = ["app_main"] }
 columns = [ { name = "created_at", type = "text", nullable = true } ]
 "#,
         &reg,
-        zero_migrate_policy::LoadContext::NonRootLayer,
+        zeroship_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
     let got = admit(&root, &draft, &reg);
@@ -1148,7 +1148,7 @@ scope = { include = ["app_main"] }
 predicate = { kind = "forbidden_columns", names = ["created_at"] }
 "#,
         &reg,
-        zero_migrate_policy::LoadContext::NonRootLayer,
+        zeroship_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
     let got = admit(&root, &draft, &reg);
@@ -1167,7 +1167,7 @@ predicate = { kind = "forbidden_columns", names = ["created_at"] }
 
 #[test]
 fn charter_vs_charter_inject_collision_rejects_at_finalize() {
-    use zero_migrate_policy::FinalizeError;
+    use zeroship_migrate_policy::FinalizeError;
     let reg = registry();
     let a = TrustedDoc::register_catalog_entry(
         r#"policy_version = 1
@@ -1197,7 +1197,7 @@ columns = [ { name = "created_at", type = "text", nullable = true } ]
 
 #[test]
 fn creatable_escaping_mandatory_inject_rejects_at_finalize() {
-    use zero_migrate_policy::FinalizeError;
+    use zeroship_migrate_policy::FinalizeError;
     let reg = registry();
     // A single root charter: mandatory inject on app_* only, but create_table @ all.
     // Assemble it via restrict(root_as_trusted, empty_trusted) so it flows through
@@ -1270,7 +1270,7 @@ scope = { include = ["app_*"] }
 
 #[test]
 fn is_injected_shape_name_matches_covering_inject() {
-    use zero_migrate_policy::ShapeElement;
+    use zeroship_migrate_policy::ShapeElement;
     let reg = registry();
     let root = RootCharter::parse_toml(
         r#"policy_version = 1
@@ -1287,7 +1287,7 @@ author_primary_key = "allow"
     let draft = PolicyDoc::parse_toml(
         "policy_version = 1\n",
         &reg,
-        zero_migrate_policy::LoadContext::NonRootLayer,
+        zeroship_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
     let ep = admit(&root, &draft, &reg).unwrap();
@@ -1312,7 +1312,7 @@ author_primary_key = "allow"
 fn effective_policy_only_via_admit_or_deny_all() {
     let reg = registry();
 
-    let floor = zero_migrate_policy::EffectivePolicy::deny_all(&reg);
+    let floor = zeroship_migrate_policy::EffectivePolicy::deny_all(&reg);
     let o = ObjectName::table(b"app_main".to_vec(), b"t".to_vec());
     assert_eq!(
         floor.grants(&KnobKey::parse(BOOL_KEY).unwrap(), &o),
@@ -1367,7 +1367,7 @@ fn registry_with_noninherit() -> PolicyRegistry {
         polarity: Polarity::Grant,
         default: KnobValue::Bool(false),
         enforcement: Enforcement::Enforced,
-        object_model: zero_migrate_policy::ObjectModel::PerTable,
+        object_model: zeroship_migrate_policy::ObjectModel::PerTable,
         requires_db_privilege: false,
         inherit: false,
         docs: String::new(),
@@ -1411,7 +1411,7 @@ scope = { include = ["app_*"] }
     let draft = PolicyDoc::parse_toml(
         "policy_version = 1\n",
         &reg,
-        zero_migrate_policy::LoadContext::NonRootLayer,
+        zeroship_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
     let ep = admit(&root, &draft, &reg).unwrap();
@@ -1459,7 +1459,7 @@ value = true
 scope = { include = ["app_main"] }
 "#,
         &reg,
-        zero_migrate_policy::LoadContext::NonRootLayer,
+        zeroship_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
     let ep = admit(&root, &draft, &reg).unwrap();
@@ -1519,7 +1519,7 @@ fn a_grant_narrowed_anywhere_is_scoped_not_top() {
     let empty = PolicyDoc::parse_toml(
         "policy_version = 1\n",
         &reg,
-        zero_migrate_policy::LoadContext::NonRootLayer,
+        zeroship_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
     let ep = admit(&charter, &empty, &reg).unwrap();
@@ -1564,7 +1564,7 @@ fn an_unnarrowed_universal_grant_is_still_top() {
     let empty = PolicyDoc::parse_toml(
         "policy_version = 1\n",
         &reg,
-        zero_migrate_policy::LoadContext::NonRootLayer,
+        zeroship_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
     let ep = admit(&charter, &empty, &reg).unwrap();
@@ -1605,7 +1605,7 @@ fn a_draft_cannot_regrant_over_a_masked_hole() {
         PolicyDoc::parse_toml(
             "policy_version = 1\n",
             &reg,
-            zero_migrate_policy::LoadContext::NonRootLayer,
+            zeroship_migrate_policy::LoadContext::NonRootLayer,
         )
         .unwrap()
     };
@@ -1623,7 +1623,7 @@ fn a_draft_cannot_regrant_over_a_masked_hole() {
     let draft = PolicyDoc::parse_toml(
         "policy_version = 1\n[[grant]]\nkey = \"sql.raw\"\nvalue = true\nscope = \"all\"\n",
         &reg,
-        zero_migrate_policy::LoadContext::NonRootLayer,
+        zeroship_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
     let err = admit(&charter, &draft, &reg)
@@ -1637,7 +1637,7 @@ fn a_draft_cannot_regrant_over_a_masked_hole() {
     let ok_draft = PolicyDoc::parse_toml(
         "policy_version = 1\n[[grant]]\nkey = \"sql.raw\"\nvalue = true\nscope = { include = [\"app_main\"] }\n",
         &reg,
-        zero_migrate_policy::LoadContext::NonRootLayer,
+        zeroship_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
     let ep =

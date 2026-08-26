@@ -169,7 +169,7 @@ enum Command {
 }
 
 /// A typed value bound NATIVELY to a `?n` placeholder of a one-shot
-/// DML statement. A transport-safe (`Send`) mirror of [`zero_migrate_backend::step::BindValue`]
+/// DML statement. A transport-safe (`Send`) mirror of [`zeroship_migrate_backend::step::BindValue`]
 /// the actor binds via rusqlite's parameter API - never interpolated, so a bind
 /// value can never alter the statement shape. `Decimal`/`Text` are bound
 /// as TEXT (the column affinity coerces; the IR numeric domain is i64 +
@@ -189,16 +189,16 @@ pub enum SqliteBind {
 }
 
 impl SqliteBind {
-    /// Map a plan [`BindValue`](zero_migrate_backend::step::BindValue) to its transport mirror.
+    /// Map a plan [`BindValue`](zeroship_migrate_backend::step::BindValue) to its transport mirror.
     #[must_use]
-    pub fn from_bind(b: &zero_migrate_backend::step::BindValue) -> Self {
+    pub fn from_bind(b: &zeroship_migrate_backend::step::BindValue) -> Self {
         match b {
-            zero_migrate_backend::step::BindValue::Null => SqliteBind::Null,
-            zero_migrate_backend::step::BindValue::Bool(v) => SqliteBind::Bool(*v),
-            zero_migrate_backend::step::BindValue::Int(v) => SqliteBind::Int(*v),
-            zero_migrate_backend::step::BindValue::Decimal(s) => SqliteBind::Text(s.clone()),
-            zero_migrate_backend::step::BindValue::Text(s) => SqliteBind::Text(s.clone()),
-            zero_migrate_backend::step::BindValue::Bytes(bytes) => SqliteBind::Blob(bytes.clone()),
+            zeroship_migrate_backend::step::BindValue::Null => SqliteBind::Null,
+            zeroship_migrate_backend::step::BindValue::Bool(v) => SqliteBind::Bool(*v),
+            zeroship_migrate_backend::step::BindValue::Int(v) => SqliteBind::Int(*v),
+            zeroship_migrate_backend::step::BindValue::Decimal(s) => SqliteBind::Text(s.clone()),
+            zeroship_migrate_backend::step::BindValue::Text(s) => SqliteBind::Text(s.clone()),
+            zeroship_migrate_backend::step::BindValue::Bytes(bytes) => SqliteBind::Blob(bytes.clone()),
         }
     }
 
@@ -927,7 +927,7 @@ mod bind_tests {
     fn binary_plan_bind_becomes_a_blob_value() {
         let bytes = vec![0, 1, 0x80, 0xff];
         let bind =
-            SqliteBind::from_bind(&zero_migrate_backend::step::BindValue::Bytes(bytes.clone()));
+            SqliteBind::from_bind(&zeroship_migrate_backend::step::BindValue::Bytes(bytes.clone()));
         assert!(matches!(
             bind.to_sql_value(),
             rusqlite::types::Value::Blob(value) if value == bytes

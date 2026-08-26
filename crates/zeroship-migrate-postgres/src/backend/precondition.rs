@@ -8,9 +8,9 @@
 //! # Two evaluation paths, by trust
 //!
 //! - **Structured checks**
-//! ([`Precondition::TableExists`](zero_migrate_ir::precondition::Precondition::TableExists),
-//! [`Precondition::ColumnExists`](zero_migrate_ir::precondition::Precondition::ColumnExists),
-//! [`Precondition::RowCount`](zero_migrate_ir::precondition::Precondition::RowCount), ...) are
+//! ([`Precondition::TableExists`](zeroship_migrate_ir::precondition::Precondition::TableExists),
+//! [`Precondition::ColumnExists`](zeroship_migrate_ir::precondition::Precondition::ColumnExists),
+//! [`Precondition::RowCount`](zeroship_migrate_ir::precondition::Precondition::RowCount), ...) are
 //! ENGINE-BUILT, fully parameterized catalog queries
 //! (`information_schema` / `pg_catalog`). The project schema is bound as `$1`;
 //! the table/column identifiers are validated with `validate_ident` (bare
@@ -18,7 +18,7 @@
 //! punctuation) and then bound as parameters too. There is **no string
 //! interpolation of user input into SQL**, so these are injection-safe by
 //! construction.
-//! - **[`Precondition::SqlBoolean`](zero_migrate_ir::precondition::Precondition::SqlBoolean)**
+//! - **[`Precondition::SqlBoolean`](zeroship_migrate_ir::precondition::Precondition::SqlBoolean)**
 //! is UNTRUSTED creator/AI SQL. It is the
 //! escape hatch for assertions the structured checks cannot express, and it is
 //! confined three ways before it is allowed to run:
@@ -59,7 +59,7 @@
 //! the `&Client`-bound `SqlBoolean` run) are PG-dialect-specific, so they live
 //! BEHIND the [`MigrationBackend`] seam: the
 //! generic apply path calls
-//! [`backend.evaluate_preconditions`](zero_migrate_backend::backend::MigrationBackend::evaluate_preconditions),
+//! [`backend.evaluate_preconditions`](zeroship_migrate_backend::backend::MigrationBackend::evaluate_preconditions),
 //! and only [`PostgresBackend`] routes into this
 //! module (via `evaluate_all`, which folds the per-check verdict loop). The
 //! SQLite backend validates/evaluates in its own dialect (descriptor migrations
@@ -70,15 +70,15 @@
 use super::PostgresBackend;
 use pg_query::protobuf::node::Node as NodeEnum;
 use serde_json::Value;
-use zero_migrate_backend::backend::MigrationBackend;
-use zero_migrate_backend::driver::SqlSession;
+use zeroship_migrate_backend::backend::MigrationBackend;
+use zeroship_migrate_backend::driver::SqlSession;
 
-use zero_migrate_backend::conn::ExecutorConfig;
-use zero_migrate_backend::executor::{unmet_halt_error, ApplyError, PreconditionVerdict};
-use zero_migrate_backend::guard::GuardError;
-use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_ir::migration::Migration;
-use zero_migrate_ir::precondition::{OnUnmet, Precondition};
+use zeroship_migrate_backend::conn::ExecutorConfig;
+use zeroship_migrate_backend::executor::{unmet_halt_error, ApplyError, PreconditionVerdict};
+use zeroship_migrate_backend::guard::GuardError;
+use zeroship_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::migration::Migration;
+use zeroship_migrate_ir::precondition::{OnUnmet, Precondition};
 
 /// Sequence-mutating and lock-acquiring builtins a read-only precondition may
 /// NEVER call. `nextval`/`setval` mutate a sequence (NOT blocked by `READ
@@ -109,7 +109,7 @@ const MUTATING_OR_LOCK_BUILTINS: &[&str] = &[
 pub enum PreconditionError {
     /// A database error while running a (structured or `SqlBoolean`) check.
     #[error("precondition db error: {0}")]
-    Db(#[from] zero_migrate_backend::driver::DbError),
+    Db(#[from] zeroship_migrate_backend::driver::DbError),
     /// A structured check named an identifier that is not a bare SQL identifier
     /// (`[A-Za-z_][A-Za-z0-9_]*`) - a schema-qualified name, a quoted-injection
     /// attempt, whitespace, or punctuation. Rejected before any query runs.
@@ -141,9 +141,9 @@ pub enum PreconditionError {
     },
     /// An engine-supplied identifier (project schema / migrator role) was not
     /// quotable (empty or NUL-bearing) at a render seam - fail-closed rather than
-    /// interpolate it. Maps [`zero_migrate_backend::dml::IdentQuoteError`].
+    /// interpolate it. Maps [`zeroship_migrate_backend::dml::IdentQuoteError`].
     #[error("precondition: {0}")]
-    IdentQuote(#[from] zero_migrate_backend::dml::IdentQuoteError),
+    IdentQuote(#[from] zeroship_migrate_backend::dml::IdentQuoteError),
 }
 
 /// Validate a bare SQL identifier (mirrors `backfill::validate_ident`): non-empty,
@@ -170,7 +170,7 @@ fn validate_ident(what: &'static str, value: &str) -> Result<(), PreconditionErr
 /// own [`crate::dml::RENDERER`] rather than from a dialect looked up at the call
 /// site, so the backend that owns the probe owns the quoting too.
 fn quote_ident(ident: &str) -> String {
-    zero_migrate_backend::dml::escape_quote_ident_for_backend(ident, &crate::dml::RENDERER)
+    zeroship_migrate_backend::dml::escape_quote_ident_for_backend(ident, &crate::dml::RENDERER)
 }
 
 /// Evaluate a precondition against the live DB. Returns `true` if the assertion
@@ -300,7 +300,7 @@ pub(crate) async fn evaluate_all<D: SqlSession>(
 ///
 /// The shared body behind BOTH seams that ask this question: the per-migration
 /// [`evaluate_all`] and the plan-wide preflight
-/// (`zero_migrate::apply::plan_precondition`, via
+/// (`zeroship_migrate::apply::plan_precondition`, via
 /// `MigrationBackend::evaluate_plan_precondition`). One body so the two can never
 /// come to different conclusions, or word the same refusal differently.
 ///
@@ -675,7 +675,7 @@ async fn run_sql_boolean_in_txn<D: SqlSession>(
     // Routed through the ONE engine seam so it fails closed on an empty/NUL
     // schema, byte-identical to the hand-rolled quoting it replaced on every real
     // (quote-free / `-`-bearing UUIDv7) schema.
-    let schema_q = zero_migrate_backend::dml::quote_ident_checked_for_backend(
+    let schema_q = zeroship_migrate_backend::dml::quote_ident_checked_for_backend(
         &cfg.project_schema,
         &crate::dml::RENDERER,
     )?;
@@ -684,7 +684,7 @@ async fn run_sql_boolean_in_txn<D: SqlSession>(
     // Drop to the migrator role for the read, scoped to this txn (line-2). No
     // role configured (tests / single-tenant dev) runs as the connecting role.
     if let Some(role) = &crate::confinement::of(cfg).migrator_role {
-        let role_q = zero_migrate_backend::dml::quote_ident_checked_for_backend(
+        let role_q = zeroship_migrate_backend::dml::quote_ident_checked_for_backend(
             role,
             &crate::dml::RENDERER,
         )?;
@@ -712,7 +712,7 @@ async fn run_sql_boolean_in_txn<D: SqlSession>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zero_migrate_ir::precondition::{CmpOp, PreconditionCheck};
+    use zeroship_migrate_ir::precondition::{CmpOp, PreconditionCheck};
 
     #[test]
     fn cmp_op_applies() {

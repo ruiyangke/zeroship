@@ -60,13 +60,13 @@
 //! resolve nothing.
 
 use std::fmt::Write as _;
-use zero_migrate_backend::registry::VendorSet;
+use zeroship_migrate_backend::registry::VendorSet;
 
 use crate::model::ir::{CommentTarget, CursorStability, ExistenceGuard, MigrationIr, Op};
 use crate::render::lower::{op_kind_tag, IrAuthor, IrLowerError, LiveSchema};
 use crate::render::plan::AppliedPlan;
 use crate::render::step::{BindValue, PlanStep, RenameStep};
-use zero_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::dialect::DialectId;
 
 /// The label prefix every runtime-resolved line carries - the single sentinel the
 /// no-fabrication tests assert on. If you change this, change the tests.
@@ -90,7 +90,7 @@ pub struct PreviewOpts {
     /// policy, so an envelope may arrive raw or already resolved. It is mandatory;
     /// preview has no ambient system-field profile. It does NOT drive anything
     /// beyond create-table injection and the lowering context.
-    pub effective_policy: zero_migrate_policy::EffectivePolicy,
+    pub effective_policy: zeroship_migrate_policy::EffectivePolicy,
 }
 
 /// The dialect's human name for the header.

@@ -26,7 +26,7 @@
 //! dangerous surface and confines execution. The engine never disables those.
 
 use std::collections::BTreeMap;
-use zero_migrate_backend::registry::VendorSet;
+use zeroship_migrate_backend::registry::VendorSet;
 
 use crate::apply::backend::MigrationBackend;
 use crate::apply::drift::DriftError;
@@ -44,8 +44,8 @@ use crate::render::fold::{fold_ops, single_fold};
 use crate::render::lower::{IrAuthor, LiveSchema, LoweredArtifact};
 use crate::render::plan::AppliedPlan;
 use crate::render::step::{DialectScope, PlanStep, RenameStep};
-use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_policy::EffectivePolicy;
+use zeroship_migrate_ir::dialect::DialectId;
+use zeroship_migrate_policy::EffectivePolicy;
 
 /// Sentinel touched-set entry meaning "this deploy touches a table I cannot
 /// NAME". The lowering folds it in when a `dropIndex` omits its
@@ -168,7 +168,7 @@ pub enum EngineError {
     /// connected backend reported - so a fourth backend appears on either side
     /// without this message being edited.
     ///
-    /// [`DialectId`]: zero_migrate_ir::dialect::DialectId
+    /// [`DialectId`]: zeroship_migrate_ir::dialect::DialectId
     #[error(
         "this plan's ops are renderable by {pinned} alone, so the plan reaches that \
          dialect and no other; the connected target is {target}. Nothing was applied. \
@@ -178,9 +178,9 @@ pub enum EngineError {
     )]
     DialectScopeRefused {
         /// The one dialect the plan's ops can be rendered for.
-        pinned: zero_migrate_ir::dialect::DialectId,
+        pinned: zeroship_migrate_ir::dialect::DialectId,
         /// The identity the connected backend reported for itself.
-        target: zero_migrate_ir::dialect::DialectId,
+        target: zeroship_migrate_ir::dialect::DialectId,
     },
     /// The plan's STEPS were rendered by one backend and the connected target is a
     /// different one.
@@ -198,9 +198,9 @@ pub enum EngineError {
     )]
     PlanRenderedForAnotherDialect {
         /// The backend that rendered the plan's steps.
-        rendered_for: zero_migrate_ir::dialect::DialectId,
+        rendered_for: zeroship_migrate_ir::dialect::DialectId,
         /// The identity the connected backend reported for itself.
-        target: zero_migrate_ir::dialect::DialectId,
+        target: zeroship_migrate_ir::dialect::DialectId,
     },
     /// The executor failed (DB error, checksum drift, mid-apply failure, or the
     /// executor's own re-run of the guard denied a migration - defense in depth).
@@ -848,7 +848,7 @@ impl MigrationEngine {
         author: &crate::render::declarative::DeclarativeAuthor,
         hints: &[crate::render::declarative::RenameHint],
         cfg: &GuardConfig,
-        effective: &zero_migrate_policy::EffectivePolicy,
+        effective: &zeroship_migrate_policy::EffectivePolicy,
     ) -> Result<DeclarativeDeployPlan, crate::render::declarative::DeclarativeError> {
         let diff = author.diff(desired, live, live_ownership, hints, effective)?;
         // CARRY `diff.rebuilds` into the plan (the fail-close is gone). The
@@ -943,7 +943,7 @@ impl MigrationEngine {
     pub async fn apply_declarative<B: MigrationBackend>(
         &self,
         plan: &DeclarativeDeployPlan,
-        effective: &zero_migrate_policy::EffectivePolicy,
+        effective: &zeroship_migrate_policy::EffectivePolicy,
         approval: Approval,
         backend: &B,
         exec_cfg: &ExecutorConfig,
@@ -1065,7 +1065,7 @@ impl MigrationEngine {
         &self,
         plan: &DeclarativeDeployPlan,
         expected: &ManifestHash,
-        effective: &zero_migrate_policy::EffectivePolicy,
+        effective: &zeroship_migrate_policy::EffectivePolicy,
         approval: Approval,
         backend: &B,
         exec_cfg: &ExecutorConfig,
@@ -1105,7 +1105,7 @@ impl MigrationEngine {
     async fn apply_declarative_locked<B: MigrationBackend>(
         &self,
         plan: &DeclarativeDeployPlan,
-        effective: &zero_migrate_policy::EffectivePolicy,
+        effective: &zeroship_migrate_policy::EffectivePolicy,
         approval: Approval,
         backend: &B,
         exec_cfg: &ExecutorConfig,
@@ -3939,7 +3939,7 @@ fn atomic_pending_resolution_migration(
     obligation: &crate::apply::journal::PendingContract,
     templates: &[Migration],
     resolution: crate::apply::journal::Resolution,
-    dialect: &zero_migrate_ir::dialect::DialectId,
+    dialect: &zeroship_migrate_ir::dialect::DialectId,
 ) -> Result<Migration, EngineError> {
     let mut migration =
         templates
@@ -4032,7 +4032,7 @@ pub fn recognizes_contract_apply(
     project_schema: &str,
     pc: &crate::apply::journal::PendingContract,
     ddl_up_by_version: &std::collections::BTreeMap<&str, &str>,
-    dialect: &zero_migrate_ir::dialect::DialectId,
+    dialect: &zeroship_migrate_ir::dialect::DialectId,
 ) -> bool {
     if pc.contract_versions.is_empty() {
         return false;
@@ -4109,19 +4109,19 @@ pub struct DeclarativeDeployPlan {
     pub accepted_index_aliases: Vec<crate::render::declarative::AcceptedIndexAlias>,
     /// The exact composed policy whose inject rules shaped this plan. Apply must
     /// be given an equal policy; there is no ambient or inferred fallback.
-    effective_policy: zero_migrate_policy::EffectivePolicy,
+    effective_policy: zeroship_migrate_policy::EffectivePolicy,
 }
 
 impl DeclarativeDeployPlan {
     /// The exact composed policy whose inject rules shaped this plan.
     #[must_use]
-    pub fn effective_policy(&self) -> &zero_migrate_policy::EffectivePolicy {
+    pub fn effective_policy(&self) -> &zeroship_migrate_policy::EffectivePolicy {
         &self.effective_policy
     }
 
     fn verify_effective_policy(
         &self,
-        effective: &zero_migrate_policy::EffectivePolicy,
+        effective: &zeroship_migrate_policy::EffectivePolicy,
     ) -> Result<(), EngineError> {
         if &self.effective_policy == effective {
             Ok(())
@@ -4251,9 +4251,9 @@ pub enum DeclarativeApplyError {
 /// contract, beside the `OnlineSchemaChange` signature it names, and it travelled
 /// alone: every arm it carries
 /// (`ApplyError`, `BackfillError`) was already there. Re-exported so
-/// `crate::engine::OnlineError` and `zero_migrate::engine::OnlineError` resolve
+/// `crate::engine::OnlineError` and `zeroship_migrate::engine::OnlineError` resolve
 /// unchanged.
-pub use zero_migrate_backend::capability::OnlineError;
+pub use zeroship_migrate_backend::capability::OnlineError;
 
 #[cfg(test)]
 mod tests {

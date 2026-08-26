@@ -1,7 +1,7 @@
 //! The engine's view of the DML render seam - and the ONE place a dialect becomes a
 //! vendor.
 //!
-//! The seam itself is `zero_migrate_backend::dml`, glob-re-exported below so every
+//! The seam itself is `zeroship_migrate_backend::dml`, glob-re-exported below so every
 //! existing `render::dml::...` path in this crate resolves unchanged. What lives HERE
 //! is the handful of doors that used to take a closed dialect identity and resolve a
 //! renderer from it.
@@ -28,13 +28,13 @@
 //! cluster deletes the doors with their callers instead of adding a reverse
 //! open-id-to-closed-enum bridge.
 
-pub use zero_migrate_backend::dml::*;
+pub use zeroship_migrate_backend::dml::*;
 
-use zero_migrate_backend::dml as seam;
-use zero_migrate_backend::registry::VendorSet;
-use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_ir::expr::Expr;
-use zero_migrate_ir::ir::{IrScalar, IrValue};
+use zeroship_migrate_backend::dml as seam;
+use zeroship_migrate_backend::registry::VendorSet;
+use zeroship_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::expr::Expr;
+use zeroship_migrate_ir::ir::{IrScalar, IrValue};
 
 use crate::render::backends::renderer;
 
@@ -224,9 +224,9 @@ mod tests {
     use super::*;
     use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
     use std::collections::BTreeMap;
-    use zero_migrate_backend::dml::{render_expr_bound, BindCtx};
-    use zero_migrate_backend::step::BindValue;
-    use zero_migrate_ir::expr::{BinaryOp, Expr, ExtractField, ScalarFn, SynthFn, UnaryOp};
+    use zeroship_migrate_backend::dml::{render_expr_bound, BindCtx};
+    use zeroship_migrate_backend::step::BindValue;
+    use zeroship_migrate_ir::expr::{BinaryOp, Expr, ExtractField, ScalarFn, SynthFn, UnaryOp};
 
     const SCHEMA: &str = "app_proj";
 
@@ -307,7 +307,7 @@ mod tests {
     ///
     /// `role` USED TO BE A LEG HERE and is not one any more, because the migrator
     /// role name derivation left this crate for the PostgreSQL backend. The leg
-    /// went WITH it - `zero_migrate_postgres::role::tests::
+    /// went WITH it - `zeroship_migrate_postgres::role::tests::
     /// the_role_seam_renders_uniformly_and_fails_closed` asserts the same two
     /// facts (byte-identical escape-and-quote, fail-closed on empty/NUL) against
     /// the same shared helper. The invariant did not get dropped; it got a home
@@ -315,7 +315,7 @@ mod tests {
     ///
     /// `journal` went the SAME way, and for the same reason, when the PostgreSQL
     /// execution half followed the role derivation out of this crate:
-    /// `zero_migrate_postgres::backend::journal_sql`'s
+    /// `zeroship_migrate_postgres::backend::journal_sql`'s
     /// `the_journal_seam_renders_uniformly_and_fails_closed` is that leg now. What
     /// is left here is the ENGINE's own seam, which is the only one this crate can
     /// still see - and that is why this file no longer names a vendor backend
@@ -354,7 +354,7 @@ mod tests {
     /// core-to-backend cycle the whole backend split exists to break.
     ///
     /// A second home also existed where nobody was looking for one:
-    /// `zero_migrate_mysql::backend::journal_sql::quote_ident_mysql` carried its own copy
+    /// `zeroship_migrate_mysql::backend::journal_sql::quote_ident_mysql` carried its own copy
     /// of the same escape. The ANSI needle has zero offenders crate-wide, so the
     /// backtick needle having two was the asymmetry, not a difference of kind.
     ///
@@ -374,7 +374,7 @@ mod tests {
     /// WHAT NEITHER NEEDLE CATCHES, and the limitation is the same shape as the ANSI
     /// scan's. Both are byte-patterns, so a bare wrap with no doubling at all -
     /// ``format!("`{ident}`")`` after a strict bare-identifier gate, which is what
-    /// `zero_migrate_mysql::backend::backfill_sql::quote_bare` used to be - passes both
+    /// `zeroship_migrate_mysql::backend::backfill_sql::quote_bare` used to be - passes both
     /// while being an unrouted spelling. That site was routed by hand; only the
     /// compile-time half (the primitive being unnameable outside its backend module)
     /// generalises. The in-crate test expectations that build a backtick literal to
@@ -481,7 +481,7 @@ mod tests {
     /// THE HOME MOVED TWICE, AND THE INVARIANT DID NOT WEAKEN. It used to be
     /// `dml.rs`, then `render/backends/mod.rs::ansi_double_quote_ident` as a
     /// `pub(in crate::render::backends)` item, and it now lives in another crate
-    /// entirely as `zero_migrate_backend::spelling::ansi_double_quote_ident`. Each
+    /// entirely as `zeroship_migrate_backend::spelling::ansi_double_quote_ident`. Each
     /// move made the home narrower rather than wider: no core module performs the
     /// escape at all, so this scan over core's own `src` finds it nowhere.
     ///
@@ -522,7 +522,7 @@ mod tests {
     ///
     /// The `"` -> `""` escape logic must NOT recur inline across sites such as
     /// `executor` / `precondition` / `baseline` / `expand_contract` / `shadow` /
-    /// `declarative` / `db` / `render::lower` / `zero_migrate_sqlite::backend`.
+    /// `declarative` / `db` / `render::lower` / `zeroship_migrate_sqlite::backend`.
     ///
     /// WHAT IT DOES NOT CATCH, MEASURED: the scan is a byte-pattern, so a
     /// re-implementation that spells the quote differently - `char::from(34)`,
@@ -554,7 +554,7 @@ mod tests {
                     continue;
                 }
                 // Neither exempted file performs the escape any more: the primitive
-                // moved to `zero_migrate_backend::spelling`. `render/backends/mod.rs`
+                // moved to `zeroship_migrate_backend::spelling`. `render/backends/mod.rs`
                 // is the primitive's former home and `render/dml.rs` matches only on
                 // this test's own needle strings and the prose that names the seam.
                 let rel = path.strip_prefix(&src_root).unwrap().display().to_string();
@@ -741,7 +741,7 @@ mod tests {
 
     #[test]
     fn cast_renders_per_dialect_type_names() {
-        use zero_migrate_ir::expr::CastTarget;
+        use zeroship_migrate_ir::expr::CastTarget;
 
         let cases = [
             (
@@ -1567,7 +1567,7 @@ mod tests {
 
     #[test]
     fn agg_renders_identically_on_all_three_dialects() {
-        use zero_migrate_ir::expr::AggFunc;
+        use zeroship_migrate_ir::expr::AggFunc;
 
         // count(*) - no arg - is byte-identical everywhere (no identifier at all).
         let count_star = Expr::Agg {
@@ -1651,7 +1651,7 @@ mod tests {
 
     #[test]
     fn pg_first_aggregates_render_postgres_sql_names_and_string_agg_delimiter() {
-        use zero_migrate_ir::expr::AggFunc;
+        use zeroship_migrate_ir::expr::AggFunc;
 
         let string_agg = Expr::Agg {
             func: AggFunc::StringAgg,

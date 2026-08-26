@@ -47,12 +47,12 @@ use crate::support;
 
 use std::collections::HashMap;
 
-use zero_migrate::model::snapshot::SchemaSnapshot;
-use zero_migrate::render::declarative::{
+use zeroship_migrate::model::snapshot::SchemaSnapshot;
+use zeroship_migrate::render::declarative::{
     desired_snapshot_for_dialect, CollectionDescriptor, DeclarativeAuthor, FieldDescriptor,
 };
-use zero_migrate::render::lower::IrAuthor;
-use zero_migrate::{
+use zeroship_migrate::render::lower::IrAuthor;
+use zeroship_migrate::{
     ColType, IrFlagsOverride, LiveSchema, MigrationIr, Op, PlanStep, CURRENT_IR_VERSION,
 };
 
@@ -80,11 +80,11 @@ fn descriptor(ty: &str, required: bool) -> CollectionDescriptor {
 fn live_with(
     ty: &str,
     required: bool,
-    dialect: &zero_migrate::DialectId,
-    effective: &zero_migrate_policy::EffectivePolicy,
+    dialect: &zeroship_migrate::DialectId,
+    effective: &zeroship_migrate_policy::EffectivePolicy,
 ) -> SchemaSnapshot {
     desired_snapshot_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         &[descriptor(ty, required)],
         dialect,
@@ -111,11 +111,11 @@ fn one_op_ir(op: Op) -> MigrationIr {
 }
 
 fn lower_steps_for(
-    dialect: &zero_migrate::DialectId,
+    dialect: &zeroship_migrate::DialectId,
     op: Op,
-) -> Result<Vec<zero_migrate::PlanStep>, String> {
+) -> Result<Vec<zeroship_migrate::PlanStep>, String> {
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
         dialect,
@@ -126,7 +126,7 @@ fn lower_steps_for(
         .map_err(|e| e.to_string())
 }
 
-fn lower_for(dialect: &zero_migrate::DialectId, op: Op) -> Result<(), String> {
+fn lower_for(dialect: &zeroship_migrate::DialectId, op: Op) -> Result<(), String> {
     lower_steps_for(dialect, op).map(|_| ())
 }
 
@@ -174,7 +174,7 @@ fn set_column_not_null_op() -> Op {
 /// facet back from a live server.
 #[test]
 fn the_ir_lane_restates_a_mysql_column_type_change_and_still_lowers_it_for_postgres() {
-    let steps = lower_steps_for(&zero_migrate_mysql::DIALECT, set_column_type_op())
+    let steps = lower_steps_for(&zeroship_migrate_mysql::DIALECT, set_column_type_op())
         .expect("MySQL lowers a retype to a restate step rather than refusing");
     assert_eq!(
         steps
@@ -193,7 +193,7 @@ fn the_ir_lane_restates_a_mysql_column_type_change_and_still_lowers_it_for_postg
 
     // The control. A change that stopped PostgreSQL rendering its own retype would
     // satisfy the assertions above while breaking the dialect that has the statement.
-    lower_for(&zero_migrate_postgres::DIALECT, set_column_type_op())
+    lower_for(&zeroship_migrate_postgres::DIALECT, set_column_type_op())
         .expect("PostgreSQL still lowers a column type change");
 }
 
@@ -203,7 +203,7 @@ fn the_ir_lane_restates_a_mysql_column_type_change_and_still_lowers_it_for_postg
 #[test]
 fn a_mysql_bounded_string_retype_strips_only_the_renderer_owned_collation() {
     let steps = lower_steps_for(
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         set_bounded_string_column_type_op(),
     )
     .expect("MySQL lowers a bounded-string retype");
@@ -222,14 +222,14 @@ fn a_mysql_bounded_string_retype_strips_only_the_renderer_owned_collation() {
 
 #[test]
 fn the_ir_lane_refuses_a_mysql_nullability_change_and_still_lowers_it_for_postgres() {
-    let refused = lower_for(&zero_migrate_mysql::DIALECT, set_column_not_null_op())
+    let refused = lower_for(&zeroship_migrate_mysql::DIALECT, set_column_not_null_op())
         .expect_err("MySQL must refuse rather than emit PostgreSQL SET NOT NULL");
     assert!(
         refused.contains("setColumnNotNull"),
         "the refusal names the authored op: {refused}"
     );
 
-    lower_for(&zero_migrate_postgres::DIALECT, set_column_not_null_op())
+    lower_for(&zeroship_migrate_postgres::DIALECT, set_column_not_null_op())
         .expect("PostgreSQL still lowers a nullability change");
 }
 
@@ -245,10 +245,10 @@ fn the_ir_lane_refuses_a_mysql_nullability_change_and_still_lowers_it_for_postgr
 #[test]
 fn a_mysql_default_change_is_rendered_with_backticks_rather_than_refused() {
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         &support::confined_charter(),
     );
     let steps = author
@@ -256,8 +256,8 @@ fn a_mysql_default_change_is_rendered_with_backticks_rather_than_refused() {
             &one_op_ir(Op::SetColumnDefault {
                 table: "accounts".to_string(),
                 column: "nickname".to_string(),
-                value: zero_migrate::IrDefault::Literal {
-                    value: zero_migrate::IrScalar::Str("new".to_string()),
+                value: zeroship_migrate::IrDefault::Literal {
+                    value: zeroship_migrate::IrScalar::Str("new".to_string()),
                 },
                 schema: None,
                 existence_guard: None,
@@ -269,7 +269,7 @@ fn a_mysql_default_change_is_rendered_with_backticks_rather_than_refused() {
     let up = steps
         .iter()
         .filter_map(|step| match step {
-            zero_migrate::render::step::PlanStep::Ddl(m) => Some(m.up.clone()),
+            zeroship_migrate::render::step::PlanStep::Ddl(m) => Some(m.up.clone()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -290,20 +290,20 @@ fn the_declarative_differ_refuses_a_mysql_column_change_and_still_diffs_for_post
     let effective = support::confined_charter();
 
     let desired = desired_snapshot_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         &[descriptor("integer", true)],
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         &effective,
     )
     .expect("desired snapshot");
-    let live = live_with("string", true, &zero_migrate_mysql::DIALECT, &effective);
+    let live = live_with("string", true, &zeroship_migrate_mysql::DIALECT, &effective);
 
     let err = DeclarativeAuthor::new_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        zero_migrate_mysql::DIALECT,
+        zeroship_migrate_mysql::DIALECT,
     )
     .diff(&desired, &live, &HashMap::new(), &[], &effective)
     .expect_err("the differ must refuse a MySQL column change rather than plan invalid DDL");
@@ -319,19 +319,19 @@ fn the_declarative_differ_refuses_a_mysql_column_change_and_still_diffs_for_post
 
     // The same control on the declarative side.
     let pg_desired = desired_snapshot_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         &[descriptor("integer", true)],
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &effective,
     )
     .expect("desired snapshot");
-    let pg_live = live_with("string", true, &zero_migrate_postgres::DIALECT, &effective);
+    let pg_live = live_with("string", true, &zeroship_migrate_postgres::DIALECT, &effective);
     DeclarativeAuthor::new_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        zero_migrate_postgres::DIALECT,
+        zeroship_migrate_postgres::DIALECT,
     )
     .diff(&pg_desired, &pg_live, &HashMap::new(), &[], &effective)
     .expect("PostgreSQL still diffs a column type change");

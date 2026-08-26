@@ -37,7 +37,7 @@
 //! encoding — so for a natural name in the 61..=63-byte window the engine
 //! emitted it verbatim while the runtime hashed it, and the two disagreed about
 //! what the index is called. [`cap_ident_name`] is byte-for-byte the engine's
-//! `zero_migrate::plan::author::cap_ident_name`, so the two now agree.
+//! `zeroship_migrate::plan::author::cap_ident_name`, so the two now agree.
 //!
 //! `ident_cap_has_exactly_one_implementation` (below) fails the build if any
 //! other file in this crate starts hashing identifiers on its own.
@@ -74,7 +74,7 @@ const HASH_HEX_CHARS: usize = 10;
 /// not.
 ///
 /// Byte-identical to the vendored migration engine's
-/// `zero_migrate::plan::author::cap_ident_name` — keep them that way, or the
+/// `zeroship_migrate::plan::author::cap_ident_name` — keep them that way, or the
 /// engine and the runtime will disagree about what an index is called.
 #[must_use]
 pub fn cap_ident_name(natural: &str) -> String {

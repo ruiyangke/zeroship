@@ -31,12 +31,12 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::apply::executor::LockMode;
-use zero_migrate::{
+use zeroship_migrate::apply::executor::LockMode;
+use zeroship_migrate::{
     Approval, DialectScope, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine,
 };
-use zero_migrate_ir::ir::{MigrationIr, Op, CURRENT_IR_VERSION};
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate_ir::ir::{MigrationIr, Op, CURRENT_IR_VERSION};
+use zeroship_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_scope";
 /// The project SCHEMA is `main`, and that is load-bearing rather than arbitrary: the
@@ -116,16 +116,16 @@ fn raw_envelope() -> MigrationIr {
 /// registered backend that renders the privileged vendor family at all: SQLite and
 /// MySQL refuse a `raw` op at `lower` with `VendorUnsupported`, so there is no other
 /// way to GET a pinned plan to point at a foreign target.
-fn lower_on_postgres(json: &str) -> zero_migrate::render::lower::LoweredArtifact {
+fn lower_on_postgres(json: &str) -> zeroship_migrate::render::lower::LoweredArtifact {
     let charter = support::operator_charter(SCHEMA);
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         APP,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &charter,
     );
-    let guard_cfg = GuardConfig::from_policy(charter, zero_migrate_postgres::DIALECT);
+    let guard_cfg = GuardConfig::from_policy(charter, zeroship_migrate_postgres::DIALECT);
     author
         .load_and_lower_guarded(
             json,
@@ -137,7 +137,7 @@ fn lower_on_postgres(json: &str) -> zero_migrate::render::lower::LoweredArtifact
         .unwrap_or_else(|error| panic!("the fixture envelope must lower on this dialect: {error}"))
 }
 
-fn lower_raw_probe_on_postgres() -> zero_migrate::render::lower::LoweredArtifact {
+fn lower_raw_probe_on_postgres() -> zeroship_migrate::render::lower::LoweredArtifact {
     let json = serde_json::to_string(&raw_envelope()).expect("probe envelope serializes");
     lower_on_postgres(&json)
 }
@@ -161,7 +161,7 @@ fn a_vendor_op_pins_the_plan_to_the_one_dialect_that_renders_it() {
     let artifact = lower_raw_probe_on_postgres();
     assert_eq!(
         artifact.plan.dialect_scope,
-        DialectScope::Only(zero_migrate_postgres::DIALECT),
+        DialectScope::Only(zeroship_migrate_postgres::DIALECT),
         "a `raw` op is renderable by exactly one registered backend, so the plan is \
          pinned to it"
     );
@@ -193,7 +193,7 @@ fn a_single_leg_dialect_expression_pins_the_plan_too() {
     let artifact = lower_on_postgres(PINNED_EXPR_ENVELOPE);
     assert_eq!(
         artifact.plan.dialect_scope,
-        DialectScope::Only(zero_migrate_postgres::DIALECT),
+        DialectScope::Only(zeroship_migrate_postgres::DIALECT),
         "an expression whose leg set covers ONE registered backend pins the plan to it"
     );
 }
@@ -208,11 +208,11 @@ fn a_single_leg_dialect_expression_pins_the_plan_too() {
 /// pin. Renaming the escape breaks the first; removing the pinning breaks the second.
 #[test]
 fn the_out_of_envelope_remedy_names_the_escape_that_exists() {
-    let error = zero_migrate::model::load::load_ir_document(
-        zero_migrate::shipping_vendors(),
+    let error = zeroship_migrate::model::load::load_ir_document(
+        zeroship_migrate::shipping_vendors(),
         OUT_OF_ENVELOPE_ENVELOPE,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &BTreeMap::new(),
         None,
     )
@@ -235,7 +235,7 @@ fn the_out_of_envelope_remedy_names_the_escape_that_exists() {
         "the remedy must not advise a field or a variant that does not exist: {text}"
     );
     assert!(
-        text.contains(zero_migrate_sqlite::DIALECT.as_str()),
+        text.contains(zeroship_migrate_sqlite::DIALECT.as_str()),
         "the refusing backend must name itself from its own DialectId: {text}"
     );
 }
@@ -285,7 +285,7 @@ async fn a_portable_plan_rendered_for_one_backend_is_refused_by_another() {
          gate this test is about"
     );
 
-    let result = MigrationEngine::new(zero_migrate::shipping_vendors())
+    let result = MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_applied_plan_with_touched_and_depends(
             &artifact.plan,
             &artifact.touched_tables,
@@ -304,8 +304,8 @@ async fn a_portable_plan_rendered_for_one_backend_is_refused_by_another() {
     );
     let text = error.to_string();
     assert!(
-        text.contains(zero_migrate_postgres::DIALECT.as_str())
-            && text.contains(zero_migrate_sqlite::DIALECT.as_str()),
+        text.contains(zeroship_migrate_postgres::DIALECT.as_str())
+            && text.contains(zeroship_migrate_sqlite::DIALECT.as_str()),
         "the refusal must name the backend that RENDERED the plan and the target it met. \
          An error mentioning neither is the database complaining about syntax, which is \
          a different failure and would let a missing gate pass this test: {text}"
@@ -326,7 +326,7 @@ async fn a_pinned_plan_is_refused_against_a_foreign_live_target() {
     let be = backend(&p);
     let artifact = lower_raw_probe_on_postgres();
 
-    let result = MigrationEngine::new(zero_migrate::shipping_vendors())
+    let result = MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_applied_plan_with_touched_and_depends(
             &artifact.plan,
             &artifact.touched_tables,
@@ -344,8 +344,8 @@ async fn a_pinned_plan_is_refused_against_a_foreign_live_target() {
     );
     let text = error.to_string();
     assert!(
-        text.contains(zero_migrate_postgres::DIALECT.as_str())
-            && text.contains(zero_migrate_sqlite::DIALECT.as_str()),
+        text.contains(zeroship_migrate_postgres::DIALECT.as_str())
+            && text.contains(zeroship_migrate_sqlite::DIALECT.as_str()),
         "the refusal must name both the plan's pinned dialect and the target it met: {text}"
     );
     assert!(

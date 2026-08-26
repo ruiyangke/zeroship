@@ -16,7 +16,7 @@
 //! exists to remove.
 //!
 //! So it was SPLIT rather than moved or left: the two types stayed in
-//! `zero_migrate_backend::vendor`, and the PostgreSQL SPELLING under them came here,
+//! `zeroship_migrate_backend::vendor`, and the PostgreSQL SPELLING under them came here,
 //! where the boundary rule says a vendor's spelling belongs. Nothing was duplicated
 //! and no byte changed.
 //!
@@ -31,19 +31,19 @@
 //! This module is the only vendor-op renderer any registered backend ships, so an
 //! artifact carrying one of these ops measures a `DialectScope::Only` reach naming
 //! this dialect - and apply declines that plan against every other target. The lower
-//! seam (`zero_migrate::render::lower`) hard-rejects a target without
+//! seam (`zeroship_migrate::render::lower`) hard-rejects a target without
 //! `Capability::PrivilegedCatalogObjects` before reaching here. The render is pure
 //! (no DB, no live schema).
 //!
 //! # NOT in this module
 //!
-//! The capability GATE lives in `zero_migrate::model::validate` (`VENDOR_OP_DENIED`
+//! The capability GATE lives in `zeroship_migrate::model::validate` (`VENDOR_OP_DENIED`
 //! at load) plus the rendered-SQL deny-list (the guard at lower). This module is
 //! render-only; it assumes the op already passed both gates.
 
-use zero_migrate_backend::dml::{quote_ident_checked_for_backend, render_predicate, DmlError};
-use zero_migrate_backend::vendor::{VendorError, VendorStatement};
-use zero_migrate_ir::ir::{
+use zeroship_migrate_backend::dml::{quote_ident_checked_for_backend, render_predicate, DmlError};
+use zeroship_migrate_backend::vendor::{VendorError, VendorStatement};
+use zeroship_migrate_ir::ir::{
     is_conservative_type_ref, FuncLanguage, GrantTarget, Op, Privilege, TriggerAction,
 };
 
@@ -175,7 +175,7 @@ fn roles_sql(roles: &[String], what: &'static str) -> Result<String, VendorError
 }
 
 /// Render a closed-AST predicate, mapping the renderer error.
-fn predicate(expr: &zero_migrate_ir::expr::Expr) -> Result<String, VendorError> {
+fn predicate(expr: &zeroship_migrate_ir::expr::Expr) -> Result<String, VendorError> {
     render_predicate(expr, &crate::dml::RENDERER)
         .map_err(|e: DmlError| VendorError::Predicate(e.to_string()))
 }

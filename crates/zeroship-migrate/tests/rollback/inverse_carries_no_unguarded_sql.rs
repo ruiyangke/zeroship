@@ -26,8 +26,8 @@
 
 use std::collections::BTreeMap;
 
-use zero_migrate::model::ir::{IrScalar, MigrationIr, Op};
-use zero_migrate::model::load::load_ir_document;
+use zeroship_migrate::model::ir::{IrScalar, MigrationIr, Op};
+use zeroship_migrate::model::load::load_ir_document;
 
 const OWNER: &str = "app_inverse_guard";
 const TABLE: &str = "acct";
@@ -70,10 +70,10 @@ fn a_raw_sql_op_in_the_inverse_does_not_load_unprivileged() {
     }]);
 
     let verdict = load_ir_document(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &serde_json::to_string(&ir).expect("envelope serializes"),
         OWNER,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &registry(),
         None,
     );
@@ -95,20 +95,20 @@ fn a_raw_sql_op_in_the_inverse_does_not_load_unprivileged() {
 fn control_an_ordinary_dml_inverse_still_loads() {
     let ir = envelope_with_inverse(vec![Op::Delete {
         table: TABLE.to_string(),
-        r#where: zero_migrate::Expr::BinOp {
-            op: zero_migrate::BinaryOp::Eq,
-            lhs: Box::new(zero_migrate::Expr::col("id")),
-            rhs: Box::new(zero_migrate::Expr::lit(IrScalar::Int(1))),
+        r#where: zeroship_migrate::Expr::BinOp {
+            op: zeroship_migrate::BinaryOp::Eq,
+            lhs: Box::new(zeroship_migrate::Expr::col("id")),
+            rhs: Box::new(zeroship_migrate::Expr::lit(IrScalar::Int(1))),
         },
         limit: None,
         schema: None,
     }]);
 
     load_ir_document(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &serde_json::to_string(&ir).expect("envelope serializes"),
         OWNER,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &registry(),
         None,
     )

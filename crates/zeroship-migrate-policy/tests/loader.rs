@@ -3,7 +3,7 @@
 //! the doc's II.3 example TOML loading legally as a root charter, and the II.2.7
 //! name-normalization cases. Composition is not exercised here.
 
-use zero_migrate_policy::{
+use zeroship_migrate_policy::{
     AuthorPkPolicy, Enforcement, KnobDef, KnobKey, KnobKind, KnobValue, LoadContext, LoadError,
     LoadWarning, ObjectModel, Polarity, PolicyDoc, PolicyRegistry, RuleKind, Scope,
     ValidatePredicate,
@@ -990,7 +990,7 @@ scope = { include = ["App_*"] }
     match &doc.rules[0].scope {
         Scope::Of { include, .. } => {
             // The folded schema glob is app_* (matches app_x).
-            assert!(include[0].matches(&zero_migrate_policy::ObjectName::schema(b"app_x".to_vec())));
+            assert!(include[0].matches(&zeroship_migrate_policy::ObjectName::schema(b"app_x".to_vec())));
         }
         other => panic!("expected Of, got {other:?}"),
     }
@@ -1010,9 +1010,9 @@ scope = { include = ["\"App_x\""] }
     .unwrap();
     match &doc.rules[0].scope {
         Scope::Of { include, .. } => {
-            assert!(include[0].matches(&zero_migrate_policy::ObjectName::schema(b"App_x".to_vec())));
+            assert!(include[0].matches(&zeroship_migrate_policy::ObjectName::schema(b"App_x".to_vec())));
             assert!(
-                !include[0].matches(&zero_migrate_policy::ObjectName::schema(b"app_x".to_vec()))
+                !include[0].matches(&zeroship_migrate_policy::ObjectName::schema(b"app_x".to_vec()))
             );
         }
         other => panic!("expected Of, got {other:?}"),
@@ -1035,10 +1035,10 @@ scope = { include = ["\"a.b\""] }
     match &doc.rules[0].scope {
         Scope::Of { include, .. } => {
             // Single segment: the schema glob is the literal `a.b`; table glob is `*`.
-            let obj = zero_migrate_policy::normalize_object_name("\"a.b\"").unwrap();
+            let obj = zeroship_migrate_policy::normalize_object_name("\"a.b\"").unwrap();
             assert!(include[0].matches(&obj));
             // The unrelated schema `a` object is NOT matched.
-            assert!(!include[0].matches(&zero_migrate_policy::ObjectName::schema(b"a".to_vec())));
+            assert!(!include[0].matches(&zeroship_migrate_policy::ObjectName::schema(b"a".to_vec())));
         }
         other => panic!("expected Of, got {other:?}"),
     }
@@ -1051,7 +1051,7 @@ scope = { include = ["\"a.b\""] }
 /// A trivial in-memory trusted catalog for the extends tests.
 struct MapCatalog(std::collections::BTreeMap<String, String>);
 
-impl zero_migrate_policy::ProfileCatalog for MapCatalog {
+impl zeroship_migrate_policy::ProfileCatalog for MapCatalog {
     fn get_source(&self, name: &str) -> Option<String> {
         self.0.get(name).cloned()
     }

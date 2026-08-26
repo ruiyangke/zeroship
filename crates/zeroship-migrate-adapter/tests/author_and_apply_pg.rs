@@ -32,8 +32,8 @@
 //! cleanly when unset, so DB-free CI stays green. The V8-authoring assertions run
 //! UNCONDITIONALLY (they need no DB) so authoring itself is proven even without PG.
 
-use zero_migrate::driver::SqlSession;
-use zero_migrate::{
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::{
     effective_policy_from_charter_toml, resolve_create_table_policy, Approval, EffectivePolicy,
     ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine, MigrationIr,
     PostgresBackend, SqlDialect,
@@ -384,7 +384,7 @@ async fn authored_v1_envelope_lowers_and_applies_over_native_compio_seam() {
         "the authored addColumn 'tag' column must exist"
     );
 
-    let applied = zero_migrate::applied(&session, &cfg)
+    let applied = zeroship_migrate::applied(&session, &cfg)
         .await
         .expect("journal read over the seam");
     assert_eq!(
@@ -400,7 +400,7 @@ async fn authored_v1_envelope_lowers_and_applies_over_native_compio_seam() {
         .await
         .expect("idempotent re-apply");
     assert!(out2.is_noop(), "second apply is a no-op");
-    let applied2 = zero_migrate::applied(&session, &cfg)
+    let applied2 = zeroship_migrate::applied(&session, &cfg)
         .await
         .expect("journal re-read");
     assert_eq!(

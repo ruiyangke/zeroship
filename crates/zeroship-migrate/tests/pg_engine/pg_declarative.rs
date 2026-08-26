@@ -15,25 +15,25 @@ use std::collections::HashMap;
 
 use crate::support::PgDevSession;
 
-use zero_migrate::{
+use zeroship_migrate::{
     diff_snapshots, Approval, CollectionDescriptor, DeclarativeAuthor, EffectivePolicy,
     ExecutorConfig, FieldDescriptor, GuardConfig, MigrationEngine, RenameHint,
 };
 
-use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zeroship_migrate_postgres::backend::drift_sql::snapshot_schema;
 
-use zero_migrate_postgres::PostgresBackend;
+use zeroship_migrate_postgres::PostgresBackend;
 
 fn desired_snapshot(
     project_schema: &str,
     descriptors: &[CollectionDescriptor],
     effective: &EffectivePolicy,
-) -> Result<zero_migrate::DesiredSchema, zero_migrate::DeclarativeError> {
-    zero_migrate::desired_snapshot_for_dialect(
-        zero_migrate::shipping_vendors(),
+) -> Result<zeroship_migrate::DesiredSchema, zeroship_migrate::DeclarativeError> {
+    zeroship_migrate::desired_snapshot_for_dialect(
+        zeroship_migrate::shipping_vendors(),
         project_schema,
         descriptors,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         effective,
     )
 }
@@ -82,7 +82,7 @@ async fn ensure_project_schema<'a>(
     session: &'a PgDevSession,
     cfg: &ExecutorConfig,
 ) -> support::SchemaGuard<'a> {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
     let guard = support::SchemaGuard::arm(
         session,
         [
@@ -101,7 +101,7 @@ async fn ensure_project_schema<'a>(
 }
 
 async fn drop_schemas(session: &PgDevSession, cfg: &ExecutorConfig) {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
     let _ = session
         .batch(&format!(
             "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
@@ -113,16 +113,16 @@ async fn drop_schemas(session: &PgDevSession, cfg: &ExecutorConfig) {
 fn guard_cfg(cfg: &ExecutorConfig) -> GuardConfig {
     GuardConfig::from_policy(
         support::no_inject(&cfg.project_schema),
-        zero_migrate_postgres::DIALECT,
+        zeroship_migrate_postgres::DIALECT,
     )
 }
 
 fn author_for(cfg: &ExecutorConfig) -> DeclarativeAuthor {
     DeclarativeAuthor::new_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         cfg.project_schema.clone(),
         "app_test",
-        zero_migrate_postgres::DIALECT,
+        zeroship_migrate_postgres::DIALECT,
     )
 }
 
@@ -143,7 +143,7 @@ fn descriptor(name: &str, field: &str, ty: &str, required: bool) -> CollectionDe
 }
 
 async fn table_exists(session: &PgDevSession, schema: &str, table: &str) -> bool {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
     let row = session
         .query_one(
             "SELECT EXISTS (SELECT 1 FROM information_schema.tables \
@@ -167,7 +167,7 @@ async fn declarative_deploy_creates_table_and_round_trips_with_zero_drift() {
     drop_schemas(&session, &cfg).await;
     let _schemas = ensure_project_schema(&session, &cfg).await;
 
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let author = author_for(&cfg);
 
     // Desired: one collection `widgets` with a required `title` string field.
@@ -226,7 +226,7 @@ async fn declarative_deploy_creates_table_and_round_trips_with_zero_drift() {
         .await
         .expect("snapshot live (after)");
     let drift = diff_snapshots(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &desired.snapshot,
         &live_after,
     );
@@ -274,7 +274,7 @@ async fn declarative_add_column_diff_applies() {
     drop_schemas(&session, &cfg).await;
     let _schemas = ensure_project_schema(&session, &cfg).await;
 
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let author = author_for(&cfg);
 
     // Deploy v1: widgets(title).
@@ -380,7 +380,7 @@ async fn declarative_add_column_diff_applies() {
         "the added column is live after the additive declarative deploy"
     );
     let drift = diff_snapshots(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &desired_v2.snapshot,
         &live2,
     );
@@ -414,7 +414,7 @@ async fn declarative_add_column_diff_applies() {
 /// itself cites.
 #[compio::test]
 async fn an_out_of_band_alter_lands_in_altered_objects() {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
@@ -423,13 +423,13 @@ async fn an_out_of_band_alter_lands_in_altered_objects() {
     drop_schemas(&session, &cfg).await;
     let _schemas = ensure_project_schema(&session, &cfg).await;
 
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let author = author_for(&cfg);
 
     // A collection with a required field AND a declared UNIQUE index, so the
     // uniqueness attribute has something to diverge from.
     let mut desc = descriptor("gadgets", "code", "string", true);
-    desc.indexes = vec![zero_migrate::IndexDescriptor {
+    desc.indexes = vec![zeroship_migrate::IndexDescriptor {
         name: "gadgets_code_key".into(),
         columns: vec!["code".into()],
         unique: true,
@@ -474,7 +474,7 @@ async fn an_out_of_band_alter_lands_in_altered_objects() {
         .await
         .expect("snapshot live (after deploy)");
     let clean = diff_snapshots(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &desired.snapshot,
         &live_after,
     );
@@ -502,7 +502,7 @@ async fn an_out_of_band_alter_lands_in_altered_objects() {
         .await
         .expect("snapshot live (tampered)");
     let drift = diff_snapshots(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &desired.snapshot,
         &tampered,
     );
@@ -539,7 +539,7 @@ async fn an_out_of_band_alter_lands_in_altered_objects() {
         .await
         .expect("snapshot live (tampered 2)");
     let drift2 = diff_snapshots(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &desired.snapshot,
         &tampered2,
     );
@@ -560,7 +560,7 @@ async fn an_out_of_band_alter_lands_in_altered_objects() {
 /// engine's back.
 #[compio::test]
 async fn the_name_buckets_fill_on_out_of_band_create_and_drop() {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
@@ -569,7 +569,7 @@ async fn the_name_buckets_fill_on_out_of_band_create_and_drop() {
     drop_schemas(&session, &cfg).await;
     let _schemas = ensure_project_schema(&session, &cfg).await;
 
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let author = author_for(&cfg);
     let desc = descriptor("sprockets", "label", "string", true);
     let desired = desired_snapshot(
@@ -612,7 +612,7 @@ async fn the_name_buckets_fill_on_out_of_band_create_and_drop() {
         .expect("snapshot live (after deploy)");
     assert!(
         diff_snapshots(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &desired.snapshot,
             &live_after
         )
@@ -636,7 +636,7 @@ async fn the_name_buckets_fill_on_out_of_band_create_and_drop() {
         .await
         .expect("snapshot live (after create)");
     let drift = diff_snapshots(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &desired.snapshot,
         &after_create,
     );
@@ -662,7 +662,7 @@ async fn the_name_buckets_fill_on_out_of_band_create_and_drop() {
         .await
         .expect("snapshot live (after drop)");
     let drift2 = diff_snapshots(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &desired.snapshot,
         &after_drop,
     );
@@ -697,7 +697,7 @@ async fn a_rename_hint_on_postgres_produces_a_rename_not_a_drop_and_recreate() {
     drop_schemas(&session, &cfg).await;
     let _schemas = ensure_project_schema(&session, &cfg).await;
 
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let author = author_for(&cfg);
 
     // v1: deploy `contacts` with an `email` field.
@@ -806,7 +806,7 @@ async fn a_rename_hint_on_postgres_produces_a_rename_not_a_drop_and_recreate() {
 /// before an online rename is readable after it.
 #[compio::test]
 async fn rows_survive_a_postgres_online_rename() {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
@@ -815,7 +815,7 @@ async fn rows_survive_a_postgres_online_rename() {
     drop_schemas(&session, &cfg).await;
     let _schemas = ensure_project_schema(&session, &cfg).await;
 
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let author = author_for(&cfg);
     let backend = PostgresBackend::new_generic(&session);
 
@@ -831,7 +831,7 @@ async fn rows_survive_a_postgres_online_rename() {
             ..Default::default()
         },
     );
-    v1.indexes = vec![zero_migrate::IndexDescriptor {
+    v1.indexes = vec![zeroship_migrate::IndexDescriptor {
         name: "people_id_key".into(),
         columns: vec!["id".into()],
         unique: true,
@@ -890,7 +890,7 @@ async fn rows_survive_a_postgres_online_rename() {
             ..Default::default()
         },
     );
-    v2.indexes = vec![zero_migrate::IndexDescriptor {
+    v2.indexes = vec![zeroship_migrate::IndexDescriptor {
         name: "people_id_key".into(),
         columns: vec!["id".into()],
         unique: true,

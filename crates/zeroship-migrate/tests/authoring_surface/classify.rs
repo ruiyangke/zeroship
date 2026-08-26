@@ -4,9 +4,9 @@
 //! kind, additive/destructive facets, transactionality, and the set of
 //! schemas it references. The security guard is built on top of this.
 
-use zero_migrate_postgres::analysis::classify::{classify, DataSecurityClass, DdlKind};
+use zeroship_migrate_postgres::analysis::classify::{classify, DataSecurityClass, DdlKind};
 
-fn one(sql: &str) -> zero_migrate_postgres::analysis::classify::StatementClass {
+fn one(sql: &str) -> zeroship_migrate_postgres::analysis::classify::StatementClass {
     let mut v = classify(sql).expect("should parse");
     assert_eq!(v.len(), 1, "expected exactly one statement for: {sql}");
     v.pop().unwrap()

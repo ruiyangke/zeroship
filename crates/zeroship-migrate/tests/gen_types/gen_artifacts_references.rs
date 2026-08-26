@@ -16,9 +16,9 @@ use crate::support;
 
 use serde_json::Value;
 
-use zero_migrate::model::ir::{MigrationIr, Op, TableRuntimeOptions};
-use zero_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor};
-use zero_migrate::{render_artifacts, render_artifacts_from_descriptors};
+use zeroship_migrate::model::ir::{MigrationIr, Op, TableRuntimeOptions};
+use zeroship_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor};
+use zeroship_migrate::{render_artifacts, render_artifacts_from_descriptors};
 
 const SCHEMA: &str = "public";
 const OWNER: &str = "app_test";
@@ -58,9 +58,9 @@ fn posts_descriptor() -> CollectionDescriptor {
 #[test]
 fn descriptor_reference_field_emits_one_foreign_key() {
     let artifacts = render_artifacts_from_descriptors(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &[users_descriptor(), posts_descriptor()],
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &support::confined_charter(),
     )
@@ -96,7 +96,7 @@ fn descriptor_reference_field_emits_one_foreign_key() {
 /// column, which carries the FK target on the `ColType::Ref` brand alone.
 fn ref_brand_envelope() -> MigrationIr {
     serde_json::from_value(serde_json::json!({
-        "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+        "ir_version": zeroship_migrate::model::ir::CURRENT_IR_VERSION,
         "name": "create_ref_brand",
         "owner_app": OWNER,
         "ops": [
@@ -121,7 +121,7 @@ fn ref_brand_envelope() -> MigrationIr {
 /// foreign key declared twice. The fold must keep refusing it.
 fn doubly_declared_reference_envelope() -> MigrationIr {
     serde_json::from_value(serde_json::json!({
-        "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+        "ir_version": zeroship_migrate::model::ir::CURRENT_IR_VERSION,
         "name": "create_double_reference",
         "owner_app": OWNER,
         "ops": [
@@ -157,7 +157,7 @@ fn doubly_declared_reference_envelope() -> MigrationIr {
 /// on `IrColumn.references` alone, with no table-level twin.
 fn typed_reference_envelope() -> MigrationIr {
     serde_json::from_value(serde_json::json!({
-        "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+        "ir_version": zeroship_migrate::model::ir::CURRENT_IR_VERSION,
         "name": "create_typed_reference",
         "owner_app": OWNER,
         "ops": [
@@ -191,9 +191,9 @@ fn envelope_ops(ir: &MigrationIr) -> Vec<Op> {
 #[test]
 fn envelope_ref_brand_emits_one_foreign_key() {
     let artifacts = render_artifacts(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &envelope_ops(&ref_brand_envelope()),
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &support::confined_charter(),
     )
@@ -214,17 +214,17 @@ fn envelope_ref_brand_emits_one_foreign_key() {
 fn descriptor_and_envelope_reference_sources_are_byte_identical() {
     let effective = support::confined_charter();
     let manual = render_artifacts_from_descriptors(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &[users_descriptor(), posts_descriptor()],
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )
     .expect("manual render");
     let generated = render_artifacts(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &envelope_ops(&ref_brand_envelope()),
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )
@@ -249,9 +249,9 @@ fn envelope_declaring_the_same_foreign_key_twice_is_still_refused() {
     // same name is a second declaration of one constraint. Fixing the producer must
     // not soften this.
     let error = render_artifacts(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &envelope_ops(&doubly_declared_reference_envelope()),
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &support::confined_charter(),
     )
@@ -266,9 +266,9 @@ fn envelope_declaring_the_same_foreign_key_twice_is_still_refused() {
 #[test]
 fn envelope_typed_column_reference_emits_one_foreign_key() {
     let artifacts = render_artifacts(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &envelope_ops(&typed_reference_envelope()),
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &support::confined_charter(),
     )

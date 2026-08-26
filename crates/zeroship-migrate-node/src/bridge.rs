@@ -63,21 +63,21 @@ use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::Env;
 use napi_derive::napi;
 
-use zero_migrate::apply::journal::{HistoryEvent, HistoryKind};
-use zero_migrate::approval::Approval;
-use zero_migrate::conn::ExecutorConfig;
-use zero_migrate::model::migration::{Migration, MigrationId};
+use zeroship_migrate::apply::journal::{HistoryEvent, HistoryKind};
+use zeroship_migrate::approval::Approval;
+use zeroship_migrate::conn::ExecutorConfig;
+use zeroship_migrate::model::migration::{Migration, MigrationId};
 // `POSTGRES` is no longer imported here. It was, for exactly one reason: an
 // `if dialect != POSTGRES` in `advisories_for` that decided on the backends' behalf
 // which of them could be analyzed. The backends state that themselves now, through
-// `zero_migrate::analyzer_absence`, so this addon has one fewer vendor it names.
-// (The PG-only status path below reaches `zero_migrate_postgres` for its backend
+// `zeroship_migrate::analyzer_absence`, so this addon has one fewer vendor it names.
+// (The PG-only status path below reaches `zeroship_migrate_postgres` for its backend
 // type, which is a different coupling and untouched here; it no longer names a
 // dialect at all.)
-use zero_migrate::{MigrationEngine, MigrationIr};
-use zero_migrate_postgres::confinement::PostgresConfinementExt;
-use zero_migrate_sqlite::SqliteBackend;
-use zero_migrate_sqlite::DIALECT as SQLITE;
+use zeroship_migrate::{MigrationEngine, MigrationIr};
+use zeroship_migrate_postgres::confinement::PostgresConfinementExt;
+use zeroship_migrate_sqlite::SqliteBackend;
+use zeroship_migrate_sqlite::DIALECT as SQLITE;
 
 use crate::api;
 use crate::descriptors::descriptor_dto_to_engine;
@@ -217,7 +217,7 @@ pub fn preview_sql(source: PreviewSqlSource) -> Result<Vec<String>> {
     let effective_policy = effective_policy_from_wire_layers(&charter_layers).map_err(|e| {
         Error::from_reason(format!("previewSql: policy charter failed to load: {e}"))
     })?;
-    let opts = zero_migrate::PreviewOpts {
+    let opts = zeroship_migrate::PreviewOpts {
         default_schema,
         owner_app,
         effective_policy,
@@ -233,23 +233,23 @@ pub fn preview_sql(source: PreviewSqlSource) -> Result<Vec<String>> {
     // the folder cannot model must not cost the operator the whole listing - the
     // render continues against the schema accumulated so far, which is exactly
     // how the per-op `[runtime-resolved]` degradation already behaves.
-    let mut history: Vec<zero_migrate::model::ir::Op> = Vec::new();
+    let mut history: Vec<zeroship_migrate::model::ir::Op> = Vec::new();
     let mut out = Vec::with_capacity(envelopes.len());
     for (index, envelope) in envelopes.iter().enumerate() {
-        let live = zero_migrate::render::fold::fold_ops(
-            zero_migrate::shipping_vendors(),
+        let live = zeroship_migrate::render::fold::fold_ops(
+            zeroship_migrate::shipping_vendors(),
             &history,
             &dialect,
             &opts.default_schema,
             &opts.effective_policy,
         )
         .map_or_else(
-            |_| zero_migrate::LiveSchema::default(),
-            |snapshot| zero_migrate::LiveSchema::from_catalog_snapshot(snapshot, &opts.owner_app),
+            |_| zeroship_migrate::LiveSchema::default(),
+            |snapshot| zeroship_migrate::LiveSchema::from_catalog_snapshot(snapshot, &opts.owner_app),
         );
         out.push(
-            zero_migrate::render_ir_envelope_sql_onto(
-                zero_migrate::shipping_vendors(),
+            zeroship_migrate::render_ir_envelope_sql_onto(
+                zeroship_migrate::shipping_vendors(),
                 envelope,
                 &dialect,
                 &opts,
@@ -261,7 +261,7 @@ pub fn preview_sql(source: PreviewSqlSource) -> Result<Vec<String>> {
                 ))
             })?,
         );
-        if let Ok(ir) = serde_json::from_str::<zero_migrate::MigrationIr>(envelope) {
+        if let Ok(ir) = serde_json::from_str::<zeroship_migrate::MigrationIr>(envelope) {
             history.extend(ir.ops);
         }
     }
@@ -617,7 +617,7 @@ pub fn apply_ir(
         }
         match target {
             ApplyDialect::Postgres => {
-                let backend = zero_migrate_postgres::PostgresBackend::new_generic(&session);
+                let backend = zeroship_migrate_postgres::PostgresBackend::new_generic(&session);
                 apply_ir_with_locked_backend(
                     &backend,
                     &cfg,
@@ -634,7 +634,7 @@ pub fn apply_ir(
                 .await
             }
             ApplyDialect::Mysql => {
-                let backend = zero_migrate_mysql::MysqlBackend::new_generic(&session);
+                let backend = zeroship_migrate_mysql::MysqlBackend::new_generic(&session);
                 apply_ir_with_locked_backend(
                     &backend,
                     &cfg,
@@ -712,7 +712,7 @@ pub fn apply_ir_sqlite(
             project_schema.clone(),
             effective.clone(),
         );
-        let outcome = MigrationEngine::new(zero_migrate::shipping_vendors())
+        let outcome = MigrationEngine::new(zeroship_migrate::shipping_vendors())
             .deploy_envelopes(
                 &envelopes,
                 &backend,
@@ -754,8 +754,8 @@ pub fn apply_ir_sqlite(
 struct DecodedRollback {
     envelope_json: Vec<String>,
     registry_json: String,
-    target: zero_migrate::RollbackTarget,
-    options: zero_migrate::RollbackOptions,
+    target: zeroship_migrate::RollbackTarget,
+    options: zeroship_migrate::RollbackOptions,
     approval: Approval,
 }
 
@@ -801,7 +801,7 @@ fn decode_rollback(req: &RollbackRequest) -> Result<DecodedRollback> {
         envelope_json,
         registry_json,
         target,
-        options: zero_migrate::RollbackOptions {
+        options: zeroship_migrate::RollbackOptions {
             force: req.force,
             backup_acknowledged: req.backup_acknowledged,
         },
@@ -854,7 +854,7 @@ pub fn rollback(
         }
         match target_backend {
             ApplyDialect::Postgres => {
-                let backend = zero_migrate_postgres::PostgresBackend::new_generic(&session);
+                let backend = zeroship_migrate_postgres::PostgresBackend::new_generic(&session);
                 rollback_with_locked_backend(
                     &backend,
                     &cfg,
@@ -872,7 +872,7 @@ pub fn rollback(
                 .await
             }
             ApplyDialect::Mysql => {
-                let backend = zero_migrate_mysql::MysqlBackend::new_generic(&session);
+                let backend = zeroship_migrate_mysql::MysqlBackend::new_generic(&session);
                 rollback_with_locked_backend(
                     &backend,
                     &cfg,
@@ -982,8 +982,8 @@ pub fn resolve_pending(
     MigrationId::parse(&pending_version)
         .map_err(|error| Error::from_reason(format!("invalid pending version: {error}")))?;
     let resolution = match action.as_str() {
-        "apply" => zero_migrate::Resolution::Applied,
-        "abort" => zero_migrate::Resolution::Aborted,
+        "apply" => zeroship_migrate::Resolution::Applied,
+        "abort" => zeroship_migrate::Resolution::Aborted,
         other => {
             return Err(Error::from_reason(format!(
                 "unknown pending-contract action {other:?} (expected apply|abort)"
@@ -1007,7 +1007,7 @@ pub fn resolve_pending(
         if let Some(role) = migrator_role {
             cfg = cfg.with_migrator_role(role);
         }
-        let backend = zero_migrate_postgres::PostgresBackend::new_generic(&session);
+        let backend = zeroship_migrate_postgres::PostgresBackend::new_generic(&session);
         resolve_pending_with_locked_backend(
             &backend,
             &cfg,
@@ -1070,7 +1070,7 @@ pub fn status_ir(
         );
         match target {
             ApplyDialect::Postgres => {
-                let backend = zero_migrate_postgres::PostgresBackend::new_generic(&session);
+                let backend = zeroship_migrate_postgres::PostgresBackend::new_generic(&session);
                 status_ir_with_locked_backend(
                     &backend,
                     &cfg,
@@ -1085,7 +1085,7 @@ pub fn status_ir(
                 .await
             }
             ApplyDialect::Mysql => {
-                let backend = zero_migrate_mysql::MysqlBackend::new_generic(&session);
+                let backend = zeroship_migrate_mysql::MysqlBackend::new_generic(&session);
                 status_ir_with_locked_backend(
                     &backend,
                     &cfg,
@@ -1202,11 +1202,11 @@ pub fn status(
         let cfg = ExecutorConfig::new(project_id, project_schema, effective);
         match target {
             ApplyDialect::Postgres => {
-                let backend = zero_migrate_postgres::PostgresBackend::new_generic(&session);
+                let backend = zeroship_migrate_postgres::PostgresBackend::new_generic(&session);
                 legacy_status_with_locked_backend(&backend, &cfg, &migrations).await
             }
             ApplyDialect::Mysql => {
-                let backend = zero_migrate_mysql::MysqlBackend::new_generic(&session);
+                let backend = zeroship_migrate_mysql::MysqlBackend::new_generic(&session);
                 legacy_status_with_locked_backend(&backend, &cfg, &migrations).await
             }
         }
@@ -1238,8 +1238,8 @@ pub fn history(
         // handed `ops::status::history` a raw session plus a `POSTGRES` dialect
         // argument that the function then ignored in favour of PostgreSQL's journal
         // module - naming the dialect and resolving it were two different things.
-        let backend = zero_migrate_postgres::PostgresBackend::new_generic(&session);
-        zero_migrate::ops::status::history_via_backend(&backend, &cfg)
+        let backend = zeroship_migrate_postgres::PostgresBackend::new_generic(&session);
+        zeroship_migrate::ops::status::history_via_backend(&backend, &cfg)
             .await
             .map(|h| history_reply(&h))
             .map_err(|e| e.to_string())
@@ -1272,7 +1272,7 @@ pub fn advisories_for(source: PreviewSqlSource) -> Result<Vec<AdvisoryDto>> {
     let effective_policy = effective_policy_from_wire_layers(&charter_layers).map_err(|e| {
         Error::from_reason(format!("advisoriesFor: policy charter failed to load: {e}"))
     })?;
-    let opts = zero_migrate::PreviewOpts {
+    let opts = zeroship_migrate::PreviewOpts {
         default_schema,
         owner_app,
         effective_policy,
@@ -1295,7 +1295,7 @@ pub fn advisories_for(source: PreviewSqlSource) -> Result<Vec<AdvisoryDto>> {
     // and the vendor states its own posture, in its own crate. Asked BEFORE the
     // envelope loop, so an unchecked set is reported even when it renders to no
     // statements at all.
-    if let Some(absent) = zero_migrate::analyzer_absence(zero_migrate::shipping_vendors(), &dialect)
+    if let Some(absent) = zeroship_migrate::analyzer_absence(zeroship_migrate::shipping_vendors(), &dialect)
     {
         let advisory = absent.advisory();
         out.push(AdvisoryDto {
@@ -1313,8 +1313,8 @@ pub fn advisories_for(source: PreviewSqlSource) -> Result<Vec<AdvisoryDto>> {
         // Statement-at-a-time so each advisory keeps the statement that raised
         // it. `analyze` over a whole multi-statement `up` would return a flat
         // list with no way back to the ALTER TABLE it describes.
-        let Ok((migration, statements)) = zero_migrate::render_ir_envelope_sql_statements(
-            zero_migrate::shipping_vendors(),
+        let Ok((migration, statements)) = zeroship_migrate::render_ir_envelope_sql_statements(
+            zeroship_migrate::shipping_vendors(),
             envelope,
             &dialect,
             &opts,
@@ -1327,8 +1327,8 @@ pub fn advisories_for(source: PreviewSqlSource) -> Result<Vec<AdvisoryDto>> {
             // The registered backend's analyzer, reached through the contract. The
             // `NotAnalyzed` arm is already handled above, before this loop; asking
             // per statement here would re-ask a question whose answer cannot change.
-            for advisory in zero_migrate::advisories_for_sql(
-                zero_migrate::shipping_vendors(),
+            for advisory in zeroship_migrate::advisories_for_sql(
+                zeroship_migrate::shipping_vendors(),
                 &dialect,
                 &statement,
             )

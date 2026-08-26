@@ -113,7 +113,7 @@
 
 use std::collections::BTreeSet;
 
-use zero_migrate_ir::effect::Effect;
+use zeroship_migrate_ir::effect::Effect;
 
 use crate::model::precondition::{OnUnmet, Precondition};
 use crate::render::step::PlanStep;

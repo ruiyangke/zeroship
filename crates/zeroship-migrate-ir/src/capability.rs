@@ -8,7 +8,7 @@
 //! gated for AUTHORITY while staying portable, and [`VendorCapability::Trigger`]
 //! records why. A vendor op declares the closed set of
 //! [`VendorCapability`] values it needs (computed by
-//! `zero_migrate::model::op_support::vendor_capabilities`); the active
+//! `zeroship_migrate::model::op_support::vendor_capabilities`); the active
 //! [`VendorCapabilities`] set either grants them (the op lowers) or REFUSES it
 //! fail-closed at validate ([`crate::validate`]) AND again at lower (the rendered
 //! SQL hits the Confined deny-list at the second gate).
@@ -46,7 +46,7 @@ use crate::policy::{SchemaScope, TrustProfile};
 
 /// The CLOSED set of vendor capabilities a privileged op can require.
 /// Each [`crate::ir::Op`] vendor variant maps to one or more of these through
-/// `zero_migrate::model::op_support::vendor_capabilities`.
+/// `zeroship_migrate::model::op_support::vendor_capabilities`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VendorCapability {
     /// `CREATE/DROP EXTENSION` ([`VendorCapabilities::allow_extension`]).

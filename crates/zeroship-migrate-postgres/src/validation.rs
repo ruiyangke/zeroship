@@ -1,8 +1,8 @@
 use crate::guard::{check_raw_view_body, RawViewBodyDefect};
-use zero_migrate_backend::validation::{Disposition, ValidationPolicy, ValidationRefusal};
-use zero_migrate_ir::capability::VendorCapability;
-use zero_migrate_ir::ir::ColType;
-use zero_migrate_ir::policy::SchemaScope;
+use zeroship_migrate_backend::validation::{Disposition, ValidationPolicy, ValidationRefusal};
+use zeroship_migrate_ir::capability::VendorCapability;
+use zeroship_migrate_ir::ir::ColType;
+use zeroship_migrate_ir::policy::SchemaScope;
 
 #[derive(Debug)]
 pub(crate) struct PostgresValidationPolicy;

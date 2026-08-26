@@ -24,10 +24,10 @@
 
 use crate::support;
 
-use zero_migrate::model::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
-use zero_migrate::render::fold::single_fold;
-use zero_migrate::render::lower::{IrAuthor, LiveSchema};
-use zero_migrate::{fold_ops, PlanStep, RenameStep};
+use zeroship_migrate::model::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
+use zeroship_migrate::render::fold::single_fold;
+use zeroship_migrate::render::lower::{IrAuthor, LiveSchema};
+use zeroship_migrate::{fold_ops, PlanStep, RenameStep};
 
 const PROJECT: &str = "public";
 const APP: &str = "app_domain";
@@ -70,9 +70,9 @@ fn amounts_ir() -> MigrationIr {
     .expect("amounts IR deserializes")
 }
 
-fn lowered_sql(dialect: &zero_migrate::DialectId) -> String {
+fn lowered_sql(dialect: &zeroship_migrate::DialectId) -> String {
     IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
         dialect,
@@ -94,7 +94,7 @@ fn lowered_sql(dialect: &zero_migrate::DialectId) -> String {
 /// put one there.
 #[test]
 fn a_native_domain_column_keeps_its_type_reference_and_gains_no_check() {
-    let sql = lowered_sql(&zero_migrate_postgres::DIALECT);
+    let sql = lowered_sql(&zeroship_migrate_postgres::DIALECT);
     assert!(
         sql.contains(r#"CREATE DOMAIN "public"."positive_number" AS integer CHECK ((VALUE > 0))"#),
         "the domain is a native type over `integer`:\n{sql}"
@@ -125,7 +125,7 @@ fn a_native_domain_column_keeps_its_type_reference_and_gains_no_check() {
 /// the use-site column. That is the shape the runtime descriptor was contradicting.
 #[test]
 fn an_inlined_domain_column_stores_the_base_type_with_exactly_one_check() {
-    let sqlite = lowered_sql(&zero_migrate_sqlite::DIALECT);
+    let sqlite = lowered_sql(&zeroship_migrate_sqlite::DIALECT);
     assert!(
         sqlite.contains(r#""amount" INTEGER NOT NULL CHECK (("amount" > 0))"#),
         "SQLite stores the base type and inlines the predicate once:\n{sqlite}"
@@ -141,7 +141,7 @@ fn an_inlined_domain_column_stores_the_base_type_with_exactly_one_check() {
         "the plain controls are untouched:\n{sqlite}"
     );
 
-    let mysql = lowered_sql(&zero_migrate_mysql::DIALECT);
+    let mysql = lowered_sql(&zeroship_migrate_mysql::DIALECT);
     assert!(
         mysql.contains("`amount` INT NOT NULL CHECK ((`amount` > 0))"),
         "MySQL does the same with its own spelling:\n{mysql}"
@@ -159,15 +159,15 @@ fn the_snapshot_fold_and_the_field_def_fold_agree_about_the_storage() {
 
     for (dialect, expected_data_type) in [
         // The inlining dialects render the BASE type into the column.
-        (&zero_migrate_sqlite::DIALECT, "integer"),
+        (&zeroship_migrate_sqlite::DIALECT, "integer"),
         // MySQL's own catalog canonicalizes the emitted INT spelling to `int`.
-        (&zero_migrate_mysql::DIALECT, "int"),
+        (&zeroship_migrate_mysql::DIALECT, "int"),
         // PostgreSQL keeps the NAMED type; the descriptor's job is to say what that
         // name is a domain OVER.
-        (&zero_migrate_postgres::DIALECT, "public.positive_number"),
+        (&zeroship_migrate_postgres::DIALECT, "public.positive_number"),
     ] {
         let snapshot = fold_ops(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &ops,
             dialect,
             PROJECT,
@@ -185,13 +185,13 @@ fn the_snapshot_fold_and_the_field_def_fold_agree_about_the_storage() {
         );
 
         let defs = single_fold::fold(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &ops,
             dialect,
             PROJECT,
             &effective,
         )
-        .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
+        .map(|folded| folded.project_field_defs(zeroship_migrate::shipping_vendors()))
         .expect("the field-def replay folds");
         assert_eq!(
             defs["amounts"]["amount"]["type"], "int",
@@ -226,9 +226,9 @@ fn a_sqlite_rebuild_keeps_the_domain_storage_and_one_check() {
     let ops = amounts_ir().ops;
     let effective = support::no_inject(PROJECT);
     let snapshot = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ops,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         PROJECT,
         &effective,
     )
@@ -236,13 +236,13 @@ fn a_sqlite_rebuild_keeps_the_domain_storage_and_one_check() {
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     // Seeded EXACTLY as `engine::refresh_historical_live` seeds it.
     live.sdk_schemas = single_fold::fold(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ops,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         PROJECT,
         &effective,
     )
-    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
+    .map(|folded| folded.project_field_defs(zeroship_migrate::shipping_vendors()))
     .expect("the field-def replay folds");
 
     let rename = MigrationIr {
@@ -267,10 +267,10 @@ fn a_sqlite_rebuild_keeps_the_domain_storage_and_one_check() {
     };
 
     let steps = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &effective,
     )
     .lower_steps(&rename, &live)

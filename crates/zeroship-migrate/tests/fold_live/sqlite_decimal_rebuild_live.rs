@@ -53,7 +53,7 @@
 //!   the digits were measured going away.
 //! * [`an_unchanged_decimal_table_does_not_phantom_diff_into_a_rebuild`] never gets as
 //!   far as a rebuild arm: it shows the shipped
-//!   [`zero_migrate::MigrationEngine::plan_declarative`] AUTHORING a destructive
+//!   [`zeroship_migrate::MigrationEngine::plan_declarative`] AUTHORING a destructive
 //!   rebuild of a table nobody changed, because the live `text` it introspects and the
 //!   `real` it derives from the field-def carrier canonicalise apart.
 //! * [`the_deploy_path_rename_replays_the_stored_create_and_leaves_the_decimal_alone`]
@@ -76,18 +76,18 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::apply::executor::LockMode;
-use zero_migrate::model::ir::Op;
-use zero_migrate::render::fold::single_fold;
-use zero_migrate::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::apply::executor::LockMode;
+use zeroship_migrate::model::ir::Op;
+use zeroship_migrate::render::fold::single_fold;
+use zeroship_migrate::{
     desired_snapshot_for_dialect, fold_ops, resolve_create_table_policy, Approval,
     CollectionDescriptor, DeclarativeAuthor, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema,
     MigrationEngine, MigrationIr,
 };
-use zero_migrate_sqlite::backend::Mode;
-use zero_migrate_sqlite::SqliteBackend;
-use zero_migrate_sqlite::DIALECT as SQLITE;
+use zeroship_migrate_sqlite::backend::Mode;
+use zeroship_migrate_sqlite::SqliteBackend;
+use zeroship_migrate_sqlite::DIALECT as SQLITE;
 
 const PROJECT: &str = "prj_decimal_rebuild";
 const APP: &str = "app_decimal_rebuild";
@@ -196,7 +196,7 @@ async fn stored(backend: &SqliteBackend, table: &str, column: &str) -> Vec<(Stri
 fn folded_live_schema(history: &[Op]) -> LiveSchema {
     let policy = support::no_inject(PROJECT);
     let snapshot = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         history,
         &SQLITE,
         PROJECT,
@@ -205,14 +205,14 @@ fn folded_live_schema(history: &[Op]) -> LiveSchema {
     .expect("the history folds");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     live.sdk_schemas = single_fold::fold(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         history,
         &SQLITE,
         PROJECT,
         &policy,
     )
     .expect("the history folds")
-    .project_field_defs(zero_migrate::shipping_vendors());
+    .project_field_defs(zeroship_migrate::shipping_vendors());
     live
 }
 
@@ -223,14 +223,14 @@ async fn apply(backend: &SqliteBackend, source: &str, live: &LiveSchema) -> Vec<
     let raw: MigrationIr = serde_json::from_str(source).expect("test IR parses");
     let resolved = resolve_create_table_policy(&raw, &policy, PROJECT).expect("the IR resolves");
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
         &SQLITE,
         &policy,
     );
     let steps = author.lower_steps(&resolved, live).expect("the IR lowers");
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &steps,
             Approval::Approved,
@@ -254,7 +254,7 @@ async fn deploy(backend: &SqliteBackend, tables: &[&str], sources: &[&str]) -> R
         .iter()
         .map(|source| serde_json::from_str(source).expect("test envelope parses"))
         .collect();
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .deploy_envelopes(
             &envelopes,
             backend,
@@ -440,7 +440,7 @@ async fn a_decimal_column_keeps_its_digits_through_a_fold_seeded_rebuild() {
 /// not author a destructive rebuild of it.**
 ///
 /// The second consequence of the collision, and the one that reaches the shipped
-/// [`zero_migrate::MigrationEngine::plan_declarative`] without any rebuild having to
+/// [`zeroship_migrate::MigrationEngine::plan_declarative`] without any rebuild having to
 /// happen first.
 ///
 /// The differ compares two type spellings through `sqlite_canonical_type`: the LIVE one
@@ -496,14 +496,14 @@ async fn an_unchanged_decimal_table_does_not_phantom_diff_into_a_rebuild() {
     // the unchanged schema presents. Nothing about the schema differs between the two
     // sides - only the carrier each is spelled through.
     let descriptors: Vec<CollectionDescriptor> = single_fold::fold(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &history,
         &SQLITE,
         PROJECT,
         &policy,
     )
     .expect("the history folds")
-    .project_collection_descriptors(zero_migrate::shipping_vendors())
+    .project_collection_descriptors(zeroship_migrate::shipping_vendors())
     .into_values()
     // The projection stamps a synthetic `__fold__` owner; a re-deploy presents
     // the descriptors under the app that owns them, and the differ's
@@ -514,7 +514,7 @@ async fn an_unchanged_decimal_table_does_not_phantom_diff_into_a_rebuild() {
     })
     .collect();
     let desired = desired_snapshot_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         &descriptors,
         &SQLITE,
@@ -522,13 +522,13 @@ async fn an_unchanged_decimal_table_does_not_phantom_diff_into_a_rebuild() {
     )
     .expect("the descriptor set resolves to a desired snapshot");
 
-    let plan = MigrationEngine::new(zero_migrate::shipping_vendors())
+    let plan = MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .plan_declarative(
             &desired,
             &live,
             &ownership,
             &DeclarativeAuthor::new_for_dialect(
-                zero_migrate::shipping_vendors(),
+                zeroship_migrate::shipping_vendors(),
                 PROJECT,
                 APP,
                 SQLITE,
@@ -567,7 +567,7 @@ async fn an_unchanged_decimal_table_does_not_phantom_diff_into_a_rebuild() {
 ///
 /// This case was green before the fix and is green after it, and that is the finding.
 /// `preserve_stored_shape = pure_rename.is_some() && dt.stored_create_sql.is_some()`,
-/// and on [`zero_migrate::MigrationEngine::deploy_envelopes`] BOTH conjuncts hold for a
+/// and on [`zeroship_migrate::MigrationEngine::deploy_envelopes`] BOTH conjuncts hold for a
 /// `renameColumn`: the live snapshot is introspected out of the running database so it
 /// carries `stored_create_sql`, and `declarative::build_column_rename_rebuild` builds
 /// its desired snapshot by CLONING that live one, so the rename is pure by

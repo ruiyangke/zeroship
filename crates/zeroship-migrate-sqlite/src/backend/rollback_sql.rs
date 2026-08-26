@@ -27,7 +27,7 @@
 //! apply path - but rollback does not route into it, and we do NOT half-implement a
 //! second one here. The classifier
 //! ([`down_needs_rebuild`]) is a lightweight SQLite-aware scan: the libpg_query
-//! parser the PG path uses (`zero_migrate_postgres::analysis::classify`) is a
+//! parser the PG path uses (`zeroship_migrate_postgres::analysis::classify`) is a
 //! POSTGRES parser and would
 //! mis-parse SQLite DDL, so it cannot be reused here.
 //!
@@ -41,9 +41,9 @@
 
 use std::time::Instant;
 
-use zero_migrate_backend::executor::RollbackError;
-use zero_migrate_backend::step::PlanStep;
-use zero_migrate_ir::migration::Migration;
+use zeroship_migrate_backend::executor::RollbackError;
+use zeroship_migrate_backend::step::PlanStep;
+use zeroship_migrate_ir::migration::Migration;
 
 use super::actor::{MigrationActor, SqliteActorError};
 use super::authorizer::Mode;
@@ -56,7 +56,7 @@ fn rb_err(e: SqliteActorError) -> RollbackError {
 
 /// Roll back ONE migration's `down` transactionally + journal a `rolled_back`
 /// event. Mirrors the PG
-/// `zero_migrate_postgres::backend::session::rollback_one_transactional`
+/// `zeroship_migrate_postgres::backend::session::rollback_one_transactional`
 /// semantics, dialect-translated. Named in prose rather than linked: the engine
 /// depends on this crate, so this crate cannot name the engine back.
 ///
@@ -191,7 +191,7 @@ async fn append_rolled_back(
             "INSERT INTO \"_mig\".schema_migrations \
              (event_kind, version, name, checksum, \"by\", exec_ms) \
              VALUES ('{rolled_back}', {version}, {name}, {checksum}, {by}, {exec_ms})",
-            rolled_back = zero_migrate_backend::journal::EventKind::RolledBack.as_str()
+            rolled_back = zeroship_migrate_backend::journal::EventKind::RolledBack.as_str()
         ))
         .await
 }

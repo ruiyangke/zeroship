@@ -11,7 +11,7 @@
 //! only knew about its own vendor.
 //!
 //! The capability is a parameter to
-//! [`MigrationEngine::dry_run`](zero_migrate::MigrationEngine::dry_run) now, so
+//! [`MigrationEngine::dry_run`](zeroship_migrate::MigrationEngine::dry_run) now, so
 //! "which backend declares one" is no longer a question the type system asks. The
 //! fact that survives is a fact about the whole workspace: **nothing implements
 //! `ShadowDryRun`**, so every dry-run refuses with `DryRunError::ShadowUnsupported`

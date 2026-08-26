@@ -4,13 +4,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use sha2::{Digest, Sha256};
 
-use zero_migrate_backend::backfill::{
+use zeroship_migrate_backend::backfill::{
     generate_per_row_value, BackfillSpec, CursorColumnContract, CursorComparison, CursorContract,
     CursorScalarType, CursorTuple,
 };
-use zero_migrate_backend::backfill::{BackfillError, BackfillOutcome, BackfillProgressEntry};
-use zero_migrate_ir::ir::{CursorStability, IrScalar, PerRowGenerator};
-use zero_migrate_ir::migration::{Checksum, MigrationId};
+use zeroship_migrate_backend::backfill::{BackfillError, BackfillOutcome, BackfillProgressEntry};
+use zeroship_migrate_ir::ir::{CursorStability, IrScalar, PerRowGenerator};
+use zeroship_migrate_ir::migration::{Checksum, MigrationId};
 
 use super::actor::{MigrationActor, SqliteActorError, SqliteBind};
 use super::authorizer::Mode;
@@ -126,7 +126,7 @@ fn validate_ident(what: &'static str, value: &str) -> Result<(), BackfillError> 
 }
 
 fn quote_ident(identifier: &str) -> String {
-    zero_migrate_backend::dml::escape_quote_ident_for_backend(identifier, &crate::dml::RENDERER)
+    zeroship_migrate_backend::dml::escape_quote_ident_for_backend(identifier, &crate::dml::RENDERER)
 }
 
 fn cursor_unavailable(spec: &BackfillSpec, reason: impl Into<String>) -> BackfillError {
@@ -191,7 +191,7 @@ fn validate_spec(spec: &BackfillSpec, set_clause: &str) -> Result<(), BackfillEr
             )));
         }
         if let PerRowGenerator::TypeId { prefix } = assignment.generator() {
-            zero_migrate_ir::ir::validate_type_id_prefix(prefix).map_err(|error| {
+            zeroship_migrate_ir::ir::validate_type_id_prefix(prefix).map_err(|error| {
                 BackfillError::InvalidSpec(format!(
                     "invalid TypeID prefix for per-row destination {column:?}: {error}"
                 ))
@@ -966,7 +966,7 @@ fn decode_progress_bool(
 }
 
 fn sqlite_journal_err(error: SqliteActorError) -> BackfillError {
-    BackfillError::Journal(zero_migrate_backend::journal::JournalError::Backend(
+    BackfillError::Journal(zeroship_migrate_backend::journal::JournalError::Backend(
         error.to_string(),
     ))
 }
@@ -1754,8 +1754,8 @@ pub(crate) async fn run_backfill_bounded(
             batches += 1;
             rows_updated += count;
             last = next;
-            if let Err(error) = zero_migrate_backend::fault::trip(
-                zero_migrate_backend::fault::points::BACKFILL_MID_BATCHES,
+            if let Err(error) = zeroship_migrate_backend::fault::trip(
+                zeroship_migrate_backend::fault::points::BACKFILL_MID_BATCHES,
             ) {
                 return Err(BackfillError::Fault(error.to_string()));
             }
@@ -1887,7 +1887,7 @@ mod tests {
         let mut spec = external_spec("items", &["cursor_value"], 1);
         spec.per_row.insert(
             "generated".to_string(),
-            zero_migrate_backend::backfill::PerRowAssignment::validated(
+            zeroship_migrate_backend::backfill::PerRowAssignment::validated(
                 "main",
                 "items",
                 "generated",

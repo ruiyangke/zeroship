@@ -26,8 +26,8 @@
 
 use crate::support;
 
-use zero_migrate::render::fold::single_fold;
-use zero_migrate::{
+use zeroship_migrate::render::fold::single_fold;
+use zeroship_migrate::{
     diff_snapshots, fold_ops, BinaryOp, ColType, Expr, GeneratedCol, IrColumn, IrConstraint,
     IrConstraintKind, IrScalar, Op,
 };
@@ -69,7 +69,7 @@ fn create_line_items() -> Op {
     let mut total = col("total_cents", ColType::Int);
     total.generated = Some(total_from_qty());
     Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "line_items".to_string(),
         columns: vec![
             col("qty", ColType::Int),
@@ -124,13 +124,13 @@ fn a_rename_follows_the_generated_expressions_that_read_the_column() {
     let effective = support::confined_charter();
     let ops = vec![create_line_items(), rename_qty_to_quantity()];
     let fields = single_fold::fold(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ops,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )
-    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
+    .map(|folded| folded.project_field_defs(zeroship_migrate::shipping_vendors()))
     .expect("the op stream folds");
 
     let table = &fields["line_items"];
@@ -188,7 +188,7 @@ fn create_qualified_line_items() -> Op {
     let mut total = col("total_cents", ColType::Int);
     total.generated = Some(total_from_qualified_qty());
     Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "line_items".to_string(),
         columns: vec![
             col("qty", ColType::Int),
@@ -249,10 +249,10 @@ fn a_table_rename_carries_a_qualified_generated_reference_in_both_artifacts() {
         },
     ];
 
-    let artifacts = zero_migrate::render_artifacts(
-        zero_migrate::shipping_vendors(),
+    let artifacts = zeroship_migrate::render_artifacts(
+        zeroship_migrate::shipping_vendors(),
         &ops,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )
@@ -307,7 +307,7 @@ fn qty_between_0_and_100() -> Expr {
 
 fn create_bounded() -> Op {
     Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "line_items".to_string(),
         columns: vec![col("qty", ColType::Int)],
         primary_key: None,
@@ -335,13 +335,13 @@ fn a_rename_carries_a_recovered_check_bound_onto_the_new_column_name() {
     let effective = support::confined_charter();
 
     let before = single_fold::fold(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &[create_bounded()],
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )
-    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
+    .map(|folded| folded.project_field_defs(zeroship_migrate::shipping_vendors()))
     .expect("the unrenamed stream folds");
     let bounded = &before["line_items"]["qty"];
     assert_eq!(
@@ -356,13 +356,13 @@ fn a_rename_carries_a_recovered_check_bound_onto_the_new_column_name() {
     );
 
     let after = single_fold::fold(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &[create_bounded(), rename_qty_to_quantity()],
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )
-    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
+    .map(|folded| folded.project_field_defs(zeroship_migrate::shipping_vendors()))
     .expect("the renamed stream folds");
     let renamed = &after["line_items"]["quantity"];
     assert_eq!(
@@ -403,9 +403,9 @@ fn the_snapshot_lane_follows_the_rename_and_the_differ_still_ignores_the_body() 
     let effective = support::confined_charter();
 
     let folded = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &[create_line_items(), rename_qty_to_quantity()],
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )
@@ -459,7 +459,7 @@ fn the_snapshot_lane_follows_the_rename_and_the_differ_still_ignores_the_body() 
     // differing only in the generated body are equal, because live PostgreSQL reports
     // a deparsed spelling the fold cannot reproduce.
     let mut rewritten = total.clone();
-    rewritten.generated = Some(zero_migrate::model::snapshot::GeneratedColumnSnapshot {
+    rewritten.generated = Some(zeroship_migrate::model::snapshot::GeneratedColumnSnapshot {
         expr: "(\"something\" * \"else\")".to_string(),
         source: None,
         stored: true,
@@ -481,7 +481,7 @@ fn the_snapshot_lane_follows_the_rename_and_the_differ_still_ignores_the_body() 
             generated.expr = "(\"something\" * \"else\")".to_string();
         }
     }
-    let drift = diff_snapshots(zero_migrate::shipping_vendors(), &folded, &other);
+    let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &folded, &other);
     assert!(
         drift.is_clean(),
         "a rewritten generated body reports no drift: the comparison is off by design, \

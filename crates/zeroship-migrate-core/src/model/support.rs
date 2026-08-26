@@ -5,18 +5,18 @@
 //! dialect/refusal diagnostics are sourced from this support matrix.
 
 use std::borrow::Cow;
-use zero_migrate_backend::registry::VendorSet;
+use zeroship_migrate_backend::registry::VendorSet;
 
 use crate::model::capability::VendorCapability;
-use zero_migrate_backend::renderer::FeatureSupportKey;
-use zero_migrate_ir::dialect::DialectId;
+use zeroship_migrate_backend::renderer::FeatureSupportKey;
+use zeroship_migrate_ir::dialect::DialectId;
 
 /// The set of dialects an op/feature is supported on.
 ///
-/// Defined in the leaf contract (`zero_migrate_ir::dialect`) and re-exported
+/// Defined in the leaf contract (`zeroship_migrate_ir::dialect`) and re-exported
 /// here unchanged: the backend registry and the support matrix key on the SAME
 /// set type, and the registry lives below the engine.
-pub use zero_migrate_ir::dialect::DialectSet;
+pub use zeroship_migrate_ir::dialect::DialectSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderMode {
@@ -476,7 +476,7 @@ mod tests {
     use super::*;
     use crate::model::op_support::FEATURE_SUPPORT_REGISTRY;
     use std::collections::BTreeSet;
-    use zero_migrate_ir::dialect::DialectId;
+    use zeroship_migrate_ir::dialect::DialectId;
 
     /// Every hand-written [`FeatureSupport`] this module declares, labelled by
     /// the registry group and feature it came from.

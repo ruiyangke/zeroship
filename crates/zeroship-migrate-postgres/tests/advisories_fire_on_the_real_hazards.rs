@@ -30,7 +30,7 @@
 //! analyser keyed on statement type rather than on the hazard would flag both,
 //! and advisories that fire on safe work are how operators learn to ignore them.
 
-use zero_migrate_postgres::analysis::analyze::analyze;
+use zeroship_migrate_postgres::analysis::analyze::analyze;
 
 #[track_caller]
 fn advises(sql: &str, expected_rule: &str) {

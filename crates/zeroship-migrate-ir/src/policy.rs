@@ -29,7 +29,7 @@ pub enum TrustProfile {
 /// (one allowed schema; everything else is a `CrossSchema` violation), matched
 /// CASE-INSENSITIVELY. A case-variant qualifier (`'APP1'` under `'app1'`) is
 /// admitted, then canonicalized to `project_schema` at render
-/// (`zero_migrate::render::lower::IrAuthor::effective_schema`) so gate and render never
+/// (`zeroship_migrate::render::lower::IrAuthor::effective_schema`) so gate and render never
 /// diverge. `Allowlist` is the **Platform** shape: a reference passes iff its
 /// schema is (case-insensitively) a member of the allowlist.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,7 +58,7 @@ impl SchemaScope {
     /// MUST be canonicalized to `project_schema` before render, or the op would land
     /// in a DIFFERENT case-sensitive Postgres schema than the one the gate blessed.
     /// That canonicalization lives in
-    /// `zero_migrate::render::lower::IrAuthor::effective_schema`
+    /// `zeroship_migrate::render::lower::IrAuthor::effective_schema`
     /// - this `permits` only decides admission, never the rendered casing.
     #[must_use]
     pub fn permits(&self, schema: &str) -> bool {

@@ -23,17 +23,17 @@
 
 #![allow(dead_code)] // Each consumer uses a different part of this module.
 
-use zero_migrate::model::expr::Expr;
-use zero_migrate::model::ir::{
+use zeroship_migrate::model::expr::Expr;
+use zeroship_migrate::model::ir::{
     AlterPrimaryKeyAction, BackfillSetValue, ColType, EmptyContainerKind, ExclusionMethod, ForEach,
     GrantTarget, IdentityCol, IndexElement, IndexMethod, IrColumn, IrConstraint, IrConstraintKind,
     IrDefault, IrIndex, IrValue, Op, PartitionBounds, PartitionSpec, PolicyCmd, Privilege,
     RaiseLevel, SafeI64, SafeU64, SelectAst, SequenceRef, TableRef, TableRuntimeOptionsPatch,
     TriggerAction, TriggerEvent, TriggerStmt, TriggerTiming, ViewQuery,
 };
-use zero_migrate_mysql::DIALECT as MYSQL;
-use zero_migrate_postgres::DIALECT as POSTGRES;
-use zero_migrate_sqlite::DIALECT as SQLITE;
+use zeroship_migrate_mysql::DIALECT as MYSQL;
+use zeroship_migrate_postgres::DIALECT as POSTGRES;
+use zeroship_migrate_sqlite::DIALECT as SQLITE;
 
 fn col_ref() -> Expr {
     Expr::ColRef {
@@ -70,7 +70,7 @@ fn column(
 
 fn plain_table(name: &str, columns: Vec<IrColumn>, primary_key: Option<Vec<String>>) -> Op {
     Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: name.into(),
         columns,
         primary_key,
@@ -94,7 +94,7 @@ fn nextval_default() -> IrDefault {
 
 fn add_constraint(kind: IrConstraintKind) -> Op {
     Op::AddConstraint {
-        attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
         table: "t".into(),
         constraint: IrConstraint { name: None, kind },
         schema: None,
@@ -247,7 +247,7 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
         "setTableOptions",
         "base",
         Op::SetTableOptions {
-            attributes: zero_migrate_ir::attribute::SetTableOptionsAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::SetTableOptionsAttributes::new(),
             table: "t".into(),
             options: TableRuntimeOptionsPatch::default(),
             schema: None,
@@ -371,7 +371,7 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
         Op::Backfill {
             table: "t".into(),
             cursor_columns: vec!["id".into()],
-            cursor_stability: zero_migrate::CursorStability::GuardUpdates,
+            cursor_stability: zeroship_migrate::CursorStability::GuardUpdates,
             batch_size: SafeU64::new(100).expect("safe u64"),
             set: std::iter::once((
                 "a".to_string(),
@@ -437,7 +437,7 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
         "comment",
         "base",
         Op::Comment {
-            target: zero_migrate::model::ir::CommentTarget::Table {
+            target: zeroship_migrate::model::ir::CommentTarget::Table {
                 schema: None,
                 name: "t".into(),
             },
@@ -448,7 +448,7 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
         "createPartition",
         "base",
         Op::CreatePartition {
-            attributes: zero_migrate_ir::attribute::CreatePartitionAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::CreatePartitionAttributes::new(),
             name: "p".into(),
             of: "t".into(),
             bounds: PartitionBounds::Default,
@@ -662,7 +662,7 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
             schema: None,
             args: None,
             returns: "trigger".into(),
-            language: zero_migrate::model::ir::FuncLanguage::Procedural,
+            language: zeroship_migrate::model::ir::FuncLanguage::Procedural,
             replace: None,
             volatility: None,
             body: "BEGIN RETURN NEW; END".into(),
@@ -697,7 +697,7 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
         "createTable",
         "partitioned",
         Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "t".into(),
             columns: vec![column("id", ColType::BigInt, None, None)],
             primary_key: None,
@@ -716,7 +716,7 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
         "createTable",
         "partitionedCollapse",
         Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "t".into(),
             columns: vec![column("id", ColType::BigInt, None, None)],
             primary_key: None,
@@ -735,7 +735,7 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
         "createTable",
         "pgOnlyIndexFeature",
         Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "t".into(),
             columns: vec![column("created_at", ColType::Timestamp, None, None)],
             primary_key: None,
@@ -801,7 +801,7 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
 
     // ── addColumn ────────────────────────────────────────────────────────────
     let add_column = |default: Option<IrDefault>, identity: Option<IdentityCol>| Op::AddColumn {
-        attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
         table: "t".into(),
         column: "a".into(),
         ty: ColType::BigInt,
@@ -884,7 +884,7 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
         "setColumnDefault",
         "base",
         set_col_default(IrDefault::Literal {
-            value: zero_migrate::model::ir::IrScalar::Int(1),
+            value: zeroship_migrate::model::ir::IrScalar::Int(1),
         }),
     ));
     c.push((
@@ -901,7 +901,7 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
     ));
 
     // ── renameColumn ─────────────────────────────────────────────────────────
-    let rename_column = |guard: Option<zero_migrate::model::ir::ExistenceGuard>| Op::RenameColumn {
+    let rename_column = |guard: Option<zeroship_migrate::model::ir::ExistenceGuard>| Op::RenameColumn {
         table: "t".into(),
         from: "a".into(),
         to: "b".into(),
@@ -913,7 +913,7 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
     c.push((
         "renameColumn",
         "existenceGuard",
-        rename_column(Some(zero_migrate::model::ir::ExistenceGuard::IfExists)),
+        rename_column(Some(zeroship_migrate::model::ir::ExistenceGuard::IfExists)),
     ));
 
     // ── addConstraint ────────────────────────────────────────────────────────
@@ -979,7 +979,7 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
     ));
 
     // ── insert ───────────────────────────────────────────────────────────────
-    let insert = |on_conflict: Option<zero_migrate::model::ir::IrOnConflict>| Op::Insert {
+    let insert = |on_conflict: Option<zeroship_migrate::model::ir::IrOnConflict>| Op::Insert {
         table: "t".into(),
         columns: vec!["a".into()],
         rows: vec![],
@@ -990,18 +990,18 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
     c.push((
         "insert",
         "onConflictDoUpdate",
-        insert(Some(zero_migrate::model::ir::IrOnConflict {
+        insert(Some(zeroship_migrate::model::ir::IrOnConflict {
             columns: vec!["a".into()],
             do_update: Some(std::collections::BTreeMap::from([(
                 "b".into(),
-                zero_migrate::model::ir::IrValue::Scalar(zero_migrate::model::ir::IrScalar::Int(1)),
+                zeroship_migrate::model::ir::IrValue::Scalar(zeroship_migrate::model::ir::IrScalar::Int(1)),
             )])),
         })),
     ));
     c.push((
         "insert",
         "onConflictDoNothing",
-        insert(Some(zero_migrate::model::ir::IrOnConflict {
+        insert(Some(zeroship_migrate::model::ir::IrOnConflict {
             columns: vec!["a".into()],
             do_update: None,
         })),

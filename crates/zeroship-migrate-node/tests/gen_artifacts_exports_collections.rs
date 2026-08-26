@@ -25,7 +25,7 @@ mod support;
 
 use serde_json::{json, Value};
 
-use zero_migrate_node::api::{gen_artifacts_from_descriptors, gen_artifacts_from_envelopes};
+use zeroship_migrate_node::api::{gen_artifacts_from_descriptors, gen_artifacts_from_envelopes};
 
 const SCHEMA: &str = "public";
 
@@ -164,7 +164,7 @@ fn an_empty_schema_reports_an_empty_list_not_an_absent_one() {
 /// name.
 #[test]
 fn the_manual_source_exports_collections_as_well() {
-    use zero_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor};
+    use zeroship_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor};
 
     let descriptors = [CollectionDescriptor {
         name: "hits".to_string(),
@@ -176,7 +176,7 @@ fn the_manual_source_exports_collections_as_well() {
             ..Default::default()
         }],
         indexes: Vec::new(),
-        runtime_options: zero_migrate::TableRuntimeOptions::default(),
+        runtime_options: zeroship_migrate::TableRuntimeOptions::default(),
     }];
     let charter = charter();
     let reply =
@@ -200,7 +200,7 @@ fn the_manual_source_exports_collections_as_well() {
 /// only `fields`, so dropping the merge moves no artifact byte and no drift gate.
 #[test]
 fn the_export_carries_indexes_and_runtime_options_not_only_fields() {
-    use zero_migrate::render::declarative::{
+    use zeroship_migrate::render::declarative::{
         CollectionDescriptor, FieldDescriptor, IndexDescriptor,
     };
 
@@ -225,10 +225,10 @@ fn the_export_carries_indexes_and_runtime_options_not_only_fields() {
             columns: vec!["path".to_string()],
             unique: false,
         }],
-        runtime_options: zero_migrate::TableRuntimeOptions {
+        runtime_options: zeroship_migrate::TableRuntimeOptions {
             soft_delete: true,
             versioning: true,
-            strictness: zero_migrate::TableStrictness::Lenient,
+            strictness: zeroship_migrate::TableStrictness::Lenient,
         },
     }];
     let charter = charter();

@@ -3,7 +3,7 @@
 //! The existence-guard IR/JS SHAPE (`ExistenceGuard::{IfNotExists,IfExists}` on
 //! every DDL op) is carried in `ir_version 2`. This module is the guard
 //! EXECUTION: a render-time-resolved, dialect-neutral [`GuardProbe`] is stamped
-//! onto each lowered [`Migration`](zero_migrate_ir::migration::Migration); at apply time the
+//! onto each lowered [`Migration`](zeroship_migrate_ir::migration::Migration); at apply time the
 //! executor reads the LIVE catalog under the ALREADY-HELD project apply lock and,
 //! on transactional backends, the open per-step transaction. [`decide`] returns a
 //! [`GuardVerdict`]:
@@ -101,12 +101,12 @@
 
 use crate::snapshot::SchemaSnapshot;
 use core::fmt;
-use zero_migrate_ir::probe::{ExpectColumn, GuardDir, GuardProbe};
+use zeroship_migrate_ir::probe::{ExpectColumn, GuardDir, GuardProbe};
 
 use crate::registry::BackendVendor;
 use crate::renderer::Capability;
 
-// `GuardProbe::schema()` now lives on the type itself in `zero_migrate_ir::probe`
+// `GuardProbe::schema()` now lives on the type itself in `zeroship_migrate_ir::probe`
 // (the type moved into the leaf wire-contract crate - an inherent `impl` here would
 // be an orphan impl on a foreign type).
 
@@ -359,7 +359,7 @@ fn decide_partition(
     name: &str,
     of: &str,
     direction: GuardDir,
-    expect_bounds: Option<&zero_migrate_ir::ir::PartitionBounds>,
+    expect_bounds: Option<&zeroship_migrate_ir::ir::PartitionBounds>,
     live: &SchemaSnapshot,
 ) -> GuardVerdict {
     let Some(actual) = live.partitions.get(name) else {
@@ -647,7 +647,7 @@ fn decide_index(
     //
     // Does NOT cover a name a preceding statement in the SAME migration unit
     // creates, and nothing else covers that: the snapshot is read once per unit
-    // (`zero_migrate_postgres::backend::session`), and the fold's `DuplicateIndex` check
+    // (`zeroship_migrate_postgres::backend::session`), and the fold's `DuplicateIndex` check
     // keys on the target table's own index list, never on which OTHER table owns a
     // name. Noted, not silently narrowed.
     let schema_wide = vendor

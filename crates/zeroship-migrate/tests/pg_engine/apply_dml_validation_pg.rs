@@ -3,13 +3,13 @@ use crate::support;
 use std::collections::BTreeMap;
 
 use crate::support::PgDevSession;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::driver::{DbError, SqlSession};
-use zero_migrate::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::driver::{DbError, SqlSession};
+use zeroship_migrate::{
     ApplyError, Approval, EngineError, ExecutorConfig, LiveSchema, MigrationEngine, MigrationIr,
 };
-use zero_migrate_postgres::PostgresBackend;
-use zero_migrate_postgres::DIALECT as POSTGRES;
+use zeroship_migrate_postgres::PostgresBackend;
+use zeroship_migrate_postgres::DIALECT as POSTGRES;
 
 const OWNER: &str = "app_test";
 
@@ -116,7 +116,7 @@ async fn prepare_schemas<'a>(
     guard
 }
 
-fn classify(result: Result<zero_migrate::AggregateOutcome, EngineError>) -> BoundaryResult {
+fn classify(result: Result<zeroship_migrate::AggregateOutcome, EngineError>) -> BoundaryResult {
     match result {
         Ok(_) => BoundaryResult::Applied,
         Err(EngineError::EnvelopeDeploy(message)) => BoundaryResult::LowerRejected { message },
@@ -216,7 +216,7 @@ async fn measure_qualified_ref(url: &str, other_present: bool) -> BoundaryResult
     }
     let policy = support::no_inject(&cfg.project_schema);
     classify(
-        MigrationEngine::new(zero_migrate::shipping_vendors())
+        MigrationEngine::new(zeroship_migrate::shipping_vendors())
             .deploy_envelopes(
                 &[ir],
                 &backend,
@@ -283,7 +283,7 @@ async fn measure_aggregate_update(url: &str) -> BoundaryResult {
     let registry = BTreeMap::from([("users".to_string(), OWNER.to_string())]);
     let policy = support::no_inject(&cfg.project_schema);
     classify(
-        MigrationEngine::new(zero_migrate::shipping_vendors())
+        MigrationEngine::new(zeroship_migrate::shipping_vendors())
             .deploy_envelopes(
                 &[ir],
                 &backend,

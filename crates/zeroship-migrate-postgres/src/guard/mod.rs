@@ -1,6 +1,6 @@
 //! PostgreSQL's line-1 defense - the `libpg_query` deny-list, behind the contract.
 //!
-//! This is the vendor half of `zero_migrate_backend::guard::MigrationGuard`: [`PgGuard`]
+//! This is the vendor half of `zeroship_migrate_backend::guard::MigrationGuard`: [`PgGuard`]
 //! is the adapter that files this vendor's machinery under its `BackendVendor`, so
 //! the engine reaches it the same way it reaches this vendor's two renderers -
 //! through the registry, never by naming a dialect.
@@ -30,7 +30,7 @@
 //!
 //! What did NOT come with it is the neutral seam - [`GuardConfig`], [`GuardError`],
 //! [`GuardOutcome`], [`MigrationGuard`] and the structured-IR data-security walk all
-//! live in `zero_migrate_backend::guard`, below every vendor, because every vendor's
+//! live in `zeroship_migrate_backend::guard`, below every vendor, because every vendor's
 //! guard is configured by the same policy and reports in the same vocabulary.
 
 pub mod denylist;
@@ -41,8 +41,8 @@ pub use sql::{
     namespace_rule, GuardReport, RawViewBodyDefect, SqlGuard,
 };
 
-use zero_migrate_backend::guard::{GuardConfig, GuardError, GuardOutcome, MigrationGuard};
-use zero_migrate_ir::migration::MigrationFlags;
+use zeroship_migrate_backend::guard::{GuardConfig, GuardError, GuardOutcome, MigrationGuard};
+use zeroship_migrate_ir::migration::MigrationFlags;
 
 /// The PostgreSQL line-1: the `libpg_query` deny-list + cross-schema confinement +
 /// classify + analyze, mapped onto the neutral `GuardOutcome`.
@@ -108,7 +108,7 @@ impl MigrationGuard for PgGuard {
     /// walk and refuses there, naming the rendered statement.
     ///
     /// The neutral posture walk in
-    /// [`check_ir_data_security_policy`](zero_migrate_backend::guard::check_ir_data_security_policy)
+    /// [`check_ir_data_security_policy`](zeroship_migrate_backend::guard::check_ir_data_security_policy)
     /// therefore skips this backend: a second, EARLIER denial would replace a refusal
     /// that names the statement with one that names an op index, changing a message
     /// existing assertions pin, for no behavioural gain. The knob is enforced either

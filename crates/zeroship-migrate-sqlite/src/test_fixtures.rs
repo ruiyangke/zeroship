@@ -1,13 +1,13 @@
 //! TEST-ONLY charter fixtures for this crate's unit tests.
 //!
-//! The engine's `zero_migrate::test_fixtures::no_inject` is `pub(crate)`, and no
+//! The engine's `zeroship_migrate::test_fixtures::no_inject` is `pub(crate)`, and no
 //! visibility widening can make a `pub(crate)` reachable across a crate boundary -
 //! so when the SQLite execution half moved here, its four project-lock tests needed
 //! a sibling. This is it, and it is the same shape `zero-migrate-mysql`'s
 //! `src/test_fixtures.rs` already has.
 //!
 //! What it does NOT do is restate the composition algebra. The real one is
-//! `zero_migrate_ir::policy_registry`, so this builds the charter TOML and hands it
+//! `zeroship_migrate_ir::policy_registry`, so this builds the charter TOML and hands it
 //! straight there. One composition, and a change to the algebra cannot leave a
 //! vendor's tests asserting against an older one.
 //!
@@ -17,8 +17,8 @@
 //! `toml::Value` does the schema-name escaping for the same reason - the same
 //! escaping, not merely equivalent escaping.
 
-use zero_migrate_ir::policy_registry::effective_policy_from_charter_toml;
-use zero_migrate_policy::EffectivePolicy;
+use zeroship_migrate_ir::policy_registry::effective_policy_from_charter_toml;
+use zeroship_migrate_policy::EffectivePolicy;
 
 /// A charter that grants this schema the table/rename/cross-schema verbs and injects
 /// nothing, so an authored table reaches the backend with exactly its own columns.

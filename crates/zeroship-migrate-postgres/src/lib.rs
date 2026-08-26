@@ -24,7 +24,7 @@
 //! A backend can still reach another vendor's spelling THROUGH a contract helper
 //! that hard-codes a dialect, and no grep of this crate can see it because the
 //! literal lives in `zero-migrate-backend`. That is measured, not hypothetical -
-//! `zero_migrate_backend::dml`'s header carries the numbers. The identifier seam
+//! `zeroship_migrate_backend::dml`'s header carries the numbers. The identifier seam
 //! (`*_for_dialect(.., DIALECT)`) is how this crate stays clear of it.
 
 mod advisory;
@@ -63,7 +63,7 @@ mod vendor;
 // directly at three sites covering sixteen op kinds that never reach
 // `DmlRenderer::render_trigger_op`. That made the vendor-op surface the one part of
 // a backend the engine knew by NAME rather than by contract, and both this file and
-// `zero_migrate::render::vendor` said so in as many words.
+// `zeroship_migrate::render::vendor` said so in as many words.
 //
 // It is behind `DmlRenderer::render_vendor_op` now. `mod vendor` above is private,
 // so with this re-export gone the function is UNREACHABLE from outside this crate:
@@ -80,20 +80,20 @@ mod vendor;
 pub use guard::PgGuard;
 
 /// This vendor's `MigrationBackend`, re-exported at the crate root the way
-/// `zero_migrate_sqlite::SqliteBackend` and `zero_migrate_mysql::MysqlBackend` are.
+/// `zeroship_migrate_sqlite::SqliteBackend` and `zeroship_migrate_mysql::MysqlBackend` are.
 pub use backend::PostgresBackend;
 
 /// TEST-ONLY charter fixtures, shared by this crate's unit tests.
 ///
-/// The engine's `zero_migrate::test_fixtures::no_inject` is `pub(crate)`, and no
+/// The engine's `zeroship_migrate::test_fixtures::no_inject` is `pub(crate)`, and no
 /// visibility widening can make a `pub(crate)` reachable across a crate boundary -
 /// so the execution half's tests needed a sibling when they moved here. This is it,
 /// and it is the same shape `zero-migrate-sqlite`'s and `zero-migrate-mysql`'s have.
 #[cfg(test)]
 mod test_fixtures;
 
-use zero_migrate_backend::registry::BackendVendor;
-use zero_migrate_ir::dialect::DialectId;
+use zeroship_migrate_backend::registry::BackendVendor;
+use zeroship_migrate_ir::dialect::DialectId;
 
 /// This backend's id STRING, spelled once for the whole crate.
 ///
@@ -145,7 +145,7 @@ const _: () = assert!(DialectId::is_well_formed_name(NAME));
 /// compiling, here, with this crate named - which is the point: a backend cannot
 /// inherit another backend's DDL, acquire a trusting guard, or acquire a silently
 /// empty advisory report by omission. See
-/// `zero_migrate_backend::registry::BackendVendor`.
+/// `zeroship_migrate_backend::registry::BackendVendor`.
 pub static VENDOR: BackendVendor = BackendVendor {
     attributes: attribute::VOCABULARY,
     descriptor: &descriptor::POSTGRES_DESCRIPTOR,

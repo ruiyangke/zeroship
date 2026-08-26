@@ -40,7 +40,7 @@
 //! row stamped `kind = 'squash'` + immutable supersession edges).
 
 use std::collections::HashSet;
-use zero_migrate_backend::registry::VendorSet;
+use zeroship_migrate_backend::registry::VendorSet;
 
 use crate::apply::backend::MigrationBackend;
 use crate::apply::executor::ApplyError;
@@ -167,7 +167,7 @@ pub enum SquashError {
 /// and the supersession write
 /// ([`record_squash`](MigrationBackend::record_squash)) all route through the
 /// trait. No concrete driver client / `pg_advisory_lock` / `pg_query` appears
-/// here; the PG specifics stay inside `zero_migrate_postgres::PostgresBackend`.
+/// here; the PG specifics stay inside `zeroship_migrate_postgres::PostgresBackend`.
 /// The PG path is byte-identical: the PG lock SQL, guard, and `record_baseline`
 /// write are the EXACT pre-seam code, now reached through the backend.
 pub async fn squash<B: MigrationBackend>(

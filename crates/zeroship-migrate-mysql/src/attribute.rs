@@ -1,7 +1,7 @@
 //! The vendor attributes MySQL declares.
 //!
 //! Each entry is one option from MySQL's own `CREATE TABLE` / `ALTER TABLE` table-options
-//! grammar that the neutral [`Op`](zero_migrate_ir::ir::Op) set does not model.
+//! grammar that the neutral [`Op`](zeroship_migrate_ir::ir::Op) set does not model.
 //!
 //! This is a STARTER SET, not the full grammar. Widening it is a
 //! change to this file alone.
@@ -15,9 +15,9 @@
 //! what it means. An over-permissive declaration is worse than an absent one, because an
 //! absent key is refused loudly and a wrong range passes quietly.
 
-use zero_migrate_backend::attribute::{AttrDef, AttrShape, AttributeVocabulary};
-use zero_migrate_backend::declare_attributes;
-use zero_migrate_ir::attribute::{
+use zeroship_migrate_backend::attribute::{AttrDef, AttrShape, AttributeVocabulary};
+use zeroship_migrate_backend::declare_attributes;
+use zeroship_migrate_ir::attribute::{
     CreatePartitionAttributes, CreateTableAttributes, SetTableOptionsAttributes,
 };
 

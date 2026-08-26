@@ -5,7 +5,7 @@
 //! their grants, row-level security and its policies, stored functions and triggers,
 //! plus the audited raw-statement escape - is rendered by whichever backend answers
 //! yes to
-//! [`Capability::PrivilegedCatalogObjects`](zero_migrate_ir::backend::Capability::PrivilegedCatalogObjects).
+//! [`Capability::PrivilegedCatalogObjects`](zeroship_migrate_ir::backend::Capability::PrivilegedCatalogObjects).
 //! This module holds only the two types that crossing costs: the statement shape
 //! ([`VendorStatement`]) and the refusal set ([`VendorError`]). It renders nothing
 //! and spells no keyword.
@@ -14,7 +14,7 @@
 //! it opened "The VENDOR (`zero-migrate`) Postgres render seam", described
 //! double-quoting identifiers and `pg_query`-parsing the rendered statement, and
 //! said "this module only renders Postgres". None of that has been true since the
-//! renderer moved to `zero_migrate_postgres::vendor`, which is where every sentence
+//! renderer moved to `zeroship_migrate_postgres::vendor`, which is where every sentence
 //! of it now applies. What was left behind was a vendor's module doc on a neutral
 //! vocabulary - a description that would have told a fourth backend it was reading
 //! PostgreSQL's code.
@@ -27,7 +27,7 @@
 //! in depth rather than the live refusal path.
 
 use crate::dml::IdentQuoteError;
-use zero_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::dialect::DialectId;
 
 /// A single rendered vendor statement: a name (for the journaled `Migration`), the
 /// forward SQL (no trailing `;`), and the reverse SQL (or `None` for an

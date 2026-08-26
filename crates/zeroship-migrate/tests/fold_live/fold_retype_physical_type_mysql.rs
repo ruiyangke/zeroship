@@ -46,13 +46,13 @@ use crate::support;
 use std::collections::BTreeMap;
 
 use crate::support::mysql::{quote_ident, DatabaseGuard, MysqlDevSession};
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::driver::SqlSession;
-use zero_migrate::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::{
     diff_snapshots, fold_ops, fold_ops_onto, model::ir::Op, resolve_create_table_policy, Approval,
     ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr,
 };
-use zero_migrate_mysql::MysqlBackend;
+use zeroship_migrate_mysql::MysqlBackend;
 
 const OWNER: &str = "app_fold_retype_physical_type_mysql";
 
@@ -88,18 +88,18 @@ async fn apply_doc(
     let resolved_source = serde_json::to_string(&resolved)
         .map_err(|error| format!("serialize resolved test IR: {error}"))?;
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         &policy,
     );
-    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate_mysql::DIALECT);
+    let guard = GuardConfig::from_policy(policy.clone(), zeroship_migrate_mysql::DIALECT);
     let artifact = author
         .load_and_lower_guarded(&resolved_source, OWNER, registry, live, &guard)
         .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;
 
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,
@@ -128,9 +128,9 @@ async fn assert_no_drift(
     stage: &str,
 ) -> Result<(), String> {
     let expected = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         ops,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         &cfg.project_schema,
         &support::no_inject(&cfg.project_schema),
     )
@@ -139,7 +139,7 @@ async fn assert_no_drift(
         .snapshot_schema(cfg)
         .await
         .map_err(|error| format!("{stage}: snapshot the live MySQL schema: {error}"))?;
-    let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
+    let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual);
     if drift.is_clean() {
         return Ok(());
     }
@@ -154,7 +154,7 @@ async fn assert_no_drift(
 }
 
 /// `data_type` / MySQL physical contract per column of one table, as readable lines.
-fn physical_types(snapshot: &zero_migrate::SchemaSnapshot, table: &str) -> String {
+fn physical_types(snapshot: &zeroship_migrate::SchemaSnapshot, table: &str) -> String {
     snapshot
         .tables
         .iter()
@@ -167,7 +167,7 @@ fn physical_types(snapshot: &zero_migrate::SchemaSnapshot, table: &str) -> Strin
                         "{} {:?} / {:?}",
                         c.name,
                         c.data_type,
-                        zero_migrate_mysql::physical_type::recorded(c)
+                        zeroship_migrate_mysql::physical_type::recorded(c)
                     )
                 })
                 .collect::<Vec<_>>()
@@ -187,8 +187,8 @@ async fn live_column_types(
             "SELECT COLUMN_NAME, COLUMN_TYPE FROM information_schema.COLUMNS \
              WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION",
             &[
-                zero_migrate::driver::Bind::Text(cfg.project_schema.clone()),
-                zero_migrate::driver::Bind::Text(table.to_string()),
+                zeroship_migrate::driver::Bind::Text(cfg.project_schema.clone()),
+                zeroship_migrate::driver::Bind::Text(table.to_string()),
             ],
         )
         .await
@@ -322,9 +322,9 @@ async fn a_narrowing_retype_folds_the_contract_mysql_reports_for_the_target() {
         // is exactly the stream that ran.
         let policy = support::no_inject(&cfg.project_schema);
         let folded = fold_ops(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &all_ops,
-            &zero_migrate_mysql::DIALECT,
+            &zeroship_migrate_mysql::DIALECT,
             &cfg.project_schema,
             &policy,
         )
@@ -353,10 +353,10 @@ async fn a_narrowing_retype_folds_the_contract_mysql_reports_for_the_target() {
 
 /// One column's MySQL physical contract out of a snapshot, or a stated failure.
 fn column_contract(
-    snapshot: &zero_migrate::SchemaSnapshot,
+    snapshot: &zeroship_migrate::SchemaSnapshot,
     table: &str,
     column: &str,
-) -> Result<zero_migrate_mysql::physical_type::MysqlPhysicalType, String> {
+) -> Result<zeroship_migrate_mysql::physical_type::MysqlPhysicalType, String> {
     snapshot
         .tables
         .iter()
@@ -364,7 +364,7 @@ fn column_contract(
         .and_then(|(_, t)| t.columns.iter().find(|c| c.name == column))
         .ok_or_else(|| format!("no column {table}.{column} in the snapshot"))
         .and_then(|c| {
-            zero_migrate_mysql::physical_type::recorded(c)
+            zeroship_migrate_mysql::physical_type::recorded(c)
                 .cloned()
                 .ok_or_else(|| {
                     format!("column {table}.{column} carries no MySQL physical contract")
@@ -513,10 +513,10 @@ async fn folding_onto_a_live_mysql_base_keeps_the_contracts_the_server_reported(
         .await?;
 
         let expected = fold_ops_onto(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &base,
             &added,
-            &zero_migrate_mysql::DIALECT,
+            &zeroship_migrate_mysql::DIALECT,
             &cfg.project_schema,
             &support::no_inject(&cfg.project_schema),
         )
@@ -550,7 +550,7 @@ async fn folding_onto_a_live_mysql_base_keeps_the_contracts_the_server_reported(
         }
 
         // HALF TWO: the ADDED column got a contract, and it is the one the server holds.
-        let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
+        let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual);
         if drift.is_clean() {
             return Ok(());
         }

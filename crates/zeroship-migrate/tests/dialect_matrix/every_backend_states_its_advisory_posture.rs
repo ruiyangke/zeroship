@@ -32,12 +32,12 @@
 //! compiles fine and reports a set as checked while reporting every statement in it
 //! as unchecked. That is what the census below is for.
 
-use zero_migrate::{
+use zeroship_migrate::{
     advisories_for_sql, analyzer_absence, shipping_backends, AdvisoryVerdict, Checksum,
     DeclarativePlan, Migration, MigrationFlags, MigrationId,
 };
-use zero_migrate_backend::advisory::rule;
-use zero_migrate_ir::dialect::DialectId;
+use zeroship_migrate_backend::advisory::rule;
+use zeroship_migrate_ir::dialect::DialectId;
 
 /// The census floor. A scan over a DISCOVERED set fails OPEN: narrow the discovery
 /// and it iterates nothing, finds nothing, and reports clean. Raise it when a
@@ -65,7 +65,7 @@ fn migration(up: &str) -> Migration {
         name: "advisory_probe".into(),
         up: up.to_string(),
         down: None,
-        checksum: Checksum::of(&zero_migrate::ChecksumInput {
+        checksum: Checksum::of(&zeroship_migrate::ChecksumInput {
             up,
             down: None,
             flags: &flags,
@@ -114,9 +114,9 @@ fn a_backends_two_advisory_answers_cannot_disagree() {
         let dialect = &descriptor.id;
         // A statement every dialect can be ASKED about. Whether it parses is the
         // backend's business; that it is asked is this test's.
-        let verdict = advisories_for_sql(zero_migrate::shipping_vendors(), dialect, "DROP TABLE t");
+        let verdict = advisories_for_sql(zeroship_migrate::shipping_vendors(), dialect, "DROP TABLE t");
         match (
-            analyzer_absence(zero_migrate::shipping_vendors(), dialect),
+            analyzer_absence(zeroship_migrate::shipping_vendors(), dialect),
             verdict,
         ) {
             (None, AdvisoryVerdict::Analyzed(_)) => analyzing += 1,
@@ -162,11 +162,11 @@ fn a_backends_two_advisory_answers_cannot_disagree() {
 fn an_unchecked_backend_never_reports_an_empty_advisory_list() {
     for descriptor in shipping_backends().iter() {
         let dialect = &descriptor.id;
-        let Some(absent) = analyzer_absence(zero_migrate::shipping_vendors(), dialect) else {
+        let Some(absent) = analyzer_absence(zeroship_migrate::shipping_vendors(), dialect) else {
             continue;
         };
 
-        let report = advisories_for_sql(zero_migrate::shipping_vendors(), dialect, "DROP TABLE t")
+        let report = advisories_for_sql(zeroship_migrate::shipping_vendors(), dialect, "DROP TABLE t")
             .into_report();
         assert!(
             !report.is_empty(),
@@ -193,9 +193,9 @@ fn a_plan_on_a_backend_without_an_analyzer_reports_the_absence() {
     for descriptor in shipping_backends().iter() {
         let dialect = &descriptor.id;
         let plan = plan_for(dialect, "DROP TABLE t");
-        let advisories = plan.advisories(zero_migrate::shipping_vendors());
+        let advisories = plan.advisories(zeroship_migrate::shipping_vendors());
 
-        if analyzer_absence(zero_migrate::shipping_vendors(), dialect).is_some() {
+        if analyzer_absence(zeroship_migrate::shipping_vendors(), dialect).is_some() {
             assert_eq!(
                 advisories.len(),
                 1,

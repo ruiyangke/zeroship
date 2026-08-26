@@ -208,7 +208,7 @@ async fn ensure_migrated_service_tables(conn: &Client) {
 
 async fn cleanup_app(conn: &Client, app_id: &Uuid) {
     let schema = app_id.to_string();
-    let role = zero_migrate::migrator_role_name(&schema).unwrap();
+    let role = zeroship_migrate::migrator_role_name(&schema).unwrap();
     let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
     let _ = conn
         .batch_execute(&format!(
@@ -1303,7 +1303,7 @@ async fn on_destructive_gates_destructive_migration_only_pg() {
 async fn store_state_machine_plan_approve_and_content_drift_revert_pg() {
     use zeroship_migrated::migration_store::{MigrationStore, StoreMigrationInput};
     use zeroship_migrated::policy::ManagedPosture;
-    use zero_migrate::DestructiveOps;
+    use zeroship_migrate::DestructiveOps;
 
     let conn = admin_conn().await;
     let app_id = Uuid::now_v7();

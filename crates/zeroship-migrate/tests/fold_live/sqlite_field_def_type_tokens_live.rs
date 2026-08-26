@@ -50,15 +50,15 @@ use crate::support;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::apply::executor::LockMode;
-use zero_migrate::model::ir::Op;
-use zero_migrate::render::fold::single_fold;
-use zero_migrate::{
+use zeroship_migrate::apply::executor::LockMode;
+use zeroship_migrate::model::ir::Op;
+use zeroship_migrate::render::fold::single_fold;
+use zeroship_migrate::{
     fold_ops, resolve_create_table_policy, Approval, ExecutorConfig, IrAuthor, LiveSchema,
     MigrationEngine, MigrationIr,
 };
-use zero_migrate_sqlite::backend::Mode;
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate_sqlite::backend::Mode;
+use zeroship_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_field_def_type_tokens";
 const APP: &str = "app_field_def_type_tokens";
@@ -153,23 +153,23 @@ async fn stored_types(backend: &SqliteBackend, table: &str, column: &str) -> Vec
 fn folded_live_schema(history: &[Op]) -> LiveSchema {
     let policy = support::no_inject(PROJECT);
     let snapshot = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         history,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         PROJECT,
         &policy,
     )
     .expect("the history folds");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     live.sdk_schemas = single_fold::fold(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         history,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         PROJECT,
         &policy,
     )
     .expect("the history folds")
-    .project_field_defs(zero_migrate::shipping_vendors());
+    .project_field_defs(zeroship_migrate::shipping_vendors());
     live
 }
 
@@ -180,14 +180,14 @@ async fn apply(backend: &SqliteBackend, source: &str, live: &LiveSchema) -> Vec<
     let raw: MigrationIr = serde_json::from_str(source).expect("test IR parses");
     let resolved = resolve_create_table_policy(&raw, &policy, PROJECT).expect("the IR resolves");
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &policy,
     );
     let steps = author.lower_steps(&resolved, live).expect("the IR lowers");
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &steps,
             Approval::Approved,

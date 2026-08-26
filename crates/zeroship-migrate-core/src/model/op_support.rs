@@ -21,8 +21,8 @@ use crate::model::ir::{
     IrConstraintKind, IrDefault, IrIndex, Op, PartitionSpec, RaiseLevel, TriggerAction,
     TriggerEvent, TriggerStmt, TriggerTiming, ViewQuery,
 };
-use zero_migrate_backend::registry::VendorSet;
-use zero_migrate_ir::attribute::CreateIndexAttributes;
+use zeroship_migrate_backend::registry::VendorSet;
+use zeroship_migrate_ir::attribute::CreateIndexAttributes;
 
 pub fn is_vendor(op: &Op) -> bool {
     !vendor_capabilities(op).is_empty()
@@ -60,7 +60,7 @@ pub fn support(vendors: VendorSet, op: &Op) -> crate::model::support::Support {
 pub fn support_for_target(
     vendors: VendorSet,
     op: &Op,
-    target: &zero_migrate_ir::dialect::DialectId,
+    target: &zeroship_migrate_ir::dialect::DialectId,
 ) -> crate::model::support::Support {
     use crate::model::support::Support;
 
@@ -110,12 +110,12 @@ const NEVER_REFUSED: &str = INTERNAL_NO_REFUSAL_REASON;
 fn support_cell(
     vendors: VendorSet,
     op: &Op,
-    disposition: zero_migrate_backend::validation::Disposition,
-    dialect: &zero_migrate_ir::dialect::DialectId,
+    disposition: zeroship_migrate_backend::validation::Disposition,
+    dialect: &zeroship_migrate_ir::dialect::DialectId,
     variant: &'static str,
 ) -> crate::model::support::SupportDecision {
     use crate::model::support::{supported, unsupported};
-    use zero_migrate_backend::validation::Disposition;
+    use zeroship_migrate_backend::validation::Disposition;
     match disposition {
         Disposition::Unsupported => {
             let reason = unsupported_reason(vendors, op, dialect, variant);
@@ -149,7 +149,7 @@ fn support_cell(
 fn render_mode(
     vendors: VendorSet,
     op: &Op,
-    dialect: &zero_migrate_ir::dialect::DialectId,
+    dialect: &zeroship_migrate_ir::dialect::DialectId,
     variant: &'static str,
 ) -> crate::model::support::RenderMode {
     use crate::model::support::RenderMode;
@@ -197,7 +197,7 @@ fn render_mode(
 fn unsupported_reason(
     vendors: VendorSet,
     op: &Op,
-    dialect: &zero_migrate_ir::dialect::DialectId,
+    dialect: &zeroship_migrate_ir::dialect::DialectId,
     variant: &'static str,
 ) -> &'static str {
     let backend_refusal = || {

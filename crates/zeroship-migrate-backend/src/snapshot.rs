@@ -2,9 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use zero_migrate_ir::attribute::Attributes;
-use zero_migrate_ir::expr::Expr;
-use zero_migrate_ir::ir::{
+use zeroship_migrate_ir::attribute::Attributes;
+use zeroship_migrate_ir::expr::Expr;
+use zeroship_migrate_ir::ir::{
     ColType, ForEach, FuncArg, FuncArgMode, FuncLanguage, FuncVolatility, IdentityCol,
     IndexSortOrder, PartitionBounds, PartitionSpec, PolicyCmd, SafeI64, SafeU64, SequenceOwnedBy,
     SequenceRef, TableRuntimeOptions, TriggerAction, TriggerEvent, TriggerTiming, ValueFormat,
@@ -295,7 +295,7 @@ pub struct ColumnSnapshot {
     /// attribute (introspection's `snapshot_schema` leaves it `None`; only
     /// `desired_snapshot` populates it), so it is EXCLUDED from `PartialEq` /
     /// `Eq`. The sentinel is built by the shared
-    /// `zero_migrate::schema::query` kernel - never re-spelled here.
+    /// `zeroship_migrate::schema::query` kernel - never re-spelled here.
     pub encryption_sentinel: Option<String>,
     /// The body of a `COMMENT ON COLUMN` sentinel to attach to
     /// THIS column in CREATE / ADD COLUMN DDL. Two sentinel families ride here:
@@ -1170,14 +1170,14 @@ pub struct ViewSnapshot {
     /// identical across dialects. A snapshot built by introspection leaves it `None`,
     /// because a live catalog cannot yield a typed query - and a drop with no typed
     /// body correctly stays irreversible rather than guessing one.
-    pub authored_query: Option<zero_migrate_ir::ir::ViewQuery>,
+    pub authored_query: Option<zeroship_migrate_ir::ir::ViewQuery>,
     /// The schema the authored `createView` resolved to, paired with
     /// [`Self::authored_query`] so the inverse names the object the drop named.
     pub authored_schema: Option<String>,
     /// User-authored catalog comment on this view.
     pub comment: Option<String>,
     /// This view's body as the SERVER re-prints it, written ONLY by
-    /// `zero_migrate::apply::drift::resolve_view_bodies` and only onto the two snapshots
+    /// `zeroship_migrate::apply::drift::resolve_view_bodies` and only onto the two snapshots
     /// a single drift check is about to compare.
     ///
     /// DELIBERATELY NOT [`Self::definition`], and the distinction is the reason this
@@ -1208,7 +1208,7 @@ impl PartialEq for ViewSnapshot {
     /// snapshots one drift check is comparing - so folding it into structural
     /// equality would make two otherwise identical snapshots differ on whether
     /// anyone had run that step. The body comparison lives in
-    /// `zero_migrate::diff_snapshots`, which reports WHICH field differs; this stays the
+    /// `zeroship_migrate::diff_snapshots`, which reports WHICH field differs; this stays the
     /// cheap identity test its callers already rely on.
     fn eq(&self, other: &Self) -> bool {
         self.materialized == other.materialized && self.comment == other.comment
@@ -1879,7 +1879,7 @@ pub struct VendorObjectIdentities {
 /// A relation on PostgreSQL only. SQLite and MySQL collapse a partition child into
 /// its parent rather than creating one, so their introspection reports no partition
 /// and this map stays empty there while a folded snapshot still carries the child -
-/// see the fold's own account of the exception in `zero_migrate::render::fold`.
+/// see the fold's own account of the exception in `zeroship_migrate::render::fold`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionSnapshot {
     /// Parent partitioned table.
@@ -2014,7 +2014,7 @@ pub struct NamedTypeSnapshot {
 /// `varchar(255)` versus `varchar` is a known instance: length is not part of a
 /// PG signature, but it is not folded here because it was not measured.
 ///
-/// SHARED WITH DRIFT. `zero_migrate::apply::drift` compares a folded function signature
+/// SHARED WITH DRIFT. `zeroship_migrate::apply::drift` compares a folded function signature
 /// against the one `pg_proc` reports, and the catalog reports `integer` where the
 /// author wrote `int`, so it needs exactly this mapping. It calls this function
 /// rather than carrying a second copy - a duplicated type table that drifts from
@@ -2049,7 +2049,7 @@ pub fn canonical_arg_type(raw: &str) -> String {
 // - a differ that stopped recognizing what one producer emits silently stops
 // comparing that producer's defaults.
 //
-// They sat in `zero_migrate::apply::drift` and `zero_migrate::render::declarative`,
+// They sat in `zeroship_migrate::apply::drift` and `zeroship_migrate::render::declarative`,
 // which put them above the vendor that writes them; the PostgreSQL introspector
 // reaches both, so they came down to where both callers can.
 
@@ -2071,7 +2071,7 @@ pub fn nextval_default_expr(sequence: &SequenceRef) -> String {
 /// SHARED rather than PostgreSQL-private, and the two callers are why. The PG
 /// introspector reaches it to recover an ID default from `pg_get_expr`
 /// (`backend::postgres::drift_sql::recover_nextval_default`), and the DIALECT-BLIND
-/// differ reaches it through `zero_migrate::apply::drift::comparable_column_default` -
+/// differ reaches it through `zeroship_migrate::apply::drift::comparable_column_default` -
 /// which runs for every
 /// dialect, because the snapshot it is handed may have been produced by any of them.
 /// A differ that could not read the spelling one producer emits would silently stop

@@ -41,9 +41,9 @@ use crate::support;
 
 use serde_json::Value;
 
-use zero_migrate::model::ir::{MigrationIr, Op, TableRuntimeOptions};
-use zero_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor, IndexDescriptor};
-use zero_migrate::{render_artifacts, render_artifacts_from_descriptors, ResolvedInject};
+use zeroship_migrate::model::ir::{MigrationIr, Op, TableRuntimeOptions};
+use zeroship_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor, IndexDescriptor};
+use zeroship_migrate::{render_artifacts, render_artifacts_from_descriptors, ResolvedInject};
 
 const SCHEMA: &str = "public";
 const OWNER: &str = "app_test";
@@ -109,7 +109,7 @@ fn people_raw_envelope() -> MigrationIr {
     MigrationIr {
         inverse_ops: None,
         irreversible: None,
-        ir_version: zero_migrate::model::ir::CURRENT_IR_VERSION,
+        ir_version: zeroship_migrate::model::ir::CURRENT_IR_VERSION,
         name: "create_people".to_string(),
         owner_app: OWNER.to_string(),
         ops: vec![create],
@@ -154,17 +154,17 @@ fn people_ops_generated() -> Vec<Op> {
 fn generated_and_manual_sources_emit_byte_identical_runtime_json() {
     let effective = support::confined_charter();
     let generated = render_artifacts(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &people_ops_generated(),
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )
     .expect("generated render");
     let manual = render_artifacts_from_descriptors(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &[people_descriptor()],
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )
@@ -186,9 +186,9 @@ fn generated_and_manual_sources_emit_byte_identical_runtime_json() {
 #[test]
 fn emitted_runtime_json_parses_and_satisfies_the_v1_shape() {
     let artifacts = render_artifacts_from_descriptors(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &[people_descriptor()],
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &support::confined_charter(),
     )
@@ -247,9 +247,9 @@ fn emitted_runtime_json_parses_and_satisfies_the_v1_shape() {
 #[test]
 fn emitted_env_db_ts_is_a_passive_current_authoring_schema() {
     let artifacts = render_artifacts_from_descriptors(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &[people_descriptor()],
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &support::confined_charter(),
     )
@@ -305,16 +305,16 @@ fn emitted_env_db_ts_is_a_passive_current_authoring_schema() {
 #[test]
 fn check_reports_drift_when_committed_differs_and_clean_when_identical() {
     let artifacts = render_artifacts_from_descriptors(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &[people_descriptor()],
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &support::confined_charter(),
     )
     .expect("render");
 
     // Clean: committed == freshly generated → Ok.
-    zero_migrate::check_artifacts(&artifacts, &artifacts.runtime_json, &artifacts.env_db_ts)
+    zeroship_migrate::check_artifacts(&artifacts, &artifacts.runtime_json, &artifacts.env_db_ts)
         .expect("identical artifacts are not drift");
 
     // Drift in runtime_json → the runtime file is reported.
@@ -323,29 +323,29 @@ fn check_reports_drift_when_committed_differs_and_clean_when_identical() {
         stale_runtime, artifacts.runtime_json,
         "the mutation actually changed bytes"
     );
-    let err = zero_migrate::check_artifacts(&artifacts, &stale_runtime, &artifacts.env_db_ts)
+    let err = zeroship_migrate::check_artifacts(&artifacts, &stale_runtime, &artifacts.env_db_ts)
         .expect_err("a differing committed runtime.json is drift");
     match err {
-        zero_migrate::GenTypesError::Drift { file, .. } => {
-            assert_eq!(file, zero_migrate::RUNTIME_DESCRIPTOR_FILE);
+        zeroship_migrate::GenTypesError::Drift { file, .. } => {
+            assert_eq!(file, zeroship_migrate::RUNTIME_DESCRIPTOR_FILE);
         }
         other => panic!("expected Drift on the runtime file, got {other:?}"),
     }
 
     // Drift in env.db.ts (runtime clean) → the ts file is reported.
     let stale_ts = format!("{}\n// injected drift\n", artifacts.env_db_ts);
-    let err = zero_migrate::check_artifacts(&artifacts, &artifacts.runtime_json, &stale_ts)
+    let err = zeroship_migrate::check_artifacts(&artifacts, &artifacts.runtime_json, &stale_ts)
         .expect_err("a differing committed env.db.ts is drift");
     match err {
-        zero_migrate::GenTypesError::Drift { file, .. } => {
-            assert_eq!(file, zero_migrate::ENV_DTS_FILE);
+        zeroship_migrate::GenTypesError::Drift { file, .. } => {
+            assert_eq!(file, zeroship_migrate::ENV_DTS_FILE);
         }
         other => panic!("expected Drift on the env.db.ts file, got {other:?}"),
     }
 
     // The structured diff peer returns None when clean.
     assert!(
-        zero_migrate::diff_artifacts(&artifacts, &artifacts.runtime_json, &artifacts.env_db_ts)
+        zeroship_migrate::diff_artifacts(&artifacts, &artifacts.runtime_json, &artifacts.env_db_ts)
             .is_none(),
         "diff_artifacts is None on identical inputs"
     );

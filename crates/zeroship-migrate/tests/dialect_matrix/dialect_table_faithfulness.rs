@@ -57,7 +57,7 @@ use std::path::PathBuf;
 
 use crate::dialect_corpus::corpus;
 use crate::dialect_table::{Disposition, DispositionRow, DIALECT_TABLE};
-use zero_migrate::model::ir::Op;
+use zeroship_migrate::model::ir::Op;
 
 /// The `op` wire tag (op-kind discriminant) of a concrete op, via its serde image.
 fn op_tag(op: &Op) -> String {
@@ -221,7 +221,7 @@ fn op_variant_matches_the_corpus_and_the_generated_table_matches_the_sidecar() {
     //    keeps the corpus and the engine's variant selection from drifting.
     for (kind, variant, op) in &corpus {
         assert_eq!(
-            &zero_migrate::model::op_support::op_variant(op),
+            &zeroship_migrate::model::op_support::op_variant(op),
             variant,
             "corpus labels {kind}/{variant} but op_variant() disagrees"
         );

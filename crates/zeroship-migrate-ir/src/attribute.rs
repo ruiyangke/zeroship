@@ -47,7 +47,7 @@
 //! This module is the neutral VOCABULARY only: the key, the value carrier, and the map.
 //! It knows no dialect ids and no attribute names. Which keys exist, what shapes their
 //! values take and whether they survive a catalog round-trip are declared by each vendor
-//! crate through the backend contract - see `zero_migrate_backend::attribute`.
+//! crate through the backend contract - see `zeroship_migrate_backend::attribute`.
 //!
 //! Values are [`IrScalar`], not a new type: it already exists, is closed, is
 //! checksum-stable and normalizes non-canonical encodings, so an attribute cannot carry
@@ -162,7 +162,7 @@ impl AttrKey {
     /// A well-formed declared key compiles:
     ///
     /// ```
-    /// use zero_migrate_ir::attribute::AttrKey;
+    /// use zeroship_migrate_ir::attribute::AttrKey;
     /// static FILLFACTOR: AttrKey = AttrKey::from_static("postgres.fillfactor");
     /// assert_eq!(FILLFACTOR.dialect(), "postgres");
     /// ```
@@ -171,7 +171,7 @@ impl AttrKey {
     /// declaring `static`:
     ///
     /// ```compile_fail
-    /// use zero_migrate_ir::attribute::AttrKey;
+    /// use zeroship_migrate_ir::attribute::AttrKey;
     /// static UNPREFIXED: AttrKey = AttrKey::from_static("fillfactor");
     /// ```
     ///

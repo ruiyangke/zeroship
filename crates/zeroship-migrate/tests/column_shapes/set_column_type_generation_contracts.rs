@@ -37,9 +37,9 @@ use crate::support;
 
 use std::collections::BTreeMap;
 
-use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::render::fold::fold_ops;
-use zero_migrate::{IrAuthor, LiveSchema, PlanStep};
+use zeroship_migrate::model::ir::MigrationIr;
+use zeroship_migrate::render::fold::fold_ops;
+use zeroship_migrate::{IrAuthor, LiveSchema, PlanStep};
 
 const SCHEMA: &str = "public";
 
@@ -111,9 +111,9 @@ fn live_after_create(create_col: &str) -> LiveSchema {
     ));
     let effective = support::operator_charter(SCHEMA);
     let folded = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir.ops,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )
@@ -124,13 +124,13 @@ fn live_after_create(create_col: &str) -> LiveSchema {
 /// Lower `ir` against `live` and return the ALTER COLUMN TYPE statement, or the
 /// refusal.
 fn alter_statement(
-    dialect: &zero_migrate::DialectId,
+    dialect: &zeroship_migrate::DialectId,
     ir: &MigrationIr,
     live: &LiveSchema,
 ) -> Result<String, String> {
     let effective = support::operator_charter(SCHEMA);
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         "app",
         dialect,
@@ -168,18 +168,18 @@ const IDENTITY_FIELD: &str = r#","identity":{"always":false}"#;
 fn differ_alters(facet: &str, live_ty: &str, desired_ty: &str) -> Result<Vec<String>, String> {
     let effective = support::operator_charter(SCHEMA);
     let desired_of = |ty: &str| {
-        let descriptor: zero_migrate::CollectionDescriptor = serde_json::from_str(&format!(
+        let descriptor: zeroship_migrate::CollectionDescriptor = serde_json::from_str(&format!(
             r#"{{"name":"a","owner_app":"app","fields":[
                 {{"name":"c0","type":"int","required":true,"primaryKey":true}},
                 {{"name":"v","type":"{ty}"{facet}}}
             ]}}"#
         ))
         .expect("the descriptor parses");
-        zero_migrate::desired_snapshot_for_dialect(
-            zero_migrate::shipping_vendors(),
+        zeroship_migrate::desired_snapshot_for_dialect(
+            zeroship_migrate::shipping_vendors(),
             SCHEMA,
             std::slice::from_ref(&descriptor),
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &effective,
         )
         .expect("the descriptor set resolves")
@@ -188,11 +188,11 @@ fn differ_alters(facet: &str, live_ty: &str, desired_ty: &str) -> Result<Vec<Str
     let desired = desired_of(desired_ty);
     let ownership: std::collections::HashMap<String, String> =
         [("a".to_string(), "app".to_string())].into_iter().collect();
-    let plan = zero_migrate::DeclarativeAuthor::new_for_dialect(
-        zero_migrate::shipping_vendors(),
+    let plan = zeroship_migrate::DeclarativeAuthor::new_for_dialect(
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         "app",
-        zero_migrate_postgres::DIALECT,
+        zeroship_migrate_postgres::DIALECT,
     )
     .diff(&desired, &live, &ownership, &[], &effective)
     .map_err(|error| error.to_string())?;
@@ -211,7 +211,7 @@ fn both_routes(create_col: &str, to_type: &str) -> BTreeMap<&'static str, Result
     out.insert(
         "declared-in-envelope",
         alter_statement(
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &declared_in_envelope(create_col, to_type),
             &LiveSchema::default(),
         ),
@@ -219,7 +219,7 @@ fn both_routes(create_col: &str, to_type: &str) -> BTreeMap<&'static str, Result
     out.insert(
         "live",
         alter_statement(
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &retype_only(to_type),
             &live_after_create(create_col),
         ),
@@ -294,7 +294,7 @@ fn a_retype_of_an_ordinary_column_beside_an_identity_column_is_untouched() {
             {"op":"setColumnType","table":"a","column":"v","toType":"text"}
         ]}"#,
     );
-    let up = alter_statement(&zero_migrate_postgres::DIALECT, &ir, &LiveSchema::default())
+    let up = alter_statement(&zeroship_migrate_postgres::DIALECT, &ir, &LiveSchema::default())
         .expect("a plain column beside an identity column retypes freely");
     assert!(
         up.contains(" USING ") && up.contains("TYPE text"),
@@ -364,7 +364,7 @@ fn a_column_added_in_this_envelope_carries_its_generation_contract_to_a_later_re
     // record kept at all. `addColumn` publishes nothing, so this is the shape that
     // proves `declared_column_generation` does work rather than duplicating work.
     let refusal = alter_statement(
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &added_in_envelope(
             r#""type":"int","nullable":false,"identity":{"always":false}"#,
             r#""text""#,
@@ -379,7 +379,7 @@ fn a_column_added_in_this_envelope_carries_its_generation_contract_to_a_later_re
     );
 
     let up = alter_statement(
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &added_in_envelope(
             r#""type":"int","generated":{"expr":{"node":"colRef","name":"c0"},"stored":true}"#,
             r#""bigInt""#,
@@ -449,7 +449,7 @@ fn the_declarative_differ_refuses_an_identity_column_retype_the_same_way() {
 fn sqlite_refuses_the_whole_op_before_either_verdict_applies() {
     for create_col in [IDENTITY_COL, GENERATED_COL, ORDINARY_COL] {
         let error = alter_statement(
-            &zero_migrate_sqlite::DIALECT,
+            &zeroship_migrate_sqlite::DIALECT,
             &declared_in_envelope(create_col, r#""bigInt""#),
             &LiveSchema::default(),
         )
@@ -484,10 +484,10 @@ fn mysql_lowers_every_column_shape_to_a_restate_step_instead_of_refusing() {
     for create_col in [IDENTITY_COL, GENERATED_COL, ORDINARY_COL] {
         let effective = support::operator_charter(SCHEMA);
         let author = IrAuthor::new(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             SCHEMA,
             "app",
-            &zero_migrate_mysql::DIALECT,
+            &zeroship_migrate_mysql::DIALECT,
             &effective,
         );
         let steps = author

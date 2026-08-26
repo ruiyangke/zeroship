@@ -48,10 +48,10 @@ use crate::snapshot::{
     canonical_index_sort_order, ColumnSnapshot, ConstraintSnapshot, GeneratedColumnSnapshot,
     IndexElementSnapshot, IndexSnapshot, TableSnapshot,
 };
-use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_ir::ir::IndexSortOrder;
-use zero_migrate_ir::ir::PartitionBounds;
-use zero_migrate_ir::ir::{ExclusionMethod, ExclusionOperator};
+use zeroship_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::ir::IndexSortOrder;
+use zeroship_migrate_ir::ir::PartitionBounds;
+use zeroship_migrate_ir::ir::{ExclusionMethod, ExclusionOperator};
 
 /// True if `index_name` is the implicit index a PRIMARY KEY materialises. It is
 /// created/dropped by the PK clause, never by a standalone CREATE/DROP INDEX, so
@@ -120,7 +120,7 @@ pub struct CreateTableRequest<'a> {
     /// The field was `Option<&ResolvedInject>` and SQLite read it through exactly
     /// one expression: `is_injected_index(table, &idx.name, inj)`. That predicate
     /// lives in the engine and cannot leave it - it resolves an inject spec's
-    /// columns through `zero_migrate::schema::query::index_name`, i.e. the ENGINE's
+    /// columns through `zeroship_migrate::schema::query::index_name`, i.e. the ENGINE's
     /// index-naming convention, which is a decision core makes and not a spelling a
     /// vendor is asked for.
     ///
@@ -545,7 +545,7 @@ pub fn fk_referenced_columns(definition: &str) -> Vec<String> {
 // ===========================================================================
 // The COLUMN-CLAUSE spellings every backend shares.
 //
-// Moved here from `zero_migrate::render::declarative`, where they were private
+// Moved here from `zeroship_migrate::render::declarative`, where they were private
 // siblings of the three `DdlEmitter` impls. All three impls call every one of
 // them, from BOTH `create_table` and `add_column`, so a helper the vendors share
 // cannot stay above the vendors - that is the same arrow the trait itself moved
@@ -553,7 +553,7 @@ pub fn fk_referenced_columns(definition: &str) -> Vec<String> {
 //
 // They are dialect-neutral: every helper left here has one spelling shared by all
 // three backends. Nothing here resolves a vendor or names one it was not handed,
-// so the boundary rule in `zero_migrate::render::backends`'s header is unchanged -
+// so the boundary rule in `zeroship_migrate::render::backends`'s header is unchanged -
 // the caller has already decided which vendor it is.
 //
 // Moved VERBATIM: same bodies, same names, same order of tests over the same

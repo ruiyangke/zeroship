@@ -29,13 +29,13 @@ zeroship-schema = { workspace = true }
 # engine's hardened `SqliteBackend` (connection B) on the app file, plans a
 # descriptor diff vs live introspection, and applies through
 # `MigrationEngine::apply_declarative`.
-# Phase F: this consumes the published, standalone `zero-migrate` engine (the
+# Phase F: this consumes the published, standalone `zeroship-migrate` engine (the
 # `zeroship-migrated` service's engine) — a clean, V8-FREE, tokio-AND-compio-free
 # library whose default `host-pg` feature is a marker cfg only (no heavy deps).
 # plugin-db uses solely the V8-free apply/render surface
 # (`apply::backend::{MigrationBackend, sqlite::SqliteBackend}` / `MigrationEngine` /
 # `render::declarative` / `desired_snapshot`) — no V8 host, no dependency cycle.
-zero-migrate = { workspace = true }
+zeroship-migrate = { workspace = true }
 # Metering infrastructure: exec.rs emits a raw usage metric
 # (db_reads / db_writes / db_rows_written) in the success arm of each
 # query / mutation / count via a MeterHandle. Platform-measured,

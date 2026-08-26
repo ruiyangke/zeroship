@@ -16,7 +16,7 @@
 //! # This is not the whole of MySQL's data security
 //!
 //! `data_security.destructive_ops = forbid` IS enforced for MySQL, by
-//! `zero_migrate_backend::guard::check_ir_data_security_policy`, over the structured IR.
+//! `zeroship_migrate_backend::guard::check_ir_data_security_policy`, over the structured IR.
 //! Its gate reads `if cfg.dialect() != &POSTGRES` - it exists
 //! because the guard here is empty and is handed no policy. Do not read the empty
 //! outcome below as "MySQL enforces nothing"; read it as "MySQL enforces at the IR,
@@ -29,8 +29,8 @@
 //! now writes its own trusting guard, so a change to one dialect's posture cannot
 //! silently become a change to the other's.
 
-use zero_migrate_backend::guard::{GuardConfig, GuardError, GuardOutcome, MigrationGuard};
-use zero_migrate_ir::migration::MigrationFlags;
+use zeroship_migrate_backend::guard::{GuardConfig, GuardError, GuardOutcome, MigrationGuard};
+use zeroship_migrate_ir::migration::MigrationFlags;
 
 /// MySQL's line-1: trust the descriptor output.
 #[derive(Debug, Clone, Copy, Default)]
@@ -89,7 +89,7 @@ impl MigrationGuard for MysqlGuard {
     /// read `data_security.destructive_ops` at all, let alone refuse on it.
     ///
     /// The neutral posture walk in
-    /// [`check_ir_data_security_policy`](zero_migrate_backend::guard::check_ir_data_security_policy)
+    /// [`check_ir_data_security_policy`](zeroship_migrate_backend::guard::check_ir_data_security_policy)
     /// is consequently the ONLY enforcement that knob has on this backend. Answering
     /// `true` would turn it off and make the knob silently inert - which is exactly
     /// what it was before that walk existed: a `DROP TABLE` applied under the default

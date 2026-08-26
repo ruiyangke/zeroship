@@ -1,19 +1,19 @@
 use std::collections::BTreeMap;
 
 use crate::DIALECT;
-use zero_migrate_backend::error::IrLowerError;
-use zero_migrate_backend::fold::{
+use zeroship_migrate_backend::error::IrLowerError;
+use zeroship_migrate_backend::fold::{
     AuthorTypeOverride, CatalogFoldPolicy, CatalogFoldRefusal, FoldCursorColumnContract,
     FoldCursorComparison, FoldCursorScalarType, FoldDatabaseFeature, ReferenceTextStorage,
     SnapshotProvenanceStrength,
 };
-use zero_migrate_backend::schema::SchemaRenderer;
-use zero_migrate_backend::snapshot::{
+use zeroship_migrate_backend::schema::SchemaRenderer;
+use zeroship_migrate_backend::snapshot::{
     ColumnSnapshot, PartitionSnapshot, SequenceSnapshot, TableSnapshot, ViewSnapshot,
 };
-use zero_migrate_ir::expr::{Expr, SynthFn};
-use zero_migrate_ir::ir::{ColType, ValueFormat};
-use zero_migrate_ir::precondition::PreconditionCheck;
+use zeroship_migrate_ir::expr::{Expr, SynthFn};
+use zeroship_migrate_ir::ir::{ColType, ValueFormat};
+use zeroship_migrate_ir::precondition::PreconditionCheck;
 
 #[derive(Debug)]
 pub(crate) struct MysqlCatalogFoldPolicy;

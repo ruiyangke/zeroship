@@ -15,13 +15,13 @@ use crate::support;
 
 use std::path::PathBuf;
 
-use zero_migrate::model::expr::{BinaryOp, Expr};
-use zero_migrate::model::ir::{
+use zeroship_migrate::model::expr::{BinaryOp, Expr};
+use zeroship_migrate::model::ir::{
     ColType, IrColumn, IrConstraint, IrConstraintKind, IrScalar, MigrationIr, Op,
 };
-use zero_migrate::model::validate::validate_ir_scoped;
-use zero_migrate::DialectId;
-use zero_migrate::{IrAuthor, IrFlagsOverride, LiveSchema, SchemaScope, CURRENT_IR_VERSION};
+use zeroship_migrate::model::validate::validate_ir_scoped;
+use zeroship_migrate::DialectId;
+use zeroship_migrate::{IrAuthor, IrFlagsOverride, LiveSchema, SchemaScope, CURRENT_IR_VERSION};
 
 fn ir(op: Op) -> MigrationIr {
     MigrationIr {
@@ -41,10 +41,10 @@ fn ir(op: Op) -> MigrationIr {
 
 fn pg_sql(op: Op) -> Vec<String> {
     IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         "app",
         "app_nv",
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &support::no_inject("app"),
     )
     .lower(&ir(op), &LiveSchema::default())
@@ -56,7 +56,7 @@ fn pg_sql(op: Op) -> Vec<String> {
 
 fn validates(op: Op, dialect: &DialectId) -> bool {
     validate_ir_scoped(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir(op),
         dialect,
         Some(&SchemaScope::Unconfined),
@@ -66,7 +66,7 @@ fn validates(op: Op, dialect: &DialectId) -> bool {
 
 fn fk_not_valid(not_valid: Option<bool>) -> Op {
     Op::AddConstraint {
-        attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
         table: "line_items".into(),
         constraint: IrConstraint {
             name: Some("line_items_order_fkey".into()),
@@ -88,7 +88,7 @@ fn fk_not_valid(not_valid: Option<bool>) -> Op {
 
 fn check_not_valid(not_valid: Option<bool>) -> Op {
     Op::AddConstraint {
-        attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
         table: "line_items".into(),
         constraint: IrConstraint {
             name: Some("line_items_qty_positive".into()),
@@ -174,37 +174,37 @@ fn pg_validate_constraint_renders_validate_constraint() {
 fn not_valid_fk_is_postgres_only() {
     assert!(validates(
         fk_not_valid(Some(true)),
-        &zero_migrate_postgres::DIALECT
+        &zeroship_migrate_postgres::DIALECT
     ));
     assert!(!validates(
         fk_not_valid(Some(true)),
-        &zero_migrate_sqlite::DIALECT
+        &zeroship_migrate_sqlite::DIALECT
     ));
     assert!(!validates(
         fk_not_valid(Some(true)),
-        &zero_migrate_mysql::DIALECT
+        &zeroship_migrate_mysql::DIALECT
     ));
     // A plain FK (no notValid) is still portable to PG + MySQL.
     assert!(validates(
         fk_not_valid(None),
-        &zero_migrate_postgres::DIALECT
+        &zeroship_migrate_postgres::DIALECT
     ));
-    assert!(validates(fk_not_valid(None), &zero_migrate_mysql::DIALECT));
+    assert!(validates(fk_not_valid(None), &zeroship_migrate_mysql::DIALECT));
 }
 
 #[test]
 fn not_valid_check_is_postgres_only() {
     assert!(validates(
         check_not_valid(Some(true)),
-        &zero_migrate_postgres::DIALECT
+        &zeroship_migrate_postgres::DIALECT
     ));
     assert!(!validates(
         check_not_valid(Some(true)),
-        &zero_migrate_sqlite::DIALECT
+        &zeroship_migrate_sqlite::DIALECT
     ));
     assert!(!validates(
         check_not_valid(Some(true)),
-        &zero_migrate_mysql::DIALECT
+        &zeroship_migrate_mysql::DIALECT
     ));
 }
 
@@ -212,15 +212,15 @@ fn not_valid_check_is_postgres_only() {
 fn validate_constraint_op_is_postgres_only() {
     assert!(validates(
         validate_constraint(),
-        &zero_migrate_postgres::DIALECT
+        &zeroship_migrate_postgres::DIALECT
     ));
     assert!(!validates(
         validate_constraint(),
-        &zero_migrate_sqlite::DIALECT
+        &zeroship_migrate_sqlite::DIALECT
     ));
     assert!(!validates(
         validate_constraint(),
-        &zero_migrate_mysql::DIALECT
+        &zeroship_migrate_mysql::DIALECT
     ));
 }
 
@@ -228,7 +228,7 @@ fn validate_constraint_op_is_postgres_only() {
 fn not_valid_on_create_time_constraint_is_refused_everywhere() {
     // NOT VALID is meaningless at create-time; refused fail-closed on every dialect.
     let create = |not_valid: Option<bool>| Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "line_items".into(),
         columns: vec![],
         primary_key: None,
@@ -256,7 +256,7 @@ fn not_valid_on_create_time_constraint_is_refused_everywhere() {
     };
     assert!(!validates(
         create(Some(true)),
-        &zero_migrate_postgres::DIALECT
+        &zeroship_migrate_postgres::DIALECT
     ));
 
     // This CHECK fixture cannot carry the `Some(false)` half or an absent control:
@@ -278,7 +278,7 @@ fn create_time_not_valid_is_refused_in_both_spellings_by_validate() {
     // reachable from the surface: the recorder's `requireOptionalBoolean` passes a
     // literal `false` through unchanged.
     let create = |not_valid: Option<bool>| Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "line_items".into(),
         columns: vec![IrColumn {
             name: "parent_id".into(),
@@ -319,7 +319,7 @@ fn create_time_not_valid_is_refused_in_both_spellings_by_validate() {
 
     for spelling in [Some(true), Some(false)] {
         assert!(
-            !validates(create(spelling), &zero_migrate_postgres::DIALECT),
+            !validates(create(spelling), &zeroship_migrate_postgres::DIALECT),
             "createTable FOREIGN KEY notValid={spelling:?} must be refused at validate"
         );
     }
@@ -328,7 +328,7 @@ fn create_time_not_valid_is_refused_in_both_spellings_by_validate() {
     // the facet absent clears validate. Without it, both lines above would pass on a
     // fixture that validate rejects for some unrelated reason.
     assert!(
-        validates(create(None), &zero_migrate_postgres::DIALECT),
+        validates(create(None), &zeroship_migrate_postgres::DIALECT),
         "the same createTable without the facet must clear validate"
     );
 }

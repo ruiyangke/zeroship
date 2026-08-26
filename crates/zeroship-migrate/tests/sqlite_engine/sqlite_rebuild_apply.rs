@@ -23,15 +23,15 @@ use std::path::PathBuf;
 
 use serde_json::json;
 use tempfile::TempDir;
-use zero_migrate::model::ir::CURRENT_IR_VERSION;
-use zero_migrate::{
+use zeroship_migrate::model::ir::CURRENT_IR_VERSION;
+use zeroship_migrate::{
     CollectionDescriptor, DeclarativeAuthor, FieldDescriptor, IndexDescriptor, IrAuthor,
     LiveSchema, Migration, MigrationIr, PlanStep, RenameStep, SchemaSnapshot, TableRebuild,
     TableRebuildSpec,
 };
-use zero_migrate_backend::table_rebuild::SequenceHighWaterPolicy;
-use zero_migrate_sqlite::backend::Mode;
-use zero_migrate_sqlite::{RebuildError, SqliteBackend};
+use zeroship_migrate_backend::table_rebuild::SequenceHighWaterPolicy;
+use zeroship_migrate_sqlite::backend::Mode;
+use zeroship_migrate_sqlite::{RebuildError, SqliteBackend};
 
 const PROJECT: &str = "prj_demo";
 const APP: &str = "app_demo";
@@ -59,27 +59,27 @@ fn backend(p: &Paths) -> SqliteBackend {
 
 fn sqlite_author() -> DeclarativeAuthor {
     DeclarativeAuthor::new_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        zero_migrate_sqlite::DIALECT,
+        zeroship_migrate_sqlite::DIALECT,
     )
 }
 
-fn effective_policy() -> zero_migrate::EffectivePolicy {
+fn effective_policy() -> zeroship_migrate::EffectivePolicy {
     support::confined_charter()
 }
 
 fn desired_snapshot(
     project_schema: &str,
     descriptors: &[CollectionDescriptor],
-    effective: &zero_migrate::EffectivePolicy,
-) -> Result<zero_migrate::DesiredSchema, zero_migrate::DeclarativeError> {
-    zero_migrate::desired_snapshot_for_dialect(
-        zero_migrate::shipping_vendors(),
+    effective: &zeroship_migrate::EffectivePolicy,
+) -> Result<zeroship_migrate::DesiredSchema, zeroship_migrate::DeclarativeError> {
+    zeroship_migrate::desired_snapshot_for_dialect(
+        zeroship_migrate::shipping_vendors(),
         project_schema,
         descriptors,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         effective,
     )
 }
@@ -200,10 +200,10 @@ fn drop_composite_fk_ir() -> MigrationIr {
 
 fn lower_sqlite_rebuild(ir: &MigrationIr, live: &LiveSchema) -> TableRebuild {
     let steps = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::no_inject("app"),
     )
     .lower_steps(ir, live)
@@ -893,7 +893,7 @@ async fn type_change_rebuild_preserves_data_and_recreates_index() {
     let v = rb.migration.version.as_str();
     assert!(
         net.iter()
-            .any(|e| e.version == v && e.phase == zero_migrate::apply::journal::Phase::Completed),
+            .any(|e| e.version == v && e.phase == zeroship_migrate::apply::journal::Phase::Completed),
         "the rebuild must be journaled completed"
     );
 
@@ -984,7 +984,7 @@ async fn nullability_tighten_rebuild() {
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn column_rename_rebuild_carries_data() {
-    use zero_migrate::RenameHint;
+    use zeroship_migrate::RenameHint;
 
     // v1: people(nickname). v2: people(handle). A hinted rename nickname → handle.
     let v1 = vec![CollectionDescriptor {
@@ -2428,7 +2428,7 @@ async fn drop_foreign_key_via_rebuild_removes_the_fk() {
 // ---------------------------------------------------------------------------
 
 fn simple_migration(name: &str, up: &str) -> Migration {
-    use zero_migrate::model::migration::{Checksum, ChecksumInput, MigrationFlags, MigrationId};
+    use zeroship_migrate::model::migration::{Checksum, ChecksumInput, MigrationFlags, MigrationId};
     let flags = MigrationFlags::default();
     let checksum = Checksum::of(&ChecksumInput {
         up,
@@ -2469,7 +2469,7 @@ fn simple_migration(name: &str, up: &str) -> Migration {
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn rebuild_one_seam_refuses_destructive_rebuild_outside_version_scope() {
-    use zero_migrate::{ApplyError, ApprovalScope, MigrationBackend};
+    use zeroship_migrate::{ApplyError, ApprovalScope, MigrationBackend};
 
     // A genuine type-change rebuild (destructive=true by construction).
     let v1 = vec![CollectionDescriptor {
@@ -2584,7 +2584,7 @@ async fn rebuild_one_seam_refuses_destructive_rebuild_outside_version_scope() {
 
 /// A destructive journal migration for a directly-constructed rebuild spec.
 fn rebuild_migration(table: &str, spec: &TableRebuildSpec) -> Migration {
-    use zero_migrate::model::migration::{Checksum, ChecksumInput, MigrationFlags, MigrationId};
+    use zeroship_migrate::model::migration::{Checksum, ChecksumInput, MigrationFlags, MigrationId};
     let flags = MigrationFlags {
         destructive: true,
         requires_approval: true,

@@ -27,10 +27,10 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use zero_migrate_backend::backfill::BackfillSpec;
-use zero_migrate_backend::driver::{Bind, DbError, Row, SqlSession, Value};
-use zero_migrate_backend::step::{BindValue, PlanStep};
-use zero_migrate_ir::migration::{Checksum, ChecksumInput, MigrationFlags, MigrationId};
+use zeroship_migrate_backend::backfill::BackfillSpec;
+use zeroship_migrate_backend::driver::{Bind, DbError, Row, SqlSession, Value};
+use zeroship_migrate_backend::step::{BindValue, PlanStep};
+use zeroship_migrate_ir::migration::{Checksum, ChecksumInput, MigrationFlags, MigrationId};
 
 /// The host-shaped one-in-flight guard, mechanically enforced in the
 /// driver rather than trusted by analogy. Every verb `compare_exchange(false,
@@ -294,7 +294,7 @@ pub fn plan_backfill_step() -> (PlanStep, MigrationId, Checksum) {
                 schema: "proj_x".into(),
                 table: "users".into(),
                 cursor_columns: vec!["id".into()],
-                cursor_stability: zero_migrate_ir::ir::CursorStability::GuardUpdates,
+                cursor_stability: zeroship_migrate_ir::ir::CursorStability::GuardUpdates,
                 cursor_contract: None,
                 batch_size: 100,
                 set_clause: "ready = TRUE".into(),

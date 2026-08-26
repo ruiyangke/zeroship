@@ -5,12 +5,12 @@
 //! them. A fourth backend could not extend that closed bridge. The rows now live in their vendor
 //! crates and this integration test checks the composition that can see all three.
 
-use zero_migrate::{shipping_backends, Capability};
-use zero_migrate_backend::registry::BackendVendor;
-use zero_migrate_ir::ir::PartitionBounds;
-use zero_migrate_mysql::DIALECT as MYSQL;
-use zero_migrate_postgres::DIALECT as POSTGRES;
-use zero_migrate_sqlite::DIALECT as SQLITE;
+use zeroship_migrate::{shipping_backends, Capability};
+use zeroship_migrate_backend::registry::BackendVendor;
+use zeroship_migrate_ir::ir::PartitionBounds;
+use zeroship_migrate_mysql::DIALECT as MYSQL;
+use zeroship_migrate_postgres::DIALECT as POSTGRES;
+use zeroship_migrate_sqlite::DIALECT as SQLITE;
 
 const REGISTERED_VENDOR_FLOOR: usize = 3;
 const EXPECTED_VENDOR_IDS: &[&str] = &["postgres", "sqlite", "mysql"];
@@ -20,9 +20,9 @@ const EXPECTED_VENDOR_IDS: &[&str] = &["postgres", "sqlite", "mysql"];
 /// the composition that can see all three.
 fn shipping_vendors() -> [&'static BackendVendor; 3] {
     [
-        &zero_migrate_postgres::VENDOR,
-        &zero_migrate_sqlite::VENDOR,
-        &zero_migrate_mysql::VENDOR,
+        &zeroship_migrate_postgres::VENDOR,
+        &zeroship_migrate_sqlite::VENDOR,
+        &zeroship_migrate_mysql::VENDOR,
     ]
 }
 
@@ -58,15 +58,15 @@ fn the_shipping_registry_is_the_only_descriptor_list() {
 
     assert!(std::ptr::eq(
         registry.get(&POSTGRES).expect("PostgreSQL is registered"),
-        zero_migrate_postgres::VENDOR.descriptor,
+        zeroship_migrate_postgres::VENDOR.descriptor,
     ));
     assert!(std::ptr::eq(
         registry.get(&SQLITE).expect("SQLite is registered"),
-        zero_migrate_sqlite::VENDOR.descriptor,
+        zeroship_migrate_sqlite::VENDOR.descriptor,
     ));
     assert!(std::ptr::eq(
         registry.get(&MYSQL).expect("MySQL is registered"),
-        zero_migrate_mysql::VENDOR.descriptor,
+        zeroship_migrate_mysql::VENDOR.descriptor,
     ));
 }
 

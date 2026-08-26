@@ -2,19 +2,19 @@
 
 use std::collections::BTreeMap;
 
-use zero_migrate_backend::drift::DriftError;
-use zero_migrate_backend::driver::SqlSession;
-use zero_migrate_backend::fold::CatalogFoldPolicy as _;
-use zero_migrate_backend::schema::SchemaRenderer;
-use zero_migrate_backend::snapshot::{
+use zeroship_migrate_backend::drift::DriftError;
+use zeroship_migrate_backend::driver::SqlSession;
+use zeroship_migrate_backend::fold::CatalogFoldPolicy as _;
+use zeroship_migrate_backend::schema::SchemaRenderer;
+use zeroship_migrate_backend::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, IdDefaultSnapshot, IndexElementSnapshot, IndexSnapshot,
     SchemaSnapshot, TableSnapshot, TextStorageSnapshot, ViewSnapshot,
 };
-use zero_migrate_backend::value_format::{
+use zeroship_migrate_backend::value_format::{
     catalog_id_default, catalog_text_id_default, catalog_uuid_id_default, recover_format_check,
     RecoveredFormatCheck,
 };
-use zero_migrate_ir::ir::{IdentityCol, IndexSortOrder};
+use zeroship_migrate_ir::ir::{IdentityCol, IndexSortOrder};
 
 /// This vendor's own catalog-normalization renderer, and the DML renderer whose
 /// generator spellings it compares against.
@@ -24,9 +24,9 @@ use zero_migrate_ir::ir::{IdentityCol, IndexSortOrder};
 /// MySQL is the round trip `registry_resolution_stays_core_only` reads this crate
 /// for. They are the same `&'static` objects `VENDOR` registers, so the comparison
 /// is byte-for-byte the one the engine's own door performs.
-const VALUE_FORMAT: &dyn zero_migrate_backend::value_format::ValueFormatRenderer =
+const VALUE_FORMAT: &dyn zeroship_migrate_backend::value_format::ValueFormatRenderer =
     crate::VENDOR.value_format;
-const DML: &dyn zero_migrate_backend::renderer::DmlRenderer = crate::VENDOR.dml;
+const DML: &dyn zeroship_migrate_backend::renderer::DmlRenderer = crate::VENDOR.dml;
 
 #[derive(Debug)]
 struct IndexParts {
@@ -175,7 +175,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
                 // the live snapshot comparable to a folded one: `TableSnapshot::eq` excludes
                 // this field precisely because filling it on one side only would report every
                 // attribute-carrying table as drifted.
-                attributes: zero_migrate_ir::attribute::Attributes::new(),
+                attributes: zeroship_migrate_ir::attribute::Attributes::new(),
                 partition_by: None,
                 comment: None,
                 stored_create_sql: None,
@@ -463,7 +463,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
                     kind: "PRIMARY KEY".to_string(),
                     definition: format!(
                         "PRIMARY KEY ({})",
-                        zero_migrate_backend::constraint_definition::constraintdef_cols(
+                        zeroship_migrate_backend::constraint_definition::constraintdef_cols(
                             &parts.columns
                         )
                     ),
@@ -610,7 +610,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
         // author wrote no constraint name. A key read out of `information_schema`
         // always arrives named, so that half has nothing to do here and the name
         // below is the one the catalog gave.
-        let constraint = zero_migrate_backend::constraint_definition::fk_constraint_snapshot(
+        let constraint = zeroship_migrate_backend::constraint_definition::fk_constraint_snapshot(
             constraint_name.clone(),
             &parts.referenced_schema,
             &parts.columns,
@@ -853,7 +853,7 @@ mod tests {
             "spatial carries an SRID that COLUMN_TYPE does not, so it is not modelled here yet"
         );
     }
-    use zero_migrate_backend::snapshot::IdDefaultSnapshot;
+    use zeroship_migrate_backend::snapshot::IdDefaultSnapshot;
 
     #[test]
     fn mysql_collations_normalize_to_portable_case_sensitive_intent() {

@@ -28,9 +28,9 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 
-use zero_migrate::model::ir::{MigrationIr, Op};
-use zero_migrate::render_artifacts;
-use zero_migrate_sqlite::DIALECT as SQLITE;
+use zeroship_migrate::model::ir::{MigrationIr, Op};
+use zeroship_migrate::render_artifacts;
+use zeroship_migrate_sqlite::DIALECT as SQLITE;
 
 const SCHEMA: &str = "public";
 
@@ -62,9 +62,9 @@ fn history() -> Vec<Op> {
 /// The emitted field names of one collection, out of `schema.runtime.json`.
 fn field_names(collection: &str) -> BTreeSet<String> {
     let artifacts = render_artifacts(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &history(),
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &support::confined_charter(),
     )
@@ -140,7 +140,7 @@ fn a_create_in_an_unselected_leg_is_resolved_too() {
 }"#;
     let ir: MigrationIr = serde_json::from_str(source).expect("the unselected-leg IR parses");
     let resolved =
-        zero_migrate::resolve_create_table_policy(&ir, &support::confined_charter(), SCHEMA)
+        zeroship_migrate::resolve_create_table_policy(&ir, &support::confined_charter(), SCHEMA)
             .expect("the confined charter resolves the leg's create");
 
     let Some(Op::Dialectal { legs }) = resolved.ops.first() else {

@@ -1,7 +1,7 @@
 //! The apply/rollback vocabulary every backend's signatures name.
 //!
 //! This module holds CONCEPTS, not an executor. The generic apply and rollback
-//! orchestration stays in the engine (`zero_migrate::apply::executor`); what lives
+//! orchestration stays in the engine (`zeroship_migrate::apply::executor`); what lives
 //! here is the shared shape those orchestrators and every `MigrationBackend` impl
 //! agree on: how a batch says who owns the project lock ([`LockMode`]), what an
 //! apply reports ([`ApplyOutcome`]) or refuses ([`ApplyError`]), how a driver
@@ -18,7 +18,7 @@
 use std::error::Error;
 use std::fmt;
 
-use zero_migrate_ir::migration::MigrationId;
+use zeroship_migrate_ir::migration::MigrationId;
 
 use crate::guard::GuardError;
 use crate::journal::JournalError;
@@ -192,7 +192,7 @@ pub enum ApplyError {
         /// The rejected migration's version.
         version: String,
         /// The target that lacks a non-txn path, from its own identity.
-        dialect: zero_migrate_ir::dialect::DialectId,
+        dialect: zeroship_migrate_ir::dialect::DialectId,
     },
     /// A plan step needs an optional backend capability
     /// ([`BackendCapability`](crate::capability::BackendCapability)) the deploy
@@ -465,7 +465,7 @@ pub enum ApplyError {
         shared: String,
     },
     /// A pending migration carried a precondition with
-    /// [`OnUnmet::Halt`](zero_migrate_ir::precondition::OnUnmet::Halt) that was UNMET (it
+    /// [`OnUnmet::Halt`](zeroship_migrate_ir::precondition::OnUnmet::Halt) that was UNMET (it
     /// evaluated false), or a precondition that could not be evaluated at all (a
     /// guard-denied / malformed `SqlBoolean`, an invalid identifier). Fail-closed:
     /// the whole apply is aborted before this migration's `up` runs, and NOTHING
@@ -953,7 +953,7 @@ pub enum RollbackError {
     /// rolled back. A target that reverses everything natively never reaches here,
     /// which is why the concept is stated once instead of once per backend - the
     /// refusing target names itself from its own
-    /// [`DialectId`](zero_migrate_ir::dialect::DialectId), and `reason` is its
+    /// [`DialectId`](zeroship_migrate_ir::dialect::DialectId), and `reason` is its
     /// own account of what specifically needs the rebuild.
     #[error(
         "migration {version} has a {dialect} `down` requiring a whole-table rebuild \
@@ -963,7 +963,7 @@ pub enum RollbackError {
     )]
     TableRebuildRequired {
         /// The target that cannot reverse it natively, from its own identity.
-        dialect: zero_migrate_ir::dialect::DialectId,
+        dialect: zeroship_migrate_ir::dialect::DialectId,
         /// The migration whose `down` needs a table rebuild.
         version: String,
         /// That target's account of what specifically requires the rebuild.
@@ -997,7 +997,7 @@ pub fn authorize_existence_guard_schema(
     cfg: &crate::conn::ExecutorConfig,
     version: &str,
     probe_schema: &str,
-    dialect: &zero_migrate_ir::dialect::DialectId,
+    dialect: &zeroship_migrate_ir::dialect::DialectId,
 ) -> Result<(), ApplyError> {
     if cfg
         .guard_config_for(dialect)
@@ -1034,13 +1034,13 @@ pub fn authorize_existence_guard_schema(
 
 use std::collections::HashMap;
 
-use zero_migrate_ir::migration::Migration;
-use zero_migrate_ir::precondition::Precondition;
+use zeroship_migrate_ir::migration::Migration;
+use zeroship_migrate_ir::precondition::Precondition;
 
 use crate::journal::AppliedEntry;
 
 /// The refusal an unmet
-/// [`OnUnmet::Halt`](zero_migrate_ir::precondition::OnUnmet::Halt) check produces.
+/// [`OnUnmet::Halt`](zeroship_migrate_ir::precondition::OnUnmet::Halt) check produces.
 ///
 /// Shared by the per-migration seam and the plan-wide preflight so that moving
 /// WHEN a refusal fires never changes WHAT the operator reads.
@@ -1129,7 +1129,7 @@ pub fn order_pending<'a>(
 /// The SHARED canonical ordering core: a deterministic, **version-tiebroken
 /// topological sort** of `nodes` over their `depends_on` edges. Both the apply
 /// path ([`order_pending`]) and the integrity manifest ([`canonical_set_order`],
-/// folded by `zero_migrate::plan::manifest::compute_manifest`) order through this one
+/// folded by `zeroship_migrate::plan::manifest::compute_manifest`) order through this one
 /// implementation, so the order the manifest blesses can NEVER diverge from the
 /// order the executor runs.
 ///
@@ -1211,7 +1211,7 @@ pub fn topo_order_version_tiebroken<'a>(
 }
 
 /// The CANONICAL EXECUTED ORDER of a FULL supplied set, used by
-/// `zero_migrate::plan::manifest::compute_manifest` to fold the manifest over the order the
+/// `zeroship_migrate::plan::manifest::compute_manifest` to fold the manifest over the order the
 /// executor will actually run - NOT the cosmetic slice order.
 ///
 /// This is [`topo_order_version_tiebroken`] over the WHOLE set with NO journal

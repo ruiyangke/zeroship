@@ -82,7 +82,7 @@
 //! [`op_refused_still_disagrees_across_the_three_backends_on_an_unclassified_drop`] is
 //! the LIVE red, and it is a REAL residual gap rather than a constructed one. The
 //! defect this observation is seeded from was fixed by
-//! `zero_migrate_backend::guard::check_ir_data_security_policy`, a neutral walk over
+//! `zeroship_migrate_backend::guard::check_ir_data_security_policy`, a neutral walk over
 //! the structured ops that refuses `Op::is_destructive` minus row DML and raw. The
 //! parser-backed guard refuses on a different question: it refuses anything its
 //! classifier cannot POSITIVELY vouch for as non-destructive
@@ -125,7 +125,7 @@
 //! mutated separately and each went red on its own, with the split NAMED:
 //!
 //! - Inverting the neutral walk's gate in
-//!   `zero_migrate_backend::guard::check_ir_data_security_policy` restores the
+//!   `zeroship_migrate_backend::guard::check_ir_data_security_policy` restores the
 //!   original defect exactly - `["postgres"] -> RefusedByPolicy` against `["mysql",
 //!   "sqlite"] -> None`, which is the review entry's own sentence. Arm 1 red, the
 //!   other three green.
@@ -176,22 +176,22 @@ use tempfile::TempDir;
 use crate::dialect_conformance_live::Outcome;
 use crate::support::mysql::{quote_ident, DatabaseGuard, MysqlDevSession};
 use crate::support::PgDevSession;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::apply::executor::LockMode;
-use zero_migrate::driver::SqlSession;
-use zero_migrate::guard::{data_security_rule, GuardConfig, GuardError};
-use zero_migrate::model::ir::Op;
-use zero_migrate::model::load::IrLoadError;
-use zero_migrate::model::policy::DestructiveOps;
-use zero_migrate::render::fold::single_fold;
-use zero_migrate::render::lower::{IrGuardedLowerError, IrLowerError, LoadAndLowerGuardedError};
-use zero_migrate::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::apply::executor::LockMode;
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::guard::{data_security_rule, GuardConfig, GuardError};
+use zeroship_migrate::model::ir::Op;
+use zeroship_migrate::model::load::IrLoadError;
+use zeroship_migrate::model::policy::DestructiveOps;
+use zeroship_migrate::render::fold::single_fold;
+use zeroship_migrate::render::lower::{IrGuardedLowerError, IrLowerError, LoadAndLowerGuardedError};
+use zeroship_migrate::{
     resolve_create_table_policy, Approval, DialectId, EffectivePolicy, ExecutorConfig, IrAuthor,
     LiveSchema, MigrationEngine, MigrationIr,
 };
-use zero_migrate_mysql::MysqlBackend;
-use zero_migrate_postgres::PostgresBackend;
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate_mysql::MysqlBackend;
+use zeroship_migrate_postgres::PostgresBackend;
+use zeroship_migrate_sqlite::SqliteBackend;
 
 const OWNER: &str = "app_op_refused";
 
@@ -219,7 +219,7 @@ const BUMPED_VAL: i64 = 2;
 /// `class` is taken FROM [`Outcome`] by calling its own `token()`, so the two layers
 /// cannot drift into two vocabularies that happen to agree today. `rule` is the stable
 /// rule id the refusal named, which is a `&'static str` const out of a neutral crate
-/// (`zero_migrate_backend::guard::data_security_rule`) and is identical on every
+/// (`zeroship_migrate_backend::guard::data_security_rule`) and is identical on every
 /// dialect that raises it.
 ///
 /// `rule` is what makes an arm's claim specific. Without it every policy refusal
@@ -456,7 +456,7 @@ fn table_t() -> Value {
 /// the auxiliary table is created here rather than beside the trigger.
 fn table_ops(subject: Subject, dialect: &DialectId) -> Vec<Value> {
     let mut ops = vec![table_t()];
-    if subject == Subject::DropTrigger && dialect == &zero_migrate_mysql::DIALECT {
+    if subject == Subject::DropTrigger && dialect == &zeroship_migrate_mysql::DIALECT {
         ops.push(json!({
             "op": "createTable", "name": AUX_TABLE,
             "columns": [
@@ -489,7 +489,7 @@ fn trigger_ops(subject: Subject, dialect: &DialectId) -> Vec<Value> {
     if subject != Subject::DropTrigger {
         return ops;
     }
-    if dialect == &zero_migrate_postgres::DIALECT {
+    if dialect == &zeroship_migrate_postgres::DIALECT {
         ops.push(json!({
             "op": "createFunction", "name": FUNCTION, "returns": "trigger",
             "language": "procedural", "body": "BEGIN RETURN NEW; END",
@@ -499,7 +499,7 @@ fn trigger_ops(subject: Subject, dialect: &DialectId) -> Vec<Value> {
             "timing": "before", "events": ["insert"], "forEach": "row",
             "action": { "kind": "executeFunction", "name": FUNCTION },
         }));
-    } else if dialect == &zero_migrate_mysql::DIALECT {
+    } else if dialect == &zeroship_migrate_mysql::DIALECT {
         ops.push(json!({
             "op": "createTrigger", "name": TRIGGER, "table": TABLE,
             "timing": "before", "events": ["insert"], "forEach": "row",
@@ -507,7 +507,7 @@ fn trigger_ops(subject: Subject, dialect: &DialectId) -> Vec<Value> {
                 { "stmt": "delete", "table": AUX_TABLE,
                   "where": { "node": "colRef", "name": "flag" } }] },
         }));
-    } else if dialect == &zero_migrate_sqlite::DIALECT {
+    } else if dialect == &zeroship_migrate_sqlite::DIALECT {
         ops.push(json!({
             "op": "createTrigger", "name": TRIGGER, "table": TABLE,
             "timing": "before", "events": ["insert"], "forEach": "row",
@@ -587,7 +587,7 @@ async fn apply_envelope<B: MigrationBackend>(
     let source = serde_json::to_string(&resolved)
         .map_err(|error| format!("{tag}: re-serialize the resolved envelope: {error}"))?;
     let artifact = match IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
         dialect,
@@ -603,7 +603,7 @@ async fn apply_envelope<B: MigrationBackend>(
         Ok(artifact) => artifact,
         Err(error) => return Ok(Err(error)),
     };
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,
@@ -635,15 +635,15 @@ async fn live_schema_now<B: MigrationBackend>(
         .await
         .map_err(|error| format!("read the applied schema back: {error}"))?;
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, OWNER);
-    if dialect == &zero_migrate_sqlite::DIALECT {
+    if dialect == &zeroship_migrate_sqlite::DIALECT {
         if let Ok(defs) = single_fold::fold(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             history,
             dialect,
             &cfg.project_schema,
             policy,
         )
-        .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
+        .map(|folded| folded.project_field_defs(zeroship_migrate::shipping_vendors()))
         {
             live.sdk_schemas = defs;
         }
@@ -868,7 +868,7 @@ async fn pg_leg(url: &str, case: Case) -> Result<Leg, String> {
         .await
         .map_err(|error| format!("create the journal: {error}"))?;
 
-    let dialect = zero_migrate_postgres::DIALECT;
+    let dialect = zeroship_migrate_postgres::DIALECT;
     let history = apply_setup(case, &backend, &cfg, &policy, &dialect).await?;
 
     let count = |sql: String| {
@@ -947,7 +947,7 @@ async fn mysql_leg(url: &str, case: Case) -> Result<Leg, String> {
         .await
         .map_err(|error| format!("create the journal: {error}"))?;
 
-    let dialect = zero_migrate_mysql::DIALECT;
+    let dialect = zeroship_migrate_mysql::DIALECT;
     let history = apply_setup(case, &backend, &cfg, &policy, &dialect).await?;
 
     let count = |sql: String| {
@@ -1013,7 +1013,7 @@ async fn sqlite_leg(case: Case) -> Result<Leg, String> {
         support::operator_charter_with_destructive_ops(SQLITE_PROJECT, case.posture.grant());
     let cfg = ExecutorConfig::new(SQLITE_PROJECT, SQLITE_PROJECT, policy.clone());
 
-    let dialect = zero_migrate_sqlite::DIALECT;
+    let dialect = zeroship_migrate_sqlite::DIALECT;
     let history = apply_setup(case, &backend, &cfg, &policy, &dialect).await?;
 
     let table_sql =
@@ -1224,9 +1224,9 @@ fn the_oracle_separates_agreement_from_disagreement() {
 #[test]
 fn the_two_postures_this_file_contrasts_are_different() {
     for dialect in [
-        zero_migrate_postgres::DIALECT,
-        zero_migrate_mysql::DIALECT,
-        zero_migrate_sqlite::DIALECT,
+        zeroship_migrate_postgres::DIALECT,
+        zeroship_migrate_mysql::DIALECT,
+        zeroship_migrate_sqlite::DIALECT,
     ] {
         for (posture, want) in [
             (Posture::Default, DestructiveOps::Forbid),

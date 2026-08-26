@@ -5,7 +5,7 @@
 //! [`ColType`](crate::model::ir::ColType). Turning that metadata into an exact column
 //! collation and inline `CHECK`, and comparing what a catalog gives back against what
 //! was authored, is single-sourced in
-//! [`zero_migrate_backend::value_format`] so no backend can hold a private opinion
+//! [`zeroship_migrate_backend::value_format`] so no backend can hold a private opinion
 //! about whether two defaults are the same default.
 //!
 //! # What lives HERE
@@ -33,19 +33,19 @@ use crate::model::expr::Expr;
 use crate::model::ir::{IrDefault, IrScalar, SequenceRef, ValueFormat};
 use crate::model::snapshot::{ColumnCollationSnapshot, IdDefaultSnapshot};
 use crate::render::backends::{renderer, value_format_renderer, value_format_renderers};
-use zero_migrate_backend::registry::VendorSet;
-use zero_migrate_backend::value_format as seam;
-use zero_migrate_backend::value_format::{
+use zeroship_migrate_backend::registry::VendorSet;
+use zeroship_migrate_backend::value_format as seam;
+use zeroship_migrate_backend::value_format::{
     id_default_from_literal_fingerprint, CatalogRules, CatalogSqlContext, LiteralCastKind,
     ValueFormatColumnMetadata, VendorRules,
 };
-use zero_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::dialect::DialectId;
 
 // The recovered-format verdict. `#[cfg(test)]` for the same reason the door below
 // is: its last production consumer left with the PostgreSQL execution half, and the
 // comparison tests here still name it.
 #[cfg(test)]
-pub(crate) use zero_migrate_backend::value_format::RecoveredFormatCheck;
+pub(crate) use zeroship_migrate_backend::value_format::RecoveredFormatCheck;
 
 /// Every registered vendor's declared catalog rules, composed.
 ///
@@ -416,7 +416,7 @@ fn catalog_expression_fingerprint_for(
 ///
 /// `#[cfg(test)]` because its last PRODUCTION caller left with the PostgreSQL
 /// execution half: all three vendors now enter
-/// [`zero_migrate_backend::value_format::recover_format_check`] with their OWN
+/// [`zeroship_migrate_backend::value_format::recover_format_check`] with their OWN
 /// renderers, which is what the contract crate's copy takes, so nothing in the
 /// engine holds a `DialectId` and needs it turned into a pair of renderers here. The
 /// comparison tests below still drive it, and they are the reason it is gated rather

@@ -23,12 +23,12 @@
 
 use crate::support;
 
-use zero_migrate::render::lower::{IrAuthor, LiveSchema};
-use zero_migrate::render::sql_preview::{
+use zeroship_migrate::render::lower::{IrAuthor, LiveSchema};
+use zeroship_migrate::render::sql_preview::{
     render_ir_envelope_sql, render_plan_sql, render_set_sql, PreviewOpts, RUNTIME_RESOLVED,
 };
-use zero_migrate::PlanStep;
-use zero_migrate::{resolve_create_table_policy, MigrationIr};
+use zeroship_migrate::PlanStep;
+use zeroship_migrate::{resolve_create_table_policy, MigrationIr};
 
 /// The representative IR exercising every renderable op + the honest-boundary
 /// witnesses (a guarded addColumn, a one-shot insert/update, and an online rename
@@ -120,14 +120,14 @@ fn opts() -> PreviewOpts {
 }
 
 /// Render the representative IR for a dialect through the offline IR preview.
-fn render_representative(dialect: &zero_migrate::DialectId) -> String {
-    let ir = if dialect == &zero_migrate_mysql::DIALECT {
+fn render_representative(dialect: &zeroship_migrate::DialectId) -> String {
+    let ir = if dialect == &zeroship_migrate_mysql::DIALECT {
         REPRESENTATIVE_IR_MYSQL
     } else {
         REPRESENTATIVE_IR
     };
     let ir = resolve_envelope_json(ir);
-    render_ir_envelope_sql(zero_migrate::shipping_vendors(), &ir, dialect, &opts())
+    render_ir_envelope_sql(zeroship_migrate::shipping_vendors(), &ir, dialect, &opts())
         .expect("representative IR renders offline")
 }
 
@@ -155,7 +155,7 @@ fn assert_golden(name: &str, actual: &str) {
 fn golden_pg() {
     assert_golden(
         "sql_preview_pg.txt",
-        &render_representative(&zero_migrate_postgres::DIALECT),
+        &render_representative(&zeroship_migrate_postgres::DIALECT),
     );
 }
 
@@ -163,7 +163,7 @@ fn golden_pg() {
 fn golden_sqlite() {
     assert_golden(
         "sql_preview_sqlite.txt",
-        &render_representative(&zero_migrate_sqlite::DIALECT),
+        &render_representative(&zeroship_migrate_sqlite::DIALECT),
     );
 }
 
@@ -171,7 +171,7 @@ fn golden_sqlite() {
 fn golden_mysql() {
     assert_golden(
         "sql_preview_mysql.txt",
-        &render_representative(&zero_migrate_mysql::DIALECT),
+        &render_representative(&zeroship_migrate_mysql::DIALECT),
     );
 }
 
@@ -182,20 +182,20 @@ fn golden_mysql() {
 /// preview surfaces the lowered SQL rather than re-implementing a renderer.
 #[test]
 fn faithful_to_lowered_sql_pg() {
-    faithful_to_lowered_sql(&zero_migrate_postgres::DIALECT);
+    faithful_to_lowered_sql(&zeroship_migrate_postgres::DIALECT);
 }
 
 #[test]
 fn faithful_to_lowered_sql_sqlite() {
-    faithful_to_lowered_sql(&zero_migrate_sqlite::DIALECT);
+    faithful_to_lowered_sql(&zeroship_migrate_sqlite::DIALECT);
 }
 
 #[test]
 fn faithful_to_lowered_sql_mysql() {
-    faithful_to_lowered_sql(&zero_migrate_mysql::DIALECT);
+    faithful_to_lowered_sql(&zeroship_migrate_mysql::DIALECT);
 }
 
-fn faithful_to_lowered_sql(dialect: &zero_migrate::DialectId) {
+fn faithful_to_lowered_sql(dialect: &zeroship_migrate::DialectId) {
     // An IR with ONLY the DB-independent ops (so `lower_steps` succeeds end-to-end).
     let envelope_json = r#"{
       "ir_version": 1,
@@ -214,7 +214,7 @@ fn faithful_to_lowered_sql(dialect: &zero_migrate::DialectId) {
     let envelope_json = resolve_envelope_json(envelope_json);
     let ir: MigrationIr = serde_json::from_str(&envelope_json).unwrap();
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         "public",
         "app_preview",
         dialect,
@@ -225,7 +225,7 @@ fn faithful_to_lowered_sql(dialect: &zero_migrate::DialectId) {
         .expect("lowers offline");
 
     let preview = render_ir_envelope_sql(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &envelope_json,
         dialect,
         &opts(),
@@ -259,9 +259,9 @@ fn faithful_to_lowered_sql(dialect: &zero_migrate::DialectId) {
 fn mysql_feature_preview_renders_mysql8_sql() {
     let ir = resolve_envelope_json(MYSQL_FEATURE_IR);
     let out = render_ir_envelope_sql(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         &opts(),
     )
     .expect("MySQL feature fixture renders offline");
@@ -302,13 +302,13 @@ fn mysql_feature_preview_renders_mysql8_sql() {
 #[test]
 fn online_rename_is_labeled_never_fabricated() {
     for dialect in [
-        &zero_migrate_postgres::DIALECT,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
     ] {
         let ir = r#"{"ir_version":1,"name":"r","ops":[
           {"op":"renameColumn","table":"codes","from":"label","to":"display_name","type":"text"}
         ]}"#;
-        let out = render_ir_envelope_sql(zero_migrate::shipping_vendors(), ir, dialect, &opts())
+        let out = render_ir_envelope_sql(zeroship_migrate::shipping_vendors(), ir, dialect, &opts())
             .expect("renders offline");
         assert!(
             out.contains(RUNTIME_RESOLVED) && out.contains("online rename"),
@@ -355,9 +355,9 @@ fn backfill_is_labeled_never_fabricated() {
     ]}"#;
     let ir = resolve_envelope_json(ir);
     let out = render_ir_envelope_sql(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &opts(),
     )
     .expect("renders offline");
@@ -386,9 +386,9 @@ fn external_cursor_invariant_is_prominent_in_preview() {
     ]}"#;
     let ir = resolve_envelope_json(ir);
     let out = render_ir_envelope_sql(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &opts(),
     )
     .expect("preview");
@@ -408,11 +408,11 @@ fn synchronize_identity_quiescence_assertion_is_prominent_in_preview() {
     ]}"#;
 
     for dialect in [
-        &zero_migrate_postgres::DIALECT,
-        &zero_migrate_sqlite::DIALECT,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
     ] {
-        let out = render_ir_envelope_sql(zero_migrate::shipping_vendors(), ir, dialect, &opts())
+        let out = render_ir_envelope_sql(zeroship_migrate::shipping_vendors(), ir, dialect, &opts())
             .expect("preview");
         assert!(
             out.contains(RUNTIME_RESOLVED)
@@ -435,9 +435,9 @@ fn guarded_op_labeled_and_bare_ddl_has_no_fabricated_clause() {
       {"op":"addColumn","table":"codes","column":"flag","type":"boolean","nullable":true,"existenceGuard":"ifNotExists"}
     ]}"#;
     let out = render_ir_envelope_sql(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         ir,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &opts(),
     )
     .expect("renders offline");
@@ -479,13 +479,13 @@ fn guard_label_is_truthful_per_dialect() {
     const PROBE_CLAIM: &str = "catalog-probed at apply (run / satisfied-noop / fail-drift)";
 
     for dialect in [
-        &zero_migrate_postgres::DIALECT,
-        &zero_migrate_sqlite::DIALECT,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
     ] {
         for ir in [ADD_COLUMN_IR, DROP_VIEW_IR] {
             let out =
-                render_ir_envelope_sql(zero_migrate::shipping_vendors(), ir, dialect, &opts())
+                render_ir_envelope_sql(zeroship_migrate::shipping_vendors(), ir, dialect, &opts())
                     .expect("renders offline");
             assert!(
                 out.contains(PROBE_CLAIM),
@@ -495,9 +495,9 @@ fn guard_label_is_truthful_per_dialect() {
     }
 
     let out = render_ir_envelope_sql(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         ADD_COLUMN_IR,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         &opts(),
     )
     .expect("renders offline");
@@ -512,9 +512,9 @@ fn guard_label_is_truthful_per_dialect() {
     );
 
     let out = render_ir_envelope_sql(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         DROP_VIEW_IR,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         &opts(),
     )
     .expect("renders offline");
@@ -543,21 +543,21 @@ fn render_succeeds_without_a_dsn() {
     let representative = resolve_envelope_json(REPRESENTATIVE_IR);
     let representative_mysql = resolve_envelope_json(REPRESENTATIVE_IR_MYSQL);
     let pg = render_ir_envelope_sql(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &representative,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &opts(),
     );
     let sqlite = render_ir_envelope_sql(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &representative,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &opts(),
     );
     let mysql = render_ir_envelope_sql(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &representative_mysql,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         &opts(),
     );
     assert!(
@@ -583,10 +583,10 @@ fn render_plan_sql_surfaces_lowered_ddl_offline() {
     }"#;
     let ir: MigrationIr = serde_json::from_str(envelope_json).unwrap();
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         "public",
         "app_preview",
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &support::no_inject("public"),
     );
     let plan = author
@@ -594,9 +594,9 @@ fn render_plan_sql_surfaces_lowered_ddl_offline() {
         .expect("DB-independent IR lowers offline");
 
     let out = render_plan_sql(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &plan,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &opts(),
     );
     assert!(
@@ -629,16 +629,16 @@ fn render_plan_sql_surfaces_lowered_ddl_offline() {
 /// `ALTER … RENAME`, no `CREATE TRIGGER`, no uncommented expand DDL) may leak.
 #[test]
 fn render_plan_sql_online_rename_is_labeled_never_fabricated() {
-    use zero_migrate::{ExpandContractAuthor, OnlineIntent};
-    use zero_migrate::{PlanStep, RenameStep};
+    use zeroship_migrate::{ExpandContractAuthor, OnlineIntent};
+    use zeroship_migrate::{PlanStep, RenameStep};
 
     // Author a REAL PG expand-contract plan via the same author the engine uses, so
     // the test feeds the genuine E1..C2 + backfill shape (never a synthetic stub).
     let ec = ExpandContractAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         "public",
         "app_preview",
-        zero_migrate_postgres::DIALECT,
+        zeroship_migrate_postgres::DIALECT,
     )
     .author(&OnlineIntent::RenameColumn {
         table: "codes".to_string(),
@@ -663,10 +663,10 @@ fn render_plan_sql_online_rename_is_labeled_never_fabricated() {
     }"#;
     let seed: MigrationIr = serde_json::from_str(seed_json).unwrap();
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         "public",
         "app_preview",
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &support::no_inject("public"),
     );
     let mut plan = author
@@ -675,9 +675,9 @@ fn render_plan_sql_online_rename_is_labeled_never_fabricated() {
     plan.steps = vec![PlanStep::OnlineRename(rename)];
 
     let out = render_plan_sql(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &plan,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &opts(),
     );
 
@@ -725,9 +725,9 @@ fn render_plan_sql_online_rename_is_labeled_never_fabricated() {
 #[test]
 fn malformed_ir_is_error() {
     let err = render_ir_envelope_sql(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         "{ not json",
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &opts(),
     );
     assert!(err.is_err(), "malformed IR must be an error");
@@ -757,10 +757,10 @@ fn render_set_sql_surfaces_lowered_ddl_offline() {
     }"#;
     let ir: MigrationIr = serde_json::from_str(envelope_json).unwrap();
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         "public",
         "app_preview",
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &support::no_inject("public"),
     );
     let plan = author
@@ -768,9 +768,9 @@ fn render_set_sql_surfaces_lowered_ddl_offline() {
         .expect("DB-independent IR lowers offline");
 
     let out = render_set_sql(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &[plan],
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &opts(),
     );
     assert!(
@@ -797,9 +797,9 @@ fn string_length_renders_bounded_varchar_across_dialects() {
     let resolved = resolve_envelope_json(ir);
 
     let pg = render_ir_envelope_sql(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &resolved,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &opts(),
     )
     .expect("bounded string renders on PG");
@@ -809,9 +809,9 @@ fn string_length_renders_bounded_varchar_across_dialects() {
     );
 
     let mysql = render_ir_envelope_sql(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &resolved,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         &opts(),
     )
     .expect("bounded string renders on MySQL");
@@ -821,9 +821,9 @@ fn string_length_renders_bounded_varchar_across_dialects() {
     );
 
     let sqlite = render_ir_envelope_sql(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &resolved,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &opts(),
     )
     .expect("bounded string renders on SQLite");
@@ -858,9 +858,9 @@ fn mysql_constraint_requoting_escapes_hostile_identifiers() {
             .expect("hostile IR resolves");
         let json = serde_json::to_string(&resolved).expect("resolved IR serializes");
         render_ir_envelope_sql(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &json,
-            &zero_migrate_mysql::DIALECT,
+            &zeroship_migrate_mysql::DIALECT,
             &opts(),
         )
         .expect("hostile IR renders offline")
@@ -915,9 +915,9 @@ fn preview_of_a_raw_envelope_shows_the_charter_injected_shape() {
     ]}"#;
 
     let out = render_ir_envelope_sql(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         raw,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &opts(),
     )
     .expect("a raw envelope renders under the injecting charter");
@@ -973,15 +973,15 @@ fn preview_is_identical_for_raw_and_pre_resolved_envelopes() {
     let pre_resolved = resolve_envelope_json(raw);
 
     for dialect in [
-        &zero_migrate_postgres::DIALECT,
-        &zero_migrate_sqlite::DIALECT,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
     ] {
         let from_raw =
-            render_ir_envelope_sql(zero_migrate::shipping_vendors(), raw, dialect, &opts())
+            render_ir_envelope_sql(zeroship_migrate::shipping_vendors(), raw, dialect, &opts())
                 .expect("raw envelope previews");
         let from_resolved = render_ir_envelope_sql(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &pre_resolved,
             dialect,
             &opts(),
@@ -1014,9 +1014,9 @@ fn preview_fails_closed_on_a_charter_violating_envelope() {
     ]}"#;
 
     let err = render_ir_envelope_sql(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         violating,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &opts(),
     )
     .expect_err("a create-table colliding with an injected system column is refused");
@@ -1047,9 +1047,9 @@ fn preview_resolves_before_it_validates() {
     ]}"#;
 
     let out = render_ir_envelope_sql(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         raw,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &opts(),
     )
     .expect("a partial index over an injected column previews once the shape is resolved first");
@@ -1094,7 +1094,7 @@ scope = { include = ["tenant_a.*"] }
 mandatory = true
 columns = [ { name = "tenant_stamp", type = "text", nullable = false } ]
 "#;
-    let scoped = zero_migrate::effective_policy_from_charter_toml(charter)
+    let scoped = zeroship_migrate::effective_policy_from_charter_toml(charter)
         .expect("schema-scoped inject charter composes");
     let scoped_opts = |schema: &str| PreviewOpts {
         default_schema: schema.to_string(),
@@ -1108,9 +1108,9 @@ columns = [ { name = "tenant_stamp", type = "text", nullable = false } ]
     ]}"#;
 
     let covered = render_ir_envelope_sql(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         raw,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &scoped_opts("tenant_a"),
     )
     .expect("the covered schema previews");
@@ -1120,9 +1120,9 @@ columns = [ { name = "tenant_stamp", type = "text", nullable = false } ]
     );
 
     let uncovered = render_ir_envelope_sql(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         raw,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &scoped_opts("tenant_b"),
     )
     .expect("an uncovered schema previews");
@@ -1183,9 +1183,9 @@ fn guarded_drop_partition_announces_that_a_run_verdict_destroys_rows() {
     let note = "DROPS the partition and every row in it";
 
     let guarded_drop = render_ir_envelope_sql(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &resolve(&ir(r#","existenceGuard":"ifExists""#, drop_op)),
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &preview_opts,
     )
     .expect("a guarded dropPartition previews offline");
@@ -1195,9 +1195,9 @@ fn guarded_drop_partition_announces_that_a_run_verdict_destroys_rows() {
     );
 
     let unguarded_drop = render_ir_envelope_sql(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &resolve(&ir("", drop_op)),
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &preview_opts,
     )
     .expect("an unguarded dropPartition previews offline");
@@ -1207,9 +1207,9 @@ fn guarded_drop_partition_announces_that_a_run_verdict_destroys_rows() {
     );
 
     let guarded_create = render_ir_envelope_sql(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &resolve(&ir(r#","existenceGuard":"ifNotExists""#, create_op)),
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &preview_opts,
     )
     .expect("a guarded createPartition previews offline");
@@ -1253,19 +1253,19 @@ fn a_retype_previews_the_statement_apply_runs_and_nothing_more() {
     let envelope_json = resolve_envelope_json(envelope_json);
     let ir: MigrationIr = serde_json::from_str(&envelope_json).unwrap();
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         "public",
         "app_preview",
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &support::confined_charter(),
     );
     let steps = author
         .lower_steps(&ir, &LiveSchema::default())
         .expect("lowers offline");
     let preview = render_ir_envelope_sql(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &envelope_json,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &opts(),
     )
     .expect("renders offline");

@@ -518,7 +518,7 @@ pub fn collection_descriptor_for_tests(
     collection: &str,
     schema: &Value,
     indexes: &Value,
-) -> Result<zero_migrate::render::declarative::CollectionDescriptor, DbError> {
+) -> Result<zeroship_migrate::render::declarative::CollectionDescriptor, DbError> {
     sqlite_engine::schema_to_descriptor(app_id, collection, schema, indexes)
 }
 

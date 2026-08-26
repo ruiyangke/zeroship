@@ -11,7 +11,7 @@
 //! live suite reports exactly like a passing one, so there is no skip.
 
 use crate::support::PgDevSession;
-use zero_migrate::driver::conformance::{self, SeamFixture};
+use zeroship_migrate::driver::conformance::{self, SeamFixture};
 
 /// PostgreSQL's spelling of the scratch SQL the suite runs. The checks are
 /// neutral; these are not, which is why the caller owns them.

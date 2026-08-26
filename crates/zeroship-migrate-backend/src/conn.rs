@@ -22,7 +22,7 @@
 //! to the PostgreSQL backend instead of being made `pub`.
 
 use std::time::Duration;
-use zero_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::dialect::DialectId;
 
 /// Error opening a migrator connection.
 ///
@@ -103,7 +103,7 @@ pub struct ConfinementConfig {
     /// This field is the executor-WIDE default. For a planned maintenance
     /// window, a single migration raises ITS OWN lock-acquisition budget via the
     /// per-migration override
-    /// [`zero_migrate_ir::migration::MigrationFlags::lock_timeout_ms`] (mirrors
+    /// [`zeroship_migrate_ir::migration::MigrationFlags::lock_timeout_ms`] (mirrors
     /// `timeout_ms`), so the conservative fail-fast default stays in force for
     /// every other migration in the same deploy.
     pub lock_timeout: Duration,
@@ -202,7 +202,7 @@ pub struct ExecutorConfig {
     /// PRIVATE (`pub(crate)`). The caller-authored composed policy every
     /// executor-path guard uses. The guard is built from this single policy source
     /// for every composable decision.
-    pub(crate) effective: zero_migrate_policy::EffectivePolicy,
+    pub(crate) effective: zeroship_migrate_policy::EffectivePolicy,
 }
 
 impl ExecutorConfig {
@@ -215,7 +215,7 @@ impl ExecutorConfig {
     pub fn new(
         project_id: impl Into<String>,
         project_schema: impl Into<String>,
-        effective: zero_migrate_policy::EffectivePolicy,
+        effective: zeroship_migrate_policy::EffectivePolicy,
     ) -> Self {
         let project_schema = project_schema.into();
         let meta_schema = format!("{project_schema}_migrations");
@@ -233,13 +233,13 @@ impl ExecutorConfig {
     /// Replace the guard's composed policy with the deployment's explicit policy.
     ///
     /// Host paths that resolve or lower authored IR under an
-    /// [`EffectivePolicy`](zero_migrate_policy::EffectivePolicy)
+    /// [`EffectivePolicy`](zeroship_migrate_policy::EffectivePolicy)
     /// must carry that same policy into the executor's defense-in-depth guard.
     /// This setter changes no project identity or confinement mode.
     #[must_use]
     pub fn with_effective_policy(
         mut self,
-        effective: zero_migrate_policy::EffectivePolicy,
+        effective: zeroship_migrate_policy::EffectivePolicy,
     ) -> Self {
         self.effective = effective;
         self
@@ -282,7 +282,7 @@ impl ExecutorConfig {
     /// The struct-literal boundary is unaffected - an external crate still cannot
     /// NAME `effective`.
     #[must_use]
-    pub const fn effective(&self) -> &zero_migrate_policy::EffectivePolicy {
+    pub const fn effective(&self) -> &zeroship_migrate_policy::EffectivePolicy {
         &self.effective
     }
 

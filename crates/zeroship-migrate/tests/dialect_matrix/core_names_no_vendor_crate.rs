@@ -5,7 +5,7 @@
 //! # CARGO SUBSUMED THIS CENSUS'S PRODUCTION HALF, AND THAT IS WHY IT NARROWED
 //!
 //! `zero-migrate-core` declares no vendor `[dependencies]`. Writing
-//! `zero_migrate_postgres` in its production source is an unresolved-crate error, so
+//! `zeroship_migrate_postgres` in its production source is an unresolved-crate error, so
 //! the rule this file used to hold over production code is now held by the build. That
 //! is strictly stronger than a census: it is checked at every compile, it cannot go
 //! blind, and it names the offending line itself.
@@ -21,8 +21,8 @@
 //!
 //! # What "name a vendor" means here, precisely
 //!
-//! Three crate idents — `zero_migrate_postgres`, `zero_migrate_sqlite`,
-//! `zero_migrate_mysql` — appearing anywhere in the engine's source. Every place a
+//! Three crate idents — `zeroship_migrate_postgres`, `zeroship_migrate_sqlite`,
+//! `zeroship_migrate_mysql` — appearing anywhere in the engine's source. Every place a
 //! `#[cfg(test)]` module writes one is a place where a test resolved a vendor WITHOUT
 //! going through the registry it was handed, and that is exactly the drift the
 //! production rule exists to prevent, wearing test clothes: twenty-two files knowing
@@ -47,8 +47,8 @@
 //! |------|-------|-------------|-----------|
 //! | `render/backends/mod.rs` | 3 | the registry — the PERMANENT entry | never |
 //! | `lib.rs` | 3 | `pub use {Mysql,Pg,Sqlite}Guard` at the crate root | closed |
-//! | `render/vendor.rs` | 1 | `pub use zero_migrate_postgres::render_vendor_op` | closed |
-//! | `render/declarative.rs` | 1 | `use zero_migrate_mysql::collation::{…}` | closed |
+//! | `render/vendor.rs` | 1 | `pub use zeroship_migrate_postgres::render_vendor_op` | closed |
+//! | `render/declarative.rs` | 1 | `use zeroship_migrate_mysql::collation::{…}` | closed |
 //!
 //! `render/vendor.rs` closed by putting the vendor-op surface behind
 //! `DmlRenderer::render_vendor_op`. That one is now ALSO a privacy rule — `mod vendor`
@@ -106,9 +106,9 @@ use std::path::{Path, PathBuf};
 /// the underscore form is what separates "core reached this crate" from "core talked
 /// about it".
 const VENDOR_CRATES: &[&str] = &[
-    "zero_migrate_mysql",
-    "zero_migrate_postgres",
-    "zero_migrate_sqlite",
+    "zeroship_migrate_mysql",
+    "zeroship_migrate_postgres",
+    "zeroship_migrate_sqlite",
 ];
 
 /// The ratchet: which core files may name a vendor crate, and exactly how many times.
@@ -346,7 +346,7 @@ fn core_names_no_vendor_crate_outside_the_registry() {
 /// thing that makes naming a vendor impossible in production code is one level down
 /// and is not source at all: `crates/zero-migrate-core/Cargo.toml` lists
 /// `zero-migrate-backend`, `zero-migrate-ir` and `zero-migrate-policy` under
-/// `[dependencies]` and no backend implementation, so `zero_migrate_postgres` does not
+/// `[dependencies]` and no backend implementation, so `zeroship_migrate_postgres` does not
 /// resolve there.
 ///
 /// ONE LINE IN THAT MANIFEST UNDOES IT. Add `zero-migrate-postgres = { workspace =
@@ -415,7 +415,7 @@ fn the_engine_manifest_declares_no_vendor_dependency() {
         "{ENGINE_MANIFEST} declares a vendor crate outside `{ALLOWED_SECTION}`:\n{}\n\n\
          That one line dissolves the whole structural rule this crate split exists for. \
          The engine is NEUTRAL BY CONSTRUCTION: it cannot name a backend because it \
-         cannot see one, and a normal dependency edge makes `zero_migrate_postgres` \
+         cannot see one, and a normal dependency edge makes `zeroship_migrate_postgres` \
          resolve in every module under `src`. Whatever this edge was added for, the \
          answer is a `VendorSet` parameter the composition supplies — that is what \
          every resolution door in `render::backends` already takes.",

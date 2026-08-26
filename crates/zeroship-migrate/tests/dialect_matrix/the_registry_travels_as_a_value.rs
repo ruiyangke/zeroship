@@ -14,7 +14,7 @@
 //!
 //! The header is phrased in terms of the RULE and not the current file layout,
 //! because the layout changed underneath it exactly as it warned it would. The
-//! composition is `zero_migrate::shipping_vendors()` now, in the crate that names the
+//! composition is `zeroship_migrate::shipping_vendors()` now, in the crate that names the
 //! vendors; the engine is `zero-migrate-core` and can no longer see it.
 //!
 //! # THE SPLIT HAPPENED, AND IT COST NOTHING — WHICH IS THIS FILE'S RESULT
@@ -47,8 +47,8 @@
 //!    route, and the one every site that used to exist took. The test handle's own
 //!    spelling is excluded — see [`composition_sites`] for why that is a spelling
 //!    exclusion and not a region one.
-//! 2. **CALL an accessor for it.** [`zero_migrate::shipping_vendors`] and
-//!    [`zero_migrate::shipping_backends`] hand the composition to a HOST. They are
+//! 2. **CALL an accessor for it.** [`zeroship_migrate::shipping_vendors`] and
+//!    [`zeroship_migrate::shipping_backends`] hand the composition to a HOST. They are
 //!    `pub`, so a `#[cfg(test)]` module in the engine could call one through the
 //!    dev-dependency edge, and a call from inside `src` is the same reach wearing a
 //!    function's clothes. It SURVIVED the crate split, exactly as this entry predicted
@@ -71,7 +71,7 @@
 //! `#[cfg(test)] pub(crate)` and no integration test can hold both values at once.
 //!
 //! It reads `src` only: this crate's `tests/` binaries are HOSTS and are entitled to
-//! compose, which is why [`zero_migrate::shipping_vendors`] exists at all. [`is_code`]
+//! compose, which is why [`zeroship_migrate::shipping_vendors`] exists at all. [`is_code`]
 //! is a line-oriented comment filter, not a Rust parser: it cannot see inside a block
 //! comment that opens mid-line and does not try. It over-counts prose into code, never
 //! the reverse, which is the safe direction for a census asserting a ZERO.
@@ -567,9 +567,9 @@ fn the_two_compositions_list_the_same_vendors() {
     /// The idents to look for. The ORDER is not asserted from this list — it is read
     /// out of each file, so a reordering in one and not the other is a red.
     const VENDOR_CRATES: &[&str] = &[
-        "zero_migrate_mysql",
-        "zero_migrate_postgres",
-        "zero_migrate_sqlite",
+        "zeroship_migrate_mysql",
+        "zeroship_migrate_postgres",
+        "zeroship_migrate_sqlite",
     ];
 
     /// The vendor crate idents `text` names, in the order its CODE lines name them.

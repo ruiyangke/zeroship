@@ -41,7 +41,7 @@
 //! (the napi `block_on` worker + JS host) - ZERO tokio, ZERO compio.
 
 use std::collections::{HashMap, HashSet};
-use zero_migrate_backend::registry::VendorSet;
+use zeroship_migrate_backend::registry::VendorSet;
 
 use crate::approval::Approval;
 // The orchestration below is driver-neutral AND vendor-neutral: it names the
@@ -59,7 +59,7 @@ use crate::render::step::PlanStep;
 // two-pass apply body, the topological ordering, the rollback selection - stays
 // here. Re-exported so every `crate::apply::executor::...` path (and the flattened
 // root re-exports in `lib.rs`) resolves unchanged.
-pub use zero_migrate_backend::executor::{
+pub use zeroship_migrate_backend::executor::{
     ApplyError, ApplyOutcome, BackendError, LockMode, PreconditionVerdict, RollbackError,
     RollbackOptions, RollbackOutcome, RollbackRequest, RollbackTarget,
 };
@@ -67,12 +67,12 @@ pub use zero_migrate_backend::executor::{
 // each backend's own session path runs before reading a schema a guard NAMED, so it
 // has to be reachable from a vendor crate; it reads the `ExecutorConfig`'s composed
 // policy and nothing of the orchestration's.
-pub use zero_migrate_backend::executor::authorize_existence_guard_schema;
+pub use zeroship_migrate_backend::executor::authorize_existence_guard_schema;
 
 // `unmet_halt_error` travelled with them and for the same reason: it formats a
 // `Precondition` and a blocker list into an `ApplyError`, touches no database, and the
 // PostgreSQL precondition evaluator is one of its two callers.
-pub(crate) use zero_migrate_backend::executor::unmet_halt_error;
+pub(crate) use zeroship_migrate_backend::executor::unmet_halt_error;
 
 /// Apply the project's pending migrations through a backend the CALLER built.
 /// Idempotent: a re-run with no new migrations is a no-op.
@@ -855,7 +855,7 @@ async fn apply_repeatables<B: MigrationBackend>(
 fn guard_repeatable_batch(
     vendors: VendorSet,
     cfg: &ExecutorConfig,
-    dialect: &zero_migrate_ir::dialect::DialectId,
+    dialect: &zeroship_migrate_ir::dialect::DialectId,
     migrations: &[&Migration],
 ) -> Result<(), ApplyError> {
     let guard = crate::render::backends::guard_for(vendors, &cfg.guard_config_for(dialect));
@@ -950,7 +950,7 @@ fn order_repeatables<'a>(
 }
 
 /// The per-migration precondition verdict loop now lives in
-/// `zero_migrate_postgres::backend::precondition::evaluate_all` - the **Postgres** leaf reached only via
+/// `zeroship_migrate_postgres::backend::precondition::evaluate_all` - the **Postgres** leaf reached only via
 /// [`MigrationBackend::evaluate_preconditions`]
 /// (multi-engine abstraction). The generic apply body calls the backend method
 /// (`backend.evaluate_preconditions(cfg, m)`); it holds no `&Client` and runs no
@@ -1041,7 +1041,7 @@ fn check_expand_contract_gate(
 // `zero-migrate-postgres`'s `status_sql` says so in its own comment, "so the two views
 // never diverge". Re-exported so every `crate::apply::executor::...` path resolves
 // unchanged.
-pub(crate) use zero_migrate_backend::executor::{
+pub(crate) use zeroship_migrate_backend::executor::{
     canonical_set_order, compute_superseded, order_pending, topo_order_version_tiebroken,
 };
 /// Refuse a malformed set in which two distinct squashes both supersede the same
@@ -2025,7 +2025,7 @@ async fn rollback_locked<B: MigrationBackend>(
 //
 // The external boundary the header claimed for that ctor is unaffected and still
 // pinned where it always was: the unforgeable `EffectivePolicy`, held by the T8
-// `compile_fail` doctests in `zero_migrate_backend::guard`.
+// `compile_fail` doctests in `zeroship_migrate_backend::guard`.
 // ===========================================================================
 
 #[cfg(test)]

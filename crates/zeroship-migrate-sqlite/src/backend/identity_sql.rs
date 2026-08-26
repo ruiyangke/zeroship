@@ -18,12 +18,12 @@
 
 use std::time::Instant;
 
-use zero_migrate_ir::migration::Migration;
+use zeroship_migrate_ir::migration::Migration;
 
 use super::actor::{MigrationActor, SqliteActorError};
 use super::authorizer::Mode;
 use super::journal_sql;
-use zero_migrate_backend::stored_ddl::StoredDdl;
+use zeroship_migrate_backend::stored_ddl::StoredDdl;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RowidAllocation {
@@ -50,7 +50,7 @@ fn lit(value: &str) -> String {
 }
 
 fn ident(value: &str) -> String {
-    zero_migrate_backend::dml::escape_quote_ident_for_backend(value, &crate::dml::RENDERER)
+    zeroship_migrate_backend::dml::escape_quote_ident_for_backend(value, &crate::dml::RENDERER)
 }
 
 fn integer_cell(row: &[Option<String>], index: usize) -> i64 {
@@ -472,7 +472,7 @@ async fn journal_completed(
              (event_kind, version, name, checksum, \"by\", exec_ms, phase, outcome, kind) \
              VALUES ('{applied}', {version}, {name}, {checksum}, {by}, {exec_ms}, \
                      'completed', 'success', 'apply')",
-            applied = zero_migrate_backend::journal::EventKind::Applied.as_str()
+            applied = zeroship_migrate_backend::journal::EventKind::Applied.as_str()
         ))
         .await
 }

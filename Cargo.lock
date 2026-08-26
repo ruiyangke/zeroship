@@ -7105,177 +7105,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zero-migrate"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "compio",
- "futures",
- "hex",
- "mysql",
- "pg_query",
- "postgres",
- "rusqlite",
- "schemars 1.2.1",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "toml 0.8.23",
- "zero-migrate-backend",
- "zero-migrate-core",
- "zero-migrate-ir",
- "zero-migrate-mysql",
- "zero-migrate-policy",
- "zero-migrate-postgres",
- "zero-migrate-sqlite",
-]
-
-[[package]]
-name = "zero-migrate-backend"
-version = "0.1.0"
-dependencies = [
- "base64",
- "hex",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.18",
- "uuid",
- "zero-migrate-ir",
- "zero-migrate-policy",
-]
-
-[[package]]
-name = "zero-migrate-core"
-version = "0.1.0"
-dependencies = [
- "base64",
- "futures",
- "hex",
- "hmac 0.12.1",
- "indexmap 2.14.0",
- "rusqlite",
- "schemars 1.2.1",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.18",
- "toml 0.8.23",
- "tracing",
- "uuid",
- "zero-migrate-backend",
- "zero-migrate-ir",
- "zero-migrate-mysql",
- "zero-migrate-policy",
- "zero-migrate-postgres",
- "zero-migrate-sqlite",
-]
-
-[[package]]
-name = "zero-migrate-ir"
-version = "0.1.0"
-dependencies = [
- "base64",
- "hex",
- "schemars 1.2.1",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.18",
- "toml 0.8.23",
- "uuid",
- "zero-migrate-policy",
-]
-
-[[package]]
-name = "zero-migrate-mysql"
-version = "0.1.0"
-dependencies = [
- "compio",
- "hex",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.18",
- "toml 0.8.23",
- "tracing",
- "uuid",
- "zero-migrate-backend",
- "zero-migrate-ir",
- "zero-migrate-policy",
-]
-
-[[package]]
-name = "zero-migrate-node"
-version = "0.1.0"
-dependencies = [
- "futures",
- "hex",
- "napi",
- "napi-build",
- "napi-derive",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "tracing",
- "tracing-subscriber",
- "zero-migrate",
- "zero-migrate-mysql",
- "zero-migrate-postgres",
- "zero-migrate-sqlite",
-]
-
-[[package]]
-name = "zero-migrate-policy"
-version = "0.1.0"
-dependencies = [
- "hex",
- "hmac 0.12.1",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.18",
- "toml 0.8.23",
-]
-
-[[package]]
-name = "zero-migrate-postgres"
-version = "0.1.0"
-dependencies = [
- "compio",
- "hex",
- "pg_query",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.18",
- "toml 0.8.23",
- "tracing",
- "uuid",
- "zero-migrate-backend",
- "zero-migrate-ir",
- "zero-migrate-policy",
-]
-
-[[package]]
-name = "zero-migrate-sqlite"
-version = "0.1.0"
-dependencies = [
- "compio",
- "flume 0.11.1",
- "hex",
- "rusqlite",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.18",
- "toml 0.8.23",
- "zero-migrate-backend",
- "zero-migrate-ir",
- "zero-migrate-policy",
-]
-
-[[package]]
 name = "zerocopy"
 version = "0.8.48"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7334,31 +7163,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "zeroship"
-version = "0.1.0"
-dependencies = [
- "base64",
- "ed25519-dalek",
- "hex",
- "jsonc-parser",
- "libc",
- "percent-encoding",
- "rand 0.8.5",
- "serde",
- "serde_json",
- "tempfile",
- "url",
- "uuid",
- "zeroship-core",
- "zeroship-metering",
- "zeroship-plugin-db",
- "zeroship-plugin-kv",
- "zeroship-plugin-storage",
- "zeroship-plugin-workflow",
- "zeroship-runtime",
 ]
 
 [[package]]
@@ -7458,6 +7262,31 @@ dependencies = [
  "uuid",
  "zeroship-test-support",
  "zstd",
+]
+
+[[package]]
+name = "zeroship-cli"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "ed25519-dalek",
+ "hex",
+ "jsonc-parser",
+ "libc",
+ "percent-encoding",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "url",
+ "uuid",
+ "zeroship-core",
+ "zeroship-metering",
+ "zeroship-plugin-db",
+ "zeroship-plugin-kv",
+ "zeroship-plugin-storage",
+ "zeroship-plugin-workflow",
+ "zeroship-runtime",
 ]
 
 [[package]]
@@ -7677,6 +7506,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroship-migrate"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "compio",
+ "futures",
+ "hex",
+ "mysql",
+ "pg_query",
+ "postgres",
+ "rusqlite",
+ "schemars 1.2.1",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "toml 0.8.23",
+ "zeroship-migrate-backend",
+ "zeroship-migrate-core",
+ "zeroship-migrate-ir",
+ "zeroship-migrate-mysql",
+ "zeroship-migrate-policy",
+ "zeroship-migrate-postgres",
+ "zeroship-migrate-sqlite",
+]
+
+[[package]]
 name = "zeroship-migrate-adapter"
 version = "0.1.0"
 dependencies = [
@@ -7688,12 +7543,157 @@ dependencies = [
  "tempfile",
  "tracing",
  "v8",
- "zero-migrate",
- "zero-migrate-ir",
- "zero-migrate-policy",
  "zeroship-core",
+ "zeroship-migrate",
+ "zeroship-migrate-ir",
+ "zeroship-migrate-policy",
  "zeroship-runtime",
  "zeroship-test-support",
+]
+
+[[package]]
+name = "zeroship-migrate-backend"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "uuid",
+ "zeroship-migrate-ir",
+ "zeroship-migrate-policy",
+]
+
+[[package]]
+name = "zeroship-migrate-core"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "futures",
+ "hex",
+ "hmac 0.12.1",
+ "indexmap 2.14.0",
+ "rusqlite",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "toml 0.8.23",
+ "tracing",
+ "uuid",
+ "zeroship-migrate-backend",
+ "zeroship-migrate-ir",
+ "zeroship-migrate-mysql",
+ "zeroship-migrate-policy",
+ "zeroship-migrate-postgres",
+ "zeroship-migrate-sqlite",
+]
+
+[[package]]
+name = "zeroship-migrate-ir"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "hex",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "toml 0.8.23",
+ "uuid",
+ "zeroship-migrate-policy",
+]
+
+[[package]]
+name = "zeroship-migrate-mysql"
+version = "0.1.0"
+dependencies = [
+ "compio",
+ "hex",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "toml 0.8.23",
+ "tracing",
+ "uuid",
+ "zeroship-migrate-backend",
+ "zeroship-migrate-ir",
+ "zeroship-migrate-policy",
+]
+
+[[package]]
+name = "zeroship-migrate-node"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "hex",
+ "napi",
+ "napi-build",
+ "napi-derive",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+ "zeroship-migrate",
+ "zeroship-migrate-mysql",
+ "zeroship-migrate-postgres",
+ "zeroship-migrate-sqlite",
+]
+
+[[package]]
+name = "zeroship-migrate-policy"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "hmac 0.12.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "toml 0.8.23",
+]
+
+[[package]]
+name = "zeroship-migrate-postgres"
+version = "0.1.0"
+dependencies = [
+ "compio",
+ "hex",
+ "pg_query",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "toml 0.8.23",
+ "tracing",
+ "uuid",
+ "zeroship-migrate-backend",
+ "zeroship-migrate-ir",
+ "zeroship-migrate-policy",
+]
+
+[[package]]
+name = "zeroship-migrate-sqlite"
+version = "0.1.0"
+dependencies = [
+ "compio",
+ "flume 0.11.1",
+ "hex",
+ "rusqlite",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml 0.8.23",
+ "zeroship-migrate-backend",
+ "zeroship-migrate-ir",
+ "zeroship-migrate-policy",
 ]
 
 [[package]]
@@ -7716,13 +7716,13 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "uuid",
- "zero-migrate",
- "zero-migrate-ir",
- "zero-migrate-policy",
  "zeroship-authn",
  "zeroship-authz",
  "zeroship-core",
+ "zeroship-migrate",
  "zeroship-migrate-adapter",
+ "zeroship-migrate-ir",
+ "zeroship-migrate-policy",
 ]
 
 [[package]]
@@ -7747,10 +7747,10 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "v8",
- "zero-migrate",
  "zeroize",
  "zeroship-core",
  "zeroship-metering",
+ "zeroship-migrate",
  "zeroship-migrate-adapter",
  "zeroship-migrated",
  "zeroship-plugin-workflow",

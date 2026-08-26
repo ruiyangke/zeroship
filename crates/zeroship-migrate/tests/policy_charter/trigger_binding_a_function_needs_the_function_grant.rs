@@ -38,15 +38,15 @@
 use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
-use zero_migrate::guard::GuardConfig;
-use zero_migrate::model::capability::VendorCapability;
-use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::model::op_support::vendor_capabilities;
-use zero_migrate::model::table_shape::resolve_create_table_policy;
-use zero_migrate::render::lower::{
+use zeroship_migrate::guard::GuardConfig;
+use zeroship_migrate::model::capability::VendorCapability;
+use zeroship_migrate::model::ir::MigrationIr;
+use zeroship_migrate::model::op_support::vendor_capabilities;
+use zeroship_migrate::model::table_shape::resolve_create_table_policy;
+use zeroship_migrate::render::lower::{
     IrAuthor, LiveSchema, LoadAndLowerGuardedError, LoweredArtifact,
 };
-use zero_migrate::{effective_policy_from_charter_toml, DialectId, EffectivePolicy};
+use zeroship_migrate::{effective_policy_from_charter_toml, DialectId, EffectivePolicy};
 
 const SCHEMA: &str = "app";
 const OWNER: &str = "app_a";
@@ -148,14 +148,14 @@ fn a_backend_that_cannot_render_the_action_says_so_about_the_action() {
         serde_json::from_str(&envelope(vec![create_table_op(), bind_function_op()]))
             .expect("the envelope parses");
 
-    for dialect in [zero_migrate_sqlite::DIALECT, zero_migrate_mysql::DIALECT] {
+    for dialect in [zeroship_migrate_sqlite::DIALECT, zeroship_migrate_mysql::DIALECT] {
         let policy = trigger_and_function_charter();
-        let error = zero_migrate::model::validate::validate_ir_authorized(
-            zero_migrate::shipping_vendors(),
+        let error = zeroship_migrate::model::validate::validate_ir_authorized(
+            zeroship_migrate::shipping_vendors(),
             &ir,
             &dialect,
             None,
-            Some(zero_migrate::model::validate::VendorAuthority {
+            Some(zeroship_migrate::model::validate::VendorAuthority {
                 effective: &policy,
                 default_schema: SCHEMA,
             }),
@@ -233,7 +233,7 @@ fn lower(
     let resolved_json = serde_json::to_string(&resolved).expect("resolved IR serializes");
     let guard = GuardConfig::from_policy(policy.clone(), dialect.clone());
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         OWNER,
         dialect,
@@ -253,7 +253,7 @@ fn lower(
 /// accepts the statement precisely because the function is already there.
 #[test]
 fn the_trigger_only_charter_is_refused_at_the_guarded_lower() {
-    let dialect = zero_migrate_postgres::DIALECT;
+    let dialect = zeroship_migrate_postgres::DIALECT;
     let error = lower(
         &trigger_only_charter(),
         &dialect,
@@ -281,13 +281,13 @@ fn the_same_trigger_only_charter_still_admits_a_trigger_that_binds_no_code() {
     let charter = trigger_only_charter();
     lower(
         &charter,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         vec![create_table_op(), body_trigger_op()],
     )
     .expect("a body trigger introduces no pre-existing code and needs no function grant");
     lower(
         &charter,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         vec![create_table_op(), drop_trigger_op()],
     )
     .expect("dropping a trigger unbinds code and needs no function grant");
@@ -299,7 +299,7 @@ fn the_same_trigger_only_charter_still_admits_a_trigger_that_binds_no_code() {
 fn granting_the_function_capability_as_well_admits_the_binding() {
     let artifact = lower(
         &trigger_and_function_charter(),
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         vec![create_table_op(), bind_function_op()],
     )
     .expect("a charter granting code.trigger AND code.function must admit the binding");
@@ -308,7 +308,7 @@ fn granting_the_function_capability_as_well_admits_the_binding() {
         .steps
         .iter()
         .filter_map(|step| match step {
-            zero_migrate::PlanStep::Ddl(migration) => Some(migration.up.as_str()),
+            zeroship_migrate::PlanStep::Ddl(migration) => Some(migration.up.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()

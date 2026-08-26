@@ -27,14 +27,14 @@
 use crate::support;
 
 use crate::support::PgDevSession;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::apply::executor::LockMode;
-use zero_migrate::driver::SqlSession;
-use zero_migrate::model::migration::{Checksum, ChecksumInput, MigrationFlags, MigrationId};
-use zero_migrate::model::precondition::{OnUnmet, Precondition, PreconditionCheck};
-use zero_migrate::render::step::PlanStep;
-use zero_migrate::{model::migration::Migration, Approval, ExecutorConfig, MigrationEngine};
-use zero_migrate_postgres::PostgresBackend;
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::apply::executor::LockMode;
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::model::migration::{Checksum, ChecksumInput, MigrationFlags, MigrationId};
+use zeroship_migrate::model::precondition::{OnUnmet, Precondition, PreconditionCheck};
+use zeroship_migrate::render::step::PlanStep;
+use zeroship_migrate::{model::migration::Migration, Approval, ExecutorConfig, MigrationEngine};
+use zeroship_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_precondition_pg";
 
@@ -138,7 +138,7 @@ async fn run_case(
         .await
         .expect("ensure the migration journal");
 
-    let applied = MigrationEngine::new(zero_migrate::shipping_vendors())
+    let applied = MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &[PlanStep::Ddl(migration(
                 &cfg.project_schema,

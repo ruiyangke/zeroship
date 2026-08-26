@@ -7,11 +7,11 @@
 
 use crate::support;
 
-use zero_migrate::guard::GuardConfig;
-use zero_migrate::Advisory;
-use zero_migrate_backend::advisory::{rule, Severity};
-use zero_migrate_postgres::analysis::analyze::{analyze, analyze_migration};
-use zero_migrate_postgres::guard::SqlGuard;
+use zeroship_migrate::guard::GuardConfig;
+use zeroship_migrate::Advisory;
+use zeroship_migrate_backend::advisory::{rule, Severity};
+use zeroship_migrate_postgres::analysis::analyze::{analyze, analyze_migration};
+use zeroship_migrate_postgres::guard::SqlGuard;
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -522,7 +522,7 @@ fn non_concurrent_index_suggestion_notes_own_nontransactional_migration() {
 fn guard_cfg() -> GuardConfig {
     GuardConfig::from_policy(
         support::no_inject("proj_acme"),
-        zero_migrate_postgres::DIALECT,
+        zeroship_migrate_postgres::DIALECT,
     )
 }
 
@@ -588,13 +588,13 @@ fn analyze_runs_independently_of_the_guard() {
 
 #[test]
 fn analyze_migration_attaches_advisories_to_a_generated_migration() {
-    use zero_migrate::{Column, MigrationAuthor, RawSqlAuthor};
+    use zeroship_migrate::{Column, MigrationAuthor, RawSqlAuthor};
     // Author a destructive drop the way the differ / RawSqlAuthor would, then
     // run the analyzer seam over it.
     let drop = RawSqlAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         "app_acme",
-        zero_migrate_postgres::DIALECT,
+        zeroship_migrate_postgres::DIALECT,
         support::no_inject("proj_acme"),
     )
     .wrap("drop_legacy", "DROP TABLE \"proj_acme\".\"legacy\"", None)
@@ -616,13 +616,13 @@ fn analyze_migration_attaches_advisories_to_a_generated_migration() {
         .to_lowercase()
         .contains("expand-contract"));
     // sanity: a benign additive migration gets no advisories.
-    let add = zero_migrate::DeterministicAuthor::new(
-        zero_migrate::shipping_vendors(),
+    let add = zeroship_migrate::DeterministicAuthor::new(
+        zeroship_migrate::shipping_vendors(),
         "proj_acme",
         "app_acme",
-        zero_migrate_postgres::DIALECT,
+        zeroship_migrate_postgres::DIALECT,
     )
-    .author(&zero_migrate::AuthorRequest::CreateTable {
+    .author(&zeroship_migrate::AuthorRequest::CreateTable {
         name: "orders".into(),
         columns: vec![Column {
             name: "id".into(),

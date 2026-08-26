@@ -36,8 +36,8 @@
 
 use crate::support;
 
-use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::model::validate::{validate_ir_authorized, VendorAuthority};
+use zeroship_migrate::model::ir::MigrationIr;
+use zeroship_migrate::model::validate::{validate_ir_authorized, VendorAuthority};
 
 fn verdict(ops: &str) -> Result<(), String> {
     let policy = support::operator_charter("public");
@@ -48,9 +48,9 @@ fn verdict(ops: &str) -> Result<(), String> {
         default_schema: "public",
     };
     validate_ir_authorized(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         None,
         Some(authority),
     )

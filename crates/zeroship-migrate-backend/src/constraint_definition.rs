@@ -4,7 +4,7 @@
 //!
 //! # Why it is here and not in the engine
 //!
-//! It was `pub(crate)` in `zero_migrate::render::declarative` until the vendor
+//! It was `pub(crate)` in `zeroship_migrate::render::declarative` until the vendor
 //! crates became separately linkable. `crates/zero-migrate-mysql/src/backend/`
 //! is being extracted into `zero-migrate-mysql`, and its `drift_sql.rs` BUILDS this
 //! body: MySQL's `information_schema` stores no rendered constraint text - there is
@@ -40,13 +40,13 @@
 //! they take a `&BackendVendor` PARAMETER. They used to resolve one from a
 //! `DialectId` through the engine's registry, which is exactly what a vendor crate
 //! may not do. The engine RESOLVES and hands the vendor down; a vendor hands its OWN
-//! `VENDOR` down and never asks. `zero_migrate::render::declarative` keeps the
+//! `VENDOR` down and never asks. `zeroship_migrate::render::declarative` keeps the
 //! dialect-taking shims its in-engine callers use, the same split
 //! `existence_probe::decide` draws.
 
 use std::fmt::Write as _;
 
-use zero_migrate_ir::backend::Capability;
+use zeroship_migrate_ir::backend::Capability;
 
 use crate::registry::BackendVendor;
 use crate::snapshot::{quote_constraint_definition_ident, ConstraintSnapshot};
@@ -260,8 +260,8 @@ pub fn quote_ident_if_needed(ident: &str) -> String {
 /// constraint `definition` body - `<col>, <col>, ...` with CONDITIONAL per-column
 /// quoting ([`quote_ident_if_needed`]: bare for a safe lowercase ident, double-
 /// quoted for reserved/mixed-case). This is the SINGLE source of the constraintdef
-/// body spelling: the engine's offline fold (`zero_migrate::render::fold`), the IR
-/// lower's snapshot half (`zero_migrate::render::lower`) and every backend's drift
+/// body spelling: the engine's offline fold (`zeroship_migrate::render::fold`), the IR
+/// lower's snapshot half (`zeroship_migrate::render::lower`) and every backend's drift
 /// normalization consume it, so the folded, the lower-emitted and the introspected
 /// UNIQUE/PK `definition` cannot drift apart (an unconditional quote would
 /// phantom-diff `UNIQUE ("handle")` against the catalog's `UNIQUE (handle)`).
@@ -285,7 +285,7 @@ pub const NOT_VALID_DEFINITION_SUFFIX: &str = " NOT VALID";
 /// vendor's canonical catalog form - InnoDB collapsing `RESTRICT` into `NO ACTION`,
 /// say - is the vendor's answer, asked for by [`normalize_fk_action_for_vendor`].
 ///
-/// `zero_migrate::schema::query::normalize_fk_action` is the engine's re-export of
+/// `zeroship_migrate::schema::query::normalize_fk_action` is the engine's re-export of
 /// this, kept so the out-of-repo data plane's import path is unchanged.
 #[must_use]
 pub fn normalize_fk_action(s: Option<&str>) -> &'static str {
@@ -423,7 +423,7 @@ pub fn fk_definition(
 /// policy: it is `<table>_<cols>_fkey` capped to the target's declared identifier
 /// budget, which is why it needs the table (this function otherwise never sees one)
 /// and the engine's `plan::author::cap_ident_name`. The engine keeps that half in
-/// `zero_migrate::render::declarative::ir_fk_constraint_snapshot_for_columns`, which
+/// `zeroship_migrate::render::declarative::ir_fk_constraint_snapshot_for_columns`, which
 /// still takes `table` + `explicit_name` and calls through to here.
 ///
 /// A backend never needs the derived half: a constraint it read out of a live

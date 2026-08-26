@@ -10,7 +10,7 @@
 //! An in-`src` `#[cfg(test)] mod` is how a suite reaches engine internals, and this one
 //! must not live that way: the
 //! assertions below name PostgreSQL's deny-list rule ids
-//! (`zero_migrate_postgres::guard::denylist::rule`), and
+//! (`zeroship_migrate_postgres::guard::denylist::rule`), and
 //! `dialect_matrix/core_names_no_vendor_crate.rs` forbids ANY file under
 //! `crates/zero-migrate-core/src` from naming a vendor crate — a test asserting one
 //! vendor's rule ids is exactly the coupling that census exists to catch, whether or
@@ -32,19 +32,19 @@
 //!   - the SchemaScope swap is byte-identical under Single for the
 //!     func-def-target + literal-schema-ref read sites.
 
-// Many types below are named via full `zero_migrate::…` paths (matching the original
+// Many types below are named via full `zeroship_migrate::…` paths (matching the original
 // in-module code); only the bare-referenced names are imported here.
-use zero_migrate::guard::{
+use zeroship_migrate::guard::{
     check_ir_data_security_policy, data_security_rule, GuardConfig, GuardError, MigrationGuard,
 };
-use zero_migrate::model::ir::{MigrationIr, Op};
-use zero_migrate::model::policy::{DestructiveOps, SchemaScope};
-use zero_migrate::DialectId;
-use zero_migrate_mysql::DIALECT as MYSQL;
-use zero_migrate_postgres::guard::denylist::rule;
-use zero_migrate_postgres::guard::{flags_for, SqlGuard};
-use zero_migrate_postgres::DIALECT as POSTGRES;
-use zero_migrate_sqlite::DIALECT as SQLITE;
+use zeroship_migrate::model::ir::{MigrationIr, Op};
+use zeroship_migrate::model::policy::{DestructiveOps, SchemaScope};
+use zeroship_migrate::DialectId;
+use zeroship_migrate_mysql::DIALECT as MYSQL;
+use zeroship_migrate_postgres::guard::denylist::rule;
+use zeroship_migrate_postgres::guard::{flags_for, SqlGuard};
+use zeroship_migrate_postgres::DIALECT as POSTGRES;
+use zeroship_migrate_sqlite::DIALECT as SQLITE;
 
 /// A Platform guard over the real port allowlist (`zero_migrate` / `public`) +
 /// the two ported extensions.
@@ -83,11 +83,11 @@ fn confined_guard() -> SqlGuard {
     SqlGuard::new(confined_guard_config())
 }
 
-fn vendor_ir(op: zero_migrate_ir::ir::Op) -> zero_migrate_ir::ir::MigrationIr {
-    zero_migrate_ir::ir::MigrationIr {
+fn vendor_ir(op: zeroship_migrate_ir::ir::Op) -> zeroship_migrate_ir::ir::MigrationIr {
+    zeroship_migrate_ir::ir::MigrationIr {
         inverse_ops: None,
         irreversible: None,
-        ir_version: zero_migrate_ir::ir::CURRENT_IR_VERSION,
+        ir_version: zeroship_migrate_ir::ir::CURRENT_IR_VERSION,
         name: "vendor_guard_probe".into(),
         owner_app: "app_corpus".into(),
         ops: vec![op],
@@ -103,7 +103,7 @@ fn ir_with(ops: Vec<Op>) -> MigrationIr {
     MigrationIr {
         inverse_ops: None,
         irreversible: None,
-        ir_version: zero_migrate_ir::ir::CURRENT_IR_VERSION,
+        ir_version: zeroship_migrate_ir::ir::CURRENT_IR_VERSION,
         name: "data_security_probe".into(),
         owner_app: "app_corpus".into(),
         ops,
@@ -117,7 +117,7 @@ fn ir_with(ops: Vec<Op>) -> MigrationIr {
 
 fn create_table(name: &str) -> Op {
     Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: name.to_string(),
         columns: Vec::new(),
         primary_key: None,
@@ -242,7 +242,7 @@ fn destructive_ops_warn_allows_and_records_structured_warning() {
 
         assert!(
             report.advisories.iter().any(|a| {
-                a.rule == zero_migrate_backend::advisory::rule::DATA_SECURITY_DESTRUCTIVE_OPS_WARN
+                a.rule == zeroship_migrate_backend::advisory::rule::DATA_SECURITY_DESTRUCTIVE_OPS_WARN
             }),
             "warn must record advisory for {sql}: {:?}",
             report.advisories
@@ -254,7 +254,7 @@ fn destructive_ops_warn_allows_and_records_structured_warning() {
         .expect("warn permits non-destructive DROP INDEX SQL");
     assert!(
         !report.advisories.iter().any(|a| {
-            a.rule == zero_migrate_backend::advisory::rule::DATA_SECURITY_DESTRUCTIVE_OPS_WARN
+            a.rule == zeroship_migrate_backend::advisory::rule::DATA_SECURITY_DESTRUCTIVE_OPS_WARN
         }),
         "plain DROP INDEX must not record a destructive_ops warning: {:?}",
         report.advisories
@@ -274,7 +274,7 @@ fn destructive_ops_warn_allows_and_records_unknown_warning() {
 
     assert!(
         report.advisories.iter().any(|a| {
-            a.rule == zero_migrate_backend::advisory::rule::DATA_SECURITY_UNCLASSIFIED_OPS_WARN
+            a.rule == zeroship_migrate_backend::advisory::rule::DATA_SECURITY_UNCLASSIFIED_OPS_WARN
         }),
         "warn must record advisory for unclassified SQL: {:?}",
         report.advisories
@@ -293,7 +293,7 @@ fn destructive_ops_allow_is_silent_for_policy_warning() {
         .expect("allow permits the drop");
 
     assert!(!report.advisories.iter().any(|a| {
-        a.rule == zero_migrate_backend::advisory::rule::DATA_SECURITY_DESTRUCTIVE_OPS_WARN
+        a.rule == zeroship_migrate_backend::advisory::rule::DATA_SECURITY_DESTRUCTIVE_OPS_WARN
     }));
 }
 
@@ -349,7 +349,7 @@ fn require_rls_rejects_create_table_without_same_migration_enable() {
     let err = check_ir_data_security_policy(
         &cfg,
         &ir,
-        zero_migrate::guard_for(zero_migrate::shipping_vendors(), &cfg).as_ref(),
+        zeroship_migrate::guard_for(zeroship_migrate::shipping_vendors(), &cfg).as_ref(),
     )
     .unwrap_err();
 
@@ -379,7 +379,7 @@ fn require_rls_accepts_create_table_with_same_migration_enable() {
     check_ir_data_security_policy(
         &cfg,
         &ir,
-        zero_migrate::guard_for(zero_migrate::shipping_vendors(), &cfg).as_ref(),
+        zeroship_migrate::guard_for(zeroship_migrate::shipping_vendors(), &cfg).as_ref(),
     )
     .expect("matching setRls satisfies require_rls");
 }
@@ -406,7 +406,7 @@ fn require_rls_rejects_create_enable_disable_net_off() {
     let err = check_ir_data_security_policy(
         &cfg,
         &ir,
-        zero_migrate::guard_for(zero_migrate::shipping_vendors(), &cfg).as_ref(),
+        zeroship_migrate::guard_for(zeroship_migrate::shipping_vendors(), &cfg).as_ref(),
     )
     .unwrap_err();
 
@@ -441,7 +441,7 @@ fn require_rls_rejects_standalone_disable_and_no_force() {
         let err = check_ir_data_security_policy(
             &cfg,
             &ir_with(vec![op]),
-            zero_migrate::guard_for(zero_migrate::shipping_vendors(), &cfg).as_ref(),
+            zeroship_migrate::guard_for(zeroship_migrate::shipping_vendors(), &cfg).as_ref(),
         )
         .unwrap_err();
         assert_eq!(err.op_index, 0);
@@ -467,9 +467,9 @@ fn require_rls_rejects_raw_table_creation_island_fail_closed() {
     match author.lower_guarded(
         &vendor_ir(op),
         &cfg,
-        &zero_migrate::render::lower::LiveSchema::default(),
+        &zeroship_migrate::render::lower::LiveSchema::default(),
     ) {
-        Err(zero_migrate::render::lower::IrGuardedLowerError::Denied(denial)) => {
+        Err(zeroship_migrate::render::lower::IrGuardedLowerError::Denied(denial)) => {
             assert_eq!(denial.op_kind, "raw");
             assert!(matches!(
                 denial.source,
@@ -488,9 +488,9 @@ fn require_rls_rejects_raw_table_creation_island_fail_closed() {
 /// guard varies (`require_rls`, `destructive_ops`) carry no vendor capability, so the
 /// author holds them at their guard-neutral values. The guarded lower derives its
 /// confinement scope from the guard config, so nothing widens the author by hand.
-fn platform_author() -> zero_migrate::render::lower::IrAuthor {
-    zero_migrate::render::lower::IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+fn platform_author() -> zeroship_migrate::render::lower::IrAuthor {
+    zeroship_migrate::render::lower::IrAuthor::new(
+        zeroship_migrate::shipping_vendors(),
         "zero_migrate",
         "app_corpus",
         &POSTGRES,
@@ -783,7 +783,7 @@ fn m2_stage2_superuser_belt_sites_stay_hard_denied() {
 /// composed policy - so they are unchanged here, and the name now says what they check.
 ///
 /// The boundary that IS pinned is the unforgeable `EffectivePolicy`, held by the T8
-/// `compile_fail` doctests in `zero_migrate_backend::guard`.
+/// `compile_fail` doctests in `zeroship_migrate_backend::guard`.
 #[test]
 fn t11_platform_posture_is_carried_by_the_composed_policy() {
     // The Platform posture is identified by its PDP shape: a schema allowlist scope.
@@ -798,7 +798,7 @@ fn t11_platform_posture_is_carried_by_the_composed_policy() {
         gcfg.schema_scope(),
         Some(SchemaScope::Allowlist(vec!["zero_migrate".into()]))
     );
-    let ecfg = zero_migrate::conn::ExecutorConfig::new(
+    let ecfg = zeroship_migrate::conn::ExecutorConfig::new(
         "platform",
         "zero_migrate",
         crate::support::operator_no_inject("zero_migrate"),
@@ -1008,7 +1008,7 @@ fn superuser_role_in_if_not_exists_do_wrap_denied_even_under_platform() {
 fn vendor_if_not_exists_superuser_role_op_is_refused_under_platform() {
     let guard_cfg = platform_guard_config();
     let author = platform_author();
-    let op = zero_migrate_ir::ir::Op::CreateRole {
+    let op = zeroship_migrate_ir::ir::Op::CreateRole {
         name: "evil".into(),
         login: Some(true),
         password: None,
@@ -1024,7 +1024,7 @@ fn vendor_if_not_exists_superuser_role_op_is_refused_under_platform() {
     match author.lower_guarded(
         &vendor_ir(op),
         &guard_cfg,
-        &zero_migrate::render::lower::LiveSchema::default(),
+        &zeroship_migrate::render::lower::LiveSchema::default(),
     ) {
         Err(_) => {}
         Ok((_steps, fragments)) => panic!(
@@ -1081,12 +1081,12 @@ fn host_escape_role_grant_denied_even_under_platform() {
 fn vendor_create_function_body_rce_is_denied_under_platform_guard() {
     let guard_cfg = platform_guard_config();
     let author = platform_author();
-    let op = zero_migrate_ir::ir::Op::CreateFunction {
+    let op = zeroship_migrate_ir::ir::Op::CreateFunction {
         name: "audit_events_rce".into(),
         schema: Some("zero_migrate".into()),
         args: None,
         returns: "void".into(),
-        language: zero_migrate_ir::ir::FuncLanguage::Procedural,
+        language: zeroship_migrate_ir::ir::FuncLanguage::Procedural,
         replace: Some(true),
         volatility: None,
         body: "BEGIN COPY zero_migrate.audit_events TO PROGRAM 'sh -c id'; END;".into(),
@@ -1095,9 +1095,9 @@ fn vendor_create_function_body_rce_is_denied_under_platform_guard() {
     match author.lower_guarded(
         &vendor_ir(op),
         &guard_cfg,
-        &zero_migrate::render::lower::LiveSchema::default(),
+        &zeroship_migrate::render::lower::LiveSchema::default(),
     ) {
-        Err(zero_migrate::render::lower::IrGuardedLowerError::Denied(denial)) => {
+        Err(zeroship_migrate::render::lower::IrGuardedLowerError::Denied(denial)) => {
             assert_eq!(denial.op_kind, "createFunction");
             assert!(
                 matches!(
@@ -1121,12 +1121,12 @@ fn vendor_create_function_body_rce_is_denied_under_platform_guard() {
 fn vendor_create_function_benign_body_is_allowed_under_platform_guard() {
     let guard_cfg = platform_guard_config();
     let author = platform_author();
-    let op = zero_migrate_ir::ir::Op::CreateFunction {
+    let op = zeroship_migrate_ir::ir::Op::CreateFunction {
         name: "audit_events_note".into(),
         schema: Some("zero_migrate".into()),
         args: None,
         returns: "void".into(),
-        language: zero_migrate_ir::ir::FuncLanguage::Procedural,
+        language: zeroship_migrate_ir::ir::FuncLanguage::Procedural,
         replace: Some(true),
         volatility: None,
         body: "BEGIN RAISE NOTICE 'ok'; RETURN; END;".into(),
@@ -1136,7 +1136,7 @@ fn vendor_create_function_benign_body_is_allowed_under_platform_guard() {
         .lower_guarded(
             &vendor_ir(op),
             &guard_cfg,
-            &zero_migrate::render::lower::LiveSchema::default(),
+            &zeroship_migrate::render::lower::LiveSchema::default(),
         )
         .expect("benign vendor createFunction body must pass the Platform guard");
     assert_eq!(fragments.len(), 1);
@@ -1152,7 +1152,7 @@ fn vendor_create_function_benign_body_is_allowed_under_platform_guard() {
 fn vendor_raw_rce_is_denied_under_platform_guard() {
     let guard_cfg = platform_guard_config();
     let author = platform_author();
-    let op = zero_migrate_ir::ir::Op::Raw {
+    let op = zeroship_migrate_ir::ir::Op::Raw {
         sql: "COPY zero_migrate.audit_events TO PROGRAM 'sh -c id'".into(),
         reason: "raw COPY PROGRAM denial regression".into(),
     };
@@ -1160,9 +1160,9 @@ fn vendor_raw_rce_is_denied_under_platform_guard() {
     match author.lower_guarded(
         &vendor_ir(op),
         &guard_cfg,
-        &zero_migrate::render::lower::LiveSchema::default(),
+        &zeroship_migrate::render::lower::LiveSchema::default(),
     ) {
-        Err(zero_migrate::render::lower::IrGuardedLowerError::Denied(denial)) => {
+        Err(zeroship_migrate::render::lower::IrGuardedLowerError::Denied(denial)) => {
             assert_eq!(denial.op_kind, "raw");
             assert!(
                 matches!(
@@ -1183,14 +1183,14 @@ fn vendor_raw_rce_is_denied_under_platform_guard() {
 #[test]
 fn vendor_role_op_is_refused_at_lower_without_platform_capability() {
     let guard_cfg = confined_guard_config();
-    let author = zero_migrate::render::lower::IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+    let author = zeroship_migrate::render::lower::IrAuthor::new(
+        zeroship_migrate::shipping_vendors(),
         "zero_migrate",
         "app_corpus",
         &POSTGRES,
         &crate::support::no_inject("app"),
     );
-    let op = zero_migrate_ir::ir::Op::CreateRole {
+    let op = zeroship_migrate_ir::ir::Op::CreateRole {
         name: "zero_migrate_auth".into(),
         login: Some(true),
         password: None,
@@ -1206,15 +1206,15 @@ fn vendor_role_op_is_refused_at_lower_without_platform_capability() {
     match author.lower_guarded(
         &vendor_ir(op),
         &guard_cfg,
-        &zero_migrate::render::lower::LiveSchema::default(),
+        &zeroship_migrate::render::lower::LiveSchema::default(),
     ) {
-        Err(zero_migrate::render::lower::IrGuardedLowerError::Lower(
-            zero_migrate::render::lower::IrLowerError::VendorCapabilityDenied { op, capability },
+        Err(zeroship_migrate::render::lower::IrGuardedLowerError::Lower(
+            zeroship_migrate::render::lower::IrLowerError::VendorCapabilityDenied { op, capability },
         )) => {
             assert_eq!(op, "createRole");
             assert_eq!(
                 capability,
-                zero_migrate_ir::capability::VendorCapability::Role
+                zeroship_migrate_ir::capability::VendorCapability::Role
             );
         }
         other => panic!(
@@ -1226,21 +1226,21 @@ fn vendor_role_op_is_refused_at_lower_without_platform_capability() {
 #[test]
 fn benign_vendor_policy_is_refused_at_lower_without_capability() {
     let guard_cfg = confined_guard_config();
-    let author = zero_migrate::render::lower::IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+    let author = zeroship_migrate::render::lower::IrAuthor::new(
+        zeroship_migrate::shipping_vendors(),
         "zero_migrate",
         "app_corpus",
         &POSTGRES,
         &crate::support::no_inject("app"),
     );
-    let op = zero_migrate_ir::ir::Op::CreatePolicy {
+    let op = zeroship_migrate_ir::ir::Op::CreatePolicy {
         name: "tenant_isolation".into(),
         table: "app_secrets".into(),
         schema: None,
-        for_cmd: zero_migrate_ir::ir::PolicyCmd::All,
+        for_cmd: zeroship_migrate_ir::ir::PolicyCmd::All,
         to: None,
-        using: zero_migrate_ir::expr::Expr::Literal {
-            value: zero_migrate_ir::ir::IrScalar::Bool(true),
+        using: zeroship_migrate_ir::expr::Expr::Literal {
+            value: zeroship_migrate_ir::ir::IrScalar::Bool(true),
         },
         with_check: None,
     };
@@ -1250,9 +1250,9 @@ fn benign_vendor_policy_is_refused_at_lower_without_capability() {
             author.lower_guarded(
                 &vendor_ir(op),
                 &guard_cfg,
-                &zero_migrate::render::lower::LiveSchema::default(),
+                &zeroship_migrate::render::lower::LiveSchema::default(),
             ),
-            Err(zero_migrate::render::lower::IrGuardedLowerError::Lower(_))
+            Err(zeroship_migrate::render::lower::IrGuardedLowerError::Lower(_))
         ),
         "lower_guarded must re-enforce the vendor capability gate before rendering; \
          the SQL guard alone would allow a benign same-schema CREATE POLICY"
@@ -1341,9 +1341,9 @@ fn unconfined_operator_guard_config() -> GuardConfig {
 /// The unconfined peer of [`platform_author`]: the author composes the same charter
 /// `unconfined_operator_guard_config` does, because the charter is what grants a
 /// vendor capability.
-fn unconfined_operator_author() -> zero_migrate::render::lower::IrAuthor {
-    zero_migrate::render::lower::IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+fn unconfined_operator_author() -> zeroship_migrate::render::lower::IrAuthor {
+    zeroship_migrate::render::lower::IrAuthor::new(
+        zeroship_migrate::shipping_vendors(),
         "public",
         "app_corpus",
         &POSTGRES,
@@ -1422,7 +1422,7 @@ fn an_admitted_destructive_op_still_requires_approval() {
 fn a_raw_island_creating_a_superuser_role_is_refused() {
     let cfg = unconfined_operator_guard_config();
     let author = unconfined_operator_author();
-    let bad = zero_migrate_ir::ir::Op::Raw {
+    let bad = zeroship_migrate_ir::ir::Op::Raw {
         sql: "CREATE ROLE zsmig_raw_evil SUPERUSER".into(),
         reason: "raw SUPERUSER denial regression".into(),
     };
@@ -1430,9 +1430,9 @@ fn a_raw_island_creating_a_superuser_role_is_refused() {
     match author.lower_guarded(
         &vendor_ir(bad),
         &cfg,
-        &zero_migrate::render::lower::LiveSchema::default(),
+        &zeroship_migrate::render::lower::LiveSchema::default(),
     ) {
-        Err(zero_migrate::render::lower::IrGuardedLowerError::Denied(denial)) => {
+        Err(zeroship_migrate::render::lower::IrGuardedLowerError::Denied(denial)) => {
             assert_eq!(denial.op_kind, "raw");
             assert!(
                 matches!(
@@ -1449,7 +1449,7 @@ fn a_raw_island_creating_a_superuser_role_is_refused() {
         other => panic!("a raw island creating a SUPERUSER role must be denied; got {other:?}"),
     }
 
-    let clean = zero_migrate_ir::ir::Op::Raw {
+    let clean = zeroship_migrate_ir::ir::Op::Raw {
         sql: "SELECT 1".into(),
         reason: "clean raw island smoke test".into(),
     };
@@ -1457,7 +1457,7 @@ fn a_raw_island_creating_a_superuser_role_is_refused() {
         .lower_guarded(
             &vendor_ir(clean),
             &cfg,
-            &zero_migrate::render::lower::LiveSchema::default(),
+            &zeroship_migrate::render::lower::LiveSchema::default(),
         )
         .expect("a clean raw island should pass");
 }
@@ -1470,12 +1470,12 @@ fn a_raw_island_creating_a_superuser_role_is_refused() {
 fn a_create_function_body_that_shells_out_is_refused() {
     let cfg = unconfined_operator_guard_config();
     let author = unconfined_operator_author();
-    let bad = zero_migrate_ir::ir::Op::CreateFunction {
+    let bad = zeroship_migrate_ir::ir::Op::CreateFunction {
         name: "raw_body_evil".into(),
         schema: Some("public".into()),
         args: None,
         returns: "void".into(),
-        language: zero_migrate_ir::ir::FuncLanguage::Procedural,
+        language: zeroship_migrate_ir::ir::FuncLanguage::Procedural,
         replace: Some(true),
         volatility: None,
         body: "BEGIN COPY public.audit_events TO PROGRAM 'sh -c id'; END;".into(),
@@ -1484,9 +1484,9 @@ fn a_create_function_body_that_shells_out_is_refused() {
     match author.lower_guarded(
         &vendor_ir(bad),
         &cfg,
-        &zero_migrate::render::lower::LiveSchema::default(),
+        &zeroship_migrate::render::lower::LiveSchema::default(),
     ) {
-        Err(zero_migrate::render::lower::IrGuardedLowerError::Denied(denial)) => {
+        Err(zeroship_migrate::render::lower::IrGuardedLowerError::Denied(denial)) => {
             assert_eq!(denial.op_kind, "createFunction");
             assert!(
                 matches!(
@@ -1503,12 +1503,12 @@ fn a_create_function_body_that_shells_out_is_refused() {
         other => panic!("a COPY … TO PROGRAM function body must deny; got {other:?}"),
     }
 
-    let clean = zero_migrate_ir::ir::Op::CreateFunction {
+    let clean = zeroship_migrate_ir::ir::Op::CreateFunction {
         name: "raw_body_clean".into(),
         schema: Some("public".into()),
         args: None,
         returns: "void".into(),
-        language: zero_migrate_ir::ir::FuncLanguage::Procedural,
+        language: zeroship_migrate_ir::ir::FuncLanguage::Procedural,
         replace: Some(true),
         volatility: None,
         body: "BEGIN RAISE NOTICE 'ok'; RETURN; END;".into(),
@@ -1517,7 +1517,7 @@ fn a_create_function_body_that_shells_out_is_refused() {
         .lower_guarded(
             &vendor_ir(clean),
             &cfg,
-            &zero_migrate::render::lower::LiveSchema::default(),
+            &zeroship_migrate::render::lower::LiveSchema::default(),
         )
         .expect("a clean createFunction body should pass");
 }
@@ -1562,7 +1562,7 @@ fn platform_widening_is_real_and_bounded() {
 ///
 /// # Why this test exists
 ///
-/// `zero_migrate_sqlite::SqliteGuard::check` and `zero_migrate_mysql::MysqlGuard::check`
+/// `zeroship_migrate_sqlite::SqliteGuard::check` and `zeroship_migrate_mysql::MysqlGuard::check`
 /// both return `Ok(GuardOutcome::default())`. Read on its own, either one says "this
 /// dialect vets nothing", and the obvious conclusion — that the two dialects have no
 /// data-security posture, and that this arm of `check_ir_data_security_policy` is dead
@@ -1605,7 +1605,7 @@ fn platform_widening_is_real_and_bounded() {
 struct FourthBackendGuard;
 
 impl MigrationGuard for FourthBackendGuard {
-    fn check(&self, _up: &str) -> Result<zero_migrate::guard::GuardOutcome, GuardError> {
+    fn check(&self, _up: &str) -> Result<zeroship_migrate::guard::GuardOutcome, GuardError> {
         unreachable!("the destructive-posture gate decides before any SQL text is vetted")
     }
     fn check_raw_island_sql(&self, _sql: &str) -> Result<(), GuardError> {
@@ -1625,7 +1625,7 @@ impl MigrationGuard for FourthBackendGuard {
     fn flags_for_sql(
         &self,
         _up: &str,
-    ) -> Result<zero_migrate::model::migration::MigrationFlags, GuardError> {
+    ) -> Result<zeroship_migrate::model::migration::MigrationFlags, GuardError> {
         unreachable!("the IR walk never derives flags from SQL text")
     }
 }
@@ -1652,7 +1652,7 @@ fn destructive_ops_forbid_is_enforced_over_the_ir_for_every_non_postgres_id() {
         let guard: Box<dyn MigrationGuard> = if dialect == DialectId::new("duckdb") {
             Box::new(FourthBackendGuard)
         } else {
-            zero_migrate::guard_for(zero_migrate::shipping_vendors(), &cfg)
+            zeroship_migrate::guard_for(zeroship_migrate::shipping_vendors(), &cfg)
         };
         let err = check_ir_data_security_policy(&cfg, &ir, guard.as_ref()).expect_err(
             "a trusting MigrationGuard means this IR walk is the dialect's ONLY \
@@ -1677,7 +1677,7 @@ fn destructive_ops_forbid_is_enforced_over_the_ir_for_every_non_postgres_id() {
         check_ir_data_security_policy(
             &pg,
             &ir,
-            zero_migrate::guard_for(zero_migrate::shipping_vendors(), &pg).as_ref()
+            zeroship_migrate::guard_for(zeroship_migrate::shipping_vendors(), &pg).as_ref()
         )
         .is_ok(),
         "the IR arm is for the dialects whose guard cannot read the knob; PostgreSQL's \

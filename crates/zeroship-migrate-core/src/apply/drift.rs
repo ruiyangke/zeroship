@@ -45,9 +45,9 @@
 //! DDL.
 
 use std::collections::BTreeMap;
-use zero_migrate_backend::registry::VendorSet;
-use zero_migrate_ir::attribute::Attributes;
-use zero_migrate_ir::ir::IrScalar;
+use zeroship_migrate_backend::registry::VendorSet;
+use zeroship_migrate_ir::attribute::Attributes;
+use zeroship_migrate_ir::ir::IrScalar;
 
 use crate::model::ir::{IndexSortOrder, SafeI64, SequenceOwnedBy, TriggerEvent};
 use crate::model::snapshot::{
@@ -68,7 +68,7 @@ use crate::render::value_format::{
 // comparisons - `diff_snapshots` and every per-vendor catalog normalization below -
 // stay here, because they read the engine's dialect-resolving value-format helpers.
 // Re-exported so each `crate::apply::drift::...` path resolves unchanged.
-pub use zero_migrate_backend::drift::{
+pub use zeroship_migrate_backend::drift::{
     compare_applied_to_set, AlteredObject, ChecksumDrift, ChecksumDriftReport, DriftError,
     DriftReport, OrphanJournal, StructuralDrift,
 };
@@ -77,7 +77,7 @@ pub use zero_migrate_backend::drift::{
 // read the SAME one - a second, drifting copy in the probe is exactly how a guard and
 // a drift report come to disagree about the same catalog - so it now sits beside the
 // decider rather than one crate above it.
-pub(crate) use zero_migrate_backend::drift::partition_divergences;
+pub(crate) use zeroship_migrate_backend::drift::partition_divergences;
 
 // ---------------------------------------------------------------------------
 // B2 - structural introspection + pure diff
@@ -486,7 +486,7 @@ fn format_sequence_owned_by(value: Option<&SequenceOwnedBy>) -> String {
 // shared vocabulary. The PostgreSQL introspector reaches it to recover an ID default
 // out of `pg_get_expr`, and it cannot reach into the engine. Re-exported so
 // `crate::apply::drift::parse_nextval_sequence_ref` resolves unchanged.
-pub(crate) use zero_migrate_backend::snapshot::parse_nextval_sequence_ref;
+pub(crate) use zeroship_migrate_backend::snapshot::parse_nextval_sequence_ref;
 
 /// Canonical rendered form of a `nextval` default, or `None` when the expression
 /// is not one. Backend-identity-free on purpose: the sequence identity is the whole key.
@@ -582,7 +582,7 @@ fn comparable_nextval_default(expr: Option<&str>) -> Option<String> {
 /// keeps `attgenerated = 's'`, so both sides agree here and the rewrite is not
 /// reported. That refusal is measured rather than assumed, and the measurement is
 /// NOT the injected cast the sibling predicates cite - it is the column RENAME.
-/// [`GeneratedColumnSnapshot::expr`](zero_migrate_backend::snapshot::GeneratedColumnSnapshot::expr)
+/// [`GeneratedColumnSnapshot::expr`](zeroship_migrate_backend::snapshot::GeneratedColumnSnapshot::expr)
 /// is RENDERED TEXT, and `fold_ops`'s
 /// `Op::RenameColumn` arm cannot replay a rename over it: substituting the name
 /// inside rendered SQL would rewrite the string literal in a real generated column
@@ -620,7 +620,7 @@ fn format_generated_kind(kind: GeneratedKindSnapshot) -> &'static str {
 fn comparable_column_default(
     vendors: VendorSet,
     raw: Option<&str>,
-    vendor: Option<&zero_migrate_backend::registry::BackendVendor>,
+    vendor: Option<&zeroship_migrate_backend::registry::BackendVendor>,
     expression_default: Option<bool>,
 ) -> Option<IdDefaultSnapshot> {
     let Some(raw) = raw else {
@@ -896,7 +896,7 @@ fn format_id_default(default: Option<&crate::model::snapshot::IdDefaultSnapshot>
 fn introspected_table_vendor(
     vendors: VendorSet,
     table: &TableSnapshot,
-) -> Option<&'static zero_migrate_backend::registry::BackendVendor> {
+) -> Option<&'static zeroship_migrate_backend::registry::BackendVendor> {
     vendors
         .as_slice()
         .iter()
@@ -1495,7 +1495,7 @@ fn index_referenced_columns(index: &IndexSnapshot) -> Option<Vec<&str>> {
 /// compare structurally, rather than comparing spellings.
 ///
 /// Kept separate from `constraint_definition_is_retained` (private to
-/// `zero_migrate_postgres::backend::drift_sql`, so it is named here rather than linked)
+/// `zeroship_migrate_postgres::backend::drift_sql`, so it is named here rather than linked)
 /// on purpose - it is the PostgreSQL introspector's own rule about what to STORE and
 /// now lives with the reader that applies it. Not
 /// comparing a body is not a reason to stop recording it: the guard's fail-closed
@@ -1903,14 +1903,14 @@ mod physical_contract_tests {
     //! property under test is not any vendor's rule but the seam's: whatever the
     //! vendor answers, core asks it exactly when a leg is present on both sides.
     //! What makes two MySQL contracts equal is asserted where that rule lives, in
-    //! `zero_migrate_mysql::physical_type`.
+    //! `zeroship_migrate_mysql::physical_type`.
 
     use std::any::Any;
     use std::sync::Arc;
 
     use super::{column_data_types_eq, ColumnSnapshot};
-    use zero_migrate_backend::dialectal::{Dialectal, DialectalValue, VendorColumnFacts};
-    use zero_migrate_ir::dialect::DialectId;
+    use zeroship_migrate_backend::dialectal::{Dialectal, DialectalValue, VendorColumnFacts};
+    use zeroship_migrate_ir::dialect::DialectId;
 
     const A_BACKEND: DialectId = DialectId::new("a_backend");
     const ANOTHER_BACKEND: DialectId = DialectId::new("another_backend");
@@ -2062,7 +2062,7 @@ mod constraint_definition_tests {
                 indexes: Vec::new(),
                 constraints,
                 runtime_options: TableRuntimeOptions::default(),
-                attributes: zero_migrate_ir::attribute::Attributes::new(),
+                attributes: zeroship_migrate_ir::attribute::Attributes::new(),
                 partition_by: None,
                 comment: None,
                 stored_create_sql: None,
@@ -2218,7 +2218,7 @@ mod unattributed_snapshot_tests {
                 indexes: Vec::new(),
                 constraints: Vec::new(),
                 runtime_options: TableRuntimeOptions::default(),
-                attributes: zero_migrate_ir::attribute::Attributes::new(),
+                attributes: zeroship_migrate_ir::attribute::Attributes::new(),
                 partition_by: None,
                 comment: None,
                 stored_create_sql: None,

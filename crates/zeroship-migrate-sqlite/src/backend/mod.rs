@@ -1,4 +1,4 @@
-//! The SQLite [`MigrationBackend`](zero_migrate_backend::backend::MigrationBackend)
+//! The SQLite [`MigrationBackend`](zeroship_migrate_backend::backend::MigrationBackend)
 //! impl (confinement folded in).
 //!
 //! `SqliteBackend` is the security core for SQLite migrations. It owns a
@@ -63,18 +63,18 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use zero_migrate_backend::backend::MigrationBackend;
-use zero_migrate_backend::baseline::{BaselineError, BaselineOutcome};
-use zero_migrate_backend::conn::ExecutorConfig;
-use zero_migrate_backend::drift::{ChecksumDriftReport, DriftError};
-use zero_migrate_backend::executor::{
+use zeroship_migrate_backend::backend::MigrationBackend;
+use zeroship_migrate_backend::baseline::{BaselineError, BaselineOutcome};
+use zeroship_migrate_backend::conn::ExecutorConfig;
+use zeroship_migrate_backend::drift::{ChecksumDriftReport, DriftError};
+use zeroship_migrate_backend::executor::{
     authorize_existence_guard_schema, ApplyError, PreconditionVerdict, RollbackError,
 };
-use zero_migrate_backend::journal::{AppliedEntry, JournalError};
-use zero_migrate_backend::snapshot::SchemaSnapshot;
-use zero_migrate_backend::table_rebuild::TableRebuildSpec;
-use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_ir::migration::Migration;
+use zeroship_migrate_backend::journal::{AppliedEntry, JournalError};
+use zeroship_migrate_backend::snapshot::SchemaSnapshot;
+use zeroship_migrate_backend::table_rebuild::TableRebuildSpec;
+use zeroship_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::migration::Migration;
 
 pub use actor::{MigrationActor, SqliteActorError};
 pub use authorizer::Mode;
@@ -199,26 +199,26 @@ impl SqliteBackend {
     /// the PG bounded backfill runner) - the checkpointed /
     /// crash-fuzz seam tests drive. `set_clause` / `filter` are the inline SQL the
     /// shared assembler
-    /// ([`assemble_backfill_clauses_for_backend`](zero_migrate_backend::dml::assemble_backfill_clauses_for_backend))
+    /// ([`assemble_backfill_clauses_for_backend`](zeroship_migrate_backend::dml::assemble_backfill_clauses_for_backend))
     /// renders; the
     /// executor-internal direct seam has NO approval gate (the generic executor
     /// gates approval before reaching the backend's `run_backfill_step`). Stops after
     /// at most `max_batches` committed batches (`None` = run to completion).
     ///
     /// # Errors
-    /// [`zero_migrate_backend::backfill::BackfillError`] on a malformed spec, an unsafe cursor
+    /// [`zeroship_migrate_backend::backfill::BackfillError`] on a malformed spec, an unsafe cursor
     /// column, a cursor-column mutation, a resumable batch failure, or a poisoned
     /// connection.
     pub async fn run_backfill_bounded_sqlite(
         &self,
-        spec: &zero_migrate_backend::backfill::BackfillSpec,
+        spec: &zeroship_migrate_backend::backfill::BackfillSpec,
         set_clause: &str,
         filter: Option<&str>,
         applied_by: &str,
         max_batches: Option<u64>,
     ) -> Result<
-        zero_migrate_backend::backfill::BackfillOutcome,
-        zero_migrate_backend::backfill::BackfillError,
+        zeroship_migrate_backend::backfill::BackfillOutcome,
+        zeroship_migrate_backend::backfill::BackfillError,
     > {
         backfill_sql::run_backfill_bounded(
             &self.actor,
@@ -263,7 +263,7 @@ impl SqliteBackend {
     ///
     /// This inherent method runs the rebuild WITHOUT an approval gate - it is the raw
     /// dialect-coupled drive. The GATED production path is the engine's
-    /// generic `zero_migrate::MigrationEngine::apply_declarative` (named in prose,
+    /// generic `zeroship_migrate::MigrationEngine::apply_declarative` (named in prose,
     /// not linked: the engine depends on this crate, so this crate cannot name it),
     /// which classifies the rebuild's `destructive + requires_approval` journal
     /// migration and refuses an un-approved rebuild BEFORE calling down into
@@ -350,7 +350,7 @@ impl SqliteBackend {
              SELECT version, name, checksum FROM ranked \
               WHERE rn = 1 AND event_kind = '{applied}' \
               ORDER BY version",
-            applied = zero_migrate_backend::journal::EventKind::Applied.as_str()
+            applied = zeroship_migrate_backend::journal::EventKind::Applied.as_str()
         );
         let rows = self.actor.query(&sql).await?;
         let mut out = Vec::with_capacity(rows.len());
@@ -402,7 +402,7 @@ impl SqliteBackend {
         let net = journal_sql::applied(&self.actor)
             .await?
             .into_iter()
-            .filter(|e| e.phase == zero_migrate_backend::journal::Phase::Completed)
+            .filter(|e| e.phase == zeroship_migrate_backend::journal::Phase::Completed)
             .count();
         if net > 0 {
             return Err(SqliteActorError::Exec(format!(
@@ -680,20 +680,20 @@ impl MigrationBackend for SqliteBackend {
             // dialect-taking `render::existence_probe::decide` is a shim whose body
             // resolves the dialect through the registry and calls exactly this; a
             // backend that already knows which vendor it is passes its own.
-            match zero_migrate_backend::existence_probe::decide(probe, &live, &crate::VENDOR) {
-                zero_migrate_backend::existence_probe::GuardVerdict::RunBare => {
+            match zeroship_migrate_backend::existence_probe::decide(probe, &live, &crate::VENDOR) {
+                zeroship_migrate_backend::existence_probe::GuardVerdict::RunBare => {
                     return journal_sql::apply_one_additive(&self.actor, m, applied_by)
                         .await
                         .map(|_| false)
                         .map_err(apply_err);
                 }
-                zero_migrate_backend::existence_probe::GuardVerdict::SatisfiedNoop => {
+                zeroship_migrate_backend::existence_probe::GuardVerdict::SatisfiedNoop => {
                     return journal_sql::journal_satisfied_noop(&self.actor, m, applied_by)
                         .await
                         .map(|_| false)
                         .map_err(apply_err);
                 }
-                zero_migrate_backend::existence_probe::GuardVerdict::FailDrift(d) => {
+                zeroship_migrate_backend::existence_probe::GuardVerdict::FailDrift(d) => {
                     return Err(ApplyError::ExistenceGuardDrift {
                         version: m.version.as_str().to_string(),
                         object: d.object,
@@ -727,7 +727,7 @@ impl MigrationBackend for SqliteBackend {
         &self,
         _cfg: &ExecutorConfig,
         forward: &Migration,
-        inverse_steps: &[zero_migrate_backend::step::PlanStep],
+        inverse_steps: &[zeroship_migrate_backend::step::PlanStep],
         applied_by: &str,
     ) -> Result<(), RollbackError> {
         rollback_sql::rollback_dml_plan_transactional(
@@ -815,7 +815,7 @@ impl MigrationBackend for SqliteBackend {
     async fn history(
         &self,
         _cfg: &ExecutorConfig,
-    ) -> Result<Vec<zero_migrate_backend::journal::HistoryEvent>, JournalError> {
+    ) -> Result<Vec<zeroship_migrate_backend::journal::HistoryEvent>, JournalError> {
         // The SQLite journal keeps the same append-only events; what it has never
         // had is the READER that projects them into `HistoryEvent`. Refusing by
         // name is the honest posture: an empty Vec would be indistinguishable from
@@ -841,7 +841,7 @@ impl MigrationBackend for SqliteBackend {
     async fn backfill_progress(
         &self,
         _cfg: &ExecutorConfig,
-    ) -> Result<Vec<zero_migrate_backend::backfill::BackfillProgressEntry>, JournalError> {
+    ) -> Result<Vec<zeroship_migrate_backend::backfill::BackfillProgressEntry>, JournalError> {
         backfill_sql::read_progress_entries(&self.actor)
             .await
             .map_err(journal_err)
@@ -879,7 +879,7 @@ impl MigrationBackend for SqliteBackend {
         let applied = journal_sql::applied(&self.actor)
             .await
             .map_err(|e| DriftError::Backend(e.to_string()))?;
-        Ok(zero_migrate_backend::drift::compare_applied_to_set(
+        Ok(zeroship_migrate_backend::drift::compare_applied_to_set(
             &applied, migrations,
         ))
     }
@@ -944,7 +944,7 @@ impl MigrationBackend for SqliteBackend {
         &self,
         spec: &TableRebuildSpec,
         m: &Migration,
-        scope: &zero_migrate_backend::approval::ApprovalScope,
+        scope: &zeroship_migrate_backend::approval::ApprovalScope,
         applied_by: &str,
     ) -> Result<(), ApplyError> {
         // **Per-version scope (executor-layer defense in depth).** A rebuild on a
@@ -974,9 +974,9 @@ impl MigrationBackend for SqliteBackend {
     async fn alter_primary_key(
         &self,
         cfg: &ExecutorConfig,
-        step: &zero_migrate_backend::step::AlterPrimaryKeyStep,
-        approval: zero_migrate_backend::approval::Approval,
-        scope: &zero_migrate_backend::approval::ApprovalScope,
+        step: &zeroship_migrate_backend::step::AlterPrimaryKeyStep,
+        approval: zeroship_migrate_backend::approval::Approval,
+        scope: &zeroship_migrate_backend::approval::ApprovalScope,
         applied_by: &str,
     ) -> Result<bool, ApplyError> {
         journal_sql::ensure_journal(&self.actor)
@@ -988,7 +988,7 @@ impl MigrationBackend for SqliteBackend {
             .map_err(journal_err)
             .map_err(ApplyError::Journal)?
             .into_iter()
-            .filter(|entry| matches!(entry.phase, zero_migrate_backend::journal::Phase::Completed))
+            .filter(|entry| matches!(entry.phase, zeroship_migrate_backend::journal::Phase::Completed))
             .find(|entry| entry.version == step.migration.version.as_str())
         {
             if entry.checksum != step.migration.checksum.as_str() {
@@ -1001,7 +1001,7 @@ impl MigrationBackend for SqliteBackend {
             return Ok(false);
         }
         if step.migration.flags.destructive || step.migration.flags.requires_approval {
-            if approval != zero_migrate_backend::approval::Approval::Approved {
+            if approval != zeroship_migrate_backend::approval::Approval::Approved {
                 return Err(ApplyError::ApprovalRequired);
             }
             if !scope.admits(step.migration.version.as_str()) {
@@ -1034,7 +1034,7 @@ impl MigrationBackend for SqliteBackend {
     async fn synchronize_identity(
         &self,
         cfg: &ExecutorConfig,
-        step: &zero_migrate_backend::step::SynchronizeIdentityStep,
+        step: &zeroship_migrate_backend::step::SynchronizeIdentityStep,
         applied_by: &str,
     ) -> Result<bool, ApplyError> {
         if step.writes_quiesced.trim().is_empty() {
@@ -1052,7 +1052,7 @@ impl MigrationBackend for SqliteBackend {
             .map_err(journal_err)
             .map_err(ApplyError::Journal)?
             .into_iter()
-            .filter(|entry| matches!(entry.phase, zero_migrate_backend::journal::Phase::Completed))
+            .filter(|entry| matches!(entry.phase, zeroship_migrate_backend::journal::Phase::Completed))
             .find(|entry| entry.version == step.migration.version.as_str())
         {
             if entry.checksum != step.migration.checksum.as_str() {
@@ -1087,14 +1087,14 @@ impl MigrationBackend for SqliteBackend {
     async fn run_backfill_step(
         &self,
         _cfg: &ExecutorConfig,
-        version: &zero_migrate_ir::migration::MigrationId,
-        checksum: &zero_migrate_ir::migration::Checksum,
-        spec: &zero_migrate_backend::backfill::BackfillSpec,
-        approval: zero_migrate_backend::approval::Approval,
-        scope: &zero_migrate_backend::approval::ApprovalScope,
+        version: &zeroship_migrate_ir::migration::MigrationId,
+        checksum: &zeroship_migrate_ir::migration::Checksum,
+        spec: &zeroship_migrate_backend::backfill::BackfillSpec,
+        approval: zeroship_migrate_backend::approval::Approval,
+        scope: &zeroship_migrate_backend::approval::ApprovalScope,
         applied_by: &str,
-        _lock_mode: zero_migrate_backend::executor::LockMode,
-    ) -> Result<zero_migrate_backend::executor::ApplyOutcome, ApplyError> {
+        _lock_mode: zeroship_migrate_backend::executor::LockMode,
+    ) -> Result<zeroship_migrate_backend::executor::ApplyOutcome, ApplyError> {
         // The SQLite batched/resumable backfill executor, the SQLite
         // analog of the PG writable-CTE windowed UPDATE. Completes the "one
         // script, both backends, DDL+DML" headline: a batched backfill is now
@@ -1107,7 +1107,7 @@ impl MigrationBackend for SqliteBackend {
             .map_err(journal_err)
             .map_err(ApplyError::Journal)?
             .into_iter()
-            .filter(|entry| matches!(entry.phase, zero_migrate_backend::journal::Phase::Completed))
+            .filter(|entry| matches!(entry.phase, zeroship_migrate_backend::journal::Phase::Completed))
             .find(|entry| entry.version == version.as_str())
         {
             if entry.checksum != checksum.as_str() {
@@ -1117,7 +1117,7 @@ impl MigrationBackend for SqliteBackend {
                     expected: checksum.as_str().to_string(),
                 });
             }
-            return Ok(zero_migrate_backend::executor::ApplyOutcome {
+            return Ok(zeroship_migrate_backend::executor::ApplyOutcome {
                 applied: Vec::new(),
                 skipped: vec![version.as_str().to_string()],
                 recovered: Vec::new(),
@@ -1126,7 +1126,7 @@ impl MigrationBackend for SqliteBackend {
         // A pending backfill mutates table data and requires explicit approval.
         // A completed matching step above is an idempotent skip and does not need
         // renewed approval.
-        if approval != zero_migrate_backend::approval::Approval::Approved {
+        if approval != zeroship_migrate_backend::approval::Approval::Approved {
             return Err(ApplyError::ApprovalRequired);
         }
         if !scope.admits(version.as_str()) {
@@ -1145,7 +1145,7 @@ impl MigrationBackend for SqliteBackend {
         )
         .await
         .map_err(|error| match error {
-            zero_migrate_backend::backfill::BackfillError::ChecksumDrift {
+            zeroship_migrate_backend::backfill::BackfillError::ChecksumDrift {
                 version,
                 recorded,
                 expected,
@@ -1163,7 +1163,7 @@ impl MigrationBackend for SqliteBackend {
         } else {
             Vec::new()
         };
-        Ok(zero_migrate_backend::executor::ApplyOutcome {
+        Ok(zeroship_migrate_backend::executor::ApplyOutcome {
             applied,
             skipped: Vec::new(),
             recovered: Vec::new(),
@@ -1173,21 +1173,21 @@ impl MigrationBackend for SqliteBackend {
     async fn run_dml_step(
         &self,
         _cfg: &ExecutorConfig,
-        version: &zero_migrate_ir::migration::MigrationId,
-        checksum: &zero_migrate_ir::migration::Checksum,
+        version: &zeroship_migrate_ir::migration::MigrationId,
+        checksum: &zeroship_migrate_ir::migration::Checksum,
         name: &str,
         template: &str,
-        binds: &[zero_migrate_backend::step::BindValue],
+        binds: &[zeroship_migrate_backend::step::BindValue],
         _target_schema: &str,
         _target_table: &str,
         _conflict_target: Option<&[String]>,
         _mutates_data: bool,
         destructive: bool,
         _owner_app: &str,
-        approval: zero_migrate_backend::approval::Approval,
-        scope: &zero_migrate_backend::approval::ApprovalScope,
+        approval: zeroship_migrate_backend::approval::Approval,
+        scope: &zeroship_migrate_backend::approval::ApprovalScope,
         applied_by: &str,
-        _lock_mode: zero_migrate_backend::executor::LockMode,
+        _lock_mode: zeroship_migrate_backend::executor::LockMode,
     ) -> Result<bool, ApplyError> {
         // The SQLite one-shot DML executor. The `template` carries `?n`
         // placeholders; the binds are bound NATIVELY (never interpolated).
@@ -1199,7 +1199,7 @@ impl MigrationBackend for SqliteBackend {
             .map_err(journal_err)
             .map_err(ApplyError::Journal)?
             .into_iter()
-            .filter(|e| matches!(e.phase, zero_migrate_backend::journal::Phase::Completed))
+            .filter(|e| matches!(e.phase, zeroship_migrate_backend::journal::Phase::Completed))
             .find(|e| e.version == version.as_str());
         if let Some(entry) = completed {
             if entry.checksum != checksum.as_str() {
@@ -1211,7 +1211,7 @@ impl MigrationBackend for SqliteBackend {
             }
             return Ok(false);
         }
-        if destructive && approval != zero_migrate_backend::approval::Approval::Approved {
+        if destructive && approval != zeroship_migrate_backend::approval::Approval::Approved {
             return Err(ApplyError::ApprovalRequired);
         }
         // Per-version scope defense in depth. A pending destructive DML runs only
@@ -1241,7 +1241,7 @@ impl MigrationBackend for SqliteBackend {
         Ok(true)
     }
 
-    fn online(&self) -> Option<&dyn zero_migrate_backend::capability::OnlineSchemaChange> {
+    fn online(&self) -> Option<&dyn zeroship_migrate_backend::capability::OnlineSchemaChange> {
         // SQLite has NO online schema-change capability: a SQLite declarative rename
         // is routed to a `rebuild_one` (the 12-step offline rebuild), never
         // expand-contract, so `plan.renames` is structurally EMPTY on the SQLite leg
@@ -1253,7 +1253,7 @@ impl MigrationBackend for SqliteBackend {
 
     fn pending_contracts(
         &self,
-    ) -> Option<&dyn zero_migrate_backend::backend::CrossDeployObligations> {
+    ) -> Option<&dyn zeroship_migrate_backend::backend::CrossDeployObligations> {
         // SQLite has no cross-deploy pending-contract partition: a rebuild rename
         // is one atomic offline step, so there is no obligation to open or
         // recover. Generic callers treat `None` as empty/no-op.

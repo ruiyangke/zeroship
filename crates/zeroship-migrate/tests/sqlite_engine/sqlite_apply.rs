@@ -6,16 +6,16 @@ use crate::support;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::apply::backend::{MigrationBackend, PlanPreconditionVerdict};
-use zero_migrate::apply::journal::Phase;
-use zero_migrate::conn::ExecutorConfig;
-use zero_migrate::model::migration::{
+use zeroship_migrate::apply::backend::{MigrationBackend, PlanPreconditionVerdict};
+use zeroship_migrate::apply::journal::Phase;
+use zeroship_migrate::conn::ExecutorConfig;
+use zeroship_migrate::model::migration::{
     Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
 };
-use zero_migrate::model::precondition::{Precondition, PreconditionCheck};
-use zero_migrate::PreconditionVerdict;
-use zero_migrate::{AppliedPlan, PlanStatusManifest, ReconciledPlanState};
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate::model::precondition::{Precondition, PreconditionCheck};
+use zeroship_migrate::PreconditionVerdict;
+use zeroship_migrate::{AppliedPlan, PlanStatusManifest, ReconciledPlanState};
+use zeroship_migrate_sqlite::SqliteBackend;
 
 struct Paths {
     _dir: TempDir,
@@ -135,24 +135,24 @@ async fn apply_create_table_then_idempotent_rerun() {
 async fn empty_ir_plan_anchor_applies_once_and_then_skips() {
     let p = paths("empty_anchor");
     let be = backend(&p);
-    let ir: zero_migrate::MigrationIr = serde_json::from_value(serde_json::json!({
+    let ir: zeroship_migrate::MigrationIr = serde_json::from_value(serde_json::json!({
         "ir_version": 1,
         "name": "empty_accounts_plan",
         "owner_app": "app_test",
         "ops": []
     }))
     .expect("empty IR parses");
-    let plan = zero_migrate::IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+    let plan = zeroship_migrate::IrAuthor::new(
+        zeroship_migrate::shipping_vendors(),
         "app",
         "app_test",
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::no_inject("app"),
     )
-    .lower_plan(&ir, &zero_migrate::LiveSchema::default())
+    .lower_plan(&ir, &zeroship_migrate::LiveSchema::default())
     .expect("empty IR lowers to a journal anchor");
     let anchor = match plan.steps.as_slice() {
-        [zero_migrate::PlanStep::Ddl(migration)] => migration,
+        [zeroship_migrate::PlanStep::Ddl(migration)] => migration,
         other => panic!("expected one journal anchor, got {other:?}"),
     };
 
@@ -600,7 +600,7 @@ async fn is_autocommit_detects_open_transaction() {
     // Open a transaction under engine mode (which the authorizer allows) — now the
     // connection is the WEDGED state the fix detects.
     be.actor()
-        .set_mode(zero_migrate_sqlite::backend::Mode::EngineJournal)
+        .set_mode(zeroship_migrate_sqlite::backend::Mode::EngineJournal)
         .await
         .expect("engine mode");
     be.actor().exec("BEGIN IMMEDIATE").await.expect("begin");
@@ -624,7 +624,7 @@ async fn is_autocommit_detects_open_transaction() {
 async fn reports_sqlite_dialect() {
     let p = paths("dialect");
     let be = backend(&p);
-    assert_eq!(MigrationBackend::dialect(&be), zero_migrate_sqlite::DIALECT);
+    assert_eq!(MigrationBackend::dialect(&be), zeroship_migrate_sqlite::DIALECT);
     // ensure_journal through the trait works and applied() is empty initially.
     let c = cfg();
     MigrationBackend::ensure_journal(&be, &c)
@@ -657,7 +657,7 @@ async fn read_only_plan_status_never_creates_a_fresh_journal() {
         "a fresh backend has no journal meta objects"
     );
 
-    let fresh = zero_migrate::ops::status::status_plans_via_backend_read_only(
+    let fresh = zeroship_migrate::ops::status::status_plans_via_backend_read_only(
         &be,
         &c,
         std::slice::from_ref(&manifest),
@@ -687,7 +687,7 @@ async fn read_only_plan_status_never_creates_a_fresh_journal() {
         "the journal table exists after apply"
     );
 
-    let applied = zero_migrate::ops::status::status_plans_via_backend_read_only(
+    let applied = zeroship_migrate::ops::status::status_plans_via_backend_read_only(
         &be,
         &c,
         std::slice::from_ref(&manifest),

@@ -16,7 +16,7 @@
 //! [`MysqlDevSession`] is the exact sibling of [`PgDevSession`](super::PgDevSession):
 //! a TEST-ONLY [`SqlSession`] over the BLOCKING `mysql` crate, pinned to ONE
 //! connection, that drives the SHIPPED generic
-//! [`MysqlBackend`](zero_migrate_mysql::MysqlBackend) / executor / journal
+//! [`MysqlBackend`](zeroship_migrate_mysql::MysqlBackend) / executor / journal
 //! / drift path through the SAME seam the production `mysql2` host rides.
 //!
 //! **Never ships.** `mysql` is a `[dev-dependency]`; `cargo tree -p zero-migrate -e
@@ -53,7 +53,7 @@ use mysql::consts::ColumnType;
 use mysql::prelude::Queryable;
 use mysql::{Conn, Opts, Value as MyValue};
 
-use zero_migrate::driver::{Bind, DbError, Row, SqlSession, Value};
+use zeroship_migrate::driver::{Bind, DbError, Row, SqlSession, Value};
 
 /// The env var carrying the live-MySQL DSN. It is REQUIRED: when unset, every test
 /// that needs MySQL fails rather than skipping into a green report.

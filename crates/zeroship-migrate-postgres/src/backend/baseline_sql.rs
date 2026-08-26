@@ -1,25 +1,25 @@
 //! The PostgreSQL adoption baseline: record an existing project DB's schema as a
 //! `completed` journal event WITHOUT running its `up`.
 //!
-//! This body used to live in `zero_migrate_backend::baseline`, next to the dialect-neutral
+//! This body used to live in `zeroship_migrate_backend::baseline`, next to the dialect-neutral
 //! [`BaselineOutcome`]/[`BaselineError`] vocabulary it returns - and from there it
 //! called `apply::backend::postgres::journal_sql` by name. That made core's baseline
 //! verb PostgreSQL's baseline verb: SQLite has its own body in
-//! `zero_migrate_sqlite::backend::journal_sql` (named in prose, not linked - that
+//! `zeroship_migrate_sqlite::backend::journal_sql` (named in prose, not linked - that
 //! crate is below this one in the graph, so this crate's docs cannot resolve into
 //! it), MySQL refuses, and neither could ever have been reached through the module
 //! that named this one.
 //!
 //! The neutral half stayed where it was. `BaselineOutcome` and `BaselineError` are
-//! the [`MigrationBackend::baseline_one`](zero_migrate_backend::backend::MigrationBackend::baseline_one)
+//! the [`MigrationBackend::baseline_one`](zeroship_migrate_backend::backend::MigrationBackend::baseline_one)
 //! signature, so every backend still speaks them; only the PostgreSQL IMPLEMENTATION
 //! moved down here, where naming `journal_sql` is naming yourself.
 
-use zero_migrate_backend::baseline::{BaselineError, BaselineOutcome};
-use zero_migrate_backend::conn::ExecutorConfig;
-use zero_migrate_backend::driver::SqlSession;
-use zero_migrate_backend::journal::{self, JournalError};
-use zero_migrate_ir::migration::Migration;
+use zeroship_migrate_backend::baseline::{BaselineError, BaselineOutcome};
+use zeroship_migrate_backend::conn::ExecutorConfig;
+use zeroship_migrate_backend::driver::SqlSession;
+use zeroship_migrate_backend::journal::{self, JournalError};
+use zeroship_migrate_ir::migration::Migration;
 
 use super::journal_sql;
 
@@ -27,7 +27,7 @@ use super::journal_sql;
 /// - a `completed` journal event WITHOUT running its `up`.
 ///
 /// This is the **Postgres impl behind**
-/// [`MigrationBackend::baseline_one`](zero_migrate_backend::backend::MigrationBackend::baseline_one)
+/// [`MigrationBackend::baseline_one`](zeroship_migrate_backend::backend::MigrationBackend::baseline_one)
 /// (multi-engine abstraction): it is `pub(crate)`, reached only through
 /// [`PostgresBackend::baseline_one`](super::PostgresBackend), which keeps the
 /// `&Client`/`pg_advisory_lock` confined to the PG backend. There is no longer a
@@ -47,11 +47,11 @@ use super::journal_sql;
 /// migrations (not a first-entry DB).
 /// - [`BaselineError::ConflictingBaseline`] - a different baseline already exists.
 /// - [`BaselineError::Db`] / [`BaselineError::Journal`] - infrastructure failures.
-pub(crate) async fn baseline<B: zero_migrate_backend::backend::MigrationBackend, D: SqlSession>(
+pub(crate) async fn baseline<B: zeroship_migrate_backend::backend::MigrationBackend, D: SqlSession>(
     backend: &B,
     conn: &D,
     cfg: &ExecutorConfig,
-    dialect: &zero_migrate_ir::dialect::DialectId,
+    dialect: &zeroship_migrate_ir::dialect::DialectId,
     baseline_migration: &Migration,
     applied_by: &str,
 ) -> Result<BaselineOutcome, BaselineError> {
@@ -157,7 +157,7 @@ async fn first_baseline_version<D: SqlSession>(
     // fails closed on an empty / NUL name, byte-identical to the hand-rolled
     // quoting it replaced. This is a journal-table read, so the fail-closed error
     // is mapped through `JournalError` (which carries `From<IdentQuoteError>`).
-    let meta = zero_migrate_backend::dml::quote_ident_checked_for_backend(
+    let meta = zeroship_migrate_backend::dml::quote_ident_checked_for_backend(
         &cfg.confinement.meta_schema,
         &crate::dml::RENDERER,
     )

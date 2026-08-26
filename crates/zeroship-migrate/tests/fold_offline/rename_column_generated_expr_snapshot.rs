@@ -35,16 +35,16 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::apply::executor::LockMode;
-use zero_migrate::model::ir::IrFlagsOverride;
-use zero_migrate::render::fold::single_fold;
-use zero_migrate::render::lower::{IrAuthor, LiveSchema};
-use zero_migrate::{
+use zeroship_migrate::apply::executor::LockMode;
+use zeroship_migrate::model::ir::IrFlagsOverride;
+use zeroship_migrate::render::fold::single_fold;
+use zeroship_migrate::render::lower::{IrAuthor, LiveSchema};
+use zeroship_migrate::{
     fold_ops, resolve_create_table_policy, Approval, BinaryOp, ColType, ExecutorConfig, Expr,
     GeneratedCol, IrColumn, IrScalar, MigrationEngine, MigrationIr, Op,
 };
-use zero_migrate_sqlite::backend::Mode;
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate_sqlite::backend::Mode;
+use zeroship_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_gen_rename";
 const APP: &str = "app_gen_rename";
@@ -92,7 +92,7 @@ fn create_ir() -> MigrationIr {
     ir(
         "create_line_items",
         vec![Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
             name: TABLE.to_string(),
             columns: vec![col(OLD_COLUMN, ColType::Int), generated],
             primary_key: None,
@@ -162,21 +162,21 @@ fn exec_cfg() -> ExecutorConfig {
 fn folded_live_schema(history: &[Op]) -> LiveSchema {
     let effective = support::confined_charter();
     let snapshot = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         history,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         PROJECT,
         &effective,
     )
     .expect("the history folds");
     let sdk_schemas = single_fold::fold(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         history,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         PROJECT,
         &effective,
     )
-    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
+    .map(|folded| folded.project_field_defs(zeroship_migrate::shipping_vendors()))
     .expect("the history folds to field defs");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     live.sdk_schemas = sdk_schemas;
@@ -194,12 +194,12 @@ async fn a_sqlite_rename_rebuild_emits_a_generated_body_over_the_new_column_name
     let effective = support::confined_charter();
     let p = paths("gen_rename");
     let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &effective,
     );
 
@@ -262,7 +262,7 @@ async fn a_sqlite_rename_rebuild_emits_a_generated_body_over_the_new_column_name
     // table, which has not been renamed yet), so a whole-step text search would pass
     // for the wrong reason and fail for a right one.
     let spec = match &steps[..] {
-        [zero_migrate::PlanStep::OnlineRename(zero_migrate::RenameStep::TableRebuild(rebuild))] => {
+        [zeroship_migrate::PlanStep::OnlineRename(zeroship_migrate::RenameStep::TableRebuild(rebuild))] => {
             &rebuild.spec
         }
         other => panic!("a SQLite rename lowers to exactly one rebuild step, got {other:?}"),

@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
-use zero_migrate_backend::registry::VendorSet;
+use zeroship_migrate_backend::registry::VendorSet;
 
 use crate::model::op_support::FEATURE_SUPPORT_REGISTRY;
 use crate::model::support::{Feature, SupportDecision};

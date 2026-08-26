@@ -20,11 +20,11 @@
 
 use std::collections::BTreeMap;
 
-use zero_migrate::apply::journal::{AppliedEntry, JournaledKind, Phase};
-use zero_migrate::model::snapshot::{ColumnSnapshot, SchemaSnapshot, TableSnapshot};
-use zero_migrate::PlanStatusManifest;
+use zeroship_migrate::apply::journal::{AppliedEntry, JournaledKind, Phase};
+use zeroship_migrate::model::snapshot::{ColumnSnapshot, SchemaSnapshot, TableSnapshot};
+use zeroship_migrate::PlanStatusManifest;
 
-use zero_migrate_node::lower::{
+use zeroship_migrate_node::lower::{
     lower_ordered_envelopes_to_plans_for_apply, lower_ordered_envelopes_to_plans_for_rollback,
 };
 
@@ -85,7 +85,7 @@ fn items_with(columns: &[&str]) -> SchemaSnapshot {
 /// The rename that has since been contracted away.
 fn rename_envelope() -> String {
     serde_json::json!({
-        "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+        "ir_version": zeroship_migrate::model::ir::CURRENT_IR_VERSION,
         "name": "rename_a_to_b",
         "ops": [{ "op": "renameColumn", "table": "items", "from": "a", "to": "b", "type": "text" }]
     })
@@ -96,7 +96,7 @@ fn rename_envelope() -> String {
 /// operator would actually be trying to unwind.
 fn later_envelope() -> String {
     serde_json::json!({
-        "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+        "ir_version": zeroship_migrate::model::ir::CURRENT_IR_VERSION,
         "name": "add_notes",
         "ops": [{ "op": "createTable", "name": "notes",
                   "columns": [{ "name": "id", "type": "text", "nullable": false }] }]

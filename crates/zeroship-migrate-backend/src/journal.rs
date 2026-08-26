@@ -7,9 +7,9 @@
 //! shared [`JournalError`]. It emits NO SQL and names NO vendor. Each backend
 //! writes its own journal in its own dialect:
 //!
-//! - PostgreSQL - `zero_migrate_postgres::backend::journal_sql`
-//! - MySQL - `zero_migrate_mysql::backend::journal_sql`
-//! - SQLite - `zero_migrate_sqlite::backend::journal_sql`
+//! - PostgreSQL - `zeroship_migrate_postgres::backend::journal_sql`
+//! - MySQL - `zeroship_migrate_mysql::backend::journal_sql`
+//! - SQLite - `zeroship_migrate_sqlite::backend::journal_sql`
 //!
 //! The wire strings the enums below carry are the CONTRACT between those three
 //! implementations: every backend's `CHECK` constraints, INSERTs and net-state

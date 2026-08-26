@@ -82,7 +82,7 @@ pub type JsonValue = serde_json::Value;
 /// conversion.
 #[cfg(feature = "napi")]
 pub(crate) fn restore_exact_integers(value: &mut JsonValue) {
-    /// `2^53`. Matches `zero_migrate_ir`'s `MAX_EXACT_INT`, the point past which an
+    /// `2^53`. Matches `zeroship_migrate_ir`'s `MAX_EXACT_INT`, the point past which an
     /// integer must use the exact carrier rather than a JS number.
     const MAX_EXACT: f64 = 9_007_199_254_740_992.0;
     match value {
@@ -352,7 +352,7 @@ pub struct HistoryRequest {
 
 /// The typed reply for `applyIr` (the projected [`ApplyOutcome`]).
 ///
-/// [`ApplyOutcome`]: zero_migrate::apply::executor::ApplyOutcome
+/// [`ApplyOutcome`]: zeroship_migrate::apply::executor::ApplyOutcome
 #[cfg_attr(feature = "napi", napi(object))]
 #[derive(Debug, Clone)]
 pub struct ApplyReply {
@@ -440,7 +440,7 @@ pub struct RollbackRequest {
 /// and every apply carry one it never fills. A host reading `applied` off a
 /// rollback reply would read an empty list as "nothing happened".
 ///
-/// [`RollbackOutcome`]: zero_migrate::RollbackOutcome
+/// [`RollbackOutcome`]: zeroship_migrate::RollbackOutcome
 #[cfg_attr(feature = "napi", napi(object))]
 #[derive(Debug, Clone)]
 pub struct RollbackReply {

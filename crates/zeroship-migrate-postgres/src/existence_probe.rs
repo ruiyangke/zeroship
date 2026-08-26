@@ -1,4 +1,4 @@
-use zero_migrate_backend::existence_probe::ExistenceProbePolicy;
+use zeroship_migrate_backend::existence_probe::ExistenceProbePolicy;
 
 /// This crate's DECLARED identifier cap, read off its own descriptor rather than
 /// restated as a literal. A second `63` in the same crate as
@@ -6,9 +6,9 @@ use zero_migrate_backend::existence_probe::ExistenceProbePolicy;
 /// fact, and they drift silently - which is the defect the one-definition rule
 /// closed for the three core sites.
 const PG_MAX_IDENT_BYTES: usize = match crate::VENDOR.descriptor.limits.identifier {
-    zero_migrate_ir::backend::IdentifierLimit::Bytes(n) => n,
-    zero_migrate_ir::backend::IdentifierLimit::Unbounded
-    | zero_migrate_ir::backend::IdentifierLimit::Characters(_) => {
+    zeroship_migrate_ir::backend::IdentifierLimit::Bytes(n) => n,
+    zeroship_migrate_ir::backend::IdentifierLimit::Unbounded
+    | zeroship_migrate_ir::backend::IdentifierLimit::Characters(_) => {
         panic!("PostgreSQL declares a BYTE identifier cap")
     }
 };

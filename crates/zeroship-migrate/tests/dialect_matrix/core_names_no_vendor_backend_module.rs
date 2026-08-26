@@ -2,7 +2,7 @@
 //! BACKEND MODULE.
 //!
 //! Its sibling [`core_names_no_vendor_crate`](super::core_names_no_vendor_crate)
-//! measures core reaching a vendor CRATE (`zero_migrate_postgres`). That census was
+//! measures core reaching a vendor CRATE (`zeroship_migrate_postgres`). That census was
 //! green while a strictly larger coupling ran underneath it, because the three
 //! shipping backends also have an IN-CRATE home — `apply::backend::{postgres,
 //! mysql, sqlite}` — and a path through *that* names no crate at all.
@@ -22,8 +22,8 @@
 //!
 //! A `postgres::` / `mysql::` / `sqlite::` segment in PATH position — preceded by a
 //! character that cannot continue an identifier. That is what separates
-//! `crate::zero_migrate_postgres::backend::journal_sql::applied` (core reached PostgreSQL)
-//! from `zero_migrate_postgres::VENDOR` (the sibling census's subject, whose
+//! `crate::zeroship_migrate_postgres::backend::journal_sql::applied` (core reached PostgreSQL)
+//! from `zeroship_migrate_postgres::VENDOR` (the sibling census's subject, whose
 //! `postgres::` is preceded by `_`) and from prose about either.
 //!
 //! # The ratchet reached zero
@@ -44,7 +44,7 @@
 //! The needle's control USED TO BE a corpus hit — `render/dml.rs` named the
 //! PostgreSQL journal seam exactly twice, in `all_engine_seams_render_uniformly`,
 //! which had to name it to compare it. That leg went with the execution half (it is
-//! `zero_migrate_postgres::backend::journal_sql`'s
+//! `zeroship_migrate_postgres::backend::journal_sql`'s
 //! `the_journal_seam_renders_uniformly_and_fails_closed` now), so the corpus count is
 //! a true zero and a corpus control is no longer available AT ALL: there is nothing
 //! left in core for it to match. The control is a FIXTURE instead — the identical
@@ -77,7 +77,7 @@ const VENDOR_SUBTREES: &[&str] = &[];
 ///
 /// - `apply/backend/mod.rs` declared `pub mod postgres` and re-exported
 ///   `PostgresBackend`. The module left for `zero-migrate-postgres` and the re-export
-///   was NOT repointed: a `pub use zero_migrate_postgres::PostgresBackend` here would
+///   was NOT repointed: a `pub use zeroship_migrate_postgres::PostgresBackend` here would
 ///   be core naming a vendor CRATE outside the registry, which is what the sibling
 ///   census `core_names_no_vendor_crate` forbids. Closing one coupling by opening the
 ///   other would have been a wash. A host that wants `PostgresBackend` names the
@@ -120,7 +120,7 @@ fn is_code(line: &str) -> bool {
 /// How many times `line` names a vendor backend module in PATH position.
 ///
 /// A match must not be preceded by a character that can continue a Rust identifier,
-/// which is what keeps `zero_migrate_postgres::VENDOR` (preceded by `_`) out of this
+/// which is what keeps `zeroship_migrate_postgres::VENDOR` (preceded by `_`) out of this
 /// census and inside its sibling's.
 fn vendor_module_names(line: &str) -> usize {
     let bytes = line.as_bytes();
@@ -180,7 +180,7 @@ fn walked_files(root: &Path) -> Vec<(String, PathBuf)> {
 ///
 /// * the three vendor module names in path position each count once — a needle that
 ///   stopped matching them returns 0 here and this fails;
-/// * `zero_migrate_postgres::VENDOR` counts ZERO, because its `postgres::` is
+/// * `zeroship_migrate_postgres::VENDOR` counts ZERO, because its `postgres::` is
 ///   preceded by `_`. That discount is the whole boundary between this census and
 ///   its crate-naming sibling, so a needle that lost it returns 1 here and this
 ///   fails just as loudly. Both directions, not just the blind one.
@@ -197,7 +197,7 @@ fn needle_positive_control() {
         "the needle found {all} of the three vendor backend modules in a line that \
          carries all three; it recognizes some vendors and not others."
     );
-    let crate_named = vendor_module_names("pub use zero_migrate_postgres::VENDOR;");
+    let crate_named = vendor_module_names("pub use zeroship_migrate_postgres::VENDOR;");
     assert_eq!(
         crate_named, 0,
         "the needle counted {crate_named} vendor backend modules in a line that names \

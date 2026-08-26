@@ -1,19 +1,19 @@
 use std::collections::BTreeMap;
 
-use zero_migrate_backend::error::IrLowerError;
-use zero_migrate_backend::fold::{
+use zeroship_migrate_backend::error::IrLowerError;
+use zeroship_migrate_backend::fold::{
     AuthorTypeOverride, CatalogFoldPolicy, CatalogFoldRefusal, FoldCursorColumnContract,
     FoldCursorComparison, FoldCursorScalarType, FoldDatabaseFeature, ReferenceTextStorage,
     SnapshotProvenanceStrength,
 };
-use zero_migrate_backend::schema::SchemaRenderer;
-use zero_migrate_backend::snapshot::{
+use zeroship_migrate_backend::schema::SchemaRenderer;
+use zeroship_migrate_backend::snapshot::{
     ColumnSnapshot, PartitionSnapshot, SequenceSnapshot, TableSnapshot, ViewSnapshot,
 };
-use zero_migrate_backend::stored_ddl::StoredDdl;
-use zero_migrate_ir::expr::Expr;
-use zero_migrate_ir::ir::{ColType, ValueFormat};
-use zero_migrate_ir::precondition::PreconditionCheck;
+use zeroship_migrate_backend::stored_ddl::StoredDdl;
+use zeroship_migrate_ir::expr::Expr;
+use zeroship_migrate_ir::ir::{ColType, ValueFormat};
+use zeroship_migrate_ir::precondition::PreconditionCheck;
 
 #[derive(Debug)]
 pub(crate) struct SqliteCatalogFoldPolicy;
@@ -129,7 +129,7 @@ impl CatalogFoldPolicy for SqliteCatalogFoldPolicy {
         column: &str,
         values: &[String],
     ) -> Result<Option<String>, IrLowerError> {
-        let col = zero_migrate_backend::dml::quote_ident_for_backend(
+        let col = zeroship_migrate_backend::dml::quote_ident_for_backend(
             "column",
             column,
             &crate::dml::RENDERER,
@@ -381,7 +381,7 @@ impl CatalogFoldPolicy for SqliteCatalogFoldPolicy {
 fn render_enum_values(values: &[String]) -> String {
     values
         .iter()
-        .map(|v| zero_migrate_backend::dml::sql_string_literal(v))
+        .map(|v| zeroship_migrate_backend::dml::sql_string_literal(v))
         .collect::<Vec<_>>()
         .join(", ")
 }

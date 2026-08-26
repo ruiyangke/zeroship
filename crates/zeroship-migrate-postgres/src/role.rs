@@ -108,12 +108,12 @@
 //! Schema ownership is only (re)assigned when it differs.
 
 use sha2::{Digest, Sha256};
-use zero_migrate_backend::dml::IdentQuoteError;
-use zero_migrate_ir::backend::IdentifierLimit;
-use zero_migrate_ir::id::base62_encode_bytes;
+use zeroship_migrate_backend::dml::IdentQuoteError;
+use zeroship_migrate_ir::backend::IdentifierLimit;
+use zeroship_migrate_ir::id::base62_encode_bytes;
 
 /// This vendor's DECLARED identifier byte cap, read off its own
-/// [`BackendDescriptor`](zero_migrate_ir::backend::BackendDescriptor) rather than
+/// [`BackendDescriptor`](zeroship_migrate_ir::backend::BackendDescriptor) rather than
 /// restated, so the number the role name truncates to and the number this backend
 /// declares cannot drift apart. The `Bytes` arm is not incidental: MySQL's cap is 64
 /// CHARACTERS and SQLite has none, which is why this bound is PostgreSQL's and not
@@ -142,7 +142,7 @@ pub enum RoleError {
 /// Quote a SQL identifier (double embedded quotes, wrap in `"`), so a schema /
 /// role name is never interpolated as raw SQL. Routes through the ONE crate-shared
 /// explicit backend seam
-/// ([`quote_ident_checked_for_backend`](zero_migrate_backend::dml::quote_ident_checked_for_backend))
+/// ([`quote_ident_checked_for_backend`](zeroship_migrate_backend::dml::quote_ident_checked_for_backend))
 /// - byte-identical to (and uniformly self-defending with)
 /// `author`/`backfill`/`journal`/`dml`: fail-closed on an empty / NUL identifier.
 ///
@@ -150,7 +150,7 @@ pub enum RoleError {
 /// module names no dialect literal at all.
 #[cfg(test)]
 fn quote_ident(ident: &str) -> Result<String, RoleError> {
-    Ok(zero_migrate_backend::dml::quote_ident_checked_for_backend(
+    Ok(zeroship_migrate_backend::dml::quote_ident_checked_for_backend(
         ident,
         &crate::dml::RENDERER,
     )?)

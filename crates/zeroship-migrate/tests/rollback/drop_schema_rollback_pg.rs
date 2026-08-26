@@ -22,20 +22,20 @@ use crate::support;
 use std::collections::BTreeMap;
 
 use crate::support::PgDevSession;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::apply::executor::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::apply::executor::{
     rollback, LockMode, RollbackError, RollbackRequest, RollbackTarget,
 };
-use zero_migrate::driver::SqlSession;
-use zero_migrate::model::ir::Op;
-use zero_migrate::model::migration::Migration;
-use zero_migrate::render::step::PlanStep;
-use zero_migrate::{
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::model::ir::Op;
+use zeroship_migrate::model::migration::Migration;
+use zeroship_migrate::render::step::PlanStep;
+use zeroship_migrate::{
     fold_ops, guard_for, Approval, EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor,
     LiveSchema, MigrationEngine,
 };
-use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
-use zero_migrate_postgres::PostgresBackend;
+use zeroship_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zeroship_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_drop_schema_rollback_pg";
 
@@ -98,17 +98,17 @@ async fn apply_doc(
     let backend = PostgresBackend::new_generic(session);
     let pol = policy(&cfg.project_schema);
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &pol,
     );
-    let guard = GuardConfig::from_policy(pol.clone(), zero_migrate_postgres::DIALECT);
+    let guard = GuardConfig::from_policy(pol.clone(), zeroship_migrate_postgres::DIALECT);
     let folded = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         history,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &cfg.project_schema,
         &pol,
     )
@@ -117,10 +117,10 @@ async fn apply_doc(
     let artifact = author
         .load_and_lower_guarded(ir, OWNER, &BTreeMap::new(), &live, &guard)
         .map_err(|error| format!("load and lower the guarded plan: {error}"))?;
-    let authored: zero_migrate::MigrationIr =
+    let authored: zeroship_migrate::MigrationIr =
         serde_json::from_str(ir).map_err(|error| format!("parse the authored IR: {error}"))?;
     history.extend(authored.ops);
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             approval,
@@ -151,10 +151,10 @@ async fn schema_exists(session: &PgDevSession, name: &str) -> Result<bool, Strin
     Ok(snapshot.schemas.contains_key(name))
 }
 
-fn pg_guard(cfg: &ExecutorConfig) -> Box<dyn zero_migrate::MigrationGuard> {
+fn pg_guard(cfg: &ExecutorConfig) -> Box<dyn zeroship_migrate::MigrationGuard> {
     guard_for(
-        zero_migrate::shipping_vendors(),
-        &GuardConfig::from_policy(policy(&cfg.project_schema), zero_migrate_postgres::DIALECT),
+        zeroship_migrate::shipping_vendors(),
+        &GuardConfig::from_policy(policy(&cfg.project_schema), zeroship_migrate_postgres::DIALECT),
     )
 }
 

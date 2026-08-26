@@ -8,19 +8,19 @@ use crate::support;
 use std::collections::BTreeMap;
 
 use crate::support::PgDevSession;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::apply::executor::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::apply::executor::{
     rollback, LockMode, RollbackError, RollbackRequest, RollbackTarget,
 };
-use zero_migrate::driver::SqlSession;
-use zero_migrate::model::ir::Op;
-use zero_migrate::model::migration::Migration;
-use zero_migrate::render::step::PlanStep;
-use zero_migrate::{
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::model::ir::Op;
+use zeroship_migrate::model::migration::Migration;
+use zeroship_migrate::render::step::PlanStep;
+use zeroship_migrate::{
     fold_ops, guard_for, Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema,
     MigrationEngine,
 };
-use zero_migrate_postgres::PostgresBackend;
+use zeroship_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_drop_sequence_position_pg";
 const SEQ: &str = "order_no";
@@ -77,25 +77,25 @@ async fn apply_doc(
     let backend = PostgresBackend::new_generic(session);
     let policy = support::no_inject(&cfg.project_schema);
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &policy,
     );
-    let document = zero_migrate::model::load::load_ir_document(
-        zero_migrate::shipping_vendors(),
+    let document = zeroship_migrate::model::load::load_ir_document(
+        zeroship_migrate::shipping_vendors(),
         ir,
         OWNER,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &BTreeMap::new(),
         None,
     )
     .map_err(|error| format!("load gate (postgres): {error}"))?;
     let folded = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         history,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &cfg.project_schema,
         &policy,
     )
@@ -105,7 +105,7 @@ async fn apply_doc(
     let plan = author
         .lower_plan(&document, &live)
         .map_err(|error| format!("lower the doc plan on PostgreSQL: {error}"))?;
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &plan.steps,
             approval,
@@ -150,12 +150,12 @@ async fn sequence_exists(session: &PgDevSession, schema: &str) -> Result<bool, S
         .map_err(|error| format!("decode live sequence presence: {error}"))
 }
 
-fn pg_guard(cfg: &ExecutorConfig) -> Box<dyn zero_migrate::MigrationGuard> {
+fn pg_guard(cfg: &ExecutorConfig) -> Box<dyn zeroship_migrate::MigrationGuard> {
     guard_for(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &GuardConfig::from_policy(
             support::no_inject(&cfg.project_schema),
-            zero_migrate_postgres::DIALECT,
+            zeroship_migrate_postgres::DIALECT,
         ),
     )
 }

@@ -17,7 +17,7 @@
 //! live suite reports exactly like a passing one, so there is no skip.
 
 use crate::support::mysql::MysqlDevSession;
-use zero_migrate::driver::conformance::{self, SeamFixture};
+use zeroship_migrate::driver::conformance::{self, SeamFixture};
 
 /// MySQL's spelling of the scratch SQL the suite runs.
 ///

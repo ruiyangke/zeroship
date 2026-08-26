@@ -34,7 +34,7 @@
 //! where the effective budget is resolved, which is the boundary a hand-built
 //! `Migration` or a config-sourced zero also crosses.
 //!
-//! Lowering the validated IR to an executable `zero_migrate::render::plan::AppliedPlan`
+//! Lowering the validated IR to an executable `zeroship_migrate::render::plan::AppliedPlan`
 //! (`IrAuthor::lower`, the snapshot-builder + per-dialect DDL render) is the
 //! next wave; this module is the load + gate that MUST run first.
 
@@ -125,7 +125,7 @@ pub enum IrLoadError {
     /// This is the author-facing half of the rule: it fails the artifact at load,
     /// where the author can still edit it. The binding half runs at apply, where
     /// the effective value is resolved
-    /// (`zero_migrate_backend::timeout::resolve_timeout_ms`), because an embedder
+    /// (`zeroship_migrate_backend::timeout::resolve_timeout_ms`), because an embedder
     /// can build the `Migration` directly and a zero can also come from executor
     /// config that never passes through this gate.
     ///
@@ -474,7 +474,7 @@ pub fn enforce_ir_finite_timeouts(ir: &MigrationIr) -> Result<(), IrLoadError> {
 /// and refuse a hint over a wider domain rather than compare a partial one (a
 /// partial compare both false-rejects a spec-correct hint and false-accepts
 /// tampering of the un-folded fields). The result is what
-/// `zero_migrate::model::load::load_ir_document`
+/// `zeroship_migrate::model::load::load_ir_document`
 /// compares to a present `checksum` hint, only after the gate passes.
 #[must_use]
 pub fn recompute_hint_domain_checksum(ir: &MigrationIr) -> Checksum {
@@ -511,7 +511,7 @@ pub fn recompute_hint_domain_checksum(ir: &MigrationIr) -> Checksum {
 /// changes this checksum => the executor's net-applied drift gate aborts
 /// (`drift.rs` compares the journaled checksum to the lowered `Migration.checksum`,
 /// which the IR Lower stamps with THIS value - see
-/// `zero_migrate::render::lower::IrAuthor::lower_plan`).
+/// `zeroship_migrate::render::lower::IrAuthor::lower_plan`).
 ///
 /// `name` remains part of the stable plan identity rather than its content, and
 /// `ir_version` only selects the already-validated wire interpretation. The

@@ -5,7 +5,7 @@
 //! engine is driver-free and no longer exports a `provision_migrator` free
 //! function (it was `&compio_postgres::Client`-typed, so it did not survive the
 //! engine's decoupling from a concrete network driver). The engine still exports
-//! [`migrator_role_name`](zero_migrate::migrator_role_name) (pure identifier
+//! [`migrator_role_name`](zeroship_migrate::migrator_role_name) (pure identifier
 //! derivation); this module supplies the DDL that establishes the least-privilege
 //! `migrator_<project>_<hash>` role.
 //!
@@ -35,7 +35,7 @@
 
 use compio_postgres::Client;
 use uuid::Uuid;
-use zero_migrate::ExecutorConfig;
+use zeroship_migrate::ExecutorConfig;
 
 /// The narrow, precreated role that owns every app's workflow journal schema.
 ///
@@ -103,7 +103,7 @@ pub async fn provision_migrator(
     admin: &Client,
     cfg: &ExecutorConfig,
 ) -> Result<(), ProvisionRoleError> {
-    let role = zero_migrate::migrator_role_name(&cfg.project_id)
+    let role = zeroship_migrate::migrator_role_name(&cfg.project_id)
         .map_err(|_| ProvisionRoleError::BadRoleName(cfg.project_id.clone()))?;
     let role_q = quote_ident(&role);
     let role_lit = quote_lit(&role);

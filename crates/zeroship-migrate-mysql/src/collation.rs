@@ -2,12 +2,12 @@
 //!
 //! # Why this is its own module and where it came from
 //!
-//! These spelling functions lived in `zero_migrate::render::declarative`, the
+//! These spelling functions lived in `zeroship_migrate::render::declarative`, the
 //! engine's declarative differ. They now sit beside `MysqlSchemaRenderer`, so the
 //! vendor renderer has no edge back into core.
 //!
 //! They are MySQL SPELLING by the boundary rule stated in
-//! `zero_migrate::render::backends`: `utf8mb4_0900_as_cs` versus
+//! `zeroship_migrate::render::backends`: `utf8mb4_0900_as_cs` versus
 //! `utf8mb4_0900_ai_ci` is how this vendor WRITES case sensitivity, not a decision
 //! the engine makes about it. `MysqlSchemaRenderer::column_type` pins every rendered
 //! character spelling here, including native `ENUM(...)`.
@@ -18,7 +18,7 @@
 /// ONE spelling of the engine's collation choice, so the `VARCHAR`/`CHAR`/`TEXT`
 /// family and `ENUM` cannot drift apart. `None` is the canonical
 /// snapshot spelling for the default case-SENSITIVE intent - see
-/// `zero_migrate_mysql::backend::drift_sql::case_sensitive_from_collation`, which is the
+/// `zeroship_migrate_mysql::backend::drift_sql::case_sensitive_from_collation`, which is the
 /// inverse of this function and never emits `Some(true)`.
 pub fn mysql_collation_clause(case_sensitive: Option<bool>) -> &'static str {
     if matches!(case_sensitive, Some(false)) {

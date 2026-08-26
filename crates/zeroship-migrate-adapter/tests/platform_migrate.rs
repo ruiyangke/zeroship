@@ -49,7 +49,7 @@ mod platform_cli {
 
     use std::sync::Mutex;
 
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
     use zeroship_migrate_adapter::platform::{
         author_and_lower_all, run_platform_migrations, PlatformMigrateConfig, PlatformMigrateError,
         PLATFORM_MIGRATION_LEDGER_TABLE,
@@ -2402,7 +2402,7 @@ export function down() {}
             let path = dir.join(&filename);
             let source = std::fs::read(&path)
                 .unwrap_or_else(|e| panic!("read released migration {}: {e}", path.display()));
-            let current = zero_migrate::manifest_entry::sha256_hex(&source);
+            let current = zeroship_migrate::manifest_entry::sha256_hex(&source);
             if current != released {
                 drifted.push(format!(
                     "  {filename}\n    released {released}\n    current  {current}"

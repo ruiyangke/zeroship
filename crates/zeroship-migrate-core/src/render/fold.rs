@@ -74,7 +74,7 @@
 //! schema the live DB is introspected under for both uses.
 
 use std::collections::BTreeMap;
-use zero_migrate_backend::registry::VendorSet;
+use zeroship_migrate_backend::registry::VendorSet;
 
 use crate::model::ir::{
     AlterPrimaryKeyAction, ColType, ColumnCollation, ColumnOrExpr, ColumnReference, CommentTarget,
@@ -114,15 +114,15 @@ use crate::render::value_format::{
 };
 #[cfg(test)]
 use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
-use zero_migrate_backend::fold::CatalogFoldRefusal;
-use zero_migrate_ir::attribute::OpAttributes;
-use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_policy::EffectivePolicy;
+use zeroship_migrate_backend::fold::CatalogFoldRefusal;
+use zeroship_migrate_ir::attribute::OpAttributes;
+use zeroship_migrate_ir::dialect::DialectId;
+use zeroship_migrate_policy::EffectivePolicy;
 
 fn fold_policy(
     vendors: VendorSet,
     dialect: &DialectId,
-) -> &'static dyn zero_migrate_backend::fold::CatalogFoldPolicy {
+) -> &'static dyn zeroship_migrate_backend::fold::CatalogFoldPolicy {
     crate::render::backends::vendor(vendors, dialect).catalog_fold
 }
 
@@ -725,7 +725,7 @@ fn rewrite_incoming_fk_column_targets(
 /// exact-id lookup rather than letting selection drift between passes.
 pub(crate) fn selected_dialectal_leg<'a>(
     dialect: &DialectId,
-    legs: &'a std::collections::BTreeMap<zero_migrate_ir::dialect::DialectId, Vec<Op>>,
+    legs: &'a std::collections::BTreeMap<zeroship_migrate_ir::dialect::DialectId, Vec<Op>>,
 ) -> Option<&'a [Op]> {
     legs.get(dialect).map(Vec::as_slice)
 }
@@ -1004,7 +1004,7 @@ fn apply_fold_alter_primary_key(
     dialect: &DialectId,
     implicit_name: &str,
 ) -> Result<(), FoldError> {
-    zero_migrate_ir::validate::validate_alter_primary_key_action(action)
+    zeroship_migrate_ir::validate::validate_alter_primary_key_action(action)
         .map_err(FoldError::InvalidPrimaryKeyAction)?;
 
     let current = folded_primary_key(snap)?;
@@ -4123,7 +4123,7 @@ fn apply_fold_named_type_column_metadata(
                 }
             }
             if let Some(check) = &def.check {
-                let value_sql = zero_migrate_backend::dml::quote_ident_for_backend(
+                let value_sql = zeroship_migrate_backend::dml::quote_ident_for_backend(
                     "column",
                     &source.name,
                     crate::render::backends::renderer(vendors, dialect),
@@ -5584,7 +5584,7 @@ fn facet_check_constraints(
 pub fn descriptors_to_create_ops(
     descriptors: &[crate::render::declarative::CollectionDescriptor],
     project_schema: &str,
-    effective: &zero_migrate_policy::EffectivePolicy,
+    effective: &zeroship_migrate_policy::EffectivePolicy,
 ) -> Result<Vec<Op>, ProduceError> {
     let mut ops = Vec::with_capacity(descriptors.len());
     for d in descriptors {
@@ -5657,7 +5657,7 @@ pub fn descriptors_to_create_ops(
         // An empty `_indexes` yields `Vec::new()`, byte-identical to the pre-index shape.
         let indexes = d.indexes.iter().map(index_descriptor_to_ir).collect();
         let op = Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
             name: d.name.clone(),
             columns,
             primary_key: None,
@@ -5965,7 +5965,7 @@ mod tests {
 
     fn create(name: &str, columns: Vec<IrColumn>) -> Op {
         let op = Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
             name: name.to_string(),
             columns,
             primary_key: None,
@@ -6022,7 +6022,7 @@ mod tests {
     #[test]
     fn no_inject_fold_preserves_author_updated_at_shape() {
         let op = Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "events".to_string(),
             columns: vec![col("updated_at", ColType::Text, true)],
             primary_key: None,
@@ -6053,7 +6053,7 @@ mod tests {
     #[test]
     fn no_inject_fold_preserves_uuid_columns_named_id() {
         let create_with_id = Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "external_keys".to_string(),
             columns: vec![col("id", ColType::Uuid, true)],
             primary_key: None,
@@ -6065,7 +6065,7 @@ mod tests {
             existence_guard: None,
         };
         let create_then_add = Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "imported_keys".to_string(),
             columns: vec![col("label", ColType::Text, true)],
             primary_key: None,
@@ -6077,7 +6077,7 @@ mod tests {
             existence_guard: None,
         };
         let add_id = Op::AddColumn {
-            attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
             table: "imported_keys".to_string(),
             column: "id".to_string(),
             ty: ColType::Uuid,
@@ -6137,7 +6137,7 @@ columns = [
             name: "scoped_create".to_string(),
             owner_app: "app_fold".to_string(),
             ops: vec![Op::CreateTable {
-                attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
                 name: "events".to_string(),
                 columns: vec![id, col("payload", ColType::Json, true)],
                 primary_key: Some(vec!["id".to_string()]),
@@ -6446,7 +6446,7 @@ columns = [
 
     fn add_col(table: &str, column: &str, ty: ColType, nullable: bool) -> Op {
         Op::AddColumn {
-            attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
             table: table.to_string(),
             column: column.to_string(),
             ty,
@@ -6618,7 +6618,7 @@ columns = [
                 ],
             ),
             Op::AddConstraint {
-                attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
                 table: "t".to_string(),
                 constraint: unique_constraint(Some("t_b_uq"), &["b"]),
                 schema: None,
@@ -6664,7 +6664,7 @@ columns = [
             create("teams", vec![col("label", ColType::Text, false)]),
             create("members", vec![col("team_id", ColType::Text, false)]),
             Op::AddConstraint {
-                attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
                 table: "members".to_string(),
                 constraint: fk,
                 schema: None,
@@ -7143,7 +7143,7 @@ columns = [
             create("accounts", vec![col("email", ColType::Text, false)]),
             rename_table("accounts", "members"),
             Op::AddColumn {
-                attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
                 table: "members".to_string(),
                 column: "nickname".to_string(),
                 ty: ColType::Text,
@@ -7227,7 +7227,7 @@ columns = [
             create("accounts", vec![col("email", ColType::Text, false)]),
             create("orders", vec![col("account_id", ColType::Text, true)]),
             Op::AddConstraint {
-                attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
                 table: "orders".to_string(),
                 constraint: fk,
                 schema: None,
@@ -7265,7 +7265,7 @@ columns = [
             create("members", vec![col("email", ColType::Text, false)]),
             create("orders", vec![col("account_id", ColType::Text, true)]),
             Op::AddConstraint {
-                attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
                 table: "orders".to_string(),
                 constraint: IrConstraint {
                     name: Some("orders_account_fk".to_string()),
@@ -7320,7 +7320,7 @@ columns = [
         let snap = fold(&[
             create("nodes", vec![col("parent_id", ColType::Text, true)]),
             Op::AddConstraint {
-                attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
                 table: "nodes".to_string(),
                 constraint: self_fk,
                 schema: None,
@@ -7540,7 +7540,7 @@ columns = [
             create("parents", vec![col("label", ColType::Text, false)]),
             create("children", vec![col("parent_id", ColType::Text, true)]),
             Op::AddConstraint {
-                attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
                 table: "children".to_string(),
                 constraint: not_valid_fk(constraint),
                 schema: None,
@@ -7617,7 +7617,7 @@ columns = [
         let named = fold(&[
             create("users", vec![col("handle", ColType::Text, false)]),
             Op::AddConstraint {
-                attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
                 table: "users".to_string(),
                 constraint: unique_constraint(Some("u_handle"), &["handle"]),
                 schema: None,
@@ -7644,7 +7644,7 @@ columns = [
         let derived = fold(&[
             create("users", vec![col("handle", ColType::Text, false)]),
             Op::AddConstraint {
-                attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
                 table: "users".to_string(),
                 constraint: unique_constraint(None, &["handle"]),
                 schema: None,
@@ -7667,7 +7667,7 @@ columns = [
         let round = fold(&[
             create("users", vec![col("handle", ColType::Text, false)]),
             Op::AddConstraint {
-                attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
                 table: "users".to_string(),
                 constraint: unique_constraint(Some("u_handle"), &["handle"]),
                 schema: None,
@@ -7687,7 +7687,7 @@ columns = [
     #[test]
     fn add_constraint_to_missing_table_errors() {
         let err = fold(&[Op::AddConstraint {
-            attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
             table: "ghost".to_string(),
             constraint: unique_constraint(Some("u"), &["x"]),
             schema: None,
@@ -7702,14 +7702,14 @@ columns = [
         let err = fold(&[
             create("users", vec![col("handle", ColType::Text, false)]),
             Op::AddConstraint {
-                attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
                 table: "users".to_string(),
                 constraint: unique_constraint(Some("u_handle"), &["handle"]),
                 schema: None,
                 existence_guard: None,
             },
             Op::AddConstraint {
-                attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
                 table: "users".to_string(),
                 constraint: unique_constraint(Some("u_handle"), &["handle"]),
                 schema: None,
@@ -7778,7 +7778,7 @@ columns = [
         let pg_ops = vec![
             create_op.clone(),
             Op::AddConstraint {
-                attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
                 table: "users".to_string(),
                 constraint: add_chk.clone(),
                 schema: None,
@@ -7803,7 +7803,7 @@ columns = [
                 vec![
                     create("users", vec![col("age", ColType::Int, false)]),
                     Op::AddConstraint {
-                        attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+                        attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
                         table: "users".to_string(),
                         constraint: add_chk.clone(),
                         schema: None,
@@ -7838,7 +7838,7 @@ columns = [
             create("teams", vec![col("label", ColType::Text, false)]),
             create("members", vec![col("team_id", ColType::Text, false)]),
             Op::AddConstraint {
-                attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
                 table: "members".to_string(),
                 constraint: fk,
                 schema: None,
@@ -7894,7 +7894,7 @@ columns = [
         let mut id = col("id", ColType::BigInt, false);
         id.identity = identity_id.then_some(crate::model::ir::IdentityCol { always: false });
         Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "orders".to_string(),
             columns: vec![
                 id,
@@ -8015,7 +8015,7 @@ columns = [
         let snapshot = fold(&[
             lifecycle_table(None, false),
             Op::AddConstraint {
-                attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
                 table: "orders".to_string(),
                 constraint: IrConstraint {
                     name: Some(candidate_name.to_string()),
@@ -8362,7 +8362,7 @@ columns = [
         // single-`id` FK + an extra index) - proves they fold onto the snapshot.
         let teams = create("teams", vec![col("label", ColType::Text, false)]);
         let memberships = Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "memberships".to_string(),
             columns: vec![
                 col("team_id", ColType::Text, false),
@@ -8424,7 +8424,7 @@ columns = [
     fn runtime_options_and_plain_indexes_fold_into_table_snapshot() {
         let ops = vec![
             Op::CreateTable {
-                attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
                 name: "posts".to_string(),
                 columns: vec![
                     col("author_id", ColType::Text, false),
@@ -8471,7 +8471,7 @@ columns = [
                 existence_guard: None,
             },
             Op::SetTableOptions {
-                attributes: zero_migrate_ir::attribute::SetTableOptionsAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::SetTableOptionsAttributes::new(),
                 table: "posts".to_string(),
                 options: TableRuntimeOptionsPatch {
                     soft_delete: None,
@@ -8631,7 +8631,7 @@ columns = [
         indexes: Vec<IrIndex>,
     ) -> Op {
         Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
             name: name.to_string(),
             columns,
             primary_key: None,
@@ -8931,7 +8931,7 @@ columns = [
         let snap = fold(&[
             create("g", vec![col("x", ColType::Text, true)]),
             Op::AddColumn {
-                attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
                 table: "g".to_string(),
                 column: "secret".to_string(),
                 ty: encrypted_text(),
@@ -9210,7 +9210,7 @@ columns = [
         let ops = vec![
             create("people", vec![col("name", ColType::Text, false)]),
             Op::AddColumn {
-                attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
                 table: "people".into(),
                 column: "card".into(),
                 ty: ColType::Text,

@@ -25,16 +25,16 @@
 
 use crate::support;
 
-use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::model::validate::validate_ir;
+use zeroship_migrate::model::ir::MigrationIr;
+use zeroship_migrate::model::validate::validate_ir;
 
 fn verdict(ops: &str) -> Result<(), String> {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{ops}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
     validate_ir(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
     )
     .map_err(|e| format!("{}: {}", e.code, e.reason))
 }
@@ -352,7 +352,7 @@ fn detaching_then_dropping_the_parent_does_not_free_the_detached_name() {
 /// only one a confined-profile probe could never have surfaced.
 #[test]
 fn attaching_a_table_makes_it_a_dependent_of_the_parent() {
-    use zero_migrate::model::validate::{validate_ir_authorized, VendorAuthority};
+    use zeroship_migrate::model::validate::{validate_ir_authorized, VendorAuthority};
 
     let policy = support::operator_charter("public");
     let check = |ops: &str| {
@@ -363,9 +363,9 @@ fn attaching_a_table_makes_it_a_dependent_of_the_parent() {
             default_schema: "public",
         };
         validate_ir_authorized(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &ir,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             None,
             Some(authority),
         )

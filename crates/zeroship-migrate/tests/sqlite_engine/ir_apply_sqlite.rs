@@ -14,13 +14,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::{
+use zeroship_migrate::{
     apply::executor::LockMode, resolve_create_table_policy, Approval, DeclarativeApplyError,
     EngineError, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LoadAndLowerError,
     MigrationEngine, MigrationIr,
 };
-use zero_migrate_sqlite::backend::Mode;
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate_sqlite::backend::Mode;
+use zeroship_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_ir";
 const APP: &str = "app_ir";
@@ -169,10 +169,10 @@ async fn ir_envelope_lowers_and_applies_on_sqlite() {
 
     // The REAL fail-closed gate + lower, SQLite dialect.
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
     let migrations = author
@@ -181,9 +181,9 @@ async fn ir_envelope_lowers_and_applies_on_sqlite() {
     assert!(!migrations.is_empty(), "lowering must yield migration(s)");
 
     // Apply through the engine on the real SQLite backend (Confined SQLite guard).
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let guard_cfg =
-        GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate_sqlite::DIALECT);
+        GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_sqlite::DIALECT);
     let plan = engine.plan(&migrations, &guard_cfg);
     assert!(
         plan.denied.is_empty(),
@@ -239,14 +239,14 @@ async fn per_row_backfill_generates_a_fresh_exact_value_for_every_sqlite_row() {
     );
     let charter = support::no_inject("app");
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &charter,
     );
     let guard_cfg =
-        GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate_sqlite::DIALECT);
+        GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_sqlite::DIALECT);
     let schema_artifact = author
         .load_and_lower_guarded(
             &schema_ir,
@@ -257,7 +257,7 @@ async fn per_row_backfill_generates_a_fresh_exact_value_for_every_sqlite_row() {
         )
         .expect("the perRow destination schema must lower on SQLite");
 
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &schema_artifact.plan.steps,
             Approval::None,
@@ -273,9 +273,9 @@ async fn per_row_backfill_generates_a_fresh_exact_value_for_every_sqlite_row() {
         serde_json::from_str(&schema_ir).expect("resolved schema IR parses");
     let mut live = LiveSchema::from_tables(BTreeSet::from(["samples".to_string()]));
     live.advance_logical_columns(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &schema_envelope,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         PROJECT,
         None,
     )
@@ -289,7 +289,7 @@ async fn per_row_backfill_generates_a_fresh_exact_value_for_every_sqlite_row() {
             &guard_cfg,
         )
         .expect("declared perRow destination formats must lower on SQLite");
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &data_artifact.plan.steps,
             Approval::Approved,
@@ -419,10 +419,10 @@ async fn per_row_destination_mismatches_fail_before_any_sqlite_row_changes() {
         });
         let ir = no_inject_envelope_json(&raw.to_string());
         let error = IrAuthor::new(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             PROJECT,
             APP,
-            &zero_migrate_sqlite::DIALECT,
+            &zeroship_migrate_sqlite::DIALECT,
             &support::no_inject("app"),
         )
         .load_and_lower_guarded(
@@ -430,7 +430,7 @@ async fn per_row_destination_mismatches_fail_before_any_sqlite_row_changes() {
             APP,
             &registry(&[]),
             &LiveSchema::default(),
-            &GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate_sqlite::DIALECT),
+            &GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_sqlite::DIALECT),
         )
         .expect_err(label);
         let message = error.to_string();
@@ -480,14 +480,14 @@ async fn insert_on_conflict_updates_and_does_nothing_on_real_sqlite() {
         ]}"#,
     );
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
     let guard_cfg =
-        GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate_sqlite::DIALECT);
+        GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_sqlite::DIALECT);
     let artifact = author
         .load_and_lower_guarded(
             &ir,
@@ -498,7 +498,7 @@ async fn insert_on_conflict_updates_and_does_nothing_on_real_sqlite() {
         )
         .expect("both exact SQLite conflict forms lower");
 
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let outcome = engine
         .apply_plan(
             &artifact.plan.steps,
@@ -560,10 +560,10 @@ async fn portable_scalar_and_date_functions_apply_on_hardened_sqlite() {
         ]}"#,
     );
     let artifact = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     )
     .load_and_lower_guarded(
@@ -571,11 +571,11 @@ async fn portable_scalar_and_date_functions_apply_on_hardened_sqlite() {
         APP,
         &registry(&[("metrics", APP)]),
         &LiveSchema::default(),
-        &GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate_sqlite::DIALECT),
+        &GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_sqlite::DIALECT),
     )
     .expect("portable function update lowers");
 
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::None,
@@ -654,14 +654,14 @@ async fn byte_value_insert_persists_exact_blob_and_completed_journal_on_real_sql
         ]}"#,
     );
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
     let guard_cfg =
-        GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate_sqlite::DIALECT);
+        GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_sqlite::DIALECT);
     let artifact = author
         .load_and_lower_guarded(
             &ir,
@@ -672,7 +672,7 @@ async fn byte_value_insert_persists_exact_blob_and_completed_journal_on_real_sql
         )
         .expect("a byteValue insert lowers for SQLite");
 
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let outcome = engine
         .apply_plan(
             &artifact.plan.steps,
@@ -713,7 +713,7 @@ async fn byte_value_insert_persists_exact_blob_and_completed_journal_on_real_sql
         .expect("the byteValue DML step is journaled");
     assert_eq!(
         entry.phase,
-        zero_migrate::apply::journal::Phase::Completed,
+        zeroship_migrate::apply::journal::Phase::Completed,
         "the exact BLOB write and its completed journal event commit together"
     );
 }
@@ -742,10 +742,10 @@ async fn byte_value_backfill_persists_exact_blob_on_real_sqlite() {
         ]}"#,
     );
     let artifact = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     )
     .load_and_lower_guarded(
@@ -753,11 +753,11 @@ async fn byte_value_backfill_persists_exact_blob_on_real_sqlite() {
         APP,
         &registry(&[("files", APP)]),
         &LiveSchema::default(),
-        &GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate_sqlite::DIALECT),
+        &GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_sqlite::DIALECT),
     )
     .expect("a byteValue backfill lowers for SQLite");
 
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,
@@ -802,13 +802,13 @@ async fn fixed_decimal_create_and_insert_preserve_exact_text_on_real_sqlite() {
         ]}"#,
     );
     let guard_cfg =
-        GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate_sqlite::DIALECT);
+        GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_sqlite::DIALECT);
     let charter = support::no_inject("app");
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &charter,
     );
     let schema_artifact = author
@@ -821,7 +821,7 @@ async fn fixed_decimal_create_and_insert_preserve_exact_text_on_real_sqlite() {
         )
         .expect("a fixed decimal table creation lowers on SQLite");
 
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &schema_artifact.plan.steps,
             Approval::None,
@@ -842,7 +842,7 @@ async fn fixed_decimal_create_and_insert_preserve_exact_text_on_real_sqlite() {
             &guard_cfg,
         )
         .expect("a fixed decimal insert lowers on SQLite");
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &data_artifact.plan.steps,
             Approval::None,
@@ -915,10 +915,10 @@ async fn mixed_data_plan_is_refused_before_insert_when_delete_and_backfill_are_u
         ]}"#,
     );
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
     let artifact = author
@@ -927,11 +927,11 @@ async fn mixed_data_plan_is_refused_before_insert_when_delete_and_backfill_are_u
             APP,
             &registry(&[("users", APP)]),
             &LiveSchema::default(),
-            &GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate_sqlite::DIALECT),
+            &GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_sqlite::DIALECT),
         )
         .expect("the mixed data plan lowers");
 
-    let result = MigrationEngine::new(zero_migrate::shipping_vendors())
+    let result = MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::None,
@@ -985,10 +985,10 @@ async fn ir_envelope_date_column_lowers_and_applies_on_sqlite() {
     );
 
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
     let migrations = author
@@ -1001,9 +1001,9 @@ async fn ir_envelope_date_column_lowers_and_applies_on_sqlite() {
         "SQLite date column must render with TEXT affinity: {migrations:#?}"
     );
 
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let guard_cfg =
-        GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate_sqlite::DIALECT);
+        GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_sqlite::DIALECT);
     let plan = engine.plan(&migrations, &guard_cfg);
     assert!(
         plan.denied.is_empty(),
@@ -1051,14 +1051,14 @@ async fn ir_envelope_string_default_with_embedded_semicolon_newline_applies_on_s
 
     // The REAL fail-closed gate + GUARDED lower (the production deploy entry).
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
     let guard_cfg =
-        GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate_sqlite::DIALECT);
+        GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_sqlite::DIALECT);
     let artifact = author
         .load_and_lower_guarded(&ir, APP, &registry(&[]), &LiveSchema::default(), &guard_cfg)
         .expect("a portable ;\\n string default must lower through the guarded path on SQLite");
@@ -1078,7 +1078,7 @@ async fn ir_envelope_string_default_with_embedded_semicolon_newline_applies_on_s
     );
 
     // Apply the guarded artifact's plan on the real SQLite backend.
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let outcome = engine
         .apply_plan(
             &artifact.plan.steps,
@@ -1151,20 +1151,20 @@ async fn out_of_envelope_splitpart_refused_on_sqlite() {
     let mut live = BTreeSet::new();
     live.insert("users".to_string());
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::no_inject("app"),
     );
     let err = author
         .load_and_lower(ir, APP, &registry(&[("users", APP)]), &(&live).into())
         .expect_err("an out-of-envelope splitPart must be refused on SQLite");
     match err {
-        LoadAndLowerError::Load(zero_migrate::IrLoadError::Validate(ae)) => {
+        LoadAndLowerError::Load(zeroship_migrate::IrLoadError::Validate(ae)) => {
             assert_eq!(
                 ae.code,
-                zero_migrate::model::validate::CODE_EXPR_NOT_PORTABLE,
+                zeroship_migrate::model::validate::CODE_EXPR_NOT_PORTABLE,
                 "the SQLite-out-of-envelope splitPart is EXPR_NOT_PORTABLE; got {:?}",
                 ae.code
             );

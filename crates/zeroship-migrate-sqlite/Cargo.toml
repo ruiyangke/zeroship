@@ -1,19 +1,19 @@
 [package]
-name = "zero-migrate-sqlite"
+name = "zeroship-migrate-sqlite"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The SQLite backend for zero-migrate: this vendor's DML, schema, DDL, value-format and guard behavior. Implements the zero-migrate-backend contract; does NOT depend on the engine."
+description = "The SQLite backend for zeroship-migrate: this vendor's DML, schema, DDL, value-format and guard behavior. Implements the zeroship-migrate-backend contract; does NOT depend on the engine."
 
 [dependencies]
 # The CONTRACT: the required renderer traits, the render errors their signatures name,
 # the identifier/expression spelling seam this vendor calls, and the VendorSet shape
-# `VENDOR` below is registered through. This is the ONLY zero-migrate crate a
+# `VENDOR` below is registered through. This is the ONLY zeroship-migrate crate a
 # backend may depend on - depending on the engine is the cycle the split removed.
-zero-migrate-backend = { workspace = true }
+zeroship-migrate-backend = { workspace = true }
 # The closed `Op` / `Expr` / `IrScalar` vocabulary the trait methods are handed, plus
 # open dialect identity and this vendor's `BackendDescriptor`.
-zero-migrate-ir = { workspace = true }
+zeroship-migrate-ir = { workspace = true }
 # The schema-field shape `SchemaRenderer` reads is the SDK's field JSON.
 serde_json = { workspace = true }
 # MySQL and SQLite both spell a binary/string literal as a hex form.
@@ -53,8 +53,8 @@ toml = { workspace = true }
 # TEST-ONLY: `ExecutorConfig::new` takes an `EffectivePolicy`, which is the PDP's
 # type. Only `src/test_fixtures.rs` names it — the execution half itself reads
 # `cfg.project_schema` and the lock budgets and never the policy — so this is a
-# dev-dependency, not a dependency, and a shipping `zero-migrate-sqlite` links no PDP.
-zero-migrate-policy = { workspace = true }
+# dev-dependency, not a dependency, and a shipping `zeroship-migrate-sqlite` links no PDP.
+zeroship-migrate-policy = { workspace = true }
 
 [lints]
 workspace = true

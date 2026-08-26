@@ -25,18 +25,18 @@ use crate::support;
 
 use std::path::PathBuf;
 use tempfile::TempDir;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::apply::executor::ApplyError;
-use zero_migrate::apply::journal::Phase;
-use zero_migrate::conn::ExecutorConfig;
-use zero_migrate::model::ir::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::apply::executor::ApplyError;
+use zeroship_migrate::apply::journal::Phase;
+use zeroship_migrate::conn::ExecutorConfig;
+use zeroship_migrate::model::ir::{
     ColType, ExistenceGuard, IndexElement, IrColumn, IrIndex, MigrationIr, Op, SelectAst,
     SelectItem, TableRef, ViewQuery,
 };
-use zero_migrate::model::migration::Migration;
-use zero_migrate::render::lower::{IrAuthor, LiveSchema};
-use zero_migrate::resolve_create_table_policy;
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate::model::migration::Migration;
+use zeroship_migrate::render::lower::{IrAuthor, LiveSchema};
+use zeroship_migrate::resolve_create_table_policy;
+use zeroship_migrate_sqlite::SqliteBackend;
 
 struct Paths {
     _dir: TempDir,
@@ -88,10 +88,10 @@ fn lower(op: Op) -> Vec<Migration> {
     let ir = resolve_create_table_policy(&ir, &support::confined_charter(), "main")
         .expect("guard test IR resolves");
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         "main",
         "app_test",
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
     author
@@ -197,7 +197,7 @@ async fn add_column_ifnotexists_absent_runs() {
     let be = backend(&p);
     // base table without the guarded column (unguarded createTable).
     for m in lower(Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "t".into(),
         columns: vec![col("n", ColType::Int)],
         primary_key: None,
@@ -214,7 +214,7 @@ async fn add_column_ifnotexists_absent_runs() {
     }
 
     let migs = lower(Op::AddColumn {
-        attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
         table: "t".into(),
         column: "email".into(),
         ty: ColType::Text,
@@ -250,7 +250,7 @@ async fn add_column_ifnotexists_present_text_affinity_match_is_noop() {
     let p = paths("sq_add_text_match");
     let be = backend(&p);
     for m in lower(Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "t".into(),
         columns: vec![col("n", ColType::Int)],
         primary_key: None,
@@ -266,7 +266,7 @@ async fn add_column_ifnotexists_present_text_affinity_match_is_noop() {
         apply_one(&be, &m).await.expect("create base table");
     }
     for m in lower(Op::AddColumn {
-        attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
         table: "t".into(),
         column: "email".into(),
         ty: ColType::Text,
@@ -285,7 +285,7 @@ async fn add_column_ifnotexists_present_text_affinity_match_is_noop() {
     }
 
     let migs = lower(Op::AddColumn {
-        attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
         table: "t".into(),
         column: "email".into(),
         ty: ColType::Text,
@@ -321,7 +321,7 @@ async fn add_column_ifnotexists_present_integer_affinity_match_is_noop() {
     let p = paths("sq_add_int_match");
     let be = backend(&p);
     for m in lower(Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "t".into(),
         columns: vec![col("n", ColType::Int)],
         primary_key: None,
@@ -337,7 +337,7 @@ async fn add_column_ifnotexists_present_integer_affinity_match_is_noop() {
         apply_one(&be, &m).await.expect("create base table");
     }
     for m in lower(Op::AddColumn {
-        attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
         table: "t".into(),
         column: "count".into(),
         ty: ColType::Int,
@@ -358,7 +358,7 @@ async fn add_column_ifnotexists_present_integer_affinity_match_is_noop() {
     }
 
     let migs = lower(Op::AddColumn {
-        attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
         table: "t".into(),
         column: "count".into(),
         ty: ColType::Int,
@@ -396,7 +396,7 @@ async fn add_column_ifnotexists_sqlite_ref_over_live_string_is_noop() {
     let p = paths("sq_add_ref_over_string");
     let be = backend(&p);
     for m in lower(Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "t".into(),
         columns: vec![col("n", ColType::Int)],
         primary_key: None,
@@ -414,7 +414,7 @@ async fn add_column_ifnotexists_sqlite_ref_over_live_string_is_noop() {
     // The live column is authored as a plain STRING (→ snapshot `text` → SQLite TEXT
     // affinity).
     for m in lower(Op::AddColumn {
-        attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
         table: "t".into(),
         column: "owner".into(),
         ty: ColType::Text,
@@ -438,7 +438,7 @@ async fn add_column_ifnotexists_sqlite_ref_over_live_string_is_noop() {
     // affinity) → present-match → SatisfiedNoop (NOT a fail-closed, NOT a silent skip
     // over a real divergence — there is none on SQLite).
     let migs = lower(Op::AddColumn {
-        attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
         table: "t".into(),
         column: "owner".into(),
         ty: ColType::Ref {
@@ -474,7 +474,7 @@ async fn add_column_ifnotexists_present_divergent_type_fails_closed() {
     let be = backend(&p);
     // base table + an `email` column of INTEGER affinity (divergent from declared text).
     for m in lower(Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "t".into(),
         columns: vec![col("n", ColType::Int)],
         primary_key: None,
@@ -490,7 +490,7 @@ async fn add_column_ifnotexists_present_divergent_type_fails_closed() {
         apply_one(&be, &m).await.expect("create base table");
     }
     for m in lower(Op::AddColumn {
-        attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
         table: "t".into(),
         column: "email".into(),
         ty: ColType::Int,
@@ -512,7 +512,7 @@ async fn add_column_ifnotexists_present_divergent_type_fails_closed() {
 
     // Guarded addColumn declaring text over the live integer column → FailDrift.
     let migs = lower(Op::AddColumn {
-        attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
         table: "t".into(),
         column: "email".into(),
         ty: ColType::Text,
@@ -546,7 +546,7 @@ async fn create_table_ifnotexists_present_extra_column_fails_closed() {
     // Create the declared table via an unguarded apply, then add an EXTRA live
     // column out-of-band so the guarded re-create finds a WIDER live table.
     for m in lower(Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "t".into(),
         columns: vec![col("n", ColType::Int)],
         primary_key: None,
@@ -567,7 +567,7 @@ async fn create_table_ifnotexists_present_extra_column_fails_closed() {
         .expect("add extra live column");
 
     let migs = lower(Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "t".into(),
         columns: vec![col("n", ColType::Int)],
         primary_key: None,
@@ -603,7 +603,7 @@ async fn drop_column_ifexists_present_runs_absent_noops() {
     let p = paths("sq_drop_col");
     let be = backend(&p);
     for m in lower(Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "t".into(),
         columns: vec![col("legacy", ColType::Text)],
         primary_key: None,
@@ -672,7 +672,7 @@ async fn create_table_ifnotexists_reruns_idempotent_with_timestamp_and_text_colu
     // A table with a text column AND a timestamp column ON TOP of the always-present
     // system fields (id text, created_at/updated_at/deleted_at timestamps, …).
     let make_op = || Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "t".into(),
         columns: vec![
             col("title", ColType::Text),
@@ -763,7 +763,7 @@ async fn create_table_ifnotexists_fresh_creates_unique_secondary_index_and_rerun
     // a `unique:true` field → a `t_email_key` unique index unit, ON TOP of the
     // CREATE TABLE unit (which inlines the SQLite system-field indexes).
     let make_op = || Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "t".into(),
         columns: vec![IrColumn {
             name: "email".into(),
@@ -858,7 +858,7 @@ async fn add_column_ifnotexists_timestamp_rerun_is_noop() {
     let p = paths("sq_add_ts_rerun");
     let be = backend(&p);
     for m in lower(Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "t".into(),
         columns: vec![col("n", ColType::Int)],
         primary_key: None,
@@ -875,7 +875,7 @@ async fn add_column_ifnotexists_timestamp_rerun_is_noop() {
     }
     // First guarded add: runs (absent → creates the timestamp column).
     let migs1 = lower(Op::AddColumn {
-        attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
         table: "t".into(),
         column: "happened".into(),
         ty: ColType::Timestamp,
@@ -902,7 +902,7 @@ async fn add_column_ifnotexists_timestamp_rerun_is_noop() {
 
     // RE-RUN: present + matching affinity → SatisfiedNoop, NOT a false drift.
     let migs2 = lower(Op::AddColumn {
-        attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
         table: "t".into(),
         column: "happened".into(),
         ty: ColType::Timestamp,
@@ -952,7 +952,7 @@ async fn drop_view_ifexists_present_runs_absent_noops() {
     let be = backend(&p);
 
     for m in lower(Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "t".into(),
         columns: vec![col("name", ColType::Text)],
         primary_key: None,
@@ -1053,7 +1053,7 @@ async fn create_index_ifnotexists_name_owned_by_another_table_fails_closed() {
     let be = backend(&p);
 
     let make_table = |name: &str| Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: name.into(),
         columns: vec![col("bucket", ColType::Int)],
         primary_key: None,
@@ -1161,7 +1161,7 @@ async fn create_index_unguarded_name_owned_by_another_table_fails_closed() {
     let be = backend(&p);
 
     let make_table = |name: &str| Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: name.into(),
         columns: vec![col("bucket", ColType::Int)],
         primary_key: None,
@@ -1280,7 +1280,7 @@ async fn create_table_unguarded_inline_index_name_owned_by_another_table_fails_c
     let be = backend(&p);
 
     let make_table = |name: &str, index: Option<&str>| Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: name.into(),
         columns: vec![col("bucket", ColType::Int)],
         primary_key: None,
@@ -1360,7 +1360,7 @@ async fn create_table_unguarded_inline_index_free_name_still_creates() {
     let be = backend(&p);
 
     for m in lower(Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "solo".into(),
         columns: vec![col("bucket", ColType::Int)],
         primary_key: None,

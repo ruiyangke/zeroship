@@ -108,7 +108,7 @@
 //! regardless.
 
 use compio_postgres::Config;
-use zero_migrate::driver::SqlSession;
+use zeroship_migrate::driver::SqlSession;
 
 use super::PlatformMigrateError;
 use crate::CompioPgSession;

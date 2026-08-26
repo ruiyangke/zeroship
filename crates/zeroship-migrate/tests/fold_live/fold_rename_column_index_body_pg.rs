@@ -62,15 +62,15 @@ use crate::support;
 use std::collections::BTreeMap;
 
 use crate::support::PgDevSession;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::driver::SqlSession;
-use zero_migrate::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::{
     diff_snapshots, fold_ops, resolve_create_table_policy, Approval, EffectivePolicy,
     ExecutorConfig, GuardConfig, IndexElementSnapshot, IrAuthor, LiveSchema, LockMode,
     MigrationEngine, MigrationIr, SchemaSnapshot,
 };
-use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
-use zero_migrate_postgres::PostgresBackend;
+use zeroship_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zeroship_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_fold_stale_index_body_pg";
 
@@ -268,9 +268,9 @@ fn fold(
     let resolved = resolve_create_table_policy(&authored, policy, project_schema)
         .map_err(|error| format!("resolve create-table policy: {error}"))?;
     fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &resolved.ops,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         project_schema,
         policy,
     )
@@ -293,17 +293,17 @@ async fn apply_through_engine(
     let resolved_source = serde_json::to_string(&resolved)
         .map_err(|error| format!("serialize resolved IR: {error}"))?;
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         policy,
     );
-    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT);
+    let guard = GuardConfig::from_policy(policy.clone(), zeroship_migrate_postgres::DIALECT);
     let artifact = author
         .load_and_lower_guarded(&resolved_source, OWNER, registry, live, &guard)
         .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,
@@ -377,11 +377,11 @@ async fn measure() -> Measured {
             .await
             .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
 
-        let stale = diff_snapshots(zero_migrate::shipping_vendors(), &folded, &live);
+        let stale = diff_snapshots(zeroship_migrate::shipping_vendors(), &folded, &live);
         let wrong_column_drift =
-            diff_snapshots(zero_migrate::shipping_vendors(), &wrong_column, &live);
+            diff_snapshots(zeroship_migrate::shipping_vendors(), &wrong_column, &live);
         let no_predicate_drift =
-            diff_snapshots(zero_migrate::shipping_vendors(), &no_predicate, &live);
+            diff_snapshots(zeroship_migrate::shipping_vendors(), &no_predicate, &live);
 
         Ok(Measured {
             fold_predicate: index_predicate(&folded, PARTIAL_INDEX),

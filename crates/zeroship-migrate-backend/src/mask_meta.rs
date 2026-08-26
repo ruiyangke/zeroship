@@ -1,8 +1,8 @@
 //! The mask / encryption COLUMN-METADATA vocabulary.
 //!
-//! Five pure-data types lifted out of `zero_migrate::schema::diff` - the only part
+//! Five pure-data types lifted out of `zeroship_migrate::schema::diff` - the only part
 //! of that 2540-line classifier a backend crate needs. They are re-exported from
-//! `zero_migrate::schema::diff`, the path every existing caller uses.
+//! `zeroship_migrate::schema::diff`, the path every existing caller uses.
 //!
 //! WHY THEY HAD TO MOVE, measured. `SchemaRenderer::column_comment_statements` is
 //! the vendor's spelling of `COMMENT ON COLUMN`, and PostgreSQL's impl reaches
@@ -16,7 +16,7 @@
 //! is metadata a column CARRIES; everything below is the classifier's own machinery
 //! (`compute_diff`, `LiveSchema`, `ChangeKind`), which is core's decision about a
 //! vendor rather than a vendor's spelling, and stays in the engine by the boundary
-//! rule `zero_migrate::render::backends` states at length.
+//! rule `zeroship_migrate::render::backends` states at length.
 
 use crate::descriptors::EncryptionMode;
 

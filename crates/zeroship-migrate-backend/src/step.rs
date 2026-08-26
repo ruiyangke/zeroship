@@ -15,24 +15,24 @@
 //!
 //! # What is still in the engine, and the ONE thing holding it
 //!
-//! `zero_migrate::render::step` keeps `PlanStep`, `RenameStep` and
+//! `zeroship_migrate::render::step` keeps `PlanStep`, `RenameStep` and
 //! `DialectScope`. `PlanStep::OnlineRename` carries a `RenameStep`, which carries
 //! `render::declarative::TableRebuild`, which carries
 //! `render::plan::TableRebuildSpec` - and that spec's `sequence_policy` field is
-//! typed `zero_migrate_sqlite::SqliteSequencePolicy`. A vendor type cannot come
+//! typed `zeroship_migrate_sqlite::SqliteSequencePolicy`. A vendor type cannot come
 //! DOWN into the contract crate the vendors sit above, so the chain stops there
 //! rather than at anything about `PlanStep` itself.
 //!
-//! Every item here is re-exported from `zero_migrate::render::step`, the path
+//! Every item here is re-exported from `zeroship_migrate::render::step`, the path
 //! every existing caller uses.
 
 use crate::backfill::BackfillSpec;
 use crate::capability::{BackendCapability, ExpandContractPlan, OnlineIntent};
 use crate::table_rebuild::TableRebuild;
-use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_ir::ir::AlterPrimaryKeyAction;
-use zero_migrate_ir::migration::Migration;
-use zero_migrate_ir::migration::{Checksum, MigrationId};
+use zeroship_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::ir::AlterPrimaryKeyAction;
+use zeroship_migrate_ir::migration::Migration;
+use zeroship_migrate_ir::migration::{Checksum, MigrationId};
 
 /// A typed scalar bound into a parameterized `PlanStep::Dml` statement.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -453,7 +453,7 @@ mod touched_table_tests {
             schema: "app".into(),
             table: "members".into(),
             cursor_columns: vec!["id".into()],
-            cursor_stability: zero_migrate_ir::ir::CursorStability::GuardUpdates,
+            cursor_stability: zeroship_migrate_ir::ir::CursorStability::GuardUpdates,
             cursor_contract: None,
             batch_size: 100,
             set_clause: "x = 1".into(),
@@ -463,10 +463,10 @@ mod touched_table_tests {
         };
         let step = PlanStep::Backfill {
             version: MigrationId::derive("test_backfill", b"members"),
-            checksum: Checksum::of(&zero_migrate_ir::migration::ChecksumInput {
+            checksum: Checksum::of(&zeroship_migrate_ir::migration::ChecksumInput {
                 up: "backfill members",
                 down: None,
-                flags: &zero_migrate_ir::migration::MigrationFlags::default(),
+                flags: &zeroship_migrate_ir::migration::MigrationFlags::default(),
                 owner_app: "app",
                 depends_on: &[],
                 supersedes: &[],

@@ -1,20 +1,20 @@
 [package]
-name = "zero-migrate"
+name = "zeroship-migrate"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Portable, security-first, multi-dialect DB migration engine — the whole product: the vendor-neutral `zero-migrate-core` engine composed with the PostgreSQL, SQLite and MySQL backends this build ships. Driver-neutral Postgres/MySQL seam (host-callback / napi bridge) plus in-process SQLite. Runs V8-free: authoring, MySQL, and Postgres execution all run in the Node process (npm drivers) reached through the zero-migrate-node napi bridge; it ships NO embedded V8."
+description = "Portable, security-first, multi-dialect DB migration engine — the whole product: the vendor-neutral `zeroship-migrate-core` engine composed with the PostgreSQL, SQLite and MySQL backends this build ships. Driver-neutral Postgres/MySQL seam (host-callback / napi bridge) plus in-process SQLite. Runs V8-free: authoring, MySQL, and Postgres execution all run in the Node process (npm drivers) reached through the zeroship-migrate-node napi bridge; it ships NO embedded V8."
 
 # THE COMPOSITION ROOT, and almost nothing else.
 #
-# `src/lib.rs` is a re-export of `zero-migrate-core` plus ONE fact: which vendors
+# `src/lib.rs` is a re-export of `zeroship-migrate-core` plus ONE fact: which vendors
 # exist. That is the entire content of this crate, and it is why it exists — the three
 # `[dependencies]` lines below used to sit in the engine's own manifest, where nothing
 # but a hand-written census stopped any engine module from reaching a vendor directly.
-# Moving them here makes the neutrality rule STRUCTURAL: `zero-migrate-core` cannot see
+# Moving them here makes the neutrality rule STRUCTURAL: `zeroship-migrate-core` cannot see
 # these crates, so it cannot name them.
 #
-# The consumer-facing name did not move. `zero-migrate` is what a host depends on and
+# The consumer-facing name did not move. `zeroship-migrate` is what a host depends on and
 # "the whole product" is the right meaning for it; the engine is the part that got a
 # new name.
 #
@@ -29,20 +29,20 @@ description = "Portable, security-first, multi-dialect DB migration engine — t
 [dependencies]
 # THE ENGINE. Re-exported wholesale by `src/lib.rs`, so every `zero_migrate::…` path a
 # host already wrote resolves unchanged across the split.
-zero-migrate-core = { workspace = true }
+zeroship-migrate-core = { workspace = true }
 # THE THREE SHIPPING BACKENDS. Named exactly once each, in the `SHIPPING` array in
 # `src/lib.rs`, which is the registry composition that replaced the hard-coded match
 # over the former closed SQL-dialect enum. The arrow only points this way: no vendor
 # crate depends on the engine or on this crate, which is what let them be extracted at
-# all, and what lets `zero-migrate-core` name none of them.
-zero-migrate-postgres = { workspace = true }
-zero-migrate-sqlite = { workspace = true }
-zero-migrate-mysql = { workspace = true }
+# all, and what lets `zeroship-migrate-core` name none of them.
+zeroship-migrate-postgres = { workspace = true }
+zeroship-migrate-sqlite = { workspace = true }
+zeroship-migrate-mysql = { workspace = true }
 # The backend CONTRACT, for the two types the composition itself is written in:
 # `BackendVendor` (what each vendor registers) and `VendorSet` (what this crate hands
 # out). No renderer, no guard, no emitter is named here — resolving one is the
 # engine's job, against the set it is given.
-zero-migrate-backend = { workspace = true }
+zeroship-migrate-backend = { workspace = true }
 
 [dev-dependencies]
 # The wire contract, named DIRECTLY by the suites that build IR envelopes and dialect
@@ -50,7 +50,7 @@ zero-migrate-backend = { workspace = true }
 # entry: `shipping_backends()` returns a `BackendRegistry`, but that name reaches this
 # crate through the engine's own root re-export, so the composition needs no edge of
 # its own to the leaf.
-zero-migrate-ir = { workspace = true }
+zeroship-migrate-ir = { workspace = true }
 # The integration suites under `tests/` are HOSTS: they compose the product and drive
 # it through its public surface, so their dependencies are this crate's dev edges
 # rather than the engine's. Everything below is TEST-ONLY and none of it ships.
@@ -58,10 +58,10 @@ zero-migrate-ir = { workspace = true }
 # The PDP, named directly by the charter/policy suites rather than through the
 # engine's re-export, because those tests construct policy inputs rather than consume
 # an `EffectivePolicy` the engine handed them.
-zero-migrate-policy = { workspace = true }
+zeroship-migrate-policy = { workspace = true }
 # TEST-ONLY. Every engine parse site the old `[dependencies]` entry justified was
 # PostgreSQL's and reached only through `MigrationBackend`; all of them left with
-# `apply/backend/postgres/` for `zero-migrate-postgres/src/backend/`.
+# `apply/backend/postgres/` for `zeroship-migrate-postgres/src/backend/`.
 #
 # COUNT THE CALL SITES BEFORE EDITING THIS COMMENT — the entry it replaces was wrong
 # twice before for exactly that reason. Today there is ONE:
@@ -79,9 +79,9 @@ pg_query = "6"
 # copies drift silently.
 #
 # Resolver 3 keeps dev-dependency features out of the normal build, so a shipping
-# `zero-migrate` compiles none of it.
-zero-migrate-mysql = { workspace = true, features = ["testing"] }
-zero-migrate-postgres = { workspace = true, features = ["testing"] }
+# `zeroship-migrate` compiles none of it.
+zeroship-migrate-mysql = { workspace = true, features = ["testing"] }
+zeroship-migrate-postgres = { workspace = true, features = ["testing"] }
 # TEST-ONLY: the SEAM-generic async apply/backend surface is `async`, so the test
 # harness drives it on a runtime. `#[compio::test]` spins a throwaway compio run loop
 # per test (zero tokio) to `.await` the seam-generic apply/journal/drift/status paths
@@ -103,7 +103,7 @@ rusqlite = { workspace = true, features = ["bundled", "load_extension"] }
 # path has in-repo live-DB regression coverage.
 # It is a `[dev-dependency]` ONLY — it pulls `tokio` TRANSITIVELY (the blocking
 # `postgres` client wraps `tokio-postgres` on a private runtime), which is ACCEPTABLE
-# because it NEVER ships: `cargo tree -p zero-migrate -e normal` stays tokio-free.
+# because it NEVER ships: `cargo tree -p zeroship-migrate -e normal` stays tokio-free.
 postgres = "0.19"
 # TEST-ONLY (with `postgres`, above): the text-format param wrapper (`TextParam`)
 # implements `postgres::types::ToSql`, whose `to_sql` writes into a

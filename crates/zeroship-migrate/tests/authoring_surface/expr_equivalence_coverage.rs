@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use zero_migrate::model::expr::{
+use zeroship_migrate::model::expr::{
     AggFunc, BinaryOp, CaseBranch, CastTarget, Expr, ExtractField, ScalarFn, SynthFn, UnaryOp,
 };
-use zero_migrate::model::ir::{IrScalar, IrValue};
-use zero_migrate::model::validate::{validate_expr, TargetScope};
-use zero_migrate::render::dml::assemble_backfill_clauses;
-use zero_migrate_postgres::DIALECT as POSTGRES;
+use zeroship_migrate::model::ir::{IrScalar, IrValue};
+use zeroship_migrate::model::validate::{validate_expr, TargetScope};
+use zeroship_migrate::render::dml::assemble_backfill_clauses;
+use zeroship_migrate_postgres::DIALECT as POSTGRES;
 
 const EXPECTED_PORTABLE_EXPR_VARIANTS: &[&str] = &[
     "Agg",
@@ -317,14 +317,14 @@ fn portable_expr_samples() -> Vec<Expr> {
     ]
 }
 
-fn dialect_pairs() -> [(zero_migrate::DialectId, zero_migrate::DialectId); 3] {
+fn dialect_pairs() -> [(zeroship_migrate::DialectId, zeroship_migrate::DialectId); 3] {
     [
         (
-            zero_migrate_postgres::DIALECT,
-            zero_migrate_postgres::DIALECT,
+            zeroship_migrate_postgres::DIALECT,
+            zeroship_migrate_postgres::DIALECT,
         ),
-        (zero_migrate_sqlite::DIALECT, zero_migrate_sqlite::DIALECT),
-        (zero_migrate_mysql::DIALECT, zero_migrate_mysql::DIALECT),
+        (zeroship_migrate_sqlite::DIALECT, zeroship_migrate_sqlite::DIALECT),
+        (zeroship_migrate_mysql::DIALECT, zeroship_migrate_mysql::DIALECT),
     ]
 }
 
@@ -342,7 +342,7 @@ fn assert_validates_and_renders_on_all_three(expr: &Expr, variant: &str) {
     let scope = TargetScope::new("t", &columns);
     for (validator_dialect, sql_dialect) in dialect_pairs() {
         validate_expr(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             expr,
             &validator_dialect,
             &scope,
@@ -353,7 +353,7 @@ fn assert_validates_and_renders_on_all_three(expr: &Expr, variant: &str) {
         let mut set = BTreeMap::new();
         set.insert("out".to_string(), IrValue::Expr(expr.clone()));
         let rendered = assemble_backfill_clauses(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &sql_dialect,
             "t",
             &set,
@@ -450,7 +450,7 @@ fn vendor_expr_variants_are_classified_out_of_the_portable_gate() {
             from: Box::new(Expr::col("ts")),
         },
         Expr::Interval {
-            duration: zero_migrate::Duration {
+            duration: zeroship_migrate::Duration {
                 years: None,
                 months: None,
                 days: None,

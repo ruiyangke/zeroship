@@ -6,9 +6,9 @@
 //! method is required so a newly registered backend cannot silently inherit one
 //! of the shipping engines' answers.
 
-use zero_migrate_ir::capability::VendorCapability;
-use zero_migrate_ir::ir::ColType;
-use zero_migrate_ir::policy::SchemaScope;
+use zeroship_migrate_ir::capability::VendorCapability;
+use zeroship_migrate_ir::ir::ColType;
+use zeroship_migrate_ir::policy::SchemaScope;
 
 /// One backend's disposition for a closed operation-shape token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

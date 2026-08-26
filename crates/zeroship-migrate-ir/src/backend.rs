@@ -32,7 +32,7 @@ use crate::dialect::{DialectId, DialectSet};
 
 /// A question CORE ASKS a backend. Never a vendor name.
 ///
-/// Promoted from `zero_migrate::render::renderer`, where it was `pub(crate)`.
+/// Promoted from `zeroship_migrate::render::renderer`, where it was `pub(crate)`.
 /// The promotion changed neither spelling nor meaning of any predicate it
 /// carried over; membership has grown since, which is what the paragraph below
 /// is about. (This doc used to pin a count of the promoted predicates. The count

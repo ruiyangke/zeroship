@@ -106,16 +106,16 @@ use crate::support;
 use std::collections::BTreeMap;
 
 use crate::support::PgDevSession;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::driver::SqlSession;
-use zero_migrate::render::fold::effects::state_at;
-use zero_migrate::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::render::fold::effects::state_at;
+use zeroship_migrate::{
     diff_snapshots, resolve_create_table_policy, Approval, EffectivePolicy, ExecutorConfig,
     GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr, SchemaSnapshot,
     StructuralDrift,
 };
-use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
-use zero_migrate_postgres::PostgresBackend;
+use zeroship_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zeroship_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_state_at_matches_the_server_pg";
 
@@ -266,13 +266,13 @@ async fn prefixes(
         let resolved_source = serde_json::to_string(&resolved)
             .map_err(|error| format!("serialize resolved test IR: {error}"))?;
         let author = IrAuthor::new(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &cfg.project_schema,
             OWNER,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &policy,
         );
-        let guard = GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT);
+        let guard = GuardConfig::from_policy(policy.clone(), zeroship_migrate_postgres::DIALECT);
         let artifact = author
             .load_and_lower_guarded(&resolved_source, OWNER, &registry, &live, &guard)
             .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;
@@ -307,7 +307,7 @@ async fn prefixes(
             ));
         }
 
-        let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+        let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
         let mut measured = Vec::with_capacity(resolved.ops.len() + 1);
 
         // ---------------------------------------------------------------
@@ -316,11 +316,11 @@ async fn prefixes(
         // ---------------------------------------------------------------
         for k in 0..=resolved.ops.len() {
             let expected = state_at(
-                zero_migrate::shipping_vendors(),
+                zeroship_migrate::shipping_vendors(),
                 &live_at_0,
                 &resolved.ops,
                 k,
-                &zero_migrate_postgres::DIALECT,
+                &zeroship_migrate_postgres::DIALECT,
                 &cfg.project_schema,
                 &policy,
             )
@@ -342,7 +342,7 @@ async fn prefixes(
                 }
             }
 
-            let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
+            let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual);
             measured.push(Prefix {
                 expected,
                 actual,

@@ -12,8 +12,8 @@
 //! `admit` is not by itself a property the product has. These three cases ask the
 //! product's own entry point.
 
-use zero_migrate::model::table_shape::effective_policy_from_charter_layers;
-use zero_migrate_policy::{KnobKey, ObjectName};
+use zeroship_migrate::model::table_shape::effective_policy_from_charter_layers;
+use zeroship_migrate_policy::{KnobKey, ObjectName};
 
 /// Grants `schema.create_table` and says nothing at all about `sql.raw`.
 const ROOT_SILENT_ON_RAW: &str = r#"policy_version = 1
@@ -105,7 +105,7 @@ scope = { include = ["app"] }
         .expect("the mask composes on its own");
     assert_eq!(
         charter_only.grants(&raw, &masked),
-        Some(zero_migrate_policy::KnobValue::Bool(false)),
+        Some(zeroship_migrate_policy::KnobValue::Bool(false)),
         "premise: the upper layer masks sql.raw off at appx"
     );
 
@@ -142,12 +142,12 @@ scope = { include = ["app_one"] }
     let outside = ObjectName::table(b"app_two".to_vec(), b"t".to_vec());
     assert_eq!(
         policy.grants(&raw, &inside),
-        Some(zero_migrate_policy::KnobValue::Bool(true)),
+        Some(zeroship_migrate_policy::KnobValue::Bool(true)),
         "the grant both documents agree on must survive composition"
     );
     assert_eq!(
         policy.grants(&raw, &outside),
-        Some(zero_migrate_policy::KnobValue::Bool(false)),
+        Some(zeroship_migrate_policy::KnobValue::Bool(false)),
         "and it must stop at the root's boundary"
     );
 }

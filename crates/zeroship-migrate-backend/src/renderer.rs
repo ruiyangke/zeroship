@@ -40,9 +40,9 @@
 use crate::dml::{BindCtx, DmlError, LimitedDeleteRenderRequest, OnConflictRenderRequest};
 use crate::error::IrLowerError;
 use crate::step::BindValue;
-use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_ir::expr::{CastTarget, Duration, ExtractField, ScalarFn};
-use zero_migrate_ir::ir::{IrScalar, IrValue, Op, TableRef};
+use zeroship_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::expr::{CastTarget, Duration, ExtractField, ScalarFn};
+use zeroship_migrate_ir::ir::{IrScalar, IrValue, Op, TableRef};
 
 /// Neutral inputs to one backend's materialized enum/domain DDL renderer.
 ///
@@ -94,11 +94,11 @@ pub enum MaterializedNamedTypeOp<'a> {
 
 /// The dialect feature predicates the migration lowerer asks.
 ///
-/// PROMOTED to public vocabulary in `zero_migrate_ir::backend` - unchanged in
+/// PROMOTED to public vocabulary in `zeroship_migrate_ir::backend` - unchanged in
 /// spirit and unchanged in membership (the same 25 predicates, the same
 /// spellings). It is re-exported here so the ~250 in-crate `Capability::...` uses
 /// keep naming it through `render::renderer`.
-pub use zero_migrate_ir::backend::Capability;
+pub use zeroship_migrate_ir::backend::Capability;
 
 /// A backend-owned feature-support decision used by the authoring matrix.
 ///
@@ -173,7 +173,7 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
     ///
     /// No default is provided: a backend cannot silently borrow another
     /// vendor's portability envelope by omitting the method.
-    fn expr_validator(&self) -> &dyn zero_migrate_ir::validate::ExprDialectValidator;
+    fn expr_validator(&self) -> &dyn zeroship_migrate_ir::validate::ExprDialectValidator;
 
     /// Which vendor this is.
     ///
@@ -224,7 +224,7 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
     /// Asking the VENDOR instead removes the table. A backend crate declares one
     /// `BackendDescriptor` const and returns it here; core reads capabilities off
     /// the value rather than deriving them from a name it recognises.
-    fn descriptor(&self) -> &'static zero_migrate_ir::backend::BackendDescriptor;
+    fn descriptor(&self) -> &'static zeroship_migrate_ir::backend::BackendDescriptor;
 
     /// Statements a copied offline preview must run before author SQL so its
     /// grammar matches this backend's apply session.
@@ -434,7 +434,7 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
     /// # Why this is on the trait, and what it replaced
     ///
     /// The engine used to reach PostgreSQL's renderer BY NAME:
-    /// `zero_migrate::render::vendor` re-exported `zero_migrate_postgres::render_vendor_op`
+    /// `zeroship_migrate::render::vendor` re-exported `zeroship_migrate_postgres::render_vendor_op`
     /// and `render::lower` called it directly for the privileged vendor ops. Those
     /// op kinds never touch [`DmlRenderer::render_trigger_op`], which is exactly why
     /// they were left behind when the two renderers went behind the contract, and

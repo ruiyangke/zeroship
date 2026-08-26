@@ -9,13 +9,13 @@ use crate::support;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::support::PgDevSession;
-use zero_migrate::driver::SqlSession;
-use zero_migrate::model::ir::AlterPrimaryKeyAction;
-use zero_migrate::{
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::model::ir::AlterPrimaryKeyAction;
+use zeroship_migrate::{
     AlterPrimaryKeyStep, ApplyError, Approval, ApprovalScope, Checksum, ChecksumInput,
     ExecutorConfig, Migration, MigrationBackend, MigrationFlags, MigrationId,
 };
-use zero_migrate_postgres::PostgresBackend;
+use zeroship_migrate_postgres::PostgresBackend;
 
 fn token() -> String {
     static NEXT: AtomicU64 = AtomicU64::new(0);

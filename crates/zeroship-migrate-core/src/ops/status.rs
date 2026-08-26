@@ -11,7 +11,7 @@
 //! what let these verbs NAME a dialect and then read PostgreSQL's journal
 //! regardless. The one read the neutral trait cannot serve - full
 //! [`RolledBackEntry`](crate::apply::journal::RolledBackEntry) detail - stayed with the vendor that has it, in
-//! `zero_migrate_postgres::backend::status_sql`.
+//! `zeroship_migrate_postgres::backend::status_sql`.
 //!
 //! This module emits NO DDL and mutates nothing - it surfaces journal state. It
 //! reuses the journal's NET-state reader (the backend's
@@ -411,7 +411,7 @@ pub struct ResolvedPendingContract {
 // isolation statement no other vendor accepts, and then answers this exact question.
 // Two copies of the vocabulary would be two answers that drift. Re-exported so every
 // `crate::ops::status::...` path (and the flattened root re-exports) resolves unchanged.
-pub use zero_migrate_backend::status::{BlockedPlan, MigrationStatus, PendingContractStatus};
+pub use zeroship_migrate_backend::status::{BlockedPlan, MigrationStatus, PendingContractStatus};
 
 /// What a status read produced: a reconciled verdict, or the report that a peer's
 /// deploy holds the project lock.
@@ -464,7 +464,7 @@ impl<S> StatusSnapshot<S> {
     }
 }
 
-pub use zero_migrate_backend::status::StatusError;
+pub use zeroship_migrate_backend::status::StatusError;
 
 /// Reconcile complete lowered-plan manifests against net journal state.
 ///
@@ -1071,7 +1071,7 @@ fn order_plan_manifests(manifests: &[PlanStatusManifest]) -> Result<Vec<usize>, 
 ///
 /// PostgreSQL additionally keeps a `REPEATABLE READ READ ONLY` snapshot read of the
 /// same net state in
-/// `zero_migrate_postgres::backend::status_sql` - the one path that can
+/// `zeroship_migrate_postgres::backend::status_sql` - the one path that can
 /// report full [`RolledBackEntry`](crate::apply::journal::RolledBackEntry) detail. It lives in that backend rather than
 /// here because the transaction it opens and the journal it reads are that vendor's.
 ///
@@ -1247,7 +1247,7 @@ async fn status_via_backend_locked_inner<B: crate::apply::backend::MigrationBack
 // `derive_pending_contract_status` travelled with the two structs it builds: it is a
 // pure fold over the obligation set and the supplied migration set, and the PG
 // snapshot path is one of its two callers.
-pub(crate) use zero_migrate_backend::status::derive_pending_contract_status;
+pub(crate) use zeroship_migrate_backend::status::derive_pending_contract_status;
 
 /// Plan-manifest peer of [`derive_pending_contract_status`]. Logical plan ids and
 /// dependencies are available directly, so online-contract orphan/block reporting

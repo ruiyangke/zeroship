@@ -27,13 +27,13 @@ use crate::support;
 use std::collections::BTreeMap;
 
 use crate::support::PgDevSession;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::apply::executor::LockMode;
-use zero_migrate::driver::SqlSession;
-use zero_migrate::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::apply::executor::LockMode;
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::{
     Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine, MigrationIr,
 };
-use zero_migrate_postgres::PostgresBackend;
+use zeroship_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_scalar_precision";
 
@@ -81,15 +81,15 @@ async fn round_trip(
         .await
         .expect("ensure the migration journal");
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &support::confined_charter(),
     );
     let guard_cfg = GuardConfig::from_policy(
         support::no_inject(&cfg.project_schema),
-        zero_migrate_postgres::DIALECT,
+        zeroship_migrate_postgres::DIALECT,
     );
     let registry: BTreeMap<String, String> =
         [("t".to_string(), OWNER.to_string())].into_iter().collect();
@@ -100,7 +100,7 @@ async fn round_trip(
     let schema_artifact = author
         .load_and_lower_guarded(&ddl, OWNER, &registry, &LiveSchema::default(), &guard_cfg)
         .expect("the schema envelope lowers");
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &schema_artifact.plan.steps,
             Approval::Approved,
@@ -117,9 +117,9 @@ async fn round_trip(
     live.tables.insert("t".into());
     let declared: MigrationIr = serde_json::from_str(&ddl).expect("the schema envelope parses");
     live.advance_logical_columns(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &declared,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &cfg.project_schema,
         None,
     )
@@ -131,7 +131,7 @@ async fn round_trip(
     let data_artifact = author
         .load_and_lower_guarded(&dml, OWNER, &registry, &live, &guard_cfg)
         .map_err(|e| format!("{e:?}"))?;
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &data_artifact.plan.steps,
             Approval::Approved,

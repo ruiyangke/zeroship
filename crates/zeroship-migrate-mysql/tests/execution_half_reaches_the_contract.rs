@@ -46,7 +46,7 @@
 //! # What is deliberately NOT here yet
 //!
 //! Nothing. The list this section carried held one entry -
-//! `zero_migrate::render::value_format`'s `catalog_id_default`,
+//! `zeroship_migrate::render::value_format`'s `catalog_id_default`,
 //! `catalog_text_id_default`, `catalog_uuid_id_default`, `recover_format_check` and
 //! `RecoveredFormatCheck`, all read by `drift_sql.rs` - and it came down exactly the
 //! way the entry predicted: each took a `&DialectId` and resolved a renderer out of
@@ -56,22 +56,22 @@
 
 use std::time::Duration;
 
-use zero_migrate_backend::backend::{PROJECT_LOCK_TRY_ATTEMPTS, PROJECT_LOCK_TRY_BACKOFF};
-use zero_migrate_backend::conn::ExecutorConfig;
-use zero_migrate_backend::constraint_definition::{constraintdef_cols, fk_constraint_snapshot};
-use zero_migrate_backend::drift::{compare_applied_to_set, ChecksumDriftReport};
-use zero_migrate_backend::executor::{authorize_existence_guard_schema, ApplyError};
-use zero_migrate_backend::existence_probe::{decide, GuardVerdict};
-use zero_migrate_backend::fault;
-use zero_migrate_backend::journal::AppliedEntry;
-use zero_migrate_backend::snapshot::{IdDefaultSnapshot, SchemaSnapshot};
-use zero_migrate_backend::value_format::{
+use zeroship_migrate_backend::backend::{PROJECT_LOCK_TRY_ATTEMPTS, PROJECT_LOCK_TRY_BACKOFF};
+use zeroship_migrate_backend::conn::ExecutorConfig;
+use zeroship_migrate_backend::constraint_definition::{constraintdef_cols, fk_constraint_snapshot};
+use zeroship_migrate_backend::drift::{compare_applied_to_set, ChecksumDriftReport};
+use zeroship_migrate_backend::executor::{authorize_existence_guard_schema, ApplyError};
+use zeroship_migrate_backend::existence_probe::{decide, GuardVerdict};
+use zeroship_migrate_backend::fault;
+use zeroship_migrate_backend::journal::AppliedEntry;
+use zeroship_migrate_backend::snapshot::{IdDefaultSnapshot, SchemaSnapshot};
+use zeroship_migrate_backend::value_format::{
     catalog_id_default, column_metadata, recover_format_check, RecoveredFormatCheck,
 };
-use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_ir::ir::ValueFormat;
-use zero_migrate_ir::migration::Migration;
-use zero_migrate_ir::probe::{GuardDir, GuardProbe};
+use zeroship_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::ir::ValueFormat;
+use zeroship_migrate_ir::migration::Migration;
+use zeroship_migrate_ir::probe::{GuardDir, GuardProbe};
 
 /// The crash-simulation seam the two-phase MySQL apply trips at.
 ///
@@ -176,7 +176,7 @@ fn the_existence_guard_decider_answers_for_this_vendor() {
         decide(
             &probe,
             &SchemaSnapshot::default(),
-            &zero_migrate_mysql::VENDOR
+            &zeroship_migrate_mysql::VENDOR
         ),
         GuardVerdict::RunBare,
         "an ifNotExists probe for a table absent from the live catalog did not run \
@@ -229,7 +229,7 @@ fn the_constraint_definition_codec_is_reachable_and_spells_the_comparison_form()
         false,
         false,
         false,
-        &zero_migrate_mysql::VENDOR,
+        &zeroship_migrate_mysql::VENDOR,
     );
     assert_eq!(
         fk.kind, "FOREIGN KEY",
@@ -265,7 +265,7 @@ fn the_catalog_id_default_comparison_answers_with_this_vendors_renderers() {
     /// MySQL's UUIDv4 default exactly as `information_schema` echoes it back.
     const MYSQL_CATALOG_UUID_V4_DEFAULT: &str = "lower(concat(hex(random_bytes(4)),_latin1'-',hex(random_bytes(2)),_latin1'-',hex(((ord(random_bytes(1)) & 15) | 64)),hex(random_bytes(1)),_latin1'-',hex(((ord(random_bytes(1)) & 63) | 128)),hex(random_bytes(1)),_latin1'-',hex(random_bytes(6))))";
 
-    let vendor = &zero_migrate_mysql::VENDOR;
+    let vendor = &zeroship_migrate_mysql::VENDOR;
 
     assert_eq!(
         catalog_id_default(Some("abc"), vendor.value_format, vendor.dml, Some(false)),
@@ -297,7 +297,7 @@ fn the_catalog_id_default_comparison_answers_with_this_vendors_renderers() {
 /// stores unless the renderers handed in are MySQL's.
 #[test]
 fn the_format_check_recovery_answers_with_this_vendors_renderers() {
-    let vendor = &zero_migrate_mysql::VENDOR;
+    let vendor = &zeroship_migrate_mysql::VENDOR;
     let authored = column_metadata(
         "public_id",
         &ValueFormat::TypeId {

@@ -48,16 +48,16 @@
 use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
-use zero_migrate::guard::GuardConfig;
-use zero_migrate::model::capability::VendorCapability;
-use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::model::op_support::vendor_capabilities;
-use zero_migrate::model::table_shape::resolve_create_table_policy;
-use zero_migrate::model::validate::{validate_ir_authorized, CODE_VENDOR_OP_DENIED};
-use zero_migrate::render::lower::{
+use zeroship_migrate::guard::GuardConfig;
+use zeroship_migrate::model::capability::VendorCapability;
+use zeroship_migrate::model::ir::MigrationIr;
+use zeroship_migrate::model::op_support::vendor_capabilities;
+use zeroship_migrate::model::table_shape::resolve_create_table_policy;
+use zeroship_migrate::model::validate::{validate_ir_authorized, CODE_VENDOR_OP_DENIED};
+use zeroship_migrate::render::lower::{
     IrAuthor, LiveSchema, LoadAndLowerGuardedError, LoweredArtifact,
 };
-use zero_migrate::{
+use zeroship_migrate::{
     effective_policy_from_charter_toml, DialectId, EffectivePolicy, PlanStep, SchemaScope,
 };
 
@@ -72,9 +72,9 @@ const FUNCTION: &str = "audited_touch_fn";
 /// support tables, which is what makes one subject op answerable everywhere.
 fn dialects() -> Vec<DialectId> {
     vec![
-        zero_migrate_postgres::DIALECT,
-        zero_migrate_mysql::DIALECT,
-        zero_migrate_sqlite::DIALECT,
+        zeroship_migrate_postgres::DIALECT,
+        zeroship_migrate_mysql::DIALECT,
+        zeroship_migrate_sqlite::DIALECT,
     ]
 }
 
@@ -92,9 +92,9 @@ fn drop_trigger_op() -> Value {
 /// an oversight: minting the function is `code.function`-gated, so a leg that created
 /// one could not tell a refusal of the TRIGGER from a refusal of the FUNCTION.
 fn create_trigger_op(dialect: &DialectId) -> Value {
-    let action = if dialect == &zero_migrate_postgres::DIALECT {
+    let action = if dialect == &zeroship_migrate_postgres::DIALECT {
         json!({ "kind": "executeFunction", "name": FUNCTION })
-    } else if dialect == &zero_migrate_mysql::DIALECT {
+    } else if dialect == &zeroship_migrate_mysql::DIALECT {
         json!({ "kind": "body", "statements": [
             { "stmt": "delete", "table": TABLE,
               "where": { "node": "colRef", "name": "flag" } }] })
@@ -259,8 +259,8 @@ fn the_trigger_grant_did_not_pin_the_op_to_one_dialect() {
     let ir: MigrationIr =
         serde_json::from_str(&envelope("reach", vec![drop_trigger_op()])).expect("envelope parses");
     let supported =
-        zero_migrate::model::op_support::support(zero_migrate::shipping_vendors(), &ir.ops[0])
-            .supported_dialects(zero_migrate::shipping_vendors());
+        zeroship_migrate::model::op_support::support(zeroship_migrate::shipping_vendors(), &ir.ops[0])
+            .supported_dialects(zeroship_migrate::shipping_vendors());
     for dialect in dialects() {
         assert!(
             supported.contains_id(&dialect),
@@ -273,8 +273,8 @@ fn the_trigger_grant_did_not_pin_the_op_to_one_dialect() {
         let ir: MigrationIr =
             serde_json::from_str(&envelope("reach", vec![op.clone()])).expect("envelope parses");
         assert!(
-            zero_migrate::model::op_support::support(zero_migrate::shipping_vendors(), &ir.ops[0])
-                .supported_dialects(zero_migrate::shipping_vendors())
+            zeroship_migrate::model::op_support::support(zeroship_migrate::shipping_vendors(), &ir.ops[0])
+                .supported_dialects(zeroship_migrate::shipping_vendors())
                 .contains_id(&dialect),
             "{dialect}: the trigger capability must not have cost this backend its own \
              create shape: {op}"
@@ -304,7 +304,7 @@ fn validate_refuses_trigger_ops_under_the_posture_that_grants_nothing() {
             let ir: MigrationIr = serde_json::from_str(&envelope("t", vec![create_table_op(), op]))
                 .expect("the trigger envelope parses");
             let error = validate_ir_authorized(
-                zero_migrate::shipping_vendors(),
+                zeroship_migrate::shipping_vendors(),
                 &ir,
                 &dialect,
                 Some(&scope),
@@ -340,9 +340,9 @@ fn the_same_validate_posture_still_refuses_an_op_that_needs_a_grant() {
     ))
     .expect("the control envelope parses");
     let error = validate_ir_authorized(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         Some(&scope),
         None,
     )
@@ -373,7 +373,7 @@ fn the_same_validate_posture_still_admits_an_op_that_needs_no_grant() {
             serde_json::from_str(&envelope("i", vec![create_table_op(), drop_index_op()]))
                 .expect("the ungated control envelope parses");
         validate_ir_authorized(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &ir,
             &dialect,
             Some(&scope),
@@ -509,7 +509,7 @@ fn lower(
     let resolved_json = serde_json::to_string(&resolved).expect("resolved IR serializes");
     let guard = GuardConfig::from_policy(policy.clone(), dialect.clone());
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         OWNER,
         dialect,
@@ -593,7 +593,7 @@ fn granting_every_vendor_capability_is_what_lowers_a_trigger_drop() {
 /// pass on a build where the charter axis had stopped being read at all.
 #[test]
 fn the_same_two_charters_still_disagree_about_an_op_that_needs_a_grant() {
-    let dialect = zero_migrate_postgres::DIALECT;
+    let dialect = zeroship_migrate_postgres::DIALECT;
     let ops = vec![create_table_op(), create_function_op()];
     let error = lower(&no_vendor_capability_charter(), &dialect, ops.clone())
         .expect_err("a charter granting no vendor capability must refuse createFunction");

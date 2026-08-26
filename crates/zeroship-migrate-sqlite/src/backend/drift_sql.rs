@@ -1,9 +1,9 @@
 //! SQLite live-schema introspection for drift.
 //!
 //! Produces the SAME dialect-agnostic [`SchemaSnapshot`]
-//! the Postgres path returns, so [`check_checksum_drift`](zero_migrate_backend::backend::MigrationBackend::check_checksum_drift)
+//! the Postgres path returns, so [`check_checksum_drift`](zeroship_migrate_backend::backend::MigrationBackend::check_checksum_drift)
 //! and the engine's `diff_snapshots` (named in prose, not linked: it is
-//! `zero_migrate::apply::drift`'s, and the engine depends on this crate) work
+//! `zeroship_migrate::apply::drift`'s, and the engine depends on this crate) work
 //! unchanged across both dialects. The PG path reads `information_schema` + `pg_catalog`; this reads
 //! `sqlite_master` + `PRAGMA table_info` / `PRAGMA index_list` / `PRAGMA index_info`
 //! / `PRAGMA foreign_key_list` of the connection's `main` database (the app file).
@@ -33,7 +33,7 @@
 //! keeps comments in the stored schema text, unlike PG which discards them at
 //! parse). [`recover_inline_sentinel`] pulls the `zero-migrate:mask:` / `zero-migrate:enc:` body for a
 //! given column out of that stored text into the snapshot's
-//! [`comment_sentinel`](zero_migrate_backend::snapshot::ColumnSnapshot::comment_sentinel), so a
+//! [`comment_sentinel`](zeroship_migrate_backend::snapshot::ColumnSnapshot::comment_sentinel), so a
 //! masked/encrypted column round-trips faithfully rather than being silently
 //! dropped to a plain column.
 
@@ -41,19 +41,19 @@ use std::collections::BTreeMap;
 
 use super::actor::{MigrationActor, SqliteActorError};
 use super::authorizer::Mode;
-use zero_migrate_backend::drift::DriftError;
-use zero_migrate_backend::snapshot::{
+use zeroship_migrate_backend::drift::DriftError;
+use zeroship_migrate_backend::snapshot::{
     ColumnCollationSnapshot, ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot,
     IndexSnapshot, SchemaSnapshot, TableSnapshot, ViewSnapshot,
 };
-use zero_migrate_backend::stored_ddl::StoredDdl;
-use zero_migrate_ir::ir::{IdentityCol, IndexSortOrder};
+use zeroship_migrate_backend::stored_ddl::StoredDdl;
+use zeroship_migrate_ir::ir::{IdentityCol, IndexSortOrder};
 // The catalog-side value-format comparison, called at the NEUTRAL seam with this
 // vendor's own renderers. The engine's `render::value_format` doors are a
 // `pub(crate)` module whose whole body is `seam::...(value_format_renderer(dialect),
 // renderer(dialect))`; a backend that already knows which vendor it is passes them
 // itself and the registry round trip disappears.
-use zero_migrate_backend::value_format::{
+use zeroship_migrate_backend::value_format::{
     catalog_id_default, catalog_uuid_id_default, recover_format_check, RecoveredFormatCheck,
 };
 
@@ -135,7 +135,7 @@ pub(crate) async fn snapshot_schema_for(
         .await
         .map_err(drift_err)?;
     let schema_ident =
-        zero_migrate_backend::dml::quote_ident_checked_for_backend(schema, &crate::dml::RENDERER)
+        zeroship_migrate_backend::dml::quote_ident_checked_for_backend(schema, &crate::dml::RENDERER)
             .map_err(|error| DriftError::Snapshot(error.to_string()))?;
 
     let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
@@ -184,7 +184,7 @@ pub(crate) async fn snapshot_schema_for(
                 // the live snapshot comparable to a folded one: `TableSnapshot::eq` excludes
                 // this field precisely because filling it on one side only would report every
                 // attribute-carrying table as drifted.
-                attributes: zero_migrate_ir::attribute::Attributes::new(),
+                attributes: zeroship_migrate_ir::attribute::Attributes::new(),
                 partition_by: None,
                 comment: None,
                 // carry the verbatim CREATE text so the DROP-COLUMN rebuild
@@ -359,7 +359,7 @@ async fn introspect_columns(
         };
         let is_uuid_v4_default = matches!(
             catalog_default,
-            zero_migrate_backend::snapshot::IdDefaultSnapshot::UuidV4
+            zeroship_migrate_backend::snapshot::IdDefaultSnapshot::UuidV4
         );
         // Defaults remain emission-only in `default`, but ID-bearing defaults
         // have a narrow semantic drift key. Recognize the exact engine UUIDv4
@@ -934,7 +934,7 @@ fn identifier_lists_equal(left: &[String], right: &[String]) -> bool {
 }
 
 fn fk_actions_equal(parsed: Option<&str>, pragma: &str) -> bool {
-    use zero_migrate_backend::constraint_definition::normalize_fk_action_for_vendor;
+    use zeroship_migrate_backend::constraint_definition::normalize_fk_action_for_vendor;
 
     normalize_fk_action_for_vendor(parsed, &crate::VENDOR)
         == normalize_fk_action_for_vendor(Some(pragma), &crate::VENDOR)
@@ -948,7 +948,7 @@ fn canonical_foreign_key_definition(
 ) -> String {
     use std::fmt::Write as _;
 
-    use zero_migrate_backend::constraint_definition::{
+    use zeroship_migrate_backend::constraint_definition::{
         constraintdef_cols, normalize_fk_action_for_vendor, quote_ident_if_needed,
     };
 
@@ -1362,7 +1362,7 @@ fn sqlite_column_clause<'a>(create_sql: &'a str, column: &str) -> Option<&'a str
 #[derive(Default)]
 struct RecoveredColumnFormatChecks {
     uuid: bool,
-    value_format: Option<zero_migrate_ir::ir::ValueFormat>,
+    value_format: Option<zeroship_migrate_ir::ir::ValueFormat>,
     mixed_uuid_and_value_format: bool,
 }
 
@@ -1708,7 +1708,7 @@ mod tests {
         // `<table>_<cols>_fkey` when the author wrote none, and this case names the
         // constraint, so the two are the same call: the wrapper's body is
         // `fk_constraint_snapshot(name, .., vendor(dialect))`.
-        use zero_migrate_backend::constraint_definition::fk_constraint_snapshot;
+        use zeroship_migrate_backend::constraint_definition::fk_constraint_snapshot;
         let pragma = PragmaForeignKey {
             referenced_table: "Parent".to_string(),
             columns: Vec::new(),
@@ -1760,9 +1760,9 @@ mod tests {
 
     #[test]
     fn recovers_an_exact_table_level_value_format_check() {
-        let check = zero_migrate_backend::value_format::column_metadata(
+        let check = zeroship_migrate_backend::value_format::column_metadata(
             "id",
-            &zero_migrate_ir::ir::ValueFormat::TypeId {
+            &zeroship_migrate_ir::ir::ValueFormat::TypeId {
                 prefix: "account".to_string(),
             },
             &crate::value_format::RENDERER,
@@ -1774,7 +1774,7 @@ mod tests {
         let recovered = recover_column_format_checks(&create_sql, "id");
         assert_eq!(
             recovered.value_format,
-            Some(zero_migrate_ir::ir::ValueFormat::TypeId {
+            Some(zeroship_migrate_ir::ir::ValueFormat::TypeId {
                 prefix: "account".to_string()
             })
         );

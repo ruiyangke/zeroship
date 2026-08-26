@@ -26,8 +26,8 @@
 //! walk over it, so only the wiring was missing. A backfill `set` value is the
 //! one expression site still unreached.
 
-use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::model::validate::validate_ir;
+use zeroship_migrate::model::ir::MigrationIr;
+use zeroship_migrate::model::validate::validate_ir;
 
 const TABLE: &str = r#"{"op":"createTable","name":"a","columns":[{"name":"c0","type":"int","nullable":false},{"name":"v","type":"int","nullable":true},{"name":"w","type":"int","nullable":true}],"primaryKey":["c0"]}"#;
 
@@ -35,9 +35,9 @@ fn verdict(tail: &str) -> Result<(), String> {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{TABLE},{tail}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
     validate_ir(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
     )
     .map_err(|e| format!("{}: {}", e.code, e.reason))
 }
@@ -113,9 +113,9 @@ fn dropping_a_column_of_a_different_table_does_not_block() {
     );
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
     validate_ir(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
     )
     .expect("a drop on another table must not block this one");
 }

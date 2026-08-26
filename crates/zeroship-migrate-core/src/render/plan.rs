@@ -31,7 +31,7 @@
 use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId};
 use crate::model::precondition::PreconditionCheck;
 use crate::render::step::{DialectScope, PlanStep, StepReversibility};
-use zero_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::dialect::DialectId;
 
 // What a lowered plan needs the LIVE target to be able to do. Both types moved
 // down to the backend contract, beside the
@@ -41,14 +41,14 @@ use zero_migrate_ir::dialect::DialectId;
 // `&'static str` descriptions and version floors, and `DatabaseRequirements` is a
 // `BTreeSet` of it. Re-exported so `crate::render::plan::{DatabaseFeature,
 // DatabaseRequirements}` resolve unchanged.
-pub use zero_migrate_backend::requirements::{DatabaseFeature, DatabaseRequirements};
+pub use zeroship_migrate_backend::requirements::{DatabaseFeature, DatabaseRequirements};
 // The fully-resolved specification for ONE table rebuild, and the neutral
 // high-water policy that finally let it travel. Its `sequence_policy` used to be
-// typed `zero_migrate_sqlite::SqliteSequencePolicy` - a type from a crate ABOVE
+// typed `zeroship_migrate_sqlite::SqliteSequencePolicy` - a type from a crate ABOVE
 // the contract - which stranded this spec, `TableRebuild`, `RenameStep` and
 // `PlanStep` in the engine for want of one field. Re-exported so
 // `crate::render::plan::TableRebuildSpec` resolves unchanged.
-pub use zero_migrate_backend::table_rebuild::{SequenceHighWaterPolicy, TableRebuildSpec};
+pub use zeroship_migrate_backend::table_rebuild::{SequenceHighWaterPolicy, TableRebuildSpec};
 
 /// The independent facts a caller needs before offering an operator a rollback.
 ///

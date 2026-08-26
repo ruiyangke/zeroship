@@ -6,14 +6,14 @@
 //! `zero-migrate-backend`. The doc beside it argued - correctly - that these are
 //! "genuinely one vendor's" rather than a shared concept wearing a vendor hat, and
 //! that the reason they stayed was that no carrier for RUN-TIME vendor data existed:
-//! [`BackendVendor`](zero_migrate_backend::registry::BackendVendor) holds
+//! [`BackendVendor`](zeroship_migrate_backend::registry::BackendVendor) holds
 //! `&'static dyn` policy objects, and a migrator role is per-project host input.
 //!
 //! That argument was about the absence of a mechanism, not about the name being
 //! right. A vendor name in a neutral crate is a violation however well the comment
 //! beside it reads. The mechanism now exists and does not need to live in the static
 //! vendor table - it only needs to be keyed the same way, by
-//! [`DialectId`](zero_migrate_ir::dialect::DialectId).
+//! [`DialectId`](zeroship_migrate_ir::dialect::DialectId).
 //!
 //! # What an absent leg means
 //!
@@ -28,8 +28,8 @@ use std::any::Any;
 use std::sync::{Arc, LazyLock};
 
 use crate::DIALECT;
-use zero_migrate_backend::conn::ExecutorConfig;
-use zero_migrate_backend::dialectal::{DialectalValue, VendorConfinement};
+use zeroship_migrate_backend::conn::ExecutorConfig;
+use zeroship_migrate_backend::dialectal::{DialectalValue, VendorConfinement};
 
 /// The confinement settings **only the PostgreSQL backend reads**.
 ///
@@ -54,7 +54,7 @@ use zero_migrate_backend::dialectal::{DialectalValue, VendorConfinement};
 /// PostgreSQL backend too: `search_path_clause`, in that crate's
 /// `backend/session.rs`. It used to be a method on the neutral
 /// [`ExecutorConfig`] in this file, and this doc named that as the real reason the
-/// neutral [`ConfinementConfig`](zero_migrate_backend::conn::ConfinementConfig) still carried a vendor-typed field - "relocating
+/// neutral [`ConfinementConfig`](zeroship_migrate_backend::conn::ConfinementConfig) still carried a vendor-typed field - "relocating
 /// the field without first relocating `search_path_clause` would only move the
 /// coupling". That relocation has happened: a `search_path` is PostgreSQL's
 /// concept, all three callers were already in that file, and all three passed
@@ -66,8 +66,8 @@ use zero_migrate_backend::dialectal::{DialectalValue, VendorConfinement};
 /// `&'static dyn` policy objects and these are per-project host input, so they could
 /// not live there. They did not need to. A carrier for run-time vendor data does not
 /// have to live in the static vendor table; it only has to be keyed the same way, and
-/// [`Dialectal`](zero_migrate_backend::dialectal::Dialectal) keyed by
-/// [`DialectId`](zero_migrate_ir::dialect::DialectId) is that.
+/// [`Dialectal`](zeroship_migrate_backend::dialectal::Dialectal) keyed by
+/// [`DialectId`](zeroship_migrate_ir::dialect::DialectId) is that.
 #[derive(Debug, Clone)]
 pub struct PostgresConfinement {
     /// The least-privilege `migrator` role the apply flow runs each migration's

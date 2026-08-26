@@ -12,7 +12,7 @@
 //! exact IR lowering the engine cannot render around - a generator function or an
 //! enforced constraint the target either has or has not - never a general
 //! capability probe. The engine re-exports both types at
-//! `zero_migrate::render::plan`.
+//! `zeroship_migrate::render::plan`.
 
 /// A database feature whose exact IR lowering has live target requirements.
 ///
@@ -23,7 +23,7 @@
 /// production caller was that backend's own `verify_database_requirements`, which is
 /// exactly the seam the trait exists to route through - the engine asks WHAT a plan
 /// needs, and each target answers whether it has it, in whatever terms its own
-/// server versions come in. It is `zero_migrate_postgres::backend::minimum_server_version_num`
+/// server versions come in. It is `zeroship_migrate_postgres::backend::minimum_server_version_num`
 /// now, private to the crate that reads it.
 /// These are derived from the typed expression AST and carried on the complete
 /// engine's `AppliedPlan` so apply can check them before any authored step.

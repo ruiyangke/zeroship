@@ -39,7 +39,7 @@
 //! and `zero-migrate/tests/fold_live/pg_bounded_string_producer_live.rs` is the live
 //! PostgreSQL oracle for the difference that made.
 
-use zero_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor, IndexDescriptor};
+use zeroship_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor, IndexDescriptor};
 
 use crate::wire::{
     CollectionDescriptorDto, FieldDescriptorDto, IndexDescriptorDto, RuntimeOptionsDto,
@@ -93,7 +93,7 @@ pub fn descriptor_dto_to_engine(
 pub fn field_dto_to_engine(
     dto: FieldDescriptorDto,
 ) -> std::result::Result<FieldDescriptor, String> {
-    use zero_migrate::model::ir::{GeneratedCol, IdentityCol};
+    use zeroship_migrate::model::ir::{GeneratedCol, IdentityCol};
 
     let generated: Option<GeneratedCol> = match dto.generated {
         Some(v) => Some(
@@ -159,8 +159,8 @@ pub fn field_dto_to_engine(
 
 fn runtime_options_dto_to_engine(
     dto: Option<RuntimeOptionsDto>,
-) -> std::result::Result<zero_migrate::TableRuntimeOptions, String> {
-    use zero_migrate::{TableRuntimeOptions, TableStrictness};
+) -> std::result::Result<zeroship_migrate::TableRuntimeOptions, String> {
+    use zeroship_migrate::{TableRuntimeOptions, TableStrictness};
     let Some(dto) = dto else {
         return Ok(TableRuntimeOptions::default());
     };
@@ -215,9 +215,9 @@ pub fn descriptor_to_dto(descriptor: &CollectionDescriptor) -> CollectionDescrip
             versioning: Some(descriptor.runtime_options.versioning),
             strictness: Some(
                 match descriptor.runtime_options.strictness {
-                    zero_migrate::TableStrictness::Strict => "strict",
-                    zero_migrate::TableStrictness::Lenient => "lenient",
-                    zero_migrate::TableStrictness::Off => "off",
+                    zeroship_migrate::TableStrictness::Strict => "strict",
+                    zeroship_migrate::TableStrictness::Lenient => "lenient",
+                    zeroship_migrate::TableStrictness::Off => "off",
                 }
                 .to_string(),
             ),

@@ -12,7 +12,7 @@
 //!
 //! # What changed, and why the property is now stronger
 //!
-//! The type left the neutral crate. It is `zero_migrate_mysql::physical_type::
+//! The type left the neutral crate. It is `zeroship_migrate_mysql::physical_type::
 //! MysqlPhysicalType` now, and it reaches a `ColumnSnapshot` as an opaque leg of a
 //! `Dialectal` carrier keyed by dialect id. The engine still gets the two sides of a
 //! `data_type` drift line, but it gets them ALREADY WRITTEN: it asks the leg via
@@ -302,7 +302,7 @@ fn mysql_type_text_lives_with_its_parser() {
          has to be `pub`, and this census is what stands in for the modifier. The \
          engine no longer even COMPARES a physical contract - it asks the carrier leg, \
          and the vendor both judges and spells. See `core_does_not_spell_a_vendors_\
-         bytes.rs` for the rule and `zero_migrate::render::backends`'s header for why.",
+         bytes.rs` for the rule and `zeroship_migrate::render::backends`'s header for why.",
         strays.join("\n")
     );
 }

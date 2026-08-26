@@ -1,7 +1,7 @@
 //! Descriptor → engine-generated `SQLite` `up` → applied through the
 //! hardened `SqliteBackend` → drift round-trip. Real temp-file `SQLite` throughout
 //! (the faithful path: the actual `DeclarativeAuthor` emitter routes through the
-//! shared `zero_migrate::schema` emitter, and the real backend authorizer applies the
+//! shared `zeroship_migrate::schema` emitter, and the real backend authorizer applies the
 //! unqualified DDL into `main` = the app file).
 //!
 //! Also: the TrustProfile-SQLite wiring (Confined `SQLite` accepts descriptor-
@@ -14,15 +14,15 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::{
+use zeroship_migrate::{
     desired_snapshot_for_dialect, CollectionDescriptor, DeclarativeAuthor, DeclarativeError,
     DesiredSchema, EffectivePolicy, FieldDescriptor, GuardConfig, GuardError, IndexDescriptor,
     Migration, MigrationEngine, SchemaSnapshot,
 };
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate_sqlite::SqliteBackend;
 // PostgreSQL's line-1, named at the vendor that owns it: these arms assert that a
 // PG guard handed a SQLite config refuses rather than mis-vetting SQLite text.
-use zero_migrate_postgres::guard::SqlGuard;
+use zeroship_migrate_postgres::guard::SqlGuard;
 
 const PROJECT: &str = "prj_demo";
 const APP: &str = "app_demo";
@@ -33,10 +33,10 @@ fn effective_policy() -> EffectivePolicy {
 
 fn desired_sqlite(descriptors: &[CollectionDescriptor]) -> Result<DesiredSchema, DeclarativeError> {
     desired_snapshot_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         descriptors,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &effective_policy(),
     )
 }
@@ -65,10 +65,10 @@ fn backend(p: &Paths) -> SqliteBackend {
 /// A SQLite-dialect declarative author.
 fn sqlite_author() -> DeclarativeAuthor {
     DeclarativeAuthor::new_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        zero_migrate_sqlite::DIALECT,
+        zeroship_migrate_sqlite::DIALECT,
     )
 }
 
@@ -363,7 +363,7 @@ async fn sqlite_deferred_fk_is_typed_error() {
 fn confined_sqlite_guard_rejects_raw_sql() {
     let guard = SqlGuard::new(GuardConfig::from_policy(
         support::no_inject(PROJECT),
-        zero_migrate_sqlite::DIALECT,
+        zeroship_migrate_sqlite::DIALECT,
     ));
     // A perfectly benign-looking raw string is still refused — the SQLite Confined
     // path is descriptor-diff-only (no untrusted raw SQL).
@@ -374,7 +374,7 @@ fn confined_sqlite_guard_rejects_raw_sql() {
         matches!(
             err,
             GuardError::RawSqlRejected { ref dialect }
-                if dialect == &zero_migrate_sqlite::DIALECT
+                if dialect == &zeroship_migrate_sqlite::DIALECT
         ),
         "expected a SQLite-provenance RawSqlRejected, got: {err:?}"
     );
@@ -386,7 +386,7 @@ fn confined_sqlite_guard_rejects_raw_sql() {
 fn confined_pg_guard_still_checks_raw_sql() {
     let guard = SqlGuard::new(GuardConfig::from_policy(
         support::no_inject(PROJECT),
-        zero_migrate_postgres::DIALECT,
+        zeroship_migrate_postgres::DIALECT,
     ));
     let report = guard
         .check(r#"CREATE TABLE "prj_demo"."users" (id text primary key)"#)
@@ -402,8 +402,8 @@ fn platform_fails_closed_to_confined_on_sqlite() {
     // SQLite. (The Platform constructor is operator-gated; `for_dialect` is the
     // dialect-selection seam any caller uses, and Confined→Sqlite is the same
     // fail-closed mapping Platform→Sqlite takes.)
-    let cfg = GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate_postgres::DIALECT)
-        .for_dialect(zero_migrate_sqlite::DIALECT);
+    let cfg = GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_postgres::DIALECT)
+        .for_dialect(zeroship_migrate_sqlite::DIALECT);
     let guard = SqlGuard::new(cfg);
     let err = guard
         .check("SELECT 1")
@@ -412,15 +412,15 @@ fn platform_fails_closed_to_confined_on_sqlite() {
         matches!(
             err,
             GuardError::RawSqlRejected { ref dialect }
-                if dialect == &zero_migrate_sqlite::DIALECT
+                if dialect == &zeroship_migrate_sqlite::DIALECT
         ),
         "got: {err:?}"
     );
 
     // And `for_dialect(Postgres)` is identity — the PG guard still checks raw SQL.
     let pg = SqlGuard::new(
-        GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate_postgres::DIALECT)
-            .for_dialect(zero_migrate_postgres::DIALECT),
+        GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_postgres::DIALECT)
+            .for_dialect(zeroship_migrate_postgres::DIALECT),
     );
     assert!(pg
         .check(r#"CREATE TABLE "prj_demo"."t" (id text primary key)"#)
@@ -976,8 +976,8 @@ async fn plan_declarative_carries_sqlite_rebuild_into_the_plan() {
     assert_eq!(diff.rebuilds.len(), 1, "the diff yields a rebuild to carry");
 
     // plan_declarative now CARRIES the rebuild (no error) — the fail-close is gone.
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
-    let cfg = GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate_sqlite::DIALECT);
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
+    let cfg = GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_sqlite::DIALECT);
     let plan = engine
         .plan_declarative(
             &desired2,

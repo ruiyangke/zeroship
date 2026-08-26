@@ -1,7 +1,7 @@
-# Phase F — the monorepo's bridge between the published `zero-migrate` engine and
+# Phase F — the monorepo's bridge between the published `zeroship-migrate` engine and
 # the platform's native compio-postgres driver.
 #
-# `zero-migrate` (the standalone engine vendored at third_party/zero-migrate)
+# `zeroship-migrate` (the standalone engine vendored at third_party/zeroship-migrate)
 # ships NO native Rust network Postgres driver: its PG apply path is generic over
 # the driver-neutral `zero_migrate::driver::SqlSession` seam (the host/napi bridge
 # is the production producer). This crate supplies the MONOREPO's producer: a
@@ -36,20 +36,20 @@ reason = "Production platform migration one-shot that requires configuration reg
 # The platform-schema migrate binary (`zeroship-platform-migrate`).
 # Lights up the `platform` module + its V8 authoring front-end (zeroship-runtime).
 # OFF by default so the base library surface (Stage 1's adapter) stays V8-free.
-platform-cli = ["dep:zeroship-runtime", "dep:v8", "dep:serde_json", "dep:serde", "dep:zero-migrate-ir", "dep:zero-migrate-policy"]
+platform-cli = ["dep:zeroship-runtime", "dep:v8", "dep:serde_json", "dep:serde", "dep:zeroship-migrate-ir", "dep:zeroship-migrate-policy"]
 
 [dependencies]
 # The published engine (vendored git submodule; path declared once in the root
 # `[workspace.dependencies]`). Default features light `host-pg` → the internal
 # `pg_seam` cfg, which exposes `driver::SqlSession`, the generic `PostgresBackend<D>`,
 # and the `<D: SqlSession>` apply/journal path this adapter drives.
-zero-migrate = { workspace = true }
+zeroship-migrate = { workspace = true }
 # The published engine's IR crate — names the `OperatorCapability` trust token the
 # Platform executor/guard posture requires (Stage 4a platform-migrate only).
-zero-migrate-ir = { workspace = true, optional = true }
+zeroship-migrate-ir = { workspace = true, optional = true }
 # The engine PDP — names the composed `EffectivePolicy` the platform table-shape
 # resolver + `load_and_lower_guarded` thread (Stage 4a platform-migrate only).
-zero-migrate-policy = { workspace = true, optional = true }
+zeroship-migrate-policy = { workspace = true, optional = true }
 # The declared-environment registry. The `zeroship-platform-migrate` bin reads
 # DATABASE_URL and the PG suites resolve the test database through
 # `zeroship_core::config::test_database_url_opt` (PG_TEST_URL, falling back to
@@ -110,7 +110,7 @@ zeroship-test-support = { workspace = true }
 # through the engine's `MigrationIr` (de)serialize + confined table-shape resolver.
 serde_json = { workspace = true }
 serde = { workspace = true }
-# Phase F Stage 2 authoring proof: run the STANDALONE zero-migrate recorder inside
+# Phase F Stage 2 authoring proof: run the STANDALONE zeroship-migrate recorder inside
 # zeroship-runtime's V8 isolate to author an ir_version:1 envelope from a `.ts`
 # migration — the platform's own V8 (no Node in the loop). Dev-only: the library
 # surface (Stage 1's SqlSession adapter) stays V8-free.

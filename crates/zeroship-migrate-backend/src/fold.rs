@@ -12,9 +12,9 @@ use crate::error::IrLowerError;
 use crate::snapshot::{
     ColumnSnapshot, PartitionSnapshot, SequenceSnapshot, TableSnapshot, ViewSnapshot,
 };
-use zero_migrate_ir::expr::Expr;
-use zero_migrate_ir::ir::{ColType, ValueFormat};
-use zero_migrate_ir::precondition::PreconditionCheck;
+use zeroship_migrate_ir::expr::Expr;
+use zeroship_migrate_ir::ir::{ColType, ValueFormat};
+use zeroship_migrate_ir::precondition::PreconditionCheck;
 
 /// Exact character storage used when a backend requires both sides of a
 /// reference to agree on more than a portable text/case-sensitivity token.

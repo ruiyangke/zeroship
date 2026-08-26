@@ -22,10 +22,10 @@ use std::time::Duration;
 
 use crate::support::PgDevSession;
 
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::driver::SqlSession;
-use zero_migrate::{ExecutorConfig, StatusSnapshot};
-use zero_migrate_postgres::PostgresBackend;
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::{ExecutorConfig, StatusSnapshot};
+use zeroship_migrate_postgres::PostgresBackend;
 
 /// How long a reader gets to answer before the test calls it blocked. The bounded
 /// retry is three attempts around 200ms apart, so a correct reader answers in well
@@ -113,7 +113,7 @@ fn plan_status_reports_a_busy_project_lock_instead_of_waiting_for_a_peer() {
     let read_cfg = cfg.clone();
     let outcome = read_within_deadline(&url, "read-only plan status", move |backend| {
         futures::executor::block_on(
-            zero_migrate::ops::status::status_plans_via_backend_read_only(backend, &read_cfg, &[]),
+            zeroship_migrate::ops::status::status_plans_via_backend_read_only(backend, &read_cfg, &[]),
         )
     })
     .expect("a contended read is an outcome, not an error");
@@ -159,7 +159,7 @@ fn plan_status_still_locks_reads_and_reconciles_when_no_peer_holds_the_lock() {
     let read_cfg = cfg.clone();
     let outcome = read_within_deadline(&url, "uncontended plan status", move |backend| {
         futures::executor::block_on(
-            zero_migrate::ops::status::status_plans_via_backend_read_only(backend, &read_cfg, &[]),
+            zeroship_migrate::ops::status::status_plans_via_backend_read_only(backend, &read_cfg, &[]),
         )
     })
     .expect("an uncontended read succeeds");

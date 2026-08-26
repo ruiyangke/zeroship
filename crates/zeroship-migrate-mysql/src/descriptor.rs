@@ -1,4 +1,4 @@
-use zero_migrate_ir::backend::{
+use zeroship_migrate_ir::backend::{
     BackendDescriptor, Capability, CapabilitySet, IdentifierLimit, Limits,
 };
 

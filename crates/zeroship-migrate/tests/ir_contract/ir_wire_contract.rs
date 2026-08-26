@@ -27,8 +27,8 @@
 //!   / `IrIndex.using` are the closed `IndexMethod` enum — a raw-SQL string or an
 //!   out-of-set method is rejected at load.
 
-use zero_migrate::model::ir::{CanonicalOpList, IndexElement, IrScalar, MigrationIr, Op};
-use zero_migrate::EXPR_INVALID_NUMERIC;
+use zeroship_migrate::model::ir::{CanonicalOpList, IndexElement, IrScalar, MigrationIr, Op};
+use zeroship_migrate::EXPR_INVALID_NUMERIC;
 
 // ----------------------------------------------------------------------------
 // Wire casing — op-region fields are camelCase
@@ -39,7 +39,7 @@ fn drop_table_fields_are_camel_case() {
     // The legacy native `if_exists`/`ifExists` boolean field is GONE; the
     // existence guard is the uniform `existenceGuard` enum (engine-synthesized via a
     // catalog probe, NOT native `IF EXISTS`). The intentional wire break.
-    use zero_migrate::model::ir::ExistenceGuard;
+    use zeroship_migrate::model::ir::ExistenceGuard;
     let op = Op::DropTable {
         table: "t".into(),
         cascade: Some(false),
@@ -111,7 +111,7 @@ fn backfill_fields_are_camel_case() {
             assert_eq!(cursor_columns, &["tenant_id", "id"]);
             assert!(matches!(
                 cursor_stability,
-                zero_migrate::model::ir::CursorStability::ExternalInvariant { name }
+                zeroship_migrate::model::ir::CursorStability::ExternalInvariant { name }
                     if name == "keys_are_immutable"
             ));
             assert_eq!(batch_size.get(), 100);
@@ -153,7 +153,7 @@ fn backfill_rejects_removed_cursor_column_and_missing_stability() {
 
 #[test]
 fn per_row_generators_are_backfill_only_and_round_trip_without_sampling() {
-    use zero_migrate::model::ir::{BackfillSetValue, PerRowGenerator};
+    use zeroship_migrate::model::ir::{BackfillSetValue, PerRowGenerator};
 
     let json = r#"{"op":"backfill","table":"t","cursorColumns":["id"],
         "cursorStability":{"mode":"guardUpdates"},"batchSize":10,
@@ -260,7 +260,7 @@ fn ir_column_facet_fields_are_camel_case() {
     // spelling across IR↔descriptor. And because `IrColumn` is `deny_unknown_fields`,
     // the snake_case spelling must NOT deserialize (the inverse of the bug: pre-fix
     // a camelCase IR envelope following the codebase convention was REJECTED).
-    use zero_migrate::model::ir::{ColType, IrColumn, VectorMetric};
+    use zeroship_migrate::model::ir::{ColType, IrColumn, VectorMetric};
 
     let col = IrColumn {
         name: "id".into(),
@@ -309,7 +309,7 @@ fn ir_column_facet_fields_are_camel_case() {
 
 #[test]
 fn column_collation_round_trips_and_absent_collation_omits_key() {
-    use zero_migrate::model::ir::{ColType, ColumnCollation, IrColumn};
+    use zeroship_migrate::model::ir::{ColType, ColumnCollation, IrColumn};
 
     let collated = IrColumn {
         name: "id".into(),
@@ -358,7 +358,7 @@ fn column_collation_round_trips_and_absent_collation_omits_key() {
 
 #[test]
 fn identity_by_default_round_trips_and_absent_identity_omits_key() {
-    use zero_migrate::model::ir::{ColType, IdentityCol, IrColumn};
+    use zeroship_migrate::model::ir::{ColType, IdentityCol, IrColumn};
 
     let with_identity = IrColumn {
         name: "id".into(),
@@ -403,10 +403,10 @@ fn identity_by_default_round_trips_and_absent_identity_omits_key() {
 
 #[test]
 fn create_table_primary_key_round_trips_and_schema_carries_field() {
-    use zero_migrate::model::ir::{ColType, IrColumn};
+    use zeroship_migrate::model::ir::{ColType, IrColumn};
 
     let op = Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "membership".into(),
         columns: vec![
             IrColumn {
@@ -467,7 +467,7 @@ fn create_table_primary_key_round_trips_and_schema_carries_field() {
     }
 
     let no_pk = Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "audit".into(),
         columns: vec![],
         primary_key: None,
@@ -487,7 +487,7 @@ fn create_table_primary_key_round_trips_and_schema_carries_field() {
         "None serializes explicitly as primaryKey:null: {no_pk_v}"
     );
 
-    let schema = schemars::schema_for!(zero_migrate::MigrationIr);
+    let schema = schemars::schema_for!(zeroship_migrate::MigrationIr);
     let schema_value = serde_json::to_value(&schema).expect("schema -> value");
     let create_table = schema_value["$defs"]["Op"]["oneOf"]
         .as_array()
@@ -712,8 +712,8 @@ fn invalid_base64_bytes_is_rejected() {
 
 #[test]
 fn expr_ast_is_camel_case_and_round_trips() {
-    use zero_migrate::model::expr::{BinaryOp, Expr};
-    use zero_migrate::model::ir::IrScalar;
+    use zeroship_migrate::model::expr::{BinaryOp, Expr};
+    use zeroship_migrate::model::ir::IrScalar;
     // col("total").gt(0)
     let e = Expr::BinOp {
         op: BinaryOp::Gt,
@@ -735,7 +735,7 @@ fn expr_ast_is_camel_case_and_round_trips() {
 
 #[test]
 fn unknown_expr_node_tag_is_rejected_at_load() {
-    use zero_migrate::model::expr::Expr;
+    use zeroship_migrate::model::expr::Expr;
     // A hand-crafted IR carrying an unknown AST node tag (`subquery`) — not in the
     // closed set — must fail to deserialize (the "UNSUPPORTED kind:expr
     // at load" obligation: an unknown node simply cannot parse).
@@ -749,7 +749,7 @@ fn unknown_expr_node_tag_is_rejected_at_load() {
 
 #[test]
 fn expr_node_with_unknown_field_is_rejected() {
-    use zero_migrate::model::expr::Expr;
+    use zeroship_migrate::model::expr::Expr;
     let json = r#"{"node":"colRef","name":"x","evil":1}"#;
     let err = serde_json::from_str::<Expr>(json).unwrap_err();
     assert!(
@@ -766,7 +766,7 @@ fn expr_node_with_unknown_field_is_rejected() {
 
 #[test]
 fn create_index_where_is_a_closed_expr_not_raw_sql() {
-    use zero_migrate::model::expr::{BinaryOp, Expr};
+    use zeroship_migrate::model::expr::{BinaryOp, Expr};
     // A `createIndex` with a partial-index predicate authored as the closed AST
     // the JS `createIndex({where:(col)=>Expr})` emits — it MUST round-trip into a
     // typed `Expr`, exactly like IrIndex.where inside createTable.
@@ -811,7 +811,7 @@ fn create_index_using_is_a_closed_method_enum() {
     // The index method is a closed union ("btree"|"brin"|"gin"|"gist"|"ivfflat"
     // |"hnsw", design line 648) — an arbitrary/injection-shaped string must NOT
     // deserialize, and a valid member round-trips.
-    use zero_migrate::model::ir::IndexMethod;
+    use zeroship_migrate::model::ir::IndexMethod;
     let ok = r#"{"op":"createIndex","table":"t","columns":[{"kind":"column","name":"a"}],"using":"gin"}"#;
     let op: Op = serde_json::from_str(ok).unwrap();
     match op {
@@ -853,7 +853,7 @@ fn comment_target_rejects_unknown_fields() {
 #[test]
 fn create_table_index_using_is_a_closed_method_enum() {
     // The same closed-enum guard applies to IrIndex.using inside createTable.
-    use zero_migrate::model::ir::IndexMethod;
+    use zeroship_migrate::model::ir::IndexMethod;
     let ok = r#"{"op":"createTable","name":"t","columns":[
         {"name":"a","type":"int"}],
         "indexes":[{"columns":[{"kind":"column","name":"a"}],"using":"hnsw"}]}"#;
@@ -876,7 +876,7 @@ fn create_table_index_using_is_a_closed_method_enum() {
 
 #[test]
 fn alter_column_type_using_is_a_closed_expr_not_raw_sql() {
-    use zero_migrate::model::expr::{CastTarget, Expr};
+    use zeroship_migrate::model::expr::{CastTarget, Expr};
     // The USING cast expression must be the closed AST (a Cast node here), never
     // raw SQL — property A is binding everywhere a transform/predicate appears.
     let json = r#"{"op":"setColumnType","table":"t","column":"a","toType":"int",
@@ -975,7 +975,7 @@ fn add_column_id_prefix_is_create_only_but_metric_and_mask_are_carried() {
     match &metric_op {
         Op::AddColumn { vector_metric, .. } => assert_eq!(
             *vector_metric,
-            Some(zero_migrate::model::ir::VectorMetric::Cosine),
+            Some(zeroship_migrate::model::ir::VectorMetric::Cosine),
             "the carried vector metric deserializes onto the op"
         ),
         other => panic!("expected AddColumn, got {other:?}"),
@@ -989,10 +989,10 @@ fn add_column_id_prefix_is_create_only_but_metric_and_mask_are_carried() {
     match &mask_op {
         Op::AddColumn { mask, .. } => {
             let m = mask.expect("the carried mask deserializes onto the op");
-            assert_eq!(m.kind, zero_migrate::model::ir::IrMaskKind::Last4);
+            assert_eq!(m.kind, zeroship_migrate::model::ir::IrMaskKind::Last4);
             assert_eq!(
                 m.classification,
-                zero_migrate::model::ir::IrClassification::Spi
+                zeroship_migrate::model::ir::IrClassification::Spi
             );
         }
         other => panic!("expected AddColumn, got {other:?}"),
@@ -1004,10 +1004,10 @@ fn add_column_omits_absent_optionals() {
     // nullable:None, default:None — both MUST be absent from the JSON object,
     // exactly as an idiomatic JS `op.addColumn("t","x","int")` (no opts) emits.
     let op = Op::AddColumn {
-        attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
         table: "t".into(),
         column: "x".into(),
-        ty: zero_migrate::model::ir::ColType::Int,
+        ty: zeroship_migrate::model::ir::ColType::Int,
         nullable: None,
         default: None,
         value_format: None,
@@ -1085,7 +1085,7 @@ fn create_index_omits_all_absent_optionals() {
 
 #[test]
 fn nested_ir_column_index_constraint_omit_absent_optionals() {
-    use zero_migrate::model::ir::{ColType, IrColumn, IrConstraint, IrConstraintKind, IrIndex};
+    use zeroship_migrate::model::ir::{ColType, IrColumn, IrConstraint, IrConstraintKind, IrIndex};
     // IrColumn nullable/default/unique absent.
     let col = IrColumn {
         name: "id".into(),
@@ -1169,12 +1169,12 @@ fn nested_ir_column_index_constraint_omit_absent_optionals() {
 
 #[test]
 fn partition_ops_round_trip_and_absent_fields_stay_omitted() {
-    use zero_migrate::model::ir::{
+    use zeroship_migrate::model::ir::{
         ColType, IrColumn, PartitionBoundValue, PartitionBounds, PartitionSpec, SafeI64,
     };
 
     let parent = Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "events".into(),
         columns: vec![IrColumn {
             name: "created_at".into(),
@@ -1224,7 +1224,7 @@ fn partition_ops_round_trip_and_absent_fields_stay_omitted() {
     assert_eq!(parent, back);
 
     let old_shape = Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "plain".into(),
         columns: vec![],
         primary_key: None,
@@ -1242,7 +1242,7 @@ fn partition_ops_round_trip_and_absent_fields_stay_omitted() {
     );
 
     let create_partition = Op::CreatePartition {
-        attributes: zero_migrate_ir::attribute::CreatePartitionAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreatePartitionAttributes::new(),
         name: "events_2026_05".into(),
         of: "events".into(),
         bounds: PartitionBounds::Range {
@@ -1291,8 +1291,8 @@ fn partition_ops_round_trip_and_absent_fields_stay_omitted() {
 
 #[test]
 fn expr_case_omits_absent_else() {
-    use zero_migrate::model::expr::{CaseBranch, UnaryOp};
-    use zero_migrate::Expr;
+    use zeroship_migrate::model::expr::{CaseBranch, UnaryOp};
+    use zeroship_migrate::Expr;
     let e = Expr::Case {
         branches: vec![CaseBranch {
             when: Expr::UnaryOp {
@@ -1319,12 +1319,12 @@ fn checksum_of_ir_matches_js_idiomatic_omitted_optionals() {
     // fix, the Rust side folded `"nullable":null,"default":null` while the JS
     // doc omitted them — distinct bytes, distinct checksum. After the fix both
     // canonicalize to the same omitted-key image.
-    use zero_migrate::model::ir::ColType;
-    use zero_migrate::{Checksum, MigrationFlags};
+    use zeroship_migrate::model::ir::ColType;
+    use zeroship_migrate::{Checksum, MigrationFlags};
 
     // Rust-built op (None optionals).
     let rust_op = Op::AddColumn {
-        attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
         table: "t".into(),
         column: "x".into(),
         ty: ColType::Int,

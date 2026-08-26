@@ -13,15 +13,15 @@
 
 use crate::support;
 
-use zero_migrate::guard::{GuardConfig, GuardError};
-use zero_migrate_postgres::guard::{flags_for, SqlGuard};
+use zeroship_migrate::guard::{GuardConfig, GuardError};
+use zeroship_migrate_postgres::guard::{flags_for, SqlGuard};
 
 /// A guard whose project schema is `project_acme` and which allowlists only
 /// `pgcrypto` + `uuid-ossp` extensions — a realistic per-project config.
 fn guard() -> SqlGuard {
     SqlGuard::new(GuardConfig::from_policy(
         support::no_inject_with_extensions("project_acme", &["pgcrypto", "uuid-ossp"]),
-        zero_migrate_postgres::DIALECT,
+        zeroship_migrate_postgres::DIALECT,
     ))
 }
 
@@ -55,7 +55,7 @@ fn assert_cross_schema(sql: &str) {
 
 /// Assert the SQL passes the guard.
 #[track_caller]
-fn assert_ok(sql: &str) -> zero_migrate_postgres::guard::GuardReport {
+fn assert_ok(sql: &str) -> zeroship_migrate_postgres::guard::GuardReport {
     match guard().check(sql) {
         Ok(report) => report,
         other => panic!("expected OK for: {sql}\n  got: {other:?}"),
@@ -1083,7 +1083,7 @@ fn concurrent_create_index_does_not_warn_concurrently() {
     assert!(
         !r.advisories
             .iter()
-            .any(|a| a.rule == zero_migrate_backend::advisory::rule::NON_CONCURRENT_INDEX),
+            .any(|a| a.rule == zeroship_migrate_backend::advisory::rule::NON_CONCURRENT_INDEX),
         "CONCURRENTLY index must not get a NON_CONCURRENT_INDEX advisory, got: {:?}",
         r.advisories
     );
@@ -1832,18 +1832,18 @@ fn pg_get_object_address_own_schema_array_passes() {
 // The engine's crate root re-exports the NEUTRAL vocabulary; the `libpg_query`
 // machinery is named at the vendor that owns it. That split is the point of this
 // test's import list and is asserted structurally: `Checksum`, `Migration`,
-// `MigrationFlags`, `MigrationId` and `GuardConfig` come from `zero_migrate`, while
+// `MigrationFlags`, `MigrationId` and `GuardConfig` come from `zeroship_migrate`, while
 // `classify`, `DdlKind`, `SqlGuard` and `flags_for` come from
-// `zero_migrate_postgres`. They used to ALL be reachable from the engine root, which
+// `zeroship_migrate_postgres`. They used to ALL be reachable from the engine root, which
 // put PostgreSQL's parser on the neutral engine's public API — so a caller could hold
 // a `DdlKind` believing it described any backend's statement.
 // ---------------------------------------------------------------------------
 
 #[test]
 fn crate_root_reexports_compose_an_end_to_end_check() {
-    use zero_migrate::{Checksum, GuardConfig, Migration, MigrationFlags, MigrationId};
-    use zero_migrate_postgres::analysis::classify::{classify, DdlKind};
-    use zero_migrate_postgres::guard::{flags_for, SqlGuard};
+    use zeroship_migrate::{Checksum, GuardConfig, Migration, MigrationFlags, MigrationId};
+    use zeroship_migrate_postgres::analysis::classify::{classify, DdlKind};
+    use zeroship_migrate_postgres::guard::{flags_for, SqlGuard};
 
     // classify is reachable at the vendor that owns the parser.
     let classes = classify("CREATE TABLE project_x.t(id int)").expect("parses");
@@ -1852,7 +1852,7 @@ fn crate_root_reexports_compose_an_end_to_end_check() {
     // A guard + report + flags_for, composed across the neutral root and the vendor.
     let g = SqlGuard::new(GuardConfig::from_policy(
         support::no_inject("project_x"),
-        zero_migrate_postgres::DIALECT,
+        zeroship_migrate_postgres::DIALECT,
     ));
     let up = "CREATE TABLE project_x.t(id int primary key); DROP TABLE project_x.old;";
     let report = g.check(up).expect("safe migration passes");
@@ -1873,7 +1873,7 @@ fn crate_root_reexports_compose_an_end_to_end_check() {
             name: "create_t".to_string(),
             up: up.to_string(),
             down: Some("DROP TABLE project_x.t".to_string()),
-            checksum: Checksum::of(&zero_migrate::ChecksumInput {
+            checksum: Checksum::of(&zeroship_migrate::ChecksumInput {
                 up: "",
                 down: None,
                 flags: &MigrationFlags::default(),

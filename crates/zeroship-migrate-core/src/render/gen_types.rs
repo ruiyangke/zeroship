@@ -47,13 +47,13 @@
 //! collections dropped, so there is one fold behind both.
 
 use std::collections::{BTreeMap, BTreeSet};
-use zero_migrate_backend::registry::VendorSet;
-use zero_migrate_ir::attribute::OpAttributes;
+use zeroship_migrate_backend::registry::VendorSet;
+use zeroship_migrate_ir::attribute::OpAttributes;
 
 use indexmap::IndexMap;
 use serde::Serialize;
 use serde_json::Value;
-use zero_migrate_policy::EffectivePolicy;
+use zeroship_migrate_policy::EffectivePolicy;
 
 use crate::model::expr::{Expr, SynthFn};
 use crate::model::ir::{
@@ -61,7 +61,7 @@ use crate::model::ir::{
     IndexSortOrder, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, IrJsonValue,
     IrScalar, MigrationIr, Op, PartitionSpec, ValueFormat,
 };
-use zero_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::dialect::DialectId;
 
 /// The two emitted artifact filenames (committed; the `--check` CI gate diffs
 /// against them).
@@ -1496,8 +1496,8 @@ fn render_partition_kind(kind: &str, columns: &[String], collapse: bool) -> Stri
 /// Mirrors the shapes a vendor may DECLARE (`bool | int | enum | text`); the two that
 /// cannot be declared render as `null` rather than being dropped, so a hand-built value
 /// is visible in the emitted source instead of vanishing from it.
-fn render_attribute_value_ts(value: &zero_migrate_ir::ir::IrScalar) -> String {
-    use zero_migrate_ir::ir::IrScalar;
+fn render_attribute_value_ts(value: &zeroship_migrate_ir::ir::IrScalar) -> String {
+    use zeroship_migrate_ir::ir::IrScalar;
     match value {
         IrScalar::Bool(b) => b.to_string(),
         IrScalar::Int(i) | IrScalar::Int64(i) => i.to_string(),
@@ -2026,7 +2026,7 @@ mod tests {
     fn runtime_json_no_inject_preserves_uuid_column_named_id() {
         let effective = crate::test_fixtures::no_inject("app");
         let ops = vec![Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "external_keys".to_string(),
             columns: vec![column("id", ColType::Uuid)],
             primary_key: None,
@@ -2113,7 +2113,7 @@ mod tests {
 
         let misspelled = Expr::Dialectal {
             legs: [(
-                zero_migrate_ir::dialect::DialectId::new("postgre"),
+                zeroship_migrate_ir::dialect::DialectId::new("postgre"),
                 leg("typo"),
             )]
             .into_iter()

@@ -28,10 +28,10 @@
 
 use crate::support;
 use std::collections::BTreeMap;
-use zero_migrate::apply::executor::LockMode;
-use zero_migrate::render::step::PlanStep;
-use zero_migrate::{Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine};
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate::apply::executor::LockMode;
+use zeroship_migrate::render::step::PlanStep;
+use zeroship_migrate::{Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine};
+use zeroship_migrate_sqlite::SqliteBackend;
 const PROJECT: &str = "prj_ir";
 const APP: &str = "app_ir";
 
@@ -78,7 +78,7 @@ async fn an_engine_rendered_down_restores_the_schema_its_up_changed() {
         )
         .expect("open");
         let cfg = ExecutorConfig::new(PROJECT, PROJECT, support::no_inject(PROJECT));
-        let eng = MigrationEngine::new(zero_migrate::shipping_vendors());
+        let eng = MigrationEngine::new(zeroship_migrate::shipping_vendors());
         let mut live = LiveSchema::default();
         let reg: BTreeMap<String, String> = [
             ("t1".to_string(), APP.to_string()),
@@ -87,14 +87,14 @@ async fn an_engine_rendered_down_restores_the_schema_its_up_changed() {
         .into_iter()
         .collect();
         let author = IrAuthor::new(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             PROJECT,
             APP,
-            &zero_migrate_sqlite::DIALECT,
+            &zeroship_migrate_sqlite::DIALECT,
             &support::confined_charter(),
         );
         let gc =
-            GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate_sqlite::DIALECT);
+            GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_sqlite::DIALECT);
         if needs_seed {
             let s = format!(r#"{{"ir_version":1,"name":"seed","ops":[{seed}]}}"#);
             let a = author

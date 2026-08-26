@@ -9,7 +9,7 @@
 //!
 //! | before                        | after                        |
 //! |-------------------------------|------------------------------|
-//! | `render::renderer`            | `zero_migrate_backend::renderer` |
+//! | `render::renderer`            | `zeroship_migrate_backend::renderer` |
 //! | `render::backends::postgres`  | `zero-migrate-postgres`      |
 //! | `render::backends::sqlite`    | `zero-migrate-sqlite`        |
 //! | `render::backends::mysql`     | `zero-migrate-mysql`         |
@@ -69,7 +69,7 @@
 //! for the same reason as above.
 //!
 //! RESOLVED by VISIBILITY, and the crate split WEAKENED that fix. The primitive is
-//! now `zero_migrate_backend::spelling::ansi_double_quote_ident`, and across a crate
+//! now `zeroship_migrate_backend::spelling::ansi_double_quote_ident`, and across a crate
 //! boundary `pub(in ...)` cannot say "these three crates and no other" - the vendor
 //! crates must reach it, so it is `pub`, so the engine can name it too. The compiler
 //! no longer enforces the rule. It is replaced by a textual census,
@@ -79,7 +79,7 @@
 //! equal substitute.
 //!
 //! And a DELIBERATE non-defect that looks identical to a neuter: the
-//! `pg_get_constraintdef` normal form (`zero_migrate_backend::constraint_definition`
+//! `pg_get_constraintdef` normal form (`zeroship_migrate_backend::constraint_definition`
 //! - `quote_ident_if_needed` / `constraintdef_cols`, re-exported at their historical
 //! `render::declarative::...` paths) is PostgreSQL-spelled ON PURPOSE and is read by
 //! the SQLite and MySQL drift comparators. It has a renderer-independent snapshot
@@ -94,21 +94,21 @@
 //! `dml.rs` may not spell an EMITTED identifier with it. On PostgreSQL and SQLite
 //! the wrong call emits correct bytes, so only a census can see it.
 
-use zero_migrate_backend::advisory::{
+use zeroship_migrate_backend::advisory::{
     AdvisoryVerdict, AnalyzerAbsent, IndexCoverage, OperationalAdvisor,
 };
-use zero_migrate_backend::ddl::DdlEmitter;
-use zero_migrate_backend::guard::{GuardConfig, MigrationGuard};
-use zero_migrate_backend::registry::{BackendVendor, VendorSet};
-use zero_migrate_backend::renderer::DmlRenderer;
-use zero_migrate_ir::dialect::DialectId;
+use zeroship_migrate_backend::ddl::DdlEmitter;
+use zeroship_migrate_backend::guard::{GuardConfig, MigrationGuard};
+use zeroship_migrate_backend::registry::{BackendVendor, VendorSet};
+use zeroship_migrate_backend::renderer::DmlRenderer;
+use zeroship_migrate_ir::dialect::DialectId;
 
 // ---------------------------------------------------------------------------
 // THE COMPOSITION USED TO LIVE HERE, AND IT IS THE REASON THIS CRATE EXISTS
 // ---------------------------------------------------------------------------
 //
-// Three `const`s naming `zero_migrate_postgres::VENDOR`, `zero_migrate_sqlite::VENDOR`
-// and `zero_migrate_mysql::VENDOR`, a `static SHIPPING` array over them, and a
+// Three `const`s naming `zeroship_migrate_postgres::VENDOR`, `zeroship_migrate_sqlite::VENDOR`
+// and `zeroship_migrate_mysql::VENDOR`, a `static SHIPPING` array over them, and a
 // `pub(crate) const VENDORS: VendorSet` folded from that array. Those three lines were
 // the whole of why this crate had to depend on all three backends.
 //
@@ -127,12 +127,12 @@ use zero_migrate_ir::dialect::DialectId;
 // `ExpandContractAuthor`, `CatalogFold`, `MigrationEngine` and the raw/deterministic
 // authors all carry it, so their methods pay no signature for it at all.
 //
-// `zero_migrate::shipping_vendors()` is how a host asks for the composed value, and
+// `zeroship_migrate::shipping_vendors()` is how a host asks for the composed value, and
 // `tests/dialect_matrix/the_registry_travels_as_a_value.rs` is what keeps the list of
 // places that may name it from growing back - a rule Cargo now enforces for this crate
 // but not for the `#[cfg(test)]` modules that reach the vendors through dev edges.
 //
-// (Earlier notes here recorded a `pub(crate) use zero_migrate_sqlite::VENDOR;` that
+// (Earlier notes here recorded a `pub(crate) use zeroship_migrate_sqlite::VENDOR;` that
 // made one registry entry asymmetric with the other two, and a `SqliteSequencePolicy`
 // re-export riding the same line. Both were closed before the split; nothing of either
 // is left to move.)
@@ -213,9 +213,9 @@ pub(crate) const fn generated_ident_max_bytes(vendors: VendorSet) -> usize {
     let mut at = 0;
     while at < vendors.len() {
         let declared = match vendors[at].descriptor.limits.identifier {
-            zero_migrate_ir::backend::IdentifierLimit::Bytes(n)
-            | zero_migrate_ir::backend::IdentifierLimit::Characters(n) => n,
-            zero_migrate_ir::backend::IdentifierLimit::Unbounded => usize::MAX,
+            zeroship_migrate_ir::backend::IdentifierLimit::Bytes(n)
+            | zeroship_migrate_ir::backend::IdentifierLimit::Characters(n) => n,
+            zeroship_migrate_ir::backend::IdentifierLimit::Unbounded => usize::MAX,
         };
         if declared < budget {
             budget = declared;
@@ -245,7 +245,7 @@ pub(crate) fn renderer(vendors: VendorSet, dialect: &DialectId) -> &'static dyn 
 pub(crate) fn schema_renderer(
     vendors: VendorSet,
     dialect: &DialectId,
-) -> &'static dyn zero_migrate_backend::schema::SchemaRenderer {
+) -> &'static dyn zeroship_migrate_backend::schema::SchemaRenderer {
     vendor(vendors, dialect).schema
 }
 
@@ -253,7 +253,7 @@ pub(crate) fn schema_renderer(
 pub(crate) fn value_format_renderer(
     vendors: VendorSet,
     dialect: &DialectId,
-) -> &'static dyn zero_migrate_backend::value_format::ValueFormatRenderer {
+) -> &'static dyn zeroship_migrate_backend::value_format::ValueFormatRenderer {
     vendor(vendors, dialect).value_format
 }
 
@@ -262,7 +262,7 @@ pub(crate) fn value_format_renderer(
 /// explicitly declared normalization rules.
 pub(crate) fn value_format_renderers(
     vendors: VendorSet,
-) -> impl Iterator<Item = &'static dyn zero_migrate_backend::value_format::ValueFormatRenderer> {
+) -> impl Iterator<Item = &'static dyn zeroship_migrate_backend::value_format::ValueFormatRenderer> {
     vendors.as_slice().iter().map(|vendor| vendor.value_format)
 }
 
@@ -297,7 +297,7 @@ pub(crate) fn ddl_emitter(
 ///   be omitted from.
 /// - "This vendor ships no guard" became a compile error at the vendor's own
 ///   definition site rather than something a `_ =>` arm here could paper over. See
-///   `zero_migrate_backend::registry::BackendVendor`.
+///   `zeroship_migrate_backend::registry::BackendVendor`.
 ///
 /// SQLite and MySQL no longer share a guard TYPE either; each writes its own trusting
 /// impl, so a change to one dialect's posture cannot silently become a change to the
@@ -385,7 +385,7 @@ pub(crate) fn reserved_catalog_prefixes(
 /// themselves.
 pub(crate) fn targets_declaring(
     vendors: VendorSet,
-    capability: zero_migrate_ir::backend::Capability,
+    capability: zeroship_migrate_ir::backend::Capability,
 ) -> Option<String> {
     let able: Vec<&str> = vendors
         .as_slice()
@@ -511,9 +511,9 @@ mod tests {
         let mut tightest = usize::MAX;
         for v in crate::test_fixtures::VENDORS.as_slice() {
             let declared = match v.descriptor.limits.identifier {
-                zero_migrate_ir::backend::IdentifierLimit::Bytes(n)
-                | zero_migrate_ir::backend::IdentifierLimit::Characters(n) => n,
-                zero_migrate_ir::backend::IdentifierLimit::Unbounded => usize::MAX,
+                zeroship_migrate_ir::backend::IdentifierLimit::Bytes(n)
+                | zeroship_migrate_ir::backend::IdentifierLimit::Characters(n) => n,
+                zeroship_migrate_ir::backend::IdentifierLimit::Unbounded => usize::MAX,
             };
             assert!(
                 budget <= declared,
@@ -542,7 +542,7 @@ mod tests {
     /// dormant answer too: unreachable is not permission to reimplement it.
     #[test]
     fn sqlite_deferred_fk_clause_keeps_the_former_postgres_bytes() {
-        let fk = zero_migrate_backend::snapshot::ConstraintSnapshot {
+        let fk = zeroship_migrate_backend::snapshot::ConstraintSnapshot {
             name: "fk\"child".to_string(),
             kind: "FOREIGN KEY".to_string(),
             definition: "FOREIGN KEY (\"child\"\"col\") REFERENCES old.parents(id, \"parent\"\"col\") ON DELETE CASCADE".to_string(),

@@ -25,13 +25,13 @@ use crate::support;
 use std::collections::BTreeMap;
 
 use crate::support::PgDevSession;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::driver::SqlSession;
-use zero_migrate::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::{
     Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine,
     MigrationIr,
 };
-use zero_migrate_postgres::PostgresBackend;
+use zeroship_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_setcolumntype_half_migration";
 
@@ -177,7 +177,7 @@ async fn attempt_retype(
 async fn apply_envelope(
     backend: &PostgresBackend<'_, PgDevSession>,
     cfg: &ExecutorConfig,
-    policy: &zero_migrate::EffectivePolicy,
+    policy: &zeroship_migrate::EffectivePolicy,
     source: &str,
     registry: &BTreeMap<String, String>,
     live: &LiveSchema,
@@ -185,18 +185,18 @@ async fn apply_envelope(
     let authored: MigrationIr =
         serde_json::from_str(source).map_err(|error| format!("parse test IR: {error}"))?;
     let resolved =
-        zero_migrate::resolve_create_table_policy(&authored, policy, &cfg.project_schema)
+        zeroship_migrate::resolve_create_table_policy(&authored, policy, &cfg.project_schema)
             .map_err(|error| format!("resolve create-table policy: {error}"))?;
     let resolved_source = serde_json::to_string(&resolved)
         .map_err(|error| format!("serialize resolved test IR: {error}"))?;
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         policy,
     );
-    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT);
+    let guard = GuardConfig::from_policy(policy.clone(), zeroship_migrate_postgres::DIALECT);
     // The AUTHORING gate. Every arm below reaches a plan through it, which is what
     // makes "cleared validate, the guard and the lower" a measurement rather than a
     // claim: a defect caught here would never have been the half-migration.
@@ -204,7 +204,7 @@ async fn apply_envelope(
         .load_and_lower_guarded(&resolved_source, OWNER, registry, live, &guard)
         .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;
 
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,

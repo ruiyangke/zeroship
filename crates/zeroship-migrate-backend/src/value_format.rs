@@ -13,7 +13,7 @@
 //! format `CHECK`s are equivalent by ONE algorithm, and a backend that wrote its own
 //! copy would be a backend whose drift verdict could disagree with the engine's.
 //!
-//! They used to sit in `zero_migrate::render::value_format`, where they resolved a
+//! They used to sit in `zeroship_migrate::render::value_format`, where they resolved a
 //! renderer out of the engine's registry from a `DialectId`. That is the same
 //! compressed cycle `crate::dml`'s header describes: the registry sits ABOVE the
 //! vendors and the comparison sits BELOW them, so no crate can hold both, and a
@@ -38,9 +38,9 @@ use crate::renderer::DmlRenderer;
 use crate::snapshot::{
     canonical_id_default_expression, ColumnCollationSnapshot, IdDefaultSnapshot,
 };
-use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_ir::expr::Expr;
-use zero_migrate_ir::ir::{validate_type_id_prefix, ValueFormat};
+use zeroship_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::expr::Expr;
+use zeroship_migrate_ir::ir::{validate_type_id_prefix, ValueFormat};
 
 /// The physical column details implied by one logical value format.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -294,7 +294,7 @@ pub fn id_default_from_literal_fingerprint(literal: String) -> IdDefaultSnapshot
 }
 
 fn canonical_decimal_sql_literal(value: &str) -> Option<String> {
-    if !zero_migrate_ir::ir::is_decimal_string(value) {
+    if !zeroship_migrate_ir::ir::is_decimal_string(value) {
         return None;
     }
     let (negative, body) = if let Some(body) = value.strip_prefix('-') {

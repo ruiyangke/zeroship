@@ -11,21 +11,21 @@
 
 use std::collections::BTreeMap;
 
-use zero_migrate_backend::dml::{
+use zeroship_migrate_backend::dml::{
     self, BindCtx, DmlError, LimitedDeleteRenderRequest, OnConflictRenderRequest,
 };
-use zero_migrate_backend::error::IrLowerError;
-use zero_migrate_backend::renderer::{
+use zeroship_migrate_backend::error::IrLowerError;
+use zeroship_migrate_backend::renderer::{
     Capability, DmlRenderer, FeatureSupportKey, MaterializedNamedTypeOp,
 };
-use zero_migrate_backend::step::BindValue;
-use zero_migrate_ir::backend::BackendDescriptor;
-use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_ir::expr::{AggFunc, CastTarget, Duration, Expr, ExtractField, ScalarFn};
-use zero_migrate_ir::ir::{
+use zeroship_migrate_backend::step::BindValue;
+use zeroship_migrate_ir::backend::BackendDescriptor;
+use zeroship_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::expr::{AggFunc, CastTarget, Duration, Expr, ExtractField, ScalarFn};
+use zeroship_migrate_ir::ir::{
     ForEach, IrScalar, IrValue, Op, RaiseLevel, TableRef, TriggerAction, TriggerEvent, TriggerStmt,
 };
-use zero_migrate_ir::validate::{
+use zeroship_migrate_ir::validate::{
     ExprDialectFeature, ExprDialectRejection, ExprDialectValidator, UnsupportedKind,
     CODE_DIALECT_UNSUPPORTED, CODE_EXPR_NOT_PORTABLE, CODE_UNSUPPORTED,
 };
@@ -267,7 +267,7 @@ impl DmlRenderer for SqliteDmlRenderer {
         &crate::descriptor::SQLITE_DESCRIPTOR
     }
 
-    fn supports(&self, cap: zero_migrate_ir::backend::Capability) -> bool {
+    fn supports(&self, cap: zeroship_migrate_ir::backend::Capability) -> bool {
         self.descriptor().capabilities.contains(cap)
     }
 
@@ -506,7 +506,7 @@ impl DmlRenderer for SqliteDmlRenderer {
     }
 
     fn quote_ident(&self, ident: &str) -> String {
-        zero_migrate_backend::spelling::ansi_double_quote_ident(ident)
+        zeroship_migrate_backend::spelling::ansi_double_quote_ident(ident)
     }
 
     fn qualify_table(&self, _project_schema: &str, table: &str) -> Result<String, DmlError> {
@@ -872,14 +872,14 @@ impl DmlRenderer for SqliteDmlRenderer {
     /// `render::vendor`, and that one was not the same shape: `render::vendor` was
     /// PostgreSQL by CONSTRUCTION rather than by gate (it carried no dialect literal
     /// at all), so every dialect-match census scored it zero. RESOLVED as well now -
-    /// see [`Self::render_vendor_op`] below and `zero_migrate::render::vendor`. The
+    /// see [`Self::render_vendor_op`] below and `zeroship_migrate::render::vendor`. The
     /// census that DOES see it is `core_names_no_vendor_crate.rs`, which counts crate
     /// idents rather than dialect literals.
     fn render_trigger_op(
         &self,
         op: &Op,
         eff_schema: &str,
-    ) -> Result<Vec<zero_migrate_backend::vendor::VendorStatement>, IrLowerError> {
+    ) -> Result<Vec<zeroship_migrate_backend::vendor::VendorStatement>, IrLowerError> {
         Ok(vec![render_sqlite_trigger_op(op, eff_schema)?])
     }
 
@@ -890,7 +890,7 @@ impl DmlRenderer for SqliteDmlRenderer {
         &self,
         _op: &Op,
         _eff_schema: &str,
-    ) -> Result<zero_migrate_backend::vendor::VendorStatement, IrLowerError> {
+    ) -> Result<zeroship_migrate_backend::vendor::VendorStatement, IrLowerError> {
         Err(IrLowerError::SequenceUnsupported {
             kind: "sequence",
             dialect: DIALECT,
@@ -903,7 +903,7 @@ impl DmlRenderer for SqliteDmlRenderer {
     fn render_materialized_named_type_op(
         &self,
         _op: MaterializedNamedTypeOp<'_>,
-    ) -> Result<zero_migrate_backend::vendor::VendorStatement, IrLowerError> {
+    ) -> Result<zeroship_migrate_backend::vendor::VendorStatement, IrLowerError> {
         Err(IrLowerError::UnsupportedOp(
             "validated materialized named type unsupported by SQLite reached lower",
         ))
@@ -915,7 +915,7 @@ impl DmlRenderer for SqliteDmlRenderer {
         &self,
         _op: &Op,
         _eff_schema: &str,
-    ) -> Result<zero_migrate_backend::vendor::VendorStatement, IrLowerError> {
+    ) -> Result<zeroship_migrate_backend::vendor::VendorStatement, IrLowerError> {
         Err(IrLowerError::UnsupportedOp(
             "validated COMMENT ON unsupported dialect reached lower",
         ))
@@ -926,7 +926,7 @@ impl DmlRenderer for SqliteDmlRenderer {
     ///
     /// This is the other half of the note above: PostgreSQL is no longer "in the
     /// position SQLite just left", because the engine no longer names
-    /// `zero_migrate_postgres::render_vendor_op`. It asks whichever vendor it
+    /// `zeroship_migrate_postgres::render_vendor_op`. It asks whichever vendor it
     /// resolved, and this is what this one answers.
     ///
     /// The privileged op kinds are rendered by exactly one registered
@@ -936,24 +936,24 @@ impl DmlRenderer for SqliteDmlRenderer {
     /// earlier and more informatively - the lower seam checks
     /// `Capability::PrivilegedCatalogObjects` and reports the op KIND - so nothing in
     /// the shipping paths reaches this. It is here because
-    /// [`zero_migrate_backend::renderer::DmlRenderer`] gives no method a default
+    /// [`zeroship_migrate_backend::renderer::DmlRenderer`] gives no method a default
     /// body: a vendor's posture has to be visible in that vendor's own diff.
     fn render_vendor_op(
         &self,
         _op: &Op,
         _eff_schema: &str,
     ) -> Result<
-        Vec<zero_migrate_backend::vendor::VendorStatement>,
-        zero_migrate_backend::vendor::VendorError,
+        Vec<zeroship_migrate_backend::vendor::VendorStatement>,
+        zeroship_migrate_backend::vendor::VendorError,
     > {
-        Err(zero_migrate_backend::vendor::VendorError::VendorOpsUnsupported(DIALECT))
+        Err(zeroship_migrate_backend::vendor::VendorError::VendorOpsUnsupported(DIALECT))
     }
 }
 
 fn render_sqlite_trigger_op(
     op: &Op,
     eff_schema: &str,
-) -> Result<zero_migrate_backend::vendor::VendorStatement, IrLowerError> {
+) -> Result<zeroship_migrate_backend::vendor::VendorStatement, IrLowerError> {
     match op {
         Op::CreateTrigger {
             name,
@@ -967,7 +967,7 @@ fn render_sqlite_trigger_op(
         } => {
             if events.is_empty() {
                 return Err(IrLowerError::Vendor(
-                    zero_migrate_backend::vendor::VendorError::EmptyList {
+                    zeroship_migrate_backend::vendor::VendorError::EmptyList {
                         what: "trigger events",
                     },
                 ));
@@ -1007,17 +1007,17 @@ fn render_sqlite_trigger_op(
             }
             if statements.is_empty() {
                 return Err(IrLowerError::Vendor(
-                    zero_migrate_backend::vendor::VendorError::EmptyList {
+                    zeroship_migrate_backend::vendor::VendorError::EmptyList {
                         what: "trigger body statements",
                     },
                 ));
             }
 
-            let qname = zero_migrate_backend::dml::quote_bare_ident_for_backend(
+            let qname = zeroship_migrate_backend::dml::quote_bare_ident_for_backend(
                 "trigger", name, &RENDERER,
             )?;
             let qtable =
-                zero_migrate_backend::dml::quote_bare_ident_for_backend("table", table, &RENDERER)?;
+                zeroship_migrate_backend::dml::quote_bare_ident_for_backend("table", table, &RENDERER)?;
             let events_sql = events
                 .iter()
                 .map(|e| e.as_sql())
@@ -1031,7 +1031,7 @@ fn render_sqlite_trigger_op(
             if let Some(pred) = when {
                 up.push_str(&format!(
                     " WHEN ({})",
-                    zero_migrate_backend::dml::render_predicate(pred, &RENDERER)?
+                    zeroship_migrate_backend::dml::render_predicate(pred, &RENDERER)?
                 ));
             }
             let body: Result<Vec<_>, _> = statements
@@ -1047,7 +1047,7 @@ fn render_sqlite_trigger_op(
                     .join(" "),
             );
             up.push_str(" END;");
-            Ok(zero_migrate_backend::vendor::VendorStatement {
+            Ok(zeroship_migrate_backend::vendor::VendorStatement {
                 name: format!("create_trigger_{name}_{table}"),
                 up,
                 down: Some(format!("DROP TRIGGER IF EXISTS {qname}")),
@@ -1059,7 +1059,7 @@ fn render_sqlite_trigger_op(
             if_exists,
             ..
         } => {
-            let qname = zero_migrate_backend::dml::quote_bare_ident_for_backend(
+            let qname = zeroship_migrate_backend::dml::quote_bare_ident_for_backend(
                 "trigger", name, &RENDERER,
             )?;
             let mut up = String::from("DROP TRIGGER ");
@@ -1067,7 +1067,7 @@ fn render_sqlite_trigger_op(
                 up.push_str("IF EXISTS ");
             }
             up.push_str(&qname);
-            Ok(zero_migrate_backend::vendor::VendorStatement {
+            Ok(zeroship_migrate_backend::vendor::VendorStatement {
                 name: format!("drop_trigger_{name}_{table}"),
                 up,
                 down: None,
@@ -1089,7 +1089,7 @@ fn sqlite_trigger_table_ref(
             return Err(IrLowerError::LowerCrossSchema(schema.to_string()));
         }
     }
-    Ok(zero_migrate_backend::dml::quote_bare_ident_for_backend(
+    Ok(zeroship_migrate_backend::dml::quote_bare_ident_for_backend(
         "table", table, &RENDERER,
     )?)
 }
@@ -1107,7 +1107,7 @@ fn render_sqlite_trigger_stmt(
         } => {
             if columns.is_empty() {
                 return Err(IrLowerError::DmlAssemble(
-                    zero_migrate_backend::dml::DmlError::MalformedInsert {
+                    zeroship_migrate_backend::dml::DmlError::MalformedInsert {
                         table: table.clone(),
                         reason: "no columns".to_string(),
                     },
@@ -1115,7 +1115,7 @@ fn render_sqlite_trigger_stmt(
             }
             if rows.is_empty() {
                 return Err(IrLowerError::DmlAssemble(
-                    zero_migrate_backend::dml::DmlError::MalformedInsert {
+                    zeroship_migrate_backend::dml::DmlError::MalformedInsert {
                         table: table.clone(),
                         reason: "no rows".to_string(),
                     },
@@ -1125,7 +1125,7 @@ fn render_sqlite_trigger_stmt(
             let qcols: Result<Vec<_>, _> = columns
                 .iter()
                 .map(|c| {
-                    zero_migrate_backend::dml::quote_bare_ident_for_backend("column", c, &RENDERER)
+                    zeroship_migrate_backend::dml::quote_bare_ident_for_backend("column", c, &RENDERER)
                 })
                 .collect();
             let qcols = qcols?;
@@ -1133,7 +1133,7 @@ fn render_sqlite_trigger_stmt(
             for (ri, row) in rows.iter().enumerate() {
                 if row.len() != columns.len() {
                     return Err(IrLowerError::DmlAssemble(
-                        zero_migrate_backend::dml::DmlError::MalformedInsert {
+                        zeroship_migrate_backend::dml::DmlError::MalformedInsert {
                             table: table.clone(),
                             reason: format!(
                                 "row {ri} has {} value(s) but {} column(s) were named",
@@ -1146,7 +1146,7 @@ fn render_sqlite_trigger_stmt(
                 let vals: Result<Vec<_>, _> = row
                     .iter()
                     .map(|v| {
-                        zero_migrate_backend::dml::render_value_inline_for_backend(v, &RENDERER)
+                        zeroship_migrate_backend::dml::render_value_inline_for_backend(v, &RENDERER)
                     })
                     .collect();
                 groups.push(format!("({})", vals?.join(", ")));
@@ -1165,7 +1165,7 @@ fn render_sqlite_trigger_stmt(
         } => {
             if set.is_empty() {
                 return Err(IrLowerError::DmlAssemble(
-                    zero_migrate_backend::dml::DmlError::EmptySet {
+                    zeroship_migrate_backend::dml::DmlError::EmptySet {
                         op: "update",
                         table: table.clone(),
                     },
@@ -1176,17 +1176,17 @@ fn render_sqlite_trigger_stmt(
             for (col, rhs) in set {
                 assigns.push(format!(
                     "{} = {}",
-                    zero_migrate_backend::dml::quote_bare_ident_for_backend(
+                    zeroship_migrate_backend::dml::quote_bare_ident_for_backend(
                         "column", col, &RENDERER
                     )?,
-                    zero_migrate_backend::dml::render_value_inline_for_backend(rhs, &RENDERER)?
+                    zeroship_migrate_backend::dml::render_value_inline_for_backend(rhs, &RENDERER)?
                 ));
             }
             let mut sql = format!("UPDATE {qtable} SET {}", assigns.join(", "));
             if let Some(pred) = r#where {
                 sql.push_str(&format!(
                     " WHERE {}",
-                    zero_migrate_backend::dml::render_expr_inline_for_backend(pred, &RENDERER)?
+                    zeroship_migrate_backend::dml::render_expr_inline_for_backend(pred, &RENDERER)?
                 ));
             }
             Ok(sql)
@@ -1199,7 +1199,7 @@ fn render_sqlite_trigger_stmt(
         } => {
             let qtable = sqlite_trigger_table_ref(table, schema.as_deref(), eff_schema)?;
             let pred =
-                zero_migrate_backend::dml::render_expr_inline_for_backend(r#where, &RENDERER)?;
+                zeroship_migrate_backend::dml::render_expr_inline_for_backend(r#where, &RENDERER)?;
             Ok(match limit {
                 None => format!("DELETE FROM {qtable} WHERE {pred}"),
                 // Trigger rendering has no live-catalog snapshot for the body
@@ -1207,7 +1207,7 @@ fn render_sqlite_trigger_stmt(
                 // rowid; the one-shot DML path can use a proven PK/UNIQUE key.
                 Some(_) => {
                     return Err(IrLowerError::DmlAssemble(
-                        zero_migrate_backend::dml::DmlError::LimitedDeleteNeedsUniqueIdentity {
+                        zeroship_migrate_backend::dml::DmlError::LimitedDeleteNeedsUniqueIdentity {
                             dialect: DIALECT,
                             table: table.clone(),
                         },
@@ -1217,7 +1217,7 @@ fn render_sqlite_trigger_stmt(
         }
         TriggerStmt::Select { expr } => Ok(format!(
             "SELECT {}",
-            zero_migrate_backend::dml::render_expr_inline_for_backend(expr, &RENDERER)?
+            zeroship_migrate_backend::dml::render_expr_inline_for_backend(expr, &RENDERER)?
         )),
         TriggerStmt::Raise {
             level: RaiseLevel::Ignore,
@@ -1226,7 +1226,7 @@ fn render_sqlite_trigger_stmt(
         TriggerStmt::Raise { level, message, .. } => Ok(format!(
             "SELECT RAISE({},{})",
             raise_level_sql(*level),
-            zero_migrate_backend::dml::sql_string_literal(message)
+            zeroship_migrate_backend::dml::sql_string_literal(message)
         )),
     }
 }
@@ -1250,8 +1250,8 @@ const fn raise_level_sql(level: RaiseLevel) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zero_migrate_ir::expr::Expr;
-    use zero_migrate_ir::ir::SafeU64;
+    use zeroship_migrate_ir::expr::Expr;
+    use zeroship_migrate_ir::ir::SafeU64;
 
     /// Relocated from `render::lower`'s test module with the renderer it covers.
     /// A unit test for a private helper cannot outlive its module, and leaving it
@@ -1262,7 +1262,7 @@ mod tests {
         let stmt = TriggerStmt::Delete {
             table: "events".to_string(),
             r#where: Expr::UnaryOp {
-                op: zero_migrate_ir::expr::UnaryOp::IsNull,
+                op: zeroship_migrate_ir::expr::UnaryOp::IsNull,
                 operand: Box::new(Expr::col("code")),
             },
             limit: Some(SafeU64::new(1).unwrap()),
@@ -1273,7 +1273,7 @@ mod tests {
         assert!(matches!(
             err,
             IrLowerError::DmlAssemble(
-                zero_migrate_backend::dml::DmlError::LimitedDeleteNeedsUniqueIdentity {
+                zeroship_migrate_backend::dml::DmlError::LimitedDeleteNeedsUniqueIdentity {
                     ref table,
                     ..
                 }

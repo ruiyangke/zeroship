@@ -11,20 +11,20 @@ use std::time::Instant;
 use sha2::{Digest, Sha256};
 
 use super::{journal_sql, session};
-use zero_migrate_backend::backfill::{
+use zeroship_migrate_backend::backfill::{
     generate_per_row_value, CursorColumnContract, CursorComparison, CursorContract,
     CursorScalarType, CursorTuple,
 };
-use zero_migrate_backend::backfill::{
+use zeroship_migrate_backend::backfill::{
     BackfillError, BackfillOutcome, BackfillProgressEntry, BackfillSpec,
 };
-use zero_migrate_backend::conn::ExecutorConfig;
-use zero_migrate_backend::driver::{Bind, Row, SqlSession};
-use zero_migrate_backend::executor::ApplyError;
-use zero_migrate_backend::journal::{CompletedRecord, EventKind, JournalError};
-use zero_migrate_backend::schema::SchemaRenderer;
-use zero_migrate_ir::ir::{CursorStability, IrScalar, PerRowGenerator};
-use zero_migrate_ir::migration::{Checksum, MigrationId};
+use zeroship_migrate_backend::conn::ExecutorConfig;
+use zeroship_migrate_backend::driver::{Bind, Row, SqlSession};
+use zeroship_migrate_backend::executor::ApplyError;
+use zeroship_migrate_backend::journal::{CompletedRecord, EventKind, JournalError};
+use zeroship_migrate_backend::schema::SchemaRenderer;
+use zeroship_migrate_ir::ir::{CursorStability, IrScalar, PerRowGenerator};
+use zeroship_migrate_ir::migration::{Checksum, MigrationId};
 
 const GUARD_PLANNED: &str = "planned";
 const GUARD_INSTALLED: &str = "installed";
@@ -401,8 +401,8 @@ pub(crate) async fn run_backfill<D: SqlSession>(
             batches = batches.saturating_add(1);
             rows_updated = rows_updated.saturating_add(selected_count);
 
-            zero_migrate_backend::fault::trip(
-                zero_migrate_backend::fault::points::BACKFILL_MID_BATCHES,
+            zeroship_migrate_backend::fault::trip(
+                zeroship_migrate_backend::fault::points::BACKFILL_MID_BATCHES,
             )?;
 
             if selected_count < u64::from(spec.batch_size) {
@@ -501,7 +501,7 @@ fn validate_spec(spec: &BackfillSpec) -> Result<&CursorContract, ApplyError> {
             )));
         }
         if let PerRowGenerator::TypeId { prefix } = generator {
-            zero_migrate_ir::ir::validate_type_id_prefix(prefix).map_err(|error| {
+            zeroship_migrate_ir::ir::validate_type_id_prefix(prefix).map_err(|error| {
                 ApplyError::Backend(format!(
                     "mysql backfill: invalid TypeID prefix for per-row destination {column:?}: {error}"
                 ))
@@ -543,7 +543,7 @@ fn cursor_component_mutated(component: &str) -> ApplyError {
 
 /// Gate an author-supplied bare identifier, then let the MySQL backend spell it.
 ///
-/// The MySQL twin of `zero_migrate_postgres::backend::backfill_sql::quote_ident`, which
+/// The MySQL twin of `zeroship_migrate_postgres::backend::backfill_sql::quote_ident`, which
 /// has always forwarded to `render::dml`. This one used to end in a bare
 /// ``format!("`{ident}`")`` - byte-identical (the gate above admits no backtick, so
 /// there is nothing to double) but an unrouted spelling, and one that the
@@ -564,7 +564,7 @@ fn quote_bare(what: &'static str, ident: &str) -> Result<String, ApplyError> {
             "mysql backfill: invalid {what} identifier {ident:?}"
         )));
     }
-    Ok(zero_migrate_backend::dml::escape_quote_ident_for_backend(
+    Ok(zeroship_migrate_backend::dml::escape_quote_ident_for_backend(
         ident,
         &crate::dml::RENDERER,
     ))
@@ -1379,7 +1379,7 @@ async fn append_completed_journal<D: SqlSession>(
         let already_journaled = if let Some(row) = latest.first() {
             let event_kind_s: String = row.try_get("event_kind")?;
             let event_kind = EventKind::parse(&event_kind_s).ok_or_else(|| {
-                ApplyError::Journal(zero_migrate_backend::journal::JournalError::BadEventKind(
+                ApplyError::Journal(zeroship_migrate_backend::journal::JournalError::BadEventKind(
                     event_kind_s,
                 ))
             })?;
@@ -2767,13 +2767,13 @@ async fn run_one_batch_inner<D: SqlSession>(
 mod tests {
     use super::*;
     use std::cell::RefCell;
-    use zero_migrate_backend::driver::{DbError, Value};
+    use zeroship_migrate_backend::driver::{DbError, Value};
 
     fn checksum(label: &str) -> Checksum {
-        Checksum::of(&zero_migrate_ir::migration::ChecksumInput {
+        Checksum::of(&zeroship_migrate_ir::migration::ChecksumInput {
             up: label,
             down: None,
-            flags: &zero_migrate_ir::migration::MigrationFlags::default(),
+            flags: &zeroship_migrate_ir::migration::MigrationFlags::default(),
             owner_app: "app",
             depends_on: &[],
             supersedes: &[],

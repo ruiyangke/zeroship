@@ -143,7 +143,7 @@ pub enum OnUnmet {
     /// not a batch-wide rollback.
     ///
     /// An unmet precondition surfaces as
-    /// `zero_migrate::apply::executor::ApplyError::PreconditionFailed`. That type
+    /// `zeroship_migrate::apply::executor::ApplyError::PreconditionFailed`. That type
     /// lives in the engine crate, which depends on this one, so it cannot be linked
     /// from here.
     #[default]

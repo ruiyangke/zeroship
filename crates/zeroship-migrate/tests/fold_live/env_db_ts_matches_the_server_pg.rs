@@ -33,14 +33,14 @@ use crate::support;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::support::PgDevSession;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::driver::SqlSession;
-use zero_migrate::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::{
     effective_policy_from_charter_toml, render_artifacts, resolve_create_table_policy, Approval,
     EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine,
     MigrationIr,
 };
-use zero_migrate_postgres::PostgresBackend;
+use zeroship_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_env_db_ts_server";
 
@@ -254,13 +254,13 @@ async fn apply_ir(
     let resolved_source = serde_json::to_string(&resolved)
         .map_err(|error| format!("serialize resolved test IR: {error}"))?;
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &policy,
     );
-    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT);
+    let guard = GuardConfig::from_policy(policy.clone(), zeroship_migrate_postgres::DIALECT);
     let artifact = author
         .load_and_lower_guarded(
             &resolved_source,
@@ -271,7 +271,7 @@ async fn apply_ir(
         )
         .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;
 
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,
@@ -319,9 +319,9 @@ async fn measure(label: &str, charter: Charter, ops: &str) -> Measured {
         // The SAME resolved ops and the SAME charter the server just applied, through
         // the real artifact entry point.
         let env_db_ts = render_artifacts(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &ir.ops,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &cfg.project_schema,
             &policy,
         )

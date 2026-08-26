@@ -21,14 +21,14 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::apply::journal::Phase;
-use zero_migrate::{
+use zeroship_migrate::apply::journal::Phase;
+use zeroship_migrate::{
     Approval, ApprovalScope, CollectionDescriptor, DeclarativeApplyError, DeclarativeAuthor,
     DeclarativeDeployOutcome, DeclarativeDeployPlan, EffectivePolicy, EngineError, ExecutorConfig,
     FieldDescriptor, GuardConfig, MigrationBackend, MigrationEngine, RenameHint, SchemaSnapshot,
 };
-use zero_migrate_sqlite::backend::Mode;
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate_sqlite::backend::Mode;
+use zeroship_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_golden";
 const APP: &str = "app_golden";
@@ -41,12 +41,12 @@ fn desired_snapshot(
     project_schema: &str,
     descriptors: &[CollectionDescriptor],
     effective: &EffectivePolicy,
-) -> Result<zero_migrate::DesiredSchema, zero_migrate::DeclarativeError> {
-    zero_migrate::desired_snapshot_for_dialect(
-        zero_migrate::shipping_vendors(),
+) -> Result<zeroship_migrate::DesiredSchema, zeroship_migrate::DeclarativeError> {
+    zeroship_migrate::desired_snapshot_for_dialect(
+        zeroship_migrate::shipping_vendors(),
         project_schema,
         descriptors,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         effective,
     )
 }
@@ -74,10 +74,10 @@ fn backend(p: &Paths) -> SqliteBackend {
 
 fn sqlite_author() -> DeclarativeAuthor {
     DeclarativeAuthor::new_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        zero_migrate_sqlite::DIALECT,
+        zeroship_migrate_sqlite::DIALECT,
     )
 }
 
@@ -86,7 +86,7 @@ fn exec_cfg() -> ExecutorConfig {
 }
 
 fn guard_cfg() -> GuardConfig {
-    GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate_sqlite::DIALECT)
+    GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_sqlite::DIALECT)
 }
 
 fn live_from(descs: &[CollectionDescriptor]) -> (SchemaSnapshot, HashMap<String, String>) {
@@ -275,7 +275,7 @@ fn rename_plan(
 
 #[compio::test]
 async fn golden_b_sqlite_rename_rebuild() {
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let cfg = exec_cfg();
 
     async fn run_one(engine: &MigrationEngine, cfg: &ExecutorConfig, leg: &str) -> String {
@@ -351,11 +351,11 @@ async fn golden_b_sqlite_rename_rebuild() {
 
 #[compio::test]
 async fn golden_g_sqlite_pg_rename_fails_closed() {
-    use zero_migrate::ExpandContractAuthor;
-    use zero_migrate::OnlineIntent;
-    use zero_migrate::{PlanStep, RenameStep};
+    use zeroship_migrate::ExpandContractAuthor;
+    use zeroship_migrate::OnlineIntent;
+    use zeroship_migrate::{PlanStep, RenameStep};
 
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let cfg = exec_cfg();
     let p = paths("golden_g");
     let be = backend(&p);
@@ -366,10 +366,10 @@ async fn golden_g_sqlite_pg_rename_fails_closed() {
     // construct it directly to prove the apply_plan dispatch fails closed rather
     // than silently dropping the rename (the fail-closed invariant).
     let rename = ExpandContractAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        zero_migrate_postgres::DIALECT,
+        zeroship_migrate_postgres::DIALECT,
     )
     .author(&OnlineIntent::RenameColumn {
         table: "people".into(),
@@ -387,7 +387,7 @@ async fn golden_g_sqlite_pg_rename_fails_closed() {
             &be,
             &cfg,
             "deployer",
-            zero_migrate::apply::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await;
     // The refusal NAMES the gap: which step, which capability, which target. It
@@ -397,7 +397,7 @@ async fn golden_g_sqlite_pg_rename_fails_closed() {
     // not the plan's FIRST step the earlier steps used to commit before this fired.
     match &res {
         Err(DeclarativeApplyError::Plain(EngineError::Apply(
-            zero_migrate::apply::executor::ApplyError::UnsupportedCapability {
+            zeroship_migrate::apply::executor::ApplyError::UnsupportedCapability {
                 version,
                 capability,
                 dialect,
@@ -406,7 +406,7 @@ async fn golden_g_sqlite_pg_rename_fails_closed() {
             assert_eq!(version, &rename_version, "the refusal names the rename");
             assert_eq!(
                 *capability,
-                zero_migrate::BackendCapability::OnlineSchemaChange
+                zeroship_migrate::BackendCapability::OnlineSchemaChange
             );
             assert_eq!(dialect, "sqlite", "the refusal names the deploy target");
         }

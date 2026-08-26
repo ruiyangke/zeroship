@@ -2,23 +2,23 @@
 
 use std::collections::BTreeMap;
 
-use zero_migrate_backend::dml::{
+use zeroship_migrate_backend::dml::{
     self, BindCtx, DmlError, LimitedDeleteRenderRequest, OnConflictRenderRequest,
 };
-use zero_migrate_backend::error::IrLowerError;
-use zero_migrate_backend::renderer::{
+use zeroship_migrate_backend::error::IrLowerError;
+use zeroship_migrate_backend::renderer::{
     Capability, DmlRenderer, FeatureSupportKey, MaterializedNamedTypeOp,
 };
-use zero_migrate_backend::step::BindValue;
-use zero_migrate_ir::backend::BackendDescriptor;
-use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_ir::expr::{CastTarget, Duration, ExtractField, ScalarFn};
-use zero_migrate_ir::ir::TableRef;
-use zero_migrate_ir::ir::{
+use zeroship_migrate_backend::step::BindValue;
+use zeroship_migrate_ir::backend::BackendDescriptor;
+use zeroship_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::expr::{CastTarget, Duration, ExtractField, ScalarFn};
+use zeroship_migrate_ir::ir::TableRef;
+use zeroship_migrate_ir::ir::{
     ColType, CommentTarget, ExistenceGuard, IrScalar, IrValue, Op, SafeI64, SequenceOwnedBy,
     TriggerAction,
 };
-use zero_migrate_ir::validate::{ExprDialectFeature, ExprDialectRejection, ExprDialectValidator};
+use zeroship_migrate_ir::validate::{ExprDialectFeature, ExprDialectRejection, ExprDialectValidator};
 
 // This module's vendor identity. It names NO dialect literal of its own - the one
 // declaration is `crate::DIALECT` in `lib.rs`, and the one-dialect rule is a
@@ -33,9 +33,9 @@ use crate::DIALECT;
 /// pins which operator runs.
 ///
 /// Core owns whether the operand is LEGAL (non-empty, no NUL) and the two checks below
-/// mirror `zero_migrate_backend::dml::in_list_text_literal`, which applies the same two
+/// mirror `zeroship_migrate_backend::dml::in_list_text_literal`, which applies the same two
 /// to the operand a caller's own backend then spells. This function was
-/// `zero_migrate_backend::dml::pg_text_literal`, a vendor name in the neutral contract
+/// `zeroship_migrate_backend::dml::pg_text_literal`, a vendor name in the neutral contract
 /// whose only callers were this file and [`in_list_elem`] beside it.
 fn text_literal(s: &str, what: &'static str) -> Result<String, DmlError> {
     if s.is_empty() {
@@ -54,7 +54,7 @@ fn text_literal(s: &str, what: &'static str) -> Result<String, DmlError> {
 /// One `IN`-list element in this backend's spelling.
 ///
 /// It takes no backend, and that is the difference from the shared
-/// `zero_migrate_backend::dml::render_in_list_elem_portable`: every spelling here is
+/// `zeroship_migrate_backend::dml::render_in_list_elem_portable`: every spelling here is
 /// FIXED - `'x'::text` for a string, the decimal verbatim - so there is no vendor to
 /// resolve. The two backends whose in-list needs one (a quoted decimal, a hex string)
 /// call the portable helper and hand it `self`.
@@ -123,15 +123,15 @@ impl ExprDialectValidator for PostgresDmlRenderer {
                 | ScalarFn::CurrentUser => Ok(()),
             },
             ExprDialectFeature::Aggregate(function) => match function {
-                zero_migrate_ir::expr::AggFunc::Count
-                | zero_migrate_ir::expr::AggFunc::Sum
-                | zero_migrate_ir::expr::AggFunc::Avg
-                | zero_migrate_ir::expr::AggFunc::Min
-                | zero_migrate_ir::expr::AggFunc::Max
-                | zero_migrate_ir::expr::AggFunc::StringAgg
-                | zero_migrate_ir::expr::AggFunc::ArrayAgg
-                | zero_migrate_ir::expr::AggFunc::BoolAnd
-                | zero_migrate_ir::expr::AggFunc::BoolOr => Ok(()),
+                zeroship_migrate_ir::expr::AggFunc::Count
+                | zeroship_migrate_ir::expr::AggFunc::Sum
+                | zeroship_migrate_ir::expr::AggFunc::Avg
+                | zeroship_migrate_ir::expr::AggFunc::Min
+                | zeroship_migrate_ir::expr::AggFunc::Max
+                | zeroship_migrate_ir::expr::AggFunc::StringAgg
+                | zeroship_migrate_ir::expr::AggFunc::ArrayAgg
+                | zeroship_migrate_ir::expr::AggFunc::BoolAnd
+                | zeroship_migrate_ir::expr::AggFunc::BoolOr => Ok(()),
             },
             ExprDialectFeature::ConcatWs { .. }
             | ExprDialectFeature::SplitPart { .. }
@@ -145,8 +145,8 @@ impl ExprDialectValidator for PostgresDmlRenderer {
             ExprDialectFeature::Extract(field) => DmlRenderer::render_extract(self, field, "x")
                 .map(|_| ())
                 .map_err(|e| ExprDialectRejection {
-                    code: zero_migrate_ir::validate::CODE_UNSUPPORTED,
-                    kind: Some(zero_migrate_ir::validate::UnsupportedKind::Expr),
+                    code: zeroship_migrate_ir::validate::CODE_UNSUPPORTED,
+                    kind: Some(zeroship_migrate_ir::validate::UnsupportedKind::Expr),
                     reason: format!("{e}"),
                     suggested_fix: None,
                 }),
@@ -167,7 +167,7 @@ impl DmlRenderer for PostgresDmlRenderer {
         &crate::descriptor::POSTGRES_DESCRIPTOR
     }
 
-    fn supports(&self, cap: zero_migrate_ir::backend::Capability) -> bool {
+    fn supports(&self, cap: zeroship_migrate_ir::backend::Capability) -> bool {
         self.descriptor().capabilities.contains(cap)
     }
 
@@ -252,7 +252,7 @@ impl DmlRenderer for PostgresDmlRenderer {
     }
 
     fn quote_ident(&self, ident: &str) -> String {
-        zero_migrate_backend::spelling::ansi_double_quote_ident(ident)
+        zeroship_migrate_backend::spelling::ansi_double_quote_ident(ident)
     }
 
     fn qualify_table(&self, project_schema: &str, table: &str) -> Result<String, DmlError> {
@@ -293,7 +293,7 @@ impl DmlRenderer for PostgresDmlRenderer {
     }
 
     fn inline_bytes_literal(&self, bytes: &[u8]) -> String {
-        let encoded = zero_migrate_backend::spelling::base64_standard(bytes);
+        let encoded = zeroship_migrate_backend::spelling::base64_standard(bytes);
         format!("decode({}, 'base64')", dml::sql_string_literal(&encoded))
     }
 
@@ -302,7 +302,7 @@ impl DmlRenderer for PostgresDmlRenderer {
     /// inline one with a placeholder where the literal would be.
     fn bind_bytes(&self, bytes: &[u8], push: &mut dyn FnMut(BindValue) -> String) -> String {
         let placeholder = push(BindValue::Text(
-            zero_migrate_backend::spelling::base64_standard(bytes),
+            zeroship_migrate_backend::spelling::base64_standard(bytes),
         ));
         format!("decode({placeholder}, 'base64')")
     }
@@ -532,14 +532,14 @@ impl DmlRenderer for PostgresDmlRenderer {
         &self,
         op: &Op,
         eff_schema: &str,
-    ) -> Result<zero_migrate_backend::vendor::VendorStatement, IrLowerError> {
+    ) -> Result<zeroship_migrate_backend::vendor::VendorStatement, IrLowerError> {
         render_sequence_op(op, eff_schema)
     }
 
     fn render_materialized_named_type_op(
         &self,
         op: MaterializedNamedTypeOp<'_>,
-    ) -> Result<zero_migrate_backend::vendor::VendorStatement, IrLowerError> {
+    ) -> Result<zeroship_migrate_backend::vendor::VendorStatement, IrLowerError> {
         render_materialized_named_type_op(op)
     }
 
@@ -547,7 +547,7 @@ impl DmlRenderer for PostgresDmlRenderer {
         &self,
         op: &Op,
         eff_schema: &str,
-    ) -> Result<zero_migrate_backend::vendor::VendorStatement, IrLowerError> {
+    ) -> Result<zeroship_migrate_backend::vendor::VendorStatement, IrLowerError> {
         render_comment_op(op, eff_schema)
     }
 
@@ -564,8 +564,8 @@ impl DmlRenderer for PostgresDmlRenderer {
         op: &Op,
         eff_schema: &str,
     ) -> Result<
-        Vec<zero_migrate_backend::vendor::VendorStatement>,
-        zero_migrate_backend::vendor::VendorError,
+        Vec<zeroship_migrate_backend::vendor::VendorStatement>,
+        zeroship_migrate_backend::vendor::VendorError,
     > {
         crate::vendor::render_vendor_op(op, eff_schema)
     }
@@ -574,7 +574,7 @@ impl DmlRenderer for PostgresDmlRenderer {
         &self,
         op: &Op,
         eff_schema: &str,
-    ) -> Result<Vec<zero_migrate_backend::vendor::VendorStatement>, IrLowerError> {
+    ) -> Result<Vec<zeroship_migrate_backend::vendor::VendorStatement>, IrLowerError> {
         if let Op::CreateTrigger {
             action: TriggerAction::Body { .. },
             ..
@@ -589,7 +589,7 @@ impl DmlRenderer for PostgresDmlRenderer {
         }
         let stmts = match crate::vendor::render_vendor_op(op, eff_schema) {
             Ok(stmts) => stmts,
-            Err(zero_migrate_backend::vendor::VendorError::UnsupportedTriggerAction {
+            Err(zeroship_migrate_backend::vendor::VendorError::UnsupportedTriggerAction {
                 kind,
                 ..
             }) => {
@@ -606,7 +606,7 @@ impl DmlRenderer for PostgresDmlRenderer {
 
 fn render_materialized_named_type_op(
     op: MaterializedNamedTypeOp<'_>,
-) -> Result<zero_migrate_backend::vendor::VendorStatement, IrLowerError> {
+) -> Result<zeroship_migrate_backend::vendor::VendorStatement, IrLowerError> {
     match op {
         MaterializedNamedTypeOp::CreateEnum {
             name,
@@ -620,7 +620,7 @@ fn render_materialized_named_type_op(
                 .join(", ");
             let up = format!("CREATE TYPE {qualified_name} AS ENUM ({rendered_values})");
             let down = Some(format!("DROP TYPE {qualified_name}"));
-            Ok(zero_migrate_backend::vendor::VendorStatement {
+            Ok(zeroship_migrate_backend::vendor::VendorStatement {
                 name: format!("create_enum_{name}"),
                 up,
                 down,
@@ -629,7 +629,7 @@ fn render_materialized_named_type_op(
         MaterializedNamedTypeOp::DropEnum {
             name,
             qualified_name,
-        } => Ok(zero_migrate_backend::vendor::VendorStatement {
+        } => Ok(zeroship_migrate_backend::vendor::VendorStatement {
             name: format!("drop_enum_{name}"),
             up: format!("DROP TYPE {qualified_name}"),
             down: None,
@@ -656,7 +656,7 @@ fn render_materialized_named_type_op(
                 up.push(')');
             }
             let down = Some(format!("DROP DOMAIN {qualified_name}"));
-            Ok(zero_migrate_backend::vendor::VendorStatement {
+            Ok(zeroship_migrate_backend::vendor::VendorStatement {
                 name: format!("create_domain_{name}"),
                 up,
                 down,
@@ -665,7 +665,7 @@ fn render_materialized_named_type_op(
         MaterializedNamedTypeOp::DropDomain {
             name,
             qualified_name,
-        } => Ok(zero_migrate_backend::vendor::VendorStatement {
+        } => Ok(zeroship_migrate_backend::vendor::VendorStatement {
             name: format!("drop_domain_{name}"),
             up: format!("DROP DOMAIN {qualified_name}"),
             down: None,
@@ -676,7 +676,7 @@ fn render_materialized_named_type_op(
 fn render_sequence_op(
     op: &Op,
     eff_schema: &str,
-) -> Result<zero_migrate_backend::vendor::VendorStatement, IrLowerError> {
+) -> Result<zeroship_migrate_backend::vendor::VendorStatement, IrLowerError> {
     match op {
         Op::CreateSequence {
             name,
@@ -717,7 +717,7 @@ fn render_sequence_op(
                 up.push_str(" OWNED BY ");
                 up.push_str(&render_sequence_owned_by(owned_by.as_ref(), eff_schema)?);
             }
-            Ok(zero_migrate_backend::vendor::VendorStatement {
+            Ok(zeroship_migrate_backend::vendor::VendorStatement {
                 name: format!("create_sequence_{name}"),
                 up,
                 down: Some(format!("DROP SEQUENCE {qname}")),
@@ -774,7 +774,7 @@ fn render_sequence_op(
                 up.push_str(" OWNED BY ");
                 up.push_str(&render_sequence_owned_by(owned_by.as_ref(), eff_schema)?);
             }
-            Ok(zero_migrate_backend::vendor::VendorStatement {
+            Ok(zeroship_migrate_backend::vendor::VendorStatement {
                 name: format!("alter_sequence_{name}"),
                 up,
                 down: None,
@@ -795,7 +795,7 @@ fn render_sequence_op(
             // Refuse to synthesize an inverse: the definition is half the object
             // and its runtime position is the other half. No IR history knows the
             // position, so recreation could reissue values.
-            Ok(zero_migrate_backend::vendor::VendorStatement {
+            Ok(zeroship_migrate_backend::vendor::VendorStatement {
                 name: format!("drop_sequence_{name}"),
                 up,
                 down: None,
@@ -810,7 +810,7 @@ fn render_sequence_op(
 fn render_comment_op(
     op: &Op,
     eff_schema: &str,
-) -> Result<zero_migrate_backend::vendor::VendorStatement, IrLowerError> {
+) -> Result<zeroship_migrate_backend::vendor::VendorStatement, IrLowerError> {
     let Op::Comment { target, comment } = op else {
         return Err(IrLowerError::UnsupportedOp(
             "non-comment op routed to comment renderer",
@@ -821,7 +821,7 @@ fn render_comment_op(
         .as_deref()
         .map(dml::sql_string_literal)
         .unwrap_or_else(|| "NULL".to_string());
-    Ok(zero_migrate_backend::vendor::VendorStatement {
+    Ok(zeroship_migrate_backend::vendor::VendorStatement {
         name: format!("comment_{}", comment_target_name_part(target)),
         up: format!("COMMENT ON {object} IS {value}"),
         down: None,

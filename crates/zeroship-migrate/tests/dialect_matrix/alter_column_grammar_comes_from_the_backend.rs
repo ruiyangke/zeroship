@@ -2,7 +2,7 @@
 //!
 //! # The defect this file was written against
 //!
-//! [`zero_migrate_backend::ddl::DdlEmitter`] covers the table-level and column
+//! [`zeroship_migrate_backend::ddl::DdlEmitter`] covers the table-level and column
 //! add/drop verbs and used to stop exactly at the `ALTER COLUMN` family. Its only
 //! member there handed back the two IDENTIFIERS - a quoted table reference and a
 //! quoted column reference - and no statement. Everything after those identifiers was
@@ -40,9 +40,9 @@
 //!
 //! # What the fixture is, exactly, and what it is not
 //!
-//! `FOURTH_VENDOR` is a real [`zero_migrate_backend::registry::BackendVendor`] resolved
-//! through the real [`zero_migrate_backend::registry::VendorSet`] by the real
-//! `IrAuthor`, and it supplies its OWN [`zero_migrate_backend::ddl::DdlEmitter`] —
+//! `FOURTH_VENDOR` is a real [`zeroship_migrate_backend::registry::BackendVendor`] resolved
+//! through the real [`zeroship_migrate_backend::registry::VendorSet`] by the real
+//! `IrAuthor`, and it supplies its OWN [`zeroship_migrate_backend::ddl::DdlEmitter`] —
 //! the seam under test, and the only surface a backend has for spelling DDL.
 //!
 //! Every OTHER surface is PostgreSQL's, and that is deliberate rather than a
@@ -68,17 +68,17 @@
 use std::collections::BTreeSet;
 use std::sync::LazyLock;
 
-use zero_migrate::model::ir::{ColType, IrDefault, IrFlagsOverride, Op};
-use zero_migrate::{IrAuthor, LiveSchema, Migration, MigrationIr, CURRENT_IR_VERSION};
-use zero_migrate_backend::attribute::AttributeVocabulary;
-use zero_migrate_backend::ddl::{CreateTableRequest, DdlEmitter};
-use zero_migrate_backend::registry::{BackendVendor, VendorSet};
-use zero_migrate_backend::snapshot::{ColumnSnapshot, ConstraintSnapshot, IndexSnapshot};
-use zero_migrate_ir::backend::{
+use zeroship_migrate::model::ir::{ColType, IrDefault, IrFlagsOverride, Op};
+use zeroship_migrate::{IrAuthor, LiveSchema, Migration, MigrationIr, CURRENT_IR_VERSION};
+use zeroship_migrate_backend::attribute::AttributeVocabulary;
+use zeroship_migrate_backend::ddl::{CreateTableRequest, DdlEmitter};
+use zeroship_migrate_backend::registry::{BackendVendor, VendorSet};
+use zeroship_migrate_backend::snapshot::{ColumnSnapshot, ConstraintSnapshot, IndexSnapshot};
+use zeroship_migrate_ir::backend::{
     BackendDescriptor, Capability, CapabilitySet, IdentifierLimit, Limits,
 };
-use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_ir::ir::PartitionBounds;
+use zeroship_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::ir::PartitionBounds;
 
 use crate::support;
 
@@ -250,7 +250,7 @@ impl DdlEmitter for FourthEmitter {
 /// `&'static dyn`, and a `static` initializer may not READ another `static` to borrow
 /// SQLite's. Leaking once at first use is the same lifetime with a different birth.
 static FOURTH_VENDOR: LazyLock<&'static BackendVendor> = LazyLock::new(|| {
-    let borrowed = &zero_migrate_postgres::VENDOR;
+    let borrowed = &zeroship_migrate_postgres::VENDOR;
     Box::leak(Box::new(BackendVendor {
         descriptor: &FOURTH_DESCRIPTOR,
         dml: borrowed.dml,
@@ -275,9 +275,9 @@ static FOURTH_VENDOR: LazyLock<&'static BackendVendor> = LazyLock::new(|| {
 fn four_vendors() -> VendorSet {
     static SET: LazyLock<&'static [&'static BackendVendor]> = LazyLock::new(|| {
         Box::leak(Box::new([
-            &zero_migrate_postgres::VENDOR,
-            &zero_migrate_sqlite::VENDOR,
-            &zero_migrate_mysql::VENDOR,
+            &zeroship_migrate_postgres::VENDOR,
+            &zeroship_migrate_sqlite::VENDOR,
+            &zeroship_migrate_mysql::VENDOR,
             *FOURTH_VENDOR,
         ])) as &'static [&'static BackendVendor]
     });
@@ -394,7 +394,7 @@ fn a_default_change_is_spelled_by_the_backend() {
         table: TABLE.into(),
         column: COLUMN.into(),
         value: IrDefault::Literal {
-            value: zero_migrate::model::ir::IrScalar::Int(7),
+            value: zeroship_migrate::model::ir::IrScalar::Int(7),
         },
         schema: None,
         existence_guard: None,

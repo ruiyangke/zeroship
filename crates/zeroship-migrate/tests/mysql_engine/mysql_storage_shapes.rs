@@ -22,12 +22,12 @@
 use std::collections::HashMap;
 
 use crate::support;
-use zero_migrate::model::ir::{
+use zeroship_migrate::model::ir::{
     AlterPrimaryKeyAction, ColType, ColumnReference, EmptyContainerKind, IndexElement, IrColumn,
     IrConstraint, IrConstraintKind, IrDefault, IrFlagsOverride, IrIndex, IrScalar, Op, ValueFormat,
 };
-use zero_migrate::model::validate::validate_ir;
-use zero_migrate::{
+use zeroship_migrate::model::validate::validate_ir;
+use zeroship_migrate::{
     desired_snapshot_for_dialect, CollectionDescriptor, DeclarativeAuthor, FieldDescriptor,
     IndexDescriptor, MigrationIr, SchemaSnapshot, CURRENT_IR_VERSION,
 };
@@ -71,7 +71,7 @@ fn column(name: &str, ty: ColType) -> IrColumn {
 
 fn create_table(name: &str, columns: Vec<IrColumn>) -> Op {
     Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: name.to_string(),
         columns,
         primary_key: None,
@@ -163,7 +163,7 @@ fn fk_constraint(
 fn assert_mysql_key_refusal(migration: &MigrationIr, position: &str, column: &str) {
     let rendered = refused(
         migration,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         "MySQL 1170: an unbounded TEXT key needs a prefix length",
     );
     assert!(
@@ -176,14 +176,14 @@ fn assert_mysql_key_refusal(migration: &MigrationIr, position: &str, column: &st
     );
 }
 
-fn refused(migration: &MigrationIr, dialect: &zero_migrate::DialectId, what: &str) -> String {
-    let error = validate_ir(zero_migrate::shipping_vendors(), migration, dialect).expect_err(what);
+fn refused(migration: &MigrationIr, dialect: &zeroship_migrate::DialectId, what: &str) -> String {
+    let error = validate_ir(zeroship_migrate::shipping_vendors(), migration, dialect).expect_err(what);
     assert_eq!(&error.dialect, dialect, "{what}: {error}");
     format!("{error}")
 }
 
-fn accepted(migration: &MigrationIr, dialect: &zero_migrate::DialectId, what: &str) {
-    validate_ir(zero_migrate::shipping_vendors(), migration, dialect)
+fn accepted(migration: &MigrationIr, dialect: &zeroship_migrate::DialectId, what: &str) {
+    validate_ir(zeroship_migrate::shipping_vendors(), migration, dialect)
         .unwrap_or_else(|error| panic!("{what} should validate on {dialect:?}: {error}"));
 }
 
@@ -200,7 +200,7 @@ fn mysql_refuses_a_bare_literal_default_on_a_text_column() {
 
     let rendered = refused(
         &migration,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         "a literal DEFAULT on TEXT is fatal on MySQL",
     );
     assert!(
@@ -210,10 +210,10 @@ fn mysql_refuses_a_bare_literal_default_on_a_text_column() {
 
     accepted(
         &migration,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         "a text default",
     );
-    accepted(&migration, &zero_migrate_sqlite::DIALECT, "a text default");
+    accepted(&migration, &zeroship_migrate_sqlite::DIALECT, "a text default");
 }
 
 // (b) A bytes default renders `DEFAULT (X'..')`, an EXPRESSION MySQL accepts.
@@ -225,7 +225,7 @@ fn mysql_accepts_a_bytes_default_that_renders_as_an_expression() {
     });
     let migration = ir(vec![create_table("widgets", vec![blob])]);
 
-    accepted(&migration, &zero_migrate_mysql::DIALECT, "a bytes default");
+    accepted(&migration, &zeroship_migrate_mysql::DIALECT, "a bytes default");
 }
 
 // (c) A JSON container default renders `DEFAULT (JSON_OBJECT())`.
@@ -239,7 +239,7 @@ fn mysql_accepts_a_json_container_default_that_renders_as_an_expression() {
 
     accepted(
         &migration,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         "a json container default",
     );
 }
@@ -255,7 +255,7 @@ fn mysql_accepts_a_literal_default_on_a_bounded_string_column() {
 
     accepted(
         &migration,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         "a bounded string default",
     );
 }
@@ -272,7 +272,7 @@ fn mysql_refuses_a_literal_default_on_a_case_insensitive_text_column() {
 
     let rendered = refused(
         &migration,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         "caseInsensitive renders bare TEXT, so the literal DEFAULT is fatal",
     );
     assert!(
@@ -282,12 +282,12 @@ fn mysql_refuses_a_literal_default_on_a_case_insensitive_text_column() {
 
     accepted(
         &migration,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         "a citext default",
     );
     accepted(
         &migration,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         "a NOCASE text default",
     );
 }
@@ -305,7 +305,7 @@ fn mysql_accepts_a_literal_default_on_a_value_formatted_text_column() {
 
     accepted(
         &migration,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         "a value-formatted text default",
     );
 }
@@ -321,7 +321,7 @@ fn mysql_refuses_an_index_over_a_bare_text_column() {
 
     let rendered = refused(
         &migration,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         "MySQL 1170: a TEXT key needs a prefix length",
     );
     assert!(
@@ -329,8 +329,8 @@ fn mysql_refuses_an_index_over_a_bare_text_column() {
         "the refusal should name the column: {rendered}"
     );
 
-    accepted(&migration, &zero_migrate_postgres::DIALECT, "a text index");
-    accepted(&migration, &zero_migrate_sqlite::DIALECT, "a text index");
+    accepted(&migration, &zeroship_migrate_postgres::DIALECT, "a text index");
+    accepted(&migration, &zeroship_migrate_sqlite::DIALECT, "a text index");
 }
 
 // (g) A bounded string renders VARCHAR(50), which indexes without a prefix.
@@ -346,7 +346,7 @@ fn mysql_accepts_an_index_over_a_bounded_string_column() {
 
     accepted(
         &migration,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         "a bounded string index",
     );
 }
@@ -364,7 +364,7 @@ fn mysql_accepts_an_index_over_an_id_prefixed_text_column() {
 
     accepted(
         &migration,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         "an id-prefixed text index",
     );
 }
@@ -489,7 +489,7 @@ fn mysql_refuses_an_added_foreign_key_that_would_synthesize_a_text_key() {
         create_table("parents", vec![parent_id]),
         create_table("children", vec![column("parent_id", ColType::Text)]),
         Op::AddConstraint {
-            attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
             table: "children".to_string(),
             constraint: fk_constraint("children_parent_fkey", "parent_id", "parents", "id"),
             schema: None,
@@ -553,18 +553,18 @@ fn mysql_declarative_refuses_the_live_fixture_shape_of_a_widthless_indexed_strin
     };
     let policy = support::no_inject("mysql_key_gate");
     let desired = desired_snapshot_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         "mysql_key_gate",
         &[descriptor],
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         &policy,
     )
     .expect("the descriptor compiles before the storage gate runs");
     let error = DeclarativeAuthor::new_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         "mysql_key_gate",
         OWNER,
-        zero_migrate_mysql::DIALECT,
+        zeroship_migrate_mysql::DIALECT,
     )
     .diff(
         &desired,
@@ -611,18 +611,18 @@ fn mysql_declarative_refuses_an_implicit_foreign_key_index_over_widthless_string
     };
     let policy = support::no_inject("mysql_key_gate");
     let desired = desired_snapshot_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         "mysql_key_gate",
         &[parent, child],
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         &policy,
     )
     .expect("the descriptors compile before the storage gate runs");
     let error = DeclarativeAuthor::new_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         "mysql_key_gate",
         OWNER,
-        zero_migrate_mysql::DIALECT,
+        zeroship_migrate_mysql::DIALECT,
     )
     .diff(
         &desired,

@@ -4,15 +4,15 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::model::ir::{IndexElement, IndexMethod, IrFlagsOverride, Op};
-use zero_migrate::model::validate::{validate_ir, CODE_OP_INVALID};
-use zero_migrate::{
+use zeroship_migrate::model::ir::{IndexElement, IndexMethod, IrFlagsOverride, Op};
+use zeroship_migrate::model::validate::{validate_ir, CODE_OP_INVALID};
+use zeroship_migrate::{
     effective_policy_from_charter_toml, resolve_create_table_policy, Approval, EffectivePolicy,
     ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine, MigrationIr, PlanStep,
     CURRENT_IR_VERSION,
 };
-use zero_migrate_postgres::DIALECT as POSTGRES;
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate_postgres::DIALECT as POSTGRES;
+use zeroship_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_dialectal";
 const APP: &str = "app_dialectal";
@@ -68,10 +68,10 @@ fn pg_only_ir() -> MigrationIr {
 #[test]
 fn lower_selects_postgres_leg_and_emits_nothing_for_absent_sqlite_mysql_legs() {
     let pg_steps = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &support::no_inject("app"),
     )
     .lower_steps(&pg_only_ir(), &LiveSchema::default())
@@ -94,9 +94,9 @@ fn lower_selects_postgres_leg_and_emits_nothing_for_absent_sqlite_mysql_legs() {
     // Asserting the step list is EXACTLY EMPTY, not merely "no HNSW step": the
     // whole claim is that the op vanished, and a length check is what catches a
     // future change that emits some other step in its place.
-    for dialect in [&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT] {
+    for dialect in [&zeroship_migrate_sqlite::DIALECT, &zeroship_migrate_mysql::DIALECT] {
         let steps = IrAuthor::new(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             PROJECT,
             APP,
             dialect,
@@ -204,13 +204,13 @@ fn authored_create_table_lowers_under_the_charter_that_shaped_it() {
     let resolved =
         resolve_create_table_policy(&authored, &policy, PROJECT).expect("table shape resolves");
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &policy,
     );
-    let guard_cfg = GuardConfig::from_policy(policy, zero_migrate_postgres::DIALECT);
+    let guard_cfg = GuardConfig::from_policy(policy, zeroship_migrate_postgres::DIALECT);
     let (steps, _fragments) = author
         .lower_guarded(&resolved, &guard_cfg, &LiveSchema::default())
         .expect("an authored createTable lowers under the charter that shaped it");
@@ -234,10 +234,10 @@ async fn sqlite_apply_selects_explicit_empty_leg_without_column_effect() {
     );
 
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
     let migrations = author
@@ -249,9 +249,9 @@ async fn sqlite_apply_selects_explicit_empty_leg_without_column_effect() {
         "SQLite lower should emit only createTable; its explicit dialectal leg is empty"
     );
 
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let guard_cfg =
-        GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate_sqlite::DIALECT);
+        GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_sqlite::DIALECT);
     let plan = engine.plan(&migrations, &guard_cfg);
     assert!(
         plan.denied.is_empty(),
@@ -288,9 +288,9 @@ fn validate_rejects_empty_and_nested_dialectal_ops() {
         }],
     );
     let err = validate_ir(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &empty,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
     )
     .unwrap_err();
     assert_eq!(err.code, CODE_OP_INVALID);
@@ -307,9 +307,9 @@ fn validate_rejects_empty_and_nested_dialectal_ops() {
         }],
     );
     let err = validate_ir(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &nested,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
     )
     .unwrap_err();
     assert_eq!(err.code, CODE_OP_INVALID);
@@ -322,9 +322,9 @@ fn validate_accepts_absent_and_misspelled_target_dialectal_legs() {
     // every migration would be rejected for ops the target was never going to run.
     let absent = pg_only_ir();
     validate_ir(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &absent,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
     )
     .expect("an absent exact target leg contributes nothing, it does not refuse");
 
@@ -335,15 +335,15 @@ fn validate_accepts_absent_and_misspelled_target_dialectal_legs() {
         "misspelled_postgres",
         vec![Op::Dialectal {
             legs: BTreeMap::from([(
-                zero_migrate_ir::dialect::DialectId::new("postgre"),
+                zeroship_migrate_ir::dialect::DialectId::new("postgre"),
                 vec![hnsw_index_op()],
             )]),
         }],
     );
     validate_ir(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &misspelled,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
     )
     .expect("a misspelled key leaves postgres uncovered, which emits nothing");
 }

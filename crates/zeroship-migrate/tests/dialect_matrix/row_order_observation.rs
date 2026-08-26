@@ -90,19 +90,19 @@ use tempfile::TempDir;
 
 use crate::support::mysql::{DatabaseGuard, MysqlDevSession};
 use crate::support::PgDevSession;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::apply::executor::LockMode;
-use zero_migrate::driver::SqlSession;
-use zero_migrate::model::ir::Op;
-use zero_migrate::render::fold::single_fold;
-use zero_migrate::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::apply::executor::LockMode;
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::model::ir::Op;
+use zeroship_migrate::render::fold::single_fold;
+use zeroship_migrate::{
     resolve_create_table_policy, Approval, EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor,
     LiveSchema, MigrationEngine, MigrationIr,
 };
-use zero_migrate_mysql::MysqlBackend;
-use zero_migrate_postgres::PostgresBackend;
-use zero_migrate_sqlite::backend::Mode;
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate_mysql::MysqlBackend;
+use zeroship_migrate_postgres::PostgresBackend;
+use zeroship_migrate_sqlite::backend::Mode;
+use zeroship_migrate_sqlite::SqliteBackend;
 
 const OWNER: &str = "app_row_order";
 
@@ -220,7 +220,7 @@ async fn apply_envelope<B: MigrationBackend>(
     backend: &B,
     cfg: &ExecutorConfig,
     policy: &EffectivePolicy,
-    dialect: &zero_migrate::DialectId,
+    dialect: &zeroship_migrate::DialectId,
     live: &LiveSchema,
 ) -> Result<(), String> {
     let authored: MigrationIr = serde_json::from_str(envelope)
@@ -230,7 +230,7 @@ async fn apply_envelope<B: MigrationBackend>(
     let source = serde_json::to_string(&resolved)
         .map_err(|error| format!("{tag}: re-serialize the resolved envelope: {error}"))?;
     let artifact = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
         dialect,
@@ -244,7 +244,7 @@ async fn apply_envelope<B: MigrationBackend>(
         &GuardConfig::from_policy(policy.clone(), dialect.clone()),
     )
     .map_err(|error| format!("{tag}: guarded lower: {error:?}"))?;
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,
@@ -270,7 +270,7 @@ async fn apply_fixture<B: MigrationBackend>(
     backend: &B,
     cfg: &ExecutorConfig,
     policy: &EffectivePolicy,
-    dialect: &zero_migrate::DialectId,
+    dialect: &zeroship_migrate::DialectId,
 ) -> Result<(), String> {
     let ddl = ddl_envelope(pin);
     apply_envelope(
@@ -289,18 +289,18 @@ async fn apply_fixture<B: MigrationBackend>(
         .await
         .map_err(|error| format!("read the applied schema back: {error}"))?;
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, OWNER);
-    if dialect == &zero_migrate_sqlite::DIALECT {
+    if dialect == &zeroship_migrate_sqlite::DIALECT {
         let authored: MigrationIr =
             serde_json::from_str(&ddl).map_err(|error| format!("re-parse the DDL: {error}"))?;
         let history: Vec<Op> = authored.ops;
         if let Ok(defs) = single_fold::fold(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &history,
             dialect,
             &cfg.project_schema,
             policy,
         )
-        .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
+        .map(|folded| folded.project_field_defs(zeroship_migrate::shipping_vendors()))
         {
             live.sdk_schemas = defs;
         }
@@ -403,7 +403,7 @@ async fn pg_row_order(url: &str, pin: Pin) -> Result<Vec<String>, String> {
         &backend,
         &cfg,
         &policy,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
     )
     .await?;
 
@@ -446,7 +446,7 @@ async fn mysql_row_order(url: &str, pin: Pin) -> Result<Vec<String>, String> {
         .ensure_journal(&cfg)
         .await
         .map_err(|error| format!("create the journal: {error}"))?;
-    apply_fixture(pin, &backend, &cfg, &policy, &zero_migrate_mysql::DIALECT).await?;
+    apply_fixture(pin, &backend, &cfg, &policy, &zeroship_migrate_mysql::DIALECT).await?;
 
     let rows = session
         .query(
@@ -477,7 +477,7 @@ async fn sqlite_row_order(pin: Pin) -> Result<Vec<String>, String> {
         .map_err(|error| format!("open the probe database: {error}"))?;
     let policy = support::operator_charter(SQLITE_PROJECT);
     let cfg = ExecutorConfig::new(SQLITE_PROJECT, SQLITE_PROJECT, policy.clone());
-    apply_fixture(pin, &backend, &cfg, &policy, &zero_migrate_sqlite::DIALECT).await?;
+    apply_fixture(pin, &backend, &cfg, &policy, &zeroship_migrate_sqlite::DIALECT).await?;
 
     backend
         .actor()

@@ -6,7 +6,7 @@
 //! single monolithic shape field on a policy profile. They are driven by the composed,
 //! unforgeable [`EffectivePolicy`]: for each `createTable` op we build the
 //! [`ObjectName`] the op names and ask `effective.injects_for(&object)` for the
-//! covering [`zero_migrate_policy::InjectSpec`]s (in the sealed cross-layer inject total order). Each
+//! covering [`zeroship_migrate_policy::InjectSpec`]s (in the sealed cross-layer inject total order). Each
 //! spec contributes its columns (prepended, in order), indexes (appended), and - if
 //! it pins one - the table's primary key. The policy CONTENT (which columns, which
 //! type token) lives in the policy crate; this module only MAPS the opaque type
@@ -32,7 +32,7 @@
 //! primary-key rules hold up better against the same raw-create path has not been
 //! measured here; do not read this note as a claim that they do.
 
-use zero_migrate_policy::{
+use zeroship_migrate_policy::{
     normalize_object_name, AuthorPkPolicy, EffectivePolicy, InjectCollation, InjectColumn,
     InjectIndex, ObjectName,
 };
@@ -41,7 +41,7 @@ use crate::model::expr::{Expr, SynthFn};
 use crate::model::ir::{
     ColType, ColumnCollation, IndexElement, IrColumn, IrDefault, IrIndex, MigrationIr, Op,
 };
-use zero_migrate_ir::policy_registry;
+use zeroship_migrate_ir::policy_registry;
 
 /// Error raised while applying the effective policy's table injection.
 #[derive(Debug, thiserror::Error)]
@@ -136,7 +136,7 @@ pub enum TableShapeError {
 }
 
 /// The resolved injection shape covering ONE object: the union of every covering
-/// [`zero_migrate_policy::InjectSpec`]'s columns/indexes plus the first pinned primary key. This is the
+/// [`zeroship_migrate_policy::InjectSpec`]'s columns/indexes plus the first pinned primary key. This is the
 /// per-object content the resolver lays into the IR - the flattening of
 /// `injects_for(object)` into a single ordered shape.
 ///
@@ -681,7 +681,7 @@ fn validate_folded_id_identity(table: &str, column: &IrColumn) -> Result<(), Tab
 ///
 /// The predicate this replaced re-derived the expected columns from a policy
 /// profile's own shape field; this peer re-derives them from the covering
-/// [`zero_migrate_policy::InjectSpec`]s (`inject`). Beyond the leading-prefix name/shape match it adds
+/// [`zeroship_migrate_policy::InjectSpec`]s (`inject`). Beyond the leading-prefix name/shape match it adds
 /// the II.2.6b conformance check: a resolved column occupying an injected slot must
 /// match the [`InjectColumn`]'s type + nullability + default (a rename-into or a
 /// hand-forged column that merely borrows an injected NAME but diverges in shape is
@@ -765,14 +765,14 @@ fn system_columns_match(actual: &IrColumn, expected: &IrColumn) -> bool {
 }
 
 // The charter -> `EffectivePolicy` constructor moved DOWN to
-// `zero_migrate_ir::policy_registry`, beside the builtin registry it composes
+// `zeroship_migrate_ir::policy_registry`, beside the builtin registry it composes
 // against. It needed nothing from the engine, and leaving it here put it out of
 // reach of the BACKEND crates, which sit below the engine - so a vendor that
 // wanted a real composed policy for its tests had to hand-roll a second
 // implementation of a security-critical composition. Re-exported so every
 // `model::table_shape::effective_policy_from_charter_toml` and
-// `zero_migrate::effective_policy_from_charter_toml` path resolves unchanged.
-pub use zero_migrate_ir::policy_registry::effective_policy_from_charter_toml;
+// `zeroship_migrate::effective_policy_from_charter_toml` path resolves unchanged.
+pub use zeroship_migrate_ir::policy_registry::effective_policy_from_charter_toml;
 
 /// Compose an ORDERED list of charter documents into one sealed [`EffectivePolicy`].
 /// `layers[0]` is the ROOT charter (the bound; the only layer where a `mandatory`
@@ -796,13 +796,13 @@ pub fn effective_policy_from_charter_layers(layers: &[&str]) -> Result<Effective
     let registry = policy_registry::builtin_registry();
     let mut acc = effective_policy_from_charter_toml(root)?;
     for (index, source) in layers.iter().enumerate().skip(1) {
-        let draft = zero_migrate_policy::PolicyDoc::parse_toml(
+        let draft = zeroship_migrate_policy::PolicyDoc::parse_toml(
             source,
             &registry,
-            zero_migrate_policy::LoadContext::NonRootLayer,
+            zeroship_migrate_policy::LoadContext::NonRootLayer,
         )
         .map_err(|e| format!("policy layer {} failed to load: {e:?}", index + 1))?;
-        acc = zero_migrate_policy::admit(&acc, &draft, &registry)
+        acc = zeroship_migrate_policy::admit(&acc, &draft, &registry)
             .map_err(|e| format!("policy layer {} rejected: {e:?}", index + 1))?;
     }
     creatable_escape_checked(acc)
@@ -818,8 +818,8 @@ pub fn effective_policy_from_charter_layers(layers: &[&str]) -> Result<Effective
 /// site reaches. Both now ask one shared function, so the two composition paths cannot
 /// answer differently.
 fn creatable_escape_checked(
-    composed: zero_migrate_policy::EffectivePolicy,
-) -> Result<zero_migrate_policy::EffectivePolicy, String> {
+    composed: zeroship_migrate_policy::EffectivePolicy,
+) -> Result<zeroship_migrate_policy::EffectivePolicy, String> {
     composed
         .check_creatable_escape()
         .map_err(|e| format!("policy charter rejected: {e:?}"))?;
@@ -851,7 +851,7 @@ mod tests {
             name: "m".into(),
             owner_app: "app".into(),
             ops: vec![Op::CreateTable {
-                attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
                 name: "widgets".into(),
                 columns,
                 primary_key,

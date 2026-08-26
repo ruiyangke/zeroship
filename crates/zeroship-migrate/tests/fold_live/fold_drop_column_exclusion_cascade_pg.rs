@@ -67,14 +67,14 @@ use crate::support;
 use std::collections::BTreeMap;
 
 use crate::support::PgDevSession;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::driver::SqlSession;
-use zero_migrate::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::{
     diff_snapshots, fold_ops, resolve_create_table_policy, Approval, ExecutorConfig, GuardConfig,
     IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr, StructuralDrift,
 };
-use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
-use zero_migrate_postgres::PostgresBackend;
+use zeroship_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zeroship_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_fold_drop_exclusion_pg";
 
@@ -146,13 +146,13 @@ async fn drift_between_fold_and_live(
         let resolved_source = serde_json::to_string(&resolved)
             .map_err(|error| format!("serialize resolved test IR: {error}"))?;
         let author = IrAuthor::new(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &cfg.project_schema,
             OWNER,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &policy,
         );
-        let guard = GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT);
+        let guard = GuardConfig::from_policy(policy.clone(), zeroship_migrate_postgres::DIALECT);
         let artifact = author
             .load_and_lower_guarded(
                 &resolved_source,
@@ -163,7 +163,7 @@ async fn drift_between_fold_and_live(
             )
             .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;
 
-        MigrationEngine::new(zero_migrate::shipping_vendors())
+        MigrationEngine::new(zeroship_migrate::shipping_vendors())
             .apply_plan(
                 &artifact.plan.steps,
                 Approval::Approved,
@@ -189,9 +189,9 @@ async fn drift_between_fold_and_live(
             resolve_create_table_policy(&folded_authored, &policy, &cfg.project_schema)
                 .map_err(|error| format!("resolve folded create-table policy: {error}"))?;
         let expected = fold_ops(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &folded_resolved.ops,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &cfg.project_schema,
             &policy,
         )
@@ -200,7 +200,7 @@ async fn drift_between_fold_and_live(
             .await
             .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
         Ok(diff_snapshots(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &expected,
             &actual,
         ))

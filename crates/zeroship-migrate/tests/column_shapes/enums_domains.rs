@@ -1,11 +1,11 @@
 use crate::support;
 
-use zero_migrate::model::ir::ExistenceGuard;
-use zero_migrate::{
+use zeroship_migrate::model::ir::ExistenceGuard;
+use zeroship_migrate::{
     BinaryOp, ColType, Expr, IrAuthor, IrColumn, IrDefault, IrFlagsOverride, IrLowerError,
     IrScalar, LiveSchema, MigrationIr, Op, CURRENT_IR_VERSION,
 };
-use zero_migrate::{GuardDir, GuardProbe};
+use zeroship_migrate::{GuardDir, GuardProbe};
 
 const SCHEMA: &str = "app";
 const OWNER: &str = "app_a";
@@ -47,7 +47,7 @@ fn ir(ops: Vec<Op>) -> MigrationIr {
 
 fn create_table(name: &str, columns: Vec<IrColumn>) -> Op {
     Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: name.to_string(),
         columns,
         primary_key: None,
@@ -91,9 +91,9 @@ fn create_domain() -> Op {
     }
 }
 
-fn lower_all(dialect: &zero_migrate::DialectId, ops: Vec<Op>) -> Vec<String> {
+fn lower_all(dialect: &zeroship_migrate::DialectId, ops: Vec<Op>) -> Vec<String> {
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         OWNER,
         dialect,
@@ -107,7 +107,7 @@ fn lower_all(dialect: &zero_migrate::DialectId, ops: Vec<Op>) -> Vec<String> {
         .collect()
 }
 
-fn lower_create_table(dialect: &zero_migrate::DialectId, ops: Vec<Op>) -> String {
+fn lower_create_table(dialect: &zeroship_migrate::DialectId, ops: Vec<Op>) -> String {
     lower_all(dialect, ops)
         .into_iter()
         .find(|sql| sql.starts_with("CREATE TABLE"))
@@ -117,7 +117,7 @@ fn lower_create_table(dialect: &zero_migrate::DialectId, ops: Vec<Op>) -> String
 #[test]
 fn pg_enum_and_domain_render_standalone_types_and_column_refs() {
     let sql = lower_all(
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         vec![
             create_enum(),
             create_domain(),
@@ -166,7 +166,7 @@ fn pg_enum_and_domain_render_standalone_types_and_column_refs() {
 #[test]
 fn pg_domain_over_enum_uses_the_materialized_enum_qname() {
     let sql = lower_all(
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         vec![
             create_enum(),
             Op::CreateDomain {
@@ -196,7 +196,7 @@ fn pg_domain_over_enum_uses_the_materialized_enum_qname() {
 fn pg_named_type_column_operations_honor_explicit_reference_schema() {
     let ops = vec![
         Op::AddColumn {
-            attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
             table: "subscriptions".to_string(),
             column: "tier".to_string(),
             ty: ColType::Enum {
@@ -226,7 +226,7 @@ fn pg_named_type_column_operations_honor_explicit_reference_schema() {
             existence_guard: None,
         },
     ];
-    let sql = lower_all(&zero_migrate_postgres::DIALECT, ops.clone());
+    let sql = lower_all(&zeroship_migrate_postgres::DIALECT, ops.clone());
 
     assert_eq!(
         sql[0],
@@ -237,11 +237,11 @@ fn pg_named_type_column_operations_honor_explicit_reference_schema() {
         r#"ALTER TABLE "app"."subscriptions" ALTER COLUMN "period" TYPE "shared_types"."billing_period" USING "period"::"shared_types"."billing_period""#
     );
 
-    let base = zero_migrate::SchemaSnapshot {
+    let base = zeroship_migrate::SchemaSnapshot {
         tables: std::collections::BTreeMap::from([(
             "subscriptions".to_string(),
-            zero_migrate::TableSnapshot {
-                columns: vec![zero_migrate::ColumnSnapshot {
+            zeroship_migrate::TableSnapshot {
+                columns: vec![zeroship_migrate::ColumnSnapshot {
                     name: "period".to_string(),
                     data_type: "integer".to_string(),
                     nullable: true,
@@ -258,11 +258,11 @@ fn pg_named_type_column_operations_honor_explicit_reference_schema() {
         )]),
         ..Default::default()
     };
-    let folded = zero_migrate::fold_ops_onto(
-        zero_migrate::shipping_vendors(),
+    let folded = zeroship_migrate::fold_ops_onto(
+        zeroship_migrate::shipping_vendors(),
         &base,
         &ops,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &support::no_inject("app"),
     )
@@ -291,7 +291,7 @@ fn pg_named_type_column_operations_honor_explicit_reference_schema() {
 #[test]
 fn sqlite_enum_and_domain_inline_at_column_use_site() {
     let sql = lower_create_table(
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         vec![
             create_enum(),
             create_domain(),
@@ -330,7 +330,7 @@ fn sqlite_enum_and_domain_inline_at_column_use_site() {
 #[test]
 fn mysql_enum_and_domain_inline_at_column_use_site() {
     let sql = lower_create_table(
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         vec![
             create_enum(),
             create_domain(),
@@ -369,10 +369,10 @@ fn mysql_enum_and_domain_inline_at_column_use_site() {
 #[test]
 fn mysql_named_type_reference_outside_inline_create_add_fails_closed() {
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         OWNER,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         &support::no_inject("app"),
     );
     let err = author
@@ -408,10 +408,10 @@ fn mysql_named_type_reference_outside_inline_create_add_fails_closed() {
 #[test]
 fn pg_guarded_type_drops_stamp_named_type_probes() {
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         OWNER,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &support::no_inject("app"),
     );
     let migrations = author

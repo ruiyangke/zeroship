@@ -7,22 +7,22 @@
 
 use std::collections::BTreeMap;
 
-use zero_migrate_backend::dml::{
+use zeroship_migrate_backend::dml::{
     self, BindCtx, DmlError, LimitedDeleteRenderRequest, OnConflictRenderRequest,
 };
-use zero_migrate_backend::error::IrLowerError;
-use zero_migrate_backend::renderer::{
+use zeroship_migrate_backend::error::IrLowerError;
+use zeroship_migrate_backend::renderer::{
     Capability, DmlRenderer, FeatureSupportKey, MaterializedNamedTypeOp,
 };
-use zero_migrate_backend::step::BindValue;
-use zero_migrate_ir::backend::BackendDescriptor;
-use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_ir::expr::{AggFunc, CastTarget, Duration, Expr, ExtractField, ScalarFn};
-use zero_migrate_ir::ir::{
+use zeroship_migrate_backend::step::BindValue;
+use zeroship_migrate_ir::backend::BackendDescriptor;
+use zeroship_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::expr::{AggFunc, CastTarget, Duration, Expr, ExtractField, ScalarFn};
+use zeroship_migrate_ir::ir::{
     ForEach, IrScalar, IrValue, Op, RaiseLevel, TableRef, TriggerAction, TriggerEvent, TriggerStmt,
     TriggerTiming,
 };
-use zero_migrate_ir::validate::{
+use zeroship_migrate_ir::validate::{
     ExprDialectFeature, ExprDialectRejection, ExprDialectValidator, UnsupportedKind,
     CODE_DIALECT_UNSUPPORTED, CODE_EXPR_NOT_PORTABLE, CODE_UNSUPPORTED,
 };
@@ -245,7 +245,7 @@ impl DmlRenderer for MysqlDmlRenderer {
         &crate::descriptor::MYSQL_DESCRIPTOR
     }
 
-    fn supports(&self, cap: zero_migrate_ir::backend::Capability) -> bool {
+    fn supports(&self, cap: zeroship_migrate_ir::backend::Capability) -> bool {
         self.descriptor().capabilities.contains(cap)
     }
 
@@ -303,7 +303,7 @@ impl DmlRenderer for MysqlDmlRenderer {
                 columns, r#where, ..
             } => {
                 if columns.iter().any(|element| {
-                    matches!(element, zero_migrate_ir::ir::IndexElement::Expr { .. })
+                    matches!(element, zeroship_migrate_ir::ir::IndexElement::Expr { .. })
                 }) {
                     Some("createIndex expression elements are not supported on MySQL")
                 } else if r#where.is_some() {
@@ -552,7 +552,7 @@ impl DmlRenderer for MysqlDmlRenderer {
     ///
     /// Neutering this method AFTER the move reddens strictly more than neutering
     /// core did before it, because the change also routed two SECOND homes found
-    /// during it - `zero_migrate_mysql::backend::journal_sql` and `::backfill_sql`,
+    /// during it - `zeroship_migrate_mysql::backend::journal_sql` and `::backfill_sql`,
     /// each carrying its own copy of the spelling, and so unreachable by the core
     /// neuter at all. Nothing was lost at any step: the after-set is a strict
     /// superset of the before-set, and the binary's test total did not move.
@@ -615,7 +615,7 @@ impl DmlRenderer for MysqlDmlRenderer {
     /// reaches the MySQL session without a `FROM_BASE64` wrapper is refused.
     fn bind_bytes(&self, bytes: &[u8], push: &mut dyn FnMut(BindValue) -> String) -> String {
         let placeholder = push(BindValue::Text(
-            zero_migrate_backend::spelling::base64_standard(bytes),
+            zeroship_migrate_backend::spelling::base64_standard(bytes),
         ));
         format!("FROM_BASE64({placeholder})")
     }
@@ -965,7 +965,7 @@ impl DmlRenderer for MysqlDmlRenderer {
         &self,
         op: &Op,
         eff_schema: &str,
-    ) -> Result<Vec<zero_migrate_backend::vendor::VendorStatement>, IrLowerError> {
+    ) -> Result<Vec<zeroship_migrate_backend::vendor::VendorStatement>, IrLowerError> {
         match op {
             Op::CreateTrigger {
                 name,
@@ -998,7 +998,7 @@ impl DmlRenderer for MysqlDmlRenderer {
                     up.push_str("IF EXISTS ");
                 }
                 up.push_str(&qname);
-                Ok(vec![zero_migrate_backend::vendor::VendorStatement {
+                Ok(vec![zeroship_migrate_backend::vendor::VendorStatement {
                     name: format!("drop_trigger_{name}_{table}"),
                     up,
                     down: None,
@@ -1017,7 +1017,7 @@ impl DmlRenderer for MysqlDmlRenderer {
         &self,
         _op: &Op,
         _eff_schema: &str,
-    ) -> Result<zero_migrate_backend::vendor::VendorStatement, IrLowerError> {
+    ) -> Result<zeroship_migrate_backend::vendor::VendorStatement, IrLowerError> {
         Err(IrLowerError::SequenceUnsupported {
             kind: "sequence",
             dialect: DIALECT,
@@ -1030,7 +1030,7 @@ impl DmlRenderer for MysqlDmlRenderer {
     fn render_materialized_named_type_op(
         &self,
         _op: MaterializedNamedTypeOp<'_>,
-    ) -> Result<zero_migrate_backend::vendor::VendorStatement, IrLowerError> {
+    ) -> Result<zeroship_migrate_backend::vendor::VendorStatement, IrLowerError> {
         Err(IrLowerError::UnsupportedOp(
             "validated materialized named type unsupported by MySQL reached lower",
         ))
@@ -1042,7 +1042,7 @@ impl DmlRenderer for MysqlDmlRenderer {
         &self,
         _op: &Op,
         _eff_schema: &str,
-    ) -> Result<zero_migrate_backend::vendor::VendorStatement, IrLowerError> {
+    ) -> Result<zeroship_migrate_backend::vendor::VendorStatement, IrLowerError> {
         Err(IrLowerError::UnsupportedOp(
             "validated COMMENT ON unsupported dialect reached lower",
         ))
@@ -1061,19 +1061,19 @@ impl DmlRenderer for MysqlDmlRenderer {
     /// the shipping paths reaches this.
     ///
     /// It is written out anyway because
-    /// [`zero_migrate_backend::renderer::DmlRenderer`] gives no method a default
+    /// [`zeroship_migrate_backend::renderer::DmlRenderer`] gives no method a default
     /// body. An `Option` or an inherited refusal would let the NEXT backend acquire
     /// this posture by omitting something, which is the exact failure
-    /// [`zero_migrate_backend::registry::BackendVendor::guard`] exists to prevent.
+    /// [`zeroship_migrate_backend::registry::BackendVendor::guard`] exists to prevent.
     fn render_vendor_op(
         &self,
         _op: &Op,
         _eff_schema: &str,
     ) -> Result<
-        Vec<zero_migrate_backend::vendor::VendorStatement>,
-        zero_migrate_backend::vendor::VendorError,
+        Vec<zeroship_migrate_backend::vendor::VendorStatement>,
+        zeroship_migrate_backend::vendor::VendorError,
     > {
-        Err(zero_migrate_backend::vendor::VendorError::VendorOpsUnsupported(DIALECT))
+        Err(zeroship_migrate_backend::vendor::VendorError::VendorOpsUnsupported(DIALECT))
     }
 }
 
@@ -1115,13 +1115,13 @@ fn render_mysql_trigger_create(
     timing: TriggerTiming,
     events: &[TriggerEvent],
     for_each: ForEach,
-    when: Option<&zero_migrate_ir::expr::Expr>,
+    when: Option<&zeroship_migrate_ir::expr::Expr>,
     action: &TriggerAction,
     eff_schema: &str,
-) -> Result<zero_migrate_backend::vendor::VendorStatement, IrLowerError> {
+) -> Result<zeroship_migrate_backend::vendor::VendorStatement, IrLowerError> {
     if events.is_empty() {
         return Err(IrLowerError::Vendor(
-            zero_migrate_backend::vendor::VendorError::EmptyList {
+            zeroship_migrate_backend::vendor::VendorError::EmptyList {
                 what: "trigger events",
             },
         ));
@@ -1164,7 +1164,7 @@ fn render_mysql_trigger_create(
     };
     if statements.is_empty() {
         return Err(IrLowerError::Vendor(
-            zero_migrate_backend::vendor::VendorError::EmptyList {
+            zeroship_migrate_backend::vendor::VendorError::EmptyList {
                 what: "trigger body statements",
             },
         ));
@@ -1189,7 +1189,7 @@ fn render_mysql_trigger_create(
             .join(" "),
     );
     up.push_str(" END");
-    Ok(zero_migrate_backend::vendor::VendorStatement {
+    Ok(zeroship_migrate_backend::vendor::VendorStatement {
         name: format!("create_trigger_{name}_{table}"),
         up,
         down: Some(format!("DROP TRIGGER IF EXISTS {qname}")),
@@ -1206,7 +1206,7 @@ fn render_mysql_trigger_stmt(stmt: &TriggerStmt, eff_schema: &str) -> Result<Str
         } => {
             if columns.is_empty() {
                 return Err(IrLowerError::DmlAssemble(
-                    zero_migrate_backend::dml::DmlError::MalformedInsert {
+                    zeroship_migrate_backend::dml::DmlError::MalformedInsert {
                         table: table.clone(),
                         reason: "no columns".to_string(),
                     },
@@ -1214,7 +1214,7 @@ fn render_mysql_trigger_stmt(stmt: &TriggerStmt, eff_schema: &str) -> Result<Str
             }
             if rows.is_empty() {
                 return Err(IrLowerError::DmlAssemble(
-                    zero_migrate_backend::dml::DmlError::MalformedInsert {
+                    zeroship_migrate_backend::dml::DmlError::MalformedInsert {
                         table: table.clone(),
                         reason: "no rows".to_string(),
                     },
@@ -1229,7 +1229,7 @@ fn render_mysql_trigger_stmt(stmt: &TriggerStmt, eff_schema: &str) -> Result<Str
             for (ri, row) in rows.iter().enumerate() {
                 if row.len() != columns.len() {
                     return Err(IrLowerError::DmlAssemble(
-                        zero_migrate_backend::dml::DmlError::MalformedInsert {
+                        zeroship_migrate_backend::dml::DmlError::MalformedInsert {
                             table: table.clone(),
                             reason: format!(
                                 "row {ri} has {} value(s) but {} column(s) were named",
@@ -1242,7 +1242,7 @@ fn render_mysql_trigger_stmt(stmt: &TriggerStmt, eff_schema: &str) -> Result<Str
                 let vals: Result<Vec<_>, _> = row
                     .iter()
                     .map(|value| {
-                        zero_migrate_backend::dml::render_value_inline_for_backend(value, &RENDERER)
+                        zeroship_migrate_backend::dml::render_value_inline_for_backend(value, &RENDERER)
                     })
                     .collect();
                 groups.push(format!("({})", vals?.join(", ")));
@@ -1261,7 +1261,7 @@ fn render_mysql_trigger_stmt(stmt: &TriggerStmt, eff_schema: &str) -> Result<Str
         } => {
             if set.is_empty() {
                 return Err(IrLowerError::DmlAssemble(
-                    zero_migrate_backend::dml::DmlError::EmptySet {
+                    zeroship_migrate_backend::dml::DmlError::EmptySet {
                         op: "update",
                         table: table.clone(),
                     },
@@ -1273,14 +1273,14 @@ fn render_mysql_trigger_stmt(stmt: &TriggerStmt, eff_schema: &str) -> Result<Str
                 assigns.push(format!(
                     "{} = {}",
                     dml::quote_bare_ident_for_backend("column", col, &RENDERER)?,
-                    zero_migrate_backend::dml::render_value_inline_for_backend(rhs, &RENDERER)?
+                    zeroship_migrate_backend::dml::render_value_inline_for_backend(rhs, &RENDERER)?
                 ));
             }
             let mut sql = format!("UPDATE {qtable} SET {}", assigns.join(", "));
             if let Some(pred) = r#where {
                 sql.push_str(&format!(
                     " WHERE {}",
-                    zero_migrate_backend::dml::render_expr_inline_for_backend(pred, &RENDERER)?
+                    zeroship_migrate_backend::dml::render_expr_inline_for_backend(pred, &RENDERER)?
                 ));
             }
             Ok(sql)
@@ -1293,7 +1293,7 @@ fn render_mysql_trigger_stmt(stmt: &TriggerStmt, eff_schema: &str) -> Result<Str
         } => {
             let qtable = mysql_trigger_table_ref(table, schema.as_deref(), eff_schema)?;
             let pred =
-                zero_migrate_backend::dml::render_expr_inline_for_backend(r#where, &RENDERER)?;
+                zeroship_migrate_backend::dml::render_expr_inline_for_backend(r#where, &RENDERER)?;
             Ok(match limit {
                 None => format!("DELETE FROM {qtable} WHERE {pred}"),
                 Some(n) => format!("DELETE FROM {qtable} WHERE {pred} LIMIT {}", n.get()),

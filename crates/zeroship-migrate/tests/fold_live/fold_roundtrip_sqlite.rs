@@ -24,11 +24,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::{
+use zeroship_migrate::{
     apply::executor::LockMode, fold_ops, model::ir::Op, resolve_create_table_policy, Approval,
     ExecutorConfig, IrAuthor, LiveSchema, MigrationEngine, MigrationIr, SchemaSnapshot,
 };
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_fold";
 const APP: &str = "app_fold";
@@ -80,17 +80,17 @@ async fn apply_doc(
         .expect("test IR resolves");
     let ir = serde_json::to_string(&resolved).expect("resolved IR serializes");
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
-    let document = zero_migrate::model::load::load_ir_document(
-        zero_migrate::shipping_vendors(),
+    let document = zeroship_migrate::model::load::load_ir_document(
+        zeroship_migrate::shipping_vendors(),
         &ir,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         reg,
         None,
     )
@@ -100,7 +100,7 @@ async fn apply_doc(
     let plan = author
         .lower_plan(&document, &live)
         .expect("lower the doc plan on SQLite");
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     engine
         .apply_plan(
             &plan.steps,
@@ -171,9 +171,9 @@ async fn apply_doc(
 fn canonicalize(mut snap: SchemaSnapshot) -> SchemaSnapshot {
     for t in snap.tables.values_mut() {
         for c in &mut t.columns {
-            c.data_type = zero_migrate::schema::query::renderer(
-                zero_migrate::shipping_vendors(),
-                &zero_migrate_sqlite::DIALECT,
+            c.data_type = zeroship_migrate::schema::query::renderer(
+                zeroship_migrate::shipping_vendors(),
+                &zeroship_migrate_sqlite::DIALECT,
             )
             .canonical_type(&c.data_type);
         }
@@ -208,9 +208,9 @@ async fn assert_matches_live(be: &SqliteBackend, ops: &[Op], stage: &str) {
         .await
         .unwrap_or_else(|error| panic!("{stage}: introspect live SQLite schema: {error}"));
     let folded = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         ops,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         PROJECT,
         &support::confined_charter(),
     )

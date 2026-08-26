@@ -266,7 +266,7 @@ fn seg_from_normalized(seg: &NormalizedSegment) -> Option<SegGlob> {
 /// charter-shaped fold invites a second one "for the other dialects", and a second
 /// fold is how a scope of `app.users` stops covering a table spelled `Users`.
 ///
-/// The same reclassification `zero_migrate_backend::constraint_definition`'s
+/// The same reclassification `zeroship_migrate_backend::constraint_definition`'s
 /// `quote_ident_if_needed` already carries: a deliberate canonical normal form keeps
 /// a neutral name and a doc saying whose grammar it encodes.
 #[must_use]

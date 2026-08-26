@@ -99,13 +99,13 @@
 use crate::support;
 
 use crate::support::mysql::{database_token, quote_ident, DatabaseGuard, MysqlDevSession};
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::driver::SqlSession;
-use zero_migrate::model::ir::CURRENT_IR_VERSION;
-use zero_migrate::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::model::ir::CURRENT_IR_VERSION;
+use zeroship_migrate::{
     ApplyError, ExecutorConfig, IrAuthor, LiveSchema, PlanStep, SynchronizeIdentityStep,
 };
-use zero_migrate_mysql::MysqlBackend;
+use zeroship_migrate_mysql::MysqlBackend;
 
 const OWNER: &str = "app_synchronize_identity_mysql";
 
@@ -136,7 +136,7 @@ fn cfg_for(database: &str) -> ExecutorConfig {
 /// hand-assembles.
 fn step(database: &str, name: &str) -> SynchronizeIdentityStep {
     let policy = support::no_inject(database);
-    let ir: zero_migrate::MigrationIr = serde_json::from_value(serde_json::json!({
+    let ir: zeroship_migrate::MigrationIr = serde_json::from_value(serde_json::json!({
         "ir_version": CURRENT_IR_VERSION,
         "name": name,
         "owner_app": OWNER,
@@ -149,10 +149,10 @@ fn step(database: &str, name: &str) -> SynchronizeIdentityStep {
     }))
     .expect("synchronizeIdentity IR parses");
     let plan = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         database,
         OWNER,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         &policy,
     )
     .lower_plan(&ir, &LiveSchema::default())

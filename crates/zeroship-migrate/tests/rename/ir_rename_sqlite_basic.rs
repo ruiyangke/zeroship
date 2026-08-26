@@ -24,18 +24,18 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::model::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
-use zero_migrate::render::declarative::{
+use zeroship_migrate::model::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
+use zeroship_migrate::render::declarative::{
     desired_snapshot_for_dialect, CollectionDescriptor, FieldDescriptor,
 };
-use zero_migrate::render::lower::{IrAuthor, IrLowerError, LiveSchema};
-use zero_migrate::{
+use zeroship_migrate::render::lower::{IrAuthor, IrLowerError, LiveSchema};
+use zeroship_migrate::{
     apply::executor::LockMode, resolve_create_table_policy, Approval, ExecutorConfig,
     MigrationBackend, MigrationEngine,
 };
-use zero_migrate::{PlanStep, RenameStep};
-use zero_migrate_sqlite::backend::Mode;
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate::{PlanStep, RenameStep};
+use zeroship_migrate_sqlite::backend::Mode;
+use zeroship_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_rename";
 const APP: &str = "app_rename";
@@ -88,10 +88,10 @@ fn descriptor(table: &str, field: &str, ty: &str) -> CollectionDescriptor {
 fn live_schema_for(descriptors: &[CollectionDescriptor]) -> LiveSchema {
     let effective = support::confined_charter();
     let desired = desired_snapshot_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         descriptors,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &effective,
     )
     .expect("desired snapshot");
@@ -153,18 +153,18 @@ fn rename_ir(table: &str, from: &str, to: &str, ty: ColType) -> MigrationIr {
 async fn first_deploy(be: &SqliteBackend, descriptors: &[CollectionDescriptor]) {
     // Lower each table's createTable IR and apply it.
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     for d in descriptors {
-        let cols: Vec<zero_migrate::model::ir::IrColumn> = d
+        let cols: Vec<zeroship_migrate::model::ir::IrColumn> = d
             .fields
             .iter()
-            .map(|f| zero_migrate::model::ir::IrColumn {
+            .map(|f| zeroship_migrate::model::ir::IrColumn {
                 name: f.name.clone(),
                 ty: ColType::Text, // the e2e tables use text fields
                 nullable: Some(!f.required),
@@ -188,7 +188,7 @@ async fn first_deploy(be: &SqliteBackend, descriptors: &[CollectionDescriptor]) 
             name: format!("create_{}", d.name),
             owner_app: APP.into(),
             ops: vec![Op::CreateTable {
-                attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
                 name: d.name.clone(),
                 columns: cols,
                 primary_key: None,
@@ -269,10 +269,10 @@ async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() 
 
     // Lower the rename `nickname → handle` on the SQLite leg.
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
     let ir = rename_ir("people", "nickname", "handle", ColType::Text);
@@ -301,13 +301,13 @@ async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() 
         .await
         .expect("journal before rename")
         .into_iter()
-        .filter(|e| matches!(e.phase, zero_migrate::apply::journal::Phase::Completed))
+        .filter(|e| matches!(e.phase, zeroship_migrate::apply::journal::Phase::Completed))
         .map(|e| e.version.as_str().to_string())
         .collect();
 
     // Apply THROUGH the single shared apply_plan (a rebuild on a populated table is
     // destructive ⇒ Approval::Approved).
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let out = engine
         .apply_plan(
             &steps,
@@ -377,7 +377,7 @@ async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() 
     let applied = be.applied(&exec_cfg()).await.expect("journal");
     assert!(
         applied.iter().any(|e| e.version == rebuild_version
-            && matches!(e.phase, zero_migrate::apply::journal::Phase::Completed)),
+            && matches!(e.phase, zeroship_migrate::apply::journal::Phase::Completed)),
         "the rebuild migration is journaled completed (rebuild_one path)"
     );
     // And NO PG expand-contract sub-step ever journaled (the run_online_backfill path was
@@ -388,7 +388,7 @@ async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() 
     // as *additional, distinct* versions; their absence is the load-bearing proof.
     let after: std::collections::BTreeSet<String> = applied
         .iter()
-        .filter(|e| matches!(e.phase, zero_migrate::apply::journal::Phase::Completed))
+        .filter(|e| matches!(e.phase, zeroship_migrate::apply::journal::Phase::Completed))
         .map(|e| e.version.as_str().to_string())
         .collect();
     let added: std::collections::BTreeSet<String> = after.difference(&before).cloned().collect();
@@ -414,13 +414,13 @@ async fn renamecolumn_sqlite_renders_neutral_type_as_affinity_not_pg_string() {
     // Create it for real with an int column.
     {
         let author = IrAuthor::new(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             PROJECT,
             APP,
-            &zero_migrate_sqlite::DIALECT,
+            &zeroship_migrate_sqlite::DIALECT,
             &support::confined_charter(),
         );
-        let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+        let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
         let ir = MigrationIr {
             inverse_ops: None,
             irreversible: None,
@@ -428,9 +428,9 @@ async fn renamecolumn_sqlite_renders_neutral_type_as_affinity_not_pg_string() {
             name: "create_events".into(),
             owner_app: APP.into(),
             ops: vec![Op::CreateTable {
-                attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
                 name: "events".into(),
-                columns: vec![zero_migrate::model::ir::IrColumn {
+                columns: vec![zeroship_migrate::model::ir::IrColumn {
                     name: "count".into(),
                     ty: ColType::Int,
                     nullable: Some(false),
@@ -480,10 +480,10 @@ async fn renamecolumn_sqlite_renders_neutral_type_as_affinity_not_pg_string() {
 
     let live = live_schema_for(&v1);
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
     let ir = rename_ir("events", "count", "total", ColType::Int);
@@ -526,10 +526,10 @@ fn renamecolumn_sqlite_rejects_ir_type_disagreeing_with_live_column() {
     let v1 = vec![descriptor("people", "nickname", "string")];
     let live = live_schema_for(&v1);
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
     // The IR claims the renamed column is `Int` — disagreeing with the live text type.
@@ -567,10 +567,10 @@ fn renamecolumn_sqlite_rejects_cross_app_rename() {
 
     // The IrAuthor deploys as `APP` (≠ app_other) — a non-owner rename.
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
     let ir = rename_ir("people", "nickname", "handle", ColType::Text);
@@ -604,10 +604,10 @@ fn renamecolumn_sqlite_rejects_cross_app_rename() {
 #[test]
 fn renamecolumn_sqlite_fails_closed_without_live_table_structure() {
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
     let ir = rename_ir("ghost", "a", "b", ColType::Text);
@@ -636,12 +636,12 @@ fn renamecolumn_sqlite_fails_closed_without_live_table_structure() {
 // This keeps the rebuild-needs-whole-shape guard exercised after the type gate.
 #[test]
 fn renamecolumn_sqlite_fails_closed_with_column_but_no_sqlite_schema() {
-    use zero_migrate::{ColumnSnapshot, TableSnapshot};
+    use zeroship_migrate::{ColumnSnapshot, TableSnapshot};
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
     let ir = rename_ir("ghost", "a", "b", ColType::Text);
@@ -703,7 +703,7 @@ fn renamecolumn_sqlite_fails_closed_with_column_but_no_sqlite_schema() {
     match err {
         IrLowerError::RenameNeedsLiveTable { table, dialect, .. } => {
             assert_eq!(table, "ghost");
-            assert_eq!(dialect, zero_migrate_sqlite::DIALECT);
+            assert_eq!(dialect, zeroship_migrate_sqlite::DIALECT);
         }
         other => panic!("expected RenameNeedsLiveTable, got: {other}"),
     }
@@ -770,10 +770,10 @@ fn renamecolumn_sqlite_retains_fk_to_another_known_live_table() {
     let child = referencing_descriptor("employees", "departments");
     let live = live_schema_for(&[parent, child]);
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
 
@@ -807,10 +807,10 @@ fn renamecolumn_sqlite_rejects_fk_to_table_missing_from_live_table_set() {
     let mut live = live_schema_for(&[parent, child]);
     assert!(live.tables.remove("departments"));
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
 
@@ -841,10 +841,10 @@ fn renamecolumn_sqlite_rejects_fk_to_table_missing_from_live_table_set() {
 #[test]
 fn renamecolumn_sqlite_rejects_rename_to_existing_column() {
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
     // Live `people(nickname, handle)` — both real columns + SDK schema entries.
@@ -900,10 +900,10 @@ async fn two_renames_of_one_table_in_one_migration_are_refused_on_sqlite() {
     live.table_snapshots = catalog.tables;
 
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
     let mut ir = rename_ir("people", "nickname", "handle", ColType::Text);
@@ -924,7 +924,7 @@ async fn two_renames_of_one_table_in_one_migration_are_refused_on_sqlite() {
         matches!(
             error,
             IrLowerError::RepeatRenameTarget { ref table, ref dialect }
-                if table == "people" && *dialect == zero_migrate_sqlite::DIALECT
+                if table == "people" && *dialect == zeroship_migrate_sqlite::DIALECT
         ),
         "the refusal is the dedicated variant naming the table: {message}"
     );

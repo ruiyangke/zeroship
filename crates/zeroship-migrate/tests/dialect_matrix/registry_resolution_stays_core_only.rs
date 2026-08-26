@@ -17,7 +17,7 @@
 //!
 //! The header is deliberately phrased in terms of the RULE and not the current file
 //! layout, because the layout is about to change underneath it. At the time of
-//! writing the subject items are `pub(crate)` in `zero_migrate::render::backends`.
+//! writing the subject items are `pub(crate)` in `zeroship_migrate::render::backends`.
 //! That is a fact about today, not the thing being asserted.
 //!
 //! # What is about to be lost, exactly
@@ -540,7 +540,7 @@ fn no_vendor_crate_resolves_a_vendor() {
          ANSWERS FOR ITSELF. A backend reaches its own spellings through `self`, its \
          own modules, and the `&'static` surfaces its own `BackendVendor` registers — \
          never by asking the registry which backend handles a dialect, not even its \
-         own. These resolvers were `pub(crate)` in `zero_migrate::render::backends` \
+         own. These resolvers were `pub(crate)` in `zeroship_migrate::render::backends` \
          before `apply/backend/` was extracted into the vendor crates; the crate \
          boundary is what dissolved that modifier, and this census is what stands in \
          for it.",

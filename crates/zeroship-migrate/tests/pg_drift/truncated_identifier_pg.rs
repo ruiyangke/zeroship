@@ -29,12 +29,12 @@ use crate::support;
 use crate::support::PgDevSession;
 
 use crate::support::apply_pg as apply;
-use zero_migrate::model::ir::ExistenceGuard;
-use zero_migrate::model::probe::{GuardDir, GuardProbe};
-use zero_migrate::render::existence_probe::{decide, GuardVerdict};
-use zero_migrate::{Approval, ExecutorConfig, IrAuthor, LiveSchema, MigrationIr, Op, Phase};
-use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
-use zero_migrate_postgres::DIALECT as POSTGRES;
+use zeroship_migrate::model::ir::ExistenceGuard;
+use zeroship_migrate::model::probe::{GuardDir, GuardProbe};
+use zeroship_migrate::render::existence_probe::{decide, GuardVerdict};
+use zeroship_migrate::{Approval, ExecutorConfig, IrAuthor, LiveSchema, MigrationIr, Op, Phase};
+use zeroship_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zeroship_migrate_postgres::DIALECT as POSTGRES;
 
 /// PostgreSQL's NAMEDATALEN-derived identifier bound, in bytes.
 const MAX: usize = 63;
@@ -69,7 +69,7 @@ async fn ensure_project_schema<'a>(
     session: &'a PgDevSession,
     cfg: &ExecutorConfig,
 ) -> support::SchemaGuard<'a> {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
     let guard = support::SchemaGuard::arm(
         session,
         [
@@ -88,7 +88,7 @@ async fn ensure_project_schema<'a>(
 }
 
 async fn drop_schemas(session: &PgDevSession, cfg: &ExecutorConfig) {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
     let _ = session
         .batch(&format!(
             "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
@@ -99,7 +99,7 @@ async fn drop_schemas(session: &PgDevSession, cfg: &ExecutorConfig) {
 
 /// The UNIQUE constraint names the catalog actually holds for `schema.t`.
 async fn unique_constraint_names(session: &PgDevSession, schema: &str) -> Vec<String> {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
     session
         .query(
             "SELECT con.conname FROM pg_constraint con \
@@ -146,7 +146,7 @@ fn drop_constraint_ir(name: &str) -> MigrationIr {
 /// Completed, and leaves `pg_constraint` empty of it.
 #[compio::test]
 async fn a_truncated_constraint_name_can_no_longer_make_a_guarded_drop_journal_a_lie() {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
@@ -188,10 +188,10 @@ async fn a_truncated_constraint_name_can_no_longer_make_a_guarded_drop_journal_a
     );
 
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         "app_test",
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &support::no_inject(&cfg.project_schema),
     );
 
@@ -220,7 +220,7 @@ async fn a_truncated_constraint_name_can_no_longer_make_a_guarded_drop_journal_a
         expect_kind: None,
         expect_definition: None,
     };
-    match decide(zero_migrate::shipping_vendors(), &probe, &live, &POSTGRES) {
+    match decide(zeroship_migrate::shipping_vendors(), &probe, &live, &POSTGRES) {
         GuardVerdict::FailDrift(divergence) => assert_eq!(
             divergence.actual, truncated,
             "the verdict must name the truncated spelling the catalog holds"
@@ -243,7 +243,7 @@ async fn a_truncated_constraint_name_can_no_longer_make_a_guarded_drop_journal_a
         .expect("the guarded drop carries a probe");
     assert_eq!(
         decide(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             remedy_probe,
             &live,
             &POSTGRES
@@ -261,7 +261,7 @@ async fn a_truncated_constraint_name_can_no_longer_make_a_guarded_drop_journal_a
         "apply reports the migration applied: {out:?}"
     );
 
-    let journal = zero_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
+    let journal = zeroship_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
         .await
         .expect("read the journal");
     assert!(

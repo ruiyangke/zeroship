@@ -38,8 +38,8 @@ use crate::support;
 
 use serde_json::Value;
 
-use zero_migrate::model::ir::{MigrationIr, Op};
-use zero_migrate::render_artifacts;
+use zeroship_migrate::model::ir::{MigrationIr, Op};
+use zeroship_migrate::render_artifacts;
 
 const SCHEMA: &str = "public";
 
@@ -75,9 +75,9 @@ fn history() -> Vec<Op> {
         .ops
 }
 
-fn runtime_json(dialect: &zero_migrate::DialectId) -> Value {
+fn runtime_json(dialect: &zeroship_migrate::DialectId) -> Value {
     let artifacts = render_artifacts(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &history(),
         dialect,
         SCHEMA,
@@ -89,7 +89,7 @@ fn runtime_json(dialect: &zero_migrate::DialectId) -> Value {
 
 /// The `notes` collection object out of the v1 descriptor, so a failure prints the
 /// collection rather than the whole document.
-fn notes(dialect: &zero_migrate::DialectId) -> Value {
+fn notes(dialect: &zeroship_migrate::DialectId) -> Value {
     let doc = runtime_json(dialect);
     doc.get("collections")
         .and_then(|c| c.get("notes"))
@@ -101,7 +101,7 @@ fn notes(dialect: &zero_migrate::DialectId) -> Value {
 /// PostgreSQL gets, so the artifact has to name it.
 #[test]
 fn an_index_authored_in_the_selected_leg_reaches_the_runtime_descriptor() {
-    let collection = notes(&zero_migrate_postgres::DIALECT);
+    let collection = notes(&zeroship_migrate_postgres::DIALECT);
     let rendered = serde_json::to_string(&collection).expect("collection serializes");
     assert!(
         rendered.contains("notes_pg_idx"),
@@ -115,7 +115,7 @@ fn an_index_authored_in_the_selected_leg_reaches_the_runtime_descriptor() {
 /// absent map entry silently reads as the default rather than as unknown.
 #[test]
 fn a_runtime_option_set_in_the_selected_leg_reaches_the_runtime_descriptor() {
-    let collection = notes(&zero_migrate_postgres::DIALECT);
+    let collection = notes(&zeroship_migrate_postgres::DIALECT);
     assert_eq!(
         collection.pointer("/options/softDelete"),
         Some(&Value::Bool(true)),
@@ -131,7 +131,7 @@ fn a_runtime_option_set_in_the_selected_leg_reaches_the_runtime_descriptor() {
 /// here.
 #[test]
 fn an_index_authored_only_in_an_inactive_leg_stays_out_of_the_artifact() {
-    let collection = notes(&zero_migrate_postgres::DIALECT);
+    let collection = notes(&zeroship_migrate_postgres::DIALECT);
     let rendered = serde_json::to_string(&collection).expect("collection serializes");
     assert!(
         !rendered.contains("notes_sqlite_idx"),
@@ -145,7 +145,7 @@ fn an_index_authored_only_in_an_inactive_leg_stays_out_of_the_artifact() {
 /// to the PostgreSQL leg would pass every arm above.
 #[test]
 fn the_sqlite_artifact_carries_the_sqlite_leg_and_not_the_postgres_one() {
-    let collection = notes(&zero_migrate_sqlite::DIALECT);
+    let collection = notes(&zeroship_migrate_sqlite::DIALECT);
     let rendered = serde_json::to_string(&collection).expect("collection serializes");
     assert!(
         rendered.contains("notes_sqlite_idx"),

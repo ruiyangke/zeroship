@@ -17,7 +17,7 @@
 //!
 //! plugin-db's data-plane backend **A** (`crate::backend::sqlite::SqliteBackend`)
 //! is CDC-armed and intentionally *un*-hardened for CRUD throughput. The
-//! migration backend **B** (`zero_migrate::SqliteBackend`) is the hardened
+//! migration backend **B** (`zeroship_migrate::SqliteBackend`) is the hardened
 //! actor (authorizer line-2 deny-list, journal immutability, ATTACH isolation).
 //! DDL MUST run on B (the security invariant). Both touch the SAME app file
 //! `zs-<app_id>.sqlite`, so we sequence a **single-owner window**:
@@ -58,12 +58,12 @@
 use std::collections::{BTreeMap, HashSet};
 
 use serde_json::Value;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::apply::backend::sqlite::SqliteBackend as MigrateBackend;
-use zero_migrate::render::declarative::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::apply::backend::sqlite::SqliteBackend as MigrateBackend;
+use zeroship_migrate::render::declarative::{
     CollectionDescriptor, FieldDescriptor, IndexDescriptor,
 };
-use zero_migrate::{
+use zeroship_migrate::{
     desired_snapshot_for_dialect, effective_policy_from_charter_toml, Approval, Checksum,
     ChecksumInput, DeclarativeApplyError, DeclarativeAuthor, ExecutorConfig, GuardConfig, Migration,
     MigrationEngine, MigrationFlags, MigrationId,
@@ -71,7 +71,7 @@ use zero_migrate::{
 // The engine's own dialect enum (re-exported from `zero-migrate-ir`). Distinct
 // from `zeroship_schema::query::SqlDialect` (the schema crate plugin-db keeps for
 // its DDL builders) — `DeclarativeAuthor::new_for_dialect` takes the engine type.
-use zero_migrate::SqlDialect;
+use zeroship_migrate::SqlDialect;
 
 use crate::backend::NamespaceManager;
 use crate::backend::SqliteBackend as DataBackend;

@@ -30,10 +30,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::{
+use zeroship_migrate::{
     CollectionDescriptor, DeclarativeAuthor, DeclarativeError, FieldDescriptor, SchemaSnapshot,
 };
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_demo";
 
@@ -61,27 +61,27 @@ fn backend(p: &Paths) -> SqliteBackend {
 /// A `SQLite` author deploying AS `owner_app`.
 fn author_as(owner_app: &str) -> DeclarativeAuthor {
     DeclarativeAuthor::new_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         owner_app,
-        zero_migrate_sqlite::DIALECT,
+        zeroship_migrate_sqlite::DIALECT,
     )
 }
 
-fn effective_policy() -> zero_migrate::EffectivePolicy {
+fn effective_policy() -> zeroship_migrate::EffectivePolicy {
     support::confined_charter()
 }
 
 fn desired_snapshot(
     project_schema: &str,
     descriptors: &[CollectionDescriptor],
-    effective: &zero_migrate::EffectivePolicy,
-) -> Result<zero_migrate::DesiredSchema, DeclarativeError> {
-    zero_migrate::desired_snapshot_for_dialect(
-        zero_migrate::shipping_vendors(),
+    effective: &zeroship_migrate::EffectivePolicy,
+) -> Result<zeroship_migrate::DesiredSchema, DeclarativeError> {
+    zeroship_migrate::desired_snapshot_for_dialect(
+        zeroship_migrate::shipping_vendors(),
         project_schema,
         descriptors,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         effective,
     )
 }

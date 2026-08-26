@@ -38,10 +38,10 @@ use std::time::{Duration, Instant};
 
 use crate::support::PgDevSession;
 
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::driver::SqlSession;
-use zero_migrate::{ExecutorConfig, ProjectLockAcquisition};
-use zero_migrate_postgres::PostgresBackend;
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::{ExecutorConfig, ProjectLockAcquisition};
+use zeroship_migrate_postgres::PostgresBackend;
 
 /// The engine's own acquisition statement, sent verbatim by the control arm so it
 /// races the identical server-side path with no compensation wrapped around it.

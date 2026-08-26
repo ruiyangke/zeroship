@@ -15,29 +15,29 @@
 //! avoided.
 
 use std::collections::BTreeMap;
-use zero_migrate::model::probe::{ExpectColumn, GuardDir, GuardProbe};
-use zero_migrate::model::snapshot::{
+use zeroship_migrate::model::probe::{ExpectColumn, GuardDir, GuardProbe};
+use zeroship_migrate::model::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot, SchemaSnapshot,
     TableSnapshot,
 };
-use zero_migrate::render::existence_probe::{decide, GuardVerdict};
-use zero_migrate_mysql::DIALECT as MYSQL;
-use zero_migrate_postgres::DIALECT as POSTGRES;
-use zero_migrate_sqlite::DIALECT as SQLITE;
+use zeroship_migrate::render::existence_probe::{decide, GuardVerdict};
+use zeroship_migrate_mysql::DIALECT as MYSQL;
+use zeroship_migrate_postgres::DIALECT as POSTGRES;
+use zeroship_migrate_sqlite::DIALECT as SQLITE;
 
 /// `decide` on the PG leg (raw `information_schema` compare).
 fn decide_pg(probe: &GuardProbe, live: &SchemaSnapshot) -> GuardVerdict {
-    decide(zero_migrate::shipping_vendors(), probe, live, &POSTGRES)
+    decide(zeroship_migrate::shipping_vendors(), probe, live, &POSTGRES)
 }
 
 /// `decide` on the SQLite leg (affinity-fold compare — F1).
 fn decide_sqlite(probe: &GuardProbe, live: &SchemaSnapshot) -> GuardVerdict {
-    decide(zero_migrate::shipping_vendors(), probe, live, &SQLITE)
+    decide(zeroship_migrate::shipping_vendors(), probe, live, &SQLITE)
 }
 
 /// `decide` on the MySQL leg (constraint-first catalog resolution).
 fn decide_mysql(probe: &GuardProbe, live: &SchemaSnapshot) -> GuardVerdict {
-    decide(zero_migrate::shipping_vendors(), probe, live, &MYSQL)
+    decide(zeroship_migrate::shipping_vendors(), probe, live, &MYSQL)
 }
 
 /// PostgreSQL's own catalog normalization, taken from PostgreSQL's own vendor
@@ -46,7 +46,7 @@ fn decide_mysql(probe: &GuardProbe, live: &SchemaSnapshot) -> GuardVerdict {
 /// would be the wrong shape anyway: a caller that already knows which vendor it
 /// wants asks that vendor, it does not ask which backend handles a dialect.
 fn normalize_pg_constraint_definition(definition: &str) -> String {
-    zero_migrate_postgres::VENDOR
+    zeroship_migrate_postgres::VENDOR
         .existence_probe
         .normalize_constraint_definition(definition)
 }
@@ -56,8 +56,8 @@ fn normalize_pg_constraint_definition(definition: &str) -> String {
 /// `pub(crate)` budget that an integration test cannot see; reading the source both
 /// of them read keeps the two from drifting without publishing an engine internal.
 fn pg_identifier_max_bytes() -> usize {
-    match zero_migrate_postgres::VENDOR.descriptor.limits.identifier {
-        zero_migrate_ir::backend::IdentifierLimit::Bytes(n) => n,
+    match zeroship_migrate_postgres::VENDOR.descriptor.limits.identifier {
+        zeroship_migrate_ir::backend::IdentifierLimit::Bytes(n) => n,
         other => panic!("PostgreSQL declares a BYTE identifier cap, not {other:?}"),
     }
 }
@@ -440,7 +440,7 @@ fn index_ownership_only_ignores_a_foreign_owner_where_names_are_per_table() {
     live.tables.insert("orders".to_string(), empty_table());
     assert_eq!(
         decide(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &ownership_probe("orders", "idx_shared"),
             &live,
             &MYSQL

@@ -30,7 +30,7 @@ use crate::support;
 
 use std::collections::BTreeMap;
 
-use zero_migrate::{resolve_create_table_policy, GuardConfig, IrAuthor, LiveSchema, MigrationIr};
+use zeroship_migrate::{resolve_create_table_policy, GuardConfig, IrAuthor, LiveSchema, MigrationIr};
 
 const PROJECT: &str = "app";
 const APP: &str = "app";
@@ -43,10 +43,10 @@ fn artifact_created_tables(ops_json: &str) -> Vec<String> {
     let resolved_json = serde_json::to_string(&resolved).expect("resolved test IR serializes");
 
     IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::no_inject("app"),
     )
     .load_and_lower_guarded(
@@ -54,7 +54,7 @@ fn artifact_created_tables(ops_json: &str) -> Vec<String> {
         APP,
         &BTreeMap::new(),
         &LiveSchema::default(),
-        &GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate_sqlite::DIALECT),
+        &GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_sqlite::DIALECT),
     )
     .expect("the dialectal create lowers under SQLite")
     .created_tables

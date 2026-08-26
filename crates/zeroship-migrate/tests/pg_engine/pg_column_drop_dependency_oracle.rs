@@ -27,9 +27,9 @@
 
 use crate::support;
 
-use zero_migrate::driver::SqlSession;
-use zero_migrate::{ExecutorConfig, MigrationBackend};
-use zero_migrate_postgres::PostgresBackend;
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::{ExecutorConfig, MigrationBackend};
+use zeroship_migrate_postgres::PostgresBackend;
 
 /// The shipped predicate's own answer for one column: the blockers it would name, and
 /// whether naming any of them means refusal.

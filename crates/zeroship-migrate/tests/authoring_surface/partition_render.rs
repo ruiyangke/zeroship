@@ -1,14 +1,14 @@
 use crate::support;
 
-use zero_migrate::model::ir::{
+use zeroship_migrate::model::ir::{
     ColType, IndexElement, IndexMethod, IrColumn, IrScalar, IrValue, MigrationIr, Op,
     PartitionBoundValue, PartitionBounds, PartitionSpec, SafeI64,
 };
-use zero_migrate::{
+use zeroship_migrate::{
     fold_ops, Approval, ExecutorConfig, IrAuthor, IrFlagsOverride, LiveSchema, LockMode,
     MigrationEngine, CURRENT_IR_VERSION,
 };
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate_sqlite::SqliteBackend;
 
 fn col(name: &str, ty: ColType) -> IrColumn {
     col_with_nullability(name, ty, None)
@@ -68,10 +68,10 @@ fn ir_ops(ops: Vec<Op>) -> MigrationIr {
 
 fn pg_sql(op: Op) -> Vec<String> {
     IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         "app",
         "app_partition",
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &support::no_inject("app"),
     )
     .lower(&ir(op), &LiveSchema::default())
@@ -83,12 +83,12 @@ fn pg_sql(op: Op) -> Vec<String> {
 
 /// Lower one op the way [`pg_sql`] does, but keep the whole `Migration` so a test can
 /// read the FLAGS the author attached rather than only the SQL it spelled.
-fn pg_lower(op: Op) -> Vec<zero_migrate::Migration> {
+fn pg_lower(op: Op) -> Vec<zeroship_migrate::Migration> {
     IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         "app",
         "app_partition",
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &support::no_inject("app"),
     )
     .lower(&ir(op), &LiveSchema::default())
@@ -103,7 +103,7 @@ fn int_bound(value: i64) -> PartitionBoundValue {
 
 fn create_events_parent() -> Op {
     Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "events".into(),
         columns: vec![
             not_null_col("bucket", ColType::Int),
@@ -124,7 +124,7 @@ fn create_events_parent() -> Op {
 
 fn create_range_partition(name: &str, from: PartitionBoundValue, to: PartitionBoundValue) -> Op {
     Op::CreatePartition {
-        attributes: zero_migrate_ir::attribute::CreatePartitionAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreatePartitionAttributes::new(),
         name: name.into(),
         of: "events".into(),
         bounds: PartitionBounds::Range {
@@ -150,7 +150,7 @@ fn attach_range_partition(name: &str, from: PartitionBoundValue, to: PartitionBo
 
 fn create_default_partition() -> Op {
     Op::CreatePartition {
-        attributes: zero_migrate_ir::attribute::CreatePartitionAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreatePartitionAttributes::new(),
         name: "events_default".into(),
         of: "events".into(),
         bounds: PartitionBounds::Default,
@@ -189,9 +189,9 @@ fn insert_events(rows: &[(i64, &str)]) -> Op {
 
 fn partition_live_from_fold(ops: &[Op]) -> LiveSchema {
     let snap = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         ops,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         "prj_partition",
         &support::no_inject("app"),
     )
@@ -211,29 +211,29 @@ fn partition_exec_cfg() -> ExecutorConfig {
 }
 
 #[track_caller]
-fn lower_sqlite_partition_steps(ops: Vec<Op>, live: &LiveSchema) -> Vec<zero_migrate::PlanStep> {
+fn lower_sqlite_partition_steps(ops: Vec<Op>, live: &LiveSchema) -> Vec<zeroship_migrate::PlanStep> {
     // Applied calls in this fixture represent separate migration files. Give
     // each call site its own durable name so stable plan identities do not turn
     // unrelated setup and teardown plans into checksum drift.
     let mut migration = ir_ops(ops);
     migration.name = format!("partition_render_{}", std::panic::Location::caller().line());
     IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         "prj_partition",
         "app_partition",
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::no_inject("app"),
     )
     .lower_steps(&migration, live)
     .expect("lower partition ops to SQLite")
 }
 
-fn rendered_partition_sql(steps: &[zero_migrate::PlanStep]) -> String {
+fn rendered_partition_sql(steps: &[zeroship_migrate::PlanStep]) -> String {
     steps
         .iter()
         .map(|step| match step {
-            zero_migrate::PlanStep::Ddl(migration) => migration.up.clone(),
-            zero_migrate::PlanStep::Dml { template, .. } => template.clone(),
+            zeroship_migrate::PlanStep::Ddl(migration) => migration.up.clone(),
+            zeroship_migrate::PlanStep::Dml { template, .. } => template.clone(),
             other => format!("{other:?}"),
         })
         .collect::<Vec<_>>()
@@ -242,11 +242,11 @@ fn rendered_partition_sql(steps: &[zero_migrate::PlanStep]) -> String {
 
 async fn apply_sqlite_partition_steps(
     backend: &SqliteBackend,
-    steps: &[zero_migrate::PlanStep],
+    steps: &[zeroship_migrate::PlanStep],
     approval: Approval,
-) -> Result<zero_migrate::DeclarativeDeployOutcome, zero_migrate::DeclarativeApplyError> {
+) -> Result<zeroship_migrate::DeclarativeDeployOutcome, zeroship_migrate::DeclarativeApplyError> {
     let cfg = partition_exec_cfg();
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             steps,
             approval,
@@ -295,21 +295,21 @@ fn collapse_events_ops() -> Vec<Op> {
 
 /// Index attributes in the wire form the op now carries, for fixtures that used to build
 /// an `IndexStorageParams` literal.
-fn index_attrs(pairs: &[(&str, i64)]) -> zero_migrate_ir::attribute::CreateIndexAttributes {
-    let mut carried = zero_migrate_ir::attribute::Attributes::new();
+fn index_attrs(pairs: &[(&str, i64)]) -> zeroship_migrate_ir::attribute::CreateIndexAttributes {
+    let mut carried = zeroship_migrate_ir::attribute::Attributes::new();
     for (key, value) in pairs {
         carried.insert(
-            zero_migrate_ir::attribute::AttrKey::parse(key).expect("a well-formed key"),
-            zero_migrate::IrScalar::Int(*value),
+            zeroship_migrate_ir::attribute::AttrKey::parse(key).expect("a well-formed key"),
+            zeroship_migrate::IrScalar::Int(*value),
         );
     }
-    zero_migrate_ir::attribute::CreateIndexAttributes::from(carried)
+    zeroship_migrate_ir::attribute::CreateIndexAttributes::from(carried)
 }
 
 fn create_index(
     using: Option<IndexMethod>,
     include: Vec<String>,
-    attributes: zero_migrate_ir::attribute::CreateIndexAttributes,
+    attributes: zeroship_migrate_ir::attribute::CreateIndexAttributes,
     only: Option<bool>,
 ) -> Op {
     Op::CreateIndex {
@@ -332,7 +332,7 @@ fn create_index(
 #[test]
 fn render_partitioned_parent_create_table_pg() {
     let sql = pg_sql(Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "events".into(),
         columns: vec![col("created_at", ColType::Timestamp)],
         primary_key: None,
@@ -356,24 +356,24 @@ fn render_partitioned_parent_create_table_pg() {
 
 #[compio::test]
 async fn collapse_affirmed_events_apply_as_plain_table_on_sqlite() {
-    use zero_migrate::model::validate::validate_ir_scoped;
-    use zero_migrate_sqlite::backend::Mode;
+    use zeroship_migrate::model::validate::validate_ir_scoped;
+    use zeroship_migrate_sqlite::backend::Mode;
 
     let ops = collapse_events_ops();
     let migration_ir = ir_ops(ops);
     validate_ir_scoped(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &migration_ir,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         None,
     )
     .expect("collapse-affirmed partition recording validates on SQLite");
 
     let steps = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         "prj_partition",
         "app_partition",
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::no_inject("app"),
     )
     .lower_steps(&migration_ir, &LiveSchema::default())
@@ -650,7 +650,7 @@ async fn collapse_range_min_value_omits_lower_delete_bound_on_sqlite() {
 #[test]
 fn render_create_partition_range_pg_dump_timestamptz_bounds() {
     let sql = pg_sql(Op::CreatePartition {
-        attributes: zero_migrate_ir::attribute::CreatePartitionAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreatePartitionAttributes::new(),
         name: "events_2026_05".into(),
         of: "events".into(),
         bounds: PartitionBounds::Range {
@@ -778,7 +778,7 @@ fn render_index_element_collation_precedes_opclass_pg() {
 
 #[test]
 fn pg_vendor_index_features_refused_fail_closed_off_pg() {
-    use zero_migrate::model::validate::{validate_ir, CODE_UNSUPPORTED};
+    use zeroship_migrate::model::validate::{validate_ir, CODE_UNSUPPORTED};
 
     let cases: Vec<(&str, Op)> = vec![
         (
@@ -812,8 +812,8 @@ fn pg_vendor_index_features_refused_fail_closed_off_pg() {
 
     for (label, op) in cases {
         let migration = ir(op);
-        for dialect in [&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT] {
-            let err = validate_ir(zero_migrate::shipping_vendors(), &migration, dialect)
+        for dialect in [&zeroship_migrate_sqlite::DIALECT, &zeroship_migrate_mysql::DIALECT] {
+            let err = validate_ir(zeroship_migrate::shipping_vendors(), &migration, dialect)
                 .expect_err(&format!("{label} must be refused on {dialect:?}"));
             assert_eq!(
                 err.code, CODE_UNSUPPORTED,
@@ -822,9 +822,9 @@ fn pg_vendor_index_features_refused_fail_closed_off_pg() {
         }
         // The same op validates cleanly on PostgreSQL.
         validate_ir(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &migration,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
         )
         .unwrap_or_else(|e| panic!("{label} must validate on Postgres: {e:?}"));
     }
@@ -833,7 +833,7 @@ fn pg_vendor_index_features_refused_fail_closed_off_pg() {
 #[test]
 fn render_create_partition_default_pg() {
     let sql = pg_sql(Op::CreatePartition {
-        attributes: zero_migrate_ir::attribute::CreatePartitionAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreatePartitionAttributes::new(),
         name: "events_default".into(),
         of: "events".into(),
         bounds: PartitionBounds::Default,
@@ -952,7 +952,7 @@ fn render_attach_partition_pg() {
 
 #[test]
 fn attach_partition_refused_fail_closed_off_pg() {
-    use zero_migrate::model::validate::{
+    use zeroship_migrate::model::validate::{
         validate_ir_scoped, CODE_UNSUPPORTED, CODE_VENDOR_OP_DENIED,
     };
 
@@ -961,8 +961,8 @@ fn attach_partition_refused_fail_closed_off_pg() {
         int_bound(100),
         int_bound(200),
     ));
-    for dialect in [&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT] {
-        let err = validate_ir_scoped(zero_migrate::shipping_vendors(), &migration, dialect, None)
+    for dialect in [&zeroship_migrate_sqlite::DIALECT, &zeroship_migrate_mysql::DIALECT] {
+        let err = validate_ir_scoped(zeroship_migrate::shipping_vendors(), &migration, dialect, None)
             .expect_err(&format!("attachPartition must be refused on {dialect:?}"));
         assert!(
             matches!(err.code.as_str(), CODE_UNSUPPORTED | CODE_VENDOR_OP_DENIED),

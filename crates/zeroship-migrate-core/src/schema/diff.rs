@@ -33,9 +33,9 @@
 //! `driver::SqlSession` seam, the way the rest of the engine introspects.
 
 use serde_json::Value;
-use zero_migrate_backend::registry::VendorSet;
-use zero_migrate_backend::schema::{AddColumnDefinition, AddColumnIfNotExistsRequest};
-use zero_migrate_ir::dialect::DialectId;
+use zeroship_migrate_backend::registry::VendorSet;
+use zeroship_migrate_backend::schema::{AddColumnDefinition, AddColumnIfNotExistsRequest};
+use zeroship_migrate_ir::dialect::DialectId;
 
 use crate::model::table_shape::ResolvedInject;
 
@@ -329,7 +329,7 @@ impl Default for ColumnInfo {
 /// `LiveSchema`, `ChangeKind`, `IndexInfo` - decides something ABOUT a vendor
 /// rather than asking a vendor how to spell something, which is the boundary rule
 /// `render::backends` states at length.
-pub use zero_migrate_backend::mask_meta::{
+pub use zeroship_migrate_backend::mask_meta::{
     Classification, EncryptionMeta, MaskKind, MaskMeta, WrappedType,
 };
 

@@ -19,21 +19,21 @@
 //! `DeclarativeError` payload is a `String`, a `&'static str` or a `Vec<String>`;
 //! `IrLowerError`'s only non-scalar payloads are the other three render errors
 //! ([`DeclarativeError`], [`crate::vendor::VendorError`], [`crate::dml::DmlError`])
-//! and `zero_migrate_ir::validate::AuthoringError`, which was already in the leaf
+//! and `zeroship_migrate_ir::validate::AuthoringError`, which was already in the leaf
 //! wire crate.
 //!
 //! Both are re-exported from their historical engine paths
-//! (`zero_migrate::render::lower::IrLowerError`,
-//! `zero_migrate::render::declarative::DeclarativeError`), so every existing caller
+//! (`zeroship_migrate::render::lower::IrLowerError`,
+//! `zeroship_migrate::render::declarative::DeclarativeError`), so every existing caller
 //! and every `match` arm resolves unchanged.
 
-use zero_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::dialect::DialectId;
 
 /// A failure to author an online expand-contract sequence.
 ///
 /// One variant, one `String`. It is here only because `DeclarativeError::Rename` is
 /// `#[from] ExpandContractError` and `DeclarativeError` had to move; the authoring
-/// machinery it names stays in `zero_migrate::render::expand_contract`, which
+/// machinery it names stays in `zeroship_migrate::render::expand_contract`, which
 /// re-exports this type at its historical path.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ExpandContractError {
@@ -467,7 +467,7 @@ pub enum DeclarativeError {
         other_app: String,
     },
     /// A foreign key had to be inlined at CREATE TABLE - because the target answers
-    /// no to [`Capability::AlterTableAddConstraint`](zero_migrate_ir::backend::Capability)
+    /// no to [`Capability::AlterTableAddConstraint`](zeroship_migrate_ir::backend::Capability)
     /// - but the FK's referenced table is neither already live nor created earlier in
     /// THIS batch, so there is nothing to inline it against.
     ///
@@ -568,7 +568,7 @@ pub enum IrLowerError {
     /// declares so through `CatalogFoldPolicy::alter_column_refusal` - which is where
     /// this is constructed, in the backend's own crate, with its own id.
     ///
-    /// `zero_migrate_backend::fold::CatalogFoldPolicy::restates_column_type_at_apply`
+    /// `zeroship_migrate_backend::fold::CatalogFoldPolicy::restates_column_type_at_apply`
     /// is the same fact asked as a question rather than raised as an error, and it has
     /// been spelled neutrally since it was written.
     #[error(
@@ -831,7 +831,7 @@ pub enum IrLowerError {
     /// an op carrying an
     /// EXPLICIT `schema()` qualifier that the active confinement
     /// scope does NOT permit. The friendly op-level cross-schema
-    /// VALIDATE gate (`zero_migrate_ir::validate::validate_ir_scoped`) already refuses this
+    /// VALIDATE gate (`zeroship_migrate_ir::validate::validate_ir_scoped`) already refuses this
     /// fail-closed on every PRODUCTION path (`load_and_lower[_guarded]` ->
     /// `load_ir_document` -> `validate_ir_scoped` gates the explicit qualifier before
     /// lower). But the public `lower`/`lower_steps`
@@ -894,7 +894,7 @@ pub enum IrLowerError {
     RenameLower(String),
     /// A privileged vendor op (roles/grants/RLS/policies/triggers/functions/
     /// extensions/schemas/`raw`) was lowered against a target that does not
-    /// answer [`Capability::PrivilegedCatalogObjects`](zero_migrate_ir::backend::Capability::PrivilegedCatalogObjects).
+    /// answer [`Capability::PrivilegedCatalogObjects`](zeroship_migrate_ir::backend::Capability::PrivilegedCatalogObjects).
     /// Refused fail-closed at lower; the validate gate already refuses it at load.
     ///
     /// The refusing target is CARRIED rather than written into the message. The
@@ -910,7 +910,7 @@ pub enum IrLowerError {
         /// The op kind tag that was refused.
         op_kind: &'static str,
         /// The target that refused it, from its own identity.
-        dialect: zero_migrate_ir::dialect::DialectId,
+        dialect: zeroship_migrate_ir::dialect::DialectId,
     },
     /// A vendor op reached lower without the
     /// capability validated by the load gate. Lower refuses it before rendering so
@@ -925,7 +925,7 @@ pub enum IrLowerError {
         /// The op kind tag.
         op: &'static str,
         /// The capability the op requires.
-        capability: zero_migrate_ir::capability::VendorCapability,
+        capability: zeroship_migrate_ir::capability::VendorCapability,
     },
     /// **VENDOR** - rendering a vendor op to its Postgres DDL failed (an invalid
     /// identifier, an unrenderable policy/trigger predicate, an empty privilege/role
@@ -961,7 +961,7 @@ pub enum IrLowerError {
         dialect: DialectId,
     },
     /// A RELATION-valued partition operation reached a target that does not declare
-    /// [`Capability::PartitionRelationDdl`](zero_migrate_ir::backend::Capability).
+    /// [`Capability::PartitionRelationDdl`](zeroship_migrate_ir::backend::Capability).
     ///
     /// The refusing target is CARRIED, for the reason
     /// [`Self::VendorUnsupported`] states: these three refusals were
@@ -1051,9 +1051,9 @@ pub enum IrLowerError {
     /// payload is large). The structured payload reaches the author through
     /// the boxed error's `Display`.
     #[error("IrAuthor::lower of a DML op: {0}")]
-    DmlValidate(Box<zero_migrate_ir::validate::AuthoringError>),
+    DmlValidate(Box<zeroship_migrate_ir::validate::AuthoringError>),
     /// a selected backend's key-storage policy refused a live catalog column.
-    /// [`zero_migrate_ir::ir::IndexElement::Column`] carries no backend-specific
+    /// [`zeroship_migrate_ir::ir::IndexElement::Column`] carries no backend-specific
     /// prefix or storage modifier, so the authoring error supplies that backend's
     /// exact reason and remedy.
     ///
@@ -1066,7 +1066,7 @@ pub enum IrLowerError {
     ///
     /// Boxed because the `AuthoringError` payload is large.
     #[error("{0}")]
-    KeyStorage(Box<zero_migrate_ir::validate::AuthoringError>),
+    KeyStorage(Box<zeroship_migrate_ir::validate::AuthoringError>),
     /// the creator-DML assembler (`crate::render::dml`) rejected a DML op: a
     /// malformed identifier, an empty/ragged insert, or a MySQL `onConflict`
     /// shape whose authored target cannot be retained safely.

@@ -159,21 +159,21 @@ use tempfile::TempDir;
 use crate::dialect_table::{Disposition, DIALECT_TABLE};
 use crate::support::mysql::{quote_ident, DatabaseGuard, MysqlDevSession};
 use crate::support::PgDevSession;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::apply::executor::{ApplyError, LockMode};
-use zero_migrate::driver::{DbError, SqlSession};
-use zero_migrate::model::ir::Op;
-use zero_migrate::render::fold::single_fold;
-use zero_migrate::render::lower::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::apply::executor::{ApplyError, LockMode};
+use zeroship_migrate::driver::{DbError, SqlSession};
+use zeroship_migrate::model::ir::Op;
+use zeroship_migrate::render::fold::single_fold;
+use zeroship_migrate::render::lower::{
     IrGuardedLowerError, IrLowerError, LoadAndLowerGuardedError, LoweredArtifact,
 };
-use zero_migrate::{
+use zeroship_migrate::{
     resolve_create_table_policy, Approval, DeclarativeApplyError, EffectivePolicy, EngineError,
     ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine, MigrationIr,
 };
-use zero_migrate_mysql::MysqlBackend;
-use zero_migrate_postgres::PostgresBackend;
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate_mysql::MysqlBackend;
+use zeroship_migrate_postgres::PostgresBackend;
+use zeroship_migrate_sqlite::SqliteBackend;
 
 /// What the MySQL leg needed, and where each piece of it now lives. Recorded as a
 /// constant so it is in the file a MySQL author opens, not only in a doc.
@@ -303,28 +303,28 @@ const fn required_outcome(disposition: Disposition) -> Outcome {
 /// `pub(crate)` for the same reason [`Outcome`] is: layer 2's `op_refused` observation
 /// sorts a refusal into the SAME two classes and must sort it by the same list.
 pub(crate) const CAPABILITY_CODES: &[&str] = &[
-    zero_migrate::CODE_UNSUPPORTED,
-    zero_migrate::CODE_DIALECT_UNSUPPORTED,
-    zero_migrate::CODE_EXPR_NOT_PORTABLE,
-    zero_migrate::CODE_PARTITION_COMPOSITE_KEY_UNSUPPORTED,
-    zero_migrate::CODE_PARTITION_KEY_NULLABLE_UNDER_COLLAPSE,
-    zero_migrate::CODE_PARTITION_HASH_DROP_UNDERIVABLE,
+    zeroship_migrate::CODE_UNSUPPORTED,
+    zeroship_migrate::CODE_DIALECT_UNSUPPORTED,
+    zeroship_migrate::CODE_EXPR_NOT_PORTABLE,
+    zeroship_migrate::CODE_PARTITION_COMPOSITE_KEY_UNSUPPORTED,
+    zeroship_migrate::CODE_PARTITION_KEY_NULLABLE_UNDER_COLLAPSE,
+    zeroship_migrate::CODE_PARTITION_HASH_DROP_UNDERIVABLE,
 ];
 
 /// Validate codes that mean "the CHARTER did not authorize this", which is a
 /// different question from what the dialect can do.
 pub(crate) const POLICY_CODES: &[&str] = &[
-    zero_migrate::model::validate::CODE_VENDOR_OP_DENIED,
-    zero_migrate::model::validate::CODE_CROSS_SCHEMA,
-    zero_migrate::model::validate::CODE_TABLE_SHAPE_POLICY,
-    zero_migrate::model::validate::CODE_INVALID_SCHEMA_IDENT,
+    zeroship_migrate::model::validate::CODE_VENDOR_OP_DENIED,
+    zeroship_migrate::model::validate::CODE_CROSS_SCHEMA,
+    zeroship_migrate::model::validate::CODE_TABLE_SHAPE_POLICY,
+    zeroship_migrate::model::validate::CODE_INVALID_SCHEMA_IDENT,
 ];
 
 fn classify_lower(error: &LoadAndLowerGuardedError) -> Verdict {
     let detail = error.to_string();
     match error {
         LoadAndLowerGuardedError::Load(load) => {
-            if let zero_migrate::model::load::IrLoadError::Validate(authoring) = load {
+            if let zeroship_migrate::model::load::IrLoadError::Validate(authoring) = load {
                 let code = authoring.code.as_str();
                 if CAPABILITY_CODES.contains(&code) {
                     return Verdict::of(Outcome::RefusedByCapability, detail);
@@ -384,7 +384,7 @@ fn classify_ir_lower(error: &IrLowerError, detail: String) -> Verdict {
 fn server_words(error: &DeclarativeApplyError) -> Option<String> {
     let apply = match error {
         DeclarativeApplyError::Plain(EngineError::Apply(apply)) => apply,
-        DeclarativeApplyError::Expand(zero_migrate::OnlineError::Apply(apply)) => apply,
+        DeclarativeApplyError::Expand(zeroship_migrate::OnlineError::Apply(apply)) => apply,
         _ => return None,
     };
     // `ApplyError::Backend(String)` is how the SQLite actor reports a statement the
@@ -406,7 +406,7 @@ fn server_words(error: &DeclarativeApplyError) -> Option<String> {
             None => db.message.clone(),
         });
     }
-    if let Some(sqlite) = source.downcast_ref::<zero_migrate_sqlite::backend::SqliteActorError>() {
+    if let Some(sqlite) = source.downcast_ref::<zeroship_migrate_sqlite::backend::SqliteActorError>() {
         return Some(sqlite.to_string());
     }
     Some(source.to_string())
@@ -459,7 +459,7 @@ fn lower(
     envelope: &str,
     schema: &str,
     policy: &EffectivePolicy,
-    dialect: &zero_migrate::DialectId,
+    dialect: &zeroship_migrate::DialectId,
     live: &LiveSchema,
 ) -> Result<LoweredArtifact, Verdict> {
     let authored: MigrationIr = match serde_json::from_str(envelope) {
@@ -490,7 +490,7 @@ fn lower(
         }
     };
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         schema,
         OWNER,
         dialect,
@@ -680,7 +680,7 @@ fn create_function() -> Value {
 fn prelude(
     kind: &str,
     variant: &str,
-    dialect: &zero_migrate::DialectId,
+    dialect: &zeroship_migrate::DialectId,
     probe: &Names,
 ) -> Vec<Value> {
     // THE MySQL AXIS, and it is the exact counterpart of the SQLite one below.
@@ -707,7 +707,7 @@ fn prelude(
     // FIXTURE half of the answer; the ungated standalone lane is an engine finding,
     // recorded in `docs/review-log.md`, not something this fixture can repair.
     let keyable = || {
-        if dialect == &zero_migrate_mysql::DIALECT {
+        if dialect == &zeroship_migrate_mysql::DIALECT {
             json!({ "string": { "length": 24 } })
         } else {
             json!("text")
@@ -820,7 +820,7 @@ fn prelude(
         // from it. What this row asks is whether `dropTrigger` drops a trigger, not
         // what the trigger's body says.
         ("dropTrigger", _) => {
-            if dialect == &zero_migrate_mysql::DIALECT {
+            if dialect == &zeroship_migrate_mysql::DIALECT {
                 vec![
                     text(),
                     json!({ "op": "createTable", "name": "t2",
@@ -833,7 +833,7 @@ fn prelude(
                             { "stmt": "delete", "table": "t2",
                               "where": { "node": "colRef", "name": "x" } }] } }),
                 ]
-            } else if dialect == &zero_migrate_postgres::DIALECT {
+            } else if dialect == &zeroship_migrate_postgres::DIALECT {
                 vec![
                     text(),
                     create_function(),
@@ -841,7 +841,7 @@ fn prelude(
                             "timing": "before", "events": ["insert"], "forEach": "row",
                             "action": { "kind": "executeFunction", "name": "f" } }),
                 ]
-            } else if dialect == &zero_migrate_sqlite::DIALECT {
+            } else if dialect == &zeroship_migrate_sqlite::DIALECT {
                 vec![
                     text(),
                     json!({ "op": "createTrigger", "name": "tg", "table": "t",
@@ -1128,7 +1128,7 @@ async fn pg_verdict(url: &str, kind: &str, variant: &str, op: &Op) -> Verdict {
         kind,
         variant,
         op,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &probe,
         &policy,
         &cfg,
@@ -1204,7 +1204,7 @@ async fn mysql_verdict(url: &str, kind: &str, variant: &str, op: &Op) -> Verdict
         kind,
         variant,
         op,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         &probe,
         &policy,
         &cfg,
@@ -1237,7 +1237,7 @@ async fn mysql_probe_databases(session: &MysqlDevSession) -> (i64, Vec<String>) 
         .query(
             "SELECT SCHEMA_NAME AS nspname FROM information_schema.SCHEMATA \
              WHERE SCHEMA_NAME LIKE ? ORDER BY SCHEMA_NAME",
-            &[zero_migrate::driver::Bind::Text(format!("{PROBE_PREFIX}%"))],
+            &[zeroship_migrate::driver::Bind::Text(format!("{PROBE_PREFIX}%"))],
         )
         .await
         .expect("query information_schema.SCHEMATA for probe databases");
@@ -1288,7 +1288,7 @@ async fn sqlite_verdict(kind: &str, variant: &str, op: &Op) -> Verdict {
         kind,
         variant,
         op,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &probe,
         &policy,
         &cfg,
@@ -1305,7 +1305,7 @@ async fn run_row<B: MigrationBackend>(
     kind: &str,
     variant: &str,
     op: &Op,
-    dialect: &zero_migrate::DialectId,
+    dialect: &zeroship_migrate::DialectId,
     probe: &Names,
     policy: &EffectivePolicy,
     cfg: &ExecutorConfig,
@@ -1325,7 +1325,7 @@ async fn run_row<B: MigrationBackend>(
         ) {
             Err(verdict) => prelude_failure = Some(format!("prelude lower: {}", verdict.detail)),
             Ok(artifact) => {
-                if let Err(error) = MigrationEngine::new(zero_migrate::shipping_vendors())
+                if let Err(error) = MigrationEngine::new(zeroship_migrate::shipping_vendors())
                     .apply_plan(
                         &artifact.plan.steps,
                         Approval::Approved,
@@ -1355,19 +1355,19 @@ async fn run_row<B: MigrationBackend>(
         Ok(snapshot) => LiveSchema::from_catalog_snapshot(snapshot, OWNER),
         Err(_) => LiveSchema::from_tables(BTreeSet::new()),
     };
-    if dialect == &zero_migrate_sqlite::DIALECT && !prelude_ops.is_empty() {
+    if dialect == &zeroship_migrate_sqlite::DIALECT && !prelude_ops.is_empty() {
         let history: Vec<Op> = prelude_ops
             .iter()
             .filter_map(|op| serde_json::from_value(op.clone()).ok())
             .collect();
         if let Ok(defs) = single_fold::fold(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &history,
             dialect,
             &cfg.project_schema,
             policy,
         )
-        .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
+        .map(|folded| folded.project_field_defs(zeroship_migrate::shipping_vendors()))
         {
             live.sdk_schemas = defs;
         }
@@ -1379,7 +1379,7 @@ async fn run_row<B: MigrationBackend>(
     let source = envelope(&format!("{kind}_{variant}"), &[subject], is_dml);
     let verdict = match lower(&source, &cfg.project_schema, policy, dialect, &live) {
         Err(verdict) => verdict,
-        Ok(artifact) => match MigrationEngine::new(zero_migrate::shipping_vendors())
+        Ok(artifact) => match MigrationEngine::new(zeroship_migrate::shipping_vendors())
             .apply_plan(
                 &artifact.plan.steps,
                 Approval::Approved,
@@ -1829,7 +1829,7 @@ async fn probe_schemas(session: &PgDevSession) -> (i64, Vec<String>) {
     let rows = session
         .query(
             "SELECT nspname FROM pg_namespace WHERE nspname LIKE $1 ORDER BY nspname",
-            &[zero_migrate::driver::Bind::Text(format!("{PROBE_PREFIX}%"))],
+            &[zeroship_migrate::driver::Bind::Text(format!("{PROBE_PREFIX}%"))],
         )
         .await
         .expect("query pg_namespace for probe schemas");
@@ -2117,7 +2117,7 @@ async fn the_extension_claim_is_exclusive_and_only_the_extension_rows_take_it() 
     let held: bool = contender
         .query_one(
             "SELECT pg_try_advisory_lock(hashtext($1)::bigint) AS got",
-            &[zero_migrate::driver::Bind::Text(extension_claim_key())],
+            &[zeroship_migrate::driver::Bind::Text(extension_claim_key())],
         )
         .await
         .expect("the contender asks for the claim")
