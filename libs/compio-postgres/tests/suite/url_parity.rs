@@ -103,10 +103,26 @@ fn malformed_brackets_are_rejected_like_libpq() {
 //     -> [app=emptyport][db=postgres][usr=postgres][port=5432]
 //   postgres://postgres@[::1]:/postgres?...&application_name=v6emptyport
 //     -> [app=v6emptyport]...
+//
+// THE 5432 ABOVE IS THE EFFECTIVE PORT, NOT AN EXPLICIT ONE, and this test
+// asserted the wrong half of that until 2026-08-26. An empty value means
+// "unset" to libpq, which then supplies `DEF_PGPORT_STR` (`fe-connect.c`
+// stores the compiled default for an empty port rather than a parsed 5432).
+// `get_ports` reports what the CALLER set, so the empty spelling must leave it
+// empty - exactly as the keyword form does in
+// `config::tests::empty_parameter_values::an_empty_port_value_leaves_the_default`.
+// The two spellings reach the same option in libpq, so they cannot disagree
+// here. `connect.rs` supplies the 5432 at dial time via `.unwrap_or(5432)`,
+// which is what the transcript above actually measured.
 #[test]
-fn empty_port_defaults_to_5432_like_libpq() {
-    assert_eq!(cfg("postgres://h:/db").get_ports(), [5432]);
-    assert_eq!(cfg("postgres://[::1]:/db").get_ports(), [5432]);
+fn an_empty_uri_port_is_unset_and_dials_5432_like_libpq() {
+    assert!(cfg("postgres://h:/db").get_ports().is_empty());
+    assert!(cfg("postgres://[::1]:/db").get_ports().is_empty());
+
+    // The control: an EXPLICIT port is still reported, so the assertions above
+    // cannot be satisfied by a parser that dropped every port.
+    assert_eq!(cfg("postgres://h:5433/db").get_ports(), [5433]);
+    assert_eq!(cfg("postgres://[::1]:5433/db").get_ports(), [5433]);
 }
 
 // Unparseable and out-of-range ports are rejected, as libpq rejects them.
