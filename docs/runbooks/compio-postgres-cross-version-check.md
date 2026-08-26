@@ -23,6 +23,42 @@ belonging to `zero-migrate`). Concurrent suites on one server contend for
 replication slots and hang, and you would also be interfering with someone
 else's run.
 
+## `psql --version` DOES NOT NAME THE LIBPQ THAT CONNECTS
+
+When the thing under test is CLIENT behaviour - a connection parameter's
+default, unit, or refusal - the oracle is the libpq library, and `psql` is only
+the program that calls it. Those two carry SEPARATE versions, and in the
+`zs-cpg-review-5455` image they disagree:
+
+```console
+$ docker exec zs-cpg-review-5455 psql --version
+psql (PostgreSQL) 16.14 (Debian 16.14-1.pgdg13+1)
+$ docker exec zs-cpg-review-5455 dpkg -l | grep libpq5
+ii  libpq5:amd64  18.4-1.pgdg13+1  amd64  PostgreSQL C client library
+```
+
+So every "measured against libpq 16.14" reading taken through that container
+was taken against **libpq 18.4**. This is not hypothetical: it put a wrong
+comment in `config.rs` claiming `connect_timeout=1` "is honoured as one second,
+on libpq 16.15 AND 18.4", concluding "there is no floor to match". Both
+readings were 18.4. PostgreSQL 16's `connectDBComplete` does hold the floor -
+`if (timeout < 2) timeout = 2;`, `fe-connect.c:2439` on `REL_16_STABLE`, with
+the comment "insist on at least two seconds" - and 18 removed it. Re-measured
+2026-08-26 through that container: 1101 / 2104 ms for `connect_timeout=1` / `2`
+against the blackhole `192.0.2.1`, both ending in "timeout expired", which is
+18.4's behaviour and not 16's.
+
+Check the LIBRARY before attributing a client reading to a version:
+
+```bash
+docker exec <container> dpkg -l | grep libpq5      # the version that matters
+docker exec <container> psql --version             # only the caller
+```
+
+To measure a specific libpq, run a container whose `libpq5` is that version and
+verify it with the first command - do not infer it from the image tag or from
+the server's `SELECT version()`, neither of which constrains the client library.
+
 ## Steps
 
 Start a dedicated server. The three settings are load-bearing: logical
