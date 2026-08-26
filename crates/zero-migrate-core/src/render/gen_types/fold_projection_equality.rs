@@ -1,7 +1,7 @@
 //! **The projection gate: every projection reproduces its walker, byte for byte.**
 //!
-//! ONE leg, not four. A leg retires with each walker that is deleted:
-//! `runtime_metadata`, `authoring_tables` and `field_defs` have all lost theirs - see
+//! ONE leg, not four. A leg lives exactly as long as the walker it compares against,
+//! and retires with it - see
 //! [`Projection`]. Only `fold_ops` is left to compare against, and that leg retires
 //! when its walker goes, at which point this file has nothing to measure and goes
 //! with it.
@@ -74,10 +74,10 @@ use zero_migrate_ir::dialect::DialectId;
 
 /// The projections still measurable here, named for the walker each must reproduce.
 ///
-/// `RuntimeMetadata`, `AuthoringTables` and `FieldDefs` are NOT in this list any more,
-/// and their absence is the point rather than a gap. This gate compares a projection to
-/// the WALKER it replaces; the runtime-metadata, authoring-table and `FieldDef`
-/// walkers are all deleted, so for each of those three there is no second answer left
+/// The runtime-metadata, authoring-table and `FieldDef` projections are NOT in this
+/// list, and their absence is the point rather than a gap. This gate compares a
+/// projection to the WALKER it replaces; those three walkers are all deleted, so for
+/// each of them there is no second answer left
 /// and keeping
 /// the leg would have compared the projection to itself. What replaces each is a gate at
 /// the ARTIFACT level - `tests/gen_types_runtime_metadata_from_the_fold.rs`,

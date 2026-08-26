@@ -587,11 +587,11 @@ mod tests {
     /// `...(role)`, `...(&exec_cfg.confinement.meta_schema)`) - every such site is an
     /// engine-identifier seam that must NOT use an infallible escaper.
     ///
-    /// RETARGETED WITH THE SEAM. The infallible primitive used to be
-    /// `dml::escape_quote_ident`, and these needles named it. That symbol no
-    /// longer exists - the raw spelling moved into `render::backends` and became
-    /// private to it - so needles built on the old name would have matched nothing
-    /// forever after and this pin would have gone quietly dead while still passing.
+    /// RETARGETED WITH THE SEAM. The infallible primitive these needles first named
+    /// was a single raw escaper in this module; the raw spelling has since moved into
+    /// `render::backends` and become private to it, so needles built on that name
+    /// would have matched nothing forever after and this pin would have gone quietly
+    /// dead while still passing.
     /// The needles now name the two doors that replaced it,
     /// [`escape_quote_ident_for_dialect`] and the constraint-definition codec, which is
     /// where an engine identifier could actually land today.
@@ -1722,8 +1722,9 @@ mod tests {
     /// the engine-supplied `project_schema`. A NUL byte - the one char that
     /// `"`-doubling cannot neutralise (PG rejects it inside an identifier) - is
     /// refused fail-closed with `DmlError::InvalidIdentifier { what: "schema" }`,
-    /// not interpolated. RED before the `quote_schema` assertion landed (the old
-    /// `format!` would have emitted a statement carrying the raw NUL).
+    /// not interpolated. RED before the schema qualifier was routed through the
+    /// checked quoter (the old `format!` would have emitted a statement carrying
+    /// the raw NUL).
     #[test]
     fn rejects_nul_in_project_schema_pg() {
         let err = assemble_insert(

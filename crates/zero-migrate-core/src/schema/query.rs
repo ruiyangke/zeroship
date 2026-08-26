@@ -628,11 +628,8 @@ fn validate_schema(name: &str) -> Result<(), QueryError> {
 // `ALTER TABLE ... ADD CONSTRAINT` rather than an inline clause the statement
 // order cannot satisfy. `render::declarative::lower_create_table` is that caller,
 // reaching `build_create_table_with_fks_for_dialect_scoped_statements` directly.
-//
-// An earlier version of this comment named `exec_register_model_with_pool` as
-// the production path. That function does not exist in this workspace and never
-// has - it belongs to appbase's plugin-db, from which this kernel was seeded.
-// The `schema::diff` module header still carries the same inherited name.
+// The orchestrator that drives these builders in production is appbase's plugin-db,
+// from which this kernel was seeded; nothing in this workspace plays that role.
 
 /// Controls FK emission strategy for `build_create_table_with_fks_for_dialect`.
 ///
@@ -881,7 +878,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
             // where the variant requires a value. The discriminator
             // column itself already gets `CHECK (kind IN (...))` via
             // the regular `enum` constraint emitted by
-            // `def_to_constraints`, so we don't repeat the IN-list here.
+            // `def_to_constraints_for_dialect`, so we don't repeat the IN-list here.
             if def.get("discriminator").and_then(|v| v.as_str()) == Some("__discriminator__") {
                 if let Some(variants) = def.get("variants").and_then(|v| v.as_array()) {
                     let constraint_clauses =
@@ -2108,7 +2105,7 @@ pub(crate) fn def_to_column_type_for_backend(
 /// so a `kind='login'` row cannot store NULL where the variant requires
 /// a value. The discriminator column itself already gets
 /// `CHECK (kind IN ('login', 'error', ...))` from the regular `enum`
-/// constraint emitter (`def_to_constraints`).
+/// constraint emitter (`def_to_constraints_for_dialect`).
 ///
 /// The constraint name is content-addressed (`<table>_<disc>_<value>_chk`)
 /// and hash-truncated like our index names so it stays within Postgres'
@@ -2700,16 +2697,6 @@ columns = [
     // These lock in the fixes from 6a309b3 ("resolve 7 native-layer bugs"):
     // type preservation on jsonb array ops, value-based $pull, $set flattening,
     // and updated_at auto-injection.
-    // -----------------------------------------------------------------------
-
-    // -----------------------------------------------------------------------
-    // UPDATE auto-bumps version + updated_at + updated_by
-    //
-    // The auto-bumps fire only on the new dispatch path (signalled by
-    // an `actor_id` being threaded through OR by `skip_*` hints).
-    // continue to see the single-column auto-bump
-    // (`updated_at = NOW()` on PG) so the regression tests above stay
-    // green.
     // -----------------------------------------------------------------------
 
     // -----------------------------------------------------------------------
@@ -4245,15 +4232,11 @@ columns = [
         }
     }
 
-    // NOTE: `system_field_reservation_error_carries_correct_code` - which
-    // asserted the `From<QueryError> for DbError` lift carries
-    // `code = "reserved_system_field_name"` - was relocated to the data plane's
-    // `error.rs` test module as part of the schema-authority extraction.
-    // `DbError` lives in the data plane (it is built on a runtime `OpError`)
-    // and cannot be named from this schema layer. The validator
+    // NOTE: the lift from `QueryError` into the SDK error envelope is NOT covered
+    // here. That envelope is a data-plane lifecycle type this schema layer must not
+    // reach into, so the mapping is tested where the envelope lives. The validator
     // (`validate_field_name_for_declaration`) and the `QueryError`
-    // variant it produces are tested here; the *mapping* to `DbError` is
-    // tested where `DbError` lives.
+    // variant it produces are tested here.
 
     /// `field_to_column_for_dialect` (the DDL builder for one column) must propagate
     /// the system-field reservation. End-to-end check that the

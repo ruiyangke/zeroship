@@ -8,7 +8,7 @@
 //! validator ([`validate_ir_scoped`](crate::model::validate::validate_ir_scoped))
 //! and therefore cannot live in the leaf. (Table-shape injection + author-PK
 //! conformance ride on the composed `EffectivePolicy` in
-//! `crate::model::table_shape::resolve_create_table_policy`, not a `PolicyProfile`.)
+//! `crate::model::table_shape::resolve_create_table_policy`, and on nothing else.)
 
 use std::collections::BTreeMap;
 use zero_migrate_backend::registry::VendorSet;
@@ -89,8 +89,8 @@ pub fn load_ir_document_authorized(
     // 3. structural validation - the authoritative gate over every Expr slot, plus
     //    the schema-confinement + guard-direction gate threaded with the active
     //    [`SchemaScope`]: a Confined cross-schema op is REFUSED here, fail-closed,
-    //    BEFORE lower. (The author-PK CONFORMANCE re-check is no longer
-    //    threaded through a `PolicyProfile` here - that conformance is owned by the
+    //    BEFORE lower. (The author-PK CONFORMANCE re-check does NOT run here -
+    //    that conformance is owned by the
     //    injection resolver `resolve_create_table_policy`, which the server runs
     //    over the operator's `EffectivePolicy` before this load.)
     validate_ir_authorized(vendors, &ir, target_dialect, schema_scope, authority)?;

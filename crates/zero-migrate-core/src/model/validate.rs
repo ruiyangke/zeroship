@@ -11986,7 +11986,7 @@ mod tests {
     /// nothing from this op", so both must pass rather than one passing and one
     /// refusing on a distinction the author never drew.
     ///
-    /// `without_panicking` is the original point and still is. An absent leg used to
+    /// Not panicking is the original point and still is. An absent leg used to
     /// reach an `unwrap` here; the guarantee is that it resolves to no ops instead of
     /// either panicking or inventing a refusal.
     #[test]

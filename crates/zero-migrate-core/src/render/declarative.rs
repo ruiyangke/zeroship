@@ -412,8 +412,8 @@ pub struct CollectionDescriptor {
 /// emitting drop+add - the column's data is preserved by the dual-write +
 /// backfill sequence, and the destructive `DROP COLUMN <from>` is gated.
 ///
-/// The DSL `renamedFrom` surface that produces these hints is a separate SDK
-/// follow-up; this struct is the engine-side input contract.
+/// The authoring surface that produces these hints belongs to the SDK, not here;
+/// this struct is the engine-side input contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenameHint {
     /// The table the rename happens on.
@@ -2208,7 +2208,7 @@ fn build_table_snapshot_impl(
         // the `zero-migrate:mask:kind=...,classification=...` sentinel that
         // plugin-db reads at RUNTIME (via `pg_description`) to drive the mask
         // read-pass is now EMITTED into the generated DDL: it rides on the
-        // sibling column's `mask_sentinel`, which `render_create_table` /
+        // sibling column's `comment_sentinel`, which `render_create_table` /
         // `render_add_column` turn into a `COMMENT ON COLUMN` statement. Built
         // by the SHARED codec (`crate::schema::query::mask_sentinel_for_field`
         // -> `build_mask_sentinel`) so it is byte-identical to the one
@@ -2593,11 +2593,9 @@ pub(crate) fn unique_index_name(vendors: VendorSet, table: &str, field: &str) ->
 /// spatial index. `derived_index_aliases_name_every_derived_index` pins them to
 /// that builder's actual output so the two cannot fall out of step silently.
 ///
-/// The composite FTS index is absent on purpose. Both halves of the engine derive
-/// that name through the single shared `crate::schema::query::fts_index_name`, so
-/// it has no second spelling to alias. Policy-injected indexes are absent for the
-/// same reason: they are built AND recognised through
-/// `crate::schema::query::index_name` on both sides.
+/// Policy-injected indexes are absent on purpose: they are built AND recognised
+/// through `crate::schema::query::index_name` on both sides, so they have no second
+/// spelling to alias.
 fn derived_index_aliases_for(
     vendors: VendorSet,
     d: &CollectionDescriptor,
