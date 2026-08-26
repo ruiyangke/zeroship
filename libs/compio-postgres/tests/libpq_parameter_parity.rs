@@ -253,6 +253,21 @@ fn the_parity_table_covers_every_parameter_libpq_18_accepts() {
 /// `application_name` never appears standalone inside
 /// `fallback_application_name`.
 ///
+/// RE-VERIFIED 2026-08-26 against the same `libpq.so.5.18`, independently:
+/// 463 candidates (345 whole strings plus their underscore tails), 413 of them
+/// not already in the table, every one probed. NONE was a valid option, so the
+/// table still covers the whole surface. The control ran first and matters -
+/// the loop prints nothing both when there is nothing missing and when the
+/// probe is broken, so `sslmode`, `connect_timeout`, `application_name`,
+/// `oauth_issuer` and `min_protocol_version` were each confirmed to come back
+/// VALID, and `zz_not_an_option` to come back rejected.
+///
+/// THE TAILS ARE NOT OPTIONAL. The re-verification was first run on whole
+/// strings only, which is a sweep that cannot see any option that happens to
+/// be a suffix of another literal - precisely the case the paragraph above
+/// describes. It reported a clean result, and that result was worth nothing
+/// until the tails were added and the candidate count went from 345 to 463.
+///
 /// To re-derive after a libpq upgrade, repeat that sweep rather than reading a
 /// release note; `host` is the one accepted key deliberately absent here, for
 /// the reason given above.
