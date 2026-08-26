@@ -1303,7 +1303,7 @@ fn a_fourth_backend_answers_dialect_with_its_own_id() {
     assert!(!dml.supports(Capability::MaterializedView));
     // The outsider's PARTITION posture, stated in the same one place it states
     // everything else about itself. This used to be a required
-    // `ValidationPolicy::supports_native_partitioning` - a method the outsider had
+    // a native-partitioning predicate on ValidationPolicy - a method the outsider had
     // to implement but whose answer nothing ever checked. It is a descriptor row
     // now, which means the outsider's NO is the ordinary consequence of not
     // claiming a capability rather than a separate contract to satisfy, and it

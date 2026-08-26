@@ -17,7 +17,7 @@
 //! them:
 //!
 //! * `FoldedSchema::project_runtime_metadata` replaced `runtime_metadata_from_ops`;
-//! * `FoldedSchema::project_authoring_tables` replaced `authoring_tables_from_ops`,
+//! * `FoldedSchema::project_authoring_tables` replaced a standalone op walker,
 //!   and is the source model `env.db.ts` is rendered from;
 //! * `FoldedSchema::project_field_defs` replaced `fold_to_field_defs`, and is the wire
 //!   `FieldDef` map behind `schema.runtime.json` and behind `LiveSchema::sdk_schemas`.
@@ -63,7 +63,7 @@
 //! writing streams for the carriers rather than by re-running the gate.
 //!
 //! `project_authoring_tables` found the reverse: the model was RIGHT and the artifact had been wrong
-//! for as long as `authoring_tables_from_ops` existed. That walker had no
+//! for as long as that separate walker existed. It had no
 //! `Op::AlterPrimaryKey` arm at all, so `env.db.ts` kept declaring the key the
 //! migration replaced, dropped or added, and kept `.autoIncrement()` on a column the
 //! same op stripped identity from. This traversal's `Op::AlterPrimaryKey` arm is what
@@ -1045,7 +1045,7 @@ impl FoldedSchema {
 
     /// **Projection 3: the authoring tables.** The source model `env.db.ts` is
     /// rendered from, and LIVE - `render_artifacts` reads this, and
-    /// `authoring_tables_from_ops`, which used to produce it, is deleted.
+    /// The separate walker that used to produce it is deleted.
     #[must_use]
     pub(crate) fn project_authoring_tables(&self) -> BTreeMap<String, AuthoringTable> {
         self.authored

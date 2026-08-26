@@ -155,7 +155,7 @@ fn every_shipping_capability_answer_is_pinned() {
 ///
 /// # Why this replaced a required trait method rather than joining it
 ///
-/// `ValidationPolicy::supports_native_partitioning` used to be a third spelling of
+/// A native-partitioning predicate on ValidationPolicy used to be a third spelling of
 /// this same fact, consulted only by the authoring validator while `render/lower.rs`
 /// asked the identical question as `self.dialect != POSTGRES`. Two spellings of one
 /// fact drift; three is a promise to. The capability is now the single spelling —

@@ -290,7 +290,7 @@ pub(crate) fn ddl_emitter(
 ///
 /// This replaced the old `guard_for` free function in the since-dissolved guard crate, which was a second
 /// closed identity match living in the guard crate and mapping BOTH
-/// descriptor-only dialects onto one shared `SqliteDescriptorGuard`. Two consequences
+/// descriptor-only dialects onto one shared guard type. Two consequences
 /// of folding it into the vendor registry are worth stating:
 ///
 /// - Every backend surface now resolves through the same [`VendorSet`] lookup, keyed

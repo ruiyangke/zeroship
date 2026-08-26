@@ -24,7 +24,7 @@
 //! * `schema::query`'s "platform-reserved" name table held one BACKEND's catalog
 //!   namespace (`sqlite_`), and `validate_collection` held another's (`pg_`) as a
 //!   hard-coded byte comparison.
-//! * `db_url::is_sqlite_url` decided which backend a URL selects by string-matching
+//! * a DSN classifier decided which backend a URL selects by string-matching
 //!   schemes, without the registry. It had zero callers anywhere in the workspace.
 //! * The managed dual-write trigger was spelled in the engine —
 //!   `CREATE OR REPLACE FUNCTION … LANGUAGE plpgsql`, `CREATE TRIGGER …`, and twice

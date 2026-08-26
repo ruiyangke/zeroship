@@ -687,7 +687,7 @@ fn a_literal_field_is_unreachable_from_both_gen_artifacts_sources() {
 
 /// **A `VARCHAR(n)` width survives the wire AND the producer, end to end.**
 ///
-/// This test used to be called `the_producer_not_the_wire_is_where_a_varchar_width_dies`
+/// This test was renamed from one naming the producer as where a varchar width dies
 /// and it asserted the opposite of its last line: `token_to_col_type` mapped every
 /// `"string"` token to `ColType::Text` without consulting `max_length`, so re-importing
 /// an exported `VARCHAR(64)` produced an unbounded `TEXT`. It was written as a sighted

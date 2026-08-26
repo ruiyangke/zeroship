@@ -141,7 +141,7 @@ fn supports(vendors: VendorSet, dialect: &DialectId, capability: Capability) -> 
 /// `recover_fk_policy`, `resolved_inject_prefix_len`) without widening a dozen
 /// production functions to `pub(crate)` for a module that ships dead.
 ///
-/// PUBLIC because `fold_to_field_defs` was the crate's public entry point to the wire
+/// PUBLIC because the standalone walker was the crate's public entry point to the wire
 /// `FieldDef` map and it is deleted; what replaces it is not a
 /// renamed function but the fold itself plus a READ of it, so the entry point callers
 /// name is `single_fold::fold(...)?.project_field_defs()`. Only [`single_fold::fold`],

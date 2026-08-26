@@ -67,7 +67,7 @@ pub trait ValidationPolicy: std::fmt::Debug + Sync {
     /// Whether relations and named types share this backend's type namespace.
     fn tracks_relation_type_namespace(&self) -> bool;
 
-    // NOTE: `supports_native_partitioning` used to live here. It was a THIRD
+    // NOTE: a native-partitioning predicate used to live here. It was a THIRD
     // spelling of a fact this contract already carried twice: `DdlEmitter`'s four
     // required partition methods answer it by `Option`, and the render layer asked
     // it as `dialect != POSTGRES`. It is now one question in the vocabulary both

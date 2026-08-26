@@ -60,7 +60,7 @@
 //!
 //! This is what replaces the old `guard_for(cfg) -> Box<dyn MigrationGuard>` dispatch,
 //! whose closed three-way match handed BOTH descriptor-only dialects one shared
-//! `SqliteDescriptorGuard`. That match was exhaustive, so a fourth dialect broke it -
+//! one shared descriptor-only guard type. That match was exhaustive, so a fourth dialect broke it -
 //! but a `_ =>` arm added in haste would have granted every future backend the
 //! trusting path silently. The required field removes the arm the mistake could be
 //! made in. `BackendVendor` therefore derives no `Default`, has no `Default` impl, is

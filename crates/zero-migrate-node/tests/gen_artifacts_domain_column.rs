@@ -491,7 +491,7 @@ fn encrypted_domain_history(base: Value) -> Vec<Value> {
 /// encrypted DOMAIN column routes through the same resolution - and it now completes
 /// it, on BOTH producers.
 ///
-/// This test used to be `an_encrypted_domain_column_is_left_exactly_as_it_was`, which
+/// This test was renamed from a name that asserted the column is left untouched, which
 /// pinned `type: "string"` / `wraps: "string"` for a domain over `int`. That pin was
 /// deliberate: resolving the runtime descriptor alone would have left the catalog
 /// sentinel the LOWER stamps still saying `string`, so the two would disagree about how

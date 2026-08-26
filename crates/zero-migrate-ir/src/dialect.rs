@@ -224,7 +224,7 @@ impl FromIterator<DialectId> for DialectSet {
 mod tests {
     use super::*;
 
-    // `shipping_ids_are_well_formed` USED TO LIVE HERE. It looped over the three
+    // A well-formedness test over the shipping ids USED TO LIVE HERE. It looped over the three
     // constants this module declared and asserted the id rule on each. Both halves of
     // it moved and the proposition is now checked more strongly than a test can:
     //

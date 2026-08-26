@@ -106,7 +106,7 @@ pub use zero_migrate_backend::approval;
 // argument of. Re-exported so every `crate::conn::...` and `zero_migrate::conn::...`
 // reference resolves unchanged.
 pub use zero_migrate_backend::conn;
-// `pub mod db_url` USED TO LIVE HERE. It held one function, `is_sqlite_url`, a DSN
+// A DSN-classifier module was removed from here. It held one function, a
 // classifier that decided which backend a URL selects by string-matching
 // `postgres://` / `sqlite:` / `file:` in core - the engine resolving a vendor without
 // asking the registry. It was also DEAD: a sweep of `crates` and `packages` found zero
@@ -338,7 +338,7 @@ pub use zero_migrate_policy::{seal, SealError, SealedPolicy};
 // The composed policy-decision point the injection + guard share. Re-exported at
 // the crate root so the napi addon (`gen_artifacts_*`, the schema-emit path) can
 // name it without reaching into the `zero-migrate-policy` crate directly.
-// `fold_to_field_defs` is NOT in this list any more. It is deleted
+// The standalone wire-shape walker is NOT in this list any more. It is deleted
 // (`docs/proposals/single-fold-and-effects.md` section G); the wire `FieldDef`
 // map it produced is now `single_fold::fold(...)?.project_field_defs()`, reached through
 // `render::fold::single_fold`. The replacement is deliberately not a renamed function:

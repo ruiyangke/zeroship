@@ -24,7 +24,7 @@
 //!
 //! # Why this is a separate type from SQLite's
 //!
-//! Both dialects used to run one `SqliteDescriptorGuard` - a type named after the
+//! Both dialects used to share one guard type named after the
 //! other vendor, whose own doc had to explain that the name was wrong. Each vendor
 //! now writes its own trusting guard, so a change to one dialect's posture cannot
 //! silently become a change to the other's.
