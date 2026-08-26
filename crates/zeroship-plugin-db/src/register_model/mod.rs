@@ -116,8 +116,6 @@ use crate::context;
 use crate::error::DbError;
 use crate::v8_bridge::{runtime_state, setup_js_promise};
 
-#[cfg(any(test, feature = "test-helpers"))]
-pub(crate) mod bootstrap;
 
 /// `zeroship.db.registerModel(collection, schemaJson)` → `Promise<void>`
 ///
@@ -307,109 +305,7 @@ async fn exec_register_model(
     }
 }
 
-/// Backend-driven variant of `exec_register_model`. Public so
-/// integration tests can drive the four-phase orchestrator without
-/// going through V8.
-///
-/// `deploy_id` controls audit-log grouping (proposal A3 line 233
-/// reserves `'cold_start'` for pre-deploy DDL).
-///
-/// The four stages are:
-///
-/// ```text
-/// bootstrap → plan → validate → apply
-/// ```
-///
-/// Each stage is implemented as a free function in its own submodule;
-/// this entry just sequences them. The advisory-lock client returned
-/// from `bootstrap` lives until `apply` releases the lock between
-/// passes.
-///
-/// Generic over [`RegisterBackend`] (was concrete
-/// `&PostgresBackend`). The PG pool's `get()` lives behind
-/// [`crate::backend::PgLockManager::acquire_pooled_client_for_lock`]
-/// now, so the `PooledClient<'p>` lifetime still threads through to
-/// `apply` but no concrete-type leak remains in this signature. Open
-/// Q5 resolution per `docs/archive/p0-implementation-plan.md`
-/// §"PR 3" + §3 Q5 and `docs/archive/db-system-design.md` §7.
-#[cfg(any(test, feature = "test-helpers"))]
-/// THREE PARAMETERS ARE NOW IGNORED, and that is a finding rather than an
-/// oversight.
-///
-/// `collection`, `indexes` and `deploy_id` are still accepted because the
-/// JS-facing `registerModel(collection, schemaJson)` contract and every caller
-/// pass them - but nothing here reads them. registerModel ensures the app's
-/// schema and audit table and takes the per-app advisory lock, none of which is
-/// per-collection. It became a PER-APP operation the moment it stopped
-/// reconciling a table.
-///
-/// They are kept, not deleted, so the dispatch signature and its callers stay
-/// still while the schema-authority split settles. If that holds, the honest
-/// next step is to drop them from this function and from `exec_register_model`.
-pub async fn run_pipeline<B: RegisterBackend + DialectBuilder + AuditWriter>(
-    backend: &B,
-    app_id: &str,
-    _collection: &str,
-    schema: &Value,
-    _indexes: &Value,
-    _deploy_id: &str,
-) -> Result<(), DbError> {
-    // registerModel REGISTERS. It does not reconcile schema.
-    //
-    // Bootstrap is the whole pipeline now: it ensures the app schema and the
-    // audit table, takes the per-app advisory lock, and captures the
-    // schema_version. Three stages used to follow it - plan, validate, apply -
-    // which introspected the live catalog, diffed it against the declared
-    // schema, and applied the difference as DDL.
-    //
-    // WHY THEY ARE GONE, rather than narrowed. Nothing consumed the diff: the
-    // data plane sources column types, encryption metadata and mask metadata
-    // from LIVE introspection plus the engine's sentinels, never from the
-    // declared schema (`crud::read_pipeline`, `crud::write_pipeline`, both of
-    // which say so in as many words). So the diff was a SECOND model of schema
-    // truth inside plugin-db, competing with the introspection the data plane
-    // actually reads and with the migration engine that owns the tables. A
-    // creator's schema is applied by the migration process - by
-    // `crates/zeroship-migrated` at deploy, by the vite plugin's apply in dev.
-    //
-    // WHAT A MISMATCH LOOKS LIKE NOW. If the declared schema names a column the
-    // table does not have, the first query against it fails with the database's
-    // own error. That is later than a deploy-time refusal and it is a real
-    // trade, made deliberately: an in-process refusal needed plugin-db to keep
-    // modelling the schema, which is the coupling being removed.
-    let lock_guard =
-        bootstrap::bootstrap(backend, app_id, schema).await?;
 
-    // The lock is taken by bootstrap and released here on every path. It no
-    // longer spans an apply, but it still serialises concurrent registerModel
-    // calls for one app past `ensure_audit_table` and the schema_version read.
-    let _ = lock_guard.release().await;
-
-    Ok(())
-}
-
-/// Pool-driven entry retained for integration tests that hand in a
-/// `Rc<Pool>` directly (predates the Backend trait). Builds an ad-hoc
-/// [`crate::backend::PostgresBackend`] around the pool and delegates to
-/// [`run_pipeline`].
-///
-/// Production code reaches the orchestrator through
-/// [`register_model_dispatch`] / [`exec_register_model`], which read
-/// the backend from the per-isolate context. Test code that doesn't
-/// drive the V8 lifecycle uses this helper to skip the lookup.
-#[cfg(feature = "test-helpers")]
-pub async fn exec_register_model_with_pool(
-    pool: std::rc::Rc<compio_postgres::Pool>,
-    app_id: &str,
-    collection: &str,
-    schema: &Value,
-    indexes: &Value,
-    deploy_id: &str,
-) -> Result<(), DbError> {
-    let url = context::with(|c| c.db_url()).unwrap_or_default();
-    let backend = crate::backend::PostgresBackend::new(pool, url);
-    run_pipeline(&backend, app_id, collection, schema, indexes, deploy_id).await
-}
 
 /// Test seam that drives the PRODUCTION dialect dispatch
 /// ([`exec_register_model`]) without the V8 lifecycle. The backend is read

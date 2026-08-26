@@ -1435,7 +1435,7 @@ mod backup_pg {
         BusyPolicy, LockGuard, LockScope, PgLockManager, PitrTarget, SnapshotHandle, SnapshotOpts,
     };
     use crate::error::DbError;
-    use crate::register_model::bootstrap::LOCK_TAG as REGISTER_MODEL_LOCK_TAG;
+    use crate::backend::REGISTER_MODEL_LOCK_TAG;
 
     /// Parse a `file:///abs/path` URI into the underlying filesystem
     /// path. Returns a typed `Configuration` error for unsupported

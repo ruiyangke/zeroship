@@ -204,6 +204,14 @@ pub trait SqlExecutor: 'static {
 /// directly as keys into a per-process HashMap (`GlobalApp` and
 /// `LocalApp` both, since SQLite is in-process by definition;
 /// §8.5). The variant classifies *visibility*, not key shape.
+/// Name of the per-app register-model advisory lock.
+///
+/// MOVED HERE from `register_model::bootstrap` when that module was deleted. It
+/// is not a leftover: two live [`LockScope::GlobalApp`] sites in the PostgreSQL
+/// backend name this same lock, so the string outlived the module that used to
+/// define it and belongs beside the scope type it parameterises.
+pub const REGISTER_MODEL_LOCK_TAG: &str = "register_model";
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum LockScope {
     /// Cluster-wide / cross-process advisory lock. Visible to every
