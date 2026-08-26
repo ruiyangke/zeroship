@@ -212,7 +212,15 @@ impl ReadDeadline {
     }
 
     fn clear_reader(&self) {
-        self.inner.reader_waker.borrow_mut().take();
+        // Bound, not discarded inline. `borrow_mut().take();` drops the taken
+        // `Waker` while the `RefMut` temporary is still alive - MEASURED with a
+        // standalone probe on edition 2024, where the discarded-inline form
+        // reports the cell as still borrowed inside the destructor and the
+        // bound form does not. A `Waker` is arbitrary caller code, and a
+        // destructor re-entering this cell meets `BorrowMutError`. Same rule as
+        // `register_reader` above and `wake_reader` below.
+        let cleared = self.inner.reader_waker.borrow_mut().take();
+        drop(cleared);
     }
 
     fn wake_reader(&self) {
@@ -980,6 +988,38 @@ mod tests {
             observed,
             Some(false),
             "the replaced reader waker was destroyed while its slot was still \
+             borrowed (None means the destructor never ran at all)"
+        );
+    }
+
+    /// `clear_reader` must not destroy the taken waker inside the borrow
+    /// either.
+    ///
+    /// `borrow_mut().take();` discards the taken `Waker` as an unbound
+    /// temporary, and it is destroyed while the `RefMut` is still alive.
+    /// MEASURED with a standalone probe on edition 2024: the discarded-inline
+    /// form reports the cell as still borrowed inside the destructor, and
+    /// binding it first does not. Same invariant as `register_reader`, reached
+    /// through the other function that empties this slot.
+    #[test]
+    fn clearing_the_reader_waker_does_not_destroy_it_inside_the_borrow() {
+        let deadline = ReadDeadline::new(std::time::Duration::from_secs(1));
+        let probe = Waker::from(std::sync::Arc::new(ReaderDropProbe));
+        deadline.register_reader(&probe);
+
+        READER_PROBE.with(|cell| *cell.borrow_mut() = Some(deadline.clone()));
+        READER_DROP_BORROWED.with(|flag| flag.set(None));
+        // The slot owns the last `Arc`, so clearing runs the destructor.
+        drop(probe);
+
+        deadline.clear_reader();
+
+        let observed = READER_DROP_BORROWED.with(std::cell::Cell::get);
+        READER_PROBE.with(|cell| *cell.borrow_mut() = None);
+        assert_eq!(
+            observed,
+            Some(false),
+            "the cleared reader waker was destroyed while its slot was still \
              borrowed (None means the destructor never ran at all)"
         );
     }
