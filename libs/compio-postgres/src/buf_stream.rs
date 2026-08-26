@@ -191,12 +191,20 @@ impl ReadDeadline {
     }
 
     fn register_reader(&self, waker: &Waker) {
-        // The clone stays inside the borrow below, deliberately: see the note in
-        // `pool.rs` `Waiter::poll`. MEASURED - a `Waker` from `Arc<W>` runs the
-        // user impl on `wake` and on `drop`, both carried outside here, but its
-        // `clone` is `Arc::clone` and reaches no user code without a hand-rolled
-        // `RawWakerVTable`, which needs `unsafe`. Hoisting it out was tried and
-        // reverted: it relocated the hazard rather than removing it.
+        // A valid custom RawWaker may run caller code from its clone vtable, so
+        // clone before taking the mutable borrow. Re-check after the clone:
+        // that caller code may itself have changed the registration.
+        if self
+            .inner
+            .reader_waker
+            .borrow()
+            .as_ref()
+            .is_some_and(|saved| saved.will_wake(waker))
+        {
+            return;
+        }
+        let cloned = waker.clone();
+
         // Carry the REPLACED waker out and destroy it with no borrow held.
         // Assigning through the `RefMut` drops the previous `Waker` while
         // `reader_waker` is still borrowed, and a `Waker` is arbitrary caller
@@ -208,10 +216,10 @@ impl ReadDeadline {
         // destructor instead of the wake, and it was the half this file missed.
         let replaced = {
             let mut slot = self.inner.reader_waker.borrow_mut();
-            if slot.as_ref().is_some_and(|saved| saved.will_wake(waker)) {
+            if slot.as_ref().is_some_and(|saved| saved.will_wake(&cloned)) {
                 None
             } else {
-                slot.replace(waker.clone())
+                slot.replace(cloned)
             }
         };
         drop(replaced);
@@ -937,6 +945,8 @@ mod tests {
         /// must not read as success.
         static READER_DROP_BORROWED: std::cell::Cell<Option<bool>> =
             const { std::cell::Cell::new(None) };
+        static READER_CLONE_BORROWED: std::cell::Cell<Option<bool>> =
+            const { std::cell::Cell::new(None) };
     }
 
     struct ReaderDropProbe;
@@ -956,6 +966,57 @@ mod tests {
                 }
             });
         }
+    }
+
+    #[allow(unsafe_code)]
+    mod reader_clone_probe {
+        use super::*;
+
+        fn raw_waker() -> std::task::RawWaker {
+            unsafe fn clone(_: *const ()) -> std::task::RawWaker {
+                READER_PROBE.with(|deadline| {
+                    if let Some(deadline) = deadline.borrow().as_ref() {
+                        READER_CLONE_BORROWED.with(|flag| {
+                            flag.set(Some(deadline.inner.reader_waker.try_borrow_mut().is_err()));
+                        });
+                    }
+                });
+                raw_waker()
+            }
+
+            unsafe fn wake(_: *const ()) {}
+            unsafe fn wake_by_ref(_: *const ()) {}
+            unsafe fn drop(_: *const ()) {}
+
+            static VTABLE: std::task::RawWakerVTable =
+                std::task::RawWakerVTable::new(clone, wake, wake_by_ref, drop);
+            std::task::RawWaker::new(std::ptr::null(), &VTABLE)
+        }
+
+        pub(super) fn waker() -> Waker {
+            // The vtable owns no data, all four operations preserve that
+            // invariant, and its static functions are safe on any thread.
+            unsafe { Waker::from_raw(raw_waker()) }
+        }
+    }
+
+    #[test]
+    fn cloning_the_reader_waker_does_not_borrow_its_slot() {
+        let deadline = ReadDeadline::new(std::time::Duration::from_secs(1));
+        deadline.register_reader(Waker::noop());
+        READER_PROBE.with(|cell| *cell.borrow_mut() = Some(deadline.clone()));
+        READER_CLONE_BORROWED.with(|flag| flag.set(None));
+
+        let probe = reader_clone_probe::waker();
+        deadline.register_reader(&probe);
+
+        let observed = READER_CLONE_BORROWED.with(std::cell::Cell::get);
+        READER_PROBE.with(|cell| *cell.borrow_mut() = None);
+        assert_eq!(
+            observed,
+            Some(false),
+            "the caller waker's clone vtable ran while its reader slot was borrowed"
+        );
     }
 
     /// Replacing the reader waker must not DESTROY the old one inside the
