@@ -788,8 +788,8 @@ fn m2_stage2_superuser_belt_sites_stay_hard_denied() {
 fn t11_platform_posture_is_carried_by_the_composed_policy() {
     // The Platform posture is identified by its PDP shape: a schema allowlist scope.
     //
-    // Each assertion below had a `!skips_denylist_belt()` partner reading "Platform
-    // runs the full static belt", which distinguished Platform from the one posture
+    // Each assertion below had a partner reading "Platform runs the full static
+    // belt", which distinguished Platform from the one posture
     // that did not. That posture is gone and every config runs the belt, so the
     // question no longer separates anything and both partners came off.
     let gcfg =

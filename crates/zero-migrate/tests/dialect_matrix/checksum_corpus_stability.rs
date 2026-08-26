@@ -106,9 +106,10 @@ fn corpus_checksums_are_byte_stable() {
     // from closed `default`/`pg`/`sqlite`/`mysql` fields to a canonical
     // `DialectId`-keyed `legs` map. There is no deployed-journal compatibility
     // requirement, but every later wire change remains an explicit review gate.
-    // Re-recorded again when the gated raw-statement escape was renamed
-    // `Op::PgRaw` -> `Op::Raw` (wire tag `"pgRaw"` -> `"raw"`). The review this
-    // assertion asks for was done with `ZM_CHECKSUM_CORPUS_DUMP` on both sides:
+    // Re-recorded again when the gated raw-statement escape stopped spelling one
+    // server's product in the neutral vocabulary: the variant is `Op::Raw` and the
+    // wire tag is `"raw"`. The review this assertion asks for was done with
+    // `ZM_CHECKSUM_CORPUS_DUMP` on both sides:
     // of the 92 rows, EXACTLY ONE moved --
     //   -pgRaw|base|0d8096e44299459958f5667cc82d61b69b86b13b953faf0b9455c286d214b529
     //   +raw|base|7d09edb22e3b80abdfbe36ace97cac8d49c39d488a9d16bf3115b0224af85e81

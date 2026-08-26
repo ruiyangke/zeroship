@@ -7,8 +7,8 @@
 //!      `ADD CONSTRAINT … CHECK (…) NOT VALID`, `ALTER TABLE … VALIDATE CONSTRAINT`.
 //!   2. VALIDATE (fail-closed) — `notValid` on FK/CHECK is REFUSED on SQLite/MySQL;
 //!      `Op::ValidateConstraint` is REFUSED off Postgres; both are accepted on PG.
-//!   3. RECORDER — the `constraint_not_valid` corpus fixture (`op_round_trip.rs`) is
-//!      the byte-stable REAL-recorder gate for `addForeignKey/addCheck { notValid }`
+//!   3. RECORDER - the `constraint_not_valid` corpus fixture is the byte-stable
+//!      REAL-recorder gate for `addForeignKey/addCheck { notValid }`
 //!      + `.constraint(name).validate()`; this file asserts the recorded golden shape.
 
 use crate::support;
@@ -337,7 +337,7 @@ fn create_time_not_valid_is_refused_in_both_spellings_by_validate() {
 
 #[test]
 fn recorder_golden_carries_not_valid_and_validate_constraint() {
-    // The op_round_trip corpus records `constraint_not_valid.mig.js` via the REAL
+    // The op fixture corpus records `constraint_not_valid.mig.js` via the REAL
     // V8 recorder; this asserts the committed golden shape the surface produces.
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/op_fixtures/constraint_not_valid.golden.json");

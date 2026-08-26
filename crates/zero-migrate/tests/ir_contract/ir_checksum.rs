@@ -157,9 +157,10 @@ fn checksum_of_ir_byte_stable_golden() {
     // every golden updated in the SAME patch. NB: `typed_checksum` (the JS-builder
     // anchor) reuses this same Rust serialization, so there is no separate JS
     // serializer to bump.
-    // Re-captured again when the gated raw-statement escape was renamed
-    // `Op::PgRaw` -> `Op::Raw` and its wire tag `"pgRaw"` -> `"raw"`, so the op
-    // list this golden folds serializes differently by construction:
+    // Re-captured again when the gated raw-statement escape stopped spelling one
+    // server's product in the neutral vocabulary - the variant is `Op::Raw` and its
+    // wire tag is `"raw"` - so the op list this golden folds serializes
+    // differently by construction:
     // be51301392288399d3622b7a5156b48931dfd1a8472049299a783b017623f64f ->
     // 2cabce5ae58f72938e4eecd3c8de9618a8819ec264c8e052f331cddb41f60751.
     // The INPUT changed; the assertion did not.

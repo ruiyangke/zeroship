@@ -230,7 +230,7 @@ fn col_ref_tables(value: &serde_json::Value, found: &mut Vec<String>) {
 // A generated expression may QUALIFY its column references with the enclosing table,
 // and a TABLE rename moves that qualifier exactly as it moves the collection key. The
 // `env.db.ts` replay in `render::gen_types` has rewritten it all along; this descriptor
-// fold did not, so the two artifacts shipped SIDE BY SIDE out of one `renderArtifacts`
+// fold did not, so the two artifacts shipped SIDE BY SIDE out of one `render_artifacts`
 // call described the same column under different table names — the runtime descriptor
 // still naming a collection that no longer exists.
 //

@@ -4,8 +4,8 @@
 //! TWO recorders now, one per vendor that has one: `zero-migrate-mysql` and
 //! `zero-migrate-postgres`. The rule and the mechanism are identical for both, so
 //! this file walks a TABLE rather than one crate — a third recorder is a row here,
-//! not a copy of this file. (The file was `the_mysql_recorder_never_ships.rs` while
-//! MySQL was the only one.)
+//! not a copy of this file. It was written when MySQL was the only vendor with a
+//! recorder, and generalising it cost one row rather than a second file.
 //!
 //! # What was lost, exactly
 //!

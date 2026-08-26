@@ -48,8 +48,8 @@
 # engine code: `crates/zero-migrate-core/src/model/op_support.rs` calls
 # `dialect_table::lookup(kind, variant)`. The TypeScript mirror is read by
 # NOTHING outside its own generated file - it exists so the SDK can be checked
-# against the same sidecar, and a grep for `generated/dialect-table`,
-# `DIALECT_TABLE` or `dialectTable` finds no other reference. Do not collapse
+# against the same sidecar, and a grep for `generated/dialect-table` or for
+# `DIALECT_TABLE` on that side finds no other reference. Do not collapse
 # these into one claim; they have already drifted apart once.
 #
 # ROW KEYS: `kind` and `variant` are the two STRUCTURAL keys. EVERY OTHER KEY IS A

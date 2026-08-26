@@ -33,14 +33,14 @@
 //! depend on the engine.
 //!
 //! [`the_backend_contract_declares_no_vendor_named_item`] caught
-//! `PgSessionSnapshot`, declared on the neutral contract in
+//! `PostgresSessionSnapshot`, declared on the neutral contract in
 //! `apply/backend/mod.rs` while its own sibling `MysqlSessionSnapshot` was
 //! declared in the MySQL backend's own `mod.rs` — the asymmetry being the tell. It
 //! is genuinely vendor (its three fields are PostgreSQL GUCs; `SqliteBackend`'s
 //! `SessionSnapshot` is `()`), so it kept a vendor name and moved to
-//! `apply/backend/postgres/mod.rs` beside the sibling, spelled the way the
-//! dialect id spells it. (That file is `zero-migrate-postgres/src/backend/mod.rs`
-//! now; the type went with it.)
+//! `apply/backend/postgres/mod.rs` beside the sibling, spelled out the way the
+//! dialect id spells it rather than abbreviated. (That file is
+//! `zero-migrate-postgres/src/backend/mod.rs` now; the type went with it.)
 //!
 //! # What this does NOT catch
 //!

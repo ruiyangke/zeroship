@@ -25,7 +25,7 @@
 //!   WAS ALREADY RIGHT. Green before and after; it is the tripwire, and it is also what
 //!   makes the next case a DISAGREEMENT between two carriers rather than a preference.
 //! * [`a_bounded_string_through_the_descriptor_producer_reaches_the_server_unbounded`]
-//!   is the producer route — the one `genArtifactsFromDescriptors` and
+//!   is the producer route - the one `gen_artifacts_from_descriptors` and
 //!   `render_schema_export_from_descriptors` take, and the one a host takes when it
 //!   feeds an exported `SchemaExport` back in. THE PRODUCER DECIDES, and it answered
 //!   `text`.
@@ -350,7 +350,7 @@ async fn a_bounded_string_authored_as_ops_is_a_varchar_the_server_enforces() {
 /// The SAME width, declared as a descriptor facet instead of inside a `ColType`, and
 /// run through the shipped `descriptors_to_create_ops` — the producer behind
 /// `render_schema_export_from_descriptors` and the addon's
-/// `genArtifactsFromDescriptors`. `token_to_col_type` mapped the `"string"` token to
+/// `gen_artifacts_from_descriptors`. `token_to_col_type` mapped the `"string"` token to
 /// `ColType::Text` without consulting `max_length`, so the ops it produced declared an
 /// unbounded column and PostgreSQL stored 200 characters in a field the author bounded
 /// at 64.

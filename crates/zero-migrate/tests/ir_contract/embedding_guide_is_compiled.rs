@@ -14,11 +14,11 @@
 //! what it carries now - the PostgreSQL apply walkthrough and the SQLite backend
 //! open - and they are the two a reader is most likely to copy.
 //!
-//! The `ignore`d blocks are deliberate and are not defects: five of them are
-//! fragments that reference identifiers the surrounding prose introduces (`session`,
-//! `mysql`, `engine`, `policy_toml`), plus one trait-signature listing that names
-//! types it never defines. Making those compile means hidden setup lines, which is
-//! worth doing and is filed rather than done here.
+//! The `ignore`d blocks are deliberate and are not defects: they are fragments that
+//! reference identifiers the surrounding prose introduces (`session`, `mysql`,
+//! `engine`), plus one trait-signature listing that names types it never defines.
+//! Making those compile means hidden setup lines, which is worth doing and is filed
+//! rather than done here.
 
 use std::path::Path;
 

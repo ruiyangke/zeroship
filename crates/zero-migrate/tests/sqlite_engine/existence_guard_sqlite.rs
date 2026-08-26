@@ -707,9 +707,9 @@ async fn create_table_ifnotexists_reruns_idempotent_with_timestamp_and_text_colu
     );
 
     // RE-RUN: a fresh lowering of the SAME guarded create over the now-present table
-    // must be an idempotent no-op — the CREATE TABLE unit SatisfiedNoops (presence +
-    // affinity match across the text/timestamp/system columns), every index unit
-    // SatisfiedNoops on its own object. NO ExistenceGuardDrift.
+    // must be an idempotent no-op - the CREATE TABLE unit is a `SatisfiedNoop`
+    // (presence + affinity match across the text/timestamp/system columns), every
+    // index unit a `SatisfiedNoop` on its own object. NO ExistenceGuardDrift.
     let steps2 = lower(make_op());
     for m in &steps2 {
         apply_one(&be, m)
@@ -752,8 +752,8 @@ async fn create_table_ifnotexists_reruns_idempotent_with_timestamp_and_text_colu
 /// the PG `create_table_ifnotexists_fresh_creates_all_secondary_indexes_…` test
 /// covers on the PG leg.
 ///
-/// RED pre-fix: the per-unit object-scoped probe does not exist, the index unit
-/// `SatisfiedNoops` on the table's presence, so `index_exists(… "t_email_key", …)`
+/// RED pre-fix: the per-unit object-scoped probe does not exist, the index unit is a
+/// `SatisfiedNoop` on the table's presence, so `index_exists(... "t_email_key", ...)`
 /// is false.
 #[compio::test]
 async fn create_table_ifnotexists_fresh_creates_unique_secondary_index_and_reruns_idempotent() {
@@ -825,8 +825,8 @@ async fn create_table_ifnotexists_fresh_creates_unique_secondary_index_and_rerun
     }
 
     // RE-RUN: a fresh lowering of the SAME guarded create over the now-present
-    // table+index must be an idempotent no-op — the CREATE TABLE unit SatisfiedNoops
-    // (presence + affinity match), the index unit SatisfiedNoops on its OWN object
+    // table+index must be an idempotent no-op - the CREATE TABLE unit is a
+    // `SatisfiedNoop` (presence + affinity match), the index unit one on its OWN object
     // (present + matching unique/columns), with NO "already exists" error and NO
     // ExistenceGuardDrift.
     let steps2 = lower(make_op());

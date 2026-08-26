@@ -8,8 +8,9 @@
 //! * A **boundary** resolution — a `pub` surface whose callers hand in a
 //!   `&zero_migrate::DialectId`, turning it into a backend exactly where it crosses in — survives
 //!   the extraction. It becomes the facade's `register(..)` table.
-//! * A **caller-fixed target** — `build_add_foreign_key` and `def_to_constraints`,
-//!   `pg_quote_ident`-spelled throughout, and the tests that name the vendor under
+//! * A **caller-fixed target** - `build_add_foreign_key` and
+//!   `def_to_constraints_for_dialect`, `pg_quote_ident`-spelled throughout, and
+//!   the tests that name the vendor under
 //!   test — is not a decision at all. Naming a fixed target survives too.
 //! * A **point-of-use** lookup — a core emitter deep in a call chain, holding a
 //!   `dialect` parameter, reaching for the registry at the moment it needs one

@@ -26,8 +26,8 @@
 //! have denied a migration the database accepts and honours.
 //!
 //! WHAT EACH LEG PROVES, since they are not interchangeable. The
-//! `within_one_envelope` legs create the table and retype it in ONE artifact, so
-//! the column's contract is known only from the op stream. The `across_envelopes`
+//! within-one-envelope legs create the table and retype it in ONE artifact, so
+//! the column's contract is known only from the op stream. The across-envelope
 //! legs apply the create, INTROSPECT the live database, and lower the retype
 //! against that snapshot — so the contract arrives from `pg_attribute` by way of
 //! `ColumnSnapshot::identity` / `generated_kind`, which is the ordinary case and

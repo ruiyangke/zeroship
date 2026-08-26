@@ -1,7 +1,7 @@
 //! The GOLDEN-TRACE ORACLE, `SQLite` leg.
 //!
-//! The peer of `golden_trace_pg.rs` for the two SQLite-specific declarative paths
-//! the re-point must preserve byte-for-byte:
+//! It covers the two SQLite-specific declarative paths the re-point must preserve
+//! byte-for-byte:
 //!
 //! - (b) a `SQLite` RENAME-via-REBUILD (the offline 12-step `rebuild_one`, NOT
 //!   expand-contract), driven through the live re-pointed `apply_declarative` vs.

@@ -1048,7 +1048,8 @@ async fn create_table_with_policy_injected_indexes_applies_under_creator_up() {
 // ---------------------------------------------------------------------------
 
 /// The message a user gets for a KNOWN denial names the action, the database and
-/// the mode. `PRAGMA writable_schema=ON` is the denial `confine_b` already proves;
+/// the mode. `PRAGMA writable_schema=ON` is the denial
+/// `confine_b_writable_schema_denied` already proves;
 /// this asserts the DIAGNOSTIC on it.
 #[compio::test]
 async fn a_denied_up_names_the_refused_action() {
