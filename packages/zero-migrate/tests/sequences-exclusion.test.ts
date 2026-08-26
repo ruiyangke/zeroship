@@ -10,7 +10,7 @@ import {
 } from "../src/ops.js";
 // Artifact-identity oracle: the engine-embedded recorder is the COMPILED
 // `dist/embedded-recorder.js` (the same build output this suite imports),
-// not the deleted `migrate_ops.js` twin.
+// not a hand-kept second recorder.
 import {
   __begin as engBegin,
   __drain as engDrain,

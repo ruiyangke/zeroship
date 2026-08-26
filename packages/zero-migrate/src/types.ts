@@ -774,8 +774,8 @@ export type DomainCheckFn = (v: DomainValueBuilder) => ExprChain | Expr;
 
 // ── Shared op-arg fragments ──
 
-/** A FK's `ON DELETE`/`ON UPDATE` referential action. Renamed from the old
- *  `FkAction` — these ARE rendered now. */
+/** A FK's `ON DELETE`/`ON UPDATE` referential action. Every token here is honoured
+ *  at render time, not accepted and dropped. */
 export type RefAction = "cascade" | "restrict" | "setNull" | "setDefault" | "noAction";
 
 export type IndexMethod = "btree" | "hash" | "gin" | "gist" | "spgist" | "brin" | "ivfflat" | "hnsw";
