@@ -63,29 +63,25 @@ use zeroship_runtime::state::{OpResult, ResolveValue};
 // `use` below is test-only — putting this there compiles under `cargo test`
 // and fails under `cargo check`, which is how it was first written.
 
-#[cfg(any(test, feature = "test-helpers"))]
-use crate::backend::{AuditWriter, DialectBuilder, RegisterBackend};
 use crate::context;
 use crate::error::DbError;
 use crate::v8_bridge::{runtime_state, setup_js_promise};
 
 
-/// `zeroship.db.registerModel(collection, schemaJson)` → `Promise<void>`
+/// `zeroship.db.registerModel(collection, schemaJson)` -> `Promise<void>`
 ///
-/// Creates the table and any missing columns. Idempotent — safe to call
-/// on every cold start. Skips DDL if the model was already registered
-/// for this app on this thread.
+/// Records that `collection` exists and caches its declared schema. It creates
+/// nothing: the table must already have been made by the schema authority.
+/// Idempotent, and safe to call on every cold start.
 pub fn register_model_dispatch<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
     collection: &str,
     schema: Value,
-    indexes: Value,
-    declared_collections: Vec<String>,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
 
-    // Fast path: already registered on this thread — skip DDL.
+    // Fast path: already registered on this thread.
     if crate::is_model_registered(app_id, collection) {
         let resolver = v8::PromiseResolver::new(scope).unwrap();
         let promise = resolver.get_promise(scope);
@@ -99,14 +95,7 @@ pub fn register_model_dispatch<'s>(
     let collection_owned = collection.to_string();
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        match exec_register_model(
-            &app_id_owned,
-            &collection_owned,
-            &schema,
-            &indexes,
-            &declared_collections,
-        )
-        .await
+        match exec_register_model(&app_id_owned).await
         {
             Ok(()) => {
                 crate::mark_model_registered(&app_id_owned, &collection_owned);
@@ -140,13 +129,17 @@ pub fn register_model_dispatch<'s>(
 ///
 /// `collection` is unread here for the same reason it is unread in
 /// [`run_pipeline`]: registering is per-app now, not per-collection.
-async fn exec_register_model(
-    app_id: &str,
-    _collection: &str,
-    schema: &Value,
-    indexes: &Value,
-    declared_collections: &[String],
-) -> Result<(), DbError> {
+/// The database half of registerModel. It needs ONE argument.
+///
+/// The dispatch signature carries `collection`, `schema`, `indexes` and the
+/// declared-collection set because the JS API does, and because the dispatch
+/// caller genuinely uses `schema` - it seeds the declared cache. None of them
+/// reach the database: on PostgreSQL this returns `Ok(())`, and on SQLite it
+/// attaches the app file, which is keyed by `app_id` alone.
+///
+/// The four dead parameters used to be accepted here and discarded with a
+/// `let _ = (...)`, which read like they were pending rather than irrelevant.
+async fn exec_register_model(app_id: &str) -> Result<(), DbError> {
     // Lazy pool init
     let has_pool = context::with(|c| c.pool_initialised());
     if !has_pool {
@@ -249,7 +242,6 @@ async fn exec_register_model(
         // idPrefix, encrypted/mask facets). The ATTACH is kept explicitly: the
         // data plane cannot read the app file it never attached.
         (_, Some(sqlite)) => {
-            let _ = (&schema, &indexes, &declared_collections);
             sqlite.attach_app_file(app_id).await
         }
         // Unknown / future backend surfaces a typed, SDK-visible error rather than
@@ -274,11 +266,16 @@ pub async fn exec_register_model_via_dispatch_for_tests(
     schema: &Value,
     indexes: &Value,
 ) -> Result<(), DbError> {
-    // No declared-set hint from this seam — pass empty, which makes the dev
-    // SQLite drop pass treat every non-desired live table as a real drop
-    // candidate (the single-collection-only behaviour, before the warm
-    // multi-collection fix below). Tests that exercise the warm
-    // multi-collection drop-suppression path call
-    // `run_sqlite_via_engine` directly with an explicit declared set.
-    exec_register_model(app_id, collection, schema, indexes, &[]).await
+    // THE THREE EXTRA ARGUMENTS DO NOTHING, and the signature keeps them only
+    // so a test reads like the JS call it stands in for. `exec_register_model`
+    // takes `app_id` alone; see its doc.
+    //
+    // This seam is the DATABASE half. It does NOT `mark_model_registered` or
+    // `cache_schema` - those happen in `register_model_dispatch`, above. A test
+    // that needs a collection to count as registered (so `runtime_schema_for`
+    // stops returning `None` and encryption / mask metadata applies) calls
+    // `mark_model_registered_for_tests` / `cache_schema_for_tests` itself. The
+    // existing callers do exactly that.
+    let _ = (collection, schema, indexes);
+    exec_register_model(app_id).await
 }
