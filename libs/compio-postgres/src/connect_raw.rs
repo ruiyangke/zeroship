@@ -572,6 +572,10 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     T: AsyncRead + AsyncWrite + Unpin,
 {
+    if let Some(state) = target_session_state_from_parameters(target, parameters) {
+        return require_target_session_attrs(target, state);
+    }
+
     let probe = match target {
         TargetSessionAttrs::Any => return Ok(()),
         TargetSessionAttrs::ReadWrite | TargetSessionAttrs::ReadOnly => {
@@ -622,6 +626,43 @@ where
             Some(_) => return Err(Error::unexpected_message()),
             None => return Err(Error::closed()),
         }
+    }
+}
+
+/// Use the same startup status fast path as libpq before falling back to SQL.
+///
+/// For a read-only decision, both values must be known: hot standby OR a
+/// read-only transaction default makes the session read-only. For a recovery
+/// decision, `in_hot_standby` alone is the property being tested.
+fn target_session_state_from_parameters(
+    target: TargetSessionAttrs,
+    parameters: &HashMap<String, String>,
+) -> Option<TargetSessionState> {
+    let in_hot_standby = parameter_status_bool(parameters, "in_hot_standby");
+
+    match target {
+        TargetSessionAttrs::Any => None,
+        TargetSessionAttrs::ReadWrite | TargetSessionAttrs::ReadOnly => {
+            let default_read_only =
+                parameter_status_bool(parameters, "default_transaction_read_only")?;
+            let in_hot_standby = in_hot_standby?;
+            Some(TargetSessionState::TransactionReadOnly(
+                default_read_only || in_hot_standby,
+            ))
+        }
+        TargetSessionAttrs::Primary
+        | TargetSessionAttrs::Standby
+        | TargetSessionAttrs::PreferStandby => {
+            Some(TargetSessionState::InRecovery(in_hot_standby?))
+        }
+    }
+}
+
+fn parameter_status_bool(parameters: &HashMap<String, String>, name: &str) -> Option<bool> {
+    match parameters.get(name).map(String::as_str) {
+        Some("on") => Some(true),
+        Some("off") => Some(false),
+        _ => None,
     }
 }
 
@@ -1228,6 +1269,15 @@ mod tests {
         frame(b'N', &body)
     }
 
+    fn parameter_status(name: &str, value: &str) -> Vec<u8> {
+        let mut body = Vec::with_capacity(name.len() + value.len() + 2);
+        body.extend_from_slice(name.as_bytes());
+        body.push(0);
+        body.extend_from_slice(value.as_bytes());
+        body.push(0);
+        frame(b'S', &body)
+    }
+
     fn successful_handshake(notices: impl IntoIterator<Item = Vec<u8>>) -> Vec<u8> {
         let mut script = frame(b'R', &0u32.to_be_bytes());
         for notice in notices {
@@ -1273,6 +1323,95 @@ mod tests {
             crate::Socket::new_tcp(TcpStream::connect(addr).await.unwrap()),
             startup_observed,
         )
+    }
+
+    async fn connect_with_startup_parameters(
+        target: TargetSessionAttrs,
+        parameters: &[(&str, &str)],
+    ) -> Result<(), Error> {
+        let mut script = frame(b'R', &0u32.to_be_bytes());
+        for &(name, value) in parameters {
+            script.extend_from_slice(&parameter_status(name, value));
+        }
+        script.extend_from_slice(&frame(b'K', &[0; 8]));
+        script.extend_from_slice(&frame(b'Z', b"I"));
+
+        // The fixture closes immediately after ReadyForQuery. A SQL probe
+        // therefore sees EOF, while a decision made from startup status can
+        // return the connected pair before the regular connection task starts.
+        let (stream, _) = scripted_server_after_startup(Some(script)).await;
+        let config: Config = "user=scripted-user sslmode=disable"
+            .parse()
+            .expect("parse scripted config");
+        connect_raw_with_target_session_attrs(
+            stream,
+            NoTls,
+            Encryption::Plaintext,
+            false,
+            &config,
+            target,
+            None,
+        )
+        .await
+        .map(drop)
+    }
+
+    #[compio::test]
+    async fn read_only_targets_use_startup_parameter_status_without_a_query() {
+        for (target, default_read_only, in_hot_standby, accepted) in [
+            (TargetSessionAttrs::ReadWrite, "off", "off", true),
+            (TargetSessionAttrs::ReadOnly, "off", "on", true),
+            (TargetSessionAttrs::ReadWrite, "on", "off", false),
+            (TargetSessionAttrs::ReadOnly, "off", "off", false),
+        ] {
+            let result = connect_with_startup_parameters(
+                target,
+                &[
+                    ("default_transaction_read_only", default_read_only),
+                    ("in_hot_standby", in_hot_standby),
+                ],
+            )
+            .await;
+
+            if accepted {
+                result.unwrap_or_else(|error| {
+                    panic!("startup status did not satisfy {target:?}: {error:?}")
+                });
+            } else {
+                let error = result.unwrap_err();
+                assert!(
+                    error.is_target_session_attrs(),
+                    "startup status mismatch for {target:?} was not classified: {error:?}"
+                );
+            }
+        }
+    }
+
+    #[compio::test]
+    async fn recovery_targets_use_startup_parameter_status_without_a_query() {
+        for (target, in_hot_standby, accepted) in [
+            (TargetSessionAttrs::Primary, "off", true),
+            (TargetSessionAttrs::Standby, "on", true),
+            (TargetSessionAttrs::PreferStandby, "on", true),
+            (TargetSessionAttrs::Primary, "on", false),
+            (TargetSessionAttrs::Standby, "off", false),
+        ] {
+            let result =
+                connect_with_startup_parameters(target, &[("in_hot_standby", in_hot_standby)])
+                    .await;
+
+            if accepted {
+                result.unwrap_or_else(|error| {
+                    panic!("startup status did not satisfy {target:?}: {error:?}")
+                });
+            } else {
+                let error = result.unwrap_err();
+                assert!(
+                    error.is_target_session_attrs(),
+                    "startup status mismatch for {target:?} was not classified: {error:?}"
+                );
+            }
+        }
     }
 
     /// The default has to exercise both halves of protocol negotiation: ask
