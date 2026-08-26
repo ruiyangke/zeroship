@@ -134,6 +134,18 @@ impl Endpoint {
 pub(crate) fn endpoints(config: &Config) -> Result<Vec<Endpoint>, Error> {
     config.validate_connection_settings()?;
 
+    #[cfg(not(target_os = "linux"))]
+    if config
+        .get_hosts()
+        .iter()
+        .any(|host| matches!(host, Host::Tcp(name) if name.starts_with('@')))
+    {
+        return Err(Error::config(
+            "host values beginning with `@` require abstract Unix sockets, which this target does not implement"
+                .into(),
+        ));
+    }
+
     // A DIVERGENCE FROM libpq, and a deliberate one. `postgres:///db` parses
     // here exactly as it does there, but libpq then connects over a
     // compiled-in default socket directory (overridable by `PGHOST`), while
