@@ -901,7 +901,7 @@ where
 
             let pass = config
                 .get_password()
-                .ok_or_else(|| Error::config("password missing".into()))?;
+                .ok_or_else(|| Error::authentication("password missing".into()))?;
 
             authenticate_password(handshake, pass).await?;
         }
@@ -911,7 +911,7 @@ where
 
             let pass = config
                 .get_password()
-                .ok_or_else(|| Error::config("password missing".into()))?;
+                .ok_or_else(|| Error::authentication("password missing".into()))?;
 
             let output = authentication::md5_hash(user.as_bytes(), pass, body.salt());
             authenticate_password(handshake, output.as_bytes()).await?;
@@ -1019,7 +1019,7 @@ where
 {
     let password = config
         .get_password()
-        .ok_or_else(|| Error::config("password missing".into()))?;
+        .ok_or_else(|| Error::authentication("password missing".into()))?;
 
     let mut has_scram = false;
     let mut has_scram_plus = false;

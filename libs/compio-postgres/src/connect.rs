@@ -261,7 +261,7 @@ where
     let target = config.get_target_session_attrs();
 
     if target == TargetSessionAttrs::PreferStandby {
-        if let Ok(connected) = connect_pass(
+        let first_pass_error = match connect_pass(
             &endpoints,
             resolver,
             &mut tls,
@@ -270,7 +270,17 @@ where
         )
         .await
         {
-            return Ok(connected);
+            Ok(connected) => return Ok(connected),
+            Err(error) => error,
+        };
+
+        // `prefer-standby` starts its any-host pass only after the standby
+        // search exhausts retryable connection failures and target
+        // mismatches. A completed startup/authentication failure is terminal
+        // for the whole connection request, just as it is for every other
+        // target_session_attrs value.
+        if stops_host_walk(&first_pass_error) {
+            return Err(first_pass_error);
         }
 
         return connect_pass(
@@ -284,6 +294,24 @@ where
     }
 
     connect_pass(&endpoints, resolver, &mut tls, config, target).await
+}
+
+/// PostgreSQL's one server-side exception to terminal startup errors.
+///
+/// SQLSTATE 57P03 means that this server is temporarily unable to accept a
+/// connection. libpq advances directly to the next CONFIGURED HOST, skipping
+/// sibling addresses and alternate encryption methods for the current host.
+fn advances_to_next_host(error: &Error) -> bool {
+    error.code() == Some(&crate::error::SqlState::CANNOT_CONNECT_NOW)
+}
+
+/// Whether a completed startup/authentication exchange ends the entire host
+/// walk rather than behaving like an unreachable endpoint.
+fn stops_host_walk(error: &Error) -> bool {
+    error.is_authentication()
+        || error
+            .code()
+            .is_some_and(|code| code != &crate::error::SqlState::CANNOT_CONNECT_NOW)
 }
 
 async fn connect_pass<T, R>(
@@ -307,6 +335,7 @@ where
 
         match connect_host(endpoint, resolver, tls, config, target_session_attrs).await {
             Ok((client, connection)) => return Ok((client, connection)),
+            Err(e) if stops_host_walk(&e) => return Err(e),
             Err(e) => error = Some(e),
         }
     }
@@ -426,7 +455,13 @@ where
             // libpq treats the role as a property of this configured host: a
             // mismatch advances to the next host instead of trying another
             // address returned for this one.
-            Err(e) if e.is_target_session_attrs() => return Err(e),
+            Err(e)
+                if e.is_target_session_attrs()
+                    || advances_to_next_host(&e)
+                    || stops_host_walk(&e) =>
+            {
+                return Err(e);
+            }
             Err(e) => {
                 last_err = Some(e);
             }
@@ -528,11 +563,14 @@ where
         Err(e) => e,
     };
 
-    // A completed target-session probe that proves the endpoint does not meet
-    // the requirement is not a reason for `sslmode=allow` to reopen that same
-    // endpoint over TLS. Transport and protocol failures during the probe keep
-    // their original kinds and reach the normal retry policy below.
-    if err.is_target_session_attrs() {
+    // Three failures bypass `sslmode=allow`'s alternate TLS leg. A completed
+    // target-session mismatch is a property of the endpoint. SQLSTATE 57P03
+    // advances directly to the next configured host. A local authentication
+    // failure goes straight to libpq's error_return path. Other server
+    // ErrorResponses do NOT appear here: libpq may retry those under a
+    // different encryption method before treating the final result as
+    // terminal, and the policy below preserves that behavior.
+    if err.is_target_session_attrs() || advances_to_next_host(&err) || err.is_authentication() {
         return Err(err);
     }
 
@@ -734,11 +772,25 @@ mod tests {
         let with_password = password_from_passfile(&config, &endpoint)
             .expect("look up the effective operating-system user")
             .expect("the effective user and database match the passfile");
-        assert_eq!(with_password.get_password(), Some(b"from-passfile".as_slice()));
+        assert_eq!(
+            with_password.get_password(),
+            Some(b"from-passfile".as_slice())
+        );
     }
 
     fn refused_handshake() -> Vec<u8> {
         frame(b'E', b"SERROR\0C57P03\0Mscripted refusal\0\0")
+    }
+
+    fn invalid_password_handshake() -> Vec<u8> {
+        frame(
+            b'E',
+            b"SFATAL\0C28P01\0Mscripted authentication failure\0\0",
+        )
+    }
+
+    fn cleartext_password_challenge() -> Vec<u8> {
+        frame(b'R', &3u32.to_be_bytes())
     }
 
     enum ProbeReply {
@@ -1501,6 +1553,119 @@ mod tests {
     }
 
     #[compio::test]
+    async fn startup_fatal_stops_the_configured_host_walk() {
+        let (first, first_seen) =
+            scripted_server_after_startup(Some(invalid_password_handshake())).await;
+        let (second, mut second_seen) =
+            scripted_server_after_startup(Some(successful_handshake())).await;
+        let mut config = Config::new();
+        config
+            .user("scripted-user")
+            .hostaddr(first.ip())
+            .hostaddr(second.ip())
+            .port(first.port())
+            .port(second.port())
+            .ssl_mode(SslMode::Disable)
+            .connect_timeout(Duration::from_secs(2));
+
+        let result = compio::time::timeout(Duration::from_secs(5), config.connect(NoTls))
+            .await
+            .expect("the fatal-startup connection hung");
+        let Err(error) = result else {
+            panic!("an authentication FATAL advanced to the healthy second host");
+        };
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("28P01")
+        );
+        first_seen
+            .await
+            .expect("the first host never received StartupMessage");
+        assert!(
+            second_seen
+                .try_recv()
+                .expect("the second-host fixture disappeared")
+                .is_none(),
+            "an authentication FATAL dialled the second configured host"
+        );
+    }
+
+    #[compio::test]
+    async fn client_authentication_failure_stops_the_configured_host_walk() {
+        let (first, first_seen) =
+            scripted_server_after_startup(Some(cleartext_password_challenge())).await;
+        let (second, mut second_seen) =
+            scripted_server_after_startup(Some(successful_handshake())).await;
+        let mut config = Config::new();
+        config
+            .user("scripted-user")
+            .hostaddr(first.ip())
+            .hostaddr(second.ip())
+            .port(first.port())
+            .port(second.port())
+            .ssl_mode(SslMode::Allow)
+            .connect_timeout(Duration::from_secs(2));
+
+        let result = compio::time::timeout(Duration::from_secs(5), config.connect(NoTls))
+            .await
+            .expect("the client-authentication failure hung");
+        let Err(error) = result else {
+            panic!("a missing password advanced to the healthy second host");
+        };
+        assert_eq!(error.to_string(), "authentication error");
+        first_seen
+            .await
+            .expect("the first host never received StartupMessage");
+        assert!(
+            second_seen
+                .try_recv()
+                .expect("the second-host fixture disappeared")
+                .is_none(),
+            "a client-side authentication failure dialled the second configured host"
+        );
+    }
+
+    #[compio::test]
+    async fn prefer_standby_does_not_start_pass_two_after_a_startup_fatal() {
+        let (primary, mut fallback_observed) = scripted_prefer_standby_fallback_server().await;
+        let (fatal, fatal_seen) =
+            scripted_server_after_startup(Some(invalid_password_handshake())).await;
+        let mut config = Config::new();
+        config
+            .user("scripted-user")
+            .hostaddr(primary.ip())
+            .hostaddr(primary.ip())
+            .hostaddr(fatal.ip())
+            .port(primary.port())
+            .port(primary.port())
+            .port(fatal.port())
+            .ssl_mode(SslMode::Disable)
+            .target_session_attrs(TargetSessionAttrs::PreferStandby)
+            .connect_timeout(Duration::from_secs(2));
+
+        let result = compio::time::timeout(Duration::from_secs(5), config.connect(NoTls))
+            .await
+            .expect("the prefer-standby connection walk hung");
+        let Err(error) = result else {
+            panic!("prefer-standby ignored a FATAL and connected during its any-host pass");
+        };
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("28P01")
+        );
+        fatal_seen
+            .await
+            .expect("the fatal endpoint never received StartupMessage");
+        assert!(
+            fallback_observed
+                .try_recv()
+                .expect("the primary-host fixture disappeared")
+                .is_none(),
+            "prefer-standby began its any-host pass after a FATAL"
+        );
+    }
+
+    #[compio::test]
     async fn target_mismatch_skips_other_addresses_for_the_same_host() {
         let (first, first_query_observed) =
             scripted_probe_server(ProbeReply::Recovery(false)).await;
@@ -1690,11 +1855,12 @@ mod tests {
         );
     }
 
-    /// A failed first address does not merely make the walk dial address two:
-    /// a healthy second PostgreSQL server must be allowed to win the walk.
+    /// A transport failure on the first address does not merely make the walk
+    /// dial address two: a healthy second PostgreSQL server must be allowed to
+    /// win the walk.
     #[compio::test]
     async fn connect_succeeds_via_second_resolved_address() {
-        let (first, first_seen) = scripted_server_after_startup(Some(refused_handshake())).await;
+        let (first, first_seen) = scripted_server_after_startup(Some(Vec::new())).await;
         let second_bind = SocketAddr::from(([127, 0, 0, 2], first.port()));
         let (second, second_seen) =
             scripted_server_bound(second_bind, Some(successful_handshake())).await;
@@ -1729,6 +1895,69 @@ mod tests {
             "the returned client must record the healthy second address"
         );
         drop((client, connection));
+    }
+
+    #[compio::test]
+    async fn cannot_connect_now_skips_other_addresses_for_the_same_host() {
+        let (first, first_seen) = scripted_server_after_startup(Some(refused_handshake())).await;
+        let second_bind = SocketAddr::from(([127, 0, 0, 2], first.port()));
+        let (_second, mut second_seen) =
+            scripted_server_bound(second_bind, Some(successful_handshake())).await;
+        let mut config = hostname_config_for(first, Duration::from_secs(5));
+        config.ssl_mode(SslMode::Allow);
+        let mut resolver = ListResolver(vec![first, second_bind]);
+
+        let result = compio::time::timeout(
+            Duration::from_secs(10),
+            connect_with_resolver(NoTls, &config, &mut resolver),
+        )
+        .await
+        .expect("the 57P03 address walk hung");
+        let Err(error) = result else {
+            panic!("57P03 advanced to another address for the same host");
+        };
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("57P03")
+        );
+        first_seen
+            .await
+            .expect("the first address never received StartupMessage");
+        assert!(
+            second_seen
+                .try_recv()
+                .expect("the second-address fixture disappeared")
+                .is_none(),
+            "57P03 dialled another address for the same configured host"
+        );
+    }
+
+    #[compio::test]
+    async fn cannot_connect_now_advances_to_the_next_configured_host() {
+        let (first, first_seen) = scripted_server_after_startup(Some(refused_handshake())).await;
+        let (second, second_seen) =
+            scripted_server_after_startup(Some(successful_handshake())).await;
+        let mut config = Config::new();
+        config
+            .user("scripted-user")
+            .hostaddr(first.ip())
+            .hostaddr(second.ip())
+            .port(first.port())
+            .port(second.port())
+            .ssl_mode(SslMode::Allow)
+            .connect_timeout(Duration::from_secs(2));
+
+        let connected = compio::time::timeout(Duration::from_secs(5), config.connect(NoTls))
+            .await
+            .expect("the configured-host failover hung")
+            .expect("57P03 must advance to the next configured host");
+        first_seen
+            .await
+            .expect("the first host never received StartupMessage");
+        second_seen
+            .await
+            .expect("the healthy second host never received StartupMessage");
+        drop(connected);
     }
 
     /// `connect_timeout` restarts for EVERY resolved address, not once per
