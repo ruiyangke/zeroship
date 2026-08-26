@@ -81,6 +81,13 @@ const COPY_IN_UNSUPPORTED: &str = "simple query execution cannot supply COPY dat
 pub(crate) const COPY_IN_UNSUPPORTED_EXTENDED: &str =
     "extended query execution cannot supply COPY data; use copy_in";
 
+/// PostgreSQL refuses a target list wider than this, so no well-formed
+/// `RowDescription` can describe more columns. Used to bound a reservation,
+/// never to reject: a peer that sends more simply makes the Vec grow.
+/// MEASURED on 16.14, 2026-08-26: 1664 columns succeed, 1665 fails with
+/// "target lists can have at most 1664 entries".
+const MAX_TARGET_LIST_ENTRIES: usize = 1664;
+
 /// Route a possible simple-query COPY through the connection-owned producer.
 ///
 /// A `COPY ... FROM STDIN` sent as a simple query is answered with
@@ -438,12 +445,31 @@ impl Stream for SimpleQueryStream {
                     return Poll::Ready(Some(Ok(SimpleQueryMessage::CommandComplete(0))));
                 }
                 Message::RowDescription(body) => {
-                    let columns: Arc<[SimpleColumn]> = body
-                        .fields()
-                        .map(|f| Ok(SimpleColumn::new(f.name().to_string())))
-                        .collect::<Vec<_>>()
-                        .map_err(Error::parse)?
-                        .into();
+                    // Reserve for a row PostgreSQL could actually describe, not
+                    // for the count the peer declares. `Fields::size_hint`
+                    // returns that u16 verbatim (postgres-protocol 0.6.12,
+                    // backend.rs), and `collect` reserves it, so
+                    // `T 00 00 00 06 ff ff` reserved 65535 `SimpleColumn` slots
+                    // - about 1.6 MB - before failing on the absent first
+                    // field.
+                    //
+                    // Unlike the DataRow sites in `row.rs` there is no buffer
+                    // length to bound this with: `RowDescriptionBody` exposes
+                    // only `fields()`. The server's own ceiling is the bound
+                    // instead. MEASURED on 16.14, 2026-08-26: a SELECT of 1664
+                    // columns succeeds and 1665 fails with "target lists can
+                    // have at most 1664 entries", so no well-formed
+                    // RowDescription exceeds it.
+                    //
+                    // This clamps the RESERVATION only, and never rejects: a
+                    // peer that really sends more just makes the Vec grow.
+                    let mut fields = body.fields();
+                    let mut collected: Vec<SimpleColumn> =
+                        Vec::with_capacity(fields.size_hint().0.min(MAX_TARGET_LIST_ENTRIES));
+                    while let Some(field) = fields.next().map_err(Error::parse)? {
+                        collected.push(SimpleColumn::new(field.name().to_string()));
+                    }
+                    let columns: Arc<[SimpleColumn]> = collected.into();
 
                     *this.columns = Some(columns.clone());
                     return Poll::Ready(Some(Ok(SimpleQueryMessage::RowDescription(columns))));
