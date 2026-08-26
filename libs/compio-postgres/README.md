@@ -98,7 +98,7 @@ unreachable - which is what the previous one was, 110 bytes deep, leaving
 `Host::Unix` reaching a real server asserted nowhere. The script refuses a
 directory that would not fit rather than creating another unusable fixture.
 
-Two more shapes have runbooks rather than scripts, because they answer a
+Three more shapes have runbooks rather than scripts, because they answer a
 question rather than gate a change:
 
 - `docs/runbooks/compio-postgres-transaction-pooler-check.md` - the suite
@@ -111,6 +111,12 @@ question rather than gate a change:
   sends `StreamAbort`, while 18.4 sends nothing at all. Both are green as of
   2026-08-25, same totals on each; the runbook records the figure and says to
   re-measure rather than trust it.
+- `docs/runbooks/compio-postgres-tls-teardown-noise.md` - what this driver
+  leaves in a server log when a TLS session ends. Read it before touching
+  `release.rs` or `tls_sansio.rs`: the teardown has three separate paths, and
+  after fixing each one a single-connection probe read clean while the others
+  were still broken. The expected whole-suite figure is about ten lines,
+  essentially all from `connection_churn` abandoning sessions on purpose.
 
 ## The oracles
 
