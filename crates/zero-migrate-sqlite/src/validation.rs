@@ -313,7 +313,7 @@ impl ValidationPolicy for SqliteValidationPolicy {
     /// half was dialect-neutral INTENT wearing PostgreSQL's grammar: "one statement,
     /// a SELECT, read-only, no host reach" is true of a SQLite view body too. A real
     /// SQLite implementation should restore that half against SQLite's own grammar.
-    /// Until then this is a hole, and it is this vendor's hole.
+    /// As it stands this is a hole, and it is this vendor's hole.
     fn raw_view_body_refusal(
         &self,
         _sql: &str,

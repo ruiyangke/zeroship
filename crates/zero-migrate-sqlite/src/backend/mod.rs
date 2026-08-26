@@ -900,10 +900,10 @@ impl MigrationBackend for SqliteBackend {
     ) -> Result<PreconditionVerdict, ApplyError> {
         // Descriptor-generated SQLite migrations carry NO preconditions (the
         // declarative author never emits them), so the common case is trivially
-        // `AllMet`. Precondition EVALUATION against a live SQLite schema is a later
-        // capability; until then a migration that actually declares a precondition
-        // fails closed rather than silently treating it as met (the declarative
-        // path only needs the no-precondition path the descriptor diff produces).
+        // `AllMet`. There is no precondition EVALUATOR against a live SQLite schema,
+        // so a migration that actually declares a precondition fails closed rather
+        // than silently treating it as met (the declarative path only needs the
+        // no-precondition path the descriptor diff produces).
         if m.preconditions.is_empty() {
             Ok(PreconditionVerdict::AllMet)
         } else {

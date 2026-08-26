@@ -86,7 +86,8 @@ pub(crate) async fn rollback_one_transactional(
         })?;
 
     // GATE: refuse a rebuild-needing `down` UP FRONT (before BEGIN), so nothing
-    // is half-done. This is the additive-only boundary; the rebuild is not built.
+    // is half-done. This is the additive-only boundary: the rebuild ships on the
+    // apply path, and rollback does not route into it.
     if let Some(reason) = down_needs_rebuild(down) {
         return Err(RollbackError::TableRebuildRequired {
             dialect: crate::DIALECT,
