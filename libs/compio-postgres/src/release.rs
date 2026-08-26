@@ -184,21 +184,53 @@ fn send_close_notify_on(
 /// type-checked by CI, by a local build, or by the clippy gate's
 /// `--all-features` sweep. Checked 2026-08-26.
 ///
-/// So when you change one arm, change the other by hand and read it twice:
-/// a mistake there cannot go red here, it can only break someone else's
-/// build later. The same holds for the `cfg(not(target_os = "linux"))` send
-/// in `send_close_notify_on` - that one at least can be checked locally by
-/// flipping its `cfg` to `all()` and building, because it calls a `socket2`
-/// method that exists on Linux too. The `cfg(windows)` arm cannot, because
-/// `std::os::windows` does not exist here.
+/// So the blind arm is kept as SMALL as possible rather than merely watched.
+/// It holds a trait bound, an accessor and a `map`; the struct literal - the
+/// part a new field changes - lives once in
+/// [`ConnectionRelease::from_owned`], which Linux compiles. Adding a field
+/// now fails the build at exactly ONE site, measured 2026-08-26 by adding a
+/// throwaway field and reading the `E0063` list. Before the split it failed at
+/// one site and silently skipped the other.
+///
+/// What is left blind is a bound and an accessor, which break loudly against a
+/// changed `std` or `socket2` API rather than quietly. Still: read both arms
+/// when touching either.
+///
+/// The `cfg(not(target_os = "linux"))` send in `send_close_notify_on` is
+/// better off - it CAN be checked here by flipping its `cfg` to `all()` and
+/// building, because it calls a `socket2` method that exists on Linux too.
+/// That was done and it compiles. The `cfg(windows)` arm cannot be, because
+/// `std::os::windows` does not exist on this target.
+impl ConnectionRelease {
+    /// Build one from an owned handle, whatever the platform calls it.
+    ///
+    /// THE STRUCT LITERAL LIVES HERE AND NOWHERE ELSE, deliberately: this is
+    /// the part that changes when a field is added, and the `cfg(windows)`
+    /// arm below is compiled by nothing in this repository. Adding
+    /// `tls_session` on 2026-08-26 meant editing both copies by hand, and only
+    /// one of them could go red. Now each arm carries a bound, an accessor and
+    /// a `map`, so the next field cannot diverge between them.
+    ///
+    /// One `Into` bound covers both because socket2 0.5.10 - the resolved
+    /// version - implements `From<OwnedFd>` and `From<OwnedSocket>` for
+    /// `Socket` in `sys/unix.rs` and `sys/windows.rs` respectively.
+    fn from_owned(owned: impl Into<socket2::Socket>) -> Self {
+        Self {
+            socket: Arc::new(owned.into()),
+            #[cfg(feature = "tls")]
+            tls_session: None,
+        }
+    }
+}
+
 #[cfg(unix)]
 impl ConnectionRelease {
     pub(crate) fn dup_of<F: std::os::fd::AsFd>(handle: &F) -> Option<Self> {
-        handle.as_fd().try_clone_to_owned().ok().map(|owned| Self {
-            socket: Arc::new(socket2::Socket::from(owned)),
-            #[cfg(feature = "tls")]
-            tls_session: None,
-        })
+        handle
+            .as_fd()
+            .try_clone_to_owned()
+            .ok()
+            .map(Self::from_owned)
     }
 }
 
@@ -209,11 +241,7 @@ impl ConnectionRelease {
             .as_socket()
             .try_clone_to_owned()
             .ok()
-            .map(|owned| Self {
-                socket: Arc::new(socket2::Socket::from(owned)),
-                #[cfg(feature = "tls")]
-                tls_session: None,
-            })
+            .map(Self::from_owned)
     }
 }
 
