@@ -8,9 +8,10 @@
 // "Anything else" is the whole point of this file. It used to be three outcomes, and
 // the third one - no DSN configured, so skip - is the defect: a machine that never
 // started a database reported the identical green summary as a machine that
-// exercised every verb. `ZERO_MIGRATE_REQUIRE_LIVE_DB` could turn that skip into a
-// failure, but a safety mechanism that is opt-IN protects only the runs that already
-// remembered to ask. There is no such variable now, and no skip for it to control.
+// exercised every verb. An opt-IN environment variable could turn that skip into a
+// failure, but a safety mechanism that must be asked for protects only the runs that
+// already remembered to ask. There is no such variable, and no skip for it to
+// control.
 //
 // The arms below drive a real gated suite in a child process and read its exit code,
 // because the exit code is the only thing CI reads. `crates/zero-migrate/tests/

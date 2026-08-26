@@ -162,9 +162,10 @@ test("genArtifacts folds the MySQL target's own dialectal leg (matches the live 
 });
 
 test("genArtifacts folds the Postgres target's own dialectal leg (matches the live Postgres catalog)", async (ctx) => {
-  // `connectLivePg` owns the connect, so it can tell "this machine has no database"
-  // (skip) from "a database was configured and did not work" (throw); the client it
-  // hands back is closed here, and on a skip there is no client to close.
+  // `connectLivePg` owns the connect and has two outcomes, not three: it either
+  // hands back a live client or throws carrying the reason. "This machine has no
+  // database" is one of the throwing cases, not a skip, because a skip and a pass
+  // print the same exit code. The client it hands back is closed here.
   const admin = await connectLivePg();
   const schema = uniqueName("gad_pg");
 

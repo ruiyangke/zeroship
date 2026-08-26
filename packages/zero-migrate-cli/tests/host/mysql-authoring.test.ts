@@ -1,5 +1,5 @@
 // Live-MySQL host apply e2e — the MySQL analogue of
-// `authoring.test.ts`, GATED behind `ZERO_MIGRATE_MYSQL_URL`.
+// `authoring.test.ts`, REQUIRING `ZERO_MIGRATE_MYSQL_URL`.
 //
 // Proves the V8-FREE authoring path end-to-end against a REAL MySQL server, using
 // the SAME `SqlSession` seam Postgres rides:
@@ -14,8 +14,9 @@
 // This is the structural proof that a `{ kind: "mysql" }` driver routes
 // into the MySQL backend, NOT the Postgres executor, and applies a real migration.
 //
-// GATING: unless `ZERO_MIGRATE_MYSQL_URL` is set, the whole test SKIPS cleanly, so
-// DB-free CI stays green. Set it to e.g.
+// GATING: `ZERO_MIGRATE_MYSQL_URL` is REQUIRED. Unset, wrong, or unreachable, the
+// test FAILS with the reason; it never skips, because a skip and a pass print the
+// same exit code and CI reads only the exit code. Set it to e.g.
 //   mysql://root:root@127.0.0.1:3310/zmtest
 // (a dedicated throwaway server).
 
@@ -103,7 +104,7 @@ const INVALID_ULIDS = [
 
 // ---------------------------------------------------------------------------
 // Live-MySQL apply — the napi addon lowers for the `mysql` dialect + applies over
-// the real `mysql2` driver into a fresh throwaway database. Skips (does not fail)
+// the real `mysql2` driver into a fresh throwaway database. FAILS (does not skip)
 // when `ZERO_MIGRATE_MYSQL_URL` is unset.
 // ---------------------------------------------------------------------------
 test("Live MySQL apply: napi addon lowers + applies the authored IR over the mysql2 driver", async (t) => {
