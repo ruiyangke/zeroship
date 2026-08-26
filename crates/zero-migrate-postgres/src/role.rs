@@ -18,9 +18,9 @@
 //!
 //! WHAT THIS MODULE ACTUALLY CONTAINS, because the rest of this header reads like
 //! it describes code that is here and it does not: [`migrator_role_name`], the NAME
-//! derivation, and nothing else. There is no `provision_migrator` in this
-//! repository - the two mentions of it were both in this header, describing a
-//! function that ran over a `&Client` and left with the native PostgreSQL driver.
+//! derivation, and nothing else. No provisioning routine lives in this repository;
+//! the one this header used to describe ran over a native PostgreSQL client handle
+//! and left with that driver.
 //! **The grant set below is the SPEC the host implements**, and it is kept because
 //! `ExecutorConfig::with_migrator_role` is the seam the host's provisioned role
 //! arrives through, so the two halves have to agree on what that role may do.

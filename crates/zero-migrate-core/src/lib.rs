@@ -267,11 +267,10 @@ pub use apply::executor::{
     rollback_with_lock_and_inverse_plans, AppliedRecord, RollbackPlan,
 };
 // `apply` is generic over `MigrationBackend` too, exactly like `rollback` above.
-// It used to take the `SqlSession` seam and build a `PostgresBackend` inside the
-// executor, which made this "neutral" entry PostgreSQL-only by construction; the
-// caller now supplies the backend. Its two vendor-constructing siblings
-// (`apply_with_lock`, `apply_with_lock_mysql`) were deleted rather than converted
-// - nothing called them.
+// The caller supplies the backend. An earlier shape took the `SqlSession` seam and
+// built a PostgreSQL backend inside the executor, which made a nominally neutral
+// entry PostgreSQL-only by construction; the vendor-constructing entry points that
+// went with it are gone, and core no longer knows which vendors exist.
 pub use apply::executor::apply;
 // The OFFLINE ops->snapshot fold. Pure, no
 // DB: replay an ordered `Op` list into the EXISTING `SchemaSnapshot` (drift.rs),

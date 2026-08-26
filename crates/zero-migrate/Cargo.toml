@@ -105,8 +105,8 @@ rusqlite = { workspace = true, features = ["bundled", "load_extension"] }
 # `postgres` client wraps `tokio-postgres` on a private runtime), which is ACCEPTABLE
 # because it NEVER ships: `cargo tree -p zero-migrate -e normal` stays tokio-free.
 postgres = "0.19"
-# TEST-ONLY (with `postgres`, above): the `exec_text` text-format param wrapper
-# (`TextParam`) implements `postgres::types::ToSql`, whose `to_sql` writes into a
+# TEST-ONLY (with `postgres`, above): the text-format param wrapper (`TextParam`)
+# implements `postgres::types::ToSql`, whose `to_sql` writes into a
 # `bytes::BytesMut`. Pinned to the version `tokio-postgres` already resolves, so the
 # buffer type matches exactly.
 bytes = "1"

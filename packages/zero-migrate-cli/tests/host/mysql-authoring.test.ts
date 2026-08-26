@@ -7,8 +7,8 @@
 //      name, ops }` op-IR envelope (no embedded V8, no in-Rust recorder);
 //   2. the `zero-migrate-node` napi addon LOWERs the envelope in Rust (stamps
 //      `owner_app`, folds the authoritative `Checksum::of_ir`, folds the confined
-//      system shape) for the `mysql` dialect, then drives `executor::apply_with_lock_mysql`
-//      — the `MysqlBackend` (`GET_LOCK`, MySQL journal DDL, `?` placeholders) — over
+//      system shape) for the `mysql` dialect, then drives the apply path over
+//      `MysqlBackend` (`GET_LOCK`, MySQL journal DDL, `?` placeholders) against
 //      the real `mysql2` npm driver (`driver-mysql2.ts`) via the `hostDriver` seam.
 //
 // This is the structural proof that a `{ kind: "mysql" }` driver routes

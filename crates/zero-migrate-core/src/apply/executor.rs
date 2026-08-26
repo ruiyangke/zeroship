@@ -139,10 +139,9 @@ pub async fn apply<B: MigrationBackend>(
 /// It takes `&B` and never builds one. That is the whole reason this file names no
 /// vendor: choosing between PostgreSQL, MySQL and SQLite is knowledge about which
 /// vendors exist, and it lives with whoever knows the deploy's target - the host -
-/// not in the orchestration. Two `pub` entries used to sit here doing exactly that
-/// (`apply_with_lock` built a `PostgresBackend`, `apply_with_lock_mysql` built a
-/// `MysqlBackend`); both were dead, and deleting them is what made core neutral
-/// here. Do not reintroduce a vendor-constructing entry point in this module.
+/// not in the orchestration. Do not reintroduce an entry point in this module that
+/// constructs a backend for a particular vendor: that is what made this file name a
+/// vendor before, and it is the one thing that would make it name one again.
 pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
     vendors: VendorSet,
     backend: &B,

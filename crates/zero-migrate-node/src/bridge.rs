@@ -582,10 +582,10 @@ pub fn apply_ir(
         .map_err(|e| Error::from_reason(format!("registry is not serializable: {e}")))?;
     // Dialect identity selects the backend: Postgres and MySQL ride the
     // SAME `SqlSession` seam, but each dialect's lock / journal / placeholder SQL
-    // lives in its own `MigrationBackend`. `apply` builds `PostgresBackend`;
-    // `apply_with_lock_mysql` builds `MysqlBackend` (`GET_LOCK`, MySQL journal DDL,
-    // `?` placeholders). SQLite is in-process rusqlite and never reaches the host
-    // seam, so it is not a valid host-driver dialect here.
+    // lives in its own `MigrationBackend`: `PostgresBackend`, or `MysqlBackend`
+    // (`GET_LOCK`, MySQL journal DDL, `?` placeholders). SQLite is in-process
+    // rusqlite and never reaches the host seam, so it is not a valid host-driver
+    // dialect here.
     let target = ApplyDialect::parse(&req.dialect).map_err(Error::from_reason)?;
 
     let ApplyRequest {

@@ -37,14 +37,14 @@ napi = ["dep:napi", "dep:napi-derive"]
 # the core; the host supplies PG/MySQL over the seam.
 zero-migrate = { path = "../zero-migrate" }
 # The PostgreSQL backend, named DIRECTLY rather than through a `zero-migrate`
-# re-export. `apply_with_lock` and the status/journal hosts below build
-# `PostgresBackend` over the napi `pg` seam; the engine stopped re-exporting it when
+# re-export. The apply and status/journal hosts below build `PostgresBackend` over
+# the napi `pg` seam; the engine stopped re-exporting it when
 # the execution half moved into this crate, and re-adding the re-export would be core
 # naming a vendor crate outside its registry, which `core_names_no_vendor_crate`
 # forbids. All three vendors are named the same way now.
 zero-migrate-postgres = { path = "../zero-migrate-postgres" }
 # The MySQL backend, named DIRECTLY rather than through a `zero-migrate` re-export.
-# `apply_with_lock_mysql` below builds `MysqlBackend` over the `mysql2` seam, and the
+# The apply host below builds `MysqlBackend` over the `mysql2` seam, and the
 # engine no longer re-exports it: core naming a vendor crate outside its registry is
 # what `core_names_no_vendor_crate` forbids, so the host names the vendor it wants.
 zero-migrate-mysql = { path = "../zero-migrate-mysql" }

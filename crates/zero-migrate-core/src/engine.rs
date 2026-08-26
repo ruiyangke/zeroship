@@ -3600,14 +3600,11 @@ impl MigrationEngine {
         // not a replacement.
         //
         // Call the dialect-generic `apply_with_lock_backend` with the supplied
-        // backend. This is the ONLY apply route now. The executor used to also
-        // expose `apply_with_lock`/`apply_with_lock_mysql`, which built a
-        // `PostgresBackend`/`MysqlBackend` from a session and then called this same
-        // shell; both were dead and were deleted, because choosing a vendor is not
-        // the orchestration's knowledge to hold. Going straight through the backend
-        // was always the same code path anyway (the guard re-run, least-privilege
-        // role, GUC hygiene, and the lock-mode discipline are all inside
-        // `apply_with_lock_backend`).
+        // backend. This is the ONLY apply route: choosing a vendor is not the
+        // orchestration's knowledge to hold, so the caller supplies the backend and
+        // the executor never builds one. The guard re-run, least-privilege role,
+        // GUC hygiene, and the lock-mode discipline all live inside
+        // `apply_with_lock_backend`, so every caller gets them.
         // Thread the caller's per-version `scope` into the executor gate. The
         // routine flat `apply`/`apply_with_lock` callers pass `ApprovalScope::All`;
         // the out-of-band approved `.sql` deploy surface
