@@ -398,12 +398,36 @@ mod tests {
         let mut escape_home_hits = 0;
         let mut escape_literal_hits = 0;
         let mut requote_home_hits = 0;
+        // ENGINE crates only. This walk used to say "every directory under
+        // `crates/`", which meant the engine for as long as the engine owned its
+        // own workspace. Grafting it into the product workspace changed what that
+        // sentence denotes without anyone editing it: `crates/` now holds 27 more
+        // crates that were never this census's subject, and it duly went red on
+        // `zeroship-schema/src/query.rs`, which spells MySQL backticks because
+        // spelling them is its job.
+        //
+        // The `-` is required rather than a bare `starts_with`, because
+        // `zeroship-migrated` — the policy server, no relation — extends the prefix
+        // without a separator and a prefix match would drag it in.
+        const ENGINE: &str = "zeroship-migrate";
+        let is_engine = |name: &str| name == ENGINE || name.starts_with("zeroship-migrate-");
         let mut stack = std::fs::read_dir(crates_root)
             .expect("read crates root")
             .filter_map(Result::ok)
-            .map(|entry| entry.path().join("src"))
+            .map(|entry| entry.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(&is_engine)
+            })
+            .map(|p| p.join("src"))
             .filter(|src| src.is_dir())
             .collect::<Vec<_>>();
+        assert!(
+            stack.len() >= 9,
+            "the engine walk collapsed to {} root(s); this census would pass vacuously",
+            stack.len()
+        );
         while let Some(dir) = stack.pop() {
             for entry in std::fs::read_dir(&dir).expect("read_dir src") {
                 let path = entry.expect("dir entry").path();
