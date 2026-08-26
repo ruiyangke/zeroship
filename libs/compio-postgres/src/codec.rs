@@ -366,18 +366,25 @@ where
     }
 }
 
-/// Apply the small, protocol-defined limits for startup-only messages before
-/// the decoder reads their bodies. The generic connection limit is 64 MiB by
-/// default, which is appropriate for rows but far too large for either of
-/// these unauthenticated messages.
+/// PostgreSQL caps the startup body whose option names this message can echo at
+/// 10,000 bytes. Leave a little room for the negotiation header while keeping
+/// an unauthenticated peer far below the generic 64 MiB message limit.
+const MAX_NEGOTIATE_PROTOCOL_VERSION_LENGTH: u32 = 10 * 1024;
+
+/// Apply the small startup-message limits before the decoder reads their
+/// bodies. The generic connection limit is appropriate for rows but far too
+/// large for either of these unauthenticated messages.
 fn validate_startup_message_length(tag: u8, length: u32) -> Result<(), Error> {
     match tag {
-        b'v' if length != 12 => Err(Error::io(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "invalid NegotiateProtocolVersion length {length}; expected 12 when no protocol options were sent"
-            ),
-        ))),
+        b'v' if !(12..=MAX_NEGOTIATE_PROTOCOL_VERSION_LENGTH).contains(&length) => {
+            Err(Error::io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "invalid NegotiateProtocolVersion length {length}; expected 12 to \
+                     {MAX_NEGOTIATE_PROTOCOL_VERSION_LENGTH}"
+                ),
+            )))
+        }
         b'K' if !(12..=264).contains(&length) => Err(Error::io(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("invalid BackendKeyData length {length}; expected 12 to 264"),
@@ -525,13 +532,15 @@ mod tests {
         );
     }
 
-    /// The negotiation body is exactly two u32 values when the client sent no
-    /// `_pq_.` options. Its fixed limit must be enforced from the five-byte
-    /// header, before the decoder asks the socket for an attacker-sized body.
+    /// A negotiation carries two u32 values followed by the names of any
+    /// unrecognized `_pq_.` options. PostgreSQL caps the startup body that
+    /// supplied those names at 10,000 bytes, so this ceiling accepts every
+    /// response it can produce while rejecting an attacker-sized body from the
+    /// five-byte header.
     #[compio::test]
     async fn an_oversized_negotiation_is_rejected_from_its_header() {
         let mut frame = vec![b'v'];
-        frame.extend_from_slice(&13u32.to_be_bytes());
+        frame.extend_from_slice(&(MAX_NEGOTIATE_PROTOCOL_VERSION_LENGTH + 1).to_be_bytes());
         let mut framer = ScriptedFramer::new(vec![frame]);
 
         let error = match read_backend(&mut framer).await {
@@ -540,7 +549,8 @@ mod tests {
         };
         let chain = error_chain(&error);
         assert!(
-            chain.contains("NegotiateProtocolVersion") && chain.contains("12"),
+            chain.contains("NegotiateProtocolVersion")
+                && chain.contains(&MAX_NEGOTIATE_PROTOCOL_VERSION_LENGTH.to_string()),
             "the header-specific limit was not enforced: {chain}"
         );
     }
