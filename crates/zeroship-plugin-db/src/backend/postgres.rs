@@ -904,15 +904,6 @@ impl DialectBuilder for PgDialect {
         format!("\"{}\"", name.replace('"', "\"\""))
     }
 
-    /// `CREATE SCHEMA IF NOT EXISTS "<app_id>"` — the canonical PG
-    /// shape. Byte-identical to
-    /// `crate::query::build_create_schema(app_id)` output, so the
-    /// create-schema caller can swap without
-    /// changing the on-wire SQL.
-    fn build_ensure_app_schema(&self, app_id: &str) -> String {
-        format!("CREATE SCHEMA IF NOT EXISTS {}", self.quote_ident(app_id))
-    }
-
     /// Return the `IndexSpec::sql` field verbatim. The spec is built
     /// by `crate::query::build_create_indexes` against the PG dialect
     /// already (`CREATE [UNIQUE] INDEX CONCURRENTLY …`); the `online`
@@ -977,10 +968,6 @@ impl DialectBuilder for PostgresBackend {
 
     fn quote_ident(&self, name: &str) -> String {
         PgDialect.quote_ident(name)
-    }
-
-    fn build_ensure_app_schema(&self, app_id: &str) -> String {
-        PgDialect.build_ensure_app_schema(app_id)
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
@@ -2001,19 +1988,6 @@ mod tests {
         let d = PgDialect;
         assert_eq!(d.quote_ident("plain"), "\"plain\"");
         assert_eq!(d.quote_ident("with\"quote"), "\"with\"\"quote\"");
-    }
-
-    #[test]
-    fn pg_dialect_build_ensure_app_schema_matches_legacy_helper() {
-        let d = PgDialect;
-        // The dialect output MUST equal the legacy
-        // `crate::query::build_create_schema` output byte-for-byte —
-        // PR-3 rewired the create-schema SQL through
-        // the dialect, and any divergence here changes the wire SQL.
-        let legacy = crate::query::build_create_schema("app_demo");
-        let dialect = d.build_ensure_app_schema("app_demo");
-        assert_eq!(legacy, dialect, "dialect SQL must match legacy helper");
-        assert_eq!(dialect, "CREATE SCHEMA IF NOT EXISTS \"app_demo\"");
     }
 
     #[test]

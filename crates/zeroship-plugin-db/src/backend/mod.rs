@@ -815,11 +815,6 @@ pub trait DialectBuilder: 'static {
     /// with embedded-NUL rejection.
     fn quote_ident(&self, name: &str) -> String;
 
-    /// Build the SQL string that idempotently provisions the per-app
-    /// namespace. PG: `CREATE SCHEMA IF NOT EXISTS "<app>"`. SQLite:
-    /// `ATTACH DATABASE 'file:.../zs-<app>.sqlite' AS "<app>"`.
-    fn build_ensure_app_schema(&self, app_id: &str) -> String;
-
     /// Build a `CREATE INDEX` statement for the given [`crate::query::IndexSpec`].
     /// `online = true` requests the engine's "concurrent" variant
     /// (PG: `CREATE INDEX CONCURRENTLY`); SQLite has no concurrent
