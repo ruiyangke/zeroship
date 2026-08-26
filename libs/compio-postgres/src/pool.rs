@@ -2124,6 +2124,14 @@ impl Future for Waiter<'_> {
             return Poll::Ready(None);
         }
 
+        // RawWaker's clone vtable is caller code. Clone before inspecting the
+        // hand-off and queue state, then inspect both from scratch in case the
+        // callback re-entered the pool. Re-check close for the same reason.
+        let new_waker = cx.waker().clone();
+        if self.pool.closed.get() {
+            return Poll::Ready(None);
+        }
+
         // 1. A connection handed directly to us takes priority - claim it and
         // remove its otherwise-hidden ownership record.
         if let Some(slot) = self.slot.as_ref().map(Rc::clone) {
@@ -2137,7 +2145,6 @@ impl Future for Waiter<'_> {
         // 2. Register or refresh our FIFO slot before consulting global
         // availability. A later waiter must remain parked even if it receives a
         // spurious poll while the head owns the first claim.
-        let new_waker = cx.waker();
         let current_slot = self.slot.as_ref().map(Rc::clone);
         let mut waiters = self.pool.waiters.borrow_mut();
 
@@ -2152,32 +2159,15 @@ impl Future for Waiter<'_> {
         if let Some(slot) = current_slot
             && waiters.iter().any(|queued| Rc::ptr_eq(queued, &slot))
         {
-            // THE CLONE STAYS INSIDE THE BORROW, and that is deliberate. A
-            // `Waker` has three entry points and they are NOT equivalent.
-            // MEASURED 2026-08-26 on edition 2024 with a `Waker::from(Arc<W>)`:
-            // `wake` and `drop` run the user's `impl Wake` / `impl Drop`, so
-            // both are reachable from SAFE code and both are carried outside
-            // the borrow above. `clone` runs `Arc::clone` and NOTHING of the
-            // user's - reaching user code there needs a hand-rolled
-            // `RawWakerVTable`, which needs `unsafe`, which this workspace
-            // denies.
-            //
-            // Hoisting it out was tried and reverted. It bought nothing safe
-            // code can trip, cost a refcount pair per poll, and RELOCATED the
-            // hazard: with the clone before the state checks, a re-entrant
-            // callback that drops the sole `PooledClient` leaves the entry
-            // hidden in `handoffs` while this poll installs a new slot, so at
-            // `max_size == 1` capacity is permanently full and unavailable.
-            // A `BorrowMutError` is loud; that is silent.
             let mut w = slot.waker.borrow_mut();
             match &*w {
-                Some(existing) if existing.will_wake(new_waker) => {}
-                _ => replaced = w.replace(new_waker.clone()),
+                Some(existing) if existing.will_wake(&new_waker) => {}
+                _ => replaced = w.replace(new_waker),
             }
         } else {
             // First poll, or our slot was popped for a direct hand-off and we
             // need to re-park. Register a fresh live slot at the back.
-            let slot = WaiterSlot::new(new_waker.clone());
+            let slot = WaiterSlot::new(new_waker);
             waiters.push_back(Rc::clone(&slot));
             self.slot = Some(slot);
         }
@@ -3516,6 +3506,84 @@ mod tests {
     fn poll_with_waker<F: Future>(future: Pin<&mut F>, waker: &Waker) -> Poll<F::Output> {
         let mut cx = Context::from_waker(waker);
         future.poll(&mut cx)
+    }
+
+    thread_local! {
+        static WAITER_CLONE_POOL: RefCell<Option<Rc<Pool>>> = const { RefCell::new(None) };
+        static WAITER_CLONE_SLOT: RefCell<Option<Rc<WaiterSlot>>> = const { RefCell::new(None) };
+        static WAITER_CLONE_BORROWED: Cell<Option<[bool; 2]>> = const { Cell::new(None) };
+    }
+
+    #[allow(unsafe_code)]
+    mod waiter_clone_probe {
+        use super::*;
+
+        fn record() {
+            let queue = WAITER_CLONE_POOL.with(|pool| {
+                pool.borrow()
+                    .as_ref()
+                    .is_some_and(|pool| pool.waiters.try_borrow_mut().is_err())
+            });
+            let slot = WAITER_CLONE_SLOT.with(|slot| {
+                slot.borrow()
+                    .as_ref()
+                    .is_some_and(|slot| slot.waker.try_borrow_mut().is_err())
+            });
+            WAITER_CLONE_BORROWED.with(|borrowed| borrowed.set(Some([queue, slot])));
+        }
+
+        fn raw_waker() -> std::task::RawWaker {
+            unsafe fn clone(_: *const ()) -> std::task::RawWaker {
+                record();
+                raw_waker()
+            }
+
+            unsafe fn wake(_: *const ()) {}
+            unsafe fn wake_by_ref(_: *const ()) {}
+            unsafe fn drop(_: *const ()) {}
+
+            static VTABLE: std::task::RawWakerVTable =
+                std::task::RawWakerVTable::new(clone, wake, wake_by_ref, drop);
+            std::task::RawWaker::new(std::ptr::null(), &VTABLE)
+        }
+
+        pub(super) fn waker() -> Waker {
+            // The vtable owns no data and every operation preserves that.
+            unsafe { Waker::from_raw(raw_waker()) }
+        }
+    }
+
+    #[test]
+    fn cloning_a_waiter_waker_does_not_borrow_pool_state() {
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            ..PoolConfig::default()
+        };
+        let pool = Rc::new(test_pool(config, Vec::new(), 0, 1));
+        let mut waiter = Box::pin(Waiter::new(&pool));
+        assert!(poll_once(waiter.as_mut()).is_pending());
+        let slot = pool
+            .waiters
+            .borrow()
+            .front()
+            .cloned()
+            .expect("the first poll registered a waiter slot");
+        WAITER_CLONE_POOL.with(|stored| *stored.borrow_mut() = Some(Rc::clone(&pool)));
+        WAITER_CLONE_SLOT.with(|stored| *stored.borrow_mut() = Some(slot));
+        WAITER_CLONE_BORROWED.with(|borrowed| borrowed.set(None));
+
+        let probe = waiter_clone_probe::waker();
+        assert!(poll_with_waker(waiter.as_mut(), &probe).is_pending());
+
+        let observed = WAITER_CLONE_BORROWED.with(Cell::get);
+        WAITER_CLONE_POOL.with(|stored| *stored.borrow_mut() = None);
+        WAITER_CLONE_SLOT.with(|stored| *stored.borrow_mut() = None);
+        assert_eq!(
+            observed,
+            Some([false, false]),
+            "the caller waker's clone vtable ran while [waiters, slot.waker] was borrowed"
+        );
     }
 
     thread_local! {
