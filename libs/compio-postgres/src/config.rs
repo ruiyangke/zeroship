@@ -2039,21 +2039,25 @@ impl Config {
             // key is an override.
             "host" => {
                 self.host.clear();
-                for host in value.split(',') {
-                    self.host(host);
+                if !value.is_empty() {
+                    for host in value.split(',') {
+                        self.host(host);
+                    }
                 }
             }
             "hostaddr" => {
                 self.hostaddr.clear();
-                for hostaddr in value.split(',') {
-                    if hostaddr.is_empty() {
-                        self.hostaddr.push(None);
-                        continue;
+                if !value.is_empty() {
+                    for hostaddr in value.split(',') {
+                        if hostaddr.is_empty() {
+                            self.hostaddr.push(None);
+                            continue;
+                        }
+                        let addr = hostaddr
+                            .parse()
+                            .map_err(|_| Error::config_parse(Box::new(InvalidValue("hostaddr"))))?;
+                        self.hostaddr(addr);
                     }
-                    let addr = hostaddr
-                        .parse()
-                        .map_err(|_| Error::config_parse(Box::new(InvalidValue("hostaddr"))))?;
-                    self.hostaddr(addr);
                 }
             }
             "port" => {
@@ -4843,11 +4847,8 @@ mod dsn_parse_tests {
         use std::io::Write as _;
 
         let mut file = tempfile::NamedTempFile::new().expect("create service file");
-        writeln!(
-            file,
-            "[uri-defaults]\nhost=service.example\nport=6543"
-        )
-        .expect("write service file");
+        writeln!(file, "[uri-defaults]\nhost=service.example\nport=6543")
+            .expect("write service file");
         file.flush().expect("flush service file");
         file
     }
