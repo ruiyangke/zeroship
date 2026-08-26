@@ -687,8 +687,8 @@ mod tests {
         .into();
         let body = data_row(&[Some(b"hello"), None]);
 
-        let row = SimpleQueryRow::new(columns, body)
-            .expect("a row matching its columns is well formed");
+        let row =
+            SimpleQueryRow::new(columns, body).expect("a row matching its columns is well formed");
         assert_eq!(row.try_get(0).unwrap(), Some("hello"));
         assert_eq!(row.try_get("b").unwrap(), None);
         assert!(row.try_get("nope").is_err());

@@ -8,9 +8,9 @@ use crate::buf_stream::SplitStream;
 use crate::release::ConnectionRelease;
 use compio::buf::{BufResult, IoBuf, IoBufMut};
 use compio::io::{AsyncRead, AsyncWrite};
-use compio::net::{OwnedReadHalf, OwnedWriteHalf, TcpStream};
 #[cfg(unix)]
 use compio::net::UnixStream;
+use compio::net::{OwnedReadHalf, OwnedWriteHalf, TcpStream};
 
 #[derive(Debug)]
 enum Inner {

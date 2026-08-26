@@ -4146,7 +4146,7 @@ mod tests {
             crate::config::SslMode::Disable,
             crate::config::SslNegotiation::Postgres,
             0,
-            0,
+            Some(0.into()),
             None,
             crate::client::StatementCacheSettings::new(0, std::num::NonZeroUsize::MIN),
         );

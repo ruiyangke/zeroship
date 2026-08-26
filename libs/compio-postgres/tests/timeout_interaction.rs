@@ -134,8 +134,8 @@ fn complete_startup(stream: &mut TcpStream, process_id: i32) {
         .expect("read startup packet body");
     assert_eq!(
         &body[..4],
-        &[0, 3, 0, 0],
-        "client did not request protocol 3"
+        &[0, 3, 0, 2],
+        "client did not request protocol 3.2"
     );
 
     let mut response = backend_frame(b'R', &0u32.to_be_bytes());
@@ -800,7 +800,10 @@ async fn command_recovery_waits_for_cancel_eof_before_sync_and_reuse() {
         let pool = Pool::connect_with_config(connection_config, pool_config)
             .await
             .expect("open pool against cancel-EOF-gated peer");
-        let mut client = pool.get().await.expect("check out cancel-EOF-gated session");
+        let mut client = pool
+            .get()
+            .await
+            .expect("check out cancel-EOF-gated session");
 
         let command = Box::pin(
             client.command(async |client| client.batch_execute("SELECT pg_sleep(30)").await),

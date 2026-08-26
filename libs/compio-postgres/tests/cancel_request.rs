@@ -4,11 +4,14 @@
 //! future. Every cancellation here opens a second connection and sends the
 //! backend PID and secret key captured from the target connection's startup.
 
-use compio::io::AsyncRead;
-use compio::net::TcpStream;
+use compio::buf::{BufResult, IoBuf, IoBufMut};
+use compio::io::{AsyncRead, AsyncWrite};
+use compio::net::{TcpListener, TcpStream};
 use compio_postgres::config::Host;
 use compio_postgres::error::SqlState;
 use compio_postgres::{CancelToken, Client, Config, Error, NoTls};
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::time::Duration;
 
 #[allow(dead_code)]
@@ -139,12 +142,53 @@ fn assert_query_canceled(result: Result<(), Error>) {
     );
 }
 
-async fn cancel_raw_and_wait_for_server_close(token: &CancelToken, endpoint: &(String, u16)) {
+struct RecordingStream<'a> {
+    inner: &'a mut TcpStream,
+    writes: Rc<RefCell<Vec<u8>>>,
+}
+
+impl AsyncRead for RecordingStream<'_> {
+    async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+        self.inner.read(buf).await
+    }
+}
+
+impl AsyncWrite for RecordingStream<'_> {
+    async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+        let BufResult(result, buf) = self.inner.write(buf).await;
+        if let Ok(written) = result {
+            self.writes
+                .borrow_mut()
+                .extend_from_slice(&buf.as_init()[..written]);
+        }
+        BufResult(result, buf)
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush().await
+    }
+
+    async fn shutdown(&mut self) -> std::io::Result<()> {
+        self.inner.shutdown().await
+    }
+}
+
+async fn cancel_raw_and_wait_for_server_close(
+    token: &CancelToken,
+    endpoint: &(String, u16),
+) -> Vec<u8> {
     let mut socket = TcpStream::connect((endpoint.0.as_str(), endpoint.1))
         .await
         .expect("open the caller-owned CancelRequest connection");
+    let writes = Rc::new(RefCell::new(Vec::new()));
     token
-        .cancel_query_raw(&mut socket, NoTls)
+        .cancel_query_raw(
+            RecordingStream {
+                inner: &mut socket,
+                writes: Rc::clone(&writes),
+            },
+            NoTls,
+        )
         .await
         .expect("send CancelRequest on the caller-owned connection");
 
@@ -159,22 +203,46 @@ async fn cancel_raw_and_wait_for_server_close(token: &CancelToken, endpoint: &(S
         0,
         "PostgreSQL sent bytes in response to a fire-and-forget CancelRequest"
     );
+
+    writes.borrow().clone()
 }
 
-/// Hand-build the 16-byte `CancelRequest` so the secret key can be varied
-/// independently of the backend PID. `CancelToken` deliberately offers no way
-/// to do that; the point here is what the SERVER does with a key that does not
-/// match, which is what bounds the hazard of holding a token whose backend has
-/// gone away.
-fn cancel_request_packet(process_id: i32, secret_key: i32) -> Vec<u8> {
-    const CANCEL_REQUEST_CODE: i32 = 80_877_102;
+/// Capture the token's real length-prefixed packet against a loopback peer.
+/// Mutating that packet lets the wrong-key test vary exactly one byte while
+/// preserving the 4-byte PG16 or 32-byte PG18 key length issued by the server.
+async fn capture_cancel_request_packet(token: &CancelToken) -> Vec<u8> {
+    use compio::io::AsyncReadExt;
 
-    let mut packet = Vec::with_capacity(16);
-    packet.extend_from_slice(&16u32.to_be_bytes());
-    packet.extend_from_slice(&CANCEL_REQUEST_CODE.to_be_bytes());
-    packet.extend_from_slice(&process_id.to_be_bytes());
-    packet.extend_from_slice(&secret_key.to_be_bytes());
-    packet
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind cancel capture peer");
+    let address = listener.local_addr().expect("cancel capture peer address");
+    let (packet_tx, packet_rx) = futures_channel::oneshot::channel();
+    compio::runtime::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept captured cancel");
+        let compio::BufResult(result, length) = socket.read_exact(vec![0u8; 4]).await;
+        result.expect("read captured CancelRequest length");
+        let length = u32::from_be_bytes(length.as_slice().try_into().unwrap()) as usize;
+        assert!(length >= 16, "captured CancelRequest is too short");
+        let compio::BufResult(result, body) = socket.read_exact(vec![0u8; length - 4]).await;
+        result.expect("read captured CancelRequest body");
+
+        let mut packet = (length as u32).to_be_bytes().to_vec();
+        packet.extend_from_slice(&body);
+        packet_tx
+            .send(packet)
+            .expect("report captured CancelRequest");
+    })
+    .detach();
+
+    let socket = TcpStream::connect(address)
+        .await
+        .expect("connect cancel capture peer");
+    token
+        .cancel_query_raw(socket, NoTls)
+        .await
+        .expect("write captured CancelRequest");
+    packet_rx.await.expect("cancel capture peer did not report")
 }
 
 async fn send_packet_and_wait_for_server_close(endpoint: &(String, u16), packet: Vec<u8>) {
@@ -245,9 +313,11 @@ async fn a_cancel_request_with_the_wrong_secret_key_is_inert() {
     let cancel_task = compio::runtime::spawn(async move {
         wait_until_pg_sleep_is_running(&observer, pid, MARKER).await;
 
-        // Arm one: the right PID, a key that is not this backend's. A
-        // collision would need the server's 32-bit key to equal this constant.
-        send_packet_and_wait_for_server_close(&endpoint, cancel_request_packet(pid, 0)).await;
+        // Arm one: the token's real packet, with exactly one key byte changed.
+        // PID, framing and the server-issued key length remain identical.
+        let mut wrong_key_packet = capture_cancel_request_packet(&token).await;
+        wrong_key_packet[12] ^= 1;
+        send_packet_and_wait_for_server_close(&endpoint, wrong_key_packet).await;
         assert!(
             pg_sleep_is_running(&observer, pid, MARKER).await,
             "PostgreSQL honoured a CancelRequest whose secret key did not match the backend; a \
@@ -255,7 +325,10 @@ async fn a_cancel_request_with_the_wrong_secret_key_is_inert() {
         );
 
         // Arm two: the same PID with the session's own key.
-        token.cancel_query(common::suite_tls()).await.expect("send CancelRequest");
+        token
+            .cancel_query(common::suite_tls())
+            .await
+            .expect("send CancelRequest");
     });
 
     let (query_result, cancel_result) = compio::time::timeout(
@@ -310,7 +383,7 @@ async fn cancel_twice_with_nothing_running_is_harmless() {
     let second_token = first_token.clone();
 
     for (attempt, token) in [("first", first_token), ("second", second_token)] {
-        compio::time::timeout(
+        let _packet = compio::time::timeout(
             OPERATION_TIMEOUT,
             cancel_raw_and_wait_for_server_close(&token, &endpoint),
         )
@@ -334,7 +407,7 @@ async fn cancel_after_query_finished_is_harmless() {
         .expect("finish the query before cancelling");
     assert_eq!(finished, 7);
 
-    compio::time::timeout(
+    let _packet = compio::time::timeout(
         OPERATION_TIMEOUT,
         cancel_raw_and_wait_for_server_close(&token, &endpoint),
     )
@@ -348,7 +421,9 @@ async fn cancel_after_query_finished_is_harmless() {
 async fn stale_cancel_token_completes_cleanly_without_hanging() {
     let url = plaintext_url();
     let observer = connect(&url).await.unwrap();
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls()).await.unwrap();
+    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+        .await
+        .unwrap();
     let pid = client.process_id();
     let token = client.cancel_token();
     let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -381,10 +456,14 @@ async fn raw_cancel_interrupts_running_query_and_preserves_session() {
     let observer = connect(&url).await.unwrap();
     let pid = client.process_id();
     let token = client.cancel_token();
+    let server_version: i32 = client
+        .query_one_scalar("SELECT current_setting('server_version_num')::int4", &[])
+        .await
+        .expect("ask PostgreSQL for its server version");
 
     let cancel_task = compio::runtime::spawn(async move {
         wait_until_pg_sleep_is_running(&observer, pid, MARKER).await;
-        cancel_raw_and_wait_for_server_close(&token, &endpoint).await;
+        cancel_raw_and_wait_for_server_close(&token, &endpoint).await
     });
 
     let (query_result, cancel_result) = compio::time::timeout(
@@ -394,7 +473,18 @@ async fn raw_cancel_interrupts_running_query_and_preserves_session() {
     .await
     .expect("raw CancelRequest did not interrupt pg_sleep before the test deadline");
 
-    cancel_result.expect("raw CancelRequest task panicked or was cancelled");
+    let packet = cancel_result.expect("raw CancelRequest task panicked or was cancelled");
+    let expected_len = if server_version >= 180_000 { 44 } else { 16 };
+    assert_eq!(
+        packet.len(),
+        expected_len,
+        "CancelRequest did not echo the key length issued by this PostgreSQL server"
+    );
+    assert_eq!(
+        u32::from_be_bytes(packet[..4].try_into().unwrap()) as usize,
+        expected_len,
+        "CancelRequest's length field did not cover the server-issued key"
+    );
     assert_query_canceled(query_result);
     assert_client_still_works(&client).await;
 }

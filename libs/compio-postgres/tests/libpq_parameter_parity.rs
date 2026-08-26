@@ -13,8 +13,8 @@
 //! When libpq gains a parameter, add it here and rule on it. This table failing
 //! is the point: it means we have not decided.
 
-use compio_postgres::Config;
-use compio_postgres::config::Host;
+use compio_postgres::config::{Host, ProtocolVersion};
+use compio_postgres::{Config, NoTls};
 
 #[allow(dead_code)]
 mod common;
@@ -65,8 +65,8 @@ const LIBPQ_PARAMETERS: &[(&str, &str, Verdict)] = &[
     ("keepalives_interval", "5", Accepted),
     ("krbsrvname", "postgres", Refused),
     ("load_balance_hosts", "disable", Accepted),
-    ("max_protocol_version", "3.0", Refused),
-    ("min_protocol_version", "3.0", Refused),
+    ("max_protocol_version", "3.2", Accepted),
+    ("min_protocol_version", "3.2", Accepted),
     ("oauth_client_id", "id", Refused),
     ("oauth_client_secret", "secret", Refused),
     ("oauth_issuer", "https://example.test", Refused),
@@ -253,6 +253,113 @@ fn the_parity_table_names_exactly_the_parameters_libpq_18_accepts() {
         actual, EXPECTED,
         "the parity table no longer names libpq 18's parameter set"
     );
+}
+
+/// The driver opts in to PostgreSQL 18's stronger cancel key by default, but
+/// keeps 3.0 as the floor so an older server can negotiate the startup down.
+/// Both getters are asserted: accepting these parameters and throwing their
+/// values away is the exact silent failure this file exists to prevent.
+#[test]
+fn wire_protocol_defaults_request_3_2_and_allow_3_0_fallback() {
+    let config = Config::new();
+    assert_eq!(
+        config.get_min_protocol_version(),
+        ProtocolVersion::V3_0,
+        "the default minimum must leave the PostgreSQL 16 fallback available"
+    );
+    assert_eq!(
+        config.get_max_protocol_version(),
+        ProtocolVersion::V3_2,
+        "the default maximum is the version sent in the startup request"
+    );
+}
+
+/// PostgreSQL 18's accepted spellings are a closed set. `latest` denotes the
+/// latest version this driver implements, currently 3.2; it is not a third
+/// wire version.
+#[test]
+fn wire_protocol_bounds_parse_every_supported_spelling() {
+    for (value, expected) in [
+        ("3.0", ProtocolVersion::V3_0),
+        ("3.2", ProtocolVersion::V3_2),
+        ("latest", ProtocolVersion::V3_2),
+    ] {
+        let minimum = format!("host=h min_protocol_version={value}")
+            .parse::<Config>()
+            .unwrap_or_else(|error| panic!("min_protocol_version={value} was refused: {error}"));
+        assert_eq!(
+            minimum.get_min_protocol_version(),
+            expected,
+            "min_protocol_version={value} was accepted but ignored"
+        );
+
+        let maximum = format!("postgresql://h/db?max_protocol_version={value}")
+            .parse::<Config>()
+            .unwrap_or_else(|error| panic!("max_protocol_version={value} was refused: {error}"));
+        assert_eq!(
+            maximum.get_max_protocol_version(),
+            expected,
+            "max_protocol_version={value} was accepted but ignored"
+        );
+    }
+}
+
+/// Programmatic configuration has the same typed bounds as a connection
+/// string. Using opposite values is deliberate: it proves the two setters do
+/// not alias the same field before the range check below rules on the pair.
+#[test]
+fn wire_protocol_bound_builders_store_distinct_values() {
+    let mut config = Config::new();
+    config
+        .min_protocol_version(ProtocolVersion::V3_2)
+        .max_protocol_version(ProtocolVersion::V3_0);
+
+    assert_eq!(config.get_min_protocol_version(), ProtocolVersion::V3_2);
+    assert_eq!(config.get_max_protocol_version(), ProtocolVersion::V3_0);
+    assert_eq!(ProtocolVersion::V3_0.as_str(), "3.0");
+    assert_eq!(ProtocolVersion::V3_2.as_str(), "3.2");
+}
+
+/// Values outside the versions the driver can actually speak are rejected by
+/// key. In particular 3.1 is reserved, and `latest` is case-sensitive in
+/// libpq's connection parser.
+#[test]
+fn unsupported_wire_protocol_versions_are_refused_by_key() {
+    for key in ["min_protocol_version", "max_protocol_version"] {
+        for value in ["", "3", "3.1", "3.3", "LATEST"] {
+            let error = format!("host=h {key}='{value}'")
+                .parse::<Config>()
+                .expect_err("an unsupported wire protocol version parsed");
+            assert!(
+                a_cause_names(&error, key),
+                "{key}={value:?}: the refusal did not name the parameter: {error:?}"
+            );
+        }
+    }
+}
+
+/// An empty range is a local configuration error. The loop covers both input
+/// orders because the parser must store the pair and connection validation,
+/// not whichever arm happens to run last, must reject it before socket I/O.
+#[compio::test]
+async fn inverted_wire_protocol_range_is_refused_before_connecting() {
+    for bounds in [
+        "min_protocol_version=3.2 max_protocol_version=3.0",
+        "max_protocol_version=3.0 min_protocol_version=3.2",
+    ] {
+        let config = format!("hostaddr=127.0.0.1 port=1 sslmode=disable {bounds}")
+            .parse::<Config>()
+            .expect("each bound is individually valid");
+        let error = match config.connect(NoTls).await {
+            Ok(_) => panic!("an inverted protocol range connected: {bounds}"),
+            Err(error) => error,
+        };
+        assert!(
+            a_cause_names(&error, "min_protocol_version")
+                && a_cause_names(&error, "max_protocol_version"),
+            "the range error must name both conflicting bounds: {error:?}"
+        );
+    }
 }
 
 /// A repeated key REPLACES, as libpq does; only a comma builds a host list.

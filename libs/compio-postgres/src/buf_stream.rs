@@ -133,9 +133,11 @@ impl ReadDeadline {
     /// request cannot buy more time for a read already in flight.
     pub(crate) fn begin_response(&self) {
         let obligations = self.inner.obligations.get();
-        self.inner
-            .obligations
-            .set(obligations.checked_add(1).expect("read obligation overflow"));
+        self.inner.obligations.set(
+            obligations
+                .checked_add(1)
+                .expect("read obligation overflow"),
+        );
         if obligations == 0 {
             self.inner.deadline.set(self.next_deadline());
             self.wake_reader();
@@ -801,8 +803,12 @@ mod tests {
     #[test]
     fn splitting_preserves_every_buffer_and_unsplittable_fallback_does_too() {
         let mut splittable = BufStream::new(ReadySplitIo);
-        splittable.read_buf.extend_from_slice(b"buffered server bytes");
-        splittable.write_buf.extend_from_slice(b"buffered client bytes");
+        splittable
+            .read_buf
+            .extend_from_slice(b"buffered server bytes");
+        splittable
+            .write_buf
+            .extend_from_slice(b"buffered client bytes");
         splittable.set_read_timeout(Some(Duration::from_secs(1)));
 
         let (read, write) = match splittable.try_into_split() {
@@ -814,7 +820,9 @@ mod tests {
         assert!(read.read_deadline.is_some());
 
         let mut unsplittable = BufStream::new(UnsplitIo);
-        unsplittable.read_buf.extend_from_slice(b"fallback server bytes");
+        unsplittable
+            .read_buf
+            .extend_from_slice(b"fallback server bytes");
         unsplittable
             .write_buf
             .extend_from_slice(b"fallback client bytes");

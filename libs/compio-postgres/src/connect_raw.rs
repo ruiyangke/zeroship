@@ -16,16 +16,21 @@
 // fields, but `stream` is a `BufStream` and `buf` is unused because
 // `read_backend` always returns a fresh batch.
 
+use crate::Error;
 use crate::buf_stream::BufStream;
+use crate::cancel_token::CancelKey;
 use crate::client::{Client, StatementCacheSettings};
-use crate::codec::{BackendMessage, BackendMessages, FrontendMessage, read_backend, write_frontend};
-use crate::config::{self, AuthMethod, Config, ReplicationMode, TargetSessionAttrs};
+use crate::codec::{
+    BackendMessage, BackendMessages, FrontendMessage, read_backend, write_frontend,
+};
+use crate::config::{
+    self, AuthMethod, Config, ProtocolVersion, ReplicationMode, TargetSessionAttrs,
+};
 use crate::connect_tls::{Encryption, negotiate_tls};
 use crate::connection::Connection;
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::tls::{ServerVerification, TlsConnect, TlsStream};
-use crate::Error;
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use compio::io::{AsyncRead, AsyncWrite};
 use fallible_iterator::FallibleIterator;
 use futures_channel::mpsc;
@@ -73,6 +78,14 @@ const MAX_DELAYED_HANDSHAKE_MESSAGES: usize = 256;
 /// below anything worth holding.
 const MAX_DELAYED_HANDSHAKE_BYTES: usize = 1024 * 1024;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HandshakePhase {
+    AwaitingAuthentication,
+    Authenticating,
+    ReadingStartupInfo,
+    Complete,
+}
+
 /// Carries the handshake-time state: the wrapped stream, a cursor through
 /// the currently-in-flight `BackendMessages` batch, and a deferred queue of
 /// async messages (NoticeResponse / NotificationResponse) that arrive
@@ -94,6 +107,12 @@ struct Handshake<S, T> {
     /// Bytes retained in `delayed`. Tracked rather than recomputed so the
     /// guard stays O(1) per message.
     delayed_bytes: usize,
+    requested_protocol: ProtocolVersion,
+    protocol: ProtocolVersion,
+    min_protocol: ProtocolVersion,
+    negotiation_seen: bool,
+    backend_key: Option<(i32, CancelKey)>,
+    phase: HandshakePhase,
 }
 
 impl<S, T> Handshake<S, T>
@@ -101,6 +120,22 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     T: AsyncRead + AsyncWrite + Unpin,
 {
+    fn new(stream: MaybeTlsStream<S, T>, config: &Config) -> Self {
+        let requested_protocol = config.get_max_protocol_version();
+        Self {
+            stream: BufStream::new(stream),
+            pending: BackendMessages::empty(),
+            delayed: VecDeque::new(),
+            delayed_bytes: 0,
+            requested_protocol,
+            protocol: requested_protocol,
+            min_protocol: config.get_min_protocol_version(),
+            negotiation_seen: false,
+            backend_key: None,
+            phase: HandshakePhase::AwaitingAuthentication,
+        }
+    }
+
     async fn send(&mut self, msg: FrontendMessage) -> Result<(), Error> {
         write_frontend(&mut self.stream, msg)?;
         self.stream.flush().await
@@ -123,16 +158,46 @@ where
     ///   sent (e.g. `server_version`).
     async fn next(&mut self) -> Result<Option<Message>, Error> {
         loop {
+            if let Some(body) = self.pending.take_raw_frame(b'v').map_err(Error::parse)? {
+                if self.phase != HandshakePhase::AwaitingAuthentication {
+                    return Err(protocol_error(
+                        "PostgreSQL sent NegotiateProtocolVersion after authentication began",
+                    ));
+                }
+                self.negotiate_protocol(body)?;
+                continue;
+            }
+            if let Some(body) = self.pending.take_raw_frame(b'K').map_err(Error::parse)? {
+                if self.phase != HandshakePhase::ReadingStartupInfo {
+                    let timing = match self.phase {
+                        HandshakePhase::AwaitingAuthentication | HandshakePhase::Authenticating => {
+                            "before authentication completed"
+                        }
+                        HandshakePhase::Complete => "after startup completed",
+                        HandshakePhase::ReadingStartupInfo => unreachable!(),
+                    };
+                    return Err(protocol_error(format!(
+                        "PostgreSQL sent BackendKeyData {timing}"
+                    )));
+                }
+                self.record_backend_key(body)?;
+                continue;
+            }
+
             // First, drain any unread messages from the previous batch -
             // only pull a fresh batch off the wire when the pending
             // iterator is empty.
             if let Some(m) = self.pending.next().map_err(Error::parse)? {
+                self.authentication_started();
                 return Ok(Some(m));
             }
 
             let batch = read_backend(&mut self.stream).await?;
             match batch {
-                BackendMessage::Async { message: msg, frame_len } => match msg {
+                BackendMessage::Async {
+                    message: msg,
+                    frame_len,
+                } => match msg {
                     Message::NoticeResponse(_) | Message::NotificationResponse(_) => {
                         // Preserve ordering - the connection task
                         // will replay these in front of its first
@@ -144,7 +209,10 @@ where
                     // directly. Every other async-tagged message is
                     // unexpected here; return it and let the caller
                     // produce an `unexpected_message` error.
-                    _ => return Ok(Some(msg)),
+                    _ => {
+                        self.authentication_started();
+                        return Ok(Some(msg));
+                    }
                 },
                 BackendMessage::Normal { messages, .. } => {
                     // Stash the iterator; the top of the loop will drain
@@ -153,6 +221,118 @@ where
                 }
             }
         }
+    }
+
+    fn authentication_started(&mut self) {
+        if self.phase == HandshakePhase::AwaitingAuthentication {
+            self.phase = HandshakePhase::Authenticating;
+        }
+    }
+
+    fn begin_startup_info(&mut self) -> Result<(), Error> {
+        if self.phase != HandshakePhase::Authenticating {
+            return Err(protocol_error(
+                "PostgreSQL authentication completed in an invalid startup phase",
+            ));
+        }
+        self.phase = HandshakePhase::ReadingStartupInfo;
+        Ok(())
+    }
+
+    fn finish_startup(&mut self) {
+        self.phase = HandshakePhase::Complete;
+    }
+
+    fn negotiate_protocol(&mut self, body: Bytes) -> Result<(), Error> {
+        if self.negotiation_seen {
+            return Err(protocol_error(
+                "PostgreSQL sent NegotiateProtocolVersion more than once",
+            ));
+        }
+        if body.len() < 8 {
+            return Err(protocol_error(
+                "PostgreSQL sent a truncated NegotiateProtocolVersion message",
+            ));
+        }
+
+        let version = u32::from_be_bytes(body[..4].try_into().unwrap());
+        let option_count = i32::from_be_bytes(body[4..8].try_into().unwrap());
+        if option_count < 0 {
+            return Err(protocol_error(
+                "PostgreSQL sent a negative unsupported-option count in \
+                 NegotiateProtocolVersion",
+            ));
+        }
+        if option_count != 0 {
+            return Err(protocol_error(format!(
+                "PostgreSQL rejected {option_count} protocol options, but this client sent none"
+            )));
+        }
+        if body.len() != 8 {
+            return Err(protocol_error(
+                "PostgreSQL sent trailing bytes in NegotiateProtocolVersion",
+            ));
+        }
+
+        let Some(protocol) = ProtocolVersion::from_wire(version) else {
+            return Err(protocol_error(format!(
+                "PostgreSQL negotiated unsupported protocol version {}.{}",
+                version >> 16,
+                version & 0xffff
+            )));
+        };
+        if protocol > self.requested_protocol {
+            return Err(protocol_error(format!(
+                "PostgreSQL negotiated protocol {} above the requested max_protocol_version={}",
+                protocol.as_str(),
+                self.requested_protocol.as_str()
+            )));
+        }
+        if protocol == self.requested_protocol {
+            return Err(protocol_error(format!(
+                "PostgreSQL sent NegotiateProtocolVersion without lowering protocol {}",
+                protocol.as_str()
+            )));
+        }
+        if protocol < self.min_protocol {
+            return Err(Error::config(
+                format!(
+                    "PostgreSQL negotiated protocol {}, below min_protocol_version={}",
+                    protocol.as_str(),
+                    self.min_protocol.as_str()
+                )
+                .into(),
+            ));
+        }
+
+        self.negotiation_seen = true;
+        self.protocol = protocol;
+        Ok(())
+    }
+
+    fn record_backend_key(&mut self, body: Bytes) -> Result<(), Error> {
+        if self.backend_key.is_some() {
+            return Err(protocol_error(
+                "PostgreSQL sent BackendKeyData more than once during startup",
+            ));
+        }
+        if body.len() < 4 {
+            return Err(protocol_error(
+                "PostgreSQL sent BackendKeyData without a complete process ID",
+            ));
+        }
+
+        let process_id = i32::from_be_bytes(body[..4].try_into().unwrap());
+        let secret_key = CancelKey::new(body.slice(4..)).map_err(Error::parse)?;
+        if self.protocol == ProtocolVersion::V3_0 && secret_key.as_bytes().len() != 4 {
+            return Err(protocol_error(format!(
+                "PostgreSQL sent a {}-byte cancel key for protocol 3.0; expected 4 bytes",
+                secret_key.as_bytes().len()
+            )));
+        }
+
+        self.backend_key = Some((process_id, secret_key));
+        Ok(())
     }
 
     fn delay(&mut self, msg: Message, frame_len: usize) -> Result<(), Error> {
@@ -184,6 +364,10 @@ where
         self.delayed.push_back(msg);
         Ok(())
     }
+}
+
+fn protocol_error(message: impl Into<String>) -> Error {
+    Error::connect(io::Error::new(io::ErrorKind::InvalidData, message.into()))
 }
 
 /// Negotiate TLS if configured, drive the startup + auth exchange,
@@ -259,12 +443,7 @@ where
         );
     }
 
-    let mut handshake = Handshake {
-        stream: BufStream::new(stream),
-        pending: BackendMessages::empty(),
-        delayed: VecDeque::new(),
-        delayed_bytes: 0,
-    };
+    let mut handshake = Handshake::new(stream, config);
 
     let user = match config.get_user() {
         Some(user) => Cow::Borrowed(user),
@@ -275,12 +454,7 @@ where
     authenticate(&mut handshake, config, &user).await?;
     check_ssl_cert_mode(config, handshake.stream.get_mut().client_cert_status())?;
     let (process_id, secret_key, mut parameters) = read_info(&mut handshake).await?;
-    probe_target_session_attrs(
-        &mut handshake,
-        target_session_attrs,
-        &mut parameters,
-    )
-    .await?;
+    probe_target_session_attrs(&mut handshake, target_session_attrs, &mut parameters).await?;
 
     // `connect_timeout` owns negotiation, startup, authentication, and the
     // target-session probe above. The socket-read inactivity clock is a
@@ -439,9 +613,7 @@ where
                     body.value().map_err(Error::parse)?.to_string(),
                 )?;
             }
-            Some(Message::ReadyForQuery(_))
-                if saw_row_description && saw_command_complete =>
-            {
+            Some(Message::ReadyForQuery(_)) if saw_row_description && saw_command_complete => {
                 let state = state.ok_or_else(Error::unexpected_message)?;
                 return require_target_session_attrs(target, state);
             }
@@ -469,9 +641,7 @@ impl TargetSessionProbe {
     fn parse(self, row: &DataRowBody) -> Result<TargetSessionState, Error> {
         let value = single_text_value(row)?;
         match (self, value) {
-            (Self::TransactionReadOnly, b"on") => {
-                Ok(TargetSessionState::TransactionReadOnly(true))
-            }
+            (Self::TransactionReadOnly, b"on") => Ok(TargetSessionState::TransactionReadOnly(true)),
             (Self::TransactionReadOnly, b"off") => {
                 Ok(TargetSessionState::TransactionReadOnly(false))
             }
@@ -514,19 +684,15 @@ fn require_target_session_attrs(
     state: TargetSessionState,
 ) -> Result<(), Error> {
     match (target, state) {
-        (TargetSessionAttrs::ReadWrite, TargetSessionState::TransactionReadOnly(true)) => {
-            Err(target_session_attrs_mismatch(
-                "database does not allow writes",
-            ))
-        }
+        (TargetSessionAttrs::ReadWrite, TargetSessionState::TransactionReadOnly(true)) => Err(
+            target_session_attrs_mismatch("database does not allow writes"),
+        ),
         (TargetSessionAttrs::ReadOnly, TargetSessionState::TransactionReadOnly(false)) => {
             Err(target_session_attrs_mismatch("database is not read only"))
         }
-        (TargetSessionAttrs::Primary, TargetSessionState::InRecovery(true)) => {
-            Err(target_session_attrs_mismatch(
-                "database server is in recovery",
-            ))
-        }
+        (TargetSessionAttrs::Primary, TargetSessionState::InRecovery(true)) => Err(
+            target_session_attrs_mismatch("database server is in recovery"),
+        ),
         (
             TargetSessionAttrs::Standby | TargetSessionAttrs::PreferStandby,
             TargetSessionState::InRecovery(false),
@@ -534,14 +700,8 @@ fn require_target_session_attrs(
             "database server is not in recovery",
         )),
         (TargetSessionAttrs::Any, _)
-        | (
-            TargetSessionAttrs::ReadWrite,
-            TargetSessionState::TransactionReadOnly(false),
-        )
-        | (
-            TargetSessionAttrs::ReadOnly,
-            TargetSessionState::TransactionReadOnly(true),
-        )
+        | (TargetSessionAttrs::ReadWrite, TargetSessionState::TransactionReadOnly(false))
+        | (TargetSessionAttrs::ReadOnly, TargetSessionState::TransactionReadOnly(true))
         | (TargetSessionAttrs::Primary, TargetSessionState::InRecovery(false))
         | (
             TargetSessionAttrs::Standby | TargetSessionAttrs::PreferStandby,
@@ -577,17 +737,18 @@ fn target_session_attrs_mismatch(message: &'static str) -> Error {
 pub(crate) async fn handshake_for_replication<S, T>(
     stream: MaybeTlsStream<S, T>,
     config: &Config,
-) -> Result<(MaybeTlsStream<S, T>, std::collections::HashMap<String, String>), Error>
+) -> Result<
+    (
+        MaybeTlsStream<S, T>,
+        std::collections::HashMap<String, String>,
+    ),
+    Error,
+>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     T: crate::tls::TlsStream + Unpin,
 {
-    let mut handshake = Handshake {
-        stream: BufStream::new(stream),
-        pending: BackendMessages::empty(),
-        delayed: VecDeque::new(),
-        delayed_bytes: 0,
-    };
+    let mut handshake = Handshake::new(stream, config);
 
     let user = match config.get_user() {
         Some(user) => Cow::Borrowed(user),
@@ -607,10 +768,7 @@ where
 /// That timing matches libpq: an earlier server authentication failure remains
 /// the primary error, while a server that would otherwise accept the session
 /// cannot quietly omit the requested TLS client-certificate exchange.
-fn check_ssl_cert_mode(
-    config: &Config,
-    status: crate::tls::ClientCertStatus,
-) -> Result<(), Error> {
+fn check_ssl_cert_mode(config: &Config, status: crate::tls::ClientCertStatus) -> Result<(), Error> {
     use crate::tls::ClientCertStatus;
 
     if config.get_ssl_cert_mode() != config::SslCertMode::Require {
@@ -675,10 +833,9 @@ where
 
     let mut buf = BytesMut::new();
     frontend::startup_message(params, &mut buf).map_err(Error::encode)?;
+    buf[4..8].copy_from_slice(&config.get_max_protocol_version().as_wire().to_be_bytes());
 
-    handshake
-        .send(FrontendMessage::Raw(buf.freeze()))
-        .await
+    handshake.send(FrontendMessage::Raw(buf.freeze())).await
 }
 
 async fn authenticate<S, T>(
@@ -783,10 +940,7 @@ fn check_require_auth(config: &Config, method: AuthMethod) -> Result<(), Error> 
         AuthMethod::None => "server did not complete authentication",
     };
     Err(Error::authentication(
-        format!(
-            "authentication method requirement \"{policy}\" failed: {reason}"
-        )
-        .into(),
+        format!("authentication method requirement \"{policy}\" failed: {reason}").into(),
     ))
 }
 
@@ -863,8 +1017,7 @@ where
     if channel_binding_cfg == config::ChannelBinding::Require {
         if !has_scram_plus {
             return Err(Error::authentication(
-                "server did not offer SCRAM-SHA-256-PLUS but channel binding was required"
-                    .into(),
+                "server did not offer SCRAM-SHA-256-PLUS but channel binding was required".into(),
             ));
         }
         if tls_server_end_point.is_none() {
@@ -1001,21 +1154,16 @@ fn record_parameter_status(
 
 async fn read_info<S, T>(
     handshake: &mut Handshake<S, T>,
-) -> Result<(i32, i32, HashMap<String, String>), Error>
+) -> Result<(i32, Option<CancelKey>, HashMap<String, String>), Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     T: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut process_id = 0;
-    let mut secret_key = 0;
+    handshake.begin_startup_info()?;
     let mut parameters = HashMap::new();
 
     loop {
         match handshake.next().await? {
-            Some(Message::BackendKeyData(body)) => {
-                process_id = body.process_id();
-                secret_key = body.secret_key();
-            }
             Some(Message::ParameterStatus(body)) => {
                 record_parameter_status(
                     &mut parameters,
@@ -1031,7 +1179,14 @@ where
             // match, and the arm that used to sit here was unreachable - it
             // queued into `delayed` a second time, which is why the byte budget
             // has exactly one enforcement point rather than two.
-            Some(Message::ReadyForQuery(_)) => return Ok((process_id, secret_key, parameters)),
+            Some(Message::ReadyForQuery(_)) => {
+                handshake.finish_startup();
+                let (process_id, secret_key) = match handshake.backend_key.take() {
+                    Some((process_id, secret_key)) => (process_id, Some(secret_key)),
+                    None => (0, None),
+                };
+                return Ok((process_id, secret_key, parameters));
+            }
             Some(Message::ErrorResponse(body)) => return Err(Error::db(body)),
             Some(_) => return Err(Error::unexpected_message()),
             None => return Err(Error::closed()),
@@ -1084,7 +1239,7 @@ mod tests {
 
     async fn scripted_server_after_startup(
         server_says: Option<Vec<u8>>,
-    ) -> (crate::Socket, oneshot::Receiver<()>) {
+    ) -> (crate::Socket, oneshot::Receiver<Vec<u8>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (startup_seen, startup_observed) = oneshot::channel();
@@ -1097,10 +1252,9 @@ mod tests {
             let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
             assert!(length >= 4, "startup packet length must include its header");
 
-            let compio::BufResult(result, _) =
-                socket.read_exact(vec![0u8; length - 4]).await;
+            let compio::BufResult(result, startup) = socket.read_exact(vec![0u8; length - 4]).await;
             result.unwrap();
-            let _ = startup_seen.send(());
+            let _ = startup_seen.send(startup);
 
             if let Some(server_says) = server_says {
                 let compio::BufResult(result, _) = socket.write_all(server_says).await;
@@ -1120,13 +1274,246 @@ mod tests {
         )
     }
 
+    /// The default has to exercise both halves of protocol negotiation: ask
+    /// for 3.2, then keep the same startup exchange alive when an older server
+    /// selects 3.0. Checking only the requested bytes misses a decoder that
+    /// cannot consume `NegotiateProtocolVersion`; checking only that the
+    /// connection succeeded passes on a client that quietly kept requesting
+    /// 3.0.
+    #[compio::test]
+    async fn the_default_requests_3_2_and_accepts_a_3_0_negotiation() {
+        let mut negotiation = Vec::new();
+        negotiation.extend_from_slice(&0x0003_0000u32.to_be_bytes());
+        negotiation.extend_from_slice(&0u32.to_be_bytes());
+
+        let mut script = frame(b'v', &negotiation);
+        script.extend_from_slice(&successful_handshake(std::iter::empty()));
+        let (stream, startup) = scripted_server_after_startup(Some(script)).await;
+
+        let config: Config = "user=scripted-user sslmode=disable"
+            .parse()
+            .expect("parse scripted config");
+        let connected = config.connect_raw(stream, NoTls).await;
+        let startup = startup.await.expect("scripted server did not see startup");
+
+        assert_eq!(
+            startup.get(..4),
+            Some(&0x0003_0002u32.to_be_bytes()[..]),
+            "the default startup packet did not request protocol 3.2"
+        );
+        let (client, connection) =
+            connected.expect("protocol 3.0 negotiation did not continue startup");
+        drop((client, connection));
+    }
+
+    /// `BackendKeyData` belongs after authentication. In particular, a peer
+    /// must not be able to install a 3.2 key and then downgrade the connection
+    /// to 3.0, where only the fixed four-byte key is valid.
+    #[compio::test]
+    async fn backend_key_data_before_authentication_is_rejected() {
+        let mut key_data = Vec::with_capacity(36);
+        key_data.extend_from_slice(&1234i32.to_be_bytes());
+        key_data.extend_from_slice(&[0x5a; 32]);
+
+        let mut negotiation = Vec::new();
+        negotiation.extend_from_slice(&0x0003_0000u32.to_be_bytes());
+        negotiation.extend_from_slice(&0u32.to_be_bytes());
+
+        let mut script = frame(b'K', &key_data);
+        script.extend_from_slice(&frame(b'v', &negotiation));
+        script.extend_from_slice(&frame(b'R', &0u32.to_be_bytes()));
+        script.extend_from_slice(&frame(b'Z', b"I"));
+
+        let (stream, _) = scripted_server_after_startup(Some(script)).await;
+        let config: Config = "user=scripted-user sslmode=disable"
+            .parse()
+            .expect("parse scripted config");
+        let error = match config.connect_raw(stream, NoTls).await {
+            Ok(_) => panic!("BackendKeyData before authentication was accepted"),
+            Err(error) => error,
+        };
+        let chain = authentication_error_chain(error);
+        assert!(
+            chain.contains("BackendKeyData") && chain.contains("before authentication"),
+            "the out-of-phase BackendKeyData was not identified: {chain}"
+        );
+    }
+
+    /// Negotiation is the first server response to the startup packet. Once
+    /// authentication has begun, a later negotiation cannot change the
+    /// protocol governing already-consumed messages.
+    #[compio::test]
+    async fn negotiation_after_authentication_is_rejected() {
+        let mut negotiation = Vec::new();
+        negotiation.extend_from_slice(&0x0003_0000u32.to_be_bytes());
+        negotiation.extend_from_slice(&0u32.to_be_bytes());
+
+        let mut script = frame(b'R', &0u32.to_be_bytes());
+        script.extend_from_slice(&frame(b'v', &negotiation));
+        script.extend_from_slice(&frame(b'K', &[0; 8]));
+        script.extend_from_slice(&frame(b'Z', b"I"));
+
+        let (stream, _) = scripted_server_after_startup(Some(script)).await;
+        let config: Config = "user=scripted-user sslmode=disable"
+            .parse()
+            .expect("parse scripted config");
+        let error = match config.connect_raw(stream, NoTls).await {
+            Ok(_) => panic!("NegotiateProtocolVersion after authentication was accepted"),
+            Err(error) => error,
+        };
+        let chain = authentication_error_chain(error);
+        assert!(
+            chain.contains("NegotiateProtocolVersion") && chain.contains("after authentication"),
+            "the out-of-phase negotiation was not identified: {chain}"
+        );
+    }
+
+    /// `max_protocol_version` is the version put on the wire, not merely a
+    /// value the connection-string parser accepts.
+    #[compio::test]
+    async fn max_protocol_version_bounds_the_startup_request() {
+        let (stream, startup) =
+            scripted_server_after_startup(Some(successful_handshake(std::iter::empty()))).await;
+        let config: Config = "user=scripted-user sslmode=disable max_protocol_version=3.0"
+            .parse()
+            .expect("parse scripted protocol maximum");
+
+        let connected = config.connect_raw(stream, NoTls).await;
+        let startup = startup.await.expect("scripted server did not see startup");
+        assert_eq!(
+            startup.get(..4),
+            Some(&0x0003_0000u32.to_be_bytes()[..]),
+            "max_protocol_version=3.0 did not bound the startup request"
+        );
+
+        let (client, connection) = connected.expect("protocol 3.0 startup failed");
+        drop((client, connection));
+    }
+
+    /// A fallback below the configured floor must stop on the same socket
+    /// before authentication continues, and the error must name the bound the
+    /// server could not satisfy.
+    #[compio::test]
+    async fn min_protocol_version_rejects_a_lower_server_negotiation() {
+        let mut negotiation = Vec::new();
+        negotiation.extend_from_slice(&0x0003_0000u32.to_be_bytes());
+        negotiation.extend_from_slice(&0u32.to_be_bytes());
+
+        let mut script = frame(b'v', &negotiation);
+        script.extend_from_slice(&successful_handshake(std::iter::empty()));
+        let (stream, _) = scripted_server_after_startup(Some(script)).await;
+        let config: Config = "user=scripted-user sslmode=disable min_protocol_version=3.2"
+            .parse()
+            .expect("parse scripted protocol minimum");
+
+        let error = match config.connect_raw(stream, NoTls).await {
+            Ok(_) => panic!("protocol 3.0 satisfied min_protocol_version=3.2"),
+            Err(error) => error,
+        };
+        let chain = authentication_error_chain(error);
+        assert!(
+            chain.contains("min_protocol_version"),
+            "the negotiation refusal did not name the configured floor: {chain}"
+        );
+    }
+
+    /// With no `_pq_.` startup options, the server sends negotiation only to
+    /// lower the requested version. An equal version asks the client to make
+    /// no change and is a malformed startup response.
+    #[compio::test]
+    async fn negotiation_without_a_protocol_downgrade_is_rejected() {
+        let mut negotiation = Vec::new();
+        negotiation.extend_from_slice(&0x0003_0002u32.to_be_bytes());
+        negotiation.extend_from_slice(&0u32.to_be_bytes());
+
+        let mut script = frame(b'v', &negotiation);
+        script.extend_from_slice(&successful_handshake(std::iter::empty()));
+        let (stream, _) = scripted_server_after_startup(Some(script)).await;
+        let config: Config = "user=scripted-user sslmode=disable"
+            .parse()
+            .expect("parse scripted config");
+
+        let error = match config.connect_raw(stream, NoTls).await {
+            Ok(_) => panic!("a no-op NegotiateProtocolVersion continued startup"),
+            Err(error) => error,
+        };
+        let chain = authentication_error_chain(error);
+        assert!(
+            chain.contains("without lowering"),
+            "the invalid negotiation was not identified: {chain}"
+        );
+    }
+
+    /// A 3.2 `BackendKeyData` key is retained byte-for-byte and determines the
+    /// variable length of the later `CancelRequest`.
+    #[compio::test]
+    async fn a_variable_backend_key_is_echoed_in_the_cancel_request() {
+        const PROCESS_ID: i32 = 1234;
+        const KEY: [u8; 32] = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+            0x1c, 0x1d, 0x1e, 0x1f,
+        ];
+
+        let mut key_data = Vec::with_capacity(4 + KEY.len());
+        key_data.extend_from_slice(&PROCESS_ID.to_be_bytes());
+        key_data.extend_from_slice(&KEY);
+        let mut script = frame(b'R', &0u32.to_be_bytes());
+        script.extend_from_slice(&frame(b'K', &key_data));
+        script.extend_from_slice(&frame(b'Z', b"I"));
+
+        let (stream, startup) = scripted_server_after_startup(Some(script)).await;
+        let config: Config = "user=scripted-user sslmode=disable"
+            .parse()
+            .expect("parse scripted config");
+        let (client, connection) = config
+            .connect_raw(stream, NoTls)
+            .await
+            .expect("accept a variable BackendKeyData key");
+        let startup = startup.await.expect("scripted server did not see startup");
+        assert_eq!(startup.get(..4), Some(&0x0003_0002u32.to_be_bytes()[..]));
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind scripted cancel peer");
+        let address = listener.local_addr().expect("scripted cancel peer address");
+        let (packet_tx, packet_rx) = oneshot::channel();
+        compio::runtime::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept cancel connection");
+            let compio::BufResult(result, length) = socket.read_exact(vec![0u8; 4]).await;
+            result.expect("read cancel packet length");
+            let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
+            let compio::BufResult(result, body) = socket.read_exact(vec![0u8; length - 4]).await;
+            result.expect("read cancel packet body");
+            packet_tx
+                .send((length, body))
+                .expect("report scripted cancel packet");
+        })
+        .detach();
+
+        let mut cancel_stream = TcpStream::connect(address)
+            .await
+            .expect("connect scripted cancel peer");
+        client
+            .cancel_token()
+            .cancel_query_raw(&mut cancel_stream, NoTls)
+            .await
+            .expect("send variable-length CancelRequest");
+        let (length, body) = packet_rx
+            .await
+            .expect("scripted cancel peer did not report");
+
+        assert_eq!(length, 12 + KEY.len());
+        assert_eq!(&body[..4], &80_877_102i32.to_be_bytes());
+        assert_eq!(&body[4..8], &PROCESS_ID.to_be_bytes());
+        assert_eq!(&body[8..], &KEY);
+        drop((client, connection));
+    }
+
     async fn scripted_password_auth_server(
         auth_request: Vec<u8>,
         complete_after_response: bool,
-    ) -> (
-        crate::Socket,
-        oneshot::Receiver<Result<Vec<u8>, String>>,
-    ) {
+    ) -> (crate::Socket, oneshot::Receiver<Result<Vec<u8>, String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (client_bytes_tx, client_bytes_rx) = oneshot::channel();
@@ -1140,8 +1527,7 @@ mod tests {
                 return;
             }
             let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
-            let compio::BufResult(result, _) =
-                socket.read_exact(vec![0u8; length - 4]).await;
+            let compio::BufResult(result, _) = socket.read_exact(vec![0u8; length - 4]).await;
             if let Err(error) = result {
                 let _ = client_bytes_tx.send(Err(error.to_string()));
                 return;
@@ -1175,9 +1561,8 @@ mod tests {
                 let frame_length =
                     u32::from_be_bytes(length.as_slice().try_into().unwrap()) as usize;
                 if frame_length < 4 {
-                    let _ = client_bytes_tx.send(Err(format!(
-                        "invalid frontend frame length {frame_length}"
-                    )));
+                    let _ = client_bytes_tx
+                        .send(Err(format!("invalid frontend frame length {frame_length}")));
                     return;
                 }
                 let compio::BufResult(result, body) =
@@ -1244,17 +1629,16 @@ mod tests {
 
     fn sha256(input: &[u8]) -> [u8; 32] {
         const K: [u32; 64] = [
-            0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
-            0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-            0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
-            0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-            0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
-            0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-            0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-            0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-            0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
-            0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-            0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+            0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+            0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+            0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+            0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+            0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+            0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+            0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+            0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+            0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+            0xc67178f2,
         ];
 
         let mut state = [
@@ -1315,10 +1699,7 @@ mod tests {
                 a = temp1.wrapping_add(temp2);
             }
 
-            for (current, compressed) in state
-                .iter_mut()
-                .zip([a, b, c, d, e, f, g, h])
-            {
+            for (current, compressed) in state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
                 *current = current.wrapping_add(compressed);
             }
         }
@@ -1361,9 +1742,7 @@ mod tests {
             encoded.push(ALPHABET[(first >> 2) as usize] as char);
             encoded.push(ALPHABET[(((first & 0x03) << 4) | (second >> 4)) as usize] as char);
             if chunk.len() > 1 {
-                encoded.push(
-                    ALPHABET[(((second & 0x0f) << 2) | (third >> 6)) as usize] as char,
-                );
+                encoded.push(ALPHABET[(((second & 0x0f) << 2) | (third >> 6)) as usize] as char);
             } else {
                 encoded.push('=');
             }
@@ -1396,18 +1775,16 @@ mod tests {
         config
     }
 
-    async fn scripted_successful_scram_server() -> (
-        crate::Socket,
-        oneshot::Receiver<Result<(), String>>,
-    ) {
+    async fn scripted_successful_scram_server()
+    -> (crate::Socket, oneshot::Receiver<Result<(), String>>) {
         // PBKDF2-HMAC-SHA-256("scripted-password", "salt", 1), followed by
         // HMAC-SHA-256(salted_password, "Server Key"). Keeping the derived
         // verifier here lets the scripted peer compute its nonce-dependent
         // server signature without adding a test-only crypto dependency.
         const SERVER_KEY: [u8; 32] = [
-            0xf1, 0x83, 0x92, 0xfc, 0x94, 0x37, 0xe6, 0x33, 0x43, 0x42, 0x26, 0x63,
-            0x9a, 0xba, 0x84, 0x91, 0x32, 0xa6, 0x3e, 0x12, 0x47, 0xbf, 0x0f, 0x07,
-            0x58, 0x71, 0x43, 0xa4, 0x57, 0x01, 0x2d, 0xc7,
+            0xf1, 0x83, 0x92, 0xfc, 0x94, 0x37, 0xe6, 0x33, 0x43, 0x42, 0x26, 0x63, 0x9a, 0xba,
+            0x84, 0x91, 0x32, 0xa6, 0x3e, 0x12, 0x47, 0xbf, 0x0f, 0x07, 0x58, 0x71, 0x43, 0xa4,
+            0x57, 0x01, 0x2d, 0xc7,
         ];
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1421,14 +1798,12 @@ mod tests {
                 let compio::BufResult(result, length) = socket.read_exact(vec![0u8; 4]).await;
                 result.map_err(|e| e.to_string())?;
                 let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
-                let compio::BufResult(result, _) =
-                    socket.read_exact(vec![0u8; length - 4]).await;
+                let compio::BufResult(result, _) = socket.read_exact(vec![0u8; length - 4]).await;
                 result.map_err(|e| e.to_string())?;
 
                 let mut auth_sasl = 10i32.to_be_bytes().to_vec();
                 auth_sasl.extend_from_slice(b"SCRAM-SHA-256\0\0");
-                let compio::BufResult(result, _) =
-                    socket.write_all(frame(b'R', &auth_sasl)).await;
+                let compio::BufResult(result, _) = socket.write_all(frame(b'R', &auth_sasl)).await;
                 result.map_err(|e| e.to_string())?;
                 socket.flush().await.map_err(|e| e.to_string())?;
 
@@ -1463,13 +1838,12 @@ mod tests {
                         .try_into()
                         .unwrap(),
                 );
-                if response_length < 0
-                    || response_length as usize != initial.len() - response_start
+                if response_length < 0 || response_length as usize != initial.len() - response_start
                 {
                     return Err("SASL initial response length was invalid".to_string());
                 }
-                let client_first = std::str::from_utf8(&initial[response_start..])
-                    .map_err(|e| e.to_string())?;
+                let client_first =
+                    std::str::from_utf8(&initial[response_start..]).map_err(|e| e.to_string())?;
                 let client_first_bare = client_first
                     .strip_prefix("n,,")
                     .ok_or_else(|| format!("unexpected client-first message: {client_first}"))?;
@@ -1496,20 +1870,17 @@ mod tests {
                 let compio::BufResult(result, client_final) =
                     socket.read_exact(vec![0u8; length - 4]).await;
                 result.map_err(|e| e.to_string())?;
-                let client_final =
-                    std::str::from_utf8(&client_final).map_err(|e| e.to_string())?;
+                let client_final = std::str::from_utf8(&client_final).map_err(|e| e.to_string())?;
                 let proof_start = client_final
                     .rfind(",p=")
                     .ok_or_else(|| format!("client-final message had no proof: {client_final}"))?;
                 let client_final_without_proof = &client_final[..proof_start];
-                let auth_message = format!(
-                    "{client_first_bare},{server_first},{client_final_without_proof}"
-                );
+                let auth_message =
+                    format!("{client_first_bare},{server_first},{client_final_without_proof}");
                 let server_signature = hmac_sha256(&SERVER_KEY, auth_message.as_bytes());
                 let mut auth_final = 12i32.to_be_bytes().to_vec();
                 auth_final.extend_from_slice(format!("v={}", base64(&server_signature)).as_bytes());
-                let compio::BufResult(result, _) =
-                    socket.write_all(frame(b'R', &auth_final)).await;
+                let compio::BufResult(result, _) = socket.write_all(frame(b'R', &auth_final)).await;
                 result.map_err(|e| e.to_string())?;
                 let compio::BufResult(result, _) = socket
                     .write_all(successful_handshake(std::iter::empty()))
@@ -1558,14 +1929,12 @@ mod tests {
                 let compio::BufResult(result, length) = socket.read_exact(vec![0u8; 4]).await;
                 result.map_err(|e| e.to_string())?;
                 let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
-                let compio::BufResult(result, _) =
-                    socket.read_exact(vec![0u8; length - 4]).await;
+                let compio::BufResult(result, _) = socket.read_exact(vec![0u8; length - 4]).await;
                 result.map_err(|e| e.to_string())?;
 
                 let mut auth_sasl = 10i32.to_be_bytes().to_vec();
                 auth_sasl.extend_from_slice(b"SCRAM-SHA-256\0\0");
-                let compio::BufResult(result, _) =
-                    socket.write_all(frame(b'R', &auth_sasl)).await;
+                let compio::BufResult(result, _) = socket.write_all(frame(b'R', &auth_sasl)).await;
                 result.map_err(|e| e.to_string())?;
                 socket.flush().await.map_err(|e| e.to_string())?;
 
@@ -1604,8 +1973,7 @@ mod tests {
     #[compio::test]
     async fn require_scram_refuses_cleartext_without_sending_the_password() {
         let auth_request = 3i32.to_be_bytes().to_vec();
-        let (stream, client_bytes) =
-            scripted_password_auth_server(auth_request, false).await;
+        let (stream, client_bytes) = scripted_password_auth_server(auth_request, false).await;
         let mut config = scram_config();
         config.require_auth(RequireAuth::Require(AuthMethods::new(
             AuthMethod::ScramSha256,
@@ -1647,8 +2015,7 @@ mod tests {
         };
         let chain = authentication_error_chain(error);
         assert!(
-            chain.contains("scram-sha-256")
-                && chain.contains("did not complete authentication"),
+            chain.contains("scram-sha-256") && chain.contains("did not complete authentication"),
             "the refusal must name the requirement and incomplete exchange: {chain}"
         );
     }
@@ -1667,8 +2034,7 @@ mod tests {
         };
         let chain = authentication_error_chain(error);
         assert!(
-            chain.contains("scram-sha-256")
-                && chain.contains("did not complete authentication"),
+            chain.contains("scram-sha-256") && chain.contains("did not complete authentication"),
             "the refusal must name the requirement and incomplete exchange: {chain}"
         );
 
@@ -2075,10 +2441,9 @@ mod tests {
 
     #[compio::test]
     async fn handshake_rejects_excess_delayed_messages() {
-        let notices = (0..=EXPECTED_DELAYED_MESSAGE_LIMIT)
-            .map(|index| notice(&format!("notice {index}")));
-        let (stream, _) =
-            scripted_server_after_startup(Some(successful_handshake(notices))).await;
+        let notices =
+            (0..=EXPECTED_DELAYED_MESSAGE_LIMIT).map(|index| notice(&format!("notice {index}")));
+        let (stream, _) = scripted_server_after_startup(Some(successful_handshake(notices))).await;
 
         let error = match plaintext_config().connect_raw(stream, NoTls).await {
             Ok(_) => panic!(
@@ -2148,8 +2513,7 @@ mod tests {
     async fn handshake_replays_a_few_delayed_notices() {
         const NOTICE_TEXTS: [&str; 3] = ["first warning", "second warning", "third warning"];
         let notices = NOTICE_TEXTS.into_iter().map(notice);
-        let (stream, _) =
-            scripted_server_after_startup(Some(successful_handshake(notices))).await;
+        let (stream, _) = scripted_server_after_startup(Some(successful_handshake(notices))).await;
 
         let (client, mut connection) = plaintext_config()
             .connect_raw(stream, NoTls)
