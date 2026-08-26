@@ -8,8 +8,16 @@ It is a SUPERSET of tokio-postgres's client surface. On top of that crate's API
 it adds a connection pool, logical replication with a pgoutput decoder, a
 rustls transport, four timeout clocks, an opt-in prepared-statement cache, a
 password-file and `pg_service.conf` reader, TLS key logging, a configurable
-maximum message size, and
-`is_dirty` / `process_id` / `transaction_status` / `query_events`.
+maximum message size, wire protocol 3.2 with negotiated fallback to 3.0, and
+`is_dirty` / `process_id` / `transaction_status` / `query_events` /
+`protocol_version`.
+
+Two of those are worth knowing before comparing behaviour with libpq. This
+driver requests protocol **3.2** by default where libpq 18 defaults to 3.0, so
+it gets 3.2's longer cancel key wherever the server offers it and negotiates
+down everywhere else. And `protocol_version` reports what the session SETTLED
+on, which is the only way to find out: PostgreSQL exposes no server-side view
+of it, which is why libpq keeps its own and `psql`'s `\conninfo` prints that.
 
 It reads NO environment variables. libpq defaults most parameters from the
 environment; a published library takes resolved options from its caller
