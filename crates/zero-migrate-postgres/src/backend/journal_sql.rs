@@ -214,7 +214,7 @@ pub async fn ensure_journal<D: SqlSession>(
     // deterministic per rename, used by the engine interlock's
     // idempotent-skip + self-EXPAND exemption + the `resolve-pending` lookup;
     // `plan_version` is the rename's PLAN-GROUP version (the ExpandContract
-    // plan's E1-anchored id, `render::lower::plan_step_version`) - the STABLE
+    // plan's E1-anchored id, assigned by the engine's plan lowering) - the STABLE
     // identity the SUPPLIED migration set carries (a re-lowered IR's
     // `lower_plan.version`) and an author's `depends_on` references, so
     // `status`'s orphan/blocked surfacing keys on THIS, not the deep E2

@@ -2,7 +2,7 @@
 //! ONLY` snapshot.
 //!
 //! This body used to live in `zero_migrate::ops::status` under the neutral name `status`,
-//! and from there it reached `apply::backend::postgres::journal_sql` five times.
+//! and from there it reached back into this backend's own `journal_sql` repeatedly.
 //! Core's status verb WAS PostgreSQL's status verb - nothing about the signature
 //! (`&D: SqlSession`, a `dialect` argument) could have routed it anywhere else, and
 //! the SQL it drives is PostgreSQL's: `BEGIN ISOLATION LEVEL REPEATABLE READ READ

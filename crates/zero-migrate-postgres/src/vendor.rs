@@ -4,7 +4,7 @@
 //!
 //! # Why this file is HERE and its two TYPES are not
 //!
-//! This was one 814-line module in the engine, `render::vendor`, and the crate split
+//! This was one module in the engine, `render::vendor`, and the crate split
 //! could not keep it whole. Its two types are contract vocabulary:
 //! [`VendorStatement`] is the return
 //! type of `DmlRenderer::render_trigger_op`, which ALL THREE vendors implement and
