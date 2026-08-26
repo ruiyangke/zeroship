@@ -191,11 +191,6 @@ impl SqlSession for RecordingSession {
         self.binds.borrow_mut().push(params.to_vec());
         Ok(1)
     }
-    async fn exec_text(&self, sql: &str, _params: &[Option<String>]) -> Result<u64, DbError> {
-        let _g = InFlightGuard::enter(&self.in_flight);
-        self.log.borrow_mut().push(format!("exec_text: {sql}"));
-        Ok(1)
-    }
     async fn query(&self, sql: &str, params: &[Bind]) -> Result<Vec<Row>, DbError> {
         let _g = InFlightGuard::enter(&self.in_flight);
         self.log.borrow_mut().push(format!("query: {sql}"));

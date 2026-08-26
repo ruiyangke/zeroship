@@ -104,12 +104,6 @@ async function runVerb(
       );
       return { rows: [], rowCount: affectedRows(result) };
     }
-    case "executeTextParams": {
-      // Text-format params: cross verbatim; null → SQL NULL. mysql2 binds strings.
-      const values = request.textParams.map((v) => (v === null || v === undefined ? null : v));
-      const [result] = await connection.execute({ sql: request.sql, timeout: timeoutMs }, values);
-      return { rows: [], rowCount: affectedRows(result) };
-    }
     case "query":
     case "queryOne": {
       const [rows, fields] = await connection.execute({

@@ -444,17 +444,6 @@ impl SqlSession for MysqlDevSession {
         drain_affected(&mut result)
     }
 
-    async fn exec_text(&self, sql: &str, params: &[Option<String>]) -> Result<u64, DbError> {
-        // MySQL has no equivalent of PostgreSQL's concrete-OID refusal of
-        // `text -> timestamptz`, so the shipped contract makes this an ALIAS for
-        // `exec` on this dialect - `driver-mysql2.ts` implements it the same way.
-        let binds: Vec<Bind> = params
-            .iter()
-            .map(|param| param.clone().map_or(Bind::Null, Bind::Text))
-            .collect();
-        self.exec(sql, &binds).await
-    }
-
     async fn query(&self, sql: &str, binds: &[Bind]) -> Result<Vec<Row>, DbError> {
         let mut conn = self.conn.borrow_mut();
         let rows: Vec<mysql::Row> = conn

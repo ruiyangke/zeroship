@@ -628,7 +628,7 @@ export interface JsError {
 
 /**
  * A successful verb reply crossing the boundary: the returned rows (empty for a
- * pure DML `execute`/`executeTextParams`) plus the driver's affected-/returned-row
+ * pure DML `execute`) plus the driver's affected-/returned-row
  * count (`result.rowCount` from node-pg). The engine's `execute` verbs read the
  * count; `query`/`queryOne` read the rows.
  */
@@ -646,21 +646,21 @@ export interface JsReply {
 /**
  * A single verb request the engine hands to the host driver.
  *
- * `kind` selects the verb (`batch | execute | executeTextParams | query |
- * queryOne`); `sql` is the statement; `binds` carries the neutral params for
- * `execute`/`query`/`queryOne`; `textParams` carries the `&[Option<String>]`
- * text-format params for `executeTextParams` (text-format, server-inferred
- * OID). Exactly one of `binds`/`textParams` is populated per verb kind.
+ * `kind` selects the verb (`batch | execute | query | queryOne`); `sql` is the
+ * statement; `binds` carries the neutral params for `execute`/`query`/`queryOne`.
+ *
+ * This wire carries no DECLARED parameter types: every cell reaches the host
+ * driver as a plain JS value, and both shipped drivers send those text-format
+ * with no OID. Whether a value must be server-inferred therefore rides in the
+ * bind itself rather than in the verb.
  */
 export interface JsRequest {
-  /** The verb: `"batch" | "execute" | "executeTextParams" | "query" | "queryOne"`. */
+  /** The verb: `"batch" | "execute" | "query" | "queryOne"`. */
   kind: string
   /** The SQL statement. */
   sql: string
   /** Neutral binds for `execute`/`query`/`queryOne` (as [`JsCell`]s). */
   binds: Array<JsCell>
-  /** Text-format params for `executeTextParams` (`None` element -> SQL NULL bind). */
-  textParams: Array<string | undefined | null>
 }
 
 /** A driver-neutral row crossing the boundary: parallel column-name / cell vectors. */

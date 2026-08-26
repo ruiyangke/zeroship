@@ -2076,17 +2076,21 @@ async fn run_batch<D: SqlSession>(
             let update_sql = build_per_row_update_sql(spec, cursor)?;
             let mut updated = 0_u64;
             for selected_tuple in &selected_tuples {
+                // The generated per-row values land in columns whose types this
+                // backend does not know, so they must be server-inferred. The cursor
+                // tuple that follows is a different case: those binds are already
+                // typed, and now stay that way. Under the old all-or-nothing verb
+                // they had to be stripped to strings behind an `unreachable!`
+                // asserting they were text - the assertion existed only because the
+                // signature could not carry what the caller held.
                 let mut parameters = spec
                     .per_row
                     .values()
                     .map(|assignment| generate_per_row_value(assignment.generator()))
-                    .map(Some)
+                    .map(|value| Bind::Inferred(Some(value)))
                     .collect::<Vec<_>>();
-                parameters.extend(tuple_binds(selected_tuple).into_iter().map(|bind| match bind {
-                    Bind::Text(value) => Some(value),
-                    _ => unreachable!("cursor tuple binds are text"),
-                }));
-                let affected = conn.exec_text(&update_sql, &parameters).await.map_err(|error| {
+                parameters.extend(tuple_binds(selected_tuple));
+                let affected = conn.exec(&update_sql, &parameters).await.map_err(|error| {
                     backend_error(format!(
                         "per-row update failed at cursor {selected_tuple:?}: {error}"
                     ))

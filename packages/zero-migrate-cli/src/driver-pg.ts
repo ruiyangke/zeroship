@@ -2,7 +2,7 @@
 // `hostDriver([request, done]) => void` TSFN contract.
 //
 // ONE pinned `pg.Client` per session (the addon pins one connection and is strictly
-// one-verb-at-a-time). A verb request `{ kind, sql, binds, textParams }`
+// one-verb-at-a-time). A verb request `{ kind, sql, binds }`
 // becomes a `pg` query; the reply is `{ rows, rowCount }` on success or
 // `{ error: { sqlstate, message } }` on failure — surfaced to the addon as
 // `done(err, null)` / `done(null, reply)`.
@@ -28,11 +28,13 @@
 //     `::text`-casts enums, `"char"` and timestamps, and the int arms re-coerce with
 //     `Number(value)`, which yields a loud NaN for garbage).
 //
-//  2. `executeTextParams` is a DISTINCT path: it receives a
-//     `(string | null)[]` and calls `client.query(sql, values)` with NO explicit
-//     param type OIDs — `pg` sends them text-format and PG INFERS the target type
-//     (e.g. a text literal → timestamptz). `null` → PG NULL; every
-//     non-null crosses as its exact string, no coercion.
+//  2. This driver declares NO parameter types. `client.query(sql, values)` takes
+//     no type OIDs, so `pg` sends every value text-format and PostgreSQL infers
+//     each target type from the statement. That is what makes a text instant
+//     land in a `timestamptz` column here, and it is why a bind marked
+//     server-inferred needs no special handling on this side - it arrives as the
+//     same JS value as any other. A driver that DOES declare types, such as an
+//     in-process Rust one, has to honour the distinction explicitly.
 
 // `pg` is an optionalDependency. Imported lazily so a host that only uses
 // SQLite (native rusqlite) never needs it installed.
@@ -325,13 +327,6 @@ async function runVerb(client: PgClient, request: JsRequest): Promise<JsReply> {
     }
     case "execute": {
       const result = await client.query(request.sql, cellsToParams(request.binds));
-      return { rows: [], rowCount: result.rowCount ?? undefined };
-    }
-    case "executeTextParams": {
-      // DISTINCT path: text-format params, NO explicit OID → PG infers
-      // the target type. `null` → PG NULL; non-null crosses as its exact string.
-      const values = request.textParams.map((v) => (v === null || v === undefined ? null : v));
-      const result = await client.query(request.sql, values);
       return { rows: [], rowCount: result.rowCount ?? undefined };
     }
     case "query":

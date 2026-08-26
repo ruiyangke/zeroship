@@ -40,8 +40,8 @@
 /// The driver-neutral [`SqlSession`] conformance suite - the FIRST external
 /// consumer of the seam. A host driver (or the in-crate `PgDevSession`) runs
 /// [`conformance::run`] against a live session to prove it honours the seam
-/// invariants (session pinning, transaction visibility, `exec_text` semantics,
-/// error/SQLSTATE mapping) the engine relies on but never re-checks.
+/// invariants (session pinning, transaction visibility, bind-inference
+/// semantics, error/SQLSTATE mapping) the engine relies on but never re-checks.
 #[path = "driver/conformance.rs"]
 pub mod conformance;
 
@@ -51,13 +51,17 @@ use std::fmt;
 /// The in-session network driver surface the migrate apply path is generic over.
 ///
 /// Exactly the in-session verbs the engine issues on a live session: `batch`
-/// (DDL / txn control / multi-statement session setup), `exec` /
-/// [`exec_text`](SqlSession::exec_text) (parameterized DML -> rows affected), and
-/// `query` / `query_one` (catalog / journal introspection -> rows).
+/// (DDL / txn control / multi-statement session setup), `exec` (parameterized
+/// DML -> rows affected), and `query` / `query_one` (catalog / journal
+/// introspection -> rows).
 ///
 /// Every verb's error is the neutral [`DbError`] (uniform across all verbs). The
-/// bind params are neutral [`Bind`] on `exec`/`query`/`query_one`; `exec_text`
-/// keeps its already-neutral `&[Option<String>]` shape; `batch` takes no params.
+/// bind params are neutral [`Bind`] on `exec`/`query`/`query_one`; `batch` takes
+/// no params.
+///
+/// Whether the server types a param by inference rather than the client
+/// declaring it is a property of the VALUE, carried by [`Bind::Inferred`], so
+/// one statement can mix a declared key with an inferred instant.
 ///
 /// The seam carries no transaction-object or lock abstraction: transaction
 /// control (`BEGIN`/`COMMIT`/`ROLLBACK`), advisory locks, and confinement `SET`s
@@ -71,18 +75,6 @@ pub trait SqlSession {
 
     /// Parameterized DML -> rows affected.
     async fn exec(&self, sql: &str, binds: &[Bind]) -> Result<u64, DbError>;
-
-    /// Schema-blind DML: **all params as server-inferred text**.
-    ///
-    /// Load-bearing and deliberately distinct from [`exec`](SqlSession::exec): the
-    /// executor runs lowered op.* DML through this to dodge PG's concrete-OID
-    /// binary-bind refusal of `text -> timestamptz` (a concrete-OID binary bind
-    /// makes Postgres refuse the coercion; the assembler needs text-format
-    /// inference). Its BIND side is already neutral (`&[Option<String>]`); its
-    /// ERROR side widens to [`DbError`] uniformly with the other verbs. A MySQL
-    /// (`mysql2`) driver implements this as an alias for [`exec`](SqlSession::exec)
-    /// (MySQL has no equivalent OID refusal). **Do not remove.**
-    async fn exec_text(&self, sql: &str, params: &[Option<String>]) -> Result<u64, DbError>;
 
     /// Parameterized SELECT -> all rows.
     async fn query(&self, sql: &str, binds: &[Bind]) -> Result<Vec<Row>, DbError>;

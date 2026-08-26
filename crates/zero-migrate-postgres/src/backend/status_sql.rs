@@ -201,10 +201,6 @@ mod legacy_snapshot_transaction_tests {
             Err(DbError::message("unexpected exec"))
         }
 
-        async fn exec_text(&self, _sql: &str, _params: &[Option<String>]) -> Result<u64, DbError> {
-            Err(DbError::message("unexpected exec_text"))
-        }
-
         async fn query(&self, _sql: &str, _binds: &[Bind]) -> Result<Vec<Row>, DbError> {
             Err(DbError::message("unexpected query"))
         }

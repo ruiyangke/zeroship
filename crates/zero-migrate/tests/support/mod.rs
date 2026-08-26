@@ -815,7 +815,7 @@ fn bind_holders(params: &[Bind]) -> Vec<ToSqlHolder> {
 }
 
 /// A `ToSql` wrapper that sends its value in **text format** with no concrete OID
-/// coercion — the `exec_text` server-inference path (`text → timestamptz`). `None`
+/// coercion - the server-inference path (text to timestamp). `None`
 /// is a SQL NULL. It `accepts` every type (the server, not the client, decides the
 /// target) and reports [`Format::Text`], so tokio-postgres frames the param
 /// text-format exactly as node-pg does.
@@ -894,22 +894,6 @@ impl SqlSession for PgDevSession {
         }
     }
 
-    async fn exec_text(&self, sql: &str, params: &[Option<String>]) -> Result<u64, DbError> {
-        // Server-inferred TEXT params (the load-bearing text→timestamptz coercion).
-        // Each param is sent as a TEXT-format value with `Type::UNKNOWN`, so PG
-        // infers the target column type from the statement context — exactly what
-        // node-pg does (send text-format, no explicit OID) and what the shipped
-        // `exec_text` contract requires. A concrete-OID binary bind would make PG
-        // refuse `text → timestamptz`. `None` → SQL NULL. Drains the row iterator to
-        // read `rows_affected`.
-        // Expressed through `exec` and `Bind::Inferred` rather than a second bind
-        // path. This is the equivalence claim made executable: if the two ever
-        // diverged, the live PostgreSQL suite - which drives every DML step through
-        // here - would say so.
-        let binds: Vec<Bind> = params.iter().cloned().map(Bind::Inferred).collect();
-        self.exec(sql, &binds).await
-    }
-
     async fn query(&self, sql: &str, binds: &[Bind]) -> Result<Vec<Row>, DbError> {
         let holders = bind_holders(binds);
         let refs = holder_refs(&holders);
@@ -943,7 +927,7 @@ impl SqlSession for PgDevSession {
 }
 
 /// Drain a `RowIter` fully, returning (decoded rows, `rows_affected`). Used by
-/// `exec_text` (ignores rows, reads the count).
+/// a DML `exec` (ignores rows, reads the count).
 fn drain_row_iter(mut iter: postgres::RowIter<'_>) -> Result<(Vec<Row>, u64), DbError> {
     use postgres::fallible_iterator::FallibleIterator;
     let mut out = Vec::new();

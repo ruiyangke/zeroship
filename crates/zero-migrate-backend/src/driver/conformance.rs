@@ -16,13 +16,14 @@
 //!    `query(SELECT ...)` sees the row *inside* the txn; a subsequent
 //!    `batch("ROLLBACK")` discards it. This is the exact discipline
 //!    `apply_transactional` depends on.
-//! 3. **`exec` vs `exec_text` param semantics.** `exec` binds neutral [`Bind`]s;
-//!    `exec_text` sends every param as server-inferred TEXT (the load-bearing
-//!    `text -> timestamptz` coercion path, `executor.rs`'s `apply_dml_transactional`).
-//!    A `None` text param is a SQL NULL. This suite proves both param sides.
+//! 3. **Bind-inference semantics.** A DECLARED bind carries its type; a
+//!    [`Bind::Inferred`] one carries none and the server types it from context.
+//!    That difference is the load-bearing `text` to timestamp coercion path the
+//!    DML executor depends on, and `Inferred(None)` is a SQL NULL. This suite
+//!    proves both kinds, separately and mixed in one statement.
 //! 4. **Error + SQLSTATE mapping.** A failing statement surfaces a [`DbError`] whose
 //!    `message` is non-empty and whose `sqlstate` (when the driver has one) is the
-//!    real Postgres SQLSTATE - not a stringified panic. Every `#[source]` wrap
+//!    real server SQLSTATE - not a stringified panic. Every `#[source]` wrap
 //!    reads this.
 //!
 //! This is the FIRST external consumer of the seam beyond the engine itself: a
@@ -34,15 +35,9 @@
 //!
 //! The checks are neutral; the scratch SQL that provokes them is not, so the
 //! caller passes a [`crate::driver::conformance::SeamFixture`] carrying its own
-//! spellings - the session-scoped
-//! table keyword, the integer and timestamp types, the placeholder form, an
-//! integer cast, and the SQLSTATE for a missing table.
-//!
-//! This used to say the suite was "Postgres-flavoured by design" and that a MySQL
-//! profile "would render the dialect equivalents". It does now, and both run
-//! against a live server. Note what the older shape cost: the header two
-//! paragraphs up claimed the suite covered every host driver while the SQL below
-//! could only execute on one of them, so the gap read as covered.
+//! spellings - the session-scoped table keyword, the integer and timestamp
+//! types, the placeholder form, an integer cast, and the SQLSTATE for a missing
+//! table. PostgreSQL and MySQL each supply one and both run this suite live.
 
 use super::{Bind, DbError, SqlSession};
 
@@ -50,7 +45,7 @@ use super::{Bind, DbError, SqlSession};
 #[derive(Debug, Clone)]
 pub struct ConformanceFailure {
     /// The check that failed (`"session-pinning"`, `"transaction-visibility"`,
-    /// `"exec-text-semantics"`, `"error-sqlstate-mapping"`).
+    /// `"bind-inference-semantics"`, `"error-sqlstate-mapping"`).
     pub check: &'static str,
     /// A precise, human-readable reason.
     pub reason: String,
@@ -87,21 +82,17 @@ fn fail(check: &'static str, reason: impl Into<String>) -> ConformanceFailure {
 /// neutral contract and must not learn one. That split is also what lets a
 /// fourth backend run the same suite by writing one of these rather than
 /// forking the checks.
-///
-/// This existed as PostgreSQL SQL inlined into the checks, under a module doc
-/// claiming the suite was driver-neutral. It was not: the suite could only ever
-/// execute against PostgreSQL, and only PostgreSQL ever ran it.
 #[derive(Debug, Clone, Copy)]
 pub struct SeamFixture {
     /// The session-scoped table modifier: `TEMP` or `TEMPORARY`.
     pub temp_keyword: &'static str,
     /// The 64-bit signed integer column type.
     pub bigint_type: &'static str,
-    /// The timestamp column type used by the `exec_text` coercion check.
+    /// The timestamp column type used by the inference-coercion check.
     pub timestamp_type: &'static str,
-    /// The instant `exec_text` sends as TEXT, spelled the way this server parses
-    /// it. This is the value under test: the seam's whole reason for a separate
-    /// `exec_text` is that it must arrive as text and be coerced server-side.
+    /// The instant an inferred bind sends as TEXT, spelled the way this server
+    /// parses it. This is the value under test: the whole reason a bind can be
+    /// inferred is that it must arrive as text and be coerced server-side.
     pub timestamp_text_param: &'static str,
     /// A boolean SQL expression asserting column `ts` equals
     /// [`Self::timestamp_text_param`]. Kept a callback because a vendor may need
@@ -136,7 +127,7 @@ pub async fn run<S: SqlSession>(
 ) -> Result<(), ConformanceFailure> {
     check_session_pinning(session, scratch_table, fixture).await?;
     check_transaction_visibility(session, scratch_table, fixture).await?;
-    check_exec_text_semantics(session, fixture).await?;
+    check_bind_inference_semantics(session, fixture).await?;
     check_error_sqlstate_mapping(session, fixture).await?;
     Ok(())
 }
@@ -281,15 +272,15 @@ async fn check_transaction_visibility<S: SqlSession>(
     Ok(())
 }
 
-/// Check 3 - `exec_text` semantics: a text param with NO explicit OID is coerced by
+/// Check 3 - bind-inference semantics: a param with NO declared type is coerced by
 /// the server to the target column type (the `text -> timestamptz` path), and a
 /// `None` text param is a SQL NULL. This is the load-bearing distinction between
-/// `exec` (typed binds) and `exec_text` (all-text, server-inferred).
-async fn check_exec_text_semantics<S: SqlSession>(
+/// a DECLARED bind and an inferred one.
+async fn check_bind_inference_semantics<S: SqlSession>(
     session: &S,
     fixture: &SeamFixture,
 ) -> Result<(), ConformanceFailure> {
-    const CHECK: &str = "exec-text-semantics";
+    const CHECK: &str = "bind-inference-semantics";
     let temp = fixture.temp_keyword;
     let int8 = fixture.bigint_type;
     let ts_ty = fixture.timestamp_type;
@@ -304,30 +295,30 @@ async fn check_exec_text_semantics<S: SqlSession>(
         ))
         .await
         .map_err(|e| fail(CHECK, format!("create text-coercion scratch table: {e}")))?;
-    // exec_text: every param crosses as server-inferred TEXT. The id becomes an
-    // integer, the instant becomes a timestamp, `None` becomes SQL NULL. A
-    // concrete-OID binary bind of a text value against a timestamp would be
-    // REFUSED on at least one supported server - this path must not be.
+    // All-inferred: every param crosses with NO declared type. The id becomes an
+    // integer, the instant becomes a timestamp, `Inferred(None)` becomes SQL NULL.
+    // A DECLARED text bind against a timestamp column is REFUSED on at least one
+    // supported server - this path must not be.
     let affected = session
-        .exec_text(
+        .exec(
             &format!("INSERT INTO zm_conf_text (id, ts, tag) VALUES ({p1}, {p2}, {p3})"),
             &[
-                Some("7".to_string()),
-                Some(fixture.timestamp_text_param.to_string()),
-                None,
+                Bind::Inferred(Some("7".to_string())),
+                Bind::Inferred(Some(fixture.timestamp_text_param.to_string())),
+                Bind::Inferred(None),
             ],
         )
         .await
         .map_err(|e| {
             fail(
                 CHECK,
-                format!("exec_text INSERT with a text→timestamptz coercion failed: {e}"),
+                format!("all-inferred INSERT with a text-to-timestamp coercion failed: {e}"),
             )
         })?;
     if affected != 1 {
         return Err(fail(
             CHECK,
-            format!("exec_text reported {affected} rows affected, expected 1"),
+            format!("all-inferred exec reported {affected} rows affected, expected 1"),
         ));
     }
     // Read back: the id coerced to int8, the tag is a genuine SQL NULL.
@@ -347,7 +338,12 @@ async fn check_exec_text_semantics<S: SqlSession>(
             &[],
         )
         .await
-        .map_err(|e| fail(CHECK, format!("read-back after exec_text: {e}")))?;
+        .map_err(|e| {
+            fail(
+                CHECK,
+                format!("read-back after the all-inferred insert: {e}"),
+            )
+        })?;
     let id: i64 = row
         .try_get("id")
         .map_err(|e| fail(CHECK, format!("decode coerced id (text→int8): {e}")))?;
@@ -376,7 +372,7 @@ async fn check_exec_text_semantics<S: SqlSession>(
     // Also assert `exec` (typed binds) round-trips a NULL Bind on a text column -
     // the exact shape the shipped `exec` path binds a NULL (a nullable text
     // `last_cursor`, `backfill.rs`), never against a timestamp column (that path
-    // is `exec_text`). A `Bind::Null` must land as a SQL NULL and read back as
+    // is an inferred bind). A `Bind::Null` must land as a SQL NULL and read back as
     // `Option::None`.
     let n = session
         .exec(
@@ -406,6 +402,62 @@ async fn check_exec_text_semantics<S: SqlSession>(
             ))
         }
         Err(e) => return Err(fail(CHECK, format!("decode nullable tag: {e}"))),
+    }
+    // MIXED binds in ONE statement: a DECLARED integer key, an INFERRED instant,
+    // and a DECLARED text tag. This is the case the seam could not express while
+    // untypedness was a property of the verb rather than of the value - the old
+    // all-or-nothing spelling forced the key and the tag to go untyped too.
+    //
+    // It is also the sharpest check in this suite, because it fails in BOTH
+    // directions: declare the instant and the server refuses the coercion, infer
+    // everything and a driver that silently drops declared types still passes.
+    let mixed = session
+        .exec(
+            &format!("INSERT INTO zm_conf_text (id, ts, tag) VALUES ({p1}, {p2}, {p3})"),
+            &[
+                Bind::Int(9),
+                Bind::Inferred(Some(fixture.timestamp_text_param.to_string())),
+                Bind::Text("mixed".to_string()),
+            ],
+        )
+        .await
+        .map_err(|e| {
+            fail(
+                CHECK,
+                format!("exec mixing a typed key with an inferred instant failed: {e}"),
+            )
+        })?;
+    if mixed != 1 {
+        return Err(fail(
+            CHECK,
+            format!("mixed-bind exec reported {mixed} rows, expected 1"),
+        ));
+    }
+    let mixed_row = session
+        .query_one(
+            &format!("SELECT tag, {ts_ok_expr} AS ts_ok FROM zm_conf_text WHERE id = 9"),
+            &[],
+        )
+        .await
+        .map_err(|e| fail(CHECK, format!("read-back mixed-bind row: {e}")))?;
+    let mixed_tag: Option<String> = mixed_row
+        .try_get("tag")
+        .map_err(|e| fail(CHECK, format!("decode mixed-bind tag: {e}")))?;
+    if mixed_tag.as_deref() != Some("mixed") {
+        return Err(fail(
+            CHECK,
+            format!("mixed-bind tag round-tripped as {mixed_tag:?}, expected \"mixed\""),
+        ));
+    }
+    let mixed_ts_ok: i64 = mixed_row
+        .try_get("ts_ok")
+        .map_err(|e| fail(CHECK, format!("decode mixed-bind ts flag: {e}")))?;
+    if mixed_ts_ok != 1 {
+        return Err(fail(
+            CHECK,
+            "the inferred instant in a mixed-bind statement did not reach the \
+             timestamp column intact",
+        ));
     }
     session
         .batch("DROP TABLE zm_conf_text")

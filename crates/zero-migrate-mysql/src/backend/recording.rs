@@ -507,10 +507,6 @@ impl SqlSession for RecordingSession {
                 .is_some_and(|fragment| sql.contains(fragment)),
         ))
     }
-    async fn exec_text(&self, sql: &str, _params: &[Option<String>]) -> Result<u64, DbError> {
-        self.log.borrow_mut().push(format!("exec_text: {sql}"));
-        Ok(1)
-    }
     async fn query(&self, sql: &str, params: &[Bind]) -> Result<Vec<Row>, DbError> {
         self.log.borrow_mut().push(format!("query: {sql}"));
         self.binds.borrow_mut().push(params.to_vec());

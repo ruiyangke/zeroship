@@ -4,7 +4,7 @@
 //! the TS host imports (no hand-copied interfaces):
 //!
 //! 1. **Driver cell transport** ([`JsCell`]/[`JsRow`]/[`JsReply`]/[`JsError`]/
-//!    [`JsRequest`]) - the neutral `{ kind, sql, binds, textParams }` verb the engine
+//!    [`JsRequest`]) - the neutral `{ kind, sql, binds }` verb the engine
 //!    hands the host `pg`/`mysql2` driver and the `{ rows, rowCount }` reply it gets
 //!    back. Plain owned data (`String`/`i64`/`Vec`/`bool`), all
 //!    `Send + 'static`, so they ride a `ThreadsafeFunction` call + a `done` callback
@@ -151,7 +151,7 @@ pub struct JsRow {
 }
 
 /// A successful verb reply crossing the boundary: the returned rows (empty for a
-/// pure DML `execute`/`executeTextParams`) plus the driver's affected-/returned-row
+/// pure DML `execute`) plus the driver's affected-/returned-row
 /// count (`result.rowCount` from node-pg). The engine's `execute` verbs read the
 /// count; `query`/`queryOne` read the rows.
 #[cfg_attr(feature = "napi", napi(object))]
@@ -177,22 +177,22 @@ pub struct JsError {
 
 /// A single verb request the engine hands to the host driver.
 ///
-/// `kind` selects the verb (`batch | execute | executeTextParams | query |
-/// queryOne`); `sql` is the statement; `binds` carries the neutral params for
-/// `execute`/`query`/`queryOne`; `textParams` carries the `&[Option<String>]`
-/// text-format params for `executeTextParams` (text-format, server-inferred
-/// OID). Exactly one of `binds`/`textParams` is populated per verb kind.
+/// `kind` selects the verb (`batch | execute | query | queryOne`); `sql` is the
+/// statement; `binds` carries the neutral params for `execute`/`query`/`queryOne`.
+///
+/// This wire carries no DECLARED parameter types: every cell reaches the host
+/// driver as a plain JS value, and both shipped drivers send those text-format
+/// with no OID. Whether a value must be server-inferred therefore rides in the
+/// bind itself rather than in the verb.
 #[cfg_attr(feature = "napi", napi(object))]
 #[derive(Debug, Clone)]
 pub struct JsRequest {
-    /// The verb: `"batch" | "execute" | "executeTextParams" | "query" | "queryOne"`.
+    /// The verb: `"batch" | "execute" | "query" | "queryOne"`.
     pub kind: String,
     /// The SQL statement.
     pub sql: String,
     /// Neutral binds for `execute`/`query`/`queryOne` (as [`JsCell`]s).
     pub binds: Vec<JsCell>,
-    /// Text-format params for `executeTextParams` (`None` element -> SQL NULL bind).
-    pub text_params: Vec<Option<String>>,
 }
 
 // ===========================================================================

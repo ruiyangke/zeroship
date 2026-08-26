@@ -30,7 +30,6 @@ use crate::marshal::{bind_to_cell, js_error_to_seam, row_to_seam, JsError, JsRep
 /// The verb kinds crossing to the host (kept in sync with [`JsRequest::kind`]).
 pub const KIND_BATCH: &str = "batch";
 pub const KIND_EXECUTE: &str = "execute";
-pub const KIND_EXECUTE_TEXT: &str = "executeTextParams";
 pub const KIND_QUERY: &str = "query";
 pub const KIND_QUERY_ONE: &str = "queryOne";
 
@@ -96,7 +95,6 @@ impl<D: VerbDispatch> NapiHostSession<D> {
             kind: kind.to_string(),
             sql: sql.to_string(),
             binds: binds.iter().map(bind_to_cell).collect(),
-            text_params: Vec::new(),
         };
         self.dispatch
             .dispatch(req)
@@ -122,7 +120,6 @@ impl<D: VerbDispatch> SqlSession for NapiHostSession<D> {
             kind: KIND_BATCH.to_string(),
             sql: sql.to_string(),
             binds: Vec::new(),
-            text_params: Vec::new(),
         };
         match self.dispatch.dispatch(req).await {
             Ok(_) => Ok(()),
@@ -132,24 +129,6 @@ impl<D: VerbDispatch> SqlSession for NapiHostSession<D> {
 
     async fn exec(&self, sql: &str, params: &[Bind]) -> Result<u64, DbError> {
         let reply = self.call(KIND_EXECUTE, sql, params).await?;
-        Ok(affected(&reply))
-    }
-
-    async fn exec_text(&self, sql: &str, params: &[Option<String>]) -> Result<u64, DbError> {
-        let _g = self.enter();
-        // Text-format params: cross verbatim as `(string | null)[]` - NO
-        // type coercion, NO explicit OID. `None -> null -> PG NULL`.
-        let req = JsRequest {
-            kind: KIND_EXECUTE_TEXT.to_string(),
-            sql: sql.to_string(),
-            binds: Vec::new(),
-            text_params: params.to_vec(),
-        };
-        let reply = self
-            .dispatch
-            .dispatch(req)
-            .await
-            .map_err(|e| js_error_to_seam(&e))?;
         Ok(affected(&reply))
     }
 
@@ -167,7 +146,7 @@ impl<D: VerbDispatch> SqlSession for NapiHostSession<D> {
     }
 }
 
-/// Affected-row count for an `execute`/`executeTextParams` reply: the driver's
+/// Affected-row count for an `execute` reply: the driver's
 /// `result.rowCount` (node-pg) when present, else the returned rowset length. The
 /// engine's `execute` consumers branch on `== 0` vs `> 0` (journal write-back /
 /// idempotent recovery), so a faithful count matters.

@@ -4079,9 +4079,12 @@ async fn limited_delete_honors_its_cap_across_partitions() {
     .expect("assemble limited delete");
     assert!(assembled.template.contains("(tableoid, ctid)"));
     let changed = session
-        .exec_text(
+        .exec(
             &assembled.template,
-            &[Some("0".to_string()), Some("1".to_string())],
+            &[
+                zero_migrate::driver::Bind::Inferred(Some("0".to_string())),
+                zero_migrate::driver::Bind::Inferred(Some("1".to_string())),
+            ],
         )
         .await
         .expect("execute limited delete");

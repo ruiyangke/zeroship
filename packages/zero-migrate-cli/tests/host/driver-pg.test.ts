@@ -55,7 +55,7 @@ function runVerb(driver: HostDriver, request: JsRequest): Promise<JsReply> {
 }
 
 function query(sql: string): JsRequest {
-  return { kind: "query", sql, binds: [], textParams: [] };
+  return { kind: "query", sql, binds: [] };
 }
 
 /**

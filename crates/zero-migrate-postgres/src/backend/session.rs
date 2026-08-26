@@ -852,19 +852,22 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
 
 fn postgres_dml_params(
     binds: &[zero_migrate_backend::step::BindValue],
-) -> Result<Vec<Option<String>>, String> {
+) -> Result<Vec<zero_migrate_backend::driver::Bind>, String> {
+    use zero_migrate_backend::driver::Bind;
     binds
         .iter()
         .map(|bind| match bind {
-            zero_migrate_backend::step::BindValue::Null => Ok(None),
-            zero_migrate_backend::step::BindValue::Bool(value) => Ok(Some(if *value {
-                "true".to_string()
-            } else {
-                "false".to_string()
-            })),
-            zero_migrate_backend::step::BindValue::Int(value) => Ok(Some(value.to_string())),
+            zero_migrate_backend::step::BindValue::Null => Ok(Bind::Inferred(None)),
+            zero_migrate_backend::step::BindValue::Bool(value) => Ok(Bind::Inferred(Some(
+                if *value { "true" } else { "false" }.to_string(),
+            ))),
+            zero_migrate_backend::step::BindValue::Int(value) => {
+                Ok(Bind::Inferred(Some(value.to_string())))
+            }
             zero_migrate_backend::step::BindValue::Decimal(value)
-            | zero_migrate_backend::step::BindValue::Text(value) => Ok(Some(value.clone())),
+            | zero_migrate_backend::step::BindValue::Text(value) => {
+                Ok(Bind::Inferred(Some(value.clone())))
+            }
             zero_migrate_backend::step::BindValue::Bytes(_) => Err(
                 "postgres DML: raw binary bind reached the backend without a decode wrapper"
                     .to_string(),
@@ -937,7 +940,7 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
             return Err(ApplyError::Db(e.into()));
         }
     }
-    if let Err(e) = conn.exec_text(template, &params).await {
+    if let Err(e) = conn.exec(template, &params).await {
         if let Err(rb) = conn.batch("ROLLBACK").await {
             tracing::warn!(error = %rb, version = %version, "zero-migrate: ROLLBACK failed after a DML error");
         }
@@ -1576,7 +1579,7 @@ pub(crate) async fn rollback_dml_plan_transactional<D: SqlSession>(
         .map_err(|error| RollbackError::Backend(error.to_string()))?;
     let role_sql =
         set_local_role_sql(cfg).map_err(|error| RollbackError::Backend(error.to_string()))?;
-    let params: Vec<Vec<Option<String>>> = inverse_steps
+    let params: Vec<Vec<zero_migrate_backend::driver::Bind>> = inverse_steps
         .iter()
         .map(|step| {
             let zero_migrate_backend::step::PlanStep::Dml { binds, .. } = step else {
@@ -1606,7 +1609,7 @@ pub(crate) async fn rollback_dml_plan_transactional<D: SqlSession>(
         let zero_migrate_backend::step::PlanStep::Dml { template, .. } = step else {
             unreachable!("inverse shape was validated before BEGIN")
         };
-        if let Err(error) = conn.exec_text(template, params).await {
+        if let Err(error) = conn.exec(template, params).await {
             if let Err(rollback) = conn.batch("ROLLBACK").await {
                 tracing::warn!(error = %rollback, version, "zero-migrate: ROLLBACK failed after inverse DML error");
             }

@@ -71,7 +71,7 @@ test("Live MySQL host session reports both pinned sql_mode modes back from the s
       kind: "queryOne",
       sql: "SELECT @@SESSION.sql_mode",
       binds: [],
-      textParams: [],
+
     });
 
     // The reply carries one row of one cell; the server's sql_mode crosses as text.

@@ -123,7 +123,7 @@ impl VerbDispatch for MockDispatch {
             .borrow_mut()
             .push(format!("{}: {}", req.kind, req.sql));
         // DML verbs report an affected count; read verbs return rows. The engine's
-        // `execute`/`executeTextParams` only branch on 0 vs >0, so report 1.
+        // `execute` only branches on 0 vs >0, so report 1.
         let rows = self.rows_for(&req.sql);
         Ok(JsReply {
             rows,
@@ -433,7 +433,7 @@ fn data_only_plan_executes_and_journals_through_the_host_bridge() {
     assert_eq!(outcome.applied.applied, vec![dml_version]);
     assert!(
         log.iter().any(|entry| {
-            entry.starts_with("executeTextParams:")
+            entry.starts_with("execute:")
                 && entry.contains("UPDATE mock_t SET label = $1 WHERE id = $2")
         }),
         "the parameterized update must reach the host driver: {log:#?}"
