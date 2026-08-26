@@ -15,6 +15,16 @@
 //! layout spent roughly 960 MB of linking per feature configuration and the
 //! verification matrix builds four of them; this suite binary is 58 MB.
 //!
+//! AND THEY STILL BITE. A name-set diff proves the cases are PRESENT, never
+//! that they still catch anything, so two guards were mutated after the fold
+//! and both killed exactly the right test (2026-08-26, each mutation confirmed
+//! applied by `git diff` before the run and restored to an empty diff after):
+//! flipping the pool's release-time rollback condition in `pool.rs` to `==`
+//! fails `integration::released_open_transaction_is_not_inherited_by_the
+//! _next_borrower`, and raising `DEFAULT_MAX_MESSAGE_SIZE` 64x fails
+//! `message_size_limit::a_message_over_the_limit_names_the_limit` while its
+//! three siblings correctly survive, since they do not depend on the default.
+//!
 //! THE CASES ARE UNCHANGED. Verified by diffing the test-name sets before and
 //! after: 869 distinct names on each side, empty difference both ways. The
 //! headline count falls 1779 -> 895 because `common`'s 13 tests were being
