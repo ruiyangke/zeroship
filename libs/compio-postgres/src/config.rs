@@ -2574,6 +2574,39 @@ fn canonical_parameter_key(key: &str) -> &str {
     }
 }
 
+/// The final string value for each connection option, before that value is
+/// interpreted.
+///
+/// libpq's conninfo parser stores strings in option slots and validates those
+/// slots only after the whole connection string has been read. Consequently,
+/// an invalid earlier value is harmless when a later occurrence replaces it.
+/// Keeping the original spelling matters for `requiressl`, whose value parser
+/// differs from `sslmode` even though the two names share one precedence slot.
+#[derive(Default)]
+struct ParsedParameters(Vec<(String, String)>);
+
+impl ParsedParameters {
+    fn insert(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        let key = key.into();
+        let canonical_key = canonical_parameter_key(&key);
+        if let Some(index) = self
+            .0
+            .iter()
+            .position(|(given, _)| canonical_parameter_key(given) == canonical_key)
+        {
+            self.0.remove(index);
+        }
+        self.0.push((key, value.into()));
+    }
+
+    fn apply(self, config: &mut Config) -> Result<(), Error> {
+        for (key, value) in self.0 {
+            config.param(&key, &value)?;
+        }
+        Ok(())
+    }
+}
+
 /// Parse libpq's integer grammar: a signed C `int`, surrounded only by C
 /// whitespace. Rust's integer parser has the right digit and sign grammar once
 /// those six whitespace bytes have been removed.
@@ -2686,11 +2719,14 @@ impl<'a> Parser<'a> {
 
         let mut config = Config::new();
         let mut explicit = Vec::new();
+        let mut parameters = ParsedParameters::default();
 
         while let Some((key, value)) = parser.parameter()? {
-            config.param(key, &value)?;
+            parameters.insert(key, value);
             explicit.push(key.to_owned());
         }
+
+        parameters.apply(&mut config)?;
 
         // A `service` names parameters to fall back on, so it is expanded once
         // the string is fully read and every explicitly given key is known.
@@ -2881,6 +2917,9 @@ impl<'a> Parser<'a> {
 struct UrlParser<'a> {
     s: &'a str,
     config: Config,
+    /// Query parameters and the authority's port list, kept as strings until
+    /// every possible override has been seen.
+    parameters: ParsedParameters,
     /// Every key the URL itself supplied, so a `service` cannot override one.
     explicit: Vec<String>,
 }
@@ -2895,6 +2934,7 @@ impl<'a> UrlParser<'a> {
         let mut parser = UrlParser {
             s,
             config: Config::new(),
+            parameters: ParsedParameters::default(),
             explicit: Vec::new(),
         };
 
@@ -2902,6 +2942,8 @@ impl<'a> UrlParser<'a> {
         parser.parse_host()?;
         parser.parse_path()?;
         parser.parse_params()?;
+
+        std::mem::take(&mut parser.parameters).apply(&mut parser.config)?;
 
         let explicit = std::mem::take(&mut parser.explicit);
         parser.config.apply_service(&explicit)?;
@@ -3003,6 +3045,7 @@ impl<'a> UrlParser<'a> {
         // The authority named hosts, so a service must not supply its own.
         self.explicit.push("host".to_owned());
         self.explicit.push("port".to_owned());
+        let mut ports = Vec::new();
 
         for chunk in host.split(',') {
             let (host, port) = if chunk.starts_with('[') {
@@ -3028,29 +3071,20 @@ impl<'a> UrlParser<'a> {
             };
 
             self.host_param(host)?;
-            // APPEND, and do not route through `param("port", ..)`, which
-            // clears so that a repeated keyword overrides. This loop runs once
-            // per host in the authority, so clearing here would leave only the
-            // LAST host's port and dial every earlier host on the wrong one.
-            // `host_param` above appends for the same reason.
-            //
-            // A `?port=` in the query string still overrides the whole list,
-            // because that arrives through `param` and the query is parsed
-            // after the authority -- which is libpq's precedence.
+            // Keep the authority ports as strings until the query has been
+            // parsed. A later `?port=` owns the same libpq option slot, so it
+            // can replace even an authority value that would be invalid if it
+            // survived. The joined value preserves one port per authority
+            // host; applying each one separately would make only the last win.
             let port = self.decode(port.unwrap_or("5432"))?;
-            let port: u16 = if port.is_empty() {
-                5432
+            ports.push(if port.is_empty() {
+                "5432".to_owned()
             } else {
-                match port.parse() {
-                    // Port 0 is refused here too; see the `"port"` arm above.
-                    Ok(0) | Err(_) => {
-                        return Err(Error::config_parse(Box::new(InvalidValue("port"))));
-                    }
-                    Ok(port) => port,
-                }
-            };
-            self.config.port(port);
+                port.into_owned()
+            });
         }
+
+        self.parameters.insert("port", ports.join(","));
 
         Ok(())
     }
@@ -3114,8 +3148,8 @@ impl<'a> UrlParser<'a> {
                     self.host_param(host)?;
                 }
             } else {
-                let value = self.decode(value)?;
-                self.config.param(&key, &value)?;
+                let value = self.decode(value)?.into_owned();
+                self.parameters.insert(key.into_owned(), value);
             }
         }
 
@@ -3400,9 +3434,7 @@ mod tests {
         #[test]
         fn a_later_indefinite_connect_timeout_clears_an_earlier_limit() {
             for value in ["0", "-1"] {
-                let config = parse(&format!(
-                    "connect_timeout=5 connect_timeout={value}"
-                ));
+                let config = parse(&format!("connect_timeout=5 connect_timeout={value}"));
                 assert_eq!(
                     config.get_connect_timeout(),
                     None,
@@ -3414,9 +3446,7 @@ mod tests {
         #[test]
         fn a_later_system_tcp_user_timeout_clears_an_earlier_limit() {
             for value in ["0", "-1"] {
-                let config = parse(&format!(
-                    "tcp_user_timeout=5000 tcp_user_timeout={value}"
-                ));
+                let config = parse(&format!("tcp_user_timeout=5000 tcp_user_timeout={value}"));
                 assert_eq!(
                     config.get_tcp_user_timeout(),
                     None,
@@ -3928,10 +3958,7 @@ mod tests {
         fn servicefile_is_not_accepted_from_a_service() {
             let mut config = Config::new();
             let error = config
-                .fill_unset(
-                    vec![("servicefile".to_owned(), "/ignored".to_owned())],
-                    &[],
-                )
+                .fill_unset(vec![("servicefile".to_owned(), "/ignored".to_owned())], &[])
                 .expect_err("servicefile inside a service would be ignored");
 
             assert!(
@@ -4790,6 +4817,94 @@ mod tests {
 #[cfg(test)]
 mod dsn_parse_tests {
     use super::*;
+
+    #[test]
+    fn only_the_last_keyword_value_is_semantically_validated() {
+        let cases = [
+            ("host=h port=abc port=5455", "port"),
+            ("host=h sslmode=bogus sslmode=disable", "sslmode"),
+            (
+                "host=h hostaddr=not-an-address hostaddr=127.0.0.1",
+                "hostaddr",
+            ),
+            ("host=h gssencmode=require gssencmode=disable", "gssencmode"),
+            ("host=h requiressl=1 sslmode=disable", "requiressl/sslmode"),
+        ];
+
+        for (dsn, parameter) in cases {
+            dsn.parse::<Config>().unwrap_or_else(|error| {
+                panic!("the later valid {parameter} did not shadow the earlier value: {error:?}")
+            });
+        }
+
+        let port = "host=h port=abc port=5455".parse::<Config>().unwrap();
+        assert_eq!(port.get_ports(), [5455]);
+
+        let hostaddr = "host=h hostaddr=bad hostaddr=127.0.0.1"
+            .parse::<Config>()
+            .unwrap();
+        assert_eq!(
+            hostaddr.get_hostaddrs(),
+            ["127.0.0.1".parse::<IpAddr>().unwrap()]
+        );
+
+        let sslmode = "host=h requiressl=1 sslmode=disable"
+            .parse::<Config>()
+            .unwrap();
+        assert_eq!(sslmode.get_ssl_mode(), SslMode::Disable);
+    }
+
+    #[test]
+    fn only_the_last_uri_query_value_is_semantically_validated() {
+        let cases = [
+            "postgresql://h/db?port=abc&port=5455",
+            "postgresql://h/db?sslmode=bogus&sslmode=disable",
+            "postgresql://h/db?hostaddr=bad&hostaddr=127.0.0.1",
+            "postgresql://h/db?gssencmode=require&gssencmode=disable",
+            "postgresql://h/db?requiressl=1&sslmode=disable",
+        ];
+
+        for dsn in cases {
+            dsn.parse::<Config>().unwrap_or_else(|error| {
+                panic!("a later valid query value did not shadow the earlier value in {dsn:?}: {error:?}")
+            });
+        }
+
+        let port = cases[0].parse::<Config>().unwrap();
+        assert_eq!(port.get_ports(), [5455]);
+
+        let hostaddr = cases[2].parse::<Config>().unwrap();
+        assert_eq!(
+            hostaddr.get_hostaddrs(),
+            ["127.0.0.1".parse::<IpAddr>().unwrap()]
+        );
+
+        let sslmode = cases[4].parse::<Config>().unwrap();
+        assert_eq!(sslmode.get_ssl_mode(), SslMode::Disable);
+    }
+
+    #[test]
+    fn a_query_port_can_shadow_an_invalid_authority_port() {
+        let config = "postgresql://h:not-a-port/db?port=5455"
+            .parse::<Config>()
+            .expect("the query port is the final value");
+        assert_eq!(config.get_ports(), [5455]);
+    }
+
+    #[test]
+    fn an_unknown_parameter_is_not_shadowed() {
+        let error = "host=h unknown_connection_option=bad sslmode=disable"
+            .parse::<Config>()
+            .expect_err("an unknown name must still be refused");
+        let named = std::iter::successors(std::error::Error::source(&error), |cause| {
+            std::error::Error::source(*cause)
+        })
+        .any(|cause| cause.to_string().contains("unknown_connection_option"));
+        assert!(
+            named,
+            "the refusal did not name the unknown parameter: {error:?}"
+        );
+    }
 
     /// A keyword/value string that cannot be parsed must be REFUSED, not
     /// truncated at the bad token.
