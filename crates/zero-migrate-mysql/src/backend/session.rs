@@ -904,8 +904,8 @@ pub(crate) async fn apply_two_phase<D: SqlSession>(
             })?;
 
         // Refuse a present table or column create before `decide` can fold the
-        // lossy canonical type. The probe does not yet carry the modifier-bearing
-        // MySQL contract needed to prove column-type equality.
+        // lossy canonical type. The probe carries no modifier-bearing MySQL contract,
+        // so it cannot prove column-type equality.
         let type_equality_refusal = match probe {
             GuardProbe::Table {
                 table,
