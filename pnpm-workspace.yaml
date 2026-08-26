@@ -4,12 +4,16 @@ packages:
   # Browser-tier e2e suites (vitest + Playwright). One package, not one per
   # example, so a single run reports every demo's status in one summary.
   - "tests/e2e-browser"
-  # The vendored migration engine. It is in the workspace so the vite-plugin
-  # can depend on it by `workspace:*` rather than by an absolute path into a
-  # sibling checkout that only exists on one machine - which is what made the
-  # sdk CI job unable to install at all.
-  - "third_party/zero-migrate/packages/*"
-  - "third_party/zero-migrate/crates/zero-migrate-node"
+  # The migration engine's TypeScript half: the authoring DSL, the CLI and its
+  # live host suite, and the three driver shims. The vite-plugin depends on them
+  # by `workspace:*` rather than by an absolute path into a sibling checkout that
+  # only exists on one machine - which is what made the sdk CI job unable to
+  # install at all.
+  - "packages/*"
+  # The N-API addon crate is a first-class publishable npm package, so the CLI
+  # resolves it as `workspace:*` and pnpm links the built `.node`. It is compiled
+  # by `napi build` rather than tsup, but is otherwise an ordinary member.
+  - "crates/zero-migrate-node"
 
 # Packages permitted to run lifecycle scripts. pnpm 11 renamed this from
 # `onlyBuiltDependencies` (a list) to `allowBuilds` (a map), and writes the
