@@ -11,8 +11,9 @@ legal in a conninfo string - so measure the one you are changing.
 description does not mention any of the rules that actually matter. This crate's
 parser was written from the description and diverged from libpq in five ways,
 every one of which would have silently connected somewhere the operator did not
-ask for - or refused a file `psql` accepts. Measured 2026-08-25 against libpq
-16.14.
+ask for - or refused a file `psql` accepts. Measured 2026-08-25 through the
+container below, which means **libpq 18.4** - see the version warning in
+Prerequisites before you attribute any reading here to a version.
 
 Re-run this when touching `libs/compio-postgres/src/service.rs`, or when moving
 to a libpq whose behaviour might have shifted. Do not carry the table below
@@ -28,6 +29,40 @@ is the answer.
 C=zs-cpg-review-5455      # any postgres:16 container
 docker exec $C psql --version
 ```
+
+**`psql --version` IS NOT THE VERSION YOU ARE MEASURING.** Everything on this
+page is CLIENT behaviour, so the oracle is the libpq library; `psql` is only the
+program that calls it, and the two carry separate versions. In this very
+container they disagree - measured 2026-08-26:
+
+```console
+$ docker exec zs-cpg-review-5455 psql --version
+psql (PostgreSQL) 16.14 (Debian 16.14-1.pgdg13+1)
+$ docker exec zs-cpg-review-5455 dpkg -l | grep -i libpq
+ii  libpq5:amd64  18.4-1.pgdg13+1  amd64  PostgreSQL C client library
+$ docker exec zs-cpg-review-5455 sh -c 'ls -l /usr/lib/*/libpq.so.5'
+... libpq.so.5 -> libpq.so.5.18
+```
+
+The image tag is `postgres:16` and the SERVER really is 16.14, which is why the
+mismatch reads as settled when it is not. This is not hypothetical: it put a
+wrong comment in `config.rs` asserting `connect_timeout=1` "is honoured as one
+second, on libpq 16.15 AND 18.4" and concluding there is no floor to match.
+PostgreSQL 16 does hold the floor - `if (timeout < 2) timeout = 2;` in
+`connectDBComplete`, `fe-connect.c:2439` on `REL_16_STABLE` - and 18 removed it.
+Both readings had been taken through 18.4.
+
+So run BOTH lines and quote the library, never the caller:
+
+```bash
+docker exec $C dpkg -l | grep -i libpq       # the version that matters
+docker exec $C sh -c 'ls -l /usr/lib/*/libpq.so.5'  # the soname it loads
+```
+
+To measure a SPECIFIC libpq, use a container whose `libpq5` is that version and
+prove it with those two commands. Do not infer it from the image tag, from
+`psql --version`, or from the server's `SELECT version()` - none of the three
+constrains the client library.
 
 ## The instrument
 
@@ -138,20 +173,68 @@ both columns are given, because the temptation is to assume one parser.
 The conninfo rules above are ALREADY correct in this crate - all fourteen forms
 were checked and matched. What was not correct is the empty value.
 
-**`key=` is per-TYPE, and this is the trap.** A numeric option takes empty as
-"not given"; an enum REFUSES it; a string keeps it:
+**`key=` is per-OPTION, and this is the trap.** An enum REFUSES it. `port=`
+selects the compiled default. The SIX socket integers reject it. Identity
+strings fall back to their defaults rather than keeping an empty value.
+
+**THE `.invalid` INSTRUMENT CANNOT MEASURE THIS, and that is how the row above
+used to read "a numeric option takes empty as not given".** Host resolution runs
+BEFORE integer validation, so an unresolvable host short-circuits the very check
+you are trying to observe, and every integer option prints a resolution failure
+that looks like acceptance. Point it at a REACHABLE server for these. Measured
+2026-08-26, one variable changed:
+
+```console
+$ psql "host=x.invalid connect_timeout=" ...
+could not translate host name "x.invalid" to address: Name or service not known
+$ psql "host=127.0.0.1 port=5432 user=postgres dbname=zeroship connect_timeout=" ...
+... failed: invalid integer value "" for connection option "connect_timeout"
+```
+
+`keepalives_idle=` and `tcp_user_timeout=` behave identically, and the source
+agrees: `pqParseIntParam` fails when `value == end`, which an empty string
+always satisfies (`fe-connect.c`). `port=` is the exception - `DEF_PGPORT_STR`
+supplies the compiled default. So run the enums against `.invalid` and the
+integers against a live server:
 
 ```bash
-docker exec $C sh -c 'for k in port connect_timeout keepalives_idle sslmode \
-    channel_binding target_session_attrs gssencmode load_balance_hosts; do
+# enums: the .invalid instrument is fine, nothing reaches the network
+docker exec $C sh -c 'for k in sslmode channel_binding target_session_attrs \
+    gssencmode load_balance_hosts; do
   printf "%-24s " "$k"
   psql "host=x.invalid $k=" -c "select 1" 2>&1 | head -1 | sed "s/^psql: error: //"
 done'
+
+# integers and identities: MUST reach a real server or the check is skipped
+docker exec $C sh -c 'for k in port connect_timeout keepalives_idle \
+    tcp_user_timeout keepalives keepalives_interval keepalives_count user dbname; do
+  printf "%-24s " "$k"
+  PGPASSWORD=zeroship psql "host=127.0.0.1 port=5432 user=postgres dbname=zeroship $k=" \
+    -tAc "select 1" 2>&1 | head -1 | sed "s/^psql: error: //"
+done'
 ```
 
-Expect a host-resolution failure for the numeric ones and
-`invalid <name> value: ""` for the enums. `require_auth=` accepts empty despite
-looking like an enum - do not infer it from the others.
+Measured 2026-08-26, verbatim from that second block:
+
+| Input | Result |
+| --- | --- |
+| `port=` | `1` - the compiled default is substituted |
+| `connect_timeout=` | `invalid integer value ""` |
+| `keepalives_idle=`, `keepalives_interval=`, `keepalives_count=` | same |
+| `keepalives=`, `tcp_user_timeout=` | same |
+| `user=` | `FATAL: role "root" does not exist` |
+| `dbname=` | `1` |
+
+READ THE `user=` ROW CAREFULLY: it is a FAILURE that proves a SUCCESS. libpq
+substituted the operating-system user - `root` in this container - and the
+server then refused that role. It never tried an empty user. `dbname=` succeeds
+because it defaults to the user, which here is the connecting `postgres`. Both
+are the `pguser[0] == '\0'` / `dbName[0] == '\0'` arms of `pqConnectOptions2`.
+Do not record this row as "user= is rejected"; the substitution is the finding,
+and the role error is just this container's OS user.
+
+`require_auth=` accepts empty despite looking like an enum - do not infer it
+from the others.
 
 **An empty value can only occur at the END of the string.** After `=` libpq
 skips whitespace and takes what follows as the value, so `user= host=h` asks for
