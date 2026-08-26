@@ -1574,7 +1574,7 @@ impl Config {
     /// TCP_USER_TIMEOUT is available and will default to the system default if omitted or set to 0;
     /// on other systems, it has no effect.
     pub fn tcp_user_timeout(&mut self, tcp_user_timeout: Duration) -> &mut Config {
-        self.tcp_user_timeout = Some(tcp_user_timeout);
+        self.tcp_user_timeout = (!tcp_user_timeout.is_zero()).then_some(tcp_user_timeout);
         self
     }
 
@@ -2096,6 +2096,11 @@ impl Config {
                     // oracle for a unit question - it can be confidently wrong in
                     // a way no differential against it will ever surface.
                     self.tcp_user_timeout(Duration::from_millis(timeout as u64));
+                } else {
+                    // libpq clamps a negative value to zero, and zero restores
+                    // the system default. This must also clear an earlier
+                    // occurrence of the same key.
+                    self.tcp_user_timeout(Duration::ZERO);
                 }
             }
             #[cfg(not(target_arch = "wasm32"))]
@@ -3382,6 +3387,20 @@ mod tests {
                     config.get_connect_timeout(),
                     None,
                     "the later connect_timeout={value} did not override the earlier limit"
+                );
+            }
+        }
+
+        #[test]
+        fn a_later_system_tcp_user_timeout_clears_an_earlier_limit() {
+            for value in ["0", "-1"] {
+                let config = parse(&format!(
+                    "tcp_user_timeout=5000 tcp_user_timeout={value}"
+                ));
+                assert_eq!(
+                    config.get_tcp_user_timeout(),
+                    None,
+                    "the later tcp_user_timeout={value} did not override the earlier limit"
                 );
             }
         }
