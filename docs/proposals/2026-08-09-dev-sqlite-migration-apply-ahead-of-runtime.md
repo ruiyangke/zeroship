@@ -102,7 +102,7 @@ partial union.
 The vite-plugin dev-server already (a) has the `migrations/` dir, (b) records the
 migration IR envelopes in gen-types, and (c) owns `.zeroship/`. Have it apply the
 migrations to the dev SQLite **app file** at boot, before spawning the worker, using
-the addon's in-process SQLite apply verb (already exported by `zero-migrate-node`):
+the addon's in-process SQLite apply verb (already exported by `zeroship-migrate-node`):
 
 ```ts
 applyIrSqlite(appPath: string, journalPath: string, req: ApplyIrSqliteRequest): Promise<ApplyReply>
@@ -171,7 +171,7 @@ interface ApplyIrSqliteRequest {
   the migration hot-update path. Log-not-throw (a bad migration must not crash the
   dev server). Idempotent — the `_mig` journal skips already-applied migrations.
 - Expose `applyIrSqlite` on the `MigrateAddon` interface in
-  `sdks/vite-plugin/src/gen-types/addon.ts` (types from `zero-migrate-node`), and add
+  `sdks/vite-plugin/src/gen-types/addon.ts` (types from `zeroship-migrate-node`), and add
   an `applyMigrationsToDevSqlite()` helper that records envelopes, builds the
   `registry` from the descriptor's collection names (all → `default`), and calls the
   verb.
@@ -299,8 +299,8 @@ authority — the same category error as A.
 
 ## Key references
 
-- Addon verb: `zero-migrate-node` `applyIrSqlite` / `ApplyIrSqliteRequest` /
-  `ApplyReply` (`third_party/zero-migrate/crates/zero-migrate-node/index.d.ts`).
+- Addon verb: `zeroship-migrate-node` `applyIrSqlite` / `ApplyIrSqliteRequest` /
+  `ApplyReply` (`third_party/zero-migrate/crates/zeroship-migrate-node/index.d.ts`).
 - Confined apply charter to mirror: `crates/migrated/policies/confined.policy.toml`.
 - Postgres register no-op to mirror: `crates/plugin-db/src/register_model/mod.rs`.
 - The SQLite register-drives-engine path to retire:

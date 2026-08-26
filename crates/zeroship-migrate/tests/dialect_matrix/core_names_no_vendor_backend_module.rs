@@ -81,7 +81,7 @@ const VENDOR_SUBTREES: &[&str] = &[];
 ///   be core naming a vendor CRATE outside the registry, which is what the sibling
 ///   census `core_names_no_vendor_crate` forbids. Closing one coupling by opening the
 ///   other would have been a wash. A host that wants `PostgresBackend` names the
-///   vendor crate; `zero-migrate-node`'s bridge already does that for all three.
+///   vendor crate; `zeroship-migrate-node`'s bridge already does that for all three.
 /// - `render/dml.rs`'s two were `all_engine_seams_render_uniformly` comparing the
 ///   author seam against the PostgreSQL journal seam. That leg went WITH the
 ///   execution half, exactly as the `role` leg did before it; the engine's test keeps

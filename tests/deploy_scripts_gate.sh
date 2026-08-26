@@ -529,7 +529,7 @@ NOSENT="$(edge_claimed_labels "$FIX/no-sentinel.json")"; NOSENT_RC=$?
 # built for about twenty minutes, and then:
 #
 #   src/gen-types/addon.ts(66,8): error TS2307:
-#       Cannot find module 'zero-migrate-node'
+#       Cannot find module 'zeroship-migrate-node'
 #   [ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL] @zeroship/vite-plugin build
 #
 # tests/dockerfile_copy_paths_gate.sh does NOT cover this and cannot: it asks
@@ -571,7 +571,7 @@ importers:
   sdks/vite-plugin:
     dependencies: {}
 
-  third_party/zero-migrate/crates/zero-migrate-node:
+  third_party/zero-migrate/crates/zeroship-migrate-node:
     dependencies: {}
 
   third_party/zero-migrate/packages/zero-migrate:
@@ -591,7 +591,7 @@ zero-migrate = { path = "third_party/zero-migrate/crates/zero-migrate" }
 decoy = { path = "third_party/zero-migrate-other/crates/decoy" }
 FIXTURE
 expect_set "$(submodule_manifests third_party/zero-migrate "$FIX/lock.yaml" "$FIX/cargo.toml" | sort -u)" \
-  "third_party/zero-migrate/crates/zero-migrate-node/package.json
+  "third_party/zero-migrate/crates/zeroship-migrate-node/package.json
    third_party/zero-migrate/packages/zero-migrate/package.json
    third_party/zero-migrate/Cargo.toml
    third_party/zero-migrate/crates/zero-migrate/Cargo.toml" \
@@ -621,7 +621,7 @@ if [ -f "$ROOT/pnpm-lock.yaml" ] && [ -f "$ROOT/Cargo.toml" ] && [ -f "$ROOT/.gi
     fail "no manifest was derived for any declared submodule of this repo ($N_REAL_MAN); the preflight would inspect nothing"
   else
     miss=""
-    for m in third_party/zero-migrate/crates/zero-migrate-node/package.json \
+    for m in third_party/zero-migrate/crates/zeroship-migrate-node/package.json \
              third_party/zero-migrate/Cargo.toml; do
       printf '%s\n' "$REAL_MAN" | grep -qx "$m" || miss="$miss $m"
     done

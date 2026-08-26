@@ -39,7 +39,7 @@ const CLI_BIN = resolve(HERE, "../../src/cli-bin.ts");
 const ABI = process.platform === "linux" ? "-gnu" : "";
 const ADDON_PATH = resolve(
   HERE,
-  `../../../../crates/zero-migrate-node/zero-migrate-node.${process.platform}-${process.arch}${ABI}.node`,
+  `../../../../crates/zeroship-migrate-node/zeroship-migrate-node.${process.platform}-${process.arch}${ABI}.node`,
 );
 /**
  * A charter that INJECTS NOTHING, for the arms that only need author-shaped output.

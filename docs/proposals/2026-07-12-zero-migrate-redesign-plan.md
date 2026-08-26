@@ -78,7 +78,7 @@ zero-migrate  ◄────────  THE engine (fable's "zmg-engine"): sc
     │                    executor, drift, policy, role provisioning, the SqlSession seam.
     │                    The ONLY crate an embedder (zeroship control plane) depends on.
     │
-zero-migrate-node       napi cdylib, IN the workspace: #[napi(object)] wire DTOs as the
+zeroship-migrate-node       napi cdylib, IN the workspace: #[napi(object)] wire DTOs as the
                         single source of truth (TS imports the generated .d.ts),
                         JS-driver→SqlSession adapter, typed verbs (validate/plan/apply/
                         status/history/rollback).
@@ -99,7 +99,7 @@ zero-migrate          The authoring DSL: op.*, defineMigration, types, the pure-
                       "./internal/recorder" subpath (one sanctioned consumer).
     ▲
     │ depends on (drains migration modules through ./internal/recorder)
-zero-migrate-engine   Host runtime: loads the zero-migrate-node addon, ships pg/mysql2
+zero-migrate-engine   Host runtime: loads the zeroship-migrate-node addon, ships pg/mysql2
                       driver adapters (optionalDependencies), exposes apply/plan/status/
                       history/validate, ships the ONE CLI (bin: `zero-migrate`, incl.
                       `zero-migrate new` scaffolding). napi per-platform binary packages.
@@ -184,7 +184,7 @@ executor. MySQL can finally ride the same seam.
 
 | Class | Today | New (long form) |
 |---|---|---|
-| Crates | `zeroship-migrate`, `-schema`, `-node` | `zero-migrate` (engine), `zero-migrate-ir`, `zero-migrate-guard`, `zero-migrate-node` |
+| Crates | `zeroship-migrate`, `-schema`, `-node` | `zero-migrate` (engine), `zero-migrate-ir`, `zero-migrate-guard`, `zeroship-migrate-node` |
 | npm | `zero-migrate` (combined) | `zero-migrate` (DSL) + `zero-migrate-engine` (host+CLI) |
 | Env vars | `ZEROSHIP_MIGRATE_*`, `ZEROSHIP_MIGRATE_NATIVE` | `ZERO_MIGRATE_*`, `ZERO_MIGRATE_ADDON_PATH` |
 | recorder-child override | — | **deleted** with `frontend/` |
@@ -246,7 +246,7 @@ table was inertia mislabeled "deliberate," not a contract with anyone.
    structural→ir vs policy→engine. (b) Extract `zero-migrate-guard` from `guard/` +
    `analysis/` (takes the `pg_query` C dep). (c) Dissolve the schema crate into
    `zero-migrate::schema`; offer `query.rs`'s data-plane half back to the monorepo
-   or delete. (d) Move `zero-migrate-node` into the workspace (`exclude` dies, its
+   or delete. (d) Move `zeroship-migrate-node` into the workspace (`exclude` dies, its
    private `Cargo.lock` dies, workspace lints apply).
 4. **Kill the false MySQL arm, then build the real one.** Immediately remove
    `{kind:"mysql"}` from `DriverConfig` (shipping a typed lie is worse than
@@ -255,7 +255,7 @@ table was inertia mislabeled "deliberate," not a contract with anyone.
    re-add `kind:"mysql"` **in the same PR as a live-MySQL integration test**.
    Rename the seam; both value enums gain `Decimal`; `SeamRow::get` panic → `try_get`.
 5. **Type the napi boundary; split npm; retire the Rust CLI.** Consolidate all DTOs
-   into `zero-migrate-node/src/wire.rs`; bump napi floor to **napi6** (integers
+   into `zeroship-migrate-node/src/wire.rs`; bump napi floor to **napi6** (integers
    cross as `bigint`); generate the `.d.ts`, delete the 3 TS hand-copies + the
    JSON-string verb plumbing. Split `sdks/migrate` → `packages/{migrate,engine}`;
    delete `generate()` throw-stub; make `status()` consume its `migrations` arg (or

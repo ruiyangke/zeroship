@@ -19,7 +19,7 @@
 //! PARENT module's scope, so a bare `[`field_dto_to_engine`]` here does not resolve to
 //! the function two screens below it. That is the trap `single_fold.rs` documents, and
 //! it caught this file too.) So both
-//! directions live here, napi-free, where `cargo test -p zero-migrate-node
+//! directions live here, napi-free, where `cargo test -p zeroship-migrate-node
 //! --no-default-features` reaches them and `bridge` calls the same functions the test
 //! does.
 //!

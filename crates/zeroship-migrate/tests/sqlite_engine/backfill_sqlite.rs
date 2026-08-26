@@ -796,7 +796,7 @@ async fn sqlite_backfill_rejects_schema_qualified_table() {
 // fire on another. That per-thread scoping is the ONLY reason the ungated
 // `fault` module is unreachable from the shipping Node consumer, which runs every
 // apply on a freshly spawned worker thread (`run_engine_blocking` in
-// `zero-migrate-node/src/runtime.rs`) that never arms anything. These tests pin
+// `zeroship-migrate-node/src/runtime.rs`) that never arms anything. These tests pin
 // the boundary through the same surface the crash-fuzz suite uses: a real SQLite
 // backfill over the real BACKFILL_MID_BATCHES trip point.
 //

@@ -1165,7 +1165,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
 /// MySQL client; `postgres` is a dev-dependency carried solely so `tests/support`'s
 /// `PgDevSession` can drive the PG scenarios. A Rust-side MySQL harness would have
 /// to add a client and a second `SqlSession` over it in order to re-prove what the
-/// host suite already proves through the SHIPPED one: `zero-migrate-node`'s bridge
+/// host suite already proves through the SHIPPED one: `zeroship-migrate-node`'s bridge
 /// builds this same `MysqlBackend::new_generic` over the `mysql2` seam, so a live
 /// apply or rollback from the CLI runs the code in this file against a real server.
 /// The added driver would also sit between the test and the engine, where a bug in

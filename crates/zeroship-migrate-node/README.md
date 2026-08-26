@@ -1,9 +1,9 @@
-# zero-migrate-node
+# zeroship-migrate-node
 
 The native N-API addon for zero-migrate: the V8-free Rust core that applies
 portable migrations over a host-driven (pg / mysql2) database session. It ships a
 small loader (`index.js`) that resolves the correct prebuilt binary for your
-platform from one of the `zero-migrate-node-<triple>` optional dependencies.
+platform from one of the `zeroship-migrate-node-<triple>` optional dependencies.
 
 You usually do not depend on this package directly. Install
 [`zero-migrate-cli`](https://www.npmjs.com/package/zero-migrate-cli), which

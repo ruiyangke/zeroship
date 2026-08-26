@@ -72,7 +72,7 @@ structurally absent from any production `.zship`. Full contract:
 ## Migration-first type generation (`gen-types`)
 
 The plugin records the migrations under `migrations.dir` in-process through its
-pure-JS recorder, then passes the resulting IR envelopes to `zero-migrate-node`'s
+pure-JS recorder, then passes the resulting IR envelopes to `zeroship-migrate-node`'s
 `genArtifacts` renderer. It writes into `migrations.out` (both keys come from
 [`zeroship.jsonc`](project-config.md), defaults `migrations` and
 `generated/zeroship`): `env.db.ts` (a generated `@zeroship/db` `t.*()` schema

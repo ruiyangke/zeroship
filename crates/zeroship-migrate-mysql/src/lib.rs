@@ -87,7 +87,7 @@ pub use guard::MysqlGuard;
 /// TEST-ONLY charter fixtures, shared by this crate's unit tests.
 ///
 /// The engine's `test_fixtures::no_inject` is `pub(crate)` and cannot cross a crate
-/// boundary, so this is the MySQL sibling of `zero-migrate-node`'s. It composes
+/// boundary, so this is the MySQL sibling of `zeroship-migrate-node`'s. It composes
 /// through the REAL `zeroship_migrate_ir::policy_registry` rather than restating the
 /// algebra, so what a vendor's tests compose and what production composes cannot
 /// drift.

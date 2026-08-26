@@ -52,7 +52,7 @@ const DOCS = resolve(HERE, "../../../../docs");
 const ABI = process.platform === "linux" ? "-gnu" : "";
 const ADDON_PATH = resolve(
   HERE,
-  `../../../../crates/zero-migrate-node/zero-migrate-node.${process.platform}-${process.arch}${ABI}.node`,
+  `../../../../crates/zeroship-migrate-node/zeroship-migrate-node.${process.platform}-${process.arch}${ABI}.node`,
 );
 
 /**
@@ -82,7 +82,7 @@ const FOREIGN_FLAGS: Readonly<Record<string, string>> = {
  * another tool's build invocations — noise that dilutes the allowlist without
  * checking a single claim about this CLI.
  *
- * `crates/zero-migrate-node/README.md` was missing from this list until it was
+ * `crates/zeroship-migrate-node/README.md` was missing from this list until it was
  * checked directly. It carries no flags today, so nothing was wrong — but it is a
  * shipped README, and its absence was an accident of which paths someone happened
  * to type, not a decision like the CONTRIBUTING one above. */
@@ -90,7 +90,7 @@ const EXTRA_DOCS = [
   resolve(HERE, "../../../../README.md"),
   resolve(HERE, "../../README.md"),
   resolve(HERE, "../../../zero-migrate/README.md"),
-  resolve(HERE, "../../../../crates/zero-migrate-node/README.md"),
+  resolve(HERE, "../../../../crates/zeroship-migrate-node/README.md"),
 ];
 
 /**

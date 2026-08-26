@@ -41,7 +41,7 @@ FROM node:22-bookworm AS sdks
 WORKDIR /build
 RUN corepack enable
 # Rust, in the NODE stage. This looks wrong and is not.
-# sdks/vite-plugin imports `zero-migrate-node`, a Rust N-API addon, and that
+# sdks/vite-plugin imports `zeroship-migrate-node`, a Rust N-API addon, and that
 # addon's build is `napi build --platform --release`. `napi` is @napi-rs/cli,
 # a NODE cli (its package.json:61 devDependency), and it compiles a Rust crate.
 # So the addon needs BOTH toolchains in ONE stage - which is why the obvious
@@ -76,13 +76,13 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 # fetching the extracted builder repo, not re-adding this COPY.
 COPY sdks/ sdks/
 COPY examples/ examples/
-# pnpm-workspace.yaml lists packages/* and crates/zero-migrate-node as workspace
+# pnpm-workspace.yaml lists packages/* and crates/zeroship-migrate-node as workspace
 # members, and the lockfile pins them as importers - so --frozen-lockfile needs
 # them PRESENT, and the root build script compiles the addon out of this tree.
 # The engine's crates were a submodule under third_party/ and are now ordinary
 # members, so these two COPYs replace the one that brought the submodule in.
 COPY packages/ packages/
-COPY crates/zero-migrate-node/ crates/zero-migrate-node/
+COPY crates/zeroship-migrate-node/ crates/zeroship-migrate-node/
 RUN pnpm install --frozen-lockfile
 # Root build script only builds sdks/* (topo: @zeroship/db ->
 # @zeroship/bootstrap -> rest); it does not touch apps/ or examples/.

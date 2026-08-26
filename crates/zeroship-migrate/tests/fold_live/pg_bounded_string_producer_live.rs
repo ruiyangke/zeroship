@@ -56,7 +56,7 @@
 //!   it plus a change of storage family. It is a separate file because the prediction
 //!   about MySQL was wrong and the server said so.
 //! * Not that the export WIRE carries the width. It does, and
-//!   `zero-migrate-node/tests/collection_export_round_trip.rs` is where that is pinned.
+//!   `zeroship-migrate-node/tests/collection_export_round_trip.rs` is where that is pinned.
 //!   This file is about the leg after it.
 //!
 //! REQUIRES `ZERO_MIGRATE_TEST_PG_URL` through `require_live_pg!`: with no DSN the

@@ -37,7 +37,7 @@ export default defineConfig([
       "mysql2",
       "mysql2/promise",
       "zero-migrate",
-      "zero-migrate-node",
+      "zeroship-migrate-node",
       "tsx",
       "tsx/esm/api",
     ],

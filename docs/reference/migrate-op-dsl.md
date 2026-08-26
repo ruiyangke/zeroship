@@ -1149,7 +1149,7 @@ and the typed `env.db` surface is **generated from it** rather than from a
 separate declared schema object on the app entry. The in-process gen-types path
 in `@zeroship/vite-plugin` records each `migrations/*.ts` source through its
 pure-JS recorder in version order, passes the resulting IR envelopes to
-`zero-migrate-node`'s `genArtifacts` renderer, and emits two artifacts:
+`zeroship-migrate-node`'s `genArtifacts` renderer, and emits two artifacts:
 
 - **`schema.runtime.json`** — the v1 `RuntimeSchemaDescriptor`:
   `{ version, collections: { [name]: { fields, options, indexes } } }`. It is

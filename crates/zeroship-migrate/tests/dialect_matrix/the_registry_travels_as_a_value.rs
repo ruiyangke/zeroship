@@ -112,7 +112,7 @@ const ACCESSORS: &[&str] = &["shipping_vendors", "shipping_backends"];
 /// A HOST, which is what the accessors exist for: it composes the engine and must
 /// therefore call one. The control cannot live in `src`, because "nothing in `src`
 /// calls one" is the property itself.
-const ACCESSOR_CONTROL_CRATE: &str = "zero-migrate-node";
+const ACCESSOR_CONTROL_CRATE: &str = "zeroship-migrate-node";
 
 /// How many accessor calls the host must still make, so a broken needle is loud.
 ///

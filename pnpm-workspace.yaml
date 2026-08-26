@@ -13,7 +13,7 @@ packages:
   # The N-API addon crate is a first-class publishable npm package, so the CLI
   # resolves it as `workspace:*` and pnpm links the built `.node`. It is compiled
   # by `napi build` rather than tsup, but is otherwise an ordinary member.
-  - "crates/zero-migrate-node"
+  - "crates/zeroship-migrate-node"
 
 # Packages permitted to run lifecycle scripts. pnpm 11 renamed this from
 # `onlyBuiltDependencies` (a list) to `allowBuilds` (a map), and writes the

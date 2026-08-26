@@ -338,7 +338,7 @@ pub fn render_ir_envelope_sql_onto(
 /// evidence of a short plan; compare against [`render_ir_envelope_sql`] to see
 /// what was dropped.
 ///
-/// The addon's `advisoriesFor` verb (`crates/zero-migrate-node/src/bridge.rs`) is its
+/// The addon's `advisoriesFor` verb (`crates/zeroship-migrate-node/src/bridge.rs`) is its
 /// in-tree production caller: it needs one statement at a time so each advisory keeps
 /// the statement that raised it. The addon's `previewSql` verb, which backs the TS
 /// CLI's `lint` and `plan`, renders the HUMAN preview through
@@ -385,7 +385,7 @@ fn render_ir_envelope_rendered(
         serde_json::from_str(bytes).map_err(|e| format!("parse IR envelope: {e}"))?;
 
     // Run the policy table-shape resolve the apply path runs
-    // (`crates/zero-migrate-node/src/lower.rs`), so the previewed `createTable`
+    // (`crates/zeroship-migrate-node/src/lower.rs`), so the previewed `createTable`
     // carries the charter-injected columns, pinned primary key, and injected indexes
     // apply will actually create. Without this the preview showed the author's bare
     // declaration and silently disagreed with apply.

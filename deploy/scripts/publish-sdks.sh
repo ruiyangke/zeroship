@@ -58,7 +58,7 @@ fi
 #
 # This is not hypothetical. Measured 2026-08-10 via tests/external_chain.sh:
 # published @zeroship/vite-plugin@0.3.0 declares zero-migrate@0.1.0 and
-# zero-migrate-node@0.1.0, neither of which exists on registry.npmjs.org at ANY
+# zeroship-migrate-node@0.1.0, neither of which exists on registry.npmjs.org at ANY
 # version, so `npm install` in a scaffolded app dies with E404. The scaffold
 # template depends on @zeroship/vite-plugin, so this is every new app.
 #

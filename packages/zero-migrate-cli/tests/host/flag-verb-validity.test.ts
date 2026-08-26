@@ -42,7 +42,7 @@ const CLI_SRC = resolve(HERE, "../../src/cli.ts");
 const ABI = process.platform === "linux" ? "-gnu" : "";
 const ADDON_PATH = resolve(
   HERE,
-  `../../../../crates/zero-migrate-node/zero-migrate-node.${process.platform}-${process.arch}${ABI}.node`,
+  `../../../../crates/zeroship-migrate-node/zeroship-migrate-node.${process.platform}-${process.arch}${ABI}.node`,
 );
 
 /** Flags whose per-verb validity the CLI enforces, with a usable value for the

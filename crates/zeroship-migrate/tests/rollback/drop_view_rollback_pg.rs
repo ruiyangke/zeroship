@@ -831,7 +831,7 @@ async fn a_guarded_drop_keeps_no_inverse_on_postgres() {
 /// `failed to project pending schema after envelope ...`, because
 /// `lower_ordered_envelopes_to_plans_for_apply` folds pending ops onto the catalog
 /// snapshot first. `ProjectionGuardVerdict` exists in exactly one file of one crate -
-/// `crates/zero-migrate-node/src/lower.rs` - so nothing on this path can produce that
+/// `crates/zeroship-migrate-node/src/lower.rs` - so nothing on this path can produce that
 /// refusal.
 ///
 /// This arm exists to make the difference concrete rather than argued. What it shows is

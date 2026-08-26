@@ -2,7 +2,7 @@
  * gen-types orchestrator — the in-process schema-artifact emitter the
  * vite-plugin links (no CLI subprocess).
  *
- * Two sources, one Rust renderer (the `zero-migrate-node` `genArtifacts` verb):
+ * Two sources, one Rust renderer (the `zeroship-migrate-node` `genArtifacts` verb):
  *  - MANUAL — {@link genTypesFromSchemaFile}: evaluate a committed `schema.ts`
  *    (`@zeroship/db` builders) → `CollectionDescriptorDto[]` → `genArtifacts`.
  *  - GENERATED — {@link genTypesFromMigrations}: record `op.*` migrations →
@@ -98,7 +98,7 @@ const MIGRATION_SOURCE_FAULT = "migration-source";
  * wrongly put it there with `GenericFailure`. At OUR PIN a panic never reaches
  * this catch at all -- it aborts the process. Verified in our own
  * `third_party/zero-migrate` @ cb1bcb59: `catch_unwind` appears ZERO times in
- * the whole `zero-migrate-node` crate src, and the export is a bare
+ * the whole `zeroship-migrate-node` crate src, and the export is a bare
  * `#[napi(js_name = "genArtifacts")]` (bridge.rs:132; that same grep returning
  * line 132 is the positive control that the file was read). Without
  * `catch_unwind` a Rust panic crossing an `extern "C"` shim aborts rather than

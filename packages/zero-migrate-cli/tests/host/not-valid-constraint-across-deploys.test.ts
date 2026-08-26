@@ -18,7 +18,7 @@
 // fatal lookup, so a fold whose VALIDATE named a table an EARLIER artifact created
 // failed instead of folding. Restoring that defect and rebuilding the addon, this
 // file still PASSED. The reason is `lower_ordered_envelopes_to_plans_inner`
-// (`crates/zero-migrate-node/src/lower.rs:588`): the Node apply path seeds its fold
+// (`crates/zeroship-migrate-node/src/lower.rs:588`): the Node apply path seeds its fold
 // from the live catalog snapshot, so the table is in the folded map no matter which
 // artifact created it, and the lookup cannot miss. That defect is reachable only
 // through a bare `fold_ops` over a partial op list with no catalog-seeded base, and

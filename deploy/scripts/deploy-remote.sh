@@ -704,7 +704,7 @@ main() {
   # and the build died twenty minutes in:
   #
   #   src/gen-types/addon.ts(66,8): error TS2307:
-  #       Cannot find module 'zero-migrate-node'
+  #       Cannot find module 'zeroship-migrate-node'
   #   src/gen-types/recorder.ts(31,8): error TS2307:
   #       Cannot find module 'zero-migrate/internal/recorder'
   #   [ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL] @zeroship/vite-plugin build
@@ -754,7 +754,7 @@ main() {
     [ -z "$EMPTY_SUBS" ] || fail "submodule directories are EMPTY in $ROOT:$EMPTY_SUBS
   deploy/Dockerfile COPYs them into the sdks and builder stages, so the build
   would run for about twenty minutes and then die on TS2307 'Cannot find module
-  zero-migrate-node'. \`git worktree add\` does not populate submodules; this is
+  zeroship-migrate-node'. \`git worktree add\` does not populate submodules; this is
   almost always a deploy run from a fresh worktree. Fix it with:
       git -C $ROOT submodule update --init --recursive
   or rsync the populated tree across from a checkout that has it."

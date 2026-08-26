@@ -3,7 +3,7 @@
 //! The engine's `zeroship_migrate::test_fixtures::no_inject` is `pub(crate)`, and no
 //! visibility widening can make a `pub(crate)` reachable across a crate boundary -
 //! so when the MySQL execution half moved here, every one of its fixture call sites
-//! needed a sibling. This is it, and it is the same shape `zero-migrate-node`'s
+//! needed a sibling. This is it, and it is the same shape `zeroship-migrate-node`'s
 //! `src/test_fixtures.rs` already has.
 //!
 //! What it does NOT do is restate the composition algebra. That was a real risk:
