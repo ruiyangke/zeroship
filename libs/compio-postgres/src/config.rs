@@ -1750,9 +1750,20 @@ impl Config {
     ///
     /// The consequence is a live trap: revert an override arm and its
     /// `key=A key=B` test still passes, which reads as a proved regression
-    /// guard. Two such tests are marked NON-DISCRIMINATING below. To exercise
-    /// an override, drive the SETTER (`Config::connect_timeout`) - that path is
-    /// reachable and its tests do discriminate.
+    /// guard. Two such tests are marked NON-DISCRIMINATING below.
+    ///
+    /// THEY WERE NOT WRITTEN THAT WAY. The collapse arrived with
+    /// `ParsedParameters::insert`, which removes an existing key before
+    /// pushing; before it, the DSN loop called `param` once per OCCURRENCE.
+    /// Both tests were measured failing against their own fix reverted, at the
+    /// commits that introduced them - so each was a working guard that a later
+    /// refactor in the same series silently disarmed, with the suite green the
+    /// whole way. That is the durable hazard here: collapsing duplicates is
+    /// correct, and it costs coverage somewhere far from the change.
+    ///
+    /// To exercise an override now, drive the SETTER
+    /// (`Config::connect_timeout`) - that path is still reachable and its
+    /// tests do discriminate.
     fn param(&mut self, key: &str, value: &str) -> Result<(), Error> {
         // libpq's treatment of `key=` is per-OPTION, not uniform. `port=` uses
         // the compiled default, while the six socket integer options reject an
@@ -3474,10 +3485,10 @@ mod tests {
             assert_eq!(config.get_connect_timeout(), None);
         }
 
-        // NON-DISCRIMINATING: passes with the zero arm in `param` reverted, for
-        // the same duplicate-collapse reason. See the note on `Config::param`.
-        // The programmatic peer, `a_programmatic_zero_connect_timeout_is_indefinite`,
-        // DOES discriminate.
+        // NON-DISCRIMINATING NOW, for the same duplicate-collapse reason; it DID
+        // fail at d51ae16ff, the commit that added it. See `Config::param`. The
+        // programmatic peer, `a_programmatic_zero_connect_timeout_is_indefinite`,
+        // still discriminates.
         #[test]
         fn a_later_indefinite_connect_timeout_clears_an_earlier_limit() {
             for value in ["0", "-1"] {
@@ -3777,10 +3788,10 @@ mod tests {
             assert!(config.get_ports().is_empty(), "port= must not set a port");
         }
 
-        // NON-DISCRIMINATING: passes with the `port` arm in `param` reverted,
-        // because the keyword parser collapses `port=5455 port=` to the last
-        // value. See the note on `Config::param`. Kept as a behaviour pin, NOT
-        // as a regression guard.
+        // NON-DISCRIMINATING NOW: passes with the `port` arm in `param` reverted,
+        // because duplicates collapse to the last value. It DID fail that way at
+        // 618825f82, the commit that added it; `ParsedParameters` disarmed it
+        // later. See the note on `Config::param`.
         #[test]
         fn a_later_empty_port_restores_the_compiled_default() {
             let config: Config = "host=x.invalid port=5455 port="
