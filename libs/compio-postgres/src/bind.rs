@@ -152,7 +152,7 @@ mod tests {
     use super::PortalCleanup;
     use crate::client::{Client, StatementCacheSettings};
     use crate::codec::FrontendMessage;
-    use crate::config::{SslMode, SslNegotiation};
+    use crate::config::{ProtocolVersion, SslMode, SslNegotiation};
     use crate::connection::{RequestDisposition, RequestMessages, TransactionEffect};
     use futures_channel::mpsc;
     use std::num::NonZeroUsize;
@@ -167,6 +167,7 @@ mod tests {
             0,
             Some(0.into()),
             None,
+            ProtocolVersion::V3_0,
             StatementCacheSettings::new(0, NonZeroUsize::MIN),
         );
 

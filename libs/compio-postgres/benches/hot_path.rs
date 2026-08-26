@@ -268,6 +268,7 @@ fn make_client(
         0,
         None,
         None,
+        config::ProtocolVersion::V3_0,
         StatementCacheSettings::new(cache_capacity, cache_threshold),
     );
     (client, receiver)
