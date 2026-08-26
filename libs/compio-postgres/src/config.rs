@@ -1735,6 +1735,24 @@ impl Config {
         self.replication
     }
 
+    /// NO CALLER EVER DELIVERS THE SAME KEY TWICE, so an arm here cannot
+    /// "override an earlier occurrence" and a test shaped `key=A key=B` cannot
+    /// prove that it does. Measured 2026-08-26 across all three routes:
+    ///
+    /// * keyword strings collapse duplicates to the LAST value - `host=a host=b`
+    ///   yields ONE host, and `application_name=first application_name=second`
+    ///   yields `"second"`, so the first value is never applied at all;
+    /// * `fill_unset` (service files) skips a key already in `applied` or
+    ///   `explicit`, deliberately, because libpq takes the FIRST of a repeated
+    ///   service key;
+    /// * a URI's query replaces the authority before anything reaches here, so
+    ///   `postgres://h:5455/db?port=` is one `port` application, not two.
+    ///
+    /// The consequence is a live trap: revert an override arm and its
+    /// `key=A key=B` test still passes, which reads as a proved regression
+    /// guard. Two such tests are marked NON-DISCRIMINATING below. To exercise
+    /// an override, drive the SETTER (`Config::connect_timeout`) - that path is
+    /// reachable and its tests do discriminate.
     fn param(&mut self, key: &str, value: &str) -> Result<(), Error> {
         // libpq's treatment of `key=` is per-OPTION, not uniform. `port=` uses
         // the compiled default, while the six socket integer options reject an
@@ -3456,6 +3474,10 @@ mod tests {
             assert_eq!(config.get_connect_timeout(), None);
         }
 
+        // NON-DISCRIMINATING: passes with the zero arm in `param` reverted, for
+        // the same duplicate-collapse reason. See the note on `Config::param`.
+        // The programmatic peer, `a_programmatic_zero_connect_timeout_is_indefinite`,
+        // DOES discriminate.
         #[test]
         fn a_later_indefinite_connect_timeout_clears_an_earlier_limit() {
             for value in ["0", "-1"] {
@@ -3755,6 +3777,10 @@ mod tests {
             assert!(config.get_ports().is_empty(), "port= must not set a port");
         }
 
+        // NON-DISCRIMINATING: passes with the `port` arm in `param` reverted,
+        // because the keyword parser collapses `port=5455 port=` to the last
+        // value. See the note on `Config::param`. Kept as a behaviour pin, NOT
+        // as a regression guard.
         #[test]
         fn a_later_empty_port_restores_the_compiled_default() {
             let config: Config = "host=x.invalid port=5455 port="
