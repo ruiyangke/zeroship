@@ -5,12 +5,11 @@
 // and COPY helpers are still stubbed until `transaction.rs`,
 // `copy_in.rs`, and `copy_out.rs` land.
 
+use crate::cancel_token::CancelKey;
 use crate::codec::{BackendMessages, FrontendMessage};
 use crate::config::{SslMode, SslNegotiation};
 use crate::connect_tls::Encryption;
-use crate::connection::{
-    Request, RequestDisposition, RequestMessages, TransactionEffect,
-};
+use crate::connection::{Request, RequestDisposition, RequestMessages, TransactionEffect};
 use crate::copy_in::CopyInSink;
 use crate::copy_out::CopyOutStream;
 use crate::keepalive::KeepaliveConfig;
@@ -305,7 +304,10 @@ impl QueryObservation {
                     | Message::EmptyQueryResponse
             );
         if extended_terminal
-            || matches!(message, Message::ErrorResponse(_) | Message::ReadyForQuery(_))
+            || matches!(
+                message,
+                Message::ErrorResponse(_) | Message::ReadyForQuery(_)
+            )
         {
             state.consumer = ConsumerDisposition::Completed;
             drop(state);
@@ -547,17 +549,16 @@ mod transaction_status_tests {
             SslMode::Disable,
             SslNegotiation::Postgres,
             0,
-            0,
+            Some(0.into()),
             None,
         );
-        assert_eq!(
-            client.transaction_status(),
-            Some(TransactionStatus::Idle)
-        );
+        assert_eq!(client.transaction_status(), Some(TransactionStatus::Idle));
 
-        let result = client.inner().send(RequestMessages::Single(
-            FrontendMessage::Raw(BytesMut::new().freeze()),
-        ));
+        let result = client
+            .inner()
+            .send(RequestMessages::Single(FrontendMessage::Raw(
+                BytesMut::new().freeze(),
+            )));
         assert!(
             result.is_err(),
             "the disconnected request channel accepted a send"
@@ -609,9 +610,7 @@ impl ResponseMessages {
 
     fn next(&mut self) -> Result<Option<Message>, Error> {
         match self {
-            Self::Raw(messages) | Self::Filtered(messages) => {
-                messages.next().map_err(Error::parse)
-            }
+            Self::Raw(messages) | Self::Filtered(messages) => messages.next().map_err(Error::parse),
             Self::Observed(messages) => messages.pop_front().transpose(),
         }
     }
@@ -738,8 +737,8 @@ mod type_cache_tests {
         StatementCacheSettings, statement_uses_cached_typeinfo,
     };
     use crate::config::{SslMode, SslNegotiation};
-    use crate::{Error, Statement};
     use crate::types::{Kind, Type};
+    use crate::{Error, Statement};
     use bytes::{BufMut, BytesMut};
     use futures_channel::mpsc;
     use postgres_protocol::message::backend::Message;
@@ -763,7 +762,7 @@ mod type_cache_tests {
             SslMode::Disable,
             SslNegotiation::Postgres,
             0,
-            0,
+            Some(0.into()),
             None,
             StatementCacheSettings::new(1, NonZeroUsize::MIN),
         )
@@ -815,10 +814,7 @@ mod type_cache_tests {
             Vec::new(),
             false,
         );
-        let old_winner =
-            client
-                .inner()
-                .cache_statement(SQL, old.clone(), generation);
+        let old_winner = client.inner().cache_statement(SQL, old.clone(), generation);
         assert!(old_winner.same_instance(&old));
 
         let replacement = Statement::new(
@@ -879,9 +875,7 @@ mod type_cache_tests {
         );
 
         client.clear_type_cache();
-        client
-            .inner()
-            .set_type(custom.oid(), &custom, generation);
+        client.inner().set_type(custom.oid(), &custom, generation);
         let returned = client
             .inner()
             .cache_statement("SELECT $1", statement, generation);
@@ -899,7 +893,7 @@ mod type_cache_tests {
             SslMode::Disable,
             SslNegotiation::Postgres,
             0,
-            0,
+            Some(0.into()),
             None,
             StatementCacheSettings::new(1, NonZeroUsize::new(usize::MAX).unwrap()),
         );
@@ -930,7 +924,7 @@ mod type_cache_tests {
             SslMode::Disable,
             SslNegotiation::Postgres,
             0,
-            0,
+            Some(0.into()),
             None,
             StatementCacheSettings::new(1, NonZeroUsize::new(3).unwrap()),
         );
@@ -1514,9 +1508,10 @@ impl InnerClient {
 
         let removed = {
             let mut cache = self.statement_cache.lock();
-            let key = cache.statements.iter().find_map(|(key, cached)| {
-                cached.same_instance(statement).then(|| Arc::clone(key))
-            });
+            let key = cache
+                .statements
+                .iter()
+                .find_map(|(key, cached)| cached.same_instance(statement).then(|| Arc::clone(key)));
 
             let removed = key.and_then(|key| {
                 cache.lru.retain(|candidate| candidate != &key);
@@ -1621,7 +1616,7 @@ pub struct Client {
     ssl_mode: SslMode,
     ssl_negotiation: SslNegotiation,
     process_id: i32,
-    secret_key: i32,
+    secret_key: Option<CancelKey>,
 }
 
 const _: () = {
@@ -1653,7 +1648,7 @@ impl Client {
         ssl_mode: SslMode,
         ssl_negotiation: SslNegotiation,
         process_id: i32,
-        secret_key: i32,
+        secret_key: Option<CancelKey>,
         release: Option<ConnectionRelease>,
     ) -> Self {
         Self::new_with_statement_cache(
@@ -1672,7 +1667,7 @@ impl Client {
         ssl_mode: SslMode,
         ssl_negotiation: SslNegotiation,
         process_id: i32,
-        secret_key: i32,
+        secret_key: Option<CancelKey>,
         release: Option<ConnectionRelease>,
         statement_cache: StatementCacheSettings,
     ) -> Self {
@@ -2055,7 +2050,10 @@ impl Client {
             return Err(Error::row_count());
         }
 
-        rows.into_iter().next().map(|x| x.try_get::<_, R>(0)).transpose()
+        rows.into_iter()
+            .next()
+            .map(|x| x.try_get::<_, R>(0))
+            .transpose()
     }
 
     /// The maximally flexible version of [`query`].
@@ -2068,10 +2066,7 @@ impl Client {
         I: IntoIterator<Item = P>,
         I::IntoIter: ExactSizeIterator,
     {
-        let execution = statement
-            .__convert()
-            .into_statement(&self.inner)
-            .await?;
+        let execution = statement.__convert().into_statement(&self.inner).await?;
         if execution.unnamed_sql.is_some() {
             let params = params.into_iter().collect::<Vec<_>>();
             let execution = execution
@@ -2105,11 +2100,7 @@ impl Client {
                 Ok(stream) => Ok(stream),
                 Err(error) => {
                     let Some(replacement) = self
-                        .reprepare_cached_statement_once(
-                            Some(cache_sql),
-                            replay_permitted,
-                            &error,
-                        )
+                        .reprepare_cached_statement_once(Some(cache_sql), replay_permitted, &error)
                         .await
                     else {
                         return Err(error);
@@ -2142,11 +2133,7 @@ impl Client {
             Ok(stream) => Ok(stream),
             Err(error) => {
                 let Some(replacement) = self
-                    .reprepare_cached_statement_once(
-                        Some(cache_sql),
-                        replay_permitted,
-                        &error,
-                    )
+                    .reprepare_cached_statement_once(Some(cache_sql), replay_permitted, &error)
                     .await
                 else {
                     return Err(error);
@@ -2192,11 +2179,7 @@ impl Client {
     ///     .await?;
     /// # let _ = rows; Ok(()) }
     /// ```
-    pub async fn query_text_params(
-        &self,
-        sql: &str,
-        params: &[&str],
-    ) -> Result<Vec<Row>, Error> {
+    pub async fn query_text_params(&self, sql: &str, params: &[&str]) -> Result<Vec<Row>, Error> {
         query::query_text_params(&self.inner, sql, params)
             .await?
             .try_collect()
@@ -2298,10 +2281,7 @@ impl Client {
         I: IntoIterator<Item = P>,
         I::IntoIter: ExactSizeIterator,
     {
-        let execution = statement
-            .__convert()
-            .into_statement(&self.inner)
-            .await?;
+        let execution = statement.__convert().into_statement(&self.inner).await?;
         if execution.unnamed_sql.is_some() {
             let params = params.into_iter().collect::<Vec<_>>();
             let execution = execution
@@ -2309,12 +2289,7 @@ impl Client {
                 .await?;
             if let Some(sql) = execution.unnamed_sql {
                 let types = execution.statement.params().to_vec();
-                return query::execute_typed(
-                    &self.inner,
-                    sql,
-                    params.into_iter().zip(types),
-                )
-                .await;
+                return query::execute_typed(&self.inner, sql, params.into_iter().zip(types)).await;
             }
 
             let Some(cache_sql) = execution.cache_sql else {
@@ -2335,11 +2310,7 @@ impl Client {
                 Ok(rows) => Ok(rows),
                 Err(error) => {
                     let Some(replacement) = self
-                        .reprepare_cached_statement_once(
-                            Some(cache_sql),
-                            replay_permitted,
-                            &error,
-                        )
+                        .reprepare_cached_statement_once(Some(cache_sql), replay_permitted, &error)
                         .await
                     else {
                         return Err(error);
@@ -2372,11 +2343,7 @@ impl Client {
             Ok(rows) => Ok(rows),
             Err(error) => {
                 let Some(replacement) = self
-                    .reprepare_cached_statement_once(
-                        Some(cache_sql),
-                        replay_permitted,
-                        &error,
-                    )
+                    .reprepare_cached_statement_once(Some(cache_sql), replay_permitted, &error)
                     .await
                 else {
                     return Err(error);
@@ -2407,21 +2374,11 @@ impl Client {
             .finalize_probationary(&self.inner, 0)
             .await?;
         let replay_permitted = execution.cache_sql.is_some() && self.stale_cache_replay_permitted();
-        match copy_in::copy_in(
-            self.inner(),
-            execution.statement,
-            execution.unnamed_sql,
-        )
-        .await
-        {
+        match copy_in::copy_in(self.inner(), execution.statement, execution.unnamed_sql).await {
             Ok(sink) => Ok(sink),
             Err(error) => {
                 let Some(replacement) = self
-                    .reprepare_cached_statement_once(
-                        execution.cache_sql,
-                        replay_permitted,
-                        &error,
-                    )
+                    .reprepare_cached_statement_once(execution.cache_sql, replay_permitted, &error)
                     .await
                 else {
                     return Err(error);
@@ -2443,21 +2400,11 @@ impl Client {
             .finalize_probationary(&self.inner, 0)
             .await?;
         let replay_permitted = execution.cache_sql.is_some() && self.stale_cache_replay_permitted();
-        match copy_out::copy_out(
-            self.inner(),
-            execution.statement,
-            execution.unnamed_sql,
-        )
-        .await
-        {
+        match copy_out::copy_out(self.inner(), execution.statement, execution.unnamed_sql).await {
             Ok(stream) => Ok(stream),
             Err(error) => {
                 let Some(replacement) = self
-                    .reprepare_cached_statement_once(
-                        execution.cache_sql,
-                        replay_permitted,
-                        &error,
-                    )
+                    .reprepare_cached_statement_once(execution.cache_sql, replay_permitted, &error)
                     .await
                 else {
                     return Err(error);
@@ -2520,7 +2467,7 @@ impl Client {
             ssl_mode: self.ssl_mode,
             ssl_negotiation: self.ssl_negotiation,
             process_id: self.process_id,
-            secret_key: self.secret_key,
+            secret_key: self.secret_key.clone(),
         }
     }
 
@@ -2650,13 +2597,11 @@ impl Client {
             return;
         }
 
-        let _ = self
-            .inner()
-            .send_with(
-                RequestMessages::Single(FrontendMessage::Raw(buf)),
-                RequestDisposition::Housekeeping,
-                TransactionEffect::MayChange,
-            );
+        let _ = self.inner().send_with(
+            RequestMessages::Single(FrontendMessage::Raw(buf)),
+            RequestDisposition::Housekeeping,
+            TransactionEffect::MayChange,
+        );
     }
 
     #[doc(hidden)]

@@ -2,8 +2,45 @@
 
 use crate::config::{SslMode, SslNegotiation};
 use crate::tls::TlsConnect;
-use crate::{Error, Socket, cancel_query, cancel_query_raw, client::SocketConfig, tls::MakeTlsConnect};
+use crate::{
+    Error, Socket, cancel_query, cancel_query_raw, client::SocketConfig, tls::MakeTlsConnect,
+};
+use bytes::Bytes;
 use compio::io::{AsyncRead, AsyncWrite};
+use std::io;
+
+pub(crate) const MIN_CANCEL_KEY_LEN: usize = 4;
+pub(crate) const MAX_CANCEL_KEY_LEN: usize = 256;
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct CancelKey(Bytes);
+
+impl CancelKey {
+    pub(crate) fn new(bytes: Bytes) -> Result<Self, io::Error> {
+        if !(MIN_CANCEL_KEY_LEN..=MAX_CANCEL_KEY_LEN).contains(&bytes.len()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "invalid PostgreSQL cancel key length {}; expected {MIN_CANCEL_KEY_LEN} to \
+                     {MAX_CANCEL_KEY_LEN} bytes",
+                    bytes.len()
+                ),
+            ));
+        }
+        Ok(Self(bytes))
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+impl From<i32> for CancelKey {
+    fn from(key: i32) -> Self {
+        Self(Bytes::copy_from_slice(&key.to_be_bytes()))
+    }
+}
 
 /// The capability to request cancellation of in-progress queries on a
 /// connection.
@@ -13,7 +50,7 @@ pub struct CancelToken {
     pub(crate) ssl_mode: SslMode,
     pub(crate) ssl_negotiation: SslNegotiation,
     pub(crate) process_id: i32,
-    pub(crate) secret_key: i32,
+    pub(crate) secret_key: Option<CancelKey>,
 }
 
 impl CancelToken {
@@ -31,13 +68,14 @@ impl CancelToken {
     where
         T: MakeTlsConnect<Socket>,
     {
+        let secret_key = self.secret_key.clone().ok_or_else(missing_cancel_key)?;
         cancel_query::cancel_query(
             self.socket_config.clone(),
             self.ssl_mode,
             self.ssl_negotiation,
             tls,
             self.process_id,
-            self.secret_key,
+            secret_key,
         )
         .await
     }
@@ -52,13 +90,14 @@ impl CancelToken {
     where
         T: MakeTlsConnect<Socket>,
     {
+        let secret_key = self.secret_key.clone().ok_or_else(missing_cancel_key)?;
         cancel_query::cancel_query_confirmed(
             self.socket_config.clone(),
             self.ssl_mode,
             self.ssl_negotiation,
             tls,
             self.process_id,
-            self.secret_key,
+            secret_key,
         )
         .await
     }
@@ -70,6 +109,7 @@ impl CancelToken {
         S: AsyncRead + AsyncWrite + Unpin,
         T: TlsConnect<S>,
     {
+        let secret_key = self.secret_key.clone().ok_or_else(missing_cancel_key)?;
         cancel_query_raw::cancel_query_raw(
             stream,
             self.ssl_mode,
@@ -98,10 +138,16 @@ impl CancelToken {
             // Upstream tokio-postgres passes `true` here too.
             true,
             self.process_id,
-            self.secret_key,
+            secret_key,
         )
         .await
     }
+}
+
+fn missing_cancel_key() -> Error {
+    Error::config(
+        "PostgreSQL did not provide BackendKeyData, so this connection cannot be cancelled".into(),
+    )
 }
 
 #[cfg(test)]
@@ -165,7 +211,7 @@ mod tests {
             ssl_mode: SslMode::Disable,
             ssl_negotiation: SslNegotiation::Postgres,
             process_id: PROCESS_ID,
-            secret_key: SECRET_KEY,
+            secret_key: Some(SECRET_KEY.into()),
         }
     }
 
@@ -181,13 +227,14 @@ mod tests {
             let (public_seen_tx, public_seen_rx) = futures_channel::oneshot::channel();
             let (release_public_tx, release_public_rx) = futures_channel::oneshot::channel();
             let (confirmed_seen_tx, confirmed_seen_rx) = futures_channel::oneshot::channel();
-            let (release_confirmed_tx, release_confirmed_rx) =
-                futures_channel::oneshot::channel();
+            let (release_confirmed_tx, release_confirmed_rx) = futures_channel::oneshot::channel();
 
             let peer = compio::runtime::spawn(async move {
                 let (mut public, _) = listener.accept().await.expect("accept public cancel");
                 assert_eq!(read_exact(&mut public, 16).await, cancel_packet());
-                public_seen_tx.send(()).expect("report public cancel packet");
+                public_seen_tx
+                    .send(())
+                    .expect("report public cancel packet");
                 release_public_rx.await.expect("release public cancel peer");
                 drop(public);
 
@@ -340,7 +387,7 @@ mod tests {
                 ssl_mode: SslMode::Prefer,
                 ssl_negotiation: SslNegotiation::Postgres,
                 process_id: PROCESS_ID,
-                secret_key: SECRET_KEY,
+                secret_key: Some(SECRET_KEY.into()),
             };
             let stream = TcpStream::connect(addr)
                 .await

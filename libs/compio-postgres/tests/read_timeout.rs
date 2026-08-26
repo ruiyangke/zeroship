@@ -104,7 +104,11 @@ fn complete_startup(stream: &mut TcpStream, process_id: i32) {
     stream
         .read_exact(&mut body)
         .expect("read startup packet body");
-    assert_eq!(&body[..4], &[0, 3, 0, 0], "client did not request protocol 3");
+    assert_eq!(
+        &body[..4],
+        &[0, 3, 0, 2],
+        "client did not request protocol 3.2"
+    );
 
     let mut response = backend_frame(b'R', &0u32.to_be_bytes());
     let mut key_data = Vec::with_capacity(8);
@@ -297,10 +301,7 @@ fn read_timeout_is_opt_in_connection_policy() {
     assert_eq!(config.get_read_timeout(), None);
 
     config.read_timeout(Duration::from_millis(250));
-    assert_eq!(
-        config.get_read_timeout(),
-        Some(&Duration::from_millis(250))
-    );
+    assert_eq!(config.get_read_timeout(), Some(&Duration::from_millis(250)));
 
     // THE CONTROL FIRST. `is_err()` alone was the whole assertion here until
     // 2026-08-23, and it is satisfied by any regression that stops this DSN
@@ -338,13 +339,11 @@ async fn a_silent_server_trips_a_distinguishable_read_timeout() {
             .expect("connect to scripted PostgreSQL peer");
         let driver = compio::runtime::spawn(async move { connection.run().await });
         let started = Instant::now();
-        let query_error = compio::time::timeout(
-            Duration::from_secs(2),
-            client.simple_query("SELECT 1"),
-        )
-        .await
-        .expect("stalled query exceeded its outer watchdog")
-        .expect_err("a silent server answered the query");
+        let query_error =
+            compio::time::timeout(Duration::from_secs(2), client.simple_query("SELECT 1"))
+                .await
+                .expect("stalled query exceeded its outer watchdog")
+                .expect_err("a silent server answered the query");
         assert!(
             query_error.is_read_timeout(),
             "stalled operation lost its read-timeout classification: {query_error:?}"
@@ -396,13 +395,11 @@ async fn silence_mid_frame_trips_the_deadline_and_retires_the_session() {
             .expect("connect to partial-frame peer");
         let driver = compio::runtime::spawn(async move { connection.run().await });
 
-        let operation_error = compio::time::timeout(
-            Duration::from_secs(2),
-            client.simple_query("SELECT 1"),
-        )
-        .await
-        .expect("partial-frame query exceeded its outer watchdog")
-        .expect_err("partial-frame peer completed the query");
+        let operation_error =
+            compio::time::timeout(Duration::from_secs(2), client.simple_query("SELECT 1"))
+                .await
+                .expect("partial-frame query exceeded its outer watchdog")
+                .expect_err("partial-frame peer completed the query");
         assert!(
             operation_error.is_read_timeout(),
             "partial-frame stall lost its timeout classification: {operation_error:?}"
@@ -590,13 +587,10 @@ async fn a_timed_out_pool_entry_is_retired_before_return() {
 
         let first = pool.get().await.expect("check out warm scripted session");
         assert_eq!(first.process_id(), 201);
-        let error = compio::time::timeout(
-            Duration::from_secs(2),
-            first.simple_query("SELECT 1"),
-        )
-        .await
-        .expect("pooled stalled query exceeded its outer watchdog")
-        .expect_err("silent pooled session answered the query");
+        let error = compio::time::timeout(Duration::from_secs(2), first.simple_query("SELECT 1"))
+            .await
+            .expect("pooled stalled query exceeded its outer watchdog")
+            .expect_err("silent pooled session answered the query");
         assert!(error.is_read_timeout());
         // Drop immediately: the read task must have published pool poison
         // before it delivered the operation error, even if Connection::run has
@@ -604,7 +598,11 @@ async fn a_timed_out_pool_entry_is_retired_before_return() {
         drop(first);
 
         assert_eq!(pool.idle_count(), 0, "timed-out session became idle");
-        assert_eq!(pool.total_count(), 0, "timed-out session kept its pool slot");
+        assert_eq!(
+            pool.total_count(),
+            0,
+            "timed-out session kept its pool slot"
+        );
         assert_eq!(pool.metrics.evictions.get(), 1);
 
         let second = compio::time::timeout(Duration::from_secs(2), pool.get())
@@ -688,9 +686,10 @@ async fn backpressure_cannot_hide_retirement_from_the_pool() {
         // `a_silent_server_trips_a_distinguishable_read_timeout` handles by
         // asserting on the driver handle, which a pooled entry does not expose.
         // So the assertion here is that it terminates rather than completing.
-        retained.try_collect::<Vec<_>>().await.expect_err(
-            "the backpressured response completed even though its session was retired",
-        );
+        retained
+            .try_collect::<Vec<_>>()
+            .await
+            .expect_err("the backpressured response completed even though its session was retired");
 
         compio::time::timeout(Duration::from_secs(2), pool.close())
             .await
@@ -952,7 +951,10 @@ async fn copy_input_time_is_not_charged_as_server_read_silence() {
             producer_started.elapsed() >= COPY_PRODUCER_DELAY,
             "COPY exemption was not exposed for the scripted producer delay"
         );
-        assert!(!client.is_closed(), "COPY producer time spent the read budget");
+        assert!(
+            !client.is_closed(),
+            "COPY producer time spent the read budget"
+        );
         sink.as_mut()
             .send(Bytes::from_static(b"7\n"))
             .await

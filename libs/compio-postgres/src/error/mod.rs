@@ -429,9 +429,9 @@ impl fmt::Display for Error {
             Kind::UnexpectedMessage => fmt.write_str("unexpected message from server"),
             Kind::Tls => fmt.write_str("TLS could not be negotiated"),
             Kind::TlsHandshake => fmt.write_str("error performing TLS handshake"),
-            Kind::TlsUnattested => {
-                fmt.write_str("the supplied TLS connector does not attest to the configured TLS parameters")
-            }
+            Kind::TlsUnattested => fmt.write_str(
+                "the supplied TLS connector does not attest to the configured TLS parameters",
+            ),
             Kind::ToSql(idx) => write!(fmt, "error serializing parameter {idx}"),
             Kind::FromSql(idx) => write!(fmt, "error deserializing column {idx}"),
             Kind::Column(column) => write!(fmt, "invalid column `{column}`"),
@@ -666,9 +666,7 @@ impl Error {
             Kind::ReadTimeout,
             Some(Box::new(io::Error::new(
                 io::ErrorKind::TimedOut,
-                format!(
-                    "socket read made no progress for {timeout:?}; the connection was retired"
-                ),
+                format!("socket read made no progress for {timeout:?}; the connection was retired"),
             ))),
         )
     }
@@ -699,9 +697,10 @@ impl Error {
         if !self.is_read_timeout() {
             return None;
         }
-        let detail = self
-            .source()
-            .map_or_else(|| "the connection was retired".to_string(), ToString::to_string);
+        let detail = self.source().map_or_else(
+            || "the connection was retired".to_string(),
+            ToString::to_string,
+        );
         Some(Error::new(
             Kind::ReadTimeout,
             Some(Box::new(io::Error::new(io::ErrorKind::TimedOut, detail))),

@@ -325,7 +325,10 @@ mod tests {
             .await
             .err()
             .unwrap_or_else(|| panic!("sslmode={} accepted a plaintext session", mode.as_str()));
-            assert!(!err.is_tls_handshake(), "a refusal is not a handshake failure");
+            assert!(
+                !err.is_tls_handshake(),
+                "a refusal is not a handshake failure"
+            );
         }
     }
 
@@ -351,7 +354,10 @@ mod tests {
             .await
             .err()
             .unwrap_or_else(|| {
-                panic!("sslmode={} treated an ErrorResponse as a refusal", mode.as_str())
+                panic!(
+                    "sslmode={} treated an ErrorResponse as a refusal",
+                    mode.as_str()
+                )
             });
         }
     }
@@ -365,7 +371,10 @@ mod tests {
             Encryption::Plaintext,
             "allow is the plaintext-first mode"
         );
-        assert_eq!(Encryption::first_for(SslMode::Disable), Encryption::Plaintext);
+        assert_eq!(
+            Encryption::first_for(SslMode::Disable),
+            Encryption::Plaintext
+        );
         for mode in [
             SslMode::Prefer,
             SslMode::Require,
@@ -389,11 +398,7 @@ mod tests {
 /// asks it of [`SslMode::permits_plaintext`] - the set membership, not a list
 /// of mode names. `require`, `verify-ca` and `verify-full` cannot reach the
 /// `Ok` arm.
-fn unavailable<S, T>(
-    stream: S,
-    mode: SslMode,
-    why: &str,
-) -> Result<MaybeTlsStream<S, T>, Error> {
+fn unavailable<S, T>(stream: S, mode: SslMode, why: &str) -> Result<MaybeTlsStream<S, T>, Error> {
     if mode.permits_plaintext() {
         Ok(MaybeTlsStream::Raw(stream))
     } else {

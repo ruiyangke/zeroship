@@ -102,10 +102,8 @@ use crate::{CancelToken, Client, Config, Connection, Error, Socket, TransactionS
 /// the duration of the hook invocation.
 pub type PoolHookFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
-type AfterConnectHook =
-    dyn for<'a> Fn(&'a Client) -> PoolHookFuture<'a, Result<(), Error>>;
-type BeforeAcquireHook =
-    dyn for<'a> Fn(&'a Client) -> PoolHookFuture<'a, Result<bool, Error>>;
+type AfterConnectHook = dyn for<'a> Fn(&'a Client) -> PoolHookFuture<'a, Result<(), Error>>;
+type BeforeAcquireHook = dyn for<'a> Fn(&'a Client) -> PoolHookFuture<'a, Result<bool, Error>>;
 type AfterReleaseHook = dyn Fn(&Client) -> bool;
 
 /// Pool tuning and lifecycle callbacks with HikariCP-inspired defaults.
@@ -594,9 +592,7 @@ impl Error {
             if let Some(io_error) = error.downcast_ref::<io::Error>()
                 && io_error
                     .get_ref()
-                    .is_some_and(
-                        <dyn std::error::Error + Send + Sync>::is::<PoolClosedError>,
-                    )
+                    .is_some_and(<dyn std::error::Error + Send + Sync>::is::<PoolClosedError>)
             {
                 return true;
             }
@@ -610,7 +606,7 @@ impl Error {
 ///
 /// This is a build-capability check, not a policy: the contradictions between
 /// `sslmode`, `sslrootcert` and `sslnegotiation` are `Config`'s to catch (see
-/// `Config::validate_tls_settings`), and they are caught for every entry point,
+/// `Config::validate_connection_settings`), and they are caught for every entry point,
 /// not just this one.
 ///
 /// libpq draws the line in the same place. Compiled without SSL support,
@@ -659,7 +655,7 @@ struct Transport {
 
 impl Transport {
     fn resolve(config: Config) -> Result<Transport, Error> {
-        config.validate_tls_settings()?;
+        config.validate_connection_settings()?;
         #[cfg(not(feature = "tls"))]
         reject_tls_without_a_connector(&config)?;
 
@@ -2499,7 +2495,7 @@ mod tests {
                 SslMode::Disable,
                 SslNegotiation::Postgres,
                 process_id,
-                0,
+                Some(0.into()),
                 None,
             ),
             receiver,
@@ -2614,8 +2610,8 @@ mod tests {
                 let pid = process_id.to_be_bytes();
                 stream
                     .write_all(&[
-                        b'R', 0, 0, 0, 8, 0, 0, 0, 0, b'K', 0, 0, 0, 12, pid[0], pid[1],
-                        pid[2], pid[3], 0, 0, 0, 46, b'Z', 0, 0, 0, 5, b'I',
+                        b'R', 0, 0, 0, 8, 0, 0, 0, 0, b'K', 0, 0, 0, 12, pid[0], pid[1], pid[2],
+                        pid[3], 0, 0, 0, 46, b'Z', 0, 0, 0, 5, b'I',
                     ])
                     .unwrap();
                 stream
@@ -2688,7 +2684,10 @@ mod tests {
         };
         let pool = test_pool(config, Vec::new(), 1, 1);
         let (client, _receiver) = fake_client(17);
-        assert!(!client.is_closed(), "fixture request channel started closed");
+        assert!(
+            !client.is_closed(),
+            "fixture request channel started closed"
+        );
         client
             .tx_status_handle()
             .store(crate::connection::READ_RETIRED_STATUS, Ordering::Release);
@@ -3566,7 +3565,11 @@ mod tests {
         assert!(Pool::housekeep(&weak).await);
         assert_eq!(calls.get(), 1);
         assert_eq!(pool.total_count(), 1);
-        assert_eq!(pool.idle_count(), 1, "refill was not deposited after its hook");
+        assert_eq!(
+            pool.idle_count(),
+            1,
+            "refill was not deposited after its hook"
+        );
         assert_eq!(pool.active_count(), 0);
 
         drop(pool);
@@ -3768,11 +3771,10 @@ mod tests {
     #[compio::test]
     async fn later_warmup_after_connect_failure_closes_earlier_sessions() {
         let (address, eof_rx, server) = two_session_postgres_server();
-        let connection_config: Config = format!(
-            "postgres://postgres@{address}/fake?sslmode=disable"
-        )
-        .parse()
-        .unwrap();
+        let connection_config: Config =
+            format!("postgres://postgres@{address}/fake?sslmode=disable")
+                .parse()
+                .unwrap();
         let calls = Rc::new(Cell::new(0));
         let hook_calls = Rc::clone(&calls);
         let mut pool_config = PoolConfig {
@@ -3798,7 +3800,10 @@ mod tests {
         )
         .await
         .expect("pool warm-up did not finish");
-        assert!(outcome.is_err(), "second after_connect rejection was ignored");
+        assert!(
+            outcome.is_err(),
+            "second after_connect rejection was ignored"
+        );
         assert_eq!(calls.get(), 2);
 
         let closed = compio::time::timeout(Duration::from_secs(5), eof_rx)
