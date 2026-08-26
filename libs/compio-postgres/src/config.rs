@@ -870,7 +870,8 @@ impl Config {
     ///
     /// Defaults to the user executing this process.
     pub fn user(&mut self, user: impl Into<String>) -> &mut Config {
-        self.user = Some(user.into());
+        let user = user.into();
+        self.user = (!user.is_empty()).then_some(user);
         self
     }
 
@@ -885,7 +886,8 @@ impl Config {
     where
         T: AsRef<[u8]>,
     {
-        self.password = Some(password.as_ref().to_vec());
+        let password = password.as_ref();
+        self.password = (!password.is_empty()).then(|| password.to_vec());
         self
     }
 
@@ -1047,7 +1049,8 @@ impl Config {
     ///
     /// Defaults to the user.
     pub fn dbname(&mut self, dbname: impl Into<String>) -> &mut Config {
-        self.dbname = Some(dbname.into());
+        let dbname = dbname.into();
+        self.dbname = (!dbname.is_empty()).then_some(dbname);
         self
     }
 
@@ -1722,14 +1725,10 @@ impl Config {
             // "password authentication failed" where libpq says
             // "no password supplied".
             "user" => {
-                if !value.is_empty() {
-                    self.user(value);
-                }
+                self.user(value);
             }
             "password" => {
-                if !value.is_empty() {
-                    self.password(value);
-                }
+                self.password(value);
             }
             "dbname" => {
                 self.dbname(value);
@@ -3570,6 +3569,28 @@ mod tests {
                 None,
                 "an empty password is unset, not a password of length zero"
             );
+        }
+
+        #[test]
+        fn empty_identity_values_restore_their_defaults() {
+            let parsed = "user=alice user='' password=secret password='' dbname=app dbname=''"
+                .parse::<Config>()
+                .expect("empty identity values are default selections");
+            assert_eq!(parsed.get_user(), None);
+            assert_eq!(parsed.get_password(), None);
+            assert_eq!(parsed.get_dbname(), None);
+
+            let mut built = Config::new();
+            built
+                .user("alice")
+                .user("")
+                .password("secret")
+                .password([])
+                .dbname("app")
+                .dbname("");
+            assert_eq!(built.get_user(), None);
+            assert_eq!(built.get_password(), None);
+            assert_eq!(built.get_dbname(), None);
         }
 
         /// Port is the one integer option whose documented empty value selects
