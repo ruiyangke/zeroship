@@ -11,6 +11,7 @@
 mod support;
 
 mod mysql_alter_column_render;
+mod mysql_conformance;
 mod mysql_enum_collation;
 mod mysql_expression_default_render;
 mod mysql_query_renderer_collation;

@@ -32,9 +32,17 @@
 //! deliberately **schema-agnostic** - it creates and drops its own scratch objects
 //! in a caller-provided scratch schema, touching nothing the engine journals.
 //!
-//! Postgres-flavoured by design (it issues `BEGIN`/`ROLLBACK`, a `TEMP TABLE`, and a
-//! text->timestamptz coercion). A MySQL conformance profile would render the dialect
-//! equivalents; the shape (four checks, one verdict) is the same.
+//! The checks are neutral; the scratch SQL that provokes them is not, so the
+//! caller passes a [`crate::driver::conformance::SeamFixture`] carrying its own
+//! spellings - the session-scoped
+//! table keyword, the integer and timestamp types, the placeholder form, an
+//! integer cast, and the SQLSTATE for a missing table.
+//!
+//! This used to say the suite was "Postgres-flavoured by design" and that a MySQL
+//! profile "would render the dialect equivalents". It does now, and both run
+//! against a live server. Note what the older shape cost: the header two
+//! paragraphs up claimed the suite covered every host driver while the SQL below
+//! could only execute on one of them, so the gap read as covered.
 
 use super::{Bind, DbError, SqlSession};
 
@@ -67,9 +75,52 @@ fn fail(check: &'static str, reason: impl Into<String>) -> ConformanceFailure {
     }
 }
 
+/// The handful of dialect spellings the conformance FIXTURE needs.
+///
+/// The invariants this suite checks are neutral - pinning, transaction
+/// visibility, param-format semantics and error surfacing are properties of a
+/// DRIVER, not of a grammar. The scratch SQL that provokes them is not: a
+/// temp-table declaration, a positional placeholder and an integer cast are all
+/// spelled differently per vendor.
+///
+/// So the caller supplies them. It knows its own dialect; this crate is the
+/// neutral contract and must not learn one. That split is also what lets a
+/// fourth backend run the same suite by writing one of these rather than
+/// forking the checks.
+///
+/// This existed as PostgreSQL SQL inlined into the checks, under a module doc
+/// claiming the suite was driver-neutral. It was not: the suite could only ever
+/// execute against PostgreSQL, and only PostgreSQL ever ran it.
+#[derive(Debug, Clone, Copy)]
+pub struct SeamFixture {
+    /// The session-scoped table modifier: `TEMP` or `TEMPORARY`.
+    pub temp_keyword: &'static str,
+    /// The 64-bit signed integer column type.
+    pub bigint_type: &'static str,
+    /// The timestamp column type used by the `exec_text` coercion check.
+    pub timestamp_type: &'static str,
+    /// The instant `exec_text` sends as TEXT, spelled the way this server parses
+    /// it. This is the value under test: the seam's whole reason for a separate
+    /// `exec_text` is that it must arrive as text and be coerced server-side.
+    pub timestamp_text_param: &'static str,
+    /// A boolean SQL expression asserting column `ts` equals
+    /// [`Self::timestamp_text_param`]. Kept a callback because a vendor may need
+    /// to type its literal for the comparison to mean anything.
+    pub ts_matches: fn() -> String,
+    /// Render the 1-based positional placeholder for bind `n`.
+    pub placeholder: fn(usize) -> String,
+    /// Wrap a scalar expression so the server returns it as a 64-bit integer.
+    pub as_bigint: fn(&str) -> String,
+    /// The SQLSTATE the server raises for a reference to a missing table. A
+    /// driver may carry no SQLSTATE at all, but a driver that carries one MUST
+    /// carry this one.
+    pub undefined_table_sqlstate: &'static str,
+}
+
 /// Run the full [`SqlSession`] conformance suite against a live `session`, using
 /// `scratch_table` as a caller-owned temp-table name (must be a bare, unqualified
-/// identifier - the check creates it `TEMP` so it never touches a real schema).
+/// identifier - the check creates it session-scoped so it never touches a real
+/// schema) and `fixture` for this dialect's scratch spellings.
 ///
 /// Returns `Ok(())` if the driver honours all four seam invariants, or the FIRST
 /// failing [`ConformanceFailure`]. The suite leaves no residue: the temp table is
@@ -81,11 +132,12 @@ fn fail(check: &'static str, reason: impl Into<String>) -> ConformanceFailure {
 pub async fn run<S: SqlSession>(
     session: &S,
     scratch_table: &str,
+    fixture: &SeamFixture,
 ) -> Result<(), ConformanceFailure> {
-    check_session_pinning(session, scratch_table).await?;
-    check_transaction_visibility(session, scratch_table).await?;
-    check_exec_text_semantics(session).await?;
-    check_error_sqlstate_mapping(session).await?;
+    check_session_pinning(session, scratch_table, fixture).await?;
+    check_transaction_visibility(session, scratch_table, fixture).await?;
+    check_exec_text_semantics(session, fixture).await?;
+    check_error_sqlstate_mapping(session, fixture).await?;
     Ok(())
 }
 
@@ -95,18 +147,23 @@ pub async fn run<S: SqlSession>(
 async fn check_session_pinning<S: SqlSession>(
     session: &S,
     scratch_table: &str,
+    fixture: &SeamFixture,
 ) -> Result<(), ConformanceFailure> {
     const CHECK: &str = "session-pinning";
+    let temp = fixture.temp_keyword;
+    let int8 = fixture.bigint_type;
+    let p1 = (fixture.placeholder)(1);
+    let p2 = (fixture.placeholder)(2);
     // A TEMP table lives for the session only, on the backend that created it.
     session
         .batch(&format!(
-            "CREATE TEMP TABLE {scratch_table} (id int8, note text)"
+            "CREATE {temp} TABLE {scratch_table} (id {int8}, note text)"
         ))
         .await
         .map_err(|e| fail(CHECK, format!("could not create scratch TEMP table: {e}")))?;
     session
         .exec(
-            &format!("INSERT INTO {scratch_table} (id, note) VALUES ($1, $2)"),
+            &format!("INSERT INTO {scratch_table} (id, note) VALUES ({p1}, {p2})"),
             &[Bind::Int(7), Bind::Text("pinned".to_string())],
         )
         .await
@@ -114,7 +171,7 @@ async fn check_session_pinning<S: SqlSession>(
     // The read MUST see the row - proving the same backend serviced all three verbs.
     let rows = session
         .query(
-            &format!("SELECT id, note FROM {scratch_table} WHERE id = $1"),
+            &format!("SELECT id, note FROM {scratch_table} WHERE id = {p1}"),
             &[Bind::Int(7)],
         )
         .await
@@ -155,10 +212,15 @@ async fn check_session_pinning<S: SqlSession>(
 async fn check_transaction_visibility<S: SqlSession>(
     session: &S,
     scratch_table: &str,
+    fixture: &SeamFixture,
 ) -> Result<(), ConformanceFailure> {
     const CHECK: &str = "transaction-visibility";
+    let temp = fixture.temp_keyword;
+    let int8 = fixture.bigint_type;
+    let p1 = (fixture.placeholder)(1);
+    let count_n = (fixture.as_bigint)("count(*)");
     session
-        .batch(&format!("CREATE TEMP TABLE {scratch_table} (id int8)"))
+        .batch(&format!("CREATE {temp} TABLE {scratch_table} (id {int8})"))
         .await
         .map_err(|e| fail(CHECK, format!("create scratch table: {e}")))?;
     session
@@ -167,17 +229,14 @@ async fn check_transaction_visibility<S: SqlSession>(
         .map_err(|e| fail(CHECK, format!("BEGIN: {e}")))?;
     session
         .exec(
-            &format!("INSERT INTO {scratch_table} (id) VALUES ($1)"),
+            &format!("INSERT INTO {scratch_table} (id) VALUES ({p1})"),
             &[Bind::Int(99)],
         )
         .await
         .map_err(|e| fail(CHECK, format!("in-txn INSERT: {e}")))?;
     // Visible inside the open txn on the SAME session.
     let in_txn = session
-        .query_one(
-            &format!("SELECT count(*)::int8 AS n FROM {scratch_table}"),
-            &[],
-        )
+        .query_one(&format!("SELECT {count_n} AS n FROM {scratch_table}"), &[])
         .await
         .map_err(|e| fail(CHECK, format!("in-txn count read: {e}")))?;
     let n_in: i64 = in_txn
@@ -200,10 +259,7 @@ async fn check_transaction_visibility<S: SqlSession>(
         .map_err(|e| fail(CHECK, format!("ROLLBACK: {e}")))?;
     // After rollback the row is gone.
     let after = session
-        .query_one(
-            &format!("SELECT count(*)::int8 AS n FROM {scratch_table}"),
-            &[],
-        )
+        .query_one(&format!("SELECT {count_n} AS n FROM {scratch_table}"), &[])
         .await
         .map_err(|e| fail(CHECK, format!("post-rollback count read: {e}")))?;
     let n_after: i64 = after
@@ -229,24 +285,35 @@ async fn check_transaction_visibility<S: SqlSession>(
 /// the server to the target column type (the `text -> timestamptz` path), and a
 /// `None` text param is a SQL NULL. This is the load-bearing distinction between
 /// `exec` (typed binds) and `exec_text` (all-text, server-inferred).
-async fn check_exec_text_semantics<S: SqlSession>(session: &S) -> Result<(), ConformanceFailure> {
+async fn check_exec_text_semantics<S: SqlSession>(
+    session: &S,
+    fixture: &SeamFixture,
+) -> Result<(), ConformanceFailure> {
     const CHECK: &str = "exec-text-semantics";
-    // A scratch temp table with a timestamptz column: the coercion the engine's
-    // op.* DML path relies on (a text `'2026-01-02T03:04:05Z'` -> timestamptz).
+    let temp = fixture.temp_keyword;
+    let int8 = fixture.bigint_type;
+    let ts_ty = fixture.timestamp_type;
+    let p1 = (fixture.placeholder)(1);
+    let p2 = (fixture.placeholder)(2);
+    let p3 = (fixture.placeholder)(3);
+    // A scratch temp table with a timestamp column: the coercion the engine's
+    // op.* DML path relies on (a text instant -> the server's timestamp type).
     session
-        .batch("CREATE TEMP TABLE zm_conf_text (id int8, ts timestamptz, tag text)")
+        .batch(&format!(
+            "CREATE {temp} TABLE zm_conf_text (id {int8}, ts {ts_ty}, tag text)"
+        ))
         .await
         .map_err(|e| fail(CHECK, format!("create text-coercion scratch table: {e}")))?;
-    // exec_text: every param crosses as server-inferred TEXT. `'7'` -> int8,
-    // `'2026-01-02T03:04:05Z'` -> timestamptz, `None` -> SQL NULL. A concrete-OID
-    // binary bind of a text value against timestamptz would be REFUSED - this path
-    // must not be.
+    // exec_text: every param crosses as server-inferred TEXT. The id becomes an
+    // integer, the instant becomes a timestamp, `None` becomes SQL NULL. A
+    // concrete-OID binary bind of a text value against a timestamp would be
+    // REFUSED on at least one supported server - this path must not be.
     let affected = session
         .exec_text(
-            "INSERT INTO zm_conf_text (id, ts, tag) VALUES ($1, $2, $3)",
+            &format!("INSERT INTO zm_conf_text (id, ts, tag) VALUES ({p1}, {p2}, {p3})"),
             &[
                 Some("7".to_string()),
-                Some("2026-01-02T03:04:05Z".to_string()),
+                Some(fixture.timestamp_text_param.to_string()),
                 None,
             ],
         )
@@ -264,10 +331,19 @@ async fn check_exec_text_semantics<S: SqlSession>(session: &S) -> Result<(), Con
         ));
     }
     // Read back: the id coerced to int8, the tag is a genuine SQL NULL.
+    // `ts_ok` comes back as an INTEGER 1/0 rather than a boolean: the two servers
+    // do not agree on how a boolean crosses the wire, and the property under test
+    // is the coercion, not the boolean encoding.
+    // `CASE WHEN` rather than a direct cast of the comparison: at least one
+    // supported server has no boolean-to-integer cast, and CASE is understood by
+    // every one of them.
+    let ts_ok_expr = (fixture.as_bigint)(&format!(
+        "CASE WHEN {} THEN 1 ELSE 0 END",
+        (fixture.ts_matches)()
+    ));
     let row = session
         .query_one(
-            "SELECT id, tag, (ts = timestamptz '2026-01-02T03:04:05Z') AS ts_ok \
-             FROM zm_conf_text WHERE id = 7",
+            &format!("SELECT id, tag, {ts_ok_expr} AS ts_ok FROM zm_conf_text WHERE id = 7"),
             &[],
         )
         .await
@@ -288,10 +364,10 @@ async fn check_exec_text_semantics<S: SqlSession>(session: &S) -> Result<(), Con
             format!("None text param did not become SQL NULL (got {tag:?})"),
         ));
     }
-    let ts_ok: bool = row
+    let ts_ok: i64 = row
         .try_get("ts_ok")
-        .map_err(|e| fail(CHECK, format!("decode ts coercion bool: {e}")))?;
-    if !ts_ok {
+        .map_err(|e| fail(CHECK, format!("decode ts coercion flag: {e}")))?;
+    if ts_ok != 1 {
         return Err(fail(
             CHECK,
             "the text `ts` param did not coerce to the expected timestamptz value",
@@ -299,12 +375,12 @@ async fn check_exec_text_semantics<S: SqlSession>(session: &S) -> Result<(), Con
     }
     // Also assert `exec` (typed binds) round-trips a NULL Bind on a text column -
     // the exact shape the shipped `exec` path binds a NULL (a nullable text
-    // `last_cursor`, `backfill.rs`), never against a timestamptz (that path is
-    // `exec_text`). A `Bind::Null` must land as a SQL NULL and read back as
+    // `last_cursor`, `backfill.rs`), never against a timestamp column (that path
+    // is `exec_text`). A `Bind::Null` must land as a SQL NULL and read back as
     // `Option::None`.
     let n = session
         .exec(
-            "INSERT INTO zm_conf_text (id, ts, tag) VALUES ($1, now(), $2)",
+            &format!("INSERT INTO zm_conf_text (id, ts, tag) VALUES ({p1}, now(), {p2})"),
             &[Bind::Int(8), Bind::Null],
         )
         .await
@@ -340,12 +416,14 @@ async fn check_exec_text_semantics<S: SqlSession>(session: &S) -> Result<(), Con
 
 /// Check 4 - error + SQLSTATE mapping: a statement that fails at the server
 /// surfaces a [`DbError`] with a non-empty message and (when the driver carries it)
-/// the real Postgres SQLSTATE. A driver that swallows the error, or stringifies a
+/// the real server SQLSTATE. A driver that swallows the error, or stringifies a
 /// panic, fails here.
 async fn check_error_sqlstate_mapping<S: SqlSession>(
     session: &S,
+    fixture: &SeamFixture,
 ) -> Result<(), ConformanceFailure> {
     const CHECK: &str = "error-sqlstate-mapping";
+    let want_state = fixture.undefined_table_sqlstate;
     // A deliberate undefined-table error (SQLSTATE 42P01). It runs OUTSIDE any txn
     // so it does not poison the session.
     let err: DbError = match session
@@ -364,22 +442,22 @@ async fn check_error_sqlstate_mapping<S: SqlSession>(
     if err.message.trim().is_empty() {
         return Err(fail(CHECK, "the DbError carried an empty message"));
     }
-    // The SQLSTATE is optional in the seam, but a Postgres driver that surfaces one
+    // The SQLSTATE is optional in the seam, but a driver that surfaces one
     // MUST surface the real code. 42P01 = undefined_table. We accept either "the
     // driver carries no sqlstate" (message-only is a valid seam contract) or "it
     // carries the correct one" - but a WRONG non-empty sqlstate is a bug.
     if let Some(state) = &err.sqlstate {
-        if state != "42P01" {
+        if state != want_state {
             return Err(fail(
                 CHECK,
-                format!("expected SQLSTATE 42P01 (undefined_table), got {state:?}"),
+                format!("expected SQLSTATE {want_state} (undefined_table), got {state:?}"),
             ));
         }
     }
     // Prove the session is still usable after the error (the driver did not wedge
     // the pinned connection): a trivial query still runs and decodes.
     let alive = session
-        .query_one("SELECT 1::int8 AS one", &[])
+        .query_one(&format!("SELECT {} AS one", (fixture.as_bigint)("1")), &[])
         .await
         .map_err(|e| {
             fail(
