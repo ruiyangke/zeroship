@@ -985,7 +985,7 @@ pub async fn status_ir_with_locked_backend<B: MigrationBackend>(
         .map_err(|error| error.to_string())?;
         // The state apply and rollback both refuse over. Status reporting a clean
         // project while they refuse leaves the operator with a contradiction and
-        // nothing to act on, so it is read here and carried in the reply (F661).
+        // nothing to act on, so it is read here and carried in the reply.
         // The hook returns nothing on the dialects that cannot leave the marker.
         // The seam hands back each marker WITH the owning backend's instruction for
         // clearing it. This reply carries versions only, so the instruction is dropped

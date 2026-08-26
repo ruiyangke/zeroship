@@ -23,10 +23,10 @@
 //! a separate `Op::CreateDomain`. The resolution has to happen where the op stream is in
 //! scope, so the fold behind the `FieldDef` map does it through the same
 //! `NamedTypeRegistry` the DDL lower and the snapshot fold already use. (That was
-//! `fold_to_field_defs`'s registry until step 4 consumer 3 of
-//! `docs/proposals/single-fold-and-effects.md` deleted the walker; the registry is
-//! carried on `FoldedSchema` now and `project_field_defs` reads it, so the claim - one
-//! registry, three resolvers, no fourth opinion - is unchanged and is in fact stronger.)
+//! `fold_to_field_defs`'s registry until `docs/proposals/single-fold-and-effects.md`
+//! deleted the walker; the registry is carried on `FoldedSchema` now and
+//! `project_field_defs` reads it, so the claim - one registry, three resolvers, no
+//! fourth opinion - is unchanged and is in fact stronger.)
 //!
 //! WHAT IS ASSERTED. Content, never `ok`: a column silently described as text also
 //! returns `ok=true`, which is exactly how this shipped. The controls carry the weight:

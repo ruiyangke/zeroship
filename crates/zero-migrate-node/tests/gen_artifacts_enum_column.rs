@@ -11,7 +11,7 @@
 //! given `&IrColumn` alone can populate `enum_values`; the members have to be
 //! resolved from the op stream, which is what the fold behind the `FieldDef` map does
 //! through the same `NamedTypeRegistry` the DDL lower and the snapshot fold resolve them
-//! through. (That was `fold_to_field_defs`'s registry until step 4 consumer 3 of
+//! through. (That was `fold_to_field_defs`'s registry until
 //! `docs/proposals/single-fold-and-effects.md` deleted the walker; the registry is
 //! carried on `FoldedSchema` now and `project_field_defs` reads it.)
 //!

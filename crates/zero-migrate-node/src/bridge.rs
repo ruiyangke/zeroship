@@ -227,8 +227,7 @@ pub fn preview_sql(source: PreviewSqlSource) -> Result<Vec<String>> {
     // the same way apply lowers them. Rendering every envelope against an empty
     // schema is what let `lint` report ok on a backfill whose cursor column is
     // declared by a `createTable` two files earlier and whose type `apply` then
-    // refuses (F653): the rule was never unreachable, the column simply was not
-    // in view.
+    // refuses: the rule was never unreachable, the column simply was not in view.
     //
     // A fold that fails is NOT fatal here. This is an offline preview, and an op
     // the folder cannot model must not cost the operator the whole listing - the
@@ -736,11 +735,11 @@ pub fn apply_ir_sqlite(
             // path drops them. `SqliteBackend::pending_contracts` returns `None`
             // (`zero-migrate-sqlite`'s `backend/mod.rs`): a rebuild rename is one atomic
             // offline step, so no obligation is ever opened. The networked verb
-            // reaches the same value by asking - `None => Vec::new()` at
-            // verbs.rs:296 - so the two replies agree today.
+            // reaches the same value by asking - the `None => Vec::new()` arm in
+            // `verbs::apply_ir_with_locked_backend` - so the two replies agree today.
             //
             // They agree by coincidence of the answer, not by sharing the question.
-            // Giving SQLite a contract partition would make verbs.rs report them and
+            // Giving SQLite a contract partition would make that verb report them and
             // leave this constant silently empty, so that change has to reach here.
             pending_contracts: Vec::new(),
         })
@@ -1250,7 +1249,7 @@ pub fn history(
 /// The operational advisories the analyzer finds in an envelope set's lowered
 /// DDL, attributed to the statement that raised each one.
 ///
-/// F650. The engine already computed these and threw them away: `analyze`
+/// The engine already computed these and threw them away: `analyze`
 /// produces an ACCESS EXCLUSIVE warning for `ALTER TABLE ... ADD CONSTRAINT ...
 /// UNIQUE`, the declarative differ exposes them, and no CLI verb ever read one.
 /// An operator adding a unique column to a populated table took a table-wide
@@ -1281,7 +1280,7 @@ pub fn advisories_for(source: PreviewSqlSource) -> Result<Vec<AdvisoryDto>> {
 
     let mut out = Vec::new();
 
-    // F657. The analyzer parses PostgreSQL. MySQL renders identifiers with
+    // The analyzer parses PostgreSQL. MySQL renders identifiers with
     // backticks, which is not valid PostgreSQL, so every statement fails to parse
     // and the analyzer returns an empty vector - for SQL THIS ENGINE EMITS and is
     // about to run. The result was a clean advisory report on MySQL that meant

@@ -79,8 +79,8 @@ const DROP_ACTIVE_USERS: &str = r#"{"ir_version":1,"name":"drop_active_users","o
 
 /// The table the multi-step data migration below writes into.
 ///
-/// This used to be one envelope carrying the createTable AND the insert. F656
-/// retired that shape: DDL and DML may no longer share an op list, so the fixture
+/// This used to be one envelope carrying the createTable AND the insert. That
+/// shape is retired: DDL and DML may no longer share an op list, so the fixture
 /// has to reach a multi-step plan a way an author could actually write.
 const CREATE_SEEDS: &str = r#"{"ir_version":1,"name":"create_seeds","ops":[
     {"op":"createTable","name":"seeds","columns":[

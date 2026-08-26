@@ -430,7 +430,7 @@ mod tests {
 
     #[test]
     fn gen_artifacts_from_raw_author_only_envelope_injects_system_fields_and_indexes() {
-        // WALL 1 regression: the pure-JS recorder emits RAW author-only createTable ops
+        // Regression: the pure-JS recorder emits RAW author-only createTable ops
         // (NO system columns). `gen_artifacts_from_envelopes` MUST resolve the confined
         // policy shape before folding - otherwise the generated descriptor is
         // missing it entirely. Pre-fix this path fed the raw ops straight to
