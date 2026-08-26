@@ -731,6 +731,15 @@ pub struct StartReplicationOptions<'a> {
     /// pgoutput protocol version. This decoder supports versions 1 through 4:
     /// `2` adds streaming, `3` adds two-phase transactions, and `4` adds
     /// parallel streaming.
+    ///
+    /// A protocol version is not the same thing as a SERVER version, and the
+    /// server is the one that refuses. Version 4 needs PostgreSQL 16 or newer:
+    /// measured 2026-08-25, `streaming 'parallel'` on 15.19 answers
+    /// `streaming requires a Boolean value` - its pgoutput takes only a
+    /// boolean there - while 16.14 understands the word and objects instead
+    /// that the proto version is too low. Nothing here downgrades an option
+    /// the server cannot take; the request goes as written and the server's
+    /// refusal reaches the caller unchanged.
     pub proto_version: u32,
     /// The publications to stream, one name per element, unquoted and
     /// unescaped as the user wrote them. This driver quotes each one.
@@ -831,6 +840,11 @@ impl Streaming {
 /// The server's default is [`OriginFilter::Any`]; a bidirectional setup sets
 /// [`OriginFilter::None`] so a change this node received from a peer is not
 /// echoed straight back to it.
+///
+/// REQUIRES PostgreSQL 16 OR NEWER. The `origin` pgoutput option does not
+/// exist before it: measured 2026-08-25, 15.19 answers `unrecognized pgoutput
+/// option: origin` and the stream never starts. Setting this against an older
+/// server is refused by the server, not quietly ignored here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OriginFilter {
     /// `any` - every change, whatever origin it came from.
