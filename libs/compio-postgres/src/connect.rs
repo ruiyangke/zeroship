@@ -870,6 +870,39 @@ mod tests {
     }
 
     #[test]
+    fn a_whole_empty_host_list_is_unset_but_empty_list_slots_are_positional() {
+        let hostaddr_unset = "host=first.example,second.example hostaddr=''"
+            .parse::<Config>()
+            .expect("a whole-empty hostaddr value is unset");
+        assert!(hostaddr_unset.get_hostaddrs().is_empty());
+        let host_endpoints = endpoints(&hostaddr_unset).expect("both hosts remain usable");
+        assert_eq!(host_endpoints.len(), 2);
+        assert!(matches!(
+            &host_endpoints[0].target,
+            EndpointTarget::Name(host) if host == "first.example"
+        ));
+        assert!(matches!(
+            &host_endpoints[1].target,
+            EndpointTarget::Name(host) if host == "second.example"
+        ));
+
+        let host_unset = "host='' hostaddr=127.0.0.1,127.0.0.2"
+            .parse::<Config>()
+            .expect("a whole-empty host value is unset");
+        assert!(host_unset.get_hosts().is_empty());
+        let address_endpoints = endpoints(&host_unset).expect("both addresses remain usable");
+        assert_eq!(address_endpoints.len(), 2);
+        assert!(matches!(
+            address_endpoints[0].target,
+            EndpointTarget::Ip(ip) if ip == "127.0.0.1".parse::<IpAddr>().unwrap()
+        ));
+        assert!(matches!(
+            address_endpoints[1].target,
+            EndpointTarget::Ip(ip) if ip == "127.0.0.2".parse::<IpAddr>().unwrap()
+        ));
+    }
+
+    #[test]
     fn empty_host_uses_hostaddr_for_tls_and_passfile_identity() {
         let config = "host='' hostaddr=127.0.0.3"
             .parse::<Config>()
@@ -905,7 +938,7 @@ mod tests {
             source = cause.source();
         }
         assert!(
-            text.contains("hostaddr entry 1") && text.contains("compiled default Unix socket"),
+            text.contains("both host and hostaddr are missing"),
             "the intentional default-host refusal was not clear: {text}"
         );
     }
