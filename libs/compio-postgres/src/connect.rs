@@ -28,8 +28,11 @@ use crate::tls::MakeTlsConnect;
 use crate::{Config, Error, Socket};
 use compio::net::ToSocketAddrsAsync;
 use rand::seq::SliceRandom;
+use std::borrow::Cow;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
@@ -78,16 +81,17 @@ impl Endpoint {
 
     /// The hostname this endpoint is spelled with in a password file.
     ///
-    /// A Unix socket matches as `localhost` rather than as its socket path. A
-    /// bare `hostaddr` with no name matches as the ADDRESS - measured against
-    /// libpq 16.14, where a file keyed by the IP was used and one keyed by
-    /// `localhost` was not.
-    fn passfile_host(&self) -> String {
+    /// An explicitly named Unix socket matches its path. A bare `hostaddr`
+    /// with no name matches as the ADDRESS.
+    fn passfile_host(&self) -> Vec<u8> {
         match &self.target {
             #[cfg(unix)]
-            EndpointTarget::Unix(_) => passfile::UNIX_SOCKET_HOST.to_owned(),
-            EndpointTarget::Name(host) => host.clone(),
-            EndpointTarget::Ip(ip) => self.hostname.clone().unwrap_or_else(|| ip.to_string()),
+            EndpointTarget::Unix(path) => unix_passfile_host(path),
+            EndpointTarget::Name(host) => host.as_bytes().to_vec(),
+            EndpointTarget::Ip(ip) => self.hostname.as_ref().map_or_else(
+                || ip.to_string().into_bytes(),
+                |host| host.as_bytes().to_vec(),
+            ),
         }
     }
 
@@ -128,10 +132,35 @@ impl Endpoint {
     }
 }
 
+#[cfg(unix)]
+fn unix_passfile_host(path: &Path) -> Vec<u8> {
+    #[cfg(target_os = "linux")]
+    if let Some(name) = path.as_os_str().as_bytes().strip_prefix(&[0]) {
+        let mut host = Vec::with_capacity(name.len() + 1);
+        host.push(b'@');
+        host.extend_from_slice(name);
+        return host;
+    }
+
+    path.as_os_str().as_bytes().to_vec()
+}
+
 /// Validate and enumerate the configured host entries once for every
 /// connection path.
 pub(crate) fn endpoints(config: &Config) -> Result<Vec<Endpoint>, Error> {
     config.validate_connection_settings()?;
+
+    #[cfg(not(target_os = "linux"))]
+    if config
+        .get_hosts()
+        .iter()
+        .any(|host| matches!(host, Host::Tcp(name) if name.starts_with('@')))
+    {
+        return Err(Error::config(
+            "host values beginning with `@` require abstract Unix sockets, which this target does not implement"
+                .into(),
+        ));
+    }
 
     // A DIVERGENCE FROM libpq, and a deliberate one. `postgres:///db` parses
     // here exactly as it does there, but libpq then connects over a
@@ -171,22 +200,34 @@ pub(crate) fn endpoints(config: &Config) -> Result<Vec<Endpoint>, Error> {
         indices.shuffle(&mut rand::rng());
     }
 
-    Ok(indices
+    indices
         .into_iter()
-        .map(|i| {
+        .map(|i| -> Result<Endpoint, Error> {
             let host = config.get_hosts().get(i);
             let hostname = match host {
-                Some(Host::Tcp(host)) => Some(host.clone()),
+                Some(Host::Tcp(host)) if !host.is_empty() => Some(host.clone()),
+                Some(Host::Tcp(_)) => None,
                 #[cfg(unix)]
                 Some(Host::Unix(_)) => None,
                 None => None,
             };
-            let target = match config.get_hostaddrs().get(i) {
-                Some(ip) => EndpointTarget::Ip(*ip),
-                None => match host.expect("one of host / hostaddr is present at this index") {
-                    Host::Tcp(host) => EndpointTarget::Name(host.clone()),
+            let target = match config.get_hostaddrs().get(i).copied().flatten() {
+                Some(ip) => EndpointTarget::Ip(ip),
+                None => match host {
+                    Some(Host::Tcp(host)) if !host.is_empty() => {
+                        EndpointTarget::Name(host.clone())
+                    }
+                    Some(Host::Tcp(_)) | None => {
+                        return Err(Error::config(
+                            format!(
+                                "host and hostaddr entry {} are both empty; this driver does not infer libpq's compiled default Unix socket directory",
+                                i + 1
+                            )
+                            .into(),
+                        ));
+                    }
                     #[cfg(unix)]
-                    Host::Unix(path) => EndpointTarget::Unix(path.clone()),
+                    Some(Host::Unix(path)) => EndpointTarget::Unix(path.clone()),
                 },
             };
             let port = config
@@ -196,13 +237,13 @@ pub(crate) fn endpoints(config: &Config) -> Result<Vec<Endpoint>, Error> {
                 .copied()
                 .unwrap_or(5432);
 
-            Endpoint {
+            Ok(Endpoint {
                 target,
                 hostname,
                 port,
-            }
+            })
         })
-        .collect())
+        .collect()
 }
 
 pub(crate) async fn with_connect_timeout<T, F>(
@@ -248,7 +289,7 @@ where
     let target = config.get_target_session_attrs();
 
     if target == TargetSessionAttrs::PreferStandby {
-        if let Ok(connected) = connect_pass(
+        let first_pass_error = match connect_pass(
             &endpoints,
             resolver,
             &mut tls,
@@ -257,7 +298,17 @@ where
         )
         .await
         {
-            return Ok(connected);
+            Ok(connected) => return Ok(connected),
+            Err(error) => error,
+        };
+
+        // `prefer-standby` starts its any-host pass only after the standby
+        // search exhausts retryable connection failures and target
+        // mismatches. A completed startup/authentication failure is terminal
+        // for the whole connection request, just as it is for every other
+        // target_session_attrs value.
+        if stops_host_walk(&first_pass_error) {
+            return Err(first_pass_error);
         }
 
         return connect_pass(
@@ -271,6 +322,32 @@ where
     }
 
     connect_pass(&endpoints, resolver, &mut tls, config, target).await
+}
+
+/// PostgreSQL's one server-side exception to terminal startup errors.
+///
+/// SQLSTATE 57P03 means that this server is temporarily unable to accept a
+/// connection. libpq advances directly to the next CONFIGURED HOST, skipping
+/// sibling addresses and alternate encryption methods for the current host.
+fn advances_to_next_host(error: &Error) -> bool {
+    error.code() == Some(&crate::error::SqlState::CANNOT_CONNECT_NOW)
+}
+
+/// Whether an error ends the entire configured-host walk.
+///
+/// A target-session SQL/result rejection is the exception among database
+/// errors: libpq advances to the next configured host for that classification.
+/// Failure to communicate during the same probe is globally terminal.
+fn stops_host_walk(error: &Error) -> bool {
+    if error.is_target_session_attrs() {
+        return false;
+    }
+
+    error.is_target_session_attrs_fatal()
+        || error.is_authentication()
+        || error
+            .code()
+            .is_some_and(|code| code != &crate::error::SqlState::CANNOT_CONNECT_NOW)
 }
 
 async fn connect_pass<T, R>(
@@ -289,11 +366,12 @@ where
         // The password file is keyed on host, port, database and user, so it
         // is consulted PER ENDPOINT: failover to a different host or port can
         // legitimately select a different line. libpq does the same.
-        let from_passfile = password_from_passfile(config, endpoint);
+        let from_passfile = password_from_passfile(config, endpoint)?;
         let config = from_passfile.as_ref().unwrap_or(config);
 
         match connect_host(endpoint, resolver, tls, config, target_session_attrs).await {
             Ok((client, connection)) => return Ok((client, connection)),
+            Err(e) if stops_host_walk(&e) => return Err(e),
             Err(e) => error = Some(e),
         }
     }
@@ -309,35 +387,46 @@ where
 /// matches. None of those is an error - libpq lets authentication fail on its
 /// own terms rather than refusing to connect, and a driver that raised here
 /// would reject setups libpq accepts.
-fn password_from_passfile(config: &Config, endpoint: &Endpoint) -> Option<Config> {
+///
+/// Resolving libpq's default operating-system user can fail; that is returned
+/// as an error, just as it is when startup resolves the same default.
+fn password_from_passfile(config: &Config, endpoint: &Endpoint) -> Result<Option<Config>, Error> {
     if config.get_password().is_some() {
-        return None;
+        return Ok(None);
     }
 
     // Only an explicitly configured file. libpq would fall back to
     // `$PGPASSFILE` and `~/.pgpass`; resolving those is the caller's job, for
     // the reason `passfile.rs` gives at length.
-    let path = Path::new(config.get_passfile()?);
-    let user = config.get_user()?;
+    let Some(path) = config.get_passfile() else {
+        return Ok(None);
+    };
+    let path = Path::new(path);
+    let user = match config.get_user() {
+        Some(user) => Cow::Borrowed(user),
+        None => Cow::Owned(whoami::username().map_err(|error| Error::io(error.into()))?),
+    };
     // libpq defaults the database to the user, and matches the file on the
     // database it will actually connect to.
-    let dbname = config.get_dbname().unwrap_or(user);
+    let dbname = config.get_dbname().unwrap_or(&user);
     let host = endpoint.passfile_host();
     let port = endpoint.port().to_string();
 
-    let password = passfile::lookup(
+    let Some(password) = passfile::lookup(
         path,
         passfile::PassfileKey {
             host: &host,
             port: &port,
             dbname,
-            user,
+            user: &user,
         },
-    )?;
+    ) else {
+        return Ok(None);
+    };
 
     let mut with_password = config.clone();
     with_password.password(password);
-    Some(with_password)
+    Ok(Some(with_password))
 }
 
 /// One configured host entry: resolve it, then try each address it denotes
@@ -402,7 +491,14 @@ where
             // libpq treats the role as a property of this configured host: a
             // mismatch advances to the next host instead of trying another
             // address returned for this one.
-            Err(e) if e.is_target_session_attrs() => return Err(e),
+            Err(e)
+                if e.is_target_session_attrs()
+                    || e.is_target_session_attrs_fatal()
+                    || advances_to_next_host(&e)
+                    || stops_host_walk(&e) =>
+            {
+                return Err(e);
+            }
             Err(e) => {
                 last_err = Some(e);
             }
@@ -422,6 +518,17 @@ pub(crate) fn first_encryption_for_addr(addr: &Addr, mode: SslMode) -> Encryptio
         #[cfg(unix)]
         Addr::Unix(_) => Encryption::Plaintext,
     }
+}
+
+/// The name passed to a TLS backend for verification and SNI configuration.
+/// A hostaddr-only endpoint uses its IP address; `has_hostname` remains a
+/// separate policy bit so `verify-full` can still require an actual `host`.
+pub(crate) fn tls_server_name(addr: &Addr, hostname: Option<&str>) -> String {
+    hostname.map(str::to_owned).unwrap_or_else(|| match addr {
+        Addr::Tcp(ip) => ip.to_string(),
+        #[cfg(unix)]
+        Addr::Unix(_) => String::new(),
+    })
 }
 
 /// One address, with libpq's transport ordering and its reconnect.
@@ -493,11 +600,19 @@ where
         Err(e) => e,
     };
 
-    // A completed target-session probe that proves the endpoint does not meet
-    // the requirement is not a reason for `sslmode=allow` to reopen that same
-    // endpoint over TLS. Transport and protocol failures during the probe keep
-    // their original kinds and reach the normal retry policy below.
-    if err.is_target_session_attrs() {
+    // Four failure classes bypass `sslmode=allow`'s alternate TLS leg. A
+    // target-session SQL/result rejection advances to the next configured
+    // host, while a communication failure during that probe ends the whole
+    // request. SQLSTATE 57P03 advances directly to the next configured host.
+    // A local authentication failure goes straight to libpq's error_return
+    // path. Other startup ErrorResponses do NOT appear here: libpq may retry
+    // those under a different encryption method before treating the final
+    // result as terminal, and the policy below preserves that behavior.
+    if err.is_target_session_attrs()
+        || err.is_target_session_attrs_fatal()
+        || advances_to_next_host(&err)
+        || err.is_authentication()
+    {
         return Err(err);
     }
 
@@ -587,8 +702,9 @@ where
     )
     .await?;
 
+    let server_name = tls_server_name(&addr, hostname);
     let tls = tls
-        .make_tls_connect(hostname.unwrap_or(""))
+        .make_tls_connect(&server_name)
         .map_err(|e| Error::tls(e.into()))?;
     let has_hostname = hostname.is_some();
     // Taken while the socket is still a `Socket` - `connect_raw` is generic
@@ -653,6 +769,7 @@ mod tests {
     use std::error::Error as _;
     use std::future;
     use std::net::SocketAddr;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     const SSL_REQUEST_CODE: u32 = 80_877_103;
@@ -672,14 +789,208 @@ mod tests {
         script
     }
 
+    #[test]
+    fn passfile_uses_the_default_os_user_and_database() {
+        use std::io::Write as _;
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let user = whoami::username().expect("look up the operating-system user");
+        let mut passfile = tempfile::NamedTempFile::new().expect("create a password file");
+        writeln!(passfile, "127.0.0.1:5432:{user}:{user}:from-passfile")
+            .expect("write the password file");
+        #[cfg(unix)]
+        std::fs::set_permissions(passfile.path(), std::fs::Permissions::from_mode(0o600))
+            .expect("make the password file private");
+
+        let mut config = Config::new();
+        config.passfile(passfile.path().to_string_lossy());
+        let endpoint = Endpoint {
+            target: EndpointTarget::Ip("127.0.0.1".parse().unwrap()),
+            hostname: None,
+            port: 5432,
+        };
+
+        let with_password = password_from_passfile(&config, &endpoint)
+            .expect("look up the effective operating-system user")
+            .expect("the effective user and database match the passfile");
+        assert_eq!(
+            with_password.get_password(),
+            Some(b"from-passfile".as_slice())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn passfile_uses_an_explicit_unix_socket_path_as_the_host() {
+        let mut config = Config::new();
+        config.host_path("/custom/postgresql-sockets");
+        let endpoint = endpoints(&config)
+            .expect("an explicit Unix socket is an endpoint")
+            .pop()
+            .expect("one Unix endpoint");
+
+        assert_eq!(
+            endpoint.passfile_host(),
+            b"/custom/postgresql-sockets",
+            "only libpq's compiled-default socket directory maps to localhost"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn passfile_preserves_non_utf8_unix_socket_host_bytes() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let raw_host = b"/custom/postgresql-\xff";
+        let mut config = Config::new();
+        config.host_path(OsString::from_vec(raw_host.to_vec()));
+        let endpoint = endpoints(&config)
+            .expect("a non-UTF-8 Unix socket is an endpoint")
+            .pop()
+            .expect("one Unix endpoint");
+
+        assert_eq!(
+            endpoint.passfile_host(),
+            raw_host,
+            "passfile matching must use the original Unix socket path bytes"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn passfile_preserves_an_abstract_unix_socket_name() {
+        let config = "host=@passfile-cluster"
+            .parse::<Config>()
+            .expect("parse abstract Unix socket");
+        let endpoint = endpoints(&config)
+            .expect("an abstract Unix socket is an endpoint")
+            .pop()
+            .expect("one abstract endpoint");
+
+        assert_eq!(endpoint.passfile_host(), b"@passfile-cluster");
+    }
+
+    #[test]
+    fn empty_hostaddr_slots_fall_back_to_the_corresponding_hosts() {
+        let config = "host=first.example,second.example hostaddr=,127.0.0.2"
+            .parse::<Config>()
+            .expect("empty hostaddr slots are positional defaults");
+        assert_eq!(
+            config.get_hostaddrs(),
+            [None, Some("127.0.0.2".parse().unwrap())]
+        );
+
+        let endpoints = endpoints(&config).expect("build the two positional endpoints");
+        assert_eq!(endpoints.len(), 2);
+        assert!(matches!(
+            &endpoints[0].target,
+            EndpointTarget::Name(host) if host == "first.example"
+        ));
+        assert_eq!(endpoints[0].hostname(), Some("first.example"));
+        assert!(matches!(
+            endpoints[1].target,
+            EndpointTarget::Ip(ip) if ip == "127.0.0.2".parse::<IpAddr>().unwrap()
+        ));
+        assert_eq!(endpoints[1].hostname(), Some("second.example"));
+    }
+
+    #[test]
+    fn a_whole_empty_host_list_is_unset_but_empty_list_slots_are_positional() {
+        let hostaddr_unset = "host=first.example,second.example hostaddr=''"
+            .parse::<Config>()
+            .expect("a whole-empty hostaddr value is unset");
+        assert!(hostaddr_unset.get_hostaddrs().is_empty());
+        let host_endpoints = endpoints(&hostaddr_unset).expect("both hosts remain usable");
+        assert_eq!(host_endpoints.len(), 2);
+        assert!(matches!(
+            &host_endpoints[0].target,
+            EndpointTarget::Name(host) if host == "first.example"
+        ));
+        assert!(matches!(
+            &host_endpoints[1].target,
+            EndpointTarget::Name(host) if host == "second.example"
+        ));
+
+        let host_unset = "host='' hostaddr=127.0.0.1,127.0.0.2"
+            .parse::<Config>()
+            .expect("a whole-empty host value is unset");
+        assert!(host_unset.get_hosts().is_empty());
+        let address_endpoints = endpoints(&host_unset).expect("both addresses remain usable");
+        assert_eq!(address_endpoints.len(), 2);
+        assert!(matches!(
+            address_endpoints[0].target,
+            EndpointTarget::Ip(ip) if ip == "127.0.0.1".parse::<IpAddr>().unwrap()
+        ));
+        assert!(matches!(
+            address_endpoints[1].target,
+            EndpointTarget::Ip(ip) if ip == "127.0.0.2".parse::<IpAddr>().unwrap()
+        ));
+    }
+
+    #[test]
+    fn empty_host_uses_hostaddr_for_tls_and_passfile_identity() {
+        let config = "host='' hostaddr=127.0.0.3"
+            .parse::<Config>()
+            .expect("an empty host may be paired with hostaddr");
+        let endpoint = endpoints(&config)
+            .expect("hostaddr supplies the network target")
+            .pop()
+            .expect("one endpoint");
+
+        assert!(matches!(
+            &endpoint.target,
+            EndpointTarget::Ip(ip) if *ip == "127.0.0.3".parse::<IpAddr>().unwrap()
+        ));
+        assert_eq!(endpoint.hostname(), None);
+        assert_eq!(endpoint.passfile_host(), b"127.0.0.3");
+    }
+
+    #[test]
+    fn empty_default_host_is_refused_instead_of_resolved_as_an_empty_name() {
+        let config = "host=''"
+            .parse::<Config>()
+            .expect("libpq syntax permits its default host slot");
+        let error = match endpoints(&config) {
+            Ok(_) => panic!("an empty host was sent to DNS instead of being refused"),
+            Err(error) => error,
+        };
+
+        let mut text = error.to_string();
+        let mut source = error.source();
+        while let Some(cause) = source {
+            text.push_str(" | ");
+            text.push_str(&cause.to_string());
+            source = cause.source();
+        }
+        assert!(
+            text.contains("both host and hostaddr are missing"),
+            "the intentional default-host refusal was not clear: {text}"
+        );
+    }
+
     fn refused_handshake() -> Vec<u8> {
         frame(b'E', b"SERROR\0C57P03\0Mscripted refusal\0\0")
+    }
+
+    fn invalid_password_handshake() -> Vec<u8> {
+        frame(
+            b'E',
+            b"SFATAL\0C28P01\0Mscripted authentication failure\0\0",
+        )
+    }
+
+    fn cleartext_password_challenge() -> Vec<u8> {
+        frame(b'R', &3u32.to_be_bytes())
     }
 
     enum ProbeReply {
         Close,
         CloseThenTls(oneshot::Sender<u32>),
+        ErrorThenTls(oneshot::Sender<u32>),
         Stall,
+        TransactionReadOnly(bool),
         Recovery(bool),
     }
 
@@ -755,7 +1066,36 @@ mod tests {
                     result.unwrap();
                     socket.flush().await.unwrap();
                 }
+                ProbeReply::ErrorThenTls(opening_seen) => {
+                    let reply = frame(
+                        b'E',
+                        b"SERROR\0CXX000\0Mscripted target-session probe failure\0\0",
+                    );
+                    let compio::BufResult(result, _) = socket.write_all(reply).await;
+                    result.unwrap();
+                    socket.flush().await.unwrap();
+                    drop(socket);
+
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let compio::BufResult(result, opening) = socket.read_exact(vec![0u8; 8]).await;
+                    result.unwrap();
+                    assert_eq!(u32::from_be_bytes(opening[..4].try_into().unwrap()), 8);
+                    let code = u32::from_be_bytes(opening[4..].try_into().unwrap());
+                    let _ = opening_seen.send(code);
+
+                    let compio::BufResult(result, _) = socket.write_all(vec![b'S']).await;
+                    result.unwrap();
+                    socket.flush().await.unwrap();
+                }
                 ProbeReply::Stall => {
+                    let compio::BufResult(_, _) = socket.read(vec![0u8; 1]).await;
+                }
+                ProbeReply::TransactionReadOnly(read_only) => {
+                    let value = if read_only { "on" } else { "off" };
+                    let reply = probe_result(b"transaction_read_only", value, b"SHOW\0");
+                    let compio::BufResult(result, _) = socket.write_all(reply).await;
+                    result.unwrap();
+                    socket.flush().await.unwrap();
                     let compio::BufResult(_, _) = socket.read(vec![0u8; 1]).await;
                 }
                 ProbeReply::Recovery(in_recovery) => {
@@ -1045,6 +1385,21 @@ mod tests {
     /// successful test handshake would be a fixture bug.
     struct HandshakeFailingTls;
 
+    struct RecordingDomainTls {
+        domains: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl<S> MakeTlsConnect<S> for RecordingDomainTls {
+        type Stream = NoTlsStream;
+        type TlsConnect = HandshakeFailingTls;
+        type Error = io::Error;
+
+        fn make_tls_connect(&mut self, domain: &str) -> Result<Self::TlsConnect, Self::Error> {
+            self.domains.lock().unwrap().push(domain.to_owned());
+            Ok(HandshakeFailingTls)
+        }
+    }
+
     impl<S> MakeTlsConnect<S> for HandshakeFailingTls {
         type Stream = NoTlsStream;
         type TlsConnect = HandshakeFailingTls;
@@ -1063,6 +1418,38 @@ mod tests {
         fn connect(self, _stream: S) -> Self::Future {
             future::ready(Err(io::Error::other("scripted TLS handshake failure")))
         }
+    }
+
+    #[compio::test]
+    async fn hostaddr_only_tls_uses_the_ip_as_the_connector_server_name() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = compio::runtime::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let compio::BufResult(result, _) = socket.read_exact(vec![0u8; 8]).await;
+            if result.is_ok() {
+                let compio::BufResult(result, _) = socket.write_all(vec![b'S']).await;
+                result.unwrap();
+                socket.flush().await.unwrap();
+            }
+        });
+
+        let mut config = Config::new();
+        config
+            .user("scripted-user")
+            .hostaddr(addr.ip())
+            .port(addr.port())
+            .ssl_mode(SslMode::Require)
+            .connect_timeout(Duration::from_secs(2));
+        let domains = Arc::new(Mutex::new(Vec::new()));
+        let outcome = config
+            .connect(RecordingDomainTls {
+                domains: domains.clone(),
+            })
+            .await;
+        assert!(outcome.is_err(), "the scripted TLS handshake must fail");
+        assert_eq!(domains.lock().unwrap().as_slice(), [addr.ip().to_string()]);
+        server.await.expect("scripted server panicked");
     }
 
     fn config_for(addr: SocketAddr, connect_timeout: Duration) -> Config {
@@ -1263,44 +1650,132 @@ mod tests {
     }
 
     #[compio::test]
-    async fn allow_retries_tls_after_probe_transport_failure() {
-        let (tls_seen, tls_observed) = oneshot::channel();
-        let (addr, query_observed) =
-            scripted_probe_server(ProbeReply::CloseThenTls(tls_seen)).await;
+    async fn probe_sql_error_skips_transport_and_address_before_next_host() {
+        let (tls_seen, mut tls_observed) = oneshot::channel();
+        let (first, first_query_observed) =
+            scripted_probe_server(ProbeReply::ErrorThenTls(tls_seen)).await;
+        let sibling_bind = SocketAddr::from(([127, 0, 0, 2], first.port()));
+        let (sibling, mut sibling_startup_observed) =
+            scripted_server_bound(sibling_bind, Some(successful_handshake())).await;
+        let (second, second_query_observed) =
+            scripted_probe_server(ProbeReply::TransactionReadOnly(false)).await;
+
         let mut config = Config::new();
         config
             .user("scripted-user")
-            .host("localhost")
-            .hostaddr(addr.ip())
-            .port(addr.port())
+            .host("probe-error.example")
+            .host("healthy.example")
+            .port(first.port())
+            .port(second.port())
             .ssl_mode(SslMode::Allow)
-            .target_session_attrs(TargetSessionAttrs::ReadWrite);
+            .target_session_attrs(TargetSessionAttrs::ReadWrite)
+            .connect_timeout(Duration::from_secs(2));
+        let mut resolver = ProbeRoutingResolver {
+            first: vec![first, sibling],
+            second: vec![second],
+        };
 
-        let connect =
-            compio::runtime::spawn(async move { config.connect(HandshakeFailingTls).await });
+        let connected = compio::time::timeout(
+            Duration::from_secs(5),
+            connect_with_resolver(HandshakeFailingTls, &config, &mut resolver),
+        )
+        .await
+        .expect("the probe SQL error host walk hung")
+        .expect("a probe SQL error did not advance to the healthy configured host");
+
+        assert_eq!(
+            first_query_observed
+                .await
+                .expect("the first host closed without receiving the probe"),
+            b"SHOW transaction_read_only\0"
+        );
+        assert_eq!(
+            second_query_observed
+                .await
+                .expect("the healthy host closed without receiving the probe"),
+            b"SHOW transaction_read_only\0"
+        );
+        assert!(
+            tls_observed
+                .try_recv()
+                .expect("the first-host fixture disappeared")
+                .is_none(),
+            "a probe SQL error retried another transport on the same address"
+        );
+        assert!(
+            sibling_startup_observed
+                .try_recv()
+                .expect("the sibling-address fixture disappeared")
+                .is_none(),
+            "a probe SQL error retried another address for the same configured host"
+        );
+        drop(connected);
+    }
+
+    #[compio::test]
+    async fn probe_transport_failure_stops_every_retry_path() {
+        let (tls_seen, mut tls_observed) = oneshot::channel();
+        let (first, query_observed) =
+            scripted_probe_server(ProbeReply::CloseThenTls(tls_seen)).await;
+        let sibling_bind = SocketAddr::from(([127, 0, 0, 2], first.port()));
+        let (sibling, mut sibling_startup_observed) =
+            scripted_server_bound(sibling_bind, Some(successful_handshake())).await;
+        let (second, mut second_query_observed) =
+            scripted_probe_server(ProbeReply::TransactionReadOnly(false)).await;
+        let mut config = Config::new();
+        config
+            .user("scripted-user")
+            .host("broken-probe.example")
+            .host("healthy.example")
+            .port(first.port())
+            .port(second.port())
+            .ssl_mode(SslMode::Allow)
+            .target_session_attrs(TargetSessionAttrs::ReadWrite)
+            .connect_timeout(Duration::from_secs(2));
+        let mut resolver = ProbeRoutingResolver {
+            first: vec![first, sibling],
+            second: vec![second],
+        };
+
+        let result = compio::time::timeout(
+            Duration::from_secs(5),
+            connect_with_resolver(HandshakeFailingTls, &config, &mut resolver),
+        )
+        .await
+        .expect("the probe transport failure host walk hung");
         let query = compio::time::timeout(Duration::from_secs(2), query_observed)
             .await
             .expect("the plaintext target-session probe was never sent")
             .expect("the plaintext connection closed before the target-session probe");
         assert_eq!(query, b"SHOW transaction_read_only\0");
 
-        let opening = compio::time::timeout(Duration::from_secs(2), tls_observed)
-            .await
-            .expect("sslmode=allow did not retry the probe transport failure over TLS")
-            .expect("the TLS retry closed before sending its SSLRequest");
-        assert_eq!(opening, SSL_REQUEST_CODE);
-
-        let result = compio::time::timeout(Duration::from_secs(2), connect)
-            .await
-            .expect("the scripted TLS handshake failure hung connect")
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-        let error = match result {
-            Ok(_) => panic!("the scripted TLS handshake unexpectedly succeeded"),
-            Err(error) => error,
+        let Err(error) = result else {
+            panic!("a probe transport failure advanced to the healthy configured host");
         };
         assert!(
-            error.is_tls_handshake(),
-            "the TLS retry must report its handshake failure: {error:?}"
+            error.is_target_session_attrs_fatal(),
+            "the probe transport failure was not globally terminal: {error:?}"
+        );
+        assert!(
+            tls_observed
+                .try_recv()
+                .expect("the first-host fixture disappeared")
+                .is_none(),
+            "a probe transport failure retried another transport"
+        );
+        assert!(
+            sibling_startup_observed
+                .try_recv()
+                .expect("the sibling-address fixture disappeared")
+                .is_none(),
+            "a probe transport failure retried another address"
+        );
+        assert!(
+            second_query_observed
+                .try_recv()
+                .expect("the healthy-host fixture disappeared")
+                .is_none(),
+            "a probe transport failure retried another configured host"
         );
     }
 
@@ -1389,6 +1864,119 @@ mod tests {
     }
 
     #[compio::test]
+    async fn startup_fatal_stops_the_configured_host_walk() {
+        let (first, first_seen) =
+            scripted_server_after_startup(Some(invalid_password_handshake())).await;
+        let (second, mut second_seen) =
+            scripted_server_after_startup(Some(successful_handshake())).await;
+        let mut config = Config::new();
+        config
+            .user("scripted-user")
+            .hostaddr(first.ip())
+            .hostaddr(second.ip())
+            .port(first.port())
+            .port(second.port())
+            .ssl_mode(SslMode::Disable)
+            .connect_timeout(Duration::from_secs(2));
+
+        let result = compio::time::timeout(Duration::from_secs(5), config.connect(NoTls))
+            .await
+            .expect("the fatal-startup connection hung");
+        let Err(error) = result else {
+            panic!("an authentication FATAL advanced to the healthy second host");
+        };
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("28P01")
+        );
+        first_seen
+            .await
+            .expect("the first host never received StartupMessage");
+        assert!(
+            second_seen
+                .try_recv()
+                .expect("the second-host fixture disappeared")
+                .is_none(),
+            "an authentication FATAL dialled the second configured host"
+        );
+    }
+
+    #[compio::test]
+    async fn client_authentication_failure_stops_the_configured_host_walk() {
+        let (first, first_seen) =
+            scripted_server_after_startup(Some(cleartext_password_challenge())).await;
+        let (second, mut second_seen) =
+            scripted_server_after_startup(Some(successful_handshake())).await;
+        let mut config = Config::new();
+        config
+            .user("scripted-user")
+            .hostaddr(first.ip())
+            .hostaddr(second.ip())
+            .port(first.port())
+            .port(second.port())
+            .ssl_mode(SslMode::Allow)
+            .connect_timeout(Duration::from_secs(2));
+
+        let result = compio::time::timeout(Duration::from_secs(5), config.connect(NoTls))
+            .await
+            .expect("the client-authentication failure hung");
+        let Err(error) = result else {
+            panic!("a missing password advanced to the healthy second host");
+        };
+        assert_eq!(error.to_string(), "authentication error");
+        first_seen
+            .await
+            .expect("the first host never received StartupMessage");
+        assert!(
+            second_seen
+                .try_recv()
+                .expect("the second-host fixture disappeared")
+                .is_none(),
+            "a client-side authentication failure dialled the second configured host"
+        );
+    }
+
+    #[compio::test]
+    async fn prefer_standby_does_not_start_pass_two_after_a_startup_fatal() {
+        let (primary, mut fallback_observed) = scripted_prefer_standby_fallback_server().await;
+        let (fatal, fatal_seen) =
+            scripted_server_after_startup(Some(invalid_password_handshake())).await;
+        let mut config = Config::new();
+        config
+            .user("scripted-user")
+            .hostaddr(primary.ip())
+            .hostaddr(primary.ip())
+            .hostaddr(fatal.ip())
+            .port(primary.port())
+            .port(primary.port())
+            .port(fatal.port())
+            .ssl_mode(SslMode::Disable)
+            .target_session_attrs(TargetSessionAttrs::PreferStandby)
+            .connect_timeout(Duration::from_secs(2));
+
+        let result = compio::time::timeout(Duration::from_secs(5), config.connect(NoTls))
+            .await
+            .expect("the prefer-standby connection walk hung");
+        let Err(error) = result else {
+            panic!("prefer-standby ignored a FATAL and connected during its any-host pass");
+        };
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("28P01")
+        );
+        fatal_seen
+            .await
+            .expect("the fatal endpoint never received StartupMessage");
+        assert!(
+            fallback_observed
+                .try_recv()
+                .expect("the primary-host fixture disappeared")
+                .is_none(),
+            "prefer-standby began its any-host pass after a FATAL"
+        );
+    }
+
+    #[compio::test]
     async fn target_mismatch_skips_other_addresses_for_the_same_host() {
         let (first, first_query_observed) =
             scripted_probe_server(ProbeReply::Recovery(false)).await;
@@ -1447,6 +2035,24 @@ mod tests {
     impl Resolver for ListResolver {
         async fn resolve(&mut self, _host: &str, _port: u16) -> io::Result<Vec<SocketAddr>> {
             Ok(self.0.clone())
+        }
+    }
+
+    struct ProbeRoutingResolver {
+        first: Vec<SocketAddr>,
+        second: Vec<SocketAddr>,
+    }
+
+    impl Resolver for ProbeRoutingResolver {
+        async fn resolve(&mut self, host: &str, _port: u16) -> io::Result<Vec<SocketAddr>> {
+            match host {
+                "probe-error.example" | "broken-probe.example" => Ok(self.first.clone()),
+                "healthy.example" => Ok(self.second.clone()),
+                _ => Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("unexpected scripted host {host}"),
+                )),
+            }
         }
     }
 
@@ -1578,11 +2184,12 @@ mod tests {
         );
     }
 
-    /// A failed first address does not merely make the walk dial address two:
-    /// a healthy second PostgreSQL server must be allowed to win the walk.
+    /// A transport failure on the first address does not merely make the walk
+    /// dial address two: a healthy second PostgreSQL server must be allowed to
+    /// win the walk.
     #[compio::test]
     async fn connect_succeeds_via_second_resolved_address() {
-        let (first, first_seen) = scripted_server_after_startup(Some(refused_handshake())).await;
+        let (first, first_seen) = scripted_server_after_startup(Some(Vec::new())).await;
         let second_bind = SocketAddr::from(([127, 0, 0, 2], first.port()));
         let (second, second_seen) =
             scripted_server_bound(second_bind, Some(successful_handshake())).await;
@@ -1617,6 +2224,69 @@ mod tests {
             "the returned client must record the healthy second address"
         );
         drop((client, connection));
+    }
+
+    #[compio::test]
+    async fn cannot_connect_now_skips_other_addresses_for_the_same_host() {
+        let (first, first_seen) = scripted_server_after_startup(Some(refused_handshake())).await;
+        let second_bind = SocketAddr::from(([127, 0, 0, 2], first.port()));
+        let (_second, mut second_seen) =
+            scripted_server_bound(second_bind, Some(successful_handshake())).await;
+        let mut config = hostname_config_for(first, Duration::from_secs(5));
+        config.ssl_mode(SslMode::Allow);
+        let mut resolver = ListResolver(vec![first, second_bind]);
+
+        let result = compio::time::timeout(
+            Duration::from_secs(10),
+            connect_with_resolver(NoTls, &config, &mut resolver),
+        )
+        .await
+        .expect("the 57P03 address walk hung");
+        let Err(error) = result else {
+            panic!("57P03 advanced to another address for the same host");
+        };
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("57P03")
+        );
+        first_seen
+            .await
+            .expect("the first address never received StartupMessage");
+        assert!(
+            second_seen
+                .try_recv()
+                .expect("the second-address fixture disappeared")
+                .is_none(),
+            "57P03 dialled another address for the same configured host"
+        );
+    }
+
+    #[compio::test]
+    async fn cannot_connect_now_advances_to_the_next_configured_host() {
+        let (first, first_seen) = scripted_server_after_startup(Some(refused_handshake())).await;
+        let (second, second_seen) =
+            scripted_server_after_startup(Some(successful_handshake())).await;
+        let mut config = Config::new();
+        config
+            .user("scripted-user")
+            .hostaddr(first.ip())
+            .hostaddr(second.ip())
+            .port(first.port())
+            .port(second.port())
+            .ssl_mode(SslMode::Allow)
+            .connect_timeout(Duration::from_secs(2));
+
+        let connected = compio::time::timeout(Duration::from_secs(5), config.connect(NoTls))
+            .await
+            .expect("the configured-host failover hung")
+            .expect("57P03 must advance to the next configured host");
+        first_seen
+            .await
+            .expect("the first host never received StartupMessage");
+        second_seen
+            .await
+            .expect("the healthy second host never received StartupMessage");
+        drop(connected);
     }
 
     /// `connect_timeout` restarts for EVERY resolved address, not once per
