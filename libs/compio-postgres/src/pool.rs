@@ -1528,6 +1528,15 @@ impl Pool {
         // connection that is still alive. Closing over the take keeps the
         // temporary inside the closure, which matches `wake_all` collecting into
         // a `Vec` and `return_client` taking the waker as a return value.
+        //
+        // THE WHOLE CLASS WAS SWEPT 2026-08-26, not just this line: every site
+        // that hands control to arbitrary code - the six `wake` calls here and
+        // in `buf_stream.rs`, plus the `before_acquire`/`after_release` hooks -
+        // was checked for a live borrow at the call. This was the only one out
+        // of step, and `buf_stream::wake_reader` already carried the rationale
+        // in as many words ("End the RefCell borrow before invoking an arbitrary
+        // waker"). So the hazard was known and this site simply missed it; a
+        // fix that stopped at one call site would have been the real risk.
         let waker = slot.and_then(|slot| slot.waker.borrow_mut().take());
         if let Some(w) = waker {
             w.wake();
