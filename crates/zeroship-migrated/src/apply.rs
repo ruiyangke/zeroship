@@ -4,14 +4,19 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
-use zeroship_migrate::analysis::analyze::rule::DATA_SECURITY_UNCLASSIFIED_OPS_WARN;
+use zeroship_migrate_backend::advisory::rule::DATA_SECURITY_UNCLASSIFIED_OPS_WARN;
 use zeroship_migrate::apply::journal::DeployRecoveryScope;
 use zeroship_migrate::{
-    migrator_role_name, resolve_create_table_policy, snapshot_schema, Approval, ApprovalScope,
-    DeclarativeApplyError, EngineError, ExecutorConfig, GuardConfig, IrAuthor,
-    LiveSchema, LockMode, MigrationEngine, MigrationIr, PlanStep, PostgresBackend, SealError,
-    SealedPolicy, SqlDialect,
+    resolve_create_table_policy, Approval, ApprovalScope, DeclarativeApplyError, EngineError,
+    ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr,
+    PlanStep, SealError, SealedPolicy,
 };
+// PG-shaped surfaces live in the vendor crate now: the neutrality refactor moved
+// them off the facade, so this PostgreSQL host names PostgreSQL rather than
+// reaching for a re-export that deliberately no longer exists.
+use zeroship_migrate_postgres::confinement::PostgresConfinementExt;
+use zeroship_migrate_postgres::role::migrator_role_name;
+use zeroship_migrate_postgres::{PostgresBackend, DIALECT as POSTGRES};
 use zeroship_migrate_ir::policy_approval::{migration_requires_approval, ApprovalLevel};
 use zeroship_migrate_policy::EffectivePolicy as PdpPolicy;
 use zeroship_migrate_adapter::CompioPgSession;
@@ -1078,7 +1083,7 @@ async fn apply_one_ir_file_postgres(
     // proves green. Non-`createTable` ops pass through untouched.
     let bytes = resolve_shape_bytes(&raw_bytes, policy, project_schema, &file)?;
 
-    let mut author = IrAuthor::new(project_schema, owner_app, SqlDialect::Postgres, policy);
+    let mut author = IrAuthor::new(project_schema, owner_app, POSTGRES, policy);
     if let Some(scope) = guard_cfg.schema_scope() {
         author = author.with_schema_scope(scope);
     }
@@ -1223,7 +1228,7 @@ async fn preflight_ir_documents(
         // so preflight lowers the SAME resolved artifact it will apply (identical
         // version-ids + destructive/approval classification).
         let bytes = resolve_shape_bytes(&raw_bytes, &policy.policy, schema, &file)?;
-        let mut author = IrAuthor::new(schema, schema, SqlDialect::Postgres, &policy.policy);
+        let mut author = IrAuthor::new(schema, schema, POSTGRES, &policy.policy);
         if let Some(scope) = guard_cfg.schema_scope() {
             author = author.with_schema_scope(scope);
         }
@@ -1311,7 +1316,7 @@ async fn preflight_ir_documents(
 /// Build the rendered-DDL guard from the authored no-inject confined charter, bound
 /// to the same exact app schema as the inject-bearing policy used during lower.
 fn guard_config_for_managed(schema: &str) -> GuardConfig {
-    GuardConfig::from_policy(guard_policy_for_managed(schema), SqlDialect::Postgres)
+    GuardConfig::from_policy(guard_policy_for_managed(schema), POSTGRES)
 }
 
 fn guard_policy_for_managed(schema: &str) -> PdpPolicy {

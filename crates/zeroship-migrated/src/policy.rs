@@ -840,7 +840,7 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
         );
         let guard = zeroship_migrate::guard::GuardConfig::from_policy(
             guard_policy,
-            zeroship_migrate::SqlDialect::Postgres,
+            zeroship_migrate_postgres::DIALECT,
         );
         assert_eq!(
             guard.schema_scope(),
