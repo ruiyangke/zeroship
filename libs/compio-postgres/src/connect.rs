@@ -28,6 +28,7 @@ use crate::tls::MakeTlsConnect;
 use crate::{Config, Error, Socket};
 use compio::net::ToSocketAddrsAsync;
 use rand::seq::SliceRandom;
+use std::borrow::Cow;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
@@ -289,7 +290,7 @@ where
         // The password file is keyed on host, port, database and user, so it
         // is consulted PER ENDPOINT: failover to a different host or port can
         // legitimately select a different line. libpq does the same.
-        let from_passfile = password_from_passfile(config, endpoint);
+        let from_passfile = password_from_passfile(config, endpoint)?;
         let config = from_passfile.as_ref().unwrap_or(config);
 
         match connect_host(endpoint, resolver, tls, config, target_session_attrs).await {
@@ -309,35 +310,46 @@ where
 /// matches. None of those is an error - libpq lets authentication fail on its
 /// own terms rather than refusing to connect, and a driver that raised here
 /// would reject setups libpq accepts.
-fn password_from_passfile(config: &Config, endpoint: &Endpoint) -> Option<Config> {
+///
+/// Resolving libpq's default operating-system user can fail; that is returned
+/// as an error, just as it is when startup resolves the same default.
+fn password_from_passfile(config: &Config, endpoint: &Endpoint) -> Result<Option<Config>, Error> {
     if config.get_password().is_some() {
-        return None;
+        return Ok(None);
     }
 
     // Only an explicitly configured file. libpq would fall back to
     // `$PGPASSFILE` and `~/.pgpass`; resolving those is the caller's job, for
     // the reason `passfile.rs` gives at length.
-    let path = Path::new(config.get_passfile()?);
-    let user = config.get_user()?;
+    let Some(path) = config.get_passfile() else {
+        return Ok(None);
+    };
+    let path = Path::new(path);
+    let user = match config.get_user() {
+        Some(user) => Cow::Borrowed(user),
+        None => Cow::Owned(whoami::username().map_err(|error| Error::io(error.into()))?),
+    };
     // libpq defaults the database to the user, and matches the file on the
     // database it will actually connect to.
-    let dbname = config.get_dbname().unwrap_or(user);
+    let dbname = config.get_dbname().unwrap_or(&user);
     let host = endpoint.passfile_host();
     let port = endpoint.port().to_string();
 
-    let password = passfile::lookup(
+    let Some(password) = passfile::lookup(
         path,
         passfile::PassfileKey {
             host: &host,
             port: &port,
             dbname,
-            user,
+            user: &user,
         },
-    )?;
+    ) else {
+        return Ok(None);
+    };
 
     let mut with_password = config.clone();
     with_password.password(password);
-    Some(with_password)
+    Ok(Some(with_password))
 }
 
 /// One configured host entry: resolve it, then try each address it denotes
@@ -670,6 +682,34 @@ mod tests {
         script.extend_from_slice(&frame(b'K', &[0; 8]));
         script.extend_from_slice(&frame(b'Z', b"I"));
         script
+    }
+
+    #[test]
+    fn passfile_uses_the_default_os_user_and_database() {
+        use std::io::Write as _;
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let user = whoami::username().expect("look up the operating-system user");
+        let mut passfile = tempfile::NamedTempFile::new().expect("create a password file");
+        writeln!(passfile, "127.0.0.1:5432:{user}:{user}:from-passfile")
+            .expect("write the password file");
+        #[cfg(unix)]
+        std::fs::set_permissions(passfile.path(), std::fs::Permissions::from_mode(0o600))
+            .expect("make the password file private");
+
+        let mut config = Config::new();
+        config.passfile(passfile.path().to_string_lossy());
+        let endpoint = Endpoint {
+            target: EndpointTarget::Ip("127.0.0.1".parse().unwrap()),
+            hostname: None,
+            port: 5432,
+        };
+
+        let with_password = password_from_passfile(&config, &endpoint)
+            .expect("look up the effective operating-system user")
+            .expect("the effective user and database match the passfile");
+        assert_eq!(with_password.get_password(), Some(b"from-passfile".as_slice()));
     }
 
     fn refused_handshake() -> Vec<u8> {
