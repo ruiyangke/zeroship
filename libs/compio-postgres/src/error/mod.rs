@@ -546,6 +546,12 @@ impl Error {
         self.0.kind == Kind::TlsUnattested
     }
 
+    /// Whether authentication failed locally while processing the server's
+    /// challenge, before the server could report an SQLSTATE.
+    pub(crate) fn is_authentication(&self) -> bool {
+        self.0.kind == Kind::Authentication
+    }
+
     /// Whether the post-startup session-property check proved that the
     /// endpoint does not meet the requirement. Transport fallback must not
     /// reinterpret this as a TLS failure.
