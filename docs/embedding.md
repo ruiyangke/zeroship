@@ -46,9 +46,9 @@ selected by your application.
 | `AppliedPlanStatus` | Plan-aware status, including `applied`, `pending`, `aborted`, plan details, and pending contracts |
 | `ReconciledPlanState` | Plan state: applied, aborted, pending, partial, drifted, blocked, or unknown dependency |
 | `PlanStatusStepState` | Step state: pending, inflight, applied, aborted, or drifted |
-| `zero_migrate_postgres::PostgresBackend<S>` | PostgreSQL execution over a host-provided `SqlSession` |
-| `zero_migrate_mysql::MysqlBackend<S>` | MySQL execution over a host-provided `SqlSession` |
-| `zero_migrate_sqlite::SqliteBackend` | SQLite execution from a Rust host |
+| `zeroship_migrate_postgres::PostgresBackend<S>` | PostgreSQL execution over a host-provided `SqlSession` |
+| `zeroship_migrate_mysql::MysqlBackend<S>` | MySQL execution over a host-provided `SqlSession` |
+| `zeroship_migrate_sqlite::SqliteBackend` | SQLite execution from a Rust host |
 | `SchemaSnapshot` | Captured schema used for explicit structural drift |
 
 ## Plan and apply PostgreSQL
@@ -56,15 +56,15 @@ selected by your application.
 The example begins after your host has produced a reviewed `Vec<Migration>`:
 
 ```rust
-use zero_migrate::{
+use zeroship_migrate::{
     Approval, ExecutorConfig, GuardConfig, Migration, MigrationEngine, SqlSession,
     effective_policy_from_charter_toml,
 };
 // The dialect id comes from the crate that IS the backend. The engine does not
 // re-export it: it names no vendor, so it cannot hand you one.
-use zero_migrate_postgres::DIALECT as POSTGRES;
-use zero_migrate_postgres::confinement::PostgresConfinementExt;
-use zero_migrate_postgres::PostgresBackend;
+use zeroship_migrate_postgres::DIALECT as POSTGRES;
+use zeroship_migrate_postgres::confinement::PostgresConfinementExt;
+use zeroship_migrate_postgres::PostgresBackend;
 
 const POLICY_CHARTER: &str = r#"policy_version = 1
 
@@ -97,7 +97,7 @@ async fn apply_postgres<S: SqlSession>(
         .map_err(std::io::Error::other)?;
     let guard = GuardConfig::from_policy(policy.clone(), POSTGRES);
 
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let plan = engine.plan(migrations, &guard);
     if !plan.is_appliable() {
         return Err(format!("{} migrations denied", plan.denied.len()).into());
@@ -130,8 +130,8 @@ dialect, and each backend supplies the builder and the type for its own leg.
 Both network backends accept a `SqlSession`:
 
 ```rust,ignore
-let postgres = zero_migrate_postgres::PostgresBackend::new_generic(&session);
-let mysql = zero_migrate_mysql::MysqlBackend::new_generic(&session);
+let postgres = zeroship_migrate_postgres::PostgresBackend::new_generic(&session);
+let mysql = zeroship_migrate_mysql::MysqlBackend::new_generic(&session);
 ```
 
 Give each operation a dedicated, idle session. In particular, never pass a
@@ -151,7 +151,7 @@ version's row from the mutable `schema_migrations_inflight` side-table. Neither
 route touches the append-only, trigger-guarded `schema_migrations` event table.
 
 ```rust,ignore
-use zero_migrate::apply::backend::MysqlInflightResolution;
+use zeroship_migrate::apply::backend::MysqlInflightResolution;
 
 mysql
     .recover_inflight_ddl(
@@ -200,7 +200,7 @@ SQLite does not use `SqlSession`:
 
 ```rust
 use std::path::Path;
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate_sqlite::SqliteBackend;
 
 fn open_backend() -> Result<SqliteBackend, Box<dyn std::error::Error>> {
     let backend = SqliteBackend::open(
@@ -251,12 +251,12 @@ Policies are authored as root charter TOML and loaded explicitly:
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
 let policy_toml = "policy_version = 1\n";
 let policy =
-    zero_migrate::effective_policy_from_charter_toml(policy_toml)?;
-let guard = zero_migrate::GuardConfig::from_policy(
+    zeroship_migrate::effective_policy_from_charter_toml(policy_toml)?;
+let guard = zeroship_migrate::GuardConfig::from_policy(
     policy.clone(),
-    zero_migrate_postgres::DIALECT,
+    zeroship_migrate_postgres::DIALECT,
 );
-let executor = zero_migrate::ExecutorConfig::new(
+let executor = zeroship_migrate::ExecutorConfig::new(
     "project_demo",
     "app_demo",
     policy,
@@ -310,7 +310,7 @@ Rust hosts can resolve a pending rename with the public `Resolution` type and
 `MigrationEngine::resolve_pending_contract`:
 
 ```rust,ignore
-use zero_migrate::{Approval, MigrationEngine, Resolution};
+use zeroship_migrate::{Approval, MigrationEngine, Resolution};
 
 engine
     .resolve_pending_contract(
