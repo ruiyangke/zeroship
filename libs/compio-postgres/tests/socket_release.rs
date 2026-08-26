@@ -6,6 +6,7 @@ use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+#[allow(dead_code)]
 mod common;
 
 fn test_url() -> String {
