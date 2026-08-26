@@ -4981,6 +4981,17 @@ mod dsn_parse_tests {
     }
 
     #[test]
+    fn uri_authority_ports_use_libpq_integer_grammar() {
+        for port in ["%20+5455%20", "%095455%0A"] {
+            let dsn = format!("postgresql://h:{port}/db");
+            let config = dsn.parse::<Config>().unwrap_or_else(|error| {
+                panic!("the percent-decoded C integer port in {dsn:?} was refused: {error:?}")
+            });
+            assert_eq!(config.get_ports(), [5455]);
+        }
+    }
+
+    #[test]
     fn an_unknown_parameter_is_not_shadowed() {
         let error = "host=h unknown_connection_option=bad sslmode=disable"
             .parse::<Config>()
