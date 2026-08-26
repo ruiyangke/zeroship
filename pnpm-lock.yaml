@@ -77,6 +77,12 @@ importers:
 
   .: {}
 
+  crates/zero-migrate-node:
+    devDependencies:
+      '@napi-rs/cli':
+        specifier: 3.7.3
+        version: 3.7.3(@emnapi/runtime@1.11.2)(@types/node@22.19.17)(supports-color@8.1.1)
+
   examples/ai-chat:
     dependencies:
       '@ai-sdk/openai':
@@ -1107,6 +1113,74 @@ importers:
         specifier: 'catalog:'
         version: 5.9.3
 
+  packages/zero-migrate:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.17
+      json-schema-to-typescript:
+        specifier: ^15.0.4
+        version: 15.0.4
+      tsup:
+        specifier: ^8.5.1
+        version: 8.5.1(@swc/core@1.15.40)(jiti@2.6.1)(postcss@8.5.13)(supports-color@8.1.1)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.4)
+      tsx:
+        specifier: 'catalog:'
+        version: 4.21.0
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+
+  packages/zero-migrate-cli:
+    dependencies:
+      zero-migrate:
+        specifier: workspace:*
+        version: link:../zero-migrate
+      zero-migrate-node:
+        specifier: workspace:*
+        version: link:../../crates/zero-migrate-node
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.17
+      '@types/pg':
+        specifier: ^8.20.0
+        version: 8.20.0
+      tsup:
+        specifier: ^8.5.1
+        version: 8.5.1(@swc/core@1.15.40)(jiti@2.6.1)(postcss@8.5.13)(supports-color@8.1.1)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.4)
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+    optionalDependencies:
+      mysql2:
+        specifier: ^3.23.0
+        version: 3.23.2(@types/node@22.19.17)
+      pg:
+        specifier: ^8.22.0
+        version: 8.22.0
+      tsx:
+        specifier: 'catalog:'
+        version: 4.21.0
+
+  packages/zero-migrate-mysql:
+    dependencies:
+      zero-migrate:
+        specifier: workspace:*
+        version: link:../zero-migrate
+
+  packages/zero-migrate-postgres:
+    dependencies:
+      zero-migrate:
+        specifier: workspace:*
+        version: link:../zero-migrate
+
+  packages/zero-migrate-sqlite:
+    dependencies:
+      zero-migrate:
+        specifier: workspace:*
+        version: link:../zero-migrate
+
   sdks/auth:
     devDependencies:
       '@arethetypeswrong/cli':
@@ -1608,10 +1682,10 @@ importers:
         version: 2.0.0-rc.24
       zero-migrate:
         specifier: workspace:*
-        version: link:../../third_party/zero-migrate/packages/zero-migrate
+        version: link:../../packages/zero-migrate
       zero-migrate-node:
         specifier: workspace:*
-        version: link:../../third_party/zero-migrate/crates/zero-migrate-node
+        version: link:../../crates/zero-migrate-node
     devDependencies:
       '@types/mime':
         specifier: ^3.0.4
@@ -1675,62 +1749,6 @@ importers:
       vitest:
         specifier: ^4.1.7
         version: 4.1.7(@opentelemetry/api@1.9.0)(@types/node@22.19.17)(happy-dom@20.9.0)(jsdom@29.1.1(@noble/hashes@1.8.0))(msw@2.14.2(@types/node@22.19.17)(typescript@5.9.3))(vite@8.0.10(@types/node@22.19.17)(esbuild@0.28.0)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4))
-
-  third_party/zero-migrate/crates/zero-migrate-node:
-    devDependencies:
-      '@napi-rs/cli':
-        specifier: ^3.7.3
-        version: 3.8.2(@emnapi/runtime@1.11.2)(@types/node@22.19.17)(supports-color@8.1.1)
-
-  third_party/zero-migrate/packages/zero-migrate:
-    devDependencies:
-      '@types/node':
-        specifier: ^22.0.0
-        version: 22.19.17
-      json-schema-to-typescript:
-        specifier: ^15.0.4
-        version: 15.0.4
-      tsup:
-        specifier: ^8.5.1
-        version: 8.5.1(@swc/core@1.15.40)(jiti@2.6.1)(postcss@8.5.13)(supports-color@8.1.1)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.4)
-      tsx:
-        specifier: 'catalog:'
-        version: 4.21.0
-      typescript:
-        specifier: 'catalog:'
-        version: 5.9.3
-
-  third_party/zero-migrate/packages/zero-migrate-cli:
-    dependencies:
-      zero-migrate:
-        specifier: workspace:*
-        version: link:../zero-migrate
-      zero-migrate-node:
-        specifier: workspace:*
-        version: link:../../crates/zero-migrate-node
-    devDependencies:
-      '@types/node':
-        specifier: ^22.0.0
-        version: 22.19.17
-      '@types/pg':
-        specifier: ^8.20.0
-        version: 8.20.0
-      tsup:
-        specifier: ^8.5.1
-        version: 8.5.1(@swc/core@1.15.40)(jiti@2.6.1)(postcss@8.5.13)(supports-color@8.1.1)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.4)
-      typescript:
-        specifier: 'catalog:'
-        version: 5.9.3
-    optionalDependencies:
-      mysql2:
-        specifier: ^3.23.0
-        version: 3.23.2(@types/node@22.19.17)
-      pg:
-        specifier: ^8.22.0
-        version: 8.22.0
-      tsx:
-        specifier: 'catalog:'
-        version: 4.21.0
 
 packages:
 
@@ -3195,12 +3213,12 @@ packages:
     resolution: {integrity: sha512-pRLMNKTSGRoLq+KnEB/7OY5vijw1XmcheAAOiv6pj7W1FG32kAGqj1C/RK/cqxRGr1Fh+zBi8sDur8kj3EQv6A==}
     engines: {node: '>=18'}
 
-  '@napi-rs/cli@3.8.2':
-    resolution: {integrity: sha512-iFmp3Lo/ipXoJI1I/6V/xU4hQV42bXS3A7j8C+Wt3LOtYY7HFCilkhyUkN1igLJFXWMICq95kNxhNcwzNRd+Kw==}
-    engines: {node: ^20.17.0 || ^22.13.0 || >= 23.5.0}
+  '@napi-rs/cli@3.7.3':
+    resolution: {integrity: sha512-iu5BOoYjYVixp5jwE7JniHvg72XuKWXUfXteu+6Gt/XY4/mslsS+Qbipleg1+3CAUGHkWc+ebaMJj7Pc93BXSQ==}
+    engines: {node: '>= 16'}
     hasBin: true
     peerDependencies:
-      '@emnapi/runtime': 2.0.0-alpha.3
+      '@emnapi/runtime': ^1.7.1
     peerDependenciesMeta:
       '@emnapi/runtime':
         optional: true
@@ -5587,8 +5605,8 @@ packages:
     resolution: {integrity: sha512-DeWwawk6r5yR9jFgnDKYt4sLS0LmHJJi3ZOnb5/JdbYwj3nW+FxQnHIjhBKz8YLC7oRNPVM9NQ47I3CVx34eqQ==}
     engines: {node: '>=12'}
 
-  emnapi@2.0.0-alpha.3:
-    resolution: {integrity: sha512-K9bc9Xx4OwSfhJpdSOpcfIKzn7/6emuubaIorf6I5e7WBAM79665rf6iHr9y50NL4qYMUP/AheTpD1Z4yU1EBw==}
+  emnapi@1.11.3:
+    resolution: {integrity: sha512-+/ZS90YK/rYfVOHtGLHkGffVsnmD/MAKaBHio+Y4XAtg75RLr4cveV/w0jTkUdLM1CcAlaRgG76mpIemWAlk0A==}
     peerDependencies:
       node-addon-api: '>= 6.1.0'
     peerDependenciesMeta:
@@ -8175,11 +8193,6 @@ packages:
     engines: {node: '>=14.17'}
     hasBin: true
 
-  typescript@6.0.3:
-    resolution: {integrity: sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw==}
-    engines: {node: '>=14.17'}
-    hasBin: true
-
   ufo@1.6.4:
     resolution: {integrity: sha512-JFNbkD1Svwe0KvGi8GOeLcP4kAWQ609twvCdcHxq1oSL8svv39ZuSvajcD8B+5D0eL4+s1Is2D/O6KN3qcTeRA==}
 
@@ -8749,7 +8762,7 @@ snapshots:
     dependencies:
       '@jsdevtools/ono': 7.1.3
       '@types/json-schema': 7.0.15
-      js-yaml: 4.1.1
+      js-yaml: 4.3.1
 
   '@arethetypeswrong/cli@0.18.2':
     dependencies:
@@ -10066,7 +10079,7 @@ snapshots:
       outvariant: 1.4.3
       strict-event-emitter: 0.5.1
 
-  '@napi-rs/cli@3.8.2(@emnapi/runtime@1.11.2)(@types/node@22.19.17)(supports-color@8.1.1)':
+  '@napi-rs/cli@3.7.3(@emnapi/runtime@1.11.2)(@types/node@22.19.17)(supports-color@8.1.1)':
     dependencies:
       '@inquirer/prompts': 8.5.2(@types/node@22.19.17)
       '@napi-rs/cross-toolchain': 1.0.3(supports-color@8.1.1)
@@ -10074,13 +10087,12 @@ snapshots:
       '@octokit/rest': 22.0.1
       clipanion: 4.0.0-rc.4(typanion@3.14.0)
       colorette: 2.0.20
-      emnapi: 2.0.0-alpha.3
+      emnapi: 1.11.3
       es-toolkit: 1.50.0
       js-yaml: 4.3.1
       obug: 2.1.4
       semver: 7.8.5
       typanion: 3.14.0
-      typescript: 6.0.3
     optionalDependencies:
       '@emnapi/runtime': 1.11.2
     transitivePeerDependencies:
@@ -10869,8 +10881,8 @@ snapshots:
       '@storybook/theming': 8.6.18(storybook@8.6.18(prettier@3.8.4)(supports-color@8.1.1))
       better-opn: 3.0.2
       browser-assert: 1.2.1
-      esbuild: 0.21.5
-      esbuild-register: 3.6.0(esbuild@0.21.5)(supports-color@8.1.1)
+      esbuild: 0.25.12
+      esbuild-register: 3.6.0(esbuild@0.25.12)(supports-color@8.1.1)
       jsdoc-type-pratt-parser: 4.8.0
       process: 0.11.10
       recast: 0.23.11
@@ -12241,7 +12253,7 @@ snapshots:
 
   emittery@0.13.1: {}
 
-  emnapi@2.0.0-alpha.3: {}
+  emnapi@1.11.3: {}
 
   emoji-regex@10.6.0: {}
 
@@ -12301,10 +12313,10 @@ snapshots:
 
   es6-error@4.1.1: {}
 
-  esbuild-register@3.6.0(esbuild@0.21.5)(supports-color@8.1.1):
+  esbuild-register@3.6.0(esbuild@0.25.12)(supports-color@8.1.1):
     dependencies:
       debug: 4.4.3(supports-color@8.1.1)
-      esbuild: 0.21.5
+      esbuild: 0.25.12
     transitivePeerDependencies:
       - supports-color
 
@@ -13441,7 +13453,7 @@ snapshots:
       jest-util: 29.7.0
       natural-compare: 1.4.0
       pretty-format: 29.7.0
-      semver: 7.8.1
+      semver: 7.8.5
     transitivePeerDependencies:
       - supports-color
 
@@ -13592,7 +13604,7 @@ snapshots:
       '@types/json-schema': 7.0.15
       '@types/lodash': 4.17.24
       is-glob: 4.0.3
-      js-yaml: 4.1.1
+      js-yaml: 4.3.1
       lodash: 4.18.1
       minimist: 1.2.8
       prettier: 3.8.4
@@ -13785,7 +13797,7 @@ snapshots:
 
   make-dir@4.0.0:
     dependencies:
-      semver: 7.8.1
+      semver: 7.8.5
 
   makeerror@1.0.12:
     dependencies:
@@ -15232,8 +15244,6 @@ snapshots:
   typescript@5.6.1-rc: {}
 
   typescript@5.9.3: {}
-
-  typescript@6.0.3: {}
 
   ufo@1.6.4: {}
 
