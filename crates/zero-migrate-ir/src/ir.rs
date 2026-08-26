@@ -5742,7 +5742,7 @@ mod tests {
         // The hint-domain recompute (the half the loader compares to the hint):
         // ops + dialect-neutral flags + owner "" + deps/supersedes/preconditions.
         // The IR `flags`/`depends_on`/`supersedes` -> MigrationFlags/MigrationId
-        // merge is a later wave; the hint-domain checksum here uses the neutral defaults,
+        // merge is not implemented; the hint-domain checksum here uses the neutral defaults,
         // and crucially derives the OP region (the only IR-sourced of_ir input
         // today) from each value - so a hint that leaked into of_ir would show.
         let of_ir_for = |ir: &MigrationIr| {

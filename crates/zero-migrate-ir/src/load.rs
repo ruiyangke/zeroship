@@ -468,7 +468,7 @@ pub fn enforce_ir_finite_timeouts(ir: &MigrationIr) -> Result<(), IrLoadError> {
 /// fully determines the artifact's logical content) + preconditions + the
 /// dialect-neutral DEFAULT flags + EMPTY deps/supersedes. The
 /// [`IrFlagsOverride`](crate::ir::IrFlagsOverride)->[`MigrationFlags`] and
-/// `String`->`MigrationId` merges are a later wave, so this recompute is ONLY
+/// `String`->`MigrationId` merges are not implemented, so this recompute is ONLY
 /// valid for an IR whose `flags`/`depends_on`/`supersedes` are at their
 /// defaults - the caller MUST gate on that ([`hint_domain_uncomputable_field`])
 /// and refuse a hint over a wider domain rather than compare a partial one (a
@@ -563,10 +563,10 @@ pub fn authoritative_ir_checksum(ir: &MigrationIr) -> Checksum {
     )
 }
 
-/// Return the hint-domain field this engine build cannot yet fold for `ir`,
+/// Return the hint-domain field this engine build cannot fold for `ir`,
 /// or `None` when the hint domain IS fully computable (flags at default + no
 /// deps/supersedes). Used to fail closed on a hint over a not-yet-foldable
-/// domain (the `IrFlagsOverride`/`MigrationId` merges are a later wave).
+/// domain (the `IrFlagsOverride`/`MigrationId` merges are not implemented).
 ///
 /// Public so the build-time checksum fold (the JS builder's
 /// `typed_checksum`/`checksum_of_committed`) can gate on the SAME domain as the
