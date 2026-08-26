@@ -481,8 +481,16 @@ async fn a_cancel_key_outside_the_allowed_length_is_refused() {
             chain.push_str(&cause.to_string());
             source = std::error::Error::source(cause);
         }
+        // Either wording satisfies the contract, which is that the refusal
+        // NAMES the length rather than looking like any other handshake
+        // failure. Both frames here arrive behind `AuthenticationOk`, and since
+        // the per-tag startup limit began applying to batched frames too they
+        // are refused from the header - "invalid BackendKeyData length 308;
+        // expected 12 to 264" - instead of reaching the cancel-key parser,
+        // which said "cancel key length" only after buffering the whole body.
+        // Earlier, and equally specific.
         assert!(
-            chain.contains("cancel key length"),
+            chain.contains("cancel key length") || chain.contains("BackendKeyData length"),
             "the {label} key was refused without saying the length was wrong, \
              so a caller cannot tell it from any other handshake failure: {chain}"
         );
