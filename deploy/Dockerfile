@@ -76,11 +76,13 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 # fetching the extracted builder repo, not re-adding this COPY.
 COPY sdks/ sdks/
 COPY examples/ examples/
-# pnpm-workspace.yaml lists third_party/zero-migrate/packages/* and
-# .../crates/zero-migrate-node as workspace members, and the lockfile pins them
-# as importers - so --frozen-lockfile needs them PRESENT, and the root build
-# script now compiles the addon out of this tree.
-COPY third_party/ third_party/
+# pnpm-workspace.yaml lists packages/* and crates/zero-migrate-node as workspace
+# members, and the lockfile pins them as importers - so --frozen-lockfile needs
+# them PRESENT, and the root build script compiles the addon out of this tree.
+# The engine's crates were a submodule under third_party/ and are now ordinary
+# members, so these two COPYs replace the one that brought the submodule in.
+COPY packages/ packages/
+COPY crates/zero-migrate-node/ crates/zero-migrate-node/
 RUN pnpm install --frozen-lockfile
 # Root build script only builds sdks/* (topo: @zeroship/db ->
 # @zeroship/bootstrap -> rest); it does not touch apps/ or examples/.
@@ -131,11 +133,10 @@ COPY Cargo.toml Cargo.lock ./
 # never received.
 COPY .cargo/ .cargo/
 COPY crates/ crates/
-# The vendored migration engine. Cargo.toml lists `third_party/zero-migrate` as a
-# WORKSPACE MEMBER (and names zero-migrate/-ir/-policy by path), so cargo cannot
-# even resolve the workspace without it - this is not an optional dependency of
-# one crate, it is a member manifest the whole build needs.
-COPY third_party/ third_party/
+# The migration engine needs no COPY of its own any more: its nine crates are
+# ordinary `crates/*` members, so the `COPY crates/ crates/` above already
+# carries them. It used to be a submodule outside that glob, which is why a
+# separate COPY existed and why cargo could not resolve the workspace without it.
 # Cedar authz policies - crates/authz/build.rs parses these at build time
 # (and engine.rs include_str!s them), both via `../../deploy/policies`.
 # The standalone compio drivers. crates/auth (and others) depend on

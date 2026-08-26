@@ -48,7 +48,7 @@ import {
 import { __begin, __drain } from "../src/ops.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const fixturesDir = resolve(here, "../../../third_party/zero-migrate/crates/zero-migrate/tests/op_fixtures");
+const fixturesDir = resolve(here, "../../../crates/zero-migrate/tests/op_fixtures");
 
 async function golden(stem: string): Promise<any> {
   return JSON.parse(await readFile(resolve(fixturesDir, `${stem}.golden.json`), "utf8"));
@@ -73,7 +73,7 @@ function normalizeOps(ops: any[]): any[] {
 // This list MIRRORS the engine's confined injection; it does not define it. The
 // charter declares these columns with SQL-ish tokens (`text`, `timestamptz`,
 // `integer`) and the engine's `inject_column_to_ir`
-// (third_party/zero-migrate/.../model/table_shape.rs, the `match column.ty`) is
+// (.../model/table_shape.rs, the `match column.ty`) is
 // what those tokens MEAN. Read that function, not the charter, when this drifts.
 //
 // The three string columns are BOUNDED `string(255)`, not `text`, and that is

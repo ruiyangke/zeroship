@@ -42,8 +42,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # The SDK dist files BEFORE any cargo command, and this is not stylistic.
@@ -975,8 +973,6 @@ jobs:
       PG_DB: zeroship
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Same reason as the `rust` job: run_billing_suite.sh builds
@@ -1064,8 +1060,6 @@ jobs:
       PG_DB: zeroship
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # A SECOND defect, found only once the overlay fix above let this job get
@@ -1125,8 +1119,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Same reason as the `rust` job: run_plugin_db_live_suite.sh builds
@@ -1170,13 +1162,11 @@ jobs:
   sdk:
     runs-on: ubuntu-latest
     steps:
-      # The only checkout in this file that used to omit submodules, which was
-      # invisible until the vendored engine became a workspace member: without
-      # it, `third_party/zero-migrate` is an empty directory, the workspace
-      # globs match nothing, and install fails on an unresolvable link.
+      # This checkout once omitted submodules, which was invisible until the
+      # engine became a workspace member: the vendored tree came up empty, the
+      # workspace globs matched nothing, and install failed on an unresolvable
+      # link. The engine is in-tree now, so nothing here depends on a submodule.
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -1408,8 +1398,6 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
@@ -1692,8 +1680,6 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
@@ -2191,8 +2177,6 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
