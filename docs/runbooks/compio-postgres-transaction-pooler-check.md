@@ -103,6 +103,11 @@ protocol 3.2 by default costs nothing behind a pooler, which is what the
 re-measurement was for. PgBouncer does not speak 3.2 and negotiates the client
 down to 3.0 rather than refusing.
 
+RE-MEASURED 2026-08-26 at suite size 1779: **79 binaries, 1722 passed, 57
+failed, 52 distinct names**, every one inside the set below. The same tree ran
+1779/0 against the direct server and against 18.4 the same day, so the whole
+residue is the pooler and none of it is the driver.
+
 Compare the SET, not the count. Two runs can both report 55 while failing
 different tests, and the count alone cannot see that; diffing the sorted
 `failures:` names can:
@@ -128,6 +133,21 @@ not preserve. Treat anything OUTSIDE this set as the finding:
   mass-termination and terminated-backend tests): a pooler hands out whichever
   backend it likes, so "the same connection came back" is not a claim that can
   hold behind one
+- ANYTHING THAT TREATS `Client::process_id()` AS A REAL BACKEND PID. It comes
+  from `BackendKeyData`, which pgbouncer synthesizes rather than forwards, so it
+  is the same residue family as the cancel key above. MEASURED 2026-08-26: two
+  separate connections through the pooler both reported process id 18651, which
+  is what `a_notification_carries_the_notifying_backends_process_id` asserts
+  against ("two connections must be two backends").
+  This costs a cycle to diagnose if you do not know it, because the SYMPTOM is
+  not a wrong pid - it is a HANG. A test that polls `pg_stat_activity WHERE
+  pid = $1` for a state change waits on a row that cannot appear, and reports
+  its own watchdog: `abandoned_copy_in_startup_rejection_does_not_poison_the
+  _next_operation` fails 3 of 3 behind the pooler at exactly its 10s watchdog
+  while passing in 0.32s against 5455. A watchdog message here reads exactly
+  like the stranded-response-slot defect this runbook's "Why" section
+  describes, so check whether the test dereferences a backend pid BEFORE
+  concluding the driver deadlocked.
 - `copy_input_time_is_not_charged_as_server_read_silence` - ASSIGNMENT
   DEPENDENT, so it is in the residue on some runs and not others. It creates a
   session-local TEMP table, which a transaction pooler leaves on whichever
