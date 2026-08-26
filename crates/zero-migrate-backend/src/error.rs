@@ -44,6 +44,12 @@ pub enum ExpandContractError {
 }
 
 /// A failure to diff a declarative desired schema against the live one.
+///
+/// No arm here is RESERVED against a refusal the differ cannot yet raise. A variant
+/// nobody builds is not a fail-closed boundary; it is a `match` arm every reader has
+/// to account for and no test can reach. When a path that must refuse appears, so
+/// does the refusal it needs - carrying the shape that path actually has, rather
+/// than one guessed at in advance.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DeclarativeError {
     /// A descriptor name/type was not a safe bare identifier / type at the
@@ -194,10 +200,11 @@ pub enum DeclarativeError {
     /// `apps` carries EVERY app that declared this table (sorted, deduplicated),
     /// not just the first-detected pair. This makes the report **deterministic
     /// regardless of descriptor order** even with 3+ declarers: the merge no
-    /// longer reports `order_pair(slot_owner, latecomer)` on the first mismatch
-    /// (whose `slot_owner` flapped with input order when two identical twins
-    /// raced for the slot - 1b). The full sorted declarer set is the same for
-    /// every permutation of the same descriptors.
+    /// longer reports an ordered pair of the app already holding the slot and the
+    /// one that arrived after it, on the first mismatch (the holder flapped with
+    /// input order when two identical twins raced for the slot - 1b). The full
+    /// sorted declarer set is the same for every permutation of the same
+    /// descriptors.
     #[error(
         "conflicting declaration of table '{table}': apps {apps:?} declare it with \
          differing shapes (a table has exactly one owner; identical re-declaration \
@@ -481,20 +488,6 @@ pub enum DeclarativeError {
         /// The FK's target table (not yet available to inline against).
         target: String,
     },
-    /* `SqliteRebuildRequired { table, op }` USED TO LIVE HERE, and its doc called it
-     * a "**Reserved fail-closed guard**" for a future existing-table op the rebuild
-     * author cannot yet emit. It had ZERO constructors, workspace-wide, and the same
-     * doc explains why: every op it was reserved for - a column type change, a
-     * nullability change either way, a column rename, an add/drop constraint, an
-     * in-place FK redefinition - now flows through `DeclarativePlan::rebuilds`
-     * instead. The reservation outlived the gap it reserved against.
-     *
-     * A variant nobody builds is not a fail-closed boundary; it is a `match` arm
-     * every reader has to account for and no test can reach. `SeedError` came out of
-     * `capability.rs` for exactly this in the `MigrationBackend` move. If a rebuild
-     * author later meets an op it cannot emit, the refusal it needs will carry the
-     * shape that op actually has, which this one was guessing at.
-     */
     /// The diff would CREATE a table that a `safety.require_rls` obligation covers.
     ///
     /// The obligation is a final-state one: every table a migration creates and

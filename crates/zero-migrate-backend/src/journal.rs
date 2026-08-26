@@ -267,8 +267,9 @@ pub struct PendingContract {
     /// the `resolve-pending` lookup key on this. It is a deep sub-step id that the
     /// plan-level supplied set never exposes - so orphan/blocked do NOT key on it.
     pub pending_version: String,
-    /// The rename's PLAN-GROUP version (the `ExpandContract` plan's E1-anchored
-    /// id, `render::lower::plan_step_version`). This is the STABLE identity the SUPPLIED
+    /// The rename's PLAN-GROUP version (the `ExpandContract` plan's own group id -
+    /// the lowering's plan identity, or E1's deterministic id when the plan carries
+    /// none). This is the STABLE identity the SUPPLIED
     /// migration set carries (a re-lowered IR's `lower_plan.version`) and an
     /// author's `depends_on` references, so `status`'s orphan and
     /// blocked surfacing keys on THIS - not the deep E2 `pending_version`

@@ -13,9 +13,9 @@
 //! `ShadowDryRun` could NOT follow, and its blockers are worth naming precisely
 //! rather than deferring: `dry_run_declarative` takes a `DeclarativeDeployPlan`
 //! (which holds the engine's `MigrationPlan` and a private policy field) and a
-//! `DesiredSchema` (which holds the engine's `ResolvedInject`), and its
-//! `SeedError` carries the engine's whole `EngineError`. All three are
-//! ORCHESTRATION RESULTS - what the engine decided - not vocabulary a backend
+//! `DesiredSchema` (which holds the engine's `ResolvedInject`), and refuses with
+//! `DryRunError`, which is the engine's own. Each of those is an
+//! ORCHESTRATION RESULT - what the engine decided - not vocabulary a backend
 //! speaks. Its neutral half is here anyway ([`ShadowConfig`] in,
 //! [`DryRunReport`]/[`MigrationResult`] out) because those parts are backend
 //! vocabulary and were never the obstacle.

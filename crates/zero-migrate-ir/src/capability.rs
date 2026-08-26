@@ -215,15 +215,12 @@ impl VendorCapabilities {
         }
     }
 
-    // A third `local()` preset stood here, an in-between dev/CI posture. Its own doc
-    // recorded that it was "not wired to a `TrustProfile` (there is no `Local` profile)"
-    // and was "available for a caller composing a bespoke gate" - and no such caller was
-    // ever written: its only reference in the tree was the unit test that exercised it.
-    //
-    // Deleted because the preset list is not free to keep. Every capability field added
-    // to this struct has to be answered by each preset, so a preset nothing composes is
-    // a third answer that must be kept plausible forever with nothing to check it
-    // against. The two that a `TrustProfile` maps onto remain.
+    // The presets are exactly the ones a `TrustProfile` maps onto, and the list is not
+    // free to grow. Every capability field added to this struct has to be answered by
+    // each preset, so a preset nothing composes is an answer that must be kept
+    // plausible forever with nothing to check it against. An in-between dev/CI posture
+    // wired to no profile stood here once and was exactly that: its only reference in
+    // the tree was the unit test that exercised it, and it was deleted.
 
     /// Map a [`TrustProfile`] onto its named preset: Confined =>
     /// [`confined`](Self::confined); Platform => [`operator`](Self::operator).
