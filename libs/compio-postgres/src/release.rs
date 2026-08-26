@@ -177,6 +177,20 @@ fn send_close_notify_on(
 /// Written twice, once per descriptor family, because the borrow types differ
 /// (`BorrowedFd` / `BorrowedSocket`) and both offer `try_clone_to_owned` - so
 /// neither arm needs `unsafe`, which this crate denies.
+///
+/// NOTHING IN THIS REPOSITORY EVER COMPILES THE `cfg(windows)` ARM. CI is
+/// `ubuntu-latest` on every job and names no `--target`, and the only
+/// installed std is `x86_64-unknown-linux-gnu`, so that arm is not
+/// type-checked by CI, by a local build, or by the clippy gate's
+/// `--all-features` sweep. Checked 2026-08-26.
+///
+/// So when you change one arm, change the other by hand and read it twice:
+/// a mistake there cannot go red here, it can only break someone else's
+/// build later. The same holds for the `cfg(not(target_os = "linux"))` send
+/// in `send_close_notify_on` - that one at least can be checked locally by
+/// flipping its `cfg` to `all()` and building, because it calls a `socket2`
+/// method that exists on Linux too. The `cfg(windows)` arm cannot, because
+/// `std::os::windows` does not exist here.
 #[cfg(unix)]
 impl ConnectionRelease {
     pub(crate) fn dup_of<F: std::os::fd::AsFd>(handle: &F) -> Option<Self> {
