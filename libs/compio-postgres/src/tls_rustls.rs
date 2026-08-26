@@ -76,12 +76,10 @@ use zeroize::Zeroize;
 use crate::Error;
 use crate::config::{Config, SslCertMode, SslMode, SslProtocolVersion, SslRootCert};
 use crate::tls::{
-    ChannelBinding, ClientCertStatus, MakeTlsConnect, ServerVerification, TlsConnect, TlsStream,
+    ChannelBinding, ClientCertStatus, MakeTlsConnect, POSTGRESQL_ALPN_PROTOCOL, ServerVerification,
+    TlsConnect, TlsStream,
 };
 use crate::tls_sansio::{self, SharedSession, TlsReadHalf, TlsStreamCore, TlsWriteHalf, share};
-
-/// `PostgreSQL`'s registered ALPN protocol identifier.
-const POSTGRESQL_ALPN_PROTOCOL: &[u8] = b"postgresql";
 
 const TLS12_ONLY: &[&SupportedProtocolVersion] = &[&rustls::version::TLS12];
 const TLS13_ONLY: &[&SupportedProtocolVersion] = &[&rustls::version::TLS13];
@@ -1244,6 +1242,7 @@ where
                 .peer_certificates()
                 .and_then(<[CertificateDer<'_>]>::first)
                 .and_then(tls_server_end_point);
+            let negotiated_alpn_protocol = connection.alpn_protocol().map(<[u8]>::to_vec);
             let session: SharedSession = share(connection);
             let client_cert_status = client_cert_observation
                 .as_deref()
@@ -1253,6 +1252,7 @@ where
                 inner: TlsStreamCore::new(stream, session),
                 tls_server_end_point,
                 client_cert_status,
+                negotiated_alpn_protocol,
             })
         })
     }
@@ -1275,6 +1275,7 @@ pub struct RustlsStream<S> {
     inner: TlsStreamCore<S>,
     tls_server_end_point: Option<Vec<u8>>,
     client_cert_status: ClientCertStatus,
+    negotiated_alpn_protocol: Option<Vec<u8>>,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin + 'static> AsyncRead for RustlsStream<S> {
@@ -1317,6 +1318,7 @@ where
             inner,
             tls_server_end_point,
             client_cert_status,
+            negotiated_alpn_protocol,
         } = self;
         let (socket, session) = inner.into_parts();
         match socket.try_into_split() {
@@ -1329,6 +1331,7 @@ where
                 inner: TlsStreamCore::new(socket, session),
                 tls_server_end_point,
                 client_cert_status,
+                negotiated_alpn_protocol,
             }),
         }
     }
@@ -1340,6 +1343,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + 'static> TlsStream for RustlsStream<S> 
             Some(hash) => ChannelBinding::tls_server_end_point(hash.clone()),
             None => ChannelBinding::none(),
         }
+    }
+
+    fn negotiated_alpn_protocol(&self) -> Option<&[u8]> {
+        self.negotiated_alpn_protocol.as_deref()
     }
 
     fn client_cert_status(&self) -> ClientCertStatus {

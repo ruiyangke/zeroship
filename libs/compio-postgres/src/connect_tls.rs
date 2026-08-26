@@ -14,8 +14,8 @@
 use crate::Error;
 use crate::config::{SslMode, SslNegotiation};
 use crate::maybe_tls_stream::MaybeTlsStream;
-use crate::tls::TlsConnect;
 use crate::tls::private::ForcePrivateApi;
+use crate::tls::{POSTGRESQL_ALPN_PROTOCOL, TlsConnect, TlsStream};
 use bytes::BytesMut;
 use compio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use postgres_protocol::message::frontend;
@@ -141,13 +141,35 @@ where
         .await
         .map_err(|e| Error::tls_handshake(e.into()))?;
 
+    // Direct TLS omits PostgreSQL's SSLRequest discriminator, so ALPN is the
+    // protocol-confusion defense. libpq requires the server to select the one
+    // registered PostgreSQL protocol and rejects both an absent selection and
+    // any other value before it sends the startup packet.
+    if negotiation == SslNegotiation::Direct {
+        match stream.negotiated_alpn_protocol() {
+            Some(protocol) if protocol == POSTGRESQL_ALPN_PROTOCOL => {}
+            None => {
+                return Err(Error::tls_handshake(
+                    "direct SSL connection was established without ALPN protocol negotiation \
+                     extension"
+                        .into(),
+                ));
+            }
+            Some(_) => {
+                return Err(Error::tls_handshake(
+                    "SSL connection was established with unexpected ALPN protocol".into(),
+                ));
+            }
+        }
+    }
+
     Ok(MaybeTlsStream::Tls(stream))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tls::{ChannelBinding, TlsStream};
+    use crate::tls::{ChannelBinding, POSTGRESQL_ALPN_PROTOCOL, TlsStream};
     use compio::buf::{IoBuf, IoBufMut};
     use compio::net::{TcpListener, TcpStream};
     use std::future::Future;
@@ -178,9 +200,14 @@ mod tests {
 
     /// A connector that performs no handshake and simply hands the socket back,
     /// so a test can inspect what negotiation left unread on it.
-    struct PassthroughTls;
+    struct PassthroughTls {
+        negotiated_alpn_protocol: Option<&'static [u8]>,
+    }
 
-    struct PassthroughStream<S>(S);
+    struct PassthroughStream<S> {
+        inner: S,
+        negotiated_alpn_protocol: Option<&'static [u8]>,
+    }
 
     /// Unsplittable on purpose: this fixture exercises the connector
     /// contract, not a run loop, so it takes the serialized path.
@@ -197,23 +224,27 @@ mod tests {
 
     impl<S: AsyncRead + Unpin> AsyncRead for PassthroughStream<S> {
         async fn read<B: IoBufMut>(&mut self, buf: B) -> compio::BufResult<usize, B> {
-            self.0.read(buf).await
+            self.inner.read(buf).await
         }
     }
     impl<S: AsyncWrite + Unpin> AsyncWrite for PassthroughStream<S> {
         async fn write<B: IoBuf>(&mut self, buf: B) -> compio::BufResult<usize, B> {
-            self.0.write(buf).await
+            self.inner.write(buf).await
         }
         async fn flush(&mut self) -> std::io::Result<()> {
-            self.0.flush().await
+            self.inner.flush().await
         }
         async fn shutdown(&mut self) -> std::io::Result<()> {
-            self.0.shutdown().await
+            self.inner.shutdown().await
         }
     }
     impl<S: AsyncRead + AsyncWrite + Unpin> TlsStream for PassthroughStream<S> {
         fn channel_binding(&self) -> ChannelBinding {
             ChannelBinding::none()
+        }
+
+        fn negotiated_alpn_protocol(&self) -> Option<&[u8]> {
+            self.negotiated_alpn_protocol
         }
     }
 
@@ -227,7 +258,12 @@ mod tests {
         type Future = Pin<Box<dyn Future<Output = Result<PassthroughStream<S>, std::io::Error>>>>;
 
         fn connect(self, stream: S) -> Self::Future {
-            Box::pin(async move { Ok(PassthroughStream(stream)) })
+            Box::pin(async move {
+                Ok(PassthroughStream {
+                    inner: stream,
+                    negotiated_alpn_protocol: self.negotiated_alpn_protocol,
+                })
+            })
         }
 
         fn can_connect(&self, _: ForcePrivateApi) -> bool {
@@ -258,7 +294,9 @@ mod tests {
             Encryption::Tls,
             SslMode::Require,
             SslNegotiation::Postgres,
-            PassthroughTls,
+            PassthroughTls {
+                negotiated_alpn_protocol: None,
+            },
             true,
         )
         .await
@@ -285,7 +323,9 @@ mod tests {
             Encryption::Tls,
             SslMode::Require,
             SslNegotiation::Postgres,
-            PassthroughTls,
+            PassthroughTls {
+                negotiated_alpn_protocol: None,
+            },
             false,
         )
         .await
@@ -307,7 +347,9 @@ mod tests {
             Encryption::Tls,
             SslMode::Prefer,
             SslNegotiation::Postgres,
-            PassthroughTls,
+            PassthroughTls {
+                negotiated_alpn_protocol: None,
+            },
             true,
         )
         .await
@@ -334,7 +376,9 @@ mod tests {
                 Encryption::Tls,
                 mode,
                 SslNegotiation::Postgres,
-                PassthroughTls,
+                PassthroughTls {
+                    negotiated_alpn_protocol: None,
+                },
                 true,
             )
             .await
@@ -363,7 +407,9 @@ mod tests {
                 Encryption::Tls,
                 mode,
                 SslNegotiation::Postgres,
-                PassthroughTls,
+                PassthroughTls {
+                    negotiated_alpn_protocol: None,
+                },
                 true,
             )
             .await
@@ -403,6 +449,63 @@ mod tests {
                 mode.as_str()
             );
         }
+    }
+
+    async fn direct_socket() -> TcpStream {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        compio::runtime::spawn(async move {
+            let _ = listener.accept().await.unwrap();
+        })
+        .detach();
+
+        TcpStream::connect(addr).await.unwrap()
+    }
+
+    #[compio::test]
+    async fn direct_requires_postgresql_alpn() {
+        for (selected, expected) in [
+            (None, "without ALPN protocol negotiation extension"),
+            (Some(b"h2".as_slice()), "unexpected ALPN protocol"),
+        ] {
+            let error = negotiate_tls(
+                direct_socket().await,
+                Encryption::Tls,
+                SslMode::Require,
+                SslNegotiation::Direct,
+                PassthroughTls {
+                    negotiated_alpn_protocol: selected,
+                },
+                true,
+            )
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("direct TLS accepted selected ALPN {selected:?}"));
+
+            assert!(error.is_tls_handshake(), "ALPN is part of the handshake");
+            let source = std::error::Error::source(&error)
+                .expect("ALPN refusal carries the libpq-compatible reason")
+                .to_string();
+            assert!(
+                source.contains(expected),
+                "wrong error for selected ALPN {selected:?}: {source}"
+            );
+        }
+
+        let negotiated = negotiate_tls(
+            direct_socket().await,
+            Encryption::Tls,
+            SslMode::Require,
+            SslNegotiation::Direct,
+            PassthroughTls {
+                negotiated_alpn_protocol: Some(POSTGRESQL_ALPN_PROTOCOL),
+            },
+            true,
+        )
+        .await
+        .expect("direct TLS accepts the registered PostgreSQL ALPN protocol");
+        assert!(matches!(negotiated, MaybeTlsStream::Tls(_)));
     }
 }
 

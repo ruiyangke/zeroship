@@ -15,6 +15,9 @@ use std::fmt;
 use std::future::Future;
 use std::io;
 
+/// `PostgreSQL`'s registered ALPN protocol identifier.
+pub(crate) const POSTGRESQL_ALPN_PROTOCOL: &[u8] = b"postgresql";
+
 pub(crate) mod private {
     pub struct ForcePrivateApi;
 
@@ -232,6 +235,16 @@ pub trait TlsConnect<S> {
 pub trait TlsStream: AsyncRead + AsyncWrite {
     /// Returns channel binding information for the session.
     fn channel_binding(&self) -> ChannelBinding;
+
+    /// Returns the application protocol selected by the TLS handshake.
+    ///
+    /// `sslnegotiation=direct` requires the peer to select `postgresql` via
+    /// ALPN. The default reports no selection, so a custom backend that cannot
+    /// observe ALPN is refused in direct mode rather than silently skipping
+    /// that protocol-confusion check.
+    fn negotiated_alpn_protocol(&self) -> Option<&[u8]> {
+        None
+    }
 
     /// Reports whether the handshake requested and sent a client certificate.
     fn client_cert_status(&self) -> ClientCertStatus {
