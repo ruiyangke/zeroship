@@ -9,7 +9,7 @@
 //!
 //! - `SqliteSession` actor + `SqlExecutor` impl + PRAGMA bootstrap +
 //!   `error::from_sqlite` switch.
-//! - `NamespaceManager` (ATTACH) + `DialectBuilder` impl (both PG
+//! - an inherent ATTACH + `DialectBuilder` impl (both PG
 //!   and SQLite sides, 6 hooks).
 //! - `LockManager` (in-process HashMap) + `SchemaIntrospect`
 //!   (PRAGMA walk).
@@ -31,7 +31,7 @@ use std::rc::Rc;
 use serde_json::Value;
 use tempfile::TempDir;
 
-use crate::backend::{DialectBuilder, LockManager, NamespaceManager, SqlExecutor};
+use crate::backend::{DialectBuilder, LockManager, SqlExecutor};
 #[cfg(any(test, feature = "test-helpers"))]
 use crate::backend::{AuditWriter, IndexBuilder, SchemaIntrospect};
 #[cfg(any(test, feature = "test-helpers"))]
@@ -118,7 +118,7 @@ use session::{SqliteSession, SqliteSessionHandle};
 /// - `lock_registry`: in-process advisory-lock map.
 /// - `db_dir`: filesystem directory holding per-app SQLite files
 ///   (`zs-<app_id>.sqlite`).
-/// - `app_id_cache`: dedup set for the `NamespaceManager::ensure_app_schema`
+/// - `app_id_cache`: dedup set for `attach_app_file`
 ///   path — SQLite errors on a second ATTACH of the same alias, so
 ///   we filter the second call site in Rust.
 /// - `_publisher`: the worker->compio publisher task that
@@ -631,8 +631,19 @@ impl LockManager for SqliteBackend {
     }
 }
 
-impl NamespaceManager for SqliteBackend {
-    /// Idempotently provision the per-app SQLite namespace.
+impl SqliteBackend {
+    /// Bind the app's file into THIS session, under the `<app_id>` alias.
+    ///
+    /// RENAMED from a capability-trait method, and the rename is the point:
+    /// nothing here provisions a namespace. On PostgreSQL that trait method was
+    /// `CREATE SCHEMA IF NOT EXISTS`; here it is an `ATTACH DATABASE`, which is
+    /// session-scoped wiring, not schema management. plugin-db does not manage
+    /// schema on either dialect - a migration process does - so the trait that
+    /// made these two look like one operation is deleted, and the PostgreSQL
+    /// half went with it (it had no production caller at all).
+    ///
+    /// Still idempotent, still cached by `app_id_cache`, and still tolerant of
+    /// a concurrent attacher's "already attached".
     ///
     /// Constructs the per-app file path
     /// `<db_dir>/zs-<app_id>.sqlite` and routes an `ATTACH DATABASE
@@ -655,7 +666,7 @@ impl NamespaceManager for SqliteBackend {
     /// parameter; round-tripping through OsStr would mean carrying
     /// raw bytes across an `async` boundary the actor's reply channel
     /// already serialises as `String`.
-    async fn ensure_app_schema(&self, app_id: &str) -> Result<(), DbError> {
+    pub async fn attach_app_file(&self, app_id: &str) -> Result<(), DbError> {
         // Idempotent guard. The cache must be checked before the
         // ATTACH because SQLite hard-errors on a duplicate ATTACH of
         // the same alias ("database <alias> is already in use"); the
@@ -1377,7 +1388,7 @@ impl DialectBuilder for SqliteBackend {
 }
 
 // `Backend` composition marker. Every sub-trait
-// (`SqlExecutor`, `LockManager`, `NamespaceManager`,
+// (`SqlExecutor`, `LockManager`,
 // `SchemaIntrospect`, `IndexBuilder`) now carries a real (non-stub)
 // impl above, and the super-trait relaxation that dropped the
 // `Client = compio_postgres::Client` pin from `Backend` cleared the
@@ -2859,7 +2870,7 @@ mod tests {
 
     use super::*;
     use crate::backend::{
-        AuditWriter, Backend, DialectBuilder, IndexBuilder, LockManager, NamespaceManager,
+        AuditWriter, Backend, DialectBuilder, IndexBuilder, LockManager,
         SchemaIntrospect, SqlExecutor,
     };
 
@@ -2931,8 +2942,6 @@ mod tests {
     }
 
     fn assert_sqlite_backend_impls_namespace_manager() {
-        fn assert_impl<T: NamespaceManager>() {}
-        assert_impl::<SqliteBackend>();
     }
 
     fn assert_sqlite_backend_impls_schema_introspect() {

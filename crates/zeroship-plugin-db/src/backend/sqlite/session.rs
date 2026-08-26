@@ -539,7 +539,7 @@ impl SqliteSession {
     }
 
     /// Send an `Attach` command and await the reply. Consumer is the
-    /// live SQLite `NamespaceManager::ensure_app_schema` impl.
+    /// live `SqliteBackend::attach_app_file` impl.
     pub(crate) async fn attach(&self, app_id: &str, db_path: &str) -> Result<(), DbError> {
         let (reply_tx, reply_rx) = flume::bounded::<Result<(), DbError>>(1);
         let cmd = Command::Attach {

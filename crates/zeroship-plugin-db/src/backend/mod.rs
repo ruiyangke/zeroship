@@ -42,7 +42,6 @@
 //!
 //! - [`SqlExecutor`] — connection lifecycle + run-a-statement.
 //! - [`LockManager`] — session-scoped advisory locks.
-//! - [`NamespaceManager`] — idempotent per-app schema bootstrap.
 //! - [`SchemaIntrospect`] — live-schema snapshot + row-count estimate.
 //!   Owns the `LiveSchema` associated type that used to live on
 //!   `Backend`.
@@ -538,27 +537,6 @@ pub trait LockManager: SqlExecutor {
     ) -> Result<(), DbError>;
 }
 
-/// Per-app schema-namespace capability — "idempotently provision the
-/// app's logical namespace".
-///
-/// Carved out of the monolithic `Backend` trait (see
-/// `docs/archive/p0-implementation-plan.md` and the
-/// converged design at `docs/archive/db-system-design.md` §7). Carries
-/// the single `ensure_app_schema` method that used to live on
-/// `Backend` directly; consumer bounds in
-/// `register_model/bootstrap.rs` narrow onto this trait.
-///
-/// Not `Send + Sync` for the same reason as [`SqlExecutor`] — Open Q4.
-pub trait NamespaceManager: 'static {
-    /// Idempotently create the per-app schema namespace.
-    ///
-    /// For Postgres this is `CREATE SCHEMA IF NOT EXISTS "<app_id>"`;
-    /// future backends would map to whatever per-tenant namespace
-    /// primitive that engine exposes (a sqlite ATTACH DATABASE, a
-    /// PlanetScale keyspace, …).
-    #[allow(async_fn_in_trait)]
-    async fn ensure_app_schema(&self, app_id: &str) -> Result<(), DbError>;
-}
 
 /// Live-schema introspection capability — "read the catalog and return
 /// a typed snapshot the diff engine can consume".
@@ -1581,7 +1559,7 @@ impl Drop for SchemaPendingGuard {
 ///
 /// For ergonomics, the bound is exactly
 /// [`PgSqlExecutor`] (transitively [`SqlExecutor`]) +
-/// [`LockManager`] + [`NamespaceManager`] + [`SchemaIntrospect`] with
+/// [`LockManager`] + [`SchemaIntrospect`] with
 /// `LiveSchema = crate::diff::LiveSchema` + [`IndexBuilder`] +
 /// [`PgLockManager`]. The blanket `impl<T> RegisterBackend for T`
 /// auto-impls the marker for any type that already satisfies the
@@ -1599,7 +1577,6 @@ impl Drop for SchemaPendingGuard {
 pub trait RegisterBackend:
     PgSqlExecutor
     + LockManager<Client = compio_postgres::Client>
-    + NamespaceManager
     + SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>
     + IndexBuilder
     + PgLockManager
@@ -1614,7 +1591,6 @@ pub trait RegisterBackend:
 impl<T> RegisterBackend for T where
     T: PgSqlExecutor
         + LockManager<Client = compio_postgres::Client>
-        + NamespaceManager
         + SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>
         + IndexBuilder
         + PgLockManager
@@ -1640,7 +1616,6 @@ impl<T> RegisterBackend for T where
 ///   [`PgSqlExecutor`] / [`PgLockManager`] (which still pin
 ///   `Client = compio_postgres::Client`).
 /// - [`LockManager`]
-/// - [`NamespaceManager`]
 /// - [`SchemaIntrospect`] with `LiveSchema = crate::diff::LiveSchema`
 /// - [`IndexBuilder`]
 ///
@@ -1713,7 +1688,6 @@ impl<T> RegisterBackend for T where
 pub trait Backend:
     SqlExecutor
     + LockManager
-    + NamespaceManager
     + SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>
     + IndexBuilder
     + 'static
@@ -2007,15 +1981,6 @@ mod tests {
         assert_impl::<PostgresBackend>();
     }
 
-    /// Compile-time: [`PostgresBackend`] satisfies the carved
-    /// [`NamespaceManager`] capability trait. If a future
-    /// refactor pulls `ensure_app_schema` back onto the omnibus
-    /// `Backend` trait or detaches the impl block, this stops
-    /// compiling.
-    fn assert_postgres_backend_impls_namespace_manager() {
-        fn assert_impl<T: NamespaceManager>() {}
-        assert_impl::<PostgresBackend>();
-    }
 
     /// Compile-time: [`PostgresBackend`] satisfies
     /// [`SchemaIntrospect`] with the associated type pinned to
@@ -2504,7 +2469,6 @@ mod tests {
         let _ = assert_postgres_backend_impls_backend as fn();
         let _ = assert_postgres_backend_impls_sql_executor as fn();
         let _ = assert_postgres_backend_impls_lock_manager as fn();
-        let _ = assert_postgres_backend_impls_namespace_manager as fn();
         let _ = assert_postgres_backend_impls_schema_introspect as fn();
         let _ = assert_postgres_backend_impls_index_builder as fn();
         let _ = assert_postgres_backend_impls_pg_sql_executor as fn();

@@ -650,7 +650,7 @@ mod tests {
         // A top-level reserved field key is rejected.
         assert!(validate_update_patch_keys(&json!({ "ssn_masked": "x" })).is_err());
     }
-    use crate::backend::{EncryptedColumn as _, EncryptionMode, NamespaceManager, SqlExecutor};
+    use crate::backend::{EncryptedColumn as _, EncryptionMode, SqlExecutor};
     use crate::encryption;
     use crate::query::{
         build_create_table_with_fks_for_dialect, build_insert_with_dialect, FkEmission,
@@ -769,7 +769,7 @@ mod tests {
                 SqliteBackend::new(PathBuf::from(dir.path())).expect("open sqlite backend"),
             );
             backend
-                .ensure_app_schema(app_id)
+                .attach_app_file(app_id)
                 .await
                 .expect("ensure schema");
             set_sqlite_backend_for_tests(Rc::clone(&backend));

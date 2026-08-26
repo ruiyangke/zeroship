@@ -19,7 +19,7 @@ use crate::diff::LiveSchema;
 use crate::error::DbError;
 
 use super::{
-    DialectBuilder, FullTextIndex, GeoPoint, LockManager, NamespaceManager, PgSqlExecutor,
+    DialectBuilder, FullTextIndex, GeoPoint, LockManager, PgSqlExecutor,
     SpatialIndex, SqlExecutor, VectorIndex, VectorMetric,
 };
 #[cfg(any(test, feature = "test-helpers"))]
@@ -139,7 +139,6 @@ impl PostgresBackend {
 //
 //   1. `impl SqlExecutor for PostgresBackend`     -- 3 methods.
 //   2. `impl LockManager for PostgresBackend`     -- 3 methods.
-//   3. `impl NamespaceManager for PostgresBackend` -- 1 method.
 //   4. `impl SchemaIntrospect for PostgresBackend` -- 2 methods +
 //      `type LiveSchema`.
 //   5. `impl IndexBuilder for PostgresBackend`     -- 1 method.
@@ -271,28 +270,6 @@ impl LockManager for PostgresBackend {
         let sql = "SELECT pg_advisory_unlock(hashtext($1)::int4, hashtext($2)::int4)";
         client
             .query_text_params(sql, &[key1, key2])
-            .await
-            .map_err(|e| DbError::from_pg(&e))?;
-        Ok(())
-    }
-}
-
-impl NamespaceManager for PostgresBackend {
-    async fn ensure_app_schema(&self, app_id: &str) -> Result<(), DbError> {
-        // The create-schema SQL flows through the
-        // `DialectBuilder::build_ensure_app_schema` hook instead of
-        // the free function `crate::query::build_create_schema`. The
-        // SQL text is byte-identical to the previous form
-        // (`CREATE SCHEMA IF NOT EXISTS "<app>"`) — the structural
-        // change is the routing seam, not the statement. No other
-        // callers of `query::build_create_schema` exist, so the free
-        // function could be removed in a follow-up; we keep it for
-        // now as the dialect's `build_ensure_app_schema` impl
-        // delegates to the same quoting primitive.
-        let create_schema = self.build_ensure_app_schema(app_id);
-        let empty: Vec<&str> = Vec::new();
-        self.pool
-            .query_text_params(&create_schema, &empty)
             .await
             .map_err(|e| DbError::from_pg(&e))?;
         Ok(())
@@ -930,7 +907,7 @@ impl DialectBuilder for PgDialect {
     /// `CREATE SCHEMA IF NOT EXISTS "<app_id>"` — the canonical PG
     /// shape. Byte-identical to
     /// `crate::query::build_create_schema(app_id)` output, so the
-    /// `NamespaceManager::ensure_app_schema` impl can swap without
+    /// create-schema caller can swap without
     /// changing the on-wire SQL.
     fn build_ensure_app_schema(&self, app_id: &str) -> String {
         format!("CREATE SCHEMA IF NOT EXISTS {}", self.quote_ident(app_id))
@@ -1919,7 +1896,7 @@ mod tests {
     //!
     //! `PostgresBackend` is, by design, a thin facade: every method in
     //! its per-capability impls (`SqlExecutor` / `LockManager` /
-    //! `NamespaceManager` / `SchemaIntrospect` / `IndexBuilder`) either
+    //! `SchemaIntrospect` / `IndexBuilder`) either
     //! calls the `Rc<Pool>` directly or forwards into [`crate::audit`] /
     //! [`crate::diff`] / [`crate::query`] free functions.
     //! `impl Backend for PostgresBackend` is a one-line composition
@@ -1955,7 +1932,7 @@ mod tests {
 
     use super::*;
     use crate::backend::{
-        AuditWriter, Backend, DialectBuilder, IndexBuilder, LockManager, NamespaceManager,
+        AuditWriter, Backend, DialectBuilder, IndexBuilder, LockManager,
         PgLockManager, PgSqlExecutor, RegisterBackend, SchemaIntrospect, SqlExecutor,
     };
 
@@ -1976,7 +1953,6 @@ mod tests {
     fn assert_postgres_backend_impls_sub_traits() {
         fn impls_sql_executor<T: SqlExecutor<Client = compio_postgres::Client>>() {}
         fn impls_lock_manager<T: LockManager<Client = compio_postgres::Client>>() {}
-        fn impls_namespace_manager<T: NamespaceManager>() {}
         fn impls_schema_introspect<T: SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>>() {}
         fn impls_index_builder<T: IndexBuilder<Client = compio_postgres::Client>>() {}
         fn impls_pg_sql_executor<T: PgSqlExecutor>() {}
@@ -1984,7 +1960,6 @@ mod tests {
         fn impls_register_backend<T: RegisterBackend>() {}
         impls_sql_executor::<PostgresBackend>();
         impls_lock_manager::<PostgresBackend>();
-        impls_namespace_manager::<PostgresBackend>();
         impls_schema_introspect::<PostgresBackend>();
         impls_index_builder::<PostgresBackend>();
         impls_pg_sql_executor::<PostgresBackend>();
@@ -2033,7 +2008,7 @@ mod tests {
         let d = PgDialect;
         // The dialect output MUST equal the legacy
         // `crate::query::build_create_schema` output byte-for-byte —
-        // PR-3 rewires `NamespaceManager::ensure_app_schema` through
+        // PR-3 rewired the create-schema SQL through
         // the dialect, and any divergence here changes the wire SQL.
         let legacy = crate::query::build_create_schema("app_demo");
         let dialect = d.build_ensure_app_schema("app_demo");

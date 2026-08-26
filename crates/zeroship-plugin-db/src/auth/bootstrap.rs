@@ -1519,7 +1519,7 @@ pub struct PerAppRoleOutcome {
 /// Idempotently provision the per-app PG role and scope its grants to
 /// the per-app schema ONLY (§17.5).
 ///
-/// Call AFTER `NamespaceManager::ensure_app_schema` has created
+/// Call AFTER the app schema exists (the deploy creates it)
 /// `"<app_id>"` (the grants reference it). Steps:
 ///
 /// 1. `CREATE ROLE "app_<id>_role" NOLOGIN NOREPLICATION …

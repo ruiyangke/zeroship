@@ -15,7 +15,7 @@
 //!
 //! Each test spins up a per-test `tempfile::TempDir` and constructs a
 //! `SqliteBackend::new(db_dir)` directly - this deliberately bypasses
-//! the per-isolate context plumbing the NamespaceManager threads
+//! the per-isolate context plumbing the ATTACH threads
 //! through, so these tests pin the actor's behaviour in isolation.
 //! The higher-level orchestrator mirror is covered separately.
 
@@ -31,7 +31,7 @@ mod parity;
 
 use zeroship_plugin_db::backend::sqlite::SqliteBackend;
 use zeroship_plugin_db::backend::{
-    BackendHandle, ChangeStream, IndexBuilder, LockManager, LockScope, NamespaceManager,
+    BackendHandle, ChangeStream, IndexBuilder, LockManager, LockScope,
     SchemaIntrospect, SqlExecutor,
 };
 use zeroship_plugin_db::broker::{subscribe, ChangeOp, Subscription, SubscriptionMessage};
@@ -111,7 +111,7 @@ fn bytes_column_stores_a_raw_blob_on_sqlite() {
         let backend =
             SqliteBackend::new(PathBuf::from(dir.path())).expect("open the parity backend");
         backend
-            .ensure_app_schema("default")
+            .attach_app_file("default")
             .await
             .expect("attach the matrix app database");
         let client = backend
@@ -251,7 +251,7 @@ fn client_exec_round_trip() {
 }
 
 // ---------------------------------------------------------------------------
-// NamespaceManager (ATTACH) integration tests.
+// attach_app_file (ATTACH) integration tests.
 //
 // Each test exercises a behaviour the SqliteBackend's
 // `ensure_app_schema` impl is responsible for:
@@ -272,7 +272,7 @@ fn ensure_app_schema_attaches_file() {
     run(async {
         let (backend, dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_demo")
+            .attach_app_file("app_demo")
             .await
             .expect("ensure_app_schema");
 
@@ -310,14 +310,14 @@ fn ensure_app_schema_idempotent() {
         let (backend, _dir) = fresh_backend();
         // First call attaches.
         backend
-            .ensure_app_schema("app_demo")
+            .attach_app_file("app_demo")
             .await
             .expect("first ensure_app_schema");
         // Second call must NOT surface "database app_demo is already
         // in use" — the cache (or the error-suppression fallback)
         // should short-circuit it to Ok.
         backend
-            .ensure_app_schema("app_demo")
+            .attach_app_file("app_demo")
             .await
             .expect("second ensure_app_schema must be idempotent");
     });
@@ -328,11 +328,11 @@ fn ensure_app_schema_isolates_per_app() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_a")
+            .attach_app_file("app_a")
             .await
             .expect("attach app_a");
         backend
-            .ensure_app_schema("app_b")
+            .attach_app_file("app_b")
             .await
             .expect("attach app_b");
 
@@ -379,7 +379,7 @@ fn estimate_row_count_missing_table_returns_zero() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_demo")
+            .attach_app_file("app_demo")
             .await
             .expect("ensure_app_schema");
 
@@ -545,7 +545,7 @@ fn introspect_empty_schema_yields_empty_live_schema() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_demo")
+            .attach_app_file("app_demo")
             .await
             .expect("ensure_app_schema");
         let live = backend
@@ -575,7 +575,7 @@ fn introspect_after_create_table_round_trip() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_demo")
+            .attach_app_file("app_demo")
             .await
             .expect("ensure_app_schema");
 
@@ -731,7 +731,7 @@ fn create_index_succeeds() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_demo")
+            .attach_app_file("app_demo")
             .await
             .expect("ensure_app_schema");
         // Create the user table the index will cover.
@@ -794,7 +794,7 @@ fn create_unique_index_fails_on_duplicate_with_envelope() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_demo")
+            .attach_app_file("app_demo")
             .await
             .expect("ensure_app_schema");
         ensure_audit_table(&backend, "app_demo").await;
@@ -962,7 +962,7 @@ fn insert_publishes_via_preupdate_hook() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_cdc")
+            .attach_app_file("app_cdc")
             .await
             .expect("ensure_app_schema");
 
@@ -1035,7 +1035,7 @@ fn insert_publishes_logical_typed_id_not_sqlite_rowid() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_cdc")
+            .attach_app_file("app_cdc")
             .await
             .expect("ensure_app_schema");
 
@@ -1084,7 +1084,7 @@ fn update_publishes_change_event_with_pre_image() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_cdc")
+            .attach_app_file("app_cdc")
             .await
             .expect("ensure_app_schema");
         backend
@@ -1168,7 +1168,7 @@ fn rollback_does_not_publish() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_cdc")
+            .attach_app_file("app_cdc")
             .await
             .expect("ensure_app_schema");
         backend
@@ -1219,7 +1219,7 @@ fn mixed_ops_in_one_tx_ordered_by_buffer_index() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_cdc")
+            .attach_app_file("app_cdc")
             .await
             .expect("ensure_app_schema");
         backend
@@ -1343,7 +1343,7 @@ fn subscription_fanout_under_load() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_fanout")
+            .attach_app_file("app_fanout")
             .await
             .expect("ensure_app_schema");
         backend
@@ -1450,7 +1450,7 @@ fn mv_refresh_does_not_emit_change_events() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_mv")
+            .attach_app_file("app_mv")
             .await
             .expect("ensure_app_schema");
         // Create a shadow table that mimics what an MV refresh would
@@ -1504,7 +1504,7 @@ fn mv_refresh_emits_no_change_events_on_base_or_shadow() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_mv_mixed")
+            .attach_app_file("app_mv_mixed")
             .await
             .expect("ensure_app_schema");
         // Regular collection.
@@ -1599,7 +1599,7 @@ fn audit_table_writes_do_not_emit_events() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_audit")
+            .attach_app_file("app_audit")
             .await
             .expect("ensure_app_schema");
         backend
@@ -1689,7 +1689,7 @@ fn backfill_run_pauses_broker_and_emits_one_resync() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_backfill")
+            .attach_app_file("app_backfill")
             .await
             .expect("ensure_app_schema");
         backend
@@ -1799,7 +1799,7 @@ fn schema_pending_decoder_drops_then_resyncs() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_pending")
+            .attach_app_file("app_pending")
             .await
             .expect("ensure_app_schema");
         backend
@@ -1978,7 +1978,7 @@ fn backfill_pauses_broker_via_orchestrator_api_and_emits_one_resync() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_orch")
+            .attach_app_file("app_orch")
             .await
             .expect("ensure_app_schema");
         backend
@@ -2587,7 +2587,7 @@ fn vector_search_returns_k_nearest_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("vector_topk")
+            .attach_app_file("vector_topk")
             .await
             .expect("ensure_app_schema");
 
@@ -2689,7 +2689,7 @@ fn vector_dimension_mismatch_rejected_at_insert_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("vector_dim")
+            .attach_app_file("vector_dim")
             .await
             .expect("ensure_app_schema");
 
@@ -2734,7 +2734,7 @@ fn vector_search_respects_filter_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("vector_filter")
+            .attach_app_file("vector_filter")
             .await
             .expect("ensure_app_schema");
 
@@ -2835,7 +2835,7 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("vector_math")
+            .attach_app_file("vector_math")
             .await
             .expect("ensure_app_schema");
 
@@ -2961,7 +2961,7 @@ fn fts_search_matches_substring() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("fts_substring")
+            .attach_app_file("fts_substring")
             .await
             .expect("ensure_app_schema");
 
@@ -3062,7 +3062,7 @@ fn fts_and_filter_compose() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("fts_compose")
+            .attach_app_file("fts_compose")
             .await
             .expect("ensure_app_schema");
 
@@ -3141,7 +3141,7 @@ fn fts_trigger_keeps_index_in_sync_after_update() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("fts_trigger")
+            .attach_app_file("fts_trigger")
             .await
             .expect("ensure_app_schema");
 
@@ -3267,7 +3267,7 @@ fn near_returns_within_radius() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("near_radius")
+            .attach_app_file("near_radius")
             .await
             .expect("ensure_app_schema");
 
@@ -3878,7 +3878,7 @@ const _procedures = { setup, upsertInsert };
 
         let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend");
         backend
-            .ensure_app_schema("default")
+            .attach_app_file("default")
             .await
             .expect("ensure default schema");
         let client = backend
@@ -3980,7 +3980,7 @@ const _procedures = { setup, upsertConflict };
 
         let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend");
         backend
-            .ensure_app_schema("default")
+            .attach_app_file("default")
             .await
             .expect("ensure default schema");
         let client = backend
@@ -4106,7 +4106,7 @@ const _procedures = { setup, upsertConflict };
 
         let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend");
         backend
-            .ensure_app_schema("default")
+            .attach_app_file("default")
             .await
             .expect("ensure default schema");
         let client = backend
@@ -4225,7 +4225,7 @@ const _procedures = { setup, seed, updateByEmail };
 
         let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend");
         backend
-            .ensure_app_schema("default")
+            .attach_app_file("default")
             .await
             .expect("ensure default schema");
         let client = backend
@@ -4350,7 +4350,7 @@ const _procedures = { setup, seed, updateManyByName };
 
         let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend");
         backend
-            .ensure_app_schema("default")
+            .attach_app_file("default")
             .await
             .expect("ensure default schema");
         let client = backend
@@ -4613,7 +4613,7 @@ const _procedures = { setup, seed, nestedCasUpdate };
 
         let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend");
         backend
-            .ensure_app_schema("default")
+            .attach_app_file("default")
             .await
             .expect("ensure default schema");
         let client = backend
@@ -4698,7 +4698,7 @@ const _procedures = { setup, seed, nestedCasUpdateMany };
 
         let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend");
         backend
-            .ensure_app_schema("default")
+            .attach_app_file("default")
             .await
             .expect("ensure default schema");
         let client = backend
@@ -4745,7 +4745,7 @@ fn encrypted_column_round_trip_sqlite_randomised() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_demo")
+            .attach_app_file("app_demo")
             .await
             .expect("ensure_app_schema");
         backend
@@ -4825,7 +4825,7 @@ fn encrypted_column_round_trip_sqlite_deterministic() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_demo")
+            .attach_app_file("app_demo")
             .await
             .expect("ensure_app_schema");
         backend
@@ -4906,7 +4906,7 @@ fn deterministic_encrypted_equality_via_index_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_demo")
+            .attach_app_file("app_demo")
             .await
             .expect("ensure_app_schema");
         backend
@@ -5020,7 +5020,7 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_demo")
+            .attach_app_file("app_demo")
             .await
             .expect("ensure_app_schema");
         backend
@@ -5197,7 +5197,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_demo")
+            .attach_app_file("app_demo")
             .await
             .expect("ensure_app_schema");
         // PRIMARY KEY `id TEXT` + encrypted `ssn BLOB` — same shape the
@@ -5412,7 +5412,7 @@ fn dual_write_insert_persists_parent_and_sibling_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_demo")
+            .attach_app_file("app_demo")
             .await
             .expect("ensure_app_schema");
         // Hand-rolled SQLite-flavoured CREATE TABLE — the SQLite
@@ -5488,7 +5488,7 @@ fn aliased_select_serves_masked_sibling_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_demo")
+            .attach_app_file("app_demo")
             .await
             .expect("ensure_app_schema");
         backend
@@ -5661,7 +5661,7 @@ fn missing_sibling_fails_not_null_constraint_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_demo")
+            .attach_app_file("app_demo")
             .await
             .expect("ensure_app_schema");
         backend
@@ -5724,7 +5724,7 @@ fn snapshot_restore_round_trip_sqlite() {
     run(async {
         let (backend, dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_demo")
+            .attach_app_file("app_demo")
             .await
             .expect("ensure_app_schema");
 
@@ -5840,7 +5840,7 @@ fn vacuum_into_snapshot_consistent_under_concurrent_writer() {
     run(async {
         let (backend, dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_demo")
+            .attach_app_file("app_demo")
             .await
             .expect("ensure_app_schema");
         backend
@@ -6099,7 +6099,7 @@ fn restore_hash_mismatch_rejected_sqlite() {
     run(async {
         let (backend, dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_demo")
+            .attach_app_file("app_demo")
             .await
             .expect("ensure_app_schema");
         backend
@@ -6257,7 +6257,7 @@ async fn unmask_setup_with_schema(
             .expect("SqliteBackend::new"),
     );
     backend
-        .ensure_app_schema(app_id)
+        .attach_app_file(app_id)
         .await
         .expect("ensure_app_schema");
     // Install into the per-isolate context so dispatch_unmask's
@@ -6896,7 +6896,7 @@ fn mask_addition_backfills_existing_rows_end_to_end() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_demo")
+            .attach_app_file("app_demo")
             .await
             .expect("ensure_app_schema");
 
@@ -7056,7 +7056,7 @@ fn mask_kind_change_rewrites_existing_sibling_end_to_end() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_demo")
+            .attach_app_file("app_demo")
             .await
             .expect("ensure_app_schema");
 
@@ -7141,7 +7141,7 @@ fn mask_removal_classified_destructive_on_sqlite_diff() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_demo")
+            .attach_app_file("app_demo")
             .await
             .expect("ensure_app_schema");
 
@@ -7195,7 +7195,7 @@ fn malformed_mask_sentinel_skipped_on_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_demo")
+            .attach_app_file("app_demo")
             .await
             .expect("ensure_app_schema");
         backend
@@ -7989,7 +7989,7 @@ fn freshly_registered_model_has_seven_system_field_columns_end_to_end() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_demo")
+            .attach_app_file("app_demo")
             .await
             .expect("ensure_app_schema");
 
@@ -8071,7 +8071,7 @@ fn freshly_registered_model_has_three_indexes_end_to_end() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_demo")
+            .attach_app_file("app_demo")
             .await
             .expect("ensure_app_schema");
 
@@ -8135,7 +8135,7 @@ fn inserting_a_row_without_user_fields_succeeds_via_system_fields_only() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_demo")
+            .attach_app_file("app_demo")
             .await
             .expect("ensure_app_schema");
 
@@ -8216,7 +8216,7 @@ fn insert_end_to_end_populates_system_fields_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_demo")
+            .attach_app_file("app_demo")
             .await
             .expect("ensure_app_schema");
 
@@ -8334,7 +8334,7 @@ fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_demo")
+            .attach_app_file("app_demo")
             .await
             .expect("ensure_app_schema");
 
@@ -8434,7 +8434,7 @@ fn update_end_to_end_bumps_version_by_one_sqlite() {
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
-            .ensure_app_schema("app_demo")
+            .attach_app_file("app_demo")
             .await
             .expect("ensure_app_schema");
 
@@ -8522,7 +8522,7 @@ fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
 
     run(async {
         let (backend, _dir) = fresh_backend();
-        backend.ensure_app_schema("app_demo").await.unwrap();
+        backend.attach_app_file("app_demo").await.unwrap();
 
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
@@ -8592,7 +8592,7 @@ fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
 
     run(async {
         let (backend, _dir) = fresh_backend();
-        backend.ensure_app_schema("app_demo").await.unwrap();
+        backend.attach_app_file("app_demo").await.unwrap();
 
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
@@ -8663,7 +8663,7 @@ fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
 
     run(async {
         let (backend, _dir) = fresh_backend();
-        backend.ensure_app_schema("app_demo").await.unwrap();
+        backend.attach_app_file("app_demo").await.unwrap();
 
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
@@ -8749,7 +8749,7 @@ fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
 
     run(async {
         let (backend, _dir) = fresh_backend();
-        backend.ensure_app_schema("app_demo").await.unwrap();
+        backend.attach_app_file("app_demo").await.unwrap();
 
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
@@ -8834,7 +8834,7 @@ fn soft_delete_end_to_end_sets_deleted_at_and_bumps_version_sqlite() {
 
     run(async {
         let (backend, _dir) = fresh_backend();
-        backend.ensure_app_schema("app_demo").await.unwrap();
+        backend.attach_app_file("app_demo").await.unwrap();
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
             "posts",
@@ -8902,7 +8902,7 @@ fn soft_delete_on_already_soft_deleted_row_affects_zero_rows_sqlite() {
 
     run(async {
         let (backend, _dir) = fresh_backend();
-        backend.ensure_app_schema("app_demo").await.unwrap();
+        backend.attach_app_file("app_demo").await.unwrap();
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
             "posts",
@@ -8957,7 +8957,7 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
 
     run(async {
         let (backend, _dir) = fresh_backend();
-        backend.ensure_app_schema("app_demo").await.unwrap();
+        backend.attach_app_file("app_demo").await.unwrap();
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
             "posts",
@@ -9042,7 +9042,7 @@ fn restore_clears_deleted_at_and_bumps_version_sqlite() {
 
     run(async {
         let (backend, _dir) = fresh_backend();
-        backend.ensure_app_schema("app_demo").await.unwrap();
+        backend.attach_app_file("app_demo").await.unwrap();
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
             "posts",
@@ -9114,7 +9114,7 @@ fn restore_on_already_live_row_affects_zero_rows_sqlite() {
 
     run(async {
         let (backend, _dir) = fresh_backend();
-        backend.ensure_app_schema("app_demo").await.unwrap();
+        backend.attach_app_file("app_demo").await.unwrap();
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
             "posts",
@@ -9174,7 +9174,7 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
 
     run(async {
         let (backend, _dir) = fresh_backend();
-        backend.ensure_app_schema("app_demo").await.unwrap();
+        backend.attach_app_file("app_demo").await.unwrap();
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
             "posts",
@@ -9282,7 +9282,7 @@ fn soft_delete_many_sets_deleted_at_on_all_matching_live_rows_sqlite() {
 
     run(async {
         let (backend, _dir) = fresh_backend();
-        backend.ensure_app_schema("app_demo").await.unwrap();
+        backend.attach_app_file("app_demo").await.unwrap();
         let ddl = build_create_table_with_fks_for_dialect(
             "app_demo",
             "posts",
