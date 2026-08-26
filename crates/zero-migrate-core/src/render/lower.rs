@@ -281,18 +281,38 @@ pub struct LiveSchema {
     /// Index NAMES the live catalog reports as UNIQUE (drop-gating, OR-ed with the
     /// IR's advisory `unique` hint — the live fact is authoritative).
     pub unique_indexes: BTreeSet<String>,
-    /// the SQLite `renameColumn` rebuild facts.** The full introspected
-    /// per-table column structure (`table → TableSnapshot`), needed ONLY on the
-    /// SQLite leg of an online `renameColumn`: SQLite has no native online rename,
-    /// so the rename is reconciled by the 12-step table REBUILD, which needs the
-    /// whole live table shape (not just its name) to author the post-rename CREATE
-    /// and the value-copy mapping. The PG leg never reads this map (it lowers the
-    /// rename to an expand-contract sequence that needs only `{table, from, to,
-    /// ty}`). Empty ⇒ a SQLite `renameColumn` whose table's structure is absent
-    /// fails closed ([`IrLowerError::RenameNeedsLiveTable`]), never silently
-    /// emitting a wrong rebuild.
+    /// **Introspected PRE-DEPLOY table structure** (`table → TableSnapshot`) — the
+    /// whole live column shape, not just the name.
+    ///
+    /// PRE-DEPLOY IS THE POINT, not a limitation. The SQLite `renameColumn` rebuild
+    /// stages the byte-faithful OLD shape, copies values into it, replays the
+    /// captured indexes and triggers, and only THEN applies
+    /// `ALTER TABLE … RENAME COLUMN` — so SQLite's own parser rewrites the CHECKs,
+    /// generated expressions, indexes and triggers that name the column, instead of
+    /// the engine attempting a lossy SQL rewrite of them. Re-keying this map on
+    /// rename would destroy the exact property the value-copy reads from.
+    ///
+    /// THIS DOC USED TO MAKE THREE CLAIMS, ALL FALSE. Recorded so the correction is
+    /// not re-derived, and because each one inverts a real design decision:
+    /// - *"SQLite has no native online rename."* It has had `RENAME COLUMN` since
+    ///   3.25; `render::declarative` says so in as many words and emits the
+    ///   statement, and `zero_migrate_sqlite::backend`'s `SQLITE_VERSION_FLOOR`
+    ///   refuses to run against a server old enough to lack it. The rebuild
+    ///   DELEGATES to that statement — it is not a workaround for its absence.
+    /// - *"Needed ONLY on the SQLite leg"* / *"the PG leg never reads this map."*
+    ///   It has dialect-NEUTRAL readers: the `CatalogColumnEvidence` format proof,
+    ///   foreign-key and typed-reference target resolution, owner resolution. None
+    ///   is gated to one dialect. (Its sibling `sdk_schemas` genuinely does have the
+    ///   single SQLite reader this field was wrongly given.)
+    /// - That it is a pure pre-deploy read. The `addConstraint`-fk rebuild path
+    ///   INSERTS the rebuilt shape back into this map as it lowers, so later ops in
+    ///   the same envelope see the new shape.
+    ///
+    /// Empty ⇒ a SQLite `renameColumn` whose table's structure is absent fails
+    /// closed ([`IrLowerError::RenameNeedsLiveTable`]), never silently emitting a
+    /// wrong rebuild.
     pub table_snapshots: std::collections::BTreeMap<String, crate::model::snapshot::TableSnapshot>,
-    /// the SQLite `renameColumn` rebuild facts.** The live per-table SDK
+    /// **Populated for the SQLite `renameColumn` rebuild facts.** The live per-table SDK
     /// schema `Value` (`table → registerModel-shaped JSON`), the SAME shape
     /// [`crate::render::declarative::DesiredSchema`]'s `sdk_schemas` carries. The SQLite
     /// rebuild author renders the post-rename `CREATE TABLE` from this Value (with
@@ -300,7 +320,7 @@ pub struct LiveSchema {
     /// so the rebuilt table is byte-identical to what the declarative diff would
     /// emit. Only read on the SQLite `renameColumn` leg (see `table_snapshots`).
     pub sdk_schemas: std::collections::BTreeMap<String, serde_json::Value>,
-    /// the live per-table OWNER (`table → owning app`).** The SQLite
+    /// **Populated for the SQLite rebuild: the live per-table OWNER (`table → owning app`).** The SQLite
     /// `renameColumn` rebuild routes through the declarative differ, whose
     /// `enforce_ownership` REFUSES a structural change to a table the deploying app
     /// does not own ([`crate::render::declarative::DeclarativeError::NotTableOwner`]). That

@@ -1,7 +1,7 @@
 //! The dialect-neutral network driver seam (`SqlSession`).
 //!
 //! This is the ONE injected runtime dependency the network-dialect backends
-//! (`PostgresBackend`, and the forthcoming `MysqlBackend`) are generic over.
+//! (`PostgresBackend` and `MysqlBackend`) are generic over.
 //! **SQLite does NOT ride this seam** — it is an in-process `rusqlite` actor
 //! (`zero_migrate_sqlite::backend`) with no session object. The seam is therefore an
 //! implementation detail of the network backends, not a bound on the shared
