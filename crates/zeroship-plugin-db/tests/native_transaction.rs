@@ -40,6 +40,8 @@
 //! `sqlite_integration.rs`, and the SDK-side mock tests in
 //! `sdks/db/tests/p9-pr3-native-transaction.test.ts`.
 
+mod support;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -97,6 +99,12 @@ fn block_on<F: std::future::Future>(fut: F) -> F::Output {
 /// indistinguishable from a passing one at a glance - only the clock differs
 /// (0.02s against nothing, ~11s against Postgres).
 fn require_pg() -> String {
+    // Every test in this binary funnels through here, so this is the one place
+    // that has to install the subscriber. Without it the runtime's sanitization
+    // rail leaves a failure as a bare `{"message":"internal error"}` and the
+    // real cause goes to a discarded tracing stream. No-op unless RUST_LOG is
+    // set. See `support::init_test_tracing`.
+    support::init_test_tracing();
     let url = pg_url();
     let url_clone = url.clone();
     let ok = block_on(async move {
