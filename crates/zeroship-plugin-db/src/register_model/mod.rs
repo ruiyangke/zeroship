@@ -6,11 +6,11 @@
 //!
 //! * **PostgreSQL: nothing.** The arm is `Ok(())`. `zeroship-migrate` is the
 //!   sole PG schema authority and applies at DEPLOY, before the app serves.
-//! * **SQLite: one ATTACH.** `ensure_app_schema` binds `zs-<app_id>.sqlite`
-//!   into this worker's session under the `<app_id>` alias. It is NOT schema
-//!   creation - the file and its tables come from the vite dev-server's
-//!   apply-ahead. The name is inherited from the PG side, where the same trait
-//!   method IS `CREATE SCHEMA IF NOT EXISTS`, and it misleads on SQLite.
+//! * **SQLite: one ATTACH.** `SqliteBackend::attach_app_file` binds
+//!   `zs-<app_id>.sqlite` into this worker's session under the `<app_id>`
+//!   alias. It is NOT schema creation - the file and its tables come from the
+//!   vite dev-server's apply-ahead
+//!   (`sdks/vite-plugin/src/gen-types/dev-apply.ts`).
 //!
 //! Both arms then get the same two effects from the dispatch caller, on `Ok`:
 //! `mark_model_registered` (a per-thread flag) and `cache_schema` (the declared
@@ -21,8 +21,8 @@
 //!
 //! # The ATTACH is in the wrong place, and that is a known item
 //!
-//! `register_model/mod.rs` holding the only production `ensure_app_schema` call
-//! means SQLite CRUD depends on registerModel having run first. A session that
+//! This module holding the only production `attach_app_file` call means SQLite
+//! CRUD depends on registerModel having run first. A session that
 //! never registered has no alias attached, and nothing re-attaches on its own -
 //! `sqlite::session`'s recovery error says as much in plain text.
 //!
@@ -36,9 +36,10 @@
 //!
 //! # A four-phase pipeline used to live here
 //!
-//! `bootstrap`, `plan`, `validate` and `apply` introspected the live catalog,
-//! diffed it against the declared schema, and applied the difference as DDL.
-//! All four are DELETED. They were `#[cfg(any(test, feature = "test-helpers"))]`
+//! Four sibling modules introspected the live catalog, diffed it against the
+//! declared schema, and applied the difference as DDL. All four are DELETED,
+//! names included, so that a search for them turns up nothing rather than this
+//! paragraph. They were `#[cfg(any(test, feature = "test-helpers"))]`
 //! and no production build ever contained them, so reading a call chain from
 //! them into `pool_exec_ddl` and concluding plugin-db applied schema at deploy
 //! was a mistake the gating made easy - the chain was real and unreachable.
@@ -58,15 +59,9 @@
 use serde_json::Value;
 use zeroship_runtime::state::{OpResult, ResolveValue};
 
-// NOT cfg-gated: the SQLite register arm calls `ensure_app_schema` in every
-// build, so the trait must be in scope in the production build too. The
-// `use` below is test-only — putting this there compiles under `cargo test`
-// and fails under `cargo check`, which is how it was first written.
-
 use crate::context;
 use crate::error::DbError;
 use crate::v8_bridge::{runtime_state, setup_js_promise};
-
 
 /// `zeroship.db.registerModel(collection, schemaJson)` -> `Promise<void>`
 ///
@@ -124,21 +119,13 @@ pub fn register_model_dispatch<'s>(
     promise
 }
 
-/// Lazily initialise the pool, resolve the deploy id, then run the register
-/// step through the backend.
-///
-/// `collection` is unread here for the same reason it is unread in
-/// [`run_pipeline`]: registering is per-app now, not per-collection.
 /// The database half of registerModel. It needs ONE argument.
 ///
-/// The dispatch signature carries `collection`, `schema`, `indexes` and the
-/// declared-collection set because the JS API does, and because the dispatch
-/// caller genuinely uses `schema` - it seeds the declared cache. None of them
-/// reach the database: on PostgreSQL this returns `Ok(())`, and on SQLite it
-/// attaches the app file, which is keyed by `app_id` alone.
-///
-/// The four dead parameters used to be accepted here and discarded with a
-/// `let _ = (...)`, which read like they were pending rather than irrelevant.
+/// Lazily initialises the pool, then dispatches on the backend: PostgreSQL
+/// returns `Ok(())`, SQLite attaches the app file. Registration is per-APP,
+/// not per-collection, so `collection` is not among the arguments - and
+/// neither are the declared schema, the index list or the declared-collection
+/// set, none of which reach the database at all.
 async fn exec_register_model(app_id: &str) -> Result<(), DbError> {
     // Lazy pool init
     let has_pool = context::with(|c| c.pool_initialised());
@@ -151,99 +138,69 @@ async fn exec_register_model(app_id: &str) -> Result<(), DbError> {
     let backend = context::with(|c| c.backend())
         .ok_or_else(|| DbError::config("backend_not_initialized", "db: backend not initialized"))?;
 
-    // The cutover (dialect-conditional; do NOT brick SQLite dev). The
-    // schema-authority split (`docs/proposals/2026-06-18-schema-authority-drizzle-
-    // model-design.md` §6/§9/§12) makes `zeroship-migrate` the SOLE PG schema
-    // applier: the `zeroship-migrated` service creates/migrates the per-app PG
-    // schema (and provisions the migration/runtime roles) before go-live via
-    // `POST /v1/apps/{id}/migrations/apply`. So on the PG dialect
-    // `registerModel` STOPS being a schema authority — it issues NO runtime DDL
-    // (no `bootstrap` create-schema / `plan` / `validate` / `apply`). This is what
-    // eliminates the two-applier overlap (plugin-db + engine both running DDL
-    // under disjoint advisory-lock namespaces).
+    // NEITHER ARM APPLIES SCHEMA, and the reason is the same on both: something
+    // else already did, before this code could run.
     //
-    // What the PG no-DDL path STILL guarantees — the "schema-ready + metadata-
-    // available" contract the introspection cache depends on (design §6):
-    //   * readiness — the dispatch caller (`register_model_dispatch`) marks
-    //     `is_model_registered` on this `Ok(())`, which is the gate
-    //     `crud::introspect_schema::runtime_schema_for` checks before sourcing
-    //     per-collection metadata from LIVE introspection + the engine's sentinels
-    //     (the `runtime_schema_for` path). Introspection itself is lazy +
-    //     deploy-keyed and runs on the first CRUD op, so marking readiness here is
-    //     sufficient — we deliberately do NOT introspect (no catalog reads) at
-    //     register time, matching the old fast/cheap registration boundary.
-    //   * declared-schema cache — the dispatch caller also still calls
-    //     `cache_schema`, so the declared-ONLY hints that introspection cannot
-    //     recover keep working byte-identically: the `t.id(prefix)` typed-id
-    //     `idPrefix` read by `system_fields_pass::prefix_for_collection`, and the
-    //     `schema_for` hints consulted by vector-search / unmask / mask-drift.
-    // Net on PG: the runtime never CREATEs/ALTERs schema; it only reads. If the
-    // engine somehow has not applied the schema at deploy, runtime CRUD errors
-    // normally ("column does not exist") — deploy ordering (§8) guarantees the
-    // schema is present first; we deliberately do NOT re-add a runtime
-    // auto-migrate fallback.
+    // On PostgreSQL the `zeroship-migrated` service creates and migrates the
+    // per-app schema (and provisions the migration/runtime roles) before
+    // go-live, via `POST /v1/apps/{id}/migrations/apply`. On SQLite the vite
+    // dev server applies the committed migrations to the app file before it
+    // spawns the runtime. So `registerModel` reaches a schema that is already
+    // in place, on both dialects, and issuing DDL here could only conflict with
+    // the authority that owns it.
     //
-    // On the SQLite dialect (dev tier) the same is true, and THIS COMMENT SAID
-    // THE OPPOSITE until 2026-08-20: that `registerModel` "drives the SAME
-    // hardened zeroship-migrate engine", applying at first-register on the
-    // developer's own local file. That described the pre-cutover arm and
-    // contradicted the arm's own comment twenty lines below. Since d84cbbd84
-    // the dev server applies the committed migrations through the addon's
-    // `applyIrSqlite` before it spawns the runtime, so BOTH dialects reach the
-    // arms below with the schema already in place. `installSchema` is PG-UNUSED
-    // and SQLite-UNUSED for DDL; on both it supplies only the declared metadata
-    // the CRUD passes cache.
+    // What registration still earns is the "schema-ready + metadata-available"
+    // contract the introspection cache depends on, and BOTH halves of it come
+    // from the dispatch caller reacting to this `Ok(())`, not from here:
+    //
+    //   * readiness. `mark_model_registered` sets the flag that
+    //     `crud::introspect_schema::runtime_schema_for` checks before it will
+    //     source per-collection metadata from live introspection plus the
+    //     engine's sentinels. Introspection is lazy and deploy-keyed and runs
+    //     on the first CRUD op, so marking readiness is sufficient - this path
+    //     deliberately reads no catalog, keeping registration cheap.
+    //   * the declared-schema cache. `cache_schema` keeps the declared-ONLY
+    //     hints that introspection cannot recover: the `t.id(prefix)` typed-id
+    //     `idPrefix` read by `system_fields_pass::prefix_for_collection`, and
+    //     the `schema_for` hints consulted by vector-search, unmask and
+    //     mask-drift.
+    //
+    // If an authority somehow has not applied the schema, runtime CRUD fails
+    // normally ("column does not exist"). That is the intended behaviour: there
+    // is deliberately no runtime auto-migrate fallback, because a fallback is a
+    // second applier, and two appliers under disjoint locks is what this
+    // arrangement exists to prevent.
     match (backend.as_postgres(), backend.as_sqlite()) {
-        // PG: NO runtime DDL — the engine (deploy-apply) is the PG schema
-        // authority. This path no-ops the apply; the dispatch caller stamps
-        // readiness (`mark_model_registered`) + the declared cache (`cache_schema`)
-        // on the returned `Ok(())`, preserving the metadata-readiness contract
-        // above WITHOUT any CREATE/ALTER. `_pg` is bound only to select the arm.
+        // PG: nothing to do. `_pg` is bound only to select the arm.
         //
-        // **Migration-first cutover.** The `schema` value this arm
-        // receives (and that the dispatch caller stamps into `cache_schema`)
-        // now originates from the bundled `RuntimeSchemaDescriptor` (the
-        // migration fold's runtime descriptor), not the old declared t.* object:
-        // the runtime injects the descriptor as
-        // `globalThis.__zsRuntimeDescriptor` and `installSchema` runs the
-        // `registerModel` chain off it. So the declared-only hints the PG CRUD
-        // passes read out of the cache (`t.id(prefix)` idPrefix, encrypted /
-        // mask facets) come from the fold — higher fidelity than the old
-        // declared object — while this arm stays a pure no-op (no DDL). The
-        // descriptor path is PG/`.zship`-only; SQLite dev (below) still receives
-        // the declared schema and diffs it against live state.
+        // On the `.zship` path the `schema` the dispatch caller caches
+        // originates from the bundled `RuntimeSchemaDescriptor` that the
+        // runtime injects as `globalThis.__zsRuntimeDescriptor`, off which
+        // `installSchema` runs the `registerModel` chain. So the declared-only
+        // facets the PG CRUD passes read back out of the cache come from the
+        // migration fold rather than from a hand-declared object, which is
+        // higher fidelity. It changes what is cached, not what this arm does.
         (Some(_pg), _) => Ok(()),
-        // SQLite dev tier — metadata only, NO DDL, exactly like the PG arm
-        // above. The dev server applies the committed migrations to the app
-        // file ahead of the worker (`sdks/vite-plugin/src/gen-types/dev-apply.ts`),
-        // so by the time a request reaches here the schema already exists and
-        // this call has nothing to create.
+        // SQLite: the ATTACH, and nothing else. The data plane cannot read an
+        // app file it never attached.
         //
-        // WHY THE OLD ARM COULD NOT WORK. It drove the migration engine from
-        // the DESCRIPTOR, and the descriptor already carries the seven injected
+        // WHY THIS ARM DOES NOT APPLY SCHEMA, beyond the ordering argument
+        // above: when it did, it drove the migration engine from the
+        // descriptor, and the descriptor already carries the seven injected
         // system columns (gen-types folds them in at emit). Re-injecting them
-        // here made the collection collide with the platform's own columns:
+        // collided with the platform's own columns:
         //
         //   sqlite engine: desired_snapshot failed: invalid descriptor:
         //   collection 'todos' declares field 'created_at', which collides with
         //   an injected policy column
         //
         // reproduced on examples/db-todos, whose migration declares no system
-        // columns at all. The register also ran PER COLLECTION in registration
-        // order against a partial union, so a foreign key resolved only if its
-        // target happened to register first. Both failures are the same
-        // category error — the runtime doing the migration's job — and both
-        // disappear by construction once the apply happens ahead of time.
-        //
-        // What is still earned here: the dispatch caller stamps readiness
-        // (`mark_model_registered`) and the declared cache (`cache_schema`) on
-        // the returned `Ok(())`, and the CRUD paths read that cache for the
-        // declared-only facets introspection cannot recover (`t.id(prefix)`
-        // idPrefix, encrypted/mask facets). The ATTACH is kept explicitly: the
-        // data plane cannot read the app file it never attached.
-        (_, Some(sqlite)) => {
-            sqlite.attach_app_file(app_id).await
-        }
+        // columns at all. It also ran PER COLLECTION in registration order
+        // against a partial union, so a foreign key resolved only if its target
+        // happened to register first. Both are the same category error, the
+        // runtime doing the migration's job, and both disappear by construction
+        // once the apply happens ahead of time.
+        (_, Some(sqlite)) => sqlite.attach_app_file(app_id).await,
         // Unknown / future backend surfaces a typed, SDK-visible error rather than
         // aborting the spawned compio task via an `.expect()` panic.
         _ => Err(DbError::backend_unsupported("register_model")),
@@ -253,12 +210,12 @@ async fn exec_register_model(app_id: &str) -> Result<(), DbError> {
 
 
 /// Test seam that drives the PRODUCTION dialect dispatch
-/// ([`exec_register_model`]) without the V8 lifecycle. The backend is read
-/// from the per-isolate context (install it first via
-/// `set_postgres_pool_for_tests` / `set_sqlite_backend_for_tests`), so this
-/// exercises the EXACT PG-no-DDL vs SQLite-auto-migrate branch the cutover
-/// introduces — unlike `exec_register_model_with_pool`, which bypasses the
-/// dispatch and calls `run_pipeline` directly.
+/// ([`exec_register_model`]) without the V8 lifecycle.
+///
+/// The backend is read from the per-isolate context, so install one first via
+/// `set_postgres_pool_for_tests` / `set_sqlite_backend_for_tests`. Which arm
+/// runs is then decided by exactly the match production uses, not by a
+/// test-side copy of it.
 #[cfg(feature = "test-helpers")]
 pub async fn exec_register_model_via_dispatch_for_tests(
     app_id: &str,
