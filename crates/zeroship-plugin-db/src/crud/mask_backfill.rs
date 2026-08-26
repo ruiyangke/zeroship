@@ -55,16 +55,13 @@
 //! deploy by passing a different `BackfillOpts` (unused today — the
 //! constant is exposed so a future caller can lift it).
 
-use compio_postgres::Pool;
 use serde_json::Value;
 use zeroize::Zeroizing;
 
-use crate::audit::{ActorKind, AuditRow, ChangeClass, InitialStatus, Phase, TerminalStatus};
 use crate::backend::EncryptedColumn;
 use crate::crud::mask_pass::apply_mask_kind;
 use crate::diff::{Classification, MaskKind};
 use crate::error::DbError;
-use crate::query::quote_ident;
 
 /// Default batch size for backfill / rewrite loops. We use 1000 here
 /// as a middle ground between
@@ -211,565 +208,48 @@ pub struct BackfillReport {
 }
 
 // ---------------------------------------------------------------------
-// Mask backfill
+// THE MASK BACKFILL / REWRITE / REMOVE RUNNERS ARE DELETED.
+//
+// They walked every row of a creator's table writing the `<col>_masked`
+// sibling, and two of them finished with DDL: the backfill with
+// `ALTER COLUMN ... SET NOT NULL`, the remove with
+// `ALTER TABLE ... DROP COLUMN`. plugin-db does not touch DDL, and it is not
+// the schema authority, so a mask lifecycle it can only half-perform does not
+// belong here. Their one caller, `register_model::apply`, is deleted too.
+//
+// WHERE THIS GOES INSTEAD. Backfill is a migration-engine capability:
+// `PlanStep::Backfill` carries a structured, resumable `BackfillSpec` that is
+// journaled and checksummed - a better home than an ad-hoc row walk here.
+//
+// ONE CASE HAS NO HOME, recorded rather than left to be discovered. A mask over
+// an ENCRYPTED column cannot be expressed as an engine backfill: the runner
+// deleted here called `backend.resolve_key(...)` then `backend.decrypt(...)`,
+// computing the mask in Rust from AEAD-decrypted plaintext. `BackfillSpec` is
+// structured SQL and the engine holds no key material. So adding a mask to an
+// existing encrypted column is unsupported end to end, by decision, not by
+// oversight. Masks on encrypted columns still work when declared UP FRONT -
+// the CRUD write path computes them per row (`apply_mask_to_one_row`).
 // ---------------------------------------------------------------------
-
-/// Backfill the sibling column for every row where
-/// `<col>_masked IS NULL`, then flip the sibling to NOT NULL.
-///
-/// The diff classifier already emitted the
-/// `ALTER TABLE ADD COLUMN <col>_masked TEXT NULL` op immediately
-/// before the `MaskBackfill` op; that ALTER is run by the regular
-/// apply path before this function fires. We start with the sibling
-/// already in place + NULL on every existing row.
-///
-/// Steps (per batch):
-///
-/// 1. `SELECT id, <col> FROM "<app>"."<coll>"
-///       WHERE "<col>_masked" IS NULL AND "<col>" IS NOT NULL
-///       ORDER BY id LIMIT N`.
-///    Skipping rows where the parent is itself NULL because
-///    `apply_mask_on_write` writes no sibling for NULL parents
-///    (Q-MASK-L pass-through) — the sibling stays NULL forever for
-///    those rows; the SET NOT NULL at the end would refuse if we
-///    didn't filter, so the algorithm intentionally fails-loud on
-///    rows that should be filtered by the parent IS NOT NULL clause.
-/// 2. Decrypt + mask each row's parent value via
-///    [`apply_mask_to_one_row`].
-/// 3. UPDATE the sibling for each row.
-/// 4. Repeat until two consecutive polls return zero rows. The
-///    second clean poll catches a row that another worker INSERTed
-///    between the previous batch's UPDATE and the SELECT.
-/// 5. `ALTER TABLE … ALTER COLUMN <col>_masked SET NOT NULL`.
-///
-/// The dual-write CRUD pass ensures every new INSERT writes
-/// the sibling, so the race window between step 1's SELECT and
-/// step 5's ALTER is bounded by one batch's runtime.
-///
-/// Audit-row lifetime:
-///
-/// - Insert `Running` row at the start (`audit_id` returned).
-/// - On error: `update_audit_status(Failed, message)` + return.
-/// - On success: `update_audit_status(Applied, None)`.
-///
-/// Resume: a re-invoked backfill against the same `(coll, col)`
-/// finds the existing `Running` (or `Failed`) audit row and reuses it
-/// — the row's `cursor` carries the last processed PK so subsequent
-/// SELECTs pick up where the previous attempt stopped.
-#[allow(clippy::too_many_arguments)]
-pub async fn run_mask_backfill<B>(
-    backend: &B,
-    app_id: &str,
-    collection: &str,
-    column: &str,
-    kind: MaskKind,
-    classification: Classification,
-    enc_meta: Option<&crate::diff::EncryptionMeta>,
-    pool: &Pool,
-) -> Result<BackfillReport, DbError>
-where
-    B: EncryptedColumn,
-{
-    let sibling = format!("{column}_masked");
-    let name = backfill_audit_name(collection, column);
-
-    // Audit row — best-effort INSERT; if it fails the backfill still
-    // runs but operators lose the trail. (Same pattern as
-    // `validate.rs:101` / `apply.rs:84` — F1 warn-half.)
-    let audit_id = open_backfill_audit_row(
-        pool,
-        app_id,
-        collection,
-        &name,
-        kind,
-        classification,
-        ChangeClass::Additive,
-    )
-    .await;
-
-    let report = backfill_loop::<B>(
-        backend,
-        app_id,
-        collection,
-        column,
-        &sibling,
-        kind,
-        enc_meta,
-        pool,
-        audit_id,
-        /* select_only_null_sibling = */ true,
-    )
-    .await;
-
-    finalize_audit_row(pool, app_id, audit_id, &report).await;
-
-    let report = report?;
-
-    // Final ALTER — flip the sibling to NOT NULL. Sets the contract
-    // the dual-write CRUD pass expects: every existing row has a
-    // non-NULL sibling, every future INSERT must dual-write.
-    let alter_sql = format!(
-        "ALTER TABLE {}.{} ALTER COLUMN {} SET NOT NULL",
-        quote_ident(app_id),
-        quote_ident(collection),
-        quote_ident(&sibling),
-    );
-    pool.query_text_params(&alter_sql, &[])
-        .await
-        .map_err(|e| crate::error::coded_sql("mask_backfill: SET NOT NULL", e))?;
-
-    Ok(BackfillReport {
-        processed: report.processed,
-    })
-}
-
-// ---------------------------------------------------------------------
-// Mask rewrite
-// ---------------------------------------------------------------------
-
-/// Rewrite the sibling column under a NEW mask kind
-/// (or new classification) for every row. The sibling already exists +
-/// is NOT NULL, so no schema mutation runs alongside this.
-///
-/// Same loop shape as [`run_mask_backfill`] except:
-/// - No `IS NULL` filter on the sibling (we touch every row).
-/// - No SET NOT NULL at the end.
-///
-/// Idempotent on a stable `(collection, column, new_kind,
-/// classification)`: re-running the rewrite over already-correct
-/// siblings writes back the same string, so a partial run that
-/// crashes mid-pass can be re-driven from the start without
-/// observable difference. Resume from `audit_row.cursor` skips
-/// already-rewritten rows for the common case where the operator
-/// just wants to bypass the redundant work.
-#[allow(clippy::too_many_arguments)]
-pub async fn run_mask_rewrite<B>(
-    backend: &B,
-    app_id: &str,
-    collection: &str,
-    column: &str,
-    new_kind: MaskKind,
-    classification: Classification,
-    enc_meta: Option<&crate::diff::EncryptionMeta>,
-    pool: &Pool,
-) -> Result<BackfillReport, DbError>
-where
-    B: EncryptedColumn,
-{
-    let sibling = format!("{column}_masked");
-    let name = rewrite_audit_name(collection, column);
-
-    let audit_id = open_backfill_audit_row(
-        pool,
-        app_id,
-        collection,
-        &name,
-        new_kind,
-        classification,
-        ChangeClass::Compatible,
-    )
-    .await;
-
-    let report = backfill_loop::<B>(
-        backend,
-        app_id,
-        collection,
-        column,
-        &sibling,
-        new_kind,
-        enc_meta,
-        pool,
-        audit_id,
-        /* select_only_null_sibling = */ false,
-    )
-    .await;
-
-    finalize_audit_row(pool, app_id, audit_id, &report).await;
-
-    let report = report?;
-    Ok(BackfillReport {
-        processed: report.processed,
-    })
-}
-
-// ---------------------------------------------------------------------
-// Mask removal
-// ---------------------------------------------------------------------
-
-/// Drop the sibling column.
-///
-/// Only invoked from `apply.rs` under `strictness == "off"` — the
-/// validate stage's destructive-class filter refuses removal under
-/// `strict` and `lenient`. The SQL is single-statement, idempotent
-/// via `IF EXISTS`, and no audit-loop machinery is needed (the
-/// regular apply-rail audit row for the MaskRemove op is enough).
-pub async fn run_mask_remove(
-    app_id: &str,
-    collection: &str,
-    column: &str,
-    pool: &Pool,
-) -> Result<(), DbError> {
-    let sibling = format!("{column}_masked");
-    let sql = format!(
-        "ALTER TABLE {}.{} DROP COLUMN IF EXISTS {}",
-        quote_ident(app_id),
-        quote_ident(collection),
-        quote_ident(&sibling),
-    );
-    pool.query_text_params(&sql, &[])
-        .await
-        .map_err(|e| crate::error::coded_sql("mask_remove: DROP COLUMN", e))?;
-    Ok(())
-}
 
 // ---------------------------------------------------------------------
 // Shared loop
 // ---------------------------------------------------------------------
 
-/// Inner batch loop shared by the backfill and rewrite paths. Returns
-/// `BackfillReport.completed = false` and `Err(DbError)` together on
-/// the propagating-error path (the caller's `?` unwinds to the
-/// apply.rs Err); on success the caller is responsible for finalising
-/// the audit row + the optional SET NOT NULL.
-///
-/// `select_only_null_sibling`:
-/// - `true`  → backfill: `WHERE "<sibling>" IS NULL AND "<col>" IS NOT NULL`
-/// - `false` → rewrite: no filter on the sibling; only `<col> IS NOT NULL`
-///
-/// The backfill path additionally requires TWO consecutive empty
-/// SELECTs before exiting the loop — the second poll catches a row
-/// that another worker INSERTed between the last batch's UPDATE and
-/// the SELECT. The rewrite path doesn't need the fence because
-/// there's no "completion" criterion — `cursor` monotonically
-/// advances and the `LIMIT` exits the loop once every row past the
-/// cursor has been rewritten.
-#[allow(clippy::too_many_arguments)]
-async fn backfill_loop<B>(
-    backend: &B,
-    app_id: &str,
-    collection: &str,
-    column: &str,
-    sibling: &str,
-    kind: MaskKind,
-    enc_meta: Option<&crate::diff::EncryptionMeta>,
-    pool: &Pool,
-    audit_id: Option<i64>,
-    select_only_null_sibling: bool,
-) -> Result<BackfillReport, DbError>
-where
-    B: EncryptedColumn,
-{
-    let schema = quote_ident(app_id);
-    let table = quote_ident(collection);
-    let parent = quote_ident(column);
-    let sibling_q = quote_ident(sibling);
 
-    let where_clause = if select_only_null_sibling {
-        format!("WHERE {sibling_q} IS NULL AND {parent} IS NOT NULL")
-    } else {
-        format!("WHERE {parent} IS NOT NULL")
-    };
-    let select_sql = format!(
-        "SELECT id, {parent} FROM {schema}.{table} \
-         {where_clause} AND id > $1::bigint \
-         ORDER BY id LIMIT $2::bigint"
-    );
 
-    // Resume from the last cursor written to the audit row (carried
-    // over by a previously-crashed run). The lookup runs once
-    // up-front; subsequent heartbeats update it in place.
-    let mut cursor: i64 = match audit_id {
-        Some(id) => read_cursor_from_audit_id(pool, app_id, id).await.unwrap_or(0),
-        None => 0,
-    };
-    let mut processed: i64 = match audit_id {
-        Some(id) => read_processed_from_audit_id(pool, app_id, id).await.unwrap_or(0),
-        None => 0,
-    };
-    let mut consecutive_empty = 0;
-    let required_empty_polls = if select_only_null_sibling { 2 } else { 1 };
-    let batch_size_str = BATCH_SIZE.to_string();
-
-    loop {
-        let cursor_str = cursor.to_string();
-        let rows = pool
-            .query_text_params(&select_sql, &[cursor_str.as_str(), batch_size_str.as_str()])
-            .await
-            .map_err(|e| crate::error::coded_sql("mask_backfill: SELECT", e))?;
-
-        if rows.is_empty() {
-            consecutive_empty += 1;
-            if consecutive_empty >= required_empty_polls {
-                return Ok(BackfillReport {
-                    processed,
-                });
-            }
-            // For the backfill path only: if no rows came back this
-            // round, try one more poll without advancing the cursor —
-            // a racing INSERT writes a row at the END of the id
-            // ordering, so we MUST reset the cursor to 0 to catch it.
-            // The `IS NULL` filter on the sibling guarantees we don't
-            // re-touch rows already backfilled. For the rewrite path
-            // (`select_only_null_sibling = false`) the first empty
-            // poll already terminates because `required_empty_polls
-            // == 1`, so we never take this branch on the rewrite
-            // path.
-            cursor = 0;
-            continue;
-        }
-        consecutive_empty = 0;
-
-        for row in &rows {
-            let id: i64 = row.try_get("id").unwrap_or(0);
-            let parent_value = pg_row_value(row, column);
-            let row_pk = id.to_string();
-            let masked = apply_mask_to_one_row(
-                backend, app_id, collection, column, enc_meta, kind, &row_pk, &parent_value,
-            )
-            .await?;
-
-            if let Some(masked_str) = masked {
-                let update_sql = format!(
-                    "UPDATE {schema}.{table} SET {sibling_q} = $1 \
-                     WHERE id = $2::bigint",
-                );
-                let id_str = id.to_string();
-                pool.query_text_params(
-                    &update_sql,
-                    &[masked_str.as_str(), id_str.as_str()],
-                )
-                .await
-                .map_err(|e| crate::error::coded_sql("mask_backfill: UPDATE", e))?;
-                processed += 1;
-            }
-            cursor = std::cmp::max(cursor, id);
-        }
-
-        // Heartbeat: bump the audit cursor so a worker restart picks
-        // up from here. Best-effort — a transient failure on the
-        // audit UPDATE doesn't block the data write.
-        if let Some(id) = audit_id {
-            let _ = update_backfill_cursor(pool, app_id, id, cursor, processed).await;
-        }
-    }
-}
-
-/// Read the `validate_cursor` from a backfill audit row by id.
-/// Returns `None` on lookup failure (row missing, column NULL, query
-/// error) — the caller starts fresh from cursor 0.
-async fn read_cursor_from_audit_id(pool: &Pool, app_id: &str, id: i64) -> Option<i64> {
-    let sql = format!(
-        r#"SELECT validate_cursor FROM "{app_id}"."__zeroship_migrations"
-            WHERE id = $1::bigint"#
-    );
-    let id_s = id.to_string();
-    let rows = pool.query_text_params(&sql, &[id_s.as_str()]).await.ok()?;
-    rows.first().and_then(|r| r.try_get::<_, i64>("validate_cursor").ok())
-}
-
-/// Read the `details.processed` count from a backfill audit row by id.
-///
-/// `None` is "could not read it" and the caller resumes the count from 0.
-/// The SELECT above names `details`, so the decode failing means the audit
-/// table no longer has that column - drift worth a line in the log rather
-/// than a resumed zero nobody can attribute.
-async fn read_processed_from_audit_id(pool: &Pool, app_id: &str, id: i64) -> Option<i64> {
-    let sql = format!(
-        r#"SELECT details FROM "{app_id}"."__zeroship_migrations"
-            WHERE id = $1::bigint"#
-    );
-    let id_s = id.to_string();
-    let rows = pool.query_text_params(&sql, &[id_s.as_str()]).await.ok()?;
-    let row = rows.first()?;
-    match crate::audit::read_processed_from_audit_row(row) {
-        Ok(processed) => Some(processed),
-        Err(error) => {
-            tracing::warn!(
-                app_id = app_id,
-                audit_id = id,
-                %error,
-                "db: backfill audit row carries no `details` column; resuming the processed count from 0"
-            );
-            None
-        }
-    }
-}
 
 // ---------------------------------------------------------------------
 // Audit-table helpers
 // ---------------------------------------------------------------------
 
-/// Open (or reuse) the audit row tracking this run. Returns the row's
-/// `id` for downstream finalisation, or `None` on a best-effort
-/// audit-write failure (the loop still runs; operators lose the
-/// trail — matches the F1 warn-half pattern).
-///
-/// Resume semantics: if a `Running` row already exists for this
-/// `(collection, name)` pair (from a prior worker that crashed
-/// mid-backfill), we reuse it. This means a backfill that fails halfway
-/// and a deploy that re-emits the same `MaskBackfill` op finds the same
-/// audit row and resumes from the cursor it already wrote.
-async fn open_backfill_audit_row(
-    pool: &Pool,
-    app_id: &str,
-    collection: &str,
-    name: &str,
-    kind: MaskKind,
-    classification: Classification,
-    change_class: ChangeClass,
-) -> Option<i64> {
-    // Class `creator`: this identifies the DEPLOYED APP, not the platform
-    // process, and the worker injects it per app rather than an operator
-    // setting it for the host.
-    let deploy_id =
-        zeroship_core::declared_env!(creator, "ZEROSHIP_DEPLOY_ID", crate::PluginDbConsumer)
-            .unwrap_or_else(|| "cold_start".to_string());
-    let schema_version = crate::audit::next_schema_version(pool, app_id).await.unwrap_or(1);
 
-    if let Ok(Some(existing)) =
-        crate::audit::find_latest_backfill_row(pool, app_id, collection, name).await
-    {
-        if matches!(existing.status.as_str(), "running" | "failed") {
-            // Reuse the row — operators see one history per
-            // `(collection, column)` rather than a row per attempt.
-            return Some(existing.id);
-        }
-    }
 
-    // `change_kind` doubles as the lookup key on the backfill rail —
-    // `find_latest_backfill_row` matches `WHERE change_kind = $name`.
-    // The full disambiguating name (`mask_backfill_<coll>_<col>` /
-    // `mask_rewrite_<coll>_<col>`) lands here so resume across worker
-    // restarts works without a separate lookup column.
-    let row = AuditRow {
-        collection: collection.to_string(),
-        phase: Phase::Backfill,
-        change_class,
-        change_kind: name.to_string(),
-        details: serde_json::json!({
-            "kind": classify_label_from_name(name),
-            "name": name,
-            "mask_kind": kind.as_sql(),
-            "classification": classification.as_sql(),
-            "processed": 0,
-        }),
-        ddl_sql: None,
-        status: InitialStatus::Running,
-        deploy_id,
-        schema_version,
-        actor: ActorKind::Auto,
-    };
-    match crate::audit::write_audit_row(pool, app_id, &row).await {
-        Ok(id) => Some(id),
-        Err(audit_err) => {
-            tracing::warn!(
-                app_id = %app_id,
-                collection = %collection,
-                transition = "Running/insert_failed",
-                audit_err = %audit_err,
-                "audit: failed to insert mask-backfill running row",
-            );
-            None
-        }
-    }
-}
 
-/// Render the audit-details `kind` discriminator label for a given
-/// run name. Mirrors the static `ChangeKind::as_sql` shape so operator
-/// dashboards grouping by `details.kind` see consistent buckets.
-fn classify_label_from_name(name: &str) -> &'static str {
-    if name.starts_with("mask_backfill_") {
-        "mask_backfill"
-    } else if name.starts_with("mask_rewrite_") {
-        "mask_rewrite"
-    } else {
-        "mask_backfill"
-    }
-}
-
-/// Update the audit row's cursor + processed count after each batch.
-/// Best-effort — invoked from the heartbeat path; failure doesn't
-/// abort the data write.
-///
-/// Takes `&Pool` instead of a borrowed `&Client` — the mask-backfill
-/// loop doesn't hold
-/// a dedicated client (no advisory lock; the deploy pipeline's
-/// register_model lock is the broader coordination boundary).
-async fn update_backfill_cursor(
-    pool: &Pool,
-    app_id: &str,
-    audit_id: i64,
-    cursor: i64,
-    processed: i64,
-) -> Result<(), DbError> {
-    let sql = format!(
-        r#"UPDATE "{app_id}"."__zeroship_migrations"
-            SET validate_cursor = $2::bigint,
-                details = jsonb_set(COALESCE(details, '{{}}'::jsonb), '{{processed}}', to_jsonb($3::bigint)),
-                last_heartbeat_at = NOW(),
-                updated_at = NOW()
-            WHERE id = $1::bigint"#
-    );
-    let id_s = audit_id.to_string();
-    let cursor_s = cursor.to_string();
-    let processed_s = processed.to_string();
-    pool.query_text_params(
-        &sql,
-        &[id_s.as_str(), cursor_s.as_str(), processed_s.as_str()],
-    )
-    .await
-    .map_err(|e| crate::error::coded_sql("mask_backfill: update cursor", e))?;
-    Ok(())
-}
-
-/// Finalise the audit row to `Applied` / `Failed`. The `report` is
-/// `Result<BackfillReport, DbError>` — `Ok(_)` → `Applied`,
-/// `Err(_)` → `Failed` with the rendered DbError as `error_message`.
-/// Best-effort: an audit-write failure here is logged via the F1
-/// warn-half but doesn't override the underlying result.
-async fn finalize_audit_row(
-    pool: &Pool,
-    app_id: &str,
-    audit_id: Option<i64>,
-    report: &Result<BackfillReport, DbError>,
-) {
-    let Some(id) = audit_id else { return };
-    let (status, error_message) = match report {
-        Ok(_) => (TerminalStatus::Applied, None),
-        Err(e) => (TerminalStatus::Failed, Some(e.clone().into_string())),
-    };
-    if let Err(audit_err) = crate::audit::update_audit_status(
-        pool,
-        app_id,
-        id,
-        status,
-        error_message.as_deref(),
-    )
-    .await
-    {
-        tracing::warn!(
-            app_id = %app_id,
-            audit_id = id,
-            transition = ?status,
-            audit_err = %audit_err,
-            "update_audit_status failed; mask-backfill row stays in 'running' until reset",
-        );
-    }
-}
 
 // ---------------------------------------------------------------------
 // Helpers shared with the existing encryption pass
 // ---------------------------------------------------------------------
 
-/// Pluck a column value from a `compio_postgres::Row` as a JSON Value
-/// (`String` / `Null`). Lifted out of `apply_mask_to_one_row` so
-/// callers (and tests) can re-use the same shape conversion.
-fn pg_row_value(row: &compio_postgres::Row, column: &str) -> Value {
-    match row.try_get::<_, Option<String>>(column) {
-        Ok(Some(s)) => Value::String(s),
-        Ok(None) | Err(_) => Value::Null,
-    }
-}
 
 /// Convert decrypted plaintext bytes to the human-readable string the
 /// mask pass needs. Mirrors `plaintext_to_sidechannel_string` in

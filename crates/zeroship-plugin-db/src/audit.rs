@@ -564,54 +564,6 @@ pub fn read_dead_letter_pks_from_audit_row(row: &Row) -> Result<Value, DbError> 
     Ok(serde_json::from_str(json_str).unwrap_or(Value::Array(vec![])))
 }
 
-/// SELECT the latest backfill row for `(collection, change_kind=name)`.
-/// Returns `Ok(None)` if the row hasn't been inserted yet.
-pub(crate) async fn find_latest_backfill_row<E: AuditExecutor>(
-    exec: &E,
-    app_id: &str,
-    collection: &str,
-    name: &str,
-) -> Result<Option<BackfillLookup>, DbError> {
-    let sql = format!(
-        r#"SELECT id, status, validate_cursor, dead_letter_pks, details, error, audit_generation
-            FROM "{app_id}"."__zeroship_migrations"
-            WHERE collection = $1 AND phase = 'backfill' AND change_kind = $2
-            ORDER BY id DESC LIMIT 1"#
-    );
-    let rows = exec
-        .query_text(&sql, &[collection, name])
-        .await
-        .map_err(|e| coded_sql("find_latest_backfill_row", e))?;
-    let Some(row) = rows.first() else { return Ok(None) };
-    let id: i64 = row.get("id");
-    let status: String = row.get("status");
-    let cursor: i64 = row.try_get::<_, i64>("validate_cursor").unwrap_or(0);
-    let processed = read_processed_from_audit_row(row)?;
-    let dead_letter_pks = read_dead_letter_pks_from_audit_row(row)?;
-    let audit_generation: i64 = row.try_get::<_, i64>("audit_generation").unwrap_or(0);
-    // SQL NULL and empty-string both mean "no error". The migrations
-    // SDK's parseNative treats any string in `error` as a thrown
-    // exception, so an empty string would surface as a zero-message
-    // failure on the caller side.
-    let error: Option<String> = row
-        .try_get::<_, String>("error")
-        .ok()
-        .filter(|s| !s.is_empty());
-    let is_done = matches!(
-        status.as_str(),
-        "applied" | "applied_with_dead_letter" | "failed" | "cancelled"
-    );
-    Ok(Some(BackfillLookup {
-        id,
-        status,
-        cursor,
-        processed,
-        dead_letter_pks,
-        audit_generation,
-        error,
-        is_done,
-    }))
-}
 
 /// Validate an app_id used as a schema name — same rules as the query
 /// builder's `validate_schema`. Local copy avoids exporting a private
