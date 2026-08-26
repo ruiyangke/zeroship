@@ -142,7 +142,7 @@ pub mod render;
 // The dialect-neutral network driver seam (`SqlSession`) - the ONE injected
 // runtime dependency the network-dialect backends (`PostgresBackend` and
 // `MysqlBackend`) are generic over. SQLite does NOT ride it (it is an
-// in-process rusqlite actor). Its only current implementor is the host PG adapter.
+// in-process rusqlite actor).
 //
 // It LIVES in `zero-migrate-backend` - it is a contract, not engine logic, and its
 // only dependency was `std`. Re-exported under its historical `crate::driver` path
