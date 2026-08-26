@@ -119,7 +119,7 @@ impl CdcTxBuffer {
 pub(crate) struct PendingEvent {
     pub(crate) op: ChangeOp,
     /// ATTACH alias the preupdate hook reported — typically the
-    /// per-app schema name (since `NamespaceManager::ensure_app_schema`
+    /// per-app schema name (since the ATTACH
     /// ATTACHes each app file as its own alias). The publisher uses
     /// this as the `ChangeEvent::app_id` and as the schema-qualifier
     /// for the column-name PRAGMA.

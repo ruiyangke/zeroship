@@ -670,7 +670,6 @@ pub async fn exec_query_for_tests(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::NamespaceManager as _;
     use crate::backend::sqlite::SqliteBackend;
     use crate::backend::SqlExecutor as _;
     use crate::broker::ChangeOp;
@@ -1044,7 +1043,7 @@ mod tests {
                 SqliteBackend::new(PathBuf::from(dir.path())).expect("open sqlite backend"),
             );
             backend
-                .ensure_app_schema("app_exec")
+                .attach_app_file("app_exec")
                 .await
                 .expect("ensure app schema");
             backend
@@ -1155,7 +1154,7 @@ mod tests {
                 SqliteBackend::new(PathBuf::from(dir.path())).expect("open sqlite backend"),
             );
             backend
-                .ensure_app_schema(app_id)
+                .attach_app_file(app_id)
                 .await
                 .expect("ensure app schema");
             backend
@@ -1341,7 +1340,7 @@ mod tests {
                 SqliteBackend::new(PathBuf::from(dir.path())).expect("open sqlite backend"),
             );
             backend
-                .ensure_app_schema("app_exec_cancel")
+                .attach_app_file("app_exec_cancel")
                 .await
                 .expect("ensure app schema");
             backend

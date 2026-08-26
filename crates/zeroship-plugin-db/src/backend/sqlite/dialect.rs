@@ -11,7 +11,7 @@
 //! the matching `PgDialect` impl so `query.rs`'s free-function string
 //! builders can be retargeted onto a dialect-typed entry point in a
 //! later change without re-shaping their call sites. The
-//! [`crate::backend::NamespaceManager::ensure_app_schema`] impl
+//! [`crate::backend::sqlite::SqliteBackend::attach_app_file`] impl
 //! uses `quote_ident` to escape the ATTACH alias; the other
 //! hooks have no consumer yet.
 
@@ -54,7 +54,7 @@ impl DialectBuilder for SqliteDialect {
     /// backend-instance concern (it lives in
     /// [`crate::backend::sqlite::SqliteBackend::db_dir`]) — the
     /// dialect has no knowledge of `db_dir`. The
-    /// `NamespaceManager::ensure_app_schema` impl on `SqliteBackend`
+    /// `SqliteBackend::attach_app_file` impl
     /// constructs the ATTACH SQL inline using this hook only to quote
     /// the alias. This builder returns a *template* string with the
     /// alias quoted and a `:file_path` placeholder; a future change

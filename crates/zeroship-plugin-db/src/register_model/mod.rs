@@ -62,7 +62,7 @@ use zeroship_runtime::state::{OpResult, ResolveValue};
 // build, so the trait must be in scope in the production build too. The
 // `use` below is test-only — putting this there compiles under `cargo test`
 // and fails under `cargo check`, which is how it was first written.
-use crate::backend::NamespaceManager;
+
 #[cfg(any(test, feature = "test-helpers"))]
 use crate::backend::{AuditWriter, DialectBuilder, RegisterBackend};
 use crate::context;
@@ -250,7 +250,7 @@ async fn exec_register_model(
         // data plane cannot read the app file it never attached.
         (_, Some(sqlite)) => {
             let _ = (&schema, &indexes, &declared_collections);
-            sqlite.ensure_app_schema(app_id).await
+            sqlite.attach_app_file(app_id).await
         }
         // Unknown / future backend surfaces a typed, SDK-visible error rather than
         // aborting the spawned compio task via an `.expect()` panic.
