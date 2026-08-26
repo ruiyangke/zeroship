@@ -267,12 +267,39 @@ where
         let mut request_complete = false;
 
         while let Some(header) = backend::Header::parse(&stream.buf()[idx..]).map_err(Error::io)? {
+            // EVERY frame in the batch, not just the head one validated above.
+            // A single read can append a whole `READ_CHUNK`, so a peer that
+            // puts a small frame in front of an oversized one had the second
+            // delivered: the walk only measured the first.
+            //
+            // This is a contract violation rather than an allocation vector -
+            // `Header::parse` takes `&[u8]` and cannot reserve, the walk breaks
+            // below unless the frame is already buffered, and a header
+            // declaring a huge length breaks the walk and is refused as the
+            // head frame next time round. What escaped was bounded by what the
+            // read actually delivered. But a caller who set a ceiling still
+            // received a message above it, which is the whole of what the
+            // setting promises.
             let msg_len = header.len() as usize + 1;
             if stream.buf()[idx..].len() < msg_len {
                 // Partial message at the tail. Everything before it is
                 // complete, so stop walking and hand that prefix back.
                 break;
             }
+            // Measured AFTER the completeness check, so only a frame this walk
+            // is about to DELIVER is judged. Checking before it would also
+            // judge a header the walk is going to abandon, and after a
+            // desynchronising peer - one whose declared length is shorter than
+            // its payload - that header is misaligned payload bytes rather
+            // than a claim the peer made. Reporting "message too large" for
+            // those replaces the accurate "unexpected EOF" with a diagnosis
+            // the peer never earned; `a_length_shorter_than_its_payload_is
+            // _refused` pins that.
+            //
+            // `Header::parse` reads the length as `i32` and refuses anything
+            // below 4, so the value is in `4..=i32::MAX` and this cast is
+            // exact.
+            stream.validate_length(header.len() as u32)?;
 
             match header.tag() {
                 backend::NOTICE_RESPONSE_TAG
@@ -370,6 +397,9 @@ mod tests {
     struct ScriptedFramer {
         chunks: VecDeque<Vec<u8>>,
         buf: BytesMut,
+        /// The ceiling `validate_length` enforces. `usize::MAX` for the tests
+        /// that are not about the ceiling at all.
+        max_message_size: usize,
     }
 
     impl ScriptedFramer {
@@ -377,6 +407,7 @@ mod tests {
             Self {
                 chunks: chunks.into(),
                 buf: BytesMut::new(),
+                max_message_size: usize::MAX,
             }
         }
     }
@@ -409,7 +440,17 @@ mod tests {
             Some(u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]))
         }
 
-        fn validate_length(&self, _length: u32) -> Result<(), Error> {
+        fn validate_length(&self, length: u32) -> Result<(), Error> {
+            let total = 1u64 + u64::from(length);
+            if total > self.max_message_size as u64 {
+                return Err(Error::io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "message too large: {total} bytes (max {})",
+                        self.max_message_size
+                    ),
+                )));
+            }
             Ok(())
         }
     }
@@ -435,6 +476,46 @@ mod tests {
         .fold(error.to_string(), |chain, source| {
             format!("{chain}: {source}")
         })
+    }
+
+    /// Every frame in a coalesced batch is measured, not just the first.
+    ///
+    /// `read_backend` validates the head frame from its header and then walks
+    /// the buffered bytes handing back everything complete. Only that first
+    /// header went through `validate_length`, so a peer that puts a small frame
+    /// in front of an oversized one - both arriving in a single read - had the
+    /// second delivered despite the ceiling. `fill(5)` can append a whole
+    /// `READ_CHUNK`, so one read is enough to carry both.
+    ///
+    /// This is a CONTRACT violation rather than an allocation vector, and the
+    /// distinction is worth keeping: `Header::parse` takes `&[u8]` and cannot
+    /// reserve, the walk breaks unless the frame is already buffered, and a
+    /// header declaring a huge length breaks the walk and is refused as the
+    /// head frame on the next iteration. What leaks through is bounded by what
+    /// one read actually delivered - but a caller who set a ceiling still got a
+    /// message above it.
+    #[compio::test]
+    async fn an_oversized_frame_behind_a_small_one_is_still_rejected() {
+        // BindComplete: tag `2`, length 4, no body. Then a DataRow whose
+        // declared length puts the frame over the ceiling below.
+        let mut batch = vec![b'2'];
+        batch.extend_from_slice(&4u32.to_be_bytes());
+        batch.push(b'D');
+        batch.extend_from_slice(&200u32.to_be_bytes());
+        batch.extend_from_slice(&vec![0u8; 200 - 4]);
+
+        let mut framer = ScriptedFramer::new(vec![batch]);
+        framer.max_message_size = 128;
+
+        let error = match read_backend(&mut framer).await {
+            Ok(_) => panic!("an oversized frame passed the ceiling by riding behind a small one"),
+            Err(error) => error,
+        };
+        let chain = error_chain(&error);
+        assert!(
+            chain.contains("message too large"),
+            "the batched frame was not measured against the ceiling: {chain}"
+        );
     }
 
     /// The negotiation body is exactly two u32 values when the client sent no
