@@ -191,10 +191,24 @@ impl ReadDeadline {
     }
 
     fn register_reader(&self, waker: &Waker) {
-        let mut slot = self.inner.reader_waker.borrow_mut();
-        if !slot.as_ref().is_some_and(|saved| saved.will_wake(waker)) {
-            *slot = Some(waker.clone());
-        }
+        // Carry the REPLACED waker out and destroy it with no borrow held.
+        // Assigning through the `RefMut` drops the previous `Waker` while
+        // `reader_waker` is still borrowed, and a `Waker` is arbitrary caller
+        // code: a destructor that re-enters and touches this same cell - which
+        // `wake_reader` and `clear_reader` both do - meets `BorrowMutError`.
+        //
+        // `wake_reader` below already takes the waker OUT before waking, for
+        // exactly this reason. The drop is the same hazard reached through the
+        // destructor instead of the wake, and it was the half this file missed.
+        let replaced = {
+            let mut slot = self.inner.reader_waker.borrow_mut();
+            if slot.as_ref().is_some_and(|saved| saved.will_wake(waker)) {
+                None
+            } else {
+                slot.replace(waker.clone())
+            }
+        };
+        drop(replaced);
     }
 
     fn clear_reader(&self) {
@@ -898,6 +912,75 @@ mod tests {
         assert!(
             deadline.inner.reader_waker.borrow().is_none(),
             "a cancelled parked read left its task waker retained"
+        );
+    }
+
+    thread_local! {
+        /// The deadline whose reader slot the probe below interrogates.
+        static READER_PROBE: RefCell<Option<ReadDeadline>> = const { RefCell::new(None) };
+        /// `Some(true)` means the slot was STILL borrowed while a replaced
+        /// waker was destroyed. `None` means the destructor never ran, which
+        /// must not read as success.
+        static READER_DROP_BORROWED: std::cell::Cell<Option<bool>> =
+            const { std::cell::Cell::new(None) };
+    }
+
+    struct ReaderDropProbe;
+
+    impl std::task::Wake for ReaderDropProbe {
+        fn wake(self: std::sync::Arc<Self>) {}
+        fn wake_by_ref(self: &std::sync::Arc<Self>) {}
+    }
+
+    impl Drop for ReaderDropProbe {
+        fn drop(&mut self) {
+            READER_PROBE.with(|deadline| {
+                if let Some(deadline) = deadline.borrow().as_ref() {
+                    READER_DROP_BORROWED.with(|flag| {
+                        flag.set(Some(deadline.inner.reader_waker.try_borrow_mut().is_err()));
+                    });
+                }
+            });
+        }
+    }
+
+    /// Replacing the reader waker must not DESTROY the old one inside the
+    /// borrow.
+    ///
+    /// `register_reader` assigned through the `RefMut`, which drops the
+    /// previous `Waker` while `reader_waker` is still borrowed. A `Waker` is
+    /// arbitrary caller code, and a destructor that re-enters this cell - which
+    /// `wake_reader` and `clear_reader` both touch - meets `BorrowMutError`.
+    ///
+    /// `wake_reader` in this same file already takes the waker OUT before
+    /// waking, with the reason spelled out. This is that hazard reached through
+    /// the destructor rather than the wake, and it was the half that was missed.
+    ///
+    /// The assertion is on the BORROW rather than on a panic, so it states the
+    /// invariant instead of one caller's way of tripping over it. `None` fails
+    /// deliberately: a destructor that never ran proves nothing.
+    #[test]
+    fn replacing_the_reader_waker_does_not_destroy_it_inside_the_borrow() {
+        let deadline = ReadDeadline::new(std::time::Duration::from_secs(1));
+        let probe = Waker::from(std::sync::Arc::new(ReaderDropProbe));
+        deadline.register_reader(&probe);
+
+        READER_PROBE.with(|cell| *cell.borrow_mut() = Some(deadline.clone()));
+        READER_DROP_BORROWED.with(|flag| flag.set(None));
+        // Hand the slot the last `Arc`, so the replacement below runs the
+        // destructor rather than merely decrementing a count.
+        drop(probe);
+
+        let other = Waker::from(std::sync::Arc::new(ReaderDropProbe));
+        deadline.register_reader(&other);
+
+        let observed = READER_DROP_BORROWED.with(std::cell::Cell::get);
+        READER_PROBE.with(|cell| *cell.borrow_mut() = None);
+        assert_eq!(
+            observed,
+            Some(false),
+            "the replaced reader waker was destroyed while its slot was still \
+             borrowed (None means the destructor never ran at all)"
         );
     }
 }
