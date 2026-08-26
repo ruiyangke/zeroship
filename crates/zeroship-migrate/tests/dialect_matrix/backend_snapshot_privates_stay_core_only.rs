@@ -5,13 +5,13 @@
 //!
 //! The schema-shape snapshot value types (`ColumnSnapshot`, `IndexSnapshot`,
 //! `ConstraintSnapshot`, `TableSnapshot`, …) moved from `zero-migrate`'s
-//! `model/snapshot.rs` into `zero-migrate-backend`, because the `DdlEmitter` trait
+//! `model/snapshot.rs` into `zeroship-migrate-backend`, because the `DdlEmitter` trait
 //! is moving to that crate and a trait cannot move without the types in its
 //! signatures.
 //!
 //! Sixteen items in that file were `pub(crate)` — visible to the engine, invisible
 //! to everything else. `pub(crate)` DOES NOT SURVIVE A CRATE BOUNDARY: the moved
-//! file's `crate` is now `zero-migrate-backend`, so `pub(crate)` there would have
+//! file's `crate` is now `zeroship-migrate-backend`, so `pub(crate)` there would have
 //! hidden them from their only callers in the engine. They are `pub` now, which
 //! means the compiler no longer refuses what it used to refuse, and the strongest
 //! invariant in the file silently became the weakest — precisely because it had
@@ -38,7 +38,7 @@
 //! was true while it was written and it was true for the wrong reason — PostgreSQL's
 //! catalog reader was still INSIDE the engine, so the only code that could reach the
 //! sequence half was engine code by construction. When `apply/backend/postgres/`
-//! became `zero-migrate-postgres/src/backend/`, four call sites in one file crossed
+//! became `zeroship-migrate-postgres/src/backend/`, four call sites in one file crossed
 //! the boundary and the single rule went red. Nothing about the code's behaviour
 //! changed; what changed is that the rule's unstated premise stopped holding.
 //!
@@ -70,7 +70,7 @@
 //! # Why a census and not a visibility modifier
 //!
 //! There is no modifier that expresses "visible to `zero-migrate` but not to
-//! `zero-migrate-postgres`". `pub(crate)` is too narrow (it would hide them from the
+//! `zeroship-migrate-postgres`". `pub(crate)` is too narrow (it would hide them from the
 //! engine, their only caller) and `pub` is too wide. The type system genuinely
 //! cannot say this, which is why it has to be said here instead of being asserted in
 //! prose and forgotten.
@@ -136,9 +136,9 @@ const SHARED_NORMAL_FORM_ITEMS: &[&str] = &[
 /// may name a snapshot TYPE — that is what the `DdlEmitter` signatures are made of —
 /// but may not call one of the engine's comparison helpers on it.
 const VENDOR_CRATES: &[&str] = &[
-    "zero-migrate-postgres",
-    "zero-migrate-sqlite",
-    "zero-migrate-mysql",
+    "zeroship-migrate-postgres",
+    "zeroship-migrate-sqlite",
+    "zeroship-migrate-mysql",
 ];
 
 /// The walk's floor across all three vendor crates. They hold 17 `.rs` files under
@@ -157,7 +157,7 @@ const ENGINE_CALLSITE_FLOOR: usize = 10;
 /// The SHARED-NORMAL-FORM half's positive control: how many vendor code lines must
 /// reach the one implementation.
 ///
-/// Measured at 8, all in `zero-migrate-postgres/src/backend/drift_sql.rs` — the
+/// Measured at 8, all in `zeroship-migrate-postgres/src/backend/drift_sql.rs` — the
 /// `SequenceDataTypeSnapshot::from_catalog_type_name` call, the two bound normalizers, the
 /// `nextval` render and parse, and the `use` lines that import them. Set below that so
 /// ordinary churn does not trip it; a drop to zero is the question, and the answer is
@@ -250,7 +250,7 @@ fn definitions(files: &[PathBuf], base: &Path, items: &[&str]) -> BTreeMap<Strin
 fn crates_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("crates/zero-migrate has a parent")
+        .expect("crates/zeroship-migrate has a parent")
         .to_path_buf()
 }
 
@@ -281,7 +281,7 @@ fn no_vendor_crate_calls_an_engine_snapshot_comparison() {
     // FLOOR TWO — the NEEDLE, as a positive control. The identical matcher, over the
     // engine, where these names live and are called. A zero here means the matcher is
     // broken and every vendor zero below it is meaningless.
-    let engine_src = crates.join("zero-migrate-core").join("src");
+    let engine_src = crates.join("zeroship-migrate-core").join("src");
     let all_items: Vec<&str> = VERDICT_ITEMS
         .iter()
         .chain(SHARED_NORMAL_FORM_ITEMS.iter())
@@ -304,7 +304,7 @@ fn no_vendor_crate_calls_an_engine_snapshot_comparison() {
         violations.is_empty(),
         "a vendor crate calls one of the engine's snapshot COMPARISON helpers:\n{}\n\n\
          These were `pub(crate)` in `zero-migrate` before the snapshot types moved to \
-         `zero-migrate-backend`; the crate boundary made them `pub` and this census is \
+         `zeroship-migrate-backend`; the crate boundary made them `pub` and this census is \
          what stands in for the modifier. A vendor decides how to SPELL something, \
          never whether two schemas DIFFER — see `zeroship_migrate::render::backends`'s \
          header for the rule.",
@@ -336,7 +336,7 @@ fn no_vendor_crate_calls_an_engine_snapshot_comparison() {
     // it stopped (and re-derived one somewhere this file cannot see) or that
     // `SHARED_NORMAL_FORM_ITEMS` stopped matching, in which case the fork check above
     // is blind. Measured on the tree that introduced this half: four code lines in
-    // `zero-migrate-postgres/src/backend/drift_sql.rs`.
+    // `zeroship-migrate-postgres/src/backend/drift_sql.rs`.
     let reuse = callsites(&vendor_files, &crates, SHARED_NORMAL_FORM_ITEMS);
     let reuse_total: usize = reuse.values().sum();
     assert!(

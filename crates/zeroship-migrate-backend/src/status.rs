@@ -5,7 +5,7 @@
 //! `MigrationBackend`, and they stay there. What lives here is the shape those verbs
 //! and every vendor journal reader agree on.
 //!
-//! It travelled for the same reason `order_pending` did. `zero-migrate-postgres`'s
+//! It travelled for the same reason `order_pending` did. `zeroship-migrate-postgres`'s
 //! `status_sql` reads its own journal under a `REPEATABLE READ READ ONLY` snapshot -
 //! a statement no other vendor accepts, so the read cannot be generic - and then
 //! answers the SAME question in the SAME vocabulary the neutral verb answers. Two

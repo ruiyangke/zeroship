@@ -71,7 +71,7 @@ use zeroship_migrate_ir::dialect::DialectId;
 /// The neutral online-migration INTENT this author expands into a phased
 /// [`Migration`] sequence.
 ///
-/// MOVED to `zero-migrate-backend` and re-exported here. It is what
+/// MOVED to `zeroship-migrate-backend` and re-exported here. It is what
 /// `OnlineSchemaChange::run_online_backfill` is handed - the rename's MEANING rather than
 /// this module's PostgreSQL spelling of it - so a vendor crate cannot implement
 /// the capability without naming it. It carries four `String`s, so it travelled
@@ -81,7 +81,7 @@ pub use zeroship_migrate_backend::capability::OnlineIntent;
 
 /// A failure to author an online expand-contract sequence.
 ///
-/// MOVED to `zero-migrate-backend` and re-exported here. It is a one-variant
+/// MOVED to `zeroship-migrate-backend` and re-exported here. It is a one-variant
 /// `Invalid(String)` and it travelled for one reason: `DeclarativeError::Rename` is
 /// `#[from] ExpandContractError`, and `DeclarativeError` had to go with
 /// `IrLowerError`. It brought nothing with it.
@@ -89,10 +89,10 @@ pub use zeroship_migrate_backend::error::ExpandContractError;
 
 /// The full ordered output of [`ExpandContractAuthor::author`].
 ///
-/// MOVED to `zero-migrate-backend` and re-exported here. It is what
+/// MOVED to `zeroship-migrate-backend` and re-exported here. It is what
 /// `PlanStep::OnlineRename` carries through `RenameStep::ExpandContract`, so it had
 /// to travel with the lowered-plan vocabulary. Nothing came with it: the authored
-/// `Migration`s and the `MigrationId`s are `zero-migrate-ir`'s, the `BackfillSpec`
+/// `Migration`s and the `MigrationId`s are `zeroship-migrate-ir`'s, the `BackfillSpec`
 /// and the [`OnlineIntent`] were already in the contract crate. The AUTHOR - every
 /// line of PostgreSQL trigger and function DDL below - stayed here.
 pub use zeroship_migrate_backend::capability::ExpandContractPlan;
@@ -690,7 +690,7 @@ impl ExpandContractAuthor {
 // `SchemaRenderer::dual_write_trigger` now, which is a REQUIRED method, so the three
 // backends that do not resolve a rename this way say so at their own definition sites
 // rather than being papered over by a fallthrough here. See
-// `zero-migrate-postgres/src/dual_write.rs` for the whole of it, including the body
+// `zeroship-migrate-postgres/src/dual_write.rs` for the whole of it, including the body
 // that had been sitting in the CONTRACT crate.
 fn dual_write_sql(
     vendors: VendorSet,

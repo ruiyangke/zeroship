@@ -4,7 +4,7 @@
 # DISPOSITION on each dialect. The generator
 # (`packages/zero-migrate/scripts/gen-dialect-table.mjs`) reads this file and
 # emits BOTH:
-#   - crates/zero-migrate/tests/dialect_matrix/dialect_table.rs (Rust test artifact)
+#   - crates/zeroship-migrate/tests/dialect_matrix/dialect_table.rs (Rust test artifact)
 #   - packages/zero-migrate/src/generated/dialect-table.ts      (the TS mirror)
 # Regenerate with: `pnpm --filter zero-migrate gen:dialect-table`, then
 # commit both generated artifacts.
@@ -45,7 +45,7 @@
 # one of them for all three is how a gap hides.
 #
 # CONSUMERS differ per side, so state them separately. The Rust table IS read by
-# engine code: `crates/zero-migrate-core/src/model/op_support.rs` calls
+# engine code: `crates/zeroship-migrate-core/src/model/op_support.rs` calls
 # `dialect_table::lookup(kind, variant)`. The TypeScript mirror is read by
 # NOTHING outside its own generated file - it exists so the SDK can be checked
 # against the same sidecar, and a grep for `generated/dialect-table` or for

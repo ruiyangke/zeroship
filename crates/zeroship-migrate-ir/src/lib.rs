@@ -1,4 +1,4 @@
-//! `zero-migrate-ir` - the zero-migrate WIRE CONTRACT.
+//! `zeroship-migrate-ir` - the zero-migrate WIRE CONTRACT.
 //!
 //! The pure-data core the whole engine (and any external validator/checksummer)
 //! agrees on: the migration document, the closed `op.*` IR, the closed expression

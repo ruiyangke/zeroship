@@ -55,7 +55,7 @@
 //
 // Does NOT cover the stand-alone `addColumn ifNotExists` probe shape: no arm here or
 // elsewhere drives one over a length-qualified column. The recomposition it would
-// depend on lives in the SHARED snapshot builder (`crates/zero-migrate/src/apply/
+// depend on lives in the SHARED snapshot builder (`crates/zeroship-migrate/src/apply/
 // drift.rs`) that every probe shape reads, so the fix is not table-shaped -- but the
 // addColumn shape itself is unpinned end to end, which is a hole, not a handoff.
 

@@ -1,11 +1,11 @@
-//! `zero-migrate-core` - the ENGINE of a versioned DB migration system for **creator
+//! `zeroship-migrate-core` - the ENGINE of a versioned DB migration system for **creator
 //! project databases**. The shipped design docs are under `docs/`; start at
 //! `docs/architecture.md`.
 //!
 //! # It names no backend, and it cannot
 //!
-//! This crate depends on the backend CONTRACT (`zero-migrate-backend`), the wire IR
-//! (`zero-migrate-ir`) and the policy PDP (`zero-migrate-policy`). It depends on NO
+//! This crate depends on the backend CONTRACT (`zeroship-migrate-backend`), the wire IR
+//! (`zeroship-migrate-ir`) and the policy PDP (`zeroship-migrate-policy`). It depends on NO
 //! backend implementation, so it cannot name PostgreSQL, SQLite or MySQL as crates at
 //! all. Which vendors exist is a value it is HANDED: every resolution takes a
 //! [`zeroship_migrate_backend::registry::VendorSet`] and every carrier holds one.
@@ -90,7 +90,7 @@
 // was the `libpg_query` deny-list + classifier + analyzers, and re-exporting it here
 // put `SqlGuard`, `DdlKind` and `analyze` on the neutral engine's PUBLIC API. The
 // crate is gone - all of it needed `libpg_query`, so all of it was PostgreSQL's, and
-// it now lives in `zero-migrate-postgres`. Core reaches a guard the same way it
+// it now lives in `zeroship-migrate-postgres`. Core reaches a guard the same way it
 // reaches a renderer: `render::backends::guard_for`, through the registry, by open
 // dialect id.
 pub use zeroship_migrate_backend::guard;
@@ -124,7 +124,7 @@ pub mod engine;
 // `zeroship_migrate::fault::...` path resolves unchanged.
 #[doc(hidden)]
 pub use zeroship_migrate_backend::fault;
-// The typed-id (base62/UUIDv7) machinery lives in the `zero-migrate-ir` leaf crate;
+// The typed-id (base62/UUIDv7) machinery lives in the `zeroship-migrate-ir` leaf crate;
 // re-export it under its historical `crate::id` path.
 pub use zeroship_migrate_ir::id;
 // The deploy-bundle migration-file record + content-addressed hash, vendored
@@ -144,7 +144,7 @@ pub mod render;
 // `MysqlBackend`) are generic over. SQLite does NOT ride it (it is an
 // in-process rusqlite actor).
 //
-// It LIVES in `zero-migrate-backend` - it is a contract, not engine logic, and its
+// It LIVES in `zeroship-migrate-backend` - it is a contract, not engine logic, and its
 // only dependency was `std`. Re-exported under its historical `crate::driver` path
 // (the same shim idiom `model/mod.rs` uses for `zeroship_migrate_ir::ir`) so every
 // `crate::driver::...` and `zeroship_migrate::driver::...` reference resolves unchanged.
@@ -180,7 +180,7 @@ pub use zeroship_migrate_backend::advisory::{Advisory, Severity};
 //
 // This is what the old root-level `analyze` was retired in favour of, and the
 // retirement is now complete: `zero-migrate-guard` has moved into
-// `zero-migrate-postgres`, so the parser-bearing entry point is gone from this root
+// `zeroship-migrate-postgres`, so the parser-bearing entry point is gone from this root
 // exactly as this comment said it would be.
 pub use render::backends::{advisories_for_sql, analyzer_absence};
 pub use zeroship_migrate_backend::advisory::{
@@ -194,7 +194,7 @@ pub use apply::backend::{
     ShadowDryRun,
 };
 // `PostgresBackend` IS NOT RE-EXPORTED HERE, and neither is any other vendor's.
-// It lives in `zero-migrate-postgres` with the rest of the PostgreSQL execution
+// It lives in `zeroship-migrate-postgres` with the rest of the PostgreSQL execution
 // half, and a `pub use zeroship_migrate_postgres::PostgresBackend` at this root would be
 // core naming a vendor CRATE outside the registry - the thing
 // `tests/dialect_matrix/core_names_no_vendor_crate.rs` exists to forbid. Closing one
@@ -336,7 +336,7 @@ pub use model::table_shape::{
 pub use zeroship_migrate_policy::{seal, SealError, SealedPolicy};
 // The composed policy-decision point the injection + guard share. Re-exported at
 // the crate root so the napi addon (`gen_artifacts_*`, the schema-emit path) can
-// name it without reaching into the `zero-migrate-policy` crate directly.
+// name it without reaching into the `zeroship-migrate-policy` crate directly.
 // The standalone wire-shape walker is NOT in this list any more. It is deleted
 // (`docs/proposals/single-fold-and-effects.md` section G); the wire `FieldDef`
 // map it produced is now `single_fold::fold(...)?.project_field_defs()`, reached through

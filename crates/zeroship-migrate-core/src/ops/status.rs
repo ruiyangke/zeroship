@@ -407,7 +407,7 @@ pub struct ResolvedPendingContract {
 // The status VOCABULARY moved down to the backend contract: `MigrationStatus` and the
 // two derived cross-deploy views over it, plus the error the read API refuses with.
 // A vendor journal reader fills in the same struct the neutral verb below fills in -
-// `zero-migrate-postgres`'s `status_sql` reads its own journal under a snapshot
+// `zeroship-migrate-postgres`'s `status_sql` reads its own journal under a snapshot
 // isolation statement no other vendor accepts, and then answers this exact question.
 // Two copies of the vocabulary would be two answers that drift. Re-exported so every
 // `crate::ops::status::...` path (and the flattened root re-exports) resolves unchanged.

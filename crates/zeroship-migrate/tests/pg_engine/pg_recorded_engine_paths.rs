@@ -2,13 +2,13 @@
 //!
 //! They came out of `apply/backend/postgres/mod.rs` with the rest of the execution
 //! half, and they are the ones that could not follow it into
-//! `zero-migrate-postgres`: each drives `MigrationEngine`, `AppliedPlan` or
+//! `zeroship-migrate-postgres`: each drives `MigrationEngine`, `AppliedPlan` or
 //! `ops::status::history_via_backend`, which are the engine's, and `zero-migrate`
-//! depends on `zero-migrate-postgres`, so a vendor crate reaching back is a cycle
+//! depends on `zeroship-migrate-postgres`, so a vendor crate reaching back is a cycle
 //! Cargo refuses.
 //!
 //! They drive the SAME recorder the eight vendor-internal ones do, reached through
-//! `zero-migrate-postgres`'s `testing` feature. A second copy of that canned catalog
+//! `zeroship-migrate-postgres`'s `testing` feature. A second copy of that canned catalog
 //! is the hazard the feature exists to avoid: its rows are the shared premise of
 //! both suites and two copies drift silently.
 

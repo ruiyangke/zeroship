@@ -6,7 +6,7 @@
 // `ensure_create_table_masked_siblings`, and a masked `addColumn` lowers the sibling
 // as a second unit.
 //
-// The mirror op did not. `Op::DropColumn` in crates/zero-migrate/src/render/lower.rs
+// The mirror op did not. `Op::DropColumn` in crates/zeroship-migrate/src/render/lower.rs
 // emitted a single unit for the named column and nothing for the sibling, so
 // dropping a masked column left an orphan behind: a column with a mask sentinel on
 // it, belonging to a field that no longer exists.

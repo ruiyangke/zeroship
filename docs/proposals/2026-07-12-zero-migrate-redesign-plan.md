@@ -215,7 +215,7 @@ table was inertia mislabeled "deliberate," not a contract with anyone.
   (it's security policy, not a dialect fact — keep it out of `dialect/`)
 - `model/{capability,support,dialect_table}.rs` (three portability tables) → `dialect/`
 - `model/validate.rs` splits at its real fault line: structural allow-list walk →
-  `zero-migrate-ir::validate`; `PolicyProfile`-dependent checks (`validate.rs:46`
+  `zeroship-migrate-ir::validate`; `PolicyProfile`-dependent checks (`validate.rs:46`
   imports `profile.rs`) → `zero-migrate::validate_policy`
 - "plan" means exactly one thing (the dry-run `Plan`); `render/plan.rs`'s
   execution artifact → `Script`/`ScriptStep`

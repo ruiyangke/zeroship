@@ -100,7 +100,7 @@
 //! the bypass is currently avoided by convention, not by construction.
 //!
 //! The mapping is a near-mechanical port of the engine's own
-//! `third_party/zero-migrate/crates/zero-migrate/src/apply/backend/postgres/session.rs`
+//! `third_party/zero-migrate/crates/zeroship-migrate/src/apply/backend/postgres/session.rs`
 //! `PgSession` impl (whose neutral `Seam*` types are the SAME shape as the standalone's
 //! `driver::*` types, renamed): `batch_execute → batch`, `execute → exec`,
 //! `execute_text_params → exec_text`, `query`/`query_one` unchanged; the
@@ -206,7 +206,7 @@ impl CompioPgSession {
 // ---------------------------------------------------------------------------
 // Neutral-type mapping — the FIRST monorepo producer of every `driver::*` type.
 // Ported from
-// `third_party/zero-migrate/crates/zero-migrate/src/apply/backend/postgres/session.rs`.
+// `third_party/zero-migrate/crates/zeroship-migrate/src/apply/backend/postgres/session.rs`.
 // ---------------------------------------------------------------------------
 
 /// `compio_postgres::Error → driver::DbError`. The engine treats the error

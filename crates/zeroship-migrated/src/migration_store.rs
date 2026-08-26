@@ -517,7 +517,7 @@ pub enum MigrationStoreError {
 /// Audit view of a sealed managed policy. Records the seal's public BINDING fields
 /// (dialect, matcher version, ceiling version, registry digest) — the tamper-evidence
 /// identity boundary the seal HMAC binds. (The old `PolicyProfile`-era seal exposed a
-/// posture/issued-at/nonce; the surviving `zero-migrate-policy` seal binds these.)
+/// posture/issued-at/nonce; the surviving `zeroship-migrate-policy` seal binds these.)
 pub fn sealed_profile_audit_json(
     dialect: &str,
     matcher_version: u32,

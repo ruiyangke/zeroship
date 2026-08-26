@@ -1157,7 +1157,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
 /// non-compio driver and every emitted statement is inspected. The live-MySQL e2e
 /// lives in the host CLI suite, gated on the `ZERO_MIGRATE_MYSQL_URL` env var.
 ///
-/// That the live coverage sits there rather than in `crates/zero-migrate/tests/`
+/// That the live coverage sits there rather than in `crates/zeroship-migrate/tests/`
 /// beside the live-PostgreSQL scenarios is a dependency fact, not an oversight, and
 /// the asymmetry is worth stating so it is not read as a hole. [`MysqlBackend`] has
 /// exactly one constructor - [`MysqlBackend::new_generic`], over the

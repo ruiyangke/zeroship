@@ -3086,7 +3086,7 @@ fn reject_cross_app_ref(table: &str, target: &str) -> Result<(), DeclarativeErro
 
 /// A failure to diff a declarative desired schema against the live one.
 ///
-/// MOVED to `zero-migrate-backend`, and re-exported here so every
+/// MOVED to `zeroship-migrate-backend`, and re-exported here so every
 /// `render::declarative::DeclarativeError` caller and every `match` arm resolves
 /// unchanged. It travelled with [`IrLowerError`](crate::render::lower::IrLowerError),
 /// whose `Snapshot` variant is `#[from] DeclarativeError`; every one of its payloads
@@ -3182,7 +3182,7 @@ pub struct DeclarativePlan {
 /// One table rebuild: the execution `TableRebuildSpec` plus the `Migration` that
 /// carries its checksum, journal identity and approval flags.
 ///
-/// MOVED to `zero-migrate-backend` and re-exported here. `MigrationBackend::rebuild_one`
+/// MOVED to `zeroship-migrate-backend` and re-exported here. `MigrationBackend::rebuild_one`
 /// is handed the spec and `RenameStep::TableRebuild` carries this, so neither the
 /// trait nor the lowered-plan vocabulary could be stated without it. The DIFFER that
 /// produces these - every line of the SQLite rebuild-selection logic below - stayed.

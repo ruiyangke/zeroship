@@ -6,13 +6,13 @@
 //!
 //! ```text
 //!   zero-migrate            (this crate) -> core + postgres + sqlite + mysql
-//!   zero-migrate-core       the engine   -> backend, ir, policy ONLY
-//!   zero-migrate-postgres   \
-//!   zero-migrate-sqlite      >           -> backend, ir, policy
-//!   zero-migrate-mysql      /
-//!   zero-migrate-backend    the contract -> ir, policy
-//!   zero-migrate-ir         the wire     -> policy
-//!   zero-migrate-policy     the PDP      -> leaf
+//!   zeroship-migrate-core       the engine   -> backend, ir, policy ONLY
+//!   zeroship-migrate-postgres   \
+//!   zeroship-migrate-sqlite      >           -> backend, ir, policy
+//!   zeroship-migrate-mysql      /
+//!   zeroship-migrate-backend    the contract -> ir, policy
+//!   zeroship-migrate-ir         the wire     -> policy
+//!   zeroship-migrate-policy     the PDP      -> leaf
 //! ```
 //!
 //! # Why the composition is its own crate
@@ -21,7 +21,7 @@
 //! and the composition were one crate, so the rule was policed by six hand-written
 //! censuses over core's own source text — every one of them a grep that could go
 //! blind, and several of which had. Moving the three `[dependencies]` lines out makes
-//! the rule STRUCTURAL: `zero-migrate-core` does not depend on any vendor crate, so
+//! the rule STRUCTURAL: `zeroship-migrate-core` does not depend on any vendor crate, so
 //! naming one in its production source is an unresolved-crate error rather than a
 //! finding in a test.
 //!
@@ -85,8 +85,8 @@ pub const fn shipping_vendors() -> VendorSet {
 
 /// The backends THIS BUILD ships, validated into a [`BackendRegistry`].
 ///
-/// The vendors are separate crates (`zero-migrate-postgres`, `zero-migrate-sqlite`,
-/// `zero-migrate-mysql`) and this crate names each of them exactly once, in
+/// The vendors are separate crates (`zeroship-migrate-postgres`, `zeroship-migrate-sqlite`,
+/// `zeroship-migrate-mysql`) and this crate names each of them exactly once, in
 /// `SHIPPING`. That list is what replaced the hard-coded three-arm identity match;
 /// this function is how a host asks what it got, and it answers by running the leaf
 /// crate's own [`BackendRegistry::build`] over the shipping descriptors rather than by

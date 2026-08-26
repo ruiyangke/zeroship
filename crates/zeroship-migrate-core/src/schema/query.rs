@@ -85,7 +85,7 @@ pub struct BuiltQuery {
 /// The schema/DDL half of the backend CONTRACT, and the spelling primitives its
 /// three vendor implementations call.
 ///
-/// The contract MOVED to `zero-migrate-backend` and is re-exported here so the
+/// The contract MOVED to `zeroship-migrate-backend` and is re-exported here so the
 /// schema composers keep a stable trait path.
 ///
 /// The contract crate holds the trait, neutral field-shape readers, and sentinel
@@ -605,7 +605,7 @@ fn validate_schema(name: &str) -> Result<(), QueryError> {
  * so unlike the `quote_ident` case there was no unnamed vendor, and the
  * one-dialect-literal test passed because the reach was by function name rather
  * than a closed-enum literal. What it blocked was the crate split: the future
- * `zero-migrate-mysql` would have needed core AT RUNTIME to spell an identifier.
+ * `zeroship-migrate-mysql` would have needed core AT RUNTIME to spell an identifier.
  *
  * The bytes now live in `render::backends::mysql`'s own `quote_ident`, which core
  * cannot name, so this module reaches them the same way it reaches the ANSI ones -

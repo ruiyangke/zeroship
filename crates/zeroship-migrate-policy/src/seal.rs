@@ -51,7 +51,7 @@ type HmacSha256 = Hmac<Sha256>;
 
 /// A domain separator so seal bytes can never collide with any other structure this
 /// crate hashes (the registry digest has its own separator).
-const SEAL_DOMAIN: &[u8] = b"zero-migrate-policy/seal/v1";
+const SEAL_DOMAIN: &[u8] = b"zeroship-migrate-policy/seal/v1";
 
 /// A sealed effective policy: the MAC tag + the public binding fields it was minted
 /// under. Carries no secret; verification recomputes the tag from a freshly composed

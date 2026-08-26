@@ -354,7 +354,7 @@ fn capped_name(natural: &str, max_bytes: usize) -> String {
 // caught, `LANGUAGE plpgsql`, was one crate UP, in the engine's
 // `render::expand_contract`, wrapped around this body.
 //
-// Both halves are in `zero-migrate-postgres` now, behind
+// Both halves are in `zeroship-migrate-postgres` now, behind
 // `SchemaRenderer::dual_write_trigger`, next to the backfill guard that compares a
 // live trigger's source against them. The engine asks the resolved renderer and
 // spells nothing.

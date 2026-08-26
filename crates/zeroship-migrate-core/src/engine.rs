@@ -66,7 +66,7 @@ pub struct PlannedMigration {
     /// Its passing **neutral** guard outcome - the destructive flag + operational
     /// [`Advisory`](crate::Advisory)s the engine consumes. The
     /// PG-specific statement `classes` stay inside the PG guard
-    /// (`SqlGuard`/`GuardReport`, in `zero-migrate-postgres`)
+    /// (`SqlGuard`/`GuardReport`, in `zeroship-migrate-postgres`)
     /// and are not surfaced here - the engine seam is dialect-neutral.
     pub report: GuardOutcome,
 }
@@ -951,7 +951,7 @@ impl MigrationEngine {
     ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
         plan.verify_effective_policy(effective)?;
         // Through the public setter rather than the field: `ExecutorConfig` lives in
-        // `zero-migrate-backend` now, and `effective` is private there. The setter
+        // `zeroship-migrate-backend` now, and `effective` is private there. The setter
         // is the same assignment, and it is what every other policy-carrying host
         // path already uses.
         let policy_exec_cfg = exec_cfg.clone().with_effective_policy(effective.clone());

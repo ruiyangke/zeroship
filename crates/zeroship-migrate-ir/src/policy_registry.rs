@@ -1,7 +1,7 @@
 //! The zero-migrate ENGINE BUILTIN policy registry + the statement-class -> knob-key
 //! map.
 //!
-//! `zero-migrate-policy` ships the PDP *mechanism* (the knob/rule/document model,
+//! `zeroship-migrate-policy` ships the PDP *mechanism* (the knob/rule/document model,
 //! the composition algebra, the unforgeable
 //! [`EffectivePolicy`](zeroship_migrate_policy::EffectivePolicy)). It is content-free
 //! by design. THIS module is the engine's *content*: it declares zero-migrate's

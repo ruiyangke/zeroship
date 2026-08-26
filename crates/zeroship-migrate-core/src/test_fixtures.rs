@@ -29,7 +29,7 @@ use crate::{effective_policy_from_charter_toml, EffectivePolicy};
 // `DialectId::new("postgres")` IS the PostgreSQL id, whoever writes it. Re-declaring
 // rather than importing keeps the ID literals out of the vendor-crate count below, so
 // the ratchet measures the composition and not three more mentions of it.
-// `zero-migrate-ir`'s own tests do the same thing two crates lower, for the same
+// `zeroship-migrate-ir`'s own tests do the same thing two crates lower, for the same
 // reason: a crate that cannot depend on a vendor builds the id it needs.
 //
 // # Why one module and not a const per test module
@@ -48,7 +48,7 @@ use crate::{effective_policy_from_charter_toml, EffectivePolicy};
 ///
 /// It USED TO BE `crate::render::backends::VENDORS` - an alias for the composition,
 /// which lived in this crate. The composition is `zero-migrate`'s now, and this crate
-/// cannot see it: `zero-migrate` depends on `zero-migrate-core`, so the edge back
+/// cannot see it: `zero-migrate` depends on `zeroship-migrate-core`, so the edge back
 /// would be a cycle Cargo refuses even as a dev edge in the direction that matters.
 ///
 /// So core's tests compose their own, from the same three vendor crates, reached

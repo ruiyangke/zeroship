@@ -18,7 +18,7 @@ pub mod plan_precondition;
 // only caller. This comment used to say it COULD NOT follow the renderers into the
 // PostgreSQL crate, because it needs `SqlSession`/`ExecutorConfig`/`ApplyError`/
 // `Migration` and that crate must not depend on the engine. All four of those moved
-// down to `zero-migrate-backend` afterwards, which is what let the whole execution
+// down to `zeroship-migrate-backend` afterwards, which is what let the whole execution
 // half go.
 // The least-privilege `migrator` role name derivation was PostgreSQL's alone - the
 // `NOLOGIN` + `SET ROLE` model, the `[a-z0-9_]` charset, and the 63-BYTE cap this

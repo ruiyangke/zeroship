@@ -1,11 +1,11 @@
 //! The engine's view of the VENDOR render seam, which the crate split cut in two.
 //!
 //! [`VendorStatement`] and [`VendorError`] are CONTRACT vocabulary and live in
-//! `zero-migrate-backend`: the first is the return type of
+//! `zeroship-migrate-backend`: the first is the return type of
 //! `DmlRenderer::render_trigger_op` and `DmlRenderer::render_vendor_op`, which all
 //! three vendors implement and which SQLite and MySQL each construct, and the second
 //! is a `#[from]` variant of `IrLowerError`. Neither could move into
-//! `zero-migrate-postgres` without making the other two vendors depend on PostgreSQL
+//! `zeroship-migrate-postgres` without making the other two vendors depend on PostgreSQL
 //! to name their own return type.
 //!
 //! That is now ALL this module is: two names the engine re-exports as its public
@@ -18,7 +18,7 @@
 //! `DmlRenderer`. So while the two renderers are fully behind the contract, the
 //! vendor-op surface is not."* It re-exported
 //! `zeroship_migrate_postgres::render_vendor_op` to do it, and
-//! `zero-migrate-sqlite/src/dml.rs` recorded the mirror image - PostgreSQL being
+//! `zeroship-migrate-sqlite/src/dml.rs` recorded the mirror image - PostgreSQL being
 //! "still in the position SQLite just left, via `render::vendor`".
 //!
 //! Both notes are now discharged. The surface is
@@ -33,13 +33,13 @@
 //! Worth stating because the size of the thing suggests otherwise: the PostgreSQL
 //! spelling - `CREATE ROLE`, `GRANT`, `CREATE POLICY`, dollar-quoted function bodies,
 //! `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` - was ALREADY in
-//! `zero-migrate-postgres`, and it was not touched. This was a routing change: a
+//! `zeroship-migrate-postgres`, and it was not touched. This was a routing change: a
 //! handful of call sites and some small `impl` blocks. Byte-identical output, which is the
 //! bar a move has to clear.
 //!
 //! # What enforces it, and why it is stronger than the census next door
 //!
-//! `mod vendor` is PRIVATE in `zero-migrate-postgres` and the `pub use` at that
+//! `mod vendor` is PRIVATE in `zeroship-migrate-postgres` and the `pub use` at that
 //! crate's root is gone, so `render_vendor_op` is unreachable from this crate: naming
 //! it again is an E0603 privacy error at the use site. That is a compiler-enforced
 //! boundary, not a convention.

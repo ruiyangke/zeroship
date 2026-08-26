@@ -86,7 +86,10 @@ fn workspace_root() -> PathBuf {
         if manifest.is_file() {
             let text = std::fs::read_to_string(&manifest)
                 .unwrap_or_else(|e| panic!("cannot read {}: {e}", manifest.display()));
-            if text.lines().any(|l| l.trim_start().starts_with("[workspace]")) {
+            if text
+                .lines()
+                .any(|l| l.trim_start().starts_with("[workspace]"))
+            {
                 return dir;
             }
         }
@@ -105,7 +108,13 @@ fn workspace_root() -> PathBuf {
 fn members() -> BTreeMap<String, PathBuf> {
     let root = workspace_root();
     let out = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
-        .args(["metadata", "--no-deps", "--format-version", "1", "--offline"])
+        .args([
+            "metadata",
+            "--no-deps",
+            "--format-version",
+            "1",
+            "--offline",
+        ])
         .arg("--manifest-path")
         .arg(root.join("Cargo.toml"))
         .output()
@@ -265,7 +274,12 @@ fn every_crate_on_disk_is_a_member_or_declared_excluded() {
             ) {
                 continue;
             }
-            orphans.push(dir.strip_prefix(&root).unwrap_or(&dir).display().to_string());
+            orphans.push(
+                dir.strip_prefix(&root)
+                    .unwrap_or(&dir)
+                    .display()
+                    .to_string(),
+            );
         }
     }
 

@@ -2,7 +2,7 @@
 //! [`Op`] wire type.
 //!
 //! These were inherent methods on `Op` in `model/ir.rs`. When the wire contract
-//! was extracted into the `zero-migrate-ir` leaf crate, the
+//! was extracted into the `zeroship-migrate-ir` leaf crate, the
 //! dialect-support / vendor-capability logic could NOT ride along: it reads the
 //! engine-owned portability vocabulary ([`crate::model::support`],
 //! [`crate::model::capability`]) and the engine's

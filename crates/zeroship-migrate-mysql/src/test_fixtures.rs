@@ -7,7 +7,7 @@
 //! `src/test_fixtures.rs` already has.
 //!
 //! What it does NOT do is restate the composition algebra. That was a real risk:
-//! `zero-migrate-postgres`'s test support had a SECOND implementation of charter
+//! `zeroship-migrate-postgres`'s test support had a SECOND implementation of charter
 //! composition for exactly this reason, kept only because the real one lived in the
 //! engine. The real one is `zeroship_migrate_ir::policy_registry` now, so this builds
 //! the charter TOML and hands it straight there. One composition, no fourth copy,

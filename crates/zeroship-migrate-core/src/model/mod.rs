@@ -20,7 +20,7 @@ pub mod table_shape;
 // validate_expr, CODE_*, ...}` still resolve.
 pub mod validate;
 
-// -- The wire contract lives in the `zero-migrate-ir` leaf crate. Re-export its
+// -- The wire contract lives in the `zeroship-migrate-ir` leaf crate. Re-export its
 // modules under their historical `crate::model::*` paths so the
 // engine's ~hundreds of `crate::model::{ir,expr,migration,precondition,probe}::...`
 // references (and the flattened root re-exports) keep resolving unchanged.

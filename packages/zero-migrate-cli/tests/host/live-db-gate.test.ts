@@ -14,7 +14,7 @@
 // control.
 //
 // The arms below drive a real gated suite in a child process and read its exit code,
-// because the exit code is the only thing CI reads. `crates/zero-migrate/tests/
+// because the exit code is the only thing CI reads. `crates/zeroship-migrate/tests/
 // support/mod.rs` holds the same contract for the Rust side.
 
 import { test } from "node:test";

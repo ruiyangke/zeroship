@@ -1,4 +1,4 @@
-//! The backend CONTRACT - the future `zero-migrate-backend`.
+//! The backend CONTRACT - the future `zeroship-migrate-backend`.
 //!
 //! This module holds the vocabulary and the traits, and it deliberately holds no
 //! SQL. Nothing here names a vendor, spells a keyword, or quotes an identifier;
@@ -215,7 +215,7 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
     ///
     /// The renderer used to hand back an identity ([`dialect`](Self::dialect)) and
     /// core turned that identity into capabilities through the former closed
-    /// enum's `descriptor` method - an exhaustive match in `zero-migrate-ir`, i.e. a
+    /// enum's `descriptor` method - an exhaustive match in `zeroship-migrate-ir`, i.e. a
     /// table core owns about vendors core does not. That is the same closed-set
     /// problem the identity had, one level up: an outsider's id has no arm in that
     /// match, so the honest answer for it was "no capabilities at all", and a
@@ -444,7 +444,7 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
     ///
     /// # Two vendors REFUSE, and they refuse in writing
     ///
-    /// Measured rather than assumed: `zero-migrate-sqlite` and `zero-migrate-mysql`
+    /// Measured rather than assumed: `zeroship-migrate-sqlite` and `zeroship-migrate-mysql`
     /// contain no vendor-op renderer and never did, every artifact carrying one of the
     /// sixteen op kinds is pinned to a single dialect by its
     /// [`DialectScope::Only`](crate::step::DialectScope::Only), and the engine's lower

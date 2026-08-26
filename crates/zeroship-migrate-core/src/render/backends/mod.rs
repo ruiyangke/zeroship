@@ -3,16 +3,16 @@
 //! This module used to hold the vendors themselves, as three sibling modules with a
 //! hard-coded match over a closed dialect enum beneath them. The split
 //! `docs/proposals/pluggable-backends.md` describes has happened: they are
-//! `zero-migrate-postgres`, `zero-migrate-sqlite`
-//! and `zero-migrate-mysql`, the contract they implement is `zero-migrate-backend`,
+//! `zeroship-migrate-postgres`, `zeroship-migrate-sqlite`
+//! and `zeroship-migrate-mysql`, the contract they implement is `zeroship-migrate-backend`,
 //! and what is left here is the composition.
 //!
 //! | before                        | after                        |
 //! |-------------------------------|------------------------------|
 //! | `render::renderer`            | `zeroship_migrate_backend::renderer` |
-//! | `render::backends::postgres`  | `zero-migrate-postgres`      |
-//! | `render::backends::sqlite`    | `zero-migrate-sqlite`        |
-//! | `render::backends::mysql`     | `zero-migrate-mysql`         |
+//! | `render::backends::postgres`  | `zeroship-migrate-postgres`      |
+//! | `render::backends::sqlite`    | `zeroship-migrate-sqlite`        |
+//! | `render::backends::mysql`     | `zeroship-migrate-mysql`         |
 //! | `render::backends` (this)     | the registry composition     |
 //!
 //! # What belongs in a backend crate
@@ -47,7 +47,7 @@
 //!
 //! A backend can still reach another vendor's spelling THROUGH a contract helper that
 //! hard-codes a dialect, and the grep above cannot see it because the literal lives
-//! in `zero-migrate-backend`. That was not hypothetical here: `dml::quote_ident`,
+//! in `zeroship-migrate-backend`. That was not hypothetical here: `dml::quote_ident`,
 //! `dml::quote_bare_ident` and `dml::quote_ident_checked_for_dialect` all pinned
 //! the PostgreSQL enum leg, so all four identifier emissions in the SQLite backend
 //! used to be quoted by the POSTGRESQL renderer. It was correct only because both
@@ -112,8 +112,8 @@ use zeroship_migrate_ir::dialect::DialectId;
 // `pub(crate) const VENDORS: VendorSet` folded from that array. Those three lines were
 // the whole of why this crate had to depend on all three backends.
 //
-// They are `crates/zero-migrate/src/lib.rs` now - the COMPOSITION ROOT, which depends
-// on this crate rather than the other way round. `zero-migrate-core` declares no
+// They are `crates/zeroship-migrate/src/lib.rs` now - the COMPOSITION ROOT, which depends
+// on this crate rather than the other way round. `zeroship-migrate-core` declares no
 // vendor `[dependencies]` at all, so writing one of those idents in this crate's
 // production source is an unresolved-crate error. The rule *the core should be
 // neutral* stopped being something a census asserts about source text and became
@@ -268,7 +268,7 @@ pub(crate) fn value_format_renderers(
 
 /* `pub(crate) fn stored_ddl(dialect)` USED TO LIVE HERE. Its only caller was
  * SQLite's execution half, which asked this registry which parser handles SQLite
- * from inside the SQLite backend. That half is `zero-migrate-sqlite` now and names
+ * from inside the SQLite backend. That half is `zeroship-migrate-sqlite` now and names
  * `crate::stored_ddl::PARSER` directly, leaving this resolver with zero callers.
  *
  * Nothing was lost: the parser is still reached, by everything that has a resolved

@@ -1,6 +1,6 @@
 /* eslint-disable */
 // GENERATED FILE — do not edit by hand.
-// Source: crates/zero-migrate/ir-envelope.schema.json (the engine's single-source-of-
+// Source: crates/zeroship-migrate/ir-envelope.schema.json (the engine's single-source-of-
 // truth IR schema). Regenerate with: pnpm --filter zero-migrate gen:ir-types
 //
 // Covers the CLOSED STRING-ENUM IR defs only; the recursive structural types live

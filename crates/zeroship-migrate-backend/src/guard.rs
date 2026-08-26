@@ -36,10 +36,10 @@
 //!   net table state is not enumerable without a parser.
 //!
 //! So the function enforcing SQLite's and MySQL's posture needed PostgreSQL's parser.
-//! Filing it under `zero-migrate-postgres` would have put two dialects' only
+//! Filing it under `zeroship-migrate-postgres` would have put two dialects' only
 //! data-security enforcement in a third dialect's crate; putting it here as it stood
-//! would have pushed `libpg_query` beneath `zero-migrate-sqlite` and
-//! `zero-migrate-mysql`, which build without it.
+//! would have pushed `libpg_query` beneath `zeroship-migrate-sqlite` and
+//! `zeroship-migrate-mysql`, which build without it.
 //!
 //! Neither was necessary, because the parser was answering ONE question. The walk
 //! now asks it through [`MigrationGuard::raw_island_escapes_rls_net_state`]: a vendor
@@ -86,7 +86,7 @@ use crate::advisory::Advisory;
 ///
 /// Neutral because [`GuardError::Parse`] carries it and [`GuardError`] is the
 /// vocabulary every vendor's guard reports in. The PARSER that raises it is not
-/// neutral - today only `zero-migrate-postgres` has one.
+/// neutral - today only `zeroship-migrate-postgres` has one.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ParseError {
     /// The vendor's parser rejected the SQL (syntax error, etc.).

@@ -3,7 +3,7 @@
 // Source: the `attribute-vocabulary.json` exported by this backend's Rust crate from
 // its own `static DEFS`. Regenerate with:
 //
-//     UPDATE_VOCABULARY=1 cargo test -p zero-migrate-sqlite --test attribute_vocabulary_export
+//     UPDATE_VOCABULARY=1 cargo test -p zeroship-migrate-sqlite --test attribute_vocabulary_export
 //     node packages/zero-migrate-sqlite/scripts/gen-attributes.mjs
 //
 // A drift test asserts this file matches the artifact, so an edit here is reverted by

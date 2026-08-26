@@ -1,6 +1,6 @@
 //! The embedding guide's Rust examples must stay COMPILED, not just present.
 //!
-//! `crates/zero-migrate/src/lib.rs` includes `docs/embedding.md` under
+//! `crates/zeroship-migrate/src/lib.rs` includes `docs/embedding.md` under
 //! `#[cfg(doctest)]`, so rustdoc compiles every ```rust block in it against the real
 //! crate. That gate found six broken blocks the moment it was switched on, so it
 //! demonstrably has teeth.

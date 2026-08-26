@@ -1,12 +1,12 @@
 /* eslint-disable */
 // GENERATED FILE — do not edit by hand.
-// Source: crates/zero-migrate/dialect-support.toml (the single-source
+// Source: crates/zeroship-migrate/dialect-support.toml (the single-source
 // dialect-support sidecar). Regenerate with:
 //   pnpm --filter zero-migrate gen:dialect-table
 //
 // One row per (op-kind, variant) recording the token's disposition on each
 // dialect, KEYED BY DIALECT ID — the TS mirror of
-// crates/zero-migrate/tests/dialect_matrix/dialect_table.rs.
+// crates/zeroship-migrate/tests/dialect_matrix/dialect_table.rs.
 //
 // There is deliberately NO `Dialect` union here. A closed union of the shipping
 // dialect names is the same "core enumerates the vendors" shape as a struct field

@@ -12,7 +12,7 @@
 //!
 //! ## Why this is not a compile-error test
 //!
-//! Adding a field to `crates/zero-migrate-core/src/model/schema_model.rs` is ALSO a compile
+//! Adding a field to `crates/zeroship-migrate-core/src/model/schema_model.rs` is ALSO a compile
 //! error in every named comparator there, because each destructures with no `..`. That
 //! is a good tripwire and it is deliberately not what this file measures, because a
 //! compile error only fires for someone editing THIS crate. The property below fires on

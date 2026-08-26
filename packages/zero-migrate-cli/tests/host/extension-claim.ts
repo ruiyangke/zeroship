@@ -1,6 +1,6 @@
 // The host half of the cross-run, cross-binary claim on a PostgreSQL EXTENSION.
 //
-// THE OTHER HALF IS `crates/zero-migrate/tests/support/extension_claim.rs`, and that
+// THE OTHER HALF IS `crates/zeroship-migrate/tests/support/extension_claim.rs`, and that
 // file carries the reasoning: an extension is installed per DATABASE, not per schema,
 // so the pid every other cluster-visible name here carries buys no isolation
 // (`citext_<pid>` is not an isolated extension, it is `could not open extension

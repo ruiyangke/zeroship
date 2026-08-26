@@ -1,4 +1,4 @@
-//! # `zero-migrate-mysql` - the MySQL backend
+//! # `zeroship-migrate-mysql` - the MySQL backend
 //!
 //! One vendor, no engine. This crate holds BOTH halves of MySQL now:
 //!
@@ -9,7 +9,7 @@
 //!   apply MySQL's auto-committing DDL forces, the journal DDL and net-state reads,
 //!   the `information_schema` drift snapshot, and the resumable backfill.
 //!
-//! It depends on `zero-migrate-backend` and `zero-migrate-ir` - never on the engine.
+//! It depends on `zeroship-migrate-backend` and `zeroship-migrate-ir` - never on the engine.
 //! That is the whole point of the split: the engine names this crate for its
 //! registry, so this crate must not name the engine back.
 //!
@@ -39,7 +39,7 @@
 //!
 //! The rule used to be per-MODULE: each renderer held its own
 //! `const DIALECT: DialectId = MYSQL;` and imported that name from
-//! `zero-migrate-ir`, the neutral vocabulary crate, which declared the ids for all
+//! `zeroship-migrate-ir`, the neutral vocabulary crate, which declared the ids for all
 //! three shipping vendors. The ids moved into the vendors, so the rule tightened to
 //! per-crate: `"mysql"` is now spelled in exactly one place in this crate and in
 //! exactly one place in the workspace. It is ENFORCED, across the crate boundary, by
@@ -49,7 +49,7 @@
 //!
 //! A backend can still reach another vendor's spelling THROUGH a contract helper
 //! that hard-codes a dialect, and no grep of this crate can see it because the
-//! literal lives in `zero-migrate-backend`. That is measured, not hypothetical -
+//! literal lives in `zeroship-migrate-backend`. That is measured, not hypothetical -
 //! `zeroship_migrate_backend::dml`'s header carries the numbers. The identifier seam
 //! (`*_for_dialect(.., DIALECT)`) is how this crate stays clear of it.
 
@@ -60,7 +60,7 @@ pub mod attribute;
 ///
 /// This is the EXECUTION half. It arrived from `zero-migrate`'s
 /// `apply/backend/mysql/`, where it was the last vendor backend still inside the
-/// engine, and it reaches nothing but `zero-migrate-backend`, `zero-migrate-ir` and
+/// engine, and it reaches nothing but `zeroship-migrate-backend`, `zeroship-migrate-ir` and
 /// this crate's own renderers.
 pub mod backend;
 pub mod collation;
@@ -108,7 +108,7 @@ const NAME: &str = "mysql";
 
 /// This backend's identity, declared HERE for every shipping path.
 ///
-/// `zero-migrate-ir` is the neutral vocabulary crate and its own module doc says a
+/// `zeroship-migrate-ir` is the neutral vocabulary crate and its own module doc says a
 /// backend "declares its own - `DialectId::new(\"duckdb\")` - without editing this
 /// crate". It used to declare three anyway, and core re-exported them, so every
 /// consumer that wanted to name `MySQL` reached a neutral crate to get it. This is

@@ -17,7 +17,7 @@
 // (`packages/zero-migrate-cli/src/index.ts:73`), `apply()` routes it to
 // `applyIrSqlite`, and `existence-guard-fold-projection.test.ts` in this directory
 // drives live SQLite arms through exactly that. The SQLite arm for THIS question is
-// caught in `crates/zero-migrate/tests/existence_guard_sqlite.rs`
+// caught in `crates/zeroship-migrate/tests/existence_guard_sqlite.rs`
 // (`create_index_ifnotexists_name_owned_by_another_table_fails_closed`), against a
 // real SQLite catalog in process.
 //

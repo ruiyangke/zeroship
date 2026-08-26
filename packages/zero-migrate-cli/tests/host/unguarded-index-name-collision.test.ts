@@ -17,12 +17,12 @@
 // (`packages/zero-migrate-cli/src/index.ts:73`), `apply()` routes it to
 // `applyIrSqlite`, and `existence-guard-fold-projection.test.ts` in this directory
 // drives live SQLite arms through it. The SQLite arm for this exact shape is caught
-// in `crates/zero-migrate/tests/existence_guard_sqlite.rs`
+// in `crates/zeroship-migrate/tests/existence_guard_sqlite.rs`
 // (`create_index_unguarded_name_owned_by_another_table_fails_closed`).
 //
 // Does NOT cover a collision the same migration UNIT creates before the statement
 // runs, AND NOTHING ELSE COVERS IT EITHER - this is a hole, not a handoff. The probe
-// reads one catalog snapshot per unit (`zero-migrate-postgres/src/backend/session.rs`), so a
+// reads one catalog snapshot per unit (`zeroship-migrate-postgres/src/backend/session.rs`), so a
 // name an earlier statement in the same `up` created is invisible to it; and the
 // fold's `DuplicateIndex` check keys on the target table's own index list
 // (`render/fold.rs:1765`, `:2733`, `:2788`), so it never asks which OTHER table owns
@@ -31,7 +31,7 @@
 //
 // Does NOT cover an index name long enough for PostgreSQL to truncate it into a
 // collision: authoring validation refuses an over-long create-side identifier on
-// every dialect before lowering (`crates/zero-migrate/tests/
+// every dialect before lowering (`crates/zeroship-migrate/tests/
 // authored_identifier_lengths.rs`), so a name that could truncate never reaches this
 // path from the authoring API.
 

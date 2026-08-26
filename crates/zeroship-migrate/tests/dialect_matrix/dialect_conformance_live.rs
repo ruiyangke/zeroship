@@ -181,7 +181,7 @@ use zeroship_migrate_sqlite::SqliteBackend;
 /// This list used to be a TODO, and by the time the leg was written three of its
 /// four items were already satisfied elsewhere in the tree. The stale version said
 /// `ZERO_MIGRATE_MYSQL_URL` "occurs in exactly one file in `crates/`, and it is
-/// `src/apply/backend/mysql/mod.rs` (now `zero-migrate-mysql/src/backend/mod.rs`),
+/// `src/apply/backend/mysql/mod.rs` (now `zeroship-migrate-mysql/src/backend/mod.rs`),
 /// not a test". MEASURED at 9f65095a: it occurs in
 /// NINE files under `crates/`, SEVEN of them under `tests/` - six once this file's
 /// own stale sentence is discounted - and `tests/support/mysql.rs` had already
@@ -981,7 +981,7 @@ fn probe_prefix_for(pid: u32) -> String {
 /// anything else would be refused by POLICY and would stop asking its question, and
 /// BOTH of those two are claimed by `rollback/drop_extension_rollback_pg.rs` - as
 /// `EXT` and as `EXT_GUARDED`. `pgcrypto` is the smaller of the two collisions, and
-/// that is MEASURED rather than assumed: across `crates/zero-migrate/tests`, the
+/// that is MEASURED rather than assumed: across `crates/zeroship-migrate/tests`, the
 /// files that CREATE `citext` against a live server are that one and
 /// `pg_engine/pg_scenarios.rs`, while the only other file that creates `pgcrypto` is
 /// that one, in the single test `a_guarded_extension_drop_keeps_no_inverse`.

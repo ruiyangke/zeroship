@@ -22,10 +22,10 @@
 //!
 //! # What is about to be lost, exactly
 //!
-//! `crates/zero-migrate/src/apply/backend/{postgres,sqlite,mysql}/` is vendor code
+//! `crates/zeroship-migrate/src/apply/backend/{postgres,sqlite,mysql}/` is vendor code
 //! that still lives in the engine crate, and it is being extracted into the vendor
 //! crates. `pub(crate)` DOES NOT SURVIVE A CRATE BOUNDARY. There is no modifier that
-//! means "visible to `zero-migrate` but not to `zero-migrate-postgres`" — `pub(crate)`
+//! means "visible to `zero-migrate` but not to `zeroship-migrate-postgres`" — `pub(crate)`
 //! would hide these items from the engine, their intended caller, and `pub` lets
 //! every vendor in. The type system genuinely cannot express this rule, which is why
 //! it has to be written down as a test instead of being asserted in prose and
@@ -56,7 +56,7 @@
 //! not compile.
 //!
 //! That is exactly why the failure is dangerous. The loud path is not the one anybody
-//! takes. The quiet path is to PROMOTE the resolver into `zero-migrate-backend`,
+//! takes. The quiet path is to PROMOTE the resolver into `zeroship-migrate-backend`,
 //! which every vendor already depends on, and which already exposes
 //! `VendorSet::get`, `VendorSet::as_slice` and `VendorSet::dialects` as `pub`. All
 //! that is missing there is a `VendorSet` value to call them on, and the move
@@ -103,9 +103,9 @@
 //!
 //! [`SqliteSequencePolicy`] is a TYPE, not a call, so it gets the other matcher:
 //! plain word occurrence, scoped to the vendor crates that do NOT own it.
-//! `zero-migrate-sqlite` declaring and exporting its own policy enum is correct and
-//! is this file's positive control for that needle. `zero-migrate-postgres` or
-//! `zero-migrate-mysql` naming it would be one vendor reaching into another's plan
+//! `zeroship-migrate-sqlite` declaring and exporting its own policy enum is correct and
+//! is this file's positive control for that needle. `zeroship-migrate-postgres` or
+//! `zeroship-migrate-mysql` naming it would be one vendor reaching into another's plan
 //! vocabulary, which is the same failure by a different route.
 //!
 //! # What this file does NOT cover, said out loud
@@ -188,13 +188,13 @@ const REGISTRY_SET: &str = "VENDORS";
 /// its registry module so the engine never reaches into a vendor crate directly. Its
 /// owner naming it is the design; any other vendor naming it is one backend reading
 /// another's plan vocabulary.
-const VENDOR_OWNED_TYPES: &[(&str, &str)] = &[("SqliteSequencePolicy", "zero-migrate-sqlite")];
+const VENDOR_OWNED_TYPES: &[(&str, &str)] = &[("SqliteSequencePolicy", "zeroship-migrate-sqlite")];
 
 /// The vendor crates, relative to the workspace `crates/` directory.
 const VENDOR_CRATES: &[&str] = &[
-    "zero-migrate-postgres",
-    "zero-migrate-sqlite",
-    "zero-migrate-mysql",
+    "zeroship-migrate-postgres",
+    "zeroship-migrate-sqlite",
+    "zeroship-migrate-mysql",
 ];
 
 /// Files the walk MUST reach, relative to `crates/`. The real defence against a
@@ -211,13 +211,13 @@ const VENDOR_CRATES: &[&str] = &[
 /// `apply/backend/` or on anything arriving from it — that code is mid-extraction and
 /// an anchor there would rot on landing.
 const WALK_ANCHORS: &[&str] = &[
-    "zero-migrate-postgres/src/lib.rs",
-    "zero-migrate-postgres/src/analysis/mod.rs",
-    "zero-migrate-sqlite/src/lib.rs",
-    "zero-migrate-mysql/src/lib.rs",
+    "zeroship-migrate-postgres/src/lib.rs",
+    "zeroship-migrate-postgres/src/analysis/mod.rs",
+    "zeroship-migrate-sqlite/src/lib.rs",
+    "zeroship-migrate-mysql/src/lib.rs",
 ];
 
-/// Files the POSITIVE-CONTROL walk must reach, relative to `crates/zero-migrate-core/src`.
+/// Files the POSITIVE-CONTROL walk must reach, relative to `crates/zeroship-migrate-core/src`.
 ///
 /// The same pair the sibling census `core_names_no_vendor_crate.rs` uses and for the
 /// same reasons: `lib.rs` is the walk root, and `render/backends/mod.rs` is three
@@ -226,7 +226,7 @@ const ENGINE_WALK_ANCHORS: &[&str] = &["lib.rs", "render/backends/mod.rs"];
 
 /// The walk's floor across all three vendor crates. They hold 79 `.rs` files under
 /// `src` (31 + 26 + 22), up from 67: the PostgreSQL execution half landed in
-/// `zero-migrate-postgres/src/backend/` — ten files, plus that crate's own
+/// `zeroship-migrate-postgres/src/backend/` — ten files, plus that crate's own
 /// `recording.rs` and `test_fixtures.rs` — the same way the SQLite and MySQL halves
 /// landed before it. That was the last one; there is no vendor code left in the
 /// engine to arrive here.
@@ -256,7 +256,7 @@ const VENDOR_FILE_FLOOR: usize = 70;
 ///
 /// `stored_ddl` was retired exactly that way, at 4. Its only engine caller was
 /// SQLite's execution half, asking this registry which parser handles SQLite from
-/// inside the SQLite backend; that half is `zero-migrate-sqlite` now and names
+/// inside the SQLite backend; that half is `zeroship-migrate-sqlite` now and names
 /// `crate::stored_ddl::PARSER` directly, so `render::backends::stored_ddl` had zero
 /// callers and was DELETED. The name stays in [`REGISTRY_RESOLVERS`] above — the rule
 /// it states is still the rule, and it now also guards against the resolver being
@@ -276,7 +276,7 @@ const RESOLVER_CONTROL_FLOOR: &[(&str, usize)] = &[
 ];
 
 /// The type needle's positive control: how many code lines in the OWNING crate must
-/// still name each vendor-owned type. `zero-migrate-sqlite` declares
+/// still name each vendor-owned type. `zeroship-migrate-sqlite` declares
 /// `SqliteSequencePolicy` and re-exports it, which is two lines and is correct.
 const OWNER_CONTROL_FLOOR: usize = 2;
 
@@ -381,7 +381,7 @@ fn src_files(root: &Path) -> Vec<PathBuf> {
 /// Code lines of `files` that resolve through the registry, keyed by needle name.
 ///
 /// `owner` is the vendor crate being scanned, or `None` for the engine control; it is
-/// what lets `zero-migrate-sqlite` name its own `SqliteSequencePolicy` without being
+/// what lets `zeroship-migrate-sqlite` name its own `SqliteSequencePolicy` without being
 /// a finding.
 fn resolutions(
     files: &[PathBuf],
@@ -425,7 +425,7 @@ fn resolutions(
 fn no_vendor_crate_resolves_a_vendor() {
     let crates = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("crates/zero-migrate has a parent")
+        .expect("crates/zeroship-migrate has a parent")
         .to_path_buf();
 
     // ---- FLOOR ONE: the WALK. -------------------------------------------------
@@ -476,7 +476,7 @@ fn no_vendor_crate_resolves_a_vendor() {
     // The identical matchers, run where the answer must not be zero. A broken
     // pathspec or a broken matcher returns a confident ZERO, and every vendor zero
     // below would then mean nothing.
-    let engine_src = crates.join("zero-migrate-core").join("src");
+    let engine_src = crates.join("zeroship-migrate-core").join("src");
     let engine_files = src_files(&engine_src);
     let engine_reached: std::collections::BTreeSet<String> = engine_files
         .iter()

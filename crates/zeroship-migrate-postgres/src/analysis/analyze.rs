@@ -35,7 +35,7 @@ use pg_query::protobuf::{self, AlterTableType, ConstrType, ObjectType};
 
 use zeroship_migrate_ir::migration::Migration;
 
-// The advisory VOCABULARY moved to `zero-migrate-backend`, because
+// The advisory VOCABULARY moved to `zeroship-migrate-backend`, because
 // `zeroship_migrate_backend::guard::GuardOutcome` - the neutral seam every vendor's guard
 // returns - carries `Vec<Advisory>`, so the type has to sit below every vendor. The
 // ANALYZERS did not move: they read a `libpg_query` parse tree and belong with the

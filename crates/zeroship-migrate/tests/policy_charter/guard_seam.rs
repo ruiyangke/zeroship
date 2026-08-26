@@ -31,7 +31,7 @@ use zeroship_migrate_postgres::guard::SqlGuard;
 /// Built through [`guard_for`] rather than by naming `PgGuard`. The engine's crate
 /// root no longer re-exports the three vendor guard TYPES, so a test cannot name one
 /// — which is the point: the only way to reach a vendor's line-1 is the registry the
-/// engine itself goes through. `zero-migrate-postgres`'s `BackendVendor::guard` is
+/// engine itself goes through. `zeroship-migrate-postgres`'s `BackendVendor::guard` is
 /// `PgGuard::from_config(cfg.clone())`, so this is the same guard the deleted
 /// constructor built, from the same config.
 fn pg_guard() -> Box<dyn MigrationGuard> {
@@ -97,7 +97,7 @@ fn pg_guard_flags_destructive_through_seam() {
 
 #[test]
 fn sqlite_descriptor_guard_passes_descriptor_create_table() {
-    // Same guard, reached through the registry: `zero-migrate-sqlite`'s
+    // Same guard, reached through the registry: `zeroship-migrate-sqlite`'s
     // `BackendVendor::guard` is `Box::new(SqliteGuard::new())` and ignores the config,
     // so the object under test is unchanged by the re-export's removal.
     let guard = guard_for(

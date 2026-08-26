@@ -4,7 +4,7 @@
 //! **Why this file exists.** Before it, MySQL had NO live Rust coverage at all.
 //! `ZERO_MIGRATE_MYSQL_URL` appeared in 52 files under `packages/` and in exactly
 //! one file under `crates/` - then `apply/backend/mysql/mod.rs`, since moved to
-//! `zero-migrate-mysql/src/backend/mod.rs`, which is SOURCE, not a test. So the MySQL backend was exercised at RENDER level (unit tests over the
+//! `zeroship-migrate-mysql/src/backend/mod.rs`, which is SOURCE, not a test. So the MySQL backend was exercised at RENDER level (unit tests over the
 //! emitted SQL text) and at CLI/HOST level (TypeScript over `mysql2`), and nowhere
 //! in between. No Rust test had ever asked a live MySQL server what the engine
 //! actually did, and the CI `rust` job was given a PostgreSQL service only.

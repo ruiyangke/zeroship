@@ -5,7 +5,7 @@
 - **References:** `crates/zeroship-migrate-adapter/src/platform.rs`,
   `crates/zeroship-migrate-adapter/tests/platform_migrate.rs`,
   `db/released_migrations.tsv`, `deploy/scripts/deploy-remote.sh`,
-  `third_party/zero-migrate/crates/zero-migrate-ir/src/migration.rs`
+  `third_party/zero-migrate/crates/zeroship-migrate-ir/src/migration.rs`
 
 ## Context
 

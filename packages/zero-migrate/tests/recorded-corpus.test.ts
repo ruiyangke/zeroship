@@ -3,7 +3,7 @@
 // raw-author envelope in `op_fixtures/recorded.json`.
 //
 // This is one half of a two-part check. `recorded.json` is the join: the Rust half
-// (`crates/zero-migrate/tests/op_fixture_goldens.rs`) reads the same file, resolves
+// (`crates/zeroship-migrate/tests/op_fixture_goldens.rs`) reads the same file, resolves
 // those recorded ops through the real `resolve_create_table_policy`, and compares
 // the result to `<stem>.golden.json`. Composed, the halves check `.mig.js` ->
 // golden for all 27 stems. Neither half alone does, and each runs in the job that
@@ -31,7 +31,7 @@ import { test } from "node:test";
 import { buildEnvelope, type MigrationModule } from "../src/internal/recorder.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const fixturesDir = resolve(here, "../../../crates/zero-migrate/tests/op_fixtures");
+const fixturesDir = resolve(here, "../../../crates/zeroship-migrate/tests/op_fixtures");
 
 const MIG_SUFFIX = ".mig.js";
 const GOLDEN_SUFFIX = ".golden.json";

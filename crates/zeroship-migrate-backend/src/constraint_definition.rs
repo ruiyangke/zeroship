@@ -5,8 +5,8 @@
 //! # Why it is here and not in the engine
 //!
 //! It was `pub(crate)` in `zeroship_migrate::render::declarative` until the vendor
-//! crates became separately linkable. `crates/zero-migrate-mysql/src/backend/`
-//! is being extracted into `zero-migrate-mysql`, and its `drift_sql.rs` BUILDS this
+//! crates became separately linkable. `crates/zeroship-migrate-mysql/src/backend/`
+//! is being extracted into `zeroship-migrate-mysql`, and its `drift_sql.rs` BUILDS this
 //! body: MySQL's `information_schema` stores no rendered constraint text - there is
 //! no `pg_get_constraintdef` there - so the drift path has to synthesize the
 //! comparison form itself. A vendor crate cannot depend on the engine (the engine
@@ -24,7 +24,7 @@
 //! A vendor that reaches for [`quote_ident_if_needed`] to spell an identifier it is
 //! about to EMIT has read this module as a quoting helper, and it is not one:
 //! MySQL delimits identifiers with backticks, so emitting `"x"` from here would be
-//! wrong in a way no comparison test can see. `zero-migrate-mysql`'s DDL half
+//! wrong in a way no comparison test can see. `zeroship-migrate-mysql`'s DDL half
 //! re-spells the body it gets from here (`mysql_requote_sql`) precisely because the
 //! two are different jobs. `constraint_definition_is_comparison_text` is the census
 //! that keeps that rule after `pub(crate)` stopped being able to state it.

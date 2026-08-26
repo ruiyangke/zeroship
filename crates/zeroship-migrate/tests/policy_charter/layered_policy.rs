@@ -235,7 +235,7 @@ fn obligations_union_and_do_not_depend_on_narrowing_layer_order() {
 // is now `DeclaredOnly` - the engine applies no timeout from it - so a charter carrying
 // 30000 is refused at load, and BOTH builtin UintCharter knobs are in that class. The
 // coverage cannot be rebuilt from builtins, so it is not rebuilt here. It is not lost
-// outright: `zero-migrate-policy/tests/compose_oracle.rs` declares the same key in its
+// outright: `zeroship-migrate-policy/tests/compose_oracle.rs` declares the same key in its
 // OWN registry and brute-forces the UintCharter meet, including the layered
 // narrow-a-region override this test only sampled. What this file no longer proves is
 // that a UintCharter meets correctly through `effective_policy_from_charter_layers`

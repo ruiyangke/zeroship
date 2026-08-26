@@ -683,7 +683,7 @@ async fn apply_ir_documents_with_policy(
     // enforces via the state machine, NOT a destructive-posture value the apply
     // projects. Both authorization paths apply under the composed policy verbatim.
     let apply_policy = policy.clone();
-    // (d) POLICY: seal the effective policy with the zero-migrate-policy HMAC so the
+    // (d) POLICY: seal the effective policy with the zeroship-migrate-policy HMAC so the
     // apply carries an authenticated, ceiling-stamped integrity token (the audit
     // records its binding: dialect / matcher version / ceiling version / registry
     // digest). Pre-launch: stored seals don't matter — this seal is minted+verified

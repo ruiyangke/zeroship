@@ -343,14 +343,14 @@ test("PostgreSQL: rolling back a dropSchema rebuilds the schema its create autho
  *  `crates/zeroship-migrate-node/tests/rollback_sqlite.rs`
  *  (`a_view_dropped_by_a_later_envelope_comes_back_through_the_verb`), which drives the
  *  same re-lowering path this file does but against SQLite, and
- *  `crates/zero-migrate/tests/drop_view_rollback_pg.rs`, which is PostgreSQL but calls
+ *  `crates/zeroship-migrate/tests/drop_view_rollback_pg.rs`, which is PostgreSQL but calls
  *  the engine directly and never reaches the addon's envelope loop. So the cell this
  *  file would fill - a view rollback on PostgreSQL through the verb - is empty, and
  *  neither of the two tests covers it between them.
  *
  *  `citext` rather than `pgcrypto` or `hstore` for no reason beyond it being available
  *  and absent in the container, so the create is real and the drop leaves no residue.
- *  It is not on FORBIDDEN_EXTENSIONS (crates/zero-migrate-postgres/src/guard/denylist.rs:18),
+ *  It is not on FORBIDDEN_EXTENSIONS (crates/zeroship-migrate-postgres/src/guard/denylist.rs:18),
  *  which the guard applies over the allowlist regardless of any grant. */
 function scaffoldExtensionDrop(projectSchema: string, extensionName: string): string {
   const dir = mkdtempSync(join(HERE, "rollback-live-ext-"));
@@ -543,7 +543,7 @@ test("PostgreSQL: a rollback whose project lock is held waits instead of failing
     assert.equal(applied.status, 0, `apply failed: ${applied.stderr}`);
 
     // The engine's own acquire, run verbatim rather than re-derived: the key is
-    // `hashtext(project_id)` (crates/zero-migrate-postgres/src/backend/session.rs)
+    // `hashtext(project_id)` (crates/zeroship-migrate-postgres/src/backend/session.rs)
     // and the CLI passes the project SCHEMA as the project id
     // (packages/zero-migrate-cli/src/index.ts:544).
     await holder.query(`SELECT pg_advisory_lock(hashtext($1)::bigint)`, [schema]);
@@ -591,7 +591,7 @@ test("MySQL: a rollback whose project lock is held fails with the holder named",
   const mysql = (await import("mysql2/promise")).default;
   const schema = uniqueSchema("rb_lock_my");
   const metaSchema = `${schema}_migrations`;
-  // Mirrors `project_lock_name` (crates/zero-migrate-mysql/src/backend/session.rs:109):
+  // Mirrors `project_lock_name` (crates/zeroship-migrate-mysql/src/backend/session.rs:109):
   // `zero_migrate:<project_id>` while that fits in 64 chars, and the CLI passes the project
   // SCHEMA as the project id (packages/zero-migrate-cli/src/index.ts:544).
   //

@@ -3,7 +3,7 @@
 //
 // This file names no vendor, and must not start to. `zero-migrate` is the neutral
 // authoring DSL; a `postgres.fillfactor` typing in here would be the TypeScript mirror
-// of the Cargo rule that forbids `zero-migrate-core` from depending on a vendor crate.
+// of the Cargo rule that forbids `zeroship-migrate-core` from depending on a vendor crate.
 //
 // # How a vendor gets its keys in
 //

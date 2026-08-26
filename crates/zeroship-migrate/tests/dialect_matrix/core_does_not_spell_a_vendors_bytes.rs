@@ -1,6 +1,6 @@
 //! The census that replaces a VISIBILITY the crate split could not carry across a
-//! crate boundary. Both `zero-migrate-backend/src/spelling.rs` and
-//! `zero-migrate-core/src/render/backends/mod.rs` name this file by path as their
+//! crate boundary. Both `zeroship-migrate-backend/src/spelling.rs` and
+//! `zeroship-migrate-core/src/render/backends/mod.rs` name this file by path as their
 //! replacement; until this commit neither of those sentences was true.
 //!
 //! # What was lost, exactly
@@ -12,7 +12,7 @@
 //! the record — and the compiler enforced it at the DEFINITION, so no call site had
 //! to be audited and no reviewer had to remember.
 //!
-//! They now live in `zero-migrate-backend/src/spelling.rs`. Across a crate boundary
+//! They now live in `zeroship-migrate-backend/src/spelling.rs`. Across a crate boundary
 //! `pub(in …)` cannot express "these vendor crates and no other": the vendor crates
 //! genuinely need to reach them, so they are `pub`, so the engine can name them too.
 //! Nothing enforces the rule any more.
@@ -56,7 +56,7 @@
 //!   on a deletion. The pair says they moved, once, to here.
 //! - a CENSUS FLOOR. A scan over a DISCOVERED set FAILS OPEN: narrow the discovery
 //!   and it iterates nothing, finds nothing, reports clean. That was MEASURED blind
-//!   next door, not predicted — a planted call in `zero-migrate-ir` went unreported
+//!   next door, not predicted — a planted call in `zeroship-migrate-ir` went unreported
 //!   by a crate-scoped walk. There are two floors here because there are two ways to
 //!   discover nothing: the WALK can be narrowed, and the NEEDLE can stop matching.
 //! - `include_str!` FOR THE ANCHOR. A compile-time dependency, so the pin cannot
@@ -73,7 +73,7 @@ use std::path::PathBuf;
 /// would produce AND the fully-qualified `zeroship_migrate_backend::spelling::…(` form
 /// the vendors currently write. Anything that reaches the primitive has to spell its
 /// name somewhere; a name with no `(` after it is prose, and prose is not a call.
-/// That distinction is load-bearing and is measured, not assumed: `zero-migrate-core/src`
+/// That distinction is load-bearing and is measured, not assumed: `zeroship-migrate-core/src`
 /// MENTIONS `ansi_double_quote_ident` six times today, across `render/backends/mod.rs`,
 /// `render/dml.rs` and `schema/query.rs`, every one of them a doc comment explaining
 /// why the engine must not call it. A census that counted mentions would be red on
@@ -93,8 +93,8 @@ type SpellingCall = (String, &'static str, usize);
 /// Both are named because the anchor is two-sided. The former home is where they were
 /// `pub(in crate::render::backends)`; a copy left behind there would be a second
 /// physical home for byte-logic whose entire discipline is having exactly one.
-const SPELLING_HOME: &str = "zero-migrate-backend/src/spelling.rs";
-const FORMER_SPELLING_HOME: &str = "zero-migrate-core/src/render/backends/mod.rs";
+const SPELLING_HOME: &str = "zeroship-migrate-backend/src/spelling.rs";
+const FORMER_SPELLING_HOME: &str = "zeroship-migrate-core/src/render/backends/mod.rs";
 
 /// The crates that MAY call a raw spelling primitive, and the crates that MUST NOT.
 ///
@@ -103,20 +103,20 @@ const FORMER_SPELLING_HOME: &str = "zero-migrate-core/src/render/backends/mod.rs
 /// unlisted module simply could not name the function — so its replacement has to
 /// fail closed too. A deny-list would let the tenth crate walk straight through.
 ///
-/// `zero-migrate-backend` is on the allow list because it DEFINES them. The other
+/// `zeroship-migrate-backend` is on the allow list because it DEFINES them. The other
 /// three are the shipping vendors, and each is spelling bytes for ITSELF, which is
 /// the only thing these functions are for.
 const CRATES_THAT_MAY_SPELL: &[&str] = &[
-    "zero-migrate-backend",
-    "zero-migrate-mysql",
-    "zero-migrate-postgres",
-    "zero-migrate-sqlite",
+    "zeroship-migrate-backend",
+    "zeroship-migrate-mysql",
+    "zeroship-migrate-postgres",
+    "zeroship-migrate-sqlite",
 ];
 
 /// The engine and the non-vendor libraries. Named rather than inferred, so that a
 /// RENAME goes red instead of quietly moving a crate from "denied" to "unknown".
 ///
-/// `zero-migrate-core` is the one the lost visibility was actually about — it is the
+/// `zeroship-migrate-core` is the one the lost visibility was actually about — it is the
 /// ENGINE, and the primitives were `pub(in crate::render::backends)` inside it. The
 /// others are here because the same argument applies verbatim: none of them is a
 /// vendor, so none of them has a vendor to name, so a raw spelling in any of them is
@@ -128,19 +128,50 @@ const CRATES_THAT_MAY_SPELL: &[&str] = &[
 /// a vendor's bytes. It has none. Composing a registry is not emitting SQL.
 ///
 /// `zero-migrate-guard` came OFF this list when it was dissolved. It is not a rename:
-/// its contents moved into `zero-migrate-postgres`, which sits on
+/// its contents moved into `zeroship-migrate-postgres`, which sits on
 /// [`CRATES_THAT_MAY_SPELL`] above — so the code did not become unclassified, it
 /// changed classification, from "must not spell" to "may spell for itself". That is
 /// correct rather than a loosening: every line of that crate parsed PostgreSQL with
 /// `libpg_query`, so it was always one vendor's bytes filed under a neutral-sounding
 /// name.
+///
+/// `zeroship-migrate-adapter` joined this list when the engine was folded into the
+/// product workspace. It is the monorepo's native-PostgreSQL producer, so it is the
+/// entry most likely to be waved onto [`CRATES_THAT_MAY_SPELL`] by analogy with the
+/// vendors — and that would be wrong. It supplies a `SqlSession` over a PG driver; it
+/// does not EMIT DDL bytes, and the classification was measured rather than argued:
+/// it calls neither [`SPELLING_PRIMITIVES`] entry anywhere. Filing it as "must not
+/// spell" is therefore the true and stronger claim, and it is the one that goes red
+/// if that ever stops being true.
 const CRATES_THAT_MUST_NOT_SPELL: &[&str] = &[
-    "zero-migrate",
-    "zero-migrate-core",
-    "zero-migrate-ir",
+    "zeroship-migrate",
+    "zeroship-migrate-adapter",
+    "zeroship-migrate-core",
+    "zeroship-migrate-ir",
     "zeroship-migrate-node",
-    "zero-migrate-policy",
+    "zeroship-migrate-policy",
 ];
+
+/// The engine's own crates, and the reason the walk below is not simply `crates/*`.
+///
+/// The census's subject has always been THE ENGINE. `crates/*` merely happened to
+/// equal that while the engine owned its own workspace; when it was grafted into the
+/// product workspace, `crates/` grew 27 unrelated product crates and the walk started
+/// meaning something nobody chose. Nothing about the walk was edited — its meaning
+/// changed underneath it, which is exactly the kind of drift the floors below exist
+/// to catch, and it duly failed CLOSED on all 27.
+///
+/// So membership is decided by name: the composition crate, or one of its
+/// `-`-suffixed siblings. The suffix is required rather than a bare `starts_with`,
+/// because `zeroship-migrated` — the policy SERVER, no relation — shares the prefix
+/// and a prefix match would scoop it in. That is not hypothetical: the deploy gate
+/// keeps a `zero-migrate-other` decoy for the identical mistake.
+fn is_engine_crate(dir_name: &str) -> bool {
+    dir_name == ENGINE_PREFIX || dir_name.starts_with(&format!("{ENGINE_PREFIX}-"))
+}
+
+/// The composition crate's own name, taken from Cargo rather than written down twice.
+const ENGINE_PREFIX: &str = env!("CARGO_PKG_NAME");
 
 /// The census floor for the walk, and it is the SAME eight roots
 /// `sqlite_trigger_quoting_reaches_postgres.rs` walks, for the same reason.
@@ -150,17 +181,25 @@ const CRATES_THAT_MUST_NOT_SPELL: &[&str] = &[
 ///
 /// LOWERED 9 → 8: `zero-migrate-guard` was dissolved. Every line of it needed
 /// `libpg_query` to parse PostgreSQL, so all of it was one vendor's code; it moved
-/// into `zero-migrate-postgres` (`guard/sql.rs`, `guard/denylist.rs`, `analysis/`) and
+/// into `zeroship-migrate-postgres` (`guard/sql.rs`, `guard/denylist.rs`, `analysis/`) and
 /// the crate was deleted from the workspace. The walk still reaches the same source —
 /// it is under a different root — so this is the count following a real removal, not
 /// a narrowed discovery. The `crates/` listing itself is the check: eight entries,
 /// nine before.
 ///
-/// RAISED 8 -> 9: `zero-migrate-core` was ADDED. The engine and the composition that
+/// RAISED 8 -> 9: `zeroship-migrate-core` was ADDED. The engine and the composition that
 /// names the vendors are two crates now, so `crates/` holds nine entries and the walk
 /// must find all of them. This is the direction the doc above prescribes for an added
 /// crate, and the new root is the one this census is most about: the engine.
-const WORKSPACE_CRATE_FLOOR: usize = 9;
+///
+/// RAISED 9 -> 10: `zeroship-migrate-adapter` was ADDED — not written, but brought into
+/// scope, because the engine moved into the product workspace where the adapter already
+/// lived and it carries the engine's name. This is the added-crate direction again. Note
+/// what this floor now counts: ENGINE roots ([`is_engine_crate`]), not every directory
+/// under `crates/`. The product's other 27 crates are not the engine and never were the
+/// subject; before the graft the two sets were equal, which is why the walk could get
+/// away with saying `crates/*`.
+const WORKSPACE_CRATE_FLOOR: usize = 10;
 
 /// The NEEDLE-LIVENESS floor: the calls the vendors are known to make today.
 ///
@@ -172,8 +211,8 @@ const WORKSPACE_CRATE_FLOOR: usize = 9;
 /// cannot tell "clean" from "blind".
 ///
 /// Measured on the unmodified tree: `ansi_double_quote_ident` twice
-/// (`zero-migrate-postgres`, `zero-migrate-sqlite`), `base64_standard` three times
-/// (`zero-migrate-mysql` once, `zero-migrate-postgres` twice). Per-primitive rather
+/// (`zeroship-migrate-postgres`, `zeroship-migrate-sqlite`), `base64_standard` three times
+/// (`zeroship-migrate-mysql` once, `zeroship-migrate-postgres` twice). Per-primitive rather
 /// than a single total, so that breaking ONE needle cannot be masked by the other
 /// still matching.
 ///
@@ -202,8 +241,8 @@ fn core_does_not_spell_a_vendors_bytes() {
     // `include_str!` is a compile-time dependency: editing either file rebuilds this
     // binary, so the anchor cannot silently drift out from under the census, and a
     // dangling path is a build error rather than a quiet zero.
-    let home = include_str!("../../../zero-migrate-backend/src/spelling.rs");
-    let former = include_str!("../../../zero-migrate-core/src/render/backends/mod.rs");
+    let home = include_str!("../../../zeroship-migrate-backend/src/spelling.rs");
+    let former = include_str!("../../../zeroship-migrate-core/src/render/backends/mod.rs");
     assert_primitives_are_where_this_file_says_they_are(home, former);
 
     let crates_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -213,7 +252,13 @@ fn core_does_not_spell_a_vendors_bytes() {
 
     let mut roots: Vec<PathBuf> = std::fs::read_dir(&crates_root)
         .unwrap_or_else(|e| panic!("reading {}: {e}", crates_root.display()))
-        .map(|e| e.expect("dir entry").path().join("src"))
+        .map(|e| e.expect("dir entry").path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(is_engine_crate)
+        })
+        .map(|p| p.join("src"))
         .filter(|p| p.is_dir())
         .collect();
     roots.sort();
@@ -222,7 +267,7 @@ fn core_does_not_spell_a_vendors_bytes() {
     // discovery and it iterates nothing, finds nothing, and reports clean. This is
     // the floor the sibling census carries, and it is here for the same measured
     // reason: a crate-scoped walk in this tree went blind to a planted call in
-    // `zero-migrate-ir`.
+    // `zeroship-migrate-ir`.
     assert!(
         roots.len() >= WORKSPACE_CRATE_FLOOR,
         "found only {} crate `src` root(s) under {}, expected at least \
@@ -408,12 +453,12 @@ fn assert_primitives_are_where_this_file_says_they_are(home: &str, former: &str)
 ///
 /// The `(` is what separates a call from a mention. It matters here more than in most
 /// censuses: the engine's doc comments explain at length why the engine must not call
-/// these, so the name appears in `zero-migrate-core/src` six times WITHOUT ever being
+/// these, so the name appears in `zeroship-migrate-core/src` six times WITHOUT ever being
 /// called. Counting mentions would make this file red on an unmodified tree and the
 /// only way to green would be deleting the documentation that explains the rule.
 ///
 /// Comment lines are dropped by prefix - `//` covers `///` and `//!`, and `*` covers
-/// the continuation lines of the `/* … */` block in `zero-migrate-backend/src/dml.rs`
+/// the continuation lines of the `/* … */` block in `zeroship-migrate-backend/src/dml.rs`
 /// that narrates this exact history. A call cannot hide behind either prefix without
 /// being commented out, and a commented-out call is not a call.
 fn count_spelling_calls(src: &str, primitive: &str) -> usize {
@@ -426,4 +471,45 @@ fn count_spelling_calls(src: &str, primitive: &str) -> usize {
         })
         .map(|line| line.matches(&needle).count())
         .sum()
+}
+
+/// The membership rule's positive control, because [`is_engine_crate`] now decides
+/// what the census can SEE. Get it wrong in the narrowing direction and the walk goes
+/// blind; get it wrong in the widening direction and 27 product crates come back.
+///
+/// The `zeroship-migrated` case is the one that matters and the reason the rule is not
+/// a bare `starts_with`: the policy SERVER shares the composition crate's name as a
+/// prefix, so a prefix match would file an unrelated crate as engine code and demand a
+/// classification for it. The deploy gate keeps a `zero-migrate-other` decoy against
+/// the identical mistake; this is the same decoy in Rust.
+#[test]
+fn the_membership_rule_admits_the_engine_and_nothing_that_merely_rhymes() {
+    assert!(
+        is_engine_crate(ENGINE_PREFIX),
+        "the composition crate is not recognised as its own engine"
+    );
+    for member in CRATES_THAT_MAY_SPELL.iter().chain(CRATES_THAT_MUST_NOT_SPELL) {
+        assert!(
+            is_engine_crate(member),
+            "classified engine crate `{member}` is not admitted by the membership rule, \
+             so the census would never walk it and its classification would be dead text"
+        );
+    }
+    for outsider in [
+        // The collision the `-` in the rule exists for: a DIFFERENT crate whose name
+        // extends the prefix without a separator. `zeroship-migrated` is the policy
+        // server. (`zeroship-migrate-other` would NOT belong here: it takes the
+        // separator, so by name it would be an engine crate, and this control caught
+        // that when it was wrongly listed as an outsider.)
+        "zeroship-migrated",
+        "zeroship-schema",
+        "zeroship-plugin-db",
+        "zeroship-runtime",
+    ] {
+        assert!(
+            !is_engine_crate(outsider),
+            "`{outsider}` was admitted as engine code; a prefix match that scoops a \
+             sibling makes this census demand classifications for the whole product"
+        );
+    }
 }

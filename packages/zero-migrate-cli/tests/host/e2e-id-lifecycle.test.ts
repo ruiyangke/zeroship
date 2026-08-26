@@ -8,7 +8,7 @@
 // `DriverConfig` DOES carry `{ kind: "sqlite"; appPath; journalPath }`
 // (`packages/zero-migrate-cli/src/index.ts:73`) and `apply()` routes it to
 // `applyIrSqlite`. The SQLite lifecycle matrix is caught in-process by the Rust crate
-// instead (`crates/zero-migrate/tests/uuid_generation.rs`,
+// instead (`crates/zeroship-migrate/tests/uuid_generation.rs`,
 // `ulid_value_format.rs`, `type_id_value_format.rs`,
 // `synchronize_identity_sqlite.rs`). What a SQLite arm here could NOT reach either
 // way is `status`, which refuses a `sqlite` driver outright

@@ -55,8 +55,8 @@ pub(crate) fn placeholder(n: usize) -> String {
 // quotes that were NOT. Those six called the PostgreSQL-pinned
 // `dml::quote_bare_ident`, so every identifier in a rendered SQLite trigger was
 // spelled by `PostgresDmlRenderer::quote_ident` - correct only because both vendors
-// spell an identifier `"x"`, and a hard blocker on extracting a `zero-migrate-sqlite`
-// crate that does not need `zero-migrate-postgres` at RUNTIME. A crate-extraction
+// spell an identifier `"x"`, and a hard blocker on extracting a `zeroship-migrate-sqlite`
+// crate that does not need `zeroship-migrate-postgres` at RUNTIME. A crate-extraction
 // spike proved the reach was live rather than theoretical: it rendered a
 // `createTrigger` from inside the extracted crate and got PostgreSQL's marker back
 // in the SQLite trigger SQL.

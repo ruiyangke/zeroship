@@ -13,7 +13,7 @@
 //! The engine's `apply/backend/mysql/` HAS been extracted into this crate, as
 //! `src/backend/`. The extraction was blocked by exactly one thing: the items its
 //! production half reached through `crate::...` that lived in the engine rather than
-//! in `zero-migrate-backend`.
+//! in `zeroship-migrate-backend`.
 //!
 //! Naming them here made those blockers a COMPILER question instead of a reading
 //! exercise, and the file keeps that job now that the code has landed: a name that

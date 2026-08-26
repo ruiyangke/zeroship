@@ -2,7 +2,7 @@
 //! object's KIND rather than its body.
 //!
 //! `materialized: true` together with `replace: true` is already refused upstream, at
-//! `crates/zero-migrate-core/src/model/op_support.rs:240-243`. That is a DIFFERENT case and
+//! `crates/zeroship-migrate-core/src/model/op_support.rs:240-243`. That is a DIFFERENT case and
 //! checking it is what made this one easy to miss: the gap is a PLAIN replace -
 //! `replace: true` with `materialized` absent or false - aimed at a view the folded
 //! snapshot records as materialized.

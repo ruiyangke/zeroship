@@ -68,7 +68,7 @@ use zeroship_migrate::{
     ChecksumInput, DeclarativeApplyError, DeclarativeAuthor, ExecutorConfig, GuardConfig, Migration,
     MigrationEngine, MigrationFlags, MigrationId,
 };
-// The engine's own dialect enum (re-exported from `zero-migrate-ir`). Distinct
+// The engine's own dialect enum (re-exported from `zeroship-migrate-ir`). Distinct
 // from `zeroship_schema::query::SqlDialect` (the schema crate plugin-db keeps for
 // its DDL builders) — `DeclarativeAuthor::new_for_dialect` takes the engine type.
 use zeroship_migrate::SqlDialect;

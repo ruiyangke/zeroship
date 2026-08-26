@@ -733,7 +733,7 @@ pub fn apply_ir_sqlite(
             recovered: outcome.recovered,
             // Empty because SQLite HAS no cross-deploy contracts, not because this
             // path drops them. `SqliteBackend::pending_contracts` returns `None`
-            // (`zero-migrate-sqlite`'s `backend/mod.rs`): a rebuild rename is one atomic
+            // (`zeroship-migrate-sqlite`'s `backend/mod.rs`): a rebuild rename is one atomic
             // offline step, so no obligation is ever opened. The networked verb
             // reaches the same value by asking - the `None => Vec::new()` arm in
             // `verbs::apply_ir_with_locked_backend` - so the two replies agree today.

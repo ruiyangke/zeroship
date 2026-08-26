@@ -86,7 +86,7 @@
 //!    IDENTICAL matcher where each name must appear. Stated per item rather than as a
 //!    total, because a total lets one popular name carry the dead ones.
 //!
-//! The control's home is ONE file for all ten: `zero-migrate-core/src/render/value_format.rs`,
+//! The control's home is ONE file for all ten: `zeroship-migrate-core/src/render/value_format.rs`,
 //! the engine's dialect-resolving doors plus the comparison's own test module, which
 //! stayed there because it needs all three vendors and the contract crate has none.
 //! Every one of the ten is named there today, so no needle is uncontrolled — which is
@@ -119,9 +119,9 @@ const COMPARISON_ITEMS: &[&str] = &[
 
 /// The vendor crates, relative to the workspace `crates/` directory.
 const VENDOR_CRATES: &[&str] = &[
-    "zero-migrate-postgres",
-    "zero-migrate-sqlite",
-    "zero-migrate-mysql",
+    "zeroship-migrate-postgres",
+    "zeroship-migrate-sqlite",
+    "zeroship-migrate-mysql",
 ];
 
 /// The EMISSION modules inside each vendor crate — the files whose output a server
@@ -166,14 +166,14 @@ const COMPARISON_CONTROL_FLOOR: &[(&str, usize)] = &[
 /// The engine's dialect-resolving doors, relative to `crates/`. It carries the
 /// comparison's own test module too, which is why every one of the ten is reachable
 /// from this single control.
-const ENGINE_DOORS: &str = "zero-migrate-core/src/render/value_format.rs";
+const ENGINE_DOORS: &str = "zeroship-migrate-core/src/render/value_format.rs";
 
 /// Whether a source line is CODE rather than a comment.
 ///
 /// The same line-oriented filter every sibling census uses, with the same stated
 /// limits: a `//`, `///`, `//!` line is prose, a line whose first non-space character
 /// is `*` is a block-comment continuation, and everything else is code. It earns its
-/// keep rather than hypothetically — `zero-migrate-mysql/src/value_format.rs` carries
+/// keep rather than hypothetically — `zeroship-migrate-mysql/src/value_format.rs` carries
 /// doc comments naming `recover_format_check`, which are prose about the rule and not
 /// a breach of it.
 fn is_code(line: &str) -> bool {
@@ -254,7 +254,7 @@ fn reaches(path: &Path, label: &str) -> BTreeMap<String, Vec<String>> {
 fn crates_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("crates/zero-migrate has a parent")
+        .expect("crates/zeroship-migrate has a parent")
         .to_path_buf()
 }
 

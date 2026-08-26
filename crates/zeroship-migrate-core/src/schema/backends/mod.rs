@@ -8,9 +8,9 @@
 //! | before                        | after                        |
 //! |-------------------------------|------------------------------|
 //! | `schema::query` (the trait)   | `zeroship_migrate_backend::schema` |
-//! | `schema::backends::postgres`  | `zero-migrate-postgres`      |
-//! | `schema::backends::sqlite`    | `zero-migrate-sqlite`        |
-//! | `schema::backends::mysql`     | `zero-migrate-mysql`         |
+//! | `schema::backends::postgres`  | `zeroship-migrate-postgres`      |
+//! | `schema::backends::sqlite`    | `zeroship-migrate-sqlite`        |
+//! | `schema::backends::mysql`     | `zeroship-migrate-mysql`         |
 //! | `schema::backends` (this)     | the registry composition     |
 //!
 //! # There is ONE vendor list, not two

@@ -2,7 +2,7 @@
 //!
 //! # Why this exists and `zeroship_migrate_ir::backend::BackendRegistry` does not suffice
 //!
-//! `zero-migrate-ir` already has a `BackendRegistry`, built fallibly, refusing
+//! `zeroship-migrate-ir` already has a `BackendRegistry`, built fallibly, refusing
 //! duplicate and malformed ids and naming both registrants on a collision. It is
 //! reused verbatim by [`VendorSet::descriptors`] and it is the right thing for what
 //! it holds - but what it holds is `&'static BackendDescriptor`, i.e. a vendor's
@@ -97,7 +97,7 @@ pub type DdlFactory = fn(&str) -> Box<dyn DdlEmitter>;
 #[derive(Debug)]
 pub struct BackendVendor {
     /// The vendor's capability row, the same `&'static BackendDescriptor`
-    /// `zero-migrate-ir` keys its registry by.
+    /// `zeroship-migrate-ir` keys its registry by.
     pub descriptor: &'static BackendDescriptor,
     /// How this vendor spells DML, views and triggers.
     pub dml: &'static dyn DmlRenderer,
@@ -200,7 +200,7 @@ pub struct BackendVendor {
 /// missing field as the only defect.
 ///
 /// The property was also confirmed against the real tree: deleting
-/// `guard: guard::guard` from `zero-migrate-sqlite`'s live `VENDOR` literal produces
+/// `guard: guard::guard` from `zeroship-migrate-sqlite`'s live `VENDOR` literal produces
 /// `error[E0063]: missing field `guard` in initializer of `BackendVendor``, pointing
 /// at that vendor's own crate.
 ///

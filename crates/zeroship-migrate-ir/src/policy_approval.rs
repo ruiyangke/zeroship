@@ -10,7 +10,7 @@
 //! enforces the answer as a state machine (a status column + `approved_checksum`).
 //!
 //! This module is the bridge between the two crates that must both be in scope for the
-//! query - the PDP [`EffectivePolicy`] (from `zero-migrate-policy`) and the [`Op`]
+//! query - the PDP [`EffectivePolicy`] (from `zeroship-migrate-policy`) and the [`Op`]
 //! vocabulary (from this crate). It resolves the `safety.require_approval` LEVEL per
 //! target object (the knob is object-scoped) and ORs the per-op requirement across the
 //! whole migration:

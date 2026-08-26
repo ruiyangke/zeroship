@@ -1,7 +1,7 @@
 //! A charter whose create grant escapes its own mandatory inject must be refused by the
 //! composition path the product actually uses.
 //!
-//! `crates/zero-migrate-policy/src/compose.rs` has always carried this check, but only
+//! `crates/zeroship-migrate-policy/src/compose.rs` has always carried this check, but only
 //! behind `finalize_charter`, which no shipped call site reaches. Its own comment records
 //! that it was "moved here from admit" and reasons that admit's later proof of
 //! `draft.create_table` being within `charter.create_table` transitively bounds every

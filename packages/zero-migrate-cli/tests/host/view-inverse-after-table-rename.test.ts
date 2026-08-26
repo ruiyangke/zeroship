@@ -1,7 +1,7 @@
 // The CARRIER question: does a real deploy's rollback actually render a dropped
 // view's inverse from a folded history, and does a table rename reach that body?
 //
-// The Rust side proves the property (`crates/zero-migrate/tests/rollback/
+// The Rust side proves the property (`crates/zeroship-migrate/tests/rollback/
 // drop_view_rollback_pg.rs::a_table_rename_reaches_the_body_a_dropped_view_is_restored_from`),
 // but it builds its own `LiveSchema` from `fold_ops`. That is the right SHAPE and it
 // is still a claim about what the host does. This file removes the claim: it goes

@@ -217,7 +217,7 @@ The service logs the reason:
     DeclaredOnlyNonDefault { key: "runtime.lock_timeout_ms" }
 
 The engine rejects a policy that GRANTS `runtime.lock_timeout_ms`
-(third_party/zero-migrate/crates/zero-migrate-policy/src/document.rs:205).
+(third_party/zero-migrate/crates/zeroship-migrate-policy/src/document.rs:205).
 Two commits on 2026-08-10 removed exactly that grant elsewhere (4ea3c103b
 "drop the declared-only runtime timeout grants", d4d242a14). The fixtures at
 crates/migrated/tests/apply_api_test.rs:441 and :457 still carry it. Stale

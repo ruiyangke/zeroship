@@ -108,7 +108,7 @@
 /// point of the floor. Lower it, in the same commit, with the reason.
 #[test]
 fn a_schema_emitter_holding_a_backend_never_resolves_another() {
-    const SRC: &str = include_str!("../../../zero-migrate-core/src/schema/query.rs");
+    const SRC: &str = include_str!("../../../zeroship-migrate-core/src/schema/query.rs");
     const CARRIER: &str = "backend: &'static dyn SchemaRenderer";
     const LOOKUP: &str = "renderer(";
 

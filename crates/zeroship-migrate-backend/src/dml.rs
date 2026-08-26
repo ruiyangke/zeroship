@@ -98,7 +98,7 @@
 //!
 //! A SQLite-named placeholder helper sat beside it with two real callers, both inside
 //! one vendor crate. Two callers in one crate is that crate's helper; it is
-//! `crate::dml::placeholder` in `zero-migrate-sqlite` now, and this module names no
+//! `crate::dml::placeholder` in `zeroship-migrate-sqlite` now, and this module names no
 //! backend's placeholder spelling.
 //!
 //! The transport-safe bind mirror
@@ -298,7 +298,7 @@ pub const MAX_BIND_PARAMS: usize = 65535;
 /// `render::backends::sqlite` - quoted all six of its trigger
 /// identifiers with them. Both were correct SQL only because the two vendors spell
 /// an identifier `"x"`, and both were hard blockers on extracting a
-/// `zero-migrate-sqlite` crate that does not need `zero-migrate-postgres` AT
+/// `zeroship-migrate-sqlite` crate that does not need `zeroship-migrate-postgres` AT
 /// RUNTIME - a crate-extraction spike demonstrated the second one by rendering a
 /// `createTrigger` from inside the extracted crate and getting PostgreSQL's marker
 /// back.
@@ -481,7 +481,7 @@ fn scalar_to_bind(s: &IrScalar) -> BindValue {
  * crate, so deleting it costs nothing and stops the miscount recurring.
  *
  * A SQLite-named placeholder helper sat here too and its callers WERE real - both of
- * them inside `zero-migrate-sqlite`, one the `DmlRenderer::placeholder` impl and one
+ * them inside `zeroship-migrate-sqlite`, one the `DmlRenderer::placeholder` impl and one
  * the batched backfill executor. Two callers in one vendor crate is that crate's
  * shared helper, not the contract's, so it is `crate::dml::placeholder` there now.
  */
@@ -607,7 +607,7 @@ fn homogeneous_in_list_kind(elems: &[IrScalar]) -> Result<Option<InListScalarKin
 /// through `crate::render::backends::renderer` to reach the very backend that had
 /// called in. In the crate layout `docs/proposals/pluggable-backends.md` describes,
 /// that reads
-/// `zero-migrate-sqlite` -> core -> `zero-migrate-sqlite`: a dependency cycle in the
+/// `zeroship-migrate-sqlite` -> core -> `zeroship-migrate-sqlite`: a dependency cycle in the
 /// exact shape the crate split exists to remove, and one that emits byte-identical
 /// SQL either way, so no behaviour test can see it. The backends now pass `self`,
 /// and the round trip is gone.
@@ -1461,8 +1461,8 @@ where
 /// predicate renderers this replaced had identical bodies apart from the dialect
 /// literal, so each was a vendor writing its own name into a helper it then called
 /// on itself.
-/// A vendor now passes `self`: `zero-migrate-postgres` for the vendor
-/// `CREATE POLICY` / `CREATE TRIGGER` clauses, `zero-migrate-sqlite` for its trigger
+/// A vendor now passes `self`: `zeroship-migrate-postgres` for the vendor
+/// `CREATE POLICY` / `CREATE TRIGGER` clauses, `zeroship-migrate-sqlite` for its trigger
 /// bodies. Neither can reach the other's spelling any more, which is the property
 /// `sqlite_trigger_quoting_reaches_postgres.rs` exists to protect.
 pub fn render_predicate(expr: &Expr, backend: &dyn DmlRenderer) -> Result<String, DmlError> {

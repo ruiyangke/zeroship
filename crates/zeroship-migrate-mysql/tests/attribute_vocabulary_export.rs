@@ -17,7 +17,7 @@
 //!
 //! # Regenerating
 //!
-//! `UPDATE_VOCABULARY=1 cargo test -p zero-migrate-mysql --test attribute_vocabulary_export`
+//! `UPDATE_VOCABULARY=1 cargo test -p zeroship-migrate-mysql --test attribute_vocabulary_export`
 //! rewrites the file; commit it, then re-run the package's generator. A default run
 //! ASSERTS the on-disk file matches, so adding a knob without regenerating fails rather
 //! than shipping a TypeScript surface that silently lacks it.
@@ -55,7 +55,7 @@ fn emit_attribute_vocabulary() {
     let on_disk = std::fs::read_to_string(&path).unwrap_or_else(|e| {
         panic!(
             "attribute-vocabulary.json missing or unreadable at {}: {e}. Run \
-             `UPDATE_VOCABULARY=1 cargo test -p zero-migrate-mysql --test \
+             `UPDATE_VOCABULARY=1 cargo test -p zeroship-migrate-mysql --test \
              attribute_vocabulary_export` to generate it.",
             path.display()
         )
@@ -63,7 +63,7 @@ fn emit_attribute_vocabulary() {
     assert_eq!(
         on_disk, generated,
         "attribute-vocabulary.json is stale. Regenerate with `UPDATE_VOCABULARY=1 cargo \
-         test -p zero-migrate-mysql --test attribute_vocabulary_export` and commit it, then \
+         test -p zeroship-migrate-mysql --test attribute_vocabulary_export` and commit it, then \
          re-run the TypeScript generator."
     );
 }

@@ -73,7 +73,7 @@ pub trait ValidationPolicy: std::fmt::Debug + Sync {
     // it as `dialect != POSTGRES`. It is now one question in the vocabulary both
     // layers share - `Capability::PartitionRelationDdl`, off the backend's own
     // descriptor - and the shipping census in
-    // `crates/zero-migrate/tests/dialect_matrix/vendor_registry_owns_shipping_descriptors.rs`
+    // `crates/zeroship-migrate/tests/dialect_matrix/vendor_registry_owns_shipping_descriptors.rs`
     // holds that answer against the emitters, which this method never did.
     /// A fail-closed backend refusal before the operator-capability gate.
     fn vendor_capability_refusal(&self, capability: VendorCapability) -> Option<ValidationRefusal>;

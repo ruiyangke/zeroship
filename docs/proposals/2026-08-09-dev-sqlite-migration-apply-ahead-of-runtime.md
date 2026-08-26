@@ -306,6 +306,6 @@ authority — the same category error as A.
 - The SQLite register-drives-engine path to retire:
   `crates/plugin-db/src/register_model/sqlite_engine.rs`.
 - The cross-app FK union check: `validate_cross_app_fk_targets` in
-  `third_party/zero-migrate/crates/zero-migrate/src/render/declarative.rs`.
+  `third_party/zero-migrate/crates/zeroship-migrate/src/render/declarative.rs`.
 - Dev DB paths: `sdks/vite-plugin/src/dev-db.ts` (`.zeroship/`), worker app files
   `zs-<app_id>.sqlite`.

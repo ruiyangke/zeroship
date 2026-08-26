@@ -35,7 +35,7 @@
 //!
 //! It matches vendor product NAMES. The dual-write body above is the standing
 //! counter-example: twenty lines of `TG_OP` / `NEW` / `OLD` / `RETURN NEW` sat in
-//! `zero-migrate-backend` and passed that crate's identical census for its whole life
+//! `zeroship-migrate-backend` and passed that crate's identical census for its whole life
 //! there, because PL/pgSQL contains no product name. A census over names bounds how
 //! much vendor NAMING escapes, not how much vendor GRAMMAR does. Do not read a green
 //! here as "core holds no vendor"; read it as "core writes no vendor's name".
@@ -119,8 +119,8 @@ const ALLOWED: &[(&str, usize, &str)] = &[];
 // Its four were the `POSTGRES_VENDOR` / `SQLITE_VENDOR` / `MYSQL_VENDOR` consts and
 // the `SHIPPING` array that listed them — the registry composition, described here as
 // "PERMANENT, and the one place designed to hold this". It was permanent in the crate
-// it was in. The crate split moved it to `crates/zero-migrate/src/lib.rs`, a crate
-// whose entire job is to hold that knowledge, and `zero-migrate-core` stopped
+// it was in. The crate split moved it to `crates/zeroship-migrate/src/lib.rs`, a crate
+// whose entire job is to hold that knowledge, and `zeroship-migrate-core` stopped
 // declaring a vendor dependency at all.
 //
 // So this entry did not close the way the three above it did, by finding a neutral
@@ -141,7 +141,7 @@ const ALLOWED: &[(&str, usize, &str)] = &[];
 // The line was `pub use zeroship_migrate_ir::dialect::{DialectId, DialectSet, MYSQL,
 // POSTGRES, SQLITE}` — core re-exporting three id constants it does not define. The
 // violation was UPSTREAM of core and that line was its symptom: the constants lived
-// in `zero-migrate-ir/src/dialect.rs`, a crate whose own doc says a backend "declares
+// in `zeroship-migrate-ir/src/dialect.rs`, a crate whose own doc says a backend "declares
 // its own — `DialectId::new(\"duckdb\")` — without editing this crate", while itself
 // declaring three.
 //
@@ -153,10 +153,10 @@ const ALLOWED: &[(&str, usize, &str)] = &[];
 //
 // TWO CLAIMS IN THAT ARGUMENT WERE WRONG, and both were arguments for deferring:
 //
-// * "add a `zero-migrate-ir` dependency to the Node addon, which has none". The
+// * "add a `zeroship-migrate-ir` dependency to the Node addon, which has none". The
 //   addon already carries all three VENDOR crates in `[dependencies]` and already
 //   names two of their backend types in `bridge.rs`. It gained no dependency and
-//   needed no `zero-migrate-ir`.
+//   needed no `zeroship-migrate-ir`.
 // * "relocate the same three names from one neutral crate to another". They did not
 //   go to another neutral crate. They went to the three crates that ARE those
 //   vendors, which is the only move that makes the bottom of the stack neutral.
@@ -215,11 +215,11 @@ const VENDOR_CRATE_MATCH_FLOOR: usize = 40;
 ///
 /// Separate from [`VENDOR_CRATE_MATCH_FLOOR`] because the two matchers must be
 /// controlled independently — see [`names_a_vendor`]. Measured well above this in
-/// `zero-migrate-postgres`, which names types `PgCursor` and `PgEmitter` throughout.
+/// `zeroship-migrate-postgres`, which names types `PgCursor` and `PgEmitter` throughout.
 const PG_CAMEL_MATCH_FLOOR: usize = 20;
 
 /// The vendor crate the needle control runs over.
-const NEEDLE_CONTROL_CRATE: &str = "zero-migrate-postgres";
+const NEEDLE_CONTROL_CRATE: &str = "zeroship-migrate-postgres";
 
 /// Whether a source line is CODE rather than a comment, and the code half of it.
 ///
@@ -290,7 +290,7 @@ fn names_a_vendor_by_pg_word(code: &str) -> bool {
 /// controlled separately, and finding that out was itself a measurement. The first
 /// version of [`the_needle_still_matches_where_a_vendor_name_is_the_point`] asserted
 /// one floor over this combined answer, and when the needle list was corrupted to
-/// prove the control fires, IT PASSED: `zero-migrate-postgres` is full of `PgCursor`,
+/// prove the control fires, IT PASSED: `zeroship-migrate-postgres` is full of `PgCursor`,
 /// `PgEmitter` and friends, so the camel matcher alone cleared the floor while every
 /// product-name needle was dead. A positive control that two matchers can satisfy for
 /// each other is not a control over either.
@@ -630,10 +630,10 @@ fn census(dir: &Path) -> (usize, BTreeMap<String, usize>) {
     census_with(dir, names_a_vendor)
 }
 
-/// The ENGINE crate. It is `zero-migrate-core`, not `zero-migrate`: this crate is the
+/// The ENGINE crate. It is `zeroship-migrate-core`, not `zero-migrate`: this crate is the
 /// COMPOSITION now, and its `src` is one file that names all three vendors on purpose.
 /// Censusing THAT would be a one-file walk in which every finding is by design.
-const ENGINE_CRATE: &str = "zero-migrate-core";
+const ENGINE_CRATE: &str = "zeroship-migrate-core";
 
 pub(crate) fn crate_src(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

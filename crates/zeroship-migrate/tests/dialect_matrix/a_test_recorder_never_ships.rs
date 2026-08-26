@@ -1,8 +1,8 @@
 //! The REPLACEMENT for the `#[cfg(test)]` that used to hide a vendor's canned
 //! `SqlSession`, and the one thing a `cargo test` run cannot check about itself.
 //!
-//! TWO recorders now, one per vendor that has one: `zero-migrate-mysql` and
-//! `zero-migrate-postgres`. The rule and the mechanism are identical for both, so
+//! TWO recorders now, one per vendor that has one: `zeroship-migrate-mysql` and
+//! `zeroship-migrate-postgres`. The rule and the mechanism are identical for both, so
 //! this file walks a TABLE rather than one crate — a third recorder is a row here,
 //! not a copy of this file. It was written when MySQL was the only vendor with a
 //! recorder, and generalising it cost one row rather than a second file.
@@ -14,10 +14,10 @@
 //! `apply/backend/mysql/mod.rs`. Nothing outside that module could name them, and
 //! nothing outside a test build compiled them.
 //!
-//! When the MySQL execution half moved into `zero-migrate-mysql`, fourteen of its
+//! When the MySQL execution half moved into `zeroship-migrate-mysql`, fourteen of its
 //! sixty-nine tests could not follow: they drive `apply_with_lock_backend`,
 //! `MigrationEngine`, `diff_snapshots` and `fold_ops`, which are the engine's, and
-//! `zero-migrate` depends on `zero-migrate-mysql`, so the edge back is a cycle Cargo
+//! `zero-migrate` depends on `zeroship-migrate-mysql`, so the edge back is a cycle Cargo
 //! refuses. They live in `zero-migrate/tests/mysql_engine/` now — and they drive the
 //! SAME recorder, because a second copy of a canned catalog is the hazard: its rows
 //! are the shared premise of both suites, and two copies drift silently until one
@@ -40,7 +40,7 @@
 //!
 //! Resolver 3 is what makes that mean something: it does not unify dev-dependency
 //! features into the normal build, so `cargo build -p zero-migrate` compiles a
-//! `zero-migrate-mysql` with the feature OFF and the recorder absent. One
+//! `zeroship-migrate-mysql` with the feature OFF and the recorder absent. One
 //! `[dependencies]` edge that turned it on would silently undo that for every
 //! downstream consumer, including the published `.node` addon.
 //!
@@ -85,12 +85,12 @@ pub mod recording;"#;
 /// so only a dev edge may turn that feature on.
 const RECORDERS: &[(&str, &str)] = &[
     (
-        "zero-migrate-mysql",
-        "zero-migrate-mysql/src/backend/mod.rs",
+        "zeroship-migrate-mysql",
+        "zeroship-migrate-mysql/src/backend/mod.rs",
     ),
     (
-        "zero-migrate-postgres",
-        "zero-migrate-postgres/src/backend/mod.rs",
+        "zeroship-migrate-postgres",
+        "zeroship-migrate-postgres/src/backend/mod.rs",
     ),
 ];
 
@@ -99,14 +99,14 @@ const RECORDERS: &[(&str, &str)] = &[
 /// It is the COMPOSITION's, not the engine's. The suites that drive these recorders
 /// while ALSO driving `MigrationEngine` are integration tests, and an integration test
 /// is a host — so they live in `zero-migrate` and its manifest is where the dev edge
-/// sits. `zero-migrate-core` names the same vendor crates under `[dev-dependencies]`
+/// sits. `zeroship-migrate-core` names the same vendor crates under `[dev-dependencies]`
 /// for its own `#[cfg(test)]` vendor set, but WITHOUT this feature.
-const ENGINE_MANIFEST: &str = "zero-migrate/Cargo.toml";
+const ENGINE_MANIFEST: &str = "zeroship-migrate/Cargo.toml";
 
 fn crates_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("crates/zero-migrate has a parent")
+        .expect("crates/zeroship-migrate has a parent")
         .to_path_buf()
 }
 

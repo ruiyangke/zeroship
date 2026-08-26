@@ -6,7 +6,7 @@
 //! It used to be per-MODULE: a backend module names its own dialect exactly ONCE,
 //! as its `const DIALECT: DialectId = POSTGRES;`, and names no other dialect at all;
 //! everything else in the module reads `DIALECT`. The name on the right of that
-//! `=` came from `zero-migrate-ir`, the NEUTRAL vocabulary crate, which declared
+//! `=` came from `zeroship-migrate-ir`, the NEUTRAL vocabulary crate, which declared
 //! `POSTGRES`, `SQLITE` and `MYSQL` for three vendors it does not own — while its own
 //! module doc said a backend "declares its own — `DialectId::new(\"duckdb\")` —
 //! without editing this crate".
@@ -35,7 +35,7 @@
 //!
 //! WHY THIS FILE AND NOT A `#[cfg(test)] mod tests` IN a vendor crate. The check
 //! reads the vendor crates as TEXT, and it must see all three at once to say
-//! "foreign". A unit test inside `zero-migrate-postgres` cannot: the whole point of
+//! "foreign". A unit test inside `zeroship-migrate-postgres` cannot: the whole point of
 //! the split is that it does not depend on its siblings. This binary is also where
 //! the other "what does each dialect declare" checks already live.
 //!
@@ -63,7 +63,7 @@
 //! PostgreSQL-pinned `dml::quote_bare_ident` six times, and the SQLite renderer
 //! delegated its trigger rendering there. That one is now fixed too — those six say
 //! `quote_bare_ident_for_dialect(.., DIALECT)`, the pinned wrapper they used no longer
-//! exists, and the three functions moved into `zero-migrate-sqlite/src/dml.rs`, which
+//! exists, and the three functions moved into `zeroship-migrate-sqlite/src/dml.rs`, which
 //! is why this test can see them at all.
 //!
 //! HOW it was proven is the part worth keeping, because the obvious proof LIED. The
@@ -95,17 +95,17 @@ use std::path::{Path, PathBuf};
 /// reports a confident zero.
 const VENDORS: &[Vendor] = &[
     Vendor {
-        krate: "zero-migrate-postgres",
+        krate: "zeroship-migrate-postgres",
         ident: "zeroship_migrate_postgres",
         name_decl: "const NAME: &str = \"postgres\";",
     },
     Vendor {
-        krate: "zero-migrate-sqlite",
+        krate: "zeroship-migrate-sqlite",
         ident: "zeroship_migrate_sqlite",
         name_decl: "const NAME: &str = \"sqlite\";",
     },
     Vendor {
-        krate: "zero-migrate-mysql",
+        krate: "zeroship-migrate-mysql",
         ident: "zeroship_migrate_mysql",
         name_decl: "const NAME: &str = \"mysql\";",
     },
@@ -139,37 +139,37 @@ const DIALECT_DECL: &str = "pub const DIALECT: DialectId = DialectId::new(NAME);
 /// both fail here. Both are exactly the edits the rule exists to make an author
 /// justify out loud.
 const IDENTITY_READERS: &[(&str, &str)] = &[
-    ("zero-migrate-postgres/src/dml.rs", "use crate::DIALECT;"),
-    ("zero-migrate-sqlite/src/dml.rs", "use crate::DIALECT;"),
-    ("zero-migrate-mysql/src/dml.rs", "use crate::DIALECT;"),
-    ("zero-migrate-postgres/src/schema.rs", "use crate::DIALECT;"),
-    ("zero-migrate-sqlite/src/schema.rs", "use crate::DIALECT;"),
-    ("zero-migrate-mysql/src/schema.rs", "use crate::DIALECT;"),
-    ("zero-migrate-postgres/src/ddl.rs", "use crate::DIALECT;"),
-    ("zero-migrate-sqlite/src/ddl.rs", "use crate::DIALECT;"),
-    ("zero-migrate-mysql/src/ddl.rs", "use crate::DIALECT;"),
+    ("zeroship-migrate-postgres/src/dml.rs", "use crate::DIALECT;"),
+    ("zeroship-migrate-sqlite/src/dml.rs", "use crate::DIALECT;"),
+    ("zeroship-migrate-mysql/src/dml.rs", "use crate::DIALECT;"),
+    ("zeroship-migrate-postgres/src/schema.rs", "use crate::DIALECT;"),
+    ("zeroship-migrate-sqlite/src/schema.rs", "use crate::DIALECT;"),
+    ("zeroship-migrate-mysql/src/schema.rs", "use crate::DIALECT;"),
+    ("zeroship-migrate-postgres/src/ddl.rs", "use crate::DIALECT;"),
+    ("zeroship-migrate-sqlite/src/ddl.rs", "use crate::DIALECT;"),
+    ("zeroship-migrate-mysql/src/ddl.rs", "use crate::DIALECT;"),
     (
-        "zero-migrate-postgres/src/value_format.rs",
+        "zeroship-migrate-postgres/src/value_format.rs",
         "use crate::DIALECT;",
     ),
     (
-        "zero-migrate-sqlite/src/value_format.rs",
+        "zeroship-migrate-sqlite/src/value_format.rs",
         "use crate::DIALECT;",
     ),
     (
-        "zero-migrate-mysql/src/value_format.rs",
+        "zeroship-migrate-mysql/src/value_format.rs",
         "use crate::DIALECT;",
     ),
     (
-        "zero-migrate-postgres/src/backend/mod.rs",
+        "zeroship-migrate-postgres/src/backend/mod.rs",
         "pub(crate) use crate::DIALECT;",
     ),
     (
-        "zero-migrate-sqlite/src/backend/mod.rs",
+        "zeroship-migrate-sqlite/src/backend/mod.rs",
         "use crate::DIALECT as SQLITE_DIALECT;",
     ),
     (
-        "zero-migrate-mysql/src/backend/mod.rs",
+        "zeroship-migrate-mysql/src/backend/mod.rs",
         "use crate::DIALECT;",
     ),
 ];
@@ -181,7 +181,7 @@ const IDENTITY_READERS: &[(&str, &str)] = &[
 /// `gen:dialect-table` — and every row of it constructs three ids by literal. It is
 /// not a violation of anything, so it is not a control that disappears the moment
 /// this census succeeds.
-const DECL_CONTROL: &str = "zero-migrate/tests/dialect_matrix/dialect_table.rs";
+const DECL_CONTROL: &str = "zeroship-migrate/tests/dialect_matrix/dialect_table.rs";
 
 /// The floor for that control. Blunt on purpose: the number only has to prove the
 /// matcher is alive. Measured at 92 rows when this landed, and the table only grows
@@ -192,13 +192,13 @@ const DECL_CONTROL_FLOOR: usize = 80;
 /// registry composition, which names all three shipping crates exactly once each and
 /// is the one place designed to.
 ///
-/// REPOINTED from `zero-migrate-core/src/render/backends/mod.rs` when the composition
+/// REPOINTED from `zeroship-migrate-core/src/render/backends/mod.rs` when the composition
 /// root became its own crate. The engine no longer names a vendor crate ANYWHERE in
 /// production source — it cannot, since it no longer declares one as a dependency —
 /// so the file that used to vouch for this needle now returns zero for all three
 /// idents, which is the census succeeding rather than the matcher failing. The
 /// composition moved to `zero-migrate/src/lib.rs` and took the control with it.
-const IDENT_CONTROL: &str = "zero-migrate/src/lib.rs";
+const IDENT_CONTROL: &str = "zeroship-migrate/src/lib.rs";
 
 /// The walk's floor across the three vendor `src` trees.
 ///
@@ -256,7 +256,7 @@ fn rs_files(root: &Path) -> Vec<PathBuf> {
 fn crates_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("crates/zero-migrate has a parent")
+        .expect("crates/zeroship-migrate has a parent")
         .to_path_buf()
 }
 

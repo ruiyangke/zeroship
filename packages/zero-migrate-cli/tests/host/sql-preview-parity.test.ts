@@ -1,5 +1,5 @@
 // Join the TypeScript authoring surface to the hand-written SQL expectations in
-// `crates/zero-migrate/tests/sql_preview.rs`.
+// `crates/zeroship-migrate/tests/sql_preview.rs`.
 //
 // WHY THIS EXISTS
 // `buildEnvelope` (packages/zero-migrate/src/internal/recorder.ts) is the only
@@ -40,7 +40,7 @@
 //     are `includes()` checks on the author-declared facets only, because those are
 //     what `sql_preview.rs` pins by hand -- the injected shape is asserted on the
 //     Rust side, not here. Whole-file comparison against the goldens under
-//     `crates/zero-migrate/tests/golden/` is still out of scope: those goldens cover
+//     `crates/zeroship-migrate/tests/golden/` is still out of scope: those goldens cover
 //     a different migration set, not these three.
 //   - It is not a second renderer. The SQL text is produced by the one engine
 //     renderer; only the IR reaching it comes from the TypeScript side.
@@ -64,7 +64,7 @@ import type { MigrationModule } from "zero-migrate/internal/recorder";
 import { currentIrVersion, previewSql } from "zero-migrate-cli";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const CRATE = resolve(HERE, "../../../../crates/zero-migrate");
+const CRATE = resolve(HERE, "../../../../crates/zeroship-migrate");
 
 // The host suite's addon is resolved and freshness-checked in one place.
 import "./addon.js";
@@ -86,7 +86,7 @@ function confinedCharter(): string {
   assert.notEqual(
     start,
     -1,
-    "crates/zero-migrate/tests/support/mod.rs no longer declares CONFINED_CHARTER_TOML " +
+    "crates/zeroship-migrate/tests/support/mod.rs no longer declares CONFINED_CHARTER_TOML " +
       "as a raw string literal; update this reader so the two sides keep sharing one charter",
   );
   const end = source.indexOf('"#;', start + open.length);

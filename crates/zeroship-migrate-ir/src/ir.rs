@@ -13,7 +13,7 @@
 //!   `"op"` key - a discriminated union schemars can express and the JS builder
 //!   emits directly. The serde attributes here ARE the contract; the generated
 //!   `ir-envelope.schema.json` is gated against them by
-//!   `crates/zero-migrate/tests/ir_envelope_schema.rs`, so a representation
+//!   `crates/zeroship-migrate/tests/ir_envelope_schema.rs`, so a representation
 //!   change cannot land without the schema moving with it.
 //! - **All identifier fields are plain `String`**: the IR carries NO
 //!   live-schema binding. Validation that those identifiers exist / are safe is
@@ -2443,7 +2443,7 @@ pub enum RaiseLevel {
 // `RaiseLevel` carries no `as_*_sql`. The four SQL TOKENS it used to hand out
 // belong to the one backend whose `RAISE(<level>, ...)` grammar spells them, and
 // they live there now, beside the renderer that writes them -
-// `raise_level_sql` in `zero-migrate-sqlite`'s `dml`. A target with a different
+// `raise_level_sql` in `zeroship-migrate-sqlite`'s `dml`. A target with a different
 // grammar reads the same level and answers differently: the MySQL renderer
 // discards it entirely and emits `SIGNAL SQLSTATE`, which is why the enum stays
 // here and only the spelling left.

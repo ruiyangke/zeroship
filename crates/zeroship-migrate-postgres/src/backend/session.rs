@@ -2111,7 +2111,7 @@ mod non_txn_idempotency_tests {
 /// per-run config every dialect shares.
 ///
 /// Keeping it a method would have cost the invariant instead. `ExecutorConfig` now
-/// lives in `zero-migrate-backend`, and `pub(crate)` does not survive a crate
+/// lives in `zeroship-migrate-backend`, and `pub(crate)` does not survive a crate
 /// boundary: the method would have had to become `pub`, exposing a PostgreSQL
 /// `search_path` builder to every vendor crate and to the host. As a `pub(crate)`
 /// free function here it keeps exactly the visibility it had.
