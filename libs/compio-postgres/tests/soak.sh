@@ -14,6 +14,8 @@
 # The Rust harness has async phase watchdogs, but those timers need the compio
 # runtime to keep being polled. A wedged runtime could strand its own timers,
 # so this script also gives the build and run independent process watchdogs.
+# The wrapper includes the optional TLS connector; the DSN's sslmode still
+# decides whether each connection may use it.
 
 set -euo pipefail
 
@@ -87,7 +89,7 @@ echo "build_watchdog_secs=$build_watchdog_secs run_watchdog_secs=$run_watchdog_s
 
 echo "phase 1/2: build the release soak harness"
 if timeout --foreground --signal=TERM --kill-after=10s "${build_watchdog_secs}s" \
-    cargo build --release -p compio-postgres --bench soak \
+    cargo build --release -p compio-postgres --bench soak --features tls \
     --manifest-path "$repo_root/Cargo.toml"; then
     echo "phase 1/2 complete"
 else
@@ -108,7 +110,7 @@ fi
 
 echo "phase 2/2: run the soak"
 if timeout --foreground --signal=TERM --kill-after=10s "${run_watchdog_secs}s" \
-    cargo bench -p compio-postgres --bench soak \
+    cargo bench -p compio-postgres --bench soak --features tls \
     --manifest-path "$repo_root/Cargo.toml" -- \
     --url "$pg_test_url" \
     --duration-secs "$duration_secs" \
