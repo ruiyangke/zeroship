@@ -300,6 +300,13 @@ where
             // below 4, so the value is in `4..=i32::MAX` and this cast is
             // exact.
             stream.validate_length(header.len() as u32)?;
+            // The per-tag startup limits belong here too. They were head-only,
+            // so a `BackendKeyData` claiming more than its own 264 slipped
+            // through whenever it arrived behind another frame - and
+            // `AuthenticationOk` in front of it is what a real startup sequence
+            // looks like. Repeating them is a no-op on a data-phase stream,
+            // because both constrained tags are startup-only.
+            validate_startup_message_length(header.tag(), header.len() as u32)?;
 
             match header.tag() {
                 backend::NOTICE_RESPONSE_TAG
@@ -611,6 +618,47 @@ mod tests {
             payloads.len(),
             2,
             "the complete prefix was not returned whole"
+        );
+    }
+
+    /// The tag-specific startup limits apply to every frame in a batch too.
+    ///
+    /// `read_backend` checks `validate_startup_message_length` on the HEAD
+    /// frame only. The generic ceiling is now repeated for each frame in the
+    /// walk, but the per-tag limits were not, so a `BackendKeyData` claiming
+    /// 265 - above the 264 its own limit allows - passed the walk whenever it
+    /// arrived behind another frame in the same read. `AuthenticationOk` in
+    /// front of it is exactly that shape, and it is what a real startup
+    /// sequence looks like.
+    ///
+    /// These limits exist to refuse an over-long cancel key from an
+    /// UNAUTHENTICATED peer. Bypassed, the body is buffered first and only the
+    /// later cancel-key parse objects.
+    ///
+    /// Safe to repeat per frame because both constrained tags - `v` and `K` -
+    /// are startup-only messages, so the check is a no-op on a data-phase
+    /// stream.
+    #[compio::test]
+    async fn a_startup_limit_applies_to_a_frame_behind_another_one() {
+        // AuthenticationOk: tag R, length 8, body = success code 0.
+        let mut batch = vec![b'R'];
+        batch.extend_from_slice(&8u32.to_be_bytes());
+        batch.extend_from_slice(&0u32.to_be_bytes());
+        // BackendKeyData claiming 265, one past its own ceiling of 264.
+        batch.push(b'K');
+        batch.extend_from_slice(&265u32.to_be_bytes());
+        batch.extend_from_slice(&vec![0u8; 265 - 4]);
+
+        let mut framer = ScriptedFramer::new(vec![batch]);
+
+        let error = match read_backend(&mut framer).await {
+            Ok(_) => panic!("an oversized BackendKeyData passed by riding behind AuthenticationOk"),
+            Err(error) => error,
+        };
+        let chain = error_chain(&error);
+        assert!(
+            chain.contains("BackendKeyData") && chain.contains("264"),
+            "the per-tag limit was not applied to the batched frame: {chain}"
         );
     }
 }
