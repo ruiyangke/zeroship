@@ -72,11 +72,16 @@ Expected: the same pass count as the primary server, 0 failed. Anything else
 is either a real version difference or a test that pinned one version's
 behaviour - triage below.
 
-MEASURED 2026-08-25: **1738 passed, 0 failed on 18.4**, the same totals as
-16.14 on 5455 in the same session. Re-measure rather than carrying that number
-forward - it moves whenever the suite grows, and the claim worth holding is
-"the same as the primary server on the same day", not any particular figure.
-It read 1720 earlier the same day, before three commits added 18 tests.
+MEASURED 2026-08-26: **79 binaries, 1779 passed, 0 failed on 18.4**, the same
+totals the primary server on 5455 reported the same day. Re-measure rather than
+carrying that number forward - it moves whenever the suite grows, and the claim
+worth holding is "the same as the primary server on the same day", not any
+particular figure. It read 1738 on 2026-08-25 and 1720 earlier that day, before
+three commits added 18 tests.
+
+Count BINARIES as well as tests. Both numbers come from the same log and only
+the pair is evidence: 1779 of 1779 tests across 39 of 79 binaries would print a
+clean `0 failed` for the half it reached.
 
 Wait for the run to EXIT, not for its output to go quiet.
 `pgoutput_subtransactions` streams for minutes on 18 without printing, so a

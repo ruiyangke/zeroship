@@ -1729,6 +1729,18 @@ impl Config {
                 self.dbname(value);
             }
             "options" => {
+                // VERBATIM, backslashes included. libpq documents that a space
+                // inside an option value must be escaped with a backslash, which
+                // reads like something the client unescapes before sending. It
+                // does not: the escape travels to the server and `pg_split_opts`
+                // splits on it there. MEASURED 2026-08-26 against libpq 16.15,
+                // `options=-c search_path=a\ b` reaches the backend as ONE
+                // argument whose value contains a space (`invalid value for
+                // parameter "search_path": "a b"`), while the same string with a
+                // raw space splits into two (`invalid command-line argument for
+                // server process: b`). Had libpq unescaped client-side the first
+                // case would have split exactly like the second. So unescaping
+                // here would corrupt every escaped option.
                 self.options(value);
             }
             "fallback_application_name" => {
