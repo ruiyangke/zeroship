@@ -938,13 +938,14 @@ async fn second_deploy_real_type_change_still_detected_against_introspected_live
 // (P6a) `plan_declarative` now CARRIES a SQLite rebuild into the plan — the fail-close
 //      is gone. `MigrationEngine` is generic over `MigrationBackend`, and
 //      `apply_declarative` drives `plan.rebuilds` through `SqliteBackend::rebuild_one`
-//      under the destructive/approval gate. The old behavior returned a typed
-//      `DeclarativeError::SqliteRebuildRequired`; P6a replaced that with carrying the
-//      rebuild so the
-//      engine can apply it. This pins the new contract: the plan exposes the rebuild
-//      (with its destructive/approval flags) instead of refusing the whole deploy.
-//      That variant has since been DELETED: it kept zero constructors for as long as
-//      P6a has held, so the enum was carrying an arm nothing could reach.
+//      under the destructive/approval gate. The old behavior refused the whole
+//      deploy with a typed declarative error naming the required rebuild; P6a
+//      replaced that with carrying the rebuild so the engine can apply it.
+//      This pins the new contract: the plan
+//      exposes the rebuild (with its destructive/approval flags) instead of refusing
+//      the whole deploy.
+//      That error variant has since been DELETED: it kept zero constructors for as
+//      long as P6a has held, so the enum was carrying an arm nothing could reach.
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn plan_declarative_carries_sqlite_rebuild_into_the_plan() {

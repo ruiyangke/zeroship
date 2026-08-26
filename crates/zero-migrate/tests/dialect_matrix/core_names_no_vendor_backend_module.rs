@@ -120,8 +120,8 @@ fn is_code(line: &str) -> bool {
 /// How many times `line` names a vendor backend module in PATH position.
 ///
 /// A match must not be preceded by a character that can continue a Rust identifier,
-/// which is what keeps `zero_migrate_postgres::VENDOR` (preceded by `_`) and
-/// `MyPostgres::new` out of this census and inside its sibling's.
+/// which is what keeps `zero_migrate_postgres::VENDOR` (preceded by `_`) out of this
+/// census and inside its sibling's.
 fn vendor_module_names(line: &str) -> usize {
     let bytes = line.as_bytes();
     let mut n = 0;

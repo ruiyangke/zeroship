@@ -54,7 +54,7 @@
 //! zero occurrences of `AlterPrimaryKey` in `render/gen_types.rs` against 29 in
 //! `render/fold.rs` - so the op fell through its `_ => {}` and `env.db.ts` kept
 //! declaring the primary key the migration replaced, dropped or added. The step 3
-//! gate recorded it as `ATO_IGNORES_ALTER_PRIMARY_KEY` on one stream and one action;
+//! gate recorded it as one authoring-table defect on one stream and one action;
 //! measured through the artifact, it is FIVE distinct wrong artifacts, one per
 //! `AlterPrimaryKeyAction` shape plus the identity facet the same op clears:
 //!

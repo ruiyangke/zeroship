@@ -142,7 +142,8 @@ fn the_lowered_plan_vocabulary_names_no_vendor() {
     const VENDORS: [&str; 4] = ["Pg", "Postgres", "Mysql", "Sqlite"];
 
     /// Every CamelCase identifier on a line — a variant name and its payload types
-    /// both, so `Foo(BarPlan)` yields `Foo` and `BarPlan`.
+    /// both, so `ExpandContract(ExpandContractPlan)` yields `ExpandContract` and
+    /// `ExpandContractPlan`.
     fn camel_idents(line: &str) -> Vec<&str> {
         line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
             .filter(|t| t.starts_with(|c: char| c.is_ascii_uppercase()))
@@ -166,8 +167,8 @@ fn the_lowered_plan_vocabulary_names_no_vendor() {
     let mut scanned: Vec<(&str, String)> = Vec::new();
 
     // (a) The `RenameStep` arms: the variant names AND their payload types. Both are
-    // vocabulary — a neutral variant wrapping `SqliteRebuild` has moved the vendor
-    // name one line down, not removed it.
+    // vocabulary - a neutral variant wrapping a vendor-named payload type has moved
+    // the vendor name one line down, not removed it.
     let mut arms = 0usize;
     for line in item_body(STEP_SRC, "pub enum RenameStep {") {
         let trimmed = line.trim();

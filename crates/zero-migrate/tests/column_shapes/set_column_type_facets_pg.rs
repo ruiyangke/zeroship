@@ -336,7 +336,7 @@ async fn server_verdict(tag: &str, rendered_type: &str) -> String {
             .await
             .map_err(|error| format!("apply IR plan: {error}"))?;
 
-        // Byte-for-byte the shape of `DeclarativeRenderer::render_alter_column_type`.
+        // Byte-for-byte the shape PostgreSQL spells in `DdlEmitter::alter_column_type_up`.
         let alter = format!(
             "ALTER TABLE {quoted_schema}.{} ALTER COLUMN {} TYPE {rendered_type} USING {}::{rendered_type}",
             quote_ident(TABLE),

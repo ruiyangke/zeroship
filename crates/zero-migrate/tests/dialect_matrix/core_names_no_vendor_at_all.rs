@@ -185,8 +185,8 @@ const ALLOWED: &[(&str, usize, &str)] = &[];
 /// Never lower it to silence a walk that broke — [`WALK_ANCHORS`] is what tells those
 /// two apart, so check it first and trust it over this number.
 ///
-/// Measured at 47 `.rs` files under `src` when this landed — `db_url.rs` left in the
-/// same pass, having had zero callers, taking the sibling census's own recorded 48 down
+/// Measured at 47 `.rs` files under `src` when this landed - one file with zero
+/// callers left in the same pass, taking the sibling census's own recorded 48 down
 /// by one. 36 sits under that with room for churn and nowhere near a walk that found
 /// nothing.
 const SRC_FILE_FLOOR: usize = 36;
@@ -215,7 +215,7 @@ const VENDOR_CRATE_MATCH_FLOOR: usize = 40;
 ///
 /// Separate from [`VENDOR_CRATE_MATCH_FLOOR`] because the two matchers must be
 /// controlled independently — see [`names_a_vendor`]. Measured well above this in
-/// `zero-migrate-postgres`, which names types `PgRaw`, `PgDml` and so on throughout.
+/// `zero-migrate-postgres`, which names types `PgCursor` and `PgEmitter` throughout.
 const PG_CAMEL_MATCH_FLOOR: usize = 20;
 
 /// The vendor crate the needle control runs over.
@@ -265,7 +265,7 @@ fn names_a_vendor_by_pg_camel(code: &str) -> bool {
 ///
 /// * [`names_a_vendor_by_needle`] case-folds and looks for `pg_`, WITH the underscore.
 ///   `PG ` lowercases to `pg `, a space, so no needle matched.
-/// * [`names_a_vendor_by_pg_camel`] requires a lowercase `g` (`PgOnly`, `PgRaw`).
+/// * [`names_a_vendor_by_pg_camel`] requires a lowercase `g` (`PgOnly`, `PgCursor`).
 ///   `PG` has an uppercase one, so it did not match either.
 ///
 /// Two matchers tuned to two real spellings, and the third spelling went straight
@@ -290,8 +290,8 @@ fn names_a_vendor_by_pg_word(code: &str) -> bool {
 /// controlled separately, and finding that out was itself a measurement. The first
 /// version of [`the_needle_still_matches_where_a_vendor_name_is_the_point`] asserted
 /// one floor over this combined answer, and when the needle list was corrupted to
-/// prove the control fires, IT PASSED: `zero-migrate-postgres` is full of `PgRaw`,
-/// `PgDml` and friends, so the camel matcher alone cleared the floor while every
+/// prove the control fires, IT PASSED: `zero-migrate-postgres` is full of `PgCursor`,
+/// `PgEmitter` and friends, so the camel matcher alone cleared the floor while every
 /// product-name needle was dead. A positive control that two matchers can satisfy for
 /// each other is not a control over either.
 fn names_a_vendor(code: &str) -> bool {

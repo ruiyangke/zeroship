@@ -967,11 +967,10 @@ async fn roll_forward_over_destructive_history_on_sqlite() {
 // succeeds). This is the declared-set path on the SQLite schema authority (the
 // migrate engine). The engine is the ONLY warm-boot authority on SQLite here,
 // which needs no argument in this workspace: there is no runtime pipeline to
-// compete with it. The clause this comment used to carry - that
-// `register_model`/`run_pipeline` is PG-only because its `RegisterBackend` bound
-// requires `PgSqlExecutor` + `LockManager<Client = compio_postgres::Client>` -
-// described appbase's plugin-db, and named a compio-postgres client that was
-// deleted from this tree along with the native driver.
+// compete with it. The clause this comment used to carry argued it instead from
+// appbase's plugin-db registration path, and from the trait bounds a native
+// PostgreSQL driver put on that path - a product this tree is not, and a driver
+// this tree deleted.
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn warm_multi_collection_reboot_no_spurious_drop_both_usable() {

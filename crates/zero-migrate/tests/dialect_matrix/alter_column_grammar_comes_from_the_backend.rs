@@ -40,7 +40,7 @@
 //!
 //! # What the fixture is, exactly, and what it is not
 //!
-//! `FOURTH` is a real [`zero_migrate_backend::registry::BackendVendor`] resolved
+//! `FOURTH_VENDOR` is a real [`zero_migrate_backend::registry::BackendVendor`] resolved
 //! through the real [`zero_migrate_backend::registry::VendorSet`] by the real
 //! `IrAuthor`, and it supplies its OWN [`zero_migrate_backend::ddl::DdlEmitter`] —
 //! the seam under test, and the only surface a backend has for spelling DDL.
