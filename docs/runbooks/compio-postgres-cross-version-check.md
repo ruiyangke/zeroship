@@ -91,6 +91,29 @@ Tear down when finished:
 docker rm -f zs-cpg-pg18-5459
 ```
 
+## The floor is PostgreSQL 16, and that is measured rather than assumed
+
+MEASURED 2026-08-25 against **15.19** (`postgres:15`, same three settings, port
+5460): **1752 passed, 2 failed** out of the 1754 that pass on 16.14 and 18.4.
+Both failures are pgoutput OPTION support, not driver defects, and both are the
+server refusing an option it does not have:
+
+- `the_origin_none_option_drops_changes_replayed_from_a_peer` -
+  `unrecognized pgoutput option: origin`. The `origin` option arrived in 16.
+- `prepared_transactions_expose_every_two_phase_frame` -
+  `streaming requires a Boolean value`. 15's pgoutput takes only a boolean
+  there; `parallel` arrived in 16. The discriminator is that 16.14 given the
+  same `streaming 'parallel'` complains about the PROTO VERSION instead
+  (`does not support parallel streaming, need 4 or higher`), which is a server
+  that knows the word.
+
+So the driver works against 15 for everything except those two pgoutput
+options, and it does not silently downgrade them - the request goes as written
+and the refusal reaches the caller. If a deployment needs 15, that is the
+limit to state; the option docs in `src/replication.rs` now carry it.
+
+Nothing below 15 has ever been measured.
+
 ## Triaging a failure
 
 1. **Read the server log first.** `docker logs <container> | grep -iE
