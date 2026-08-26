@@ -18,7 +18,7 @@
 //! 4. NO DB CONNECTION: the render path opens no socket (proven by running it with NO
 //!    DSN env set and no DB reachable — a connection attempt would error/hang).
 //!
-//! Regenerate the goldens with `UPDATE_PREVIEW_GOLDENS=1 cargo test -p zero-migrate
+//! Regenerate the goldens with `UPDATE_PREVIEW_GOLDENS=1 cargo test -p zeroship-migrate
 //! --test sql_preview`.
 
 use crate::support;
