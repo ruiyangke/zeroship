@@ -28,6 +28,8 @@
 //! ```
 
 use std::collections::HashMap;
+mod support;
+
 use std::sync::Arc;
 use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
@@ -50,6 +52,10 @@ const PROBE: &str = "distributed-live-cross-isolate-probe";
 /// `crates/core/src/config/test_overlay.rs` cited this file by name as the one
 /// call site that "substitutes a default"; it no longer does.
 fn pg_url() -> String {
+    // Single funnel for this binary: without a subscriber the runtime's
+    // sanitization rail leaves every dispatch failure as a bare
+    // {"message":"internal error"}. No-op unless RUST_LOG is set.
+    support::init_test_tracing();
     zeroship_core::config::test_database_url()
 }
 
