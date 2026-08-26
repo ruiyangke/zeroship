@@ -1,0 +1,1015 @@
+//! Executor-side existence-guard catalog probe.
+//!
+//! The existence-guard IR/JS SHAPE (`ExistenceGuard::{IfNotExists,IfExists}` on
+//! every DDL op) is carried in `ir_version 2`. This module is the guard
+//! EXECUTION: a render-time-resolved, dialect-neutral [`GuardProbe`] is stamped
+//! onto each lowered [`Migration`](zero_migrate_ir::migration::Migration); at apply time the
+//! executor reads the LIVE catalog under the ALREADY-HELD project apply lock and,
+//! on transactional backends, the open per-step transaction. [`decide`] returns a
+//! [`GuardVerdict`]:
+//!
+//! - [`GuardVerdict::RunBare`] - the guard's precondition is met; run the op's `up`.
+//! - [`GuardVerdict::SatisfiedNoop`] - the object already has the declared shape
+//!   (`ifNotExists`) or is already absent (`ifExists`); SKIP the `up` but STILL
+//!   journal the `completed` row so the version lands (a re-deploy sees it
+//!   net-applied and skips it via normal pending computation).
+//! - [`GuardVerdict::FailDrift`] - the object EXISTS with a shape that DIVERGES
+//!   from the declared one (`ifNotExists`) and cannot be proven equal. This is a
+//!   HARD error (`ApplyError::ExistenceGuardDrift`), never a silent skip. Nothing
+//!   is applied or journaled.
+//!
+//! # No-TOCTOU
+//! No project apply lock is acquired or released across probe-to-decide-to-act.
+//! PostgreSQL and SQLite also keep the probe in their per-step atomic boundary;
+//! MySQL relies on the held project lock because its DDL auto-commits.
+//!
+//! # Fail-closed shape verification (the point of this module)
+//! A guard whose precondition CANNOT be fully proven from the catalog fails CLOSED
+//! (`FailDrift`), never optimistically `SatisfiedNoop`. The non-obvious cases:
+//!
+//! - **Constraint `ifNotExists`** - a present same-name constraint is `FailDrift`,
+//!   NOT `SatisfiedNoop`, unless its KIND clashes (also `FailDrift`, with a clearer
+//!   `kind` field). The live `pg_get_constraintdef` definition cannot be
+//!   byte-compared against the IR's un-normalized constraint body, so a present
+//!   constraint's definitional equality cannot be PROVEN - and a same-name +
+//!   same-kind constraint with a DIFFERENT predicate (a rewritten CHECK / a
+//!   different FK target) is a real divergence the PG catalog DOES expose. We refuse
+//!   rather than skip. (The realistic `ifNotExists` use - the constraint is ABSENT -
+//!   still `RunBare`.)
+//! - **Index `ifNotExists` over an expression / partial predicate** - `FailDrift`
+//!   naming `expression`: the live index carries a non-empty `pg_get_expr`
+//!   predicate the IR `createIndex` (a column-list AST) cannot render to a
+//!   byte-comparable form, so equivalence cannot be proven.
+//! - **Index `ifNotExists` under a name another TABLE owns** - `FailDrift` naming
+//!   `table`. The probe resolves an index by NAME, and an index name is schema-wide
+//!   on PostgreSQL and SQLite but PER TABLE on MySQL
+//!   (`Capability::SchemaWideIndexNames`). Where the name is schema-wide, a
+//!   same-name index on another table means the CREATE cannot succeed AND the
+//!   declared index is absent, so a `SatisfiedNoop` would journal the migration
+//!   complete over an index that was never created. Where it is per table
+//!   (MySQL) the other table's index is unrelated and the verdict is a plain
+//!   `RunBare`. This does NOT check the index's SHAPE on the other table (the name
+//!   is the collision). It does NOT cover a name collision INSIDE one migration
+//!   unit either, and nothing else does: the fold's `DuplicateIndex` check keys on
+//!   the target table's own index list (`render::fold`), so it never asks which
+//!   OTHER table owns a name, and the fold-level widening that would have closed
+//!   this was rejected on purpose (review-log F48). This probe is the only
+//!   cross-table name-to-owner check that runs, and it reads ONE catalog snapshot
+//!   per unit.
+//! - **SQLite affinity compare (F1)** - the engine's declared snapshot data_type is
+//!   ALWAYS the PG `information_schema` spelling (`field_data_type` maps via the PG
+//!   dialect, dialect-agnostically), but a REAL SQLite catalog reports the SQLite
+//!   *affinity* (`text`/`integer`/`real`/`numeric`/`blob`). A raw spelling compare
+//!   therefore false-drifts on EVERY non-text type on SQLite (a `timestamp with time
+//!   zone` / `jsonb` / `uuid`->`text` snapshot vs a `text` live affinity,
+//!   `double precision`->`real`, `bytea`->`blob`). The SQLite leg of [`decide`] folds
+//!   BOTH the declared and the live data_type through the selected backend's
+//!   [`SchemaRenderer::canonical_type`](crate::schema::SchemaRenderer::canonical_type)
+//!   - the SAME affinity fold the declarative DIFFER uses - so a clean guarded
+//!   `createTable`/`addColumn` re-run is
+//!   idempotent for every type, while a genuine affinity change (string->number, i.e.
+//!   `text` vs `real`) still maps to two distinct canonical tokens and IS a
+//!   divergence. Several distinct SDK facets collapse to the `text` affinity on SQLite
+//!   (`string`/`ref`/`actor`/`id` + `date`/`json` + a string `literal`) and the live
+//!   catalog stores only the affinity, so a within-text-affinity facet change (live
+//!   `string` vs declared `ref`/`date`) is INVISIBLE - but we do NOT fail closed on
+//!   it: an affinity-match is a `SatisfiedNoop`, exactly as the DIFFER treats it (a
+//!   documented SQLite divergence; on
+//!   SQLite a `ref` column adds no FK via `ALTER` - it is physically a plain `text`
+//!   column either way, so the blind spot carries no provable physical divergence).
+//!   On PG both sides are the `information_schema` spelling and the raw compare is
+//!   exact.
+//! - **MySQL column equality is not implemented here** - the MySQL executor calls
+//!   this function only when name lookup or non-column structure settles the
+//!   decision. A present `createTable` or `addColumn` is refused before [`decide`]
+//!   rather than comparing the lossy canonical column type.
+//!
+//! - **An over-long constraint / index name on PostgreSQL** - PostgreSQL truncates an
+//!   identifier past 63 bytes with only a NOTICE, so the catalog holds a name the
+//!   authored one is never equal to. An `ifExists` miss on such a name is a lie
+//!   whenever the TRUNCATED spelling is present, and an `ifNotExists` `RunBare` would
+//!   create a truncated identity; both are refused. An `ifExists` name that is absent
+//!   in BOTH spellings still no-ops - that is what `ifExists` is for. PostgreSQL only:
+//!   SQLite has no cap and MySQL caps at 64 CHARACTERS, so the byte rule would strand
+//!   real objects there.
+//!
+//! The expected `data_type`/`nullable`/`unique`/`columns`/`kind` values are built
+//! by the SAME shared snapshot builders the lowering arms call
+//! (`build_table_snapshot` / `add_column_snapshot` / `create_index_snapshot` / the
+//! addConstraint kind), so they are byte-comparable against the introspected
+//! [`SchemaSnapshot`].
+
+use crate::snapshot::SchemaSnapshot;
+use core::fmt;
+use zero_migrate_ir::probe::{ExpectColumn, GuardDir, GuardProbe};
+
+use crate::registry::BackendVendor;
+use crate::renderer::Capability;
+
+// `GuardProbe::schema()` now lives on the type itself in `zero_migrate_ir::probe`
+// (the type moved into the leaf wire-contract crate - an inherent `impl` here would
+// be an orphan impl on a foreign type).
+
+/// A single same-name object whose shape DIVERGES from the declared one - the
+/// payload of [`GuardVerdict::FailDrift`]. Names + values only, never DDL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Divergence {
+    /// The object the divergence is on, e.g. `table users`, `column users.email`,
+    /// `index users_email_idx`, `constraint users_age_chk`.
+    pub object: String,
+    /// The attribute that diverged: `data_type`, `nullable`, `unique`, `columns`,
+    /// `expression`, `kind`, `definition`, or `presence`.
+    pub field: String,
+    /// The DECLARED (expected) value for `field`.
+    pub expected: String,
+    /// The LIVE value for `field`.
+    pub actual: String,
+}
+
+/// The executor's decision for a guarded op, computed in Rust from the live
+/// catalog snapshot - NEVER a SQL-level conditional.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuardVerdict {
+    /// Run the op's `up` bare (the guard's precondition is met).
+    RunBare,
+    /// Skip the `up` but journal the `completed` row (the declared shape is already
+    /// present for `ifNotExists`, or the object is already absent for `ifExists`).
+    SatisfiedNoop,
+    /// The object exists with a divergent / unprovable shape - fail closed.
+    FailDrift(Divergence),
+}
+
+/// Decide the verdict for `probe` against the LIVE catalog `live`. Pure (no DB
+/// access - the caller has already taken the snapshot under its held apply lock).
+/// See the module docs for the per-variant fail-closed rules.
+///
+/// `dialect` is the backend the LIVE snapshot was introspected from. It is the
+/// caller-known open identity used to resolve that backend's registered probe
+/// policy, NOT carried on the wire-serialized probe.
+///
+/// **F1** - the declared probe `data_type` is ALWAYS the PG `information_schema`
+/// spelling (the snapshot builder maps via the PG dialect, dialect-agnostically),
+/// but a REAL SQLite catalog reports the SQLite affinity (`text`/`integer`/`real`/
+/// `numeric`/`blob`). A raw `expect != live` compare therefore false-drifts on EVERY
+/// non-text-affinity type on SQLite (a `timestamp with time zone` snapshot vs a
+/// `text` live affinity, etc.). On the SQLite leg we therefore canonicalize BOTH
+/// sides through the selected backend's
+/// [`SchemaRenderer::canonical_type`](crate::schema::SchemaRenderer::canonical_type)
+/// - the SAME affinity fold the differ uses (`declarative.rs`) - so a guarded
+/// `createTable`/`addColumn` re-run is idempotent for every type, while a real
+/// affinity change still diverges.
+#[must_use]
+pub fn decide(probe: &GuardProbe, live: &SchemaSnapshot, vendor: &BackendVendor) -> GuardVerdict {
+    match probe {
+        GuardProbe::Table {
+            table,
+            direction,
+            expect_columns,
+            ..
+        } => decide_table(table, *direction, expect_columns, live, vendor),
+        GuardProbe::Partition {
+            name,
+            of,
+            direction,
+            expect_bounds,
+            ..
+        } => decide_partition(name, of, *direction, expect_bounds.as_ref(), live),
+        GuardProbe::Column {
+            table,
+            column,
+            direction,
+            expect,
+            ..
+        } => decide_column(table, column, *direction, expect.as_ref(), live, vendor),
+        GuardProbe::Index {
+            table,
+            name,
+            direction,
+            expect,
+            ownership_only,
+            ..
+        } => decide_index(
+            table,
+            name,
+            *direction,
+            expect.as_ref(),
+            *ownership_only,
+            live,
+            vendor,
+        ),
+        GuardProbe::Constraint {
+            table,
+            name,
+            direction,
+            expect_kind,
+            expect_definition,
+            ..
+        } => decide_constraint(
+            table,
+            name,
+            *direction,
+            expect_kind.as_deref(),
+            expect_definition.as_deref(),
+            live,
+            vendor,
+        ),
+        GuardProbe::View {
+            name, direction, ..
+        } => decide_view(name, *direction, live),
+        GuardProbe::Sequence {
+            name, direction, ..
+        } => decide_sequence(name, *direction, live),
+        GuardProbe::NamedType {
+            name,
+            kind,
+            direction,
+            ..
+        } => decide_named_type(name, kind, *direction, live),
+        GuardProbe::ColumnPresence { table, column, .. } => {
+            // Always IfExists. Source column must EXIST -> RunBare; absent -> Noop.
+            if column_present(live, table, column) {
+                GuardVerdict::RunBare
+            } else {
+                GuardVerdict::SatisfiedNoop
+            }
+        }
+    }
+}
+
+fn decide_named_type(
+    name: &str,
+    kind: &str,
+    direction: GuardDir,
+    live: &SchemaSnapshot,
+) -> GuardVerdict {
+    match live.named_types.get(name) {
+        Some(actual) if actual.kind == kind => match direction {
+            GuardDir::IfExists => GuardVerdict::RunBare,
+            GuardDir::IfNotExists => GuardVerdict::SatisfiedNoop,
+        },
+        Some(actual) => GuardVerdict::FailDrift(Divergence {
+            object: format!("type {name}"),
+            field: "kind".to_string(),
+            expected: kind.to_string(),
+            actual: actual.kind.clone(),
+        }),
+        None => match direction {
+            GuardDir::IfExists => GuardVerdict::SatisfiedNoop,
+            GuardDir::IfNotExists => GuardVerdict::RunBare,
+        },
+    }
+}
+
+fn decide_view(name: &str, direction: GuardDir, live: &SchemaSnapshot) -> GuardVerdict {
+    let present = live.views.contains_key(name);
+    match direction {
+        GuardDir::IfExists => {
+            // dropView: presence-only.
+            if present {
+                GuardVerdict::RunBare
+            } else {
+                GuardVerdict::SatisfiedNoop
+            }
+        }
+        GuardDir::IfNotExists => {
+            if present {
+                GuardVerdict::SatisfiedNoop
+            } else {
+                GuardVerdict::RunBare
+            }
+        }
+    }
+}
+
+fn decide_sequence(name: &str, direction: GuardDir, live: &SchemaSnapshot) -> GuardVerdict {
+    // Sequence guards intentionally answer only the existence question requested
+    // by `ifExists` / `ifNotExists`. A guarded `createSequence` that finds an
+    // existing sequence therefore no-ops here; option equality is the structural
+    // drift layer's job (`SequenceSnapshot` carries the catalog options and
+    // `diff_snapshots` reports any mismatch). Keeping the guard presence-only
+    // avoids turning an existence probe into a partial schema validator.
+    let present = live.sequences.contains_key(name);
+    match direction {
+        GuardDir::IfExists => {
+            if present {
+                GuardVerdict::RunBare
+            } else {
+                GuardVerdict::SatisfiedNoop
+            }
+        }
+        GuardDir::IfNotExists => {
+            if present {
+                GuardVerdict::SatisfiedNoop
+            } else {
+                GuardVerdict::RunBare
+            }
+        }
+    }
+}
+
+/// Decide a `createPartition ifNotExists` / `dropPartition ifExists` guard against
+/// the live catalog's CHILD-PARTITION map.
+///
+/// A child partition never appears in `SchemaSnapshot::tables` (PostgreSQL
+/// introspection filters `relispartition = false` so a child's inherited columns and
+/// propagated indexes are not mistaken for a table of its own). Resolving the guard
+/// through the table map therefore read EVERY live child as absent, which turned a
+/// guarded `dropPartition` into a `SatisfiedNoop` that skipped the `DROP TABLE`,
+/// journaled the migration completed, and left the partition and its rows in place.
+/// This decides against `live.partitions` instead, and verifies the partition's
+/// SHAPE rather than its bare name:
+///
+/// - **`ifExists` (drop)**: RunBare only when the child is present AND belongs to
+///   the DECLARED parent. A child under a different parent is `FailDrift` on `of`:
+///   the authored op names a partition of `events`, and dropping a same-named child
+///   of some other table is not that op. Genuinely absent is `SatisfiedNoop`, which
+///   is what `ifExists` is for. Bounds are NOT compared on the drop leg; a
+///   re-bounded child is still the child the author means to remove, and its
+///   ownership is the fact that identifies it.
+/// - **`ifNotExists` (create)**: `SatisfiedNoop` only when the child is present
+///   AND its parent AND its bounds match the declared ones, so a re-run over an
+///   already-created partition stops erroring with `relation "..." already exists`
+///   without ever accepting a differently-shaped child by name.
+///
+/// In BOTH directions a name the live catalog holds as a plain TABLE rather than a
+/// partition is `FailDrift` on `kind`: a `dropPartition` must never resolve onto a
+/// standalone table, and a `createPartition` cannot succeed under an occupied name.
+///
+/// The declared-vs-live comparison is [`crate::drift::partition_divergences`],
+/// the SAME function the structural differ uses, so the guard and a drift report
+/// cannot disagree about what makes two partitions the same. The two live rules also
+/// match what the canonical fold already demands of an authored `dropPartition`
+/// (`render::fold` requires the child to BE a partition and to belong to the named
+/// parent), so guard, fold, and drift report agree; the guard's only divergence is
+/// that a genuinely ABSENT child no-ops here instead of erroring, which is the whole
+/// point of `ifExists`.
+///
+/// One consequence worth naming: a child DETACHED by an earlier op is a plain table
+/// by the time a guarded `dropPartition` probes it, so it is `FailDrift` on `kind`
+/// rather than a drop. That mirrors the fold, which already refuses `detachPartition`
+/// followed by `dropPartition` on the same child.
+///
+/// Does NOT verify the child's COLUMNS (they are inherited from the parent and the
+/// authored op declares none), does NOT model a partition of a partition beyond its
+/// immediate declared parent, does NOT canonicalize bound literal spelling across
+/// types (a timestamptz bound whose catalog rendering differs from the authored text
+/// is reported as drift, not resolved), and does NOT reach MySQL or `SQLite`, whose
+/// partition lowering emits bounded DML with no probe.
+fn decide_partition(
+    name: &str,
+    of: &str,
+    direction: GuardDir,
+    expect_bounds: Option<&zero_migrate_ir::ir::PartitionBounds>,
+    live: &SchemaSnapshot,
+) -> GuardVerdict {
+    let Some(actual) = live.partitions.get(name) else {
+        // Not a live child. If the NAME is a plain table, neither direction is
+        // safe: a drop would target a standalone table the author never named, and
+        // a create cannot succeed under an occupied name.
+        if live.tables.contains_key(name) {
+            return drift(&format!("partition {name}"), "kind", "partition", "table");
+        }
+        return match direction {
+            GuardDir::IfExists => GuardVerdict::SatisfiedNoop,
+            GuardDir::IfNotExists => GuardVerdict::RunBare,
+        };
+    };
+    // Present as a child. `of` is compared in BOTH directions (ownership identifies
+    // the partition); `bounds` only on the create leg, where the declared shape is
+    // what the no-op would be claiming is already there.
+    let expected = crate::snapshot::PartitionSnapshot {
+        of: of.to_string(),
+        bounds: match (direction, expect_bounds) {
+            (GuardDir::IfNotExists, Some(bounds)) => bounds.clone(),
+            // Drop leg, or a create whose bounds the wire type left unset: compare
+            // ownership only by echoing the live bounds back. A create with no
+            // declared bounds cannot PROVE the live child is the declared one, so it
+            // is refused separately below.
+            _ => actual.bounds.clone(),
+        },
+    };
+    if let Some((field, expected, actual)) = crate::drift::partition_divergences(&expected, actual)
+        .into_iter()
+        .next()
+    {
+        return drift(&format!("partition {name}"), field, &expected, &actual);
+    }
+    match direction {
+        GuardDir::IfExists => GuardVerdict::RunBare,
+        GuardDir::IfNotExists => {
+            if expect_bounds.is_some() {
+                GuardVerdict::SatisfiedNoop
+            } else {
+                // Never built by lowering (the create arm always carries the
+                // authored bounds), but the wire type admits it: fail closed
+                // rather than no-op over a partition whose shape we cannot prove.
+                drift(
+                    &format!("partition {name}"),
+                    "bounds",
+                    "<declared but unverifiable>",
+                    &format!("{:?}", actual.bounds),
+                )
+            }
+        }
+    }
+}
+
+fn decide_table(
+    table: &str,
+    direction: GuardDir,
+    expect_columns: &[ExpectColumn],
+    live: &SchemaSnapshot,
+    vendor: &BackendVendor,
+) -> GuardVerdict {
+    let present = live.tables.contains_key(table);
+    match direction {
+        GuardDir::IfExists => {
+            // dropTable: presence-only.
+            if present {
+                GuardVerdict::RunBare
+            } else {
+                GuardVerdict::SatisfiedNoop
+            }
+        }
+        GuardDir::IfNotExists => {
+            let Some(t) = live.tables.get(table) else {
+                return GuardVerdict::RunBare; // absent -> create it.
+            };
+            // Present: prove EXACT shape equality of the declared columns. A missing
+            // declared column, a `(data_type, nullable)` divergence, OR any EXTRA
+            // live column not in the declared set -> FailDrift (a wider live table is
+            // not the declared shape - fail closed).
+            for ec in expect_columns {
+                match t.columns.iter().find(|c| c.name == ec.name) {
+                    None => {
+                        return drift(
+                            &format!("table {table}"),
+                            "data_type",
+                            &format!("{}: {}", ec.name, ec.data_type),
+                            &format!("{}: <absent>", ec.name),
+                        );
+                    }
+                    Some(live_col) => {
+                        if let Some(v) = column_shape_divergence(&ExpectColumnShape {
+                            table,
+                            column: &ec.name,
+                            expect_dtype: &ec.data_type,
+                            expect_nullable: ec.nullable,
+                            live_dtype: &live_col.data_type,
+                            live_nullable: live_col.nullable,
+                            vendor,
+                        }) {
+                            return v;
+                        }
+                    }
+                }
+            }
+            // Extra live column -> FailDrift (the live table is wider than declared).
+            for live_col in &t.columns {
+                if !expect_columns.iter().any(|ec| ec.name == live_col.name) {
+                    return drift(
+                        &format!("table {table}"),
+                        "columns",
+                        "<declared column set>",
+                        &format!("extra live column {}", live_col.name),
+                    );
+                }
+            }
+            GuardVerdict::SatisfiedNoop
+        }
+    }
+}
+
+fn decide_column(
+    table: &str,
+    column: &str,
+    direction: GuardDir,
+    expect: Option<&(String, bool)>,
+    live: &SchemaSnapshot,
+    vendor: &BackendVendor,
+) -> GuardVerdict {
+    let present = column_present(live, table, column);
+    match direction {
+        GuardDir::IfExists => {
+            // dropColumn: presence-only.
+            if present {
+                GuardVerdict::RunBare
+            } else {
+                GuardVerdict::SatisfiedNoop
+            }
+        }
+        GuardDir::IfNotExists => {
+            if !present {
+                return GuardVerdict::RunBare; // absent -> add it.
+            }
+            // Present: verify (data_type, nullable). `expect` is always Some on the
+            // addColumn ifNotExists path; if it is somehow None (a presence-only
+            // ifNotExists we never build), fail closed - we cannot prove the shape.
+            let Some((dtype, nullable)) = expect else {
+                return drift(
+                    &format!("column {table}.{column}"),
+                    "data_type",
+                    "<declared but unverifiable>",
+                    "<present>",
+                );
+            };
+            let live_col = live
+                .tables
+                .get(table)
+                .and_then(|t| t.columns.iter().find(|c| c.name == column));
+            let Some(live_col) = live_col else {
+                // column_present said present but the column vanished - fail closed.
+                return drift(
+                    &format!("column {table}.{column}"),
+                    "data_type",
+                    dtype,
+                    "<absent>",
+                );
+            };
+            column_shape_divergence(&ExpectColumnShape {
+                table,
+                column,
+                expect_dtype: dtype,
+                expect_nullable: *nullable,
+                live_dtype: &live_col.data_type,
+                live_nullable: live_col.nullable,
+                vendor,
+            })
+            .unwrap_or(GuardVerdict::SatisfiedNoop)
+        }
+    }
+}
+
+/// The declared-vs-live column shape compare inputs, bundled so the comparison
+/// seam takes one argument instead of eight positional scalars (the two callers -
+/// `decide_table` per declared column, `decide_column` for the stand-alone
+/// addColumn - build it inline). `expect_*` is the declared shape; `live_*` is the
+/// introspected catalog shape; `vendor` selects the registered catalog
+/// canonicalization policy.
+struct ExpectColumnShape<'a> {
+    table: &'a str,
+    column: &'a str,
+    expect_dtype: &'a str,
+    expect_nullable: bool,
+    live_dtype: &'a str,
+    live_nullable: bool,
+    vendor: &'a BackendVendor,
+}
+
+/// Compare a declared column shape against the live one. Returns a `FailDrift`
+/// verdict on a divergence, or `None` if they match exactly.
+///
+/// **F1 - dialect-aware data_type compare.** The declared `expect_dtype` is ALWAYS
+/// the PG `information_schema` spelling (the snapshot builder maps via the PG
+/// dialect regardless of backend - `declarative::field_data_type`). A REAL SQLite
+/// catalog reports the SQLite *affinity* (`text`/`integer`/`real`/`numeric`/`blob`),
+/// so a raw `expect_dtype != live_dtype` compare false-drifts on EVERY non-text
+/// type on SQLite (a `timestamp with time zone` / `jsonb` / `uuid`->`text` snapshot
+/// vs a `text` live affinity, `double precision`->`real`, `bytea`->`blob`, ...). On the
+/// SQLite leg we therefore fold BOTH sides through the selected backend's
+/// [`SchemaRenderer::canonical_type`](crate::schema::SchemaRenderer::canonical_type)
+/// - the SAME affinity fold the declarative differ uses - so a clean guarded re-run is idempotent for every
+/// type, while a real affinity change (`text` vs `real`, i.e. string->number) still
+/// maps to two DIFFERENT canonical tokens and IS a divergence. On PG both sides are
+/// already the `information_schema` spelling and the raw compare is exact.
+///
+/// **F1 - SQLite verifies the canonical AFFINITY, consistent with the differ.**
+/// After the fold, several distinct SDK facets collapse to the `text` affinity on
+/// SQLite (`string`/`ref`/`actor`/`id` + `date`/`json` + a string `literal`), and the
+/// live catalog stores only the affinity - the un-collapsed SDK facet is NOT
+/// recoverable. We do NOT fail closed on that blind spot: an affinity-match is a
+/// `SatisfiedNoop`, exactly as the declarative DIFFER treats it (it compares only
+/// the backend canonicalizer on SQLite - a within-affinity facet change is a
+/// documented SQLite divergence). This is what makes
+/// a guarded `createTable`/`addColumn ifNotExists` RE-RUN idempotent on SQLite (every
+/// table carries text-affinity system columns; a stand-alone `addColumn` of a `ref`
+/// over a live `string` is physically a no-op anyway - SQLite cannot add an FK via
+/// `ALTER`, so both are plain `text` columns). A GENUINE affinity change
+/// (string->number, `text` vs `real`) still maps to two distinct canonical tokens and
+/// IS a divergence. On PG both sides are the `information_schema` spelling and the raw
+/// compare is exact.
+fn column_shape_divergence(shape: &ExpectColumnShape<'_>) -> Option<GuardVerdict> {
+    let ExpectColumnShape {
+        table,
+        column,
+        expect_dtype,
+        expect_nullable,
+        live_dtype,
+        live_nullable,
+        vendor,
+    } = *shape;
+    // **F1** - on SQLite, compare the canonical AFFINITY (PG-spelled snapshot folded
+    // to the SQLite affinity the emitter would have written, AND the already-SQLite
+    // live token folded to the same canonical form). On PG, compare the raw
+    // `information_schema` spellings unchanged.
+    let dtypes_match =
+        vendor.schema.canonical_type(expect_dtype) == vendor.schema.canonical_type(live_dtype);
+    if !dtypes_match {
+        return Some(drift(
+            &format!("column {table}.{column}"),
+            "data_type",
+            expect_dtype,
+            live_dtype,
+        ));
+    }
+    if expect_nullable != live_nullable {
+        return Some(drift(
+            &format!("column {table}.{column}"),
+            "nullable",
+            &expect_nullable.to_string(),
+            &live_nullable.to_string(),
+        ));
+    }
+    None
+}
+
+fn decide_index(
+    table: &str,
+    name: &str,
+    direction: GuardDir,
+    expect: Option<&(bool, Vec<String>)>,
+    ownership_only: bool,
+    live: &SchemaSnapshot,
+    vendor: &BackendVendor,
+) -> GuardVerdict {
+    // Look up the index under the probe's table first. A same-name index on a
+    // DIFFERENT table means different things per dialect, so the wider scan is
+    // gated on [`Capability::SchemaWideIndexNames`]: PostgreSQL and SQLite scope an
+    // index name schema-wide, so a hit elsewhere IS the named object; MySQL scopes
+    // it PER TABLE, where two tables in one database may each carry
+    // `idx_created_at` and a hit elsewhere is an unrelated index.
+    //
+    // Does NOT cover cross-SCHEMA name reuse, because there is nothing to cover: the
+    // snapshot is one schema, and an index is a schema-qualified relation on
+    // PostgreSQL, so a same-name index in a DIFFERENT schema is a legal unrelated
+    // object the CREATE does not contend with. SQLite has the single `main` schema,
+    // so the question cannot arise there at all.
+    //
+    // Does NOT cover a name a preceding statement in the SAME migration unit
+    // creates, and nothing else covers that: the snapshot is read once per unit
+    // (`zero_migrate_postgres::backend::session`), and the fold's `DuplicateIndex` check
+    // keys on the target table's own index list, never on which OTHER table owns a
+    // name. Noted, not silently narrowed.
+    let schema_wide = vendor
+        .descriptor
+        .capabilities
+        .contains(Capability::SchemaWideIndexNames);
+    let on_probe_table = |candidate: &str| {
+        live.tables
+            .get(table)
+            .and_then(|t| t.indexes.iter().find(|i| i.name == candidate))
+    };
+    // The name-to-owner answer, in ONE place: the table (other than the probe's)
+    // that already carries `candidate`, or `None`. Both the presence tests below and
+    // the fail-closed owner report read it, so a hit and the table it names can never
+    // disagree.
+    let other_owner = |candidate: &str| -> Option<&str> {
+        schema_wide
+            .then(|| {
+                live.tables
+                    .iter()
+                    .find(|(other, t)| {
+                        other.as_str() != table && t.indexes.iter().any(|i| i.name == candidate)
+                    })
+                    .map(|(other, _)| other.as_str())
+            })
+            .flatten()
+    };
+    // OWNERSHIP-ONLY (an unguarded create on a schema-wide-index-name dialect):
+    // decide on the name's owner and nothing else. A different owner is a create the
+    // engine's `IF NOT EXISTS` would skip while the journal recorded it done, so fail
+    // closed naming the owner; anything else runs the statement, which keeps the
+    // same-table re-run the idempotent no-op crash recovery replays. Returns before the
+    // truncation backstop on purpose: that backstop refuses EVERY over-long
+    // `IfNotExists` name, and an unguarded create carries no author request to be
+    // refused on a name PostgreSQL accepts today.
+    //
+    // Does NOT verify shape (ownership is the whole decision here; the guarded path
+    // below keeps the shape verify). Does NOT cover truncation collisions: authoring
+    // validation refuses an over-long create-side identifier on every dialect before
+    // lowering, and the `truncated_identifier_backstop` just below owns them for the
+    // guarded path. Does NOT cover MySQL, where index names are per table and a same
+    // name on another table is not a collision.
+    if ownership_only {
+        return match other_owner(name) {
+            Some(owner) => drift(
+                &format!("index {name}"),
+                "table",
+                table,
+                &format!("{owner} (the name is already taken schema-wide)"),
+            ),
+            None => GuardVerdict::RunBare,
+        };
+    }
+    if let Some(verdict) =
+        truncated_identifier_backstop("index", name, direction, vendor, |candidate| {
+            on_probe_table(candidate).is_some() || other_owner(candidate).is_some()
+        })
+    {
+        return verdict;
+    }
+    let live_idx = on_probe_table(name);
+    match direction {
+        GuardDir::IfExists => {
+            // dropIndex: presence-only on the index name. The table hint may be
+            // absent/empty on this path (the probe carries `String::new()` when the
+            // op omitted it), so a schema-wide name still resolves through the wider
+            // scan. On MySQL the drop names its table, and an index found under
+            // another table is a different object.
+            //
+            // This branch has NO test on any dialect: no test in this workspace
+            // authors a guarded `dropIndex`, and every `GuardProbe::Index` unit test
+            // below drives `IfNotExists`. A hole, not a handoff.
+            if live_idx.is_some() || other_owner(name).is_some() {
+                GuardVerdict::RunBare
+            } else {
+                GuardVerdict::SatisfiedNoop
+            }
+        }
+        GuardDir::IfNotExists => {
+            let Some(live_idx) = live_idx else {
+                // The declared index is absent from ITS table. Where index names are
+                // schema-wide, a same-name index on another table means the CREATE
+                // cannot succeed and the declared index does not exist: fail closed
+                // naming the owner rather than no-op over it, which would journal the
+                // migration complete while the index was never created. Does NOT
+                // rename or relocate anything: the remedy is the author's.
+                if let Some(owner) = other_owner(name) {
+                    return drift(
+                        &format!("index {name}"),
+                        "table",
+                        table,
+                        &format!("{owner} (the name is already taken schema-wide)"),
+                    );
+                }
+                return GuardVerdict::RunBare; // absent -> create it.
+            };
+            // Present: prove (unique, columns) equality. An expression / partial
+            // index fails closed: this probe contract carries only a plain
+            // column-list expectation, so expression/predicate equivalence cannot
+            // be proven here.
+            if live_idx.predicate.is_some()
+                || live_idx.elements.iter().any(|element| {
+                    matches!(element, crate::snapshot::IndexElementSnapshot::Expr(_))
+                })
+            {
+                return drift(
+                    &format!("index {name}"),
+                    "elements",
+                    "<plain column-list index>",
+                    "<expression/partial index — cannot prove equivalence>",
+                );
+            }
+            let Some((unique, columns)) = expect else {
+                return drift(
+                    &format!("index {name}"),
+                    "unique",
+                    "<declared but unverifiable>",
+                    "<present>",
+                );
+            };
+            if *unique != live_idx.unique {
+                return drift(
+                    &format!("index {name}"),
+                    "unique",
+                    &unique.to_string(),
+                    &live_idx.unique.to_string(),
+                );
+            }
+            if columns != &live_idx.columns {
+                return drift(
+                    &format!("index {name}"),
+                    "columns",
+                    &columns.join(","),
+                    &live_idx.columns.join(","),
+                );
+            }
+            GuardVerdict::SatisfiedNoop
+        }
+    }
+}
+
+fn decide_constraint(
+    table: &str,
+    name: &str,
+    direction: GuardDir,
+    expect_kind: Option<&str>,
+    expect_definition: Option<&str>,
+    live: &SchemaSnapshot,
+    vendor: &BackendVendor,
+) -> GuardVerdict {
+    let find = |candidate: &str| {
+        let table = live.tables.get(table)?;
+        if let Some(constraint) = table
+            .constraints
+            .iter()
+            .find(|constraint| constraint.name == candidate)
+        {
+            return Some((constraint.kind.as_str(), constraint.definition.as_str()));
+        }
+        // MySQL's catalog collapses a named table UNIQUE and its backing index
+        // into one key object. Resolve constraints first because PRIMARY KEY is
+        // filed in both buckets.
+        if vendor
+            .existence_probe
+            .unique_index_carries_constraint_identity()
+            && table
+                .indexes
+                .iter()
+                .any(|index| index.name == candidate && index.unique)
+        {
+            return Some(("UNIQUE", ""));
+        }
+        None
+    };
+    if let Some(verdict) =
+        truncated_identifier_backstop("constraint", name, direction, vendor, |candidate| {
+            find(candidate).is_some()
+        })
+    {
+        return verdict;
+    }
+    let live_con = find(name);
+    match direction {
+        GuardDir::IfExists => {
+            // dropConstraint: presence-only on the constraint name.
+            if live_con.is_some() {
+                GuardVerdict::RunBare
+            } else if let Some(reason) = vendor.existence_probe.unresolved_constraint_drop_reason()
+            {
+                // This backend's registered snapshot scope cannot prove absence.
+                // A no-op could skip a real DROP while journaling the migration as
+                // completed, so preserve the fail-closed conclusion.
+                drift(
+                    &format!("constraint {name}"),
+                    "presence",
+                    "<absent>",
+                    reason,
+                )
+            } else {
+                GuardVerdict::SatisfiedNoop
+            }
+        }
+        GuardDir::IfNotExists => {
+            let Some((live_kind, live_definition)) = live_con else {
+                return GuardVerdict::RunBare; // absent -> add it.
+            };
+            // Present. A kind clash is the clearest divergence.
+            if let Some(kind) = expect_kind {
+                if kind != live_kind {
+                    return drift(&format!("constraint {name}"), "kind", kind, live_kind);
+                }
+            }
+            // **F2 - structural compare when a byte-comparable definition is
+            // available.** The `createTable` deferred-FK unit stamps the declared FK
+            // body in the EXACT `pg_get_constraintdef` spelling
+            // (`declarative::fk_definition_pg`), so a present same-name + same-kind FK
+            // CAN be proven equal: a byte-equal live definition is an idempotent
+            // `SatisfiedNoop` (a re-run of the guarded `createTable ifNotExists`
+            // succeeds instead of hard-FailDrift), and a divergent one (a re-pointed
+            // FK target / changed column / ON-DELETE) is a real divergence we still
+            // refuse, naming `definition`. The compare normalizes the referenced-table
+            // SCHEMA QUALIFIER out of both sides through the registered backend
+            // policy: the
+            // declared side is always `REFERENCES <schema>.<table>` but
+            // `pg_get_constraintdef` OMITS the schema when the referenced table is in
+            // the live `search_path` (it is - same project schema, cross-app FKs are
+            // rejected at author time), so the qualifier is search_path-sensitive noise.
+            // Every MATERIAL divergence (target table, columns, ON DELETE/UPDATE,
+            // DEFERRABLE) survives the normalization and is still caught.
+            if let Some(decl_def) = expect_definition {
+                if vendor
+                    .existence_probe
+                    .normalize_constraint_definition(decl_def)
+                    == vendor
+                        .existence_probe
+                        .normalize_constraint_definition(live_definition)
+                {
+                    return GuardVerdict::SatisfiedNoop;
+                }
+                return drift(
+                    &format!("constraint {name}"),
+                    "definition",
+                    decl_def,
+                    if live_definition.is_empty() {
+                        "<present>"
+                    } else {
+                        live_definition
+                    },
+                );
+            }
+            // Fail-closed over a catalog-exposed divergence. With NO
+            // byte-comparable declared definition (the stand-alone `addConstraint
+            // ifNotExists` path), a same-name + same-kind constraint is NOT a
+            // SatisfiedNoop: the live `pg_get_constraintdef` definition cannot be
+            // byte-compared against the IR's un-normalized constraint body, so we
+            // cannot PROVE the predicate (a rewritten CHECK, a different FK target /
+            // column / ON-DELETE) is equal. We refuse rather than skip. The realistic
+            // `ifNotExists` use (the constraint is ABSENT) still RunBare above.
+            drift(
+                &format!("constraint {name}"),
+                "definition",
+                "<declared constraint — cannot prove equal to the live catalog definition>",
+                if live_definition.is_empty() {
+                    "<present>"
+                } else {
+                    live_definition
+                },
+            )
+        }
+    }
+}
+
+/// Refuse a guarded op whose authored name the selected backend silently truncates,
+/// so the verdict can never be a no-op the journal then records as done work.
+///
+/// A migration carrying a probe can reach the executor without lowering ever having run
+/// - `Migration::existence_guard` is a public field on a struct that is not
+/// `#[non_exhaustive]`, in a crate a consumer can depend on directly - so the bound the
+/// load gate and the lower seam enforce needs a last line here.
+///
+/// The rule is deliberately narrow, because a blanket refusal would break migrations
+/// that are correct today:
+///
+/// - `IfExists` - derive PostgreSQL's own truncated spelling and look THAT up in the
+///   same lookup scope. A present truncation means the miss on the authored name was a
+///   lie: the object is there and the drop would be skipped. An absent truncation means
+///   the drop's postcondition genuinely holds, so the ordinary satisfied no-op stands.
+/// - `IfNotExists` - refuse before the lookup, because `RunBare` would CREATE an object
+///   under the truncated name while the engine carries the authored one.
+///
+/// Whether truncation occurs, and the catalog spelling it produces, are required
+/// answers on the selected backend's [`ExistenceProbePolicy`].
+fn truncated_identifier_backstop(
+    kind: &str,
+    name: &str,
+    direction: GuardDir,
+    vendor: &BackendVendor,
+    present: impl Fn(&str) -> bool,
+) -> Option<GuardVerdict> {
+    let truncated = vendor.existence_probe.truncated_identifier(name)?;
+    match direction {
+        GuardDir::IfNotExists => Some(drift(
+            &format!("{kind} {name}"),
+            "name",
+            name,
+            &format!(
+                "<{} bytes; {} would create {truncated:?} instead>",
+                name.len(),
+                vendor.descriptor.display_name
+            ),
+        )),
+        GuardDir::IfExists => present(&truncated).then(|| {
+            drift(
+                &format!("{kind} {name}"),
+                "name",
+                name,
+                // Named exactly as the catalog holds it, which is also the remedy: name
+                // the object as PostgreSQL truncated it.
+                &truncated,
+            )
+        }),
+    }
+}
+
+/// Whether `table.column` exists in the live snapshot.
+fn column_present(live: &SchemaSnapshot, table: &str, column: &str) -> bool {
+    live.tables
+        .get(table)
+        .is_some_and(|t| t.columns.iter().any(|c| c.name == column))
+}
+
+/// Build a `FailDrift` verdict.
+fn drift(object: &str, field: &str, expected: &str, actual: &str) -> GuardVerdict {
+    GuardVerdict::FailDrift(Divergence {
+        object: object.to_string(),
+        field: field.to_string(),
+        expected: expected.to_string(),
+        actual: actual.to_string(),
+    })
+}
+
+/// Vendor policy for existence-guard catalog decisions.
+///
+/// Every method is required. In particular, there is no shared "ordinary SQL"
+/// implementation for a fourth backend to inherit by omission: each backend must
+/// state its own catalog identity and truncation behavior.
+pub trait ExistenceProbePolicy: fmt::Debug + Sync {
+    /// Whether a same-name unique index is also the named unique constraint.
+    fn unique_index_carries_constraint_identity(&self) -> bool;
+
+    /// Why a missing constraint row does not prove an `ifExists` target absent.
+    ///
+    /// `None` means this backend's snapshot covers the full constraint identity
+    /// scope used by the probe, so a miss is proof of absence. `Some` supplies the
+    /// backend-owned fail-closed diagnostic.
+    fn unresolved_constraint_drop_reason(&self) -> Option<&'static str>;
+
+    /// Normalize a declared/live constraint definition for this catalog's
+    /// structural comparison.
+    fn normalize_constraint_definition(&self, definition: &str) -> String;
+
+    /// The catalog spelling created for `authored`, when the backend silently
+    /// truncates it. `None` means the backend does not silently truncate this name.
+    fn truncated_identifier(&self, authored: &str) -> Option<String>;
+}

@@ -1,0 +1,53 @@
+use zero_migrate_ir::backend::{
+    BackendDescriptor, Capability, CapabilitySet, IdentifierLimit, Limits,
+};
+
+use crate::DIALECT;
+
+/// PostgreSQL's capability answers.
+pub const POSTGRES_CAPABILITIES: CapabilitySet = CapabilitySet::empty()
+    .with(Capability::NonPkIdentity)
+    .with(Capability::CrossSchemaDdl)
+    .with(Capability::TableLevelForeignKey)
+    .with(Capability::TableLevelUnique)
+    .with(Capability::NonBtreeIndexMethod)
+    .with(Capability::PartialIndexPredicate)
+    .with(Capability::NativeAlterColumn)
+    .with(Capability::AlterTableAddConstraint)
+    .with(Capability::AlterTableDropConstraint)
+    .with(Capability::AlterTableValidateConstraint)
+    .with(Capability::InsertOnConflictClause)
+    .with(Capability::PrivilegedCatalogObjects)
+    .with(Capability::MaterializedView)
+    .with(Capability::CreateOrReplaceView)
+    .with(Capability::TriggerTruncateEvent)
+    .with(Capability::TriggerStatementForEach)
+    .with(Capability::TriggerExecuteFunction)
+    .with(Capability::MaterializedEnumType)
+    .with(Capability::MaterializedDomainType)
+    .with(Capability::Sequence)
+    .with(Capability::ExclusionConstraint)
+    .with(Capability::CommentOn)
+    .with(Capability::SchemaWideIndexNames)
+    .with(Capability::TransactionalDdl)
+    .with(Capability::DeferrableConstraint)
+    .with(Capability::UniqueConstraintDistinctFromIndex)
+    // A partition here is a relation: `CREATE TABLE ... PARTITION OF`, `ATTACH`,
+    // `DETACH` (yielding a standalone table) and `DROP` all name one. The four
+    // `DdlEmitter` partition methods below spell every one of them.
+    .with(Capability::PartitionRelationDdl);
+
+/// The PostgreSQL backend descriptor.
+pub static POSTGRES_DESCRIPTOR: BackendDescriptor = BackendDescriptor {
+    id: DIALECT,
+    display_name: "PostgreSQL",
+    capabilities: POSTGRES_CAPABILITIES,
+    limits: Limits {
+        // `NAMEDATALEN - 1`. Anything longer is truncated with only a NOTICE.
+        identifier: IdentifierLimit::Bytes(63),
+        // The system catalog namespace. `pg_` is reserved for catalog objects and
+        // for the `pg_catalog` schema; a user object under it is a collision the
+        // server does not always refuse. Core used to hold this string itself.
+        reserved_identifier_prefixes: &["pg_"],
+    },
+};

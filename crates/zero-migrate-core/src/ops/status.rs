@@ -1,0 +1,2238 @@
+//! Status + history read API - **read-only**.
+//!
+//! [`status_via_backend`] answers "where is this project's schema?" - what's
+//! applied, what's pending (in the exact order apply will run it), and the current
+//! version. [`history_via_backend`] returns the FULL append-only audit log (every
+//! apply + every rollback event, in order), the tamper-evident record of every
+//! state transition the journal ever saw.
+//!
+//! Both go through [`MigrationBackend`](crate::apply::backend::MigrationBackend).
+//! Neither takes a connection plus a `dialect` argument any more: that shape is
+//! what let these verbs NAME a dialect and then read PostgreSQL's journal
+//! regardless. The one read the neutral trait cannot serve - full
+//! [`RolledBackEntry`](crate::apply::journal::RolledBackEntry) detail - stayed with the vendor that has it, in
+//! `zero_migrate_postgres::backend::status_sql`.
+//!
+//! This module emits NO DDL and mutates nothing - it surfaces journal state. It
+//! reuses the journal's NET-state reader (the backend's
+//! [`applied`](crate::apply::backend::MigrationBackend::applied)) and the
+//! executor's pending-ordering (`crate::apply::executor::order_pending`) so status's
+//! view of "applied" and "pending" is byte-for-byte the view apply itself uses.
+
+use std::collections::{BTreeSet, HashMap, HashSet};
+
+// No `SqlSession` here. Every verb in this module is generic over
+// `MigrationBackend` and emits SQL only through it; a raw connection plus a
+// `dialect` argument was exactly the shape that let the neutral verbs read
+// PostgreSQL's journal whatever dialect the caller named.
+use crate::apply::backend::{BackfillProgressEntry, ProjectLockAcquisition, ProjectLockHolder};
+use crate::apply::executor::order_pending;
+use crate::apply::journal::{self, AppliedEntry, HistoryEvent, Phase};
+use crate::conn::ExecutorConfig;
+use crate::model::migration::{Checksum, Migration, MigrationId};
+use crate::render::plan::AppliedPlan;
+use crate::render::step::{PlanStep, RenameStep};
+
+/// The journal-visible kind of one executable step in an [`AppliedPlan`].
+///
+/// An online rename is deliberately flattened to the migrations its backend
+/// actually journals. This keeps status aligned with apply instead of treating
+/// the structured rename wrapper as a fictitious journal entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanStatusStepKind {
+    /// An ordinary DDL migration.
+    Ddl,
+    /// A parameterized, one-shot data mutation.
+    Dml,
+    /// A resumable data backfill.
+    Backfill,
+    /// An import-time identity-generator reconciliation.
+    SynchronizeIdentity,
+    /// One PostgreSQL expand migration of an online rename.
+    OnlineExpand,
+    /// One PostgreSQL deferred-contract migration of an online rename.
+    OnlineContract,
+    /// The journal migration for an atomic table rebuild - the strategy a backend
+    /// selects when it has no native online form for the change, not one backend's name.
+    TableRebuild,
+}
+
+impl PlanStatusStepKind {
+    /// Stable wire spelling used by the Node status projection.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ddl => "ddl",
+            Self::Dml => "dml",
+            Self::Backfill => "backfill",
+            Self::SynchronizeIdentity => "synchronizeIdentity",
+            Self::OnlineExpand => "onlineExpand",
+            Self::OnlineContract => "onlineContract",
+            Self::TableRebuild => "tableRebuild",
+        }
+    }
+}
+
+/// The expected journal identity of one lowered plan step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanStatusManifestStep {
+    /// Stable journal version for this executable step.
+    pub version: MigrationId,
+    /// User-facing step label.
+    pub name: String,
+    /// Authoritative checksum expected in the completed journal event.
+    pub checksum: Checksum,
+    /// The executable step kind.
+    pub kind: PlanStatusStepKind,
+    /// Whether this DDL identity is a genuine journaled repeatable.
+    pub repeatable: bool,
+    /// Cursor-stability mode for resumable backfills. `None` for every other
+    /// executable step.
+    pub cursor_stability_mode: Option<String>,
+    /// The explicitly approved application/maintenance invariant name when the
+    /// mode is `externalInvariant`.
+    pub cursor_stability_invariant: Option<String>,
+    /// Named operator assertion that concurrent identity allocation is quiesced.
+    pub writes_quiesced: Option<String>,
+}
+
+/// A journal-reconcilable projection of one complete [`AppliedPlan`].
+///
+/// This projection is intentionally separate from `Migration`: DML and backfill
+/// are real executable steps but cannot be represented by a flat migration list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanStatusManifest {
+    /// Stable logical identity of the authored plan.
+    pub version: MigrationId,
+    /// User-facing plan name.
+    pub name: String,
+    /// Authoritative checksum of the complete authored artifact.
+    pub checksum: Checksum,
+    /// Ordered journal-visible steps.
+    pub steps: Vec<PlanStatusManifestStep>,
+    /// Plan-level dependencies, expressed in logical plan identities.
+    pub depends_on: Vec<MigrationId>,
+}
+
+impl PlanStatusManifest {
+    /// Flatten a lowered plan to the exact identities its execution path journals.
+    ///
+    /// `depends_on` comes from [`crate::render::lower::LoweredArtifact`] rather
+    /// than `AppliedPlan`: the guarded IR loader retains the author-declared
+    /// dependency strings alongside the executable plan for the pending-contract
+    /// interlock.
+    ///
+    /// # Errors
+    /// Returns [`StatusError::PlanManifest`] when a dependency is not a valid
+    /// migration/plan id.
+    pub fn from_applied_plan(
+        plan: &AppliedPlan,
+        depends_on: &[String],
+    ) -> Result<Self, StatusError> {
+        fn migration_step(
+            migration: &Migration,
+            kind: PlanStatusStepKind,
+        ) -> PlanStatusManifestStep {
+            PlanStatusManifestStep {
+                version: migration.version.clone(),
+                name: migration.name.clone(),
+                checksum: migration.checksum.clone(),
+                kind,
+                repeatable: migration.flags.repeatable,
+                cursor_stability_mode: None,
+                cursor_stability_invariant: None,
+                writes_quiesced: None,
+            }
+        }
+
+        let mut steps = Vec::new();
+        for step in &plan.steps {
+            match step {
+                PlanStep::Ddl(migration) => {
+                    steps.push(migration_step(migration, PlanStatusStepKind::Ddl));
+                }
+                PlanStep::Dml {
+                    version,
+                    checksum,
+                    name,
+                    ..
+                } => steps.push(PlanStatusManifestStep {
+                    version: version.clone(),
+                    name: name.clone(),
+                    checksum: checksum.clone(),
+                    kind: PlanStatusStepKind::Dml,
+                    repeatable: false,
+                    cursor_stability_mode: None,
+                    cursor_stability_invariant: None,
+                    writes_quiesced: None,
+                }),
+                PlanStep::Backfill {
+                    version,
+                    checksum,
+                    spec,
+                } => {
+                    let (mode, invariant) = match &spec.cursor_stability {
+                        crate::model::ir::CursorStability::GuardUpdates => {
+                            ("guardUpdates".to_string(), None)
+                        }
+                        crate::model::ir::CursorStability::ExternalInvariant { name } => {
+                            ("externalInvariant".to_string(), Some(name.clone()))
+                        }
+                    };
+                    steps.push(PlanStatusManifestStep {
+                        version: version.clone(),
+                        name: spec.name.clone(),
+                        checksum: checksum.clone(),
+                        kind: PlanStatusStepKind::Backfill,
+                        repeatable: false,
+                        cursor_stability_mode: Some(mode),
+                        cursor_stability_invariant: invariant,
+                        writes_quiesced: None,
+                    });
+                }
+                PlanStep::AlterPrimaryKey(step) => {
+                    steps.push(migration_step(&step.migration, PlanStatusStepKind::Ddl));
+                }
+                PlanStep::AlterColumnType(step) => {
+                    steps.push(migration_step(&step.migration, PlanStatusStepKind::Ddl));
+                }
+                PlanStep::SynchronizeIdentity(step) => {
+                    let mut status =
+                        migration_step(&step.migration, PlanStatusStepKind::SynchronizeIdentity);
+                    status.writes_quiesced = Some(step.writes_quiesced.clone());
+                    steps.push(status);
+                }
+                PlanStep::OnlineRename(RenameStep::ExpandContract(rename)) => {
+                    steps.extend(
+                        rename
+                            .expand
+                            .iter()
+                            .map(|m| migration_step(m, PlanStatusStepKind::OnlineExpand)),
+                    );
+                    steps.extend(
+                        rename
+                            .contract
+                            .iter()
+                            .map(|m| migration_step(m, PlanStatusStepKind::OnlineContract)),
+                    );
+                }
+                PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild)) => {
+                    steps.push(migration_step(
+                        &rebuild.migration,
+                        PlanStatusStepKind::TableRebuild,
+                    ));
+                }
+            }
+        }
+
+        let depends_on = depends_on
+            .iter()
+            .map(|dependency| {
+                MigrationId::parse(dependency).map_err(|error| {
+                    StatusError::PlanManifest(format!(
+                        "plan {} has invalid dependency {dependency:?}: {error}",
+                        plan.version.as_str()
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Self {
+            version: plan.version.clone(),
+            name: plan.name.clone(),
+            checksum: plan.checksum.clone(),
+            steps,
+            depends_on,
+        })
+    }
+}
+
+/// Net journal state of one expected plan step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanStatusStepState {
+    /// No journal evidence exists for this step.
+    Pending,
+    /// A non-transactional `started` marker exists but completion does not.
+    Inflight,
+    /// The step has a matching completed journal event.
+    Applied,
+    /// The enclosing online rename was explicitly aborted, so this deferred
+    /// contract step will never run for the authored plan.
+    Aborted,
+    /// The stable step id exists with a different checksum.
+    Drifted,
+}
+
+impl PlanStatusStepState {
+    /// Stable wire spelling used by the Node status projection.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Inflight => "inflight",
+            Self::Applied => "applied",
+            Self::Aborted => "aborted",
+            Self::Drifted => "drifted",
+        }
+    }
+}
+
+/// Reconciled status of one expected plan step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanStatusStep {
+    /// Stable journal version.
+    pub version: MigrationId,
+    /// User-facing step label.
+    pub name: String,
+    /// Executable step kind.
+    pub kind: PlanStatusStepKind,
+    /// Net state relative to the journal.
+    pub state: PlanStatusStepState,
+    /// The journal checksum when a row/marker exists. Kept for drift diagnostics.
+    pub journal_checksum: Option<String>,
+    /// Cursor-stability mode for a resumable backfill.
+    pub cursor_stability_mode: Option<String>,
+    /// Named external invariant prominently retained for operator status.
+    pub cursor_stability_invariant: Option<String>,
+    /// Named no-concurrent-writer assertion retained prominently for operators.
+    pub writes_quiesced: Option<String>,
+}
+
+/// A net-applied or inflight journal identity absent from every supplied plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnexpectedJournalEntry {
+    /// Stable journal identity that no supplied manifest owns.
+    pub version: String,
+    /// `Applied` for a completed event or `Inflight` for a started marker.
+    pub state: PlanStatusStepState,
+    /// Checksum retained for operator diagnostics.
+    pub journal_checksum: String,
+    /// Journaled migration kind, absent for an inflight marker.
+    pub journal_kind: Option<journal::JournaledKind>,
+}
+
+/// Aggregate state of one supplied plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconciledPlanState {
+    /// Every expected step has a matching completed event.
+    Applied,
+    /// Every non-contract step completed and at least one deferred online
+    /// contract was explicitly aborted. This is terminal, but not applied.
+    Aborted,
+    /// No step has started.
+    Pending,
+    /// Some journal evidence exists, but not every step is complete.
+    Partial,
+    /// At least one stable step id has a mismatched checksum.
+    Drifted,
+    /// A supplied dependency has not completed.
+    Blocked,
+    /// A dependency plan was omitted, so the current journal schema cannot prove
+    /// whether it completed. This is deliberately fail-closed.
+    UnknownDependency,
+}
+
+impl ReconciledPlanState {
+    /// Stable wire spelling used by the Node status projection.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::Aborted => "aborted",
+            Self::Pending => "pending",
+            Self::Partial => "partial",
+            Self::Drifted => "drifted",
+            Self::Blocked => "blocked",
+            Self::UnknownDependency => "unknownDependency",
+        }
+    }
+}
+
+/// Reconciled status of one supplied plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconciledPlan {
+    /// Stable logical plan id.
+    pub version: MigrationId,
+    /// User-facing plan name.
+    pub name: String,
+    /// Aggregate plan state.
+    pub state: ReconciledPlanState,
+    /// Ordered status of every journal-visible step.
+    pub steps: Vec<PlanStatusStep>,
+    /// Dependencies absent from the supplied manifest set. They cannot be mapped
+    /// from current step-only journal rows back to a logical plan id.
+    pub missing_dependencies: Vec<MigrationId>,
+}
+
+/// Plan-aware status over a supplied set of complete lowered plans.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedPlanStatus {
+    /// Last fully applied supplied plan in canonical dependency/input order.
+    pub current_version: Option<MigrationId>,
+    /// Fully applied logical plan ids.
+    pub applied: Vec<MigrationId>,
+    /// Every runnable or blocked logical plan id, including drifted and unknown
+    /// plans. Terminally aborted plans are excluded.
+    pub pending: Vec<MigrationId>,
+    /// Terminally aborted logical plan ids.
+    pub aborted: Vec<MigrationId>,
+    /// Versions whose latest journal event is a rollback.
+    pub rolled_back: Vec<String>,
+    /// Per-plan and per-step detail.
+    pub plans: Vec<ReconciledPlan>,
+    /// Completed or inflight journal identities absent from every supplied plan.
+    pub unexpected_journal: Vec<UnexpectedJournalEntry>,
+    /// Outstanding cross-deploy online contracts.
+    pub pending_contracts: Vec<PendingContractStatus>,
+    /// Plans blocked specifically by an outstanding online-contract dependency.
+    pub blocked: Vec<BlockedPlan>,
+}
+
+/// One terminal pending-contract event used to reconcile an authored plan.
+///
+/// Terminal resolutions overlay their matching deferred C1/C2 steps because
+/// the resolver journals one atomic migration instead of the individual steps.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedPendingContract {
+    /// Durable E2 obligation key used to derive resolver-owned step ids.
+    pub pending_version: String,
+    /// Stable logical plan identity that owns the online rename.
+    pub plan_version: String,
+    /// Deferred C1/C2 journal identities owned by the obligation.
+    pub contract_versions: Vec<String>,
+    /// Terminal action recorded for the obligation.
+    pub resolution: journal::Resolution,
+}
+
+// The status VOCABULARY moved down to the backend contract: `MigrationStatus` and the
+// two derived cross-deploy views over it, plus the error the read API refuses with.
+// A vendor journal reader fills in the same struct the neutral verb below fills in -
+// `zero-migrate-postgres`'s `status_sql` reads its own journal under a snapshot
+// isolation statement no other vendor accepts, and then answers this exact question.
+// Two copies of the vocabulary would be two answers that drift. Re-exported so every
+// `crate::ops::status::...` path (and the flattened root re-exports) resolves unchanged.
+pub use zero_migrate_backend::status::{BlockedPlan, MigrationStatus, PendingContractStatus};
+
+/// What a status read produced: a reconciled verdict, or the report that a peer's
+/// deploy holds the project lock.
+///
+/// Contention is an outcome rather than a [`StatusError`] because the callers that
+/// see it decide exit codes: a strict CI gate must be able to tell "a deploy is
+/// running" apart from "this migration set is dirty", and an error collapses the
+/// two.
+///
+/// [`ProjectLockBusy`](Self::ProjectLockBusy) means NO catalog or journal read ran.
+/// Reading without the lock is not an option: the reads are composite (catalog,
+/// then journal, then contracts) with no transaction bracketing them, and a
+/// non-transactional apply genuinely commits its inflight marker before the DDL
+/// and its completed row after, so a reader that skipped the lock would report a
+/// deploy's own halfway state as drift. The lock is also what tells a running
+/// deploy apart from a marker an interrupted one left behind.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum StatusSnapshot<S> {
+    /// The lock was taken, the reads ran, and this is the reconciled verdict.
+    Ready(S),
+    /// A peer holds the project lock; these are the sessions reported holding it.
+    ProjectLockBusy(Vec<ProjectLockHolder>),
+}
+
+impl<S> StatusSnapshot<S> {
+    /// The reconciled verdict, or `None` when a peer held the project lock.
+    pub fn ready(self) -> Option<S> {
+        match self {
+            Self::Ready(status) => Some(status),
+            Self::ProjectLockBusy(_) => None,
+        }
+    }
+
+    /// The reconciled verdict, panicking with `message` when a peer held the lock.
+    ///
+    /// For callers that have arranged for there to be no peer -- tests and
+    /// single-writer embedders -- so an unexpected contention is loud instead of
+    /// silently reconciling against nothing.
+    ///
+    /// # Panics
+    /// Panics when the snapshot is [`ProjectLockBusy`](Self::ProjectLockBusy).
+    #[must_use]
+    pub fn expect_ready(self, message: &str) -> S {
+        match self {
+            Self::Ready(status) => status,
+            Self::ProjectLockBusy(holders) => {
+                panic!("{message}: the project lock is held by {holders:?}")
+            }
+        }
+    }
+}
+
+pub use zero_migrate_backend::status::StatusError;
+
+/// Reconcile complete lowered-plan manifests against net journal state.
+///
+/// The function is pure: backend readers call it after obtaining one net-state
+/// snapshot, while unit tests exercise the exact same classification without a
+/// database. Plans are ordered by their supplied dependency DAG; ties retain the
+/// caller's order. Step order is always the order apply executes.
+///
+/// A dependency absent from `manifests` is not guessed from unrelated journal
+/// step ids. Current journal rows do not carry their logical `plan_version`, so an
+/// omitted dependency is surfaced as [`ReconciledPlanState::UnknownDependency`]
+/// until the dependency plan is supplied.
+///
+/// # Errors
+/// Returns [`StatusError::PlanManifest`] for duplicate plan/step identities or a
+/// dependency cycle among supplied plans.
+pub fn reconcile_applied_plans(
+    manifests: &[PlanStatusManifest],
+    journal_entries: &[AppliedEntry],
+    outstanding: &[journal::PendingContract],
+) -> Result<AppliedPlanStatus, StatusError> {
+    reconcile_applied_plans_with_progress(manifests, journal_entries, &[], outstanding)
+}
+
+/// Reconcile complete lowered-plan manifests against journal and backfill
+/// progress evidence.
+///
+/// A matching progress row means its stable step has started even when no
+/// ordinary journal event exists yet. A missing or different progress checksum
+/// is drift. A matching completed journal event remains authoritative over the
+/// mutable progress table.
+///
+/// # Errors
+///
+/// Returns [`StatusError::PlanManifest`] for duplicate plan/step identities or a
+/// dependency cycle among supplied plans.
+pub fn reconcile_applied_plans_with_progress(
+    manifests: &[PlanStatusManifest],
+    journal_entries: &[AppliedEntry],
+    backfill_progress: &[BackfillProgressEntry],
+    outstanding: &[journal::PendingContract],
+) -> Result<AppliedPlanStatus, StatusError> {
+    reconcile_applied_plans_with_snapshot(
+        manifests,
+        journal_entries,
+        backfill_progress,
+        outstanding,
+        &[],
+    )
+}
+
+/// Reconcile one coherent backend snapshot, including net rollbacks.
+///
+/// This is the complete pure status fold used by the backend reader. The
+/// convenience functions above omit mutable progress or rollback evidence when
+/// their caller does not have it.
+///
+/// # Errors
+/// Returns [`StatusError::PlanManifest`] for duplicate plan/step identities or a
+/// dependency cycle among supplied plans.
+pub fn reconcile_applied_plans_with_snapshot(
+    manifests: &[PlanStatusManifest],
+    journal_entries: &[AppliedEntry],
+    backfill_progress: &[BackfillProgressEntry],
+    outstanding: &[journal::PendingContract],
+    rolled_back: &[String],
+) -> Result<AppliedPlanStatus, StatusError> {
+    reconcile_applied_plans_with_resolutions(
+        manifests,
+        journal_entries,
+        backfill_progress,
+        outstanding,
+        &[],
+        rolled_back,
+    )
+}
+
+/// Reconcile one coherent backend snapshot, including terminal online-contract
+/// resolutions.
+///
+/// A terminal resolution overlays the matching deferred contract steps with its
+/// outcome. An abort removes the plan from the pending queue once every other
+/// step is applied. Atomic resolver entries, plus legacy per-step abort entries,
+/// are recognized as lifecycle evidence instead of unexpected journal data.
+///
+/// # Errors
+/// Returns [`StatusError::PlanManifest`] for duplicate plan/step identities or a
+/// dependency cycle among supplied plans.
+pub fn reconcile_applied_plans_with_resolutions(
+    manifests: &[PlanStatusManifest],
+    journal_entries: &[AppliedEntry],
+    backfill_progress: &[BackfillProgressEntry],
+    outstanding: &[journal::PendingContract],
+    resolved: &[ResolvedPendingContract],
+    rolled_back: &[String],
+) -> Result<AppliedPlanStatus, StatusError> {
+    let order = order_plan_manifests(manifests)?;
+
+    let mut seen_steps: HashMap<&str, (&str, &str)> = HashMap::new();
+    for manifest in manifests {
+        for step in &manifest.steps {
+            if let Some((other_plan, other_name)) = seen_steps.insert(
+                step.version.as_str(),
+                (manifest.version.as_str(), step.name.as_str()),
+            ) {
+                return Err(StatusError::PlanManifest(format!(
+                    "step version {} is shared by plan {} ({other_name:?}) and plan {} ({:?})",
+                    step.version.as_str(),
+                    other_plan,
+                    manifest.version.as_str(),
+                    step.name
+                )));
+            }
+        }
+    }
+
+    let journal_by_version: HashMap<&str, &AppliedEntry> = journal_entries
+        .iter()
+        .map(|entry| (entry.version.as_str(), entry))
+        .collect();
+    let progress_by_version: HashMap<&str, &BackfillProgressEntry> = backfill_progress
+        .iter()
+        .map(|entry| (entry.version.as_str(), entry))
+        .collect();
+    let supplied_by_version: HashMap<&str, usize> = manifests
+        .iter()
+        .enumerate()
+        .map(|(index, manifest)| (manifest.version.as_str(), index))
+        .collect();
+    let mut applied_contracts_by_plan: HashMap<&str, HashSet<&str>> = HashMap::new();
+    let mut aborted_contracts_by_plan: HashMap<&str, HashSet<&str>> = HashMap::new();
+    let mut known_resolver_versions = HashSet::new();
+    for terminal in resolved {
+        match terminal.resolution {
+            journal::Resolution::Applied => {
+                applied_contracts_by_plan
+                    .entry(terminal.plan_version.as_str())
+                    .or_default()
+                    .extend(terminal.contract_versions.iter().map(String::as_str));
+                known_resolver_versions.insert(
+                    crate::render::expand_contract::resolve_pending_apply_atomic_version(
+                        &terminal.pending_version,
+                    )
+                    .as_str()
+                    .to_string(),
+                );
+            }
+            journal::Resolution::Aborted => {
+                aborted_contracts_by_plan
+                    .entry(terminal.plan_version.as_str())
+                    .or_default()
+                    .extend(terminal.contract_versions.iter().map(String::as_str));
+                known_resolver_versions.insert(
+                    crate::render::expand_contract::resolve_pending_abort_atomic_version(
+                        &terminal.pending_version,
+                    )
+                    .as_str()
+                    .to_string(),
+                );
+                known_resolver_versions.extend(terminal.contract_versions.iter().enumerate().map(
+                    |(ordinal, _)| {
+                        crate::render::expand_contract::resolve_pending_abort_version(
+                            &terminal.pending_version,
+                            ordinal,
+                        )
+                        .as_str()
+                        .to_string()
+                    },
+                ));
+            }
+        }
+    }
+
+    let mut states_by_version: HashMap<&str, ReconciledPlanState> = HashMap::new();
+    let mut plans = Vec::with_capacity(manifests.len());
+
+    for index in order {
+        let manifest = &manifests[index];
+        let mut steps = Vec::with_capacity(manifest.steps.len());
+        for expected in &manifest.steps {
+            let (mut state, journal_checksum) = match journal_by_version
+                .get(expected.version.as_str())
+            {
+                Some(entry) if entry.phase == Phase::Completed => {
+                    let journaled_repeatable = entry
+                        .kind
+                        .is_some_and(journal::JournaledKind::is_repeatable);
+                    if journaled_repeatable != expected.repeatable {
+                        (PlanStatusStepState::Drifted, Some(entry.checksum.clone()))
+                    } else if entry.checksum != expected.checksum.as_str() {
+                        if expected.repeatable {
+                            // A changed genuine repeatable is the re-apply signal,
+                            // not checksum tampering.
+                            (PlanStatusStepState::Pending, Some(entry.checksum.clone()))
+                        } else {
+                            (PlanStatusStepState::Drifted, Some(entry.checksum.clone()))
+                        }
+                    } else {
+                        (PlanStatusStepState::Applied, Some(entry.checksum.clone()))
+                    }
+                }
+                Some(entry) if entry.checksum != expected.checksum.as_str() => {
+                    (PlanStatusStepState::Drifted, Some(entry.checksum.clone()))
+                }
+                Some(entry) => (PlanStatusStepState::Inflight, Some(entry.checksum.clone())),
+                None => match progress_by_version.get(expected.version.as_str()) {
+                    Some(progress)
+                        if progress.checksum.as_deref() != Some(expected.checksum.as_str()) =>
+                    {
+                        (PlanStatusStepState::Drifted, progress.checksum.clone())
+                    }
+                    Some(progress) if !progress.complete => {
+                        (PlanStatusStepState::Inflight, progress.checksum.clone())
+                    }
+                    // Completion is not authoritative until the ordinary journal
+                    // event exists. Treat this repairable gap as still inflight.
+                    Some(progress) => (PlanStatusStepState::Inflight, progress.checksum.clone()),
+                    None => (PlanStatusStepState::Pending, None),
+                },
+            };
+            let explicitly_aborted = expected.kind == PlanStatusStepKind::OnlineContract
+                && aborted_contracts_by_plan
+                    .get(manifest.version.as_str())
+                    .is_some_and(|versions| versions.contains(expected.version.as_str()));
+            let explicitly_applied = expected.kind == PlanStatusStepKind::OnlineContract
+                && applied_contracts_by_plan
+                    .get(manifest.version.as_str())
+                    .is_some_and(|versions| versions.contains(expected.version.as_str()));
+            if state != PlanStatusStepState::Drifted {
+                if explicitly_aborted {
+                    state = PlanStatusStepState::Aborted;
+                } else if explicitly_applied {
+                    state = PlanStatusStepState::Applied;
+                }
+            }
+            steps.push(PlanStatusStep {
+                version: expected.version.clone(),
+                name: expected.name.clone(),
+                kind: expected.kind,
+                state,
+                journal_checksum,
+                cursor_stability_mode: expected.cursor_stability_mode.clone(),
+                cursor_stability_invariant: expected.cursor_stability_invariant.clone(),
+                writes_quiesced: expected.writes_quiesced.clone(),
+            });
+        }
+
+        let raw_state = if steps
+            .iter()
+            .any(|step| step.state == PlanStatusStepState::Drifted)
+        {
+            ReconciledPlanState::Drifted
+        } else if steps.is_empty() {
+            // Production IR lowering emits a journaled no-op anchor for an empty
+            // selected dialect leg. An empty manifest therefore indicates a stale
+            // or malformed producer and must not be treated as applied without any
+            // checksum evidence.
+            ReconciledPlanState::Pending
+        } else if steps
+            .iter()
+            .all(|step| step.state == PlanStatusStepState::Applied)
+        {
+            ReconciledPlanState::Applied
+        } else if steps
+            .iter()
+            .any(|step| step.state == PlanStatusStepState::Aborted)
+            && steps.iter().all(|step| {
+                matches!(
+                    step.state,
+                    PlanStatusStepState::Applied | PlanStatusStepState::Aborted
+                )
+            })
+        {
+            ReconciledPlanState::Aborted
+        } else if steps
+            .iter()
+            .all(|step| step.state == PlanStatusStepState::Pending)
+        {
+            ReconciledPlanState::Pending
+        } else {
+            ReconciledPlanState::Partial
+        };
+
+        let missing_dependencies: Vec<MigrationId> = manifest
+            .depends_on
+            .iter()
+            .filter(|dependency| !supplied_by_version.contains_key(dependency.as_str()))
+            .cloned()
+            .collect();
+        let supplied_dependency_incomplete = manifest.depends_on.iter().any(|dependency| {
+            supplied_by_version.contains_key(dependency.as_str())
+                && states_by_version.get(dependency.as_str()) != Some(&ReconciledPlanState::Applied)
+        });
+
+        // Drift and an explicit abort are terminal facts about this plan. A
+        // dependency problem must not hide either one or put an aborted plan
+        // back into the runnable pending partition.
+        let state = if matches!(
+            raw_state,
+            ReconciledPlanState::Drifted | ReconciledPlanState::Aborted
+        ) {
+            raw_state
+        } else if !missing_dependencies.is_empty() {
+            ReconciledPlanState::UnknownDependency
+        } else if supplied_dependency_incomplete {
+            ReconciledPlanState::Blocked
+        } else {
+            raw_state
+        };
+        states_by_version.insert(manifest.version.as_str(), state);
+        plans.push(ReconciledPlan {
+            version: manifest.version.clone(),
+            name: manifest.name.clone(),
+            state,
+            steps,
+            missing_dependencies,
+        });
+    }
+
+    let applied: Vec<MigrationId> = plans
+        .iter()
+        .filter(|plan| plan.state == ReconciledPlanState::Applied)
+        .map(|plan| plan.version.clone())
+        .collect();
+    let pending: Vec<MigrationId> = plans
+        .iter()
+        .filter(|plan| {
+            !matches!(
+                plan.state,
+                ReconciledPlanState::Applied | ReconciledPlanState::Aborted
+            )
+        })
+        .map(|plan| plan.version.clone())
+        .collect();
+    let aborted: Vec<MigrationId> = plans
+        .iter()
+        .filter(|plan| plan.state == ReconciledPlanState::Aborted)
+        .map(|plan| plan.version.clone())
+        .collect();
+    let current_version = applied.last().cloned();
+    let (pending_contracts, blocked) =
+        derive_pending_contract_status_for_plans(outstanding, manifests);
+    let mut unexpected_journal: Vec<UnexpectedJournalEntry> = journal_entries
+        .iter()
+        .filter(|entry| {
+            !seen_steps.contains_key(entry.version.as_str())
+                && !known_resolver_versions.contains(entry.version.as_str())
+        })
+        .map(|entry| UnexpectedJournalEntry {
+            version: entry.version.clone(),
+            state: if entry.phase == Phase::Completed {
+                PlanStatusStepState::Applied
+            } else {
+                PlanStatusStepState::Inflight
+            },
+            journal_checksum: entry.checksum.clone(),
+            journal_kind: entry.kind,
+        })
+        .collect();
+    unexpected_journal.sort_by(|left, right| left.version.cmp(&right.version));
+
+    Ok(AppliedPlanStatus {
+        current_version,
+        applied,
+        pending,
+        aborted,
+        rolled_back: rolled_back.to_vec(),
+        plans,
+        unexpected_journal,
+        pending_contracts,
+        blocked,
+    })
+}
+
+/// Read net journal state through a dialect backend and reconcile complete plans.
+///
+/// This is the plan-aware peer of [`status_via_backend`]. It deliberately accepts
+/// [`PlanStatusManifest`] rather than `Migration`, so data-only and mixed plans are
+/// never flattened away.
+///
+/// # Errors
+/// Journal/bootstrap failures and the pure reconciliation errors documented by
+/// [`reconcile_applied_plans`].
+pub async fn status_plans_via_backend<B: crate::apply::backend::MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    manifests: &[PlanStatusManifest],
+) -> Result<StatusSnapshot<AppliedPlanStatus>, StatusError> {
+    status_plans_via_backend_inner(backend, cfg, manifests, true).await
+}
+
+/// Read and reconcile complete plan status without creating journal objects.
+///
+/// An absent journal is the fresh-project state: no steps have been applied, so
+/// every supplied plan reconciles from empty journal evidence. This path never
+/// calls [`MigrationBackend::ensure_journal`](crate::apply::backend::MigrationBackend::ensure_journal).
+///
+/// # Errors
+/// Journal existence/read failures, project-lock failures, and the pure
+/// reconciliation errors documented by [`reconcile_applied_plans`].
+pub async fn status_plans_via_backend_read_only<B: crate::apply::backend::MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    manifests: &[PlanStatusManifest],
+) -> Result<StatusSnapshot<AppliedPlanStatus>, StatusError> {
+    status_plans_via_backend_inner(backend, cfg, manifests, false).await
+}
+
+async fn status_plans_via_backend_inner<B: crate::apply::backend::MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    manifests: &[PlanStatusManifest],
+    bootstrap: bool,
+) -> Result<StatusSnapshot<AppliedPlanStatus>, StatusError> {
+    if bootstrap {
+        backend.ensure_journal(cfg).await?;
+    }
+    match backend
+        .try_acquire_project_lock(cfg)
+        .await
+        .map_err(StatusError::ProjectLock)?
+    {
+        ProjectLockAcquisition::Acquired => {}
+        // Nothing was locked, so there is nothing to release and nothing to read.
+        ProjectLockAcquisition::Busy(holders) => {
+            return Ok(StatusSnapshot::ProjectLockBusy(holders))
+        }
+    }
+
+    let snapshot = status_plans_via_backend_locked_inner(backend, cfg, manifests, !bootstrap).await;
+
+    let release = backend.release_project_lock(cfg).await;
+    match (snapshot, release) {
+        (Ok(status), Ok(())) => Ok(StatusSnapshot::Ready(status)),
+        (Ok(_), Err(error)) => Err(StatusError::ProjectLock(error)),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(release_error)) => {
+            tracing::warn!(
+                error = %release_error,
+                "zero-migrate: failed to release project lock after status snapshot error"
+            );
+            Err(error)
+        }
+    }
+}
+
+/// Read and reconcile plan status while the caller holds the project lock.
+///
+/// This is the host-adapter seam for callers that must keep catalog
+/// introspection, manifest lowering, and journal reconciliation inside one lock
+/// bracket. Callers must bootstrap the journal before taking the lock and must
+/// release the lock on every exit path.
+///
+/// # Errors
+/// The same journal and reconciliation errors as [`status_plans_via_backend`].
+#[doc(hidden)]
+pub async fn status_plans_via_backend_locked<B: crate::apply::backend::MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    manifests: &[PlanStatusManifest],
+) -> Result<AppliedPlanStatus, StatusError> {
+    status_plans_via_backend_locked_inner(backend, cfg, manifests, false).await
+}
+
+/// Reconcile complete plan status without bootstrapping while the caller holds
+/// the project lock.
+///
+/// If the journal objects do not exist, all journal-derived inputs are empty.
+/// This is the locked host-adapter seam used by live planning after its catalog
+/// snapshot and lowering have been bracketed by the same project lock.
+///
+/// # Errors
+/// The same journal and reconciliation errors as
+/// [`status_plans_via_backend_read_only`].
+#[doc(hidden)]
+pub async fn status_plans_via_backend_read_only_locked<
+    B: crate::apply::backend::MigrationBackend,
+>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    manifests: &[PlanStatusManifest],
+) -> Result<AppliedPlanStatus, StatusError> {
+    status_plans_via_backend_locked_inner(backend, cfg, manifests, true).await
+}
+
+async fn status_plans_via_backend_locked_inner<B: crate::apply::backend::MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    manifests: &[PlanStatusManifest],
+    read_only: bool,
+) -> Result<AppliedPlanStatus, StatusError> {
+    // Every apply/rollback/progress/obligation mutation uses this same project
+    // lock. Holding it across all readers makes their combined result one coherent
+    // backend snapshot even on dialects without a shared read transaction seam.
+    let journal_exists = !read_only || backend.journal_exists(cfg).await?;
+    let (entries, rolled_back, backfill_progress, outstanding, resolved) = if journal_exists {
+        let entries = backend.applied(cfg).await?;
+        let rolled_back = backend.net_rolled_back_versions(cfg).await?;
+        let backfill_progress = backend.backfill_progress(cfg).await?;
+        let (outstanding, resolved) = if let Some(pending_contracts) = backend.pending_contracts() {
+            let outstanding = pending_contracts.outstanding_pending_contracts(cfg).await?;
+            let resolved = pending_contracts
+                .resolved_pending_contracts(cfg)
+                .await?
+                .into_iter()
+                .map(|terminal| ResolvedPendingContract {
+                    pending_version: terminal.contract.pending_version,
+                    plan_version: terminal.contract.plan_version,
+                    contract_versions: terminal.contract.contract_versions,
+                    resolution: terminal.resolution,
+                })
+                .collect();
+            (outstanding, resolved)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        (
+            entries,
+            rolled_back,
+            backfill_progress,
+            outstanding,
+            resolved,
+        )
+    } else {
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
+    };
+    reconcile_applied_plans_with_resolutions(
+        manifests,
+        &entries,
+        &backfill_progress,
+        &outstanding,
+        &resolved,
+        &rolled_back,
+    )
+}
+
+/// Stable topological ordering of supplied plans. Among plans whose supplied
+/// dependencies are satisfied, caller order wins. Dependencies absent from the
+/// supplied set are intentionally omitted from the graph and later classified as
+/// `unknownDependency`; they are not assumed satisfied.
+fn order_plan_manifests(manifests: &[PlanStatusManifest]) -> Result<Vec<usize>, StatusError> {
+    let mut by_version: HashMap<&str, usize> = HashMap::new();
+    for (index, manifest) in manifests.iter().enumerate() {
+        if let Some(other) = by_version.insert(manifest.version.as_str(), index) {
+            return Err(StatusError::PlanManifest(format!(
+                "duplicate plan version {} at supplied positions {other} and {index}",
+                manifest.version.as_str()
+            )));
+        }
+    }
+
+    let mut indegree = vec![0usize; manifests.len()];
+    let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); manifests.len()];
+    for (index, manifest) in manifests.iter().enumerate() {
+        let mut seen = HashSet::new();
+        for dependency in &manifest.depends_on {
+            if !seen.insert(dependency.as_str()) {
+                continue;
+            }
+            if let Some(&dependency_index) = by_version.get(dependency.as_str()) {
+                indegree[index] += 1;
+                dependents[dependency_index].push(index);
+            }
+        }
+    }
+
+    let mut ready: BTreeSet<usize> = indegree
+        .iter()
+        .enumerate()
+        .filter_map(|(index, degree)| (*degree == 0).then_some(index))
+        .collect();
+    let mut ordered = Vec::with_capacity(manifests.len());
+    while let Some(index) = ready.pop_first() {
+        ordered.push(index);
+        for &dependent in &dependents[index] {
+            indegree[dependent] -= 1;
+            if indegree[dependent] == 0 {
+                ready.insert(dependent);
+            }
+        }
+    }
+
+    if ordered.len() != manifests.len() {
+        let cyclic: Vec<&str> = indegree
+            .iter()
+            .enumerate()
+            .filter_map(|(index, degree)| {
+                (*degree > 0).then_some(manifests[index].version.as_str())
+            })
+            .collect();
+        return Err(StatusError::PlanManifest(format!(
+            "dependency cycle among supplied plans: {}",
+            cyclic.join(", ")
+        )));
+    }
+    Ok(ordered)
+}
+
+/// Compute the [`MigrationStatus`] over ANY
+/// [`MigrationBackend`](crate::apply::backend::MigrationBackend), reading net journal
+/// state through the trait (`ensure_journal` + `applied` + `superseded_versions`)
+/// rather than a PG `&Client`. THE status verb: every dialect the CLI and the addon
+/// drive, PostgreSQL included, routes here.
+///
+/// PostgreSQL additionally keeps a `REPEATABLE READ READ ONLY` snapshot read of the
+/// same net state in
+/// `zero_migrate_postgres::backend::status_sql` - the one path that can
+/// report full [`RolledBackEntry`](crate::apply::journal::RolledBackEntry) detail. It lives in that backend rather than
+/// here because the transaction it opens and the journal it reads are that vendor's.
+///
+/// `applied` / `pending` / `current_version` are derived with the SAME rules and
+/// the SAME `order_pending` the executor uses, so status never disagrees with
+/// what apply would do. `rolled_back` is left empty here because the neutral
+/// trait exposes only rollback version ids, not the full [`RolledBackEntry`](crate::apply::journal::RolledBackEntry)
+/// detail required by [`MigrationStatus`]. A rolled-back version is already
+/// absent from `applied` net-state, so it still correctly re-enters `pending`.
+///
+/// # Errors
+/// - [`StatusError::Journal`] on a journal bootstrap/read failure.
+/// - [`StatusError::Ordering`] if the set's `depends_on` is unsatisfiable/cyclic
+///   (the same fault apply would surface).
+pub async fn status_via_backend<B: crate::apply::backend::MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    migrations: &[Migration],
+) -> Result<StatusSnapshot<MigrationStatus>, StatusError> {
+    status_via_backend_inner(backend, cfg, migrations, true).await
+}
+
+/// Compute migration-only status without creating journal objects.
+///
+/// A missing journal is reconciled as empty applied and superseded state. The
+/// ordinary [`status_via_backend`] path retains its idempotent bootstrap behavior.
+///
+/// # Errors
+/// The same journal, project-lock, and ordering errors as [`status_via_backend`].
+pub async fn status_via_backend_read_only<B: crate::apply::backend::MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    migrations: &[Migration],
+) -> Result<StatusSnapshot<MigrationStatus>, StatusError> {
+    status_via_backend_inner(backend, cfg, migrations, false).await
+}
+
+async fn status_via_backend_inner<B: crate::apply::backend::MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    migrations: &[Migration],
+    bootstrap: bool,
+) -> Result<StatusSnapshot<MigrationStatus>, StatusError> {
+    if bootstrap {
+        backend.ensure_journal(cfg).await?;
+    }
+    match backend
+        .try_acquire_project_lock(cfg)
+        .await
+        .map_err(StatusError::ProjectLock)?
+    {
+        ProjectLockAcquisition::Acquired => {}
+        // Nothing was locked, so there is nothing to release and nothing to read.
+        ProjectLockAcquisition::Busy(holders) => {
+            return Ok(StatusSnapshot::ProjectLockBusy(holders))
+        }
+    }
+
+    let snapshot = status_via_backend_locked_inner(backend, cfg, migrations, !bootstrap).await;
+    let release = backend.release_project_lock(cfg).await;
+    match (snapshot, release) {
+        (Ok(status), Ok(())) => Ok(StatusSnapshot::Ready(status)),
+        (Ok(_), Err(error)) => Err(StatusError::ProjectLock(error)),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(release_error)) => {
+            tracing::warn!(
+                error = %release_error,
+                "zero-migrate: failed to release project lock after status error"
+            );
+            Err(error)
+        }
+    }
+}
+
+/// Reconcile migration-only status while the caller holds the backend's project
+/// lock. Callers must bootstrap the journal before acquiring the lock and release
+/// the lock on every exit path.
+///
+/// This is the dialect-neutral host-adapter seam for journal-only status. It emits
+/// SQL only through the supplied backend, so a MySQL session never receives the
+/// PostgreSQL status transaction or journal queries.
+///
+/// # Errors
+/// The same journal and ordering errors as [`status_via_backend`].
+#[doc(hidden)]
+pub async fn status_via_backend_locked<B: crate::apply::backend::MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    migrations: &[Migration],
+) -> Result<MigrationStatus, StatusError> {
+    status_via_backend_locked_inner(backend, cfg, migrations, false).await
+}
+
+/// Compute migration-only status without bootstrapping while the caller holds
+/// the backend project lock.
+///
+/// # Errors
+/// The same journal and ordering errors as [`status_via_backend_read_only`].
+#[doc(hidden)]
+pub async fn status_via_backend_read_only_locked<B: crate::apply::backend::MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    migrations: &[Migration],
+) -> Result<MigrationStatus, StatusError> {
+    status_via_backend_locked_inner(backend, cfg, migrations, true).await
+}
+
+async fn status_via_backend_locked_inner<B: crate::apply::backend::MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+    migrations: &[Migration],
+    read_only: bool,
+) -> Result<MigrationStatus, StatusError> {
+    let journal_exists = !read_only || backend.journal_exists(cfg).await?;
+    let entries = if journal_exists {
+        backend.applied(cfg).await?
+    } else {
+        Vec::new()
+    };
+    let applied: Vec<AppliedEntry> = entries
+        .iter()
+        .filter(|e| e.phase == Phase::Completed)
+        .cloned()
+        .collect();
+
+    let current_version = applied
+        .iter()
+        .filter_map(|e| MigrationId::parse(&e.version).ok())
+        .max();
+
+    let completed: HashMap<&str, &AppliedEntry> =
+        applied.iter().map(|e| (e.version.as_str(), e)).collect();
+    let journal_superseded = if journal_exists {
+        backend.superseded_versions(cfg).await?
+    } else {
+        Vec::new()
+    };
+    let superseded_owned =
+        crate::apply::executor::compute_superseded(migrations, &journal_superseded);
+    let superseded: std::collections::HashSet<&str> =
+        superseded_owned.iter().map(String::as_str).collect();
+    let ordered =
+        order_pending(migrations, &completed, &superseded).map_err(StatusError::Ordering)?;
+    let pending: Vec<MigrationId> = ordered.iter().map(|m| m.version.clone()).collect();
+
+    // Outstanding pending contracts + blocked plans, read
+    // through the neutral capability. If the backend has no pending-contract
+    // capability, this is structurally empty and can never false-gate a deploy.
+    let outstanding = if journal_exists {
+        if let Some(pending_contracts) = backend.pending_contracts() {
+            pending_contracts.outstanding_pending_contracts(cfg).await?
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+    let (pending_contracts, blocked) = derive_pending_contract_status(&outstanding, migrations);
+
+    Ok(MigrationStatus {
+        current_version,
+        applied,
+        pending,
+        // The neutral trait exposes only rollback ids, not the full detail this
+        // legacy reply shape requires. A rolled-back version is already dropped
+        // from `applied` net-state (it reappears in `pending`).
+        rolled_back: Vec::new(),
+        pending_contracts,
+        blocked,
+    })
+}
+
+// `derive_pending_contract_status` travelled with the two structs it builds: it is a
+// pure fold over the obligation set and the supplied migration set, and the PG
+// snapshot path is one of its two callers.
+pub(crate) use zero_migrate_backend::status::derive_pending_contract_status;
+
+/// Plan-manifest peer of [`derive_pending_contract_status`]. Logical plan ids and
+/// dependencies are available directly, so online-contract orphan/block reporting
+/// remains correct without projecting data steps to fake migrations.
+fn derive_pending_contract_status_for_plans(
+    outstanding: &[journal::PendingContract],
+    manifests: &[PlanStatusManifest],
+) -> (Vec<PendingContractStatus>, Vec<BlockedPlan>) {
+    let supplied: HashSet<&str> = manifests
+        .iter()
+        .map(|manifest| manifest.version.as_str())
+        .collect();
+    let pending_contracts = outstanding
+        .iter()
+        .map(|contract| PendingContractStatus {
+            table: contract.table.clone(),
+            pending_version: contract.pending_version.clone(),
+            orphaned: !supplied.contains(contract.plan_version.as_str()),
+        })
+        .collect();
+
+    let outstanding_by_plan: HashMap<&str, &str> = outstanding
+        .iter()
+        .map(|contract| {
+            (
+                contract.plan_version.as_str(),
+                contract.pending_version.as_str(),
+            )
+        })
+        .collect();
+    let mut blocked = Vec::new();
+    for manifest in manifests {
+        for dependency in &manifest.depends_on {
+            if let Some(pending_version) = outstanding_by_plan.get(dependency.as_str()) {
+                blocked.push(BlockedPlan {
+                    blocked: manifest.version.clone(),
+                    dependency: dependency.clone(),
+                    pending_version: (*pending_version).to_string(),
+                });
+            }
+        }
+    }
+    (pending_contracts, blocked)
+}
+
+/// Read the FULL append-only event log (every apply + rollback event) in
+/// `event_seq` order - the audit trail.
+///
+/// **Read-only.** Unlike [`status_via_backend`], this does NOT collapse to net
+/// state: a version applied -> rolled back -> re-applied shows all three events.
+/// Bootstraps the journal idempotently first so a fresh project returns an empty
+/// log.
+///
+/// Both reads go through the supplied
+/// [`MigrationBackend`](crate::apply::backend::MigrationBackend), so the audit
+/// trail a caller gets is the one the REGISTERED engine keeps. This function used
+/// to take a `&D: SqlSession` plus a `dialect` argument and then call PostgreSQL's
+/// journal by name, which meant "the engine's history" and "PostgreSQL's history"
+/// were the same function no matter which dialect the caller named.
+///
+/// Not every backend keeps a readable audit trail:
+/// [`MigrationBackend::history`](crate::apply::backend::MigrationBackend::history)
+/// is a REQUIRED method precisely so each one states its own posture rather than
+/// inheriting a default, and MySQL and SQLite currently refuse it explicitly.
+///
+/// # Preconditions
+/// The caller MUST supply an **admin/read** backend. This function drives whatever
+/// backend it is handed and never elevates to the `migrator` role; the reads are
+/// scoped to `cfg.meta_schema`, but the connection's privilege is the caller's
+/// obligation.
+///
+/// # Errors
+/// [`StatusError::Journal`] on a journal read/bootstrap failure, including the
+/// refusal a backend without an audit trail returns.
+pub async fn history_via_backend<B: crate::apply::backend::MigrationBackend>(
+    backend: &B,
+    cfg: &ExecutorConfig,
+) -> Result<Vec<HistoryEvent>, StatusError> {
+    backend.ensure_journal(cfg).await?;
+    Ok(backend.history(cfg).await?)
+}
+
+#[cfg(test)]
+mod plan_status_tests {
+    use super::*;
+    use crate::model::backfill::BackfillSpec;
+    use crate::model::migration::{ChecksumInput, MigrationFlags};
+    use crate::render::lower::{IrAuthor, LiveSchema};
+    use crate::render::step::DialectScope;
+    use crate::test_fixtures::POSTGRES;
+
+    fn id(seed: &str) -> MigrationId {
+        MigrationId::derive("status_test", seed.as_bytes())
+    }
+
+    fn checksum(body: &str) -> Checksum {
+        let flags = MigrationFlags::default();
+        Checksum::of(&ChecksumInput {
+            up: body,
+            down: None,
+            flags: &flags,
+            owner_app: "app_status",
+            depends_on: &[],
+            supersedes: &[],
+            preconditions: &[],
+        })
+    }
+
+    fn step(seed: &str, kind: PlanStatusStepKind, anchor: &Checksum) -> PlanStatusManifestStep {
+        PlanStatusManifestStep {
+            version: id(seed),
+            name: seed.to_string(),
+            checksum: anchor.clone(),
+            kind,
+            repeatable: false,
+            cursor_stability_mode: None,
+            cursor_stability_invariant: None,
+            writes_quiesced: None,
+        }
+    }
+
+    fn manifest(
+        seed: &str,
+        steps: Vec<PlanStatusManifestStep>,
+        depends_on: Vec<MigrationId>,
+    ) -> PlanStatusManifest {
+        PlanStatusManifest {
+            version: id(&format!("plan_{seed}")),
+            name: seed.to_string(),
+            checksum: checksum(seed),
+            steps,
+            depends_on,
+        }
+    }
+
+    fn journal(step: &PlanStatusManifestStep, phase: Phase) -> AppliedEntry {
+        AppliedEntry {
+            down: None,
+            version: step.version.as_str().to_string(),
+            checksum: step.checksum.as_str().to_string(),
+            phase,
+            kind: None,
+            event_seq: 0,
+        }
+    }
+
+    fn progress(
+        step: &PlanStatusManifestStep,
+        checksum: Option<&Checksum>,
+        complete: bool,
+    ) -> BackfillProgressEntry {
+        BackfillProgressEntry {
+            version: step.version.as_str().to_string(),
+            checksum: checksum.map(|value| value.as_str().to_string()),
+            complete,
+        }
+    }
+
+    fn resolved_abort(plan: &PlanStatusManifest) -> ResolvedPendingContract {
+        let contract_versions = plan
+            .steps
+            .iter()
+            .filter(|step| step.kind == PlanStatusStepKind::OnlineContract)
+            .map(|step| step.version.as_str().to_string())
+            .collect();
+        ResolvedPendingContract {
+            pending_version: id("abort_trigger").as_str().to_string(),
+            plan_version: plan.version.as_str().to_string(),
+            contract_versions,
+            resolution: journal::Resolution::Aborted,
+        }
+    }
+
+    fn resolved_apply(plan: &PlanStatusManifest) -> ResolvedPendingContract {
+        let mut resolved = resolved_abort(plan);
+        resolved.resolution = journal::Resolution::Applied;
+        resolved
+    }
+
+    fn atomic_resolver_journal(
+        resolved: &ResolvedPendingContract,
+        resolution: journal::Resolution,
+    ) -> AppliedEntry {
+        let version = match resolution {
+            journal::Resolution::Applied => {
+                crate::render::expand_contract::resolve_pending_apply_atomic_version(
+                    &resolved.pending_version,
+                )
+            }
+            journal::Resolution::Aborted => {
+                crate::render::expand_contract::resolve_pending_abort_atomic_version(
+                    &resolved.pending_version,
+                )
+            }
+        };
+        AppliedEntry {
+            down: None,
+            version: version.as_str().to_string(),
+            checksum: checksum(resolution.as_str()).as_str().to_string(),
+            phase: Phase::Completed,
+            kind: Some(crate::apply::journal::JournaledKind::Apply),
+            event_seq: 0,
+        }
+    }
+
+    fn resolver_abort_journal(resolved: &ResolvedPendingContract) -> Vec<AppliedEntry> {
+        resolved
+            .contract_versions
+            .iter()
+            .enumerate()
+            .map(|(ordinal, _)| AppliedEntry {
+                down: None,
+                version: crate::render::expand_contract::resolve_pending_abort_version(
+                    &resolved.pending_version,
+                    ordinal,
+                )
+                .as_str()
+                .to_string(),
+                checksum: checksum(&format!("abort {ordinal}")).as_str().to_string(),
+                phase: Phase::Completed,
+                kind: Some(crate::apply::journal::JournaledKind::Apply),
+                event_seq: 0,
+            })
+            .collect()
+    }
+
+    fn repeatable_manifest(seed: &str, checksum: Checksum) -> PlanStatusManifest {
+        let migration = Migration {
+            version: id(&format!("{seed}_step")),
+            name: seed.to_string(),
+            up: format!("CREATE OR REPLACE VIEW {seed} AS SELECT 1"),
+            down: None,
+            checksum: checksum.clone(),
+            flags: MigrationFlags {
+                repeatable: true,
+                ..MigrationFlags::default()
+            },
+            owner_app: "app_status".to_string(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+            existence_guard: None,
+            effect: None,
+        };
+        let plan = AppliedPlan {
+            version: id(&format!("{seed}_plan")),
+            name: seed.to_string(),
+            steps: vec![PlanStep::Ddl(migration)],
+            database_requirements: Default::default(),
+            checksum,
+            flags: MigrationFlags::default(),
+            dialect_scope: DialectScope::Portable,
+            rendered_for: None,
+            rollbackable: false,
+            owner_app: "app_status".to_string(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+        };
+        PlanStatusManifest::from_applied_plan(&plan, &[]).expect("repeatable manifest")
+    }
+
+    #[test]
+    fn mixed_plan_reconciles_every_step_and_only_completes_when_all_are_applied() {
+        let anchor = checksum("mixed");
+        let plan = manifest(
+            "mixed",
+            vec![
+                step("ddl", PlanStatusStepKind::Ddl, &anchor),
+                step("dml", PlanStatusStepKind::Dml, &anchor),
+                step("backfill", PlanStatusStepKind::Backfill, &anchor),
+            ],
+            Vec::new(),
+        );
+        let partial_journal = vec![
+            journal(&plan.steps[0], Phase::Completed),
+            journal(&plan.steps[1], Phase::Completed),
+        ];
+        let partial = reconcile_applied_plans(std::slice::from_ref(&plan), &partial_journal, &[])
+            .expect("partial status");
+        assert_eq!(partial.plans[0].state, ReconciledPlanState::Partial);
+        assert_eq!(
+            partial.plans[0].steps[2].state,
+            PlanStatusStepState::Pending
+        );
+        assert!(partial.applied.is_empty());
+        assert_eq!(partial.pending, vec![plan.version.clone()]);
+
+        let complete_journal: Vec<_> = plan
+            .steps
+            .iter()
+            .map(|expected| journal(expected, Phase::Completed))
+            .collect();
+        let complete = reconcile_applied_plans(std::slice::from_ref(&plan), &complete_journal, &[])
+            .expect("complete status");
+        assert_eq!(complete.plans[0].state, ReconciledPlanState::Applied);
+        assert_eq!(complete.current_version, Some(plan.version.clone()));
+        assert_eq!(complete.applied, vec![plan.version]);
+        assert!(complete.aborted.is_empty());
+        assert!(complete.pending.is_empty());
+    }
+
+    #[test]
+    fn resolved_apply_overlays_contract_steps_and_filters_atomic_resolver_journal() {
+        let anchor = checksum("atomic apply");
+        let plan = manifest(
+            "applied rename",
+            vec![
+                step("apply_expand", PlanStatusStepKind::OnlineExpand, &anchor),
+                step(
+                    "apply_contract_trigger",
+                    PlanStatusStepKind::OnlineContract,
+                    &anchor,
+                ),
+                step(
+                    "apply_contract_column",
+                    PlanStatusStepKind::OnlineContract,
+                    &anchor,
+                ),
+            ],
+            Vec::new(),
+        );
+        let resolved = resolved_apply(&plan);
+        let entries = vec![
+            journal(&plan.steps[0], Phase::Completed),
+            atomic_resolver_journal(&resolved, journal::Resolution::Applied),
+        ];
+
+        let status = reconcile_applied_plans_with_resolutions(
+            std::slice::from_ref(&plan),
+            &entries,
+            &[],
+            &[],
+            std::slice::from_ref(&resolved),
+            &[],
+        )
+        .expect("atomic applied status");
+
+        assert_eq!(status.plans[0].state, ReconciledPlanState::Applied);
+        assert!(status.plans[0]
+            .steps
+            .iter()
+            .all(|step| step.state == PlanStatusStepState::Applied));
+        assert_eq!(status.applied, vec![plan.version]);
+        assert!(status.pending.is_empty());
+        assert!(status.aborted.is_empty());
+        assert!(status.unexpected_journal.is_empty());
+    }
+
+    #[test]
+    fn resolved_apply_does_not_hide_contract_checksum_drift() {
+        let anchor = checksum("atomic apply drift");
+        let plan = manifest(
+            "applied rename drift",
+            vec![
+                step(
+                    "apply_drift_expand",
+                    PlanStatusStepKind::OnlineExpand,
+                    &anchor,
+                ),
+                step(
+                    "apply_drift_contract",
+                    PlanStatusStepKind::OnlineContract,
+                    &anchor,
+                ),
+            ],
+            Vec::new(),
+        );
+        let resolved = resolved_apply(&plan);
+        let entries = vec![
+            journal(&plan.steps[0], Phase::Completed),
+            AppliedEntry {
+                down: None,
+                version: plan.steps[1].version.as_str().to_string(),
+                checksum: checksum("edited atomic contract").as_str().to_string(),
+                phase: Phase::Completed,
+                kind: None,
+                event_seq: 0,
+            },
+        ];
+
+        let status = reconcile_applied_plans_with_resolutions(
+            std::slice::from_ref(&plan),
+            &entries,
+            &[],
+            &[],
+            std::slice::from_ref(&resolved),
+            &[],
+        )
+        .expect("atomic apply drift status");
+
+        assert_eq!(status.plans[0].state, ReconciledPlanState::Drifted);
+        assert_eq!(status.plans[0].steps[1].state, PlanStatusStepState::Drifted);
+        assert_eq!(status.pending, vec![plan.version]);
+        assert!(status.applied.is_empty());
+        assert!(status.aborted.is_empty());
+    }
+
+    #[test]
+    fn resolved_abort_is_terminal_and_filters_its_resolver_journal_steps() {
+        let anchor = checksum("online rename");
+        let plan = manifest(
+            "aborted rename",
+            vec![
+                step("expand_add", PlanStatusStepKind::OnlineExpand, &anchor),
+                step("expand_trigger", PlanStatusStepKind::OnlineExpand, &anchor),
+                step(
+                    "contract_trigger",
+                    PlanStatusStepKind::OnlineContract,
+                    &anchor,
+                ),
+                step(
+                    "contract_column",
+                    PlanStatusStepKind::OnlineContract,
+                    &anchor,
+                ),
+            ],
+            Vec::new(),
+        );
+        let resolved = resolved_abort(&plan);
+        let mut entries = vec![
+            journal(&plan.steps[0], Phase::Completed),
+            journal(&plan.steps[1], Phase::Completed),
+        ];
+        entries.extend(resolver_abort_journal(&resolved));
+        entries.push(atomic_resolver_journal(
+            &resolved,
+            journal::Resolution::Aborted,
+        ));
+
+        let status = reconcile_applied_plans_with_resolutions(
+            std::slice::from_ref(&plan),
+            &entries,
+            &[],
+            &[],
+            std::slice::from_ref(&resolved),
+            &[],
+        )
+        .expect("aborted status");
+
+        assert_eq!(status.plans[0].state, ReconciledPlanState::Aborted);
+        assert_eq!(
+            status.plans[0]
+                .steps
+                .iter()
+                .map(|step| step.state)
+                .collect::<Vec<_>>(),
+            vec![
+                PlanStatusStepState::Applied,
+                PlanStatusStepState::Applied,
+                PlanStatusStepState::Aborted,
+                PlanStatusStepState::Aborted,
+            ]
+        );
+        assert!(status.applied.is_empty());
+        assert!(status.pending.is_empty());
+        assert_eq!(status.aborted, vec![plan.version]);
+        assert_eq!(status.current_version, None);
+        assert!(status.unexpected_journal.is_empty());
+    }
+
+    #[test]
+    fn aborted_plan_does_not_satisfy_a_dependent_plan() {
+        let anchor = checksum("aborted dependency");
+        let base = manifest(
+            "aborted base",
+            vec![
+                step("base_expand", PlanStatusStepKind::OnlineExpand, &anchor),
+                step("base_contract", PlanStatusStepKind::OnlineContract, &anchor),
+            ],
+            Vec::new(),
+        );
+        let dependent = manifest(
+            "dependent on abort",
+            vec![step("dependent_step", PlanStatusStepKind::Ddl, &anchor)],
+            vec![base.version.clone()],
+        );
+        let resolved = resolved_abort(&base);
+        let entries = vec![journal(&base.steps[0], Phase::Completed)];
+
+        let status = reconcile_applied_plans_with_resolutions(
+            &[dependent.clone(), base.clone()],
+            &entries,
+            &[],
+            &[],
+            std::slice::from_ref(&resolved),
+            &[],
+        )
+        .expect("aborted dependency status");
+
+        assert_eq!(status.plans[0].version, base.version);
+        assert_eq!(status.plans[0].state, ReconciledPlanState::Aborted);
+        assert_eq!(status.plans[1].version, dependent.version);
+        assert_eq!(status.plans[1].state, ReconciledPlanState::Blocked);
+        assert_eq!(status.pending, vec![dependent.version]);
+    }
+
+    #[test]
+    fn aborted_plan_remains_terminal_when_a_dependency_is_no_longer_supplied() {
+        let anchor = checksum("aborted missing dependency");
+        let plan = manifest(
+            "aborted missing dependency",
+            vec![
+                step("missing_expand", PlanStatusStepKind::OnlineExpand, &anchor),
+                step(
+                    "missing_contract",
+                    PlanStatusStepKind::OnlineContract,
+                    &anchor,
+                ),
+            ],
+            vec![id("removed_dependency")],
+        );
+        let resolved = resolved_abort(&plan);
+        let entries = vec![journal(&plan.steps[0], Phase::Completed)];
+
+        let status = reconcile_applied_plans_with_resolutions(
+            std::slice::from_ref(&plan),
+            &entries,
+            &[],
+            &[],
+            std::slice::from_ref(&resolved),
+            &[],
+        )
+        .expect("terminal aborted status");
+
+        assert_eq!(status.plans[0].state, ReconciledPlanState::Aborted);
+        assert_eq!(status.aborted, vec![plan.version]);
+        assert!(status.pending.is_empty());
+    }
+
+    #[test]
+    fn resolved_abort_does_not_hide_contract_checksum_drift() {
+        let anchor = checksum("abort drift");
+        let plan = manifest(
+            "aborted drift",
+            vec![
+                step("drift_expand", PlanStatusStepKind::OnlineExpand, &anchor),
+                step(
+                    "drift_contract",
+                    PlanStatusStepKind::OnlineContract,
+                    &anchor,
+                ),
+            ],
+            Vec::new(),
+        );
+        let resolved = resolved_abort(&plan);
+        let entries = vec![
+            journal(&plan.steps[0], Phase::Completed),
+            AppliedEntry {
+                down: None,
+                version: plan.steps[1].version.as_str().to_string(),
+                checksum: checksum("edited contract").as_str().to_string(),
+                phase: Phase::Completed,
+                kind: None,
+                event_seq: 0,
+            },
+        ];
+
+        let status = reconcile_applied_plans_with_resolutions(
+            std::slice::from_ref(&plan),
+            &entries,
+            &[],
+            &[],
+            std::slice::from_ref(&resolved),
+            &[],
+        )
+        .expect("aborted drift status");
+
+        assert_eq!(status.plans[0].state, ReconciledPlanState::Drifted);
+        assert_eq!(status.plans[0].steps[1].state, PlanStatusStepState::Drifted);
+        assert_eq!(status.pending, vec![plan.version]);
+    }
+
+    #[test]
+    fn stable_step_checksum_mismatch_is_drift_not_pending() {
+        let anchor = checksum("expected");
+        let plan = manifest(
+            "drift",
+            vec![step("data", PlanStatusStepKind::Dml, &anchor)],
+            Vec::new(),
+        );
+        let entries = vec![AppliedEntry {
+            down: None,
+            version: plan.steps[0].version.as_str().to_string(),
+            checksum: checksum("edited").as_str().to_string(),
+            phase: Phase::Completed,
+            kind: None,
+            event_seq: 0,
+        }];
+        let status = reconcile_applied_plans(std::slice::from_ref(&plan), &entries, &[])
+            .expect("drift status");
+        assert_eq!(status.plans[0].state, ReconciledPlanState::Drifted);
+        assert_eq!(status.plans[0].steps[0].state, PlanStatusStepState::Drifted);
+        assert_eq!(status.pending, vec![plan.version]);
+    }
+
+    #[test]
+    fn changed_genuine_repeatable_is_pending_instead_of_drifted() {
+        let expected = checksum("new repeatable definition");
+        let recorded = checksum("old repeatable definition");
+        let plan = repeatable_manifest("repeatable_view", expected);
+        let entries = vec![AppliedEntry {
+            down: None,
+            version: plan.steps[0].version.as_str().to_string(),
+            checksum: recorded.as_str().to_string(),
+            phase: Phase::Completed,
+            kind: Some(crate::apply::journal::JournaledKind::Repeatable),
+            event_seq: 0,
+        }];
+
+        let status = reconcile_applied_plans(std::slice::from_ref(&plan), &entries, &[])
+            .expect("repeatable status");
+
+        assert_eq!(status.plans[0].state, ReconciledPlanState::Pending);
+        assert_eq!(status.plans[0].steps[0].state, PlanStatusStepState::Pending);
+        assert_eq!(status.pending, vec![plan.version]);
+    }
+
+    #[test]
+    fn changing_between_once_only_and_repeatable_is_drift() {
+        let anchor = checksum("same definition");
+        let repeatable = repeatable_manifest("kind_flip_repeatable", anchor.clone());
+        let once_only = manifest(
+            "kind_flip_once",
+            vec![step(
+                "kind_flip_once_step",
+                PlanStatusStepKind::Ddl,
+                &anchor,
+            )],
+            Vec::new(),
+        );
+
+        let repeatable_as_once = vec![AppliedEntry {
+            down: None,
+            version: repeatable.steps[0].version.as_str().to_string(),
+            checksum: anchor.as_str().to_string(),
+            phase: Phase::Completed,
+            kind: Some(crate::apply::journal::JournaledKind::Apply),
+            event_seq: 0,
+        }];
+        let once_as_repeatable = vec![AppliedEntry {
+            down: None,
+            version: once_only.steps[0].version.as_str().to_string(),
+            checksum: anchor.as_str().to_string(),
+            phase: Phase::Completed,
+            kind: Some(crate::apply::journal::JournaledKind::Repeatable),
+            event_seq: 0,
+        }];
+
+        let repeatable_status =
+            reconcile_applied_plans(std::slice::from_ref(&repeatable), &repeatable_as_once, &[])
+                .expect("repeatable-to-once status");
+        let once_status =
+            reconcile_applied_plans(std::slice::from_ref(&once_only), &once_as_repeatable, &[])
+                .expect("once-to-repeatable status");
+
+        assert_eq!(
+            repeatable_status.plans[0].state,
+            ReconciledPlanState::Drifted
+        );
+        assert_eq!(once_status.plans[0].state, ReconciledPlanState::Drifted);
+    }
+
+    #[test]
+    fn empty_manifest_without_a_journal_anchor_is_pending() {
+        let plan = manifest("empty", Vec::new(), Vec::new());
+        let status = reconcile_applied_plans(std::slice::from_ref(&plan), &[], &[])
+            .expect("empty manifest status");
+        assert_eq!(status.plans[0].state, ReconciledPlanState::Pending);
+        assert_eq!(status.pending, vec![plan.version]);
+    }
+
+    #[test]
+    fn incomplete_backfill_progress_is_inflight_and_makes_the_plan_partial() {
+        let anchor = checksum("backfill");
+        let plan = manifest(
+            "backfill",
+            vec![step("backfill_step", PlanStatusStepKind::Backfill, &anchor)],
+            Vec::new(),
+        );
+        let progress = vec![progress(&plan.steps[0], Some(&anchor), false)];
+
+        let status =
+            reconcile_applied_plans_with_progress(std::slice::from_ref(&plan), &[], &progress, &[])
+                .expect("progress status");
+
+        assert_eq!(status.plans[0].state, ReconciledPlanState::Partial);
+        assert_eq!(
+            status.plans[0].steps[0].state,
+            PlanStatusStepState::Inflight
+        );
+        assert_eq!(status.pending, vec![plan.version]);
+    }
+
+    #[test]
+    fn backfill_progress_checksum_mismatch_is_drift_without_a_journal_event() {
+        let anchor = checksum("expected backfill");
+        let edited = checksum("edited backfill");
+        let plan = manifest(
+            "backfill drift",
+            vec![step("backfill_step", PlanStatusStepKind::Backfill, &anchor)],
+            Vec::new(),
+        );
+        let progress = vec![progress(&plan.steps[0], Some(&edited), false)];
+
+        let status =
+            reconcile_applied_plans_with_progress(std::slice::from_ref(&plan), &[], &progress, &[])
+                .expect("progress drift status");
+
+        assert_eq!(status.plans[0].state, ReconciledPlanState::Drifted);
+        assert_eq!(status.plans[0].steps[0].state, PlanStatusStepState::Drifted);
+        assert_eq!(
+            status.plans[0].steps[0].journal_checksum.as_deref(),
+            Some(edited.as_str())
+        );
+    }
+
+    #[test]
+    fn backfill_progress_without_a_checksum_is_drift() {
+        let anchor = checksum("anchored backfill");
+        let plan = manifest(
+            "legacy progress",
+            vec![step("backfill_step", PlanStatusStepKind::Backfill, &anchor)],
+            Vec::new(),
+        );
+        let progress = vec![progress(&plan.steps[0], None, false)];
+
+        let status =
+            reconcile_applied_plans_with_progress(std::slice::from_ref(&plan), &[], &progress, &[])
+                .expect("legacy progress status");
+
+        assert_eq!(status.plans[0].state, ReconciledPlanState::Drifted);
+        assert_eq!(status.plans[0].steps[0].state, PlanStatusStepState::Drifted);
+        assert_eq!(status.plans[0].steps[0].journal_checksum, None);
+    }
+
+    #[test]
+    fn matching_completed_progress_without_a_journal_event_is_still_inflight() {
+        let anchor = checksum("repairable backfill");
+        let plan = manifest(
+            "repairable backfill",
+            vec![step("backfill_step", PlanStatusStepKind::Backfill, &anchor)],
+            Vec::new(),
+        );
+        let progress = vec![progress(&plan.steps[0], Some(&anchor), true)];
+
+        let status =
+            reconcile_applied_plans_with_progress(std::slice::from_ref(&plan), &[], &progress, &[])
+                .expect("repairable progress status");
+
+        assert_eq!(status.plans[0].state, ReconciledPlanState::Partial);
+        assert_eq!(
+            status.plans[0].steps[0].state,
+            PlanStatusStepState::Inflight
+        );
+    }
+
+    #[test]
+    fn completed_journal_event_wins_over_mutable_progress() {
+        let anchor = checksum("completed backfill");
+        let edited = checksum("stale progress");
+        let plan = manifest(
+            "completed backfill",
+            vec![step("backfill_step", PlanStatusStepKind::Backfill, &anchor)],
+            Vec::new(),
+        );
+        let entries = vec![journal(&plan.steps[0], Phase::Completed)];
+        let progress = vec![progress(&plan.steps[0], Some(&edited), false)];
+
+        let status = reconcile_applied_plans_with_progress(
+            std::slice::from_ref(&plan),
+            &entries,
+            &progress,
+            &[],
+        )
+        .expect("completed status");
+
+        assert_eq!(status.plans[0].state, ReconciledPlanState::Applied);
+        assert_eq!(status.plans[0].steps[0].state, PlanStatusStepState::Applied);
+    }
+
+    #[test]
+    fn unexpected_completed_and_inflight_versions_and_rollbacks_are_retained() {
+        let completed = AppliedEntry {
+            down: None,
+            version: id("unexpected_completed").as_str().to_string(),
+            checksum: checksum("unexpected completed").as_str().to_string(),
+            phase: Phase::Completed,
+            kind: Some(crate::apply::journal::JournaledKind::Apply),
+            event_seq: 0,
+        };
+        let inflight = AppliedEntry {
+            down: None,
+            version: id("unexpected_inflight").as_str().to_string(),
+            checksum: checksum("unexpected inflight").as_str().to_string(),
+            phase: Phase::Started,
+            kind: None,
+            event_seq: 0,
+        };
+        let rolled_back = id("rolled_back").as_str().to_string();
+
+        let status = reconcile_applied_plans_with_snapshot(
+            &[],
+            &[completed.clone(), inflight.clone()],
+            &[],
+            &[],
+            std::slice::from_ref(&rolled_back),
+        )
+        .expect("unexpected journal status");
+
+        assert_eq!(status.rolled_back, vec![rolled_back]);
+        assert_eq!(status.unexpected_journal.len(), 2);
+        let completed_status = status
+            .unexpected_journal
+            .iter()
+            .find(|entry| entry.version == completed.version)
+            .expect("completed entry");
+        assert_eq!(completed_status.state, PlanStatusStepState::Applied);
+        let inflight_status = status
+            .unexpected_journal
+            .iter()
+            .find(|entry| entry.version == inflight.version)
+            .expect("inflight entry");
+        assert_eq!(inflight_status.state, PlanStatusStepState::Inflight);
+    }
+
+    #[test]
+    fn dependencies_reorder_supplied_plans_and_block_until_dependency_completes() {
+        let anchor = checksum("dependency");
+        let base = manifest(
+            "base",
+            vec![step("base_step", PlanStatusStepKind::Ddl, &anchor)],
+            Vec::new(),
+        );
+        let dependent = manifest(
+            "dependent",
+            vec![step("dependent_step", PlanStatusStepKind::Dml, &anchor)],
+            vec![base.version.clone()],
+        );
+        // Supply the dependent first: the status order still follows its DAG.
+        let status = reconcile_applied_plans(&[dependent.clone(), base.clone()], &[], &[])
+            .expect("blocked status");
+        assert_eq!(status.plans[0].version, base.version);
+        assert_eq!(status.plans[0].state, ReconciledPlanState::Pending);
+        assert_eq!(status.plans[1].version, dependent.version);
+        assert_eq!(status.plans[1].state, ReconciledPlanState::Blocked);
+    }
+
+    #[test]
+    fn omitted_dependency_is_unknown_instead_of_assumed_from_step_rows() {
+        let anchor = checksum("unknown dependency");
+        let omitted = id("omitted_plan");
+        let dependent = manifest(
+            "dependent",
+            vec![step("dependent_data", PlanStatusStepKind::Dml, &anchor)],
+            vec![omitted.clone()],
+        );
+        let status = reconcile_applied_plans(std::slice::from_ref(&dependent), &[], &[])
+            .expect("unknown status");
+        assert_eq!(
+            status.plans[0].state,
+            ReconciledPlanState::UnknownDependency
+        );
+        assert_eq!(status.plans[0].missing_dependencies, vec![omitted]);
+    }
+
+    #[test]
+    fn manifest_projection_retains_backfill_cursor_stability() {
+        let anchor = checksum("artifact");
+        let dml_version = id("artifact_dml");
+        let backfill_version = id("artifact_backfill");
+        let plan = AppliedPlan {
+            version: id("artifact_plan"),
+            name: "artifact".to_string(),
+            steps: vec![
+                PlanStep::Dml {
+                    version: dml_version.clone(),
+                    checksum: anchor.clone(),
+                    name: "update widgets".to_string(),
+                    template: "UPDATE widgets SET ready = $1".to_string(),
+                    binds: vec![crate::render::step::BindValue::Bool(true)],
+                    target_schema: "app".to_string(),
+                    target_table: "widgets".to_string(),
+                    conflict_target: None,
+                    mutates_data: true,
+                    transactional: true,
+                    destructive: false,
+                    requires_approval: false,
+                    owner_app: "app_status".to_string(),
+                },
+                PlanStep::Backfill {
+                    version: backfill_version.clone(),
+                    checksum: anchor.clone(),
+                    spec: BackfillSpec {
+                        schema: "app".to_string(),
+                        table: "widgets".to_string(),
+                        cursor_columns: vec!["id".to_string()],
+                        cursor_stability: crate::model::ir::CursorStability::ExternalInvariant {
+                            name: "writers_hold_cursor_key".to_string(),
+                        },
+                        cursor_contract: None,
+                        batch_size: 100,
+                        set_clause: "ready = true".to_string(),
+                        per_row: Default::default(),
+                        filter: None,
+                        name: "backfill widgets".to_string(),
+                    },
+                },
+            ],
+            database_requirements: Default::default(),
+            checksum: anchor,
+            flags: MigrationFlags::default(),
+            dialect_scope: DialectScope::Portable,
+            rendered_for: None,
+            rollbackable: false,
+            owner_app: "app_status".to_string(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+        };
+
+        let projected =
+            PlanStatusManifest::from_applied_plan(&plan, &[]).expect("manifest projection");
+        assert_eq!(projected.steps.len(), 2);
+        assert_eq!(projected.steps[0].version, dml_version);
+        assert_eq!(projected.steps[0].kind, PlanStatusStepKind::Dml);
+        assert_eq!(projected.steps[1].version, backfill_version);
+        assert_eq!(projected.steps[1].kind, PlanStatusStepKind::Backfill);
+        assert_eq!(
+            projected.steps[1].cursor_stability_mode.as_deref(),
+            Some("externalInvariant")
+        );
+        assert_eq!(
+            projected.steps[1].cursor_stability_invariant.as_deref(),
+            Some("writers_hold_cursor_key")
+        );
+
+        let status = reconcile_applied_plans(&[projected], &[], &[]).expect("status");
+        assert_eq!(
+            status.plans[0].steps[1].cursor_stability_mode.as_deref(),
+            Some("externalInvariant")
+        );
+        assert_eq!(
+            status.plans[0].steps[1]
+                .cursor_stability_invariant
+                .as_deref(),
+            Some("writers_hold_cursor_key")
+        );
+    }
+
+    #[test]
+    fn manifest_and_status_retain_synchronize_identity_quiescence_assertion() {
+        let ir: crate::model::ir::MigrationIr = serde_json::from_str(
+            r#"{"ir_version":1,"name":"sync_imported_orders","ops":[
+              {"op":"synchronizeIdentity","schema":"app","table":"orders",
+               "column":"id","writesQuiesced":"orders_import_window"}
+            ]}"#,
+        )
+        .expect("synchronizeIdentity IR");
+        let plan = IrAuthor::new(
+            crate::test_fixtures::VENDORS,
+            "app",
+            "app_status",
+            &POSTGRES,
+            &crate::test_fixtures::no_inject("app"),
+        )
+        .lower_plan(&ir, &LiveSchema::default())
+        .expect("synchronizeIdentity plan");
+
+        let projected =
+            PlanStatusManifest::from_applied_plan(&plan, &[]).expect("manifest projection");
+        assert_eq!(projected.steps.len(), 1);
+        assert_eq!(
+            projected.steps[0].kind,
+            PlanStatusStepKind::SynchronizeIdentity
+        );
+        assert_eq!(
+            projected.steps[0].writes_quiesced.as_deref(),
+            Some("orders_import_window")
+        );
+
+        let status = reconcile_applied_plans(&[projected], &[], &[]).expect("status");
+        assert_eq!(
+            status.plans[0].steps[0].writes_quiesced.as_deref(),
+            Some("orders_import_window")
+        );
+    }
+}

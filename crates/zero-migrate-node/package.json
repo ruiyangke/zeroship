@@ -1,0 +1,63 @@
+{
+  "name": "zero-migrate-node",
+  "version": "0.1.0",
+  "description": "Native N-API addon for zero-migrate: the V8-free Rust core that applies portable migrations over the host-driven (pg/mysql2) SqlSession seam. Resolves the right prebuilt binary for your platform. You usually depend on `zero-migrate-cli`, not this package directly.",
+  "keywords": [
+    "database",
+    "migration",
+    "migrations",
+    "schema",
+    "postgres",
+    "postgresql",
+    "mysql",
+    "sqlite",
+    "ddl",
+    "napi",
+    "native-addon"
+  ],
+  "author": "Ruiyang Ke <me@ry.ke>",
+  "license": "MIT",
+  "homepage": "https://github.com/ruiyangke/zero-migrate#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ruiyangke/zero-migrate.git",
+    "directory": "crates/zero-migrate-node"
+  },
+  "bugs": {
+    "url": "https://github.com/ruiyangke/zero-migrate/issues"
+  },
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "napi": {
+    "binaryName": "zero-migrate-node",
+    "targets": [
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-pc-windows-msvc"
+    ]
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "test": "node __test__/build_info.mjs && node __test__/force_wasi.mjs && node __test__/mock_apply.mjs && node __test__/status_ir.mjs && node __test__/gen_artifacts.mjs",
+    "test:codegen": "node __test__/gen_artifacts_typecheck.mjs"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "3.7.3"
+  }
+}

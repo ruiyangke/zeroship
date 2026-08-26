@@ -1,0 +1,5266 @@
+// `zero-migrate` — the fluent-only op-builder DSL implementation.
+//
+// This is the TS authoring surface a creator imports:
+//   import { ids, table, t } from "zero-migrate";
+//
+//   // Schema and data are SEPARATE migrations; one module may not do both.
+//   export default {
+//     schema() {
+//       table("users").column("first_name").add({ type: t.text() });
+//     },
+//   };
+//
+//   // ...and, in its own migration module:
+//   export default {
+//     data() {
+//       table("users").backfill({
+//         set: { first_name: col => col("name").splitPart(" ", 1) },
+//         cursorColumns: ["id"],
+//         cursorStability: { mode: "guardUpdates" },
+//       });
+//     },
+//     irreversible: "the original first_name values are not recoverable",
+//   };
+//
+// It emits the dialect-neutral op objects the closed Rust `Op` enum /
+// `ir-envelope.schema.json` deserialize — the IR envelope wire shape is frozen, and the
+// golden corpus (`tests/op_fixtures`) + the `Checksum::of_ir` round-trip are the
+// contract.
+//
+// `table()` is the reusable table DDL/DML entry. The flat op-functions are GONE
+// from the public API; their op-construction logic survives as the internal
+// `record*` helpers the handle delegates to (so the IR is unchanged). Every terminal
+// RECORDS one canonical op object onto the ambient per-migration recorder
+// synchronously, returning the handle. Recording OUTSIDE an active recorder
+// throws a structured `OP_OUTSIDE_RECORDER`.
+
+import type {
+  BackfillArgs,
+  BackfillSetValue,
+  CursorStability,
+  CheckBuilder,
+  CheckDef,
+  CheckExprFn,
+  CheckRef,
+  ColType,
+  ColumnDef as ColumnDefType,
+  ColumnRef,
+  CommentTargetArg,
+  ConstraintRef,
+  AlterSequenceArgs,
+  CastTarget,
+  CreateDomainArgs,
+  CreateEnumArgs,
+  CreateSequenceArgs,
+  CurrentSettingOptions,
+  CreateTableArgs,
+  TriggerCreateArgs,
+  CreateViewArgs,
+  DbSynthSymbol,
+  DecimalValue,
+  BytesValue,
+  DefaultBuilder,
+  DefaultExprFn,
+  DefaultValue,
+  DelArgs,
+  DialectExprLegs,
+  DialectOpLegs,
+  DmlSetValue,
+  DomainCheckFn,
+  DomainHandle,
+  DomainValueBuilder,
+  DeterminismFinding,
+  DropDomainArgs,
+  DropEnumArgs,
+  DropSequenceArgs,
+  DropViewArgs,
+  Duration,
+  DroppedExtensionHandle,
+  DroppedRoleHandle,
+  DroppedSchemaHandle,
+  ExtensionCreateArgs,
+  ExtensionDropArgs,
+  ExtensionHandle,
+  ExclusionAddArgs,
+  ExclusionConstraintArgs,
+  ExclusionElementArg,
+  ExclusionRef,
+  Expr,
+  ExprBuilder,
+  ExprChain as ExprChainType,
+  ExprFn,
+  EnumHandle,
+  ForeignKeyRef,
+  ForeignKeyReference,
+  GeneratedColumnExprFn,
+  GeneratedOptions,
+  GroupByItem,
+  IdFormats,
+  IdentityOptions,
+  Int64Value,
+  IndexExprBuilder,
+  IndexExprFn,
+  IndexRef,
+  IndexElementArg,
+  InsertArgs,
+  Join,
+  JoinKind,
+  MaskOptions,
+  NextvalDefault,
+  NextvalOptions,
+  OrderItem,
+  OrderedColumns,
+  PartitionBoundArgs,
+  PartitionBoundInput,
+  PartitionBoundSentinel,
+  PartitionByInput,
+  PerRowGeneratorValue,
+  PerRowGenerators,
+  PrimaryKeyOperations,
+  IndexAddArgs,
+  IndexDropArgs,
+  RoleCreateArgs,
+  RoleDropArgs,
+  RoleHandle,
+  RoleSetOptionsArgs,
+  RefAction,
+  Row,
+  Scalar,
+  ScalarValue,
+  SchemaCreateArgs,
+  SchemaDropArgs,
+  SchemaHandle,
+  SelectAst,
+  SelectItem,
+  SequenceHandle,
+  TableHandle,
+  TableOptions,
+  TableRuntimeOptions,
+  TableStrictness,
+  TableRef,
+  TextOptions,
+  StringOptions,
+  TypeIdOptions,
+  TriggerBodyBuilder,
+  TriggerStmt,
+  TypeLexicon,
+  UniqueRef,
+  UpdateArgs,
+  VectorOptions,
+  ViewHandle,
+  ViewOptions,
+  ViewQueryBuilder,
+} from "./types.js";
+import { flattenVendorAttributes, type VendorAttributeArgs } from "./vendor-attributes.js";
+
+import { TypeBuilder as DbTypeBuilder } from "./db-types.js";
+
+import { colTypeFromDbField, type DbSchemaField } from "./db-lexicon.js";
+
+import type {
+  Classification,
+  FuncArg,
+  FuncLanguage,
+  FuncVolatility,
+  GrantTarget,
+  MaskKind,
+  PerRowGenerator,
+  Privilege,
+  ValueFormat,
+  VectorMetric,
+} from "./generated/ir.js";
+
+type Node = Record<string, unknown>;
+
+export interface DropOwnedByArgs {
+  roles: string[];
+}
+
+export interface GrantArgs {
+  privileges: Privilege[];
+  on: GrantTarget;
+  to: string[];
+  withGrantOption?: boolean;
+}
+
+export interface RevokeArgs {
+  privileges: Privilege[];
+  on: GrantTarget;
+  from: string[];
+}
+
+export interface CreateFunctionArgs {
+  name: string;
+  schema?: string;
+  args?: FuncArg[];
+  returns: string;
+  language: FuncLanguage;
+  replace?: boolean;
+  volatility?: FuncVolatility;
+  body: string;
+}
+
+export interface DropFunctionArgs {
+  name: string;
+  schema?: string;
+  argTypes?: string[];
+  ifExists?: boolean;
+}
+
+export interface RawArgs {
+  sql: string;
+  reason: string;
+}
+
+// ── The ambient recorder ──
+
+// Capture the native nondeterministic function symbols before a migration module
+// can mutate globals. A bare symbol (`crypto.randomUUID` without parens) is an
+// opt-in to DB-side evaluation, matched by IDENTITY below. In the constrained
+// engine V8 recorder isolate (an authoring profile that installs
+// no Web Crypto), `globalThis.crypto` may be absent, so a bare `crypto.randomUUID`
+// in the migration source would be a `ReferenceError`; install an identity-only
+// stub so the symbol resolves (its `randomUUID` throws if CALLED — the symbol form
+// is record-time-only). GUARDED by `if absent`: in Node / browsers, where real Web
+// Crypto exists, both guards skip and this is a pure no-op (the real
+// `crypto.randomUUID` is captured). MUST precede the capture below.
+if (typeof globalThis !== "undefined") {
+  if (typeof globalThis.crypto === "undefined" || globalThis.crypto === null) {
+    Object.defineProperty(globalThis, "crypto", {
+      value: {},
+      configurable: true,
+      writable: false,
+    });
+  }
+  if (typeof globalThis.crypto.randomUUID !== "function") {
+    Object.defineProperty(globalThis.crypto, "randomUUID", {
+      value: function randomUUID() {
+        throw new Error(
+          "crypto.randomUUID() is not available in the migration recorder; " +
+            "use the crypto.randomUUID symbol (no parens) or uuidV4()",
+        );
+      },
+      configurable: true,
+      writable: false,
+    });
+  }
+}
+
+const nativeDateNow = typeof Date !== "undefined" ? Date.now : undefined;
+const nativeMathRandom = typeof Math !== "undefined" ? Math.random : undefined;
+const nativeCryptoRandomUUID =
+  typeof globalThis.crypto !== "undefined" && typeof globalThis.crypto.randomUUID === "function"
+    ? globalThis.crypto.randomUUID
+    : undefined;
+const NEXTVAL_DEFAULT_MARKER = "__zeroMigrateNextvalDefault";
+const INT64_VALUE_BRAND = Symbol.for("zero-migrate.int64/v1");
+const DECIMAL_VALUE_BRAND = Symbol.for("zero-migrate.decimal/v1");
+const BYTES_VALUE_BRAND = Symbol.for("zero-migrate.bytes/v1");
+const PER_ROW_GENERATOR_BRAND = Symbol.for("zero-migrate.perRowGenerator/v1");
+const INT64_STRING_RE = /^(?:0|-?[1-9][0-9]*)$/;
+const INT64_MIN = -(1n << 63n);
+const INT64_MAX = (1n << 63n) - 1n;
+const DECIMAL_STRING_RE = /^-?\d+(?:\.\d+)?$/;
+const BASE64_STRING_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}(?:==)?|[A-Za-z0-9+/]{3}=?)?$/;
+const INT64_VALUE_ERROR =
+  'int64(value) requires a canonical signed integer bigint or decimal string (for example int64(42n) or int64("42"))';
+const INT64_RANGE_ERROR =
+  "int64(value) must be between -9223372036854775808 and 9223372036854775807";
+const DECIMAL_VALUE_ERROR =
+  'decimal(value) requires a well-formed decimal string; use decimal("<n>") or decimal("0.00")';
+const BYTES_VALUE_ERROR =
+  'byteValue(bytes) requires a Uint8Array or well-formed base64 string; use byteValue(new Uint8Array([...])) or byteValue("<base64>")';
+
+function requireInt64String(value: unknown): string {
+  if (typeof value !== "bigint" && typeof value !== "string") {
+    throw structuredError("OP_INVALID", INT64_VALUE_ERROR);
+  }
+  const rendered = typeof value === "bigint" ? String(value) : value;
+  if (!INT64_STRING_RE.test(rendered)) {
+    throw structuredError("OP_INVALID", INT64_VALUE_ERROR);
+  }
+  const parsed = BigInt(rendered);
+  if (parsed < INT64_MIN || parsed > INT64_MAX) {
+    throw structuredError("OP_INVALID", `${INT64_RANGE_ERROR}; got ${rendered}`);
+  }
+  return rendered;
+}
+
+export function int64(value: bigint | string): Int64Value {
+  return Object.freeze({
+    [INT64_VALUE_BRAND]: true,
+    int64: requireInt64String(value),
+  }) as unknown as Int64Value;
+}
+
+function requireDecimalString(value: unknown): string {
+  if (typeof value !== "string" || !DECIMAL_STRING_RE.test(value)) {
+    throw structuredError("OP_INVALID", DECIMAL_VALUE_ERROR);
+  }
+  return value;
+}
+
+export function decimal(value: string): DecimalValue {
+  return Object.freeze({
+    [DECIMAL_VALUE_BRAND]: true,
+    decimal: requireDecimalString(value),
+  }) as unknown as DecimalValue;
+}
+
+function requireBase64String(value: unknown): string {
+  if (typeof value !== "string" || !BASE64_STRING_RE.test(value)) {
+    throw structuredError("OP_INVALID", BYTES_VALUE_ERROR);
+  }
+  const padded = value + "=".repeat((4 - (value.length % 4)) % 4);
+  try {
+    const normalized = btoa(atob(padded));
+    if (normalized !== padded) throw new Error("non-canonical base64");
+    return normalized;
+  } catch {
+    throw structuredError("OP_INVALID", BYTES_VALUE_ERROR);
+  }
+}
+
+export function byteValue(bytes: Uint8Array | string): BytesValue {
+  return Object.freeze({
+    [BYTES_VALUE_BRAND]: true,
+    bytes: bytes instanceof Uint8Array ? bytesToBase64(bytes) : requireBase64String(bytes),
+  }) as unknown as BytesValue;
+}
+
+function nativeDbExprNode(value: unknown): Node | undefined {
+  if (value === nativeDateNow) return { node: "fnSynth", fn: "now", args: [] };
+  if (value === nativeMathRandom) return { node: "uuidV4" };
+  if (nativeCryptoRandomUUID !== undefined && value === nativeCryptoRandomUUID) {
+    return { node: "uuidV4" };
+  }
+  return undefined;
+}
+
+const INVALID_FUNCTION_VALUE_MESSAGE =
+  "function values are not valid here; only the supported native symbols " +
+  "Date.now / Math.random / crypto.randomUUID translate to DB-evaluated scalars";
+
+function rejectFunctionValue(value: unknown): void {
+  if (typeof value === "function") {
+    throw structuredError("OP_INVALID", INVALID_FUNCTION_VALUE_MESSAGE);
+  }
+}
+
+/** A handed-out, not-yet-terminated selector the recorder tracks. */
+interface PendingSelector {
+  selector: string;
+  name: string;
+  terminated: boolean;
+}
+
+interface Recorder {
+  ops: Node[];
+  /** Every selector the handle handed out this phase, keyed by a monotonic id. */
+  pending: Map<number, PendingSelector>;
+  nextSelectorId: number;
+}
+
+let active: Recorder | null = null;
+
+function structuredError(code: string, message: string, extra?: Record<string, unknown>): Error {
+  const err = new Error(message) as Error & Record<string, unknown>;
+  err.code = code;
+  if (extra) Object.assign(err, extra);
+  return err;
+}
+
+/** Begin a fresh recording buffer (the build evaluator calls this before each
+ *  recorded phase — `schema()`, `data()`, or `inverse()`). */
+export function __begin(): void {
+  active = {
+    ops: [],
+    pending: new Map(),
+    nextSelectorId: 0,
+  };
+}
+
+/** Discard the current recording after migration authoring throws or returns a promise. */
+export function __abort(): void {
+  active = null;
+}
+
+/**
+ * Drain + return the recorded op list, clearing the active recorder. At DRAIN
+ * (not eagerly — so a var-held selector terminated on a later line is fine),
+ * any selector that was handed out but never terminated is a hard structured
+ * `SELECTOR_NOT_TERMINATED` error.
+ */
+export function __drain(): Node[] {
+  if (active === null) return [];
+  const rec = active;
+  active = null;
+  for (const sel of rec.pending.values()) {
+    if (!sel.terminated) {
+      throw structuredError(
+        "SELECTOR_NOT_TERMINATED",
+        `selector .${sel.selector}(${JSON.stringify(sel.name)}) was never terminated; ` +
+          "a selector records nothing until one of its terminals is called",
+        {
+          selector: sel.selector,
+          name: sel.name,
+          suggested_fix: `call a terminal on .${sel.selector}(${JSON.stringify(sel.name)}) ` +
+            "(e.g. .add({…})) or remove the selector",
+        },
+      );
+    }
+  }
+  return rec.ops;
+}
+
+function recorder(): Recorder {
+  if (active === null) {
+    throw structuredError(
+      "OP_OUTSIDE_RECORDER",
+      "migration operations may only be authored synchronously inside schema(), data(), or inverse()",
+      {
+        suggested_fix:
+          "move the operation call inside the migration's schema() body (for DDL) " +
+          "or data()/inverse() body (for DML)",
+      },
+    );
+  }
+  return active;
+}
+
+function push(op: Node): Node {
+  recorder().ops.push(op);
+  return op;
+}
+
+/** Internal hook used by vendor DDL helpers that record closed Postgres ops. */
+export function __pgPush(op: Node): Node {
+  return push(op);
+}
+
+// ── The `defineOp` chokepoint + derived tier-1 producer registry (S0.3) ──
+//
+// Every op producer emits through an emitter minted by `defineOp(kind, …)`, the
+// single chokepoint wrapping `push`. The emitter is
+// behaviour-preserving: it records `compact({ op: kind, ...payload })` —
+// byte-identical to the prior in-line `push(compact({ op: kind, … }))`. Each mint
+// APPENDS to `tier1Producers`, so the producer registry (op-kind → producer(s)) is
+// DERIVED from the mints, never self-reported (which is why the multi-producer kind
+// `addConstraint` mints several distinct producers here).
+
+/** One tier-1 op-emission producer, DERIVED from a `defineOp` mint call. */
+export interface OpProducer {
+  /** The op discriminant this producer stamps as the node's `op` field. */
+  readonly kind: string;
+  /** A stable identity for the emission site (census grouping + diagnostics). */
+  readonly producer: string;
+}
+
+const tier1Producers: OpProducer[] = [];
+
+type OpEmitter = (payload: Node) => Node;
+
+/** Mint the single emitter every producer for `kind` records through, and register
+ *  the (kind → producer) fact so the tier-1 registry is derivable. `producer`
+ *  defaults to `kind` (the common one-producer-per-kind case). */
+function defineOp(kind: string, producer: string = kind): OpEmitter {
+  tier1Producers.push({ kind, producer });
+  return (payload: Node): Node => push(compact({ op: kind, ...payload }));
+}
+
+/** The flat tier-1 producer list, in mint (declaration) order — DATA the census
+ *  consumes (a later slice asserts one-producer-per-op-kind over it). */
+export function opProducers(): readonly OpProducer[] {
+  return tier1Producers;
+}
+
+/** The tier-1 producer registry: per op-kind, the producer(s) that emit it —
+ *  DERIVED from the `defineOp` mints (never self-reported). */
+export function opProducerRegistry(): ReadonlyMap<string, readonly OpProducer[]> {
+  const byKind = new Map<string, OpProducer[]>();
+  for (const producer of tier1Producers) {
+    const list = byKind.get(producer.kind);
+    if (list === undefined) byKind.set(producer.kind, [producer]);
+    else list.push(producer);
+  }
+  return byKind;
+}
+
+// The minted emitters — one per producer site. Multi-producer op-kinds
+// (`addConstraint`) mint several, so the registry surfaces the duplication as
+// data.
+const emitCreateEnum = defineOp("createEnum");
+const emitDropEnum = defineOp("dropEnum");
+const emitCreateDomain = defineOp("createDomain");
+const emitDropDomain = defineOp("dropDomain");
+const emitCreateSequence = defineOp("createSequence");
+const emitAlterSequence = defineOp("alterSequence");
+const emitDropSequence = defineOp("dropSequence");
+const emitCreateSchema = defineOp("createSchema");
+const emitDropSchema = defineOp("dropSchema");
+const emitCreateExtension = defineOp("createExtension");
+const emitDropExtension = defineOp("dropExtension");
+const emitCreateRole = defineOp("createRole");
+const emitAlterRole = defineOp("alterRole");
+const emitDropRole = defineOp("dropRole");
+const emitComment = defineOp("comment");
+const emitCreateTable = defineOp("createTable");
+const emitCreatePartition = defineOp("createPartition");
+const emitAttachPartition = defineOp("attachPartition");
+const emitDetachPartition = defineOp("detachPartition");
+const emitDropPartition = defineOp("dropPartition");
+const emitSetTableOptions = defineOp("setTableOptions");
+const emitDropTable = defineOp("dropTable");
+const emitRenameTable = defineOp("renameTable");
+const emitAlterPrimaryKey = defineOp("alterPrimaryKey");
+const emitSynchronizeIdentity = defineOp("synchronizeIdentity");
+const emitAddColumn = defineOp("addColumn");
+const emitAddColumnUnique = defineOp("addConstraint", "addColumn.unique");
+const emitDropColumn = defineOp("dropColumn");
+const emitRenameColumn = defineOp("renameColumn");
+const emitSetColumnType = defineOp("setColumnType");
+const emitSetColumnNotNull = defineOp("setColumnNotNull");
+const emitDropColumnNotNull = defineOp("dropColumnNotNull");
+const emitSetColumnDefault = defineOp("setColumnDefault");
+const emitDropColumnDefault = defineOp("dropColumnDefault");
+const emitAddForeignKey = defineOp("addConstraint", "foreignKey");
+const emitAddUnique = defineOp("addConstraint", "unique");
+const emitAddCheck = defineOp("addConstraint", "check");
+const emitAddExclusion = defineOp("addConstraint", "exclusion");
+const emitDropConstraint = defineOp("dropConstraint");
+const emitValidateConstraint = defineOp("validateConstraint");
+const emitCreateIndex = defineOp("createIndex");
+const emitDropIndex = defineOp("dropIndex");
+const emitInsert = defineOp("insert");
+const emitUpdate = defineOp("update");
+const emitDelete = defineOp("delete");
+const emitBackfill = defineOp("backfill");
+const emitDialectal = defineOp("dialectal");
+const emitCreateView = defineOp("createView", "view.create");
+const emitDropView = defineOp("dropView");
+const emitSetRls = defineOp("setRls");
+const emitCreatePolicy = defineOp("createPolicy");
+const emitDropPolicy = defineOp("dropPolicy");
+const emitCreateTrigger = defineOp("createTrigger");
+const emitDropTrigger = defineOp("dropTrigger");
+
+/** Register a handed-out selector; returns its id (used at terminate). */
+function registerSelector(selector: string, name: string): number {
+  const rec = recorder();
+  const id = rec.nextSelectorId++;
+  rec.pending.set(id, { selector, name, terminated: false });
+  return id;
+}
+
+/** Mark a selector terminated; double-terminate is a structured error. */
+function terminateSelector(id: number): void {
+  const rec = recorder();
+  const sel = rec.pending.get(id);
+  // `sel` is always present for a live id; defensive only.
+  if (sel === undefined) return;
+  if (sel.terminated) {
+    throw structuredError(
+      "SELECTOR_ALREADY_TERMINATED",
+      `selector .${sel.selector}(${JSON.stringify(sel.name)}) was terminated twice; ` +
+        "each selector records exactly one op",
+      { selector: sel.selector, name: sel.name },
+    );
+  }
+  sel.terminated = true;
+}
+
+function compact<T extends Record<string, unknown>>(obj: T): T {
+  for (const k of Object.keys(obj)) {
+    if (obj[k] === undefined) delete obj[k];
+  }
+  return obj;
+}
+
+/** Define an enumerable own property without invoking Object.prototype.__proto__. */
+function setOwn<T>(target: Record<string, T>, key: string, value: T): void {
+  Object.defineProperty(target, key, {
+    value,
+    enumerable: true,
+    configurable: true,
+    writable: true,
+  });
+}
+
+function requireString(v: unknown, what: string): asserts v is string {
+  if (typeof v !== "string") {
+    throw structuredError("OP_INVALID", `${what} must be a string; got ${typeof v}`);
+  }
+}
+
+function requireNonEmptyString(v: unknown, what: string): asserts v is string {
+  requireString(v, what);
+  if (v.length === 0) {
+    throw structuredError("OP_INVALID", `${what} must be a non-empty string`);
+  }
+}
+
+/** Validate the public non-empty tuple contract at the runtime boundary too.
+ *  TypeScript callers get `OrderedColumns`; this catches plain JavaScript and
+ *  values that crossed an `any` boundary before they reach the frozen IR. */
+function requireOrderedColumns(v: unknown, what: string): asserts v is OrderedColumns {
+  if (!Array.isArray(v) || v.length === 0) {
+    throw structuredError(
+      "OP_INVALID",
+      `${what} must be a non-empty ordered column-name array`,
+    );
+  }
+  const seen = new Set<string>();
+  for (let position = 0; position < v.length; position += 1) {
+    const column = v[position];
+    requireNonEmptyString(column, `${what}[${position}]`);
+    if (seen.has(column)) {
+      throw structuredError(
+        "OP_INVALID",
+        `${what} names column ${JSON.stringify(column)} more than once`,
+        { column, position },
+      );
+    }
+    seen.add(column);
+  }
+}
+
+function requireDropIdentitySubset(
+  dropIdentityFrom: OrderedColumns | undefined,
+  expectedColumns: OrderedColumns,
+  what: string,
+): void {
+  if (dropIdentityFrom === undefined) return;
+  const expected = new Set<string>(expectedColumns);
+  for (const column of dropIdentityFrom) {
+    if (!expected.has(column)) {
+      throw structuredError(
+        "OP_INVALID",
+        `${what} names column ${JSON.stringify(column)}, which is not in expectedColumns`,
+        { column },
+      );
+    }
+  }
+}
+
+function requireStrictness(v: unknown, what: string): TableStrictness | undefined {
+  if (v === undefined) return undefined;
+  if (v !== "strict" && v !== "lenient" && v !== "off") {
+    throw structuredError("OP_INVALID", `${what} must be \"strict\", \"lenient\", or \"off\"`);
+  }
+  return v;
+}
+
+function requireOptionalBoolean(v: unknown, what: string): boolean | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v !== "boolean") {
+    throw structuredError("OP_INVALID", `${what} must be a boolean`);
+  }
+  return v;
+}
+
+function requirePlainObject(v: unknown, what: string): asserts v is Record<string, unknown> {
+  if (v === null || typeof v !== "object" || Array.isArray(v)) {
+    throw structuredError("OP_INVALID", `${what} must be an object`);
+  }
+}
+
+/** Validate the persisted TypeID 0.3 prefix at the authoring boundary. The
+ * Rust validator repeats this check for hand-authored IR envelopes. */
+function requireTypeIdPrefix(v: unknown, what = "ids.typeId({ prefix })"): asserts v is string {
+  requireString(v, what);
+  if (v.length > 63 || (v !== "" && !/^[a-z](?:[a-z_]*[a-z])?$/.test(v))) {
+    throw structuredError(
+      "OP_INVALID",
+      `${what}: prefix must be empty or at most 63 lowercase ASCII ` +
+        "letters/underscores beginning and ending with a letter",
+      { prefix: v },
+    );
+  }
+}
+
+function requireOptionalPositiveInteger(v: unknown, what: string): number | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v !== "number" || !Number.isInteger(v) || v <= 0) {
+    throw structuredError("OP_INVALID", `${what} must be a positive integer; got ${v}`);
+  }
+  return v;
+}
+
+function requireOptionalNonNegativeInteger(v: unknown, what: string): number | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 0) {
+    throw structuredError("OP_INVALID", `${what} must be a non-negative integer; got ${v}`);
+  }
+  return v;
+}
+
+function indexElementFacet(v: unknown, what: string): string | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v !== "string" || v.length === 0) {
+    throw structuredError("OP_INVALID", `${what} must be a non-empty string`);
+  }
+  return v;
+}
+
+function runtimeOptionsFromCreateArgs(args: CreateTableArgs): Node | undefined {
+  const opts = args.options;
+  if (opts === undefined) return undefined;
+  requirePlainObject(opts, "create({ options })");
+  const softDelete = requireOptionalBoolean(opts.softDelete, "create({ options: { softDelete } })");
+  const versioning = requireOptionalBoolean(opts.versioning, "create({ options: { versioning } })");
+  const strictness = requireStrictness(opts.strictness, "create({ options: { strictness } })");
+  const hasOptions =
+    softDelete !== undefined ||
+    versioning !== undefined ||
+    strictness !== undefined;
+  if (!hasOptions) return undefined;
+  return compact({
+    softDelete: softDelete ?? false,
+    versioning: versioning ?? false,
+    strictness: strictness ?? "strict",
+  });
+}
+
+function runtimeOptionsPatchFromArgs(args: TableRuntimeOptions): Node {
+  requirePlainObject(args, "setOptions(args)");
+  const softDelete = requireOptionalBoolean(args.softDelete, "setOptions({ softDelete })");
+  const versioning = requireOptionalBoolean(args.versioning, "setOptions({ versioning })");
+  const strictness = requireStrictness(args.strictness, "setOptions({ strictness })");
+  const patch = compact({
+    softDelete,
+    versioning,
+    strictness,
+  });
+  if (Object.keys(patch).length === 0) {
+    throw structuredError(
+      "OP_INVALID",
+      "setOptions(...) must set at least one of softDelete, versioning, or strictness",
+    );
+  }
+  return patch;
+}
+
+function requireSafeI64(v: unknown, what: string): number | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v !== "number" || !Number.isSafeInteger(v)) {
+    throw structuredError("OP_INVALID", `${what} must be a JS safe integer; got ${v}`);
+  }
+  return v;
+}
+
+function requireNullableSafeI64(v: unknown, what: string): number | null | undefined {
+  if (v === null) return null;
+  return requireSafeI64(v, what);
+}
+
+function requireSequenceIncrement(v: unknown, what: string): number | undefined {
+  const n = requireSafeI64(v, what);
+  if (n === 0) {
+    throw structuredError("OP_INVALID", `${what} must be non-zero`);
+  }
+  return n;
+}
+
+function requireSequenceCache(v: unknown, what: string): number | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 1) {
+    throw structuredError("OP_INVALID", `${what} must be a positive JS safe integer; got ${v}`);
+  }
+  return v;
+}
+
+function requireSequenceBounds(min: number | null | undefined, max: number | null | undefined, what: string): void {
+  if (typeof min === "number" && typeof max === "number" && min > max) {
+    throw structuredError("OP_INVALID", `${what}: minValue must be <= maxValue`);
+  }
+}
+
+// ── (B) The IMMUTABLE chainable `t.*` lexicon ──
+
+/** The CLOSED pgvector distance-metric token set — the camelCase wire
+ *  spelling of the engine's `VectorMetric` enum. Mirrored here (lock-step with
+ *  the engine enum) so `t.vector({ dimensions, metric })` rejects an out-of-set metric
+ *  with a friendly client-side OP_INVALID; the engine's closed enum stays
+ *  authoritative. */
+export const VECTOR_METRICS: readonly VectorMetric[] = ["cosine", "l2", "innerProduct"];
+// The closed set of integer types a sequence may be declared `AS` (PG renders
+// only `integer` / `bigint`; everything else fails late at lower as UnsupportedOp).
+export const SEQUENCE_AS_TYPES: readonly ColType[] = ["int", "bigInt"];
+
+/** The CLOSED column-mask token sets — the SDK/IR WIRE spelling of the
+ *  engine's `IrMaskKind` / `IrClassification` enums. The two date kinds are KEBAB
+ *  (`date-year`/`date-decade`); the rest are single camelCase words. Mirrored here
+ *  (lock-step with the engine enums) so `.mask({ kind, classification })` rejects an
+ *  out-of-set token with a friendly client-side OP_INVALID; the engine's closed
+ *  enums stay authoritative. */
+export const MASK_KINDS: readonly MaskKind[] = [
+  "full",
+  "last4",
+  "first4",
+  "email",
+  "name",
+  "date-year",
+  "date-decade",
+  "none",
+];
+export const MASK_CLASSIFICATIONS: readonly Classification[] = [
+  "public",
+  "pii",
+  "spi",
+  "phi",
+  "pci",
+  "internal",
+];
+
+const REF_ACTIONS: readonly RefAction[] = [
+  "cascade",
+  "restrict",
+  "setNull",
+  "setDefault",
+  "noAction",
+];
+
+type ColumnReferenceFacet = Readonly<{
+  table: string;
+  column: string;
+  name?: string;
+  onDelete?: RefAction;
+  onUpdate?: RefAction;
+}>;
+
+function requireReferenceAction(v: unknown, what: string): RefAction | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v !== "string" || !REF_ACTIONS.includes(v as RefAction)) {
+    throw structuredError(
+      "OP_INVALID",
+      `${what} must be one of ${REF_ACTIONS.join(" | ")}; got ${JSON.stringify(v)}`,
+    );
+  }
+  return v as RefAction;
+}
+
+class ColumnDefImpl implements ColumnDefType {
+  readonly _type: ColType;
+  readonly _nullable: boolean;
+  readonly _default: unknown;
+  readonly _primaryKey: boolean;
+  readonly _unique: boolean;
+  readonly _reference: ColumnReferenceFacet | undefined;
+  // Semantic facets carried on the IrColumn: canonical value format
+  // (`ids.typeId({prefix})`), pgvector distance metric, and the remaining
+  // standalone column facets.
+  // Absent ⇒ omitted on the wire.
+  readonly _valueFormat: ValueFormat | undefined;
+  readonly _vectorMetric: string | undefined;
+  readonly _caseSensitive: boolean | undefined;
+  readonly _mask: { kind: string; classification: string } | undefined;
+  readonly _generated: { expr: Node; stored: boolean } | undefined;
+  readonly _identity: { always: boolean } | undefined;
+
+  constructor(
+    colType: ColType,
+    fields?: {
+      nullable?: boolean;
+      default?: unknown;
+      primaryKey?: boolean;
+      unique?: boolean;
+      reference?: ColumnReferenceFacet;
+      valueFormat?: ValueFormat;
+      vectorMetric?: string;
+      caseSensitive?: boolean;
+      mask?: { kind: string; classification: string };
+      generated?: { expr: Node; stored: boolean };
+      identity?: { always: boolean };
+    },
+  ) {
+    this._type = colType;
+    this._nullable = fields?.nullable ?? true;
+    this._default = fields?.default;
+    this._primaryKey = fields?.primaryKey ?? false;
+    this._unique = fields?.unique ?? false;
+    this._reference = fields?.reference;
+    this._valueFormat = fields?.valueFormat;
+    this._vectorMetric = fields?.vectorMetric;
+    this._caseSensitive = fields?.caseSensitive;
+    this._mask = fields?.mask;
+    this._generated = fields?.generated;
+    this._identity = fields?.identity;
+  }
+
+  /** Clone with the named fields overridden — the basis of immutability. */
+  private with(over: {
+    type?: ColType;
+    nullable?: boolean;
+    default?: unknown;
+    primaryKey?: boolean;
+    unique?: boolean;
+    reference?: ColumnReferenceFacet;
+    valueFormat?: ValueFormat;
+    vectorMetric?: string;
+    caseSensitive?: boolean;
+    mask?: { kind: string; classification: string };
+    generated?: { expr: Node; stored: boolean };
+    identity?: { always: boolean };
+  }): ColumnDefImpl {
+    return new ColumnDefImpl(over.type ?? this._type, {
+      nullable: over.nullable ?? this._nullable,
+      default: "default" in over ? over.default : this._default,
+      primaryKey: over.primaryKey ?? this._primaryKey,
+      unique: over.unique ?? this._unique,
+      reference: "reference" in over ? over.reference : this._reference,
+      valueFormat: "valueFormat" in over ? over.valueFormat : this._valueFormat,
+      vectorMetric: "vectorMetric" in over ? over.vectorMetric : this._vectorMetric,
+      caseSensitive: "caseSensitive" in over ? over.caseSensitive : this._caseSensitive,
+      mask: "mask" in over ? over.mask : this._mask,
+      generated: "generated" in over ? over.generated : this._generated,
+      identity: "identity" in over ? over.identity : this._identity,
+    });
+  }
+
+  /** Internal: carry the pgvector distance metric (`t.vector({ dimensions, metric })`). */
+  __withVectorMetric(metric: string): ColumnDefImpl {
+    return this.with({ vectorMetric: metric });
+  }
+
+  notNull(): ColumnDefImpl {
+    return this.with({ nullable: false });
+  }
+  default(value: DefaultValue | DefaultExprFn | ExprChainType | Expr): ColumnDefImpl {
+    return this.with({ default: toIrDefault(value) });
+  }
+  primaryKey(): ColumnDefImpl {
+    return this.with({ primaryKey: true, nullable: false });
+  }
+  unique(): ColumnDefImpl {
+    return this.with({ unique: true });
+  }
+  references(
+    table: string,
+    column: string,
+    options: { onDelete?: RefAction; onUpdate?: RefAction; name?: string } = {},
+  ): ColumnDefImpl {
+    requireString(table, "t.*.references(table, column, options): table");
+    if (table.length === 0) {
+      throw structuredError(
+        "OP_INVALID",
+        "t.*.references(table, column, options): table must be a non-empty string",
+      );
+    }
+    requireString(column, "t.*.references(table, column, options): column");
+    if (column.length === 0) {
+      throw structuredError(
+        "OP_INVALID",
+        "t.*.references(table, column, options): column must be a non-empty string",
+      );
+    }
+    requirePlainObject(options, "t.*.references(table, column, options): options");
+    if (options.name !== undefined) {
+      requireNonEmptyString(options.name, "t.*.references(table, column, { name })");
+    }
+    const reference = compact({
+      table,
+      column,
+      name: options.name,
+      onDelete: requireReferenceAction(
+        options.onDelete,
+        "t.*.references(table, column, { onDelete })",
+      ),
+      onUpdate: requireReferenceAction(
+        options.onUpdate,
+        "t.*.references(table, column, { onUpdate })",
+      ),
+    }) as ColumnReferenceFacet;
+    return this.with({ reference: Object.freeze(reference) });
+  }
+
+  /** `.mask({ kind, classification? })` — declare a STANDALONE column mask so
+   *  the field reads back as `MaskedValue<T>` and the op lower emits the `zero-migrate:mask`
+   *  sentinel + `_masked` sibling. `kind` is REQUIRED (closed `MASK_KINDS`);
+   *  `classification` is optional and DEFAULTS to `"pii"` (closed
+   *  `MASK_CLASSIFICATIONS`). The closed-set checks mirror `t.vector({ dimensions, metric })`:
+   *  a friendly client-side OP_INVALID over the SAME closed set the engine's enums
+   *  enforce authoritatively. */
+  mask(opts: MaskOptions): ColumnDefImpl {
+    if (opts === null || typeof opts !== "object") {
+      throw structuredError("OP_INVALID", "t.*.mask(opts): opts must be { kind, classification? }");
+    }
+    requireString(opts.kind, "t.*.mask({ kind })");
+    if (!MASK_KINDS.includes(opts.kind)) {
+      throw structuredError(
+        "OP_INVALID",
+        `t.*.mask({ kind }): kind must be one of ${MASK_KINDS.join(" | ")}, ` +
+          `got ${JSON.stringify(opts.kind)}`,
+        { kind: opts.kind },
+      );
+    }
+    const classification = opts.classification === undefined ? "pii" : opts.classification;
+    if (!MASK_CLASSIFICATIONS.includes(classification)) {
+      throw structuredError(
+        "OP_INVALID",
+        `t.*.mask({ classification }): classification must be one of ` +
+          `${MASK_CLASSIFICATIONS.join(" | ")}, got ${JSON.stringify(classification)}`,
+        { classification },
+      );
+    }
+    return this.with({ mask: { kind: opts.kind, classification } });
+  }
+
+  generated(expr: GeneratedColumnExprFn | ExprChainType | Expr, opts?: GeneratedOptions): ColumnDefImpl {
+    if (opts !== undefined && (opts === null || typeof opts !== "object")) {
+      throw structuredError("OP_INVALID", "t.*.generated(expr, opts): opts must be { virtual?: boolean }");
+    }
+    if (opts?.virtual !== undefined && typeof opts.virtual !== "boolean") {
+      throw structuredError("OP_INVALID", "t.*.generated(expr, { virtual }): virtual must be a boolean");
+    }
+    return this.with({
+      generated: {
+        expr: resolveImmutableExpr(expr as GeneratedColumnExprFn | ExprChainType | Node, "generated column expression")!,
+        stored: opts?.virtual === true ? false : true,
+      },
+    });
+  }
+
+  identity(opts?: IdentityOptions): ColumnDefImpl {
+    if (opts !== undefined && (opts === null || typeof opts !== "object")) {
+      throw structuredError("OP_INVALID", "t.*.identity(opts): opts must be { always?: boolean }");
+    }
+    if (opts?.always !== undefined && typeof opts.always !== "boolean") {
+      throw structuredError("OP_INVALID", "t.*.identity({ always }): always must be a boolean");
+    }
+    return this.with({ identity: { always: opts?.always === true } });
+  }
+
+  autoIncrement(): ColumnDefImpl {
+    return this.with({ identity: { always: false } });
+  }
+
+  __toIrColumn(name: string): Node {
+    return compact({
+      name,
+      type: this._type,
+      nullable: this._nullable === false ? false : undefined,
+      default: this._default,
+      // A PRIMARY KEY already IMPLIES uniqueness, so a column that is BOTH
+      // `.unique()` and `.primaryKey()` would otherwise carry a redundant
+      // column-level UNIQUE (an extra index/constraint) on top of the table's pk
+      // constraint. Suppress it (lock-step with the addColumn path + the differ,
+      // which never emits a separate UNIQUE for the PK column).
+      unique: this._unique && !this._primaryKey ? true : undefined,
+      // Carry the semantic facets onto the wire IrColumn (camelCase keys
+      // `valueFormat`/`references`/`vectorMetric`/`mask`). Absent ⇒ omitted, so a
+      // plain column is byte-identical to the pre-facet image (checksum-neutral).
+      valueFormat: this._valueFormat,
+      references: this._reference,
+      vectorMetric: this._vectorMetric,
+      caseSensitive: this._caseSensitive === false ? false : undefined,
+      mask: this._mask,
+      generated: this._generated,
+      identity: this._identity,
+    });
+  }
+  __toAddColumnTail(): Node {
+    rejectColumnReferenceFacet(
+      this,
+      ".column(name).add({ type }): typed references are not a lifecycle operation",
+    );
+    return compact({
+      type: this._type,
+      nullable: this._nullable === false ? false : undefined,
+      default: this._default,
+      // Carry the value format + remaining column facets onto the addColumn op tail
+      // (camelCase keys, lock-step with `Op::AddColumn`). Absent ⇒ omitted (compact).
+      valueFormat: this._valueFormat,
+      vectorMetric: this._vectorMetric,
+      caseSensitive: this._caseSensitive === false ? false : undefined,
+      mask: this._mask,
+      generated: this._generated,
+      identity: this._identity,
+    });
+  }
+}
+
+function isColumnDef(x: unknown): x is ColumnDefImpl {
+  return x instanceof ColumnDefImpl;
+}
+
+function rejectColumnReferenceFacet(def: ColumnDefImpl, where: string): void {
+  if (def._reference !== undefined) {
+    throw structuredError(
+      "OP_INVALID",
+      `${where} cannot use a .references() ColumnDef; typed references are supported only in table(...).create({ columns })`,
+    );
+  }
+}
+
+function textColumn(opts?: TextOptions): ColumnDefImpl {
+  if (opts !== undefined && (opts === null || typeof opts !== "object")) {
+    throw structuredError("OP_INVALID", "t.text(opts): opts must be { caseSensitive?: boolean }");
+  }
+  if (opts?.caseSensitive !== undefined && typeof opts.caseSensitive !== "boolean") {
+    throw structuredError("OP_INVALID", "t.text({ caseSensitive }): caseSensitive must be a boolean");
+  }
+  return new ColumnDefImpl("text", {
+    caseSensitive: opts?.caseSensitive === false ? false : undefined,
+  });
+}
+
+function stringColumn(opts?: StringOptions): ColumnDefImpl {
+  if (opts !== undefined && (opts === null || typeof opts !== "object")) {
+    throw structuredError(
+      "OP_INVALID",
+      "t.string(opts): opts must be { length?: number, caseSensitive?: boolean }",
+    );
+  }
+  // `length` defaults to 255 (the industrial convention) when omitted.
+  const length = requireOptionalPositiveInteger(opts?.length, "t.string({ length })") ?? 255;
+  if (opts?.caseSensitive !== undefined && typeof opts.caseSensitive !== "boolean") {
+    throw structuredError("OP_INVALID", "t.string({ caseSensitive }): caseSensitive must be a boolean");
+  }
+  return new ColumnDefImpl({ string: { length } } as ColType, {
+    caseSensitive: opts?.caseSensitive === false ? false : undefined,
+  });
+}
+
+/** Base64-encode raw bytes (the `IrScalar::Bytes` wire carrier) without a Node
+ *  `Buffer` dependency — runs identically in the V8 record host and Node. */
+function bytesToBase64(bytes: Uint8Array): string {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]!);
+  // `btoa` is a WHATWG global present in V8 + Node ≥16.
+  return btoa(bin);
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object") return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function isInt64Value(value: unknown): value is Int64Value {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    (value as Record<PropertyKey, unknown>)[INT64_VALUE_BRAND] === true &&
+    typeof (value as { int64?: unknown }).int64 === "string"
+  );
+}
+
+function isDecimalValue(value: unknown): value is DecimalValue {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    (value as Record<PropertyKey, unknown>)[DECIMAL_VALUE_BRAND] === true &&
+    typeof (value as { decimal?: unknown }).decimal === "string"
+  );
+}
+
+function isBytesValue(value: unknown): value is BytesValue {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    (value as Record<PropertyKey, unknown>)[BYTES_VALUE_BRAND] === true &&
+    typeof (value as { bytes?: unknown }).bytes === "string"
+  );
+}
+
+function isPerRowGenerator(generator: unknown): generator is PerRowGenerator {
+  if (generator === "uuidV4" || generator === "uuidV7" || generator === "ulid") {
+    return true;
+  }
+  if (!isPlainObject(generator)) return false;
+  const keys = Object.keys(generator);
+  if (keys.length !== 1 || keys[0] !== "typeId" || !isPlainObject(generator.typeId)) {
+    return false;
+  }
+  const typeIdKeys = Object.keys(generator.typeId);
+  return typeIdKeys.length === 1 &&
+    typeIdKeys[0] === "prefix" &&
+    typeof generator.typeId.prefix === "string";
+}
+
+function perRowGeneratorOf(value: unknown): PerRowGenerator | undefined {
+  if (value === null || typeof value !== "object") return undefined;
+  const generator = (value as Record<PropertyKey, unknown>)[PER_ROW_GENERATOR_BRAND];
+  return isPerRowGenerator(generator) ? generator : undefined;
+}
+
+function perRowGeneratorValue(generator: PerRowGenerator): PerRowGeneratorValue {
+  return Object.freeze({
+    [PER_ROW_GENERATOR_BRAND]: generator,
+  }) as unknown as PerRowGeneratorValue;
+}
+
+function rejectPerRowGeneratorValue(value: unknown): void {
+  if (perRowGeneratorOf(value) !== undefined) {
+    throw structuredError(
+      "OP_INVALID",
+      "perRow.* values are valid only inside backfill({ set }); they are not scalar values, SQL expressions, or column defaults",
+    );
+  }
+}
+
+/** Reject a branded per-row descriptor anywhere inside a caller-supplied value.
+ *
+ * Raw closed-expression nodes are a supported escape hatch for generated
+ * authoring code. Their literal/argument fields therefore need the same
+ * backfill-only boundary as ordinary scalar/default positions: otherwise a
+ * descriptor nested below `{ node: ... }` would survive recording and collapse
+ * to `{}` only when JSON serialization drops its symbol brand. Walk only own
+ * data properties (never invoke accessors), and tolerate shared/cyclic objects
+ * so the rejection itself stays deterministic.
+ */
+function rejectNestedPerRowGeneratorValues(
+  value: unknown,
+  seen: WeakSet<object> = new WeakSet<object>(),
+): void {
+  rejectPerRowGeneratorValue(value);
+  if (value === null || typeof value !== "object") return;
+  if (seen.has(value)) return;
+  seen.add(value);
+  for (const key of Reflect.ownKeys(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor !== undefined && "value" in descriptor) {
+      rejectNestedPerRowGeneratorValues(descriptor.value, seen);
+    }
+  }
+}
+
+function isRemovedDecimalCarrier(value: unknown): boolean {
+  if (!isPlainObject(value) || isDecimalValue(value)) return false;
+  const keys = Object.keys(value);
+  return keys.length === 1 && keys[0] === "decimal" && typeof value.decimal === "string";
+}
+
+function isRemovedInt64Carrier(value: unknown): boolean {
+  if (!isPlainObject(value) || isInt64Value(value)) return false;
+  const keys = Object.keys(value);
+  return keys.length === 1 && keys[0] === "int64" && typeof value.int64 === "string";
+}
+
+function isRemovedBytesCarrier(value: unknown): boolean {
+  if (!isPlainObject(value) || isBytesValue(value)) return false;
+  const keys = Object.keys(value);
+  return keys.length === 1 && keys[0] === "bytes" && typeof value.bytes === "string";
+}
+
+function rejectNestedFunctionValues(value: unknown): void {
+  rejectPerRowGeneratorValue(value);
+  rejectFunctionValue(value);
+  if (Array.isArray(value)) {
+    for (const item of value) rejectNestedFunctionValues(item);
+  } else if (isPlainObject(value)) {
+    for (const item of Object.values(value)) rejectNestedFunctionValues(item);
+  }
+}
+
+/** Expand JavaScript's scientific notation into the plain decimal spelling the
+ * public decimal carrier accepts. `String(number)` is otherwise the canonical,
+ * shortest round-trippable representation of the authored finite number. */
+function finiteNumberDecimalString(value: number): string {
+  const rendered = String(value);
+  if (!/[eE]/.test(rendered)) return rendered;
+
+  const match = /^(-?)(\d+)(?:\.(\d+))?[eE]([+-]?\d+)$/.exec(rendered);
+  if (match === null) {
+    throw structuredError(
+      "OP_INVALID",
+      'number scalar could not be represented exactly; use decimal("<n>")',
+    );
+  }
+
+  const [, sign, whole, fraction = "", exponentText] = match;
+  const digits = whole + fraction;
+  const decimalAt = whole.length + Number(exponentText);
+  let expanded: string;
+  if (decimalAt <= 0) {
+    expanded = `${sign}0.${"0".repeat(-decimalAt)}${digits}`;
+  } else if (decimalAt >= digits.length) {
+    expanded = `${sign}${digits}${"0".repeat(decimalAt - digits.length)}`;
+  } else {
+    expanded = `${sign}${digits.slice(0, decimalAt)}.${digits.slice(decimalAt)}`;
+  }
+  return requireDecimalString(expanded);
+}
+
+/**
+ * Normalize a JS scalar into the closed `IrScalar` WIRE carrier so the recorded
+ * shape is exactly what Rust's `IrScalar` deserializer accepts:
+ *  - a branded `int64(...)` value → `{ int64: "<v>" }`;
+ *  - a branded `decimal("...")` value → `{ decimal: "<v>" }`;
+ *  - a branded `byteValue(...)` value → `{ bytes: "<base64>" }`;
+ *  - a `Uint8Array` → `{ bytes: "<base64>" }` (the raw-bytes carrier);
+ *  - finite non-integer numbers use the exact decimal carrier;
+ *  - only the documented scalar kinds are accepted.
+ */
+function toIrScalar(value: unknown): unknown {
+  rejectNestedFunctionValues(value);
+  if (isInt64Value(value)) return { int64: requireInt64String(value.int64) };
+  if (isDecimalValue(value)) return { decimal: requireDecimalString(value.decimal) };
+  if (isBytesValue(value)) return { bytes: requireBase64String(value.bytes) };
+  if (typeof value === "bigint") {
+    throw structuredError("OP_INVALID", "raw bigint is not a migration scalar — use int64(...) instead");
+  }
+  if (isRemovedInt64Carrier(value)) {
+    throw structuredError("OP_INVALID", "the { int64 } carrier is not an authored value — use int64(...)");
+  }
+  if (isRemovedDecimalCarrier(value)) {
+    throw structuredError("OP_INVALID", 'the { decimal } carrier is removed — use decimal("<n>")');
+  }
+  if (isRemovedBytesCarrier(value)) {
+    throw structuredError("OP_INVALID", "the { bytes } carrier is removed — use byteValue(...)");
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw structuredError("OP_INVALID", "number scalar must be finite");
+    }
+    if (Number.isInteger(value)) {
+      if (!Number.isSafeInteger(value)) {
+        throw structuredError(
+          "OP_INVALID",
+          "integer scalar must be a JS safe integer; use int64(...) for exact signed 64-bit values",
+        );
+      }
+    } else {
+      return { decimal: finiteNumberDecimalString(value) };
+    }
+  }
+  if (value instanceof Uint8Array) return { bytes: bytesToBase64(value) };
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean" ||
+    typeof value === "number"
+  ) {
+    return value;
+  }
+  if (value === undefined) {
+    throw structuredError(
+      "OP_INVALID",
+      "scalar value cannot be undefined; use null explicitly",
+    );
+  }
+  if (typeof value === "symbol") {
+    throw structuredError("OP_INVALID", "symbol is not a supported scalar value");
+  }
+  throw structuredError(
+    "OP_INVALID",
+    "scalar value must be null, a string, boolean, finite number, int64(...), decimal(...), byteValue(...), or Uint8Array",
+  );
+}
+
+function toIrValue(value: unknown): unknown {
+  rejectNestedPerRowGeneratorValues(value);
+  const synth = nativeDbExprNode(value);
+  if (synth !== undefined) return synth;
+  rejectFunctionValue(value);
+  if (value instanceof ExprChainImpl) return value.__node;
+  if (value && typeof value === "object" && typeof (value as Node).node === "string") return value as Node;
+  return toIrScalar(value);
+}
+
+const JSON_DEFAULT_INTEGER_ERROR =
+  "json default values support integers only (floats not yet supported)";
+const JSON_DEFAULT_VALUE_ERROR =
+  "json default values must be JSON values (null, boolean, integer, string, array, or object)";
+
+function toIrJsonValue(value: unknown): unknown {
+  rejectPerRowGeneratorValue(value);
+  rejectFunctionValue(value);
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (Number.isInteger(value) && Math.abs(value) < 2 ** 53) return value;
+    throw structuredError("OP_INVALID", JSON_DEFAULT_INTEGER_ERROR);
+  }
+  if (Array.isArray(value)) return value.map((item) => toIrJsonValue(item));
+  if (isPlainObject(value)) {
+    if ("fn" in value && typeof value.fn === "string") {
+      throw structuredError("OP_INVALID", "json default values cannot contain nested function defaults");
+    }
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(value).sort()) {
+      setOwn(out, key, toIrJsonValue(value[key]));
+    }
+    return out;
+  }
+  throw structuredError("OP_INVALID", JSON_DEFAULT_VALUE_ERROR);
+}
+
+const DEFAULT_SCALAR_FNS = new Set([
+  "coalesce",
+  "nullif",
+  "lower",
+  "upper",
+  "trim",
+  "length",
+  "abs",
+  "mod",
+  "round",
+  "floor",
+  "ceil",
+  "substr",
+  "replace",
+]);
+
+const DEFAULT_SYNTH_FNS = new Set([
+  "now",
+  "concatWs",
+  "splitPart",
+]);
+
+const IMMUTABLE_SCALAR_FNS = new Set([
+  "coalesce",
+  "nullif",
+  "lower",
+  "upper",
+  "trim",
+  "length",
+  "abs",
+  "mod",
+  "round",
+  "floor",
+  "ceil",
+  "substr",
+  "replace",
+]);
+
+const IMMUTABLE_SYNTH_FNS = new Set([
+  "concatWs",
+  "splitPart",
+]);
+
+const IMMUTABLE_HELPERS =
+  "lower/upper/trim/length/abs/coalesce/nullif/mod/round/floor/ceil/substr/replace/extract/concatWs/splitPart";
+
+function defaultBuilder(): DefaultBuilder {
+  return Object.freeze({ case: caseExpr });
+}
+
+function defaultFunctionValueError(): Error {
+  return structuredError(
+    "OP_INVALID",
+    "function defaults must be authored with top-level value constructors, e.g. " +
+      "`.default(now())` or `.default(uuidV4())`; " +
+      "the old `{ fn: ... }` and bare native-symbol default forms are removed",
+  );
+}
+
+function rejectRemovedDefaultFunctionValue(value: unknown): void {
+  if (
+    value === nativeDateNow ||
+    value === nativeMathRandom ||
+    (nativeCryptoRandomUUID !== undefined && value === nativeCryptoRandomUUID)
+  ) {
+    throw defaultFunctionValueError();
+  }
+}
+
+function isExprNode(value: unknown): value is Node {
+  return Boolean(value && typeof value === "object" && typeof (value as Node).node === "string");
+}
+
+function resolveDefaultExpr(slot: DefaultExprFn | ExprChainType | Node): Node {
+  rejectRemovedDefaultFunctionValue(slot);
+  const resolved =
+    typeof slot === "function"
+      ? slot(defaultBuilder())
+      : slot;
+  if (resolved instanceof ExprChainImpl) return resolved.__node;
+  if (isExprNode(resolved)) return resolved;
+  return exprArg(resolved);
+}
+
+function validateDefaultExpr(expr: Node): void {
+  rejectNestedPerRowGeneratorValues(expr);
+  const walk = (node: unknown): void => {
+    if (!node || typeof node !== "object" || typeof (node as Node).node !== "string") {
+      throw structuredError("OP_INVALID", "default expression must be a closed Expr node");
+    }
+    const n = node as Node;
+    switch (n.node) {
+      case "colRef":
+        throw structuredError("OP_INVALID", "a column default cannot reference a column");
+      case "agg":
+        if (n.arg !== undefined && n.arg !== null) walk(n.arg);
+        if (n.delimiter !== undefined && n.delimiter !== null) walk(n.delimiter);
+        return;
+      case "literal":
+        return;
+      case "uuidV4":
+      case "uuidV7":
+        return;
+      case "fnCall": {
+        if (typeof n.fn !== "string" || !DEFAULT_SCALAR_FNS.has(n.fn)) {
+          throw structuredError(
+            "OP_INVALID",
+            "a column default cannot use volatile or vendor-only functions; use immutable scalar chain helpers",
+          );
+        }
+        if (!Array.isArray(n.args)) {
+          throw structuredError("OP_INVALID", "default function expression args must be an array");
+        }
+        n.args.forEach(walk);
+        return;
+      }
+      case "fnSynth": {
+        if (typeof n.fn !== "string" || !DEFAULT_SYNTH_FNS.has(n.fn)) {
+          throw structuredError("OP_INVALID", "a column default cannot use this synthesized function");
+        }
+        if (!Array.isArray(n.args)) {
+          throw structuredError("OP_INVALID", "default synth expression args must be an array");
+        }
+        n.args.forEach(walk);
+        return;
+      }
+      case "binOp":
+        walk(n.lhs);
+        walk(n.rhs);
+        return;
+      case "unaryOp":
+        walk(n.operand);
+        return;
+      case "case": {
+        if (!Array.isArray(n.branches)) {
+          throw structuredError("OP_INVALID", "default CASE expression branches must be an array");
+        }
+        for (const branch of n.branches) {
+          if (!isPlainObject(branch)) {
+            throw structuredError("OP_INVALID", "default CASE branches must be { when, then } objects");
+          }
+          walk(branch.when);
+          walk(branch.then);
+        }
+        if (n.else !== undefined && n.else !== null) walk(n.else);
+        return;
+      }
+      case "cast":
+        walk(n.operand);
+        return;
+      case "between":
+        walk(n.operand);
+        walk(n.low);
+        walk(n.high);
+        return;
+      case "like":
+        walk(n.operand);
+        walk(n.pattern);
+        return;
+      case "distinctFrom":
+        walk(n.left);
+        walk(n.right);
+        return;
+      case "inList":
+        walk(n.expr);
+        return;
+      case "regexMatch":
+      case "storageSize":
+      case "interval":
+      case "dialect":
+        throw structuredError(
+          "OP_INVALID",
+          "a column default cannot use volatile, dialect-specific, or vendor-only expression nodes",
+        );
+      case "extract":
+        throw structuredError("OP_INVALID", "a column default cannot use an EXTRACT expression");
+      default:
+        throw structuredError("OP_INVALID", `unsupported default expression node ${JSON.stringify(n.node)}`);
+    }
+  };
+  walk(expr);
+}
+
+function defaultExprIr(slot: DefaultExprFn | ExprChainType | Node): Node {
+  const expr = resolveDefaultExpr(slot);
+  validateDefaultExpr(expr);
+  return { expr };
+}
+
+function toIrDefault(value: DefaultValue | DefaultExprFn | ExprChainType | Node): Node {
+  // A branded per-row value has no string-keyed properties. Reject it before the
+  // empty-object default branch can mistake the intent descriptor for `{}`.
+  rejectPerRowGeneratorValue(value);
+  if (typeof value === "function" || value instanceof ExprChainImpl || isExprNode(value)) {
+    return defaultExprIr(value as DefaultExprFn | ExprChainType | Node);
+  }
+  if (isNextvalDefault(value)) {
+    return { nextval: compact({ name: value.name, schema: value.schema }) };
+  }
+  if (value && typeof value === "object" && "fn" in value && typeof value.fn === "string") {
+    throw defaultFunctionValueError();
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0) return { container: "array" };
+    rejectNestedFunctionValues(value);
+    return { json: toIrJsonValue(value) };
+  }
+  if (isInt64Value(value)) return { literal: { value: toIrScalar(value) } };
+  if (isDecimalValue(value)) return { literal: { value: toIrScalar(value) } };
+  if (isBytesValue(value)) return { literal: { value: toIrScalar(value) } };
+  if (isPlainObject(value)) {
+    if (Object.keys(value).length === 0) return { container: "object" };
+    if (isRemovedInt64Carrier(value)) return { literal: { value: toIrScalar(value) } };
+    if (isRemovedDecimalCarrier(value)) return { literal: { value: toIrScalar(value) } };
+    if (isRemovedBytesCarrier(value)) return { literal: { value: toIrScalar(value) } };
+    rejectNestedFunctionValues(value);
+    return { json: toIrJsonValue(value) };
+  }
+  return { literal: { value: toIrScalar(value) } };
+}
+
+type NextvalDefaultMarker = NextvalDefault & {
+  readonly [NEXTVAL_DEFAULT_MARKER]: true;
+};
+
+function isNextvalDefault(value: unknown): value is NextvalDefaultMarker {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    (value as Record<PropertyKey, unknown>)[NEXTVAL_DEFAULT_MARKER] === true
+  );
+}
+
+export function nextval(name: string, opts: NextvalOptions = {}): NextvalDefault {
+  requireString(name, "nextval(name)");
+  if (opts === null || typeof opts !== "object" || Array.isArray(opts)) {
+    throw structuredError("OP_INVALID", "nextval(name, opts): opts must be { schema?: string }");
+  }
+  if (opts.schema !== undefined) requireString(opts.schema, "nextval(name, { schema })");
+  return Object.freeze({
+    [NEXTVAL_DEFAULT_MARKER]: true,
+    name,
+    schema: opts.schema,
+  }) as unknown as NextvalDefault;
+}
+
+export function now(): ExprChainType {
+  return chain({ node: "fnSynth", fn: "now", args: [] });
+}
+
+export function uuidV4(): ExprChainType {
+  return chain({ node: "uuidV4" });
+}
+
+export function uuidV7(): ExprChainType {
+  return chain({ node: "uuidV7" });
+}
+
+/** @deprecated Use {@link uuidV4} instead. */
+export function genRandomUuid(): ExprChainType {
+  return uuidV4();
+}
+
+export function currentSetting(name: string, opts: CurrentSettingOptions = {}): ExprChainType {
+  requireString(name, "currentSetting(name)");
+  if (opts === null || typeof opts !== "object" || Array.isArray(opts)) {
+    throw structuredError("OP_INVALID", "currentSetting(name, opts): opts must be { missingOk?: boolean }");
+  }
+  const missingOk = requireOptionalBoolean(opts.missingOk, "currentSetting(name, { missingOk })");
+  return chain({
+    node: "fnCall",
+    fn: "currentSetting",
+    args: missingOk === undefined
+      ? [{ node: "literal", value: name }]
+      : [{ node: "literal", value: name }, { node: "literal", value: missingOk }],
+  });
+}
+
+export function currentUser(): ExprChainType {
+  return chain({ node: "fnCall", fn: "currentUser", args: [] });
+}
+
+export function interval(duration: Duration): ExprChainType {
+  return chain({
+    node: "interval",
+    duration: pgDuration(duration),
+  });
+}
+
+/** Validated textual ID formats. These helpers select storage + format only;
+ * ordinary `ColumnDef` modifiers opt into nullability/key constraints. */
+export const ids: IdFormats = {
+  typeId: (opts: TypeIdOptions) => {
+    requirePlainObject(opts, "ids.typeId(opts)");
+    requireTypeIdPrefix(opts.prefix);
+    return new ColumnDefImpl("text", {
+      valueFormat: { typeId: { prefix: opts.prefix } },
+    });
+  },
+  ulid: () => new ColumnDefImpl("text", { valueFormat: "ulid" }),
+};
+
+/** Apply-engine generator intents. These functions deliberately sample no
+ * randomness: the recorder preserves only the requested generator, and the
+ * backfill executor evaluates it independently for every affected row. */
+export const perRow: PerRowGenerators = Object.freeze({
+  uuidV4: () => perRowGeneratorValue("uuidV4"),
+  uuidV7: () => perRowGeneratorValue("uuidV7"),
+  typeId: (opts: TypeIdOptions) => {
+    requirePlainObject(opts, "perRow.typeId(opts)");
+    requireTypeIdPrefix(opts.prefix, "perRow.typeId({ prefix })");
+    const generator: PerRowGenerator = Object.freeze({
+      typeId: Object.freeze({ prefix: opts.prefix }),
+    });
+    return perRowGeneratorValue(generator);
+  },
+  ulid: () => perRowGeneratorValue("ulid"),
+});
+
+export const t: TypeLexicon = {
+  text: (opts?: TextOptions) => textColumn(opts),
+  string: (opts?: StringOptions) => stringColumn(opts),
+  textArray: () => new ColumnDefImpl("textArray"),
+  numeric: (opts = {}) => {
+    requirePlainObject(opts, "t.numeric(opts)");
+    const precision = requireOptionalPositiveInteger(opts.precision, "t.numeric({ precision })") ?? 38;
+    const scale = requireOptionalNonNegativeInteger(opts.scale, "t.numeric({ scale })") ?? 9;
+    return new ColumnDefImpl({ decimal: { precision, scale } } as ColType);
+  },
+  char: (opts) => {
+    requirePlainObject(opts, "t.char(opts)");
+    const n = requireOptionalPositiveInteger(opts.length, "t.char({ length })");
+    if (n === undefined) {
+      throw structuredError("OP_INVALID", "t.char({ length }) requires length");
+    }
+    return new ColumnDefImpl({ char: { length: n } } as ColType);
+  },
+  timestamp: () => new ColumnDefImpl("timestamp"),
+  date: () => new ColumnDefImpl("date" as ColType),
+  uuid: () => new ColumnDefImpl("uuid"),
+  bytes: () => new ColumnDefImpl("bytes"),
+  boolean: () => new ColumnDefImpl("boolean"),
+  json: () => new ColumnDefImpl("json"),
+  vector: (opts: VectorOptions) => {
+    requirePlainObject(opts, "t.vector(opts)");
+    const n = requireOptionalPositiveInteger(opts.dimensions, "t.vector({ dimensions })");
+    if (n === undefined) {
+      throw structuredError("OP_INVALID", "t.vector({ dimensions }) requires dimensions");
+    }
+    let col = new ColumnDefImpl({ vector: { vector: n } } as ColType);
+    if (opts.metric !== undefined) {
+      requireString(opts.metric, "t.vector({ metric })");
+      // A closed-set check on the metric token gives a friendly OP_INVALID at
+      // authoring time instead of a cryptic serde "unknown variant" at the Rust
+      // deserialize seam (the engine's closed `VectorMetric` enum stays authoritative).
+      if (!VECTOR_METRICS.includes(opts.metric)) {
+        throw structuredError(
+          "OP_INVALID",
+          `t.vector({ dimensions, metric }): metric must be one of ${VECTOR_METRICS.join(" | ")}, ` +
+            `got ${JSON.stringify(opts.metric)}`,
+          { metric: opts.metric },
+        );
+      }
+      col = col.__withVectorMetric(opts.metric);
+    }
+    return col;
+  },
+  geoPoint: () => new ColumnDefImpl("geoPoint"),
+  smallInt: () => new ColumnDefImpl("smallInt"),
+  int: () => new ColumnDefImpl("int"),
+  bigInt: () => new ColumnDefImpl("bigInt"),
+  real: () => new ColumnDefImpl("real"),
+  double: () => new ColumnDefImpl("double"),
+  inet: () => new ColumnDefImpl("inet"),
+  enum: (name) => {
+    const n = typeof name === "string" ? name : name.name;
+    requireString(n, "t.enum(name)");
+    return new ColumnDefImpl({ enum: { name: n } } as ColType);
+  },
+  domain: (name) => {
+    const n = typeof name === "string" ? name : name.name;
+    requireString(n, "t.domain(name)");
+    return new ColumnDefImpl({ domain: { name: n } } as ColType);
+  },
+  encrypted: (arg) => {
+    const inner = arg && typeof arg === "object" && "of" in arg ? (arg as { of: unknown }).of : arg;
+    if (isColumnDef(inner)) {
+      rejectColumnReferenceFacet(inner, "t.encrypted({ of })");
+    }
+    const innerType = isColumnDef(inner) ? inner._type : (inner as ColType);
+    if (innerType === undefined) {
+      throw structuredError("OP_INVALID", "t.encrypted({ of }): of must be a ColumnDef or ColType");
+    }
+    return new ColumnDefImpl({ encrypted: { of: innerType } } as ColType);
+  },
+};
+
+function colTypeOf(typeArg: ColumnDefType | ColType): ColType {
+  if (isColumnDef(typeArg)) {
+    rejectColumnReferenceFacet(typeArg, "this lifecycle or nested type position");
+    return typeArg._type;
+  }
+  return typeArg as ColType;
+}
+
+export function enumType(name: string): EnumHandle {
+  requireString(name, "enumType(name)");
+  const handle: EnumHandle = {
+    name,
+    create(createArgs: CreateEnumArgs) {
+      recordCreateEnum(name, createArgs);
+      return handle;
+    },
+    drop(dropArgs: DropEnumArgs = {}) {
+      rejectUnknownKeys(dropArgs, DROP_ENUM_KEYS, `enumType("${name}").drop(...)`);
+      recordDropEnum(name, dropArgs);
+      return handle;
+    },
+    comment(text: string | null, commentArgs: { schema?: string } = {}) {
+      rejectUnknownKeys(commentArgs, SCHEMA_ONLY_KEYS, `${name}.comment(...)`);
+      recordComment({ kind: "type", name, schema: commentArgs.schema }, text);
+      return handle;
+    },
+  };
+  return handle;
+}
+
+export function __pgDomain(name: string): DomainHandle {
+  requireString(name, "domain(name)");
+  const handle: DomainHandle = {
+    name,
+    create(args: CreateDomainArgs) {
+      recordCreateDomain(name, args);
+      return handle;
+    },
+    drop(args: DropDomainArgs = {}) {
+      rejectUnknownKeys(args, DROP_DOMAIN_KEYS, `domain("${name}").drop(...)`);
+      recordDropDomain(name, args);
+      return handle;
+    },
+    comment(text: string | null, commentArgs: { schema?: string } = {}) {
+      rejectUnknownKeys(commentArgs, SCHEMA_ONLY_KEYS, `${name}.comment(...)`);
+      recordComment({ kind: "type", name, schema: commentArgs.schema }, text);
+      return handle;
+    },
+  };
+  return handle;
+}
+
+export function __pgSchema(name: string): SchemaHandle {
+  requireString(name, "schema(name)");
+  let handle: SchemaHandle;
+  const dropped: DroppedSchemaHandle = {
+    name,
+    create(args: SchemaCreateArgs = {}) {
+      recordCreateSchema(name, args);
+      return handle;
+    },
+  };
+  handle = {
+    name,
+    create(args: SchemaCreateArgs = {}) {
+      recordCreateSchema(name, args);
+      return handle;
+    },
+    drop(args: SchemaDropArgs = {}) {
+      recordDropSchema(name, args);
+      return dropped;
+    },
+  };
+  return handle;
+}
+
+export function __pgExtension(name: string): ExtensionHandle {
+  requireString(name, "extension(name)");
+  let handle: ExtensionHandle;
+  const dropped: DroppedExtensionHandle = {
+    name,
+    create(args: ExtensionCreateArgs = {}) {
+      recordCreateExtension(name, args);
+      return handle;
+    },
+  };
+  handle = {
+    name,
+    create(args: ExtensionCreateArgs = {}) {
+      recordCreateExtension(name, args);
+      return handle;
+    },
+    drop(args: ExtensionDropArgs = {}) {
+      recordDropExtension(name, args);
+      return dropped;
+    },
+  };
+  return handle;
+}
+
+export function __pgRole(name: string): RoleHandle {
+  requireString(name, "role(name)");
+  let handle: RoleHandle;
+  const dropped: DroppedRoleHandle = {
+    name,
+    create(args: RoleCreateArgs = {}) {
+      recordCreateRole(name, args);
+      return handle;
+    },
+  };
+  handle = {
+    name,
+    create(args: RoleCreateArgs = {}) {
+      recordCreateRole(name, args);
+      return handle;
+    },
+    setOptions(args: RoleSetOptionsArgs) {
+      recordSetRoleOptions(name, args);
+      return handle;
+    },
+    drop(args: RoleDropArgs = {}) {
+      recordDropRole(name, args);
+      return dropped;
+    },
+  };
+  return handle;
+}
+
+export function __pgSequence(name: string): SequenceHandle {
+  requireString(name, "sequence(name)");
+  const handle: SequenceHandle = {
+    name,
+    create(args: CreateSequenceArgs = {}) {
+      recordCreateSequence(name, args);
+      return handle;
+    },
+    alter(args: AlterSequenceArgs) {
+      recordAlterSequence(name, args);
+      return handle;
+    },
+    drop(args: DropSequenceArgs = {}) {
+      rejectUnknownKeys(args, DROP_SEQUENCE_KEYS, `sequence("${name}").drop(...)`);
+      recordDropSequence(name, args);
+      return handle;
+    },
+    comment(text: string | null, commentArgs: { schema?: string } = {}) {
+      rejectUnknownKeys(commentArgs, SCHEMA_ONLY_KEYS, `${name}.comment(...)`);
+      recordComment({ kind: "sequence", name, schema: commentArgs.schema }, text);
+      return handle;
+    },
+  };
+  return handle;
+}
+
+export const domain = __pgDomain;
+export const schema = __pgSchema;
+export const extension = __pgExtension;
+export const role = __pgRole;
+export const sequence = __pgSequence;
+
+function recordVendor(op: Node): Node {
+  return __pgPush(compact(op));
+}
+
+export function dropOwnedBy(args: DropOwnedByArgs): Node {
+  if (!Array.isArray(args.roles)) {
+    throw structuredError("OP_INVALID", "dropOwnedBy({ roles }): roles must be an array");
+  }
+  return recordVendor({ op: "dropOwnedBy", roles: args.roles });
+}
+
+export function grant(args: GrantArgs): Node {
+  if (!Array.isArray(args.privileges) || args.privileges.length === 0) {
+    throw structuredError("OP_INVALID", "grant({ privileges }): privileges must be a non-empty array");
+  }
+  if (args.on === null || typeof args.on !== "object") {
+    throw structuredError("OP_INVALID", "grant({ on }): on must be a target object");
+  }
+  if (!Array.isArray(args.to) || args.to.length === 0) {
+    throw structuredError("OP_INVALID", "grant({ to }): to must be a non-empty array");
+  }
+  return recordVendor({
+    op: "grant",
+    privileges: args.privileges,
+    on: args.on,
+    to: args.to,
+    withGrantOption: args.withGrantOption,
+  });
+}
+
+export function revoke(args: RevokeArgs): Node {
+  if (!Array.isArray(args.privileges) || args.privileges.length === 0) {
+    throw structuredError("OP_INVALID", "revoke({ privileges }): privileges must be a non-empty array");
+  }
+  if (args.on === null || typeof args.on !== "object") {
+    throw structuredError("OP_INVALID", "revoke({ on }): on must be a target object");
+  }
+  if (!Array.isArray(args.from) || args.from.length === 0) {
+    throw structuredError("OP_INVALID", "revoke({ from }): from must be a non-empty array");
+  }
+  return recordVendor({
+    op: "revoke",
+    privileges: args.privileges,
+    on: args.on,
+    from: args.from,
+  });
+}
+
+export function createFunction(args: CreateFunctionArgs): Node {
+  requireString(args.name, "createFunction({ name })");
+  requireString(args.returns, "createFunction({ returns })");
+  requireString(args.language, "createFunction({ language })");
+  requireString(args.body, "createFunction({ body })");
+  return recordVendor({
+    op: "createFunction",
+    name: args.name,
+    schema: args.schema,
+    args: args.args,
+    returns: args.returns,
+    language: args.language,
+    replace: args.replace,
+    volatility: args.volatility,
+    body: args.body,
+  });
+}
+
+export function dropFunction(args: DropFunctionArgs): Node {
+  requireString(args.name, "dropFunction({ name })");
+  return recordVendor({
+    op: "dropFunction",
+    name: args.name,
+    schema: args.schema,
+    argTypes: args.argTypes,
+    ifExists: args.ifExists,
+  });
+}
+
+export function raw(args: RawArgs): Node {
+  requireString(args.sql, "raw({ sql })");
+  requireString(args.reason, "raw({ reason })");
+  return recordVendor({
+    op: "raw",
+    sql: args.sql,
+    reason: args.reason,
+  });
+}
+
+// ── (A) The shared `db` lexicon bridge ──
+
+/**
+ * Lift a `db` schema field (a `t.*` `TypeBuilder` or its `FieldDef`)
+ * into a migration `ColumnDef`, so a column declared in the live `db`
+ * schema lowers through the IDENTICAL `ColType` path a hand-written migration
+ * column does (one shared lexicon). The TYPE is bridged via the
+ * single-source {@link colTypeFromDbField} reduction; the column's NULLABILITY is
+ * carried over (`db` `.required()` → migration `.notNull()`). Table/
+ * column NAMES are NEVER bound to the live schema. Returns a chainable
+ * (immutable) `ColumnDef`, so a caller can still layer migration modifiers on top.
+ */
+export function fromDb(field: DbSchemaField): ColumnDefType {
+  let def: ColumnDefImpl = new ColumnDefImpl(colTypeFromDbField(field));
+  const fd = field instanceof DbTypeBuilder ? field.toFieldDef() : field;
+  if (fd && typeof fd === "object" && (fd as { required?: boolean }).required === true) {
+    def = def.notNull();
+  }
+  if (fd && typeof fd === "object" && (fd as { unique?: boolean }).unique === true) {
+    def = def.unique();
+  }
+  return def;
+}
+
+// ── (B) The fluent `(col) => Expr` builder ──
+
+function chain(node: Node): ExprChainImpl {
+  return new ExprChainImpl(node);
+}
+
+function exprArg(x: unknown): Node {
+  rejectNestedPerRowGeneratorValues(x);
+  const synth = nativeDbExprNode(x);
+  if (synth !== undefined) return synth;
+  rejectFunctionValue(x);
+  if (x instanceof ExprChainImpl) return x.__node;
+  if (x && typeof x === "object" && typeof (x as Node).node === "string") return x as Node;
+  return { node: "literal", value: toIrScalar(x) };
+}
+
+type InListScalarKind = "string" | "number" | "boolean" | "null";
+
+function inListScalarKind(value: unknown, label: string): InListScalarKind {
+  if (value === null) return "null";
+  switch (typeof value) {
+    case "string":
+      if (value.length === 0) {
+        throw structuredError("OP_INVALID", `${label} must be non-empty`);
+      }
+      if (value.includes("\0")) {
+        throw structuredError("OP_INVALID", `${label} must not contain a NUL byte`);
+      }
+      return "string";
+    case "number":
+      if (!Number.isFinite(value)) {
+        throw structuredError("OP_INVALID", `${label} must be a finite number`);
+      }
+      return "number";
+    case "boolean":
+      return "boolean";
+    default:
+      throw structuredError(
+        "OP_INVALID",
+        `${label} must be a Scalar (string, number, boolean, or null); got ${typeof value}`,
+      );
+  }
+}
+
+function scalarLiteralArray(values: unknown, what: string): unknown[] {
+  if (!Array.isArray(values)) {
+    throw structuredError("OP_INVALID", `${what} must be a Scalar[]`);
+  }
+  let kind: InListScalarKind | undefined;
+  return values.map((v, i) => {
+    const elemKind = inListScalarKind(v, `${what}[${i}]`);
+    if (kind === undefined) {
+      kind = elemKind;
+    } else if (elemKind !== kind) {
+      throw structuredError("OP_INVALID", `${what} list must be homogeneous; ${what}[${i}] is ${elemKind}, expected ${kind}`);
+    }
+    return toIrScalar(v);
+  });
+}
+
+function pgRegexPattern(pattern: unknown): string {
+  if (typeof pattern !== "string") {
+    throw structuredError("OP_INVALID", `.regex(pattern): pattern must be a string; got ${typeof pattern}`);
+  }
+  if (pattern.length === 0) {
+    throw structuredError("OP_INVALID", ".regex(pattern): pattern must be non-empty");
+  }
+  if (pattern.includes("\0")) {
+    throw structuredError("OP_INVALID", ".regex(pattern): pattern must not contain a NUL byte");
+  }
+  return pattern;
+}
+
+// The parts every shipping backend renders. This is NOT what makes a field
+// legal — the engine's per-target validator decides that — it is only what the
+// builder's immutable-context check treats as needing no vendor position.
+const portableExtractFields = ["year", "month", "day", "hour", "minute", "dow"] as const;
+const portableExtractFieldSet = new Set<string>(portableExtractFields);
+
+// ONE field list, matching the single `ExtractField` in the wire contract.
+const extractFields = [
+  ...portableExtractFields,
+  "second",
+  "doy",
+  "epoch",
+  "quarter",
+  "week",
+  "isodow",
+  "isoyear",
+  "century",
+  "decade",
+  "millennium",
+  "microseconds",
+  "milliseconds",
+  "timezone",
+  "timezoneHour",
+  "timezoneMinute",
+] as const;
+type ExtractFieldToken = typeof extractFields[number];
+const extractFieldSet = new Set<string>(extractFields);
+
+const castTargets = ["text", "int", "real", "boolean", "bytes", "uuid"] as const;
+const castTargetSet = new Set<string>(castTargets);
+
+function castTarget(args: unknown): CastTarget {
+  if (!isPlainObject(args)) {
+    throw structuredError("OP_INVALID", "cast(args): args must be { to }");
+  }
+  const to = args.to;
+  if (typeof to !== "string" || !castTargetSet.has(to)) {
+    throw structuredError(
+      "OP_INVALID",
+      `cast({ to }): to must be one of ${castTargets.map((t) => JSON.stringify(t)).join(", ")}; got ${JSON.stringify(to)}`,
+    );
+  }
+  return to as CastTarget;
+}
+
+function extractField(field: unknown): ExtractFieldToken {
+  if (typeof field === "string" && extractFieldSet.has(field)) {
+    return field as ExtractFieldToken;
+  }
+  throw structuredError(
+    "OP_INVALID",
+    `.extract(field): field must be one of ${extractFields.map((f) => JSON.stringify(f)).join(", ")}; got ${JSON.stringify(field)}`,
+  );
+}
+
+const durationFields = ["years", "months", "days", "hours", "minutes", "seconds"] as const;
+
+function pgDuration(duration: unknown): Duration {
+  if (!isPlainObject(duration)) {
+    throw structuredError("OP_INVALID", `interval(duration): duration must be an object; got ${typeof duration}`);
+  }
+
+  const normalized: Duration = {};
+  for (const key of durationFields) {
+    const value = duration[key];
+    if (value === undefined) continue;
+    if (!Number.isInteger(value)) {
+      throw structuredError(
+        "OP_INVALID",
+        `interval(duration): ${key} must be an integer; got ${JSON.stringify(value)}`,
+      );
+    }
+    normalized[key] = value as number;
+  }
+
+  for (const key of Object.keys(duration)) {
+    if (!(durationFields as readonly string[]).includes(key)) {
+      throw structuredError(
+        "OP_INVALID",
+        `interval(duration): unknown duration field ${JSON.stringify(key)}`,
+      );
+    }
+  }
+
+  if (Object.keys(normalized).length === 0) {
+    throw structuredError("OP_INVALID", "interval(duration): at least one duration field is required");
+  }
+
+  return normalized;
+}
+
+class ExprChainImpl implements ExprChainType {
+  __node: Node;
+  constructor(node: Node) {
+    this.__node = node;
+  }
+  private bin(op: string, x: unknown): ExprChainImpl {
+    return chain({ node: "binOp", op, lhs: this.__node, rhs: exprArg(x) });
+  }
+  eq(x: unknown) {
+    if (x === null) {
+      throw structuredError("OP_INVALID", "eq(null) is always UNKNOWN in SQL — use isNull()");
+    }
+    return this.bin("eq", x);
+  }
+  ne(x: unknown) {
+    if (x === null) {
+      throw structuredError("OP_INVALID", "ne(null) is always UNKNOWN in SQL — use isNotNull()");
+    }
+    return this.bin("ne", x);
+  }
+  lt(x: unknown) { return this.bin("lt", x); }
+  le(x: unknown) { return this.bin("le", x); }
+  gt(x: unknown) { return this.bin("gt", x); }
+  ge(x: unknown) { return this.bin("ge", x); }
+  and(...es: unknown[]) {
+    let acc = this.__node;
+    for (const e of es) acc = { node: "binOp", op: "and", lhs: acc, rhs: exprArg(e) };
+    return chain(acc);
+  }
+  or(...es: unknown[]) {
+    let acc = this.__node;
+    for (const e of es) acc = { node: "binOp", op: "or", lhs: acc, rhs: exprArg(e) };
+    return chain(acc);
+  }
+  not() { return chain({ node: "unaryOp", op: "not", operand: this.__node }); }
+  add(x: unknown) { return this.bin("add", x); }
+  sub(x: unknown) { return this.bin("sub", x); }
+  mul(x: unknown) { return this.bin("mul", x); }
+  div(x: unknown) { return this.bin("div", x); }
+  concat(...parts: unknown[]) {
+    let acc = this.__node;
+    for (const p of parts) acc = { node: "binOp", op: "concat", lhs: acc, rhs: exprArg(p) };
+    return chain(acc);
+  }
+  isNull() { return chain({ node: "unaryOp", op: "isNull", operand: this.__node }); }
+  isNotNull() { return chain({ node: "unaryOp", op: "isNotNull", operand: this.__node }); }
+  isTrue() { return chain({ node: "unaryOp", op: "isTrue", operand: this.__node }); }
+  isFalse() { return chain({ node: "unaryOp", op: "isFalse", operand: this.__node }); }
+  cast(args: { to: CastTarget }) {
+    return chain({ node: "cast", operand: this.__node, target: castTarget(args) });
+  }
+  // Portable predicate nodes. `between`/`like` render identical syntax on
+  // all three dialects; `distinctFrom` is portably named but per-dialect rendered
+  // (PG/SQLite `IS DISTINCT FROM` vs MySQL `NOT (x <=> y)`) — the engine owns it.
+  between(low: unknown, high: unknown) {
+    return chain({ node: "between", operand: this.__node, low: exprArg(low), high: exprArg(high) });
+  }
+  like(pattern: unknown) {
+    return chain({ node: "like", operand: this.__node, pattern: exprArg(pattern) });
+  }
+  "in"(values: readonly Scalar[]) {
+    return chain({
+      node: "inList",
+      expr: this.__node,
+      elems: scalarLiteralArray(values, ".in(values)"),
+      negated: false,
+    });
+  }
+  notIn(values: readonly Scalar[]) {
+    return chain({
+      node: "inList",
+      expr: this.__node,
+      elems: scalarLiteralArray(values, ".notIn(values)"),
+      negated: true,
+    });
+  }
+  distinctFrom(x: unknown) {
+    return chain({ node: "distinctFrom", left: this.__node, right: exprArg(x) });
+  }
+  // PG-first chain operators. Same IR nodes as the old vendor helpers;
+  // the dialect gate lives in the Rust validator (fail-closed off-target).
+  regex(pattern: string) {
+    return chain({ node: "regexMatch", expr: this.__node, pattern: pgRegexPattern(pattern) });
+  }
+  columnSize() {
+    return chain({ node: "storageSize", expr: this.__node });
+  }
+  lower() {
+    return chain({ node: "fnCall", fn: "lower", args: [this.__node] });
+  }
+  upper() {
+    return chain({ node: "fnCall", fn: "upper", args: [this.__node] });
+  }
+  trim() {
+    return chain({ node: "fnCall", fn: "trim", args: [this.__node] });
+  }
+  length() {
+    return chain({ node: "fnCall", fn: "length", args: [this.__node] });
+  }
+  abs() {
+    return chain({ node: "fnCall", fn: "abs", args: [this.__node] });
+  }
+  coalesce(...rest: unknown[]) {
+    return chain({ node: "fnCall", fn: "coalesce", args: [this.__node, ...rest.map(exprArg)] });
+  }
+  nullif(b: unknown) {
+    return chain({ node: "fnCall", fn: "nullif", args: [this.__node, exprArg(b)] });
+  }
+  mod(b: unknown) {
+    return chain({ node: "fnCall", fn: "mod", args: [this.__node, exprArg(b)] });
+  }
+  round(n?: unknown) {
+    return chain({
+      node: "fnCall",
+      fn: "round",
+      args: n === undefined ? [this.__node] : [this.__node, exprArg(n)],
+    });
+  }
+  floor() {
+    return chain({ node: "fnCall", fn: "floor", args: [this.__node] });
+  }
+  ceil() {
+    return chain({ node: "fnCall", fn: "ceil", args: [this.__node] });
+  }
+  substr(start: unknown, len?: unknown) {
+    return chain({
+      node: "fnCall",
+      fn: "substr",
+      args: len === undefined ? [this.__node, exprArg(start)] : [this.__node, exprArg(start), exprArg(len)],
+    });
+  }
+  replace(from: unknown, to: unknown) {
+    return chain({ node: "fnCall", fn: "replace", args: [this.__node, exprArg(from), exprArg(to)] });
+  }
+  extract(field: unknown) {
+    return chain({ node: "extract", field: extractField(field), from: this.__node });
+  }
+  splitPart(delim: string, n: number) {
+    splitPartGrammarLint(delim, n);
+    return chain({
+      node: "fnSynth",
+      fn: "splitPart",
+      args: [this.__node, { node: "literal", value: delim }, { node: "literal", value: n }],
+    });
+  }
+  count(opts?: { distinct?: boolean }) {
+    return aggNode("count", this.__node, opts);
+  }
+  sum(opts?: { distinct?: boolean }) {
+    return aggNode("sum", this.__node, opts);
+  }
+  avg(opts?: { distinct?: boolean }) {
+    return aggNode("avg", this.__node, opts);
+  }
+  min(opts?: { distinct?: boolean }) {
+    return aggNode("min", this.__node, opts);
+  }
+  max(opts?: { distinct?: boolean }) {
+    return aggNode("max", this.__node, opts);
+  }
+  stringAgg(delimiter: unknown) {
+    return aggNode("stringAgg", this.__node, { delimiter });
+  }
+  arrayAgg() {
+    return aggNode("arrayAgg", this.__node);
+  }
+  boolAnd() {
+    return aggNode("boolAnd", this.__node);
+  }
+  boolOr() {
+    return aggNode("boolOr", this.__node);
+  }
+}
+
+export function check(name: string, expr: CheckExprFn): CheckDef {
+  requireString(name, "check(name, expr)");
+  if (typeof expr !== "function") {
+    throw structuredError("OP_INVALID", "check(name, expr): expr must be a (col) => Expr callback");
+  }
+  return { name, expr };
+}
+
+export function lit(value: ScalarValue): ExprChainType {
+  return chain({ node: "literal", value: toIrScalar(value) });
+}
+
+export function concatWs(sep: unknown, ...parts: unknown[]): ExprChainType {
+  return chain({ node: "fnSynth", fn: "concatWs", args: [exprArg(sep), ...parts.map(exprArg)] });
+}
+
+export function countStar(): ExprChainType {
+  return aggNode("count", undefined);
+}
+
+/**
+ * The one Layer-2 portability escape: either a per-backend VALUE
+ * divergence in an expression position, or a per-backend OP sequence in statement
+ * position. Expression legs are values (a `(col) => Expr` chain node, another
+ * combinator, or a bare scalar), and the engine renders the leg matching the
+ * target dialect. Keys are canonical backend identities:
+ *
+ * ```ts
+ * table("audit").update({
+ *   set: {
+ *     actor: dialect({ postgres: currentUser(), sqlite: "system", mysql: "system" }),
+ *   },
+ * })
+ * ```
+ *
+ * Op-level legs are thunks. Each present thunk records normal ops into a
+ * sub-buffer that becomes a `dialectal` op leg. A missing own leg is SKIPPED on
+ * that target (unlike expression `dialect()`, which fails closed).
+ *
+ * That asymmetry is deliberate. A missing expression leg leaves no value to write
+ * in a statement that runs regardless, so proceeding would write something wrong.
+ * A missing op leg just means this backend has no work here. Refusing instead
+ * would mean that shipping a new backend retroactively refuses every migration
+ * you authored before it existed, and the legs record into the CHECKSUMMED IR, so
+ * you could not add the missing leg afterwards without tripping a checksum drift.
+ *
+ * CAUTION: because leg keys are validated for SHAPE only, an unregistered key is
+ * indistinguishable from a deliberate skip. `dialect({ pg: ... })` is a well-formed
+ * id that matches no backend, so it contributes nothing on EVERY target and the
+ * deploy still reports success. There is no `pg` alias; the id is `postgres`.
+ *
+ * At least one leg must be present; the legs record in full in the checksummed
+ * IR in lexical backend-id order. A target with no own expression leg is
+ * refused (`EXPR_NOT_PORTABLE`).
+ */
+export function dialect(legs: DialectOpLegs): void;
+export function dialect(legs: DialectExprLegs): ExprChainType;
+export function dialect(legs: DialectExprLegs | DialectOpLegs): ExprChainType | void {
+  if (!isPlainObject(legs)) {
+    throw structuredError(
+      "OP_INVALID",
+      "dialect(legs): legs must be an object keyed by backend id with expression or op thunk legs",
+    );
+  }
+  const present = Object.keys(legs)
+    .sort()
+    .map((leg) => [leg, (legs as Record<string, unknown>)[leg]] as const)
+    .filter(([, value]) => value !== undefined);
+  if (present.length === 0) {
+    throw structuredError(
+      "OP_INVALID",
+      "dialect(legs): at least one leg must be present",
+    );
+  }
+  for (const [leg] of present) {
+    if (!/^[a-z][a-z0-9_]*$/.test(leg)) {
+      throw structuredError(
+        "OP_INVALID",
+        `dialect(legs): backend id ${JSON.stringify(leg)} must match [a-z][a-z0-9_]*`,
+      );
+    }
+  }
+
+  const isOpThunk = (value: unknown): boolean => typeof value === "function" && nativeDbExprNode(value) === undefined;
+  const firstIsThunk = isOpThunk(present[0][1]);
+  for (const [, value] of present.slice(1)) {
+    if (isOpThunk(value) !== firstIsThunk) {
+      throw structuredError(
+        "OP_INVALID",
+        "dialect(legs): cannot mix op thunk legs with expression legs",
+      );
+    }
+  }
+
+  if (firstIsThunk) {
+    const recordedLegs: Record<string, Node[]> = {};
+    for (const [leg, value] of present) {
+      const thunk = value as () => void;
+      const rec = recorder();
+      const start = rec.ops.length;
+      thunk();
+      setOwn(recordedLegs, leg, rec.ops.splice(start));
+    }
+    emitDialectal({ legs: recordedLegs });
+    return;
+  }
+
+  const expressionLegs: Record<string, Node> = {};
+  for (const [leg, value] of present) {
+    setOwn(expressionLegs, leg, exprArg(value));
+  }
+  return chain({ node: "dialect", legs: expressionLegs });
+}
+
+type AggFuncToken =
+  | "count"
+  | "sum"
+  | "avg"
+  | "min"
+  | "max"
+  | "stringAgg"
+  | "arrayAgg"
+  | "boolAnd"
+  | "boolOr";
+
+// Aggregate nodes. Receiver chain methods record
+// `<func>(<receiver>)`; countStar() records `count(*)`; stringAgg records its
+// delimiter as the aggregate's second argument. The optional `{ distinct: true }`
+// sets the `distinct` flag (skipped on the wire when false). count/sum/avg/min/max
+// are three-dialect; stringAgg/arrayAgg/boolAnd/boolOr are PG-first and fail closed
+// off-PG in Rust validate unless wrapped in dialect({...}).
+function aggNode(
+  func: AggFuncToken,
+  expr: unknown,
+  opts?: { distinct?: boolean; delimiter?: unknown },
+): ExprChainType {
+  const node: Node = { node: "agg", func };
+  if (expr !== undefined) node.arg = exprArg(expr);
+  if (opts && opts.delimiter !== undefined) node.delimiter = exprArg(opts.delimiter);
+  if (opts && opts.distinct === true) node.distinct = true;
+  return chain(node);
+}
+
+type CaseExprArgs = {
+  branches: Array<{ when: unknown; then: unknown }>;
+  else?: unknown;
+};
+
+function caseExpr(args: CaseExprArgs): ExprChainType {
+  const shape = "col.case({ branches: [{ when, then }], else? })";
+  if (!isPlainObject(args)) {
+    throw structuredError("OP_INVALID", `${shape}: args must be an object`);
+  }
+  const branches = args.branches;
+  if (!Array.isArray(branches) || branches.length === 0) {
+    throw structuredError(
+      "OP_INVALID",
+      `${shape}: branches must be a non-empty array of { when, then } objects`,
+    );
+  }
+  const node: Node = {
+    node: "case",
+    branches: branches.map((branch, i) => {
+      if (
+        !isPlainObject(branch) ||
+        !Object.prototype.hasOwnProperty.call(branch, "when") ||
+        !Object.prototype.hasOwnProperty.call(branch, "then")
+      ) {
+        throw structuredError(
+          "OP_INVALID",
+          `${shape}: branches[${i}] must be an object with when and then`,
+        );
+      }
+      return { when: exprArg(branch.when), then: exprArg(branch.then) };
+    }),
+  };
+  if (args.else !== undefined) node.else = exprArg(args.else);
+  return chain(node);
+}
+
+function makeColumnAccessor(): (first: string, second?: string) => ExprChainType {
+  // One-arg `col("col")` → unqualified colRef (byte-identical to the pre-
+  // qualification wire shape). Two-arg `col("table", "col")` → qualified colRef
+  // (the join-ON fix): the wire `colRef` node gains an optional `table`.
+  return ((first: string, second?: string) => {
+    if (second === undefined) {
+      requireString(first, 'col("name")');
+      return chain({ node: "colRef", name: first });
+    }
+    requireString(first, 'col("table", "col")');
+    requireString(second, 'col("table", "col")');
+    return chain({ node: "colRef", table: first, name: second });
+  });
+}
+
+function immutableExprBuilder(): IndexExprBuilder {
+  const c = makeColumnAccessor() as unknown as IndexExprBuilder;
+  c.case = caseExpr;
+  return Object.freeze(c);
+}
+
+function checkBuilder(): CheckBuilder {
+  const c = makeColumnAccessor() as unknown as CheckBuilder;
+  c.case = caseExpr;
+  return Object.freeze(c);
+}
+
+function domainValueBuilder(): DomainValueBuilder {
+  const v = chain({ node: "colRef", name: "VALUE" }) as unknown as DomainValueBuilder;
+  v.case = caseExpr;
+  return Object.freeze(v);
+}
+
+function makeBuilder(): ExprBuilder {
+  const c = makeColumnAccessor() as unknown as ExprBuilder;
+  c.case = caseExpr;
+  return c;
+}
+
+// The standalone `col.case` builder surfaced at a value position (`cCase(...)`) is
+// exported for the engine-embedded recorder bundle (`src/embedded-recorder.ts`,
+// the `include_str!`'d artifact), which requires the full engine-consumed
+// surface. Not re-exported through the SDK public `.` entry (`index.ts`).
+export const cCase = caseExpr;
+
+function resolveExpr(slot: ExprFn | ExprChainType | Node | undefined): Node | undefined {
+  if (slot === undefined || slot === null) return undefined;
+  rejectNestedPerRowGeneratorValues(slot);
+  if (typeof slot === "function") return exprArg(slot(makeBuilder()));
+  if (slot instanceof ExprChainImpl) return slot.__node;
+  if (slot && typeof slot === "object" && typeof (slot as Node).node === "string") return slot as Node;
+  throw structuredError("OP_INVALID", "expression slot must be a (col) => Expr callback or a built expression");
+}
+
+type ImmutableExprSlot = IndexExprFn | GeneratedColumnExprFn | CheckExprFn | ExprChainType | Node | undefined;
+
+function resolveImmutableExpr(slot: ImmutableExprSlot, position: string): Node | undefined {
+  if (slot === undefined || slot === null) return undefined;
+  let resolved: Node;
+  if (typeof slot === "function") {
+    resolved = exprArg((slot as (col: IndexExprBuilder) => unknown)(immutableExprBuilder()));
+  } else if (slot instanceof ExprChainImpl) {
+    resolved = slot.__node;
+  } else if (slot && typeof slot === "object" && typeof (slot as Node).node === "string") {
+    resolved = slot as Node;
+  } else {
+    throw structuredError("OP_INVALID", `${position} must be a (col) => Expr callback or a built expression`);
+  }
+  validateImmutableExpr(resolved, position);
+  return resolved;
+}
+
+function resolveCheckExpr(
+  slot: CheckExprFn | ExprChainType | Node | undefined,
+  position: string,
+): Node | undefined {
+  if (slot === undefined || slot === null) return undefined;
+  let resolved: Node;
+  if (typeof slot === "function") {
+    resolved = exprArg((slot as (col: CheckBuilder) => unknown)(checkBuilder()));
+  } else if (slot instanceof ExprChainImpl) {
+    resolved = slot.__node;
+  } else if (slot && typeof slot === "object" && typeof (slot as Node).node === "string") {
+    resolved = slot as Node;
+  } else {
+    throw structuredError("OP_INVALID", `${position} must be a (col) => Expr callback or a built expression`);
+  }
+  validateImmutableExpr(resolved, position, { allowPgImmutable: true });
+  return resolved;
+}
+
+function validateDomainCheckColRefs(expr: Node, position: string): void {
+  const walk = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      value.forEach(walk);
+      return;
+    }
+    if (!isPlainObject(value)) return;
+    if (value.node === "colRef") {
+      const table = (value as { table?: unknown }).table;
+      if (value.name !== "VALUE" || (table !== undefined && table !== null)) {
+        throw structuredError(
+          "OP_INVALID",
+          `${position} may reference only the domain VALUE pseudo-column; non-VALUE colRef nodes are not valid in domain SQL`,
+        );
+      }
+    }
+    Object.values(value).forEach(walk);
+  };
+  walk(expr);
+}
+
+function resolveDomainCheck(
+  slot: DomainCheckFn | ExprChainType | Node | undefined,
+  position: string,
+): Node | undefined {
+  if (slot === undefined || slot === null) return undefined;
+  let resolved: Node;
+  if (typeof slot === "function") {
+    resolved = exprArg((slot as (v: DomainValueBuilder) => unknown)(domainValueBuilder()));
+  } else if (slot instanceof ExprChainImpl) {
+    resolved = slot.__node;
+  } else if (slot && typeof slot === "object" && typeof (slot as Node).node === "string") {
+    resolved = slot as Node;
+  } else {
+    throw structuredError("OP_INVALID", `${position} must be a (v) => Expr callback or a built expression`);
+  }
+  validateImmutableExpr(resolved, position, { allowPgImmutable: true });
+  validateDomainCheckColRefs(resolved, position);
+  return resolved;
+}
+
+type CheckExprSlot = CheckExprFn | ExprChainType | Node | undefined;
+type CheckExprResolver = (slot: CheckExprSlot, position: string) => Node | undefined;
+
+const resolveTableCheckExpr: CheckExprResolver = (slot, position) =>
+  resolveCheckExpr(slot as CheckExprFn | ExprChainType | Node | undefined, position);
+
+function rejectImmutableExpr(position: string, reason: string): never {
+  throw structuredError(
+    "OP_INVALID",
+    `${position} must use only immutable expressions: column refs, literals, CASE, operators, and immutable scalar chain helpers ` +
+      `(${IMMUTABLE_HELPERS}); ${reason}`,
+  );
+}
+
+function validateImmutableExpr(expr: Node, position: string, opts: { allowPgImmutable?: boolean } = {}): void {
+  rejectNestedPerRowGeneratorValues(expr);
+  const rejectPgNode = (nodeName: string): void => {
+    rejectImmutableExpr(position, `${nodeName} is PG-vendor and non-portable`);
+  };
+  const walk = (node: unknown): void => {
+    if (!node || typeof node !== "object" || typeof (node as Node).node !== "string") {
+      rejectImmutableExpr(position, "found a non-expression value");
+    }
+    const n = node as Node;
+    switch (n.node) {
+      case "colRef":
+      case "literal":
+        return;
+      case "uuidV4":
+        rejectImmutableExpr(position, "uuidV4 is volatile");
+      case "uuidV7":
+        rejectImmutableExpr(position, "uuidV7 is volatile");
+      case "agg":
+        if (n.arg !== undefined && n.arg !== null) walk(n.arg);
+        if (n.delimiter !== undefined && n.delimiter !== null) walk(n.delimiter);
+        return;
+      case "fnCall": {
+        if (n.fn === "currentSetting" || n.fn === "currentUser") {
+          rejectImmutableExpr(position, `${String(n.fn)} is PG-vendor and non-portable`);
+        }
+        if (typeof n.fn !== "string" || !IMMUTABLE_SCALAR_FNS.has(n.fn)) {
+          rejectImmutableExpr(position, `function ${JSON.stringify(n.fn)} is not an immutable scalar chain helper`);
+        }
+        if (!Array.isArray(n.args)) {
+          rejectImmutableExpr(position, "function expression args must be an array");
+        }
+        n.args.forEach(walk);
+        return;
+      }
+      case "fnSynth": {
+        if (n.fn === "now") {
+          rejectImmutableExpr(position, `${String(n.fn)} is volatile`);
+        }
+        if (typeof n.fn !== "string" || !IMMUTABLE_SYNTH_FNS.has(n.fn)) {
+          rejectImmutableExpr(position, `synthesized function ${JSON.stringify(n.fn)} is not immutable here`);
+        }
+        if (!Array.isArray(n.args)) {
+          rejectImmutableExpr(position, "synthesized function expression args must be an array");
+        }
+        n.args.forEach(walk);
+        return;
+      }
+      case "binOp":
+        walk(n.lhs);
+        walk(n.rhs);
+        return;
+      case "unaryOp":
+        walk(n.operand);
+        return;
+      case "case": {
+        if (!Array.isArray(n.branches)) {
+          rejectImmutableExpr(position, "CASE expression branches must be an array");
+        }
+        for (const branch of n.branches) {
+          if (!isPlainObject(branch)) {
+            rejectImmutableExpr(position, "CASE branches must be { when, then } objects");
+          }
+          walk(branch.when);
+          walk(branch.then);
+        }
+        if (n.else !== undefined && n.else !== null) walk(n.else);
+        return;
+      }
+      case "cast":
+        walk(n.operand);
+        return;
+      case "between":
+        walk(n.operand);
+        walk(n.low);
+        walk(n.high);
+        return;
+      case "like":
+        walk(n.operand);
+        walk(n.pattern);
+        return;
+      case "distinctFrom":
+        walk(n.left);
+        walk(n.right);
+        return;
+      case "inList":
+        walk(n.expr);
+        return;
+      case "regexMatch":
+        if (!opts.allowPgImmutable) rejectPgNode("regexMatch");
+        walk(n.expr);
+        if (typeof n.pattern !== "string") {
+          rejectImmutableExpr(position, "regexMatch pattern must be a string");
+        }
+        return;
+      case "storageSize":
+        if (!opts.allowPgImmutable) rejectPgNode("storageSize");
+        walk(n.expr);
+        return;
+      case "extract":
+        if (typeof n.field !== "string" || !extractFieldSet.has(n.field)) {
+          rejectImmutableExpr(position, `extract field ${JSON.stringify(n.field)} is not an extract field`);
+        }
+        // One node, so the vendor-position rule keys on the FIELD: the parts
+        // every shipping backend renders are fine anywhere, the rest need the
+        // same vendor-only position the split node used to require.
+        if (!portableExtractFieldSet.has(n.field as string) && !opts.allowPgImmutable) {
+          rejectPgNode(`extract(${JSON.stringify(n.field)})`);
+        }
+        walk(n.from);
+        return;
+      case "interval":
+        if (!opts.allowPgImmutable) rejectPgNode("interval");
+        if (!isPlainObject(n.duration)) {
+          rejectImmutableExpr(position, "interval duration must be an object");
+        }
+        try {
+          pgDuration(n.duration);
+        } catch (error) {
+          rejectImmutableExpr(position, error instanceof Error ? error.message : "interval duration is invalid");
+        }
+        return;
+      case "dialect":
+        if (!isPlainObject(n.legs)) {
+          rejectImmutableExpr(position, "dialect legs must be an object keyed by backend id");
+        }
+        for (const leg of Object.values(n.legs)) {
+          if (leg !== undefined && leg !== null) walk(leg);
+        }
+        return;
+      default:
+        rejectImmutableExpr(position, `unsupported expression node ${JSON.stringify(n.node)}`);
+    }
+  };
+  walk(expr);
+}
+
+/** Internal hook used by widened Postgres checks/domain validation paths. */
+export function __pgResolveExpr(slot: ExprFn | ExprChainType | Expr | undefined): Node | undefined {
+  return resolveExpr(slot as ExprFn | ExprChainType | Node | undefined);
+}
+
+function resolveSetValue(value: DmlSetValue): unknown {
+  const synth = nativeDbExprNode(value);
+  if (synth !== undefined) return synth;
+  if (typeof value === "function") return resolveExpr(value as ExprFn)!;
+  return toIrValue(value);
+}
+
+function resolveSet(set: Record<string, DmlSetValue>): Record<string, unknown> {
+  if (!set || typeof set !== "object") {
+    throw structuredError("OP_INVALID", "`set` must be an object of column → DML value");
+  }
+  const out: Record<string, unknown> = {};
+  for (const col of Object.keys(set)) setOwn(out, col, resolveSetValue(set[col]));
+  return out;
+}
+
+function resolveBackfillSetValue(value: BackfillSetValue): unknown {
+  const generator = perRowGeneratorOf(value);
+  if (generator !== undefined) return { perRow: generator };
+  return resolveSetValue(value as DmlSetValue);
+}
+
+function resolveBackfillSet(set: Record<string, BackfillSetValue>): Record<string, unknown> {
+  if (!set || typeof set !== "object") {
+    throw structuredError("OP_INVALID", "`set` must be an object of column → backfill value");
+  }
+  const out: Record<string, unknown> = {};
+  for (const col of Object.keys(set)) setOwn(out, col, resolveBackfillSetValue(set[col]));
+  return out;
+}
+
+// ── (C) Existence-guard token mappers ──
+
+function ifNotExistsGuard(v: boolean | undefined): "ifNotExists" | undefined {
+  return v ? "ifNotExists" : undefined;
+}
+function ifExistsGuard(v: boolean | undefined): "ifExists" | undefined {
+  return v ? "ifExists" : undefined;
+}
+
+function stringArray(values: unknown, what: string): string[] {
+  if (!Array.isArray(values)) {
+    throw structuredError("OP_INVALID", `${what} must be a string[]`);
+  }
+  for (const v of values) requireString(v, what);
+  return [...values];
+}
+
+const PARTITION_BOUND_SENTINEL = "__zeroMigratePartitionBound";
+
+export const minValue = Object.freeze({ [PARTITION_BOUND_SENTINEL]: "minValue" }) as PartitionBoundSentinel;
+export const maxValue = Object.freeze({ [PARTITION_BOUND_SENTINEL]: "maxValue" }) as PartitionBoundSentinel;
+
+function partitionSpecToIr(spec: PartitionByInput | undefined, what: string): Node | undefined {
+  if (spec === undefined) return undefined;
+  if (!spec || typeof spec !== "object") {
+    throw structuredError("OP_INVALID", `${what} must be exactly one of { range }, { list }, or { hash }`);
+  }
+  const shape = spec as { range?: unknown; list?: unknown; hash?: unknown; whenUnsupported?: unknown };
+  const variants = (shape.range !== undefined ? 1 : 0) + (shape.list !== undefined ? 1 : 0) + (shape.hash !== undefined ? 1 : 0);
+  if (variants !== 1) {
+    throw structuredError("OP_INVALID", `${what} must be exactly one of { range }, { list }, or { hash }`);
+  }
+  const collapse = shape.whenUnsupported === undefined ? undefined : shape.whenUnsupported;
+  if (collapse !== undefined && collapse !== "collapse") {
+    throw structuredError("OP_INVALID", `${what}.whenUnsupported must be "collapse" when present`);
+  }
+  const affirmation = { collapse: collapse === "collapse" };
+  if (shape.range !== undefined) return { kind: "range", columns: stringArray(shape.range, `${what}.range`), ...affirmation };
+  if (shape.list !== undefined) return { kind: "list", columns: stringArray(shape.list, `${what}.list`), ...affirmation };
+  return { kind: "hash", columns: stringArray(shape.hash, `${what}.hash`), ...affirmation };
+}
+
+function requireU32(v: unknown, what: string): number | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0 || v > 0xffffffff) {
+    throw structuredError("OP_INVALID", `${what} must be a u32 integer; got ${v}`);
+  }
+  return v;
+}
+
+function partitionBoundValueToIr(value: PartitionBoundInput, what: string): Node {
+  if (value === minValue) return { kind: "minValue" };
+  if (value === maxValue) return { kind: "maxValue" };
+  if (typeof value === "string") return { kind: "string", value };
+  if (typeof value === "number" && Number.isSafeInteger(value)) {
+    return { kind: "int", value };
+  }
+  throw structuredError(
+    "OP_INVALID",
+    `${what} must be a string, JS safe integer, minValue, or maxValue`,
+  );
+}
+
+function partitionBoundListToIr(values: unknown, what: string): Node[] {
+  if (!Array.isArray(values)) {
+    throw structuredError("OP_INVALID", `${what} must be an array`);
+  }
+  return values.map((value, i) => partitionBoundValueToIr(value as PartitionBoundInput, `${what}[${i}]`));
+}
+
+function partitionBoundToIr(args: PartitionBoundArgs | unknown): Node {
+  if (!args || typeof args !== "object") {
+    throw structuredError(
+      "OP_INVALID",
+      "table(parent).partition(name).create(bound) needs a bounds object",
+    );
+  }
+  const bounds = args as { from?: unknown; to?: unknown; in?: unknown; modulus?: unknown; remainder?: unknown; default?: unknown };
+  const hasRange = bounds.from !== undefined || bounds.to !== undefined;
+  const hasList = bounds.in !== undefined;
+  const hasHash = bounds.modulus !== undefined || bounds.remainder !== undefined;
+  const hasDefault = bounds.default !== undefined;
+  const variantCount = (hasRange ? 1 : 0) + (hasList ? 1 : 0) + (hasHash ? 1 : 0) + (hasDefault ? 1 : 0);
+  if (variantCount !== 1) {
+    throw structuredError(
+      "OP_INVALID",
+      "partition bounds must be exactly one of { from, to }, { in }, { modulus, remainder }, or { default: true }",
+    );
+  }
+  if (hasDefault) {
+    if (bounds.default !== true) {
+      throw structuredError("OP_INVALID", "partition bounds.default must be true");
+    }
+    return { kind: "default" };
+  }
+  if (hasRange) {
+    return {
+      kind: "range",
+      from: partitionBoundListToIr(bounds.from, "partition bounds.from"),
+      to: partitionBoundListToIr(bounds.to, "partition bounds.to"),
+    };
+  }
+  if (hasList) {
+    return {
+      kind: "list",
+      values: partitionBoundListToIr(bounds.in, "partition bounds.in"),
+    };
+  }
+  return {
+    kind: "hash",
+    modulus: requireU32(bounds.modulus, "partition bounds.modulus"),
+    remainder: requireU32(bounds.remainder, "partition bounds.remainder"),
+  };
+}
+
+function indexIncludeToIr(include: readonly string[] | undefined): string[] | undefined {
+  if (include === undefined) return undefined;
+  const cols = stringArray(include, "index include");
+  return cols.length === 0 ? undefined : cols;
+}
+
+/**
+ * Flatten an index's vendor namespaces into the wire form.
+ *
+ * PostgreSQL storage parameters such as `pagesPerRange` and `fillfactor` are ordinary
+ * declarations in the PostgreSQL package, reached through the same
+ * `<dialect>: { ... }` surface a table's options use. So this function names no vendor
+ * and no parameter: it flattens whatever namespaces it is handed, and a new storage
+ * parameter needs no edit here.
+ */
+function indexAttributesToIr(args: object): Record<string, unknown> | undefined {
+  const namespaces: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(args)) {
+    if (INDEX_PORTABLE_KEYS.includes(key)) continue;
+    if (isPlainObject(value)) namespaces[key] = value;
+  }
+  const flat = flattenVendorAttributes(namespaces as never);
+  return Object.keys(flat).length === 0 ? undefined : flat;
+}
+
+/** Every PORTABLE key an index spec reads; anything else object-shaped is a namespace. */
+const INDEX_PORTABLE_KEYS = [
+  "name", "on", "columns", "unique", "using", "where", "include", "only",
+  "nullsNotDistinct", "concurrently", "ifNotExists", "schema", "table",
+];
+
+function recordCreateEnum(name: string, args: CreateEnumArgs): void {
+  rejectUnknownKeys(args, CREATE_ENUM_KEYS, `enumType("${name}").create(...)`);
+  requireString(name, "enumType(name)");
+  if (!args || typeof args !== "object") {
+    throw structuredError("OP_INVALID", "enumType(name).create({ values, ... }) needs an object");
+  }
+  const enumValues = stringArray(args.values, "enumType(name).create({ values })");
+  if (enumValues.length === 0) {
+    throw structuredError(
+      "OP_INVALID",
+      "enumType(name).create({ values }): values must be a non-empty string[] (an empty enum renders invalid SQL on MySQL/SQLite)",
+    );
+  }
+  emitCreateEnum({
+    name,
+    schema: args.schema,
+    values: enumValues,
+  });
+}
+
+function recordDropEnum(name: string, args: DropEnumArgs = {}): void {
+  requireString(name, "enumType(name).drop()");
+  emitDropEnum({
+    name,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+  });
+}
+
+function recordCreateDomain(name: string, args: CreateDomainArgs): void {
+  rejectUnknownKeys(args, CREATE_DOMAIN_KEYS, `domain("${name}").create(...)`);
+  requireString(name, "domain(name)");
+  if (!args || typeof args !== "object") {
+    throw structuredError("OP_INVALID", "domain(name).create({ as, ... }) needs an object");
+  }
+  if (args.notNull !== undefined && typeof args.notNull !== "boolean") {
+    throw structuredError("OP_INVALID", "domain(name).create({ notNull }): notNull must be a boolean");
+  }
+  emitCreateDomain({
+    name,
+    schema: args.schema,
+    as: colTypeOf(args.as),
+    check: resolveDomainCheck(args.check as DomainCheckFn | ExprChainType | Node | undefined, "domain(name).create({ check })"),
+    default: args.default === undefined ? undefined : toIrDefault(args.default),
+    notNull: args.notNull,
+  });
+}
+
+function recordDropDomain(name: string, args: DropDomainArgs = {}): void {
+  requireString(name, "domain(name).drop()");
+  emitDropDomain({
+    name,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+  });
+}
+
+function recordCreateSequence(name: string, args: CreateSequenceArgs = {}): void {
+  rejectUnknownKeys(args, CREATE_SEQUENCE_KEYS, `sequence("${name}").create(...)`);
+  requireString(name, "sequence(name)");
+  if (args === null || typeof args !== "object") {
+    throw structuredError("OP_INVALID", "sequence(name).create(args) needs an object");
+  }
+  const minValue = requireNullableSafeI64(args.minValue, "sequence.create({ minValue })");
+  const maxValue = requireNullableSafeI64(args.maxValue, "sequence.create({ maxValue })");
+  requireSequenceBounds(minValue, maxValue, "sequence.create(args)");
+  const asType = args.as === undefined ? undefined : colTypeOf(args.as);
+  if (asType !== undefined && !SEQUENCE_AS_TYPES.includes(asType)) {
+    throw structuredError(
+      "OP_INVALID",
+      `sequence.create({ as }): as must be one of ${SEQUENCE_AS_TYPES.join(" | ")}; got ${JSON.stringify(asType)}`,
+    );
+  }
+  emitCreateSequence({
+    name,
+    schema: args.schema,
+    as: asType,
+    increment: requireSequenceIncrement(args.increment, "sequence.create({ increment })"),
+    start: requireSafeI64(args.start, "sequence.create({ start })"),
+    minValue,
+    maxValue,
+    cache: requireSequenceCache(args.cache, "sequence.create({ cache })"),
+    cycle: args.cycle,
+    ownedBy: args.ownedBy,
+  });
+}
+
+function recordAlterSequence(name: string, args: AlterSequenceArgs): void {
+  rejectUnknownKeys(args, ALTER_SEQUENCE_KEYS, `sequence("${name}").alter(...)`);
+  requireString(name, "sequence(name)");
+  if (!args || typeof args !== "object") {
+    throw structuredError("OP_INVALID", "sequence(name).alter(args) needs an object");
+  }
+  const minValue = requireNullableSafeI64(args.minValue, "sequence.alter({ minValue })");
+  const maxValue = requireNullableSafeI64(args.maxValue, "sequence.alter({ maxValue })");
+  requireSequenceBounds(minValue, maxValue, "sequence.alter(args)");
+  emitAlterSequence({
+    name,
+    schema: args.schema,
+    increment: requireSequenceIncrement(args.increment, "sequence.alter({ increment })"),
+    restart: requireNullableSafeI64(args.restart, "sequence.alter({ restart })"),
+    minValue,
+    maxValue,
+    cache: requireSequenceCache(args.cache, "sequence.alter({ cache })"),
+    cycle: args.cycle,
+    ownedBy: args.ownedBy,
+  });
+}
+
+function recordDropSequence(name: string, args: DropSequenceArgs = {}): void {
+  requireString(name, "sequence(name)");
+  emitDropSequence({
+    name,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+  });
+}
+
+function requirePlainArgs(args: unknown, what: string): asserts args is Record<string, unknown> {
+  if (args === null || typeof args !== "object") {
+    throw structuredError("OP_INVALID", `${what} needs an object`);
+  }
+}
+
+function recordCreateSchema(name: string, args: SchemaCreateArgs = {}): void {
+  rejectUnknownKeys(args, CREATE_SCHEMA_KEYS, `schema("${name}").create(...)`);
+  requireString(name, "schema(name)");
+  requirePlainArgs(args, "schema(name).create(args)");
+  emitCreateSchema({
+    name,
+    ifNotExists: args.ifNotExists,
+    authorization: args.authorization,
+  });
+}
+
+function recordDropSchema(name: string, args: SchemaDropArgs = {}): void {
+  rejectUnknownKeys(args, DROP_SCHEMA_KEYS, `schema("${name}").drop(...)`);
+  requireString(name, "schema(name)");
+  requirePlainArgs(args, "schema(name).drop(args)");
+  emitDropSchema({
+    name,
+    ifExists: args.ifExists,
+    cascade: args.cascade,
+  });
+}
+
+function recordCreateExtension(name: string, args: ExtensionCreateArgs = {}): void {
+  rejectUnknownKeys(args, CREATE_EXTENSION_KEYS, `extension("${name}").create(...)`);
+  requireString(name, "extension(name)");
+  requirePlainArgs(args, "extension(name).create(args)");
+  emitCreateExtension({
+    name,
+    ifNotExists: args.ifNotExists,
+    schema: args.schema,
+  });
+}
+
+function recordDropExtension(name: string, args: ExtensionDropArgs = {}): void {
+  rejectUnknownKeys(args, DROP_EXTENSION_KEYS, `extension("${name}").drop(...)`);
+  requireString(name, "extension(name)");
+  requirePlainArgs(args, "extension(name).drop(args)");
+  emitDropExtension({
+    name,
+    ifExists: args.ifExists,
+  });
+}
+
+function recordCreateRole(name: string, args: RoleCreateArgs = {}): void {
+  rejectUnknownKeys(args, CREATE_ROLE_KEYS, `role("${name}").create(...)`);
+  requireString(name, "role(name)");
+  requirePlainArgs(args, "role(name).create(args)");
+  emitCreateRole({
+    name,
+    login: args.login,
+    password: args.password,
+    bypassRls: args.bypassRls,
+    createRole: args.createRole,
+    createDb: args.createDb,
+    superuser: args.superuser,
+    inRole: args.inRole,
+    setSearchPath: args.setSearchPath,
+    ifNotExists: args.ifNotExists,
+  });
+}
+
+function recordSetRoleOptions(name: string, args: RoleSetOptionsArgs): void {
+  rejectUnknownKeys(args, SET_ROLE_OPTIONS_KEYS, `role("${name}").setOptions(...)`);
+  requireString(name, "role(name)");
+  requirePlainArgs(args, "role(name).setOptions(args)");
+  emitAlterRole({
+    name,
+    setSearchPath: args.setSearchPath,
+    resetSearchPath: args.resetSearchPath,
+  });
+}
+
+function recordDropRole(name: string, args: RoleDropArgs = {}): void {
+  rejectUnknownKeys(args, DROP_ROLE_KEYS, `role("${name}").drop(...)`);
+  requireString(name, "role(name)");
+  requirePlainArgs(args, "role(name).drop(args)");
+  emitDropRole({
+    name,
+    ifExists: args.ifExists,
+  });
+}
+
+function recordComment(target: CommentTargetArg, text: string | null): void {
+  if (text !== null && typeof text !== "string") {
+    throw structuredError("OP_INVALID", "comment text must be a string or null");
+  }
+  emitComment({
+    target: commentTargetToIr(target),
+    comment: text === null ? undefined : text,
+  });
+}
+
+function commentTargetToIr(target: CommentTargetArg): Node {
+  if (!target || typeof target !== "object") {
+    throw structuredError("OP_INVALID", "comment target must be a closed target object");
+  }
+  switch (target.kind) {
+    case "table":
+    case "index":
+    case "view":
+    case "type":
+    case "sequence":
+    case "function":
+      requireString(target.name, `comment target ${target.kind}.name`);
+      return compact({ kind: target.kind, schema: target.schema, name: target.name });
+    case "column":
+    case "constraint":
+      requireString(target.table, `comment target ${target.kind}.table`);
+      requireString(target.name, `comment target ${target.kind}.name`);
+      return compact({
+        kind: target.kind,
+        schema: target.schema,
+        table: target.table,
+        name: target.name,
+      });
+    default:
+      throw structuredError("OP_INVALID", `unsupported comment target kind ${(target as { kind?: unknown }).kind}`);
+  }
+}
+
+// ── (D) The internal op-construction helpers (the single source of truth) ──
+//
+// These build + push the EXACT canonical op object the Rust `Op` enum
+// deserializes. They are internal — only the fluent `table()` handle calls them.
+
+/**
+ * Reject option keys this call does not know.
+ *
+ * The runtime used to accept any extra property and silently drop it, so
+ * `create({ fk: [...] })` recorded no foreign key and `create({ ifNotExist: true })`
+ * recorded no existence guard — both applying clean and leaving the authored
+ * intent simply absent. `tsc` rejects the same source (TS2353), but `apply` loads
+ * migrations through tsx WITHOUT typechecking, so nothing objected at the moment
+ * it mattered.
+ *
+ * Failing closed here matches what this file already does for
+ * `cursorStability` ("accepts exactly mode and name") and what the engine does for
+ * a declared constraint it cannot emit: refuse rather than quietly drop.
+ *
+ * The message lists the accepted keys because the realistic cause is a
+ * near-miss spelling (`fk`, `foriegnKeys`, `uniques` vs `unique`), and the fix is
+ * usually visible the moment the correct name is in front of the author.
+ */
+function rejectUnknownKeys(
+  args: object,
+  accepted: readonly string[],
+  what: string,
+): void {
+  const unknown = Object.keys(args).filter((key) => !accepted.includes(key));
+  if (unknown.length === 0) return;
+  throw structuredError(
+    "OP_INVALID",
+    `${what} does not accept ${unknown.map((key) => JSON.stringify(key)).join(", ")}; ` +
+      `accepted keys are ${accepted.map((key) => JSON.stringify(key)).join(", ")}`,
+  );
+}
+
+/**
+ * Separate an authoring call's PORTABLE keys from its VENDOR NAMESPACES, rejecting
+ * anything that is neither.
+ *
+ * `rejectUnknownKeys` cannot be used directly here because the accepted set is no longer
+ * closed: a vendor namespace key IS a dialect id, contributed by whichever backend
+ * packages are installed, and this file must never learn one of their names. What it can
+ * check is SHAPE — a namespace is a plain object of leaf options — so a misspelled
+ * portable key that is not an object (`ifNotExist: true`) is still caught right here with
+ * the same message as before.
+ *
+ * A misspelled key that IS an object (`colums: { … }`) survives this check and becomes
+ * candidate attributes. It does not survive the migration: TypeScript rejects it at
+ * compile time against the generated namespace map, and if it reaches Rust anyway the
+ * vocabulary check refuses `colums.id` by name at plan time. The looser gate here buys
+ * the flat `create({ columns, postgres: { … } })` surface without giving up a refusal.
+ */
+function splitVendorNamespaces(
+  args: object,
+  accepted: readonly string[],
+  what: string,
+): VendorAttributeArgs {
+  const namespaces: Record<string, unknown> = {};
+  const unknown: string[] = [];
+  for (const [key, value] of Object.entries(args)) {
+    if (accepted.includes(key)) continue;
+    // `isPlainObject` is the file's existing predicate and is stricter than a bare
+    // `typeof === "object"`: it checks the PROTOTYPE, so an array or a class instance
+    // is not mistaken for a namespace of leaf options.
+    if (isPlainObject(value)) namespaces[key] = value;
+    else unknown.push(key);
+  }
+  if (unknown.length > 0) {
+    throw structuredError(
+      "OP_INVALID",
+      `${what} does not accept ${unknown.map((key) => JSON.stringify(key)).join(", ")}; ` +
+        `accepted keys are ${accepted.map((key) => JSON.stringify(key)).join(", ")}, ` +
+        `plus a backend namespace such as \`postgres: { … }\` from an installed vendor package`,
+    );
+  }
+  return namespaces as VendorAttributeArgs;
+}
+
+/** Key lists, each mirroring the interface of the same name in `types.ts`. */
+const RENAME_TABLE_KEYS = ["to", "ifExists", "schema"] as const;
+const ADD_COLUMN_KEYS = ["type", "ifNotExists", "schema"] as const;
+const DROP_COLUMN_KEYS = ["ifExists", "schema"] as const;
+const RENAME_COLUMN_KEYS = ["to", "type", "schema"] as const;
+const SCHEMA_ONLY_KEYS = ["schema"] as const;
+const SET_TYPE_KEYS = ["to", "using", "schema"] as const;
+const PK_ADD_KEYS = ["columns"] as const;
+const PK_REPLACE_KEYS = ["expectedColumns", "columns", "dropIdentityFrom"] as const;
+const PK_DROP_KEYS = ["expectedColumns", "dropIdentityFrom"] as const;
+const SET_TABLE_OPTIONS_KEYS = ["softDelete", "versioning", "strictness"] as const;
+const CREATE_PARTITION_KEYS = ["schema", "ifNotExists"] as const;
+const ATTACH_PARTITION_KEYS = ["schema"] as const;
+const DETACH_PARTITION_KEYS = ["schema", "concurrently"] as const;
+const DROP_PARTITION_KEYS = ["schema", "ifExists", "cascade"] as const;
+const POLICY_CREATE_KEYS = ["for", "to", "using", "withCheck", "schema"] as const;
+const POLICY_DROP_KEYS = ["ifExists", "schema"] as const;
+const TRIGGER_DROP_KEYS = ["ifExists", "schema"] as const;
+const CREATE_ENUM_KEYS = ["values", "schema"] as const;
+const CREATE_DOMAIN_KEYS = ["as", "check", "default", "notNull", "schema"] as const;
+const CREATE_SEQUENCE_KEYS = ["as", "increment", "start", "minValue", "maxValue", "cache", "cycle", "ownedBy", "schema"] as const;
+const ALTER_SEQUENCE_KEYS = ["increment", "restart", "minValue", "maxValue", "cache", "cycle", "ownedBy", "schema"] as const;
+const CREATE_SCHEMA_KEYS = ["ifNotExists", "authorization"] as const;
+const DROP_SCHEMA_KEYS = ["ifExists", "cascade"] as const;
+const CREATE_EXTENSION_KEYS = ["ifNotExists", "schema"] as const;
+const DROP_EXTENSION_KEYS = ["ifExists"] as const;
+const CREATE_ROLE_KEYS = ["login", "password", "bypassRls", "createRole", "createDb", "superuser", "inRole", "setSearchPath", "ifNotExists"] as const;
+const SET_ROLE_OPTIONS_KEYS = ["setSearchPath", "resetSearchPath"] as const;
+const DROP_ROLE_KEYS = ["ifExists"] as const;
+const BACKFILL_KEYS = ["set", "where", "cursorColumns", "cursorStability", "batchSize", "name", "schema"] as const;
+const DROP_TABLE_KEYS = ["ifExists", "cascade", "schema"] as const;
+const DROP_VIEW_KEYS = ["ifExists", "materialized", "schema"] as const;
+const CREATE_VIEW_KEYS = ["as", "columns", "replace", "materialized", "schema"] as const;
+const DROP_SEQUENCE_KEYS = ["schema", "ifExists"] as const;
+const DROP_ENUM_KEYS = ["schema", "ifExists"] as const;
+const DROP_DOMAIN_KEYS = ["schema", "ifExists"] as const;
+const INDEX_DROP_KEYS = ["ifExists", "schema"] as const;
+const INSERT_KEYS = ["rows", "onConflict", "schema"] as const;
+const UPDATE_KEYS = ["set", "where", "schema"] as const;
+const DELETE_KEYS = ["where", "limit", "schema"] as const;
+const INDEX_ADD_KEYS = [
+  "on",
+  "unique",
+  "ifNotExists",
+  "schema",
+  "using",
+  "where",
+  "include",
+    "only",
+  "nullsNotDistinct",
+] as const;
+
+/** Every key `create()` reads. Keep in lock-step with `CreateTableArgs`. */
+const CREATE_TABLE_KEYS = [
+  "columns",
+  "options",
+  "primaryKey",
+  "uniques",
+  "checks",
+  "foreignKeys",
+  "exclusions",
+  "indexes",
+  "partitionBy",
+  "ifNotExists",
+  "schema",
+] as const;
+
+function recordCreateTable(
+  name: string,
+  args: CreateTableArgs,
+  checkExprResolver: CheckExprResolver = resolveTableCheckExpr,
+): void {
+  const vendorAttributes = flattenVendorAttributes(
+    splitVendorNamespaces(args, CREATE_TABLE_KEYS, `table("${name}").create(...)`),
+  );
+  const cols: Node[] = [];
+  const constraints: Node[] = [];
+  const indexes: Node[] = [];
+  const pkCols: string[] = [];
+  const columnNames = Object.keys(args.columns);
+
+  for (const colName of columnNames) {
+    const def = args.columns[colName];
+    if (!isColumnDef(def)) {
+      throw structuredError("OP_INVALID", `create column "${colName}" must be a t.* ColumnDef`);
+    }
+    cols.push(def.__toIrColumn(colName));
+    if (def._primaryKey) pkCols.push(colName);
+  }
+
+  const tablePrimaryKey = args.primaryKey;
+  if (tablePrimaryKey !== undefined && tablePrimaryKey !== null) {
+    if (!Array.isArray(tablePrimaryKey)) {
+      throw structuredError(
+        "PRIMARY_KEY_INVALID",
+        `create table "${name}" primaryKey must be null or an ordered column-name array`,
+      );
+    }
+    if (tablePrimaryKey.length === 0) {
+      throw structuredError(
+        "PRIMARY_KEY_INVALID",
+        `create table "${name}" primaryKey cannot be empty; omit it for no primary key`,
+      );
+    }
+    const seen = new Set<string>();
+    const knownColumns = new Set(columnNames);
+    for (const column of tablePrimaryKey) {
+      if (typeof column !== "string") {
+        throw structuredError(
+          "PRIMARY_KEY_INVALID",
+          `create table "${name}" primaryKey must contain only column names`,
+        );
+      }
+      if (seen.has(column)) {
+        throw structuredError(
+          "PRIMARY_KEY_INVALID",
+          `create table "${name}" primaryKey names column "${column}" more than once`,
+        );
+      }
+      if (!knownColumns.has(column)) {
+        throw structuredError(
+          "PRIMARY_KEY_INVALID",
+          `create table "${name}" primaryKey names unknown column "${column}"`,
+        );
+      }
+      seen.add(column);
+    }
+  }
+
+  if (pkCols.length > 1) {
+    throw structuredError(
+      "PRIMARY_KEY_INVALID",
+      `create table "${name}" marks multiple columns with .primaryKey(); ` +
+        `author a composite primary key solely with the ordered table-level primaryKey array`,
+      { columns: pkCols },
+    );
+  }
+
+  if (pkCols.length === 1 && tablePrimaryKey !== undefined) {
+    const columnPrimaryKey = pkCols[0];
+    const declarationsMatch =
+      Array.isArray(tablePrimaryKey) &&
+      tablePrimaryKey.length === 1 &&
+      tablePrimaryKey[0] === columnPrimaryKey;
+    if (!declarationsMatch) {
+      throw structuredError(
+        "PRIMARY_KEY_INVALID",
+        `create table "${name}" declares column "${columnPrimaryKey}" with .primaryKey() ` +
+          `and a conflicting table-level primaryKey; use one consistent single-column declaration`,
+        { column: columnPrimaryKey, primaryKey: tablePrimaryKey },
+      );
+    }
+  }
+
+  // A lone column-level `.primaryKey()` is the single-column shorthand. Composite
+  // keys come only from the explicit ordered table-level array validated above.
+  // undefined = unresolved policy default, null = explicit no-PK, string[] = author PK.
+  const primaryKey = args.primaryKey !== undefined ? args.primaryKey : pkCols.length ? pkCols : undefined;
+
+  for (const uq of args.uniques ?? []) {
+    constraints.push(compact({ name: uq.name, kind: { kind: "unique", columns: uq.columns } }));
+  }
+  for (const ck of args.checks ?? []) {
+    constraints.push(compact({
+      name: ck.name,
+      kind: { kind: "check", expr: checkExprResolver(ck.expr as CheckExprSlot, "check constraint") },
+    }));
+  }
+  for (const exclusion of args.exclusions ?? []) {
+    constraints.push(exclusionConstraintFromSpec(exclusion));
+  }
+  if (args.foreignKeys !== undefined && !Array.isArray(args.foreignKeys)) {
+    throw structuredError("OP_INVALID", `create table "${name}" foreignKeys must be an array`);
+  }
+  const knownColumns = new Set(columnNames);
+  const foreignKeyNames = new Set<string>();
+  for (const [position, fkSpec] of (args.foreignKeys ?? []).entries()) {
+    requirePlainObject(fkSpec, `create table "${name}" foreignKeys[${position}]`);
+    requireNonEmptyString(
+      fkSpec.name,
+      `create table "${name}" foreignKeys[${position}].name`,
+    );
+    if (foreignKeyNames.has(fkSpec.name)) {
+      throw structuredError(
+        "OP_INVALID",
+        `create table "${name}" foreignKeys names constraint ${JSON.stringify(fkSpec.name)} more than once`,
+      );
+    }
+    foreignKeyNames.add(fkSpec.name);
+    requireOrderedColumns(
+      fkSpec.columns,
+      `create table "${name}" foreign key ${JSON.stringify(fkSpec.name)} columns`,
+    );
+    for (const column of fkSpec.columns) {
+      if (!knownColumns.has(column)) {
+        throw structuredError(
+          "OP_INVALID",
+          `create table "${name}" foreign key ${JSON.stringify(fkSpec.name)} names unknown local column ${JSON.stringify(column)}`,
+        );
+      }
+    }
+    constraints.push(
+      fkConstraintFromSpec({
+        name: fkSpec.name,
+        columns: fkSpec.columns,
+        references: fkSpec.references,
+        onDelete: fkSpec.onDelete,
+        onUpdate: fkSpec.onUpdate,
+        deferrable: fkSpec.deferrable,
+        initiallyDeferred: fkSpec.initiallyDeferred,
+        schema: args.schema,
+      }),
+    );
+  }
+  for (const idx of args.indexes ?? []) {
+    if (!Array.isArray(idx.on)) {
+      throw structuredError("OP_INVALID", "create({ indexes }) index needs { on: IndexElementArg[] }");
+    }
+    indexes.push(
+      compact({
+        name: idx.name,
+        columns: idx.on.map(indexElementToIr),
+        unique: idx.unique,
+        using: idx.using,
+        where: resolveImmutableExpr(idx.where as IndexExprFn | ExprChainType | Node | undefined, "partial index predicate"),
+        include: indexIncludeToIr(idx.include),
+        attributes: indexAttributesToIr(idx),
+        only: requireOptionalBoolean(idx.only, "index only"),
+        nullsNotDistinct: requireOptionalBoolean(idx.nullsNotDistinct, "index nullsNotDistinct"),
+      }),
+    );
+  }
+
+  emitCreateTable({
+    name,
+    columns: cols,
+    primaryKey,
+    constraints: constraints.length ? constraints : undefined,
+    indexes: indexes.length ? indexes : undefined,
+    partitionBy: partitionSpecToIr(args.partitionBy, "create({ partitionBy })"),
+    runtimeOptions: runtimeOptionsFromCreateArgs(args),
+    schema: args.schema,
+    existenceGuard: ifNotExistsGuard(args.ifNotExists),
+    // Omitted entirely when empty: the Rust field skips serializing an empty map, so a
+    // create with no vendor options is byte-identical on the wire to one authored before
+    // attributes existed — which is what keeps every pinned checksum stable.
+    attributes: Object.keys(vendorAttributes).length > 0 ? vendorAttributes : undefined,
+  });
+}
+
+function recordCreatePartition(
+  name: string,
+  parent: string,
+  bounds: Node,
+  args: { ifNotExists?: boolean; schema?: string },
+): void {
+  emitCreatePartition({
+    name,
+    of: parent,
+    bounds,
+    schema: args.schema,
+    existenceGuard: ifNotExistsGuard(args.ifNotExists),
+  });
+}
+
+function recordAttachPartition(
+  parent: string,
+  name: string,
+  bound: Node,
+  args: { schema?: string },
+): void {
+  emitAttachPartition({
+    parent,
+    name,
+    bound,
+    schema: args.schema,
+  });
+}
+
+function recordDetachPartition(
+  parent: string,
+  name: string,
+  args: { concurrently?: boolean; schema?: string },
+): void {
+  emitDetachPartition({
+    parent,
+    name,
+    schema: args.schema,
+    concurrently: args.concurrently,
+  });
+}
+
+function recordDropPartition(
+  parent: string,
+  name: string,
+  args: { ifExists?: boolean; cascade?: boolean; schema?: string },
+): void {
+  emitDropPartition({
+    parent,
+    name,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+    cascade: args.cascade,
+  });
+}
+
+function recordSetTableOptions(
+  table: string,
+  args: { softDelete?: boolean; versioning?: boolean; strictness?: TableStrictness; schema?: string },
+): void {
+  emitSetTableOptions({
+    table,
+    options: runtimeOptionsPatchFromArgs(args),
+    schema: args.schema,
+  });
+}
+
+function recordSetRls(
+  table: string,
+  args: { enabled?: boolean; forced?: boolean; schema?: string },
+): void {
+  const enabled = requireOptionalBoolean(args.enabled, ".setRls({ enabled })");
+  const forced = requireOptionalBoolean(args.forced, ".setRls({ forced })");
+  if (enabled === undefined && forced === undefined) {
+    throw structuredError("OP_INVALID", ".setRls needs at least one of { enabled, forced }");
+  }
+  emitSetRls({
+    table,
+    schema: args.schema,
+    enabled,
+    forced,
+  });
+}
+
+function recordDropTable(
+  table: string,
+  args: { ifExists?: boolean; cascade?: boolean; schema?: string },
+): void {
+  emitDropTable({
+    table,
+    cascade: args.cascade,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+  });
+}
+
+function recordRenameTable(
+  table: string,
+  to: string,
+  args: { ifExists?: boolean; schema?: string },
+): void {
+  emitRenameTable({
+    table,
+    to,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+  });
+}
+
+function recordAddColumn(
+  table: string,
+  column: string,
+  type: ColumnDefImpl,
+  args: { ifNotExists?: boolean; schema?: string },
+): void {
+  emitAddColumn({
+    table,
+    column,
+    ...type.__toAddColumnTail(),
+    schema: args.schema,
+    existenceGuard: ifNotExistsGuard(args.ifNotExists),
+  });
+  // `.column(x).add({ type: t.text().unique() })` honors `.unique()`: emit a
+  // follow-on unique constraint (mirroring the createTable per-column `.unique()`
+  // image, which rides the column's `unique:true` field — but an ADD COLUMN has no
+  // inline UNIQUE, so it lowers to a separate ADD CONSTRAINT).
+  //
+  // There is NO add-column PRIMARY KEY follow-on: primary key is create-time only
+  // (`create({ primaryKey })` / the `.primaryKey()` facet on a create() column), so
+  // the always-refused user PK constraint shape is deleted — `.primaryKey()` on an
+  // added column records no pk op, and the `.unique()` follow-on is unconditional.
+  if (type._unique) {
+    emitAddColumnUnique({
+      table,
+      constraint: { kind: { kind: "unique", columns: [column] } },
+      schema: args.schema,
+      existenceGuard: ifNotExistsGuard(args.ifNotExists),
+    });
+  }
+}
+
+function recordDropColumn(
+  table: string,
+  column: string,
+  args: { ifExists?: boolean; schema?: string },
+): void {
+  emitDropColumn({
+    table,
+    column,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+  });
+}
+
+function recordRenameColumn(
+  table: string,
+  from: string,
+  to: string,
+  type: ColumnDefType,
+  args: { schema?: string },
+): void {
+  emitRenameColumn({
+    table,
+    from,
+    to,
+    type: colTypeOf(type),
+    schema: args.schema,
+  });
+}
+
+function recordSetColumnType(
+  table: string,
+  name: string,
+  change: { to: ColumnDefType; using?: ExprFn; schema?: string },
+): void {
+  requireColumnDef(change.to, ".column(name).setType({ to })");
+  emitSetColumnType({
+    table,
+    column: name,
+    toType: colTypeOf(change.to),
+    using: resolveExpr(change.using),
+    schema: change.schema,
+  });
+}
+
+function recordSetColumnNotNull(table: string, name: string, args: { schema?: string }): void {
+  emitSetColumnNotNull({ table, column: name, schema: args.schema });
+}
+
+function recordDropColumnNotNull(table: string, name: string, args: { schema?: string }): void {
+  emitDropColumnNotNull({ table, column: name, schema: args.schema });
+}
+
+function recordSetColumnDefault(
+  table: string,
+  name: string,
+  value: DefaultValue | DefaultExprFn | ExprChainType | Expr,
+  args: { schema?: string },
+): void {
+  emitSetColumnDefault({
+    table,
+    column: name,
+    value: toIrDefault(value),
+    schema: args.schema,
+  });
+}
+
+function recordDropColumnDefault(table: string, name: string, args: { schema?: string }): void {
+  emitDropColumnDefault({ table, column: name, schema: args.schema });
+}
+
+/** Build an `IrConstraint` of kind `fk`. `onDelete`/`onUpdate` ARE
+ *  emitted (compacted — omitted when absent, so an action-free FK is byte-
+ *  identical to the action-free wire image). */
+function fkConstraintFromSpec(spec: {
+  name?: unknown;
+  columns?: unknown;
+  references?: unknown;
+  onDelete?: unknown;
+  onUpdate?: unknown;
+  deferrable?: unknown;
+  initiallyDeferred?: unknown;
+  notValid?: unknown;
+  schema?: string;
+}): Node {
+  if (!spec || typeof spec !== "object") {
+    throw structuredError("OP_INVALID", ".foreignKey(name).add needs { columns, references:{ table, columns } }");
+  }
+  requireNonEmptyString(spec.name, "foreign key name");
+  requireOrderedColumns(spec.columns, "foreign key columns");
+  requirePlainObject(spec.references, "foreign key references");
+  requireNonEmptyString(spec.references.table, "foreign key references.table");
+  requireOrderedColumns(spec.references.columns, "foreign key references.columns");
+  if (spec.columns.length !== spec.references.columns.length) {
+    throw structuredError(
+      "OP_INVALID",
+      `foreign key local and referenced columns must have equal arity; got ${spec.columns.length} and ${spec.references.columns.length}`,
+      { localArity: spec.columns.length, referencedArity: spec.references.columns.length },
+    );
+  }
+  if (spec.references.schema !== undefined) {
+    requireNonEmptyString(spec.references.schema, "foreign key references.schema");
+    if (spec.schema === undefined) {
+      throw structuredError(
+        "OP_INVALID",
+        "foreign key references.schema requires an explicit matching table schema; the frozen IR cannot prove an implicit schema or represent a cross-schema FK",
+      );
+    }
+    if (spec.references.schema !== spec.schema) {
+      throw structuredError(
+        "OP_INVALID",
+        "foreign key references.schema must match the table schema; cross-schema FKs are not representable in the frozen IR",
+      );
+    }
+  }
+  return compact({
+    name: spec.name,
+    kind: compact({
+      kind: "fk",
+      columns: spec.columns,
+      referencesTable: spec.references.table,
+      referencesColumns: spec.references.columns,
+      onDelete: requireReferenceAction(spec.onDelete, "foreign key onDelete"),
+      onUpdate: requireReferenceAction(spec.onUpdate, "foreign key onUpdate"),
+      deferrable: requireOptionalBoolean(spec.deferrable, "foreign key deferrable"),
+      initiallyDeferred: requireOptionalBoolean(
+        spec.initiallyDeferred,
+        "foreign key initiallyDeferred",
+      ),
+      // PG-only online constraint adoption; refused off Postgres at validate.
+      notValid: requireOptionalBoolean(spec.notValid, "foreign key notValid"),
+    }),
+  });
+}
+
+function recordAddForeignKey(
+  table: string,
+  name: string,
+  args: {
+    columns: OrderedColumns;
+    references: ForeignKeyReference;
+    onDelete?: RefAction;
+    onUpdate?: RefAction;
+    deferrable?: boolean;
+    initiallyDeferred?: boolean;
+    notValid?: boolean;
+    ifNotExists?: boolean;
+    schema?: string;
+  },
+): void {
+  emitAddForeignKey({
+    table,
+    constraint: fkConstraintFromSpec({
+      name,
+      columns: args.columns,
+      references: args.references,
+      onDelete: args.onDelete,
+      onUpdate: args.onUpdate,
+      deferrable: args.deferrable,
+      initiallyDeferred: args.initiallyDeferred,
+      notValid: args.notValid,
+      schema: args.schema,
+    }),
+    schema: args.schema,
+    existenceGuard: ifNotExistsGuard(args.ifNotExists),
+  });
+}
+
+function recordAddUnique(
+  table: string,
+  name: string,
+  args: { columns: string[]; ifNotExists?: boolean; schema?: string },
+): void {
+  if (!Array.isArray(args.columns)) {
+    throw structuredError("OP_INVALID", ".unique(name).add needs { columns: string[] }");
+  }
+  emitAddUnique({
+    table,
+    constraint: compact({ name, kind: { kind: "unique", columns: args.columns } }),
+    schema: args.schema,
+    existenceGuard: ifNotExistsGuard(args.ifNotExists),
+  });
+}
+
+function recordAddCheck(
+  table: string,
+  name: string,
+  args: { expr: CheckExprFn; notValid?: boolean; ifNotExists?: boolean; schema?: string },
+  checkExprResolver: CheckExprResolver = resolveTableCheckExpr,
+): void {
+  if (!args || args.expr === undefined) {
+    throw structuredError("OP_INVALID", ".check(name).add needs { expr: (col) => Expr }");
+  }
+  emitAddCheck({
+    table,
+    constraint: compact({
+      name,
+      // `notValid` is PG-only online constraint adoption; compacted out when absent
+      // so an ordinary CHECK is byte-identical to the pre-slice wire image.
+      kind: compact({
+        kind: "check",
+        expr: checkExprResolver(args.expr as CheckExprSlot, "check constraint"),
+        notValid: args.notValid,
+      }),
+    }),
+    schema: args.schema,
+    existenceGuard: ifNotExistsGuard(args.ifNotExists),
+  });
+}
+
+function recordValidateConstraint(
+  table: string,
+  name: string,
+  args: { ifExists?: boolean; schema?: string },
+): void {
+  emitValidateConstraint({
+    table,
+    name,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+  });
+}
+
+function exclusionConstraintFromSpec(
+  spec: { name?: string } & ExclusionConstraintArgs,
+): Node {
+  if (!spec || typeof spec !== "object" || !Array.isArray(spec.elements)) {
+    throw structuredError(
+      "OP_INVALID",
+      ".exclusion(name).add needs { elements: [{ target, operator }], ... }",
+    );
+  }
+  return compact({
+    name: spec.name,
+    kind: compact({
+      kind: "exclusion",
+      usingMethod: spec.using,
+      elements: spec.elements.map(exclusionElementToIr),
+      wherePredicate: resolveImmutableExpr(
+        spec.where as IndexExprFn | ExprChainType | Node | undefined,
+        "exclusion predicate",
+      ),
+      deferrable: spec.deferrable,
+      initiallyDeferred: spec.initiallyDeferred,
+    }),
+  });
+}
+
+function exclusionElementToIr(element: ExclusionElementArg): Node {
+  if (!element || typeof element !== "object") {
+    throw structuredError(
+      "OP_INVALID",
+      "exclusion element must be { target, operator }",
+    );
+  }
+  return {
+    target: exclusionTargetToIr(element.target),
+    operator: element.operator,
+  };
+}
+
+function exclusionTargetToIr(target: ExclusionElementArg["target"]): Node {
+  if (typeof target === "string") {
+    requireString(target, "exclusion target column");
+    return { kind: "column", name: target };
+  }
+  const expr = resolveExpr(target as ExprFn | ExprChainType | Node | undefined);
+  if (!expr) {
+    throw structuredError("OP_INVALID", "exclusion target must be a column name or expression");
+  }
+  return {
+    kind: "expr",
+    expr,
+  };
+}
+
+/** Refuse index-element facets the renderer does not carry, instead of dropping
+ *  them. Silence here is the dangerous shape: the migration applies, the index
+ *  exists, and only its ORDERING is quietly not what was authored. */
+function rejectUnsupportedIndexElementFacets(
+  element: object,
+  unsupported: readonly string[],
+  shape: string,
+): void {
+  for (const facet of unsupported) {
+    if ((element as Record<string, unknown>)[facet] !== undefined) {
+      throw structuredError(
+        "OP_INVALID",
+        `index element ${shape} does not support "${facet}"; the engine does not ` +
+          `render it, and accepting it would silently change the index ordering`,
+      );
+    }
+  }
+}
+
+function indexElementToIr(element: IndexElementArg): Node {
+  if (typeof element === "string") {
+    requireString(element, "index element column");
+    return { kind: "column", name: element };
+  }
+  if (element && typeof element === "object") {
+    if ("column" in element) {
+      requireString((element as { column?: unknown }).column, "index column element column");
+      // Fail closed rather than discard. The renderer never read `nulls`, so a
+      // `{ column, nulls }` element emitted plain `btree (col)` and the author's
+      // null ordering vanished with no error.
+      rejectUnsupportedIndexElementFacets(element, ["nulls"], "{ column }");
+      const order = indexColumnOrderToIr((element as { order?: unknown }).order);
+      // PG-vendor per-column facets: carried through when present, elided when
+      // absent (byte-neutral wire shape). Validate gates them fail-closed off PG.
+      const opclass = indexElementFacet((element as { opclass?: unknown }).opclass, "index column opclass");
+      const collation = indexElementFacet((element as { collation?: unknown }).collation, "index column collation");
+      return compact({
+        kind: "column",
+        name: (element as { column: string }).column,
+        order: order === "desc" ? order : undefined,
+        opclass,
+        collation,
+      }) as Node;
+    }
+    if ("expr" in element) {
+      // All four were previously accepted and thrown away: the `order` result
+      // below was computed and never used, and opclass/collation/nulls were
+      // never read at all, so `{ expr, order: "desc" }` produced an ASCENDING
+      // index. `dialects.md` says expression elements cannot carry any of them.
+      rejectUnsupportedIndexElementFacets(
+        element,
+        ["order", "opclass", "collation", "nulls"],
+        "{ expr }",
+      );
+      const expr = resolveImmutableExpr(
+        (element as { expr?: IndexExprFn | ExprChainType | Node }).expr,
+        "index expression element",
+      );
+      if (!expr) {
+        throw structuredError("OP_INVALID", "index expr element needs { expr }");
+      }
+      return { kind: "expr", expr };
+    }
+  }
+  throw structuredError("OP_INVALID", "index element must be a column name, { column }, or { expr }");
+}
+
+function indexColumnOrderToIr(order: unknown): "desc" | undefined {
+  if (order === undefined || order === "asc") {
+    return undefined;
+  }
+  if (order === "desc") {
+    return "desc";
+  }
+  throw structuredError("OP_INVALID", "index column order must be \"asc\" or \"desc\"");
+}
+
+function recordAddExclusion(
+  table: string,
+  name: string,
+  args: ExclusionAddArgs,
+): void {
+  emitAddExclusion({
+    table,
+    constraint: exclusionConstraintFromSpec({ ...args, name }),
+    schema: args.schema,
+    existenceGuard: ifNotExistsGuard(args.ifNotExists),
+  });
+}
+
+function recordDropConstraint(
+  table: string,
+  name: string,
+  args: { ifExists?: boolean; schema?: string },
+): void {
+  emitDropConstraint({
+    table,
+    name,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+  });
+}
+
+function recordCreateIndex(
+  table: string,
+  name: string,
+  args: IndexAddArgs,
+): void {
+  const vendorAttributes = indexAttributesToIr(
+    splitVendorNamespaces(args, INDEX_ADD_KEYS, `table("${table}").index("${name}").add(...)`),
+  );
+  if (!Array.isArray(args.on)) {
+    throw structuredError("OP_INVALID", ".index(name).add needs { on: IndexElementArg[] }");
+  }
+  emitCreateIndex({
+    table,
+    columns: args.on.map(indexElementToIr),
+    name,
+    unique: args.unique,
+    using: args.using,
+    where: resolveImmutableExpr(args.where as IndexExprFn | ExprChainType | Node | undefined, "partial index predicate"),
+    include: indexIncludeToIr(args.include),
+    attributes: vendorAttributes,
+    only: requireOptionalBoolean(args.only, "index only"),
+    nullsNotDistinct: requireOptionalBoolean(args.nullsNotDistinct, "index nullsNotDistinct"),
+    schema: args.schema,
+    existenceGuard: ifNotExistsGuard(args.ifNotExists),
+  });
+}
+
+function recordDropIndex(
+  table: string,
+  name: string,
+  args: IndexDropArgs,
+): void {
+  emitDropIndex({
+    name,
+    table,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+  });
+}
+
+function normalizeInsertRows<R extends Row = Row>(
+  rows: R | R[] | undefined,
+  what: string,
+): { columns: string[]; rows: unknown[][] } {
+  if (rows === undefined) throw structuredError("OP_INVALID", `${what}: rows is required`);
+  const arr = (Array.isArray(rows) ? rows : [rows]) as R[];
+  const columns = arr.length > 0 ? Object.keys(arr[0]) : [];
+  const firstKeySet = new Set(columns);
+  const normalized = arr.map((r) => {
+    const keys = Object.keys(r);
+    const values: Record<string, unknown> = {};
+    for (const key of keys) setOwn(values, key, toIrValue((r as Row)[key]));
+    return { keys, values };
+  });
+  for (let i = 0; i < normalized.length; i++) {
+    const keys = normalized[i].keys;
+    const sameShape =
+      keys.length === columns.length && keys.every((key) => firstKeySet.has(key));
+    if (!sameShape) {
+      throw structuredError(
+        "OP_INVALID",
+        `${what}: row ${i} has keys [${keys.join(", ")}], expected [${columns.join(", ")}]; ragged insert rows are not allowed`,
+      );
+    }
+  }
+  const positional = normalized.map(({ values }) => columns.map((col) => values[col]));
+  return { columns, rows: positional };
+}
+
+function recordInsert<R extends Row = Row>(table: string, args: InsertArgs<R>): void {
+  const normalized = normalizeInsertRows(args.rows, "insert({ rows })");
+  emitInsert({
+    table,
+    columns: normalized.columns,
+    rows: normalized.rows,
+    onConflict: normalizeOnConflict(args.onConflict),
+    schema: args.schema,
+  });
+}
+
+function normalizeOnConflict(
+  oc: { columns: string[]; doUpdate?: Record<string, unknown> } | undefined | null,
+): Node | undefined {
+  if (oc === undefined || oc === null) return undefined;
+  if (oc.doUpdate === undefined) return { columns: oc.columns } as Node;
+  const doUpdate: Record<string, unknown> = {};
+  for (const col of Object.keys(oc.doUpdate)) {
+    setOwn(doUpdate, col, toIrValue(oc.doUpdate[col]));
+  }
+  return { columns: oc.columns, doUpdate } as Node;
+}
+
+function recordUpdate(table: string, args: UpdateArgs): void {
+  emitUpdate({
+    table,
+    set: resolveSet(args.set),
+    where: resolveExpr(args.where),
+    schema: args.schema,
+  });
+}
+
+function recordDel(table: string, args: DelArgs): void {
+  if (args.where === undefined || args.where === null) {
+    throw structuredError("OP_INVALID", "delete({ where }): where is mandatory (no unfiltered delete)");
+  }
+  emitDelete({
+    table,
+    where: resolveExpr(args.where),
+    limit: args.limit,
+    schema: args.schema,
+  });
+}
+
+const DEFAULT_BACKFILL_BATCH = 1000;
+
+function resolveCursorStability(value: unknown): CursorStability {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw structuredError(
+      "OP_INVALID",
+      "backfill({ cursorStability }) must be { mode: \"guardUpdates\" } or " +
+        "{ mode: \"externalInvariant\", name: string }",
+    );
+  }
+  const stability = value as Record<string, unknown>;
+  if (stability.mode === "guardUpdates") {
+    const keys = Object.keys(stability);
+    if (keys.length !== 1 || keys[0] !== "mode") {
+      throw structuredError(
+        "OP_INVALID",
+        "backfill({ cursorStability: { mode: \"guardUpdates\" } }) accepts only the mode field",
+      );
+    }
+    return { mode: "guardUpdates" };
+  }
+  if (stability.mode === "externalInvariant") {
+    const keys = Object.keys(stability).sort();
+    if (keys.length !== 2 || keys[0] !== "mode" || keys[1] !== "name") {
+      throw structuredError(
+        "OP_INVALID",
+        "backfill({ cursorStability: { mode: \"externalInvariant\", name } }) accepts exactly mode and name",
+      );
+    }
+    requireNonEmptyString(stability.name, "backfill({ cursorStability.name })");
+    return { mode: "externalInvariant", name: stability.name };
+  }
+  throw structuredError(
+    "OP_INVALID",
+    "backfill({ cursorStability.mode }) must be \"guardUpdates\" or \"externalInvariant\"",
+  );
+}
+
+function recordBackfill(table: string, args: BackfillArgs): void {
+  // The RENAMED-key check runs first, deliberately. `cursorColumn` is a key this
+  // API used to have, and its message tells the author what to write instead;
+  // the generic unknown-key refusal below would preempt that with a strictly
+  // less useful "does not accept". Specific diagnostics before generic ones.
+  if (Object.prototype.hasOwnProperty.call(args, "cursorColumn")) {
+    throw structuredError(
+      "OP_INVALID",
+      "backfill({ cursorColumn }) was removed; use cursorColumns: [\"column\"]",
+    );
+  }
+  rejectUnknownKeys(args, BACKFILL_KEYS, `table("${table}").backfill(...)`);
+  if (args.set === undefined) throw structuredError("OP_INVALID", "backfill({ set }): set is required");
+  requireOrderedColumns(args.cursorColumns, "backfill({ cursorColumns })");
+  emitBackfill({
+    table,
+    cursorColumns: [...args.cursorColumns],
+    cursorStability: resolveCursorStability(args.cursorStability),
+    batchSize: args.batchSize !== undefined ? args.batchSize : DEFAULT_BACKFILL_BATCH,
+    set: resolveBackfillSet(args.set),
+    filter: resolveExpr(args.where),
+    name: args.name || `backfill_${table}`,
+    schema: args.schema,
+  });
+}
+
+type SelectAstBuilder = ViewQueryBuilder & { __selectAst(): SelectAst };
+
+function normalizeTableRef(input: string | TableRef, what: string): TableRef {
+  if (typeof input === "string") return { name: input };
+  if (!input || typeof input !== "object") {
+    throw structuredError("OP_INVALID", `${what} must be a table name string or { name, schema?, alias? }`);
+  }
+  requireString(input.name, `${what}.name`);
+  if (input.schema !== undefined && input.schema !== null) requireString(input.schema, `${what}.schema`);
+  if (input.alias !== undefined && input.alias !== null) requireString(input.alias, `${what}.alias`);
+  return compact({ name: input.name, schema: input.schema ?? undefined, alias: input.alias ?? undefined }) as TableRef;
+}
+
+function viewExpr(slot: ExprFn | ExprChainType | Node): Expr {
+  return resolveExpr(slot)! as unknown as Expr;
+}
+
+function normalizeSelectItem(item: string | SelectItem | ExprFn | ExprChainType | Expr): SelectItem {
+  if (typeof item === "string") return { kind: "colRef", name: item };
+  if (typeof item === "function" || item instanceof ExprChainImpl) {
+    return { kind: "expr", expr: viewExpr(item as ExprFn | ExprChainType) };
+  }
+  if (item && typeof item === "object") {
+    const node = item as Node;
+    if (node.node !== undefined) return { kind: "expr", expr: viewExpr(node) };
+    if (node.kind === "colRef") {
+      requireString(node.name, "select item colRef.name");
+      if (node.table !== undefined && node.table !== null) requireString(node.table, "select item colRef.table");
+      if (node.alias !== undefined && node.alias !== null) requireString(node.alias, "select item colRef.alias");
+      return compact({
+        kind: "colRef",
+        table: node.table ?? undefined,
+        name: node.name,
+        alias: node.alias ?? undefined,
+      }) as SelectItem;
+    }
+    if (node.kind === "expr") {
+      if (node.alias !== undefined && node.alias !== null) requireString(node.alias, "select item expr.alias");
+      return compact({
+        kind: "expr",
+        expr: viewExpr(node.expr as ExprFn | ExprChainType | Node),
+        alias: node.alias ?? undefined,
+      }) as SelectItem;
+    }
+  }
+  throw structuredError("OP_INVALID", "select item must be a column name, expression, or SelectItem object");
+}
+
+function normalizeOrderDir(dir: unknown, what: string): "asc" | "desc" | undefined {
+  if (dir === undefined || dir === null) return undefined;
+  if (dir === "asc" || dir === "desc") return dir;
+  throw structuredError("OP_INVALID", `${what}.dir must be asc or desc`);
+}
+
+function normalizeOrderItem(item: string | OrderItem | ExprFn | ExprChainType | Expr): OrderItem {
+  if (typeof item === "string") return { kind: "colRef", name: item };
+  if (typeof item === "function" || item instanceof ExprChainImpl) {
+    return { kind: "expr", expr: viewExpr(item as ExprFn | ExprChainType) };
+  }
+  if (item && typeof item === "object") {
+    const node = item as Node;
+    if (node.node !== undefined) return { kind: "expr", expr: viewExpr(node) };
+    if (node.kind === "colRef") {
+      requireString(node.name, "order item colRef.name");
+      if (node.table !== undefined && node.table !== null) requireString(node.table, "order item colRef.table");
+      return compact({
+        kind: "colRef",
+        table: node.table ?? undefined,
+        name: node.name,
+        dir: normalizeOrderDir(node.dir, "order item colRef"),
+      }) as OrderItem;
+    }
+    if (node.kind === "expr") {
+      return compact({
+        kind: "expr",
+        expr: viewExpr(node.expr as ExprFn | ExprChainType | Node),
+        dir: normalizeOrderDir(node.dir, "order item expr"),
+      }) as OrderItem;
+    }
+  }
+  throw structuredError("OP_INVALID", "orderBy item must be a column name, expression, or OrderItem object");
+}
+
+function normalizeGroupByItem(item: GroupByItem): Expr {
+  if (typeof item === "string") return { node: "colRef", name: item } as Expr;
+  if (typeof item === "function" || item instanceof ExprChainImpl) {
+    return viewExpr(item as ExprFn | ExprChainType);
+  }
+  if (item && typeof item === "object" && (item as Node).node !== undefined) {
+    return viewExpr(item as Node);
+  }
+  throw structuredError("OP_INVALID", "groupBy item must be a column name or expression");
+}
+
+function viewQueryBuilder(): SelectAstBuilder {
+  const state: {
+    from?: TableRef;
+    projection: SelectItem[];
+    joins: Join[];
+    where?: Expr;
+    groupBy: Expr[];
+    having?: Expr;
+    orderBy?: OrderItem[];
+    limit?: number;
+  } = {
+    projection: [],
+    joins: [],
+    groupBy: [],
+  };
+
+  let builder: SelectAstBuilder;
+  builder = {
+    from(table: string | TableRef) {
+      state.from = normalizeTableRef(table, "view query from(table)");
+      return builder;
+    },
+    select(items: Array<string | SelectItem | ExprFn | ExprChainType | Expr>) {
+      if (!Array.isArray(items)) {
+        throw structuredError("OP_INVALID", "view query select(items): items must be an array");
+      }
+      state.projection = items.map(normalizeSelectItem);
+      return builder;
+    },
+    join(kind: JoinKind, table: string | TableRef, on: ExprFn | ExprChainType | Expr) {
+      if (kind !== "inner" && kind !== "left") {
+        throw structuredError("OP_INVALID", "view query join(kind): kind must be inner or left");
+      }
+      state.joins.push({
+        kind,
+        table: normalizeTableRef(table, "view query join(table)"),
+        on: viewExpr(on as ExprFn | ExprChainType | Node),
+      });
+      return builder;
+    },
+    innerJoin(table: string | TableRef, on: ExprFn | ExprChainType | Expr) {
+      return builder.join("inner", table, on);
+    },
+    leftJoin(table: string | TableRef, on: ExprFn | ExprChainType | Expr) {
+      return builder.join("left", table, on);
+    },
+    where(expr: ExprFn | ExprChainType | Expr) {
+      state.where = viewExpr(expr as ExprFn | ExprChainType | Node);
+      return builder;
+    },
+    groupBy(items: GroupByItem[]) {
+      if (!Array.isArray(items)) {
+        throw structuredError("OP_INVALID", "view query groupBy(items): items must be an array");
+      }
+      state.groupBy = items.map(normalizeGroupByItem);
+      return builder;
+    },
+    having(expr: ExprFn | ExprChainType | Expr) {
+      state.having = viewExpr(expr as ExprFn | ExprChainType | Node);
+      return builder;
+    },
+    orderBy(items: Array<string | OrderItem | ExprFn | ExprChainType | Expr>) {
+      if (!Array.isArray(items)) {
+        throw structuredError("OP_INVALID", "view query orderBy(items): items must be an array");
+      }
+      state.orderBy = items.map(normalizeOrderItem);
+      return builder;
+    },
+    limit(n: number) {
+      if (typeof n !== "number" || !Number.isInteger(n) || n < 0) {
+        throw structuredError("OP_INVALID", `view query limit(n): n must be a non-negative integer, got ${n}`);
+      }
+      state.limit = n;
+      return builder;
+    },
+    __selectAst() {
+      if (state.from === undefined) {
+        throw structuredError("OP_INVALID", "view query must call q.from(table)");
+      }
+      return compact({
+        from: state.from,
+        projection: state.projection,
+        joins: state.joins.length ? state.joins : undefined,
+        where: state.where,
+        groupBy: state.groupBy.length ? state.groupBy : undefined,
+        having: state.having,
+        orderBy: state.orderBy,
+        limit: state.limit,
+      }) as SelectAst;
+    },
+  };
+
+  return builder;
+}
+
+function isSelectAstBuilder(x: unknown): x is SelectAstBuilder {
+  return Boolean(x && typeof x === "object" && typeof (x as SelectAstBuilder).__selectAst === "function");
+}
+
+function isSelectAst(x: unknown): x is SelectAst {
+  return Boolean(x && typeof x === "object" && (x as SelectAst).from !== undefined);
+}
+
+function isRawViewQueryInput(x: unknown): x is { raw: string } {
+  return Boolean(x && typeof x === "object" && Object.prototype.hasOwnProperty.call(x, "raw"));
+}
+
+function resolveSelectAst(as: CreateViewArgs["as"]): SelectAst {
+  if (typeof as === "function") {
+    const q = viewQueryBuilder();
+    const built = as(q) || q;
+    if (isSelectAstBuilder(built)) return built.__selectAst();
+    if (isSelectAst(built)) return built;
+  }
+  if (isSelectAstBuilder(as)) return as.__selectAst();
+  if (isSelectAst(as)) return as;
+  throw structuredError("OP_INVALID", "view.create({ as }) must be a query-builder callback or SelectAst");
+}
+
+function recordCreateView(name: string, args: CreateViewArgs & { schema?: string }): void {
+  if (!args || args.as === undefined) {
+    throw structuredError("OP_INVALID", "view(name).create({ as }) requires a structured SelectAst builder or { raw }");
+  }
+  if (isRawViewQueryInput(args.as)) {
+    requireString(args.as.raw, "view(name).create({ as: { raw } })");
+    emitCreateView({
+      name,
+      schema: args.schema,
+      columns: args.columns,
+      query: { kind: "raw", sql: args.as.raw },
+      replace: args.replace,
+      materialized: args.materialized,
+    });
+    return;
+  }
+  emitCreateView({
+    name,
+    schema: args.schema,
+    columns: args.columns,
+    query: { kind: "structured", select: resolveSelectAst(args.as) },
+    replace: args.replace,
+    materialized: args.materialized,
+  });
+}
+
+function recordDropView(name: string, args: DropViewArgs & { schema?: string }): void {
+  emitDropView({
+    name,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+    materialized: args.materialized,
+  });
+}
+
+const TRIGGER_RAISE_KEYS = ["level", "message", "errcode"] as const;
+const TRIGGER_INSERT_KEYS = ["table", "rows", "schema"] as const;
+const TRIGGER_UPDATE_KEYS = ["table", "set", "where", "schema"] as const;
+const TRIGGER_DELETE_KEYS = ["table", "where", "limit", "schema"] as const;
+
+const TRIGGER_RAISE_LEVELS = ["abort", "fail", "ignore", "rollback"] as const;
+
+function triggerBodyBuilder(): TriggerBodyBuilder {
+  return {
+    raise(args) {
+      if (!args || typeof args !== "object") {
+        throw structuredError("OP_INVALID", "b.raise({ level, message, errcode? }) needs an object");
+      }
+      rejectUnknownKeys(args, TRIGGER_RAISE_KEYS, "b.raise(...)");
+      requireString(args.level, "b.raise({ level })");
+      if (!(TRIGGER_RAISE_LEVELS as readonly string[]).includes(args.level)) {
+        throw structuredError(
+          "OP_INVALID",
+          `b.raise({ level }): level must be one of ${TRIGGER_RAISE_LEVELS.join(" | ")}, ` +
+            `got ${JSON.stringify(args.level)}`,
+          { level: args.level },
+        );
+      }
+      requireString(args.message, "b.raise({ message })");
+      if (args.errcode !== undefined) requireString(args.errcode, "b.raise({ errcode })");
+      return compact({
+        stmt: "raise",
+        level: args.level,
+        message: args.message,
+        errcode: args.errcode,
+      }) as TriggerStmt;
+    },
+    insert(args) {
+      if (!args || typeof args !== "object") {
+        throw structuredError("OP_INVALID", "b.insert({ table, rows, schema? }) needs an object");
+      }
+      rejectUnknownKeys(args, TRIGGER_INSERT_KEYS, "b.insert(...)");
+      requireString(args.table, "b.insert({ table })");
+      const normalized = normalizeInsertRows(args.rows, "b.insert({ rows })");
+      return compact({
+        stmt: "insert",
+        table: args.table,
+        columns: normalized.columns,
+        rows: normalized.rows,
+        schema: args.schema,
+      }) as TriggerStmt;
+    },
+    update(args) {
+      if (!args || typeof args !== "object") {
+        throw structuredError("OP_INVALID", "b.update({ table, set, where?, schema? }) needs an object");
+      }
+      rejectUnknownKeys(args, TRIGGER_UPDATE_KEYS, "b.update(...)");
+      requireString(args.table, "b.update({ table })");
+      return compact({
+        stmt: "update",
+        table: args.table,
+        set: resolveSet(args.set),
+        where: resolveExpr(args.where),
+        schema: args.schema,
+      }) as TriggerStmt;
+    },
+    delete(args) {
+      if (!args || typeof args !== "object") {
+        throw structuredError("OP_INVALID", "b.delete({ table, where, limit?, schema? }) needs an object");
+      }
+      rejectUnknownKeys(args, TRIGGER_DELETE_KEYS, "b.delete(...)");
+      requireString(args.table, "b.delete({ table })");
+      if (args.where === undefined || args.where === null) {
+        throw structuredError("OP_INVALID", "b.delete({ where }): where is mandatory (no unfiltered delete)");
+      }
+      return compact({
+        stmt: "delete",
+        table: args.table,
+        where: resolveExpr(args.where),
+        limit: args.limit,
+        schema: args.schema,
+      }) as TriggerStmt;
+    },
+    select(expr) {
+      return { stmt: "select", expr: resolveExpr(expr)! } as TriggerStmt;
+    },
+  };
+}
+
+function resolveTriggerAction(args: TriggerCreateArgs): Node {
+  const hasExecute = "execute" in args && args.execute !== undefined;
+  const hasBody = "body" in args && args.body !== undefined;
+  if (hasExecute === hasBody) {
+    throw structuredError(
+      "OP_INVALID",
+      ".trigger(name).create(...) needs exactly one action: { execute: string } or { body: (b) => TriggerStmt[] }",
+    );
+  }
+  if (hasExecute) {
+    requireString(args.execute, ".trigger(name).create({ execute })");
+    return { kind: "executeFunction", name: args.execute };
+  }
+  if (!("body" in args) || typeof args.body !== "function") {
+    throw structuredError("OP_INVALID", ".trigger(name).create({ body }) must be a function");
+  }
+  const statements = args.body(triggerBodyBuilder());
+  if (!Array.isArray(statements)) {
+    throw structuredError("OP_INVALID", ".trigger(name).create({ body }) must return an array of trigger statements");
+  }
+  for (const stmt of statements) {
+    if (!stmt || typeof stmt !== "object" || typeof (stmt as Node).stmt !== "string") {
+      throw structuredError("OP_INVALID", "trigger body entries must be statements returned by the trigger body builder");
+    }
+  }
+  return { kind: "body", statements };
+}
+
+// ── (E) The fluent `table()` handle — the reusable table entry ──
+
+/** Per-op-wins-over-table-default schema precedence: a per-op `schema`
+ *  overrides the table default only when the KEY is present with a defined value;
+ *  an omitted key (or an explicit `undefined`) keeps the table default. */
+function pickSchema(perCall: { schema?: string } | undefined, dflt: string | undefined): string | undefined {
+  if (perCall && perCall.schema !== undefined) return perCall.schema;
+  return dflt;
+}
+
+function pickViewColumns(
+  perCall: { columns?: string[] } | undefined,
+  dflt: string[] | undefined,
+): string[] | undefined {
+  if (perCall && perCall.columns !== undefined) return perCall.columns;
+  return dflt;
+}
+
+function requireColumnDef(x: unknown, where: string): asserts x is ColumnDefImpl {
+  if (!isColumnDef(x)) {
+    throw structuredError("OP_INVALID", `${where} must be a t.* ColumnDef`);
+  }
+}
+
+function recordAlterPrimaryKey(
+  table: string,
+  action:
+    | { kind: "add"; columns: OrderedColumns }
+    | {
+        kind: "replace";
+        expectedColumns: OrderedColumns;
+        columns: OrderedColumns;
+        dropIdentityFrom?: OrderedColumns;
+      }
+    | {
+        kind: "drop";
+        expectedColumns: OrderedColumns;
+        dropIdentityFrom?: OrderedColumns;
+      },
+  schema: string | undefined,
+): void {
+  emitAlterPrimaryKey({ table, action: compact(action), schema });
+}
+
+function recordSynchronizeIdentity(
+  table: string,
+  column: string,
+  writesQuiesced: string,
+  schema: string | undefined,
+): void {
+  emitSynchronizeIdentity({ table, column, writesQuiesced, schema });
+}
+
+export function comment(target: CommentTargetArg, text: string | null): void {
+  recordComment(target, text);
+}
+
+export function table(name: string, opts: TableOptions = {}): TableHandle {
+  return __makeTableHandle(name, opts);
+}
+
+export function __makeTableHandle(
+  name: string,
+  opts: TableOptions = {},
+  checkExprResolver: CheckExprResolver = resolveTableCheckExpr,
+): TableHandle {
+  requireString(name, "table(name, …)");
+  const dflt = opts.schema;
+
+  const handle: TableHandle = {
+    // The table itself
+    create(args) {
+      recordCreateTable(name, { ...args, schema: pickSchema(args, dflt) }, checkExprResolver);
+      return handle;
+    },
+    drop(args = {}) {
+      rejectUnknownKeys(args, DROP_TABLE_KEYS, `table("${name}").drop(...)`);
+      recordDropTable(name, {
+        ifExists: args.ifExists,
+        cascade: args.cascade,
+        schema: pickSchema(args, dflt),
+      });
+      return handle;
+    },
+    rename(args) {
+      rejectUnknownKeys(args, RENAME_TABLE_KEYS, `table("${name}").rename(...)`);
+      requireString(args.to, "table(name).rename({ to })");
+      recordRenameTable(name, args.to, {
+        ifExists: args.ifExists,
+        schema: pickSchema(args, dflt),
+      });
+      // B7 (L10): rebind the returned handle to the NEW name so chained ops
+      // after a rename target the new name, not the dead one. (A table rename
+      // keeps the same schema, so `opts`/resolver carry over unchanged.)
+      return __makeTableHandle(args.to, opts, checkExprResolver);
+    },
+    setOptions(args) {
+      rejectUnknownKeys(args, SET_TABLE_OPTIONS_KEYS, `table("${name}").setOptions(...)`);
+      recordSetTableOptions(name, { ...args, schema: dflt });
+      return handle;
+    },
+    comment(text, args = {}) {
+      rejectUnknownKeys(args, SCHEMA_ONLY_KEYS, `table("${name}").comment(...)`);
+      recordComment({ kind: "table", name, schema: pickSchema(args, dflt) }, text);
+      return handle;
+    },
+    partition(partitionName) {
+      requireString(partitionName, ".partition(name)");
+      const id = registerSelector("partition", partitionName);
+      return {
+        create(bound, args = {}) {
+          rejectUnknownKeys(args, CREATE_PARTITION_KEYS, `table("${name}").partition("${partitionName}").create(...)`);
+          terminateSelector(id);
+          recordCreatePartition(partitionName, name, partitionBoundToIr(bound), {
+            ifNotExists: args.ifNotExists,
+            schema: pickSchema(args, dflt),
+          });
+          return handle;
+        },
+        attach(bound, args = {}) {
+          rejectUnknownKeys(args, ATTACH_PARTITION_KEYS, `table("${name}").partition("${partitionName}").attach(...)`);
+          terminateSelector(id);
+          recordAttachPartition(name, partitionName, partitionBoundToIr(bound), {
+            schema: pickSchema(args, dflt),
+          });
+          return handle;
+        },
+        drop(args = {}) {
+          rejectUnknownKeys(args, DROP_PARTITION_KEYS, `table("${name}").partition("${partitionName}").drop(...)`);
+          terminateSelector(id);
+          recordDropPartition(name, partitionName, {
+            ifExists: args.ifExists,
+            cascade: args.cascade,
+            schema: pickSchema(args, dflt),
+          });
+          return handle;
+        },
+        detach(args = {}) {
+          rejectUnknownKeys(args, DETACH_PARTITION_KEYS, `table("${name}").partition("${partitionName}").detach(...)`);
+          terminateSelector(id);
+          recordDetachPartition(name, partitionName, {
+            concurrently: args.concurrently,
+            schema: pickSchema(args, dflt),
+          });
+          return handle;
+        },
+      };
+    },
+    primaryKey(): PrimaryKeyOperations {
+      return {
+        add(args) {
+          requirePlainObject(args, ".primaryKey().add(args)");
+          rejectUnknownKeys(args, PK_ADD_KEYS, `table("${name}").primaryKey().add(...)`);
+          requireOrderedColumns(args.columns, ".primaryKey().add({ columns })");
+          recordAlterPrimaryKey(name, { kind: "add", columns: args.columns }, dflt);
+          return handle;
+        },
+        replace(args) {
+          requirePlainObject(args, ".primaryKey().replace(args)");
+          rejectUnknownKeys(args, PK_REPLACE_KEYS, `table("${name}").primaryKey().replace(...)`);
+          requireOrderedColumns(
+            args.expectedColumns,
+            ".primaryKey().replace({ expectedColumns })",
+          );
+          requireOrderedColumns(args.columns, ".primaryKey().replace({ columns })");
+          if (args.dropIdentityFrom !== undefined) {
+            requireOrderedColumns(
+              args.dropIdentityFrom,
+              ".primaryKey().replace({ dropIdentityFrom })",
+            );
+          }
+          if (
+            args.expectedColumns.length === args.columns.length &&
+            args.expectedColumns.every((column, index) => column === args.columns[index])
+          ) {
+            throw structuredError(
+              "OP_INVALID",
+              ".primaryKey().replace({ columns }) must change the ordered primary-key tuple",
+            );
+          }
+          requireDropIdentitySubset(
+            args.dropIdentityFrom,
+            args.expectedColumns,
+            ".primaryKey().replace({ dropIdentityFrom })",
+          );
+          recordAlterPrimaryKey(
+            name,
+            {
+              kind: "replace",
+              expectedColumns: args.expectedColumns,
+              columns: args.columns,
+              dropIdentityFrom: args.dropIdentityFrom,
+            },
+            dflt,
+          );
+          return handle;
+        },
+        drop(args) {
+          requirePlainObject(args, ".primaryKey().drop(args)");
+          rejectUnknownKeys(args, PK_DROP_KEYS, `table("${name}").primaryKey().drop(...)`);
+          requireOrderedColumns(
+            args.expectedColumns,
+            ".primaryKey().drop({ expectedColumns })",
+          );
+          if (args.dropIdentityFrom !== undefined) {
+            requireOrderedColumns(
+              args.dropIdentityFrom,
+              ".primaryKey().drop({ dropIdentityFrom })",
+            );
+          }
+          requireDropIdentitySubset(
+            args.dropIdentityFrom,
+            args.expectedColumns,
+            ".primaryKey().drop({ dropIdentityFrom })",
+          );
+          recordAlterPrimaryKey(
+            name,
+            {
+              kind: "drop",
+              expectedColumns: args.expectedColumns,
+              dropIdentityFrom: args.dropIdentityFrom,
+            },
+            dflt,
+          );
+          return handle;
+        },
+      };
+    },
+    // Columns
+    column(col): ColumnRef {
+      requireString(col, ".column(name)");
+      const id = registerSelector("column", col);
+      return {
+        add(args) {
+          rejectUnknownKeys(args, ADD_COLUMN_KEYS, `table("${name}").column("${col}").add(...)`);
+          requireColumnDef(args.type, ".column(name).add({ type })");
+          terminateSelector(id);
+          recordAddColumn(name, col, args.type, {
+            ifNotExists: args.ifNotExists,
+            schema: pickSchema(args, dflt),
+          });
+          return handle;
+        },
+        drop(args = {}) {
+          rejectUnknownKeys(args, DROP_COLUMN_KEYS, `table("${name}").column("${col}").drop(...)`);
+          terminateSelector(id);
+          recordDropColumn(name, col, { ifExists: args.ifExists, schema: pickSchema(args, dflt) });
+          return handle;
+        },
+        rename(args) {
+          rejectUnknownKeys(args, RENAME_COLUMN_KEYS, `table("${name}").column("${col}").rename(...)`);
+          requireString(args.to, ".column(name).rename({ to })");
+          requireColumnDef(args.type, ".column(name).rename({ type })");
+          terminateSelector(id);
+          recordRenameColumn(name, col, args.to, args.type, { schema: pickSchema(args, dflt) });
+          return handle;
+        },
+        setType(args) {
+          rejectUnknownKeys(args, SET_TYPE_KEYS, `table("${name}").column("${col}").setType(...)`);
+          terminateSelector(id);
+          recordSetColumnType(name, col, { ...args, schema: pickSchema(args, dflt) });
+          return handle;
+        },
+        setNotNull(args = {}) {
+          rejectUnknownKeys(args, SCHEMA_ONLY_KEYS, `table("${name}").column("${col}").setNotNull(...)`);
+          terminateSelector(id);
+          recordSetColumnNotNull(name, col, { schema: pickSchema(args, dflt) });
+          return handle;
+        },
+        dropNotNull(args = {}) {
+          rejectUnknownKeys(args, SCHEMA_ONLY_KEYS, `table("${name}").column("${col}").dropNotNull(...)`);
+          terminateSelector(id);
+          recordDropColumnNotNull(name, col, { schema: pickSchema(args, dflt) });
+          return handle;
+        },
+        setDefault(value, args = {}) {
+          rejectUnknownKeys(args, SCHEMA_ONLY_KEYS, `table("${name}").column("${col}").setDefault(...)`);
+          terminateSelector(id);
+          recordSetColumnDefault(name, col, value, { schema: pickSchema(args, dflt) });
+          return handle;
+        },
+        dropDefault(args = {}) {
+          rejectUnknownKeys(args, SCHEMA_ONLY_KEYS, `table("${name}").column("${col}").dropDefault(...)`);
+          terminateSelector(id);
+          recordDropColumnDefault(name, col, { schema: pickSchema(args, dflt) });
+          return handle;
+        },
+        comment(text, args = {}) {
+          terminateSelector(id);
+          recordComment({ kind: "column", table: name, name: col, schema: pickSchema(args, dflt) }, text);
+          return handle;
+        },
+        synchronizeIdentity(args) {
+          requirePlainObject(args, ".column(name).synchronizeIdentity(args)");
+          requireNonEmptyString(
+            args.writesQuiesced,
+            ".column(name).synchronizeIdentity({ writesQuiesced })",
+          );
+          if (args.writesQuiesced.trim().length === 0) {
+            throw structuredError(
+              "OP_INVALID",
+              ".column(name).synchronizeIdentity({ writesQuiesced }) must contain non-whitespace text",
+            );
+          }
+          terminateSelector(id);
+          recordSynchronizeIdentity(
+            name,
+            col,
+            args.writesQuiesced,
+            pickSchema(args, dflt),
+          );
+          return handle;
+        },
+      };
+    },
+
+    // Constraints. Selector form is THE grammar (one grammar, one
+    // spelling). The `addForeignKey`/`addCheck` verb twins are DELETED —
+    // `foreignKey(name).add`/`check(name).add` are the SOLE public
+    // writers of the `addConstraint` fk/check payload.
+    foreignKey(fkName): ForeignKeyRef {
+      requireNonEmptyString(fkName, ".foreignKey(name)");
+      const id = registerSelector("foreignKey", fkName);
+      return {
+        add(args) {
+          terminateSelector(id);
+          recordAddForeignKey(name, fkName, { ...args, schema: pickSchema(args, dflt) });
+          return handle;
+        },
+      };
+    },
+    unique(uqName): UniqueRef {
+      requireString(uqName, ".unique(name)");
+      const id = registerSelector("unique", uqName);
+      return {
+        add(args) {
+          terminateSelector(id);
+          recordAddUnique(name, uqName, { ...args, schema: pickSchema(args, dflt) });
+          return handle;
+        },
+      };
+    },
+    check(ckName): CheckRef {
+      requireString(ckName, ".check(name)");
+      const id = registerSelector("check", ckName);
+      return {
+        add(args) {
+          terminateSelector(id);
+          recordAddCheck(name, ckName, { ...args, schema: pickSchema(args, dflt) }, checkExprResolver);
+          return handle;
+        },
+      };
+    },
+    exclusion(exName): ExclusionRef {
+      requireString(exName, ".exclusion(name)");
+      const id = registerSelector("exclusion", exName);
+      return {
+        add(args) {
+          terminateSelector(id);
+          recordAddExclusion(name, exName, { ...args, schema: pickSchema(args, dflt) });
+          return handle;
+        },
+      };
+    },
+    constraint(cName): ConstraintRef {
+      requireString(cName, ".constraint(name)");
+      const id = registerSelector("constraint", cName);
+      return {
+        drop(args = {}) {
+          terminateSelector(id);
+          recordDropConstraint(name, cName, { ifExists: args.ifExists, schema: pickSchema(args, dflt) });
+          return handle;
+        },
+        comment(text, args = {}) {
+          terminateSelector(id);
+          recordComment({ kind: "constraint", table: name, name: cName, schema: pickSchema(args, dflt) }, text);
+          return handle;
+        },
+        validate(args = {}) {
+          terminateSelector(id);
+          recordValidateConstraint(name, cName, { ifExists: args.ifExists, schema: pickSchema(args, dflt) });
+          return handle;
+        },
+      };
+    },
+
+    // Indexes
+    index(idxName): IndexRef {
+      requireString(idxName, ".index(name)");
+      const id = registerSelector("index", idxName);
+      const indexRef: IndexRef = {
+        add(args) {
+          terminateSelector(id);
+          recordCreateIndex(name, idxName, { ...args, schema: pickSchema(args, dflt) });
+          return handle;
+        },
+        drop(args = {}) {
+          rejectUnknownKeys(args, INDEX_DROP_KEYS, `table("${name}").index("${idxName}").drop(...)`);
+          terminateSelector(id);
+          recordDropIndex(name, idxName, {
+            ifExists: args.ifExists,
+            schema: pickSchema(args, dflt),
+          });
+          return handle;
+        },
+        comment(text, args = {}) {
+          terminateSelector(id);
+          recordComment({ kind: "index", name: idxName, schema: pickSchema(args, dflt) }, text);
+          return handle;
+        },
+      };
+      return indexRef;
+    },
+
+    // Table data (no existence guard; schema rides on args)
+    insert(args) {
+      rejectUnknownKeys(args, INSERT_KEYS, `table("${name}").insert(...)`);
+      recordInsert(name, { ...args, schema: pickSchema(args, dflt) });
+      return handle;
+    },
+    update(args) {
+      rejectUnknownKeys(args, UPDATE_KEYS, `table("${name}").update(...)`);
+      recordUpdate(name, { ...args, schema: pickSchema(args, dflt) });
+      return handle;
+    },
+    delete(args) {
+      rejectUnknownKeys(args, DELETE_KEYS, `table("${name}").delete(...)`);
+      recordDel(name, { ...args, schema: pickSchema(args, dflt) });
+      return handle;
+    },
+    backfill(args) {
+      recordBackfill(name, { ...args, schema: pickSchema(args, dflt) });
+      return handle;
+    },
+
+    // Postgres vendor — table-scoped privileged primitives.
+    setRls(args) {
+      recordSetRls(name, { ...args, schema: dflt });
+      return handle;
+    },
+    policy(policyName) {
+      requireString(policyName, ".policy(name)");
+      const id = registerSelector("policy", policyName);
+      return {
+        create(args) {
+          rejectUnknownKeys(args, POLICY_CREATE_KEYS, `table("${name}").policy("${policyName}").create(...)`);
+          terminateSelector(id);
+          if (Array.isArray(args.to) && args.to.length === 0) {
+            throw structuredError("OP_INVALID", ".policy(name).create({ to }): to must be a non-empty role array (omit to for PUBLIC)");
+          }
+          if (args.using === undefined) {
+            throw structuredError("OP_INVALID", ".policy(name).create({ using }): using is required (the renderer always emits USING)");
+          }
+          emitCreatePolicy({
+            name: policyName,
+            table: name,
+            schema: pickSchema(args, dflt),
+            forCmd: args.for || "all",
+            to: args.to,
+            using: resolveExpr(args.using),
+            withCheck: resolveExpr(args.withCheck),
+          });
+          return handle;
+        },
+        drop(args = {}) {
+          rejectUnknownKeys(args, POLICY_DROP_KEYS, `table("${name}").policy("${policyName}").drop(...)`);
+          terminateSelector(id);
+          emitDropPolicy({
+            name: policyName,
+            table: name,
+            schema: pickSchema(args, dflt),
+            ifExists: args.ifExists,
+          });
+          return handle;
+        },
+      };
+    },
+    trigger(triggerName) {
+      requireString(triggerName, ".trigger(name)");
+      const id = registerSelector("trigger", triggerName);
+      return {
+        create(args) {
+          terminateSelector(id);
+          emitCreateTrigger({
+            name: triggerName,
+            table: name,
+            schema: pickSchema(args, dflt),
+            timing: args.timing,
+            events: args.events,
+            forEach: args.forEach,
+            action: resolveTriggerAction(args),
+            when: resolveExpr(args.when),
+          });
+          return handle;
+        },
+        drop(args = {}) {
+          rejectUnknownKeys(args, TRIGGER_DROP_KEYS, `table("${name}").trigger("${triggerName}").drop(...)`);
+          terminateSelector(id);
+          emitDropTrigger({
+            name: triggerName,
+            table: name,
+            schema: pickSchema(args, dflt),
+            ifExists: args.ifExists,
+          });
+          return handle;
+        },
+      };
+    },
+  };
+
+  return handle;
+}
+
+export function view(name: string, opts: ViewOptions = {}): ViewHandle {
+  requireString(name, "view(name, …)");
+  const dflt = opts.schema;
+  const dfltColumns = opts.columns;
+
+  const handle: ViewHandle = {
+    create(args) {
+      rejectUnknownKeys(args, CREATE_VIEW_KEYS, `view("${name}").create(...)`);
+      recordCreateView(name, {
+        ...args,
+        schema: pickSchema(args, dflt),
+        columns: pickViewColumns(args, dfltColumns),
+      });
+      return handle;
+    },
+    drop(args = {}) {
+      rejectUnknownKeys(args, DROP_VIEW_KEYS, `view("${name}").drop(...)`);
+      recordDropView(name, {
+        ifExists: args.ifExists,
+        materialized: args.materialized,
+        schema: pickSchema(args, dflt),
+      });
+      return handle;
+    },
+    comment(text, args = {}) {
+      recordComment({ kind: "view", name, schema: pickSchema(args, dflt) }, text);
+      return handle;
+    },
+  };
+
+  return handle;
+}
+
+// ── (C) Determinism lint ──
+
+const NONDETERMINISM_PATTERNS: { re: RegExp; name: string; steer: string }[] = [
+  { re: /\bDate\s*\.\s*now\s*\(/, name: "Date.now()", steer: "the Date.now symbol (no parens) or now()" },
+  { re: /\bMath\s*\.\s*random\s*\(/, name: "Math.random()", steer: "the Math.random symbol (no parens) or uuidV4()" },
+  { re: /\bcrypto\s*\.\s*randomUUID\s*\(/, name: "crypto.randomUUID()", steer: "the crypto.randomUUID symbol (no parens) or uuidV4()" },
+  { re: /\bnew\s+Date\s*\(/, name: "new Date(...)", steer: "the Date.now symbol (no parens) or now()" },
+];
+
+/**
+ * Lint a migration's SOURCE for the nondeterminism accessors (`Date.now()` /
+ * `Math.random()` / `crypto.randomUUID()` / `new Date()`).
+ *
+ * SCOPE — intentional coarse whole-source scan: it OVER-flags (a clock accessor
+ * in a comment trips it) and NEVER under-flags. The build-once committed artifact
+ * already neutralizes post-deploy non-determinism, so the lint's only job is a
+ * best-effort pre-commit STEER where a false positive is cheap (rephrase) and a
+ * false negative (a baked build-time value slipping through) is the real hazard.
+ * Findings are surfaced as WARNINGS on the record path, never a hard reject.
+ */
+export function lintDeterminism(source: string): DeterminismFinding[] {
+  if (typeof source !== "string") return [];
+  const findings: DeterminismFinding[] = [];
+  for (const { re, name, steer } of NONDETERMINISM_PATTERNS) {
+    if (re.test(source)) {
+      findings.push({
+        code: "NONDETERMINISTIC_OP_ARG",
+        accessor: name,
+        suggested_fix: `replace ${name} with the DB-evaluated ${steer}`,
+        reason: `${name} bakes a build-time value into the artifact; use a structured database expression`,
+      });
+    }
+  }
+  return findings;
+}
+
+function splitPartGrammarLint(delim: unknown, n: unknown): void {
+  const fail = (reason: string) => {
+    throw structuredError("EXPR_NOT_PORTABLE", reason, {
+      suggested_fix:
+        "pass a non-empty string-literal delimiter and a positive-integer n; to target " +
+        "SQLite too, stay in-envelope (single-ASCII delimiter, 1<=n<=8); out-of-envelope " +
+        "forms are only renderable on dialects with a native renderer such as Postgres/MySQL",
+    });
+  };
+  if (typeof delim !== "string") fail(`.splitPart delimiter must be a string literal; got ${typeof delim}`);
+  if ((delim as string).length === 0) fail(".splitPart delimiter must be a non-empty string literal");
+  if (typeof n !== "number" || !Number.isInteger(n)) {
+    fail(`.splitPart part index n must be a positive integer literal; got ${JSON.stringify(n)}`);
+  }
+  if ((n as number) < 1) fail(`.splitPart part index n must be a positive integer; got ${n}`);
+}

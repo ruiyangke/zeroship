@@ -1,0 +1,122 @@
+{
+  "ir_version": 1,
+  "name": "fluent_scalars",
+  "owner_app": "app_corpus",
+  "ops": [
+    {
+      "op": "createTable",
+      "name": "ledger",
+      "columns": [
+        {
+          "name": "id",
+          "type": {
+            "string": {
+              "length": 255
+            }
+          },
+          "nullable": false
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp",
+          "nullable": false
+        },
+        {
+          "name": "created_by",
+          "type": {
+            "string": {
+              "length": 255
+            }
+          },
+          "nullable": true
+        },
+        {
+          "name": "updated_by",
+          "type": {
+            "string": {
+              "length": 255
+            }
+          },
+          "nullable": true
+        },
+        {
+          "name": "version",
+          "type": "int",
+          "nullable": false
+        },
+        {
+          "name": "deleted_at",
+          "type": "timestamp",
+          "nullable": true
+        },
+        {
+          "name": "seq",
+          "type": {
+            "decimal": {
+              "precision": 38,
+              "scale": 0
+            }
+          },
+          "nullable": false,
+          "default": {
+            "literal": {
+              "value": {
+                "decimal": "9007199254740993"
+              }
+            }
+          }
+        },
+        {
+          "name": "salt",
+          "type": "bytes",
+          "default": {
+            "literal": {
+              "value": {
+                "bytes": "AQID/w=="
+              }
+            }
+          }
+        }
+      ],
+      "primaryKey": [
+        "id"
+      ],
+      "constraints": [],
+      "indexes": [
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "deleted_at"
+            }
+          ]
+        },
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "updated_at"
+            }
+          ]
+        },
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "created_by"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "flags": {},
+  "depends_on": [],
+  "supersedes": [],
+  "preconditions": []
+}

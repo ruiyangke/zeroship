@@ -1,0 +1,18 @@
+{
+  "ir_version": 1,
+  "name": "synchronize_identity",
+  "owner_app": "app_corpus",
+  "ops": [
+    {
+      "op": "synchronizeIdentity",
+      "table": "orders",
+      "column": "id",
+      "writesQuiesced": "orders_import_window",
+      "schema": "app"
+    }
+  ],
+  "flags": {},
+  "depends_on": [],
+  "supersedes": [],
+  "preconditions": []
+}
