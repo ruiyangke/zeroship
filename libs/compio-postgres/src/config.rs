@@ -1804,6 +1804,38 @@ impl Config {
                     return Err(Error::config_parse(Box::new(InvalidValue("gssdelegation"))));
                 }
             },
+            // TLS compression is not implemented and modern PostgreSQL removed
+            // it, so `0` asks for what happens anyway. libpq accepts ANY value
+            // here including nonsense, because the setting is vestigial for it
+            // too; this refuses `1` rather than take a request to compress and
+            // quietly not compress.
+            "sslcompression" => match value {
+                "0" => {}
+                "1" => {
+                    return Err(Error::config_parse(Box::new(UnsupportedOption(
+                        "sslcompression",
+                    ))));
+                }
+                _ => {
+                    return Err(Error::config_parse(Box::new(InvalidValue(
+                        "sslcompression",
+                    ))));
+                }
+            },
+            // The pre-`sslmode` spelling. `0` means "do not require TLS",
+            // which is this driver's default posture, so it is satisfied. `1`
+            // means `sslmode=require`, and that IS supported - under that
+            // name, which is what the error says rather than leaving the
+            // caller to guess.
+            "requiressl" => match value {
+                "0" => {}
+                "1" => {
+                    return Err(Error::config_parse(Box::new(UnsupportedOption(
+                        "requiressl (use sslmode=require)",
+                    ))));
+                }
+                _ => return Err(Error::config_parse(Box::new(InvalidValue("requiressl")))),
+            },
             "sslmode" => {
                 let mode = match value {
                     "disable" => SslMode::Disable,
@@ -3235,6 +3267,64 @@ mod tests {
             assert!(
                 chain.contains("gssencmode"),
                 "an invalid gssencmode value must be refused naming the key: {chain}"
+            );
+        }
+    }
+
+    /// The same rule as [`gssapi_parameters`], applied to the rest of the
+    /// refused surface: a value that asks for this driver's own behaviour is
+    /// satisfied, and one that asks for a feature it lacks is refused by name.
+    ///
+    /// Fixing only `gssencmode` would have repeated the mistake that made the
+    /// TLS teardown take three rounds - patching the instance in front of me
+    /// and leaving the others.
+    mod off_values_of_unsupported_features {
+        use crate::Config;
+
+        fn chain(dsn: &str) -> String {
+            let error = dsn.parse::<Config>().expect_err("this must be refused");
+            let mut chain = error.to_string();
+            let mut source = std::error::Error::source(&error);
+            while let Some(cause) = source {
+                chain.push_str(" | ");
+                chain.push_str(&cause.to_string());
+                source = std::error::Error::source(cause);
+            }
+            chain
+        }
+
+        #[test]
+        fn asking_for_the_feature_to_be_off_is_accepted() {
+            for dsn in ["host=h sslcompression=0", "host=h requiressl=0"] {
+                assert!(
+                    dsn.parse::<Config>().is_ok(),
+                    "libpq accepts this and it asks for what this driver already does: {dsn}"
+                );
+            }
+        }
+
+        /// THE CONTROL: turning these ON must still be refused, or the test
+        /// above is satisfied by a parser that swallows the whole family.
+        #[test]
+        fn asking_for_the_feature_is_refused_by_name() {
+            for (dsn, key) in [
+                ("host=h sslcompression=1", "sslcompression"),
+                ("host=h requiressl=1", "requiressl"),
+            ] {
+                let chain = chain(dsn);
+                assert!(chain.contains(key), "refused without naming {key}: {chain}");
+            }
+        }
+
+        /// `requiressl=1` is not unimplementable - it is `sslmode=require`
+        /// under the pre-`sslmode` spelling - so the error names the option
+        /// that does work instead of only saying no.
+        #[test]
+        fn the_requiressl_refusal_points_at_sslmode() {
+            let chain = chain("host=h requiressl=1");
+            assert!(
+                chain.contains("sslmode=require"),
+                "the refusal does not tell the caller what to use instead: {chain}"
             );
         }
     }
