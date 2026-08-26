@@ -9676,6 +9676,83 @@ fn p6b_apply_ahead_then_register_lets_the_data_plane_read_the_table() {
 }
 
 // ---------------------------------------------------------------------------
+// The data plane must reach an app file WITHOUT registerModel having run.
+//
+// registerModel is metadata. It happens to hold the only production
+// `attach_app_file` call, which makes SQLite CRUD silently depend on a
+// metadata call having happened first - a session that never registered has no
+// alias, and nothing re-attaches on its own. That is an ordering coupling, not
+// a contract: nothing about reading a row requires a prior registration.
+//
+// This test is the p6b test above with the register REMOVED. Everything else
+// is identical, so the only thing it can measure is whether the data plane can
+// bind the app file by itself.
+// ---------------------------------------------------------------------------
+#[test]
+fn p6c_data_plane_reaches_the_app_file_without_a_register() {
+    run(async {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let app = "p6c_no_register";
+        let collection = "notes";
+
+        crate::support::tables::create_sqlite_table(
+            dir.path(),
+            app,
+            &format!(
+                r#"CREATE TABLE IF NOT EXISTS "{app}"."{collection}" ({SYSTEM_COLUMNS_SQLITE},
+  "body" TEXT NOT NULL
+);
+{}"#,
+                system_indexes_sqlite(app, collection)
+            ),
+        );
+
+        let backend = Rc::new(SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend"));
+        zeroship_plugin_db::set_sqlite_backend_for_tests(backend.clone());
+
+        // NO registerModel here. That is the whole point of the test.
+        //
+        // Both statements go through `exec::exec_*_for_tests`, which is the
+        // PRODUCTION data-plane entry - the same `TxRoute` -> `exec_sqlite_json`
+        // path a CRUD op takes. Calling `backend.pool_exec` directly would test
+        // a layer BELOW the one that knows the app_id, and so could not observe
+        // whether the data plane binds the file for itself.
+        zeroship_plugin_db::exec::exec_mutation_with_emit_for_tests(
+            zeroship_plugin_db::query::BuiltQuery {
+                sql: format!(
+                    r#"INSERT INTO "{app}"."{collection}" (id, body)
+                       VALUES ('note_1', 'hello')"#
+                ),
+                params: Vec::new(),
+            },
+            app,
+            collection,
+            ChangeOp::Insert,
+        )
+        .await
+        .expect("the data plane must WRITE without a prior registerModel");
+
+        let rows = zeroship_plugin_db::exec::exec_query_for_tests(
+            app,
+            zeroship_plugin_db::query::BuiltQuery {
+                sql: format!(
+                    r#"SELECT body FROM "{app}"."{collection}" WHERE id = 'note_1'"#
+                ),
+                params: Vec::new(),
+            },
+        )
+        .await
+        .expect("the data plane must READ without a prior registerModel");
+        assert_eq!(rows.len(), 1, "the row is readable with no register in the way");
+        assert_eq!(
+            rows[0].get("body").and_then(|v| v.as_str()),
+            Some("hello"),
+            "body column resolves"
+        );
+    });
+}
+
+// ---------------------------------------------------------------------------
 // DELETED: the destructive-drop-column rebuild test.
 //
 // It applied a schema that dropped a column and asserted the surviving rows
