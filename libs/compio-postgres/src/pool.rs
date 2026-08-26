@@ -2107,16 +2107,6 @@ impl Future for Waiter<'_> {
         // availability. A later waiter must remain parked even if it receives a
         // spurious poll while the head owns the first claim.
         let new_waker = cx.waker();
-        // Cloned BEFORE any borrow. A `RawWakerVTable`'s clone callback is
-        // arbitrary caller code, exactly like its wake and its drop, so running
-        // it inside the `waiters` or slot borrow is the same hazard those two
-        // were fixed for. Leaving one of the three inside is how the previous
-        // two defects here survived a fix each.
-        //
-        // Done unconditionally, so it costs one refcount pair on the common
-        // re-poll where `will_wake` matches and the clone goes unused. Deciding
-        // first would need the borrow this exists to stay out of.
-        let mut fresh = Some(new_waker.clone());
         let current_slot = self.slot.as_ref().map(Rc::clone);
         let mut waiters = self.pool.waiters.borrow_mut();
 
@@ -2131,16 +2121,32 @@ impl Future for Waiter<'_> {
         if let Some(slot) = current_slot
             && waiters.iter().any(|queued| Rc::ptr_eq(queued, &slot))
         {
-            // Slot still live in the queue - refresh the waker if changed.
+            // THE CLONE STAYS INSIDE THE BORROW, and that is deliberate. A
+            // `Waker` has three entry points and they are NOT equivalent.
+            // MEASURED 2026-08-26 on edition 2024 with a `Waker::from(Arc<W>)`:
+            // `wake` and `drop` run the user's `impl Wake` / `impl Drop`, so
+            // both are reachable from SAFE code and both are carried outside
+            // the borrow above. `clone` runs `Arc::clone` and NOTHING of the
+            // user's - reaching user code there needs a hand-rolled
+            // `RawWakerVTable`, which needs `unsafe`, which this workspace
+            // denies.
+            //
+            // Hoisting it out was tried and reverted. It bought nothing safe
+            // code can trip, cost a refcount pair per poll, and RELOCATED the
+            // hazard: with the clone before the state checks, a re-entrant
+            // callback that drops the sole `PooledClient` leaves the entry
+            // hidden in `handoffs` while this poll installs a new slot, so at
+            // `max_size == 1` capacity is permanently full and unavailable.
+            // A `BorrowMutError` is loud; that is silent.
             let mut w = slot.waker.borrow_mut();
             match &*w {
                 Some(existing) if existing.will_wake(new_waker) => {}
-                _ => replaced = w.replace(fresh.take().expect("cloned before the borrow above")),
+                _ => replaced = w.replace(new_waker.clone()),
             }
         } else {
             // First poll, or our slot was popped for a direct hand-off and we
             // need to re-park. Register a fresh live slot at the back.
-            let slot = WaiterSlot::new(fresh.take().expect("cloned before the borrow above"));
+            let slot = WaiterSlot::new(new_waker.clone());
             waiters.push_back(Rc::clone(&slot));
             self.slot = Some(slot);
         }
@@ -2259,9 +2265,6 @@ impl Future for CloseWaiter<'_> {
 
         let new_waker = cx.waker();
         let current_slot = self.slot.as_ref().map(Rc::clone);
-        // Cloned before the borrow, for the same reason as in `Waiter::poll`:
-        // a `RawWakerVTable`'s clone callback is arbitrary caller code too.
-        let mut fresh = Some(new_waker.clone());
         let mut close_waiters = self.pool.close_waiters.borrow_mut();
         // Carried out for the same reason as in `Waiter::poll`: a replaced
         // `Waker` is arbitrary caller code and must not be destroyed while a
@@ -2275,12 +2278,10 @@ impl Future for CloseWaiter<'_> {
             let mut waker = slot.waker.borrow_mut();
             match &*waker {
                 Some(existing) if existing.will_wake(new_waker) => {}
-                _ => {
-                    replaced = waker.replace(fresh.take().expect("cloned before the borrow above"))
-                }
+                _ => replaced = waker.replace(new_waker.clone()),
             }
         } else {
-            let slot = CloseWaiterSlot::new(fresh.take().expect("cloned before the borrow above"));
+            let slot = CloseWaiterSlot::new(new_waker.clone());
             close_waiters.push(Rc::clone(&slot));
             self.slot = Some(slot);
         }
