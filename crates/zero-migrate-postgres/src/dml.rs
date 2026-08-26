@@ -1,4 +1,4 @@
-//! PostgreSQL SQL spelling. The future `zero-migrate-postgres`.
+//! PostgreSQL SQL spelling.
 
 use std::collections::BTreeMap;
 

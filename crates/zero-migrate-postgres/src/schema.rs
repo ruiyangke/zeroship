@@ -1,4 +1,4 @@
-//! PostgreSQL schema/DDL spelling. The future `zero-migrate-postgres`.
+//! PostgreSQL schema/DDL spelling.
 
 use zero_migrate_backend::ddl::ExclusionConstraintRequest;
 use zero_migrate_backend::renderer::DmlRenderer;
