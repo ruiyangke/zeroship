@@ -1042,7 +1042,14 @@ impl Config {
             } {
                 return Err(Error::config(Box::new(InvalidServiceOption(key))));
             }
-            if explicit.iter().any(|given| given == key) || applied.contains(&key.as_str()) {
+            let canonical_key = canonical_parameter_key(key);
+            if explicit
+                .iter()
+                .any(|given| canonical_parameter_key(given) == canonical_key)
+                || applied
+                    .iter()
+                    .any(|given| canonical_parameter_key(given) == canonical_key)
+            {
                 continue;
             }
             self.param(key, value)?;
@@ -2557,6 +2564,16 @@ impl fmt::Display for InvalidServiceOption {
 
 impl error::Error for InvalidServiceOption {}
 
+/// The deprecated `requiressl` spelling occupies libpq's `sslmode` slot.
+/// Precedence and repeated-key replacement therefore operate across the two
+/// names, not independently for each spelling.
+fn canonical_parameter_key(key: &str) -> &str {
+    match key {
+        "requiressl" => "sslmode",
+        _ => key,
+    }
+}
+
 /// Parse libpq's integer grammar: a signed C `int`, surrounded only by C
 /// whitespace. Rust's integer parser has the right digit and sign grammar once
 /// those six whitespace bytes have been removed.
@@ -3825,6 +3842,26 @@ mod tests {
             // The keys that were NOT explicit still come from the service, or
             // this test would pass for a `fill_unset` that does nothing at all.
             assert_eq!(config.get_user(), Some("service_user"));
+        }
+
+        #[test]
+        fn explicit_requiressl_blocks_the_service_sslmode_alias() {
+            let mut config = Config::new();
+            config
+                .param("requiressl", "0")
+                .expect("requiressl=0 is sslmode=prefer");
+            config
+                .fill_unset(
+                    vec![("sslmode".to_owned(), "require".to_owned())],
+                    &["requiressl".to_owned()],
+                )
+                .expect("the service sslmode must be shadowed");
+
+            assert_eq!(
+                config.get_ssl_mode(),
+                crate::config::SslMode::Prefer,
+                "the service overrode an explicit spelling of the same option"
+            );
         }
 
         /// A section may name one key twice, and libpq takes the FIRST. Probed
