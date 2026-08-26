@@ -2172,13 +2172,20 @@ impl Config {
                 // (`database` / `true` / `false`) plus a permissive
                 // off-equivalent set, matching libpq:
                 // https://www.postgresql.org/docs/16/libpq-connect.html#LIBPQ-CONNECT-REPLICATION
-                let mode = match value {
-                    "database" => Some(ReplicationMode::Logical),
-                    "true" | "on" | "1" | "yes" => Some(ReplicationMode::Physical),
-                    "false" | "off" | "0" | "no" => None,
-                    _ => {
-                        return Err(Error::config_parse(Box::new(InvalidValue("replication"))));
-                    }
+                let mode = if value.eq_ignore_ascii_case("database") {
+                    Some(ReplicationMode::Logical)
+                } else if ["true", "on", "1", "yes"]
+                    .iter()
+                    .any(|candidate| value.eq_ignore_ascii_case(candidate))
+                {
+                    Some(ReplicationMode::Physical)
+                } else if ["false", "off", "0", "no"]
+                    .iter()
+                    .any(|candidate| value.eq_ignore_ascii_case(candidate))
+                {
+                    None
+                } else {
+                    return Err(Error::config_parse(Box::new(InvalidValue("replication"))));
                 };
                 self.replication = mode;
             }
@@ -3747,8 +3754,8 @@ mod tests {
     }
 
     use crate::config::{
-        AuthMethod, AuthMethods, RequireAuth, SslCertMode, SslMode, SslNegotiation,
-        SslProtocolVersion, SslRootCert, TargetSessionAttrs,
+        AuthMethod, AuthMethods, ReplicationMode, RequireAuth, SslCertMode, SslMode,
+        SslNegotiation, SslProtocolVersion, SslRootCert, TargetSessionAttrs,
     };
     use crate::{Config, config::Host};
 
@@ -3875,6 +3882,20 @@ mod tests {
     #[test]
     fn target_session_attrs_prefer_standby_parses() {
         assert_target_session_attrs_parses("prefer-standby", TargetSessionAttrs::PreferStandby);
+    }
+
+    #[test]
+    fn replication_values_are_case_insensitive() {
+        for (value, expected) in [
+            ("TrUe", Some(ReplicationMode::Physical)),
+            ("DaTaBaSe", Some(ReplicationMode::Logical)),
+            ("OfF", None),
+        ] {
+            let config = format!("host=h replication={value}")
+                .parse::<Config>()
+                .unwrap_or_else(|error| panic!("replication={value} was refused: {error}"));
+            assert_eq!(config.get_replication(), expected, "replication={value}");
+        }
     }
 
     /// All six libpq spellings parse, to the six distinct modes.
