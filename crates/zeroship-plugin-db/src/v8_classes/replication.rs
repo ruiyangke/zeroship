@@ -60,7 +60,10 @@ impl Replication {
         // today: this keeps `resolve_watchdog_app_id` unit-testable for
         // the "ignore any caller-supplied override" invariant and
         // mirrors the `setup` pattern.
-        let opts_v = read_json_arg(scope, Some(opts));
+        let opts_v = match read_json_arg(scope, Some(opts)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
         let app_id = resolve_watchdog_app_id(&self.app_id, &opts_v);
         replication_watchdog_dispatch(scope, app_id).into()
     }
@@ -78,7 +81,10 @@ impl Replication {
         scope: &mut v8::PinScope<'s, '_>,
         opts: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let opts_v = read_json_arg(scope, Some(opts));
+        let opts_v = match read_json_arg(scope, Some(opts)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
         let inactive_seconds = opts_v
             .get("inactiveSeconds")
             .and_then(Value::as_i64)

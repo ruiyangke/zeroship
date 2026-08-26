@@ -67,8 +67,14 @@ impl Collection {
         filter: v8::Local<v8::Value>,
         opts: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let filter_v = read_json_arg(scope, Some(filter));
-        let opts_v = read_json_arg(scope, Some(opts));
+        let filter_v = match read_json_arg(scope, Some(filter)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        let opts_v = match read_json_arg(scope, Some(opts)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
         dispatch_find(scope, &self.app_id, &self.name, filter_v, opts_v).into()
     }
 
@@ -83,7 +89,10 @@ impl Collection {
         {
             return p.into();
         }
-        let doc_v = read_json_arg(scope, Some(doc));
+        let doc_v = match read_json_arg(scope, Some(doc)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
         dispatch_insert(scope, &self.app_id, &self.name, doc_v).into()
     }
 
@@ -99,7 +108,10 @@ impl Collection {
         {
             return p.into();
         }
-        let docs_v = read_json_arg(scope, Some(docs));
+        let docs_v = match read_json_arg(scope, Some(docs)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
         dispatch_insert_many(scope, &self.app_id, &self.name, docs_v).into()
     }
 
@@ -116,8 +128,14 @@ impl Collection {
         {
             return p.into();
         }
-        let filter_v = read_json_arg(scope, Some(filter));
-        let update_v = read_json_arg(scope, Some(update));
+        let filter_v = match read_json_arg(scope, Some(filter)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        let update_v = match read_json_arg(scope, Some(update)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
         dispatch_update_one(scope, &self.app_id, &self.name, filter_v, update_v).into()
     }
 
@@ -134,8 +152,14 @@ impl Collection {
         {
             return p.into();
         }
-        let filter_v = read_json_arg(scope, Some(filter));
-        let update_v = read_json_arg(scope, Some(update));
+        let filter_v = match read_json_arg(scope, Some(filter)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        let update_v = match read_json_arg(scope, Some(update)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
         dispatch_update_many(scope, &self.app_id, &self.name, filter_v, update_v).into()
     }
 
@@ -151,7 +175,10 @@ impl Collection {
         {
             return p.into();
         }
-        let filter_v = read_json_arg(scope, Some(filter));
+        let filter_v = match read_json_arg(scope, Some(filter)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
         dispatch_delete_one(scope, &self.app_id, &self.name, filter_v).into()
     }
 
@@ -167,7 +194,10 @@ impl Collection {
         {
             return p.into();
         }
-        let filter_v = read_json_arg(scope, Some(filter));
+        let filter_v = match read_json_arg(scope, Some(filter)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
         dispatch_delete_many(scope, &self.app_id, &self.name, filter_v).into()
     }
 
@@ -184,7 +214,10 @@ impl Collection {
         if let Some(p) = refuse_if_query_capability(scope, "ctx.db.purge") {
             return p.into();
         }
-        let filter_v = read_json_arg(scope, Some(filter));
+        let filter_v = match read_json_arg(scope, Some(filter)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
         dispatch_purge_one(scope, &self.app_id, &self.name, filter_v).into()
     }
 
@@ -199,7 +232,10 @@ impl Collection {
         if let Some(p) = refuse_if_query_capability(scope, "ctx.db.purgeMany") {
             return p.into();
         }
-        let filter_v = read_json_arg(scope, Some(filter));
+        let filter_v = match read_json_arg(scope, Some(filter)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
         dispatch_purge_many(scope, &self.app_id, &self.name, filter_v).into()
     }
 
@@ -214,7 +250,10 @@ impl Collection {
         if let Some(p) = refuse_if_query_capability(scope, "ctx.db.restore") {
             return p.into();
         }
-        let filter_v = read_json_arg(scope, Some(filter));
+        let filter_v = match read_json_arg(scope, Some(filter)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
         dispatch_restore_one(scope, &self.app_id, &self.name, filter_v).into()
     }
 
@@ -229,7 +268,10 @@ impl Collection {
         if let Some(p) = refuse_if_query_capability(scope, "ctx.db.restoreMany") {
             return p.into();
         }
-        let filter_v = read_json_arg(scope, Some(filter));
+        let filter_v = match read_json_arg(scope, Some(filter)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
         dispatch_restore_many(scope, &self.app_id, &self.name, filter_v).into()
     }
 
@@ -248,8 +290,14 @@ impl Collection {
         {
             return Ok(p.into());
         }
-        let doc_v = read_json_arg(scope, Some(doc));
-        let opts_v = read_json_arg(scope, Some(opts));
+        let doc_v = match read_json_arg(scope, Some(doc)) {
+            Ok(v) => v,
+            Err(e) => return Ok(crate::v8_bridge::throw_decode_error(scope, &e)),
+        };
+        let opts_v = match read_json_arg(scope, Some(opts)) {
+            Ok(v) => v,
+            Err(e) => return Ok(crate::v8_bridge::throw_decode_error(scope, &e)),
+        };
         let conflict_v = opts_v
             .get("conflictFields")
             .cloned()
@@ -289,8 +337,14 @@ impl Collection {
         filter: v8::Local<v8::Value>,
         opts: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let filter_v = read_json_arg(scope, Some(filter));
-        let opts_v = read_json_arg(scope, Some(opts));
+        let filter_v = match read_json_arg(scope, Some(filter)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        let opts_v = match read_json_arg(scope, Some(opts)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
         dispatch_count(scope, &self.app_id, &self.name, filter_v, opts_v).into()
     }
 
@@ -307,8 +361,14 @@ impl Collection {
         filter: v8::Local<v8::Value>,
         opts: v8::Local<v8::Value>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        let filter_v = read_json_arg(scope, Some(filter));
-        let opts_v = read_json_arg(scope, Some(opts));
+        let filter_v = match read_json_arg(scope, Some(filter)) {
+            Ok(v) => v,
+            Err(e) => return Ok(crate::v8_bridge::throw_decode_error(scope, &e)),
+        };
+        let opts_v = match read_json_arg(scope, Some(opts)) {
+            Ok(v) => v,
+            Err(e) => return Ok(crate::v8_bridge::throw_decode_error(scope, &e)),
+        };
         let field = opts_v
             .get("field")
             .and_then(Value::as_str)
@@ -332,8 +392,14 @@ impl Collection {
         pipeline: v8::Local<v8::Value>,
         opts: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let pipeline_v = read_json_arg(scope, Some(pipeline));
-        let opts_v = read_json_arg(scope, Some(opts));
+        let pipeline_v = match read_json_arg(scope, Some(pipeline)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        let opts_v = match read_json_arg(scope, Some(opts)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
         dispatch_aggregate(scope, &self.app_id, &self.name, pipeline_v, opts_v).into()
     }
 
@@ -354,7 +420,10 @@ impl Collection {
         scope: &mut v8::PinScope<'s, '_>,
         args: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let args_v = read_json_arg(scope, Some(args));
+        let args_v = match read_json_arg(scope, Some(args)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
         dispatch_search(scope, &self.app_id, &self.name, args_v).into()
     }
 
@@ -380,7 +449,10 @@ impl Collection {
         scope: &mut v8::PinScope<'s, '_>,
         args: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let args_v = read_json_arg(scope, Some(args));
+        let args_v = match read_json_arg(scope, Some(args)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
         dispatch_near(scope, &self.app_id, &self.name, args_v).into()
     }
 
@@ -411,9 +483,18 @@ impl Collection {
         column: v8::Local<v8::Value>,
         opts: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let row_pk_v = read_json_arg(scope, Some(row_pk));
-        let column_v = read_json_arg(scope, Some(column));
-        let opts_v = read_json_arg(scope, Some(opts));
+        let row_pk_v = match read_json_arg(scope, Some(row_pk)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        let column_v = match read_json_arg(scope, Some(column)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        let opts_v = match read_json_arg(scope, Some(opts)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
         let mut args = match opts_v {
             Value::Object(map) => map,
             _ => serde_json::Map::new(),
@@ -448,8 +529,14 @@ impl Collection {
         items: v8::Local<v8::Value>,
         opts: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
-        let items_v = read_json_arg(scope, Some(items));
-        let opts_v = read_json_arg(scope, Some(opts));
+        let items_v = match read_json_arg(scope, Some(items)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        let opts_v = match read_json_arg(scope, Some(opts)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
         let mut args = match opts_v {
             Value::Object(map) => map,
             _ => serde_json::Map::new(),

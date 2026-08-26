@@ -195,11 +195,17 @@ impl MaskedValue {
     ) -> v8::Local<'s, v8::Value> {
         if arg0.is_array() {
             // Multi-column path: arg0 is `columns`, arg1 is `opts`.
-            let cols_v = v8_value_to_serde_json(scope, arg0);
+            let cols_v = match v8_value_to_serde_json(scope, arg0) {
+                Ok(v) => v,
+                Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+            };
             let opts_v = if arg1.is_null_or_undefined() {
                 Value::Object(serde_json::Map::new())
             } else {
-                v8_value_to_serde_json(scope, arg1)
+                match v8_value_to_serde_json(scope, arg1) {
+                    Ok(v) => v,
+                    Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+                }
             };
             self.dispatch_unmask_multi(scope, cols_v, opts_v).into()
         } else {
@@ -207,7 +213,10 @@ impl MaskedValue {
             let opts_v = if arg0.is_null_or_undefined() {
                 Value::Object(serde_json::Map::new())
             } else {
-                v8_value_to_serde_json(scope, arg0)
+                match v8_value_to_serde_json(scope, arg0) {
+                    Ok(v) => v,
+                    Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+                }
             };
             self.dispatch_unmask_single(scope, opts_v, /* probe = */ false).into()
         }
@@ -229,7 +238,10 @@ impl MaskedValue {
         let mut opts_v = if opts.is_null_or_undefined() {
             Value::Object(serde_json::Map::new())
         } else {
-            v8_value_to_serde_json(scope, opts)
+            match v8_value_to_serde_json(scope, opts) {
+                Ok(v) => v,
+                Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+            }
         };
         // Stamp the probe reason so the audit row records the dispatch
         // shape; user-supplied `reason` (if any) wins.
