@@ -157,7 +157,7 @@ fn matrix_ddl_postgres(collection: &str) -> String {
   "optional" TEXT,
   "rank" INTEGER NOT NULL,
   "occurred_at" TIMESTAMPTZ,
-  "payload_bytes" TEXT,
+  "payload_bytes" BYTEA,
   "payload_json" JSONB DEFAULT '{{}}'::jsonb
 );
 CREATE INDEX IF NOT EXISTS "{collection}_deleted_at_idx" ON "{MATRIX_APP_ID}"."{collection}" ("deleted_at");
