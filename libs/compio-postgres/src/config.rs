@@ -1688,11 +1688,8 @@ impl Config {
         // libpq's treatment of `key=` is per-OPTION, not uniform. `port=` uses
         // the compiled default, while the six socket integer options reject an
         // empty value. Enums reject it too; strings generally keep it.
-        const EMPTY_MEANS_UNSET: &[&str] = &[
-            "port",
-            "statement_cache_capacity",
-            "max_message_size",
-        ];
+        const EMPTY_MEANS_UNSET: &[&str] =
+            &["port", "statement_cache_capacity", "max_message_size"];
         if value.is_empty() && EMPTY_MEANS_UNSET.contains(&key) {
             return Ok(());
         }
