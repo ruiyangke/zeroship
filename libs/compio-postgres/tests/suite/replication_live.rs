@@ -1548,3 +1548,71 @@ async fn a_configured_ceiling_governs_the_replication_stream() {
     .await
     .expect("replication ceiling test exceeded its outer watchdog");
 }
+
+/// A declared frame length must be refused BEFORE `Message::parse` sees it.
+///
+/// `read_one_message` - the read path behind `IDENTIFY_SYSTEM` and the other
+/// replication simple-query commands - called `Message::parse` first and only
+/// then `fill`. That order is what matters: when the body is short of the
+/// declared length, `Message::parse` itself does
+/// `buf.reserve(total_len - buf.len())` (postgres-protocol 0.6.12,
+/// backend.rs:133) before returning `None`. So `D ff ff ff ff` asks the
+/// allocator for roughly 4 GiB from a five-byte frame.
+///
+/// `fill` cannot save it. Its ceiling check is on the bytes the CALLER asks
+/// for, and the caller asks for `buf.len() + 1` - a handful of bytes - so the
+/// check passes while the 4 GiB reservation has already happened. The
+/// configured ceiling therefore did not govern this path at all, which is the
+/// opposite of what `fill`'s guard looks like it guarantees.
+///
+/// Validating the peeked length first is O(1) and happens before any
+/// reservation, matching what `read_header` already does on the streaming path.
+#[compio::test]
+async fn a_declared_length_is_refused_before_the_parser_reserves_for_it() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(|listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            assert_eq!(expect_simple_query(&mut stream), b"IDENTIFY_SYSTEM\0");
+            // A DataRow header declaring 0xFFFFFFFF bytes, and nothing after
+            // it. The refusal has to come from the header alone.
+            stream
+                .write_all(&[b'D', 0xFF, 0xFF, 0xFF, 0xFF])
+                .expect("write an oversized frame header");
+            stream.flush().expect("flush the oversized frame header");
+            expect_disconnect(&mut stream);
+        });
+
+        let mut config = stub_config(server.addr);
+        config.max_message_size(4096);
+
+        let mut replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(common::suite_tls(), &config),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("a 4 KiB data-phase ceiling must not block the handshake");
+
+        let error = compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system())
+            .await
+            .expect("IDENTIFY_SYSTEM exceeded its outer watchdog")
+            .expect_err("a frame declaring 4 GiB cannot pass a 4 KiB ceiling");
+
+        let mut chain = String::new();
+        let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+        while let Some(err) = source {
+            chain.push_str(&err.to_string());
+            chain.push(' ');
+            source = err.source();
+        }
+        assert!(
+            chain.contains("message too large"),
+            "the declared length reached the parser instead of the ceiling; \
+             the caller was told: {chain}"
+        );
+        server.finish();
+    })
+    .await
+    .expect("declared-length refusal test exceeded its outer watchdog");
+}

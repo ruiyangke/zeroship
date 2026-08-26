@@ -1339,6 +1339,25 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     loop {
+        // Validate the DECLARED length before the parser is allowed to act on
+        // it. When the body is short, `Message::parse` does
+        // `buf.reserve(total_len - buf.len())` before returning `None`
+        // (postgres-protocol 0.6.12, backend.rs:133), so `D ff ff ff ff` asks
+        // the allocator for about 4 GiB from a five-byte frame.
+        //
+        // `fill` below does NOT bound that, which is the part worth stating
+        // because its guard looks like it would: `fill` checks the bytes the
+        // CALLER requests, and this loop requests `buf.len() + 1`. So the
+        // check passes on a handful of bytes while the reservation has already
+        // happened, and the configured ceiling governed nothing on this path.
+        //
+        // Peeking is O(1) and returns `None` until five bytes are buffered, at
+        // which point `parse` would return `None` too and the `fill` below
+        // makes progress. This mirrors what `read_header` already does on the
+        // streaming path.
+        if let Some(length) = stream.peek_u32_be(1) {
+            stream.validate_length(length)?;
+        }
         if let Some(m) = Message::parse(stream.buf()).map_err(Error::io)? {
             return Ok(m);
         }
