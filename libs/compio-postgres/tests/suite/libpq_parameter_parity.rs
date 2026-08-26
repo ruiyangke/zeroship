@@ -847,7 +847,7 @@ fn keepalives_zero_means_off_and_the_default_is_on() {
 ///
 /// libpq parses this with `strtol` into a signed long and then tests it against
 /// zero, so `keepalives=-1` is simply non-zero, i.e. enabled. Measured against
-/// the live server on 2026-08-23: `keepalives=-1` connects, exactly as `1`,
+/// the live server on 2026-08-26: `keepalives=-1` connects, exactly as `1`,
 /// `2` and `10` do, while `yes` and the empty string are refused with
 /// `invalid integer value`.
 ///
@@ -866,23 +866,11 @@ fn negative_keepalives_is_accepted_and_means_on() {
     );
 
     // The refusals stay refusals -- this must not become "parse anything".
-    // NOT `""`: this list carried one until 2026-08-25, on the assumption that
-    // an empty value is as malformed as `yes`. Probed, libpq ACCEPTS
-    // `keepalives=` and keeps its default, the same as every other numeric
-    // option, so the entry was asserting a refusal libpq does not make.
-    for bad in ["yes", "1.5"] {
+    for bad in ["", "yes", "1.5"] {
         format!("host=h keepalives={bad}")
             .parse::<Config>()
             .expect_err("libpq refuses this with `invalid integer value`");
     }
-
-    let defaulted = "host=h keepalives="
-        .parse::<Config>()
-        .expect("libpq accepts an empty numeric value and keeps the default");
-    assert!(
-        defaulted.get_keepalives(),
-        "an empty value leaves the default, which is on"
-    );
 }
 
 /// An EMPTY ssl file path is refused here and accepted by libpq.
