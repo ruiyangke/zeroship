@@ -257,23 +257,6 @@ where
 
         let version = u32::from_be_bytes(body[..4].try_into().unwrap());
         let option_count = i32::from_be_bytes(body[4..8].try_into().unwrap());
-        if option_count < 0 {
-            return Err(protocol_error(
-                "PostgreSQL sent a negative unsupported-option count in \
-                 NegotiateProtocolVersion",
-            ));
-        }
-        if option_count != 0 {
-            return Err(protocol_error(format!(
-                "PostgreSQL rejected {option_count} protocol options, but this client sent none"
-            )));
-        }
-        if body.len() != 8 {
-            return Err(protocol_error(
-                "PostgreSQL sent trailing bytes in NegotiateProtocolVersion",
-            ));
-        }
-
         let Some(protocol) = ProtocolVersion::from_wire(version) else {
             return Err(protocol_error(format!(
                 "PostgreSQL negotiated unsupported protocol version {}.{}",
@@ -288,7 +271,13 @@ where
                 self.requested_protocol.as_str()
             )));
         }
-        if protocol == self.requested_protocol {
+        if option_count < 0 {
+            return Err(protocol_error(
+                "PostgreSQL sent a negative unsupported-option count in \
+                 NegotiateProtocolVersion",
+            ));
+        }
+        if protocol == self.requested_protocol && option_count == 0 {
             return Err(protocol_error(format!(
                 "PostgreSQL sent NegotiateProtocolVersion without lowering protocol {}",
                 protocol.as_str()
@@ -303,6 +292,41 @@ where
                 )
                 .into(),
             ));
+        }
+
+        let mut cursor = 8;
+        let mut first_option = None;
+        for option_index in 0..option_count {
+            let remaining = &body[cursor..];
+            let Some(name_len) = remaining.iter().position(|byte| *byte == 0) else {
+                return Err(protocol_error(format!(
+                    "PostgreSQL ended NegotiateProtocolVersion before protocol option {} of \
+                     {option_count}",
+                    option_index + 1
+                )));
+            };
+            let raw_name = &remaining[..name_len];
+            let name = String::from_utf8_lossy(raw_name);
+            if !raw_name.starts_with(b"_pq_.") {
+                return Err(protocol_error(format!(
+                    "PostgreSQL reported protocol option `{name}` without the required `_pq_.` \
+                     prefix"
+                )));
+            }
+            if first_option.is_none() {
+                first_option = Some(name.into_owned());
+            }
+            cursor += name_len + 1;
+        }
+        if cursor != body.len() {
+            return Err(protocol_error(
+                "PostgreSQL sent trailing bytes in NegotiateProtocolVersion",
+            ));
+        }
+        if let Some(option) = first_option {
+            return Err(protocol_error(format!(
+                "PostgreSQL reported unrequested protocol option `{option}`"
+            )));
         }
 
         self.negotiation_seen = true;
@@ -1611,8 +1635,74 @@ mod tests {
         };
         let chain = authentication_error_chain(error);
         assert!(
-            chain.contains("min_protocol_version"),
-            "the negotiation refusal did not name the configured floor: {chain}"
+            chain.contains("min_protocol_version")
+                && chain.contains("3.0")
+                && chain.contains("3.2"),
+            "the negotiation refusal did not name the server version and configured floor: \
+             {chain}"
+        );
+    }
+
+    /// A version negotiation can report protocol options the server did not
+    /// recognize without changing the version. This client sends no `_pq_.`
+    /// options, so such a response is invalid, but the refusal must parse and
+    /// name the option instead of collapsing the variable-length message into
+    /// a framing error.
+    #[compio::test]
+    async fn an_unrequested_protocol_option_is_refused_by_name() {
+        const OPTION: &str = "_pq_.future_feature";
+
+        let mut negotiation = Vec::new();
+        negotiation.extend_from_slice(&0x0003_0002u32.to_be_bytes());
+        negotiation.extend_from_slice(&1u32.to_be_bytes());
+        negotiation.extend_from_slice(OPTION.as_bytes());
+        negotiation.push(0);
+
+        let mut script = frame(b'v', &negotiation);
+        script.extend_from_slice(&successful_handshake(std::iter::empty()));
+        let (stream, _) = scripted_server_after_startup(Some(script)).await;
+        let config: Config = "user=scripted-user sslmode=disable"
+            .parse()
+            .expect("parse scripted config");
+
+        let error = match config.connect_raw(stream, NoTls).await {
+            Ok(_) => panic!("an unrequested protocol option was accepted"),
+            Err(error) => error,
+        };
+        let chain = authentication_error_chain(error);
+        assert!(
+            chain.contains(OPTION),
+            "the protocol-option refusal did not name {OPTION}: {chain}"
+        );
+    }
+
+    /// The configured version floor takes precedence over the option list,
+    /// matching libpq: the caller needs to know that no protocol in its range
+    /// can be spoken, even if the same negotiation also names an option.
+    #[compio::test]
+    async fn a_below_minimum_negotiation_with_options_names_both_versions() {
+        let mut negotiation = Vec::new();
+        negotiation.extend_from_slice(&0x0003_0000u32.to_be_bytes());
+        negotiation.extend_from_slice(&1u32.to_be_bytes());
+        negotiation.extend_from_slice(b"_pq_.future_feature\0");
+
+        let mut script = frame(b'v', &negotiation);
+        script.extend_from_slice(&successful_handshake(std::iter::empty()));
+        let (stream, _) = scripted_server_after_startup(Some(script)).await;
+        let config: Config = "user=scripted-user sslmode=disable min_protocol_version=3.2"
+            .parse()
+            .expect("parse scripted protocol minimum");
+
+        let error = match config.connect_raw(stream, NoTls).await {
+            Ok(_) => panic!("protocol 3.0 with options satisfied a 3.2 minimum"),
+            Err(error) => error,
+        };
+        let chain = authentication_error_chain(error);
+        assert!(
+            chain.contains("min_protocol_version")
+                && chain.contains("3.0")
+                && chain.contains("3.2"),
+            "the minimum-version refusal did not name both versions: {chain}"
         );
     }
 
