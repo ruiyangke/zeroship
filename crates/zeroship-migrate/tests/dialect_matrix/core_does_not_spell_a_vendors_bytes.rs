@@ -166,12 +166,12 @@ const CRATES_THAT_MUST_NOT_SPELL: &[&str] = &[
 /// because `zeroship-migrated` — the policy SERVER, no relation — shares the prefix
 /// and a prefix match would scoop it in. That is not hypothetical: the deploy gate
 /// keeps a `zero-migrate-other` decoy for the identical mistake.
-fn is_engine_crate(dir_name: &str) -> bool {
+pub(crate) fn is_engine_crate(dir_name: &str) -> bool {
     dir_name == ENGINE_PREFIX || dir_name.starts_with(&format!("{ENGINE_PREFIX}-"))
 }
 
 /// The composition crate's own name, taken from Cargo rather than written down twice.
-const ENGINE_PREFIX: &str = env!("CARGO_PKG_NAME");
+pub(crate) const ENGINE_PREFIX: &str = env!("CARGO_PKG_NAME");
 
 /// The census floor for the walk, and it is the SAME eight roots
 /// `sqlite_trigger_quoting_reaches_postgres.rs` walks, for the same reason.
