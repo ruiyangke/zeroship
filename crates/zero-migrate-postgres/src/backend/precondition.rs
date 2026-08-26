@@ -166,9 +166,9 @@ fn validate_ident(what: &'static str, value: &str) -> Result<(), PreconditionErr
 /// Double-quote a validated identifier (belt-and-suspenders; the value has passed
 /// [`validate_ident`] so it has no `"`).
 ///
-/// The only caller is the `row_count` probe. Its owning
-/// backend supplies the dialect explicitly rather than this core module assuming
-/// one; the renderer registered for that dialect owns the emitted spelling.
+/// The only caller is the [`row_count`] probe. The spelling comes from this crate's
+/// own [`crate::dml::RENDERER`] rather than from a dialect looked up at the call
+/// site, so the backend that owns the probe owns the quoting too.
 fn quote_ident(ident: &str) -> String {
     zero_migrate_backend::dml::escape_quote_ident_for_backend(ident, &crate::dml::RENDERER)
 }
@@ -538,14 +538,14 @@ fn validate_single_select(sql: &str) -> Result<(), PreconditionError> {
 /// CTE's `with_clause`), so walking the serialized tree is what catches a
 /// data-modifying CTE that a hand-written traversal would miss.
 ///
-/// This sits beside [`tree_has_key`] rather than in `zero-migrate-postgres` on
-/// purpose. It is PostgreSQL parse-tree code, and so is every other line of this
-/// file - the shape gate above already calls `pg_query::parse` directly. Importing it
-/// from the vendor crate would make neutral core NAME a vendor crate for a
-/// twelve-line local tree walk while changing nothing about the coupling that is
-/// actually here. The honest fix is relocating this whole file into
-/// `zero-migrate-postgres`, which is tracked on `crates/zero-migrate/Cargo.toml`'s
-/// `pg_query` entry; until then the helper lives with its only caller.
+/// This sits beside [`tree_has_key`], and both are PostgreSQL parse-tree code in a
+/// PostgreSQL crate - the shape gate above already calls `pg_query::parse` directly.
+///
+/// The doc here used to argue for the arrangement as a compromise, because this file
+/// lived in neutral core and importing a vendor crate to walk a parse tree would have
+/// made core name a vendor. It named relocating the file as the honest fix. That
+/// relocation happened: the file IS `zero-migrate-postgres` now, so the helper is
+/// simply local code beside its caller.
 fn first_dml_node(v: &Value) -> Option<&'static str> {
     fn first_matching(v: &Value) -> Option<&'static str> {
         match v {

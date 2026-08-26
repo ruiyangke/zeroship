@@ -16,9 +16,9 @@
 //! exists to remove.
 //!
 //! So it was SPLIT rather than moved or left: the two types stayed in
-//! `zero_migrate_backend::vendor`, and every one of the ~720 lines of PostgreSQL
-//! SPELLING under them came here, where the boundary rule says a vendor's spelling
-//! belongs. Nothing was duplicated and no byte changed.
+//! `zero_migrate_backend::vendor`, and the PostgreSQL SPELLING under them came here,
+//! where the boundary rule says a vendor's spelling belongs. Nothing was duplicated
+//! and no byte changed.
 //!
 //! # The identifier seam, resolved rather than forwarded
 //!
@@ -366,7 +366,8 @@ pub(crate) fn render_vendor_op(
                     Some(format!("DROP ROLE IF EXISTS {qname}"))
                 },
             }];
-            // The `ALTER ROLE ... SET search_path` the platform needs (x17, 0025).
+            // The `ALTER ROLE ... SET search_path` the platform's own schema
+            // migrations need to pin a provisioned role's resolution order.
             if let Some(sp) = set_search_path {
                 if !sp.is_empty() {
                     out.push(VendorStatement {
@@ -693,7 +694,7 @@ pub(crate) fn render_vendor_op(
             //
             // Irreversible is a refusal an operator sees, not a silent skip: the rollback
             // planner returns `RollbackError::Irreversible` naming the version
-            // (`apply/executor.rs:2563`), and only a `force` carrying an explicit
+            // (raised by the engine's `apply::executor`), and only a `force` carrying an explicit
             // `backup_acknowledged` proceeds past it, recording the version in
             // `skipped_irreversible`.
             let down = if replaces_existing {

@@ -17,13 +17,16 @@
 //! authority rules); [`denylist`] holds the rule ids it refuses with; and
 //! [`crate::analysis`] holds the classifier and the operational analyzers.
 //!
-//! This did NOT make this crate the sole owner of `libpg_query`, and claiming so
-//! would be the same false map the old guard crate's manifest carried for as long as
-//! it was wrong. `crates/zero-migrate/Cargo.toml` still declares `pg_query`
-//! independently, for the shape gates under `src/backend/**` (the
-//! precondition boolean-SELECT gate, the idempotence/txn scans, the backfill cursor
-//! check). Two crates declare it; no other crate in the workspace does. Sole
-//! ownership needs those files to relocate here, which is a separate move.
+//! This crate is the sole PRODUCTION owner of `libpg_query`. The shape gates that
+//! once justified a second `[dependencies]` entry in `crates/zero-migrate/Cargo.toml`
+//! - the precondition boolean-SELECT gate, the idempotence/txn scans, the backfill
+//! cursor check - are `src/backend/{precondition,session,backfill_sql}.rs` in THIS
+//! crate. The engine's remaining entry is `[dev-dependencies]`, for test parses.
+//!
+//! This doc used to say the opposite, and read as a live blocker long after the
+//! relocation closed it. Re-measure rather than trust it:
+//! `git grep -n '^pg_query' -- crates` names every manifest that declares it, and the
+//! section header above each hit says whether it is production or test-only.
 //!
 //! What did NOT come with it is the neutral seam - [`GuardConfig`], [`GuardError`],
 //! [`GuardOutcome`], [`MigrationGuard`] and the structured-IR data-security walk all

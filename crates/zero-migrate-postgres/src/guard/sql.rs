@@ -584,8 +584,8 @@ impl GuardDecisions for BodyScopeDecisions<'_> {
     /// it.
     ///
     /// `check_raw_view_body_text` is the sole constructor of this adapter, and it DOES
-    /// have a production caller: `validate_raw_view_body` at
-    /// crates/zero-migrate-core/src/model/validate.rs:5499, on every raw `viewBody`.
+    /// have a production caller: `validate_raw_view_body`, in
+    /// `zero-migrate-core`'s `model::validate`, on every raw `viewBody`.
     ///
     /// What bounds the damage is the gate directly above that call, not the caller's
     /// absence. A raw view body is refused unless it parses as a single top-level
@@ -811,7 +811,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
     /// Check one top-level statement node (and everything nested under it).
     ///
     /// `json` is the `serde_json` serialization of the statement's `RawStmt`
-    /// subtree - used by the generic full-tree walks (Root Cause 2 fix) so we
+    /// subtree - used by the generic full-tree walks so we
     /// visit EVERY node, including the slots `pg_query::nodes()` skips (column
     /// DEFAULT, CHECK, VALUES lists, RULE actions, SET SCHEMA targets, ...).
     fn check_node(&self, node: &NodeEnum, json: &Value, raw: &str) -> Result<(), GuardError> {
@@ -1384,7 +1384,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
         Ok(())
     }
 
-    /// Statement-kind gate, **deny-by-default** (Root Cause 1 fix).
+    /// Statement-kind gate, **deny-by-default**.
     ///
     /// A curated allowlist of known-safe migration statement kinds passes;
     /// every other statement node is denied (`UNRECOGNIZED_DANGEROUS`). The
@@ -1410,7 +1410,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
             NodeEnum::AlterSystemStmt(_) => return Err(denied(rule::ALTER_SYSTEM, raw)),
             // Role management - privilege escalation. ALLOW iff Platform:
             // the platform schema migrations must CREATE/ALTER/DROP roles and
-            // pin their search_path (0025/0027). Confined still hard-denies.
+            // pin their search_path. Confined still hard-denies.
             //
             // SUPERUSER is the ONE role attribute that stays HARD-DENIED even
             // under Platform: a superuser bypasses RLS and
@@ -1447,7 +1447,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
             }
             // GRANT / REVOKE / role-membership grants - privilege management.
             // ALLOW iff Platform: the platform schema migrations grant
-            // CONNECT/USAGE/etc. (0025/0027). Confined still hard-denies.
+            // CONNECT/USAGE/etc. Confined still hard-denies.
             NodeEnum::GrantStmt(s) => {
                 if grant_stmt_grants_privileged_role(s) {
                     return Err(denied(rule::PRIVILEGED_ROLE_GRANT, raw));
@@ -1567,7 +1567,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                 // OWNER TO / INHERIT / REPLICA IDENTITY / generic-options are
                 // out of remit and denied. Under Platform the four RLS subtypes
                 // (ENABLE/FORCE/NO FORCE/DISABLE ROW LEVEL SECURITY) are also
-                // admitted (0025).
+                // admitted.
                 self.check_alter_table_cmds(at, raw)?;
             }
             NodeEnum::DropStmt(d) => {
@@ -1796,7 +1796,8 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
     }
 
     /// Deny any explicit reference to a schema other than the project schema,
-    /// found ANYWHERE in the full parse tree (Root Cause 2 fix).
+    /// found ANYWHERE in the full parse tree, not only in the slots
+    /// `pg_query::nodes()` enumerates.
     fn check_cross_schema(&self, json: &Value, raw: &str) -> Result<(), GuardError> {
         if let Some(schema) = foreign_schema_in_tree(json, &|s| self.cfg.grants_cross_schema(s)) {
             return Err(GuardError::CrossSchema {
@@ -2521,7 +2522,7 @@ pub fn flags_for(report: &GuardReport) -> MigrationFlags {
 }
 
 // ---------------------------------------------------------------------------
-// Deny-by-default allowlist predicates (Root Cause 1)
+// Deny-by-default allowlist predicates
 // ---------------------------------------------------------------------------
 
 /// The `ObjectType`s a creator migration may `DROP`. Anything else (role,
@@ -2731,7 +2732,7 @@ fn def_elem_bool(d: &protobuf::DefElem) -> Option<bool> {
 }
 
 // ---------------------------------------------------------------------------
-// Generic full-parse-tree JSON walkers (Root Cause 2)
+// Generic full-parse-tree JSON walkers
 // ---------------------------------------------------------------------------
 
 /// Walk the ENTIRE serialized parse tree and invoke `visit` with the trailing
@@ -3432,7 +3433,7 @@ fn walk_schema_names(v: &Value, visit: &mut dyn FnMut(&str, SchemaSlot) -> bool)
                     // `CreateExtensionStmt ... WITH SCHEMA <name>` - a bare String DefElem
                     // arg. Confine the WITH SCHEMA target so the rendered-SQL guard
                     // (gate 2) independently scopes it, restoring gate-1/gate-2 parity
-                    // with `createSchema` (SA-20). Strictly tighter: anything passing
+                    // with `createSchema`. Strictly tighter: anything passing
                     // gate 1 is already in scope, so this adds no false-positives.
                     if let Some(s) = map.get("arg").and_then(json_string_node) {
                         if !s.is_empty() && visit(&s, SchemaSlot::Object) {

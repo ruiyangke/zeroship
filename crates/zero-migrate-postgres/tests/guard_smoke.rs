@@ -403,8 +403,8 @@ scope = "all"
 ///
 /// `check_body_text` re-parses every single-quoted fragment as SQL and recurses into
 /// `check_node`, so a literal reaches the rename checks even though a raw view body is
-/// refused unless it is a single top-level SELECT
-/// (crates/zero-migrate-core/src/model/validate.rs:5480). The cross-schema arm is the
+/// refused unless it is a single top-level SELECT (`validate_raw_view_body`, in
+/// `zero-migrate-core`'s `model::validate`). The cross-schema arm is the
 /// positive control: it proves the literal really is walked rather than ignored, which
 /// is what makes the permissive arm below a statement about the rule and not about
 /// whether the code runs.

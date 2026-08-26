@@ -9,8 +9,8 @@
 //! `sqlite::drift_sql` already sit on, so all three introspectors hand the neutral
 //! differ the same `SchemaSnapshot` shape.
 //!
-//! The helpers below are PostgreSQL catalog parsers, and `backend::postgres` is
-//! their only caller. They live beside that caller rather than in core precisely
+//! The helpers below are PostgreSQL catalog parsers, and this crate's own
+//! [`crate::backend`] is their only caller. They live beside it rather than in core precisely
 //! so the module boundary - not a build flag - is what keeps them off the neutral
 //! path.
 
@@ -1003,7 +1003,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
     }
 
     // Plain and materialized views in the schema. Definitions are carried as
-    // diagnostic metadata but excluded from equality for now; materialized-ness is
+    // diagnostic metadata and excluded from equality; materialized-ness is
     // structural because SQLite cannot represent it and PG uses a distinct object
     // class.
     let view_rows = conn

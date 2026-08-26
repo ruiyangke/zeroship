@@ -386,8 +386,8 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
     }
 
     /// The blocking-dependency predicate, MEASURED against a live server by
-    /// `tests/pg_column_drop_dependency_oracle.rs` (16 shapes, 16 agreements), which
-    /// calls THIS function and attempts a real drop per shape.
+    /// `tests/pg_column_drop_dependency_oracle.rs`, which calls THIS function and
+    /// attempts a real drop per shape, asserting the two agree on every one.
     ///
     /// The oracle used to run its own SQL spelling of the same rule, which made an
     /// edit here invisible to it. It executes the shipped function now, so changing
