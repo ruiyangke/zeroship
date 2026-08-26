@@ -1170,8 +1170,9 @@ impl MigrationEngine {
         // un-pinned `search_path` regardless. The redundant empty up-front cycle bought
         // nothing but an extra round-trip; dropping it is state-neutral. The invariant
         // (a rename-only / rebuild-only deploy leaves the session role + search_path
-        // clean) is asserted by `declarative_pg::
-        // rename_only_deploy_leaves_session_role_and_search_path_clean`.
+        // clean) rests on that per-step ownership and on nothing else: no test in this
+        // tree reads the session state back after such a deploy, so the argument above
+        // is the whole of the evidence.
 
         // The single shared orchestrator. The outer project lock is already held,
         // so every inner sub-batch re-enters it with `LockMode::AlreadyHeld`.

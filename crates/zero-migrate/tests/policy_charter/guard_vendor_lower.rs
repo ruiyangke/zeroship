@@ -779,9 +779,9 @@ fn m2_stage2_superuser_belt_sites_stay_hard_denied() {
 /// This test used to be named for capability minting and passed an
 /// `OperatorCapability` token to an `ExecutorConfig::platform` seam. Both are deleted:
 /// the token's mint was public, so holding one proved nothing, and `platform` bound it
-/// as `_cap` and returned exactly what `new` returns. The assertions never depended on
-/// the token — they read the schema scope off the composed policy — so they are
-/// unchanged here, and the name now says what they check.
+/// to a discarded parameter and returned exactly what `new` returns. The assertions
+/// never depended on the token - they read the schema scope off the composed policy -
+/// so they are unchanged here, and the name now says what they check.
 ///
 /// The boundary that IS pinned is the unforgeable `EffectivePolicy`, held by the T8
 /// `compile_fail` doctests in `zero_migrate_backend::guard`.

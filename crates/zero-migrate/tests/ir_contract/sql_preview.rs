@@ -529,11 +529,12 @@ fn guard_label_is_truthful_per_dialect() {
 
 /// RENDER SUCCEEDS WITHOUT A DSN (truth-in-advertising). Scrubbing
 /// `DATABASE_URL` and asserting `is_ok()` proves only that the render does not
-/// REQUIRE a DSN env var — it does NOT prove the absence of a hard-coded connect
+/// REQUIRE a DSN env var - it does NOT prove the absence of a hard-coded connect
 /// (a path dialing a fixed host would still pass here). Named honestly for what it
-/// proves. The LOAD-BEARING offline-proof is `cli_plan_prints_and_exits_zero_offline`
-/// below: it runs the real binary under a scrubbed env, so a stray connect to any
-/// host would fail or hang the subprocess.
+/// proves, and nothing in this tree proves the stronger claim. Only running the real
+/// binary with no DSN anywhere in its environment or arguments would: a stray connect
+/// to a fixed host fails or hangs a subprocess, and cannot hide inside an in-process
+/// `is_ok()`.
 #[test]
 fn render_succeeds_without_a_dsn() {
     // Scrub any inherited DSN so the render cannot lean on an env-provided DSN.

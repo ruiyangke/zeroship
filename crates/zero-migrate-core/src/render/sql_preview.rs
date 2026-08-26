@@ -76,9 +76,10 @@ pub const RUNTIME_RESOLVED: &str = "-- [runtime-resolved]";
 #[derive(Debug, Clone)]
 pub struct PreviewOpts {
     /// The trust profile's effective schema for an op that omits its own qualifier.
-    /// The general operator CLI default is `public`
-    /// ([`DEFAULT_GENERIC_SCHEMA`](crate)); the Confined platform path pins the
-    /// project schema. NEVER requires a DB to pick - it is a flag/profile value.
+    /// The general operator CLI default is `public`; the Confined platform path pins
+    /// the project schema. There is no constant behind either: preview holds no
+    /// ambient default, so the caller states one. NEVER requires a DB to pick - it is
+    /// a flag/profile value.
     pub default_schema: String,
     /// The declaring app stamped onto lowered migrations (ownership is enforced
     /// upstream by the load gate; here it only affects DML journal identity, never

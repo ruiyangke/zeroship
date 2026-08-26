@@ -5,5 +5,7 @@
 
 pub mod squash;
 pub mod status;
-// The confined submit path is PG-only (role provisioning over `admin_conn`, the
-// shadow dry-run harness).
+// No submit module is declared here, and that is the point of saying so. A confined
+// submit path is PostgreSQL-only: it provisions roles over a separately-privileged
+// connection and runs a shadow dry-run harness, and neither is an operation the other
+// registered backends can answer.

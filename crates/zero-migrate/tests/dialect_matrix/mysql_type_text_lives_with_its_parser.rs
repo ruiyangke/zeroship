@@ -96,7 +96,7 @@ const ENGINE_SUBJECT_FILE: &str = "apply/drift.rs";
 /// anti-blindness checks, and the one to distrust first.
 ///
 /// A floor ALONE is not enough and this one is not trusted alone: a narrowed walk in
-/// this tree has already come in ABOVE its floor. [`ENGINE_FILE_THAT_MAY_SPELL`] is
+/// this tree has already come in ABOVE its floor. [`ENGINE_SUBJECT_FILE`] is
 /// asserted to be IN the walked set, by path, which is the check a count cannot make.
 /// That anchor is what actually holds; this number only catches a walk that collapsed
 /// toward nothing.
@@ -112,7 +112,7 @@ const ENGINE_SUBJECT_FILE: &str = "apply/drift.rs";
 ///
 /// The rule is narrower than it looks. LOWER it when an extraction legitimately moved
 /// files OUT, and name that extraction in the commit. NEVER lower it to silence a walk
-/// that broke — check [`ENGINE_FILE_THAT_MAY_SPELL`] first, because that is what tells
+/// that broke - check [`ENGINE_SUBJECT_FILE`] first, because that is what tells
 /// the two cases apart, and trust it over this number.
 ///
 /// It fired exactly that way twice, on the extractions it was written in anticipation

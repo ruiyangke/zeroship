@@ -1521,11 +1521,11 @@ impl FunctionKey {
 
 /// One function-argument type in the spelling that decides function IDENTITY.
 ///
-/// ONE FOLD, TWO CALLERS, and that is why the name stopped naming a backend. An
+/// ONE FOLD, TWO CALLERS, and that is why the name does not name a backend. An
 /// authored signature and a catalog-reported one must reduce to the SAME string, or
-/// the same overload reads as one function missing and a different one appearing. It
-/// was `canonical_pg_signature_type`; the alias table it applies IS the way one
-/// backend spells types, which the doc below states, but the JOB is the comparison's.
+/// the same overload reads as one function missing and a different one appearing. The
+/// alias table it applies IS the way one backend spells types, which the doc below
+/// states, but the JOB is the comparison's.
 ///
 /// `tests/dialect_matrix/backend_snapshot_privates_stay_core_only.rs` files this
 /// under its VERDICT half, and that stays true: both callers are engine code, and a

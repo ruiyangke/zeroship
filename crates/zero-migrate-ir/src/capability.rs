@@ -35,8 +35,8 @@ use crate::policy::{SchemaScope, TrustProfile};
 // The token was a zero-sized struct with a private field, which blocks only the
 // struct-literal form - `new`, `Default` and `for_test` were all public, all the same
 // mint, and reachable from any dependent crate. So holding one proved nothing about
-// the holder, and the one function that took it bound it as `_cap` and never read it,
-// returning exactly what the public `ExecutorConfig::new` returns.
+// the holder, and the one function that took it bound it to a discarded parameter and
+// never read it, returning exactly what the public `ExecutorConfig::new` returns.
 //
 // Its own doc said so ("It authorises nothing... Do NOT hang a real check on holding
 // one of these") while two other docs described it as a seam that "neither the control

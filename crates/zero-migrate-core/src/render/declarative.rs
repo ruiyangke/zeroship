@@ -6540,9 +6540,9 @@ mod snapshot_builder_refactor_safety_tests {
     //! `build_table_snapshot`, so they pin the post-extraction output against
     //! ITSELF - a FORWARD REGRESSION PIN, not a literal pre/post byte-diff. The
     //! actual pre/post byte-preservation guarantee of the extraction rests on the
-    //! pre-existing declarative RENDER goldens (`declarative_pg` 91 /
-    //! `declarative_sqlite` 15 / `golden_trace` 6) staying unchanged-green across
-    //! the lift: those render the differ's output END-TO-END, so an
+    //! pre-existing declarative render coverage on BOTH dialects, plus the golden
+    //! traces, staying unchanged-green across the lift: those render the differ's
+    //! output END-TO-END, so an
     //! extraction that perturbed any snapshot byte that reaches the SQL would have
     //! broken them. This fixture then freezes the snapshot SHAPE going forward - so
     //! any FUTURE change to the shared builder that perturbs a single byte of the

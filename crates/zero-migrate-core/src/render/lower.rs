@@ -7244,9 +7244,10 @@ impl IrAuthor {
     ///
     /// Two replays of the same rule, as `set_column_type_facets` describes for the
     /// facet verdicts: this one produces the DDL, the fold one produces the snapshot
-    /// drift compares against. `collation_metadata_pg` in `injected_column_collation`
-    /// pins that they agree, because a disagreement here is a table that drifts the
-    /// moment it is created.
+    /// drift compares against. What holds them together is that BOTH ask the same
+    /// `bytewise_column_metadata` for the pair - not a test pinning two independently
+    /// written spellings. Keep it that way: a disagreement here is a table that drifts
+    /// the moment it is created, and no offline suite would notice.
     fn apply_collation_metadata(
         &self,
         columns: &[IrColumn],
@@ -14573,7 +14574,7 @@ columns = [
     }
 
     // Regression: the PRODUCTION IR envelope deploy entry
-    // (`load_and_lower_guarded`, wired into `apply_bundle_ir_migrations`) carries
+    // (`load_and_lower_guarded`, the door a host deploy takes) carries
     // the op-index attribution on a guard denial - proving the attribution
     // reaches the REAL deploy path, not only the `lower_guarded` unit tests. We
     // force a denial with a guard CONFINED to a DIFFERENT schema, so the rendered

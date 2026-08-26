@@ -4,8 +4,8 @@
 //!
 //! [`zero_migrate_backend::ddl::DdlEmitter`] covers the table-level and column
 //! add/drop verbs and used to stop exactly at the `ALTER COLUMN` family. Its only
-//! member there was `alter_column_refs`, which returns the two IDENTIFIERS —
-//! `(table_ref, col_ref)` — and no statement. Everything after those identifiers was
+//! member there handed back the two IDENTIFIERS - a quoted table reference and a
+//! quoted column reference - and no statement. Everything after those identifiers was
 //! written in the engine:
 //!
 //! * `ALTER TABLE … ALTER COLUMN … TYPE …` — the verb,

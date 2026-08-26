@@ -157,16 +157,16 @@ pub struct CreateIndexIfNotExistsRequest<'a> {
 /// provide every spelling explicitly. Registration associates the renderer with
 /// its open [`DialectId`], so a backend cannot inherit another vendor's answer.
 ///
-/// IT LOST TWO METHODS, AND THE MEASUREMENT IS WHY. `encrypted_column_bind_placeholder`
-/// and `wrap_encrypted_param` had ZERO call sites anywhere in the workspace - four
-/// and five mentions respectively, every one of them the declaration, an impl, or a
-/// doc line. `wrap_encrypted_param`'s SQLite arm was the sole reader of a `pub const
-/// SQLITE_ENC_BLOB_PREFIX` whose own doc claimed "the SQLite session strips the
-/// prefix and base64-decodes the remainder"; the sentinel string appeared exactly
-/// once in the whole repository, in its own definition, so nothing stripped it and
-/// nothing ever had. A dead encryption seam that DOCUMENTS a decode step it does not
-/// perform is worse than no seam, because the next reader budgets for it. All three
-/// are deleted rather than kept warm: the trait declares no method nothing calls.
+/// IT LOST TWO ENCRYPTION METHODS, AND THE MEASUREMENT IS WHY. Neither had a single
+/// call site anywhere in the workspace - every mention of either was the declaration,
+/// an impl, or a doc line. One of them wrapped a bind parameter, and its SQLite arm
+/// was the sole reader of a blob-prefix constant whose own doc claimed "the SQLite
+/// session strips the prefix and base64-decodes the remainder"; the sentinel string
+/// appeared exactly once in the whole repository, in its own definition, so nothing
+/// stripped it and nothing ever had. A dead encryption seam that DOCUMENTS a decode
+/// step it does not perform is worse than no seam, because the next reader budgets
+/// for it. All three are deleted rather than kept warm: the trait declares no method
+/// nothing calls.
 ///
 /// It then gained TWO required collation spellings. Pinning an engine-selected
 /// collation when a column is created and stripping that pin when a retype must
@@ -551,9 +551,9 @@ pub fn build_encryption_sentinel_comments(
 ///
 /// The platform reserves the `_masked` suffix at the field-name level
 /// (`validate_field_name`'s `ReservedName::Suffix`) so a creator cannot
-/// shadow a sibling. Called by both `build_create_table_with_fks_for_dialect`
-/// (DDL emission) and `build_insert` / `build_set_clauses` (atomic
-/// dual-write).
+/// shadow a sibling. Every caller is a DDL emitter - create-table, add-column and
+/// index creation all ask this, so the sibling is declared and indexed alongside the
+/// column it shadows.
 pub fn mask_sibling_column_for_field(field: &str, def: &serde_json::Value) -> Option<String> {
     let mask_meta = def.get("mask").and_then(|v| v.as_object())?;
     let kind = mask_meta

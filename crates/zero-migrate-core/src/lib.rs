@@ -421,7 +421,8 @@ pub use plan::pending::{
 // exported a `status` and a `history` that took a raw connection plus a dialect
 // argument and then read PostgreSQL's journal regardless of what that argument
 // said.
-// The confined submit path is PG-only; gated with `mod ops::submit`.
+// The confined submit path is PG-only, and no module under `ops` declares it; the
+// note there says why.
 pub use model::migration::{
     migration_id_for_version, Checksum, ChecksumInput, IdError, Migration, MigrationFlags,
     MigrationId, OnlinePhase, MIGRATION_PREFIX,
@@ -509,11 +510,12 @@ pub use render::step::{
     StepReversibility, SynchronizeIdentityStep,
 };
 // The precondition VOCABULARY is neutral and stays exported. Its PostgreSQL
-// EVALUATOR is not exported: `evaluate` and `PreconditionError` used to be aliased
-// here as `evaluate_precondition`, promising one vendor's implementation as neutral
-// crate API. Both had zero consumers, and a caller wanting to evaluate a
-// precondition should go through `MigrationBackend::evaluate_preconditions`, which
-// is what routes to the registered backend.
+// EVALUATOR is not exported: the root once re-exported that backend's evaluator
+// function and its `PreconditionError` under neutral-looking root names, promising one
+// vendor's implementation as crate API. Both had zero consumers, and a caller wanting
+// to evaluate a precondition should go through
+// `MigrationBackend::evaluate_preconditions`, which is what routes to the registered
+// backend.
 pub use model::precondition::{CmpOp, OnUnmet, Precondition, PreconditionCheck};
 // The OFFLINE `--sql` plan preview. A pure,
 // DB-free surfacing/formatting layer over the SQL `IrAuthor::lower_*` already

@@ -1351,7 +1351,9 @@ fn diff_attrs(
 /// The RENAME is what cannot be reduced. Measured on PostgreSQL 18.4, after
 /// `RENAME COLUMN qty_on_hand TO amount_on_hand` the fold projects
 /// `("qty_on_hand" > 0)` where the catalog deparses `(amount_on_hand > 0)`
-/// (`fold_rename_column_stale_index_body_pg` pins both sides separately). Those are two
+/// (`fold_rename_column_index_body_pg` measures both sides against a live server, and
+/// its header is where this measurement now stands - read it before leaning on the
+/// sentence above). Those are two
 /// different COLUMN NAMES, not two spellings of one thing; normalisation reduces
 /// spellings. The fold cannot repair its side either, because
 /// [`IndexSnapshot::predicate`] is rendered TEXT and substituting a name inside it

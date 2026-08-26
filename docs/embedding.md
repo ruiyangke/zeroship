@@ -174,17 +174,12 @@ than verifying it, so verify the live shape first, outside zero-migrate. See
 [Interrupted MySQL or non-transactional work](operations.md#interrupted-mysql-or-non-transactional-work)
 for the operator-facing checklist.
 
-The public trait has five asynchronous operations:
+The public trait has these asynchronous operations:
 
 ```rust,ignore
 pub trait SqlSession {
     async fn batch(&self, sql: &str) -> Result<(), DbError>;
     async fn exec(&self, sql: &str, binds: &[Bind]) -> Result<u64, DbError>;
-    async fn exec_text(
-        &self,
-        sql: &str,
-        params: &[Option<String>],
-    ) -> Result<u64, DbError>;
     async fn query(&self, sql: &str, binds: &[Bind])
         -> Result<Vec<Row>, DbError>;
     async fn query_one(&self, sql: &str, binds: &[Bind])

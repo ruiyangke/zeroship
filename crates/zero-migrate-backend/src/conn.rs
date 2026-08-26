@@ -261,10 +261,10 @@ impl ExecutorConfig {
 
     // A `platform()` constructor stood here. It took an `OperatorCapability` token and
     // its whole body was `Self::new(project_id, project_schema, effective)` - the token
-    // was bound as `_cap` and never read. Its doc claimed the token could be minted
-    // "only through named in-crate seams", which was false: the mint was public, so any
-    // dependent crate could reach this seam, and the config it produced was identical to
-    // the one `new` produces from the same arguments.
+    // was bound to a discarded parameter and never read. Its doc claimed the token
+    // could be minted "only through named in-crate seams", which was false: the mint
+    // was public, so any dependent crate could reach this seam, and the config it
+    // produced was identical to the one `new` produces from the same arguments.
     //
     // An operator-side host builds a Platform-trust executor by calling `new` with an
     // explicitly composed `EffectivePolicy` carrying `TrustProfile::Platform`. That

@@ -380,7 +380,7 @@ fn the_only_fold_side_producer_of_a_collation_is_the_facet_the_retype_refuses() 
     // (measured: `text COLLATE "C" -> character varying(40)` leaves the catalog
     // reporting the DEFAULT collation, never `C`). It was reachable exactly once,
     // through a value-format column - `render::value_format`'s
-    // `bytewise_catalog_collation` is the ONE fold-side writer, and it runs only
+    // `bytewise_column_metadata` is the ONE fold-side writer, and it runs only
     // for TypeID/ULID. SQLite's `NOCASE` rides on `case_sensitive`, not here.
     //
     // So the refusal above closes the only route, and `fold_ops`'s

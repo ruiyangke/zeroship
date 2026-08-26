@@ -608,7 +608,8 @@ fn an_ir_enum_column_cannot_declare_case_insensitivity() {
 // field plus `enum_values`, which `field_check_constraints` turns into a
 // `CHECK ("col" IN (...))`, which `MysqlEmitter::create_table`
 // then folds BACK into a native `ENUM(...)` on MySQL - replacing the column's whole
-// rendered type, and with it the collation `column_type_for_render` had pinned.
+// rendered type, and with it the collation `MysqlSchemaRenderer::column_type` had
+// pinned.
 //
 // These two tests exist because a NEUTER found the gap: removing the pin from that
 // one arm broke nothing in the suite while every other neuter was caught, which meant

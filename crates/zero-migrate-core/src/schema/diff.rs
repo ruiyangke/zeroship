@@ -421,7 +421,7 @@ fn desired_physical_columns(
 /// Compute the diff between the declared schema and the live snapshot.
 ///
 /// `schema` is the JS-side schema object as already passed to
-/// `build_create_table` (`{ field: { type, required, ... } }`).
+/// `build_create_table_with_fks_for_dialect` (`{ field: { type, required, ... } }`).
 ///
 /// The first deploy (`live.tables` doesn't contain `collection`) returns
 /// a single [`ChangeKind::CreateTable`] op. Subsequent deploys diff
@@ -542,8 +542,8 @@ pub fn compute_diff(
     // First-time CREATE TABLE inlines the FK in the same statement (see
     // build_create_table_with_fks_for_dialect's Deferred mode), so when the table is
     // brand new (`live_cols.is_none()`) we only emit AddForeignKey ops
-    // for refs whose target *doesn't* exist yet - but currently
-    // build_create_table emits FKs inline always. To stay safe and
+    // for refs whose target *doesn't* exist yet - but currently that builder
+    // emits FKs inline always. To stay safe and
     // explicit, we let the orchestrator decide: when the table already
     // exists, the FK might need to be attached; when it's a fresh
     // create_table, the FK is already part of the CREATE TABLE SQL and

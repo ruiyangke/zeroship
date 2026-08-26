@@ -16,7 +16,7 @@
 //! `ir_column_to_field`, `create_index_snapshot`, ...). Because
 //! the engine APPLIES the same ops the fold replays through that builder, and the
 //! differ's `desired_snapshot` is already round-trip-proven equal to
-//! `snapshot_schema(live)` (the `declarative_pg` round-trip tests), the folded
+//! `snapshot_schema(live)` (the `pg_declarative` round-trip tests), the folded
 //! snapshot is structurally identical to live introspection - transitively
 //! `fold == introspect`. The headline correctness net is the round-trip oracle
 //! (`tests/fold_roundtrip_pg.rs`): apply a corpus to real PG, introspect, assert
@@ -2566,7 +2566,7 @@ impl<'a> CatalogFold<'a> {
                 //     reporting the DEFAULT collation, never `C`. BELT-AND-BRACES
                 //     rather than the fix, and said plainly: there are now TWO
                 //     fold-side writers of this field - `value_format`'s
-                //     `bytewise_catalog_collation` and the `IrColumn::collation`
+                //     `bytewise_column_metadata` and the `IrColumn::collation`
                 //     facet's `apply_fold_collation_metadata`, which calls the same
                 //     function (SQLite's `NOCASE` rides on `case_sensitive`). Both
                 //     write the SAME bytewise identity, so re-deriving the field from
@@ -5251,12 +5251,13 @@ fn resolved_injected_column_matches(
 //        |                                                                 +- MUST be byte-identical
 //   descriptors_to_create_ops  -> ops -> project_field_defs(fold(ops))   --+
 //
-// WHY a NEW producer (closing the producer gap): the existing
-// `generate_ops` (`scaffold.rs`) derives ops from a `SchemaSnapshot`, whose
+// WHY THIS PRODUCER IS DESCRIPTOR-SOURCED: the obvious alternative is to derive the
+// ops from a `SchemaSnapshot`, and that is lossy before it starts.
 // `ColumnSnapshot.data_type` has already FLATTENED away the declared-only facets
-// (`idPrefix`/`vectorMetric`) and the CHECK-borne facets (`enum`/`min`/`max`) - it
-// even fail-closes on vector/encrypted goodies (`col_type_for_data_type` ->
-// `UnsupportedColumnType`) and pins `id_prefix: None`. A snapshot-sourced producer
+// (`idPrefix`/`vectorMetric`) and the CHECK-borne facets (`enum`/`min`/`max`);
+// `id_prefix` comes back `None`; and a vector or encrypted column has no recoverable
+// type spelling at all, so a mapping off `data_type` has to fail closed on exactly
+// the goodies worth round-tripping. A snapshot-sourced producer
 // therefore CANNOT round-trip the rich facets; the chain would be lossy. This
 // descriptor-sourced producer threads every facet through, so the author->generate->
 // fold chain is lossless for exactly the facets the SDK type inference consumes.
@@ -7254,9 +7255,11 @@ columns = [
         // in the first place - what live PG reports post-rename. (The whole-snapshot
         // is NOT compared: PG preserves the renamed table's INDEX NAMES across a
         // RENAME - `accounts_*_idx`, not `members_*_idx` - so the index buckets
-        // legitimately differ from a fresh `members` create. See the round-trip test
-        // `fold_equals_introspect_after_rename_table_pg`, which asserts the index name
-        // survives the rename on live PG.)
+        // legitimately differ from a fresh `members` create. The live oracle for that
+        // is `fold_roundtrip_pg::rename_lifecycle`: it renames an INDEXED table on
+        // real PG and requires clean drift against the fold, and drift buckets indexes
+        // BY NAME, so a fold that re-derived the name from the new table would report
+        // the index missing and unexpected at once.)
         let direct = fold(&[
             create("members", vec![col("email", ColType::Text, false)]),
             create("orders", vec![col("account_id", ColType::Text, true)]),

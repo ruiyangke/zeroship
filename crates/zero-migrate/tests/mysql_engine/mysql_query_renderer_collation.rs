@@ -29,7 +29,8 @@
 //! `SQLITE`, and the three call sites of
 //! `def_to_column_type_for_dialect` in `render::declarative` and `schema::diff` all
 //! pass a hardcoded `POSTGRES`. MySQL column DDL is produced by
-//! `render::declarative::column_type_for_render` instead.
+//! `MysqlSchemaRenderer::column_type`, which `render::declarative` reaches through the
+//! registered `SchemaRenderer`, instead.
 //!
 //! So this file does NOT claim to fix a defect a deployment can hit today. It claims
 //! that the two renderers now answer alike, and it is the only thing standing between

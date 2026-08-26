@@ -568,8 +568,8 @@ pub fn authoritative_ir_checksum(ir: &MigrationIr) -> Checksum {
 /// deps/supersedes). Used to fail closed on a hint over a not-yet-foldable
 /// domain (the `IrFlagsOverride`/`MigrationId` merges are not implemented).
 ///
-/// Public so the build-time checksum fold (the JS builder's
-/// `typed_checksum`/`checksum_of_committed`) can gate on the SAME domain as the
+/// Public so the build-time checksum fold (the JS builder's `typed_checksum` anchor
+/// and the committed-checksum check beside it) can gate on the SAME domain as the
 /// engine's load gate - refusing to anchor a partial checksum over an IR carrying
 /// non-default flags/deps/supersedes rather than silently folding a partial domain
 /// the engine's load gate would later refuse.

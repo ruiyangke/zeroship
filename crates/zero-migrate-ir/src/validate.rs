@@ -66,11 +66,11 @@ pub const CODE_EXPR_NOT_PORTABLE: &str = "EXPR_NOT_PORTABLE";
 // `zero_migrate::engine::EngineError::DialectScopeRefused`, which carries both
 // `DialectId`s as data.
 //
-// A `DIALECT_SCOPE_PGONLY` code did sit here, emitted by nothing, naming a
-// `DialectScope` variant that has never existed (the pinned arm is `Only(DialectId)`)
-// on a facet no author can write, since the reach is derived from the op list. The
-// vendor-name censuses could not see it either: `PgOnly` lowercases to `pgonly`, which
-// contains no product needle. Do not reintroduce it.
+// A dialect-scope code spelling ONE vendor into its name did sit here, emitted by
+// nothing, naming a `DialectScope` variant that has never existed (the pinned arm is
+// `Only(DialectId)`) on a facet no author can write, since the reach is derived from
+// the op list. The vendor-name censuses could not see it either: `PgOnly` lowercases
+// to `pgonly`, which contains no product needle. Do not reintroduce one.
 /// An op-function called outside an active recorder - emitted JS-side.
 pub const CODE_OP_OUTSIDE_RECORDER: &str = "OP_OUTSIDE_RECORDER";
 /// An op is structurally valid JSON but carries an internally inconsistent shape.

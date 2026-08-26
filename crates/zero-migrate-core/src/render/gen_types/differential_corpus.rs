@@ -1187,8 +1187,8 @@ enum Status {
     /// job is to have somewhere honest to put the next one - deleting the
     /// vocabulary the moment the count reaches zero is how a corpus stops being
     /// able to record bad news. `the_corpus_has_the_shape_it_claims` counts it,
-    /// and `every_defect_row_names_its_evidence` still governs how one is
-    /// written.
+    /// and the module header's rule still governs how one is written: a defect
+    /// row carries its own evidence, not an inherited verdict.
     #[expect(
         dead_code,
         reason = "the defect vocabulary outlives the current defect count; see the \

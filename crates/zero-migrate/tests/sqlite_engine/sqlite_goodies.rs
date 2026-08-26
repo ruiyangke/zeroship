@@ -1,6 +1,8 @@
-//! `SQLite` goodie-column coverage at parity with the PG `declarative_pg` /
-//! `drift_pg` vector / geoPoint tests — the faithful path: the real
-//! `DeclarativeAuthor` (`SQLite` dialect) builds the plan, applies it through the
+//! `SQLite` goodie-column coverage on the faithful path. It was written for parity
+//! with a PostgreSQL vector / geoPoint arm, and there is no such arm to be at parity
+//! WITH: this file is the only end-to-end coverage either goodie column has on any
+//! dialect. The faithful path means the real `DeclarativeAuthor` (`SQLite` dialect)
+//! builds the plan, applies it through the
 //! real hardened `SqliteBackend` on a temp file, and the assertions read the
 //! REAL DB end-state (`PRAGMA table_info`, `sqlite_master`) + a real re-diff.
 //!
@@ -93,8 +95,8 @@ async fn column_type(be: &SqliteBackend, table: &str, column: &str) -> String {
 
 // ===========================================================================
 // VECTOR — a `vector(N)` field applies as a BLOB column (+ a plain B-tree index)
-// on the SQLite engine path; a re-diff is ZERO-drift. (PG has the ivfflat test in
-// `declarative_pg`; SQLite had none.)
+// on the SQLite engine path; a re-diff is ZERO-drift. (No PostgreSQL arm applies a
+// vector column end-to-end, so this is not the SQLite half of a pair.)
 // ===========================================================================
 #[compio::test]
 async fn vector_field_applies_as_blob_and_redfiff_is_zero_drift() {

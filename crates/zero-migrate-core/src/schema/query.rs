@@ -39,10 +39,10 @@ pub enum QueryError {
     /// the active effective policy.
     /// Distinct from [`Self::InvalidIdent`] so the SDK can surface a typed code
     /// (`reserved_system_field_name`) that's distinguishable from the
-    /// generic `invalid_identifier` thrown by the `_*` / `__zero_migrate_*` prefix
+    /// generic `InvalidIdent` thrown by the `_*` / `__zero_migrate_*` prefix
     /// reservations. Filter-time use of these names is unrestricted
     /// (`db.users.find({ id: ... })` is the canonical query shape); the
-    /// fence only fires on declaration paths (`field_to_column`).
+    /// fence only fires on declaration paths (`field_to_column_for_dialect`).
     ReservedSystemFieldName(String),
     /// Creator UPDATE patch attempted to overwrite one of
     /// the three write-once system fields (`id`, `created_at`,
@@ -257,9 +257,9 @@ mod schema_renderer_tests {
  * `pub const SQLITE_ENC_BLOB_PREFIX` claimed that "the SQLite session strips the
  * prefix and base64-decodes the remainder". The literal it defined appeared EXACTLY
  * ONCE in the entire repository - in that definition - so no session stripped it,
- * and none ever had. Its only reader in code was `SchemaRenderer::wrap_encrypted_param`,
- * itself dead (see the trait's header), so the constant, its one reader, and the
- * decode step it promised are all gone together.
+ * and none ever had. Its only reader in code was one of the two encryption methods the
+ * `SchemaRenderer` trait no longer declares, itself dead (see the trait's header), so
+ * the constant, its one reader, and the decode step it promised are all gone together.
  *
  * Recorded rather than silently removed because the doc is the interesting part: a
  * comment describing a decode that does not exist reads as a designed seam, and the
@@ -372,7 +372,7 @@ pub(crate) const RESERVED_NAMES: &[ReservedName] = &[
     // Masked-column sibling suffix. The platform
     // emits `<col>_masked` siblings (Path B); creators must not
     // declare a column ending in `_masked` themselves. Refused at
-    // both schema-registration time (in `field_to_column`) and
+    // both schema-registration time (in `field_to_column_for_dialect`) and
     // filter-time (so `db.users.find({ ssn_masked: ... })` is
     // refused with the same code path).
     ReservedName::Suffix("_masked"),
@@ -484,11 +484,12 @@ pub fn validate_field_name(vendors: VendorSet, name: &str) -> Result<(), QueryEr
 /// fences the columns injected by the active effective policy.
 ///
 /// Call this from every code path that translates a creator-declared
-/// schema field into DDL (currently `field_to_column`). Filter-time
-/// validators (`build_field_condition_with_dialect`, `build_vector_search`,
-/// `build_spatial_near`) must continue to call the underlying
-/// [`validate_field_name`] so creators can keep writing
-/// `db.users.find({ id: "..." })`.
+/// schema field into DDL (currently `field_to_column_for_dialect`). It is the
+/// DECLARATION door and only that. A path that validates a field name at FILTER
+/// time takes the other one - the underlying [`validate_field_name`] - so creators
+/// can keep writing `db.users.find({ id: "..." })`. The filter builders that used
+/// that door were the data-plane query language, which no longer lives in this
+/// tree; the rule holds for the next one that arrives.
 ///
 /// On reservation hit returns [`QueryError::ReservedSystemFieldName`]
 /// - distinct from `InvalidIdent` so the SDK can branch on a stable
@@ -891,7 +892,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
     }
 
     // Defensive last-line-of-defence assertion. The
-    // declaration-time validator in `field_to_column` (via
+    // declaration-time validator in `field_to_column_for_dialect` (via
     // `validate_field_name_for_declaration`) already rejects creator
     // schemas that declare an actively injected column name; the
     // loop above propagates that error and returns before this
@@ -4253,7 +4254,7 @@ columns = [
     // variant it produces are tested here; the *mapping* to `DbError` is
     // tested where `DbError` lives.
 
-    /// `field_to_column` (the DDL builder for one column) must propagate
+    /// `field_to_column_for_dialect` (the DDL builder for one column) must propagate
     /// the system-field reservation. End-to-end check that the
     /// declaration-time fence is wired at the right call site -
     /// CREATE TABLE on a schema declaring `id` as a creator column
@@ -5160,25 +5161,18 @@ columns = [
     // -----------------------------------------------------------------
     // SELECT-shape gates
     //
-    // Three invariants pinned at the SQL-build layer (the production
-    // expr_with_unmask`):
+    // The masked-column READ shape - a default read emitting
+    // `"<col>_masked" AS "<col>"` so the ciphertext column never appears as a
+    // top-level select expression, and an SDK row shape that therefore never
+    // sees the sibling at all - belonged to the data-plane SELECT builder. That
+    // builder and the tests that pinned it left this crate with the query
+    // language, so nothing here proves the read shape; do not read this heading
+    // as though something did.
     //
-    // 1. `default_read_does_not_touch_ciphertext_column` - when a
-    //    schema declares a masked column and no `unmask` hint is
-    //    passed, the SELECT clause emits `"<col>_masked" AS "<col>"`
-    //    and the bare ciphertext column name MUST NOT appear in the
-    //    select-list (it appears in the alias's right-hand side only
-    //    and not as a top-level select expression).
-    //    refuses filter keys ending in `_masked` because
-    //    `validate_field_name` is on the reserved-suffix path.
-    //    We double-check the end-to-end path through
-    // 3. `sibling_masked_column_not_visible_in_sdk_introspection` -
-    //    the SDK `Row<S>` shape excludes `<col>_masked`. The Rust-
-    //    side dual to that invariant is that callers never need to
-    //    PROJECT through `<col>_masked` - the alias substitution
-    //    means the SDK sees `<col>` carrying the masked value.
-    //    Asserted by ensuring the build emits the sibling under an
-    //    `AS "<col>"` alias and never as a bare top-level identifier.
+    // What this layer still owns: `_masked` is a reserved SUFFIX, so
+    // `validate_field_name` refuses a creator field ending in it wherever a
+    // field name is validated. A `<col>_masked` column can therefore only ever
+    // be one the builders in this module emitted.
     // -----------------------------------------------------------------
 
     // ----------------------------------------------------------------

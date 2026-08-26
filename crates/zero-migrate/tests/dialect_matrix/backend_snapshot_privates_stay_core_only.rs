@@ -110,8 +110,8 @@ const VERDICT_ITEMS: &[&str] = &[
 ///
 /// A vendor MAY call these — it must, or its catalog read and the engine's authored
 /// fold reduce a sequence's bounds differently and every sequence reports drift. What
-/// a vendor may NOT do is define its own, which is what [`defines_own_copy`] looks
-/// for.
+/// a vendor may NOT do is define its own, which is what [`definitions`] looks for
+/// over the vendor walk.
 const SHARED_NORMAL_FORM_ITEMS: &[&str] = &[
     "from_sequence_col_type",
     "from_catalog_type_name",

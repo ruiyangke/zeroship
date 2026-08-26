@@ -20,8 +20,9 @@
 //! walk. It now keeps the closed `Expr` beside the rendering
 //! (`GeneratedColumnSnapshot::source`) for that reason alone — which is the treatment
 //! `apply::drift::comparable_generated_column` prescribes, and the one an INDEX body
-//! still does not get (see `fold_rename_column_stale_index_body_pg.rs`: a predicate
-//! and an expression key remain stale because the snapshot keeps no AST for them).
+//! still does not get from introspection (see `fold_rename_column_index_body_pg.rs`:
+//! the fold's own predicate and expression key DO follow a rename now, and what stays
+//! stale is a CATALOG-derived body, which no AST is recovered from).
 
 use crate::support;
 
