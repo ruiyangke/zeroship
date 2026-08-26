@@ -113,6 +113,13 @@ day took the crate from 79 test binaries to 5 and the reported count from 1779
 to 895 without changing a case, so re-measure here before comparing - the
 residue SET is what carries across, not the totals.
 
+RE-MEASURED 2026-08-26 after that consolidation: **5 binaries, 840 passed, 55
+failed, 50 distinct names**. Diffed against the 52 from the run above with the
+new module prefix stripped: NOTHING newly fails, and the set lost exactly two -
+the assignment-dependent temp-table case below, and
+`replacing_observer_preserves_the_in_flight_requests_receiver`. A name leaving
+the residue is not a regression; a name ENTERING it is the finding.
+
 Compare the SET, not the count. Two runs can both report 55 while failing
 different tests, and the count alone cannot see that; diffing the sorted
 `failures:` names can:
