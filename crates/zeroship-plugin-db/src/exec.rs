@@ -355,6 +355,22 @@ async fn exec_sqlite_json(
     sql: &str,
     params: &[&str],
 ) -> Result<Vec<Value>, DbError> {
+    // Bind this app's file into the session before addressing it. The SQL
+    // below qualifies its tables as `"<app_id>"."<table>"`, and that alias
+    // exists only because of an ATTACH.
+    //
+    // This is the data plane's own job, and it used to be registerModel's:
+    // holding the only ATTACH there made a row read depend on a METADATA call
+    // having run first, on this thread, at some earlier point. Nothing about
+    // reading a row needs that.
+    //
+    // Cheap to repeat. `attach_app_file` returns on a cache hit before issuing
+    // any SQL, so every call after the first is a set lookup. Placing it above
+    // the tx/autocommit split covers both: SQLite has ONE session actor (see
+    // `SqlExecutor::acquire_dedicated_client` for SqliteBackend), so a
+    // "dedicated" tx client is the same connection and inherits the ATTACH.
+    backend.attach_app_file(route.app_id()).await?;
+
     // Same discriminator as `run_sql`: the route was frozen at the V8
     // dispatch frame, so only ops issued inside THIS app's own
     // `db.transaction(fn)` callback take the tx client. SEC-1 falls out of
