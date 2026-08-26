@@ -521,7 +521,7 @@ pub fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
         // is an IEEE-754 double, so this is the exact 1:1 mapping.
         // NUMERIC would be more precise but compio-postgres' text-out
         // path doesn't decode it back to a JS value cleanly;
-        // `t.bigInteger()` exists for callers who need exact 64-bit
+        // `t.bigInt()` exists for callers who need exact 64-bit
         // ints.
         Some("number") => "DOUBLE PRECISION",
         Some("real") => "REAL",
@@ -534,7 +534,7 @@ pub fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
         // permanent drift. Mapping to `INTEGER` here makes the snapshot and the
         // emitter agree on BOTH dialects. PG stays byte-identical for every
         // existing column: the SDK's `t.*` surface never emits a bare `int` on PG
-        // (`t.number()` -> DOUBLE PRECISION, `t.bigInteger()` -> BIGINT), so no
+        // (`t.number()` -> DOUBLE PRECISION, `t.bigInt()` -> BIGINT), so no
         // previously-emitted PG column changes type. The PG type *names*
         // (`bigint`/`int4`/`int8`) are deliberately NOT accepted - they are not DSL
         // tokens and stay on the TEXT fallback so they remain typo-rejected.

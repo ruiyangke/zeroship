@@ -38,8 +38,8 @@ const SPLIT_PART_MAX_N: i64 = 8;
 /// (`crate::backend::backfill_sql`) assembles its own per-batch statements and has to
 /// bind through the same spelling the one-shot assembler reaches via
 /// [`SqliteDmlRenderer::placeholder`]. Two paths, one spelling, in the crate that owns
-/// it - it used to be `zero_migrate_backend::dml::sqlite_placeholder`, a vendor name in
-/// the neutral contract whose only two callers were both here.
+/// it - the neutral contract used to carry this spelling under a vendor-named function
+/// whose only two callers were both here.
 pub(crate) fn placeholder(n: usize) -> String {
     format!("?{n}")
 }

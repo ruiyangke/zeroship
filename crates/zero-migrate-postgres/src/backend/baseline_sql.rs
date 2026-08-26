@@ -154,8 +154,8 @@ async fn first_baseline_version<D: SqlSession>(
     cfg: &ExecutorConfig,
 ) -> Result<Option<String>, BaselineError> {
     // Engine-supplied meta schema: route through the ONE shared engine seam so it
-    // fails closed on an empty / NUL name, byte-identical to the prior
-    // `escape_quote_ident`. This is a journal-table read, so the fail-closed error
+    // fails closed on an empty / NUL name, byte-identical to the hand-rolled
+    // quoting it replaced. This is a journal-table read, so the fail-closed error
     // is mapped through `JournalError` (which carries `From<IdentQuoteError>`).
     let meta = zero_migrate_backend::dml::quote_ident_checked_for_backend(
         &cfg.confinement.meta_schema,

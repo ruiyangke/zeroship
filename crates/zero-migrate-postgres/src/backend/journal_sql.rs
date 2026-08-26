@@ -97,8 +97,8 @@ pub async fn ensure_journal<D: SqlSession>(
     // every INSERT (the INSERTs never supply it). It never ties - `now` can be
     // equal across two events in one transaction, but the IDENTITY is monotonic
     // - so the latest event per version decides net state. There is NO standalone
-    // sequence object (the old `CREATE SEQUENCE ... schema_migrations_event_seq` +
-    // `DEFAULT nextval(...)` are gone; the column is its OWN identity).
+    // sequence object and no column default reaching one: the column IS its own
+    // identity.
     //
     // Rollback is append-only too: an `applied` row is NEVER deleted on
     // rollback - a `rolled_back` event is appended to THIS SAME table. A

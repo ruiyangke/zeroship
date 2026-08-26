@@ -143,7 +143,7 @@ pub enum Polarity {
     /// requirements can never be removed.
     Require,
     /// Opaque/pinned content: draft must equal charter unless the charter marks it
-    /// delegable. Backs only the opaque `TableShapeTransform` digest (II.4.5).
+    /// delegable. Backs only the opaque transform digests (II.4.5).
     Pinned {
         /// Whether a draft may override the pinned value.
         delegable: bool,

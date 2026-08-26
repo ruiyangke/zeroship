@@ -50,9 +50,8 @@ use crate::DIALECT;
 ///
 /// It lives here rather than in the contract crate because the DISTINCTION it marks is
 /// this backend's alone: a backend whose ordinary literal already is a quoted string
-/// has no second form to pick between. It was
-/// `zero_migrate_backend::dml::mysql_grammar_string_literal`, a vendor name in the
-/// neutral contract whose every caller was in this crate.
+/// has no second form to pick between. The neutral contract used to carry this
+/// distinction under a vendor-named function whose every caller was in this crate.
 pub(crate) fn grammar_string_literal(s: &str) -> String {
     dml::sql_string_literal(s)
 }

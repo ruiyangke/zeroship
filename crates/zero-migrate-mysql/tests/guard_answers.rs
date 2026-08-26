@@ -30,9 +30,9 @@
 //!
 //! # The vendor id is load-bearing here, not decoration
 //!
-//! This guard and SQLite's were once ONE type, a shared `SqliteDescriptorGuard` whose
-//! own doc admitted it "serves BOTH descriptor-only engines - SQLite and MySQL - despite
-//! the name". They were split so that a change to one vendor's posture could not
+//! This guard and SQLite's were once ONE shared type, named after SQLite alone, whose
+//! own doc admitted it served BOTH descriptor-only engines - SQLite and MySQL - despite
+//! the name. They were split so that a change to one vendor's posture could not
 //! silently become a change to the other's. Asserting the id each door refuses under is
 //! what keeps that split real: a body copied between the two crates without swapping the
 //! constant fails here rather than passing quietly.

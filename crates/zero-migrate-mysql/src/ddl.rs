@@ -271,8 +271,7 @@ impl MysqlEmitter {
         mysql_qualified(&self.project_schema, object)
     }
 
-    /// MySQL's inline / stand-alone FK clause. (Was
-    /// `DeclarativeAuthor::mysql_fk_clause`, moved VERBATIM.) The policy tail drops
+    /// MySQL's inline / stand-alone FK clause. The policy tail drops
     /// `DEFERRABLE INITIALLY DEFERRED`, which MySQL does not accept, via
     /// [`mysql_fk_policy_tail`].
     fn fk_clause(&self, fk: &ConstraintSnapshot) -> String {

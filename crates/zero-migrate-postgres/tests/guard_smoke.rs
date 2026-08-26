@@ -340,7 +340,7 @@ fn a_body_hiding_a_privilege_verb_is_denied() {
 
 /// A schema you cannot CREATE, you also cannot DROP.
 ///
-/// `grants_drop_object` answered `OBJECT_SCHEMA` with a GLOBAL `schema.create_schema`
+/// `grants_drop_object` answered `ObjectSchema` with a GLOBAL `schema.create_schema`
 /// query that never looked at which schema was being dropped, while `CreateSchemaStmt`
 /// checks the name at its target. Under a charter granting `create_schema` over `all`
 /// with `cross_schema` scoped - the shape this engine's own operator fixture builds -

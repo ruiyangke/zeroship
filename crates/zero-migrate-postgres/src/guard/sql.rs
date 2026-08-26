@@ -50,8 +50,8 @@ use zero_migrate_policy::{normalize_object_name, GrantRegion, ObjectName, ShapeE
 // These are IMPORTED, not re-exported. This module's signatures name them, but a
 // caller wanting the neutral vocabulary must reach `zero_migrate_backend::guard` for
 // it. They were `pub use` while this file lived in `zero-migrate-guard`, where the
-// engine depended on that crate directly and the re-export was how
-// `zero_migrate_guard::guard::GuardConfig` resolved. Keeping it here would have a
+// engine depended on that crate directly and the re-export was how `GuardConfig` and
+// its neighbours resolved under that crate's own path. Keeping it here would have a
 // VENDOR crate handing out the neutral seam under its own name, which is the exact
 // confusion this move exists to remove - and it was measured to have no caller.
 use zero_migrate_backend::guard::{
@@ -1889,8 +1889,9 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
     }
 
     /// Deny a `<literal>::regprocedure` / `::regproc` cast whose literal names a
-    /// `FILE_ACCESS` / `NETWORK` function. `'pg_read_file'::regprocedure` resolves
-    /// the named function by OID at runtime - a dangerous capability the
+    /// function on the `FILE_ACCESS_FUNCTIONS` / `NETWORK_FUNCTIONS` denylists.
+    /// `'pg_read_file'::regprocedure` resolves the named function by OID at
+    /// runtime - a dangerous capability the
     /// `FuncCall` walk misses because the function name is a bare string
     /// literal, not a call node. The literal may carry an argument signature
     /// (`'pg_read_file(text)'`); we match on the leading identifier.

@@ -41,9 +41,8 @@ use zero_migrate_ir::migration::{Checksum, ChecksumInput, MigrationFlags, Migrat
 /// would otherwise deadlock (the second `tsfn.call` blocks on a socket the
 /// first hasn't released); the panic surfaces the bug loudly instead.
 ///
-/// This is the exact discipline the MySQL `JsDriverBackend` uses
-/// (`transport.rs` `in_flight: bool`), lifted to `AtomicBool` because the seam
-/// is `&self`, not `&mut self`.
+/// The flag is an `AtomicBool` rather than a plain `bool` because the seam is
+/// `&self`, not `&mut self`.
 #[derive(Debug)]
 pub struct InFlightGuard<'a>(&'a AtomicBool);
 

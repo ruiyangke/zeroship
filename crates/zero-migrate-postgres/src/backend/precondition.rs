@@ -673,7 +673,7 @@ async fn run_sql_boolean_in_txn<D: SqlSession>(
 ) -> Result<bool, PreconditionError> {
     // Pin the project schema (and only it) on the path, scoped to this txn.
     // Routed through the ONE engine seam so it fails closed on an empty/NUL
-    // schema, byte-identical to the prior `escape_quote_ident` on every real
+    // schema, byte-identical to the hand-rolled quoting it replaced on every real
     // (quote-free / `-`-bearing UUIDv7) schema.
     let schema_q = zero_migrate_backend::dml::quote_ident_checked_for_backend(
         &cfg.project_schema,

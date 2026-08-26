@@ -16,7 +16,7 @@
 //! so a nonce swap invalidates it).
 //!
 //! - **The resolved rule set** is the grants + requires + injects + validates, each
-//!   with its `effective_scope`, in the sealed **cross-layer inject total order**
+//!   with its `scope`, in the sealed **cross-layer inject total order**
 //!   (II.4.4). A tamper that reorders inject rules changes the canonical bytes and
 //!   fails the MAC. Encoding reuses the 1b-i canonical-encoding discipline: a
 //!   1-byte tag per field, integers big-endian fixed-width, strings/sets

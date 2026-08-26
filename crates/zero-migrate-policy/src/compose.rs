@@ -15,8 +15,8 @@
 //! # The grant model is POINTWISE and SYMBOLIC (II.3.2)
 //!
 //! A grant for key `k` is a partial function `Object -> Value`, NOT a scope plus a
-//! scalar. We represent it symbolically as the set of `(effective_scope, value)`
-//! grant rules on `k`; the value at an object `o` is
+//! scalar. We represent it symbolically as the set of `(scope, value)` grant rules
+//! on `k`; the value at an object `o` is
 //!
 //! ```text
 //! value(P, k, o) = the value-join over every rule r in grants(k)
@@ -217,8 +217,8 @@ pub enum ComposeError {
         /// The knob key whose grant escalated.
         key: KnobKey,
         /// A human-readable render of the offending object region (the uncovered
-        /// region, or a covered region where `draft_value` is LOOSER than
-        /// `charter_value`).
+        /// region, or a covered region where the draft's value is LOOSER than the
+        /// charter's).
         offending_pattern: String,
     },
     /// A region `admit` had to reason about for `key` is not cleanly representable by
@@ -901,7 +901,7 @@ impl LayerTag {
 // -- layered charter grant queries (crate-internal; consumed by boundary::admit) --
 
 /// Every grant rule scope of a LAYER STACK for `key` whose value RISES above default,
-/// each at its own `effective_scope` (excludes intact) (H-4).
+/// each at its own `scope` (excludes intact) (H-4).
 ///
 /// The grant-bearing subset, deliberately. `admit` subtracts these to find the region
 /// no charter rule lifts, and a rule at or below default lifts nothing - counting it

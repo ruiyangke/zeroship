@@ -387,8 +387,8 @@ pub(super) fn set_local_session_sql(
 /// The migrator role is an engine-supplied identifier, so it is quoted through
 /// the explicit backend seam
 /// ([`zero_migrate_backend::dml::quote_ident_checked_for_backend`]) - fail-closed
-/// on an empty / NUL name, byte-identical to the prior `escape_quote_ident` for
-/// every real role.
+/// on an empty / NUL name, byte-identical to the hand-rolled quoting it replaced
+/// for every real role.
 pub(super) fn set_local_role_sql(
     cfg: &ExecutorConfig,
 ) -> Result<Option<String>, zero_migrate_backend::dml::IdentQuoteError> {
@@ -2096,8 +2096,8 @@ mod non_txn_idempotency_tests {
 /// schemas, extension schemas), so each is rendered through the ONE shared
 /// explicit backend seam
 /// ([`quote_ident_checked_for_dialect`](zero_migrate_backend::dml::quote_ident_checked_for_backend))
-/// - fail-closed on an empty / NUL name, byte-identical to the prior
-/// `escape_quote_ident` for every real schema. So the whole quoting surface (not
+/// - fail-closed on an empty / NUL name, byte-identical to the hand-rolled
+/// quoting it replaced for every real schema. So the whole quoting surface (not
 /// just the DDL/journal seams) is uniformly self-defending.
 ///
 /// # Why it is HERE and not a method on `ExecutorConfig`

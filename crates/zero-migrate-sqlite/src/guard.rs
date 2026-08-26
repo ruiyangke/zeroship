@@ -23,9 +23,9 @@
 //!
 //! # Why this is not shared with MySQL
 //!
-//! It used to be. Both dialects ran one `SqliteDescriptorGuard`, whose own doc
-//! admitted it "serves BOTH descriptor-only engines - SQLite and MySQL - despite the
-//! name". Sharing a type named after one vendor made a MySQL reviewer read the
+//! It used to be. Both dialects ran ONE guard type named after SQLite alone, whose own
+//! doc admitted it served BOTH descriptor-only engines - SQLite and MySQL - despite the
+//! name. Sharing a type named after one vendor made a MySQL reviewer read the
 //! dispatch as a bug at a glance. Each vendor now writes its own, which costs a dozen
 //! lines and means a change to SQLite's posture cannot silently become a change to
 //! MySQL's.
