@@ -26,6 +26,15 @@
 //! The case count is deliberately modest so this stays inside a normal test run.
 //! It is a floor on coverage, not a soak: raise `CASES` locally to hunt.
 //!
+//! RAISE `ASYNC_WATCHDOG` IN THE SAME EDIT. It is sized for `CASES = 48`, and a
+//! hunt that only raises the case count trips the test's OWN outer watchdog and
+//! reports `frame fuzzing exceeded its outer watchdog: Elapsed(())`. That reads
+//! exactly like a driver hang - it is not one, it is this file timing itself out.
+//! Cost two runs on 2026-08-26 before the message was traced back here. MEASURED
+//! that day: `CASES = 1000` with `ASYNC_WATCHDOG = 600` completes in 251s, all 15
+//! tests pass, no panic and no hang. So the decoder survives 20x this corpus; the
+//! hunt is worth running, it just needs both constants moved together.
+//!
 //! WHAT THE FRAME CORPUS REACHES, measured 2026-08-23 by printing every case's
 //! outcome. The handshake section below has carried such a measurement since it
 //! was written; this half had none, and "the generator reaches the driver" was

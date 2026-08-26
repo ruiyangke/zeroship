@@ -349,6 +349,12 @@ fn a_hostile_pgoutput_body_is_refused_rather_than_fatal() {
     // with room for the generator to drift, and well above what the corpus
     // reached BEFORE `valid_case` existed - 132 decoded across 3 fixed-layout
     // tags, which is the state these floors exist to refuse.
+    // These floors are ABSOLUTE, not a fraction of `CASES`, so they stop being
+    // evidence if you raise the corpus to hunt: at `CASES = 200000` a floor of
+    // 1500 is met by the first 3% of the run. Run 2026-08-26 at that size passed
+    // in 0.19s with no panic - which is worth something, but it is a crash floor,
+    // NOT a coverage one. Recalibrate both numbers if you make a raised corpus
+    // permanent.
     assert!(
         reached.decoded >= 1500,
         "only {} of {CASES} bodies decoded; the corpus is being rejected before \
