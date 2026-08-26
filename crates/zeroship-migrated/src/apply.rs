@@ -15,11 +15,24 @@ use zeroship_migrate::{
 // them off the facade, so this PostgreSQL host names PostgreSQL rather than
 // reaching for a re-export that deliberately no longer exists.
 use zeroship_migrate_postgres::confinement::PostgresConfinementExt;
+use zeroship_migrate_postgres::backend::drift_sql::snapshot_schema;
 use zeroship_migrate_postgres::role::migrator_role_name;
 use zeroship_migrate_postgres::{PostgresBackend, DIALECT as POSTGRES};
 use zeroship_migrate_ir::policy_approval::{migration_requires_approval, ApprovalLevel};
 use zeroship_migrate_policy::EffectivePolicy as PdpPolicy;
 use zeroship_migrate_adapter::CompioPgSession;
+
+/// The backends this host hands to every engine entry point.
+///
+/// `zeroship-migrate` is the composition root and the only crate that knows which
+/// backends exist; a host takes the set rather than naming vendors itself, which
+/// is what let the engine stop naming vendor crates at all. This service only
+/// ever targets PostgreSQL, but that is pinned by the `POSTGRES` dialect passed
+/// at each call site, NOT by narrowing the set: the engine resolves a backend by
+/// `DialectId` out of whatever it was given, so a narrowed set would only change
+/// which errors are reachable, not which backend runs.
+const VENDORS: zeroship_migrate_backend::registry::VendorSet =
+    zeroship_migrate::shipping_vendors();
 
 use crate::migration_store::{
     sealed_profile_audit_json, AuditAction, AuditInput, MigrationStore, MigrationStoreError,
@@ -982,8 +995,29 @@ async fn postgres_ir_apply_state(
             .keys()
             .map(|t| (t.clone(), owner_app.to_string()))
             .collect(),
-        sqlite_schemas: BTreeMap::new(),
+        // EVERY CATALOG FACT THE SNAPSHOT CARRIES IS PASSED THROUGH, not defaulted.
+        // These are all `BTreeMap`s of the same snapshot types the introspection
+        // returns, so an empty one is not "no opinion" - it is the assertion that
+        // the live schema HAS no views / sequences / functions / policies /
+        // triggers / extensions, which is what the lowerer would then plan
+        // against. `..Default::default()` here would be that assertion made
+        // silently, and would go on being made for each field added later.
+        views: live.views.clone(),
+        sequences: live.sequences.clone(),
+        schemas: live.schemas.clone(),
+        extensions: live.extensions.clone(),
+        functions: live.functions.clone(),
+        policies: live.policies.clone(),
+        triggers: live.triggers.clone(),
+        // The two the catalog genuinely CANNOT answer, left empty on purpose.
+        // `sdk_schemas` is a SQLite `renameColumn` rebuild fact and this host is
+        // PostgreSQL-only; `logical_columns` and `declared_column_generation` are
+        // semantic declarations the ordered-envelope lowerer advances from each
+        // artifact, and their own docs say they are never inferred from the
+        // physical catalog (a text column cannot reveal that it is a TypeID).
+        sdk_schemas: BTreeMap::new(),
         logical_columns: BTreeMap::new(),
+        declared_column_generation: BTreeMap::new(),
     };
     Ok(PostgresIrApplyState {
         registry,
@@ -1083,7 +1117,7 @@ async fn apply_one_ir_file_postgres(
     // proves green. Non-`createTable` ops pass through untouched.
     let bytes = resolve_shape_bytes(&raw_bytes, policy, project_schema, &file)?;
 
-    let mut author = IrAuthor::new(project_schema, owner_app, POSTGRES, policy);
+    let mut author = IrAuthor::new(VENDORS, project_schema, owner_app, &POSTGRES, policy);
     if let Some(scope) = guard_cfg.schema_scope() {
         author = author.with_schema_scope(scope);
     }
@@ -1102,7 +1136,7 @@ async fn apply_one_ir_file_postgres(
 
     let created_tables = lowered.created_tables.clone();
     let recovery_scope: Option<&DeployRecoveryScope<'_>> = None;
-    let outcome = MigrationEngine::new()
+    let outcome = MigrationEngine::new(VENDORS)
         .apply_plan_with_touched_and_depends_scoped(
             &lowered.plan.steps,
             &lowered.touched_tables,
@@ -1203,7 +1237,7 @@ async fn preflight_ir_documents(
         .await
         .map_err(IrApplyError::Snapshot)?;
     let mut report = PreflightReport::default();
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(VENDORS);
 
     for path in files {
         let file = path
@@ -1228,7 +1262,7 @@ async fn preflight_ir_documents(
         // so preflight lowers the SAME resolved artifact it will apply (identical
         // version-ids + destructive/approval classification).
         let bytes = resolve_shape_bytes(&raw_bytes, &policy.policy, schema, &file)?;
-        let mut author = IrAuthor::new(schema, schema, POSTGRES, &policy.policy);
+        let mut author = IrAuthor::new(VENDORS, schema, schema, &POSTGRES, &policy.policy);
         if let Some(scope) = guard_cfg.schema_scope() {
             author = author.with_schema_scope(scope);
         }
@@ -1368,7 +1402,14 @@ fn step_version(step: &PlanStep) -> Option<String> {
     match step {
         PlanStep::Ddl(migration) => Some(migration.version.as_str().to_string()),
         PlanStep::Dml { version, .. } => Some(version.as_str().to_string()),
+        // The structural steps all defer to the engine's own accessor rather than
+        // reaching into `step.migration.version` here, so this host cannot drift
+        // from the engine's view of which version a step belongs to.
+        // `AlterColumnType` is in this group because `approval_scope_version`
+        // treats it identically to `AlterPrimaryKey` and `SynchronizeIdentity`
+        // (same destructive/requires_approval guard, same `step.migration.version`).
         PlanStep::AlterPrimaryKey(_)
+        | PlanStep::AlterColumnType(_)
         | PlanStep::SynchronizeIdentity(_)
         | PlanStep::OnlineRename(_) => step.approval_scope_version().map(ToOwned::to_owned),
         PlanStep::Backfill { .. } => None,

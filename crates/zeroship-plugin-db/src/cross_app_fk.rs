@@ -19,21 +19,22 @@
 //!
 //! # THIS VALIDATOR HAS NO PRODUCTION CALL SITE
 //!
-//! Enumerated 2026-08-20. Exactly two lines in the tree call
-//! [`reject_cross_app_fk`], and neither is reachable from a running
-//! worker:
+//! Re-enumerated 2026-08-26. Exactly ONE line in the crate calls
+//! [`reject_cross_app_fk`], and it is not reachable from a running worker:
 //!
-//! - `register_model/bootstrap.rs:133`, in `bootstrap` - NOT in
-//!   `build_ctx`, which this paragraph named until 2026-08-20 and which
-//!   does not call it and runs on the far side of the advisory lock.
-//!   The whole `bootstrap` module is `#[cfg(any(test, feature =
-//!   "test-helpers"))]` (`register_model/mod.rs:126`), so it is absent
-//!   from a default build. Its only caller is `run_pipeline`, gated the
-//!   same way (`register_model/mod.rs:344`).
-//! - `register_model/sqlite_engine.rs:102`, in `run_sqlite_via_engine`.
-//!   That function is ungated, but every call to it is inside
-//!   `#[cfg(test)] mod tests` in `register_model/mod.rs` (which starts
-//!   at line 460; the calls are at 519-713).
+//! - `register_model::bootstrap::bootstrap` - NOT `build_ctx`, which this
+//!   paragraph named until 2026-08-20 and which does not call it and runs on
+//!   the far side of the advisory lock. The whole `bootstrap` module is
+//!   `#[cfg(any(test, feature = "test-helpers"))]`, so it is absent from a
+//!   default build. Its only caller is `run_pipeline`, gated the same way.
+//!
+//! A SECOND CALLER USED TO BE LISTED HERE and is gone, not moved: it was the
+//! dev-tier arm that drove the migration engine, and it was deleted outright
+//! when plugin-db stopped depending on the engine in any profile. An earlier
+//! version of this note pointed at a `tests/support/` fixture it had briefly
+//! become; that file does not exist either. Beyond the one call above, the
+//! only things that reach this validator are the two integration tests that
+//! call it directly to pin its refusal.
 //!
 //! What production `registerModel` does instead is in
 //! `register_model::exec_register_model`: the PG arm returns `Ok(())`

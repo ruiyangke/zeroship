@@ -1,3 +1,8 @@
+// The parity Postgres fixture chains four awaits over compio-postgres futures in one
+// block; each layer is a large generated state machine, and the default 128 is not
+// enough to compute its layout. A compile-budget knob, not a behaviour change.
+#![recursion_limit = "256"]
+
 //! SQLite-side integration tests.
 //!
 //! Behind `required-features = ["test-helpers"]`. The first four
@@ -17,6 +22,9 @@
 use std::path::PathBuf;
 
 use std::rc::Rc;
+
+#[path = "support/mod.rs"]
+mod support;
 
 #[path = "parity/mod.rs"]
 mod parity;
@@ -3517,28 +3525,103 @@ fn users_encrypted_secret_schema(key_id: &str) -> serde_json::Value {
     })
 }
 
-/// Create `collection`'s table in the dev app file BEFORE the runtime boots.
-///
-/// `dir` is the same directory `parity::sqlite_url` points the runtime at, so
-/// the engine writes `<dir>/zs-default.sqlite` - the exact file connection A
-/// will ATTACH. `default` is the app id the runtime derives with no `APP_ID` in
-/// the env snapshot.
-async fn apply_schema_ahead_of_runtime(
-    dir: &tempfile::TempDir,
-    collection: &str,
-    schema: &serde_json::Value,
-) {
-    let backend =
-        SqliteBackend::new(PathBuf::from(dir.path())).expect("open the apply-ahead backend");
-    zeroship_plugin_db::register_model::apply_declared_schema_to_dev_sqlite_for_tests(
-        &backend,
-        "default",
-        collection,
-        schema,
-        &serde_json::json!([]),
+// ---------------------------------------------------------------------------
+// RAW FIXTURE DDL for the schemas above.
+//
+// These are hand-written statements, NOT rendered from the schema JSON. plugin-db
+// does not own DDL, so a test that needs a table spells it (see
+// `support::tables` for the full argument). Each literal sits next to the
+// `*_schema` helper it must match; if they drift, the first query in the test
+// fails rather than the test agreeing with a wrong emitter.
+//
+// The seven system columns, the `["id"]` PK and the three system indexes are the
+// platform's confined table shape. `_masked` companions and the `zsenc:` /
+// `__zsmask:` comment sentinels are the data plane's own catalog markers - it
+// reads them back to learn which columns are encrypted or masked, so they are
+// load-bearing, not decoration.
+// ---------------------------------------------------------------------------
+
+/// The seven system columns and the `["id"]` primary key, SQLite spelling.
+const SYSTEM_COLUMNS_SQLITE: &str = r#"
+  id TEXT PRIMARY KEY,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_by TEXT NULL,
+  updated_by TEXT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  deleted_at TEXT NULL"#;
+
+/// The three system indexes every confined table carries.
+fn system_indexes_sqlite(app_id: &str, collection: &str) -> String {
+    format!(
+        r#"
+CREATE INDEX IF NOT EXISTS "{app_id}"."{collection}_deleted_at_idx" ON "{collection}" ("deleted_at");
+CREATE INDEX IF NOT EXISTS "{app_id}"."{collection}_updated_at_idx" ON "{collection}" ("updated_at");
+CREATE INDEX IF NOT EXISTS "{app_id}"."{collection}_created_by_idx" ON "{collection}" ("created_by");
+"#
     )
-    .await
-    .expect("apply the declared schema ahead of the runtime");
+}
+
+/// Raw DDL matching [`users_encrypted_ssn_schema`].
+fn users_encrypted_ssn_ddl(key_id: &str) -> String {
+    format!(
+        r#"CREATE TABLE IF NOT EXISTS "default"."users" ({SYSTEM_COLUMNS_SQLITE},
+  "email" TEXT NOT NULL,
+  "name" TEXT NOT NULL,
+  "ssn" BLOB /* zsenc:randomised:{key_id}:string */,
+  "ssn_masked" TEXT /* __zsmask:kind=last4,classification=spi */
+);
+{}
+CREATE UNIQUE INDEX IF NOT EXISTS "default"."users_email_key" ON "users" ("email");
+"#,
+        system_indexes_sqlite("default", "users")
+    )
+}
+
+/// Raw DDL matching [`users_encrypted_secret_schema`].
+fn users_encrypted_secret_ddl(key_id: &str) -> String {
+    format!(
+        r#"CREATE TABLE IF NOT EXISTS "default"."users" ({SYSTEM_COLUMNS_SQLITE},
+  "email" TEXT NOT NULL,
+  "name" TEXT NOT NULL,
+  "secret" BLOB /* zsenc:randomised:{key_id}:string */
+);
+{}
+CREATE UNIQUE INDEX IF NOT EXISTS "default"."users_email_key" ON "users" ("email");
+"#,
+        system_indexes_sqlite("default", "users")
+    )
+}
+
+/// Raw DDL matching [`users_deterministic_email_schema`].
+///
+/// `email` is deterministically encrypted AND unique, so it carries BOTH a plain
+/// lookup index and the unique constraint over ciphertext - that pair is what the
+/// deterministic-conflict upsert needs, and the reason this schema exists.
+fn users_deterministic_email_ddl(key_id: &str) -> String {
+    format!(
+        r#"CREATE TABLE IF NOT EXISTS "default"."users" ({SYSTEM_COLUMNS_SQLITE},
+  "email" BLOB /* zsenc:deterministic:{key_id}:string */ NOT NULL,
+  "name" TEXT NOT NULL,
+  "ssn" BLOB /* zsenc:randomised:{key_id}:string */,
+  "ssn_masked" TEXT /* __zsmask:kind=last4,classification=spi */
+);
+{}
+CREATE INDEX IF NOT EXISTS "default"."users_email_idx" ON "users" ("email");
+CREATE UNIQUE INDEX IF NOT EXISTS "default"."users_email_key" ON "users" ("email");
+"#,
+        system_indexes_sqlite("default", "users")
+    )
+}
+
+/// Create the `users` table in the dev app file BEFORE the runtime boots.
+///
+/// `dir` is the same directory `parity::sqlite_url` points the runtime at, so the
+/// fixture writes `<dir>/zs-default.sqlite` - the exact file the data plane will
+/// ATTACH. `default` is the app id the runtime derives with no `APP_ID` in the
+/// env snapshot.
+fn apply_schema_ahead_of_runtime(dir: &tempfile::TempDir, ddl: &str) {
+    crate::support::tables::create_sqlite_table(dir.path(), "default", ddl);
 }
 
 fn sqlite_runtime_source(collection: &str, schema: &serde_json::Value, body: &str) -> String {
@@ -3755,7 +3838,7 @@ fn upsert_insert_branch_auto_mints_id_sqlite_runtime() {
     run(async {
         let dir = tempfile::tempdir().expect("tempdir");
         let schema = users_encrypted_ssn_schema(key_id);
-        apply_schema_ahead_of_runtime(&dir, "users", &schema).await;
+        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl(key_id));
         let source = sqlite_runtime_source(
             "users",
             &schema,
@@ -3828,7 +3911,7 @@ fn upsert_conflict_update_preserves_insert_only_fields_and_encrypts_sqlite_runti
 
         let dir = tempfile::tempdir().expect("tempdir");
         let schema = users_encrypted_ssn_schema(key_id);
-        apply_schema_ahead_of_runtime(&dir, "users", &schema).await;
+        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl(key_id));
         let source = sqlite_runtime_source(
             "users",
             &schema,
@@ -3978,7 +4061,7 @@ fn upsert_conflict_with_deterministic_key_keeps_randomised_ciphertext_readable_s
 
         let dir = tempfile::tempdir().expect("tempdir");
         let schema = users_deterministic_email_schema(key_id);
-        apply_schema_ahead_of_runtime(&dir, "users", &schema).await;
+        apply_schema_ahead_of_runtime(&dir, &users_deterministic_email_ddl(key_id));
         let source = sqlite_runtime_source(
             "users",
             &schema,
@@ -4100,7 +4183,7 @@ fn update_non_id_filter_keeps_randomised_ciphertext_readable_sqlite_runtime() {
 
         let dir = tempfile::tempdir().expect("tempdir");
         let schema = users_encrypted_ssn_schema(key_id);
-        apply_schema_ahead_of_runtime(&dir, "users", &schema).await;
+        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl(key_id));
         let source = sqlite_runtime_source(
             "users",
             &schema,
@@ -4206,7 +4289,7 @@ fn update_many_non_id_filter_encrypts_per_row_sqlite_runtime() {
 
         let dir = tempfile::tempdir().expect("tempdir");
         let schema = users_encrypted_ssn_schema(key_id);
-        apply_schema_ahead_of_runtime(&dir, "users", &schema).await;
+        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl(key_id));
         let source = sqlite_runtime_source(
             "users",
             &schema,
@@ -4332,7 +4415,7 @@ fn plain_updates_on_encrypted_collection_stay_on_fast_path_sqlite_runtime() {
     run(async {
         let dir = tempfile::tempdir().expect("tempdir");
         let schema = users_encrypted_ssn_schema(key_id);
-        apply_schema_ahead_of_runtime(&dir, "users", &schema).await;
+        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl(key_id));
         let source = sqlite_runtime_source(
             "users",
             &schema,
@@ -4413,7 +4496,7 @@ fn plain_upsert_on_encrypted_collection_skips_conflict_probe_sqlite_runtime() {
     run(async {
         let dir = tempfile::tempdir().expect("tempdir");
         let schema = users_encrypted_secret_schema(key_id);
-        apply_schema_ahead_of_runtime(&dir, "users", &schema).await;
+        apply_schema_ahead_of_runtime(&dir, &users_encrypted_secret_ddl(key_id));
         let source = sqlite_runtime_source(
             "users",
             &schema,
@@ -4475,7 +4558,7 @@ fn update_rejects_nested_version_filter_without_mutating_sqlite_row() {
     run(async {
         let dir = tempfile::tempdir().expect("tempdir");
         let schema = users_encrypted_ssn_schema(key_id);
-        apply_schema_ahead_of_runtime(&dir, "users", &schema).await;
+        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl(key_id));
         let source = sqlite_runtime_source(
             "users",
             &schema,
@@ -4566,7 +4649,7 @@ fn update_many_rejects_nested_version_filter_without_mutating_sqlite_row() {
     run(async {
         let dir = tempfile::tempdir().expect("tempdir");
         let schema = users_encrypted_ssn_schema(key_id);
-        apply_schema_ahead_of_runtime(&dir, "users", &schema).await;
+        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl(key_id));
         let source = sqlite_runtime_source(
             "users",
             &schema,
@@ -9540,17 +9623,22 @@ fn p6b_apply_ahead_then_register_lets_the_data_plane_read_the_table() {
             "pinned": {"type": "boolean"},
         });
 
-        // The migration, ahead of the runtime, on its own backend - the stand-in
-        // for the dev server's `applyMigrationsToDevSqlite`. Dropped before the
-        // runtime's connection opens the file.
-        {
-            let applier = SqliteBackend::new(PathBuf::from(dir.path())).expect("open applier");
-            zeroship_plugin_db::register_model::apply_declared_schema_to_dev_sqlite_for_tests(
-                &applier, app, collection, &schema, &serde_json::json!([]),
-            )
-            .await
-            .expect("the migration applies the declared schema");
-        }
+        // The table, ahead of the runtime, on a connection of its own - the
+        // stand-in for the dev server's `applyMigrationsToDevSqlite`. Dropped
+        // before the runtime's connection opens the file. Raw SQL matching the
+        // `schema` registered just above; see `support::tables`.
+        crate::support::tables::create_sqlite_table(
+            dir.path(),
+            app,
+            &format!(
+                r#"CREATE TABLE IF NOT EXISTS "{app}"."{collection}" ({SYSTEM_COLUMNS_SQLITE},
+  "body" TEXT NOT NULL,
+  "pinned" INTEGER
+);
+{}"#,
+                system_indexes_sqlite(app, collection)
+            ),
+        );
 
         // Now the runtime side: a FRESH data-plane backend, the production
         // register dispatch (metadata + ATTACH), then CRUD.
@@ -9588,86 +9676,25 @@ fn p6b_apply_ahead_then_register_lets_the_data_plane_read_the_table() {
 }
 
 // ---------------------------------------------------------------------------
-// Destructive applies in dev: a schema change that DROPS a column ACTUALLY
-// applies on SQLite, data preserved per the 12-step rebuild. Contrast the OLD
-// silent-skip (`apply_sqlite` `continue`d on destructive ops, so a DROP COLUMN
-// was ignored and the dev DB diverged).
+// DELETED: the destructive-drop-column rebuild test.
 //
-// This was `p6b_destructive_drop_column_actually_applies_in_dev`, which drove
-// the two applies through `registerModel`. It drives them through the migration
-// step instead, which is where a creator's `dropColumn` now lands: edit the
-// schema, restart `pnpm dev`, the dev-server's apply reconciles the file.
+// It applied a schema that dropped a column and asserted the surviving rows
+// came through the 12-step rebuild intact. That is ENGINE behaviour, and this
+// crate no longer depends on the engine: plugin-db's tests build their tables
+// directly now (`support::tables`), and a hand-built table cannot exercise a
+// rebuild at all, so there was no version of this test to keep.
+//
+// It is covered where it belongs, live, in
+// `crates/zeroship-migrate/tests/sqlite_engine/sqlite_rebuild_apply.rs`:
+// `type_change_rebuild_preserves_data_and_recreates_index` and
+// `column_rename_rebuild_carries_data` both pin data preservation across a
+// rebuild, and `h1_drop_column_in_index_routes_to_rebuild` pins that a dropped
+// column is what routes there. Checked against that file, not assumed.
+//
+// What is NOT covered after this deletion: that plugin-db's data plane reads a
+// table the engine rebuilt, as opposed to one it created. Nothing in plugin-db
+// can produce a rebuild any more, so there is no seam left to test from here.
 // ---------------------------------------------------------------------------
-#[test]
-fn p6b_apply_ahead_drop_column_rebuilds_and_preserves_rows() {
-    run(async {
-        let dir = tempfile::tempdir().expect("create tempdir");
-        let backend = Rc::new(SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend"));
-        let app = "p6b_destructive";
-        let collection = "accounts";
-
-        // v1: accounts(label, legacy_flag). Apply, then seed a row.
-        let v1 = serde_json::json!({
-            "_meta": {"strictness": "lenient"},
-            "label": {"type": "string", "required": true},
-            "legacy_flag": {"type": "boolean"},
-        });
-        zeroship_plugin_db::register_model::apply_declared_schema_to_dev_sqlite_for_tests(
-            &backend, app, collection, &v1, &serde_json::json!([]),
-        )
-        .await
-        .expect("apply v1");
-        backend
-            .pool_exec(
-                &format!(
-                    r#"INSERT INTO "{app}"."{collection}" (id, label, legacy_flag)
-                       VALUES ('a1', 'keep-me', 1)"#
-                ),
-                &[],
-            )
-            .await
-            .expect("seed v1 row");
-
-        // v2 removes `legacy_flag` - a destructive DROP COLUMN the engine
-        // reconciles via a 12-step rebuild (auto-approved on the operator's own
-        // local file). Previously this was SILENTLY SKIPPED.
-        let v2 = serde_json::json!({
-            "_meta": {"strictness": "lenient"},
-            "label": {"type": "string", "required": true},
-        });
-        zeroship_plugin_db::register_model::apply_declared_schema_to_dev_sqlite_for_tests(
-            &backend, app, collection, &v2, &serde_json::json!([]),
-        )
-        .await
-        .expect("apply v2 (drop legacy_flag) - destructive applies in dev");
-
-        // The column is GONE (destructive op actually applied), and the row's
-        // data is preserved (12-step rebuild copied surviving columns).
-        let client = backend.acquire_dedicated_client().await.expect("client");
-        let cols = client
-            .query(&format!(r#"PRAGMA "{app}".table_info("{collection}")"#), &[])
-            .await
-            .expect("table_info");
-        let col_names: Vec<String> = cols
-            .iter()
-            .filter_map(|r| r.get(1).and_then(|c| c.clone()))
-            .collect();
-        assert!(
-            !col_names.iter().any(|c| c == "legacy_flag"),
-            "the destructive DROP COLUMN must ACTUALLY apply in dev (not silent-skip); cols: {col_names:?}"
-        );
-        assert!(col_names.iter().any(|c| c == "label"), "surviving column kept");
-        let rows = client
-            .query(
-                &format!(r#"SELECT label FROM "{app}"."{collection}" WHERE id = 'a1'"#),
-                &[],
-            )
-            .await
-            .expect("read preserved row");
-        assert_eq!(rows.len(), 1, "the row survived the 12-step rebuild");
-        assert_eq!(rows[0][0].as_deref(), Some("keep-me"), "surviving data preserved");
-    });
-}
 
 // ---------------------------------------------------------------------------
 // DELETED 2026-08-20: `p6b_baseline_adopts_a_journal_less_legacy_file`.
@@ -9686,3 +9713,5 @@ fn p6b_apply_ahead_drop_column_rebuilds_and_preserves_rows() {
 // zeroship-side adoption of a pre-existing dev file, which is fine while
 // nothing can create one, and would need re-testing the day something can.
 // ---------------------------------------------------------------------------
+
+
