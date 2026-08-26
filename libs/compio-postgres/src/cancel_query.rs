@@ -24,7 +24,7 @@
 use crate::cancel_token::CancelKey;
 use crate::client::SocketConfig;
 use crate::config::{SslMode, SslNegotiation};
-use crate::connect::with_connect_timeout;
+use crate::connect::{tls_server_name, with_connect_timeout};
 use crate::connect_tls;
 use crate::tls::{MakeTlsConnect, TlsConnect};
 use crate::{Error, Socket, cancel_query_raw, connect_socket};
@@ -53,8 +53,9 @@ where
 
     with_connect_timeout(config.connect_timeout, async move {
         let encryption = config.encryption;
+        let server_name = tls_server_name(&config.addr, config.hostname.as_deref());
         let tls = tls
-            .make_tls_connect(config.hostname.as_deref().unwrap_or(""))
+            .make_tls_connect(&server_name)
             .map_err(|e| Error::tls(e.into()))?;
         // The cancel key is a BEARER CREDENTIAL, and the connector carrying it
         // arrives from the CALLER at cancel time - `CancelToken::cancel_query`
@@ -126,8 +127,9 @@ where
 
     let stream = with_connect_timeout(config.connect_timeout, async move {
         let encryption = config.encryption;
+        let server_name = tls_server_name(&config.addr, config.hostname.as_deref());
         let tls = tls
-            .make_tls_connect(config.hostname.as_deref().unwrap_or(""))
+            .make_tls_connect(&server_name)
             .map_err(|e| Error::tls(e.into()))?;
         // The cancel key is a BEARER CREDENTIAL, and the connector carrying it
         // arrives from the CALLER at cancel time - `CancelToken::cancel_query`
