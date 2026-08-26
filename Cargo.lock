@@ -7721,8 +7721,10 @@ dependencies = [
  "zeroship-core",
  "zeroship-migrate",
  "zeroship-migrate-adapter",
+ "zeroship-migrate-backend",
  "zeroship-migrate-ir",
  "zeroship-migrate-policy",
+ "zeroship-migrate-postgres",
 ]
 
 [[package]]

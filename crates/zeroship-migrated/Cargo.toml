@@ -50,6 +50,16 @@ zeroship-migrate = { workspace = true }
 # `resolve_create_table_policy`, not the composition algebra.
 zeroship-migrate-policy = { workspace = true }
 zeroship-migrate-ir = { workspace = true }
+# The neutral contract crate, named directly for the same reason `-ir` and
+# `-policy` are: this service reads advisory rule ids off it, and the facade does
+# not re-export them.
+zeroship-migrate-backend = { workspace = true }
+# The PostgreSQL vendor crate. The neutrality refactor moved every PG-shaped
+# thing off the neutral facade into here: `migrator_role_name`, and the
+# `PostgresConfinement` that used to be `ExecutorConfig.pg`. This service is a
+# PostgreSQL host, so it names the vendor it wants rather than reaching for a
+# re-export the facade deliberately no longer carries.
+zeroship-migrate-postgres = { workspace = true }
 toml = { workspace = true }
 zeroship-migrate-adapter = { workspace = true }
 

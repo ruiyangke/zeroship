@@ -5,7 +5,7 @@
 //! engine is driver-free and no longer exports a `provision_migrator` free
 //! function (it was `&compio_postgres::Client`-typed, so it did not survive the
 //! engine's decoupling from a concrete network driver). The engine still exports
-//! [`migrator_role_name`](zeroship_migrate::migrator_role_name) (pure identifier
+//! [`migrator_role_name`](zeroship_migrate_postgres::role::migrator_role_name) (pure identifier
 //! derivation); this module supplies the DDL that establishes the least-privilege
 //! `migrator_<project>_<hash>` role.
 //!
@@ -103,12 +103,12 @@ pub async fn provision_migrator(
     admin: &Client,
     cfg: &ExecutorConfig,
 ) -> Result<(), ProvisionRoleError> {
-    let role = zeroship_migrate::migrator_role_name(&cfg.project_id)
+    let role = zeroship_migrate_postgres::role::migrator_role_name(&cfg.project_id)
         .map_err(|_| ProvisionRoleError::BadRoleName(cfg.project_id.clone()))?;
     let role_q = quote_ident(&role);
     let role_lit = quote_lit(&role);
     let proj_q = quote_ident(&cfg.project_schema);
-    let meta_q = quote_ident(&cfg.pg.meta_schema);
+    let meta_q = quote_ident(&cfg.confinement.meta_schema);
 
     // 1. Create the role idempotently with the locked-down attribute set.
     exec_retry(
@@ -170,14 +170,14 @@ pub async fn provision_migrator(
                     EXECUTE 'REVOKE ALL ON SCHEMA {meta_q} FROM {role_q}';
                 END IF;
              END $revoke$",
-            meta_lit = quote_lit(&cfg.pg.meta_schema),
+            meta_lit = quote_lit(&cfg.confinement.meta_schema),
         ),
     )
     .await?;
 
     // 6. Pin search_path: project schema FIRST, then extension schema(s).
     let mut path_parts = vec![proj_q.clone()];
-    for ext in &cfg.pg.extension_schemas {
+    for ext in &zeroship_migrate_postgres::confinement::of(cfg).extension_schemas {
         if ext != &cfg.project_schema {
             path_parts.push(quote_ident(ext));
         }
@@ -192,7 +192,7 @@ pub async fn provision_migrator(
     .await?;
 
     // 7. Confine the extension schema(s) to RESOLUTION-ONLY (REVOKE ALL, GRANT USAGE).
-    for ext in &cfg.pg.extension_schemas {
+    for ext in &zeroship_migrate_postgres::confinement::of(cfg).extension_schemas {
         if ext == &cfg.project_schema {
             continue;
         }
