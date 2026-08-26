@@ -1467,61 +1467,6 @@ async fn a3_audit_table_check_alter_upgrades_existing_constraint() {
 // through __zeroship_migrations.
 // ---------------------------------------------------------------------------
 
-#[compio::test]
-async fn a2_first_deploy_writes_audit_rows() {
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-
-    let app = "a2_first_deploy";
-    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
-        .await
-        .unwrap();
-
-    let schema = json!({
-        "email": {"type": "string", "required": true, "unique": true},
-        "name": {"type": "string"},
-    });
-
-    zeroship_plugin_db::register_model::exec_register_model_with_pool(
-        std::rc::Rc::clone(&pool),
-        app,
-        "users",
-        &schema,
-        &serde_json::json!([]),
-        "test_deploy_1",)
-    .await
-    .unwrap_or_else(|e| panic!("first deploy failed: {e}"));
-
-    // The orchestrator should have logged a create_table op + one add_index op.
-    let rows = pool
-        .query_text_params(
-            &format!(
-                "SELECT change_kind, status, deploy_id FROM \"{app}\".\"__zeroship_migrations\" \
-                 WHERE phase = 'ddl' ORDER BY id"
-            ),
-            &[],
-        )
-        .await
-        .unwrap();
-
-    assert!(rows.len() >= 2, "expected at least create_table + add_index, got {} rows", rows.len());
-    let kinds: Vec<String> = rows
-        .iter()
-        .map(|r| r.get::<_, String>("change_kind"))
-        .collect();
-    assert!(kinds.contains(&"create_table".to_string()), "audit rows: {kinds:?}");
-    assert!(kinds.contains(&"add_index".to_string()), "audit rows: {kinds:?}");
-
-    // All terminal statuses must be 'applied' for a clean deploy.
-    for row in &rows {
-        let st: String = row.get("status");
-        let kind: String = row.get("change_kind");
-        let dep: String = row.get("deploy_id");
-        assert_eq!(st, "applied", "{kind} should be applied, got {st} (deploy_id={dep})");
-        assert_eq!(dep, "test_deploy_1");
-    }
-    release_pg(pool).await;
-}
 
 // ---------------------------------------------------------------------------
 // 25. A2 — destructive change (drop_column) is refused in strict mode.
@@ -1530,82 +1475,6 @@ async fn a2_first_deploy_writes_audit_rows() {
 // pipeline actually refuses changes that would corrupt data.
 // ---------------------------------------------------------------------------
 
-#[compio::test]
-async fn a2_destructive_drop_column_refused_strict() {
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-
-    let app = "a2_destructive";
-    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
-        .await
-        .unwrap();
-
-    // First deploy — create with 'legacy_score'.
-    let v1 = json!({
-        "name": {"type": "string"},
-        "legacy_score": {"type": "number"},
-    });
-    zeroship_plugin_db::register_model::exec_register_model_with_pool(
-        std::rc::Rc::clone(&pool), app, "posts", &v1, &serde_json::json!([]), "deploy_v1",)
-    .await
-    .unwrap();
-
-    // Second deploy — drop legacy_score. Strict default should refuse.
-    let v2 = json!({
-        "name": {"type": "string"},
-    });
-    let err = zeroship_plugin_db::register_model::exec_register_model_with_pool(
-        std::rc::Rc::clone(&pool), app, "posts", &v2, &serde_json::json!([]), "deploy_v2",)
-    .await
-    .expect_err("strict deploy should refuse drop_column");
-
-    // The error must be a JSON envelope with code: validation_refused.
-    let err_str = err.to_string();
-    let parsed: serde_json::Value = serde_json::from_str(&err_str)
-        .unwrap_or_else(|_| panic!("error envelope not JSON: {err_str}"));
-    assert_eq!(parsed["code"], "validation_refused", "envelope: {parsed}");
-    assert_eq!(parsed["deploy_id"], "deploy_v2");
-    let pending = parsed["destructive_pending"].as_array().unwrap();
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0]["change_kind"], "drop_column");
-    assert_eq!(pending[0]["field"], "legacy_score");
-
-    // The audit table should show the refused op as 'validation_refused'
-    // (an INSERT-direct terminal status - no orphan-Pending window).
-    // Distinguishes "platform refused this DDL" from "DDL ran and
-    // failed" without parsing `error`.
-    let rows = pool
-        .query_text_params(
-            &format!(
-                "SELECT change_kind, status, deploy_id FROM \"{app}\".\"__zeroship_migrations\" \
-                 WHERE deploy_id = 'deploy_v2' AND change_kind = 'drop_column'"
-            ),
-            &[],
-        )
-        .await
-        .unwrap();
-    assert_eq!(rows.len(), 1);
-    let st: String = rows[0].get("status");
-    assert_eq!(
-        st, "validation_refused",
-        "refused destructive ops land in validation_refused terminal",
-    );
-
-    // The legacy_score column must still exist (refused = no DDL run).
-    let cols = pool
-        .query_text_params(
-            "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2",
-            &[app, "posts"],
-        )
-        .await
-        .unwrap();
-    let names: Vec<String> = cols.iter().map(|r| r.get::<_, String>("column_name")).collect();
-    assert!(
-        names.contains(&"legacy_score".to_string()),
-        "legacy_score must remain after refused deploy; got: {names:?}"
-    );
-    release_pg(pool).await;
-}
 
 // ---------------------------------------------------------------------------
 // 26. A2 — strictness=off allows the deploy through (destructive op is
@@ -1615,106 +1484,12 @@ async fn a2_destructive_drop_column_refused_strict() {
 // suppresses the error envelope so the rest of the schema applies).
 // ---------------------------------------------------------------------------
 
-#[compio::test]
-async fn a2_strictness_off_skips_validation_refused() {
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-
-    let app = "a2_strict_off";
-    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
-        .await
-        .unwrap();
-
-    let v1 = json!({
-        "name": {"type": "string"},
-        "legacy_score": {"type": "number"},
-    });
-    zeroship_plugin_db::register_model::exec_register_model_with_pool(
-        std::rc::Rc::clone(&pool), app, "posts", &v1, &serde_json::json!([]), "off_v1",)
-    .await
-    .unwrap();
-
-    // strictness=off — drop is silently skipped, deploy succeeds.
-    let v2 = json!({
-        "_meta": {"strictness": "off"},
-        "name": {"type": "string"},
-    });
-    let result = zeroship_plugin_db::register_model::exec_register_model_with_pool(
-        std::rc::Rc::clone(&pool), app, "posts", &v2, &serde_json::json!([]), "off_v2",)
-    .await;
-    assert!(result.is_ok(), "strictness=off should not refuse: {result:?}");
-
-    // Column still exists (we don't auto-drop).
-    let cols = pool
-        .query_text_params(
-            "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2",
-            &[app, "posts"],
-        )
-        .await
-        .unwrap();
-    let names: Vec<String> = cols.iter().map(|r| r.get::<_, String>("column_name")).collect();
-    assert!(names.contains(&"legacy_score".to_string()));
-    release_pg(pool).await;
-}
 
 // ---------------------------------------------------------------------------
 // 27. A2 — additive change (add nullable column) auto-applies on a
 // non-empty table.
 // ---------------------------------------------------------------------------
 
-#[compio::test]
-async fn a2_additive_add_column_applied() {
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-
-    let app = "a2_additive";
-    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
-        .await
-        .unwrap();
-
-    let v1 = json!({"name": {"type": "string"}});
-    zeroship_plugin_db::register_model::exec_register_model_with_pool(
-        std::rc::Rc::clone(&pool), app, "items", &v1, &serde_json::json!([]), "add_v1",)
-    .await
-    .unwrap();
-
-    // Add a nullable column.
-    let v2 = json!({
-        "name": {"type": "string"},
-        "description": {"type": "string"},
-    });
-    zeroship_plugin_db::register_model::exec_register_model_with_pool(
-        std::rc::Rc::clone(&pool), app, "items", &v2, &serde_json::json!([]), "add_v2",)
-    .await
-    .unwrap();
-
-    // Verify column exists.
-    let cols = pool
-        .query_text_params(
-            "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2",
-            &[app, "items"],
-        )
-        .await
-        .unwrap();
-    let names: Vec<String> = cols.iter().map(|r| r.get::<_, String>("column_name")).collect();
-    assert!(names.contains(&"description".to_string()), "got: {names:?}");
-
-    // Audit row for the add_column op exists with status applied.
-    let rows = pool
-        .query_text_params(
-            &format!(
-                "SELECT status FROM \"{app}\".\"__zeroship_migrations\" \
-                 WHERE deploy_id = 'add_v2' AND change_kind = 'add_column'"
-            ),
-            &[],
-        )
-        .await
-        .unwrap();
-    assert_eq!(rows.len(), 1);
-    let st: String = rows[0].get("status");
-    assert_eq!(st, "applied");
-    release_pg(pool).await;
-}
 
 // ---------------------------------------------------------------------------
 // 28. A2 — adding a NOT NULL column to a non-empty table without default
@@ -1723,56 +1498,6 @@ async fn a2_additive_add_column_applied() {
 // Self-assessment: this is the proposal's headline data-corruption guard.
 // ---------------------------------------------------------------------------
 
-#[compio::test]
-async fn a2_not_null_on_non_empty_refused() {
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-
-    let app = "a2_notnull";
-    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
-        .await
-        .unwrap();
-
-    // v1: schema with 'name' field.
-    let v1 = json!({"name": {"type": "string"}});
-    zeroship_plugin_db::register_model::exec_register_model_with_pool(
-        std::rc::Rc::clone(&pool), app, "people", &v1, &serde_json::json!([]), "nn_v1",)
-    .await
-    .unwrap();
-
-    // Insert some data so the table is non-empty.
-    let bq = build_insert(app, "people", &with_seed_id(json!({"name": "alice"}))).unwrap();
-    exec_mutation(&pool, bq).await;
-    let bq = build_insert(app, "people", &with_seed_id(json!({"name": "bob"}))).unwrap();
-    exec_mutation(&pool, bq).await;
-    // ANALYZE to populate reltuples (estimate_row_count reads pg_class.reltuples).
-    pool.execute(&format!("ANALYZE \"{app}\".\"people\""), &[])
-        .await
-        .unwrap();
-
-    // v2: add required column without default. On a non-empty table this
-    // is destructive (Postgres would reject NOT NULL with no default on
-    // existing rows).
-    let v2 = json!({
-        "name": {"type": "string"},
-        "ssn": {"type": "string", "required": true},
-    });
-    let err = zeroship_plugin_db::register_model::exec_register_model_with_pool(
-        std::rc::Rc::clone(&pool), app, "people", &v2, &serde_json::json!([]), "nn_v2",)
-    .await
-    .expect_err("NOT NULL add on non-empty table should be refused");
-
-    let err_str = err.to_string();
-    let parsed: serde_json::Value = serde_json::from_str(&err_str).unwrap();
-    assert_eq!(parsed["code"], "validation_refused");
-    let pending = parsed["destructive_pending"].as_array().unwrap();
-    let ssn_op = pending
-        .iter()
-        .find(|p| p["field"] == "ssn")
-        .expect("ssn add_column op should be listed");
-    assert_eq!(ssn_op["change_kind"], "add_column");
-    release_pg(pool).await;
-}
 
 // ---------------------------------------------------------------------------
 // 30. A2 — concurrent registerModel calls serialise via the two-key
@@ -1788,171 +1513,70 @@ async fn a2_not_null_on_non_empty_refused() {
 // both deploys but only one create_table op.
 // ---------------------------------------------------------------------------
 
-#[compio::test]
-async fn a2_concurrent_deploys_serialise_via_advisory_lock() {
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 8).await.unwrap());
-
-    let app = "a2_concurrent";
-    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
-        .await
-        .unwrap();
-
-    let schema = json!({
-        "name": {"type": "string"},
-        "tag": {"type": "string", "index": true},
-    });
-
-    // Sequential calls against the same app + same schema: the second
-    // sees the table as already present (the first applied it under
-    // the advisory lock) and produces a no-op diff. Verifies the
-    // **idempotency** dimension of the lock contract — two callers
-    // converge on the same result instead of emitting conflicting DDL.
-    //
-    // True concurrency under the compio single-runtime test harness
-    // would require a multi-threaded runtime (compio is per-thread,
-    // and `compio::runtime::spawn` schedules on the same thread). The
-    // sequential variant is sufficient to verify the lock-acquire /
-    // release / re-diff path without needing a second OS thread.
-    zeroship_plugin_db::register_model::exec_register_model_with_pool(
-        std::rc::Rc::clone(&pool),
-        "a2_concurrent",
-        "races",
-        &schema,
-        &serde_json::json!([]),
-        "concurrent_a",)
-    .await
-    .expect("first deploy under lock");
-
-    zeroship_plugin_db::register_model::exec_register_model_with_pool(
-        std::rc::Rc::clone(&pool),
-        "a2_concurrent",
-        "races",
-        &schema,
-        &serde_json::json!([]),
-        "concurrent_b",)
-    .await
-    .expect("second deploy under lock (lock acquired + released + re-diff)");
-
-    // Exactly one create_table op across both deploys (the second saw
-    // the table as already present and skipped it).
-    let rows = pool
-        .query_text_params(
-            &format!(
-                "SELECT COUNT(*) AS n FROM \"{app}\".\"__zeroship_migrations\" WHERE change_kind = 'create_table'"
-            ),
-            &[],
-        )
-        .await
-        .unwrap();
-    let n: i64 = rows[0].get("n");
-    assert_eq!(n, 1, "exactly one create_table should be recorded across the two serialised deploys");
-
-    // Verify the lock is actually being acquired+released by checking
-    // pg_locks during a real call. Open a separate session that calls
-    // pg_try_advisory_lock with the same key — it should succeed when
-    // the orchestrator is idle (proves the lock is released cleanly).
-    let try_lock = pool
-        .query_text_params(
-            "SELECT pg_try_advisory_lock(hashtext('zs_reg:a2_concurrent')::int4, hashtext('register_model')::int4) AS got",
-            &[],
-        )
-        .await
-        .unwrap();
-    let got: bool = try_lock[0].get("got");
-    assert!(got, "advisory lock should be available after orchestrator returns");
-
-    // Release it so the test connection cleans up.
-    let _ = pool
-        .query_text_params(
-            "SELECT pg_advisory_unlock(hashtext('zs_reg:a2_concurrent')::int4, hashtext('register_model')::int4)",
-            &[],
-        )
-        .await;
-    release_pg(pool).await;
-}
 
 // ---------------------------------------------------------------------------
 // 31. A2 — adding a required column WITH a default literal is compatible.
 // ---------------------------------------------------------------------------
 
-#[compio::test]
-async fn a2_required_with_default_is_compatible() {
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-
-    let app = "a2_reqdefault";
-    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
-        .await
-        .unwrap();
-
-    let v1 = json!({"name": {"type": "string"}});
-    zeroship_plugin_db::register_model::exec_register_model_with_pool(
-        std::rc::Rc::clone(&pool), app, "things", &v1, &serde_json::json!([]), "rd_v1",)
-    .await
-    .unwrap();
-
-    // Insert + analyze to make non-empty.
-    let bq = build_insert(app, "things", &with_seed_id(json!({"name": "x"}))).unwrap();
-    exec_mutation(&pool, bq).await;
-    pool.execute(&format!("ANALYZE \"{app}\".\"things\""), &[])
-        .await
-        .unwrap();
-
-    let v2 = json!({
-        "name": {"type": "string"},
-        "status": {"type": "string", "required": true, "default": "active"},
-    });
-    zeroship_plugin_db::register_model::exec_register_model_with_pool(
-        std::rc::Rc::clone(&pool), app, "things", &v2, &serde_json::json!([]), "rd_v2",)
-    .await
-    .unwrap_or_else(|e| panic!("required-with-default should be compatible: {e}"));
-
-    // Status column should exist with the default applied to existing rows.
-    let rows = pool
-        .query_text_params(
-            &format!("SELECT status FROM \"{app}\".\"things\""),
-            &[],
-        )
-        .await
-        .unwrap();
-    let st: String = rows[0].get("status");
-    assert_eq!(st, "active");
-    release_pg(pool).await;
-}
 // ---------------------------------------------------------------------------
 // B2 — typed cross-table relations: foreign keys at the DB level
 // ---------------------------------------------------------------------------
 
-/// Helper: register two collections where `posts.authorId` is t.ref("users").
+/// The seven platform system columns, PostgreSQL spelling.
+///
+/// Hand-written, not rendered. plugin-db does not own DDL, so a test that needs
+/// a table spells it; a fixture rendered by the layer under test cannot detect
+/// that layer being wrong. Same argument as `tests/support/tables.rs` on the
+/// SQLite side.
+const PG_SYSTEM_COLUMNS: &str = r#"
+  id TEXT PRIMARY KEY,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_by TEXT NULL,
+  updated_by TEXT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  deleted_at TIMESTAMPTZ NULL"#;
+
+/// The three system indexes every confined table carries.
+fn pg_system_indexes(app: &str, coll: &str) -> String {
+    format!(
+        r#"
+CREATE INDEX IF NOT EXISTS "{coll}_deleted_at_idx" ON "{app}"."{coll}" ("deleted_at");
+CREATE INDEX IF NOT EXISTS "{coll}_updated_at_idx" ON "{app}"."{coll}" ("updated_at");
+CREATE INDEX IF NOT EXISTS "{coll}_created_by_idx" ON "{app}"."{coll}" ("created_by");
+"#
+    )
+}
+
+/// Helper: build `users` and `posts` where `posts.authorId` references `users`.
+///
+/// RAW SQL, not `registerModel`. registerModel registers metadata and applies no
+/// schema (production `exec_register_model` returns `Ok(())` on PostgreSQL), so
+/// a test that wants tables has to create them. The FK carries NO `ON DELETE`
+/// clause, which is what `t.ref` emits by default and what PostgreSQL records as
+/// `confdeltype = 'a'` (NO ACTION) - the variants that need CASCADE or RESTRICT
+/// spell their own.
 async fn b2_setup_users_posts(pool: &std::rc::Rc<Pool>, app: &str) {
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
         .await
         .unwrap();
-    // Users first so the FK target exists when posts is created.
-    let users_schema = json!({"name": {"type": "string", "required": true}});
-    zeroship_plugin_db::register_model::exec_register_model_with_pool(
-        std::rc::Rc::clone(pool),
-        app,
-        "users",
-        &users_schema,
-        &serde_json::json!([]),
-        "b2_v1",)
+    pool.batch_execute(&format!(
+        r#"CREATE SCHEMA "{app}";
+CREATE TABLE "{app}"."users" ({PG_SYSTEM_COLUMNS},
+  "name" TEXT NOT NULL
+);
+{users_idx}
+CREATE TABLE "{app}"."posts" ({PG_SYSTEM_COLUMNS},
+  "title" TEXT NOT NULL,
+  "authorId" TEXT,
+  CONSTRAINT "authorId_fkey" FOREIGN KEY ("authorId") REFERENCES "{app}"."users" ("id")
+);
+{posts_idx}"#,
+        users_idx = pg_system_indexes(app, "users"),
+        posts_idx = pg_system_indexes(app, "posts"),
+    ))
     .await
-    .expect("users registerModel");
-    let posts_schema = json!({
-        "title": {"type": "string", "required": true},
-        "authorId": {"type": "ref", "refTarget": "users"},
-    });
-    zeroship_plugin_db::register_model::exec_register_model_with_pool(
-        std::rc::Rc::clone(pool),
-        app,
-        "posts",
-        &posts_schema,
-        &serde_json::json!([]),
-        "b2_v1",)
-    .await
-    .expect("posts registerModel");
+    .expect("b2 users + posts fixture");
 }
 
 #[compio::test]
@@ -2095,20 +1719,27 @@ async fn b2_ref_on_delete_cascade_deletes_children() {
         .await
         .unwrap();
 
-    let users_schema = json!({"name": {"type": "string", "required": true}});
-    zeroship_plugin_db::register_model::exec_register_model_with_pool(
-        std::rc::Rc::clone(&pool), app, "users", &users_schema, &serde_json::json!([]), "b2_cas_v1",)
+    // Raw SQL, and the `ON DELETE CASCADE` is the point of the test - it is what
+    // `"onDelete": "cascade"` on a `t.ref` emits, spelled here because
+    // registerModel applies no schema.
+    pool.batch_execute(&format!(
+        r#"CREATE SCHEMA "{app}";
+CREATE TABLE "{app}"."users" ({PG_SYSTEM_COLUMNS},
+  "name" TEXT NOT NULL
+);
+{users_idx}
+CREATE TABLE "{app}"."posts" ({PG_SYSTEM_COLUMNS},
+  "title" TEXT NOT NULL,
+  "authorId" TEXT,
+  CONSTRAINT "authorId_fkey" FOREIGN KEY ("authorId")
+    REFERENCES "{app}"."users" ("id") ON DELETE CASCADE
+);
+{posts_idx}"#,
+        users_idx = pg_system_indexes(app, "users"),
+        posts_idx = pg_system_indexes(app, "posts"),
+    ))
     .await
-    .unwrap();
-    // cascade override
-    let posts_schema = json!({
-        "title": {"type": "string", "required": true},
-        "authorId": {"type": "ref", "refTarget": "users", "onDelete": "cascade"},
-    });
-    zeroship_plugin_db::register_model::exec_register_model_with_pool(
-        std::rc::Rc::clone(&pool), app, "posts", &posts_schema, &serde_json::json!([]), "b2_cas_v1",)
-    .await
-    .unwrap();
+    .expect("cascade fixture");
 
     // Insert user + 3 posts that reference it. `id` is
     // `TEXT PRIMARY KEY` (no DB default), so seed inserts must supply text ids.
@@ -2282,87 +1913,6 @@ SELECT con.conname AS name, con.condeferrable AS def, con.condeferred AS init_de
     release_pg(pool).await;
 }
 
-#[compio::test]
-async fn b2_adding_fk_to_existing_data_validates() {
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-
-    let app = "b2_existing_data";
-    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
-        .await
-        .unwrap();
-
-    // V1 — users + posts with a bare number column.
-    let users_schema = json!({"name": {"type": "string", "required": true}});
-    zeroship_plugin_db::register_model::exec_register_model_with_pool(
-        std::rc::Rc::clone(&pool), app, "users", &users_schema, &serde_json::json!([]), "v1",)
-    .await
-    .unwrap();
-    // `id` is `TEXT PRIMARY KEY`, so the FK target
-    // (`users.id`) is text -- `authorId` must be a text-shaped column to later
-    // become a `t.ref("users")`.
-    let posts_schema_v1 = json!({
-        "title": {"type": "string", "required": true},
-        "authorId": {"type": "string"},
-    });
-    zeroship_plugin_db::register_model::exec_register_model_with_pool(
-        std::rc::Rc::clone(&pool), app, "posts", &posts_schema_v1, &serde_json::json!([]), "v1",)
-    .await
-    .unwrap();
-
-    // Insert valid + orphan rows. Seed inserts must supply a text `id`.
-    let urows = pool
-        .query_text_params(
-            &format!(
-                "INSERT INTO \"{app}\".\"users\" (\"id\", \"name\") VALUES ($1, $2) RETURNING id"
-            ),
-            &["usr_b2_existing_1", "alice"],
-        )
-        .await
-        .unwrap();
-    let valid_uid: String = urows[0].get("id");
-    pool.query_text_params(
-        &format!(
-            "INSERT INTO \"{app}\".\"posts\" (\"id\", \"title\", \"authorId\") VALUES ($1, $2, $3)"
-        ),
-        &["pst_b2_existing_valid", "valid", &valid_uid],
-    )
-    .await
-    .unwrap();
-    pool.query_text_params(
-        &format!(
-            "INSERT INTO \"{app}\".\"posts\" (\"id\", \"title\", \"authorId\") VALUES ($1, $2, $3)"
-        ),
-        &["pst_b2_existing_orphan", "orphan", "usr_does_not_exist"],
-    )
-    .await
-    .unwrap();
-
-    // V2 — declare authorId as t.ref("users"). The orchestrator should
-    // detect the live column already exists, classify the FK as
-    // Compatible, and attempt the ALTER TABLE ADD CONSTRAINT, which
-    // Postgres will refuse because the orphan row violates the FK.
-    let posts_schema_v2 = json!({
-        "title": {"type": "string", "required": true},
-        "authorId": {"type": "ref", "refTarget": "users"},
-    });
-    let res = zeroship_plugin_db::register_model::exec_register_model_with_pool(
-        std::rc::Rc::clone(&pool), app, "posts", &posts_schema_v2, &serde_json::json!([]), "v2",)
-    .await;
-    assert!(
-        res.is_err(),
-        "adding FK with orphan rows must fail; got: {res:?}"
-    );
-    let err = res.unwrap_err();
-    let err_str = err.to_string();
-    assert!(
-        err_str.contains("foreign key")
-            || err_str.contains("23503")
-            || err_str.contains("add_foreign_key"),
-        "expected FK validation failure, got: {err_str}"
-    );
-    release_pg(pool).await;
-}
 
 // ===========================================================================
 // Replication slot + publication setup, watchdog, broker plumbing.
@@ -5335,16 +4885,33 @@ async fn p4_round_trip_encrypted_masked_vector_via_introspected_metadata() {
 
     // registerModel creates the table AND writes the sentinels
     // (zsenc COMMENT on `ssn`, __zsmask COMMENT on `phone_masked`).
-    zeroship_plugin_db::register_model::exec_register_model_with_pool(
-        std::rc::Rc::clone(&pool),
-        app,
-        "people",
-        &schema,
-        &serde_json::json!([]),
-        "p4_deploy_1",
-    )
+    // Raw SQL, with the sentinels the introspected round trip depends on.
+    //
+    // ONE THING HERE IS NOT A FAITHFUL REPRODUCTION, and it is called out rather
+    // than hidden: `embedding` gets a bare `vector(3)` column and NO ANN index.
+    // The declared schema asks for a cosine vector index, and that index's DDL
+    // is built by the pgvector adapter in the backend, not by the shared
+    // emitter - it is not recoverable as a literal the way the rest of this is.
+    // The column and its dimensionality are faithful; the index is absent. If a
+    // future assertion here depends on the ANN index existing, it will fail, and
+    // that failure is correct.
+    pool.batch_execute(&format!(
+        r#"CREATE SCHEMA IF NOT EXISTS "{app}";
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
+  "name" TEXT NOT NULL,
+  "ssn" BYTEA,
+  "phone" TEXT,
+  "phone_masked" TEXT,
+  "embedding" vector(3)
+);
+{idx}
+COMMENT ON COLUMN "{app}"."people"."ssn" IS 'zsenc:randomised:default:string';
+COMMENT ON COLUMN "{app}"."people"."phone_masked" IS '__zsmask:kind=last4,classification=pci';"#,
+        idx = pg_system_indexes(app, "people"),
+    ))
     .await
-    .unwrap_or_else(|e| panic!("registerModel failed: {e}"));
+    .unwrap_or_else(|e| panic!("p4 people fixture failed: {e}"));
 
     // Install the pool into the per-isolate context so
     // `runtime_schema_for` can introspect, and mark the model registered (the
@@ -5604,16 +5171,26 @@ async fn p5_pg_crud_works_via_engine_created_schema_no_runtime_ddl() {
     // === Simulate the engine/deploy-apply: create the table + sentinels. ===
     // This is the SAME DDL/sentinel emission the relocated engine uses;
     // we drive it once via the pipeline to stand in for the deploy-time apply.
-    zeroship_plugin_db::register_model::exec_register_model_with_pool(
-        std::rc::Rc::clone(&pool),
-        app,
-        "people",
-        &schema,
-        &json!([]),
-        "engine_deploy_1",
-    )
+    // The deploy stand-in, as raw SQL. The `COMMENT ON COLUMN` sentinels are
+    // load-bearing, not decoration: `runtime_schema_for` reads them back to
+    // learn that `ssn` is encrypted and `phone_masked` carries a last4/pci mask.
+    // Drop them and this test still creates a table, but the round trip it
+    // exists to prove silently stops happening.
+    pool.batch_execute(&format!(
+        r#"CREATE SCHEMA IF NOT EXISTS "{app}";
+CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
+  "name" TEXT NOT NULL,
+  "ssn" BYTEA,
+  "phone" TEXT,
+  "phone_masked" TEXT
+);
+{idx}
+COMMENT ON COLUMN "{app}"."people"."ssn" IS 'zsenc:randomised:default:string';
+COMMENT ON COLUMN "{app}"."people"."phone_masked" IS '__zsmask:kind=last4,classification=pci';"#,
+        idx = pg_system_indexes(app, "people"),
+    ))
     .await
-    .unwrap_or_else(|e| panic!("engine schema build (deploy stand-in) failed: {e}"));
+    .unwrap_or_else(|e| panic!("people fixture (deploy stand-in) failed: {e}"));
 
     // Snapshot the audit journal AFTER the engine's apply — the runtime dispatch
     // below must not add to it.
@@ -6273,86 +5850,7 @@ async fn snapshot_uri_content_hash_round_trip() {
 // invalid-identifier error at deploy time, NOT silent acceptance.
 // ---------------------------------------------------------------------------
 
-/// A schema declaring a column whose name ends in `_masked` must be
-/// refused at `register_model` time. The reserved suffix is owned by
-/// the Path B sibling-column emission; creators cannot collide
-/// with it.
-#[compio::test]
-async fn p55_pr1_register_model_refuses_masked_suffix_field() {
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
-    let app = "p55_masked_suffix";
-    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
-        .await
-        .unwrap();
-
-    let schema = json!({
-        "name": {"type": "string"},
-        // creator-declared `ssn_masked` would collide with the
-        // platform's sibling-column emission. Refuse at register_model.
-        "ssn_masked": {"type": "string"},
-    });
-
-    let err = zeroship_plugin_db::register_model::exec_register_model_with_pool(
-        std::rc::Rc::clone(&pool),
-        app,
-        "users",
-        &schema,
-        &serde_json::json!([]),
-        "p55_pr1_deploy_masked",
-    )
-    .await
-    .expect_err("schema with `_masked` suffix should be refused");
-
-    let msg = err.to_string();
-    assert!(
-        msg.contains("reserved field name") && msg.contains("_masked"),
-        "expected reserved-suffix message, got: {msg}"
-    );
-    release_pg(pool).await;
-}
-
-/// A schema declaring a column named after one of the six default
-/// classifications (`public`, `pii`, `spi`, `phi`, `pci`, `internal`)
-/// must be refused at `register_model` time. These names are reserved
-/// at the column-name level so the classification taxonomy stays
-/// non-overlapping with creator-declared columns.
-#[compio::test]
-async fn p55_pr1_register_model_refuses_reserved_classification_field() {
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-
-    let app = "p55_classification";
-    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
-        .await
-        .unwrap();
-
-    let schema = json!({
-        "name": {"type": "string"},
-        // creator-declared `pii` would collide with the platform's
-        // classification taxonomy used by authorization + audit.
-        "pii": {"type": "string"},
-    });
-
-    let err = zeroship_plugin_db::register_model::exec_register_model_with_pool(
-        std::rc::Rc::clone(&pool),
-        app,
-        "users",
-        &schema,
-        &serde_json::json!([]),
-        "p55_pr1_deploy_classification",
-    )
-    .await
-    .expect_err("schema with reserved classification name should be refused");
-
-    let msg = err.to_string();
-    assert!(
-        msg.contains("reserved field name"),
-        "expected reserved-name message, got: {msg}"
-    );
-    release_pg(pool).await;
-}
 
 // ---------------------------------------------------------------------------
 // Per-app PG role hardening (§17.5).
@@ -7682,133 +7180,6 @@ async fn drop_namespace_retries_from_step_3_on_partial_failure() {
     release_pg(pool).await;
 }
 
-// ---------------------------------------------------------------------------
-// The deploy-keyed introspection cache invalidates on a REAL deploy bump.
-//
-// Regression for `deploy-id-never-set-cache-invalidation-inert`: the
-// introspected-schema cache was keyed on `std::env::var("ZEROSHIP_DEPLOY_ID")`,
-// which NOTHING in worker/runtime/control ever set — so the token was pinned at
-// `"cold_start"` for the life of a long-lived worker isolate and the cache NEVER
-// invalidated. After a redeploy ALTERed the schema (e.g. added a masked column),
-// the runtime kept applying the STALE metadata it cached at first-introspection,
-// silently dropping the new column's mask/crypto behaviour.
-//
-// The fix re-keys the cache on the per-app deploy token the worker now injects as
-// `ZEROSHIP_DEPLOY_ID` (= the app's `deploy_hash`), stamped into the per-isolate
-// context at `mint_db` and read via `IsolateDbContext::deploy_token_for`. This
-// test drives the FAITHFUL path: register v1, introspect+cache under token
-// `deploy_1`, ALTER to v2 via the same engine register path, and prove:
-//   (a) WITHOUT bumping the token the cache holds the v1 result (no re-introspect);
-//   (b) bumping the token to `deploy_2` invalidates the entry and re-introspection
-//       surfaces the v2 column's mask metadata.
-//
-// PRE-FIX this test FAILS at assertion (b): the old `deploy_token()` ignored the
-// stamped token entirely (read the never-set env var → always `"cold_start"`), so
-// the bumped token had no effect and the stale v1 schema (no `phone` mask) was
-// returned.
-#[compio::test]
-async fn t6_introspection_cache_invalidates_on_deploy_token_bump() {
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-    // "f", not the "t" this fixture carried while it was an env var. "t" is
-    // not a hex digit, so that root could never have decoded; the env path
-    // only found out at first `resolve_key`, and this test never encrypts
-    // anything, so the bad fixture sat here unreported. Supplied roots parse
-    // on install, which is where a fixture typo should surface.
-    let _keys = with_root_key("default", &"f".repeat(64));
-
-    let app = "t6_deploy_cache";
-    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
-        .await
-        .unwrap();
-
-    // ===== Deploy 1: a goodie-FREE collection (plain `name`). =====
-    let schema_v1 = json!({
-        "name": {"type": "string", "required": true},
-    });
-    zeroship_plugin_db::register_model::exec_register_model_with_pool(
-        std::rc::Rc::clone(&pool),
-        app,
-        "people",
-        &schema_v1,
-        &json!([]),
-        "deploy_1",
-    )
-    .await
-    .unwrap_or_else(|e| panic!("deploy 1 register failed: {e}"));
-
-    // Install the PG backend, mark readiness, and stamp the per-app deploy token
-    // exactly as `mint_db` does from the worker-injected `ZEROSHIP_DEPLOY_ID`.
-    zeroship_plugin_db::set_postgres_pool_for_tests(std::rc::Rc::clone(&pool), &url);
-    zeroship_plugin_db::mark_model_registered_for_tests(app, "people");
-    zeroship_plugin_db::set_deploy_token_for_tests(app, "deploy_1");
-
-    // First introspection under `deploy_1`: collection has no goodies → the
-    // schema carries `name` but no `phone` field (and no mask anywhere). This
-    // result is now cached under the `deploy_1` token.
-    let v1 = zeroship_plugin_db::crud::runtime_schema_for_tests(app, "people")
-        .await
-        .expect("introspect v1")
-        .expect("table exists → Some");
-    assert_eq!(v1["name"]["type"], "string");
-    assert!(
-        v1.get("phone").is_none(),
-        "deploy 1 has no phone column yet, got {v1:?}"
-    );
-
-    // ===== Deploy 2: ALTER to add a MASKED `phone` column (engine path). =====
-    let schema_v2 = json!({
-        "name": {"type": "string", "required": true},
-        "phone": {
-            "type": "string",
-            "mask": {"kind": "last4", "classification": "pci"}
-        },
-    });
-    zeroship_plugin_db::register_model::exec_register_model_with_pool(
-        std::rc::Rc::clone(&pool),
-        app,
-        "people",
-        &schema_v2,
-        &json!([]),
-        "deploy_2",
-    )
-    .await
-    .unwrap_or_else(|e| panic!("deploy 2 register (add masked column) failed: {e}"));
-
-    // (a) The catalog NOW has the masked `phone` column, but until the deploy
-    // token is bumped the per-isolate cache must still return the v1 result —
-    // this proves the cache is real (not re-introspecting every call) AND that
-    // the only thing that should invalidate it is a deploy bump.
-    let still_cached = zeroship_plugin_db::crud::runtime_schema_for_tests(app, "people")
-        .await
-        .expect("introspect (still deploy_1 token)")
-        .expect("table exists → Some");
-    assert!(
-        still_cached.get("phone").is_none(),
-        "cache must hold the deploy_1 result until the deploy token bumps, got {still_cached:?}"
-    );
-
-    // (b) Simulate the redeploy: bump the per-app deploy token (a new
-    // `deploy_hash` → new `ZEROSHIP_DEPLOY_ID` injected at the next isolate
-    // load). The cache entry is now stale and must be re-introspected, surfacing
-    // the masked `phone` column's metadata. PRE-FIX this assertion fails — the
-    // token bump was inert because the cache keyed off the never-set env var.
-    zeroship_plugin_db::set_deploy_token_for_tests(app, "deploy_2");
-    let v2 = zeroship_plugin_db::crud::runtime_schema_for_tests(app, "people")
-        .await
-        .expect("introspect v2")
-        .expect("table exists → Some");
-    assert_eq!(
-        v2["phone"]["mask"]["kind"], "last4",
-        "deploy bump must re-introspect and surface the new masked column, got {v2:?}"
-    );
-    assert_eq!(v2["phone"]["mask"]["classification"], "pci");
-
-    let _ = pool
-        .execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
-        .await;
-    release_pg(pool).await;
-}
 
 /// A new test must not open a pool or raw client without teardown.
 ///

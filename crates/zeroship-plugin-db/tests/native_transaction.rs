@@ -169,24 +169,30 @@ fn reset_schema(url: &str) {
             .unwrap();
         drop(client);
 
-        // Engine/deploy stand-in: create the `notes` table (engine is the PG
-        // schema authority post-cutover). The per-isolate context needs the URL
-        // so the pipeline's dedicated-client acquisition resolves it.
+        // Deploy stand-in, as RAW SQL. `zeroship-migrate` is the PG schema
+        // authority; registerModel applies no DDL, so a test that needs the
+        // `notes` table creates it. The per-isolate context still needs the URL
+        // for the transaction orchestrator under test.
         zeroship_plugin_db::set_db_url_for_tests(&url);
         let pool = std::rc::Rc::new(compio_postgres::Pool::connect(&url, 2).await.unwrap());
-        let schema = serde_json::json!({
-            "title": { "type": "string", "required": true },
-        });
-        zeroship_plugin_db::register_model::exec_register_model_with_pool(
-            pool,
-            APP_SCHEMA,
-            "notes",
-            &schema,
-            &serde_json::json!([]),
-            "engine_deploy_notes",
-        )
+        pool.batch_execute(&format!(
+            r#"CREATE SCHEMA IF NOT EXISTS "{APP_SCHEMA}";
+CREATE TABLE "{APP_SCHEMA}"."notes" (
+  id TEXT PRIMARY KEY,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_by TEXT NULL,
+  updated_by TEXT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  deleted_at TIMESTAMPTZ NULL,
+  "title" TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS "notes_deleted_at_idx" ON "{APP_SCHEMA}"."notes" ("deleted_at");
+CREATE INDEX IF NOT EXISTS "notes_updated_at_idx" ON "{APP_SCHEMA}"."notes" ("updated_at");
+CREATE INDEX IF NOT EXISTS "notes_created_by_idx" ON "{APP_SCHEMA}"."notes" ("created_by");"#
+        ))
         .await
-        .expect("engine/deploy stand-in must create the notes table");
+        .expect("deploy stand-in must create the notes table");
         drain_open_connections().await;
     });
 }
