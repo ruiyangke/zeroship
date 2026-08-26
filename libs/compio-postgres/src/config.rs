@@ -771,6 +771,9 @@ pub struct Config {
     pub(crate) statement_cache_capacity: usize,
     pub(crate) statement_cache_execution_threshold: NonZeroUsize,
     pub(crate) ssl_mode: SslMode,
+    /// Whether the caller selected `sslmode`, as opposed to observing its
+    /// compiled default. `sslrootcert=system` may strengthen only the latter.
+    pub(crate) ssl_mode_explicit: bool,
     pub(crate) ssl_negotiation: SslNegotiation,
     pub(crate) ssl_root_cert: SslRootCert,
     pub(crate) ssl_cert: Option<String>,
@@ -827,6 +830,7 @@ impl Config {
             statement_cache_capacity: 0,
             statement_cache_execution_threshold: NonZeroUsize::MIN,
             ssl_mode: SslMode::Prefer,
+            ssl_mode_explicit: false,
             ssl_negotiation: SslNegotiation::Postgres,
             ssl_root_cert: SslRootCert::Unset,
             ssl_cert: None,
@@ -1181,9 +1185,11 @@ impl Config {
 
     /// Sets the SSL configuration.
     ///
-    /// Defaults to `prefer`.
+    /// Defaults to `prefer`, except that `sslrootcert=system` strengthens an
+    /// otherwise implicit default to `verify-full` as libpq does.
     pub fn ssl_mode(&mut self, ssl_mode: SslMode) -> &mut Config {
         self.ssl_mode = ssl_mode;
+        self.ssl_mode_explicit = true;
         self
     }
 
@@ -1210,6 +1216,13 @@ impl Config {
     /// Defaults to [`SslRootCert::Unset`].
     pub fn ssl_root_cert(&mut self, ssl_root_cert: SslRootCert) -> &mut Config {
         self.ssl_root_cert = ssl_root_cert;
+        if !self.ssl_mode_explicit {
+            self.ssl_mode = if self.ssl_root_cert == SslRootCert::System {
+                SslMode::VerifyFull
+            } else {
+                SslMode::Prefer
+            };
+        }
         self
     }
 
@@ -3974,6 +3987,29 @@ mod tests {
             .unwrap()
             .validate_connection_settings()
             .expect("verify-full is the mode sslrootcert=system exists for");
+    }
+
+    #[test]
+    fn sslrootcert_system_strengthens_only_the_implicit_sslmode() {
+        let implicit = "host=h sslrootcert=system".parse::<Config>().unwrap();
+        assert_eq!(implicit.get_ssl_mode(), SslMode::VerifyFull);
+        implicit
+            .validate_connection_settings()
+            .expect("system roots derive verify-full when sslmode is omitted");
+
+        let mut built = Config::new();
+        built.ssl_root_cert(SslRootCert::System);
+        assert_eq!(built.get_ssl_mode(), SslMode::VerifyFull);
+
+        for dsn in [
+            "host=h sslmode=prefer sslrootcert=system",
+            "host=h sslrootcert=system sslmode=prefer",
+        ] {
+            dsn.parse::<Config>()
+                .unwrap()
+                .validate_connection_settings()
+                .expect_err("an explicitly weak sslmode must remain an error");
+        }
     }
 
     /// A direct TLS handshake sends no `SSLRequest`, so there is no negotiation
