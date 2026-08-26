@@ -109,7 +109,19 @@ const FORMER_SUBJECT_FILE: &str = "zeroship-migrate-core/src/render/lower.rs";
 /// RAISED 8 -> 9: `zeroship-migrate-core` was ADDED. The engine and the composition that
 /// names the vendors are two crates now, so `crates/` holds nine entries and the walk
 /// must find all of them.
-const WORKSPACE_CRATE_FLOOR: usize = 9;
+///
+/// RAISED 9 -> 10: `zeroship-migrate-adapter` came into scope when the engine was grafted
+/// into the product workspace, where the adapter already lived under the engine's name.
+///
+/// What this counts changed with that graft, and the number alone would have hidden it.
+/// The walk now takes ENGINE roots — see [`is_engine_crate`] in
+/// `core_does_not_spell_a_vendors_bytes.rs`, which this file's sibling census defines
+/// and which is deliberately the SAME rule, because two censuses disagreeing about
+/// what the engine is would be worse than either being wrong. Before the graft
+/// `crates/*` and "the engine" were the same set, so saying `crates/*` cost nothing;
+/// afterwards `crates/` holds 38 entries and the floor `>= 9` passed on 38 without
+/// asserting anything at all.
+const WORKSPACE_CRATE_FLOOR: usize = 10;
 
 /// The subject itself. `render_sqlite_trigger_op` is the entry point
 /// `SqliteDmlRenderer::render_trigger_op` calls, and the two helpers under it are
@@ -202,7 +214,13 @@ fn no_sqlite_render_path_is_quoted_by_the_postgres_pinned_wrapper() {
 
     let mut roots: Vec<PathBuf> = std::fs::read_dir(&crates_root)
         .unwrap_or_else(|e| panic!("reading {}: {e}", crates_root.display()))
-        .map(|e| e.expect("dir entry").path().join("src"))
+        .map(|e| e.expect("dir entry").path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(crate::core_does_not_spell_a_vendors_bytes::is_engine_crate)
+        })
+        .map(|p| p.join("src"))
         .filter(|p| p.is_dir())
         .collect();
     roots.sort();
