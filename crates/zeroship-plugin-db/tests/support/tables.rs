@@ -35,11 +35,19 @@
 //! fixture creating its own table in its own tempdir, with no creator and no
 //! journal, has nothing for those to protect.
 //!
-//! The two-connections-one-file hazard does not apply either. The data-plane
-//! backend ATTACHes `zs-<app_id>.sqlite` lazily, on the app's first use
-//! (`backend/sqlite/mod.rs`), so a fixture that opens, writes its DDL and drops
-//! BEFORE that first use is strictly sequential with the backend, never
-//! concurrent. Call order is the invariant; see [`create_sqlite_table`].
+//! The two-connections-one-file hazard does not apply either, though the reason
+//! is not the one an earlier draft of this doc gave.
+//!
+//! THAT DRAFT SAID the data-plane backend ATTACHes `zs-<app_id>.sqlite` "lazily,
+//! on the app's first use". It does not. `SqliteBackend::ensure_app_schema` is
+//! an idempotent cached ATTACH, but NOTHING calls it lazily: its only production
+//! caller is `register_model`, and every other call site is `#[cfg(test)]`. No
+//! CRUD path attaches on its own.
+//!
+//! What actually makes this safe is call ORDER, which is the invariant either
+//! way: the fixture opens its own connection, writes DDL and drops it BEFORE
+//! `registerModel` runs and performs the ATTACH. Two connections never hold the
+//! file at once. See [`create_sqlite_table`].
 
 use rusqlite::Connection;
 use std::path::Path;

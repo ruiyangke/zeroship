@@ -1,106 +1,59 @@
-//! `db.registerModel(collection, schema, indexes)` - schema registration.
+//! `db.registerModel(collection, schema, indexes)` - schema REGISTRATION.
 //!
-//! # What this does depends on the backend, and on PG it is not DDL
+//! It registers. It does not create, alter, or reconcile anything.
 //!
-//! Read this before the pipeline below, because the pipeline does not run on
-//! the production backend:
+//! # What each backend does
 //!
-//! * **PostgreSQL - metadata only, NO DDL.** The apply arm is
-//!   `(Some(_pg), _) => Ok(())`. `zeroship-migrate` is the sole PG schema
-//!   authority and creates the schema at DEPLOY time, before the app serves.
-//!   What the call still earns is metadata: the dispatch caller stamps
-//!   readiness (`mark_model_registered`) and the declared cache
-//!   (`cache_schema`) on the returned `Ok(())`. The PG CRUD passes read that
-//!   cache for declared-only facets - `t.id(prefix)` idPrefix, encrypted and
-//!   mask facets - which introspection cannot recover. Since the
-//!   migration-first cutover the schema value originates from the bundled
-//!   `RuntimeSchemaDescriptor`, injected as `globalThis.__zsRuntimeDescriptor`.
-//!   So on PG this registers a model's metadata; it creates nothing.
+//! * **PostgreSQL: nothing.** The arm is `Ok(())`. `zeroship-migrate` is the
+//!   sole PG schema authority and applies at DEPLOY, before the app serves.
+//! * **SQLite: one ATTACH.** `ensure_app_schema` binds `zs-<app_id>.sqlite`
+//!   into this worker's session under the `<app_id>` alias. It is NOT schema
+//!   creation - the file and its tables come from the vite dev-server's
+//!   apply-ahead. The name is inherited from the PG side, where the same trait
+//!   method IS `CREATE SCHEMA IF NOT EXISTS`, and it misleads on SQLite.
 //!
-//! * **SQLite dev tier - also registers metadata and creates NOTHING**, the
-//!   same as the PG arm. The dev server applies the committed migrations to the
-//!   app file ahead of the worker (`sdks/vite-plugin/src/gen-types/dev-apply.ts`),
-//!   so the schema already exists by the time a request arrives; the arm keeps
-//!   only `ensure_app_schema` (the ATTACH the data plane needs), and the caller
-//!   stamps `mark_model_registered` / `cache_schema` on its `Ok(())`.
+//! Both arms then get the same two effects from the dispatch caller, on `Ok`:
+//! `mark_model_registered` (a per-thread flag) and `cache_schema` (the declared
+//! JSON). The flag is load-bearing beyond the fast path below:
+//! `crud::introspect_schema::runtime_schema_for` returns `None` for an
+//! UNREGISTERED collection, so registration is what turns introspected
+//! encryption / mask metadata on for a collection's reads and writes.
 //!
-//!   THIS PARAGRAPH SAID THE OPPOSITE until 2026-08-10: that the arm applied
-//!   through the MIGRATION ENGINE at first `registerModel`. That described the
-//!   pre-cutover arm and contradicted the comment on the arm itself further down
-//!   this file, which has said "metadata only, NO DDL" since the cutover.
+//! # The ATTACH is in the wrong place, and that is a known item
 //!
-//!   The engine-driven arm it described is GONE from this crate. It had no
-//!   production call site: every caller was a test or the `test-helpers` seam
-//!   standing in for the dev server's apply-ahead. That fixture now lives in
-//!   `tests/support/sqlite_apply_ahead.rs`, where the engine is a dev-dependency,
-//!   so a test can keep it without the LIBRARY carrying a migration engine it
-//!   never calls. `crates/zeroship-plugin-db` now names `zeroship-migrate`
-//!   nowhere in `src/`.
+//! `register_model/mod.rs` holding the only production `ensure_app_schema` call
+//! means SQLite CRUD depends on registerModel having run first. A session that
+//! never registered has no alias attached, and nothing re-attaches on its own -
+//! `sqlite::session`'s recovery error says as much in plain text.
 //!
-//! So the name is wider than either backend's behaviour: on BOTH backends this
-//! registers metadata and creates nothing. Reading it as "this creates my
-//! tables" is wrong on either tier - a migration process does that, ahead of
-//! the runtime.
+//! It belongs in the data plane, which is where the file is used. It is not
+//! there yet because there is no single chokepoint to put it: `exec.rs`
+//! resolves `route.app_id()` per operation, the backend's exec methods never
+//! receive an `app_id` (it is interpolated into the SQL), and
+//! `runtime_schema_for` short-circuits before any DB work for the very case
+//! that needs it. The contained fix is attach-and-retry inside `SqliteSession`
+//! on an "unknown database" error, which touches no signature and no PG path.
 //!
-//! Not reachable from creator code either way: `env.db.registerModel` is
-//! `undefined` inside a handler and `env.db.__platform` throws
-//! `platform_internal_only` - see `tests/platform_fence.rs`.
+//! # A four-phase pipeline used to live here
 //!
-//! # The four-phase pipeline - TEST-ONLY, run by NEITHER runtime arm
+//! `bootstrap`, `plan`, `validate` and `apply` introspected the live catalog,
+//! diffed it against the declared schema, and applied the difference as DDL.
+//! All four are DELETED. They were `#[cfg(any(test, feature = "test-helpers"))]`
+//! and no production build ever contained them, so reading a call chain from
+//! them into `pool_exec_ddl` and concluding plugin-db applied schema at deploy
+//! was a mistake the gating made easy - the chain was real and unreachable.
 //!
-//! `bootstrap`, `plan`, `validate` and `apply` are each
-//! `#[cfg(any(test, feature = "test-helpers"))]` (see the `mod` declarations
-//! below), and since the engine arm was removed there is no ungated one left.
-//! So the phases compile for this crate's tests and for downstream test targets,
-//! and for nothing else. Both arms register metadata and create nothing, so no
-//! production path executes them.
+//! Nothing consumed their output either: the data plane sources column types,
+//! encryption and mask metadata from LIVE introspection plus the engine's
+//! sentinels (`crud::read_pipeline`, `crud::write_pipeline`), never from the
+//! declared schema. The diff was a second model of schema truth competing with
+//! the introspection that is actually read.
 //!
-//! They are still worth reading - the integration tests drive the stages
-//! directly, and the shape is the reference for what an apply must do - but
-//! read them as a tested design, not as the code serving a request.
+//! # Not reachable from creator code
 //!
-//! Proposal A2 (docs/archive/zeroship-db.md, section "A2. Deploy-time
-//! data validation") defines the contract. It is accurate for the phases and
-//! predates both cutovers above:
-//!
-//! 1. **Bootstrap** (`bootstrap`) — create the per-app schema, the
-//!    `__zeroship_migrations` audit table (idempotent), acquire the
-//!    session-scoped advisory lock, compute the deploy's `schema_version`,
-//!    expand declared + named indexes. Returns a `RegisterContext` the
-//!    later stages thread through.
-//! 2. **Plan** (`plan`) — introspect the live schema, diff against the
-//!    declared schema, classify each change as additive / compatible /
-//!    destructive. Returns a `Plan`.
-//! 3. **Validate** (`validate`) — apply safety rules. Destructive ops
-//!    under `strictness=strict` produce a `validation_refused` envelope
-//!    the SDK consumes verbatim. Lenient deploys log + skip; off
-//!    proceeds.
-//! 4. **Apply** (`apply`) — two-pass DDL execution under the advisory
-//!    lock (transactional ops first; `CREATE INDEX CONCURRENTLY` after
-//!    releasing the lock). Every op writes an audit row through the
-//!    [`crate::backend::Backend`] facade.
-//!
-//! Each submodule is `pub(crate)` so integration tests can call into the
-//! stages independently. The V8-facing surface is
-//! [`register_model_dispatch`] — unchanged from before the split.
-//!
-//! ## Error rail
-//!
-//! Every fallible function here — including the three pipeline sequencers
-//! (`exec_register_model`, `run_pipeline`, `exec_register_model_with_pool`)
-//! and every stage submodule (`bootstrap`, `plan`, `apply`) — returns
-//! `Result<_, crate::error::DbError>`. The dispatch site renders the
-//! typed error through [`crate::error::DbError::to_op_error`] so the JS
-//! exception carries `.code` per variant (`lock_not_available`,
-//! `transient`, `lazy_init_failed`, etc.).
-//!
-//! The `validation_refused` envelope wire shape is preserved as the lone
-//! exception: `validate::validate` still returns `Err(envelope_json: String)`
-//! because the JSON body is the documented SDK contract. We wrap it at
-//! the boundary as [`crate::error::DbError::SchemaRefused`], whose
-//! `to_op_error()` arm materialises a plain `Error` with `message =
-//! envelope_json` — the SDK still does `JSON.parse(err.message)` exactly
-//! as before.
+//! `env.db.registerModel` is `undefined` inside a handler and
+//! `env.db.__platform` throws `platform_internal_only` - see
+//! `tests/platform_fence.rs`.
 
 use serde_json::Value;
 use zeroship_runtime::state::{OpResult, ResolveValue};
