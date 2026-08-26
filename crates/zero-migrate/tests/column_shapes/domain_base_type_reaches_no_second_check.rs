@@ -18,8 +18,8 @@
 //! and its inline CHECK both come from the `ColumnSnapshot` `fold_ops` produced.
 //!
 //! AND THE REPLAY AGREEMENT the three folds owe each other: `fold_ops` said the column
-//! stores an integer, `authoring_tables_from_ops` said `t.domain("positive_number")`,
-//! and `fold_to_field_defs` said `"string"`. Two of the three were right. The third is
+//! stores an integer, the authoring-table walker said `t.domain("positive_number")`,
+//! and the `FieldDef` walker said `"string"`. Two of the three were right. The third is
 //! now pinned against them here.
 
 use crate::support;
@@ -151,7 +151,7 @@ fn an_inlined_domain_column_stores_the_base_type_with_exactly_one_check() {
 
 /// THE REPLAY AGREEMENT. `fold_ops` and the `FieldDef` projection describe the SAME op stream
 /// and must not describe the same column differently. Before this change `fold_ops`
-/// said the SQLite column stores `INTEGER` while `fold_to_field_defs` said `"string"`.
+/// said the SQLite column stores `INTEGER` while the `FieldDef` walker said `"string"`.
 #[test]
 fn the_snapshot_fold_and_the_field_def_fold_agree_about_the_storage() {
     let ops = amounts_ir().ops;

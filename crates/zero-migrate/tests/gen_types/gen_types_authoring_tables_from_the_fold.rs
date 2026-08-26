@@ -2,7 +2,7 @@
 //!
 //! `docs/proposals/single-fold-and-effects.md` section G step 4 moves the artifact
 //! consumers off their private walkers one at a time.
-//! `authoring_tables_from_ops` is the second, and it has the SMALLEST blast radius of
+//! The authoring-table walker is the second, and it has the SMALLEST blast radius of
 //! the four: measured, it is produced in exactly one place in `render_artifacts` and
 //! read in exactly one place, `render_env_db_ts`. So this move can move bytes in
 //! `env.db.ts` and in no other artifact, where consumer 1 could move two.
@@ -16,8 +16,8 @@
 //!
 //! STEP 4 CONSUMER 3 MOVED SIX OF THOSE CONTROL LINES, and the control working is the
 //! reason they are worth reading rather than a reason to loosen it. That consumer
-//! replaced `fold_to_field_defs` - the walker that produced the `fields` block - and its
-//! own golden records five families in which the walker described a database the catalog
+//! replaced the walker that produced the `fields` block, and its own golden records
+//! five families in which that walker described a database the catalog
 //! does not have. Two of those families are reachable from carriers in THIS file:
 //! `carrier:attached_partition_dropped` (a dropped partition stayed in the map) and
 //! `carrier:unique_constraint_lifecycle` (a dropped `UNIQUE` outlived its constraint).
@@ -50,7 +50,7 @@
 //!
 //! # The defect this move FIXES, and why it is a fix rather than a change
 //!
-//! `authoring_tables_from_ops` has no `Op::AlterPrimaryKey` arm at all - measured,
+//! The authoring-table walker had no `Op::AlterPrimaryKey` arm at all - measured,
 //! zero occurrences of `AlterPrimaryKey` in `render/gen_types.rs` against 29 in
 //! `render/fold.rs` - so the op fell through its `_ => {}` and `env.db.ts` kept
 //! declaring the primary key the migration replaced, dropped or added. The step 3
@@ -994,7 +994,7 @@ fn measure_corpus() -> Vec<String> {
 /// **The behaviour-preservation gate for the move.**
 ///
 /// The golden was captured from the OLD path - `render_artifacts` driven by
-/// `authoring_tables_from_ops` - BEFORE the consumer was switched, and committed with
+/// the authoring-table walker - BEFORE the consumer was switched, and committed with
 /// exactly the rows that the walker's defects made wrong edited by hand, each of them
 /// recorded in `docs/review-log.md` with the measurement that settles which side is
 /// right. So this test compares what the new path emits against what the walker
@@ -1295,7 +1295,7 @@ fn the_move_changed_no_refusal_that_the_old_path_already_made() {
                 continue;
             };
             // The independent oracle is `fold_ops`, NOT the fold. This comparison was
-            // written against `fold_to_field_defs`, which ran `fold_ops` itself and was
+            // written against the `FieldDef` walker, which ran `fold_ops` itself and was
             // therefore a second opinion; step 4 consumer 3 deleted it, and rewriting
             // this line to `single_fold::fold(…).project_field_defs()` would have made
             // the biconditional compare `render_artifacts` to the very call it makes

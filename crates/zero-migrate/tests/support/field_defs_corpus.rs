@@ -1,8 +1,9 @@
 //! **The corpus behind step 4 consumer 3, and the reduction both halves share.**
 //!
 //! `docs/proposals/single-fold-and-effects.md` section G step 4 moves
-//! `fold_to_field_defs` onto `FoldedSchema::project_field_defs`. The wire `FieldDef`
-//! map that walker produced is not an artifact a human reads: it is
+//! the wire `FieldDef` map off a standalone walker and onto
+//! `FoldedSchema::project_field_defs`. The map that walker produced is not an artifact
+//! a human reads: it is
 //! `schema.runtime.json`'s `fields` block AND, on SQLite, `LiveSchema::sdk_schemas`,
 //! which is what the 12-step table rebuild renders its new `CREATE TABLE` from
 //! (`render/lower.rs`'s SQLite `renameColumn` leg -> `lower_ir_rename` ->
@@ -21,7 +22,7 @@
 //!
 //! # Everything is read out of the ARTIFACT
 //!
-//! Nothing here names `fold_to_field_defs` or `project_field_defs`. Every line is
+//! Nothing here names the retired walker or `project_field_defs`. Every line is
 //! derived from one [`zero_migrate::render_artifacts`] call, which is the real entry
 //! point on both sides of the move, so this file is byte-identical before and after the
 //! switch and the capture measures the walker purely by having been run first.
@@ -82,7 +83,7 @@ pub const STEMS: [&str; 27] = [
 ///
 /// They exist because the recorded corpus does not cover what moved. The step 3
 /// byte-for-byte gate measured the `field_defs` leg at 677 equal and SIX differing
-/// comparisons, and all six are one defect on one stream - `fold_to_field_defs` never
+/// comparisons, and all six are one defect on one stream - the walker never
 /// un-lifting a dropped `UNIQUE`. Six differing comparisons is what a corpus that
 /// happens to contain one `addConstraint`/`dropConstraint` pair can say; it is not a
 /// measurement of the constraint LIFECYCLE, which is the whole of what this move

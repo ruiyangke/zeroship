@@ -15,9 +15,9 @@
 //!
 //! THE CONSUMER IS CODEGEN, which is what makes it user-facing rather than
 //! internal. The IR schema records it directly: "the OFFLINE op fold ... and
-//! `gen-types` have NO live DB". (That sentence named
-//! `zero_migrate::fold_to_field_defs` until step 4 consumer 3 of
-//! `docs/proposals/single-fold-and-effects.md` deleted the walker; the map is a
+//! `gen-types` have NO live DB". (That sentence named a standalone `zero_migrate`
+//! walker until step 4 consumer 3 of `docs/proposals/single-fold-and-effects.md`
+//! deleted it; the map is a
 //! projection of the single fold now and the claim is unchanged - still no live DB.) So a
 //! migration that widens a column to `bigInt`, or tightens one to NOT NULL,
 //! produces generated TypeScript that still describes the old shape - a

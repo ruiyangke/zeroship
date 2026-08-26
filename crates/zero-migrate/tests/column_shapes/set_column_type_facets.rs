@@ -12,8 +12,8 @@
 //! | `fold_ops`                  | the snapshot drift compares                 |
 //!
 //! \* both were private walkers until step 4 of
-//! `docs/proposals/single-fold-and-effects.md`: `authoring_tables_from_ops` until
-//! consumer 2 and `fold_to_field_defs` until consumer 3. They are
+//! `docs/proposals/single-fold-and-effects.md`: the authoring-table walker until
+//! consumer 2 and the `FieldDef` walker until consumer 3. They are
 //! `FoldedSchema::project_authoring_tables` and `FoldedSchema::project_field_defs` now,
 //! and - the point of the proposal - they are two READS of ONE traversal, so the top two
 //! rows of that table are no longer two replays that can disagree. The retype verdict
@@ -25,7 +25,7 @@
 //! and needed no change across either move - which is itself the claim it makes about
 //! the retype verdict surviving a producer swap.
 //!
-//! They disagreed. `fold_to_field_defs` replayed a retype by assigning the TYPE
+//! They disagreed. The `FieldDef` walker replayed a retype by assigning the TYPE
 //! TOKEN and nothing else, which is wrong in BOTH directions because the token is
 //! not the whole type: `ColType::String { length }`, `Char { length }` and
 //! `Vector { vector }` carry their parameter in a SIBLING descriptor field.
@@ -33,7 +33,7 @@
 //! three replays:
 //!
 //! ```text
-//!                            fold_to_field_defs      env.db.ts        fold_ops
+//!                            the FieldDef map        env.db.ts        fold_ops
 //!   string(24) -> int        maxLength: 24 STALE     t.int()          integer
 //!   string(24) -> string(40) maxLength: 24 WRONG     length: 40       varchar(40)
 //!   int -> string(40)        maxLength ABSENT        length: 40       varchar(40)

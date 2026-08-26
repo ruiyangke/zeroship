@@ -1,11 +1,12 @@
 //! **The oracle that adjudicates step 4 consumer 3, live, with rows in the table.**
 //!
 //! `docs/proposals/single-fold-and-effects.md` section G step 4 moves
-//! `fold_to_field_defs` onto `FoldedSchema::project_field_defs`. Two of that walker's
-//! consumers only produce a file a human reads. The third does not:
+//! the wire `FieldDef` map off a standalone walker and onto
+//! `FoldedSchema::project_field_defs`. Two of that walker's consumers only produce a
+//! file a human reads. The third does not:
 //!
 //! ```text
-//! fold_to_field_defs
+//! the FieldDef map
 //!   -> engine.rs, inside `deploy_envelopes_locked`      live.sdk_schemas
 //!   -> render/lower.rs, the SQLite `renameColumn` leg   live.sdk_schemas.get(table)
 //!   -> render/declarative.rs                            desired.sdk_schemas.get(table)
@@ -759,7 +760,7 @@ async fn the_deploy_path_depends_on_the_maps_PRESENCE_not_its_content() {
 /// difference into a rebuilt `CREATE TABLE` appended.
 ///
 /// The sweep behind this move reported FIVE divergence families between
-/// `fold_to_field_defs` and `FoldedSchema::project_field_defs`, over every prefix of the
+/// the retired walker and `FoldedSchema::project_field_defs`, over every prefix of the
 /// 27 recorded fixtures and 22 carriers on 3 dialects. Three of the five never appear on
 /// SQLite at all because the fold refuses the op that creates them; the other two do
 /// appear in the MAP on SQLite. Whether they reach the REBUILD is a different question -

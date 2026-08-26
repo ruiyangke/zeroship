@@ -61,7 +61,7 @@
 //! measurement that settles it - on PG 18.4,
 //! `CREATE INDEX i ON t (b) INCLUDE (a); ALTER TABLE t DROP COLUMN a` leaves no `i` in
 //! `pg_indexes` - so the artifact named an index the database does not have. The fold
-//! cascades it away, `authoring_tables_from_ops` already cascaded it away for
+//! cascades it away, the authoring-table walker already cascaded it away for
 //! `env.db.ts`, and this arm pins the corrected answer.
 //!
 //! Offline throughout: the oracle is the emitted artifact, so there is no skip here
@@ -409,7 +409,7 @@ fn a_plain_index_and_an_implicit_unique_index_are_both_described() {
 /// `i` in `pg_indexes`. The artifact was naming an index the database does not have.
 ///
 /// The `env.db.ts` half of the same artifact already agreed with the server, because
-/// it rendered indexes from `authoring_tables_from_ops`, whose `DropColumn` arm
+/// it rendered indexes from the authoring-table walker, whose `DropColumn` arm
 /// cascaded on `include` (step 4 consumer 2 has since replaced that walker with
 /// `FoldedSchema::project_authoring_tables`, which cascades the same way). So before
 /// this move the TWO artifacts out of one
@@ -971,14 +971,14 @@ const REFUSAL_PROBES: &[(&str, &str)] = &[
 /// **The over-refusal control: this move added no refusal.**
 ///
 /// Before step 4, the ONLY thing that could make `render_artifacts` refuse a stream
-/// (after the policy resolution it still performs first) was `fold_to_field_defs`:
-/// `runtime_metadata_from_ops` and `authoring_tables_from_ops` applied no coherence gate
-/// at all, and the one fallible call they shared - `flatten_dialectal_ops` -
-/// `fold_to_field_defs` made too. After the move, `single_fold::fold` runs FIRST and
+/// (after the policy resolution it still performs first) was the `FieldDef` walker:
+/// `runtime_metadata_from_ops` and the authoring-table walker applied no coherence gate
+/// at all, and the one fallible call they shared - `flatten_dialectal_ops` - the
+/// `FieldDef` walker made too. After the move, `single_fold::fold` runs FIRST and
 /// brings `AuthoredState::advance` with it, whose three fallible sites have no
 /// counterpart in that old path.
 ///
-/// Step 4 consumer 3 then deleted `fold_to_field_defs`, and the comparison below moved
+/// Step 4 consumer 3 then deleted that walker, and the comparison below moved
 /// to `fold_ops` for a reason worth stating: the deleted walker ran `fold_ops` itself,
 /// so it was a genuinely SECOND opinion, while the projection that replaced it is read
 /// off the very call `render_artifacts` makes first. Comparing against the projection
@@ -1042,7 +1042,7 @@ fn the_move_added_no_refusal_that_the_old_path_did_not_already_make() {
                 continue;
             };
             // The independent oracle is `fold_ops`, NOT the fold. This comparison was
-            // written against `fold_to_field_defs`, which ran `fold_ops` itself and was
+            // written against the `FieldDef` walker, which ran `fold_ops` itself and was
             // therefore a second opinion; step 4 consumer 3 deleted it, and rewriting
             // this line to `single_fold::fold(…).project_field_defs()` would have made
             // the biconditional compare `render_artifacts` to the very call it makes

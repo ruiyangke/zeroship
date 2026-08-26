@@ -2,7 +2,7 @@
 //!
 //! `docs/proposals/single-fold-and-effects.md` section G step 4 moves the consumers off
 //! their private walkers one at a time, in ascending blast radius.
-//! `fold_to_field_defs` is the third and the first that is not artifact-only: its
+//! The `FieldDef` walker is the third and the first that is not artifact-only: its
 //! output is `schema.runtime.json`'s `fields` block AND, on SQLite,
 //! `LiveSchema::sdk_schemas`, which the 12-step table rebuild renders its new
 //! `CREATE TABLE` from. The proposal orders it third for exactly that reason
@@ -14,7 +14,7 @@
 //!
 //! # What the move changes, measured rather than assumed
 //!
-//! A sweep of `fold_to_field_defs` against `FoldedSchema::project_field_defs` over
+//! A sweep of that walker against `FoldedSchema::project_field_defs` over
 //! EVERY PREFIX of the 27 recorded fixtures and the carriers in
 //! `tests/support/field_defs_corpus.rs`, on three dialects, compared 486 prefix/dialect
 //! pairs (216 more were refused by BOTH, and there was no prefix on which one refused
@@ -247,7 +247,7 @@ fn carrier(name: &str) -> Vec<Op> {
         .unwrap_or_else(|| panic!("the corpus has no carrier named {name}"))
 }
 
-/// FAMILY 1. `fold_to_field_defs` lifted a single-column `UNIQUE` onto the column and
+/// FAMILY 1. The retired walker lifted a single-column `UNIQUE` onto the column and
 /// had no arm that could take it back, so `schema.runtime.json` kept calling a column
 /// unique after the constraint that made it so was dropped.
 ///
