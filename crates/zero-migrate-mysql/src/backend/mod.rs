@@ -3,8 +3,8 @@
 //!
 //! Generic over the dialect-neutral [`SqlSession`](zero_migrate_backend::driver::SqlSession) seam
 //! (engine root `zero_migrate_backend::driver`) - a host driver (the napi `mysql2` shell) supplies
-//! the `SqlSession` impl, exactly as the `pg` shell does for
-//! `zero_migrate::apply::backend::PostgresBackend`. MySQL rides the
+//! the `SqlSession` impl, exactly as the `pg` shell does for the PostgreSQL
+//! backend, which lives in its own vendor crate. MySQL rides the
 //! SAME seam as Postgres; only the dialect SQL (lock, session, journal DDL,
 //! placeholders) differs, and all of it lives here + in `session` / `journal_sql`
 //! - never in the shared executor (the structural fix that lets MySQL ride the

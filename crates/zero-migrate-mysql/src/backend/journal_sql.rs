@@ -60,10 +60,11 @@ const IMMUTABLE_TRG_PREFIX: &str = "zm_immutable";
 /// home for MySQL's identifier spelling - the ANSI needle in
 /// `render::dml::tests::no_bare_escape_seam_outside_dml` has zero offenders
 /// crate-wide, so the backtick needle having two was an asymmetry rather than a
-/// difference of kind. The bytes now come from `render::backends::mysql`, the one
-/// home, through the dialect-naming door; the two refusals below are unchanged,
-/// including their messages, because they are semantics and semantics stays in
-/// core.
+/// difference of kind. The bytes come from this crate's own
+/// [`crate::dml::RENDERER`] now - the one physical home of the backtick spelling -
+/// reached through [`zero_migrate_backend::dml::escape_quote_ident_for_backend`];
+/// the two refusals below are unchanged, including their messages, because they are
+/// semantics rather than spelling.
 ///
 /// # Errors
 /// [`JournalError::Backend`] on an empty or NUL-bearing identifier.
