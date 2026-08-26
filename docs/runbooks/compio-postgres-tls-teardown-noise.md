@@ -118,3 +118,10 @@ server that waits for the alert and asserts `peer_has_closed()`:
 `dropping_an_unrun_tls_connection_sends_close_notify`, and
 `a_command_timeout_closes_the_tls_session_cleanly`. They need no Docker, which
 is why they and not this runbook are what gates a change.
+
+They are `#[cfg(feature = "tls")]`, so `cargo test --workspace` does NOT build
+them - the crate's default feature set is empty. CHECKED 2026-08-25: CI runs
+`cargo test -p compio-postgres --features tls` as its own step (`ci.yml`), and
+that step builds this target, so the three do gate every push. If that step is
+ever dropped, these tests stop running everywhere except by hand, and the
+symptom is silence rather than a failure.
