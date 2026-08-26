@@ -117,13 +117,7 @@ use crate::error::DbError;
 use crate::v8_bridge::{runtime_state, setup_js_promise};
 
 #[cfg(any(test, feature = "test-helpers"))]
-pub(crate) mod apply;
-#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) mod bootstrap;
-#[cfg(any(test, feature = "test-helpers"))]
-pub(crate) mod plan;
-#[cfg(any(test, feature = "test-helpers"))]
-pub(crate) mod validate;
 
 /// `zeroship.db.registerModel(collection, schemaJson)` → `Promise<void>`
 ///
@@ -190,11 +184,14 @@ pub fn register_model_dispatch<'s>(
     promise
 }
 
-/// Lazily initialise the pool, resolve the deploy id, then drive the
-/// four-phase pipeline through the backend.
+/// Lazily initialise the pool, resolve the deploy id, then run the register
+/// step through the backend.
+///
+/// `collection` is unread here for the same reason it is unread in
+/// [`run_pipeline`]: registering is per-app now, not per-collection.
 async fn exec_register_model(
     app_id: &str,
-    collection: &str,
+    _collection: &str,
     schema: &Value,
     indexes: &Value,
     declared_collections: &[String],
@@ -336,73 +333,59 @@ async fn exec_register_model(
 /// Q5 resolution per `docs/archive/p0-implementation-plan.md`
 /// §"PR 3" + §3 Q5 and `docs/archive/db-system-design.md` §7.
 #[cfg(any(test, feature = "test-helpers"))]
+/// THREE PARAMETERS ARE NOW IGNORED, and that is a finding rather than an
+/// oversight.
+///
+/// `collection`, `indexes` and `deploy_id` are still accepted because the
+/// JS-facing `registerModel(collection, schemaJson)` contract and every caller
+/// pass them - but nothing here reads them. registerModel ensures the app's
+/// schema and audit table and takes the per-app advisory lock, none of which is
+/// per-collection. It became a PER-APP operation the moment it stopped
+/// reconciling a table.
+///
+/// They are kept, not deleted, so the dispatch signature and its callers stay
+/// still while the schema-authority split settles. If that holds, the honest
+/// next step is to drop them from this function and from `exec_register_model`.
 pub async fn run_pipeline<B: RegisterBackend + DialectBuilder + AuditWriter>(
     backend: &B,
     app_id: &str,
-    collection: &str,
+    _collection: &str,
     schema: &Value,
-    indexes: &Value,
-    deploy_id: &str,
+    _indexes: &Value,
+    _deploy_id: &str,
 ) -> Result<(), DbError> {
-    // 1. Bootstrap — schema, audit table, advisory lock, schema_version,
-    //    expanded index specs. The returned guard carries the pool
-    //    borrow lifetime; we thread it through to apply where the
-    //    advisory unlock happens between passes.
-    let (ctx, lock_guard) =
-        bootstrap::bootstrap(backend, app_id, collection, schema, indexes, deploy_id).await?;
-
-    // 2 + 3. Plan / validate. These two stages happen BEFORE the
-    // apply-side advisory-unlock. If either returns Err we must still
-    // release the advisory lock via the guard — otherwise the held
-    // PooledClient returns to the pool with the session-scoped lock
-    // alive, and every later caller hangs on
-    // `pg_advisory_lock(zs_reg:<app>, register_model)`.
+    // registerModel REGISTERS. It does not reconcile schema.
     //
-    // The pre-guard code propagated plan/validate errors via `?`,
-    // dropping `lock_client` back into the pool without an explicit
-    // unlock. The advisory lock leak cascades into the p8a2 ordering
-    // hang: tests that `expect_err` on a destructive deploy (strict
-    // refusal at validate) leave the orchestrator lock stuck, the next
-    // register_model in another test waits forever, and the
-    // `pg_create_logical_replication_slot()` in p8a2_auto_spawn
-    // ultimately blocks behind that chain. The guard centralises the
-    // unlock so any future stage added here inherits the invariant.
+    // Bootstrap is the whole pipeline now: it ensures the app schema and the
+    // audit table, takes the per-app advisory lock, and captures the
+    // schema_version. Three stages used to follow it - plan, validate, apply -
+    // which introspected the live catalog, diffed it against the declared
+    // schema, and applied the difference as DDL.
     //
-    // Validate's `Err` branch is always the `validation_refused` JSON
-    // envelope (the only fallible call inside it is a best-effort
-    // audit write under `tracing::warn`). Wrap that envelope in
-    // `DbError::SchemaRefused` so the dispatch boundary's
-    // `to_op_error()` materialises a plain `Error` with `message =
-    // envelope` — preserves the documented `JSON.parse(err.message)`
-    // SDK contract while keeping the rest of the pipeline on the
-    // typed rail.
-    let plan_res = plan::compute_plan(backend, &ctx, collection, schema).await;
-    let approved_res = match plan_res {
-        Ok(plan) => validate::validate(backend, &ctx, plan)
-            .await
-            .map_err(|envelope_json| DbError::SchemaRefused {
-                code: "validation_refused",
-                envelope_json,
-            }),
-        Err(e) => Err(e),
-    };
-    let approved = match approved_res {
-        Ok(a) => a,
-        Err(e) => {
-            // Plan/validate failed — release the advisory lock before
-            // returning the PooledClient to the pool. Best-effort:
-            // the unlock SQL may itself error if the connection was
-            // already torn down, but the more important guarantee is
-            // that we don't leak a held lock back into the pool.
-            let _ = lock_guard.release().await;
-            return Err(e);
-        }
-    };
+    // WHY THEY ARE GONE, rather than narrowed. Nothing consumed the diff: the
+    // data plane sources column types, encryption metadata and mask metadata
+    // from LIVE introspection plus the engine's sentinels, never from the
+    // declared schema (`crud::read_pipeline`, `crud::write_pipeline`, both of
+    // which say so in as many words). So the diff was a SECOND model of schema
+    // truth inside plugin-db, competing with the introspection the data plane
+    // actually reads and with the migration engine that owns the tables. A
+    // creator's schema is applied by the migration process - by
+    // `crates/zeroship-migrated` at deploy, by the vite plugin's apply in dev.
+    //
+    // WHAT A MISMATCH LOOKS LIKE NOW. If the declared schema names a column the
+    // table does not have, the first query against it fails with the database's
+    // own error. That is later than a deploy-time refusal and it is a real
+    // trade, made deliberately: an in-process refusal needed plugin-db to keep
+    // modelling the schema, which is the coupling being removed.
+    let lock_guard =
+        bootstrap::bootstrap(backend, app_id, schema).await?;
 
-    // 4. Apply — execute the validated ops under the lock (pass 1) then
-    //    release and run CIC unlocked (pass 2). Each op writes an audit
-    //    row. The guard's release lives inside apply().
-    apply::apply(backend, ctx, lock_guard, approved).await
+    // The lock is taken by bootstrap and released here on every path. It no
+    // longer spans an apply, but it still serialises concurrent registerModel
+    // calls for one app past `ensure_audit_table` and the schema_version read.
+    let _ = lock_guard.release().await;
+
+    Ok(())
 }
 
 /// Pool-driven entry retained for integration tests that hand in a

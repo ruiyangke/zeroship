@@ -25,38 +25,7 @@ use serde_json::Value;
 
 use crate::backend::{AuditWriter, LockGuard, LockScope, NamespaceManager, RegisterBackend};
 use crate::error::DbError;
-use crate::query;
 
-/// Threaded context produced by `bootstrap`. Pure value type — does
-/// not own any borrow-lifetimed handle. The advisory-lock client is
-/// returned separately by [`bootstrap`].
-pub(crate) struct RegisterContext {
-    /// App identifier — schema name, audit-row key.
-    pub app_id: String,
-    /// Deploy identifier — audit-row grouping key. `'cold_start'` for
-    /// pre-deploy bootstrap.
-    pub deploy_id: String,
-    /// `schema_version` snapshot captured AFTER `ensure_audit_table`
-    /// runs, so each DDL row gets a monotonic version. Set once at
-    /// bootstrap and shared across every audit write in this run.
-    pub schema_version: i32,
-    /// Strictness from `schema._meta.strictness` (defaults to `strict`).
-    /// Read once at bootstrap so the validate stage can branch without
-    /// re-walking the JSON.
-    pub strictness: String,
-    /// Expanded index list — declared inline + named — passed into
-    /// `compute_diff` so the plan correctly identifies which need
-    /// `CREATE INDEX CONCURRENTLY`.
-    pub declared_indexes: Vec<query::IndexSpec>,
-    /// Collection name + declared schema JSON. The
-    /// apply stage needs both to dispatch `MaskBackfill` / `MaskRewrite`
-    /// (the schema carries the optional `encrypted` block per column;
-    /// the collection is the SQL table identifier). Threaded through
-    /// the context rather than re-passed down each stage signature so
-    /// existing callers stay churn-free.
-    pub collection: String,
-    pub schema_json: serde_json::Value,
-}
 
 /// Stage tag for the per-app register-model advisory lock. Used as
 /// the `name` field of the canonical
@@ -98,20 +67,8 @@ pub(crate) const LOCK_TAG: &str = "register_model";
 pub(crate) async fn bootstrap<'p, B: RegisterBackend + AuditWriter>(
     backend: &'p B,
     app_id: &str,
-    collection: &str,
     schema: &Value,
-    indexes: &Value,
-    deploy_id: &str,
-) -> Result<(RegisterContext, LockGuard<'p>), DbError> {
-    // Strictness — proposal A2 line 122. Read from schema._meta.strictness
-    // if present; default is 'strict'.
-    let strictness = schema
-        .get("_meta")
-        .and_then(|m| m.get("strictness"))
-        .and_then(Value::as_str)
-        .unwrap_or("strict")
-        .to_string();
-
+) -> Result<LockGuard<'p>, DbError> {
     // -------------------------------------------------------------------
     // Cross-app FK parse-time check (design §18 Q1, plan §6).
     //
@@ -186,15 +143,10 @@ pub(crate) async fn bootstrap<'p, B: RegisterBackend + AuditWriter>(
     // with the session-scoped lock alive. `release_on_err` centralises
     // that pattern.
     // -------------------------------------------------------------------
-    let ctx = match build_ctx(backend, app_id, collection, schema, indexes, deploy_id, strictness)
-        .await
-    {
-        Ok(ctx) => ctx,
-        Err(e) => {
-            let _ = guard.release().await;
-            return Err(e);
-        }
-    };
+    if let Err(e) = ensure_app_objects(backend, app_id).await {
+        let _ = guard.release().await;
+        return Err(e);
+    }
 
     // §17.5 per-app PG role hardening. Provision the constrained per-app
     // role (`app_<id>_role`, NOLOGIN/NOREPLICATION) + scope its grants to
@@ -215,7 +167,7 @@ pub(crate) async fn bootstrap<'p, B: RegisterBackend + AuditWriter>(
         return Err(e);
     }
 
-    Ok((ctx, guard))
+    Ok(guard)
 }
 
 /// Inner half of [`bootstrap`] — runs everything that can fail AFTER
@@ -226,15 +178,23 @@ pub(crate) async fn bootstrap<'p, B: RegisterBackend + AuditWriter>(
 /// [`RegisterBackend`] in lock-step with `bootstrap`. See the
 /// outer function's rustdoc for the rationale.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn build_ctx<B: NamespaceManager + AuditWriter>(
+/// Ensure the platform objects registerModel depends on: the app's schema and
+/// its audit table.
+///
+/// THIS REPLACED `build_ctx`, which additionally read `next_schema_version` and
+/// expanded the declared + named index specs into a `RegisterContext` for the
+/// plan / validate / apply stages. Those stages are gone - registerModel applies
+/// no schema - so the version read and the index expansion were computing values
+/// with no reader. The two calls that remain are side effects, not values, and
+/// both are idempotent.
+///
+/// Note what is NOT here: nothing touches a CREATOR table. `ensure_app_schema`
+/// creates the app's namespace and `ensure_audit_table` creates
+/// `__zeroship_migrations`; both are platform-owned objects.
+pub(crate) async fn ensure_app_objects<B: NamespaceManager + AuditWriter>(
     backend: &B,
     app_id: &str,
-    collection: &str,
-    schema: &Value,
-    indexes: &Value,
-    deploy_id: &str,
-    strictness: String,
-) -> Result<RegisterContext, DbError> {
+) -> Result<(), DbError> {
     backend
         .ensure_app_schema(app_id)
         .await
@@ -247,21 +207,5 @@ pub(crate) async fn build_ctx<B: NamespaceManager + AuditWriter>(
 
     backend.ensure_audit_table(app_id).await?;
 
-    let schema_version = backend.next_schema_version(app_id).await?;
-
-    let mut declared_indexes =
-        query::build_create_indexes(app_id, collection, schema).map_err(DbError::from)?;
-    let named_indexes =
-        query::build_named_indexes(app_id, collection, indexes).map_err(DbError::from)?;
-    declared_indexes.extend(named_indexes);
-
-    Ok(RegisterContext {
-        app_id: app_id.to_string(),
-        deploy_id: deploy_id.to_string(),
-        schema_version,
-        strictness,
-        declared_indexes,
-        collection: collection.to_string(),
-        schema_json: schema.clone(),
-    })
+    Ok(())
 }
