@@ -78,16 +78,15 @@ where
         return Ok(MaybeTlsStream::Raw(stream));
     }
 
-    // No connector compiled in (`NoTls`), or no name to put in the handshake.
-    // libpq treats both as "this transport is unavailable": a mode that permits
-    // plaintext uses plaintext, a mode that does not gets an error. Answering
-    // here rather than after `SSLRequest` also keeps the wire quiet - there is
-    // no point asking the server for something we cannot complete.
+    // No connector compiled in (`NoTls`), or no name for verify-full to
+    // authenticate. libpq permits hostaddr-only TLS for every other mode.
+    // Answering impossible cases here rather than after `SSLRequest` also
+    // keeps the wire quiet.
     if !tls.can_connect(ForcePrivateApi) {
         return unavailable(stream, mode, "no TLS connector is configured");
     }
-    if !has_hostname {
-        return unavailable(stream, mode, "no hostname provided for TLS handshake");
+    if !has_hostname && mode == SslMode::VerifyFull {
+        return unavailable(stream, mode, "no hostname provided for sslmode=verify-full");
     }
 
     if negotiation == SslNegotiation::Postgres {
@@ -277,6 +276,22 @@ mod tests {
             rest, INJECTED,
             "negotiation buffered post-response bytes; they must stay on the socket"
         );
+    }
+
+    #[compio::test]
+    async fn hostaddr_only_require_still_negotiates_tls() {
+        let negotiated = negotiate_tls(
+            scripted_server(vec![b'S']).await,
+            Encryption::Tls,
+            SslMode::Require,
+            SslNegotiation::Postgres,
+            PassthroughTls,
+            false,
+        )
+        .await
+        .expect("libpq permits TLS without a host unless verify-full needs it");
+
+        assert!(matches!(negotiated, MaybeTlsStream::Tls(_)));
     }
 
     /// The other half: a server that refuses TLS leaves the socket usable, and

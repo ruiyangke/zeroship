@@ -448,6 +448,17 @@ pub(crate) fn first_encryption_for_addr(addr: &Addr, mode: SslMode) -> Encryptio
     }
 }
 
+/// The name passed to a TLS backend for verification and SNI configuration.
+/// A hostaddr-only endpoint uses its IP address; `has_hostname` remains a
+/// separate policy bit so `verify-full` can still require an actual `host`.
+pub(crate) fn tls_server_name(addr: &Addr, hostname: Option<&str>) -> String {
+    hostname.map(str::to_owned).unwrap_or_else(|| match addr {
+        Addr::Tcp(ip) => ip.to_string(),
+        #[cfg(unix)]
+        Addr::Unix(_) => String::new(),
+    })
+}
+
 /// One address, with libpq's transport ordering and its reconnect.
 ///
 /// Everything about `allow` and `prefer` that is not just "try TLS" lives here,
@@ -611,8 +622,9 @@ where
     )
     .await?;
 
+    let server_name = tls_server_name(&addr, hostname);
     let tls = tls
-        .make_tls_connect(hostname.unwrap_or(""))
+        .make_tls_connect(&server_name)
         .map_err(|e| Error::tls(e.into()))?;
     let has_hostname = hostname.is_some();
     // Taken while the socket is still a `Socket` - `connect_raw` is generic
@@ -677,6 +689,7 @@ mod tests {
     use std::error::Error as _;
     use std::future;
     use std::net::SocketAddr;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     const SSL_REQUEST_CODE: u32 = 80_877_103;
@@ -1097,6 +1110,21 @@ mod tests {
     /// successful test handshake would be a fixture bug.
     struct HandshakeFailingTls;
 
+    struct RecordingDomainTls {
+        domains: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl<S> MakeTlsConnect<S> for RecordingDomainTls {
+        type Stream = NoTlsStream;
+        type TlsConnect = HandshakeFailingTls;
+        type Error = io::Error;
+
+        fn make_tls_connect(&mut self, domain: &str) -> Result<Self::TlsConnect, Self::Error> {
+            self.domains.lock().unwrap().push(domain.to_owned());
+            Ok(HandshakeFailingTls)
+        }
+    }
+
     impl<S> MakeTlsConnect<S> for HandshakeFailingTls {
         type Stream = NoTlsStream;
         type TlsConnect = HandshakeFailingTls;
@@ -1115,6 +1143,38 @@ mod tests {
         fn connect(self, _stream: S) -> Self::Future {
             future::ready(Err(io::Error::other("scripted TLS handshake failure")))
         }
+    }
+
+    #[compio::test]
+    async fn hostaddr_only_tls_uses_the_ip_as_the_connector_server_name() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = compio::runtime::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let compio::BufResult(result, _) = socket.read_exact(vec![0u8; 8]).await;
+            if result.is_ok() {
+                let compio::BufResult(result, _) = socket.write_all(vec![b'S']).await;
+                result.unwrap();
+                socket.flush().await.unwrap();
+            }
+        });
+
+        let mut config = Config::new();
+        config
+            .user("scripted-user")
+            .hostaddr(addr.ip())
+            .port(addr.port())
+            .ssl_mode(SslMode::Require)
+            .connect_timeout(Duration::from_secs(2));
+        let domains = Arc::new(Mutex::new(Vec::new()));
+        let outcome = config
+            .connect(RecordingDomainTls {
+                domains: domains.clone(),
+            })
+            .await;
+        assert!(outcome.is_err(), "the scripted TLS handshake must fail");
+        assert_eq!(domains.lock().unwrap().as_slice(), [addr.ip().to_string()]);
+        server.await.expect("scripted server panicked");
     }
 
     fn config_for(addr: SocketAddr, connect_timeout: Duration) -> Config {
