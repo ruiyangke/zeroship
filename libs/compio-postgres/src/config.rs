@@ -1805,7 +1805,7 @@ impl Config {
                 // inside an option value must be escaped with a backslash, which
                 // reads like something the client unescapes before sending. It
                 // does not: the escape travels to the server and `pg_split_opts`
-                // splits on it there. MEASURED 2026-08-26 against libpq 16.15,
+                // splits on it there. MEASURED 2026-08-26 against the review container's libpq,
                 // `options=-c search_path=a\ b` reaches the backend as ONE
                 // argument whose value contains a space (`invalid value for
                 // parameter "search_path": "a b"`), while the same string with a
@@ -3265,7 +3265,7 @@ impl<'a> UrlParser<'a> {
     /// this crate used to fold the whole tail into the DATABASE NAME and fail
     /// later against the server with `database "zeroship read_timeout=5" does
     /// not exist`, which names the symptom and not the cause. Measured against
-    /// libpq 16.14 on 2026-08-26: it refuses a raw space in the user, the
+    /// the review container's libpq on 2026-08-26: it refuses a raw space in the user, the
     /// host, the database and a query value alike, and accepts `%20` in each.
     fn validate_no_raw_spaces(s: &str) -> Result<(), Error> {
         if s.contains(' ') {
@@ -3516,7 +3516,7 @@ mod tests {
 
     /// What libpq does with `key=` - a keyword whose value is empty.
     ///
-    /// Measured against libpq 16.14 with the `.invalid` host read-out
+    /// Measured against the review container's libpq with the `.invalid` host read-out
     /// (`docs/runbooks/compio-postgres-libpq-parameter-probing.md` describes the
     /// technique). The rule is per-TYPE, not uniform: every numeric option
     /// takes empty as "not given" and uses its default, every enum option

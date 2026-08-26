@@ -5,7 +5,9 @@
 //! keep credentials out of connection strings, so a driver that ignores the
 //! file rejects a setup its users reasonably expect to work.
 //!
-//! The rules below were DERIVED BY PROBING libpq 16.14, not read off the
+//! The rules below were DERIVED BY PROBING the review container's libpq -
+//! version 18.4, though `psql` there reports 16.14; see
+//! `docs/runbooks/compio-postgres-libpq-parameter-probing.md`. Not read off the
 //! documentation, because the interesting one is not what the format
 //! description implies - see `match_field`.
 //!
@@ -76,7 +78,7 @@ fn permissions_allow_use(metadata: &std::fs::Metadata) -> bool {
 /// 10.0.0.1:5432:db:od:d:secret
 /// ```
 ///
-/// matches that role and yields `secret` - MEASURED against libpq 16.14 by
+/// matches that role and yields `secret` - MEASURED against the review container's libpq by
 /// setting the role's real password to each candidate and seeing which one
 /// authenticated. Splitting on the fourth colon would instead read the user as
 /// `od` and the password as `d:secret`, match nothing, and send no password.
@@ -249,7 +251,7 @@ mod tests {
     }
 
     /// The rule a split-on-colon implementation gets wrong. Probed against
-    /// libpq 16.14 with a real role named `od:d`.
+    /// the review container's libpq with a real role named `od:d`.
     #[test]
     fn an_unescaped_colon_can_match_a_colon_inside_the_value() {
         let found = find(

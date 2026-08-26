@@ -1,10 +1,14 @@
 //! URL-form connection-string parity with libpq.
 //!
-//! Every assertion here was ruled on against a live libpq 16.14 (`psql` inside
-//! the `zs-cpg-review-5455` container, which echoes what libpq parsed via
+//! Every assertion here was ruled on against a live libpq: `psql` inside the
+//! `zs-cpg-review-5455` container, which echoes what libpq parsed via
 //! `current_setting('application_name')` / `current_database()` /
-//! `current_user`, or reports the parse error). The transcript for each case is
+//! `current_user`, or reports the parse error. The transcript for each case is
 //! quoted beside it.
+//!
+//! THAT LIBPQ IS 18.4, not the 16.14 the container's `psql` reports - the two
+//! carry separate versions and this file used to name the wrong one. See
+//! `docs/runbooks/compio-postgres-libpq-parameter-probing.md`.
 //!
 //! These are parse-level assertions: no database is contacted.
 //!

@@ -87,7 +87,7 @@ async fn a_service_file_supplies_every_connection_parameter() {
 /// The same working service, written in the awkward forms libpq accepts: a
 /// header carrying a trailing comment, an indented comment line, leading
 /// whitespace before a key, and `dbname` given TWICE where only the first is
-/// real. Every one of these was probed against libpq 16.14
+/// real. Every one of these was probed against the review container's libpq
 /// (`docs/runbooks/compio-postgres-libpq-parameter-probing.md`); before that
 /// this crate rejected the header outright and took the LAST duplicate, so
 /// this connects only if the parser agrees with libpq rather than with the
