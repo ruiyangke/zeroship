@@ -576,11 +576,11 @@ async fn run_apply_txn(
         let checksum = sql_lit(m.checksum.as_str());
         let applied_by_lit = sql_lit(applied_by);
         let version_lit = sql_lit(version);
-        // F658. The reverse is stored with the applied row so a later rollback
+        // The reverse is stored with the applied row so a later rollback
         // REPLAYS it instead of re-deriving one from the migration source with
         // whatever engine happens to be installed then. PostgreSQL already did
         // this; SQLite and MySQL kept writing NULL, so the version-instability
-        // hole F654 closed stayed open on two of three dialects.
+        // hole PostgreSQL had closed stayed open on the other two dialects.
         let down_lit = m
             .down
             .as_deref()

@@ -22,8 +22,9 @@
 //! pragma exception is `data_version` on the app database, which FTS5 issues
 //! internally on every route into an index - see the arm in `decide`); functions
 //! are allowlisted (fail-closed on unknown); creator-authored TRIGGER/VIEW
-//! bodies that target `_mig` are denied at CREATE-prepare time (closing the
-//! defer-into-engine-mode hole item 6).
+//! bodies that target `_mig` are denied at CREATE-prepare time, closing the
+//! defer-into-engine-mode hole: a body prepared under `CreatorUp` cannot wait for
+//! the engine's own mode to run its writes.
 //! - **`EngineJournal`** - only the engine's own journal writes run here. `_mig`
 //! writes are allowed (the journal tables only); ATTACH/DETACH/load_extension
 //! stay denied for life; a single `PRAGMA foreign_keys` toggle is allowed (the
@@ -540,8 +541,8 @@ fn decide(current: Mode, ctx: &AuthContext<'_>) -> Authorization {
             Authorization::Allow
         }
 
-        // PRAGMA: denied in CreatorUp (closes the `writable_schema=ON` forge,
-        // item 3). In EngineJournal, a SMALL allowlist is permitted:
+        // PRAGMA: denied in CreatorUp, which closes the `writable_schema=ON`
+        // forge. In EngineJournal, a SMALL allowlist is permitted:
         // - `foreign_keys` - the engine's toggle around the 12-step rebuild;
         // - the READ-ONLY schema-introspection pragmas the drift snapshot issues
         // (`table_info`/`index_list`/`index_info`/`foreign_key_list`).

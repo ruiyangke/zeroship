@@ -1,13 +1,13 @@
-//! SQLite SQL spelling. The future `zero-migrate-sqlite`.
+//! SQLite SQL spelling.
 //!
-//! The trigger spelling at the bottom of this file arrived here in step 3 of
-//! `docs/proposals/pluggable-backends.md`, from `render::lower`. It is a DIRECTORY
+//! The trigger spelling at the bottom of this file arrived here from
+//! `render::lower`, under `docs/proposals/pluggable-backends.md`. It was a DIRECTORY
 //! MOVE and nothing else: same functions, same bytes emitted, one const renamed. It
-//! was the last SQLite render path living in the 17k-line core lowerer, and its own
-//! doc had already said so - `backends/sqlite.rs`'s `render_trigger_op` carried a
-//! note calling the delegation "a POINTER to work that `lower.rs`'s own step-3 pass
-//! has to finish, not a boundary that is done". This is that pass. MySQL's trigger
-//! spelling was the worked example of where it lands.
+//! was the last SQLite render path living in the core lowerer, and its own doc had
+//! already said so - `backends/sqlite.rs`'s `render_trigger_op` carried a note
+//! calling the delegation "a POINTER to work that `lower.rs`'s own pass has to
+//! finish, not a boundary that is done". That pass has run. MySQL's trigger spelling
+//! was the worked example of where it lands.
 
 use std::collections::BTreeMap;
 
@@ -858,14 +858,14 @@ impl DmlRenderer for SqliteDmlRenderer {
         Ok(sql)
     }
 
-    /// STEP 3, RESOLVED. The 315 lines this used to reach across the crate for now
-    /// sit at the bottom of this file, and the delegation is a local call.
+    /// The trigger spelling this used to reach across the crate for sits at the
+    /// bottom of this file now, so the delegation is a local call.
     ///
     /// The note that stood here said the SQLite trigger SPELLING still lived in
-    /// `render::lower::render_sqlite_trigger_op`, inside the 17k-line core lowerer,
-    /// and that this delegation was "a POINTER to work that `lower.rs`'s own step-3
-    /// pass has to finish, not a boundary that is done". Nothing about the emitted
-    /// SQL changed when it moved - that is what made it a move.
+    /// `render::lower::render_sqlite_trigger_op`, inside the core lowerer, and that
+    /// this delegation was "a POINTER to work that `lower.rs`'s own pass has to
+    /// finish, not a boundary that is done". Nothing about the emitted SQL changed
+    /// when it moved - that is what made it a move.
     ///
     /// PostgreSQL used to be STILL in the position SQLite just left, via
     /// `render::vendor`, and that one was not the same shape: `render::vendor` was
@@ -928,7 +928,7 @@ impl DmlRenderer for SqliteDmlRenderer {
     /// `zero_migrate_postgres::render_vendor_op`. It asks whichever vendor it
     /// resolved, and this is what this one answers.
     ///
-    /// The sixteen privileged op kinds are rendered by exactly one registered
+    /// The privileged op kinds are rendered by exactly one registered
     /// backend, so an artifact carrying any of them measures a `DialectScope::Only`
     /// reach that does not name this one. SQLite has no analogue for any of them, so
     /// there is nothing to render and no partial answer worth giving. The engine refuses

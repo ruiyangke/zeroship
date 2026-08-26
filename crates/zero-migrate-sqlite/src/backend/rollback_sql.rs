@@ -12,7 +12,7 @@
 //! COMMIT (down + rolled_back event commit atomically)
 //! ```
 //!
-//! # Additive-only this phase
+//! # Additive-only
 //!
 //! SQLite >= 3.35 reverses these NATIVELY, no table rebuild:
 //! - `DROP TABLE` (reverses a `CREATE TABLE`)
@@ -22,8 +22,10 @@
 //!
 //! Any `down` that would REQUIRE the 12-step rebuild - a column TYPE-change
 //! reversal, a constraint add/drop, a `CHECK`/`DEFAULT`/nullability flip - is
-//! REFUSED up-front with [`RollbackError::TableRebuildRequired`] (the rebuild path
-//! is not built). We do NOT half-implement a rebuild here. The classifier
+//! REFUSED up-front with [`RollbackError::TableRebuildRequired`]. The 12-step
+//! rebuild itself IS built - [`super::rebuild_sql::rebuild_one`] drives it on the
+//! apply path - but rollback does not route into it, and we do NOT half-implement a
+//! second one here. The classifier
 //! ([`down_needs_rebuild`]) is a lightweight SQLite-aware scan: the libpg_query
 //! parser the PG path uses (`zero_migrate_postgres::analysis::classify`) is a
 //! POSTGRES parser and would

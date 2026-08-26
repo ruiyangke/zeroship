@@ -84,15 +84,15 @@ pub use rebuild_sql::RebuildError;
 // This backend's vendor identity, read once for the whole `backend/` subtree from
 // the crate's single declaration in `lib.rs`.
 //
-// The four apply-time SQL builders under this module (`backfill_sql`,
+// The apply-time SQL builders under this module (`backfill_sql`,
 // `identity_sql`, `primary_key_sql`, `rebuild_sql`) each spell identifiers into
 // SQL they send to a real SQLite database. They used to do it through the raw
 // crate-wide escape primitive, which reached no renderer at all - and because
 // they contained no vendor-identity literal, the one-dialect-literal grep read
 // them as clean: it looks for a FOREIGN literal, and "no literal" passes.
 //
-// One name, read by all four, is the shape that makes their vendor greppable
-// without putting four literals in the tree. It is aliased rather than imported
+// One name, read by all of them, is the shape that makes their vendor greppable
+// without putting a literal in each. It is aliased rather than imported
 // bare because this subtree also carries `rusqlite`'s `SQLITE_*` flag names, and a
 // lone `DIALECT` reads ambiguously beside them.
 use crate::DIALECT as SQLITE_DIALECT;
@@ -103,9 +103,10 @@ use crate::DIALECT as SQLITE_DIALECT;
  * received was always `crate::schema::RENDERER.stored_ddl()`, i.e.
  * `Some(&crate::stored_ddl::PARSER)`.
  *
- * The six call sites name `crate::stored_ddl::PARSER` directly now - the spelling
+ * Every call site names `crate::stored_ddl::PARSER` directly now - the spelling
  * `fold.rs` in this crate already used - so the round trip, the `Option`, and the
- * `expect` that could never fire are all gone with it.
+ * `expect` that could never fire are all gone with it. Measure the set with
+ * `git grep -n 'stored_ddl::PARSER' -- crates`.
  */
 
 /// The SQLite [`MigrationBackend`]. Holds the dedicated hardened migration actor
@@ -235,8 +236,8 @@ impl SqliteBackend {
     /// `rolled_back` event, atomically. The direct executor-internal seam (no
     /// approval gate; the generic executor gates approval before reaching here).
     /// A rebuild-needing `down` is refused with
-    /// [`RollbackError::TableRebuildRequired`];
-    /// the rebuild is not built.
+    /// [`RollbackError::TableRebuildRequired`]. The rebuild exists and ships on the
+    /// apply path (`rebuild_sql::rebuild_one`); rollback does not route into it.
     ///
     /// # Errors
     /// [`RollbackError`] on a rebuild-needing `down`, a confinement denial, a failed
@@ -717,7 +718,8 @@ impl MigrationBackend for SqliteBackend {
     ) -> Result<(), RollbackError> {
         // ADDITIVE rollback: reverse the `down` (DROP TABLE/COLUMN/INDEX,
         // RENAME) transactionally + append a `rolled_back` event. A rebuild-needing
-        // `down` is refused with `TableRebuildRequired` (the rebuild is not built).
+        // `down` is refused with `TableRebuildRequired`: the rebuild exists but
+        // rollback does not route into it.
         rollback_sql::rollback_one_transactional(&self.actor, m, applied_by).await
     }
 
