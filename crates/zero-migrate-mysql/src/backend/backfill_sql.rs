@@ -545,7 +545,7 @@ fn cursor_component_mutated(component: &str) -> ApplyError {
 ///
 /// The MySQL twin of `zero_migrate_postgres::backend::backfill_sql::quote_ident`, which
 /// has always forwarded to `render::dml`. This one used to end in a bare
-/// ``format!("`{ident}`")`` — byte-identical (the gate above admits no backtick, so
+/// ``format!("`{ident}`")`` - byte-identical (the gate above admits no backtick, so
 /// there is nothing to double) but an unrouted spelling, and one that the
 /// backtick-doubling scan in `render::dml::tests` CANNOT see precisely because it
 /// does no doubling. That is the documented limit of a byte-pattern guard, so this

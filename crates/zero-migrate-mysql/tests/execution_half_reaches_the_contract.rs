@@ -4,17 +4,17 @@
 //! # The invariant
 //!
 //! **Everything `MysqlBackend` touches on the apply path is reachable from a vendor
-//! crate.** Not "is neutral" — REACHABLE. A vendor crate cannot depend on the engine
+//! crate.** Not "is neutral" - REACHABLE. A vendor crate cannot depend on the engine
 //! (the engine depends on all three vendors, so the edge back is a cycle Cargo
 //! refuses), so an apply-path item still sitting in `zero-migrate` is an item
 //! MySQL's executor will not be able to call once it lives here.
 //!
 //! # Why this is a compile-time assertion and not a behaviour test
 //!
-//! `crates/zero-migrate/src/apply/backend/mysql/` — eight files, 16,262 lines, of
-//! which 8,490 are production — HAS now been extracted into this crate, as
+//! `crates/zero-migrate/src/apply/backend/mysql/` - eight files, 16,262 lines, of
+//! which 8,490 are production - HAS now been extracted into this crate, as
 //! `src/backend/`. The extraction was blocked by exactly one thing: the items its
-//! production half reached through `crate::…` that lived in the engine rather than
+//! production half reached through `crate::...` that lived in the engine rather than
 //! in `zero-migrate-backend`.
 //!
 //! Naming them here made those blockers a COMPILER question instead of a reading
@@ -31,7 +31,7 @@
 //! # Reachability, and where a cheap behavioural check is available
 //!
 //! The subject is reachability, so the minimum every item gets is being NAMED at a
-//! declared type — for a function, a `fn` pointer coercion, which fails to compile
+//! declared type - for a function, a `fn` pointer coercion, which fails to compile
 //! if the item is absent, private, or has a different signature. Where an item can
 //! also be exercised without building an `EffectivePolicy` or a `Migration` (neither
 //! of which this crate can cheaply construct), it is, because a reachable item that
@@ -40,17 +40,17 @@
 //! # Scope, said out loud
 //!
 //! This file does not assert NEUTRALITY. That an item can be named here says nothing
-//! about whether it should have moved — `registry_resolution_stays_core_only` is what
+//! about whether it should have moved - `registry_resolution_stays_core_only` is what
 //! answers that, and it reads this crate too. The two are complements: this one fails
 //! when the contract is too SMALL, that one fails when a vendor reaches for something
 //! it should have answered for itself.
 //!
 //! # What is deliberately NOT here yet
 //!
-//! Nothing. The list this section carried held one entry —
+//! Nothing. The list this section carried held one entry -
 //! `zero_migrate::render::value_format`'s `catalog_id_default`,
 //! `catalog_text_id_default`, `catalog_uuid_id_default`, `recover_format_check` and
-//! `RecoveredFormatCheck`, all read by `drift_sql.rs` — and it came down exactly the
+//! `RecoveredFormatCheck`, all read by `drift_sql.rs` - and it came down exactly the
 //! way the entry predicted: each took a `&DialectId` and resolved a renderer out of
 //! the engine's registry, and each takes the renderers directly now.
 //!
@@ -148,7 +148,7 @@ fn the_checksum_drift_comparison_is_reachable() {
 /// before reading a schema a guard named.
 ///
 /// Named at its type rather than exercised: it takes an `ExecutorConfig`, and this
-/// crate has no cheap way to compose an `EffectivePolicy` — the charter parser is in
+/// crate has no cheap way to compose an `EffectivePolicy` - the charter parser is in
 /// the engine. The coercion still fails if the item is absent, private, or has
 /// drifted, which is this file's subject. What it DOES when the schema is out of
 /// scope stays covered where a policy is cheap: the engine's existence-guard suite.
@@ -164,7 +164,7 @@ fn the_existence_guard_authorization_is_reachable() {
 /// That distinction is the whole reason `decide` takes a `&BackendVendor` now: this
 /// crate knows which vendor it is, and `registry_resolution_stays_core_only` reads
 /// this crate. The case exercised is the one that must never depend on a vendor at
-/// all — an `IfNotExists` table probe against an EMPTY live catalog runs bare — so a
+/// all - an `IfNotExists` table probe against an EMPTY live catalog runs bare - so a
 /// `decide` wired to nothing would still have to answer it correctly.
 #[test]
 fn the_existence_guard_decider_answers_for_this_vendor() {
@@ -190,8 +190,8 @@ fn the_existence_guard_decider_answers_for_this_vendor() {
 /// The canonical constraint-`definition` codec, read by `drift_sql.rs` for every
 /// PRIMARY KEY and FOREIGN KEY it lifts out of `information_schema`.
 ///
-/// MySQL's catalog stores no rendered constraint body — there is no
-/// `pg_get_constraintdef` there — so the drift path BUILDS the desired body itself
+/// MySQL's catalog stores no rendered constraint body - there is no
+/// `pg_get_constraintdef` there - so the drift path BUILDS the desired body itself
 /// and must build the byte-identical one the engine's lower and fold build, or every
 /// introspected key phantom-diffs against the snapshot it is compared to.
 ///
@@ -213,7 +213,7 @@ fn the_constraint_definition_codec_is_reachable_and_spells_the_comparison_form()
     );
 
     // The FK body, built with MySQL's OWN vendor rather than by asking the registry
-    // which backend handles MySQL — the distinction `registry_resolution_stays_core_only`
+    // which backend handles MySQL - the distinction `registry_resolution_stays_core_only`
     // reads this crate for.
     //
     // `RESTRICT` is the discriminator: InnoDB has no deferred checks, so MySQL folds
@@ -258,8 +258,8 @@ fn the_constraint_definition_codec_is_reachable_and_spells_the_comparison_form()
 ///     expression under any other vendor's `ValueFormatRenderer`; and
 ///   * the UUIDv4 catalog form below is what MySQL's `DmlRenderer` emits and what its
 ///     catalog echoes back, `_latin1` introducers and all. Recognizing it needs BOTH
-///     halves — the DML renderer to render the generator to compare against, and the
-///     value-format renderer to strip the introducers — so a call wired to another
+///     halves - the DML renderer to render the generator to compare against, and the
+///     value-format renderer to strip the introducers - so a call wired to another
 ///     vendor's pair reports a plain expression and every UUID-defaulted MySQL column
 ///     drifts on the first introspection.
 #[test]
@@ -294,7 +294,7 @@ fn the_catalog_id_default_comparison_answers_with_this_vendors_renderers() {
 /// reached with this vendor's renderers.
 ///
 /// The discriminator is the MySQL-only charset introducer: its catalog echoes a
-/// CHECK back with `_utf8mb4'…'` in front of every string literal, and only MySQL's
+/// CHECK back with `_utf8mb4'...'` in front of every string literal, and only MySQL's
 /// own normalization strips it. Recovery therefore fails on the exact clause MySQL
 /// stores unless the renderers handed in are MySQL's.
 #[test]

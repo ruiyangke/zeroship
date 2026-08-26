@@ -3,35 +3,35 @@
 //!
 //! This is the MySQL analogue of the engine's PostgreSQL journal, spelled over the
 //! same neutral [`zero_migrate_backend::journal`] vocabulary:
-//! it carries the SAME logical journal shape — a SINGLE consolidated
+//! it carries the SAME logical journal shape - a SINGLE consolidated
 //! `schema_migrations` events table (one row per `applied`/`rolled_back` event,
 //! discriminated by `event_kind`), a `_supersedes` edge table, an inflight
-//! side-table, and net-state computed over the native total order — but every
+//! side-table, and net-state computed over the native total order - but every
 //! statement is rendered in MySQL dialect:
 //!
-//! - **native total order** — `event_seq BIGINT AUTO_INCREMENT PRIMARY KEY`
+//! - **native total order** - `event_seq BIGINT AUTO_INCREMENT PRIMARY KEY`
 //! (MySQL's monotonic surrogate) replaces Postgres' `BIGINT GENERATED ALWAYS AS
 //! IDENTITY`;
-//! - **timestamps** — `TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6)` replaces
+//! - **timestamps** - `TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6)` replaces
 //! `TIMESTAMPTZ DEFAULT now`;
-//! - **keyed text columns** — `VARCHAR(255)` (MySQL cannot index a bare `TEXT`
+//! - **keyed text columns** - `VARCHAR(255)` (MySQL cannot index a bare `TEXT`
 //! without a prefix length) replaces `TEXT` for `version`/`checksum`/etc.;
-//! - **immutability** — `BEFORE UPDATE`/`BEFORE DELETE` triggers that
+//! - **immutability** - `BEFORE UPDATE`/`BEFORE DELETE` triggers that
 //! `SIGNAL SQLSTATE '45000'` replace the plpgsql `RAISE EXCEPTION` trigger
 //! function (MySQL has no per-statement `TRUNCATE` trigger, but `TRUNCATE`
 //! requires the `DROP` privilege the least-privilege migrator role lacks, and
-//! the meta database is admin-owned — defense-in-depth still holds through the
+//! the meta database is admin-owned - defense-in-depth still holds through the
 //! UPDATE/DELETE triggers + privilege model);
-//! - **placeholders** — every bind is the anonymous positional `?`
+//! - **placeholders** - every bind is the anonymous positional `?`
 //! ([`PlaceholderStyle::Question`](zero_migrate_backend::backend::PlaceholderStyle::Question)),
 //! never Postgres' `$N`;
-//! - **net state** — a MySQL-8 window-function (`ROW_NUMBER OVER (PARTITION BY
+//! - **net state** - a MySQL-8 window-function (`ROW_NUMBER OVER (PARTITION BY
 //! version ORDER BY event_seq DESC)`) replaces Postgres' `DISTINCT ON`, and
 //! `COLLATE utf8mb4_bin` replaces `COLLATE "C"` for a byte-ordered version sort;
-//! - **upsert** — `INSERT IGNORE` replaces `ON CONFLICT (version) DO NOTHING`.
+//! - **upsert** - `INSERT IGNORE` replaces `ON CONFLICT (version) DO NOTHING`.
 //!
 //! The meta schema (a MySQL *database*) is admin-owned and off the migrator's
-//! reach, exactly as on Postgres — the journal is unforgeable by a confined
+//! reach, exactly as on Postgres - the journal is unforgeable by a confined
 //! creator `up`.
 
 use zero_migrate_backend::conn::ExecutorConfig;
@@ -43,21 +43,21 @@ use zero_migrate_backend::journal::{
 
 use super::{MysqlInflightDdlMarker, MysqlInflightResolution};
 
-/// The fixed, short, table-local immutability trigger names. ASCII-safe literals —
+/// The fixed, short, table-local immutability trigger names. ASCII-safe literals -
 /// never embed the (hyphenated-UUID) app id (the meta database name carries it).
 /// A MySQL trigger name is unique per SCHEMA (unlike Postgres' per-table), so the
 /// row/table pair is distinguished by an ordinal suffix per guarded table.
 const IMMUTABLE_TRG_PREFIX: &str = "zm_immutable";
 
 /// Quote a MySQL identifier with backticks, and fail-closed on an empty /
-/// NUL-bearing name — the MySQL analogue of the shared
+/// NUL-bearing name - the MySQL analogue of the shared
 /// `quote_ident_checked_for_dialect` seam
 /// (which emits Postgres double-quotes). A schema / table / trigger name is NEVER
 /// interpolated as raw SQL.
 ///
 /// THE GATES ARE THIS FUNCTION'S JOB; THE SPELLING IS NOT. This used to end in its
 /// own `format!` doubling an embedded backtick, which made it a SECOND physical
-/// home for MySQL's identifier spelling — the ANSI needle in
+/// home for MySQL's identifier spelling - the ANSI needle in
 /// `render::dml::tests::no_bare_escape_seam_outside_dml` has zero offenders
 /// crate-wide, so the backtick needle having two was an asymmetry rather than a
 /// difference of kind. The bytes now come from `render::backends::mysql`, the one
@@ -104,10 +104,10 @@ pub(crate) async fn ensure_journal<D: SqlSession>(
     conn.batch(&format!("CREATE DATABASE IF NOT EXISTS {meta}"))
         .await?;
 
-    // 2. The append-only journal of record — the SINGLE consolidated events table.
+    // 2. The append-only journal of record - the SINGLE consolidated events table.
     // `event_seq BIGINT AUTO_INCREMENT PRIMARY KEY` is the native total order
     // (MySQL assigns it on INSERT; never supplied). `version` is a VARCHAR(255)
-    // (indexable; MySQL cannot key a bare TEXT), NOT unique — rollback↔re-apply
+    // (indexable; MySQL cannot key a bare TEXT), NOT unique - rollback<->re-apply
     // appends multiple rows. The applied-only columns (kind/phase/outcome) are
     // NULL on a `rolled_back` row; a CHECK documents the per-event_kind shape
     // (MySQL 8.0.16+ enforces CHECK). InnoDB for transactional DDL+journal
@@ -164,7 +164,7 @@ pub(crate) async fn ensure_journal<D: SqlSession>(
     }
 
     // 2a. The append-only SUPERSESSION edge log (squash). One row per
-    // (squash_version → superseded_version) edge; its own AUTO_INCREMENT PK.
+    // (squash_version -> superseded_version) edge; its own AUTO_INCREMENT PK.
     conn.batch(&format!(
         "CREATE TABLE IF NOT EXISTS {meta}.schema_migrations_supersedes (
             id                 BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -279,7 +279,7 @@ pub(crate) async fn ensure_journal<D: SqlSession>(
     // absent, and it `SIGNAL`s SQLSTATE '45000' to abort the row mutation. (A
     // `TRUNCATE TABLE` bypasses row triggers, but it needs the DROP privilege
     // the least-privilege migrator role lacks, and the meta database is
-    // admin-owned — the append-only guarantee rests on triggers + privilege
+    // admin-owned - the append-only guarantee rests on triggers + privilege
     // model, matching the PG side's defense-in-depth posture.)
     for (ord, tbl) in [
         "schema_migrations",
@@ -292,14 +292,14 @@ pub(crate) async fn ensure_journal<D: SqlSession>(
         let tbl_q = quote_ident_mysql(tbl)?;
         for (op, verb) in [("UPDATE", "update"), ("DELETE", "delete")] {
             // Trigger names are unique per SCHEMA in MySQL (not per table), so the
-            // name embeds a per-table ordinal + the op — short, fixed, ASCII (never
+            // name embeds a per-table ordinal + the op - short, fixed, ASCII (never
             // the hyphenated-UUID meta database name, which would blow MySQL's
             // 64-char identifier limit).
             let trg = format!("{IMMUTABLE_TRG_PREFIX}_{ord}_{verb}");
             let trg_q = quote_ident_mysql(&trg)?;
             // Guard on information_schema so re-bootstrap is a no-op. The whole
             // block is a single simple-query batch (no client-side statement
-            // splitting of the trigger body needed — the guard + CREATE TRIGGER are
+            // splitting of the trigger body needed - the guard + CREATE TRIGGER are
             // two batches).
             let exists: Vec<zero_migrate_backend::driver::Row> = conn
                 .query(
@@ -631,7 +631,7 @@ pub(crate) async fn superseded_versions<D: SqlSession>(
 
 /// The latest `completed` checksum per **repeatable** version (the MySQL
 /// implementation behind
-/// [`zero_migrate_backend::backend::MigrationBackend::latest_completed_checksums`]) — the repeatable
+/// [`zero_migrate_backend::backend::MigrationBackend::latest_completed_checksums`]) - the repeatable
 /// re-run oracle. Only `event_kind='applied' AND kind='repeatable'` rows count.
 ///
 /// # Errors
@@ -763,7 +763,7 @@ pub(crate) async fn record_completed_in_transaction<D: SqlSession>(
     Ok(())
 }
 
-/// Append an immutable `rolled_back` event — the MySQL analogue of the PostgreSQL
+/// Append an immutable `rolled_back` event - the MySQL analogue of the PostgreSQL
 /// rollback journal INSERT. That peer is `record_rolled_back` in
 /// `zero_migrate_postgres::backend::journal_sql`, which this crate does not depend on and
 /// so cannot link; the contract has no method of its own for it. `?`
@@ -801,7 +801,7 @@ pub(crate) async fn record_rolled_back<D: SqlSession>(
     Ok(())
 }
 
-/// Clear the inflight `started` marker for a version — the MySQL analogue of
+/// Clear the inflight `started` marker for a version - the MySQL analogue of
 /// `clear_inflight` in `zero_migrate_postgres::backend::journal_sql`, which
 /// this crate does not depend on and so cannot link. `?` placeholder.
 ///

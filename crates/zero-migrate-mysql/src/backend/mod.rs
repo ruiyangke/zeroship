@@ -2,19 +2,19 @@
 //! implementation.
 //!
 //! Generic over the dialect-neutral [`SqlSession`](zero_migrate_backend::driver::SqlSession) seam
-//! (engine root `zero_migrate_backend::driver`) — a host driver (the napi `mysql2` shell) supplies
+//! (engine root `zero_migrate_backend::driver`) - a host driver (the napi `mysql2` shell) supplies
 //! the `SqlSession` impl, exactly as the `pg` shell does for
 //! `zero_migrate::apply::backend::PostgresBackend`. MySQL rides the
 //! SAME seam as Postgres; only the dialect SQL (lock, session, journal DDL,
 //! placeholders) differs, and all of it lives here + in `session` / `journal_sql`
-//! — never in the shared executor (the structural fix that lets MySQL ride the
+//! - never in the shared executor (the structural fix that lets MySQL ride the
 //! same seam).
 //!
 //! **MySQL DDL is auto-committing** (an implicit COMMIT brackets every DDL
 //! statement), so a migration's `up` cannot commit atomically with its journal
 //! row. Every MySQL migration therefore takes the **two-phase non-transactional
-//! path** — `ddl_is_transactional()` returns `false`, which routes all versioned
-//! migrations through the started-marker → run-`up` → completed-row protocol (the
+//! path** - `ddl_is_transactional()` returns `false`, which routes all versioned
+//! migrations through the started-marker -> run-`up` -> completed-row protocol (the
 //! generalization of Postgres' `CREATE INDEX CONCURRENTLY` path to every MySQL
 //! migration).
 //!
@@ -79,7 +79,7 @@ use crate::DIALECT;
 /// The generic MySQL [`MigrationBackend`] implementation.
 ///
 /// Generic over the [`SqlSession`] driver seam. It carries no online/shadow
-/// harness (`online()` / `shadow()` are always `None` — the honest v1 gap), and
+/// harness (`online()` / `shadow()` are always `None` - the honest v1 gap), and
 /// the auto-committing MySQL DDL routes every migration through the two-phase
 /// non-transactional apply path.
 ///
@@ -862,7 +862,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         // MySQL's journal table records the events; what it has never had is the
         // READER that projects them into `HistoryEvent`. Refusing by name is the
         // honest posture: an empty Vec would be indistinguishable from a project
-        // with no history at all, and this is an AUDIT surface — a caller that gets
+        // with no history at all, and this is an AUDIT surface - a caller that gets
         // a silent empty log cannot tell "nothing happened" from "I cannot see what
         // happened". Adding the reader is a MySQL change, not a core one.
         Err(JournalError::Backend(
@@ -923,7 +923,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         m: &Migration,
     ) -> Result<zero_migrate_backend::executor::PreconditionVerdict, ApplyError> {
         // The executor calls this for EVERY migration, precondition-bearing or not.
-        // A migration with NO preconditions needs no evaluator at all — evaluating an
+        // A migration with NO preconditions needs no evaluator at all - evaluating an
         // empty list is `AllMet` by construction (exactly what the PG evaluator's
         // `evaluate_all` returns for an empty `m.preconditions`), so it must apply
         // normally on MySQL rather than trip the v1 capability gap.
@@ -951,7 +951,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         // The existing-DB squash path journals a `squash` event WITHOUT running its
         // `up` (baseline-style). That records-not-run primitive is not wired for
         // MySQL (it shares the baseline machinery below). The FRESH-path
-        // squash — where the squash's `up` DOES run — is handled inline by
+        // squash - where the squash's `up` DOES run - is handled inline by
         // `apply_two_phase` (non-empty `supersedes`), so this refusal is only the
         // existing-DB record-not-run variant.
         Err(ApplyError::Backend(
@@ -1111,7 +1111,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         // No online expand-contract harness on MySQL.
         //
         // This used to justify itself with "the differ emits no renames for MySQL, so
-        // `renames` is empty — no online path is reached". That was FALSE, and
+        // `renames` is empty - no online path is reached". That was FALSE, and
         // measured false against a live server: the differ's rename author was
         // dialect-blind, so a hinted MySQL rename planned an `ExpandContract` (then
         // spelled `PgExpandContract`, a name the same investigation disproved), hit
@@ -1125,7 +1125,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
 
     fn pending_contracts(&self) -> Option<&dyn CrossDeployObligations> {
         // No cross-deploy pending-contract partition on MySQL (the online
-        // rename that opens obligations is unsupported here). `None` ⇒ reads are
+        // rename that opens obligations is unsupported here). `None` => reads are
         // empty and writes are no-ops by construction.
         None
     }
@@ -1147,12 +1147,12 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
 
 /// UNIT / render tests for the MySQL backend.
 ///
-/// These assert the **generated MySQL SQL** — `GET_LOCK`/`RELEASE_LOCK` for the
+/// These assert the **generated MySQL SQL** - `GET_LOCK`/`RELEASE_LOCK` for the
 /// project lock, MySQL journal DDL (`AUTO_INCREMENT`, `CURRENT_TIMESTAMP(6)`,
 /// `CREATE DATABASE`, InnoDB, SIGNAL-based immutability triggers), and the `?`
-/// placeholder style on every journaled write — **WITHOUT a live MySQL server**.
+/// placeholder style on every journaled write - **WITHOUT a live MySQL server**.
 /// A host-shaped [`RecordingSession`] records the SQL + binds of every verb and
-/// returns canned rows for the reads (`GET_LOCK → 1`, trigger-existence → empty),
+/// returns canned rows for the reads (`GET_LOCK -> 1`, trigger-existence -> empty),
 /// so a full lock + `ensure_journal` + apply sweep runs generically over a
 /// non-compio driver and every emitted statement is inspected. The live-MySQL e2e
 /// lives in the host CLI suite, gated on the `ZERO_MIGRATE_MYSQL_URL` env var.
@@ -1179,7 +1179,7 @@ mod render_tests {
     use zero_migrate_ir::probe::{GuardDir, GuardProbe};
 
     /// The backend reports the MySQL dialect, the `?` placeholder style, and
-    /// non-transactional DDL (auto-commit ⇒ two-phase path for every migration).
+    /// non-transactional DDL (auto-commit => two-phase path for every migration).
     #[test]
     fn backend_reports_mysql_dialect_and_question_placeholders() {
         let rec = RecordingSession::new();
@@ -1468,7 +1468,7 @@ mod render_tests {
     /// too-long id to a deterministic 64-char SHA-256 hex (MySQL's lock-name cap).
     #[test]
     fn project_lock_name_prefixes_and_folds_to_64_chars() {
-        // Short id → prefixed verbatim.
+        // Short id -> prefixed verbatim.
         assert_eq!(
             session::project_lock_name("prj_abc"),
             "zero_migrate:prj_abc"
@@ -1681,7 +1681,7 @@ mod render_tests {
     /// EXISTS`, the `schema_migrations` table with `BIGINT AUTO_INCREMENT PRIMARY
     /// KEY` + `TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6)` + `ENGINE=InnoDB`, the
     /// `_supersedes` + `_inflight` tables, and `SIGNAL SQLSTATE '45000'`
-    /// immutability triggers — never any Postgres-flavoured `GENERATED ALWAYS AS
+    /// immutability triggers - never any Postgres-flavoured `GENERATED ALWAYS AS
     /// IDENTITY` / `TIMESTAMPTZ` / plpgsql.
     #[compio::test]
     async fn ensure_journal_emits_mysql_dialect_ddl() {
@@ -3676,8 +3676,8 @@ mod render_tests {
             .expect("empty catalog snapshot")
             .tables
             .is_empty());
-        // A migration with NO preconditions applies normally (empty list ⇒ AllMet,
-        // no evaluator needed — the executor calls this for every migration).
+        // A migration with NO preconditions applies normally (empty list => AllMet,
+        // no evaluator needed - the executor calls this for every migration).
         assert_eq!(
             backend.evaluate_preconditions(&cfg, &m).await.unwrap(),
             zero_migrate_backend::executor::PreconditionVerdict::AllMet,

@@ -2,7 +2,7 @@
 //!
 //! There is no MySQL parser in this workspace. The only analyzer the engine has
 //! reads a `libpg_query` parse tree, and MySQL renders identifiers with backticks,
-//! which is not valid PostgreSQL — so handing MySQL the PostgreSQL analyzers would
+//! which is not valid PostgreSQL - so handing MySQL the PostgreSQL analyzers would
 //! not degrade gracefully. Every statement would fail to parse and come back with no
 //! advisories, for SQL THIS ENGINE EMITS and is about to run.
 //!
@@ -30,8 +30,8 @@
 //! The security line-1 is [`crate::guard`] (empty here too, and for its own stated
 //! reasons), `data_security.destructive_ops` is enforced over the structured IR
 //! rather than over SQL text, and the engine's approval gate still confirms every
-//! destructive op. What is missing is the ADVISORY layer — the warnings an operator
-//! reads before choosing to deploy — and only that.
+//! destructive op. What is missing is the ADVISORY layer - the warnings an operator
+//! reads before choosing to deploy - and only that.
 
 use zero_migrate_backend::advisory::{
     AdvisoryVerdict, AnalyzerAbsent, IndexCoverage, OperationalAdvisor,
@@ -87,7 +87,7 @@ mod tests {
     fn no_statement_is_reported_as_clean() {
         // Backtick-quoted MySQL DDL that the PostgreSQL analyzer could not parse.
         // The point of the assertion is that the answer is NOT an empty advisory
-        // list — it is the refusal to claim one.
+        // list - it is the refusal to claim one.
         let AdvisoryVerdict::NotAnalyzed(absent) = ADVISOR.advise("DROP TABLE `orders`") else {
             panic!("MySQL ships no analyzer, so no statement may come back Analyzed");
         };

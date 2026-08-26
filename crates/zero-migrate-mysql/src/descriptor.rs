@@ -11,8 +11,8 @@ use crate::DIALECT;
 /// [`Capability::PartitionRelationDdl`] is NOT here, and that is not the same
 /// claim as "MySQL cannot partition". MySQL's `PARTITION BY RANGE/LIST/HASH/KEY`
 /// is first-class and predates PostgreSQL's declarative model. What MySQL has no
-/// spelling for is a partition that is a RELATION — there is no
-/// `CREATE TABLE … PARTITION OF`, no `ATTACH PARTITION`, and no `DETACH` that
+/// spelling for is a partition that is a RELATION - there is no
+/// `CREATE TABLE ... PARTITION OF`, no `ATTACH PARTITION`, and no `DETACH` that
 /// leaves a standalone table behind, because a MySQL partition is a storage
 /// division of one table and never appears in the relation namespace.
 /// `EXCHANGE PARTITION` swaps rows with a structurally-identical table; it moves

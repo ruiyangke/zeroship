@@ -37,8 +37,8 @@ fn mysql_qualified(schema: &str, object: &str) -> String {
 
 /// Render this backend's declared table attributes as MySQL table options.
 ///
-/// MySQL's grammar is `CREATE TABLE … ( … ) NAME=value NAME=value`, space separated after
-/// the closing paren — NOT PostgreSQL's `WITH ( … )` list, which is a syntax error here.
+/// MySQL's grammar is `CREATE TABLE ... ( ... ) NAME=value NAME=value`, space separated after
+/// the closing paren - NOT PostgreSQL's `WITH ( ... )` list, which is a syntax error here.
 ///
 /// The values are written UNQUOTED. That is not laziness: `ROW_FORMAT` and `ENGINE` take
 /// grammar keywords, and MySQL rejects `ROW_FORMAT='DYNAMIC'`. Every shape a vendor may
@@ -317,9 +317,9 @@ impl DdlEmitter for MysqlEmitter {
         ))
     }
 
-    /// MySQL has no `ALTER COLUMN … TYPE`. Its retype is `MODIFY COLUMN`, which takes
+    /// MySQL has no `ALTER COLUMN ... TYPE`. Its retype is `MODIFY COLUMN`, which takes
     /// the COMPLETE column definition and silently DISCARDS every facet the statement
-    /// omits — so the statement cannot be written until the definition is known, and
+    /// omits - so the statement cannot be written until the definition is known, and
     /// the definition is not in the op. It is written at APPLY instead, from
     /// `SHOW CREATE TABLE` under an explicit table lock; see
     /// `crate::backend::alter_column_type_sql`.
@@ -338,8 +338,8 @@ impl DdlEmitter for MysqlEmitter {
         None
     }
 
-    /// A nullability change is the same shape as a retype — `MODIFY COLUMN` with one
-    /// facet changed instead of the type — and carries the same discard-what-you-omit
+    /// A nullability change is the same shape as a retype - `MODIFY COLUMN` with one
+    /// facet changed instead of the type - and carries the same discard-what-you-omit
     /// rule. It is refused rather than restated because no one has driven one end to
     /// end against a live server, which is the bar the retype had to clear; the
     /// refusal itself is issued upstream by `CatalogFoldPolicy::alter_column_refusal`.

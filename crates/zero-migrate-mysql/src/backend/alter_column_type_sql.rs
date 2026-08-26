@@ -1,6 +1,6 @@
 //! MySQL column retype, executed by RESTATING the live column definition.
 //!
-//! MySQL has no `ALTER COLUMN … TYPE`. Its retype is `MODIFY COLUMN`, which takes
+//! MySQL has no `ALTER COLUMN ... TYPE`. Its retype is `MODIFY COLUMN`, which takes
 //! the COMPLETE column definition and silently DISCARDS every facet the statement
 //! omits. `tests/mysql_engine/mysql_setcolumntype_restate.rs` measures that against
 //! a live server: a bare `MODIFY COLUMN label varchar(128)` changes the type and
@@ -8,7 +8,7 @@
 //! in the same statement, without a warning or an error.
 //!
 //! So the statement cannot be written until the definition is known, and the
-//! definition is not in the op — `Op::SetColumnType` carries one field. It is read
+//! definition is not in the op - `Op::SetColumnType` carries one field. It is read
 //! here, under the same explicit table lock the primary-key path takes, from
 //! `SHOW CREATE TABLE`: the server's own spelling of the column, reproduced verbatim
 //! with ONLY its type token replaced. Every facet the server reports is therefore
@@ -203,7 +203,7 @@ async fn resolve_alter<D: SqlSession>(
 /// modifier words that are part of the type rather than of the column: `unsigned`,
 /// `zerofill`, and the `character set` / `collate` pair. Those are NOT skipped here.
 /// `unsigned` and `zerofill` belong to the numeric type the caller is replacing, so
-/// carrying them onto a new type would be wrong (`bigint unsigned` → `varchar(64)
+/// carrying them onto a new type would be wrong (`bigint unsigned` -> `varchar(64)
 /// unsigned` is not a statement MySQL accepts); leaving them is equally wrong.
 ///
 /// The honest boundary is therefore: this replaces the token and its argument list,

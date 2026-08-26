@@ -1,7 +1,7 @@
 //! TEST-ONLY charter fixtures for this crate's unit tests.
 //!
 //! The engine's `zero_migrate::test_fixtures::no_inject` is `pub(crate)`, and no
-//! visibility widening can make a `pub(crate)` reachable across a crate boundary —
+//! visibility widening can make a `pub(crate)` reachable across a crate boundary -
 //! so when the MySQL execution half moved here, its 80 fixture call sites needed a
 //! sibling. This is it, and it is the same shape `zero-migrate-node`'s
 //! `src/test_fixtures.rs` already has.
@@ -17,7 +17,7 @@
 //! The charter TEXT is a copy of the engine's, deliberately: these fixtures exist to
 //! keep the moved tests asserting against the same policy they asserted against
 //! before the move, so a divergence here would be a silent change of premise.
-//! `toml::Value` does the schema-name escaping for the same reason — the same
+//! `toml::Value` does the schema-name escaping for the same reason - the same
 //! escaping, not merely equivalent escaping.
 
 use zero_migrate_ir::policy::DestructiveOps;
@@ -213,7 +213,7 @@ scope = "all"
     }
 }
 
-/// The ONE composition. Not a local algebra — the same entry point the loader calls
+/// The ONE composition. Not a local algebra - the same entry point the loader calls
 /// in production.
 fn compose(charter_toml: &str, what: &str) -> EffectivePolicy {
     effective_policy_from_charter_toml(charter_toml)

@@ -1,7 +1,7 @@
 //! Explicit MySQL primary-key lifecycle execution.
 //!
 //! MySQL auto-commits DDL, so the catalog-validated operation is resolved to one
-//! `ALTER TABLE` and then rides the backend's existing started-marker → DDL →
+//! `ALTER TABLE` and then rides the backend's existing started-marker -> DDL ->
 //! completed-row protocol. In particular, removing `AUTO_INCREMENT` is never a
 //! preceding `ALTER`: every required `MODIFY COLUMN`, the old-key drop, and the
 //! optional new-key add are clauses of that one statement.

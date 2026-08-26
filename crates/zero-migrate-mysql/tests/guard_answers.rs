@@ -12,7 +12,7 @@
 //!
 //! - `refuses_destructive_ops_itself()` is the switch on
 //!   `check_ir_data_security_policy`'s neutral posture walk, and that walk is the ONLY
-//!   enforcement `data_security.destructive_ops = forbid` has on this backend — this
+//!   enforcement `data_security.destructive_ops = forbid` has on this backend - this
 //!   guard is built without the composed policy and cannot read the knob. Answering
 //!   `true` claims "I refuse destructive ops myself", the walk steps aside, and the knob
 //!   goes inert. Its doc records that exact state as the one that once let a
@@ -22,8 +22,8 @@
 //!   `MigrationFlags::default()` would look like a tidy-up and would silently assert
 //!   "not destructive, no approval needed" about text nobody inspected.
 //!
-//! The other two say this vendor has no raw door. A raw island is `Op::Raw` — PostgreSQL
-//! text — so reaching MySQL with one is a mis-dispatch, not a trusted operation.
+//! The other two say this vendor has no raw door. A raw island is `Op::Raw` - PostgreSQL
+//! text - so reaching MySQL with one is a mis-dispatch, not a trusted operation.
 //! Returning `Ok` would grant MySQL an unchecked raw door that no MySQL author can even
 //! open, and refusing under another vendor's id would blame the backend that produced
 //! the text rather than the one that received it.
@@ -31,7 +31,7 @@
 //! # The vendor id is load-bearing here, not decoration
 //!
 //! This guard and SQLite's were once ONE type, a shared `SqliteDescriptorGuard` whose
-//! own doc admitted it "serves BOTH descriptor-only engines — SQLite and MySQL — despite
+//! own doc admitted it "serves BOTH descriptor-only engines - SQLite and MySQL - despite
 //! the name". They were split so that a change to one vendor's posture could not
 //! silently become a change to the other's. Asserting the id each door refuses under is
 //! what keeps that split real: a body copied between the two crates without swapping the

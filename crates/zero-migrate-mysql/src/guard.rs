@@ -1,4 +1,4 @@
-//! MySQL's line-1 defense — the descriptor path, trusted by construction.
+//! MySQL's line-1 defense - the descriptor path, trusted by construction.
 //!
 //! MySQL migrations reach the engine as descriptor-diff output, which the author
 //! boundary and the backend's runtime checks already vet. There is no raw-SQL MySQL
@@ -10,21 +10,21 @@
 //! denied. That is why `SqlGuard::check` and
 //! `SqlGuard::check_raw_island_sql_backstop` both refuse a non-PostgreSQL dialect
 //! outright (`GuardError::RawSqlRejected`, carrying MySQL's id) rather than
-//! mis-vetting the text —
+//! mis-vetting the text -
 //! a backstop for the wrong caller, kept unchanged.
 //!
 //! # This is not the whole of MySQL's data security
 //!
 //! `data_security.destructive_ops = forbid` IS enforced for MySQL, by
 //! `zero_migrate_backend::guard::check_ir_data_security_policy`, over the structured IR.
-//! Its gate reads `if cfg.dialect() != &POSTGRES` — it exists
+//! Its gate reads `if cfg.dialect() != &POSTGRES` - it exists
 //! because the guard here is empty and is handed no policy. Do not read the empty
 //! outcome below as "MySQL enforces nothing"; read it as "MySQL enforces at the IR,
 //! not at the SQL text".
 //!
 //! # Why this is a separate type from SQLite's
 //!
-//! Both dialects used to run one `SqliteDescriptorGuard` — a type named after the
+//! Both dialects used to run one `SqliteDescriptorGuard` - a type named after the
 //! other vendor, whose own doc had to explain that the name was wrong. Each vendor
 //! now writes its own trusting guard, so a change to one dialect's posture cannot
 //! silently become a change to the other's.
@@ -53,7 +53,7 @@ impl MigrationGuard for MysqlGuard {
 
     /// REFUSED, not waved through.
     ///
-    /// A raw island is `Op::Raw` — PostgreSQL text. Reaching MySQL with it is a
+    /// A raw island is `Op::Raw` - PostgreSQL text. Reaching MySQL with it is a
     /// mis-dispatch, not a trusted operation, so this refuses with MySQL's own id
     /// rather than returning `Ok`. Returning `Ok` here would grant MySQL an unchecked
     /// raw door that no MySQL author can even open.
@@ -85,13 +85,13 @@ impl MigrationGuard for MysqlGuard {
         false
     }
 
-    /// `false` — this guard is constructed WITHOUT the composed policy, so it cannot
+    /// `false` - this guard is constructed WITHOUT the composed policy, so it cannot
     /// read `data_security.destructive_ops` at all, let alone refuse on it.
     ///
     /// The neutral posture walk in
     /// [`check_ir_data_security_policy`](zero_migrate_backend::guard::check_ir_data_security_policy)
     /// is consequently the ONLY enforcement that knob has on this backend. Answering
-    /// `true` would turn it off and make the knob silently inert — which is exactly
+    /// `true` would turn it off and make the knob silently inert - which is exactly
     /// what it was before that walk existed: a `DROP TABLE` applied under the default
     /// `forbid`.
     fn refuses_destructive_ops_itself(&self) -> bool {
@@ -102,8 +102,8 @@ impl MigrationGuard for MysqlGuard {
     ///
     /// There is no MySQL parser in this workspace, so no `destructive` /
     /// `non_transactional` / rename facet can be READ OUT of a `up` blob. Rather than
-    /// return the default flag set — which would silently assert "not destructive, no
-    /// approval needed" about text nobody inspected — this returns
+    /// return the default flag set - which would silently assert "not destructive, no
+    /// approval needed" about text nobody inspected - this returns
     /// `requires_approval: true`.
     ///
     /// What is NO LONGER CHECKED, stated plainly: a raw-SQL-authored MySQL migration

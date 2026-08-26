@@ -2,28 +2,28 @@
 //!
 //! These are the MySQL-specific lock / session / apply / rollback operations the
 //! [`MysqlBackend`](super::MysqlBackend)
-//! [`MigrationBackend`](zero_migrate_backend::backend::MigrationBackend) impl drives — the
+//! [`MigrationBackend`](zero_migrate_backend::backend::MigrationBackend) impl drives - the
 //! MySQL analogue of the Postgres
 //! `zero_migrate_postgres::backend::session` leaves. Every one of them
 //! is MySQL-flavoured, so it lives in the MySQL backend, never the shared executor:
 //!
-//! - **project lock** — `GET_LOCK(name, timeout)` / `RELEASE_LOCK(name)`, MySQL's
+//! - **project lock** - `GET_LOCK(name, timeout)` / `RELEASE_LOCK(name)`, MySQL's
 //! named advisory lock, replaces `pg_advisory_lock(hashtext($1))`. The lock name
 //! is derived from the project id (bounded to MySQL's 64-char lock-name limit).
 //! A read-only caller takes the same lock with a zero timeout instead, so it
 //! never spends any of a peer deploy's wall clock, and names the holder from
 //! `performance_schema` when the lock is taken.
-//! - **session setup** — `SET SESSION max_execution_time` +
+//! - **session setup** - `SET SESSION max_execution_time` +
 //! `innodb_lock_wait_timeout` replaces the `SET [LOCAL] search_path` +
 //! `statement_timeout` / `lock_timeout` GUCs (MySQL has no per-connection schema
-//! search-path — a migration references its objects by explicit database, or the
+//! search-path - a migration references its objects by explicit database, or the
 //! connection's default database is the project database). No `SET ROLE`: the
 //! least-privilege migrator-role confinement is a Postgres construct; on MySQL
 //! the connecting user's grants ARE the confinement.
-//! - **apply** — MySQL DDL is **auto-committing** (an implicit COMMIT brackets
+//! - **apply** - MySQL DDL is **auto-committing** (an implicit COMMIT brackets
 //! every DDL statement), so a migration's `up` cannot be wrapped with its journal
 //! row in one transaction. Every MySQL migration therefore takes the **two-phase
-//! non-transactional path**: a `started` marker → run the `up` → an immutable
+//! non-transactional path**: a `started` marker -> run the `up` -> an immutable
 //! `completed` row + clear the marker. Because generated MySQL DDL is not safely
 //! replayable after an ambiguous crash, an unmatched marker is preserved and
 //! recovery fails closed for operator inspection instead of re-running `up`.
@@ -118,7 +118,7 @@ pub(crate) async fn database_capabilities<D: SqlSession>(
 /// MySQL lock names are capped at 64 characters (since 5.7.5); a project id can be
 /// longer, so we namespace-prefix and, if the result would exceed the cap, fold
 /// the id to a stable 64-char form. The lock name is passed as a **bind** (never
-/// interpolated), so this is purely about staying within MySQL's own limit — not a
+/// interpolated), so this is purely about staying within MySQL's own limit - not a
 /// quoting concern.
 #[must_use]
 pub(crate) fn project_lock_name(project_id: &str) -> String {
@@ -130,7 +130,7 @@ pub(crate) fn project_lock_name(project_id: &str) -> String {
     // Fold to a deterministic, collision-resistant 64-char name: prefix + a
     // hex SHA-256 of the full id (64 hex chars is exactly the cap when the prefix
     // is dropped for the overflow case). Liveness-only if two ids ever collided
-    // (they serialize against each other) — never a correctness defect, exactly
+    // (they serialize against each other) - never a correctness defect, exactly
     // like the PG `hashtext` 32-bit-key limitation.
     use sha2::{Digest, Sha256};
     // Keep the historical overflow derivation stable so mixed-version deploys
@@ -253,7 +253,7 @@ pub(crate) async fn release_journal_bootstrap_lock<D: SqlSession>(
 ///
 /// # Errors
 /// [`ApplyError::Db`] on a driver failure; [`ApplyError::Backend`] if `GET_LOCK`
-/// returns a non-1 result (0 = timeout, NULL = error/killed) — surfaced rather
+/// returns a non-1 result (0 = timeout, NULL = error/killed) - surfaced rather
 /// than silently proceeding without the lock.
 pub(crate) async fn acquire_project_lock<D: SqlSession>(
     conn: &D,
@@ -414,7 +414,7 @@ fn effective_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> Result<u64, Time
 }
 
 /// The effective `innodb_lock_wait_timeout` (seconds) for a migration: its
-/// per-migration lock override (ms → whole seconds, min 1) if set, else the SHORT
+/// per-migration lock override (ms -> whole seconds, min 1) if set, else the SHORT
 /// executor-wide default. Mirrors the PG `lock_timeout` render + the lock-safety
 /// envelope (a short lock-acquisition budget separate from the long statement
 /// budget).
@@ -567,7 +567,7 @@ pub(crate) async fn restore_session<D: SqlSession>(
         .map_err(|e| ApplyError::Db(e.into()))
 }
 
-/// Session-level `SET SESSION …` for the (always non-txn on MySQL) apply path.
+/// Session-level `SET SESSION ...` for the (always non-txn on MySQL) apply path.
 /// Renders the `max_execution_time` (ms) + `innodb_lock_wait_timeout` (s) budgets;
 /// no schema search-path (MySQL uses the connection default database) and no
 /// `SET ROLE` (grants ARE the confinement). Idempotent + session-scoped.
@@ -949,7 +949,7 @@ pub(crate) async fn apply_two_phase<D: SqlSession>(
         }
 
         // This vendor's own registration, not a registry lookup keyed by a dialect
-        // literal. It used to be `&zero_migrate_ir::dialect::MYSQL` — the one place
+        // literal. It used to be `&zero_migrate_ir::dialect::MYSQL` - the one place
         // in this backend that named the dialect outside its `DIALECT` const.
         match zero_migrate_backend::existence_probe::decide(probe, &live, &crate::VENDOR) {
             zero_migrate_backend::existence_probe::GuardVerdict::RunBare => {}
@@ -1063,7 +1063,7 @@ async fn finalize_two_phase<D: SqlSession>(
     Ok(())
 }
 
-/// Insert the `S → v_i` supersession edges for a fresh-path squash (the MySQL
+/// Insert the `S -> v_i` supersession edges for a fresh-path squash (the MySQL
 /// analogue of the PG `insert_supersedes_edges`). The caller holds the journal
 /// finalization transaction. `INSERT IGNORE` plus the unique edge key makes a
 /// retried repair idempotent. `?` placeholders.
@@ -1223,7 +1223,7 @@ pub(crate) async fn rollback_dml_plan_transactional<D: SqlSession>(
 
 /// Roll back ONE migration: run the `down`, then append the `rolled_back` event
 /// (the MySQL analogue of `rollback_one_transactional`). MySQL DDL auto-commits,
-/// so — unlike PG — the `down` and its journal append are NOT one atomic
+/// so - unlike PG - the `down` and its journal append are NOT one atomic
 /// transaction; the append is ordered strictly after a successful `down`.
 ///
 /// # Errors

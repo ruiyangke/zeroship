@@ -3,8 +3,8 @@
 //!
 //! # Why this is not a field on the neutral column snapshot
 //!
-//! It used to be one — `ColumnSnapshot::mysql_physical_type`, in
-//! `zero-migrate-backend` — and the engine `match`ed on its variants in three
+//! It used to be one - `ColumnSnapshot::mysql_physical_type`, in
+//! `zero-migrate-backend` - and the engine `match`ed on its variants in three
 //! places. That put both halves of the hard limit in the wrong crate: the neutral
 //! vocabulary spelled a vendor's name, and neutral code resolved a vendor's type
 //! grammar to decide whether two columns were the same.
@@ -23,7 +23,7 @@
 //! author-built desired snapshot that has not derived one. Both the identity
 //! comparison and the drift report require the leg on BOTH sides, which
 //! [`Dialectal::paired`](zero_migrate_backend::dialectal::Dialectal::paired)
-//! enforces — a contract compared against an absent one describes nothing about the
+//! enforces - a contract compared against an absent one describes nothing about the
 //! database.
 
 use std::any::Any;
@@ -321,7 +321,7 @@ impl DialectalValue for MysqlPhysicalType {
 
 impl VendorColumnFacts for MysqlPhysicalType {
     /// Two MySQL columns are the same physical column when their parsed contracts
-    /// are equal — except that an unmodelled family cannot ESTABLISH a difference,
+    /// are equal - except that an unmodelled family cannot ESTABLISH a difference,
     /// so it declines by answering `true`.
     ///
     /// That is a DIFFER's safe direction and not a general rule: an existence guard
@@ -344,9 +344,9 @@ impl VendorColumnFacts for MysqlPhysicalType {
     /// The portable `data_type` cannot do this job and fails in two directions. The
     /// fold emits one dialect's `information_schema` spelling while the catalog side
     /// is folded through `canonical_type`, so a widened `decimal` reported
-    /// `expected: "numeric", actual: "decimal"` — one type spelled two ways, naming
-    /// nothing a reader can act on. And when the two spellings COINCIDE — a live
-    /// `TEXT` narrowed to `VARCHAR(64)` is `"text"` on both sides — the report's
+    /// `expected: "numeric", actual: "decimal"` - one type spelled two ways, naming
+    /// nothing a reader can act on. And when the two spellings COINCIDE - a live
+    /// `TEXT` narrowed to `VARCHAR(64)` is `"text"` on both sides - the report's
     /// equal-sides guard dropped the entry entirely, so it was blind exactly where
     /// the comparator was not.
     ///
@@ -356,8 +356,8 @@ impl VendorColumnFacts for MysqlPhysicalType {
     /// Two UNEQUAL contracts that nevertheless spell the same text fall back to
     /// their `Debug`, which prints every field, so two values that are not equal
     /// cannot render the same. That is unreachable for every family
-    /// [`MysqlPhysicalType::parse`] produces — each renders its distinguishing
-    /// values, and the round-trip test below says so — but a collision that returned
+    /// [`MysqlPhysicalType::parse`] produces - each renders its distinguishing
+    /// values, and the round-trip test below says so - but a collision that returned
     /// the portable pair instead would re-lose the difference through the very
     /// equal-sides guard this method exists to get past, which is too quiet a failure
     /// to leave to inspection.
@@ -506,8 +506,8 @@ mod physical_contract_rules {
     //!
     //! These moved out of `zero_migrate::apply::drift`'s in-src tests, where they
     //! asserted core's comparator against a MySQL rule core no longer holds. Core's
-    //! half — that it asks a leg exactly when one is present on both sides, and falls
-    //! through to the portable comparison otherwise — is asserted there still, against
+    //! half - that it asks a leg exactly when one is present on both sides, and falls
+    //! through to the portable comparison otherwise - is asserted there still, against
     //! a stand-in contract. This is the vendor's half, asserted where the rule lives.
 
     use super::MysqlPhysicalType;

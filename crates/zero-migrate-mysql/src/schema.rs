@@ -728,7 +728,7 @@ fn mysql_native_enum_values(def: &serde_json::Value) -> Option<Vec<String>> {
     for value in values {
         let s = value.as_str()?;
         // MySQL's ENUM value grammar accepts a bare hex literal but rejects the
-        // `_utf8mb4 X'…'` introduced form used in expression positions. The
+        // `_utf8mb4 X'...'` introduced form used in expression positions. The
         // column's utf8mb4 character set consumes these UTF-8 bytes while the hex
         // spelling remains independent of `NO_BACKSLASH_ESCAPES`.
         rendered.push(format!("X'{}'", hex::encode(s.as_bytes())));

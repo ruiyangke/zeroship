@@ -46,14 +46,14 @@ fn normalize_fk_definition(def: &str) -> String {
                                   // Keep only the FINAL dotted segment (the table), dropping any `<schema>.` prefix.
                                   // Handles quoted identifiers by splitting on the last `.`.
                                   //
-                                  // **SAFE post-validation** — `rsplit('.')` would mis-split a referenced table
+                                  // **SAFE post-validation** - `rsplit('.')` would mis-split a referenced table
                                   // whose own (quoted) identifier contained a literal dot (e.g. `"a.b"`). That
                                   // case is UNREACHABLE here: the declared side is built by
                                   // [`crate::render::declarative::fk_definition_pg`] from a `target` that has already
                                   // passed `validate_ident` (rejects `.` in identifiers) and `reject_cross_app_ref`
                                   // (rejects dotted FK targets, `declarative.rs`), so the referenced table is
                                   // ALWAYS a single dot-free segment. The live side comes from
-                                  // `pg_get_constraintdef`, which double-quotes such a name — but the catalog only
+                                  // `pg_get_constraintdef`, which double-quotes such a name - but the catalog only
                                   // ever holds names this same author path created, so it is dot-free too. The
                                   // debug_assert pins that invariant; if identifier rules ever loosen this must
                                   // become a quote-aware split.

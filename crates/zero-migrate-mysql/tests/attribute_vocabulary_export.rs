@@ -1,18 +1,18 @@
-//! Golden-file gate for `attribute-vocabulary.json` — this backend's declared knobs,
+//! Golden-file gate for `attribute-vocabulary.json` - this backend's declared knobs,
 //! exported for its npm package's TypeScript generator.
 //!
 //! The rendering itself lives in
 //! [`zero_migrate_backend::attribute::vocabulary_json`], which names no vendor and is
 //! shared by all three backends: three copies would be three chances for the artifacts
 //! to disagree in shape, at which point one package's generator reads a field another
-//! vendor never wrote. What stays here is what is genuinely this crate's — WHICH
+//! vendor never wrote. What stays here is what is genuinely this crate's - WHICH
 //! vocabulary, and the floors that make the check non-vacuous.
 //!
 //! # Why the artifact lives next to the crate
 //!
 //! One per vendor. A single combined export would have to live somewhere naming all
 //! three backends, and would hand every vendor's npm package the other vendors' knobs.
-//! This file names mysql because it IS mysql's — the one place naming a vendor is the
+//! This file names mysql because it IS mysql's - the one place naming a vendor is the
 //! design, not a leak.
 //!
 //! # Regenerating
@@ -29,7 +29,7 @@ use zero_migrate_mysql::{DIALECT, VENDOR};
 
 /// Below this, the export is near-empty and every assertion over it goes vacuous. An
 /// artifact of zero attributes is valid JSON that generates an empty TypeScript
-/// interface, which reads exactly like "this backend has no knobs" — wrong, and
+/// interface, which reads exactly like "this backend has no knobs" - wrong, and
 /// indistinguishable from a cleared vocabulary or a walk over the wrong static.
 const DECLARED_FLOOR: usize = 3;
 
@@ -125,7 +125,7 @@ fn every_exported_key_belongs_to_this_dialect() {
 ///
 /// This is a regression test for a defect that shipped in the first generated typings:
 /// `auto_increment` declares `i64::MAX`, the artifact carried it as a JSON number, and
-/// `JSON.parse` — whose numbers are `f64` — turned 9223372036854775807 into
+/// `JSON.parse` - whose numbers are `f64` - turned 9223372036854775807 into
 /// 9223372036854776000. The generated doc comment then stated a bound this backend has
 /// never declared.
 ///
@@ -153,7 +153,7 @@ fn a_64_bit_bound_survives_the_export_without_precision_loss() {
         "the f64-rounded form of i64::MAX must not appear anywhere in the export: {doc}"
     );
 
-    // And the bound really is the one under test — if MySQL stopped declaring a knob past
+    // And the bound really is the one under test - if MySQL stopped declaring a knob past
     // 2^53, this whole test would pass while checking nothing.
     assert!(
         VENDOR.attributes.iter().any(|d| matches!(

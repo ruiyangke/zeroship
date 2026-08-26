@@ -223,7 +223,7 @@ impl CatalogFoldPolicy for MysqlCatalogFoldPolicy {
         match (character_set, collation) {
             // `utf8mb4` is the platform-default charset, and the only collations the
             // renderer emits on it (`utf8mb4_0900_as_cs` case-sensitive, `utf8mb4_0900_ai_ci`
-            // case-insensitive) map 1:1 to the `caseSensitive` intent — which is compared
+            // case-insensitive) map 1:1 to the `caseSensitive` intent - which is compared
             // separately. So a `utf8mb4` column is NOT "explicit storage" that requires
             // exact target metadata; only a non-default charset (a typed-id's `ascii`)
             // does, because the charset itself must match for a foreign key.

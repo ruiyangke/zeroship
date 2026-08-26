@@ -1,22 +1,22 @@
-//! # `zero-migrate-mysql` — the MySQL backend
+//! # `zero-migrate-mysql` - the MySQL backend
 //!
 //! One vendor, no engine. This crate holds BOTH halves of MySQL now:
 //!
-//! * the RENDER half — DML, schema, DDL and value-format renderers plus the line-1
+//! * the RENDER half - DML, schema, DDL and value-format renderers plus the line-1
 //!   guard, all registered through [`VENDOR`]; and
-//! * the EXECUTION half — [`backend`], the `MigrationBackend` implementation: the
+//! * the EXECUTION half - [`backend`], the `MigrationBackend` implementation: the
 //!   `GET_LOCK` project lock, the session pins, the two-phase non-transactional
 //!   apply MySQL's auto-committing DDL forces, the journal DDL and net-state reads,
 //!   the `information_schema` drift snapshot, and the resumable backfill.
 //!
-//! It depends on `zero-migrate-backend` and `zero-migrate-ir` — never on the engine.
+//! It depends on `zero-migrate-backend` and `zero-migrate-ir` - never on the engine.
 //! That is the whole point of the split: the engine names this crate for its
 //! registry, so this crate must not name the engine back.
 //!
 //! # What that cost, and what it bought
 //!
 //! The execution half was the last vendor backend inside the engine, and moving it
-//! is what the governing rule — the core is neutral, and that is the hard limit —
+//! is what the governing rule - the core is neutral, and that is the hard limit -
 //! asks for. Three of its couplings could not simply follow it down, and each was
 //! answered by this crate naming ITSELF instead of asking a registry:
 //!
@@ -34,7 +34,7 @@
 //!
 //! # The one-dialect-literal rule
 //!
-//! This CRATE names its dialect exactly ONCE — [`DIALECT`] in this file — and no
+//! This CRATE names its dialect exactly ONCE - [`DIALECT`] in this file - and no
 //! module names another vendor at all. Everything else reads `crate::DIALECT`.
 //!
 //! The rule used to be per-MODULE: each renderer held its own
@@ -49,7 +49,7 @@
 //!
 //! A backend can still reach another vendor's spelling THROUGH a contract helper
 //! that hard-codes a dialect, and no grep of this crate can see it because the
-//! literal lives in `zero-migrate-backend`. That is measured, not hypothetical —
+//! literal lives in `zero-migrate-backend`. That is measured, not hypothetical -
 //! `zero_migrate_backend::dml`'s header carries the numbers. The identifier seam
 //! (`*_for_dialect(.., DIALECT)`) is how this crate stays clear of it.
 
@@ -72,7 +72,7 @@ mod fold;
 pub mod guard;
 // This backend's own parsed type identity, and the carrier leg it rides to the
 // neutral column snapshot in. `pub` because the engine's drift comparator holds the
-// leg — it cannot read one without naming this type, which is the point.
+// leg - it cannot read one without naming this type, which is the point.
 pub mod physical_type;
 mod schema;
 mod validation;
@@ -109,7 +109,7 @@ const NAME: &str = "mysql";
 /// This backend's identity, declared HERE and nowhere else in the workspace.
 ///
 /// `zero-migrate-ir` is the neutral vocabulary crate and its own module doc says a
-/// backend "declares its own — `DialectId::new(\"duckdb\")` — without editing this
+/// backend "declares its own - `DialectId::new(\"duckdb\")` - without editing this
 /// crate". It used to declare three anyway, and core re-exported them, so every
 /// consumer that wanted to name `MySQL` reached a neutral crate to get it. This is
 /// the declaration that ended that: the `NAME` const above is the workspace's only
@@ -138,7 +138,7 @@ const _: () = assert!(DialectId::is_well_formed_name(NAME));
 /// away at exactly the moment the vendor became separately linkable.
 ///
 /// `value_format`, `validation`, `ddl`, `guard` and `advisor` are REQUIRED. Delete any line and this literal stops
-/// compiling, here, with this crate named — which is the point: a backend cannot
+/// compiling, here, with this crate named - which is the point: a backend cannot
 /// inherit another backend's DDL, acquire a trusting guard, or acquire a silently
 /// empty advisory report by omission. See
 /// `zero_migrate_backend::registry::BackendVendor`.

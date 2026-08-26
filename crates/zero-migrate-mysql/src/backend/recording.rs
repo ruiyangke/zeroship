@@ -5,8 +5,8 @@
 //!
 //! Two suites need this one double, and they cannot be in the same crate.
 //!
-//! Most of what it proves is vendor-internal — which SQL the backend emits, in which
-//! order, with which binds — and that stays here, as unit tests beside the code.
+//! Most of what it proves is vendor-internal - which SQL the backend emits, in which
+//! order, with which binds - and that stays here, as unit tests beside the code.
 //! Fourteen of them additionally drive the ENGINE (`apply_with_lock_backend`,
 //! `MigrationEngine`, `diff_snapshots`, `fold_ops`) over the same recorder, and those
 //! cannot live in a vendor crate at all: `zero-migrate` depends on this crate, so the
@@ -15,16 +15,16 @@
 //!
 //! A second copy of the recorder over there would be the real hazard: its canned
 //! `information_schema` rows are the shared premise of both suites, and two copies
-//! drift silently — one suite would go on asserting against a catalog shape the other
+//! drift silently - one suite would go on asserting against a catalog shape the other
 //! had already corrected. So there is ONE recorder, and the engine's test tree reaches
 //! it through the `testing` feature, which `zero-migrate` turns on in its
 //! `[dev-dependencies]` only. Resolver 3 keeps dev-dependency features out of the
 //! normal build, so nothing here is compiled into a shipping `zero-migrate-mysql`.
 //!
 //! It returns canned rows for the reads the MySQL apply path issues: `GET_LOCK(...)`
-//! → a single `got=1` row (lock acquired); the `information_schema.triggers`
-//! existence probe → empty (so `ensure_journal` creates every trigger); the journal
-//! net-state reads → empty. It is the MySQL analogue of the PG backend's in-crate
+//! -> a single `got=1` row (lock acquired); the `information_schema.triggers`
+//! existence probe -> empty (so `ensure_journal` creates every trigger); the journal
+//! net-state reads -> empty. It is the MySQL analogue of the PG backend's in-crate
 //! `RecordingSession` genericity proof.
 
 use std::cell::RefCell;
@@ -44,9 +44,9 @@ pub const HOLDER_CONNECTION_ID: i64 = 113_110;
 
 /// A non-compio, host-shaped [`SqlSession`] that records the SQL + binds of
 /// every verb and returns canned rows for the reads the MySQL apply path issues:
-/// `GET_LOCK(...)` → a single `got=1` row (lock acquired); the
-/// `information_schema.triggers` existence probe → empty (so `ensure_journal`
-/// creates every trigger); the journal net-state reads → empty. This is the
+/// `GET_LOCK(...)` -> a single `got=1` row (lock acquired); the
+/// `information_schema.triggers` existence probe -> empty (so `ensure_journal`
+/// creates every trigger); the journal net-state reads -> empty. This is the
 /// MySQL analogue of the PG backend's in-crate `RecordingSession` genericity
 /// proof.
 #[derive(Debug)]
@@ -88,7 +88,7 @@ impl Default for RecordingSession {
     /// journal, and a project lock that grants.
     ///
     /// Delegating rather than `#[derive]`d, because none of those are the field
-    /// types' own defaults — an all-`Default` recorder would report an empty server
+    /// types' own defaults - an all-`Default` recorder would report an empty server
     /// version and refuse every capability gate. It exists at all because `new` went
     /// `pub` when the recorder became shared, and a `pub fn new` with no arguments is
     /// a `Default` by any caller's reading.
@@ -269,7 +269,7 @@ impl RecordingSession {
 
     /// Route a read to its canned rows by SQL shape. `GET_LOCK` returns a
     /// single `got=1` row; everything else (trigger-existence probe, journal
-    /// net-state reads) returns empty — enough to drive the whole apply/journal
+    /// net-state reads) returns empty - enough to drive the whole apply/journal
     /// sweep end-to-end without a live server.
     pub fn rows_for(&self, sql: &str) -> Vec<Row> {
         if sql.contains("GET_LOCK(?, 0)") {

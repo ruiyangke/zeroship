@@ -8,7 +8,7 @@
 //!
 //! # What is deliberately left out, and why
 //!
-//! `KEY_BLOCK_SIZE` accepts 0, 1, 2, 4, 8 or 16 — a SET of integers, not a range, and
+//! `KEY_BLOCK_SIZE` accepts 0, 1, 2, 4, 8 or 16 - a SET of integers, not a range, and
 //! [`AttrShape::Int`] can only express a range. Declaring it as `0..=16` would admit 3
 //! and 5, which the server then rejects at apply time: exactly the plan-time-versus-
 //! apply-time failure the range exists to prevent. It stays out until the shape can say
@@ -36,7 +36,7 @@ static DEFS: &[AttrDef] = declare_attributes! {
         = AttrShape::Enum {
             // The manual's own table of storage engines, in its spelling, INCLUDING the
             // documented aliases. An earlier version listed only the first five, which
-            // REFUSED five engines MySQL accepts — an over-restrictive enum is not a
+            // REFUSED five engines MySQL accepts - an over-restrictive enum is not a
             // conservative choice here, it is a wrong answer that blocks a legal
             // migration at plan time.
             variants: &[
@@ -77,7 +77,7 @@ static DEFS: &[AttrDef] = declare_attributes! {
         = AttrShape::Int {
             // `min: 0` is not decoration: the manual warns that AUTO_INCREMENT "works
             // properly only if it contains only positive values" and that inserting a
-            // negative "is regarded as inserting a very large positive number" — a
+            // negative "is regarded as inserting a very large positive number" - a
             // silent wrong answer, so it is refused here instead.
             min: 0,
             // A KNOWN under-statement. MySQL's ceiling is an UNSIGNED BIGINT

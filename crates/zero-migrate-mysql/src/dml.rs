@@ -26,7 +26,7 @@ use zero_migrate_ir::validate::{
     CODE_DIALECT_UNSUPPORTED, CODE_EXPR_NOT_PORTABLE, CODE_UNSUPPORTED,
 };
 
-// This module's vendor identity, read from `crate::DIALECT` — this module names no
+// This module's vendor identity, read from `crate::DIALECT` - this module names no
 // dialect literal of its own. See `render/backends/mod.rs`.
 //
 // Every `dml::*_for_dialect(.., DIALECT)` call below is core's "validate, then
@@ -39,10 +39,10 @@ use crate::DIALECT;
 /// Render a string in a grammar position that accepts only a quoted string TOKEN,
 /// not an expression.
 ///
-/// This backend's ordinary inline string is a `_utf8mb4 X'…'` hex literal, chosen so
+/// This backend's ordinary inline string is a `_utf8mb4 X'...'` hex literal, chosen so
 /// `NO_BACKSLASH_ESCAPES` cannot change either the value or the statement shape. Some
-/// grammar positions do not accept an expression there — an `ENUM(...)` member and the
-/// five-character `SIGNAL SQLSTATE` code are the two in this crate — so those take the
+/// grammar positions do not accept an expression there - an `ENUM(...)` member and the
+/// five-character `SIGNAL SQLSTATE` code are the two in this crate - so those take the
 /// standard quote-doubled form instead. Every author-SQL execution path here pins
 /// `NO_BACKSLASH_ESCAPES` before executing, so quote doubling has one stable reading
 /// whatever `sql_mode` the connection inherited.
@@ -523,7 +523,7 @@ impl DmlRenderer for MysqlDmlRenderer {
     /// every embedded backtick, then wrap the result in backticks.
     ///
     /// It lives HERE, in the vendor's own module, and no longer in core. It used
-    /// to be `schema::query::mysql_quote_ident` — `pub`, in the schema kernel —
+    /// to be `schema::query::mysql_quote_ident` - `pub`, in the schema kernel -
     /// with this method reaching INTO core to get its own spelling: the exact
     /// mirror image of the ANSI arrangement, where `ansi_double_quote_ident` is
     /// `pub(in crate::render::backends)` so that core CANNOT reach it un-named.
@@ -533,7 +533,7 @@ impl DmlRenderer for MysqlDmlRenderer {
     /// `backend_modules_name_one_dialect` passed because the reach was by function
     /// name rather than by a dialect-enum literal. What it blocked was step 4: the
     /// future `zero-migrate-mysql` would have needed core at RUNTIME to spell its
-    /// own identifier — the core-to-backend cycle the backend split exists to
+    /// own identifier - the core-to-backend cycle the backend split exists to
     /// break, and the same shape as the extraction spike's finding that `-sqlite`
     /// needed `-postgres` to quote a trigger name.
     ///
@@ -553,18 +553,18 @@ impl DmlRenderer for MysqlDmlRenderer {
     /// | before | `schema::query::mysql_quote_ident` | 30 |
     /// | after | this method | 54 |
     ///
-    /// The two before-sets NEST rather than being disjoint — the inverse of the
+    /// The two before-sets NEST rather than being disjoint - the inverse of the
     /// ANSI case, and exactly what "the backend delegates into core" means
     /// operationally: NOTHING reddened by neutering this method was missed by
-    /// neutering core. The 9 in the difference (`render::lower::tests` ×5,
-    /// `schema::query::hostile_identifier_quoting` ×3, and
+    /// neutering core. The 9 in the difference (`render::lower::tests` x5,
+    /// `schema::query::hostile_identifier_quoting` x3, and
     /// `policy_keyword_and_quoted_identifiers_are_quoted_in_injected_sql`) are the
     /// tests whose MySQL identifier bytes this backend had NO say in.
     ///
     /// AND THE 54 IS NOT A TYPO FOR THE 30 THAT WAS PREDICTED. Routing the two
-    /// SECOND homes found during the change — `zero_migrate_mysql::backend::journal_sql`
+    /// SECOND homes found during the change - `zero_migrate_mysql::backend::journal_sql`
     /// and `::backfill_sql`, each of which carried its own copy of the spelling and
-    /// so could not be reached by the core neuter at all — added 24
+    /// so could not be reached by the core neuter at all - added 24
     /// `zero_migrate_mysql::backend` tests on top of the 30. Nothing was lost at any
     /// step: the 54 is a strict superset of the 30, and the binary held at 1232
     /// tests throughout. The prediction was wrong because it was formed from the
@@ -858,8 +858,8 @@ impl DmlRenderer for MysqlDmlRenderer {
     fn render_scalar_fn_override(&self, f: ScalarFn, args: &[String]) -> Option<String> {
         match f {
             // The portable `length()` intent is CHARACTER length (PG + SQLite
-            // `length(text)`). MySQL's `LENGTH()` is *byte* length — wrong for
-            // any multibyte string — so MySQL must use `CHAR_LENGTH()`.
+            // `length(text)`). MySQL's `LENGTH()` is *byte* length - wrong for
+            // any multibyte string - so MySQL must use `CHAR_LENGTH()`.
             ScalarFn::Length => Some(format!("char_length({})", args.join(", "))),
             _ => None,
         }
@@ -1064,8 +1064,8 @@ impl DmlRenderer for MysqlDmlRenderer {
     /// This vendor renders NO vendor ops, and that is written here rather than
     /// inherited.
     ///
-    /// The sixteen privileged op kinds — roles, grants, RLS, policies, functions,
-    /// extensions, schemas, `raw` — are rendered by exactly one registered backend,
+    /// The sixteen privileged op kinds - roles, grants, RLS, policies, functions,
+    /// extensions, schemas, `raw` - are rendered by exactly one registered backend,
     /// so an artifact carrying any of them measures a `DialectScope::Only` reach that
     /// names that backend and not this one.
     /// MySQL has no analogue for any of them, so there is nothing to render. The
