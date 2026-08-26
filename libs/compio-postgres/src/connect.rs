@@ -31,6 +31,8 @@ use rand::seq::SliceRandom;
 use std::borrow::Cow;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
+#[cfg(target_os = "linux")]
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
@@ -79,14 +81,12 @@ impl Endpoint {
 
     /// The hostname this endpoint is spelled with in a password file.
     ///
-    /// A Unix socket matches as `localhost` rather than as its socket path. A
-    /// bare `hostaddr` with no name matches as the ADDRESS - measured against
-    /// libpq 16.14, where a file keyed by the IP was used and one keyed by
-    /// `localhost` was not.
+    /// An explicitly named Unix socket matches its path. A bare `hostaddr`
+    /// with no name matches as the ADDRESS.
     fn passfile_host(&self) -> String {
         match &self.target {
             #[cfg(unix)]
-            EndpointTarget::Unix(_) => passfile::UNIX_SOCKET_HOST.to_owned(),
+            EndpointTarget::Unix(path) => unix_passfile_host(path),
             EndpointTarget::Name(host) => host.clone(),
             EndpointTarget::Ip(ip) => self.hostname.clone().unwrap_or_else(|| ip.to_string()),
         }
@@ -127,6 +127,16 @@ impl Endpoint {
             EndpointTarget::Unix(path) => Ok(vec![Addr::Unix(path.clone())]),
         }
     }
+}
+
+#[cfg(unix)]
+fn unix_passfile_host(path: &Path) -> String {
+    #[cfg(target_os = "linux")]
+    if let Some(name) = path.as_os_str().as_bytes().strip_prefix(&[0]) {
+        return format!("@{}", String::from_utf8_lossy(name));
+    }
+
+    path.to_string_lossy().into_owned()
 }
 
 /// Validate and enumerate the configured host entries once for every
@@ -802,6 +812,37 @@ mod tests {
             with_password.get_password(),
             Some(b"from-passfile".as_slice())
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn passfile_uses_an_explicit_unix_socket_path_as_the_host() {
+        let mut config = Config::new();
+        config.host_path("/custom/postgresql-sockets");
+        let endpoint = endpoints(&config)
+            .expect("an explicit Unix socket is an endpoint")
+            .pop()
+            .expect("one Unix endpoint");
+
+        assert_eq!(
+            endpoint.passfile_host(),
+            "/custom/postgresql-sockets",
+            "only libpq's compiled-default socket directory maps to localhost"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn passfile_preserves_an_abstract_unix_socket_name() {
+        let config = "host=@passfile-cluster"
+            .parse::<Config>()
+            .expect("parse abstract Unix socket");
+        let endpoint = endpoints(&config)
+            .expect("an abstract Unix socket is an endpoint")
+            .pop()
+            .expect("one abstract endpoint");
+
+        assert_eq!(endpoint.passfile_host(), "@passfile-cluster");
     }
 
     #[test]

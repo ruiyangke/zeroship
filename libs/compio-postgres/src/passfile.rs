@@ -16,9 +16,11 @@ use std::path::Path;
 
 /// The connection identity a passfile line is matched against.
 ///
-/// `host` is the hostname as the passfile spells it: for a Unix socket that is
-/// `localhost`, not the socket directory. `port` is stringified because the
-/// file matches it as text.
+/// `host` is the hostname as the passfile spells it. An explicitly configured
+/// Unix socket uses its directory (or `@name` on Linux); `localhost` is only
+/// libpq's spelling for an implicit or compiled-default socket directory,
+/// neither of which this driver infers. `port` is stringified because the file
+/// matches it as text.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PassfileKey<'a> {
     pub(crate) host: &'a str,
@@ -26,14 +28,6 @@ pub(crate) struct PassfileKey<'a> {
     pub(crate) dbname: &'a str,
     pub(crate) user: &'a str,
 }
-
-/// The hostname a Unix-socket connection matches under.
-///
-/// TAKEN FROM libpq's DOCUMENTATION, not probed: the test server accepts local
-/// socket connections with `trust`, so no local probe can tell a match from a
-/// connection that never needed a password. Every other rule in this module
-/// was measured.
-pub(crate) const UNIX_SOCKET_HOST: &str = "localhost";
 
 // THE PATH COMES FROM THE CALLER, and this module does not go looking.
 //
