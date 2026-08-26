@@ -162,6 +162,53 @@ are not. That is why a test for an empty numeric must use ONE trailing
 parameter - a DSN with two "empty" numerics is measuring the swallow, not the
 empty value.
 
+## Probing what libpq NEGOTIATED, not just what it accepted
+
+The `.invalid` read-out shows what libpq PARSED. For parameters that change
+what is negotiated on the wire, `psql`'s `\conninfo` reports the outcome:
+
+```bash
+docker exec $C psql "host=127.0.0.1 port=5432 user=postgres dbname=zeroship" \
+  -c '\conninfo' 2>&1 | grep -i protocol
+```
+
+Run the control first, or a field that always prints the same value proves
+nothing. MEASURED 2026-08-25 against PostgreSQL 18.4:
+
+| connection string | `\conninfo` reports |
+| --- | --- |
+| no protocol settings | `3.0` |
+| `max_protocol_version=3.2` | `3.2` |
+| `max_protocol_version=3.0` | `3.0` |
+
+So the field tracks negotiation, and **libpq 18 defaults to protocol 3.0** -
+3.2 is opt-in. It reports 3.0 against a 16.14 server too, and 16 cannot do
+better anyway.
+
+`min_protocol_version` is a REFUSAL floor rather than a preference, and its
+error names both sides:
+
+```
+psql: error: connection to server ... failed: server only supports protocol
+version 3.0, but "min_protocol_version" was set to 3.2
+```
+
+That makes it the discriminating probe for whether a driver IMPLEMENTS the
+parameter or merely accepts it: an implementation that ignores the floor
+CONNECTS to a 16.14 server instead of refusing.
+
+There is NO server-side view of the negotiated version to check against -
+`pg_stat_activity` has no such column and `pg_settings` carries only the TLS
+`ssl_min/max_protocol_version`. `\conninfo` is libpq's own client-side report,
+which is still an independent implementation to compare a driver against, but
+it is not the server's word.
+
+**Through a pooler the answer changes, and that is worth knowing before
+assuming a default is safe.** Asking for 3.2 through PgBouncer reports 3.0
+whether it fronts 16.14 or 18.4: the pooler does not speak 3.2 and negotiates
+the client down rather than refusing. So requesting 3.2 by default is safe in
+that shape - it simply does not take effect there.
+
 ## Where this is pinned
 
 `libs/compio-postgres/src/service.rs`, in the tests below the parser - one test
