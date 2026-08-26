@@ -1035,6 +1035,11 @@ impl Config {
             if key == "service" {
                 return Err(Error::config(Box::new(NestedService)));
             }
+            if key == "requiressl" {
+                return Err(Error::config(Box::new(InvalidServiceOption(
+                    "requiressl",
+                ))));
+            }
             if explicit.iter().any(|given| given == key) || applied.contains(&key.as_str()) {
                 continue;
             }
@@ -2525,6 +2530,21 @@ impl fmt::Display for NestedService {
 
 impl error::Error for NestedService {}
 
+#[derive(Debug)]
+struct InvalidServiceOption(&'static str);
+
+impl fmt::Display for InvalidServiceOption {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            fmt,
+            "connection option `{}` is not valid in a service file",
+            self.0
+        )
+    }
+}
+
+impl error::Error for InvalidServiceOption {}
+
 /// Parse libpq's integer grammar: a signed C `int`, surrounded only by C
 /// whitespace. Rust's integer parser has the right digit and sign grammar once
 /// those six whitespace bytes have been removed.
@@ -3797,6 +3817,22 @@ mod tests {
             );
         }
 
+        /// `requiressl` is a conninfo-parser compatibility alias, not an
+        /// entry in libpq's connection-option table. Its service-file parser
+        /// therefore rejects it instead of translating it to `sslmode`.
+        #[test]
+        fn requiressl_is_not_accepted_from_a_service() {
+            let mut config = Config::new();
+            let error = config
+                .fill_unset(vec![("requiressl".to_owned(), "0".to_owned())], &[])
+                .expect_err("requiressl is not a valid service-file key");
+
+            assert!(
+                error_chain_contains(&error, "requiressl"),
+                "the rejection must name the invalid service key: {error:?}"
+            );
+        }
+
         #[test]
         fn an_unknown_key_in_a_service_is_rejected_by_name() {
             let mut config = Config::new();
@@ -3811,6 +3847,11 @@ mod tests {
                 names_the_key,
                 "the error does not name the offending key: {error:?}"
             );
+        }
+
+        fn error_chain_contains(error: &(dyn std::error::Error + 'static), needle: &str) -> bool {
+            std::iter::successors(Some(error), |error| std::error::Error::source(*error))
+                .any(|cause| cause.to_string().contains(needle))
         }
     }
 
