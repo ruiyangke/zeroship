@@ -2866,6 +2866,7 @@ impl<'a> UrlParser<'a> {
         }
 
         if let Some(password) = it.next().filter(|password| !password.is_empty()) {
+            Self::validate_no_raw_spaces(password)?;
             Self::validate_percent_escapes(password)?;
             let password = Cow::from(percent_encoding::percent_decode(password.as_bytes()));
             self.config.password(password);
@@ -3020,6 +3021,7 @@ impl<'a> UrlParser<'a> {
     /// not the other. Only the `/`-prefixed socket path is genuinely
     /// Unix-only.
     fn host_param(&mut self, s: &str) -> Result<(), Error> {
+        Self::validate_no_raw_spaces(s)?;
         Self::validate_percent_escapes(s)?;
         let decoded = Cow::from(percent_encoding::percent_decode(s.as_bytes()));
 
@@ -3044,6 +3046,33 @@ impl<'a> UrlParser<'a> {
     /// without encoding the `%` -- became a host name containing a percent
     /// sign. Silently using a different credential than the one written is the
     /// failure worth refusing.
+    /// Refuse a RAW space in a URL component, as libpq does
+    /// (`unexpected spaces found in "a b", use percent-encoded spaces (%20)
+    /// instead`).
+    ///
+    /// A space cannot appear unencoded in a URL, and accepting one turns a
+    /// mistake into a different connection rather than an error. The mistake
+    /// this catches is mixing the two DSN syntaxes - appending a keyword
+    /// setting to a URL, as in
+    /// `postgres://host/zeroship read_timeout=5`. libpq rejects that outright;
+    /// this crate used to fold the whole tail into the DATABASE NAME and fail
+    /// later against the server with `database "zeroship read_timeout=5" does
+    /// not exist`, which names the symptom and not the cause. Measured against
+    /// libpq 16.14 on 2026-08-26: it refuses a raw space in the user, the
+    /// host, the database and a query value alike, and accepts `%20` in each.
+    fn validate_no_raw_spaces(s: &str) -> Result<(), Error> {
+        if s.contains(' ') {
+            return Err(Error::config_parse(
+                format!(
+                    "unexpected spaces found in \"{s}\", use percent-encoded \
+                     spaces (%20) instead"
+                )
+                .into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn validate_percent_escapes(s: &str) -> Result<(), Error> {
         let bytes = s.as_bytes();
         let mut i = 0;
@@ -3064,6 +3093,7 @@ impl<'a> UrlParser<'a> {
     }
 
     fn decode(&self, s: &'a str) -> Result<Cow<'a, str>, Error> {
+        Self::validate_no_raw_spaces(s)?;
         Self::validate_percent_escapes(s)?;
         percent_encoding::percent_decode(s.as_bytes())
             .decode_utf8()
@@ -3211,6 +3241,70 @@ mod tests {
     /// distinction is the whole point - accepting them would be the
     /// "accepted and silently ignored" failure `libpq_parameter_parity.rs`
     /// exists to prevent.
+    /// A raw space in a URL is a MISTAKE, and the commonest one is mixing the
+    /// two DSN syntaxes: appending a keyword setting to a URL.
+    ///
+    /// This crate used to accept it and fold the tail into the database name,
+    /// so `postgres://h/zeroship read_timeout=5` connected to a database
+    /// literally called `zeroship read_timeout=5` and failed at the SERVER
+    /// with `database ... does not exist`, naming the symptom rather than the
+    /// cause. That cost real debugging time. libpq refuses it up front and
+    /// says what to do instead; these pin the same behaviour.
+    mod raw_spaces_in_a_url {
+        use crate::Config;
+
+        fn chain(dsn: &str) -> String {
+            let error = dsn.parse::<Config>().expect_err("a raw space must be refused");
+            let mut chain = String::new();
+            let mut source = std::error::Error::source(&error);
+            while let Some(cause) = source {
+                chain.push_str(&cause.to_string());
+                source = std::error::Error::source(cause);
+            }
+            chain
+        }
+
+        #[test]
+        fn a_raw_space_is_refused_in_every_component() {
+            for dsn in [
+                "postgres://postgres@127.0.0.1:5432/zeroship read_timeout=5",
+                "postgres://post gres@127.0.0.1:5432/zeroship",
+                "postgres://postgres@127.0.0.1:5432/zeroship?application_name=a b",
+            ] {
+                let chain = chain(dsn);
+                assert!(
+                    chain.contains("unexpected spaces found")
+                        && chain.contains("%20"),
+                    "the refusal does not tell the caller how to fix it: {chain}"
+                );
+            }
+        }
+
+        /// THE CONTROL, and it is the whole point: an ENCODED space is a legal
+        /// space and must still decode to one. Without this the test above
+        /// would be satisfied by refusing every space, encoded or not.
+        #[test]
+        fn an_encoded_space_still_decodes_to_a_space() {
+            let config: Config =
+                "postgres://postgres@127.0.0.1:5432/zeroship?application_name=a%20b"
+                    .parse()
+                    .expect("percent-encoded spaces are legal");
+            assert_eq!(config.get_application_name(), Some("a b"));
+            assert_eq!(config.get_dbname(), Some("zeroship"));
+        }
+
+        /// The KEYWORD syntax is untouched: there a space separates settings,
+        /// so this check must not reach it.
+        #[test]
+        fn the_keyword_syntax_still_takes_spaces_as_separators() {
+            let config: Config = "host=h port=5432 dbname=db"
+                .parse()
+                .expect("spaces separate keyword settings");
+            assert_eq!(config.get_dbname(), Some("db"));
+            assert_eq!(config.get_ports(), [5432]);
+        }
+    }
+
     mod gssapi_parameters {
         use crate::Config;
 
