@@ -2110,6 +2110,14 @@ impl Future for Waiter<'_> {
         let current_slot = self.slot.as_ref().map(Rc::clone);
         let mut waiters = self.pool.waiters.borrow_mut();
 
+        // The waker this poll REPLACES, carried out so it is destroyed with no
+        // borrow held. Assigning through the `RefMut` would drop the old
+        // `Waker` while both this borrow and `waiters` are live, and a `Waker`
+        // is arbitrary caller code: its `Drop` re-entering the pool would hit
+        // `BorrowError`. Same rule as waking outside the borrow in
+        // `wake_one_waiter`, applied to the destructor rather than the wake.
+        let mut replaced: Option<Waker> = None;
+
         if let Some(slot) = current_slot
             && waiters.iter().any(|queued| Rc::ptr_eq(queued, &slot))
         {
@@ -2117,7 +2125,7 @@ impl Future for Waiter<'_> {
             let mut w = slot.waker.borrow_mut();
             match &*w {
                 Some(existing) if existing.will_wake(new_waker) => {}
-                _ => *w = Some(new_waker.clone()),
+                _ => replaced = w.replace(new_waker.clone()),
             }
         } else {
             // First poll, or our slot was popped for a direct hand-off and we
@@ -2127,6 +2135,9 @@ impl Future for Waiter<'_> {
             self.slot = Some(slot);
         }
         drop(waiters);
+        // Now that no borrow is held, letting an arbitrary destructor run is
+        // safe.
+        drop(replaced);
 
         // 3. Only the FIFO head may consume global availability. Removing the
         // slot here marks a successful retry, so Drop will not mistake it for a
@@ -2239,6 +2250,10 @@ impl Future for CloseWaiter<'_> {
         let new_waker = cx.waker();
         let current_slot = self.slot.as_ref().map(Rc::clone);
         let mut close_waiters = self.pool.close_waiters.borrow_mut();
+        // Carried out for the same reason as in `Waiter::poll`: a replaced
+        // `Waker` is arbitrary caller code and must not be destroyed while a
+        // borrow is held.
+        let mut replaced: Option<Waker> = None;
         if let Some(slot) = current_slot
             && close_waiters
                 .iter()
@@ -2247,13 +2262,15 @@ impl Future for CloseWaiter<'_> {
             let mut waker = slot.waker.borrow_mut();
             match &*waker {
                 Some(existing) if existing.will_wake(new_waker) => {}
-                _ => *waker = Some(new_waker.clone()),
+                _ => replaced = waker.replace(new_waker.clone()),
             }
         } else {
             let slot = CloseWaiterSlot::new(new_waker.clone());
             close_waiters.push(Rc::clone(&slot));
             self.slot = Some(slot);
         }
+        drop(close_waiters);
+        drop(replaced);
 
         Poll::Pending
     }
@@ -4042,5 +4059,80 @@ mod tests {
             .expect("blackhole server stopped before reporting EOF");
         assert!(closed, "blackhole server did not observe a closed socket");
         server.join().expect("blackhole server thread panicked");
+    }
+
+    thread_local! {
+        /// `Some(true)` means the pool still held a borrow while a REPLACED
+        /// waker was being destroyed. `None` means the destructor never ran,
+        /// which must not read as success.
+        static DROP_BORROWED: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+
+    struct DropProbeWake;
+
+    impl Wake for DropProbeWake {
+        fn wake(self: Arc<Self>) {}
+        fn wake_by_ref(self: &Arc<Self>) {}
+    }
+
+    impl Drop for DropProbeWake {
+        fn drop(&mut self) {
+            PROBE_SLOT.with(|slot| {
+                if let Some(slot) = slot.borrow().as_ref() {
+                    DROP_BORROWED.with(|flag| flag.set(Some(slot.waker.try_borrow_mut().is_err())));
+                }
+            });
+        }
+    }
+
+    /// Replacing a waiter's `Waker` must not DESTROY the old one inside the
+    /// borrow.
+    ///
+    /// `Waiter::poll` refreshed the slot with `*w = Some(new)`, which drops the
+    /// previous `Waker` through the `RefMut` while that borrow AND the
+    /// `waiters` borrow are both live. A `Waker` is arbitrary caller code, so a
+    /// destructor that re-enters the pool meets `BorrowError` - the same hazard
+    /// as waking inside the borrow, moved from the wake to the drop.
+    ///
+    /// The assertion is on the BORROW rather than on a panic, so it states the
+    /// invariant instead of one way of tripping over it. `None` fails
+    /// deliberately: a destructor that never ran proves nothing.
+    #[test]
+    fn replacing_a_waiter_waker_does_not_destroy_it_inside_the_borrow() {
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            ..PoolConfig::default()
+        };
+        let pool = test_pool(config, Vec::new(), 0, 1);
+        let probe = Waker::from(Arc::new(DropProbeWake));
+        let mut waiter = Box::pin(Waiter::new(&pool));
+        assert!(poll_with_waker(waiter.as_mut(), &probe).is_pending());
+
+        let slot = pool
+            .waiters
+            .borrow()
+            .front()
+            .cloned()
+            .expect("the parked waiter registered a queue slot");
+        PROBE_SLOT.with(|cell| *cell.borrow_mut() = Some(slot));
+        DROP_BORROWED.with(|flag| flag.set(None));
+
+        // Hand the slot the last `Arc`, so replacing it below runs the
+        // destructor rather than merely decrementing a count.
+        drop(probe);
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let other = counting_waker(&counter);
+        assert!(poll_with_waker(waiter.as_mut(), &other).is_pending());
+
+        let observed = DROP_BORROWED.with(Cell::get);
+        PROBE_SLOT.with(|cell| *cell.borrow_mut() = None);
+        assert_eq!(
+            observed,
+            Some(false),
+            "the replaced waker was destroyed while the pool held its slot \
+             borrowed (None means the destructor never ran at all)"
+        );
     }
 }
