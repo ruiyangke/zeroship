@@ -98,6 +98,12 @@ impl BackendMessages {
         }
 
         let frame = self.0.split_to(total_len).freeze();
+        // `slice(5..)` is in range only because `Header::parse` REFUSES a
+        // declared length below 4 (`invalid message length: header length < 4`,
+        // checked in postgres-protocol 0.6.12, the resolved version). Without
+        // that upstream guard a hostile peer could declare 3, making
+        // `total_len` 4 and this slice panic. If the header parse is ever
+        // replaced with one of ours, the check has to come with it.
         Ok(Some(frame.slice(5..)))
     }
 
