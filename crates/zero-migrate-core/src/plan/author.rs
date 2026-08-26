@@ -1,16 +1,16 @@
-//! The `MigrationAuthor` seam — where SQL *enters* the pipeline.
+//! The `MigrationAuthor` seam - where SQL *enters* the pipeline.
 //!
 //! A migration's `up`/`down` SQL is produced by a pluggable **author**, then
-//! handed to the engine for the SAME `plan` (lint) → `gate` (approval) →
+//! handed to the engine for the SAME `plan` (lint) -> `gate` (approval) ->
 //! [`executor::apply`](crate::engine::MigrationEngine::apply) (guard + least-priv role)
 //! treatment regardless of where it came from. There are two authors:
 //!
-//! - [`DeterministicAuthor`] — a BOUNDED set of trivial **additive** ops
+//! - [`DeterministicAuthor`] - a BOUNDED set of trivial **additive** ops
 //!   ([`AuthorRequest`]: create table, add column, create index). Pure
 //!   pattern-matching, no AI, project-schema-qualified output, always safe
 //!   (non-destructive). It deliberately does **not** attempt renames, drops, or
-//!   type changes — those are the AI author's job.
-//! - [`RawSqlAuthor`] — the **AI-author hook**. The AI/builder generates the
+//!   type changes - those are the AI author's job.
+//! - [`RawSqlAuthor`] - the **AI-author hook**. The AI/builder generates the
 //!   `up`/`down` SQL *externally* (the engine never calls an LLM); this author
 //!   wraps that pre-generated SQL as a [`Migration`], deriving the destructive /
 //!   approval flags from a guard pass so the complex/expand-contract output
@@ -18,8 +18,8 @@
 //!   migration (renames, drops, type changes, expand-contract) reaches the executor.
 //!
 //! Both produce a fully-formed [`Migration`] (`UUIDv7` version, checksum, flags);
-//! neither bypasses the guard — [`DeterministicAuthor`] emits provably-safe SQL,
-//! and [`RawSqlAuthor`] runs the guard to *flag* (not gate — that is the
+//! neither bypasses the guard - [`DeterministicAuthor`] emits provably-safe SQL,
+//! and [`RawSqlAuthor`] runs the guard to *flag* (not gate - that is the
 //! engine's job in [`crate::engine`]) its output.
 
 use crate::guard::{GuardConfig, GuardError};
@@ -59,52 +59,52 @@ pub enum AuthorError {
 /// A column in a [`AuthorRequest::CreateTable`] / [`AuthorRequest::AddColumn`].
 ///
 /// The `ty` is emitted verbatim as the Postgres type (`text`, `bigint`,
-/// `timestamptz`, …); the deterministic author does not validate it — an invalid
+/// `timestamptz`, ...); the deterministic author does not validate it - an invalid
 /// type fails loudly at apply, and the guard already confines the *statement
 /// kind*, which is what matters for safety.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Column {
     /// The column name (emitted as a quoted identifier).
     pub name: String,
-    /// The Postgres type, verbatim (`text`, `bigint`, `jsonb`, …).
+    /// The Postgres type, verbatim (`text`, `bigint`, `jsonb`, ...).
     pub ty: String,
-    /// `true` ⇒ the column is nullable (no `NOT NULL`). Additive-safe.
+    /// `true` => the column is nullable (no `NOT NULL`). Additive-safe.
     pub nullable: bool,
 }
 
-/// A structured request for the [`DeterministicAuthor`] — the BOUNDED set of
+/// A structured request for the [`DeterministicAuthor`] - the BOUNDED set of
 /// trivial **additive** operations it can emit without AI.
 ///
 /// Every variant is non-destructive by construction; there is deliberately no
-/// `DropTable` / `RenameColumn` / `ChangeType` variant — those are destructive
+/// `DropTable` / `RenameColumn` / `ChangeType` variant - those are destructive
 /// or ambiguous and belong to the AI author (fed via [`RawSqlAuthor`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthorRequest {
-    /// `CREATE TABLE <schema>.<name> (<columns…>)` — scenario 1.
+    /// `CREATE TABLE <schema>.<name> (<columns...>)` - scenario 1.
     CreateTable {
         /// The new table's name (project-schema-qualified on emit).
         name: String,
         /// The table's columns (at least one required).
         columns: Vec<Column>,
     },
-    /// `ALTER TABLE <schema>.<table> ADD COLUMN <column>` — scenario 2.
+    /// `ALTER TABLE <schema>.<table> ADD COLUMN <column>` - scenario 2.
     ///
     /// Additive-safe only when `nullable` (an additive NOT-NULL with no default
-    /// over existing rows is scenario 4 — the AI author's job).
+    /// over existing rows is scenario 4 - the AI author's job).
     AddColumn {
         /// The table to alter (project-schema-qualified on emit).
         table: String,
         /// The column to add.
         column: Column,
     },
-    /// `CREATE INDEX [CONCURRENTLY] IF NOT EXISTS … ON <schema>.<table> (…)` —
+    /// `CREATE INDEX [CONCURRENTLY] IF NOT EXISTS ... ON <schema>.<table> (...)` -
     /// scenarios 5/42.
     CreateIndex {
         /// The table to index (project-schema-qualified on emit).
         table: String,
         /// The columns the index covers (at least one required).
         columns: Vec<String>,
-        /// `true` ⇒ `CREATE INDEX CONCURRENTLY` (non-transactional online
+        /// `true` => `CREATE INDEX CONCURRENTLY` (non-transactional online
         /// build); the emitted SQL uses `IF NOT EXISTS` so the executor's
         /// non-txn idempotency rule is satisfied.
         concurrently: bool,
@@ -115,7 +115,7 @@ pub enum AuthorRequest {
 /// crate-shared engine seam
 /// ([`crate::render::dml::quote_ident_checked_for_dialect`])
 /// so author output is byte-identical to (and uniformly self-defending with) the
-/// executor/role/journal quoting — fail-closed on an empty / NUL identifier
+/// executor/role/journal quoting - fail-closed on an empty / NUL identifier
 /// (which `"`-doubling cannot neutralise) rather than silently emitting it.
 fn quote_ident(
     vendors: VendorSet,
@@ -130,8 +130,8 @@ fn quote_ident(
     })
 }
 
-/// #150 test seam: route a probe through the local `quote_ident` so the shared
-/// helper's uniform render can be asserted across all engine seams.
+/// Test seam: route a probe through the local `quote_ident` so the shared helper's
+/// uniform render can be asserted across all engine seams.
 #[cfg(test)]
 pub(crate) fn quote_ident_for_test(ident: &str) -> Result<String, AuthorError> {
     quote_ident(
@@ -158,7 +158,7 @@ fn qualified(
 /// Render one column definition for a `CREATE TABLE` / `ADD COLUMN` clause.
 fn column_def(vendors: VendorSet, c: &Column, dialect: &DialectId) -> Result<String, AuthorError> {
     let null = if c.nullable { "" } else { " NOT NULL" };
-    // `ty` is emitted verbatim — a Postgres type, not an identifier.
+    // `ty` is emitted verbatim - a Postgres type, not an identifier.
     Ok(format!(
         "{} {}{}",
         quote_ident(vendors, &c.name, dialect)?,
@@ -169,8 +169,8 @@ fn column_def(vendors: VendorSet, c: &Column, dialect: &DialectId) -> Result<Str
 
 // `pub(crate) const GENERATED_IDENT_MAX_BYTES` USED TO LIVE HERE, aliasing a `const`
 // in the registry module so this file could spell the budget without naming the
-// composition. The budget is a query on the carried registry now —
-// `crate::render::backends::generated_ident_max_bytes(vendors)` — so an alias would be
+// composition. The budget is a query on the carried registry now -
+// `crate::render::backends::generated_ident_max_bytes(vendors)` - so an alias would be
 // a second door onto one call, and every reader here takes the set as an argument
 // anyway. See that function for what the lost compile-time evaluation cost.
 //
@@ -180,7 +180,7 @@ fn column_def(vendors: VendorSet, c: &Column, dialect: &DialectId) -> Result<Str
 // truncated name on disk). So the engine truncates deterministically ITSELF and keeps
 // the result within the budget.
 
-/// Cap an arbitrary generated identifier to ≤ the registry's generated-identifier
+/// Cap an arbitrary generated identifier to <= the registry's generated-identifier
 /// budget, deterministically: when `natural` fits, return it verbatim; when it would
 /// overflow, keep a readable prefix and append a short hash of the *full* name so
 /// distinct long inputs still map to distinct, stable names.
@@ -242,13 +242,13 @@ fn index_name(vendors: VendorSet, table: &str, columns: &[String]) -> String {
 /// The deterministic, no-AI author for trivial additive ops.
 ///
 /// Emits provably-safe, project-schema-qualified SQL with correct
-/// [`MigrationFlags`]. Pattern-based only — it never attempts renames, drops, or
+/// [`MigrationFlags`]. Pattern-based only - it never attempts renames, drops, or
 /// type changes (the AI author's remit).
 #[derive(Debug, Clone)]
 pub struct DeterministicAuthor {
     /// The project schema every emitted statement is qualified into.
     project_schema: String,
-    /// The declaring app (`app_…`) recorded on the migration (per-table
+    /// The declaring app (`app_...`) recorded on the migration (per-table
     /// ownership).
     owner_app: String,
     /// The registered backend whose identifier spelling this author emits.
@@ -415,16 +415,16 @@ impl MigrationAuthor for DeterministicAuthor {
     }
 }
 
-/// The AI-author hook — wrap externally-generated `up`/`down` SQL as a
+/// The AI-author hook - wrap externally-generated `up`/`down` SQL as a
 /// [`Migration`] (the "AI builder" author).
 ///
 /// The AI/builder produces the SQL for non-trivial migrations (renames, type
 /// changes, backfills, expand-contract sequences); the engine does **not** call
 /// an LLM. This author takes that pre-generated SQL, runs the registered line-1 guard over
-/// the `up` to derive the [`MigrationFlags`] (destructive ⇒ `requires_approval`;
-/// any non-transactional statement ⇒ transactional=false) via
+/// the `up` to derive the [`MigrationFlags`] (destructive => `requires_approval`;
+/// any non-transactional statement => transactional=false) via
 /// [`MigrationGuard::flags_for_sql`](crate::guard::MigrationGuard::flags_for_sql), and mints a versioned migration. The
-/// output then gets the SAME guard + role treatment in the pipeline — untrusted
+/// output then gets the SAME guard + role treatment in the pipeline - untrusted
 /// AI SQL is gated exactly like any other.
 ///
 /// A *denial* (RCE / cross-tenant / file / network) is NOT raised here: the
@@ -433,7 +433,7 @@ impl MigrationAuthor for DeterministicAuthor {
 /// cannot classify) surfaces as an [`AuthorError`] at authoring time.
 #[derive(Debug, Clone)]
 pub struct RawSqlAuthor {
-    /// The declaring app (`app_…`) recorded on the migration.
+    /// The declaring app (`app_...`) recorded on the migration.
     owner_app: String,
     /// The backend whose guard grammar and fail-safe rules inspect the SQL.
     dialect: DialectId,
@@ -557,7 +557,7 @@ mod tests {
             !m.up.contains("\"note\" text NOT NULL"),
             "nullable col must not be NOT NULL"
         );
-        // Additive ⇒ transactional, non-destructive, no approval.
+        // Additive => transactional, non-destructive, no approval.
         assert!(m.flags.transactional);
         assert!(!m.flags.destructive);
         assert!(!m.flags.requires_approval);
@@ -626,7 +626,7 @@ mod tests {
             concurrently: true,
         };
         let m = &det().author(&req).expect("author")[0];
-        // CONCURRENTLY ⇒ non-transactional + IF NOT EXISTS (executor's
+        // CONCURRENTLY => non-transactional + IF NOT EXISTS (executor's
         // idempotency rule for the two-phase non-txn recovery path).
         assert!(
             m.up.contains("CREATE INDEX CONCURRENTLY IF NOT EXISTS"),
@@ -668,10 +668,10 @@ mod tests {
             "index name {} bytes exceeds {max}",
             n1.len()
         );
-        // Deterministic: same inputs → same name (so re-authoring the same shape
+        // Deterministic: same inputs -> same name (so re-authoring the same shape
         // is idempotent and the `down` can target it).
         assert_eq!(n1, index_name(vendors, &long_table, &long_cols));
-        // Distinct long shapes → distinct names (the hash suffix disambiguates,
+        // Distinct long shapes -> distinct names (the hash suffix disambiguates,
         // unlike a blind truncation that would collide on the shared prefix).
         let mut other_cols = long_cols;
         other_cols.push("d".repeat(20));
@@ -694,7 +694,7 @@ mod tests {
 
     #[test]
     fn index_name_short_case_is_unchanged() {
-        // The common (fitting) case is emitted verbatim — no surprise hashing.
+        // The common (fitting) case is emitted verbatim - no surprise hashing.
         assert_eq!(
             index_name(
                 crate::test_fixtures::VENDORS,
@@ -775,7 +775,7 @@ mod tests {
         let m = author
             .wrap("drop_legacy", "DROP TABLE \"proj_acme\".\"legacy\"", None)
             .expect("wrap");
-        // A DROP is destructive ⇒ requires approval (flags_for).
+        // A DROP is destructive => requires approval (flags_for).
         assert!(
             m.flags.destructive,
             "DROP TABLE must be flagged destructive"

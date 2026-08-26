@@ -1,8 +1,9 @@
-//! The REGISTRY of shipping backends — the engine's one list of which vendors exist.
+//! The REGISTRY of shipping backends - the engine's one list of which vendors exist.
 //!
 //! This module used to hold the vendors themselves, as three sibling modules with a
-//! hard-coded match over a closed dialect enum beneath them. `docs/proposals/pluggable-backends.md`
-//! step 4 has now happened: they are `zero-migrate-postgres`, `zero-migrate-sqlite`
+//! hard-coded match over a closed dialect enum beneath them. The split
+//! `docs/proposals/pluggable-backends.md` describes has happened: they are
+//! `zero-migrate-postgres`, `zero-migrate-sqlite`
 //! and `zero-migrate-mysql`, the contract they implement is `zero-migrate-backend`,
 //! and what is left here is the composition.
 //!
@@ -16,7 +17,7 @@
 //!
 //! # What belongs in a backend crate
 //!
-//! **SPELLING only** — the bytes this vendor wants to read. `"now()"` vs
+//! **SPELLING only** - the bytes this vendor wants to read. `"now()"` vs
 //! `"CURRENT_TIMESTAMP"`, `"bytea"` vs `"blob"`, `` `x` `` vs `"x"`,
 //! `OR REPLACE VIEW` vs a `DROP VIEW IF EXISTS` prelude.
 //!
@@ -37,7 +38,7 @@
 //! names no other dialect at all. Everything else reads `DIALECT`. That rule is what
 //! made this step mechanical, and it is still ENFORCED:
 //! `tests/dialect_matrix/backend_modules_name_one_dialect.rs` reads all nine vendor
-//! modules with `include_str!` and asserts both halves — own dialect exactly once, as
+//! modules with `include_str!` and asserts both halves - own dialect exactly once, as
 //! the `const DIALECT` line, and no other dialect at all. It was repointed at the new
 //! crate paths in the commit that moved them; a re-export shim at the old path would
 //! NOT have satisfied it, because a shim has zero carriers.
@@ -53,12 +54,12 @@
 //! vendors spell an identifier `"x"`.
 //!
 //! MEASURED, not reasoned, BEFORE the fix: corrupting `PostgresDmlRenderer::quote_ident`
-//! alone failed 7 of the 155 tests in the SQLite-ONLY `sqlite_engine` binary, all
-//! against a real SQLite database. RESOLVED: every identifier emission in the SQLite
-//! and PostgreSQL backends goes through the `*_for_dialect(.., DIALECT)` seam, and
-//! re-running the identical neuter afterwards leaves `sqlite_engine` at 155 / 0 — the
-//! same 155 tests, so the SQLite backend stopped reading the PostgreSQL renderer
-//! without any emitted byte changing.
+//! alone reddened tests in the SQLite-ONLY `sqlite_engine` binary, all against a real
+//! SQLite database. RESOLVED: every identifier emission in the SQLite and PostgreSQL
+//! backends goes through the `*_for_dialect(.., DIALECT)` seam, and re-running the
+//! identical neuter afterwards leaves `sqlite_engine` fully green over the same tests,
+//! so the SQLite backend stopped reading the PostgreSQL renderer without any emitted
+//! byte changing.
 //!
 //! # The OTHER half of the class: emission that reaches no renderer at all
 //!
@@ -69,7 +70,7 @@
 //!
 //! RESOLVED by VISIBILITY, and the crate split WEAKENED that fix. The primitive is
 //! now `zero_migrate_backend::spelling::ansi_double_quote_ident`, and across a crate
-//! boundary `pub(in …)` cannot say "these three crates and no other" — the vendor
+//! boundary `pub(in ...)` cannot say "these three crates and no other" - the vendor
 //! crates must reach it, so it is `pub`, so the engine can name it too. The compiler
 //! no longer enforces the rule. It is replaced by a textual census,
 //! `tests/dialect_matrix/core_does_not_spell_a_vendors_bytes.rs`, which walks every
@@ -79,8 +80,8 @@
 //!
 //! And a DELIBERATE non-defect that looks identical to a neuter: the
 //! `pg_get_constraintdef` normal form (`zero_migrate_backend::constraint_definition`
-//! — `quote_ident_if_needed` / `constraintdef_cols`, re-exported at their historical
-//! `render::declarative::…` paths) is PostgreSQL-spelled ON PURPOSE and is read by
+//! - `quote_ident_if_needed` / `constraintdef_cols`, re-exported at their historical
+//! `render::declarative::...` paths) is PostgreSQL-spelled ON PURPOSE and is read by
 //! the SQLite and MySQL drift comparators. It has a renderer-independent snapshot
 //! codec, precisely because a red count cannot tell it apart from an unrouted
 //! emission. Re-dialecting it would be a regression.
@@ -111,7 +112,7 @@ use zero_migrate_ir::dialect::DialectId;
 // `pub(crate) const VENDORS: VendorSet` folded from that array. Those three lines were
 // the whole of why this crate had to depend on all three backends.
 //
-// They are `crates/zero-migrate/src/lib.rs` now — the COMPOSITION ROOT, which depends
+// They are `crates/zero-migrate/src/lib.rs` now - the COMPOSITION ROOT, which depends
 // on this crate rather than the other way round. `zero-migrate-core` declares no
 // vendor `[dependencies]` at all, so writing one of those idents in this crate's
 // production source is an unresolved-crate error. The rule *the core should be
@@ -121,14 +122,14 @@ use zero_migrate_ir::dialect::DialectId;
 // The resolvers below did NOT move, and that is the other half of the design: the
 // engine RESOLVES, and it resolves against the set its caller hands it. Every one of
 // them takes `vendors: VendorSet` as its first argument, and every caller of one takes
-// it from its own caller — as a parameter, or as a field on a struct that already
+// it from its own caller - as a parameter, or as a field on a struct that already
 // carries the dialect it is about to resolve. `IrAuthor`, `DeclarativeAuthor`,
 // `ExpandContractAuthor`, `CatalogFold`, `MigrationEngine` and the raw/deterministic
 // authors all carry it, so their methods pay no signature for it at all.
 //
 // `zero_migrate::shipping_vendors()` is how a host asks for the composed value, and
 // `tests/dialect_matrix/the_registry_travels_as_a_value.rs` is what keeps the list of
-// places that may name it from growing back — a rule Cargo now enforces for this crate
+// places that may name it from growing back - a rule Cargo now enforces for this crate
 // but not for the `#[cfg(test)]` modules that reach the vendors through dev edges.
 //
 // (Earlier notes here recorded a `pub(crate) use zero_migrate_sqlite::VENDOR;` that
@@ -142,7 +143,7 @@ use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
 /// The engine's generated-identifier byte budget: the TIGHTEST cap any backend in
 /// `vendors` declares. Generated names are precomputed once and then handed to every
 /// emitter, so this is one fact about the whole registry rather than a per-call vendor
-/// dispatch — which means it has to fit the strictest target in the build, not a
+/// dispatch - which means it has to fit the strictest target in the build, not a
 /// chosen one.
 ///
 /// This is the ONE definition. It used to be three - `plan::author`, `apply::role`
@@ -156,7 +157,7 @@ use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
 /// The body was `match POSTGRES_VENDOR.descriptor.limits.identifier`, with a
 /// `panic!("PostgreSQL declares a BYTE identifier cap")` on the other two arms. The
 /// doc directly above it already said "the registered backend that imposes the
-/// limiting byte-counted cap" — so the sentence was a description of the intended
+/// limiting byte-counted cap" - so the sentence was a description of the intended
 /// fold and the code was a hard-coded lookup of one vendor. The two agree by
 /// accident today: PostgreSQL declares `Bytes(63)`, MySQL `Characters(64)` and SQLite
 /// `Unbounded`, so the tightest IS PostgreSQL's. A fourth backend declaring a cap
@@ -166,7 +167,7 @@ use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
 /// # IT WAS A `const`, AND THE COMPILE-TIME EVALUATION IS GONE
 ///
 /// This was `pub(crate) const GENERATED_IDENT_MAX_BYTES: usize =
-/// tightest_identifier_budget(VENDORS);` — a `const`, folded by the compiler over the
+/// tightest_identifier_budget(VENDORS);` - a `const`, folded by the compiler over the
 /// shipping set, consumed by five files that never saw a registry. It was the ONE
 /// reader of the composition that did not take it as an argument, and that is exactly
 /// why it could not survive the composition leaving the crate: an engine that cannot
@@ -178,7 +179,7 @@ use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
 /// * the fold ran ONCE per build; it now runs once per minted or checked name;
 /// * a wrong answer was a build-time impossibility rather than a runtime value;
 /// * `cap_ident_name` and its siblings grew a `vendors` parameter, so a caller that
-///   mints a generated name has to be handed the set — which is the same threading
+///   mints a generated name has to be handed the set - which is the same threading
 ///   every other resolution in this module already pays for.
 ///
 /// What was bought is the only thing that matters here: ONE source of truth, and it
@@ -194,7 +195,7 @@ use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
 ///
 /// * `IdentifierLimit::Bytes(n)` is already a byte budget.
 /// * `IdentifierLimit::Characters(n)` becomes `n` bytes, because a byte string of
-///   length `b` holds at most `b` characters — so `b <= n` bytes always fits an
+///   length `b` holds at most `b` characters - so `b <= n` bytes always fits an
 ///   `n`-character cap, whatever encoding the name is in. Treating it as `4 * n`
 ///   would be the true maximum and the WRONG direction: it would let the engine mint
 ///   a name that fits only if the name happens to be ASCII.
@@ -273,7 +274,7 @@ pub(crate) fn value_format_renderers(
  *
  * Nothing was lost: the parser is still reached, by everything that has a resolved
  * renderer, through the `SchemaRenderer::stored_ddl()` method this body forwarded to
- * — see `render/declarative.rs`, which calls it on the renderer it already holds.
+ * - see `render/declarative.rs`, which calls it on the renderer it already holds.
  */
 
 /// The schema-bound DDL emitter registered by a dialect's vendor crate.
@@ -285,7 +286,7 @@ pub(crate) fn ddl_emitter(
     (vendor(vendors, dialect).ddl)(project_schema)
 }
 
-/// The LINE-1 guard for a config's dialect — this vendor's, built by this vendor.
+/// The LINE-1 guard for a config's dialect - this vendor's, built by this vendor.
 ///
 /// This replaced the old `guard_for` free function in the since-dissolved guard crate, which was a second
 /// closed identity match living in the guard crate and mapping BOTH
@@ -306,10 +307,10 @@ pub(crate) fn guard_for(vendors: VendorSet, cfg: &GuardConfig) -> Box<dyn Migrat
     (vendor(vendors, cfg.dialect()).guard)(cfg)
 }
 
-/// The OPERATIONAL analyzer for a dialect — this vendor's, run by this vendor.
+/// The OPERATIONAL analyzer for a dialect - this vendor's, run by this vendor.
 ///
 /// The advisory counterpart of [`guard_for`], and it removed the same shape of
-/// coupling. Before it, `render::declarative` called `crate::analysis::analyze::…`
+/// coupling. Before it, `render::declarative` called `crate::analysis::analyze::...`
 /// directly: a re-export that resolved into the `libpg_query` analyzer crate, so the
 /// engine ran the PostgreSQL parser over every backend's DDL and reported the
 /// resulting parse failures as a clean, empty advisory list. That was the whole of
@@ -333,7 +334,7 @@ pub fn advisories_for_sql(vendors: VendorSet, dialect: &DialectId, sql: &str) ->
 ///
 /// A caller reporting on a SET of statements asks this ONCE, up front, so it can
 /// tell an operator the whole set is unchecked before it renders the first statement
-/// — and still say so when the set renders to nothing.
+/// - and still say so when the set renders to nothing.
 #[must_use]
 pub fn analyzer_absence(vendors: VendorSet, dialect: &DialectId) -> Option<AnalyzerAbsent> {
     advisor(vendors, dialect).analyzer_absence()
@@ -373,14 +374,14 @@ pub(crate) fn reserved_catalog_prefixes(
 ///
 /// This exists because a capability refusal has two halves and only one of them was
 /// ever neutral. "This target cannot do X" already named the target from its own
-/// [`DialectId`]. The advice beside it — "target Postgres" — was a compiled-in vendor
+/// [`DialectId`]. The advice beside it - "target Postgres" - was a compiled-in vendor
 /// string, in core, restating a fact the registry already holds and would keep holding
 /// after it stopped being true. Every one of those strings was written when three
 /// backends shipped and PostgreSQL was the only one with the capability in question; a
 /// fourth backend that declared it would have been told to go somewhere else.
 ///
 /// Returns `None` when NO registered backend declares it, which is a different
-/// sentence and must not be rendered as an empty list of alternatives — a fix that
+/// sentence and must not be rendered as an empty list of alternatives - a fix that
 /// says "target one of: " has told the operator nothing. Callers spell that case
 /// themselves.
 pub(crate) fn targets_declaring(
@@ -536,7 +537,7 @@ mod tests {
         );
     }
 
-    /// SQLite cannot reach a deferred `ALTER TABLE … ADD CONSTRAINT` through the
+    /// SQLite cannot reach a deferred `ALTER TABLE ... ADD CONSTRAINT` through the
     /// current capability gate, but the old core router still selected the
     /// PostgreSQL FK-clause body for that arm. Moving the body must preserve that
     /// dormant answer too: unreachable is not permission to reimplement it.

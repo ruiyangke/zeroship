@@ -18,23 +18,23 @@
 //! `DmlRenderer`. So while the two renderers are fully behind the contract, the
 //! vendor-op surface is not."* It re-exported
 //! `zero_migrate_postgres::render_vendor_op` to do it, and
-//! `zero-migrate-sqlite/src/dml.rs` recorded the mirror image — PostgreSQL being
+//! `zero-migrate-sqlite/src/dml.rs` recorded the mirror image - PostgreSQL being
 //! "still in the position SQLite just left, via `render::vendor`".
 //!
 //! Both notes are now discharged. The surface is
 //! [`DmlRenderer::render_vendor_op`](zero_migrate_backend::renderer::DmlRenderer::render_vendor_op),
 //! answered by each vendor crate, and `render::lower` asks the backend it already
-//! resolved — `self.backend` at the lowering seam, and a threaded `backend` parameter
+//! resolved - `self.backend` at the lowering seam, and a threaded `backend` parameter
 //! in `vendor_inverse_from_history`, which is what its sibling
 //! `trigger_inverse_from_history` had always done.
 //!
 //! # Nothing moved to close it
 //!
-//! Worth stating because the size of the thing suggests otherwise: the ~720 lines of
-//! PostgreSQL spelling — `CREATE ROLE`, `GRANT`, `CREATE POLICY`, dollar-quoted
-//! function bodies, `ALTER TABLE … ENABLE ROW LEVEL SECURITY` — were ALREADY in
-//! `zero-migrate-postgres`, and they were not touched. This was a routing change of
-//! four call sites and three small `impl` blocks. Byte-identical output, which is the
+//! Worth stating because the size of the thing suggests otherwise: the PostgreSQL
+//! spelling - `CREATE ROLE`, `GRANT`, `CREATE POLICY`, dollar-quoted function bodies,
+//! `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` - was ALREADY in
+//! `zero-migrate-postgres`, and it was not touched. This was a routing change: a
+//! handful of call sites and some small `impl` blocks. Byte-identical output, which is the
 //! bar a move has to clear.
 //!
 //! # What enforces it, and why it is stronger than the census next door
@@ -49,8 +49,8 @@
 //! `tests/dialect_matrix/core_does_not_spell_a_vendors_bytes.rs`, which exists
 //! because a privacy invariant did NOT survive a crate boundary). The difference is
 //! direction. `ansi_double_quote_ident` has to be reachable BY the vendor crates, and
-//! `pub(in …)` cannot say "these three crates and no other", so it had to become
-//! `pub`. `render_vendor_op` only ever needs to be reachable by PostgreSQL ITSELF —
+//! `pub(in ...)` cannot say "these three crates and no other", so it had to become
+//! `pub`. `render_vendor_op` only ever needs to be reachable by PostgreSQL ITSELF -
 //! it is one crate's own item, and one crate's own privacy still works. A rule that
 //! can be a privacy should be one; the textual census in
 //! `tests/dialect_matrix/core_names_no_vendor_crate.rs` is the backstop for the rest.
@@ -61,7 +61,7 @@
 //! shipping vendor renders a vendor op and the other two refuse. A census proves core
 //! does not NAME `zero_migrate_postgres`; it cannot prove the dispatch is real, and a
 //! refactor that routed all three vendors to PostgreSQL's renderer would satisfy a
-//! census completely. That is not hypothetical in this tree — it is the shape of the
+//! census completely. That is not hypothetical in this tree - it is the shape of the
 //! SQLite-identifiers-quoted-by-PostgreSQL defect, which compiled clean and passed
 //! every emitted-SQL assertion because the two vendors agreed on the bytes. Here they
 //! do not agree: two of them have no answer at all, and that disagreement is what

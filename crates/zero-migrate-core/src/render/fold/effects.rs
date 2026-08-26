@@ -1,4 +1,4 @@
-//! **The effect model over the finished fold.** Step 5 of
+//! **The effect model over the finished fold.** Specified by
 //! `docs/proposals/single-fold-and-effects.md` section G.
 //!
 //! Two things live here, and the difference between them is the proposal's whole
@@ -27,7 +27,7 @@
 //! includes objects this engine never created: a DBA's view, another application's
 //! foreign key, an inheritance child. Those are not in the model and CANNOT BE. The
 //! effect model can prove a plan REMOVES a named blocker; it cannot ENUMERATE the
-//! blocker set. **A live query at step 0 is still required**, and
+//! blocker set. **A live query before the plan runs is still required**, and
 //! `apply::plan_precondition::answerability` is what keeps that true.
 //!
 //! So this module does not retire the classification. It changes what the
@@ -62,8 +62,8 @@ use crate::render::fold::{fold_ops_onto, FoldError};
 use crate::test_fixtures::POSTGRES;
 use zero_migrate_ir::dialect::DialectId;
 
-/// The state the plan's `n`th step will meet: the live schema at step 0, advanced by
-/// the ops the first `n` steps replay.
+/// The state the plan's `n`th step meets: the live schema as it was before the plan
+/// started, advanced by the ops the first `n` steps replay.
 ///
 /// This is the governing identity of section E spelled as code. `base` is
 /// `live_at_0` - pass the [`SchemaSnapshot`] the engine introspected under the held
@@ -167,7 +167,7 @@ pub fn effect_of(op: &Op) -> Effect {
         // ---------------------------------------------------------------
         Op::SetColumnNotNull { .. }
         | Op::DropColumnNotNull { .. }
-        // Reloptions (`fillfactor`, autovacuum, …) and the storage/RLS toggles.
+        // Reloptions (`fillfactor`, autovacuum, ...) and the storage/RLS toggles.
         // None is a `pg_depend` edge, an inheritance link, or a partition key.
         | Op::SetTableOptions { .. }
         | Op::SetRls { .. }
@@ -284,7 +284,8 @@ mod tests {
     ///
     /// The last four are the ones the deleted SQL whitelist could NOT prove
     /// additive - it answered `false` for each, disarming the hoist and letting a
-    /// plan half-apply. Measured on `839b9aca` before the change, not assumed.
+    /// plan half-apply. Measured against the whitelist before it was deleted, not
+    /// assumed.
     /// `CREATE MATERIALIZED VIEW` is adjudicated against a live server in
     /// `tests/pg_engine/pg_plan_precondition_preflight.rs`.
     #[test]

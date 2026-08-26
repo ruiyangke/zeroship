@@ -4,33 +4,33 @@
 //! "Structural vs. policy split".
 //!
 //! The closed expression AST ([`crate::model::expr::Expr`]) is **constructed in JS and
-//! serialized to IR — never parsed from text**. So validation is a
+//! serialized to IR - never parsed from text**. So validation is a
 //! purely STRUCTURAL allow-list walk over the deserialized tree:
 //!
-//! - **(a)** every node is in the allow-listed set — the serde deserializer
+//! - **(a)** every node is in the allow-listed set - the serde deserializer
 //!   already rejects an unknown node *tag* (`UNSUPPORTED { kind: "expr" }` at
 //!   load); this walk additionally rejects the structural shapes that *are*
 //!   well-typed nodes but out of policy (an out-of-envelope `FnSynth(splitPart)`,
 //!   a non-portable cast target).
-//! - **(b)** `c.fn.splitPart` has dialect-neutral grammar — `delim` is a non-empty
+//! - **(b)** `c.fn.splitPart` has dialect-neutral grammar - `delim` is a non-empty
 //!   string `Literal`, `n` is a positive integer `Literal`, and the column arg is
 //!   a `ColRef` / in-AST sub-expression. Each registered backend owns any narrower
 //!   portability envelope required by its lowering.
-//! - **(c)** every `ColRef` resolves to a column on the ENCLOSING target table —
+//! - **(c)** every `ColRef` resolves to a column on the ENCLOSING target table -
 //!   an apply/render-time check scoped to the single target table of the
 //!   enclosing op (an apply-time check). A cross-table reference is impossible by
 //!   construction (`c` is single-table-scoped), and any reference to a
 //!   column not on the target table is a hard error (injection defense + the
 //!   capability boundary).
-//! - **(d)** a `Cast` target is a portable type — guaranteed by the closed
+//! - **(d)** a `Cast` target is a portable type - guaranteed by the closed
 //!   [`crate::model::expr::CastTarget`] enum, so this is structurally total.
 //!
 //! There is **NO lexer, NO Pratt/precedence parser, NO `libpg_query`, NO
-//! differential fuzzer** — the injection risk is dissolved, not mitigated. The
+//! differential fuzzer** - the injection risk is dissolved, not mitigated. The
 //! Rust validator here is the authoritative STRUCTURAL gate (checks (a), (b),
-//! (d) — node allow-list, `FnSynth` arity/envelope, portable cast target); the
+//! (d) - node allow-list, `FnSynth` arity/envelope, portable cast target); the
 //! JS side runs an optional best-effort structural hint over the SAME schemars
-//! schema. Rule (c) — `ColRef` resolution against the live target table — runs
+//! schema. Rule (c) - `ColRef` resolution against the live target table - runs
 //! at the apply/render seam (an apply-time check): at IR load the
 //! live column set is generally unknown for the DML ops, `setColumnType`,
 //! `addConstraint` and `createIndex`, so those positions validate
@@ -45,14 +45,14 @@
 //!
 //! # Structural vs. policy split
 //!
-//! The STRUCTURAL, policy-free validator — the closed-`Expr` allow-list walk, the
+//! The STRUCTURAL, policy-free validator - the closed-`Expr` allow-list walk, the
 //! structured-error envelope ([`AuthoringError`]), the `DialectId`/`UnsupportedKind`
-//! vocabulary, the `CODE_*` codes, [`TargetScope`], and [`validate_expr`] — now
+//! vocabulary, the `CODE_*` codes, [`TargetScope`], and [`validate_expr`] - now
 //! lives in the [`zero_migrate_ir::validate`] leaf crate. It carries no
 //! [`SchemaScope`](crate::model::policy::SchemaScope) dependency and no `pg_query`.
 //! THIS module keeps the policy-bound layer: the `SchemaScope`-threaded op/IR
 //! validators, the vendor-capability gate, the raw-view-body hand-off to the target
-//! backend's `ValidationPolicy` (this module no longer parses SQL itself — it holds
+//! backend's `ValidationPolicy` (this module no longer parses SQL itself - it holds
 //! the authoring envelope and the vendor holds the grammar), and
 //! the pure primary-key validation. (Author-PK CONFORMANCE against the operator's
 //! injected shape is owned by the injection resolver, not this validator.) The
@@ -196,7 +196,7 @@ fn target_supports(
 }
 
 /// Walk an entire [`MigrationIr`](crate::model::ir::MigrationIr) and validate EVERY
-/// embedded expression-AST node against `target_dialect` — the "the
+/// embedded expression-AST node against `target_dialect` - the "the
 /// Rust validator is the authoritative STRUCTURAL gate" obligation made
 /// operative. Checks (a)/(b)/(d) run at load for every Expr slot; check (c)
 /// (`ColRef` resolution) runs here only for a self-contained `createTable`, and
@@ -206,23 +206,23 @@ fn target_supports(
 /// expression positions and calls [`validate_expr`] per node with the enclosing
 /// op's index + single target table as scope:
 ///
-/// - `createTable` — each `IrIndex` element expression, each `IrIndex.where`
+/// - `createTable` - each `IrIndex` element expression, each `IrIndex.where`
 ///   partial-index predicate + each `Check` constraint `expr` (scoped to the
 ///   table's own declared columns, so rule (c) `ColRef` resolution runs against
 ///   them).
-/// - `createIndex` — each index element expression + the `where` partial-index
+/// - `createIndex` - each index element expression + the `where` partial-index
 ///   predicate (closed AST since the property-A fix).
-/// - `setColumnType` — the `using` cast expression (closed AST since the
+/// - `setColumnType` - the `using` cast expression (closed AST since the
 ///   property-A fix).
-/// - `addConstraint` — a `Check` constraint `expr`.
-/// - `update` — every `set` RHS + the optional `where`.
-/// - `delete` — the mandatory `where`.
-/// - `backfill` — every `set` RHS + the optional `filter`.
+/// - `addConstraint` - a `Check` constraint `expr`.
+/// - `update` - every `set` RHS + the optional `where`.
+/// - `delete` - the mandatory `where`.
+/// - `backfill` - every `set` RHS + the optional `filter`.
 ///
 /// Ops with no expression slot (e.g. `dropTable`, `addColumn`, `insert`) walk to
 /// `Ok(())`. For the DML ops (`update`/`delete`/`backfill`) and `setColumnType`
 /// the live-schema column set is generally not known at IR-load time, so the
-/// scope is [`TargetScope::structural_only`] — the structural checks (a),(b),(d)
+/// scope is [`TargetScope::structural_only`] - the structural checks (a),(b),(d)
 /// still run; the apply/render seam re-runs the walk with a
 /// resolved column set to enforce (c). A `createTable` is self-contained, so its
 /// embedded predicates ARE resolved against the table's own columns here.
@@ -241,14 +241,14 @@ pub fn validate_ir(
 
 /// [`validate_ir`] threaded with the active schema confinement scope.
 /// `schema_scope`:
-/// - `None` ⇒ omitted/default public capability: no project schema is known, so
+/// - `None` => omitted/default public capability: no project schema is known, so
 ///   cross-schema checks are not applied, but vendor capabilities stay confined.
-/// - `Some(SchemaScope::Single(project_schema))` ⇒ the **Confined** creator
+/// - `Some(SchemaScope::Single(project_schema))` => the **Confined** creator
 ///   profile: an explicit `schema != project_schema` is REFUSED fail-closed
 ///   ([`CODE_CROSS_SCHEMA`]).
-/// - `Some(SchemaScope::Allowlist([...]))` ⇒ the **Platform** profile: an explicit
+/// - `Some(SchemaScope::Allowlist([...]))` => the **Platform** profile: an explicit
 ///   `schema` must be a member of the allow-list.
-/// - `Some(SchemaScope::Unconfined)` ⇒ an explicit whole-universe operator grant:
+/// - `Some(SchemaScope::Unconfined)` => an explicit whole-universe operator grant:
 ///   no cross-schema confinement and full vendor capability.
 ///
 /// # Errors
@@ -318,7 +318,7 @@ pub fn validate_ir_authorized(
 /// as a `<dialect>.<name>` string key with a scalar value, and the fold, the snapshot and
 /// the checksum all carry it without inspecting it. The renderer then spells whatever it
 /// was handed. So without this pass a misspelled `postgres.filfactor` becomes a literal
-/// `WITH (filfactor='85')` and the FIRST thing that objects is the server, mid-apply —
+/// `WITH (filfactor='85')` and the FIRST thing that objects is the server, mid-apply -
 /// after any earlier unit in the same migration has already committed.
 ///
 /// Refusing here turns that into an offline error naming the key, before a connection is
@@ -328,9 +328,9 @@ pub fn validate_ir_authorized(
 ///
 /// [`AttributeVocabulary::check`](zero_migrate_backend::attribute::AttributeVocabulary::check)
 /// skips keys belonging to another dialect, and that is the
-/// property that keeps a table portable: authoring `mysql: { engine: … }` alongside
-/// `postgres: { … }` must not fail a PostgreSQL migration. The cost is real and worth
-/// stating — a `mysql.engnie` typo is invisible until something actually targets MySQL.
+/// property that keeps a table portable: authoring `mysql: { engine: ... }` alongside
+/// `postgres: { ... }` must not fail a PostgreSQL migration. The cost is real and worth
+/// stating - a `mysql.engnie` typo is invisible until something actually targets MySQL.
 /// The alternative, judging every namespace against every registered backend, would refuse
 /// a plan for a backend the author never deploys to.
 fn validate_vendor_attributes(
@@ -380,7 +380,7 @@ fn validate_vendor_attributes(
 /// One op's attribute carrier, behind a trait so the six of them can be judged by one
 /// loop.
 ///
-/// `OpAttributes` is not object-safe — `const OP` cannot be read through a `dyn` — so the
+/// `OpAttributes` is not object-safe - `const OP` cannot be read through a `dyn` - so the
 /// generic `AttributeVocabulary::check` is reached through this one-method shim rather
 /// than by matching each carrier into its own call.
 trait CarriedAttributes {
@@ -549,7 +549,7 @@ fn validate_authored_identifier_lengths_op(
 /// strictest registered backend, so a schema authored against a permissive target can
 /// be re-pointed at a strict one without names silently merging. The DROPPED side is
 /// different and is gated per-vendor by the caller, through
-/// `existence_probe.truncated_identifier` — a backend that does NOT truncate must not
+/// `existence_probe.truncated_identifier` - a backend that does NOT truncate must not
 /// be stopped from dropping a catalog object that legitimately carries a long name.
 fn authored_name_within_bound(
     vendors: VendorSet,
@@ -565,7 +565,7 @@ fn authored_name_within_bound(
     }
     // Does THIS target silently truncate THIS name? The backend answers; core does not
     // decide it from an id. The two sentences below are different facts, and the old
-    // single sentence — "PostgreSQL truncates identifiers to 63 bytes" — was the first
+    // single sentence - "PostgreSQL truncates identifiers to 63 bytes" - was the first
     // one, emitted unconditionally, including on the two shipping backends for which it
     // is false.
     let truncates_here = registered_vendor(vendors, target_dialect, op_index)?
@@ -717,7 +717,7 @@ enum MissingLogicalDeclaration {
 }
 
 /// Live catalog columns a lower-time check may consult about a column no
-/// authored contract in view describes — because an EARLIER ordered migration
+/// authored contract in view describes - because an EARLIER ordered migration
 /// declared it, or because the table is unmanaged.
 ///
 /// Keyed by bare table name, exactly like `LiveSchema::table_snapshots`: an
@@ -2502,7 +2502,7 @@ fn validate_column_references(
 /// so only this gate turns `lint` red, and apply runs it too.
 ///
 /// SCOPE: this OFFLINE entry sees only the envelope in front of it, so the
-/// referenced column must be declared in the SAME envelope — which is what the
+/// referenced column must be declared in the SAME envelope - which is what the
 /// two-pass declaration walk sees. A column from an earlier ordered artifact or
 /// from an unmanaged table carries no type here and is left alone. That half is
 /// closed at lower time by [`validate_vendor_key_storage_for_lower`], against the
@@ -2952,7 +2952,7 @@ fn column_named_object_dependencies(
 /// a dropped enum or domain.
 ///
 /// `renameColumn` also carries a type and is deliberately NOT checked: it is
-/// metadata describing the column after the rename, and `ALTER TABLE … RENAME
+/// metadata describing the column after the rename, and `ALTER TABLE ... RENAME
 /// COLUMN` never mentions a type, so nothing there can fail to resolve.
 fn named_object_dependencies<'a>(
     ty: &'a crate::model::ir::ColType,
@@ -3014,7 +3014,7 @@ fn roles_named_by(op: &crate::model::ir::Op) -> Vec<(&str, &'static str)> {
 /// `DROP SEQUENCE sq` then a `nextval('sq')` default gives `relation "sq" does
 /// not exist`.
 ///
-/// Recreating a dropped object before using it stays allowed — dropping an enum
+/// Recreating a dropped object before using it stays allowed - dropping an enum
 /// and recreating it is how its value set is replaced.
 ///
 /// Bounded like its siblings: this reaches names carried as plain identifiers on
@@ -3079,7 +3079,7 @@ fn validate_no_column_uses_a_dropped_named_object(
         // EXHAUSTIVE over the closed op set for the confined cross-schema gate,
         // so a new op variant must declare whether it carries a schema and
         // cannot silently escape this. MEASURED: `DROP SCHEMA s; CREATE TABLE
-        // s.x (…)` is `schema "s" does not exist`.
+        // s.x (...)` is `schema "s" does not exist`.
         if let Some(schema) = op.schema() {
             if dropped.contains(&("schema", schema)) {
                 return Err(AuthoringError {
@@ -3490,7 +3490,7 @@ fn validate_no_name_is_claimed_twice(
                 relations.remove(&key);
                 // The composite row type goes with the table.
                 types.remove(&key);
-                // …and so do the dependents it contains: the partitions it
+                // ...and so do the dependents it contains: the partitions it
                 // parents AND the indexes built on it. Both live in the
                 // schema-wide relation namespace, so neither is released by
                 // removing this key alone.
@@ -3614,7 +3614,7 @@ fn validate_no_name_is_claimed_twice(
             }
             // ATTACH is the mirror of detach and the last lifecycle event that
             // touches this map: an attached table BECOMES a dependent, so a later
-            // drop of the parent takes it too. Measured live — after ATTACH and
+            // drop of the parent takes it too. Measured live - after ATTACH and
             // DROP TABLE par, `information_schema` reports no `t`.
             //
             // Reachable only under a granting profile: `attachPartition` requires
@@ -3637,7 +3637,7 @@ fn validate_no_name_is_claimed_twice(
             // drop of its former parent must not release it.
             //
             // Measured: detach p1, drop par, then `CREATE TABLE p1` is
-            // `relation "p1" already exists` on the server — the engine accepted
+            // `relation "p1" already exists` on the server - the engine accepted
             // it until this arm forgot the parentage.
             Op::DetachPartition {
                 name,
@@ -4077,7 +4077,7 @@ fn validate_no_name_is_claimed_twice(
 /// closed-AST walk, rather than re-deriving one: its match has no catch-all arm,
 /// so a new [`Expr`] variant is a compile error there instead of a silently
 /// missed reference here. It is given the TARGET dialect because it descends only
-/// into the [`Expr::Dialectal`] leg that dialect actually emits — a column named
+/// into the [`Expr::Dialectal`] leg that dialect actually emits - a column named
 /// only in the MySQL leg cannot fail a PostgreSQL apply, and refusing it would
 /// reject a migration the database would have run.
 ///
@@ -4166,7 +4166,7 @@ fn expression_column_references<'a>(
             .flat_map(|expr| refs(table, expr))
             .collect(),
         Op::Delete { table, r#where, .. } => refs(table, r#where),
-        // A BACKFILL READS COLUMNS TOO — the site F711 recorded as the last one
+        // A BACKFILL READS COLUMNS TOO - the site F711 recorded as the last one
         // its walk did not reach. `dropColumn v` followed by a backfill setting
         // `w = v` lowers to `UPDATE a SET "w" = "v"` after the column is gone;
         // measured live as `column "v" does not exist`.
@@ -4197,7 +4197,7 @@ fn expression_column_references<'a>(
         // table, exactly as a CHECK constraint does. Measured live, each after
         // `ALTER TABLE a DROP COLUMN v`:
         //     CREATE POLICY p ON a FOR ALL USING (v > 0)      column "v" does not exist
-        //     CREATE TRIGGER … WHEN (NEW.v > 0)               column new.v does not exist
+        //     CREATE TRIGGER ... WHEN (NEW.v > 0)               column new.v does not exist
         Op::CreatePolicy {
             table,
             using,
@@ -4562,8 +4562,8 @@ fn dialectal_leg<'a>(
 
 /// Refuse an operation that names a column an earlier `dropColumn` removed.
 ///
-/// Left alone it lowers to SQL naming a column that is gone — `ALTER TABLE a DROP
-/// COLUMN v` followed by `CREATE INDEX ix ON a (v)` — and fails mid-migration
+/// Left alone it lowers to SQL naming a column that is gone - `ALTER TABLE a DROP
+/// COLUMN v` followed by `CREATE INDEX ix ON a (v)` - and fails mid-migration
 /// with `column "v" does not exist`.
 ///
 /// The table-level sibling of this lives in
@@ -4633,8 +4633,8 @@ fn validate_no_op_references_a_dropped_column(
 /// same envelope has already moved away.
 ///
 /// Left alone it lowers to SQL naming a relation that no longer exists by the
-/// time it runs — `ALTER TABLE a RENAME TO b` followed by `ALTER TABLE a ADD
-/// COLUMN` — and fails mid-migration with `relation "a" does not exist`.
+/// time it runs - `ALTER TABLE a RENAME TO b` followed by `ALTER TABLE a ADD
+/// COLUMN` - and fails mid-migration with `relation "a" does not exist`.
 ///
 /// The engine already refuses the column-level equivalent: a `renameColumn`
 /// beside any other operation on the same table is rejected outright. This closes
@@ -4649,7 +4649,7 @@ fn validate_no_op_references_a_dropped_column(
 ///
 /// `touched_table` answers "which relation is this op about", and for every op
 /// below there is a second one it also requires. A walk built on one name per op
-/// cannot see these by construction — that is the boundary of that walk, not a
+/// cannot see these by construction - that is the boundary of that walk, not a
 /// defect in it.
 ///
 /// Every entry was measured: each lowers to SQL naming the second relation, and a
@@ -4730,13 +4730,13 @@ fn validate_no_op_targets_a_renamed_away_table(
 
     for (op_index, op) in effective_ops(&ir.ops, target_dialect)? {
         // A `createTable` RECLAIMS the name rather than requiring it to be there,
-        // so it is handled before the check — `touched_table` reports the table an
+        // so it is handled before the check - `touched_table` reports the table an
         // op operates on, and for a create that is the name being defined.
         //
         // A `createPartition` DEFINES a relation too: `CREATE TABLE ... PARTITION
         // OF` is a CREATE TABLE, and `touched_table` reports the name it defines,
         // not one it requires. Without this arm, `dropTable b` followed by
-        // `createPartition b` was refused as a use-after-drop — measured against
+        // `createPartition b` was refused as a use-after-drop - measured against
         // live PostgreSQL, which accepts it, so the refusal was wrong.
         // SECOND NAMES. This walk compares ONE name per op, via `touched_table`,
         // so a relation an op names in addition to its own target was asked about
@@ -4936,7 +4936,7 @@ fn validate_index_names_across_ops(
 ///
 /// This is a FAIL-OPEN rather than a late verdict. Both lower to
 /// `CREATE INDEX IF NOT EXISTS` under the same name, so PostgreSQL answers the
-/// second with `NOTICE: relation "ix" already exists, skipping` — a notice, not
+/// second with `NOTICE: relation "ix" already exists, skipping` - a notice, not
 /// an error. The apply SUCCEEDS, the schema carries one index, and the one the
 /// author declared second does not exist with nothing reporting it.
 ///
@@ -4981,8 +4981,8 @@ fn validate_index_names_are_distinct(
 /// PostgreSQL rejects `UNIQUE (c, c)` with `column "c" appears twice in unique
 /// constraint`, so without this the operator meets the mistake during apply
 /// rather than at authoring time. The sibling constraint kinds already refuse the
-/// identical shape — a foreign key whose local columns repeat, and a `primaryKey`
-/// that repeats a column — so this restores one answer to one question.
+/// identical shape - a foreign key whose local columns repeat, and a `primaryKey`
+/// that repeats a column - so this restores one answer to one question.
 ///
 /// Deliberately NOT extended to indexes: PostgreSQL ACCEPTS
 /// `CREATE INDEX ON a (c, c)`, so a duplicate there is wasteful rather than
@@ -5608,10 +5608,10 @@ struct PartitionParentFold {
 /// The second half used to be the literal `"or omit whenUnsupported and target Postgres
 /// only"`, repeated at three sites. It named the one backend that declared
 /// [`Capability::PartitionRelationDdl`] when it was written, in core, where the registry
-/// already answers the question — so it was a cached answer with no invalidation, and a
+/// already answers the question - so it was a cached answer with no invalidation, and a
 /// fourth backend declaring native partitioning would have been left out of its own
 /// advice.
-/// "…, or target X for `what`" — where X is whichever registered backends actually
+/// "..., or target X for `what`" - where X is whichever registered backends actually
 /// declare [`Capability::PartitionRelationDdl`], asked at the moment of the refusal.
 ///
 /// Same defect as [`collapse_or_native_target`], different sentence: the advice beside
@@ -6767,7 +6767,7 @@ pub fn validate_op_authorized(
                 for value in row {
                     if let crate::model::ir::IrValue::Expr(expr) = value {
                         validate_expr(vendors, expr, target_dialect, &scope, op_index)?;
-                        // `INSERT … VALUES (1, count(1))` is refused by PostgreSQL the
+                        // `INSERT ... VALUES (1, count(1))` is refused by PostgreSQL the
                         // same way an assignment is; a VALUES item is a scalar context.
                         validate_no_aggregate_expr_context(
                             expr,
@@ -6799,10 +6799,10 @@ pub fn validate_op_authorized(
             // fail-closed: a DropIndex carries an index `name` and an
             // OPTIONAL owning-table hint. The ownership gate
             // ([`crate::model::load::enforce_ir_ownership`]) checks the op's TARGET
-            // TABLE — but a bare-name DropIndex (`table: None`) has no
+            // TABLE - but a bare-name DropIndex (`table: None`) has no
             // ownership-checkable target, so the gate would SKIP it, letting a
             // hostile IR envelope `{op:"dropIndex", name:"<other_app_index>"}` drop
-            // ANOTHER app's index cross-tenant. Until a name→owning-table registry
+            // ANOTHER app's index cross-tenant. Until a name->owning-table registry
             // resolver exists, we refuse a bare-name DropIndex fail-closed: the
             // author must carry the owning-table hint, which makes the drop
             // ownership-checkable. (A name-only drop is also intrinsically
@@ -6833,8 +6833,8 @@ pub fn validate_op_authorized(
         // `vector_metric` / standalone `mask`) `createTable` columns do, so it gets
         // the SAME fail-closed facet validation. Build a synthetic single-column
         // `IrColumn` view and route it through the shared [`validate_column_facets`].
-        // (`id_prefix` cannot reach here — `Op::AddColumn` has no slot; the recorder
-        // fail-closes it — so the legacy-prefix arm is a no-op for this view.)
+        // (`id_prefix` cannot reach here - `Op::AddColumn` has no slot; the recorder
+        // fail-closes it - so the legacy-prefix arm is a no-op for this view.)
         Op::AddColumn {
             table,
             column,
@@ -6889,7 +6889,7 @@ pub fn validate_op_authorized(
                 op_index
             )
         }
-        // VENDOR — a `createPolicy`'s `USING`/`WITH CHECK` predicates are CLOSED
+        // VENDOR - a `createPolicy`'s `USING`/`WITH CHECK` predicates are CLOSED
         // `(c) => Expr` ASTs: validate them STRUCTURALLY (the
         // (a)/(b)/(d) checks) against the policy's target table. The live column set
         // is unknown at load (the table pre-exists), so structural-only here.
@@ -6901,7 +6901,7 @@ pub fn validate_op_authorized(
             }
             Ok(())
         }
-        // CROSS-DIALECT CORE — trigger `WHEN` + body statements are CLOSED ASTs.
+        // CROSS-DIALECT CORE - trigger `WHEN` + body statements are CLOSED ASTs.
         // backend-impossible actions/facets are refused per facet, not by a
         // whole-construct vendor gate.
         Op::CreateTrigger { table, events, for_each, when, action, .. } => {
@@ -6986,11 +6986,11 @@ pub fn validate_op_authorized(
             })
         }
         // Ops with no embedded expression slot. (`RenameTable` carries only its
-        // old/new table NAMES — no Expr — so the schema-ident + guard-direction
+        // old/new table NAMES - no Expr - so the schema-ident + guard-direction
         // gate in `validate_op_schema_and_guard` above is the whole check, and the
         // render-time `quote_ident` is the injection-safe identifier seam.) The
-        // remaining VENDOR ops carry no embedded Expr — their privileged payload is
-        // closed sub-enums (`Privilege`/`TriggerTiming`/…) or the capability-gated
+        // remaining VENDOR ops carry no embedded Expr - their privileged payload is
+        // closed sub-enums (`Privilege`/`TriggerTiming`/...) or the capability-gated
         // raw `body`/`sql` strings (parse-scanned by the guard deny-list at lower).
         // A rename whose target IS its source is a no-op the servers reject, and
         // they reject it with a message about the wrong thing: PostgreSQL says
@@ -7212,8 +7212,8 @@ fn validate_create_table_primary_key_policy(
     // mandatory-inject scope whose author declares its own PK is refused there with
     // `AuthorPrimaryKeyForbidden`. The generic engine no longer bakes zeroship's
     // shape into validate-time; only the PURE primaryKey validation (empty / dup /
-    // absent-column, above) stays. See the design doc §"7-column system_shape → one
-    // inject rule".
+    // absent-column, above) stays. See the design doc section "7-column
+    // system_shape -> one inject rule".
     Ok(())
 }
 
@@ -7711,10 +7711,10 @@ fn validate_op_support(
     Ok(())
 }
 
-/// **VENDOR (`zero-migrate`)** — the capability-composition gate.
+/// **VENDOR (`zero-migrate`)** - the capability-composition gate.
 /// For every VENDOR [`Op`](crate::model::ir::Op) variant:
 ///
-/// 1. **Non-renderer refusal** — exactly one registered backend renders the
+/// 1. **Non-renderer refusal** - exactly one registered backend renders the
 ///    privileged catalog-object family, so an artifact carrying one of these ops
 ///    measures a `DialectScope::Only` reach naming that backend. A target that is not
 ///    it is refused [`CODE_UNSUPPORTED`] `{kind:"op"}` at load, never silently
@@ -7741,7 +7741,7 @@ fn validate_vendor_op(
 ) -> Result<(), AuthoringError> {
     let caps = crate::model::op_support::vendor_capabilities(op);
     if caps.is_empty() {
-        return Ok(()); // portable-core op — not gated here.
+        return Ok(()); // portable-core op - not gated here.
     }
 
     // (1) Ask the selected backend for its own fail-closed refusal before the
@@ -7891,8 +7891,8 @@ fn validate_function_type_refs(
 /// Validate a raw view body before it is admitted by `ViewQuery::Raw`, by asking
 /// the TARGET BACKEND to vet it in its own grammar.
 ///
-/// Core owns the envelope — which op, which dialect, which error code, what to
-/// suggest — and owns nothing else here. It deliberately does NOT parse: this
+/// Core owns the envelope - which op, which dialect, which error code, what to
+/// suggest - and owns nothing else here. It deliberately does NOT parse: this
 /// function used to call `pg_query::parse` itself, which meant a MySQL or SQLite
 /// raw view body was judged by PostgreSQL's grammar, and each dialect's own native
 /// identifier quoting (`` `id` ``, `[id]`) was refused on its own dialect with a
@@ -8014,17 +8014,17 @@ fn validate_select_ast(
 /// Validate an op's `schema` qualifier + existence-guard direction,
 /// BEFORE the per-op expression-slot checks. Three fail-closed checks:
 ///
-/// 1. **Schema identifier safety** — if a `schema` is present it MUST be a safe bare
+/// 1. **Schema identifier safety** - if a `schema` is present it MUST be a safe bare
 ///    identifier ([`is_safe_schema_ident`], mirroring `dml.rs`'s `quote_ident`
 ///    shape); an injection-shaped value is rejected ([`CODE_INVALID_SCHEMA_IDENT`])
 ///    REGARDLESS of profile (the engine double-quotes it, but a fail-closed
 ///    validate-time reject is the defense the names-are-strings stance needs).
-/// 2. **Cross-schema confinement** — under a `Some(scope)` (Confined/Platform) an
+/// 2. **Cross-schema confinement** - under a `Some(scope)` (Confined/Platform) an
 ///    explicit `schema` the scope does not `permit` is refused
 ///    ([`CODE_CROSS_SCHEMA`]). Absent schema, or a permitted one, passes.
 ///    `SchemaScope::Unconfined` skips this for an explicit whole-universe operator
 ///    grant; `None` means default public validation without vendor capabilities.
-/// 3. **Existence-guard direction** — a guard whose direction is illegal for the op
+/// 3. **Existence-guard direction** - a guard whose direction is illegal for the op
 ///    variant is refused ([`CODE_GUARD_DIRECTION`]).
 fn validate_op_schema_and_guard(
     op: &crate::model::ir::Op,
@@ -8090,7 +8090,7 @@ fn validate_op_schema_and_guard(
         Ok(())
     };
 
-    // (1) + (2) — the top-level schema qualifier.
+    // (1) + (2) - the top-level schema qualifier.
     if let Some(schema) = op.schema() {
         check_schema(schema, "op")?;
     }
@@ -8120,7 +8120,7 @@ fn validate_op_schema_and_guard(
         _ => {}
     }
 
-    // (3) — the existence-guard direction.
+    // (3) - the existence-guard direction.
     if let Some(guard) = op.existence_guard() {
         match op.legal_existence_guard() {
             Some(legal) if legal == guard => {}
@@ -8754,26 +8754,26 @@ fn validate_default_expr(
 /// Three fail-closed checks, with the IR's hand-crafted-IR envelope threat model in
 /// mind (the closed-enum + `deny_unknown_fields` design):
 ///
-/// 1. **`id_prefix`** — a legacy internal platform-ID prefix, distinct from
+/// 1. **`id_prefix`** - a legacy internal platform-ID prefix, distinct from
 ///    TypeID, which must obey the internal `^[a-z][a-z0-9_]*$`
-///    charset rule + reserved-prefix deny-list (`usr`, …) the runtime enforces via
+///    charset rule + reserved-prefix deny-list (`usr`, ...) the runtime enforces via
 ///    [`crate::schema::query::validate_id_prefix`] (the SINGLE source of truth
 ///    in this crate, kept in step with `system_fields_pass`'s
 ///    `RESERVED_AUTO_PREFIXES`), PLUS a [`MAX_ID_PREFIX_LEN`] length bound so a
 ///    hand-authored prefix keeps the compact `<prefix>_<22 base62 UUIDv7>` shape.
 ///    A reserved/malformed/over-long prefix is [`CODE_INVALID_ID_PREFIX`], refused
-///    BEFORE lower — never a render-time surprise minting colliding `usr_…` ids.
-/// 2. **`value_format`** — TypeID prefixes obey the distinct TypeID 0.3 grammar;
+///    BEFORE lower - never a render-time surprise minting colliding `usr_...` ids.
+/// 2. **`value_format`** - TypeID prefixes obey the distinct TypeID 0.3 grammar;
 ///    TypeID and ULID formats co-occur only with exact
 ///    [`ColType::Text`](crate::model::ir::ColType::Text) storage and never with
 ///    `caseSensitive:false`.
-/// 3. **`vector_metric`** — structurally bounded by the closed
+/// 3. **`vector_metric`** - structurally bounded by the closed
 ///    [`crate::model::ir::VectorMetric`] enum at deserialize; the only authoring error
 ///    left is CO-OCCURRENCE: a metric carried on a non-`Vector` column is
 ///    meaningless (the opclass has no vector to apply to) and is refused
 ///    ([`CODE_VECTOR_METRIC_MISPLACED`]) so a hand-crafted artifact cannot ride a
 ///    dead field in.
-/// 4. **`references.name`** — an optional explicit foreign-key constraint name
+/// 4. **`references.name`** - an optional explicit foreign-key constraint name
 ///    must be a non-empty portable bare identifier no longer than the registry's
 ///    generated-identifier budget.
 ///
@@ -8958,7 +8958,7 @@ fn validate_column_facets(
     }
 
     if let Some(prefix) = &col.id_prefix {
-        // Charset + reserved deny-list — the runtime's single source of truth.
+        // Charset + reserved deny-list - the runtime's single source of truth.
         if let Err(e) = crate::schema::query::validate_id_prefix(prefix) {
             return Err(mk(
                 CODE_INVALID_ID_PREFIX,
@@ -8971,7 +8971,7 @@ fn validate_column_facets(
                     .to_string(),
             ));
         }
-        // Length bound — keep the compact typed-id shape (charset already checked).
+        // Length bound - keep the compact typed-id shape (charset already checked).
         if prefix.len() > MAX_ID_PREFIX_LEN {
             return Err(mk(
                 CODE_INVALID_ID_PREFIX,
@@ -9173,25 +9173,25 @@ fn validate_identity_placement(
 
 /// **Apply/render-seam ColRef resolution (rule (c)).** Re-run the
 /// expression-AST walk for the ops whose live-schema column set was NOT known at
-/// IR-load time — the DML ops (`update`/`delete`/`backfill`) and `setColumnType`
-/// — now that the render/apply seam HAS the live columns. For each such op whose
+/// IR-load time - the DML ops (`update`/`delete`/`backfill`) and `setColumnType`
+/// - now that the render/apply seam HAS the live columns. For each such op whose
 /// target table appears in `live_columns`, the embedded predicates / set RHS /
 /// cast are re-validated with a **RESOLVING** [`TargetScope`], so an unresolved
 /// `ColRef` is rejected with the structured [`AuthoringError`] (rule (c)) at apply
-/// — NOT as an opaque raw DB error mid-statement.
+/// - NOT as an opaque raw DB error mid-statement.
 ///
-/// `live_columns` maps a target table → its live column names (system fields
+/// `live_columns` maps a target table -> its live column names (system fields
 /// included). An op whose table is absent from the map keeps the structural-only
-/// scope (the (c) check is skipped — the caller could not resolve that table).
+/// scope (the (c) check is skipped - the caller could not resolve that table).
 /// Non-DML / non-`setColumnType` ops are revalidated structurally (a),(b),(d)
-/// — harmless and keeps the walk total.
+/// - harmless and keeps the walk total.
 ///
 /// This is the seam the `validate_ir` doc ("the apply/render seam re-runs
 /// the walk with a resolved column set to enforce (c)") names. The apply path
 /// calls this BEFORE rendering the DML statement.
 ///
 /// # Errors
-/// The first [`AuthoringError`] any embedded expression produces — incl. a rule
+/// The first [`AuthoringError`] any embedded expression produces - incl. a rule
 /// (c) `ColRef`-resolution failure now that the column set is known.
 pub fn validate_ir_resolved(
     vendors: VendorSet,
@@ -9218,18 +9218,18 @@ pub fn validate_ir_resolved(
 /// `ColRef`s against the live target-table columns BEFORE the SQL template is
 /// assembled. A `ColRef` to a column NOT on the enclosing target table (or a
 /// synthesized cross-table reference) is rejected with the structured
-/// [`AuthoringError`] (`UNSUPPORTED { kind: "expr" }`, rule (c)) at apply — NOT as
+/// [`AuthoringError`] (`UNSUPPORTED { kind: "expr" }`, rule (c)) at apply - NOT as
 /// an opaque raw DB `column does not exist` error mid-statement (the (c) check
 /// runs "at apply/render time").
 ///
-/// `live_columns` maps a target table → its live column names (system fields
+/// `live_columns` maps a target table -> its live column names (system fields
 /// included). An op whose table is ABSENT from the map keeps the structural-only
-/// scope (the (c) check is skipped — the caller could not resolve that table; the
+/// scope (the (c) check is skipped - the caller could not resolve that table; the
 /// (a)/(b)/(d) structural checks still run). A non-DML / non-`setColumnType` op
 /// re-runs the structural [`validate_op`] (harmless; keeps the walk total).
 ///
 /// # Errors
-/// The first [`AuthoringError`] the op's embedded expressions produce — incl. a
+/// The first [`AuthoringError`] the op's embedded expressions produce - incl. a
 /// rule (c) `ColRef`-resolution failure now that the column set is known.
 pub fn validate_op_resolved(
     vendors: VendorSet,
@@ -9371,7 +9371,7 @@ pub fn validate_op_resolved(
         // closed Expr (a DB-evaluated synth scalar or `DO UPDATE SET n = n + 1`).
         // When the target table resolves, walk every `IrValue::Expr` through a real
         // resolving `TargetScope` so a ColRef to a non-existent column is rejected
-        // here, not as an opaque mid-statement DB error — symmetric with the
+        // here, not as an opaque mid-statement DB error - symmetric with the
         // Update/Delete/Backfill/SetColumnType arms above.
         Op::Insert {
             table,
@@ -9457,7 +9457,7 @@ mod tests {
         TargetScope::new(table, cols)
     }
 
-    // ── DoS guard: explicit walk depth bound ────────────────────────────────
+    // -- DoS guard: explicit walk depth bound --------------------------------
     // The validator OWNS the recursion bound (MAX_EXPR_DEPTH), not an
     // implicit serde_json::recursion_limit. Build the AST in Rust (bypassing
     // serde entirely, exactly as a future streaming/custom deserializer or a
@@ -9481,7 +9481,7 @@ mod tests {
     fn walk_refuses_over_deep_expression_as_unsupported() {
         let c = cols();
         let sc = scope("users", &c);
-        // Comfortably past the bound — would stack-overflow a naive walker.
+        // Comfortably past the bound - would stack-overflow a naive walker.
         let deep = nest_not(MAX_EXPR_DEPTH + 50, Expr::col("name"));
         let err = validate_expr(crate::test_fixtures::VENDORS, &deep, &POSTGRES, &sc, 0)
             .expect_err("an over-deep expression must be refused, not recursed");
@@ -9498,7 +9498,7 @@ mod tests {
     fn walk_accepts_expression_within_the_depth_bound() {
         let c = cols();
         let sc = scope("users", &c);
-        // A legitimately-shallow tree (well under the bound) still validates —
+        // A legitimately-shallow tree (well under the bound) still validates -
         // the bound never narrows the realistic accepted set.
         let ok = nest_not(MAX_EXPR_DEPTH - 2, Expr::col("name"));
         assert!(
@@ -9511,7 +9511,7 @@ mod tests {
     fn current_setting_and_current_user_are_pg_only_rejected_off_postgres() {
         // Regression: current_setting / current_user are PG-only VENDOR scalars
         // (they render as PG built-ins with no SQLite/MySQL form). A portable op
-        // carrying them must be REFUSED at validate on SQLite/MySQL — not sail
+        // carrying them must be REFUSED at validate on SQLite/MySQL - not sail
         // through and break at apply.
         let c = cols();
         let sc = scope("users", &c);
@@ -9533,7 +9533,7 @@ mod tests {
         }
     }
 
-    // ── (a) every allow-listed node validates ──────────────────────────────
+    // -- (a) every allow-listed node validates ------------------------------
 
     #[test]
     fn all_allow_listed_nodes_validate() {
@@ -9633,7 +9633,7 @@ mod tests {
     fn portable_predicate_and_extract_nodes_validate_on_all_three_dialects() {
         // between / like / distinctFrom / inList / extract are PORTABLE:
         // they render on all three dialects (the engine owns each per-dialect
-        // lowering), so the walk accepts them with NO dialect gate — including on
+        // lowering), so the walk accepts them with NO dialect gate - including on
         // SQLite/MySQL, exactly where the PG-only nodes are refused.
         let c = cols();
         let sc = scope("users", &c);
@@ -9814,7 +9814,7 @@ mod tests {
     fn portable_scalar_fns_validate_on_all_three_dialects() {
         // mod / round / floor / ceil / substr / replace are PORTABLE ScalarFns:
         // identical spelling on PG/SQLite/MySQL (mod renders as the `%`
-        // operator), so the walk accepts them with NO dialect gate — unlike the
+        // operator), so the walk accepts them with NO dialect gate - unlike the
         // PG-only currentSetting/currentUser vendor scalars.
         let c = cols();
         let sc = scope("users", &c);
@@ -9977,7 +9977,7 @@ mod tests {
         assert!(err.reason.contains("non-empty"));
     }
 
-    // ── (b) splitPart envelope ─────────────────────────────────────────────
+    // -- (b) splitPart envelope ---------------------------------------------
 
     fn split(delim: &str, n: i64) -> Expr {
         Expr::FnSynth {
@@ -10032,9 +10032,9 @@ mod tests {
         assert_eq!(obj["code"], CODE_EXPR_NOT_PORTABLE);
     }
 
-    // ── the splitPart envelope verdict is DIALECT-GATED ─────────────────────
+    // -- the splitPart envelope verdict is DIALECT-GATED ---------------------
     // An OUT-OF-ENVELOPE-but-PG-renderable c.fn.splitPart (multi-char delim,
-    // n>8, …) is renderable on Postgres (`split_part` accepts it) and only a
+    // n>8, ...) is renderable on Postgres (`split_part` accepts it) and only a
     // hard reject on the SQLite leg. The SAME node must therefore
     // validate OK on a Postgres target and be EXPR_NOT_PORTABLE on a SQLite
     // target. RED before check_split_part branches on target_dialect.
@@ -10077,12 +10077,12 @@ mod tests {
         }
     }
 
-    // ── the GRAMMAR is dialect-NEUTRAL ──────────────────────────────────────
-    // A grammar-broken splitPart — a NON-literal / non-string delim, or a
-    // non-literal / non-positive-int n — is not renderable on EITHER dialect (the
+    // -- the GRAMMAR is dialect-NEUTRAL --------------------------------------
+    // A grammar-broken splitPart - a NON-literal / non-string delim, or a
+    // non-literal / non-positive-int n - is not renderable on EITHER dialect (the
     // renderer enforces the same grammar fail-closed on PG and SQLite). The
     // validator (the AI loop's primary structured-feedback signal) must
-    // therefore reject it on a Postgres target too, BEFORE the dialect early-return —
+    // therefore reject it on a Postgres target too, BEFORE the dialect early-return -
     // not defer the only rejection to render time. RED before check_split_part lifts
     // the grammar checks above the `if Postgres { return Ok(()) }`.
     #[test]
@@ -10090,7 +10090,7 @@ mod tests {
         let c = cols();
         let sc = scope("users", &c);
 
-        // (1) delim is a COLUMN REFERENCE (a runtime/computed delimiter) — not a
+        // (1) delim is a COLUMN REFERENCE (a runtime/computed delimiter) - not a
         //     string literal. Grammar-broken on BOTH dialects.
         let runtime_delim = Expr::FnSynth {
             r#fn: SynthFn::SplitPart,
@@ -10128,7 +10128,7 @@ mod tests {
             );
         }
 
-        // (3) n is a COLUMN REFERENCE (a runtime n) — not a literal. Both dialects.
+        // (3) n is a COLUMN REFERENCE (a runtime n) - not a literal. Both dialects.
         let runtime_n = Expr::FnSynth {
             r#fn: SynthFn::SplitPart,
             args: vec![
@@ -10147,7 +10147,7 @@ mod tests {
             );
         }
 
-        // (4) n is a non-POSITIVE integer literal (n<1) — grammar-broken on both.
+        // (4) n is a non-POSITIVE integer literal (n<1) - grammar-broken on both.
         for d in [&POSTGRES, &SQLITE, &MYSQL] {
             assert_eq!(
                 validate_expr(crate::test_fixtures::VENDORS, &split(",", 0), d, &sc, 0)
@@ -10159,7 +10159,7 @@ mod tests {
         }
 
         // GUARD: a grammar-VALID but out-of-ENVELOPE node (multi-char string-literal
-        // delim, or n>8) is still PG-renderable — the envelope stays SQLite-gated.
+        // delim, or n>8) is still PG-renderable - the envelope stays SQLite-gated.
         assert!(
             validate_expr(
                 crate::test_fixtures::VENDORS,
@@ -10216,7 +10216,7 @@ mod tests {
 
     #[test]
     fn malformed_split_part_arity_is_unconditional_unsupported() {
-        // A genuinely-MALFORMED splitPart — wrong arity (not exactly 3 args) — is
+        // A genuinely-MALFORMED splitPart - wrong arity (not exactly 3 args) - is
         // broken on BOTH dialects (`split_part` is ternary on PG too), so it is
         // an unconditional CODE_UNSUPPORTED, NOT a dialect-gated portability
         // reject. Rejected on PG AND SQLite.
@@ -10278,7 +10278,7 @@ mod tests {
         .is_ok());
     }
 
-    // ── (b') the remaining SynthFn arities — structural backstop ───────────
+    // -- (b') the remaining SynthFn arities - structural backstop -----------
     // now takes ZERO args; concatWs takes >=2 (a delimiter + >=1
     // value). Independent of the (not-yet-existing) render seam, the validator
     // is the structural backstop. RED before the check_synth arity fix.
@@ -10289,8 +10289,8 @@ mod tests {
 
     #[test]
     fn now_with_args_is_rejected() {
-        // now(arg) is a genuinely-MALFORMED synth — `now()` is nullary on
-        // BOTH dialects — so it is an unconditional CODE_UNSUPPORTED, on PG AND
+        // now(arg) is a genuinely-MALFORMED synth - `now()` is nullary on
+        // BOTH dialects - so it is an unconditional CODE_UNSUPPORTED, on PG AND
         // SQLite (not a dialect-gated portability reject).
         let sc = TargetScope::structural_only("t");
         let e = synth(SynthFn::Now, vec![Expr::lit(IrScalar::Int(1))]);
@@ -10363,7 +10363,7 @@ mod tests {
     #[test]
     fn concat_ws_arity_is_enforced() {
         // concatWs with <2 args is genuinely malformed (no valid join on
-        // EITHER dialect) → unconditional CODE_UNSUPPORTED on PG and SQLite.
+        // EITHER dialect) -> unconditional CODE_UNSUPPORTED on PG and SQLite.
         let c = cols();
         let sc = scope("users", &c);
         // 0 args and 1 arg (delimiter only, no values) are out of shape.
@@ -10432,7 +10432,7 @@ mod tests {
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
     }
 
-    // ── the Layer-2 dialect() per-dialect value escape ──────────────────────
+    // -- the Layer-2 dialect() per-dialect value escape ----------------------
 
     fn dialectal(
         legs: impl IntoIterator<Item = (zero_migrate_ir::dialect::DialectId, Expr)>,
@@ -10449,7 +10449,7 @@ mod tests {
     fn dialectal_missing_leg_accepted_on_own_target_refused_off_target() {
         // dialect({ postgres: A }). Its covered set is exactly {postgres}: it is
         // ACCEPTED targeting PG (its own leg), REFUSED targeting SQLite/MySQL
-        // (neither target has a leg) — the per-TARGET scope math.
+        // (neither target has a leg) - the per-TARGET scope math.
         let sc = TargetScope::structural_only("t");
         let e = dialectal([(
             crate::test_fixtures::POSTGRES,
@@ -10560,7 +10560,7 @@ mod tests {
 
     #[test]
     fn dialectal_with_no_legs_is_refused_on_every_target() {
-        // dialect({}) — zero legs — is malformed on EVERY target (dialect-neutral
+        // dialect({}) - zero legs - is malformed on EVERY target (dialect-neutral
         // CODE_UNSUPPORTED), enforced at validate (serde deserializes the empty
         // node, the structural gate refuses it).
         let sc = TargetScope::structural_only("t");
@@ -10615,7 +10615,7 @@ mod tests {
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
     }
 
-    // ── item-4 regression: rule (c) ColRef resolution must cover EVERY splitPart
+    // -- item-4 regression: rule (c) ColRef resolution must cover EVERY splitPart
     // arg, on PG too. check_split_part returns Ok early on a Postgres target
     // (the envelope is PG-renderable); but the structural ColRef-resolution walk
     // (rule c) must STILL run over args[1]/args[2]. Before the fix, check_synth
@@ -10627,7 +10627,7 @@ mod tests {
     fn split_part_colref_in_delim_slot_rejected_on_pg() {
         let c = cols();
         let sc = scope("users", &c);
-        // delim slot is a ColRef to a column NOT on `users` — rule (c) must fire,
+        // delim slot is a ColRef to a column NOT on `users` - rule (c) must fire,
         // even on a Postgres target (the structural resolution is dialect-neutral).
         let e = Expr::FnSynth {
             r#fn: SynthFn::SplitPart,
@@ -10649,7 +10649,7 @@ mod tests {
     fn split_part_colref_in_n_slot_rejected_on_pg() {
         let c = cols();
         let sc = scope("users", &c);
-        // n slot is a ColRef to a nonexistent column — rule (c), on PG.
+        // n slot is a ColRef to a nonexistent column - rule (c), on PG.
         let e = Expr::FnSynth {
             r#fn: SynthFn::SplitPart,
             args: vec![
@@ -10672,7 +10672,7 @@ mod tests {
         let sc = scope("users", &c);
         let bad_inner = Expr::FnSynth {
             r#fn: SynthFn::SplitPart,
-            args: vec![Expr::col("name")], // arity 1 → malformed on both dialects
+            args: vec![Expr::col("name")], // arity 1 -> malformed on both dialects
         };
         let e = Expr::FnSynth {
             r#fn: SynthFn::SplitPart,
@@ -10741,7 +10741,7 @@ mod tests {
         assert_eq!(err.op_index, 0);
     }
 
-    // ── (c) ColRef resolution against the target table ─────────────────────
+    // -- (c) ColRef resolution against the target table ---------------------
 
     #[test]
     fn colref_on_target_table_validates() {
@@ -10779,7 +10779,7 @@ mod tests {
     fn synthesized_cross_table_reference_is_rejected() {
         // A node a buggy/malicious builder might synthesize: a ColRef carrying a
         // qualified "other.col" name. `c` is single-table-scoped, so "other.col"
-        // is not a column on `users` → rejected (cross-table is not expressible).
+        // is not a column on `users` -> rejected (cross-table is not expressible).
         let c = cols();
         let sc = scope("users", &c);
         let err = validate_expr(
@@ -10806,7 +10806,7 @@ mod tests {
             0
         )
         .is_ok());
-        // …but an out-of-envelope splitPart STILL rejects (structural).
+        // ...but an out-of-envelope splitPart STILL rejects (structural).
         let err = validate_expr(
             crate::test_fixtures::VENDORS,
             &split(", ", 1),
@@ -10818,7 +10818,7 @@ mod tests {
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
     }
 
-    // ── validate_ir / validate_op — the SOLE-gate walker over a whole IR ────
+    // -- validate_ir / validate_op - the SOLE-gate walker over a whole IR ----
     //
     // These pin the obligation that the validator is actually INVOKED
     // over every embedded Expr slot of every Op.
@@ -11420,9 +11420,9 @@ mod tests {
         assert!(validate_ir_platform(&ok, &POSTGRES).is_ok());
     }
 
-    // ── schema confinement + guard direction + schema-ident safety ──────────────
+    // -- schema confinement + guard direction + schema-ident safety --------------
 
-    /// CONFINED — an explicit `schema != project_schema` is REFUSED fail-closed at
+    /// CONFINED - an explicit `schema != project_schema` is REFUSED fail-closed at
     /// validate-time with the structured `CROSS_SCHEMA` code. RED before the
     /// gate (the op would have lowered cross-schema). An op whose schema EQUALS the
     /// project schema, or omits it, passes.
@@ -11515,7 +11515,7 @@ mod tests {
     }
 
     /// A `schema` qualifier that is not a safe bare identifier (injection-shaped) is
-    /// REFUSED with `INVALID_SCHEMA_IDENT` — REGARDLESS of profile. RED before
+    /// REFUSED with `INVALID_SCHEMA_IDENT` - REGARDLESS of profile. RED before
     /// `is_safe_schema_ident` guards the author-controlled identifier position.
     #[test]
     fn injection_shaped_schema_ident_is_refused() {
@@ -11541,7 +11541,7 @@ mod tests {
     /// drop*/rename op. RED before the legal-direction check.
     #[test]
     fn wrong_direction_existence_guard_is_an_authoring_error() {
-        // ifExists on createTable — illegal.
+        // ifExists on createTable - illegal.
         let bad_create = ir_with(vec![Op::CreateTable {
             attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "t".into(),
@@ -11560,7 +11560,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code, CODE_GUARD_DIRECTION, "got: {err}");
 
-        // ifNotExists on dropTable — illegal.
+        // ifNotExists on dropTable - illegal.
         let bad_drop = ir_with(vec![Op::DropTable {
             table: "t".into(),
             cascade: None,
@@ -11873,12 +11873,12 @@ mod tests {
     // ColRef resolution at the apply/render seam. At LOAD the DML scope
     // is structural-only (the live column set is unknown), so an unresolved ColRef
     // PASSES the load walk. At APPLY, `validate_ir_resolved` re-runs the walk with
-    // the resolved live columns and REJECTS a ColRef that does not resolve — with
+    // the resolved live columns and REJECTS a ColRef that does not resolve - with
     // the structured (c) error, NOT a raw DB error.
     #[test]
     fn validate_ir_resolved_rejects_unresolved_colref_in_update_set() {
         use std::collections::BTreeMap;
-        // An update whose SET RHS references `ghost` — a column that does NOT exist
+        // An update whose SET RHS references `ghost` - a column that does NOT exist
         // on the live `users` table.
         let ir = ir_with(vec![Op::Update {
             table: "users".into(),
@@ -11889,7 +11889,7 @@ mod tests {
             schema: None,
         }]);
 
-        // At LOAD: structural-only scope ⇒ the unresolved ColRef is NOT caught.
+        // At LOAD: structural-only scope => the unresolved ColRef is NOT caught.
         assert!(
             validate_ir(crate::test_fixtures::VENDORS, &ir, &POSTGRES).is_ok(),
             "load-time validation is structural-only for DML (column set unknown)"
@@ -12065,7 +12065,7 @@ mod tests {
         use crate::model::ir::{IrOnConflict, IrValue};
         use std::collections::BTreeMap;
         // SA-18: an insert whose ON CONFLICT DO UPDATE assigns an Expr that
-        // references `ghost` — a column that does NOT exist on live `users`.
+        // references `ghost` - a column that does NOT exist on live `users`.
         let mut do_update: BTreeMap<String, IrValue> = BTreeMap::new();
         do_update.insert("name".to_string(), IrValue::Expr(Expr::col("ghost")));
         let ir = ir_with(vec![Op::Insert {
@@ -12081,8 +12081,8 @@ mod tests {
             schema: None,
         }]);
 
-        // At LOAD: structural-only ⇒ the unresolved ColRef is NOT caught (this is
-        // the asymmetry SA-18 closes — pre-fix the resolved seam also missed it).
+        // At LOAD: structural-only => the unresolved ColRef is NOT caught (this is
+        // the asymmetry SA-18 closes - pre-fix the resolved seam also missed it).
         assert!(validate_ir(crate::test_fixtures::VENDORS, &ir, &POSTGRES).is_ok());
 
         // At APPLY: resolve against the live columns of `users` (no `ghost`).
@@ -12516,7 +12516,7 @@ mod tests {
     #[test]
     fn validate_ir_create_table_still_rejects_truly_unknown_column() {
         // The system-field union must NOT loosen the gate for a genuinely unknown
-        // column — `ghost` is neither declared nor a system field.
+        // column - `ghost` is neither declared nor a system field.
         let ir = ir_with(vec![Op::CreateTable {
             attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "users".into(),
@@ -12563,7 +12563,7 @@ mod tests {
 
     #[test]
     fn validate_ir_rejects_check_colref_to_nonexistent_column() {
-        // A createTable whose Check references a column NOT on the table — rule
+        // A createTable whose Check references a column NOT on the table - rule
         // (c). The walker resolves the createTable's own columns, so this fails.
         let ir = ir_with(vec![Op::CreateTable {
             attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
@@ -12612,7 +12612,7 @@ mod tests {
 
     #[test]
     fn validate_ir_rejects_out_of_envelope_split_part_in_update_set() {
-        // The Update is the SECOND op — the walker must stamp op_index = 1, and
+        // The Update is the SECOND op - the walker must stamp op_index = 1, and
         // it must reach the `set` RHS (the splitPart) to reject it.
         let mut set = BTreeMap::new();
         set.insert("name".to_string(), IrValue::Expr(split(", ", 1))); // multi-char delim
@@ -12640,7 +12640,7 @@ mod tests {
 
     #[test]
     fn validate_ir_walks_create_index_where_predicate() {
-        // The property-A fix made createIndex.where a closed Expr — the walker
+        // The property-A fix made createIndex.where a closed Expr - the walker
         // must now reach it. An out-of-envelope splitPart there must reject.
         let ir = ir_with(vec![Op::CreateIndex {
             table: "users".into(),
@@ -12787,7 +12787,7 @@ mod tests {
             cursor_stability: crate::model::ir::CursorStability::GuardUpdates,
             batch_size: serde_json::from_str("100").unwrap(),
             set,
-            filter: Some(split(", ", 1)), // out-of-envelope → reject
+            filter: Some(split(", ", 1)), // out-of-envelope -> reject
             name: "bf".into(),
             schema: None,
         }]);
@@ -12975,18 +12975,18 @@ mod tests {
         }
     }
 
-    // ── the names-stay-strings BINDING corollary ───────────────────────────
+    // -- the names-stay-strings BINDING corollary ---------------------------
     //
     // This is the apply-time HALF of the guarantee. The OTHER half lives in
     // the JS type-level suite (`packages/zero-migrate/tests/types/type-tests.ts`): a
     // migration whose table/column NAMES are plain strings type-checks cleanly
     // EVEN WHEN those names are not in the current generated db schema (the
-    // anti-rot guarantee — names are NOT live-schema-bound, so an immutable
+    // anti-rot guarantee - names are NOT live-schema-bound, so an immutable
     // historical migration never rots as the schema evolves).
     //
     // The corollary this test pins: because tsc CANNOT see the name (it is a
     // plain string), a migration that references a NON-EXISTENT column must fail
-    // at APPLY — never silently mis-apply — with the STRUCTURED error. Load is
+    // at APPLY - never silently mis-apply - with the STRUCTURED error. Load is
     // structural-only (the name is accepted, mirroring tsc accepting the string),
     // and the resolved apply seam is the SOLE place a bad name is caught.
     #[test]
@@ -12994,7 +12994,7 @@ mod tests {
         use std::collections::BTreeMap;
 
         // A migration whose `where` and `set` reference `column_that_was_dropped`
-        // — a plain-string name the JS DSL type-checks (it is NOT live-schema-
+        // - a plain-string name the JS DSL type-checks (it is NOT live-schema-
         // bound) and that does NOT exist on the live `users` table.
         let ir = ir_with(vec![Op::Update {
             table: "users".into(),
@@ -13012,7 +13012,7 @@ mod tests {
             schema: None,
         }]);
 
-        // LOAD-time (the tsc-analog): structural-only — the plain-string name is
+        // LOAD-time (the tsc-analog): structural-only - the plain-string name is
         // ACCEPTED, exactly as tsc accepts the string literal. NOT rejected here.
         assert!(
             validate_ir(crate::test_fixtures::VENDORS, &ir, &POSTGRES).is_ok(),
@@ -13020,7 +13020,7 @@ mod tests {
         );
 
         // APPLY-time (resolved against the REAL live columns): the missing name is
-        // the SOLE place it is caught — with the STRUCTURED `UNSUPPORTED { expr }`
+        // the SOLE place it is caught - with the STRUCTURED `UNSUPPORTED { expr }`
         // error, not a raw DB \"column does not exist\" surprise.
         let mut live: BTreeMap<String, Vec<String>> = BTreeMap::new();
         live.insert(
@@ -13044,7 +13044,7 @@ mod tests {
         );
     }
 
-    // ── column-facet validate-time bounds ───────────────────────────────────
+    // -- column-facet validate-time bounds -----------------------------------
     // RED before the `validate_column_facets` wiring: a hand-crafted IR envelope
     // carrying a malformed/reserved/over-long id_prefix or a misplaced metric would
     // have passed validate and deferred the blow-up to render / mint colliding ids.
@@ -13499,7 +13499,7 @@ mod tests {
 
     #[test]
     fn p2a_create_table_rejects_an_over_long_id_prefix() {
-        // Charset-valid but longer than MAX_ID_PREFIX_LEN — refused so the minted
+        // Charset-valid but longer than MAX_ID_PREFIX_LEN - refused so the minted
         // `<prefix>_<22 base62>` typed-id keeps the compact platform shape.
         let ir = ir_with(vec![create_with_id_prefix("toolong")]);
         let err = validate_ir_platform(&ir, &POSTGRES)
@@ -13513,7 +13513,7 @@ mod tests {
 
     #[test]
     fn p2a_create_table_rejects_vector_metric_on_non_vector_column() {
-        // A metric on a non-Vector column is the co-occurrence violation — the
+        // A metric on a non-Vector column is the co-occurrence violation - the
         // closed enum already bounds the metric token at deserialize; this catches a
         // dead metric a hand-crafted artifact rides in on a text column.
         let ir = ir_with(vec![Op::CreateTable {

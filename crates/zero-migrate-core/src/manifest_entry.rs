@@ -5,9 +5,9 @@
 //! committed IR envelope bytes without a normal-graph dependency on
 //! the upstream bundle layer:
 //!
-//! - [`MigrationFileEntry`] — the manifest entry type, copied from the upstream
+//! - [`MigrationFileEntry`] - the manifest entry type, copied from the upstream
 //!   bundle layer's `manifest::MigrationFileEntry` (identical fields + serde).
-//! - [`sha256_hex`] — the canonical content-addressed hash, copied from the
+//! - [`sha256_hex`] - the canonical content-addressed hash, copied from the
 //!   upstream bundle layer's `sha256_hex`.
 //!
 //! The serde shape and the hash bytes must stay identical to the originals: the

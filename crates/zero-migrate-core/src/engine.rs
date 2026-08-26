@@ -1,24 +1,24 @@
-//! The public `MigrationEngine` API — `plan` (lint/preview) → `gate` (approval)
-//! → `executor::apply_with_lock_backend` (guard + role).
+//! The public `MigrationEngine` API - `plan` (lint/preview) -> `gate` (approval)
+//! -> `executor::apply_with_lock_backend` (guard + role).
 //!
 //! This is the surface a caller (control plane / CLI / builder) drives. The
-//! pieces beneath it — the line-1 guard
+//! pieces beneath it - the line-1 guard
 //! ([`MigrationGuard`](crate::guard::MigrationGuard)), the Postgres
 //! [`apply`](crate::engine::MigrationEngine::apply) flow, the least-privilege
-//! `migrator` role (derived in the PostgreSQL backend crate) — are already built;
+//! `migrator` role (derived in the PostgreSQL backend crate) - are already built;
 //! the engine *composes*
 //! them into the documented pipeline:
 //!
 //! 1. an **author** (see [`crate::plan::author`]) produces the [`Migration`]s;
 //! 2. [`MigrationEngine::plan`] runs the guard over every migration **read-only**
-//!    (no DB) and returns a [`MigrationPlan`] — the dry-run / preview:
+//!    (no DB) and returns a [`MigrationPlan`] - the dry-run / preview:
 //!    which migrations are destructive, which require approval, and which
 //!    are *denied* (un-appliable);
 //! 3. [`MigrationEngine::apply`] is the **gate**: it refuses a plan with any
 //!    denial, refuses a destructive plan without explicit [`Approval::Approved`],
 //!    and otherwise delegates to `executor::apply_with_lock_backend`.
 //!
-//! **Defense in depth — the gate is additional, not a replacement.**
+//! **Defense in depth - the gate is additional, not a replacement.**
 //! `executor::apply_with_lock_backend` *re-runs* the guard over every
 //! pending `up` and runs the DDL under the least-privilege `migrator` role
 //! (the guard + role defense lines). The engine gate is a third check layered in front: even
@@ -63,15 +63,15 @@ pub(crate) const TOUCHES_UNKNOWN: &str = "\0__zero_migrate_touches_unknown__";
 pub struct PlannedMigration {
     /// The migration itself (clone of the input).
     pub migration: Migration,
-    /// Its passing **neutral** guard outcome — the destructive flag + operational
+    /// Its passing **neutral** guard outcome - the destructive flag + operational
     /// [`Advisory`](crate::Advisory)s the engine consumes. The
     /// PG-specific statement `classes` stay inside the PG guard
     /// (`SqlGuard`/`GuardReport`, in `zero-migrate-postgres`)
-    /// and are not surfaced here — the engine seam is dialect-neutral.
+    /// and are not surfaced here - the engine seam is dialect-neutral.
     pub report: GuardOutcome,
 }
 
-/// The read-only result of [`MigrationEngine::plan`] — the dry-run / preview
+/// The read-only result of [`MigrationEngine::plan`] - the dry-run / preview
 /// (design scenario 45).
 ///
 /// A plan is **un-appliable** if [`denied`](Self::denied) is non-empty: the
@@ -81,7 +81,7 @@ pub struct PlannedMigration {
 pub struct MigrationPlan {
     /// The migrations that passed the guard, with their reports, in input order.
     pub items: Vec<PlannedMigration>,
-    /// `true` if any planned item is destructive (data loss) — either the guard's
+    /// `true` if any planned item is destructive (data loss) - either the guard's
     /// SQL-text classification or the migration's own `flags.destructive`.
     pub destructive: bool,
     /// `true` if applying this plan requires explicit approval. Usually tracks
@@ -90,7 +90,7 @@ pub struct MigrationPlan {
     /// gated independently of the SQL-text data-loss judgement.
     pub requires_approval: bool,
     /// Migrations the guard **denied**, as `(version, error)`. A non-empty list
-    /// makes the whole plan un-appliable — `apply` returns
+    /// makes the whole plan un-appliable - `apply` returns
     /// [`EngineError::Denied`] and runs nothing.
     pub denied: Vec<(String, GuardError)>,
 }
@@ -125,7 +125,7 @@ pub enum EngineError {
     ApprovalRequired,
     /// **Per-version approval scoping (anti-bypass).** The plan is approved
     /// ([`Approval::Approved`]) but it carries a DESTRUCTIVE op whose version-id is
-    /// NOT in the operator's reviewed [`ApprovalScope::Versions`] set — so approving
+    /// NOT in the operator's reviewed [`ApprovalScope::Versions`] set - so approving
     /// one reviewed op (e.g. an online rename) did NOT authorize this unrelated
     /// destructive op (a `dropColumn`/`dropTable`). Fail-closed: nothing was
     /// applied. Carries the refused version so the operator message + the test
@@ -164,8 +164,8 @@ pub enum EngineError {
     /// # Why it carries two [`DialectId`]s and names no product
     ///
     /// Core resolves a dialect through the registry and never spells one. Both ends
-    /// of the mismatch are DATA — the reach the ops measured, and the identity the
-    /// connected backend reported — so a fourth backend appears on either side
+    /// of the mismatch are DATA - the reach the ops measured, and the identity the
+    /// connected backend reported - so a fourth backend appears on either side
     /// without this message being edited.
     ///
     /// [`DialectId`]: zero_migrate_ir::dialect::DialectId
@@ -185,7 +185,7 @@ pub enum EngineError {
     /// The plan's STEPS were rendered by one backend and the connected target is a
     /// different one.
     ///
-    /// Distinct from [`Self::DialectScopeRefused`], which is about the ops' REACH —
+    /// Distinct from [`Self::DialectScopeRefused`], which is about the ops' REACH -
     /// which backends could render them. This is about provenance: which one did. A
     /// plan of entirely portable ops has an honest reach of every dialect while its SQL
     /// carries one vendor's spelling, so the reach gate admits a target the rendering
@@ -203,11 +203,11 @@ pub enum EngineError {
         target: zero_migrate_ir::dialect::DialectId,
     },
     /// The executor failed (DB error, checksum drift, mid-apply failure, or the
-    /// executor's own re-run of the guard denied a migration — defense in depth).
+    /// executor's own re-run of the guard denied a migration - defense in depth).
     #[error(transparent)]
     Apply(#[from] ApplyError),
     /// The supplied migration set did not match the expected integrity manifest
-    /// — the bundle was reordered / edited / inserted-into / removed-
+    /// - the bundle was reordered / edited / inserted-into / removed-
     /// from relative to the trusted [`ManifestHash`] stamped at build/review time.
     /// Refused by [`MigrationEngine::apply_verified`] **before** the advisory lock
     /// or any DDL: NOTHING was applied. Carries the
@@ -225,10 +225,10 @@ pub enum EngineError {
     PendingContract(crate::plan::pending::PendingContractRefusal),
     /// **Fail-closed cross-plan `depends_on` block.** A step (or the
     /// plan) declares `depends_on: [A]` where A is an online rename whose contract
-    /// is still OUTSTANDING from a prior deploy — so A is NOT fully satisfied and
+    /// is still OUTSTANDING from a prior deploy - so A is NOT fully satisfied and
     /// the dependent plan B MUST NOT apply against a half-applied A, **even when B
     /// touches a DIFFERENT table** (the case the touched-table refusal does
-    /// not cover — the "double-bind"). The read-back runs inside the held
+    /// not cover - the "double-bind"). The read-back runs inside the held
     /// project lock (so it is not a TOCTOU); the deploy applies
     /// NOTHING. Carries the structured
     /// [`DependencyPendingContract`](crate::plan::pending::DependencyPendingContract)
@@ -319,12 +319,12 @@ pub enum RollbackEngineError {
     #[error("rollback requires approval (a down is destructive) but none was given")]
     ApprovalRequired,
     /// The executor's rollback failed (guard denial on a `down`, irreversible
-    /// without force, checksum drift, mid-rollback DB error, …).
+    /// without force, checksum drift, mid-rollback DB error, ...).
     #[error(transparent)]
     Rollback(#[from] RollbackError),
 }
 
-/// The public migration engine — the `MigrationEngine` seam.
+/// The public migration engine - the `MigrationEngine` seam.
 #[derive(Debug, Clone, Copy)]
 pub struct MigrationEngine {
     /// The backends this build ships.
@@ -475,8 +475,7 @@ fn refresh_historical_live(
     if projects_sdk_field_defs {
         // The SDK-shaped field map the 12-step rebuild renders its `CREATE TABLE` from,
         // as a PROJECTION of the single fold rather than a fourth replay of the op
-        // stream (step 4 consumer 3 of `docs/proposals/single-fold-and-effects.md`
-        // section G).
+        // stream (`docs/proposals/single-fold-and-effects.md` section G).
         historical_live.sdk_schemas =
             single_fold::fold(vendors, cumulative_ops, dialect, project, policy)
                 .map_err(|error| error.to_string())?
@@ -709,9 +708,9 @@ impl MigrationEngine {
             if projects_sdk_field_defs {
                 // THE REBUILD LEG. This map is what `render/lower.rs`'s SQLite
                 // `renameColumn` hands the declarative differ, and what the 12-step
-                // rebuild's `CREATE TABLE` — the table every row is copied into — is
-                // rendered from. It is a PROJECTION of the single fold since step 4
-                // consumer 3; `tests/sqlite_rebuild_field_defs_live.rs` deploys through
+                // rebuild's `CREATE TABLE` - the table every row is copied into - is
+                // rendered from. It is a PROJECTION of the single fold;
+                // `tests/sqlite_rebuild_field_defs_live.rs` deploys through
                 // this function against a real SQLite file and reads the server's own
                 // `PRAGMA`s back across the rebuild.
                 live.sdk_schemas =
@@ -730,7 +729,7 @@ impl MigrationEngine {
         Ok(aggregate)
     }
 
-    /// Lint + preview a migration set **read-only** (no DB) — the dry-run /
+    /// Lint + preview a migration set **read-only** (no DB) - the dry-run /
     /// plan phase.
     ///
     /// Runs the registered backend's [`MigrationGuard`](crate::guard::MigrationGuard) over every migration's `up`. A guard **denial** is
@@ -740,12 +739,12 @@ impl MigrationEngine {
     /// if any passing item's report flags data loss.
     #[must_use]
     pub fn plan(&self, migrations: &[Migration], cfg: &GuardConfig) -> MigrationPlan {
-        // Multi-engine — run the **per-engine**
+        // Multi-engine - run the **per-engine**
         // line-1 guard for `cfg`'s dialect through the [`MigrationGuard`] seam, NOT
-        // an `if dialect == Sqlite` branch. Postgres → [`PgGuard`] (libpg_query
-        // deny-list); SQLite → `SqliteGuard` (the trusted
+        // an `if dialect == Sqlite` branch. Postgres -> [`PgGuard`] (libpg_query
+        // deny-list); SQLite -> `SqliteGuard` (the trusted
         // descriptor-diff path: `libpg_query` cannot vet SQLite, so its `check`
-        // returns the empty clean outcome — the line-1 vet is the descriptor emitter
+        // returns the empty clean outcome - the line-1 vet is the descriptor emitter
         // at the author boundary, the line-2 defense the `SqliteBackend` authorizer
         // at apply). The destructive / approval combination with the migration's OWN
         // author flags stays here (engine logic), identical for both dialects.
@@ -764,7 +763,7 @@ impl MigrationEngine {
                     // a UNIQUE index reads as a plain (reversible) index drop to the
                     // guard, but it silently removes a data-integrity guarantee, so
                     // the declarative author marks it `destructive + requires_approval`
-                    // (#4) — and the executor's own gate already honours that flag,
+                    // (#4) - and the executor's own gate already honours that flag,
                     // so the plan summary must agree (otherwise the engine would
                     // report a non-gated plan that the executor then refuses).
                     destructive |= report.destructive || m.flags.destructive;
@@ -791,7 +790,7 @@ impl MigrationEngine {
     /// This is the declarative entry point: it runs
     /// [`DeclarativeAuthor::diff`](crate::render::declarative::DeclarativeAuthor::diff)
     /// (additive ops + destructive-gated drops, with author-boundary name/type
-    /// validation) and then feeds the result through the EXISTING [`plan`](Self::plan) —
+    /// validation) and then feeds the result through the EXISTING [`plan`](Self::plan) -
     /// so the generated SQL gets the same guard treatment as any other author's
     /// output (no bypass). A destructive drop in the diff makes the plan
     /// `requires_approval`, exactly as a hand-authored drop would.
@@ -799,8 +798,8 @@ impl MigrationEngine {
     /// `hints` are the OPT-IN [`RenameHint`](crate::render::declarative::RenameHint)s:
     /// each routes a hinted drop+add pair through the zero-downtime
     /// expand-contract rename sequence instead of an independent drop + add.
-    /// Without a matching hint a drop+add stays two independent ops — the differ
-    /// NEVER infers a rename heuristically. An empty slice ⇒ pure additive behaviour.
+    /// Without a matching hint a drop+add stays two independent ops - the differ
+    /// NEVER infers a rename heuristically. An empty slice => pure additive behaviour.
     ///
     /// # A declarative rename is an online, multi-deploy op
     ///
@@ -817,7 +816,7 @@ impl MigrationEngine {
     /// # Caller contract
     ///
     /// `desired` MUST be the **COMPLETE project union** (every member app's
-    /// descriptors), and `live_ownership` MUST carry an entry (`live table name →
+    /// descriptors), and `live_ownership` MUST carry an entry (`live table name ->
     /// owning app`) for **every live table**, supplied from the journal / route
     /// registry. These are the differ's fail-closed guard against a PARTIAL-union
     /// deploy mass-dropping other tenants' tables: a `DROP TABLE` is authored
@@ -830,8 +829,8 @@ impl MigrationEngine {
     /// [`DeclarativeError`](crate::render::declarative::DeclarativeError) if the diff
     /// hits an unsupported op, an unmatched/type-mismatched rename hint, an
     /// invalid descriptor name/type at the author boundary, or a refused drop
-    /// (`NotTableOwner` / `DropOfUnownedTable` — fail-closed drop ownership). A
-    /// guard *denial* on generated SQL is NOT an error here — it lands in
+    /// (`NotTableOwner` / `DropOfUnownedTable` - fail-closed drop ownership). A
+    /// guard *denial* on generated SQL is NOT an error here - it lands in
     /// [`MigrationPlan::denied`] like any other.
     ///
     /// Also
@@ -909,23 +908,23 @@ impl MigrationEngine {
     ///    value into `<to>`, which journals E3 **only after** the backfill
     ///    succeeds (data-integrity ordering); and
     /// 3. collects every rename's **contract** (DROP TRIGGER C1 + DROP COLUMN
-    ///    `<from>` C2) into [`DeclarativeDeployOutcome::pending_contract`] —
+    ///    `<from>` C2) into [`DeclarativeDeployOutcome::pending_contract`] -
     ///    the DEFERRED set to apply in a SUBSEQUENT deploy, AFTER the app's code
     ///    has switched from `<from>` to `<to>`.
     ///
     /// The contract is deliberately NOT applied here: the executor's
     /// expand/contract gate refuses a contract while its own expand is still
-    /// pending in the same batch, and — more importantly — dropping `<from>`
+    /// pending in the same batch, and - more importantly - dropping `<from>`
     /// before old code stops reading it breaks the rolling fleet. Surfacing the
     /// contract as `pending_contract` makes the multi-deploy partition explicit.
     ///
     /// # Deploy sequence
     /// ```text
-    /// deploy N    : apply_declarative(plan)  →  plain + EXPAND (backfill runs);
+    /// deploy N    : apply_declarative(plan)  ->  plain + EXPAND (backfill runs);
     ///               returns pending_contract.  Code still uses <from>; <to> is
     ///               populated + dual-written.
     /// (code switch): a later app deploy reads/writes <to> only.
-    /// deploy N+1  : engine.apply(plan_of(pending_contract), Approved, …)  →
+    /// deploy N+1  : engine.apply(plan_of(pending_contract), Approved, ...)  ->
     ///               DROP TRIGGER + DROP COLUMN <from>.  Zero data loss: every
     ///               row's value already lives in <to>.
     /// ```
@@ -936,9 +935,9 @@ impl MigrationEngine {
     /// `destructive`), so applying it later also needs approval.
     ///
     /// # Errors
-    /// - [`DeclarativeApplyError::Plain`] — the gated plain `apply` failed
+    /// - [`DeclarativeApplyError::Plain`] - the gated plain `apply` failed
     ///   (denial, missing approval, or an executor failure). No expand ran.
-    /// - [`DeclarativeApplyError::Expand`] — a rename's expand/backfill failed.
+    /// - [`DeclarativeApplyError::Expand`] - a rename's expand/backfill failed.
     ///   The plain migrations + any earlier renames are already applied; the
     ///   backfill is resumable on a re-run.
     pub async fn apply_declarative<B: MigrationBackend>(
@@ -963,19 +962,19 @@ impl MigrationEngine {
         // expand per rename, each of which (left to itself) would acquire AND
         // RELEASE the project advisory lock. Releasing between sub-batches frees
         // the lock, letting a concurrent deploy for the SAME project interleave
-        // its own sub-batch — so a multi-rename deploy would NOT be serialized as
+        // its own sub-batch - so a multi-rename deploy would NOT be serialized as
         // a whole, violating the "serialize ALL migration activity" invariant.
         //
         // Fix: acquire the lock ONCE here, drive every inner sub-batch with
         // `LockMode::AlreadyHeld` (skip their acquire/release), and release ONCE
-        // on EVERY exit path below (success/error/early-return) — mirroring
+        // on EVERY exit path below (success/error/early-return) - mirroring
         // `executor::apply_with_lock_backend`'s release-on-every-path discipline. The lock is taken
         // exactly once and freed exactly once per declarative deploy; it is never
         // free between sub-batches.
         //
         // We acquire the lock BEFORE the gate's denial/approval check is performed
         // inside `apply_inner`; that check still runs (with `AlreadyHeld`) and can
-        // return early — every such early return runs through `release_or_warn`
+        // return early - every such early return runs through `release_or_warn`
         // below, so the lock is never held forever on a gate rejection.
         //
         // The lock is acquired/released through the dialect seam
@@ -1012,14 +1011,14 @@ impl MigrationEngine {
     /// [`apply_verified`](Self::apply_verified), closing the manifest coverage gap).
     ///
     /// This is the trusted-deploy entry point for the DECLARATIVE (AI-driven)
-    /// path. Before ANY apply work — before the denial/approval gate, before the
-    /// outer project advisory lock, before a single statement of DDL —
+    /// path. Before ANY apply work - before the denial/approval gate, before the
+    /// outer project advisory lock, before a single statement of DDL -
     /// it recomputes the integrity manifest over the plan's **full effective
     /// migration set** ([`DeclarativeDeployPlan::manifest`]) and compares it to
     /// `expected`. A mismatch (the generated plan was reordered / content-edited /
     /// inserted-into / removed-from between the control plane STAMPING it and this
-    /// APPLY) returns [`EngineError::Manifest`] — surfaced as
-    /// [`DeclarativeApplyError::Plain`] — and applies NOTHING: no lock taken, no
+    /// APPLY) returns [`EngineError::Manifest`] - surfaced as
+    /// [`DeclarativeApplyError::Plain`] - and applies NOTHING: no lock taken, no
     /// journal touched, no DDL run. A match falls through to the normal
     /// [`apply_declarative`](Self::apply_declarative) orchestration.
     ///
@@ -1030,34 +1029,34 @@ impl MigrationEngine {
     /// computed over EXACTLY that set (see [`DeclarativeDeployPlan::manifest`]),
     /// folded in the canonical executed order [`compute_manifest`] already
     /// applies. So a tamper of a plain migration, a rename's expand, OR the
-    /// deferred contract is all caught at deploy N's verify — even though the
+    /// deferred contract is all caught at deploy N's verify - even though the
     /// contract is only APPLIED in a later deploy N+1. The stamp must cover the
     /// whole generated plan, including the deferred drop.
     ///
-    /// # Determinism caveat — stamp + apply ONE generated plan instance
+    /// # Determinism caveat - stamp + apply ONE generated plan instance
     ///
     /// Declarative migration versions are freshly minted per
     /// [`plan_declarative`](Self::plan_declarative) call (`UUIDv7`), so a given
     /// manifest is only stable for a SPECIFIC generated [`DeclarativeDeployPlan`]
     /// instance. The control plane MUST generate the plan ONCE, compute the stamp
     /// with [`DeclarativeDeployPlan::manifest`] over THAT instance, hold the plan
-    /// out-of-band, and apply THAT SAME plan here — it must NOT re-generate
+    /// out-of-band, and apply THAT SAME plan here - it must NOT re-generate
     /// between stamp and apply (a fresh `plan_declarative` would mint new versions
     /// and never match). The stamp side and this verify side call the SAME
     /// `manifest()` implementation, so they cannot diverge.
     ///
-    /// # Trust model — caller contract
+    /// # Trust model - caller contract
     ///
     /// `expected` MUST come from a TRUSTED source (the control plane, stamping at
     /// build / review time and holding it out-of-band), NOT from the same bundle
-    /// the plan arrived in — see [`crate::plan::manifest`]'s trust model and
+    /// the plan arrived in - see [`crate::plan::manifest`]'s trust model and
     /// [`apply_verified`](Self::apply_verified).
     ///
     /// # Errors
-    /// - [`DeclarativeApplyError::Plain`] wrapping [`EngineError::Manifest`] — the
+    /// - [`DeclarativeApplyError::Plain`] wrapping [`EngineError::Manifest`] - the
     ///   effective set did not match `expected`. Refused before the gate / lock /
     ///   DDL; nothing applied.
-    /// - [`DeclarativeApplyError::Plain`] / [`DeclarativeApplyError::Expand`] — the
+    /// - [`DeclarativeApplyError::Plain`] / [`DeclarativeApplyError::Expand`] - the
     ///   same gate + executor + expand errors as
     ///   [`apply_declarative`](Self::apply_declarative), after a successful
     ///   manifest check.
@@ -1079,7 +1078,7 @@ impl MigrationEngine {
         // without contending for the lock or opening a transaction, leaving the
         // database + journal untouched.
         verify_manifest(&plan.effective_set(), expected).map_err(EngineError::from)?;
-        // Verified ⇒ the normal gated, lock-wrapped declarative orchestration.
+        // Verified => the normal gated, lock-wrapped declarative orchestration.
         self.apply_declarative(plan, effective, approval, backend, exec_cfg, applied_by)
             .await
     }
@@ -1091,15 +1090,15 @@ impl MigrationEngine {
     /// via the thin shape-adapter.** This function no longer *contains* the
     /// interleave/journal/`pending_contract` orchestration; it is now a
     /// shape-adapter that lowers the declarative [`DeclarativeDeployPlan`] into the
-    /// neutral ordered [`PlanStep`] list — its `plain.items` → [`PlanStep::Ddl`],
-    /// its `rebuilds` → [`PlanStep::OnlineRename`]`(`[`RenameStep::TableRebuild`]`)`,
-    /// its `renames` → [`PlanStep::OnlineRename`]`(`[`RenameStep::ExpandContract`]`)`,
-    /// preserving the historical order plain → rebuilds → renames — then feeds it
+    /// neutral ordered [`PlanStep`] list - its `plain.items` -> [`PlanStep::Ddl`],
+    /// its `rebuilds` -> [`PlanStep::OnlineRename`]`(`[`RenameStep::TableRebuild`]`)`,
+    /// its `renames` -> [`PlanStep::OnlineRename`]`(`[`RenameStep::ExpandContract`]`)`,
+    /// preserving the historical order plain -> rebuilds -> renames - then feeds it
     /// to [`apply_plan`](Self::apply_plan). There is exactly ONE
     /// orchestrator; the declarative path is a *producer* of `Vec<PlanStep>`.
     ///
     /// The plain set's denial / approval **gate** (the
-    /// [`apply_inner`](Self::apply_inner) gate) still runs here, before lowering —
+    /// [`apply_inner`](Self::apply_inner) gate) still runs here, before lowering -
     /// a denied or un-approved-destructive plain set is refused exactly as before,
     /// untouched by the convergence.
     async fn apply_declarative_locked<B: MigrationBackend>(
@@ -1126,13 +1125,13 @@ impl MigrationEngine {
             return Err(DeclarativeApplyError::Plain(EngineError::ApprovalRequired));
         }
 
-        // Shape-adapter: declarative plan → the neutral ordered PlanStep
+        // Shape-adapter: declarative plan -> the neutral ordered PlanStep
         // list, in the historical execution order (plain DDL spine, then each
         // SQLite rebuild, then each PG online rename's EXPAND).
         //
         // All THREE dialects, because a two-dialect claim here is what let the gap
         // below go unnoticed: `rebuilds` is non-empty only on SQLite (PG and MySQL
-        // use native ALTER), and `renames` is non-empty only on PostgreSQL — SQLite
+        // use native ALTER), and `renames` is non-empty only on PostgreSQL - SQLite
         // routes a rename through its rebuild, and MySQL is refused at PLAN time by
         // `DeclarativeError::ColumnRenameRefused` because the
         // `ExpandContract` step this loop builds needs an `OnlineSchemaChange`
@@ -1154,20 +1153,20 @@ impl MigrationEngine {
             )));
         }
 
-        // **Empty-plain-set session hygiene — intentional, state-neutral
+        // **Empty-plain-set session hygiene - intentional, state-neutral
         // simplification.** Previously,
-        // `apply_declarative_locked` ALWAYS called `apply_inner(&plan.plain, …)` →
+        // `apply_declarative_locked` ALWAYS called `apply_inner(&plan.plain, ...)` ->
         // `apply_with_lock_backend` first, which ran one
         // `snapshot_session`/`reset_role_best_effort`/`restore_session` hygiene cycle
-        // up front — even for an empty `plain.items`. Now the coalesce loop only
+        // up front - even for an empty `plain.items`. Now the coalesce loop only
         // calls `apply_with_lock_backend` when there is at least one `Ddl` step, so a
         // rebuild-only or rename-only declarative deploy (empty plain set) skips that
         // *initial* hygiene cycle. This is a deliberate simplification, NOT a leak:
         // every step kind that can run with an empty plain set manages its OWN session
-        // hygiene — an online rename's expand steps go through their own
+        // hygiene - an online rename's expand steps go through their own
         // `apply_with_lock_backend` batch, which snapshots+restores the session
         // around the dual-write trigger / `SET ROLE` DDL, and a SQLite `rebuild_one`
-        // owns its single actor — so the connection is left with the admin role and an
+        // owns its single actor - so the connection is left with the admin role and an
         // un-pinned `search_path` regardless. The redundant empty up-front cycle bought
         // nothing but an extra round-trip; dropping it is state-neutral. The invariant
         // (a rename-only / rebuild-only deploy leaves the session role + search_path
@@ -1189,12 +1188,12 @@ impl MigrationEngine {
 
     /// **The single shared plan orchestrator (`op.*` DSL).**
     ///
-    /// Runs an ordered [`PlanStep`] list — the convergence point of the declarative
+    /// Runs an ordered [`PlanStep`] list - the convergence point of the declarative
     /// path (re-pointed here via the shape-adapter in
     /// `apply_declarative_locked`) and the future
     /// IR `op.*` path. It is plan-shape-neutral: it dispatches by step kind,
     /// reusing the existing downstream primitives unchanged as execution
-    /// destinations — `apply_with_lock_backend` for
+    /// destinations - `apply_with_lock_backend` for
     /// DDL (including an online rename's E1/E2, driven from here) plus
     /// [`run_online_backfill`](crate::apply::backend::OnlineSchemaChange::run_online_backfill)
     /// for that rename's row mirror (with the `pending_contract` partition),
@@ -1214,19 +1213,19 @@ impl MigrationEngine {
     /// # Coalescing
     /// Consecutive [`PlanStep::Ddl`] steps are coalesced into ONE
     /// `apply_with_lock_backend` batch, so the declarative plain set (a contiguous
-    /// run of `Ddl` steps) is applied as a single batch — byte-identical session
+    /// run of `Ddl` steps) is applied as a single batch - byte-identical session
     /// hygiene + journaling to the earlier per-batch path.
     ///
     /// # `OnlineRename` dual-execution dispatch
-    /// A [`RenameStep::ExpandContract`] runs E1+E2→backfill→E3 atomically under
-    /// the held lock — this loop applies E1/E2 and calls `run_online_backfill` for
-    /// the mirror — and surfaces C1/C2 as `pending_contract`
+    /// A [`RenameStep::ExpandContract`] runs E1+E2->backfill->E3 atomically under
+    /// the held lock - this loop applies E1/E2 and calls `run_online_backfill` for
+    /// the mirror - and surfaces C1/C2 as `pending_contract`
     /// (the cross-deploy partition). A [`RenameStep::TableRebuild`] is one
     /// atomic offline `rebuild_one` (approval-gated + net-applied-skipped); it has
     /// NO `pending_contract`.
     ///
     /// # Errors
-    /// [`DeclarativeApplyError`] — `Plain` for a gate / DDL / DML / backfill /
+    /// [`DeclarativeApplyError`] - `Plain` for a gate / DDL / DML / backfill /
     /// rebuild failure, `Expand` for an online-rename expand/backfill failure.
     pub async fn apply_plan<B: MigrationBackend>(
         &self,
@@ -1261,7 +1260,7 @@ impl MigrationEngine {
     /// interlock. The IR deploy path passes its op-list touched-set
     /// ([`LoweredArtifact::touched_tables`](crate::render::lower::LoweredArtifact)) so
     /// the refusal catches ANY op (DDL or DML) touching a table with an
-    /// outstanding pending contract — not just the structurally-typed
+    /// outstanding pending contract - not just the structurally-typed
     /// `OnlineRename` steps. The step-derived set (the `OnlineRename` intent
     /// tables) is UNIONed in regardless, so a caller that passes an empty slice
     /// still gets rename-step coverage.
@@ -1292,7 +1291,7 @@ impl MigrationEngine {
             exec_cfg,
             applied_by,
             lock_mode,
-            // Routine (non-deploy) caller — no recovery scope.
+            // Routine (non-deploy) caller - no recovery scope.
             None,
         )
         .await
@@ -1321,7 +1320,7 @@ impl MigrationEngine {
     ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
         // THE DIALECT-REACH GATE. Decided from the plan and the backend's own
         // identity, so it needs no database round-trip and runs BEFORE the project
-        // lock is taken — the same "decline without touching the database" rule the
+        // lock is taken - the same "decline without touching the database" rule the
         // capability preflight states. A plan whose ops one backend alone can render
         // must never reach a different server: the executor cannot read raw or
         // vendor SQL, so a wrong-target apply is not detectable after the fact.
@@ -1395,7 +1394,7 @@ impl MigrationEngine {
     /// cross-plan dependency block fires at APPLY (not only in `status`). The IR
     /// deploy path passes its IR envelope `depends_on` here: if any referenced
     /// dependency is an online rename whose contract is still OUTSTANDING, the
-    /// deploy is fail-closed refused with `DEPENDENCY_PENDING_CONTRACT` — even when
+    /// deploy is fail-closed refused with `DEPENDENCY_PENDING_CONTRACT` - even when
     /// the dependent plan touches a DIFFERENT table than the pending one (the case
     /// the touched-table refusal does not cover). The step-derived `Migration`
     /// `depends_on` (e.g. the EXPAND chain's interior edges) is UNIONed in
@@ -1429,8 +1428,8 @@ impl MigrationEngine {
             exec_cfg,
             applied_by,
             lock_mode,
-            // No deploy recovery scope on the routine (non-deploy-handler) wrapper —
-            // identical to a non-deploy apply (fail-closed default: `None` ⇒
+            // No deploy recovery scope on the routine (non-deploy-handler) wrapper -
+            // identical to a non-deploy apply (fail-closed default: `None` =>
             // no marker written).
             None,
         )
@@ -1441,7 +1440,7 @@ impl MigrationEngine {
     /// [`apply_plan_with_touched_and_depends`](Self::apply_plan_with_touched_and_depends),
     /// but ALSO threads a per-version [`ApprovalScope`](crate::ApprovalScope) so the
     /// out-of-band approved IR-deploy path can fail-closed REFUSE a destructive op
-    /// whose version-id the operator did not individually review — even under
+    /// whose version-id the operator did not individually review - even under
     /// [`Approval::Approved`]. Existing callers' signatures are unchanged: they route
     /// through the non-`_scoped` wrapper which passes
     /// [`ApprovalScope::All`](crate::ApprovalScope::All) (byte-identical blanket
@@ -1484,14 +1483,14 @@ impl MigrationEngine {
     }
 
     /// As [`apply_plan_with_touched`](Self::apply_plan_with_touched), but with an
-    /// EXPLICIT obligation-resolution list — the `resolve-pending` path. Each
+    /// EXPLICIT obligation-resolution list - the `resolve-pending` path. Each
     /// `(pc, resolution)` names an outstanding obligation this plan is RESOLVING:
     ///
     /// - its table is EXEMPTED from the touched-table refusal (these drops ARE the
     ///   resolution of that obligation, not a new op fighting it);
     /// - on SUCCESS only, the obligation is discharged by APPENDING a `resolved`
     ///   row with the supplied [`Resolution`](crate::apply::journal::Resolution)
-    ///   (`applied`/`aborted`) — fail-closed: an apply failure leaves the
+    ///   (`applied`/`aborted`) - fail-closed: an apply failure leaves the
     ///   obligation OUTSTANDING (never resolved-but-not-applied).
     ///
     /// The resolve runs inside the SAME held project lock as the apply, so it is
@@ -1538,7 +1537,7 @@ impl MigrationEngine {
     ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
         // **Whole-plan project-lock acquisition.** When the caller asks
         // us to `Acquire`, take the project advisory lock ONCE up front for the
-        // ENTIRE plan and thread `AlreadyHeld` into every sub-step — regardless of
+        // ENTIRE plan and thread `AlreadyHeld` into every sub-step - regardless of
         // which step kind comes first. The earlier declarative path relied on the
         // first DDL batch's `apply_with_lock_backend` to acquire, but a standalone
         // plan whose first step is `Dml`/`Backfill` would then run with NO project
@@ -1969,17 +1968,17 @@ impl MigrationEngine {
         // **Bootstrap the journal up front.** The journal is the
         // net-applied ledger every sub-step reads (idempotency/net-applied-skip)
         // before it writes. The earlier declarative path always ran a DDL batch
-        // first, whose `apply_with_lock_backend` → `apply_locked` bootstrapped the
+        // first, whose `apply_with_lock_backend` -> `apply_locked` bootstrapped the
         // journal via `ensure_journal`; but `apply_plan` is public API and a
         // standalone plan whose FIRST step is `Dml`/`Backfill`/`OnlineRename` would
         // otherwise make its first journal touch a READ (`backend.applied` /
         // `run_dml_step`'s net-applied lookup) against a non-existent journal table
-        // → "relation does not exist". Bootstrapping here once, unconditionally,
+        // -> "relation does not exist". Bootstrapping here once, unconditionally,
         // restores the invariant that the journal is always materialized before any
         // step runs, for EVERY plan shape and BOTH backends (PG meta schema +
-        // SQLite `_mig`). `ensure_journal` is idempotent (`CREATE … IF NOT EXISTS`),
-        // so on the Ddl-first/declarative path — where the first DDL batch's
-        // `apply_locked` also calls it — this is a harmless no-op (the golden trace
+        // SQLite `_mig`). `ensure_journal` is idempotent (`CREATE ... IF NOT EXISTS`),
+        // so on the Ddl-first/declarative path - where the first DDL batch's
+        // `apply_locked` also calls it - this is a harmless no-op (the golden trace
         // stays byte-identical).
         backend
             .ensure_journal(exec_cfg)
@@ -2081,7 +2080,7 @@ impl MigrationEngine {
         //
         // The obligation table is bootstrapped (above), and the project advisory
         // lock is ALREADY HELD (acquired by `apply_plan` at `Acquire`, or owned by
-        // the declarative caller) — so this read → act runs INSIDE the held lock
+        // the declarative caller) - so this read -> act runs INSIDE the held lock
         // and is NOT a TOCTOU: a concurrent deploy of
         // the same project blocks at the project lock acquire until we commit and
         // release, so it always observes the committed obligation set. We do NOT
@@ -2091,7 +2090,7 @@ impl MigrationEngine {
         // partition), so this never false-gates a SQLite deploy.
         //
         // **SCOPE OF THIS READ-BACK: CROSS-deploy only.** This obligation
-        // read-back is the CROSS-deploy snapshot — the set of obligations OUTSTANDING
+        // read-back is the CROSS-deploy snapshot - the set of obligations OUTSTANDING
         // from a PRIOR committed deploy, read once at the start of THIS deploy under
         // the held lock. An INTRA-deploy EXPAND-then-touch on the SAME table within ONE
         // deploy (a deploy whose own EXPAND opens an obligation that a LATER step in the
@@ -2102,18 +2101,18 @@ impl MigrationEngine {
         // `outstanding` and does not self-refuse (the self-expand
         // exemption + the gate handle the intra-deploy case).
         //
-        // **Fail closed on ANY doubt — EXCEPT this deploy IS the contract-apply.**
+        // **Fail closed on ANY doubt - EXCEPT this deploy IS the contract-apply.**
         // If any outstanding obligation's table is in this deploy's touched-set, the
         // deploy applies NOTHING and returns the structured
-        // `TABLE_HAS_PENDING_CONTRACT` payload — UNLESS the deploy is the
+        // `TABLE_HAS_PENDING_CONTRACT` payload - UNLESS the deploy is the
         // legitimate contract-apply for that obligation: deploy
         // N+1 applies C1/C2 as `Ddl` steps to complete the rename. We
         // recognize the contract-apply by RE-AUTHOR-COMPARE: the deploy's `Ddl` steps
         // must carry the obligation's recorded `contract_versions` AND match the
-        // re-authored C1/C2 `up` SQL (not a version-id match alone — a forged plan
+        // re-authored C1/C2 `up` SQL (not a version-id match alone - a forged plan
         // carrying the ids with innocuous SQL is NOT recognized and stays gated). Such
         // an obligation is DISCHARGED after the steps apply (a `resolved='applied'` row
-        // appended), not refused — applying the REAL contract is exactly
+        // appended), not refused - applying the REAL contract is exactly
         // how the table becomes clear.
         let (outstanding, resolved_contracts) =
             if let Some(pending_contracts) = backend.pending_contracts() {
@@ -2153,14 +2152,14 @@ impl MigrationEngine {
         // deploy's `Ddl` steps both carry the recorded `contract_versions` AND match
         // the re-authored contract `up` SQL for each. Fail-CLOSED: an empty
         // `contract_versions`, a missing matching Ddl step, an SQL mismatch, or an
-        // author error all return `false` (NOT a contract-apply ⇒ the obligation is
+        // author error all return `false` (NOT a contract-apply => the obligation is
         // NOT discharged and the table stays gated).
         let recognizes_contract_apply = |pc: &crate::apply::journal::PendingContract| -> bool {
             // The recognizer is the shared module-level
             // [`recognizes_contract_apply`] so the control-plane PRE-APPLY interlock
             // gate (`prevalidate_bundle_scope`) and this APPLY-time loop decide
             // "is this deploy the legitimate contract-apply?" by the SAME
-            // re-author-compare — no drift between the bundle-level pre-check and
+            // re-author-compare - no drift between the bundle-level pre-check and
             // the per-file apply.
             recognizes_contract_apply(
                 self.vendors,
@@ -2170,12 +2169,12 @@ impl MigrationEngine {
                 &backend.dialect(),
             )
         };
-        // The set of EXPAND trigger versions this plan RE-PRESENTS — a
+        // The set of EXPAND trigger versions this plan RE-PRESENTS - a
         // `ExpandContract` step whose `pending_version` matches an outstanding
         // obligation is the SAME rename re-running idempotently (deploy N retried),
         // NOT a new op touching the pending table. Such a self
         // re-run must NOT be refused by its OWN obligation (the EXPAND
-        // net-applied-skips and re-surfaces the same pending contract — a no-op).
+        // net-applied-skips and re-surfaces the same pending contract - a no-op).
         let self_expand_versions: std::collections::BTreeSet<&str> = steps
             .iter()
             .filter_map(|s| match s {
@@ -2197,7 +2196,7 @@ impl MigrationEngine {
             touched.extend(crate::render::step::tables_touched_by(steps));
             // The lowering folds in [`TOUCHES_UNKNOWN`] when a `dropIndex` omits its
             // owning-table hint AND the live schema cannot resolve the index's owner
-            // — meaning this deploy touches a table the lowering could not name. Fail
+            // - meaning this deploy touches a table the lowering could not name. Fail
             // CLOSED: treat it as touching EVERY non-exempt outstanding obligation's
             // table, so a deploy carrying an unresolved drop is refused whenever ANY
             // obligation is outstanding rather than silently un-gated.
@@ -2220,7 +2219,7 @@ impl MigrationEngine {
                 // on the same table would apply both. This is NOT exploitable: the
                 // exemption keys on the obligation's recorded `contract_versions`,
                 // which are the rename's DETERMINISTIC, server-stamped C1/C2 ids
-                // — a creator cannot forge them, and re-authoring the same
+                // - a creator cannot forge them, and re-authoring the same
                 // rename's contract IS the only legitimate way to discharge it.
                 // The accepted contract is therefore: a contract-apply
                 // deploy SHOULD carry only the contract steps; co-bundling an
@@ -2230,13 +2229,13 @@ impl MigrationEngine {
                     discharging.push(pc.clone());
                     continue;
                 }
-                // The SAME rename re-running idempotently (deploy N retried) — its
+                // The SAME rename re-running idempotently (deploy N retried) - its
                 // EXPAND re-presents this obligation's `pending_version`. Not a new
                 // op; the EXPAND net-applied-skips and re-surfaces the obligation.
                 if self_expand_versions.contains(pc.pending_version.as_str()) {
                     continue;
                 }
-                // An obligation the caller is EXPLICITLY resolving — its drops ARE
+                // An obligation the caller is EXPLICITLY resolving - its drops ARE
                 // the resolution, not a new op fighting it. Exempt from refusal.
                 if explicit_versions.contains(pc.pending_version.as_str()) {
                     continue;
@@ -2251,12 +2250,12 @@ impl MigrationEngine {
                 }
             }
 
-            // **Cross-plan `depends_on` BLOCK — fail-closed at APPLY, not
+            // **Cross-plan `depends_on` BLOCK - fail-closed at APPLY, not
             // only in `status`.** A plan B with `depends_on: [A]` MUST NOT apply
             // while A's online-rename contract is still OUTSTANDING: A is not fully
             // satisfied (its C1/C2 are not net-applied), so B would run against a
             // half-applied A. This fires even when B touches a DIFFERENT table than
-            // A's pending one — the case the touched-table refusal above does NOT
+            // A's pending one - the case the touched-table refusal above does NOT
             // cover (the "double-bind": when B *also* touches A's table both
             // refusals fire; when it touches a different table ONLY this one does).
             // Mirror `status::derive_pending_contract_status`: a `depends_on` edge
@@ -2312,7 +2311,7 @@ impl MigrationEngine {
                             crate::plan::pending::DependencyPendingContract::new(
                                 // The blocked plan's identity: the outer plan-group
                                 // version if the steps carry one, else the deploy
-                                // actor — best-effort identity for the payload, the
+                                // actor - best-effort identity for the payload, the
                                 // refusal itself keys only on the dependency edge.
                                 steps
                                     .iter()
@@ -2450,7 +2449,7 @@ impl MigrationEngine {
         // that could strand an unbalanced level.
         let next_lock = LockMode::AlreadyHeld;
 
-        // Net-applied journal state for the rebuild net-applied-skip — read lazily
+        // Net-applied journal state for the rebuild net-applied-skip - read lazily
         // on the first rebuild step (avoids an extra journal read on the common
         // no-rebuild PG path; matches the earlier behavior which read `applied`
         // only when `plan.rebuilds` was non-empty).
@@ -2553,9 +2552,8 @@ impl MigrationEngine {
                     applied.recovered.extend(outcome.recovered);
                 }
                 PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild)) => {
-                    // Re-expresses the declarative `plan.rebuilds` loop
-                    // (`engine.rs:491-503`): approval gate + net-applied-skip +
-                    // `rebuild_one`.
+                    // Re-expresses `apply_declarative`'s `plan.rebuilds` loop:
+                    // approval gate + net-applied-skip + `rebuild_one`.
                     let version = rebuild.migration.version.as_str().to_string();
                     if completed_gated.contains(version.as_str()) {
                         applied.skipped.push(version);
@@ -2569,7 +2567,7 @@ impl MigrationEngine {
                     // idempotently no-ops BEFORE the scope gate: an
                     // idempotent re-deploy of an already-applied rebuild under a
                     // `Versions` scope that omits it must skip as a no-op, never be
-                    // refused — the scope only ever gates work that would actually run.
+                    // refused - the scope only ever gates work that would actually run.
                     if rebuild_already.is_none() {
                         rebuild_already = Some(
                             backend
@@ -2620,9 +2618,9 @@ impl MigrationEngine {
                     i += 1;
                 }
                 PlanStep::OnlineRename(RenameStep::ExpandContract(rename)) => {
-                    // Re-expresses the declarative online drive
-                    // (`engine.rs:533-552`): run EXPAND+backfill atomically under
-                    // the held lock, defer C1/C2 as `pending_contract`.
+                    // Re-expresses `apply_declarative`'s online-rename drive: run
+                    // EXPAND+backfill atomically under the held lock, defer C1/C2 as
+                    // `pending_contract`.
                     // **Capability (defense in depth).** The plan-wide preflight
                     // already refused a plan whose target cannot expand, and it did
                     // so before the FIRST step committed - which is the whole point,
@@ -2650,7 +2648,7 @@ impl MigrationEngine {
                     // pre-existing row into the new column), so it is an
                     // approval-gated op (`run_expand_pg` already requires
                     // `Approval::Approved`). Under `ApprovalScope::Versions` it runs
-                    // ONLY if the operator individually reviewed THIS rename — keyed on
+                    // ONLY if the operator individually reviewed THIS rename - keyed on
                     // the rename's PLAN-GROUP version (E1's deterministic id, the same
                     // anchor the obligation's `plan_version` records and the operator
                     // reviews), falling back to the E2 `trigger_version` if the expand
@@ -2683,23 +2681,23 @@ impl MigrationEngine {
                     };
                     // **Drive the expand's phases HERE.** This used to be one call
                     // to the backend's `run_online`, which drove the whole
-                    // sequence — and applied E1/E2 by calling
+                    // sequence - and applied E1/E2 by calling
                     // `apply_with_lock_backend`, this crate's orchestrator, back
                     // across the backend boundary. That is mutual recursion across
                     // the layer boundary the crate split exists to create: a vendor
                     // crate cannot depend on the engine, so a vendor that re-enters
                     // the orchestrator can never move out of it, and widening the
                     // backend contract cannot help because the thing being called
-                    // IS the orchestrator. Every phase below is neutral — approval,
+                    // IS the orchestrator. Every phase below is neutral - approval,
                     // scope, splitting the marker off the chain, applying the
                     // structural steps, the journal read that decides resume vs
-                    // skip — so the engine drives them and asks the backend only
+                    // skip - so the engine drives them and asks the backend only
                     // for the one phase it alone can answer: mirroring the rows.
                     //
                     // The key the two approval gates share. E1's version is the
                     // rename's PLAN-GROUP version (the id the operator reviews and
                     // the obligation records); `trigger_version` is the fallback so
-                    // the gate resolves its key UNCONDITIONALLY — an empty expand
+                    // the gate resolves its key UNCONDITIONALLY - an empty expand
                     // chain does not fall open.
                     let approval_key = rename
                         .expand
@@ -2794,14 +2792,14 @@ impl MigrationEngine {
                     // **Write the DURABLE pending-contract
                     // obligation.** The transient `pending_contract` return value is
                     // a convenience shape; the obligation table is the SOURCE OF
-                    // TRUTH for the cross-deploy interlock — it survives process
+                    // TRUTH for the cross-deploy interlock - it survives process
                     // restart and is read back by a later deploy.
                     //
                     // **Idempotent.** Keyed by `pending_version` (the
                     // E2 trigger id, deterministic per intent). If it is ALREADY in
                     // the outstanding set we read at the top of this function (under
                     // the held lock, so race-free), an idempotent re-run of deploy N
-                    // — where the EXPAND net-applied-skipped — does NOT append a
+                    // - where the EXPAND net-applied-skipped - does NOT append a
                     // duplicate `pending` row, yet the obligation stays outstanding.
                     //
                     // The `pending_version` and the `RenameColumn` identity facts come
@@ -2816,11 +2814,11 @@ impl MigrationEngine {
                         ty,
                     } = &rename.intent;
                     let pending_version = rename.trigger_version.as_str().to_string();
-                    // The rename's PLAN-GROUP version — the stable identity the
+                    // The rename's PLAN-GROUP version - the stable identity the
                     // SUPPLIED set / `depends_on` key on for orphan/blocked. It is E1's deterministic id (the
                     // `ExpandContract` plan anchors its plan version on E1, see
                     // `render::lower::plan_step_version`). Deterministic per rename,
-                    // so a re-lowered IR reproduces it — which is exactly
+                    // so a re-lowered IR reproduces it - which is exactly
                     // what `status` re-derives from the supplied set to decide
                     // orphan/present. Fail closed if the author somehow produced an
                     // empty expand chain (an internal invariant violation): fall back
@@ -2864,7 +2862,7 @@ impl MigrationEngine {
                         // Write the obligation AND, when this is a deploy with a
                         // recovery scope, its `in_progress` recovery marker in ONE
                         // transaction (engine-stamped, atomic). Every outstanding
-                        // obligation then ALWAYS has a marker — closing the
+                        // obligation then ALWAYS has a marker - closing the
                         // obligation-vs-marker crash window structurally. `None` on the
                         // routine path is identical to the plain single autocommit
                         // INSERT.
@@ -3041,7 +3039,7 @@ impl MigrationEngine {
         // **DISCHARGE the obligations this deploy's contract-apply
         // completed.** All steps applied successfully, so for every obligation whose
         // C1/C2 this deploy carried (recognized in the read-back above), APPEND a
-        // `resolved='applied'` row (append-only — the `pending` row is never edited),
+        // `resolved='applied'` row (append-only - the `pending` row is never edited),
         // so a later deploy reads the obligation as discharged and no longer refuses
         // the table. This is the routine deploy-N+1 contract-apply path; the
         // `zero-migrate resolve --commit` CLI is the operator's manual equivalent.
@@ -3063,7 +3061,7 @@ impl MigrationEngine {
         // applied successfully, so discharge each caller-named obligation with its
         // chosen resolution (`applied`/`aborted`). Resolve-AFTER-apply (inside the
         // held lock) is fail-closed: an apply failure above returned early, leaving
-        // the obligation OUTSTANDING — never a resolved-but-not-applied fail-open.
+        // the obligation OUTSTANDING - never a resolved-but-not-applied fail-open.
         if let Some(pending_contracts) = backend.pending_contracts() {
             for (pc, resolution) in explicit_resolve {
                 pending_contracts
@@ -3486,21 +3484,21 @@ impl MigrationEngine {
     /// Apply a plan through the gate.
     ///
     /// The gate, in order:
-    /// 1. if [`MigrationPlan::denied`] is non-empty ⇒ [`EngineError::Denied`]
-    ///    (never apply — a denied batch applies *nothing*);
-    /// 2. if [`MigrationPlan::requires_approval`] and `approval != Approved` ⇒
+    /// 1. if [`MigrationPlan::denied`] is non-empty => [`EngineError::Denied`]
+    ///    (never apply - a denied batch applies *nothing*);
+    /// 2. if [`MigrationPlan::requires_approval`] and `approval != Approved` =>
     ///    [`EngineError::ApprovalRequired`] (nothing applied);
     /// 3. otherwise delegate to `executor::apply_with_lock_backend`,
     ///    which **independently re-runs the guard** over every pending `up` and
-    ///    runs the DDL under the least-privilege `migrator` role — defense in
+    ///    runs the DDL under the least-privilege `migrator` role - defense in
     ///    depth, not bypassed by this gate.
     ///
     /// `applied_by` is the actor recorded in the journal (`app/actor/AI`).
     ///
     /// # Errors
-    /// - [`EngineError::Denied`] — the plan had guard denials.
-    /// - [`EngineError::ApprovalRequired`] — destructive plan without approval.
-    /// - [`EngineError::Apply`] — the executor failed (incl. its own guard
+    /// - [`EngineError::Denied`] - the plan had guard denials.
+    /// - [`EngineError::ApprovalRequired`] - destructive plan without approval.
+    /// - [`EngineError::Apply`] - the executor failed (incl. its own guard
     ///   re-check, checksum drift, or a mid-apply DB error).
     pub async fn apply<B: MigrationBackend>(
         &self,
@@ -3511,7 +3509,7 @@ impl MigrationEngine {
         applied_by: &str,
     ) -> Result<ApplyOutcome, EngineError> {
         // Standalone caller: the executor acquires + releases the project lock.
-        // Blanket scope — the routine `apply` surface has no per-version review
+        // Blanket scope - the routine `apply` surface has no per-version review
         // set; the scoped surface is `apply_verified_scoped`.
         self.apply_inner(
             plan,
@@ -3529,7 +3527,7 @@ impl MigrationEngine {
     ///
     /// Public peer of [`apply`](Self::apply) for an OUTER caller that already
     /// holds the project advisory lock on `conn` (e.g. the submission adapter,
-    /// which acquires the lock around dedup-read → apply to close the
+    /// which acquires the lock around dedup-read -> apply to close the
     /// concurrent-double-apply window). Such a caller passes
     /// [`LockMode::AlreadyHeld`] so the executor does NOT re-acquire / re-release
     /// the lock it does not own; the outer caller is responsible for releasing it
@@ -3566,7 +3564,7 @@ impl MigrationEngine {
     /// [`apply_declarative`](Self::apply_declarative) holds the lock for the whole
     /// deploy, so the inner plain-set apply must NOT re-acquire/re-release it.
     ///
-    /// The denial / approval gate runs identically in both modes — an early gate
+    /// The denial / approval gate runs identically in both modes - an early gate
     /// rejection under `AlreadyHeld` returns without touching the lock (the outer
     /// `apply_declarative` still releases it), so the lock is never leaked.
     // Eight cohesive apply parameters (plan + approval/scope + backend/cfg +
@@ -3632,18 +3630,18 @@ impl MigrationEngine {
     /// Apply a migration set, **verifying its set-level integrity manifest first**
     /// (the pre-apply gate).
     ///
-    /// This is the trusted-deploy entry point. Before ANY apply work — before the
+    /// This is the trusted-deploy entry point. Before ANY apply work - before the
     /// guard/approval gate, before `executor::apply_with_lock_backend`
-    /// acquires the project advisory lock, before a single statement of DDL runs —
+    /// acquires the project advisory lock, before a single statement of DDL runs -
     /// it recomputes the integrity manifest over the SUPPLIED `migrations` (in the
     /// given order) and compares it to `expected`:
     ///
-    /// - `Some(expected)` ⇒ **verify-then-apply.** A mismatch (the bundle was
+    /// - `Some(expected)` => **verify-then-apply.** A mismatch (the bundle was
     ///   reordered / content-edited / inserted-into / removed-from relative to the
-    ///   trusted manifest) returns [`EngineError::Manifest`] and applies NOTHING —
+    ///   trusted manifest) returns [`EngineError::Manifest`] and applies NOTHING -
     ///   no lock taken, no journal touched, no DDL run. A match falls through to
     ///   the normal gated [`apply`](Self::apply).
-    /// - `None` ⇒ **apply unverified.** For internal callers that have no manifest
+    /// - `None` => **apply unverified.** For internal callers that have no manifest
     ///   to check against (e.g. a freshly-authored in-process set that never left
     ///   the trust boundary). Identical to calling [`apply`](Self::apply) directly.
     ///
@@ -3651,26 +3649,26 @@ impl MigrationEngine {
     ///
     /// The verification runs in THIS method, before `apply` (and therefore before
     /// `executor::apply_with_lock_backend`'s `pg_advisory_lock`). A tampered set is rejected without
-    /// ever contending for the lock or opening a transaction — the gate cannot be
+    /// ever contending for the lock or opening a transaction - the gate cannot be
     /// raced past, and a refusal leaves the database and journal completely
     /// untouched.
     ///
-    /// # Trust model — caller contract
+    /// # Trust model - caller contract
     ///
     /// `expected` MUST be supplied by a **trusted** source: the control plane,
     /// which stamps the [`ManifestHash`] at build / review time and holds it
     /// out-of-band. It MUST NOT be read from the same bundle `migrations` arrived
-    /// in — an attacker who can edit the migrations can equally edit a hash
+    /// in - an attacker who can edit the migrations can equally edit a hash
     /// shipped alongside them, and the check would then verify a tampered set
     /// against its own tampered hash (vacuously passing). The manifest is a check
     /// of *the bundle* against *an independently-held expectation*. See
     /// [`crate::plan::manifest`].
     ///
-    /// # What set is verified — the RAW supplied set, before any filtering
+    /// # What set is verified - the RAW supplied set, before any filtering
     ///
     /// The manifest is verified over the RAW `migrations` slice the caller
-    /// supplied — the exact input membership/content the control plane stamped at
-    /// review time — **before** [`plan`](Self::plan) runs the guard. This is
+    /// supplied - the exact input membership/content the control plane stamped at
+    /// review time - **before** [`plan`](Self::plan) runs the guard. This is
     /// deliberate: verifying the post-`plan` `items` would let a guard *denial*
     /// (or any future `plan()`-time filtering) silently SHRINK the verified set, so
     /// the integrity check would pass over a strict subset of the stamped bundle. By
@@ -3679,20 +3677,20 @@ impl MigrationEngine {
     ///
     /// A guard-denied migration is still PART of the verified set (so the manifest
     /// matches the stamp), and is then refused by the *separate, correct* denial
-    /// gate inside [`apply`](Self::apply) ([`EngineError::Denied`]) — a denial and a
+    /// gate inside [`apply`](Self::apply) ([`EngineError::Denied`]) - a denial and a
     /// manifest mismatch are orthogonal failures, surfaced as orthogonal errors.
     ///
     /// # Errors
-    /// - [`EngineError::Manifest`] — the raw supplied set did not match `expected`
+    /// - [`EngineError::Manifest`] - the raw supplied set did not match `expected`
     ///   (only possible when `expected` is `Some`). Refused before the
     ///   plan/gate/lock/DDL; nothing applied.
     /// - [`EngineError::Denied`] / [`EngineError::ApprovalRequired`] /
-    ///   [`EngineError::Apply`] — the same gate + executor errors as
+    ///   [`EngineError::Apply`] - the same gate + executor errors as
     ///   [`apply`](Self::apply), after a successful (or skipped) manifest check.
     // Takes the RAW supplied set + the guard config (to plan internally) so
     // verification happens over the input membership BEFORE plan()/guard filtering.
     // Eight distinct, irreducible inputs (raw set, guard cfg, expected hash,
-    // approval, conn, exec cfg, actor) — each is load-bearing; bundling them into a
+    // approval, conn, exec cfg, actor) - each is load-bearing; bundling them into a
     // struct would only obscure the trusted-deploy call shape.
     #[allow(clippy::too_many_arguments)]
     pub async fn apply_verified<B: MigrationBackend>(
@@ -3706,7 +3704,7 @@ impl MigrationEngine {
         applied_by: &str,
     ) -> Result<ApplyOutcome, EngineError> {
         // Pre-apply manifest gate: recompute over the RAW supplied
-        // set — the input membership/content the control plane stamped — BEFORE
+        // set - the input membership/content the control plane stamped - BEFORE
         // plan()/guard filtering and before the gate / lock / any DDL. Verifying
         // the raw input (not the post-plan `items`) means a guard denial or any
         // future plan-time filtering cannot silently shrink the verified set. The
@@ -3715,7 +3713,7 @@ impl MigrationEngine {
         if let Some(expected) = expected {
             verify_manifest(migrations, expected)?;
         }
-        // Verified (or unverified by caller choice) ⇒ plan (guard lint) then the
+        // Verified (or unverified by caller choice) => plan (guard lint) then the
         // normal gated apply, which re-runs the denial/approval gate and then the
         // executor (guard + role + advisory lock). A guard-denied migration was
         // still part of the verified set above; the denial is surfaced HERE by the
@@ -3779,8 +3777,8 @@ impl MigrationEngine {
     ///
     /// The harness is SUPPLIED by the caller rather than declared by the backend,
     /// and never as a raw `&Client`, so no PG-driver type appears on this surface.
-    /// `None` — which is every caller today, because nothing in the workspace
-    /// implements [`ShadowDryRun`](crate::apply::backend::ShadowDryRun) — yields the
+    /// `None` - which is every caller today, because nothing in the workspace
+    /// implements [`ShadowDryRun`](crate::apply::backend::ShadowDryRun) - yields the
     /// explicit
     /// [`DryRunError::ShadowUnsupported`](crate::apply::backend::DryRunError::ShadowUnsupported),
     /// NOT a false-success report: the caller must never believe a dry-run happened
@@ -3789,7 +3787,7 @@ impl MigrationEngine {
     /// # Why the capability is a PARAMETER and not `backend.shadow()`
     ///
     /// It was a `MigrationBackend::shadow()` method, and all three backends returned
-    /// `None` — so the seam declared a capability none of them had, while being the
+    /// `None` - so the seam declared a capability none of them had, while being the
     /// single remaining reason `MigrationBackend` could not move to the backend
     /// contract crate (`ShadowDryRun::dry_run_declarative` names the engine's
     /// `DeclarativeDeployPlan` and `DesiredSchema`, which are orchestration results
@@ -3797,15 +3795,15 @@ impl MigrationEngine {
     ///
     /// Asking a backend to declare a harness it does not have bought nothing;
     /// inverting it costs nothing and keeps the extension point exactly where a real
-    /// harness would arrive — a host that builds one passes it here. The refusal
+    /// harness would arrive - a host that builds one passes it here. The refusal
     /// behaviour is byte-identical, because `None` was already the universal answer.
     ///
     /// # Errors
-    /// - [`crate::apply::backend::DryRunError::ShadowUnsupported`] — no shadow
+    /// - [`crate::apply::backend::DryRunError::ShadowUnsupported`] - no shadow
     ///   dry-run harness was supplied.
-    /// - other [`crate::apply::backend::DryRunError`] — a harness failure (CREATE/DROP
+    /// - other [`crate::apply::backend::DryRunError`] - a harness failure (CREATE/DROP
     ///   DATABASE, the shadow connection, role provisioning). A *migration* failing
-    ///   is not an error — it is reported in the [`crate::apply::backend::DryRunReport`].
+    ///   is not an error - it is reported in the [`crate::apply::backend::DryRunReport`].
     pub async fn dry_run(
         &self,
         shadow: Option<&dyn crate::apply::backend::ShadowDryRun>,
@@ -3823,7 +3821,7 @@ impl MigrationEngine {
     }
 
     /// Dry-run a DECLARATIVE deploy plan against a shadow DATABASE, validating
-    /// the resulting schema against the desired snapshot —
+    /// the resulting schema against the desired snapshot -
     /// routed through the backend's [`ShadowDryRun`](crate::apply::backend::ShadowDryRun)
     /// capability.
     ///
@@ -3839,9 +3837,9 @@ impl MigrationEngine {
     /// the engine DECIDED rather than vocabulary a backend speaks.
     ///
     /// # Errors
-    /// - [`crate::apply::backend::DryRunError::ShadowUnsupported`] — no shadow
+    /// - [`crate::apply::backend::DryRunError::ShadowUnsupported`] - no shadow
     ///   dry-run harness was supplied.
-    /// - other [`crate::apply::backend::DryRunError`] — a harness failure.
+    /// - other [`crate::apply::backend::DryRunError`] - a harness failure.
     pub async fn dry_run_declarative(
         &self,
         shadow: Option<&dyn crate::apply::backend::ShadowDryRun>,
@@ -4011,18 +4009,18 @@ fn atomic_pending_resolution_migration(
 }
 
 /// **The SHARED contract-apply recognizer.** Decide whether a
-/// deploy whose `Ddl` steps carry `ddl_up_by_version` (version → `up` SQL) is the
-/// LEGITIMATE contract-apply for the outstanding obligation `pc` — i.e. whether
+/// deploy whose `Ddl` steps carry `ddl_up_by_version` (version -> `up` SQL) is the
+/// LEGITIMATE contract-apply for the outstanding obligation `pc` - i.e. whether
 /// it RE-PRESENTS the obligation's recorded C1/C2 with the SAME re-authored `up`
 /// SQL (re-author-compare, NOT a version-id match alone). Fail-CLOSED: an empty
 /// `contract_versions`, a missing/ mismatched discharging Ddl step, a length
-/// mismatch, or an author error all return `false` (⇒ NOT a contract-apply ⇒ the
+/// mismatch, or an author error all return `false` (=> NOT a contract-apply => the
 /// obligation stays gated).
 ///
 /// This is the SINGLE source of truth for that decision, shared by:
-///   • the APPLY-time interlock loop in
+///   - the APPLY-time interlock loop in
 ///     [`apply_plan_resolving`](MigrationEngine::apply_plan_resolving), and
-///   • the control-plane PRE-APPLY bundle interlock gate (refuse a
+///   - the control-plane PRE-APPLY bundle interlock gate (refuse a
 ///     multi-file approved bundle BEFORE any earlier file's online-rename EXPAND can
 ///     commit ahead of a guaranteed-later interlock refusal).
 ///
@@ -4095,7 +4093,7 @@ pub struct DeclarativeDeployPlan {
     /// [`OnlineSchemaChange::run_online_backfill`](crate::apply::backend::OnlineSchemaChange::run_online_backfill)
     /// is never reached on a SQLite backend.
     pub renames: Vec<crate::render::expand_contract::ExpandContractPlan>,
-    /// **SQLite only** — the existing-table changes SQLite has no native
+    /// **SQLite only** - the existing-table changes SQLite has no native
     /// `ALTER` for (type / nullability change, column rename, ADD/DROP CONSTRAINT,
     /// FK redefinition), each a structured 12-step table rebuild
     /// ([`TableRebuild`](crate::render::declarative::TableRebuild)). Driven through
@@ -4133,13 +4131,13 @@ impl DeclarativeDeployPlan {
         }
     }
 
-    /// The plan's **full effective migration set** — every migration the deploy
+    /// The plan's **full effective migration set** - every migration the deploy
     /// will execute (across all of its deploys), in apply order.
     ///
-    /// It is the plain migrations ([`plain.items`](MigrationPlan::items) → their
+    /// It is the plain migrations ([`plain.items`](MigrationPlan::items) -> their
     /// `migration`s, in order) PLUS, for each rename in
     /// [`renames`](Self::renames), that rename's expand migrations AND its
-    /// (deferred) contract migrations — i.e. each rename's full
+    /// (deferred) contract migrations - i.e. each rename's full
     /// [`ExpandContractPlan::all`](crate::render::expand_contract::ExpandContractPlan::all)
     /// (expand then contract). This is the SET the integrity manifest is computed
     /// over: a declarative deploy applies the plain set + every rename's expand at
@@ -4171,7 +4169,7 @@ impl DeclarativeDeployPlan {
     }
 
     /// Compute the integrity manifest over this plan's
-    /// [`effective_set`](Self::effective_set) — the SINGLE implementation both the
+    /// [`effective_set`](Self::effective_set) - the SINGLE implementation both the
     /// control plane (stamp side) and
     /// [`apply_declarative_verified`](MigrationEngine::apply_declarative_verified)
     /// (verify side) call, so the stamped hash and the verified hash can never
@@ -4179,11 +4177,11 @@ impl DeclarativeDeployPlan {
     ///
     /// The control plane MUST call this over the SAME generated plan instance it
     /// will later apply (declarative versions are minted per `plan_declarative`
-    /// call, so the manifest is only stable for one instance — see
+    /// call, so the manifest is only stable for one instance - see
     /// [`apply_declarative_verified`](MigrationEngine::apply_declarative_verified)'s
     /// determinism caveat).
     ///
-    /// # Carrying the plan across the stamp → apply boundary
+    /// # Carrying the plan across the stamp -> apply boundary
     ///
     /// Because the manifest is only valid for one generated [`DeclarativeDeployPlan`]
     /// instance, the control plane must hold THAT instance (not re-generate) between
@@ -4195,7 +4193,7 @@ impl DeclarativeDeployPlan {
     /// [`DeclarativeDeployPlan`] is deliberately NOT `serde`-serializable today
     /// (its PostgreSQL `GuardReport`/[`BackfillSpec`](crate::model::backfill::BackfillSpec) members
     /// are not, and deriving it would
-    /// cascade invasively) — so a split-boundary control plane either keeps the
+    /// cascade invasively) - so a split-boundary control plane either keeps the
     /// generated plan in a server-side store keyed by an opaque token, or
     /// (post-launch, if a wire shape is needed) the derive is added deliberately
     /// in one patch across the member types. The manifest hash itself
@@ -4410,7 +4408,7 @@ mod tests {
 
     #[test]
     fn plan_with_a_dangerous_up_records_a_denial() {
-        // COPY … TO PROGRAM is shell RCE — hard-denied (not merely flagged).
+        // COPY ... TO PROGRAM is shell RCE - hard-denied (not merely flagged).
         let evil = RawSqlAuthor::new(
             crate::test_fixtures::VENDORS,
             "app_acme",
@@ -4469,7 +4467,7 @@ mod tests {
             ty: "text".into(),
         })
         .expect("author");
-        // The whole expand+contract set passes the guard with NO denials — the
+        // The whole expand+contract set passes the guard with NO denials - the
         // dual-write fn (INVOKER plpgsql, project-qualified), the trigger, the
         // backfill marker, and the gated drops are all guard-safe.
         let set = plan_in.all();
@@ -4480,7 +4478,7 @@ mod tests {
             plan.denied
         );
         assert_eq!(plan.items.len(), set.len(), "every migration is planned");
-        // The contract DROP COLUMN makes the set destructive ⇒ requires approval.
+        // The contract DROP COLUMN makes the set destructive => requires approval.
         assert!(plan.destructive);
         assert!(plan.requires_approval);
     }

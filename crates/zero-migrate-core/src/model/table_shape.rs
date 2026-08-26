@@ -1,14 +1,14 @@
 //! Resolve policy-managed table shape into explicit `createTable` IR.
 //!
-//! # Injection-as-rule (§II.4)
+//! # Injection-as-rule (section II.4)
 //!
 //! System columns, indexes, and the pinned primary key are no longer read from a
 //! monolithic `PolicyProfile.system_shape`. They are driven by the composed,
 //! unforgeable [`EffectivePolicy`]: for each `createTable` op we build the
 //! [`ObjectName`] the op names and ask `effective.injects_for(&object)` for the
 //! covering [`zero_migrate_policy::InjectSpec`]s (in the sealed cross-layer inject total order). Each
-//! spec contributes its columns (prepended, in order), indexes (appended), and — if
-//! it pins one — the table's primary key. The policy CONTENT (which columns, which
+//! spec contributes its columns (prepended, in order), indexes (appended), and - if
+//! it pins one - the table's primary key. The policy CONTENT (which columns, which
 //! type token) lives in the policy crate; this module only MAPS the opaque type
 //! tokens to [`ColType`] and lays the resolved shape into the IR.
 //!
@@ -137,12 +137,12 @@ pub enum TableShapeError {
 
 /// The resolved injection shape covering ONE object: the union of every covering
 /// [`zero_migrate_policy::InjectSpec`]'s columns/indexes plus the first pinned primary key. This is the
-/// per-object content the resolver lays into the IR — the flattening of
+/// per-object content the resolver lays into the IR - the flattening of
 /// `injects_for(object)` into a single ordered shape.
 ///
 /// Column order is the sealed inject total order (outermost inject first, each
 /// spec's columns in document order); indexes likewise. The primary key is the
-/// FIRST covering spec that pins one (the outermost charter wins — a draft cannot
+/// FIRST covering spec that pins one (the outermost charter wins - a draft cannot
 /// override a charter PK, which `admit`'s collision blame already
 /// guarantees is non-conflicting). `author_primary_key` is `Forbid` if ANY covering
 /// spec forbids (obligations union up).
@@ -253,7 +253,7 @@ impl ResolvedInject {
         name == "id" && self.owns_id_primary_key()
     }
 
-    /// This object carries no injection — the resolver is a no-op for it.
+    /// This object carries no injection - the resolver is a no-op for it.
     fn is_empty(&self) -> bool {
         self.columns.is_empty() && self.indexes.is_empty() && self.primary_key.is_none()
     }
@@ -275,7 +275,7 @@ fn object_for_create(name: &str, schema: Option<&str>, default_schema: &str) -> 
 /// `primaryKey` is present before canonical bytes/checksum are computed. The
 /// checksum (folded downstream over this RESOLVED IR) therefore depends on the
 /// injected SHAPE, not on how the policy was authored: two policies that inject the
-/// same columns/indexes/PK resolve to byte-identical IR ⇒ the same checksum (G6).
+/// same columns/indexes/PK resolve to byte-identical IR => the same checksum (G6).
 ///
 /// # Errors
 /// A [`TableShapeError`] on an author/system column collision, an author PK under a
@@ -344,7 +344,7 @@ fn resolve_create_table(
     indexes: &mut Vec<IrIndex>,
     inject: &ResolvedInject,
 ) -> Result<(), TableShapeError> {
-    // No columns to inject AND no pinned PK ⇒ the policy manages nothing about this
+    // No columns to inject AND no pinned PK => the policy manages nothing about this
     // table's shape (the platform/author-owned case). Leave it verbatim.
     if inject.is_empty() {
         return Ok(());
@@ -445,8 +445,8 @@ fn inject_column_to_ir(column: &InjectColumn) -> Result<IrColumn, TableShapeErro
         // created_by/updated_by) are BOUNDED `VARCHAR(255)`: they hold ids, are often
         // keyed (the `id` primary key, audit indexes), and must be index-able on
         // MySQL, where an unbounded `TEXT` cannot be a key. Typing them here (not
-        // just at render) keeps every path — validate, both injection resolvers, the
-        // collection/query renderer — consistent.
+        // just at render) keeps every path - validate, both injection resolvers, the
+        // collection/query renderer - consistent.
         //
         // MySQL's vendor renderer maps authored UNBOUNDED text to `TEXT`. It never
         // sees that semantic marker here: this policy column is explicitly bounded,
@@ -737,13 +737,13 @@ fn resolved_create_table_matches_inject(
 fn system_columns_match(actual: &IrColumn, expected: &IrColumn) -> bool {
     // II.2.6b conformance: an occupant of an injected column slot must match the
     // inject's name AND its type/nullability/default (the shape the InjectSpec
-    // carries — `inject_column_to_ir` maps the opaque token; injected columns carry
+    // carries - `inject_column_to_ir` maps the opaque token; injected columns carry
     // the canonical default mapped from the rule, when present).
     //
     // `collation` is in the comparison for the reason the facet exists. An author
     // column that matches an injected slot on name/type/nullability/default but not
     // on collation would otherwise be judged CONFORMING, left verbatim, and land
-    // without the collation the charter pinned — a column that reads as the
+    // without the collation the charter pinned - a column that reads as the
     // operator's shape and orders like the author's. That is the silent divergence
     // the facet is here to end, so it must not be reproduced inside the check.
     //
@@ -764,10 +764,10 @@ fn system_columns_match(actual: &IrColumn, expected: &IrColumn) -> bool {
         && actual.identity == expected.identity
 }
 
-// The charter → `EffectivePolicy` constructor moved DOWN to
+// The charter -> `EffectivePolicy` constructor moved DOWN to
 // `zero_migrate_ir::policy_registry`, beside the builtin registry it composes
 // against. It needed nothing from the engine, and leaving it here put it out of
-// reach of the BACKEND crates, which sit below the engine — so a vendor that
+// reach of the BACKEND crates, which sit below the engine - so a vendor that
 // wanted a real composed policy for its tests had to hand-roll a second
 // implementation of a security-critical composition. Re-exported so every
 // `model::table_shape::effective_policy_from_charter_toml` and
@@ -900,7 +900,7 @@ mod tests {
     }
 
     /// An alternate charter with the SAME injected shape as the confined charter but
-    /// authored differently (indexes named differently — index names are not part of
+    /// authored differently (indexes named differently - index names are not part of
     /// the injected IR shape; the resolver appends unnamed IR indexes over the
     /// injected columns). Used to prove checksum-invariance under equivalent-shape
     /// policies (G6).
@@ -1310,7 +1310,7 @@ columns = [
     /// G6 (checksum honesty): the checksum is over the RESOLVED IR (injected columns
     /// are part of the applied DDL), and it depends on the RESOLVED SHAPE, not on how
     /// the policy was authored. Two charters that inject the SAME columns/indexes/PK
-    /// resolve to byte-identical IR ⇒ the SAME checksum. And the checksum IS sensitive
+    /// resolve to byte-identical IR => the SAME checksum. And the checksum IS sensitive
     /// to the actual injected columns (a no-inject charter differs).
     #[test]
     fn checksum_is_invariant_under_equivalent_shape_and_sensitive_to_injection() {
@@ -1319,12 +1319,12 @@ columns = [
         let confined = resolve_create_table_policy(&input, &confined_charter()).expect("confined");
         let equivalent =
             resolve_create_table_policy(&input, &equivalent_shape_charter()).expect("equivalent");
-        // Equivalent injected SHAPE ⇒ byte-identical resolved IR ⇒ identical checksum.
+        // Equivalent injected SHAPE => byte-identical resolved IR => identical checksum.
         assert_eq!(confined.ops, equivalent.ops);
         assert_eq!(checksum_of(&confined), checksum_of(&equivalent));
 
         // Sensitivity: a charter that injects nothing resolves to a DIFFERENT shape
-        // (no system columns) ⇒ a different checksum.
+        // (no system columns) => a different checksum.
         let no_inject = resolve_create_table_policy(&input, &no_inject("app")).expect("no-inject");
         assert_ne!(confined.ops, no_inject.ops);
         assert_ne!(checksum_of(&confined), checksum_of(&no_inject));

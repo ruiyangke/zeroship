@@ -2,7 +2,7 @@
 //! Atlas / Flyway / dbmate feature).
 //!
 //! This module is a **surfacing / formatting layer over the SQL the engine ALREADY
-//! lowers** — it re-implements NOTHING. Given a lowered [`AppliedPlan`] (from
+//! lowers** - it re-implements NOTHING. Given a lowered [`AppliedPlan`] (from
 //! [`IrAuthor::lower_plan`](crate::render::lower::IrAuthor::lower_plan) for an
 //! IR envelope), it walks the steps and prints the SQL strings already held in each
 //! step (`Migration.up`, `PlanStep::Dml.template`) verbatim. It does not re-render
@@ -12,33 +12,33 @@
 //!
 //! # The honest boundary (the load-bearing design point)
 //!
-//! DB-INDEPENDENT ops — `createTable`/`dropTable`/`addColumn`/`dropColumn`/
+//! DB-INDEPENDENT ops - `createTable`/`dropTable`/`addColumn`/`dropColumn`/
 //! `addForeignKey`/`addUnique`/`addCheck`/`dropConstraint`/`createIndex`/
-//! `dropIndex` + one-shot `insert`/`update`/`delete` — render their REAL SQL: their
+//! `dropIndex` + one-shot `insert`/`update`/`delete` - render their REAL SQL: their
 //! `up`/`template` is fully determined offline (`IrAuthor::lower_*` lowers them with
 //! an EMPTY [`LiveSchema`], needing no DB).
 //!
 //! DB-STATE-DEPENDENT ops CANNOT be faithfully rendered offline. For these the
-//! preview emits a CLEARLY-LABELED `-- [runtime-resolved] …` comment line and
+//! preview emits a CLEARLY-LABELED `-- [runtime-resolved] ...` comment line and
 //! **NEVER fabricates SQL**:
 //!
-//! - **online `renameColumn`** — PG expand-contract (E1..C2) carries a windowed
+//! - **online `renameColumn`** - PG expand-contract (E1..C2) carries a windowed
 //!   runtime BACKFILL (`BackfillSpec`, exact statement stream depends on live row
 //!   count / PK ranges) and a cross-deploy CONTRACT cutover; SQLite needs the live
-//!   12-step rebuild (it does not even lower offline — fails closed with
+//!   12-step rebuild (it does not even lower offline - fails closed with
 //!   [`IrLowerError::RenameNeedsLiveTable`](crate::render::lower::IrLowerError)).
-//! - **`backfill`** — a runtime windowed loop.
+//! - **`backfill`** - a runtime windowed loop.
 //! - **any DDL migration carrying an existence-guard probe**
 //!   (`ifNotExists`/`ifExists`): apply is a
 //!   runtime catalog probe + run / satisfied-noop / fail-drift decision
 //!   ([`guard_probe`](crate::render::existence_probe), explicitly NOT offline-renderable). The
 //!   bare DDL `up` IS real SQL the apply runs when the probe says "run", so we
-//!   print it under the label — but we do NOT invent an `IF [NOT] EXISTS` clause
+//!   print it under the label - but we do NOT invent an `IF [NOT] EXISTS` clause
 //!   the engine never emits. MySQL additionally refuses a present createTable or
 //!   addColumn until its probe can prove modifier-preserving column-type equality.
 //!   This is a preview-text distinction only: it changes no lowered statement and
 //!   no apply behaviour on any dialect.
-//! - **stand-alone SQLite `alterColumn*` / non-FK constraint changes** — require
+//! - **stand-alone SQLite `alterColumn*` / non-FK constraint changes** - require
 //!   live structure; named FK add/drop changes lower to the live 12-step rebuild
 //!   and are not flattened into ordinary offline SQL
 //!   ([`IrLowerError::TableRebuildUnavailable`](crate::render::lower::IrLowerError)).
@@ -68,7 +68,7 @@ use crate::render::plan::AppliedPlan;
 use crate::render::step::{BindValue, PlanStep, RenameStep};
 use zero_migrate_ir::dialect::DialectId;
 
-/// The label prefix every runtime-resolved line carries — the single sentinel the
+/// The label prefix every runtime-resolved line carries - the single sentinel the
 /// no-fabrication tests assert on. If you change this, change the tests.
 pub const RUNTIME_RESOLVED: &str = "-- [runtime-resolved]";
 
@@ -78,7 +78,7 @@ pub struct PreviewOpts {
     /// The trust profile's effective schema for an op that omits its own qualifier.
     /// The general operator CLI default is `public`
     /// ([`DEFAULT_GENERIC_SCHEMA`](crate)); the Confined platform path pins the
-    /// project schema. NEVER requires a DB to pick — it is a flag/profile value.
+    /// project schema. NEVER requires a DB to pick - it is a flag/profile value.
     pub default_schema: String,
     /// The declaring app stamped onto lowered migrations (ownership is enforced
     /// upstream by the load gate; here it only affects DML journal identity, never
@@ -97,25 +97,25 @@ fn dialect_label(d: &DialectId) -> &str {
     d.as_str()
 }
 
-/// How a plan's body relates to the requested `--dialect` — drives the HONEST header
+/// How a plan's body relates to the requested `--dialect` - drives the HONEST header
 /// caption. The IR envelope leg is genuinely per-dialect LOWERED, so its
 /// header may claim the dialect. The raw `.sql` (Flyway, operator-authored) leg is
-/// printed VERBATIM — it is NOT dialect-transformed — so captioning it with a
+/// printed VERBATIM - it is NOT dialect-transformed - so captioning it with a
 /// `(dialect: sqlite)` claim would mislead an operator reviewing a SQLite go-live
 /// when the file is actually PG-only SQL. That leg gets a verbatim caption instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DialectCaption<'a> {
-    /// The body was lowered for this dialect — claim it.
+    /// The body was lowered for this dialect - claim it.
     Lowered(&'a DialectId),
-    /// The body is operator-authored raw `.sql`, shown verbatim — NOT transformed.
+    /// The body is operator-authored raw `.sql`, shown verbatim - NOT transformed.
     /// `requested` is the `--dialect` the operator asked for. It does not transform
     /// the body; MySQL uses it only to select the safe session envelope.
     VerbatimRawSql { requested: &'a DialectId },
 }
 
 impl DialectCaption<'_> {
-    /// The parenthetical the header carries. Lowered ⇒ a dialect claim; raw `.sql`
-    /// ⇒ an explicit "NOT dialect-transformed" disclaimer (never a bare dialect
+    /// The parenthetical the header carries. Lowered => a dialect claim; raw `.sql`
+    /// => an explicit "NOT dialect-transformed" disclaimer (never a bare dialect
     /// claim over verbatim foreign-dialect SQL).
     fn header_suffix(self) -> String {
         match self {
@@ -131,7 +131,7 @@ impl DialectCaption<'_> {
 /// A single rendered preview line + whether it was a runtime-resolved LABEL (vs a
 /// real rendered statement). The set-level renderer tallies these for the summary.
 struct Rendered {
-    /// The text (a SQL statement, or a `-- [runtime-resolved] …` line, or a comment).
+    /// The text (a SQL statement, or a `-- [runtime-resolved] ...` line, or a comment).
     text: String,
     /// `true` when the text is a runtime-resolved label (counts toward the M tally).
     runtime_resolved: bool,
@@ -193,8 +193,8 @@ pub fn render_plan_sql(
 ///
 /// This is the RAW `.sql` (Flyway, operator-authored) leg: each plan's body is the
 /// verbatim operator SQL, which is NOT dialect-transformed. The headers
-/// therefore carry a `(verbatim raw .sql — NOT dialect-transformed)` caption rather
-/// than a `(dialect: …)` claim, so an operator reviewing a SQLite go-live is never
+/// therefore carry a `(verbatim raw .sql - NOT dialect-transformed)` caption rather
+/// than a `(dialect: ...)` claim, so an operator reviewing a SQLite go-live is never
 /// misled into thinking PG-only verbatim SQL was lowered for SQLite. `dialect` does
 /// not transform the raw body; MySQL uses it to add the safe session envelope.
 #[must_use]
@@ -241,7 +241,7 @@ pub fn render_set_sql(
     out
 }
 
-/// Load + lower an IR envelope artifact's bytes OFFLINE (no DB — an EMPTY
+/// Load + lower an IR envelope artifact's bytes OFFLINE (no DB - an EMPTY
 /// [`LiveSchema`]) for the target dialect, then render the preview. DB-state-
 /// dependent ops that cannot lower against the empty live schema (SQLite rename /
 /// rebuild-only) are caught PER-OP and emitted as `[runtime-resolved]` labels
@@ -252,7 +252,7 @@ pub fn render_set_sql(
 /// # Errors
 /// Returns the load/parse error string if the IR document itself is unparseable /
 /// rejected by the load gate (a hard, clear non-zero for the CLI). A single op that
-/// merely cannot be lowered offline is NOT an error — it degrades to a label.
+/// merely cannot be lowered offline is NOT an error - it degrades to a label.
 pub fn render_ir_envelope_sql(
     vendors: VendorSet,
     bytes: &str,
@@ -267,7 +267,7 @@ pub fn render_ir_envelope_sql(
 ///
 /// An offline preview of one envelope in isolation cannot see a column another
 /// migration in the same directory declares, so every rule keyed on a column's
-/// type is silently unreachable — the `lint` gate reported ok on a backfill whose
+/// type is silently unreachable - the `lint` gate reported ok on a backfill whose
 /// cursor type `apply` refuses, because the `createTable` naming that column was
 /// simply not in view (F653).
 ///
@@ -288,7 +288,7 @@ pub fn render_ir_envelope_sql_onto(
     let (name, rendered) = render_ir_envelope_rendered(vendors, bytes, dialect, opts, live)?;
     let wrap_session = needs_preview_session_envelope(vendors, dialect, &rendered);
     let mut out = String::new();
-    // Synthesize a plan header from the IR identity (no full AppliedPlan needed —
+    // Synthesize a plan header from the IR identity (no full AppliedPlan needed -
     // a single un-lowerable op would otherwise make `lower_plan` abort).
     let _ = writeln!(
         out,
@@ -337,14 +337,15 @@ pub fn render_ir_envelope_sql_onto(
 /// evidence of a short plan; compare against [`render_ir_envelope_sql`] to see
 /// what was dropped.
 ///
-/// Nothing in this repository calls it. The TS CLI's `lint` and `plan` commands
-/// render the HUMAN preview instead, through the addon's `previewSql`
-/// verb (`crates/zero-migrate-node/src/bridge.rs`), which calls
-/// [`render_ir_envelope_sql`]. It is retained because it is re-exported from the
+/// The addon's `advisoriesFor` verb (`crates/zero-migrate-node/src/bridge.rs`) is its
+/// in-tree production caller: it needs one statement at a time so each advisory keeps
+/// the statement that raised it. The addon's `previewSql` verb, which backs the TS
+/// CLI's `lint` and `plan`, renders the HUMAN preview through
+/// [`render_ir_envelope_sql`] instead. This function is also re-exported from the
 /// crate root for out-of-tree embedders that take this crate as a path dependency
-/// (see `docs/embedding.md`), and it is the only way to obtain the statement text
-/// without re-deriving the statement/label split that
-/// [`render_ir_envelope_sql`] folds into one formatted string.
+/// (see `docs/embedding.md`), because it is the way to obtain the statement text
+/// without re-deriving the statement/label split that [`render_ir_envelope_sql`]
+/// folds into one formatted string.
 ///
 /// # Errors
 ///
@@ -376,7 +377,7 @@ fn render_ir_envelope_rendered(
 ) -> Result<(String, Vec<Rendered>), String> {
     // Parse the IR document WITHOUT the ownership/registry gate (this is an offline
     // operator preview, not a deploy): `serde` the wire shape, then validate its
-    // structure. We deliberately do NOT call `load_ir_document` — that gate stamps
+    // structure. We deliberately do NOT call `load_ir_document` - that gate stamps
     // server ownership and consults a cross-app registry which has no meaning
     // offline. The structural validator is enough to refuse a malformed artifact.
     let ir: MigrationIr =
@@ -411,8 +412,8 @@ fn render_ir_envelope_rendered(
     //
     // The unauthorised entry derives its capability set from a schema scope, and with
     // no scope that set is the Confined creator's, which grants NOTHING. So the
-    // preview refused EVERY capability-gated op — a `createFunction`, a `createRole`,
-    // a `createPolicy` — no matter what the operator's charter said, while the very
+    // preview refused EVERY capability-gated op - a `createFunction`, a `createRole`,
+    // a `createPolicy` - no matter what the operator's charter said, while the very
     // same `effective_policy` was being trusted two statements above to inject
     // columns and one statement below to author the SQL. That is not a widening: it
     // is the same authority, asked the same way the deploy path asks it, instead of a
@@ -427,7 +428,7 @@ fn render_ir_envelope_rendered(
     // The general operator preview renders into the chosen default schema:
     // bind it as the author's project schema, so an op with NO qualifier (or one
     // matching the default) renders there. A truly FOREIGN explicit qualifier is
-    // out of the Confined `Single(default_schema)` scope and fails to lower → it is
+    // out of the Confined `Single(default_schema)` scope and fails to lower -> it is
     // labeled `[runtime-resolved]` "not offline-renderable" rather than rendered
     // into the wrong schema (honest, fail-closed). NEVER requires a DB to pick.
     let author = IrAuthor::new(
@@ -458,8 +459,8 @@ fn render_ir_envelope_rendered(
 /// `IdentityColumnTypeUnsupported` is the third, and reaches this list for the
 /// same reason: it is raised only when the column's identity contract IS known, so
 /// the checker had the facts and PostgreSQL's answer is already decided. Labeling
-/// it would turn `identity column type must be smallint, integer, or bigint` — the
-/// verdict apply delivers mid-deploy — into a line of prose the migration passes
+/// it would turn `identity column type must be smallint, integer, or bigint` - the
+/// verdict apply delivers mid-deploy - into a line of prose the migration passes
 /// lint with.
 const fn is_author_error(error: &IrLowerError) -> bool {
     matches!(
@@ -472,7 +473,7 @@ const fn is_author_error(error: &IrLowerError) -> bool {
 /// Per-op lowering for the IR envelope path: lower each op in isolation so a single
 /// DB-state-dependent op (SQLite rename / rebuild-only) degrades to a label instead
 /// of aborting the whole preview. Mirrors the per-op iteration `lower_steps` does,
-/// but tolerant: a `lower_plan` error on a one-op IR ⇒ a runtime-resolved label.
+/// but tolerant: a `lower_plan` error on a one-op IR => a runtime-resolved label.
 fn render_ir_ops(
     vendors: VendorSet,
     author: &IrAuthor,
@@ -485,7 +486,7 @@ fn render_ir_ops(
     let mut working_live = live.clone();
     for op in &ir.ops {
         // A guard-carrying op lowers FINE offline (the probe is stamped, not an
-        // error) — but its apply is a runtime catalog-probe decision, so it MUST be
+        // error) - but its apply is a runtime catalog-probe decision, so it MUST be
         // labeled. Detect it from the op directly (the lowered `up` is bare DDL with
         // no `IF [NOT] EXISTS`; we print it under the label, never fabricating one).
         let guard = op.existence_guard();
@@ -505,7 +506,7 @@ fn render_ir_ops(
                 return Err(e.to_string());
             }
             Err(e) => {
-                // The op cannot be lowered offline — it is DB-state-dependent. NEVER
+                // The op cannot be lowered offline - it is DB-state-dependent. NEVER
                 // fabricate SQL: emit a labeled, descriptive line citing WHY.
                 out.push(Rendered::label(runtime_resolved_for_lower_error(op, &e)));
             }
@@ -539,7 +540,7 @@ fn render_ir_ops(
 
 /// Build a one-op `MigrationIr` carrying `op`, sharing the parent's identity so the
 /// per-op lower runs in the same author context. Strips cross-op concerns
-/// (`depends_on`/`supersedes`/`preconditions`) — they do not affect per-op SQL.
+/// (`depends_on`/`supersedes`/`preconditions`) - they do not affect per-op SQL.
 fn single_op_ir(parent: &MigrationIr, op: Op) -> MigrationIr {
     MigrationIr {
         inverse_ops: None,
@@ -717,7 +718,7 @@ fn render_alter_primary_key(
 ///
 /// Preview is offline: it lowers against an EMPTY `LiveSchema` and cannot read
 /// `SHOW CREATE TABLE`. The statement apply will issue restates the live definition,
-/// so any SQL printed here would be a GUESS at facets the preview cannot see — and a
+/// so any SQL printed here would be a GUESS at facets the preview cannot see - and a
 /// guess is exactly the silent-drop failure the step exists to prevent. The label
 /// names what apply will read and what it will change, which is everything the
 /// operator can be told truthfully before the deploy.
@@ -761,7 +762,7 @@ fn render_online_rename(op: &Op, rename: &RenameStep, out: &mut Vec<Rendered>) {
                 "{RUNTIME_RESOLVED} online rename {subject}: table rebuild; \
                  needs the live table structure — exact rebuild SQL depends on live state"
             )));
-            let _ = rb; // the rebuild statements depend on live shape — never printed as the stream
+            let _ = rb; // the rebuild statements depend on live shape - never printed as the stream
         }
     }
 }
@@ -953,7 +954,7 @@ fn op_subject(op: &Op) -> String {
             CommentTarget::Column { table, name, .. }
             | CommentTarget::Constraint { table, name, .. } => quote_dotted(&[table, name]),
         },
-        // VENDOR (`zero-migrate`) — the best-effort subject is the named
+        // VENDOR (`zero-migrate`) - the best-effort subject is the named
         // object (schema / extension / role / function) or the table+name for the
         // table-scoped RLS/policy/trigger ops.
         Op::CreateSchema { name, .. }
@@ -977,7 +978,7 @@ fn op_subject(op: &Op) -> String {
     }
 }
 
-/// The rename subject `"t"."from" → "t"."to"` for an online rename op.
+/// The rename subject `"t"."from" -> "t"."to"` for an online rename op.
 fn rename_subject(op: &Op) -> String {
     match op {
         Op::RenameColumn {
@@ -990,12 +991,12 @@ fn rename_subject(op: &Op) -> String {
             )
         }
         // Defensive: a non-rename op reaching the online-rename render is a logic
-        // error, but never fabricate — fall back to the kind subject.
+        // error, but never fabricate - fall back to the kind subject.
         other => op_subject(other),
     }
 }
 
-/// Join identifiers as `"a"."b"."c"` — a DISPLAY quoting for labels only (NOT the
+/// Join identifiers as `"a"."b"."c"` - a DISPLAY quoting for labels only (NOT the
 /// engine's render seam; labels are comments, never executed).
 fn quote_dotted(parts: &[&str]) -> String {
     parts

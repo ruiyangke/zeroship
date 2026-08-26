@@ -12,15 +12,15 @@ use crate::{effective_policy_from_charter_toml, EffectivePolicy};
 // # Why core re-declares ids it does not own
 //
 // The ids belong to the vendors: `zero_migrate_postgres::DIALECT` is the workspace's
-// one declaration of `"postgres"`, and every consumer OUTSIDE this crate — including
-// the composition's `tests/` binaries — reads it from there.
+// one declaration of `"postgres"`, and every consumer OUTSIDE this crate - including
+// the composition's `tests/` binaries - reads it from there.
 //
 // Core's `src` does not, and this file is the ONLY place in it that could: the vendor
 // crates are dev-dependencies, so `#[cfg(test)]` code can reach them, and
 // `dialect_matrix/core_names_no_vendor_crate.rs` is the ratchet that keeps that one
 // file at one. `core_names_no_vendor_backend_module.rs` allows `postgres::` in path
 // position NOWHERE, test code included. A `#[cfg(test)] use zero_migrate_postgres::DIALECT`
-// in `render/lower.rs` would be a real regression of both, not a technicality — the
+// in `render/lower.rs` would be a real regression of both, not a technicality - the
 // compiled engine would still not link differently, but the rule those censuses hold
 // is about what core's source is ALLOWED to know, and twenty-two files knowing it is
 // exactly the drift they exist to catch.
@@ -46,7 +46,7 @@ use crate::{effective_policy_from_charter_toml, EffectivePolicy};
 /// # This is the ONE place in core that names a backend crate, and it is a TEST double
 /// in the same sense the composition is not
 ///
-/// It USED TO BE `crate::render::backends::VENDORS` — an alias for the composition,
+/// It USED TO BE `crate::render::backends::VENDORS` - an alias for the composition,
 /// which lived in this crate. The composition is `zero-migrate`'s now, and this crate
 /// cannot see it: `zero-migrate` depends on `zero-migrate-core`, so the edge back
 /// would be a cycle Cargo refuses even as a dev edge in the direction that matters.
@@ -60,7 +60,7 @@ use crate::{effective_policy_from_charter_toml, EffectivePolicy};
 ///   would quietly make the engine's own tests unable to see a vendor regression.
 /// * It is a SECOND composition, and the workspace has a rule against those. It is the
 ///   one exception, it is `#[cfg(test)]`, and it must never disagree with
-///   `zero_migrate::shipping_vendors()` — `tests/dialect_matrix/the_registry_travels_as_a_value.rs`
+///   `zero_migrate::shipping_vendors()` - `tests/dialect_matrix/the_registry_travels_as_a_value.rs`
 ///   is where that is asserted, from the composing crate, where both are visible.
 ///
 /// One place, for the same reason the three ids above are one place: core's unit tests

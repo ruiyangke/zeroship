@@ -1,14 +1,14 @@
-//! Filter JSON → parameterized SQL translation.
+//! Filter JSON -> parameterized SQL translation.
 //!
 //! Translates MongoDB-style filter objects into PostgreSQL WHERE clauses
 //! with parameterized queries to prevent SQL injection.
 //!
 //! Supported operators:
-//! - `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte` — comparison
-//! - `$in`, `$nin` — set membership
-//! - `$and`, `$or` — logical combinators
-//! - `$exists` — null / not-null check
-//! - `$like` — LIKE pattern matching
+//! - `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte` - comparison
+//! - `$in`, `$nin` - set membership
+//! - `$and`, `$or` - logical combinators
+//! - `$exists` - null / not-null check
+//! - `$like` - LIKE pattern matching
 //!
 //! All user values are bound as parameters (`$1`, `$2`, ...).
 //! Column and table names are quoted with double-quotes to prevent injection.
@@ -51,7 +51,7 @@ pub enum QueryError {
     /// field for the SDK error envelope. Distinct from
     /// `ReservedSystemFieldName` (which fires only at declaration
     /// time): this fires at UPDATE-patch validation, NOT on filter
-    /// reads (`update({ id: ... }, ...)` is fine — the filter
+    /// reads (`update({ id: ... }, ...)` is fine - the filter
     /// references id; only the PATCH side is fenced).
     ImmutableSystemField(String),
 }
@@ -74,7 +74,7 @@ impl std::fmt::Display for QueryError {
 
 /// A built SQL query with text parameters.
 ///
-/// Parameters are always serialized as text strings — the PostgreSQL driver
+/// Parameters are always serialized as text strings - the PostgreSQL driver
 /// handles type inference from context (column types).
 #[derive(Debug)]
 pub struct BuiltQuery {
@@ -90,9 +90,9 @@ pub struct BuiltQuery {
 ///
 /// The contract crate holds the trait, neutral field-shape readers, and sentinel
 /// builders. Each vendor's type table lives in that vendor crate. The rest of this
-/// module — the
+/// module - the
 /// CREATE TABLE composer, the FK/index/constraint builders, the identifier and
-/// reserved-name validators, and `def_to_column_type_for_dialect` — stays as
+/// reserved-name validators, and `def_to_column_type_for_dialect` - stays as
 /// composition while asking the selected renderer to spell and canonicalize each
 /// neutral column token.
 /// That is the boundary rule `render::backends` states at length, and it is what
@@ -106,8 +106,8 @@ pub use zero_migrate_backend::schema::{
 
 /// The schema renderer for a dialect.
 ///
-/// The exhaustive dispatch itself lives in `crate::schema::backends` — one
-/// module per shipping vendor, mirroring `render::backends` — and is re-exported
+/// The exhaustive dispatch itself lives in `crate::schema::backends` - one
+/// module per shipping vendor, mirroring `render::backends` - and is re-exported
 /// here so every existing `schema::query::renderer(..)` call site resolves
 /// unchanged. See that module's header for what the split buys and for the two
 /// couplings it deliberately does NOT remove.
@@ -201,9 +201,9 @@ mod schema_renderer_tests {
     /// That reachability claim was later MEASURED rather than left as a reading of the
     /// call graph. `MysqlSchemaRenderer::column_type` was given a tripwire that panics
     /// on entry and the whole Rust suite was run against live PostgreSQL, MySQL and
-    /// SQLite (37 sections, 3333 tests): exactly EIGHT tests tripped it, and all eight
-    /// are `#[cfg(test)]` unit tests in this file - this one among them. Not one
-    /// integration test and not one live-server leg reached the MySQL arm.
+    /// SQLite. Every test that tripped it is a `#[cfg(test)]` unit test in this file -
+    /// this one among them. Not one integration test and not one live-server leg
+    /// reached the MySQL arm.
     ///
     /// A bare `number` with no facet must keep the float spelling on all three - that is
     /// the half that must NOT move, and the reason the facet is read rather than the
@@ -246,7 +246,7 @@ mod schema_renderer_tests {
         assert_eq!(backend.canonical_type("numeric"), "text");
         assert_eq!(backend.canonical_type("decimal"), "text");
         assert_eq!(backend.canonical_type("text"), "text");
-        // `double precision` / `real` stay REAL affinity — they ARE binary floats.
+        // `double precision` / `real` stay REAL affinity - they ARE binary floats.
         assert_eq!(backend.canonical_type("double precision"), "real");
         assert_eq!(backend.canonical_type("real"), "real");
     }
@@ -256,7 +256,7 @@ mod schema_renderer_tests {
  *
  * `pub const SQLITE_ENC_BLOB_PREFIX` claimed that "the SQLite session strips the
  * prefix and base64-decodes the remainder". The literal it defined appeared EXACTLY
- * ONCE in the entire repository — in that definition — so no session stripped it,
+ * ONCE in the entire repository - in that definition - so no session stripped it,
  * and none ever had. Its only reader in code was `SchemaRenderer::wrap_encrypted_param`,
  * itself dead (see the trait's header), so the constant, its one reader, and the
  * decode step it promised are all gone together.
@@ -272,9 +272,9 @@ mod schema_renderer_tests {
 /// - Must not be empty.
 /// - Must not exceed 63 bytes (Postgres `NAMEDATALEN` limit).
 /// - Must not contain a null byte.
-/// - Must not start with `pg_` (case-insensitive) — reserved for Postgres
+/// - Must not start with `pg_` (case-insensitive) - reserved for Postgres
 ///   system catalogs.
-/// - Must not start with `__zero_migrate` (case-insensitive) — reserved for the
+/// - Must not start with `__zero_migrate` (case-insensitive) - reserved for the
 ///   platform's own internal tables (e.g. `__zero_migrate_migrations`).
 pub fn validate_collection(vendors: VendorSet, name: &str) -> Result<(), QueryError> {
     if name.is_empty() {
@@ -326,9 +326,9 @@ pub fn validate_collection(vendors: VendorSet, name: &str) -> Result<(), QueryEr
 /// enforces on creator-declared field names.
 ///
 /// Three match arms cover the patterns we currently reserve:
-/// - `Exact(s)`  — refuse a field named literally `s`.
-/// - `Prefix(p)` — refuse any field name starting with `p`.
-/// - `Suffix(s)` — refuse any field name ending with `s`.
+/// - `Exact(s)`  - refuse a field named literally `s`.
+/// - `Prefix(p)` - refuse any field name starting with `p`.
+/// - `Suffix(s)` - refuse any field name ending with `s`.
 ///
 /// The `_masked` suffix is reserved for sibling columns auto-emitted
 /// by the platform's `.mask()` / `.encrypted()` machinery (Path B).
@@ -337,15 +337,15 @@ pub fn validate_collection(vendors: VendorSet, name: &str) -> Result<(), QueryEr
 /// exact names so creator schemas cannot collide with the
 /// classification taxonomy used by audit + authorization.
 pub(crate) enum ReservedName {
-    /// Literal name match — refuse a field named exactly `&str`.
+    /// Literal name match - refuse a field named exactly `&str`.
     Exact(&'static str),
-    /// Prefix match — refuse any field starting with `&str`.
+    /// Prefix match - refuse any field starting with `&str`.
     Prefix(&'static str),
-    /// Suffix match — refuse any field ending with `&str`.
+    /// Suffix match - refuse any field ending with `&str`.
     Suffix(&'static str),
 }
 
-/// Platform-reserved field names. Centralised list — every new
+/// Platform-reserved field names. Centralised list - every new
 /// reserved prefix / suffix / exact-name lands here, exercised by
 /// both the schema-registration validator and the filter-time
 /// validator (the latter fences `db.users.find({ ssn_masked: ... })`
@@ -367,7 +367,7 @@ pub(crate) const RESERVED_NAMES: &[ReservedName] = &[
     // schema namespace, and it was the only row here that belonged to a vendor rather
     // than to zero-migrate. The backend that owns it declares it now
     // (`Limits::reserved_identifier_prefixes`), and `validate_field_name` checks every
-    // REGISTERED backend's reservations below — so a fourth backend's namespace is
+    // REGISTERED backend's reservations below - so a fourth backend's namespace is
     // fenced by the same loop instead of needing a row added to this table.
     // Masked-column sibling suffix. The platform
     // emits `<col>_masked` siblings (Path B); creators must not
@@ -394,7 +394,7 @@ pub(crate) const RESERVED_NAMES: &[ReservedName] = &[
 /// Postgres silently truncates identifiers longer than 63 bytes (NAMEDATALEN),
 /// which would alias two distinct fields to the same column. Injection is
 /// already blocked by `quote_ident`. The ASCII allowlist matches
-/// [`validate_collection`]'s policy: a multi-byte identifier like `"café"`
+/// [`validate_collection`]'s policy: a multi-byte identifier like `"cafe"`
 /// is 4 chars / 5 bytes, and two distinct unicode-spelled fields could
 /// collide on the same Postgres-truncated column if either side approached
 /// the 63-byte ceiling. Enforcing ASCII-alphanumeric + underscore prevents
@@ -435,7 +435,7 @@ pub fn validate_field_name(vendors: VendorSet, name: &str) -> Result<(), QueryEr
         )));
     }
     // Reserved-name check. Run after the ASCII
-    // allowlist so a name like `"café"` reports the encoding error
+    // allowlist so a name like `"cafe"` reports the encoding error
     // (not a spurious reserved-name hit on a bogus suffix match).
     for reserved in RESERVED_NAMES {
         let matches = match reserved {
@@ -491,7 +491,7 @@ pub fn validate_field_name(vendors: VendorSet, name: &str) -> Result<(), QueryEr
 /// `db.users.find({ id: "..." })`.
 ///
 /// On reservation hit returns [`QueryError::ReservedSystemFieldName`]
-/// — distinct from `InvalidIdent` so the SDK can branch on a stable
+/// - distinct from `InvalidIdent` so the SDK can branch on a stable
 /// `reserved_system_field_name` code. The message names the offending
 /// field; the hint enumerates the active injected set so the creator knows which
 /// names this table's policy owns.
@@ -520,7 +520,7 @@ pub fn validate_field_name_for_declaration(
 /// Legacy base62-UUIDv7 ID prefixes reserved for the platform. An internal
 /// descriptor using `usr` would mint IDs that collide with platform user IDs,
 /// so the prefix is rejected.
-/// Only `usr` is reserved for now. The db SDK fences the same name at build
+/// `usr` is the whole of [`RESERVED_ID_PREFIXES`]. The db SDK fences the same name at build
 /// time, but that SDK ships with the consuming product and is not vendored
 /// here, so this list is the copy this crate enforces and the two are kept in
 /// step by hand.
@@ -548,8 +548,8 @@ pub const RESERVED_ID_PREFIXES: &[&str] = &["usr"];
 /// platform user IDs - and not on a demonstrated bypass.
 ///
 /// Rules:
-/// - must match `^[a-z][a-z0-9_]*$` → [`QueryError::InvalidIdent`]
-/// - must not be a [`RESERVED_ID_PREFIXES`] entry → [`QueryError::ReservedSystemFieldName`]
+/// - must match `^[a-z][a-z0-9_]*$` -> [`QueryError::InvalidIdent`]
+/// - must not be a [`RESERVED_ID_PREFIXES`] entry -> [`QueryError::ReservedSystemFieldName`]
 ///   (reuses the typed `reserved_system_field_name` SDK code; the prefix
 ///   collision is morally a system-field reservation).
 pub fn validate_id_prefix(prefix: &str) -> Result<(), QueryError> {
@@ -597,7 +597,7 @@ fn validate_schema(name: &str) -> Result<(), QueryError> {
  * It used to live here as `pub fn mysql_quote_ident`, and it was the exact MIRROR
  * IMAGE of the ANSI arrangement described below: instead of core reaching a
  * backend-private primitive through a named door, the MySQL BACKEND reached into
- * core — `render::backends::mysql` called this function to get its own spelling.
+ * core - `render::backends::mysql` called this function to get its own spelling.
  *
  * Nothing here was mis-emitted. Every call site named MySQL in the callee's name,
  * so unlike the `quote_ident` case there was no unnamed vendor, and the
@@ -606,7 +606,7 @@ fn validate_schema(name: &str) -> Result<(), QueryError> {
  * `zero-migrate-mysql` would have needed core AT RUNTIME to spell an identifier.
  *
  * The bytes now live in `render::backends::mysql`'s own `quote_ident`, which core
- * cannot name, so this module reaches them the same way it reaches the ANSI ones —
+ * cannot name, so this module reaches them the same way it reaches the ANSI ones -
  * through the registered schema renderer.
  */
 
@@ -624,21 +624,21 @@ fn validate_schema(name: &str) -> Result<(), QueryError> {
 // The production CREATE path passes the orchestrator's live table set through
 // `FkEmission::Deferred` so an FK to a not-yet-created target becomes a separate
 // `ALTER TABLE ... ADD CONSTRAINT` rather than an inline clause the statement
-// order cannot satisfy. `render/declarative.rs:5936` is that caller, reaching
-// `build_create_table_with_fks_for_dialect_scoped_statements` directly.
+// order cannot satisfy. `render::declarative::lower_create_table` is that caller,
+// reaching `build_create_table_with_fks_for_dialect_scoped_statements` directly.
 //
 // An earlier version of this comment named `exec_register_model_with_pool` as
 // the production path. That function does not exist in this workspace and never
 // has - it belongs to appbase's plugin-db, from which this kernel was seeded.
-// `schema/diff.rs:10` still carries the same inherited name.
+// The `schema::diff` module header still carries the same inherited name.
 
 /// Controls FK emission strategy for `build_create_table_with_fks_for_dialect`.
 ///
-/// - `Inline` — every `t.ref(target)` becomes an inline `FOREIGN KEY`
+/// - `Inline` - every `t.ref(target)` becomes an inline `FOREIGN KEY`
 ///   clause inside CREATE TABLE. The caller takes responsibility for
 ///   ordering: parent tables must exist (or be in the same statement
 ///   batch) before the FK is enforced.
-/// - `Deferred(existing)` — only emits inline FK clauses for refs whose
+/// - `Deferred(existing)` - only emits inline FK clauses for refs whose
 ///   target is `collection` itself (self-ref) or is in `existing` (already
 ///   present in the live schema). Other refs are skipped here so the
 ///   orchestrator can later attach them with `build_add_foreign_key` once
@@ -665,7 +665,7 @@ pub enum FkEmission<'a> {
 ///   `/* zero-migrate:mask:... */` comment on the sibling column is the
 ///   SQLite-side wire).
 ///
-/// Foreign-key column types continue to come from the author schema — see
+/// Foreign-key column types continue to come from the author schema - see
 /// `def_to_pg_type`.
 pub fn build_create_table_with_fks_for_dialect(
     vendors: VendorSet,
@@ -727,14 +727,14 @@ pub fn build_create_table_with_fks_for_dialect_scoped(
 
 /// **Structural** peer of [`build_create_table_with_fks_for_dialect_scoped`]:
 /// returns the CREATE-TABLE payload as its individual statement list (the CREATE,
-/// the active policy's injected indexes, and — on PG — the `COMMENT ON COLUMN`
+/// the active policy's injected indexes, and - on PG - the `COMMENT ON COLUMN`
 /// mask/encryption sentinels) instead of the `;\n`-joined string.
 ///
 /// `join(";\n")` over the returned vector is byte-identical to the joined form, so
 /// the two entry points never diverge. The `zero_migrate` engine's
 /// guard-per-statement lowering consumes this list so a string-literal column
 /// DEFAULT whose value itself contains `;\n` (e.g. `DEFAULT 'a;\nb'`) is NEVER
-/// split mid-statement — the split is structural, not a textual `;\n` heuristic.
+/// split mid-statement - the split is structural, not a textual `;\n` heuristic.
 pub fn build_create_table_with_fks_for_dialect_scoped_statements(
     vendors: VendorSet,
     app_id: &str,
@@ -815,11 +815,11 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
             //
             // The sibling type is `TEXT` for every mask kind
             // (full / last4 / first4 / email / name / dateYear /
-            // dateDecade) — the union of mask outputs is string-shaped.
+            // dateDecade) - the union of mask outputs is string-shaped.
             // Future BYTEA-shaped masks would extend this with a per-
             // kind type lookup.
             //
-            // Explicit `.mask({ kind: "none" })` opt-out → no sibling
+            // Explicit `.mask({ kind: "none" })` opt-out -> no sibling
             // emission. The decrypt-on-read path continues to serve
             // such columns; the parent column is the only storage site.
             if let Some(sibling_col) = mask_sibling_column_for_field(field, def) {
@@ -828,8 +828,8 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
                 // forbids creator-declared columns ending in
                 // `_masked`); no collision possible.
                 //
-                // Attach a `/* zero-migrate:mask:kind=…,
-                // classification=… */` inline comment to the sibling
+                // Attach a `/* zero-migrate:mask:kind=...,
+                // classification=... */` inline comment to the sibling
                 // DDL so the SQLite introspector can recover the mask
                 // metadata from `sqlite_master.sql`. PG ignores SQL
                 // comments at parse time, so the introspector on the
@@ -897,14 +897,14 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
     // loop above propagates that error and returns before this
     // assertion runs. The assertion guards a future regression where
     // a creator-declared injected field somehow makes it through the
-    // schema-iteration loop without raising — under debug builds the
+    // schema-iteration loop without raising - under debug builds the
     // panic surfaces immediately; release builds tolerate the
     // duplicated declaration and let the engine raise a
     // `column "id" specified more than once` error.
     //
     // Scans the assembled `columns` vector (not the raw schema), so
     // the assertion measures the actual DDL output rather than
-    // re-checking the input — catching any future emitter that adds
+    // re-checking the input - catching any future emitter that adds
     // a column out-of-band (e.g. a sibling-column path that
     // accidentally lands on a policy-injected name).
     debug_assert!(
@@ -913,7 +913,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
             let mut ok = true;
             for col in &columns {
                 // The column DDL starts with the quoted (or bareword)
-                // identifier — first whitespace-delimited token. We
+                // identifier - first whitespace-delimited token. We
                 // strip the leading `"` if present.
                 let first = col.split_whitespace().next().unwrap_or("");
                 let name = first.trim_matches('"').trim_matches('`');
@@ -942,7 +942,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
     // sibling column carrying a mask sentinel. Multi-statement SQL is
     // accepted by `pool.query_text_params` (the underlying libpq
     // simple-query protocol) and by SQLite's `sqlite3_exec`. On the
-    // SQLite arm `COMMENT ON COLUMN` is a syntax error — the
+    // SQLite arm `COMMENT ON COLUMN` is a syntax error - the
     // dialect-routing skips the `COMMENT ON COLUMN` append when
     // `dialect == Sqlite`; the inline `/* zero-migrate:mask:... */` comment
     // baked into the CREATE TABLE body is the SQLite-side wire (see
@@ -1090,7 +1090,7 @@ fn injected_column_type(
     let def = match &column.ty {
         ColType::Text => serde_json::json!({ "type": "string" }),
         // Bounded system string (`id`, actor stamps): `character varying(N)` on
-        // Postgres/MySQL, `TEXT` on SQLite — index-able on every dialect.
+        // Postgres/MySQL, `TEXT` on SQLite - index-able on every dialect.
         ColType::String { length } => {
             serde_json::json!({ "type": "string", "maxLength": length })
         }
@@ -1176,7 +1176,7 @@ fn render_injected_index(
     ))
 }
 
-/// Build an `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` statement (B2).
+/// Build an `ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY` statement (B2).
 ///
 /// Used by the diff engine when both tables already exist and the FK has
 /// to be attached separately. The constraint name is content-addressed
@@ -1207,8 +1207,8 @@ pub fn build_add_foreign_key(
         .map_err(|reason| QueryError::InvalidFilter(reason.to_string()))
 }
 
-/// Build `ALTER TABLE … DROP CONSTRAINT` for an existing FK (B2 diff
-/// engine — `DropForeignKey` op).
+/// Build `ALTER TABLE ... DROP CONSTRAINT` for an existing FK (B2 diff
+/// engine - `DropForeignKey` op).
 pub fn build_drop_foreign_key(
     vendors: VendorSet,
     app_id: &str,
@@ -1241,7 +1241,7 @@ pub fn fk_constraint_name(
     crate::render::lower::derived_fk_constraint_name(vendors, table, &[field.to_string()])
 }
 
-/// Build the `CONSTRAINT "name" FOREIGN KEY (...) REFERENCES …` clause
+/// Build the `CONSTRAINT "name" FOREIGN KEY (...) REFERENCES ...` clause
 /// shared by inline CREATE TABLE emission and standalone ALTER TABLE.
 ///
 /// Absent an explicit `refName`, the constraint name is the shared
@@ -1383,13 +1383,13 @@ pub fn build_add_column(
     // declaration, also emit a nullable unbounded-text ADD COLUMN op for
     // the sibling `<col>_masked` and its sentinel attachment in the
     // same multi-statement payload. Only the sibling is NULL here
-    // (versus NOT NULL on CREATE TABLE) — existing rows would refuse
+    // (versus NOT NULL on CREATE TABLE) - existing rows would refuse
     // the ALTER if the sibling were NOT NULL; the mask backfill flips it
     // to NOT NULL after every row has its sibling populated.
     //
     // Note: this branch is taken ONLY when the diff classifier emits
     // an `AddColumn` for a fresh top-level field declared with
-    // `.mask({...})` — for that case the sibling tags along in the
+    // `.mask({...})` - for that case the sibling tags along in the
     // same payload. The separate `MaskBackfill`-paired
     // `AddColumn(<col>_masked)` op the diff classifier emits for the
     // backfill sets `mask_sibling_for` in `details` and the field IS the
@@ -1421,18 +1421,18 @@ pub fn build_add_column(
 
 /// A single index to materialise during `registerModel`.
 ///
-/// `name` is the deterministic Postgres identifier (≤ 63 bytes). `sql` is a
-/// `CREATE [UNIQUE] INDEX CONCURRENTLY IF NOT EXISTS …` statement ready to be
+/// `name` is the deterministic Postgres identifier (<= 63 bytes). `sql` is a
+/// `CREATE [UNIQUE] INDEX CONCURRENTLY IF NOT EXISTS ...` statement ready to be
 /// executed outside a transaction (CONCURRENTLY cannot run inside `BEGIN`).
 /// `unique` is exposed so callers can apply different recovery policies for
 /// unique-index failures (which surface `23505 unique_violation` errors that
-/// must not be retried — see the proposal's INVALID-index recovery).
+/// must not be retried - see the proposal's INVALID-index recovery).
 ///
-/// `kind` carries the index *shape* — B-tree (the default for
+/// `kind` carries the index *shape* - B-tree (the default for
 /// every existing call site), vector (pgvector / Rust flat-scan), or spatial (PostGIS GIST on PG,
 /// haversine post-filter on SQLite). The default is [`IndexKind::BTree`]
 /// so existing call sites that build B-tree indexes (`build_create_indexes`,
-/// `build_named_indexes`) need no churn — they construct with explicit
+/// `build_named_indexes`) need no churn - they construct with explicit
 /// fields including `kind: IndexKind::BTree` to stay readable, but
 /// `..Default::default()` would also work given the `#[derive(Default)]`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1443,7 +1443,7 @@ pub struct IndexSpec {
     pub columns: Vec<String>,
     /// Whether this is a UNIQUE index.
     pub unique: bool,
-    /// `CREATE …` DDL ready for execution.
+    /// `CREATE ...` DDL ready for execution.
     pub sql: String,
     /// Index shape - selects the backend builder branch.
     ///
@@ -1457,7 +1457,7 @@ pub struct IndexSpec {
     pub kind: IndexKind,
 }
 
-/// Index shape — the closed sum over the four kinds of indexes
+/// Index shape - the closed sum over the four kinds of indexes
 /// `registerModel` can materialise.
 ///
 /// The default is [`IndexKind::BTree`] so every existing call site keeps
@@ -1466,14 +1466,14 @@ pub struct IndexSpec {
 /// alike (see [`IndexSpec::kind`]).
 ///
 /// **Why an enum, not a string**: same rationale as
-/// [`crate::schema::descriptors::VectorMetric`] — the rustc exhaustiveness check
+/// [`crate::schema::descriptors::VectorMetric`] - the rustc exhaustiveness check
 /// trips every match arm if a future change adds a fifth kind, rather
 /// than a default branch silently routing the new kind to the B-tree
 /// builder.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum IndexKind {
     /// Plain B-tree index over the listed columns. PG: `CREATE INDEX
-    /// … (col1, col2, …)`. SQLite: same shape via the sqlite dialect.
+    /// ... (col1, col2, ...)`. SQLite: same shape via the sqlite dialect.
     /// The default for every column with the `index` / `unique`
     /// modifier in the SDK schema DSL.
     #[default]
@@ -1486,7 +1486,7 @@ pub enum IndexKind {
     Vector {
         /// Declared vector dimensionality (e.g. 768 for `text-embedding-3-small`).
         dims: i32,
-        /// Distance metric — see [`crate::schema::descriptors::VectorMetric`].
+        /// Distance metric - see [`crate::schema::descriptors::VectorMetric`].
         metric: crate::schema::descriptors::VectorMetric,
     },
     /// Spatial index over a `geography(POINT, 4326)` (PG) or BLOB-
@@ -1521,7 +1521,7 @@ fn create_index_if_not_exists(
 ///   * a unique index per field with `unique: true`.
 ///
 /// Composite indexes (the proposal's `schema(...).index(name, fields)`
-/// builder) are wired separately via [`build_named_indexes`] — callers
+/// builder) are wired separately via [`build_named_indexes`] - callers
 /// merge that `Vec` with this function's output at `bootstrap.rs`.
 ///
 /// Statements are emitted in deterministic order: declared field order in the
@@ -1587,7 +1587,7 @@ pub fn build_create_indexes(
                 .map(|d| d as i32)
                 .unwrap_or(0);
             if dims == 0 {
-                // Malformed — skip the index. The column DDL emitter
+                // Malformed - skip the index. The column DDL emitter
                 // will reject the table later (PG returns
                 // `type "vector" does not exist` if the extension is
                 // missing or `dims out of range` if dims is 0).
@@ -1634,7 +1634,7 @@ pub fn build_create_indexes(
         // on deterministic columns (only equality + `$in`), so a
         // B-tree on the ciphertext is sufficient and matches the
         // user's expectation that `find({ssnDet: "X"})` is fast.
-        // Randomised columns do NOT get this index — the ciphertext is
+        // Randomised columns do NOT get this index - the ciphertext is
         // different per write so equality lookups can't work anyway.
         let det_encrypted = def
             .get("encrypted")
@@ -1658,7 +1658,7 @@ pub fn build_create_indexes(
                 sql,
                 kind: IndexKind::BTree,
             });
-            // Fall through — a deterministic-encrypted column may also
+            // Fall through - a deterministic-encrypted column may also
             // carry `.unique()` (we still want a uniqueness constraint
             // on the ciphertext, valid because deterministic mode
             // preserves equality). The `wants_unique` branch below
@@ -1677,7 +1677,7 @@ pub fn build_create_indexes(
             continue;
         }
 
-        // Unique implies an index — if both flags are set, prefer the unique
+        // Unique implies an index - if both flags are set, prefer the unique
         // form (a unique index also serves as a lookup index, so emitting
         // both would be redundant and waste storage).
         if wants_unique {
@@ -1723,7 +1723,7 @@ pub fn build_create_indexes(
         // route equality / sort queries through the masked sibling
         // without a sequential scan. Naming: `<coll>__<col>_masked_idx`
         // (double-underscore separator, matching `named_index_name`'s
-        // collision-avoidance convention). Never UNIQUE — uniqueness
+        // collision-avoidance convention). Never UNIQUE - uniqueness
         // applies to the parent column only (the sibling is a derived
         // value, multiple rows can share the same masked output).
         if wants_index || wants_unique {
@@ -1756,10 +1756,10 @@ pub fn build_create_indexes(
 ///
 /// The wire format is `[{name, fields, unique?}]`. Each entry becomes a
 /// `CREATE [UNIQUE] INDEX CONCURRENTLY IF NOT EXISTS "<collection>__<name>"
-/// ON "<schema>"."<collection>" (col1, col2, …)`. Collision with the
+/// ON "<schema>"."<collection>" (col1, col2, ...)`. Collision with the
 /// per-field auto-named indexes from `build_create_indexes` is avoided
 /// by the `<collection>__` prefix (auto-named indexes use the
-/// `<collection>_<col>_{idx,key}` shape — no double underscore).
+/// `<collection>_<col>_{idx,key}` shape - no double underscore).
 ///
 /// Validation is intentionally light: the SDK already verified that
 /// every field exists on the schema and that names are unique within
@@ -1873,20 +1873,20 @@ pub fn named_index_name(collection: &str, name: &str) -> String {
 /// Build a deterministic Postgres index name from a table name and columns.
 ///
 /// Strategy:
-///   1. Construct `<table>_<col1>_<col2>…_<suffix>` where suffix is
+///   1. Construct `<table>_<col1>_<col2>..._<suffix>` where suffix is
 ///      `key` for unique indexes and `idx` otherwise.
 ///   2. Postgres `NAMEDATALEN` defaults to 64 bytes (limit 63 chars). If the
 ///      generated name exceeds 60 bytes, replace the tail with an 8-char
 ///      base32 hash of the full name. This is Atlas's strategy
 ///      (`migrate/sqltool/index_name.go`). The 60-byte threshold leaves
 ///      headroom for the suffix without ever crossing NAMEDATALEN.
-///   3. The hash is sha256(full_name) → first 5 bytes → base32 (8 chars).
+///   3. The hash is sha256(full_name) -> first 5 bytes -> base32 (8 chars).
 ///      sha256 is in `crates/runtime` and `crates/core` already; pulling
 ///      blake3 would add a new transitive dep for an 8-char fingerprint
 ///      where collision resistance is not actually load-bearing (we only
 ///      need stable + roughly-uniform). sha256 is the cheaper choice.
 ///
-/// Naming is content-addressed (same input → same name), so re-running
+/// Naming is content-addressed (same input -> same name), so re-running
 /// `registerModel` with `IF NOT EXISTS` is idempotent.
 pub fn index_name(table: &str, columns: &[&str], unique: bool) -> String {
     let suffix = if unique { "key" } else { "idx" };
@@ -1899,10 +1899,10 @@ pub fn index_name(table: &str, columns: &[&str], unique: bool) -> String {
     let hash = short_hash_base32(&full);
     // Reserve `_<hash>` (1 + 8 = 9 bytes) on the tail. Allocate the rest
     // to a prefix of the original name (which already starts with the
-    // table). Cap the prefix at 54 bytes so the total is ≤ 63 bytes.
+    // table). Cap the prefix at 54 bytes so the total is <= 63 bytes.
     let prefix_budget = 60usize.saturating_sub(9);
     let mut prefix: String = full.chars().take(prefix_budget).collect();
-    // Drop a trailing underscore (cosmetic — keep `<a>_<hash>` rather than
+    // Drop a trailing underscore (cosmetic - keep `<a>_<hash>` rather than
     // `<a>__<hash>`).
     if prefix.ends_with('_') {
         prefix.pop();
@@ -1912,7 +1912,7 @@ pub fn index_name(table: &str, columns: &[&str], unique: bool) -> String {
 
 /// 8-char base32 fingerprint over sha256 of the input.
 ///
-/// Crockford-style alphabet without padding — Postgres identifiers are
+/// Crockford-style alphabet without padding - Postgres identifiers are
 /// case-folded but our names already go through `quote_ident`, so we can
 /// keep lowercase letters for readability.
 fn short_hash_base32(input: &str) -> String {
@@ -1920,10 +1920,10 @@ fn short_hash_base32(input: &str) -> String {
     const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
 
     let digest = Sha256::digest(input.as_bytes());
-    let bytes = &digest[..5]; // 5 bytes = 40 bits → 8 base32 chars
+    let bytes = &digest[..5]; // 5 bytes = 40 bits -> 8 base32 chars
 
     let mut out = [0u8; 8];
-    // 5 bytes packed into 8 × 5-bit groups, MSB-first.
+    // 5 bytes packed into 8 x 5-bit groups, MSB-first.
     let mut acc: u64 = 0;
     for b in bytes {
         acc = (acc << 8) | u64::from(*b);
@@ -1941,7 +1941,7 @@ fn short_hash_base32(input: &str) -> String {
 /// encryption sentinel for a field's `t.encrypted({...})` declaration, IFF the
 /// field carries an `encrypted` sub-object. Returns `None` for a plain column.
 ///
-/// This is the SINGLE source of truth for the `zero-migrate:enc` wire shape — both
+/// This is the SINGLE source of truth for the `zero-migrate:enc` wire shape - both
 /// `field_to_column_for_dialect` (the column-DDL emitter that bakes it after
 /// the `BYTEA`/`BLOB` type) and the migration engine's declarative differ (which
 /// appends it to its own snapshot-rendered column) call it, so the sentinel the
@@ -1949,7 +1949,7 @@ fn short_hash_base32(input: &str) -> String {
 /// parser side lives in `read_live_schema` (PG `pg_attribute` comment regex) /
 /// the SQLite `sqlite_master.sql` regex.
 ///
-/// The returned string INCLUDES the surrounding `/* … */` comment delimiters so
+/// The returned string INCLUDES the surrounding `/* ... */` comment delimiters so
 /// it can be embedded verbatim into DDL (PG ignores it at parse time; SQLite
 /// preserves it in `sqlite_master.sql`).
 #[must_use]
@@ -2041,7 +2041,7 @@ fn field_to_column_for_dialect(
     // SQLite stores the original CREATE TABLE text verbatim. SQLite's
     // type affinity treats "BYTEA" as NUMERIC (no INT/CHAR/TEXT/BLOB/
     // FLOA/REAL/DOUB substring match), which still accepts BLOB values
-    // — same column shape both engines see byte-identical inserts.
+    // - same column shape both engines see byte-identical inserts.
     // Sentinel-on-DDL is the same regex-on-DDL pattern used for
     // vector dims; a sidecar `__zero_migrate_schema_meta` would be the upgrade
     // path and does not exist.
@@ -2069,16 +2069,16 @@ fn field_to_column_for_dialect(
     .to_string())
 }
 
-/// Map a single SDK field definition (`{ type, encrypted?, vectorDims?, … }`)
-/// to the column SQL TYPE for `dialect`, covering the FULL type surface —
+/// Map a single SDK field definition (`{ type, encrypted?, vectorDims?, ... }`)
+/// to the column SQL TYPE for `dialect`, covering the FULL type surface -
 /// `vector(N)`, `geography(POINT,4326)` (geoPoint), `BYTEA`/`BLOB`
 /// (encrypted), `literal`'s primitive, and the plain B-tree types. This is
 /// the single source of truth the migration engine's declarative differ
 /// adopts (schema-authority): the engine builds a `def` from its
 /// `FieldDescriptor` and calls this, so it reaches full capability
-/// (vector/encrypted/geo) by reuse rather than re-implementing — and never
+/// (vector/encrypted/geo) by reuse rather than re-implementing - and never
 /// rejects those types again. The returned spelling is DDL (`vector(N)`,
-/// `DOUBLE PRECISION`, `TIMESTAMPTZ`, …); callers that need the
+/// `DOUBLE PRECISION`, `TIMESTAMPTZ`, ...); callers that need the
 /// `information_schema.data_type` spelling translate it themselves.
 pub fn def_to_column_type_for_dialect(
     vendors: VendorSet,
@@ -2136,7 +2136,7 @@ fn emit_union_variant_checks(
             continue;
         };
 
-        // Required (non-discriminator) fields in this variant — only
+        // Required (non-discriminator) fields in this variant - only
         // these need the NOT NULL clause inside the CHECK.
         let mut required_cols: Vec<String> = Vec::new();
         for (field, fd) in variant_obj {
@@ -2150,7 +2150,7 @@ fn emit_union_variant_checks(
         }
 
         // The literal value rendering must match how the column is
-        // stored — string literals are single-quoted, numbers and
+        // stored - string literals are single-quoted, numbers and
         // booleans are bare.
         let lit_sql = match disc_primitive {
             "number" => lit.as_f64().map(|n| n.to_string()).unwrap_or_default(),
@@ -2162,8 +2162,8 @@ fn emit_union_variant_checks(
             }
         };
 
-        // Skip variants with empty literal rendering — would produce
-        // bogus SQL like `kind <> ` (defensive — never hit when SDK
+        // Skip variants with empty literal rendering - would produce
+        // bogus SQL like `kind <> ` (defensive - never hit when SDK
         // emits well-formed JSON).
         if lit_sql.is_empty() {
             continue;
@@ -2204,7 +2204,7 @@ fn emit_union_variant_checks(
 }
 
 /// Sanitise a discriminator value (e.g. `login-x.y`) into a string safe
-/// to splice into a Postgres identifier — keep ASCII alphanumerics and
+/// to splice into a Postgres identifier - keep ASCII alphanumerics and
 /// underscores, replace everything else with `_`.
 fn sanitize_for_identifier(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -2222,7 +2222,7 @@ fn sanitize_for_identifier(s: &str) -> String {
 }
 
 /// Build the constraint name for a union-variant CHECK. NAMEDATALEN-safe
-/// (≤ 63 bytes) via the same hash-truncation strategy as index names.
+/// (<= 63 bytes) via the same hash-truncation strategy as index names.
 fn union_check_constraint_name(collection: &str, disc: &str, value_tag: &str) -> String {
     let full = format!("{collection}_{disc}_{value_tag}_chk");
     if full.len() <= 60 {
@@ -2285,7 +2285,7 @@ fn def_to_constraints_for_dialect(
             // `bigInt` exact: `as_f64` rounds anything past 2^53, so a default of
             // 9007199254740993 was previously unrepresentable even for the tokens
             // that DID render. Only the tokens `def_to_pg_type` maps to an integer
-            // or float column are listed — no PG type NAME (`int4`, `int8`,
+            // or float column are listed - no PG type NAME (`int4`, `int8`,
             // `bigint`) is accepted here either, for the same typo-rejection reason
             // `def_to_pg_type` gives.
             Some("number") | Some("int") | Some("integer") | Some("smallInt") | Some("bigInt")
@@ -2317,7 +2317,7 @@ fn def_to_constraints_for_dialect(
     //
     // The gate is the NUMERIC token family, not `number` alone. `min`/`max` are a
     // VALUE range, and the fold recovers them from a live `CHECK` onto whatever
-    // column the constraint bounds — including an `int` one (`project_field_defs`
+    // column the constraint bounds - including an `int` one (`project_field_defs`
     // reads `scores.score: {"type":"int","min":1,"max":9}` straight back out of an
     // applied `CHECK`). While this read `Some("number")` only, that recovered range
     // was dropped by the emitter, so a rebuild silently removed a constraint the
@@ -2329,8 +2329,8 @@ fn def_to_constraints_for_dialect(
     // alone. Widening it would change what the differ asks every dialect for, and
     // there is no live path on which the two gates can currently disagree: the only
     // production caller of this emitter is the SQLite 12-step rebuild, and a SQLite
-    // fold cannot produce a `min`/`max` at all — both routes to a CHECK are refused
-    // upstream (`model/op_support.rs`'s `addConstraint(check) … is PostgreSQL-only`
+    // fold cannot produce a `min`/`max` at all - both routes to a CHECK are refused
+    // upstream (`model/op_support.rs`'s `addConstraint(check) ... is PostgreSQL-only`
     // and `render/fold.rs`'s `createTable table-level CHECK is PostgreSQL-only`), so
     // a SQLite field def never carries the keys this block reads. The range arm here
     // is therefore correctness for the emitter's own vocabulary, exercised against a
@@ -2366,7 +2366,7 @@ fn def_to_constraints_for_dialect(
     // Standalone literal field. The value's primitive type is
     // already mapped by `def_to_pg_type`; here we attach a CHECK so the
     // column can hold only the literal value. Note this only fires for
-    // a `t.literal()` used as a top-level *non-union* column — inside a
+    // a `t.literal()` used as a top-level *non-union* column - inside a
     // flat-expanded union the discriminator carries an `enum` of all
     // variant literals (handled by the regular enum constraint below).
     if def.get("type").and_then(|t| t.as_str()) == Some("literal") {
@@ -2383,7 +2383,7 @@ fn def_to_constraints_for_dialect(
         }
     }
 
-    // Enum constraint — supports both string and numeric values
+    // Enum constraint - supports both string and numeric values
     if backend.suppress_string_enum_check(def) {
         return parts.join(" ");
     }
@@ -2655,7 +2655,7 @@ columns = [
     }
 
     // -----------------------------------------------------------------------
-    // SEC-4 — aggregation pipeline must NOT leak masked-column plaintext.
+    // SEC-4 - aggregation pipeline must NOT leak masked-column plaintext.
     //
     // For a mask-only column (`.mask({...})` without `.encrypted()`),
     // plaintext lives in `<col>` and the masked string in `<col>_masked`.
@@ -2716,7 +2716,7 @@ columns = [
     // Previously, `t.string().index()` and `t.string().unique()` set
     // `FieldDef.index/unique` in the SDK but the Rust DDL emitter produced
     // no index. These tests lock the materialisation contract: every
-    // marker yields a `CREATE [UNIQUE] INDEX CONCURRENTLY IF NOT EXISTS …`
+    // marker yields a `CREATE [UNIQUE] INDEX CONCURRENTLY IF NOT EXISTS ...`
     // statement with a deterministic name.
     // -----------------------------------------------------------------------
 
@@ -2766,7 +2766,7 @@ columns = [
     #[test]
     fn test_build_indexes_unique_wins_over_index() {
         // If a user sets both `.unique()` and `.index()` on the same field,
-        // the unique index already serves as a lookup index — emitting a
+        // the unique index already serves as a lookup index - emitting a
         // second non-unique index would be wasted storage.
         let schema = json!({
             "email": {"type": "string", "unique": true, "index": true},
@@ -2798,7 +2798,7 @@ columns = [
 
     #[test]
     fn test_build_indexes_special_column_name_is_quoted() {
-        // A column named `"user"` (reserved word) — must be quoted in
+        // A column named `"user"` (reserved word) - must be quoted in
         // the CREATE INDEX column list. The index *name* still embeds
         // the bare token, which is fine because we double-quote it
         // separately.
@@ -2857,7 +2857,7 @@ columns = [
     #[test]
     fn test_build_indexes_rejects_unknown_vector_metric() {
         // A typo'd or out-of-set metric must be REJECTED, not silently coerced
-        // to Cosine — that would pick the wrong pgvector opclass / SQLite
+        // to Cosine - that would pick the wrong pgvector opclass / SQLite
         // distance function with no build- or apply-time error.
         let schema = json!({
             "embedding": {"type": "vector", "vectorDims": 768, "vectorMetric": "manhatten"},
@@ -2906,7 +2906,7 @@ columns = [
     #[test]
     fn test_index_name_truncates_with_deterministic_hash() {
         // A pathological column name that exceeds 60 bytes when combined
-        // with table + suffix. The result must still be ≤ 63 bytes and
+        // with table + suffix. The result must still be <= 63 bytes and
         // deterministic across calls.
         let long_col = "a".repeat(70);
         let n1 = index_name("users", &[long_col.as_str()], true);
@@ -2939,9 +2939,9 @@ columns = [
     fn test_index_name_just_under_threshold_not_hashed() {
         // 60-byte threshold (inclusive). Build a name whose unhashed length
         // is exactly 60.
-        //   "t_" (2) + col (53) + "_idx" (4) = 59  → unhashed
-        //   "t_" (2) + col (54) + "_idx" (4) = 60  → unhashed
-        //   "t_" (2) + col (55) + "_idx" (4) = 61  → hashed
+        //   "t_" (2) + col (53) + "_idx" (4) = 59  -> unhashed
+        //   "t_" (2) + col (54) + "_idx" (4) = 60  -> unhashed
+        //   "t_" (2) + col (55) + "_idx" (4) = 61  -> hashed
         let col = "c".repeat(54);
         let name = index_name("t", &[col.as_str()], false);
         assert_eq!(name.len(), 60, "name: {name}");
@@ -2987,7 +2987,7 @@ columns = [
         );
         let spec = &out[0];
         assert!(spec.unique, "must be marked as unique");
-        // Statement shape — the four invariants the proposal calls out:
+        // Statement shape - the four invariants the proposal calls out:
         //   * CREATE UNIQUE INDEX (so duplicates are actually rejected)
         //   * CONCURRENTLY        (so writes are never blocked on build)
         //   * IF NOT EXISTS       (so re-runs are idempotent)
@@ -3112,7 +3112,7 @@ columns = [
     #[test]
     fn p7_id_with_non_id_type_still_rejected() {
         // A field literally named `id` with a NON-"id" type is NOT a
-        // prefix declaration — it must still trip the reserved-name fence.
+        // prefix declaration - it must still trip the reserved-name fence.
         let schema = json!({ "id": {"type": "string"} });
         let err =
             build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline).unwrap_err();
@@ -3355,7 +3355,7 @@ columns = [
         let sql =
             build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Deferred(&existing))
                 .unwrap();
-        // FK is deferred — column still present but no FOREIGN KEY clause.
+        // FK is deferred - column still present but no FOREIGN KEY clause.
         // TEXT (cascades to match the `id TEXT PRIMARY KEY`).
         assert!(sql.contains("\"authorId\" TEXT"), "{sql}");
         assert!(!sql.contains("FOREIGN KEY"), "FK should be deferred: {sql}");
@@ -3363,7 +3363,7 @@ columns = [
 
     #[test]
     fn b2_deferred_emission_inlines_self_ref() {
-        // Self-ref (employee.managerId → employee) inlines even when
+        // Self-ref (employee.managerId -> employee) inlines even when
         // existing-set is empty because the table being created IS the
         // target.
         let schema = json!({
@@ -3461,7 +3461,7 @@ columns = [
             .expect("build DDL");
         // The column itself must NOT carry INTEGER. (The CONSTRAINT
         // clause text contains nothing about INTEGER, so a substring
-        // check on the whole sql is safe — the substring
+        // check on the whole sql is safe - the substring
         // `"authorId" INTEGER` was present.)
         assert!(
             !sql.contains("\"authorId\" INTEGER"),
@@ -3514,7 +3514,7 @@ columns = [
     }
 
     // -----------------------------------------------------------------
-    // calendar dates → DATE column type
+    // calendar dates -> DATE column type
     // -----------------------------------------------------------------
 
     #[test]
@@ -3524,7 +3524,7 @@ columns = [
         });
         let sql =
             build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline).unwrap();
-        // DATE, not TIMESTAMPTZ — the whole point of D3.
+        // DATE, not TIMESTAMPTZ - the whole point of D3.
         assert!(sql.contains("\"birthday\" DATE"), "{sql}");
         assert!(!sql.contains("TIMESTAMPTZ DATE"), "{sql}");
     }
@@ -3532,7 +3532,7 @@ columns = [
     #[test]
     fn d3_calendar_date_distinct_from_date() {
         // Verify t.date() still emits TIMESTAMPTZ alongside DATE for the
-        // calendar variant — no overlap.
+        // calendar variant - no overlap.
         let schema = json!({
             "createdAt": { "type": "date" },
             "birthday": { "type": "calendarDate" },
@@ -3660,7 +3660,7 @@ columns = [
                 ),
             "missing login variant CHECK: {sql}"
         );
-        // The error variant requires message (stack is optional → not in the NOT NULL list).
+        // The error variant requires message (stack is optional -> not in the NOT NULL list).
         assert!(
             sql.contains("\"kind\" <> 'error' OR (\"message\" IS NOT NULL)"),
             "missing error variant CHECK: {sql}"
@@ -3703,7 +3703,7 @@ columns = [
     #[test]
     fn c2_union_with_only_optional_variants_skips_check() {
         // A variant with no required (non-discriminator) fields should
-        // not emit a CHECK constraint — the discriminator IN-list is
+        // not emit a CHECK constraint - the discriminator IN-list is
         // sufficient.
         let schema = json!({
             "kind": {
@@ -3737,7 +3737,7 @@ columns = [
 
     #[test]
     fn c2_union_numeric_discriminator() {
-        // Discriminator can be a number — verify the literal renders
+        // Discriminator can be a number - verify the literal renders
         // without single quotes and the IN-list does the same.
         let schema = json!({
             "code": {
@@ -3889,8 +3889,8 @@ columns = [
 
     #[test]
     fn c2_standalone_literal_field_emits_check_equality() {
-        // A top-level (non-union) literal field — `kind: t.literal("login")`
-        // alone — gets a `CHECK (kind = 'login')` constraint.
+        // A top-level (non-union) literal field - `kind: t.literal("login")`
+        // alone - gets a `CHECK (kind = 'login')` constraint.
         let schema = json!({
             "kind": { "type": "literal", "literalValue": "login", "required": true },
         });
@@ -3927,7 +3927,7 @@ columns = [
             "target": { "type": "string" }
         });
         let sql = build_create_table_with_fks("app1", "evt", &schema, &FkEmission::Inline).unwrap();
-        // Sanitised identifiers (dots / hyphens → underscore).
+        // Sanitised identifiers (dots / hyphens -> underscore).
         assert!(
             sql.contains("CONSTRAINT \"evt_kind_page_view_chk\""),
             "{sql}"
@@ -3942,10 +3942,10 @@ columns = [
     }
 
     // -----------------------------------------------------------------------
-    // Security IMPORTANT #1 — validate_collection reserved-name checks
+    // Security IMPORTANT #1 - validate_collection reserved-name checks
     // -----------------------------------------------------------------------
 
-    /// Valid collection names must still pass — no regression.
+    /// Valid collection names must still pass - no regression.
     #[test]
     fn validate_collection_accepts_valid_names() {
         for name in &["users", "todos", "order_items", "a", "A1_b"] {
@@ -4011,7 +4011,7 @@ columns = [
             }
             other => panic!("expected InvalidCollection, got {other:?}"),
         }
-        // 63 bytes is exactly the limit — must pass.
+        // 63 bytes is exactly the limit - must pass.
         assert!(
             validate_collection(crate::test_fixtures::VENDORS, &"a".repeat(63)).is_ok(),
             "63-byte name should pass"
@@ -4032,7 +4032,7 @@ columns = [
     }
 
     // -----------------------------------------------------------------------
-    // Security IMPORTANT #1 — validate_field_name length check
+    // Security IMPORTANT #1 - validate_field_name length check
     // -----------------------------------------------------------------------
 
     /// Field names within the 63-byte limit must pass.
@@ -4243,9 +4243,9 @@ columns = [
         }
     }
 
-    // NOTE: `system_field_reservation_error_carries_correct_code` — which
+    // NOTE: `system_field_reservation_error_carries_correct_code` - which
     // asserted the `From<QueryError> for DbError` lift carries
-    // `code = "reserved_system_field_name"` — was relocated to the data plane's
+    // `code = "reserved_system_field_name"` - was relocated to the data plane's
     // `error.rs` test module as part of the schema-authority extraction.
     // `DbError` lives in the data plane (it is built on a runtime `OpError`)
     // and cannot be named from this schema layer. The validator
@@ -4255,7 +4255,7 @@ columns = [
 
     /// `field_to_column` (the DDL builder for one column) must propagate
     /// the system-field reservation. End-to-end check that the
-    /// declaration-time fence is wired at the right call site —
+    /// declaration-time fence is wired at the right call site -
     /// CREATE TABLE on a schema declaring `id` as a creator column
     /// fails before any SQL is generated.
     #[test]
@@ -4362,8 +4362,8 @@ columns = [
         }
     }
 
-    /// The system `id` primary key is a BOUNDED string — `character varying(255)`
-    /// on Postgres, `TEXT` (varchar affinity) on SQLite — so it is index-able as a
+    /// The system `id` primary key is a BOUNDED string - `character varying(255)`
+    /// on Postgres, `TEXT` (varchar affinity) on SQLite - so it is index-able as a
     /// primary key on every dialect (MySQL cannot key an unbounded `TEXT`). Replaces
     /// the legacy `id SERIAL PRIMARY KEY`.
     #[test]
@@ -4470,7 +4470,7 @@ columns = [
         }
     }
 
-    /// `deleted_at <ts_type> NULL` — soft-delete sentinel. The
+    /// `deleted_at <ts_type> NULL` - soft-delete sentinel. The
     /// nullability is load-bearing for the find() auto-filter
     /// (`WHERE deleted_at IS NULL`).
     #[test]
@@ -4542,7 +4542,7 @@ columns = [
     }
 
     /// The `id` column is implicitly indexed by the PRIMARY KEY
-    /// constraint — emitting an explicit B-tree on `id` would be
+    /// constraint - emitting an explicit B-tree on `id` would be
     /// redundant.
     #[test]
     fn create_table_does_not_emit_index_for_id() {
@@ -4707,20 +4707,20 @@ columns = [
     /// is the last line of defence: under debug builds it panics if two
     /// declarations end up referencing the same system-field name in
     /// the column list. The declaration-time validator catches creator-declared
-    /// system fields before this point — so this test exercises the
+    /// system fields before this point - so this test exercises the
     /// assertion's *unreachable* path under a hand-rolled internal
     ///
     /// We can't actually trigger the assertion through the public API
     /// (every entry path is gated by `validate_field_name_for_declaration`),
     /// so instead this test pins the validator pre-check: when a creator
     /// schema declares `id`, the validator raises BEFORE the
-    /// assertion runs — confirming the assertion is a true safety net,
+    /// assertion runs - confirming the assertion is a true safety net,
     /// not the primary gate.
     #[cfg(debug_assertions)]
     #[test]
     fn debug_assert_panics_when_user_schema_collides_with_system_field() {
         // The validator raises `ReservedSystemFieldName` before
-        // the debug_assert runs — verify the rejection happens at the
+        // the debug_assert runs - verify the rejection happens at the
         // validator layer (the canonical first line of defence).
         for name in confined_injected_names("posts") {
             let mut obj = serde_json::Map::new();
@@ -4940,7 +4940,7 @@ columns = [
         assert_eq!(mask_sibling_column_for_field("ssn", &def), None);
     }
 
-    /// **DDL shape** — masked column emits parent + nullable sibling
+    /// **DDL shape** - masked column emits parent + nullable sibling
     /// `<col>_masked TEXT`.
     #[test]
     fn build_create_table_emits_sibling_for_masked_column() {
@@ -5078,7 +5078,7 @@ columns = [
         assert!(!sql.contains("COMMENT ON COLUMN"), "no comment: {sql}");
     }
 
-    /// **DDL shape** — `t.encrypted(...)` (default-mask path) gets the
+    /// **DDL shape** - `t.encrypted(...)` (default-mask path) gets the
     /// sibling because the SDK auto-populates `mask: {kind: "full", ...}`
     #[test]
     fn build_create_table_emits_sibling_for_encrypted_with_default_mask() {
@@ -5106,7 +5106,7 @@ columns = [
         );
     }
 
-    /// **DDL shape** — `kind: "none"` explicit opt-out → no sibling.
+    /// **DDL shape** - `kind: "none"` explicit opt-out -> no sibling.
     /// The parent encrypted column behaves like a plain encrypted column.
     #[test]
     fn build_create_table_no_sibling_when_mask_kind_none() {
@@ -5163,7 +5163,7 @@ columns = [
     // Three invariants pinned at the SQL-build layer (the production
     // expr_with_unmask`):
     //
-    // 1. `default_read_does_not_touch_ciphertext_column` — when a
+    // 1. `default_read_does_not_touch_ciphertext_column` - when a
     //    schema declares a masked column and no `unmask` hint is
     //    passed, the SELECT clause emits `"<col>_masked" AS "<col>"`
     //    and the bare ciphertext column name MUST NOT appear in the
@@ -5172,10 +5172,10 @@ columns = [
     //    refuses filter keys ending in `_masked` because
     //    `validate_field_name` is on the reserved-suffix path.
     //    We double-check the end-to-end path through
-    // 3. `sibling_masked_column_not_visible_in_sdk_introspection` —
+    // 3. `sibling_masked_column_not_visible_in_sdk_introspection` -
     //    the SDK `Row<S>` shape excludes `<col>_masked`. The Rust-
     //    side dual to that invariant is that callers never need to
-    //    PROJECT through `<col>_masked` — the alias substitution
+    //    PROJECT through `<col>_masked` - the alias substitution
     //    means the SDK sees `<col>` carrying the masked value.
     //    Asserted by ensuring the build emits the sibling under an
     //    `AS "<col>"` alias and never as a bare top-level identifier.
@@ -5187,14 +5187,14 @@ columns = [
     // ----------------------------------------------------------------
 
     // -----------------------------------------------------------------------
-    // boolean scope namespacing (descriptor→DDL for the migrate
+    // boolean scope namespacing (descriptor->DDL for the migrate
     // engine). The `MainUnqualified` scope drops the `<app_id>` qualifier on
     // the SQLite arm so the DDL lands in `main` (= the app file). PG and the
     // `AttachAlias` SQLite default are unchanged (regression guard).
     // -----------------------------------------------------------------------
 
-    /// A descriptor carrying a masked column, an encrypted column, and an FK —
-    /// the goodies the emitter must round-trip through emit→apply→drift.
+    /// A descriptor carrying a masked column, an encrypted column, and an FK -
+    /// the goodies the emitter must round-trip through emit->apply->drift.
     fn goodies_schema() -> serde_json::Value {
         json!({
             "ssn": {
@@ -5213,7 +5213,7 @@ columns = [
     }
 
     /// `MainUnqualified` SQLite emits an UNqualified `CREATE TABLE "<coll>"`
-    /// (no `"<app_id>".` prefix) and UNqualified system indexes — so the DDL
+    /// (no `"<app_id>".` prefix) and UNqualified system indexes - so the DDL
     /// lands in `main` under the migrate engine's hardened authorizer.
     #[test]
     fn sqlite_main_unqualified_drops_app_id_qualifier() {
@@ -5245,7 +5245,7 @@ columns = [
         );
     }
 
-    /// The stable `AttachAlias` SQLite default is BYTE-UNCHANGED — it keeps the
+    /// The stable `AttachAlias` SQLite default is BYTE-UNCHANGED - it keeps the
     /// `"<app_id>"`-qualified table + index spelling plugin-db's runtime depends
     /// on (it ATTACHes the file under the `<app_id>` alias).
     #[test]
@@ -5320,7 +5320,7 @@ columns = [
 
     /// `MainUnqualified` SQLite carries the goodies: the inline `zero-migrate:mask:` mask
     /// sentinel on the `_masked` sibling, the inline `zero-migrate:enc:` encryption
-    /// sentinel on the BLOB column, and an unqualified FK clause — so all three
+    /// sentinel on the BLOB column, and an unqualified FK clause - so all three
     /// survive into `sqlite_master.sql` for the drift snapshot to recover.
     #[test]
     fn sqlite_main_unqualified_carries_mask_enc_and_fk() {
@@ -5376,13 +5376,13 @@ mod hostile_identifier_quoting {
     /// the `schema/` subtree.
     ///
     /// BOTH HALVES OF THAT ARE NOW FALSE. The exemption is deleted, and so is
-    /// `schema::query::quote_ident` — the ANSI double-quote spelling has exactly one
+    /// `schema::query::quote_ident` - the ANSI double-quote spelling has exactly one
     /// physical home (`render::backends::ansi_double_quote_ident`) and this module
     /// reaches it, like everyone else, through a door that names a dialect.
     ///
     /// AND SO IS THE BACKTICK SPELLING. This note used to end "the backtick spelling
     /// still lives here, in `mysql_quote_ident`, which `render::backends::mysql`
-    /// delegates to" — a true statement about an arrangement that was the MIRROR
+    /// delegates to" - a true statement about an arrangement that was the MIRROR
     /// IMAGE of the one above, with the BACKEND reaching into CORE for its own
     /// spelling. Those bytes are now `render::backends::mysql`'s own `quote_ident`
     /// and this module reaches them through the same dialect-naming door.

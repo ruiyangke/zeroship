@@ -1,6 +1,5 @@
-//! **The single fold, and its five projections.** Step 3 of
-//! `docs/proposals/single-fold-and-effects.md` section G, with step 4's first THREE
-//! consumers moved.
+//! **The single fold, and its five projections.** Specified by
+//! `docs/proposals/single-fold-and-effects.md` section G.
 //!
 //! ONE traversal decides what an op means; five typed projections read the value it
 //! produces. A projection here MAY NOT walk the op stream, and none of them takes
@@ -13,9 +12,9 @@
 //!
 //! # Four projections are LIVE; one is not
 //!
-//! Step 3 shipped this module dead. Step 4 moves the consumers one at a time in
-//! blast-radius order, and the first three are done. ONE `fold` call inside
-//! `render_artifacts` now feeds all three:
+//! This module shipped dead, and the consumers moved onto it one at a time in
+//! blast-radius order. ONE `fold` call inside `render_artifacts` now feeds three of
+//! them:
 //!
 //! * `FoldedSchema::project_runtime_metadata` replaced `runtime_metadata_from_ops`;
 //! * `FoldedSchema::project_authoring_tables` replaced `authoring_tables_from_ops`,
@@ -43,8 +42,8 @@
 //! `FoldedSchema` fields it reads, measured by deleting the attribute. See the last
 //! section for why the `fold_ops_onto` extraction did not retire it.
 //!
-//! CONSUMER 3 also collapsed a duplicate: `render_artifacts` ran the structural catalog
-//! replay TWICE per render until that move - once through `fold`, once through
+//! Moving `project_field_defs` also collapsed a duplicate: `render_artifacts` ran the
+//! structural catalog replay TWICE per render until that move - once through `fold`, once through
 //! `fold_to_field_defs` -> `fold_ops` - and the second one left with the walker. The
 //! `fold_ops_onto` extraction has since collapsed the second duplicate below it:
 //! `flatten_dialectal_ops` ran twice per `fold` and now runs once.
@@ -54,16 +53,16 @@
 //! Moving a consumer is where a projection's claim to be DERIVED gets tested, and
 //! each move so far has failed that test in exactly one place.
 //!
-//! CONSUMER 1. `project_runtime_metadata` re-derived the implicit unique index name
+//! `project_runtime_metadata` re-derived the implicit unique index name
 //! `{table}_{column}_key` from the columns it could see - which silently renamed the
 //! index on every `renameTable` and `renameColumn`, naming an object no catalog has.
 //! The fix is `ImplicitUniqueIndex`, carried by this traversal, and it is decision 4
 //! of the proposal working as written: a projection that needs a fact the model does
-//! not carry is a MODEL change, not a second replay. The step 3 corpus could not see
-//! it - no stream there crosses a `unique` column with a rename - so it was found by
+//! not carry is a MODEL change, not a second replay. The differential corpus could not
+//! see it - no stream there crosses a `unique` column with a rename - so it was found by
 //! writing streams for the carriers rather than by re-running the gate.
 //!
-//! CONSUMER 2 found the reverse: the model was RIGHT and the artifact had been wrong
+//! `project_authoring_tables` found the reverse: the model was RIGHT and the artifact had been wrong
 //! for as long as `authoring_tables_from_ops` existed. That walker had no
 //! `Op::AlterPrimaryKey` arm at all, so `env.db.ts` kept declaring the key the
 //! migration replaced, dropped or added, and kept `.autoIncrement()` on a column the
@@ -75,14 +74,14 @@
 //! REFUSED on all three dialects (`table \`orders\` does not exist`), so no fixture in
 //! it renders an artifact carrying the op at all.
 //!
-//! The `Op::DropPartition` arm below moved with the same consumer, from "recorded as a
-//! choice" to measured; see its comment.
+//! The `Op::DropPartition` arm below moved with it, from "recorded as a choice" to
+//! measured; see its comment.
 //!
-//! CONSUMER 3 found the same shape as consumer 2, five times over. The step 3 gate had
-//! recorded ONE divergence for `project_field_defs`; a sweep of the walker against it
-//! over every PREFIX of the corpus and of a carrier set written for the constraint
-//! LIFECYCLE found FIVE, and the 27 recorded fixtures contributed none of them. All five
-//! are one rule: `fold_to_field_defs` lifted a constraint's facet onto a column eagerly
+//! `project_field_defs` found the same shape, several times over. The projection gate
+//! had recorded ONE divergence for it; a sweep of the walker against it over every
+//! PREFIX of the corpus and of a carrier set written for the constraint LIFECYCLE found
+//! several more, and the recorded fixtures contributed none of them. They are all one
+//! rule: `fold_to_field_defs` lifted a constraint's facet onto a column eagerly
 //! and kept a private side map to un-lift from, and never kept that side map in step
 //! with the constraint - so a dropped `UNIQUE`, a dropped `CHECK` bound, a dropped
 //! `CHECK` membership, and a column re-added under a dropped column's name all carried
@@ -90,18 +89,18 @@
 //! constraints the model still holds, which is why `Op::DropConstraint` and
 //! `Op::DropColumn` below need no un-lift arm: there is nothing to un-lift.
 //!
-//! What consumer 3 did NOT get is a live adjudication of the rebuild DDL, and the reason
+//! What that move did NOT get is a live adjudication of the rebuild DDL, and the reason
 //! is worth carrying here. `LiveSchema::sdk_schemas` is read by exactly one caller,
 //! `render/lower.rs`'s SQLite `renameColumn`, and on the deploy path that rename takes
 //! the `preserve_stored_shape` arm - which replays SQLite's own `CREATE TABLE` and never
 //! looks inside the map. Measured: corrupting every column in the map the engine builds
-//! fails NOTHING in the 229-binary suite; emptying it fails one test, on absence.
+//! fails NOTHING in the whole test suite; emptying it fails one test, on absence.
 //! `tests/sqlite_rebuild_field_defs_live.rs` pins both halves and covers the other arm.
 //!
 //! # What the model carries, measured rather than promised
 //!
-//! [`crate::model::schema_model::SchemaModel`] (step 2) is the NEUTRAL half and it is
-//! bounded to TABLES: it carries 1 of [`SchemaSnapshot`]'s 13 object families. So
+//! [`crate::model::schema_model::SchemaModel`] is the NEUTRAL half and it is
+//! bounded to TABLES: of [`SchemaSnapshot`]'s object families it carries only that one. So
 //! `fold(ops) -> SchemaModel` as the proposal spells it CANNOT reproduce `fold_ops`
 //! today, because a stream that creates a view produces a model with nowhere to put
 //! it. [`crate::render::fold::single_fold::FoldedSchema`] names that gap instead of
@@ -243,8 +242,8 @@ pub(crate) struct ImplicitUniqueIndex {
 /// object families `fold_ops` produces, so a type that claimed to be `SchemaModel`
 /// would be claiming a completeness nothing has.
 ///
-/// The TYPE is public since step 4 consumer 3 - `fold_to_field_defs` was a public
-/// entry point and its replacement has to be reachable from outside the crate - but
+/// The TYPE is public because `fold_to_field_defs` was a public entry point and its
+/// replacement has to be reachable from outside the crate - but
 /// every FIELD stays `pub(crate)`. A `pub` field would leak `AuthoredTable`,
 /// `SchemaModel` and `NamedTypeRegistry` into the public API, which is a far larger
 /// commitment than the one this move needs to make and is what `private_interfaces`
@@ -326,8 +325,8 @@ impl AuthoredState<'_> {
     ///
     /// The match is EXHAUSTIVE with no `_` arm, which is section H's op-exhaustiveness
     /// requirement: an `Op` variant added to the IR is a compile error here rather than
-    /// a silent fall-through. Section A measured five walkers whose catch-alls swallow
-    /// between 34 and 48 of the 56 variants; this one swallows nothing silently.
+    /// a silent fall-through. Section A measured walkers whose catch-alls swallow most
+    /// of the `Op` variants; this one swallows nothing silently.
     #[allow(clippy::too_many_lines)]
     fn advance(&mut self, op: &Op, effective: &EffectivePolicy) -> Result<(), FoldError> {
         let dialect = self.dialect;
@@ -393,11 +392,11 @@ impl AuthoredState<'_> {
             Op::DropTable { table, .. } => {
                 self.tables.remove(table);
             }
-            // A dropped partition is a dropped RELATION. This arm was recorded as a
-            // CHOICE at step 3 - the step 1 corpus never constructs the only pair that
-            // reaches it, `createTable` followed by `attachPartition` - and step 4
-            // consumer 2 made it live in `env.db.ts`, so it stopped being allowed to
-            // stay unmeasured. It is now measured three ways:
+            // A dropped partition is a dropped RELATION. This arm was once recorded as
+            // a CHOICE - the differential corpus never constructs the only pair that
+            // reaches it, `createTable` followed by `attachPartition` - and then
+            // `project_authoring_tables` made it live in `env.db.ts`, so it stopped
+            // being allowed to stay unmeasured. It is now measured three ways:
             //
             // * against a live PostgreSQL, in
             //   `tests/env_db_ts_matches_the_server_pg.rs`: the migration is applied
@@ -592,9 +591,9 @@ impl AuthoredState<'_> {
                 {
                     // THE PER-FACET VERDICT for `Op::SetColumnType`: what a change of
                     // base type does to every OTHER facet the column carries. It lived
-                    // on `render::lower::retype_field_descriptor` until step 4 consumer
-                    // 3, which deleted that function because the walker was its only
-                    // caller - so the verdict lives HERE now, in the one traversal, and
+                    // on `render::lower::retype_field_descriptor` until that function
+                    // was deleted, because the walker was its only caller - so the
+                    // verdict lives HERE now, in the one traversal, and
                     // `set_column_type_facets` pins it.
                     //
                     // WHY THE MOVE MATTERS. The verdict used to be stated three times:
@@ -644,7 +643,7 @@ impl AuthoredState<'_> {
                     // same side map is what let a DROPPED constraint's bound outlive it.
                     //
                     // KEPT, measured on live PostgreSQL 18.4 with one
-                    // `ALTER TABLE … ALTER COLUMN … TYPE` per row: `nullable`
+                    // `ALTER TABLE ... ALTER COLUMN ... TYPE` per row: `nullable`
                     // (`attnotnull` survives), `unique` (the index is REBUILT and
                     // survives), `default` (PostgreSQL re-casts it and REFUSES the whole
                     // ALTER when it cannot, so a default that reaches a fold is one the
@@ -658,7 +657,7 @@ impl AuthoredState<'_> {
                     // `value_format` and the encryption/mask sentinels are neither
                     // cleared nor kept - `fold_ops`'s own `Op::SetColumnType` arm fails
                     // closed on them, because the apply path emits ONLY
-                    // `ALTER COLUMN … TYPE` and the database would keep a contract this
+                    // `ALTER COLUMN ... TYPE` and the database would keep a contract this
                     // side can no longer describe. The full measurement is recorded at
                     // that refusal.
                     column.ty.clone_from(to_type);
@@ -876,7 +875,7 @@ impl AuthoredState<'_> {
 /// Flatten the typed collection set into the untyped wire `FieldDef` map.
 ///
 /// The ONE place that knows `FieldDef` map = collections mapped through
-/// `descriptor_to_sdk_schema`. Both readers go through it — `project_field_defs` and
+/// `descriptor_to_sdk_schema`. Both readers go through it - `project_field_defs` and
 /// `render_artifacts`, which needs the typed set as well as the flattened one and
 /// would otherwise spell the same mapping a second time. A second spelling is exactly
 /// what would let the exported structure and the serialized artifact drift apart,
@@ -910,9 +909,9 @@ impl FoldedSchema {
         snapshot
     }
 
-    /// **Projection 2: the per-table wire `FieldDef` map.** LIVE since step 4 consumer
-    /// 3, which deleted the `fold_to_field_defs` walker that used to produce it. It
-    /// feeds `schema.runtime.json` and, on SQLite, `live.sdk_schemas`.
+    /// **Projection 2: the per-table wire `FieldDef` map.** LIVE: it replaced the
+    /// deleted `fold_to_field_defs` walker that used to produce it, and it feeds
+    /// `schema.runtime.json` and, on SQLite, `live.sdk_schemas`.
     ///
     /// The `live.sdk_schemas` half is READ by exactly one caller - `render/lower.rs`'s
     /// SQLite `renameColumn` - and only its PRESENCE is load-bearing on the deploy path:
@@ -933,7 +932,7 @@ impl FoldedSchema {
     }
 
     /// **Projection 5: the TYPED per-collection descriptor set.** The same recovery
-    /// [`Self::project_field_defs`] runs, stopped one step earlier — before
+    /// [`Self::project_field_defs`] runs, stopped one step earlier - before
     /// `descriptor_to_sdk_schema` flattens the typed [`CollectionDescriptor`] into
     /// untyped `FieldDef` JSON. This is the OUTBOUND export surface: a host that wants
     /// to render its own artifacts reads structure here instead of re-parsing
@@ -941,7 +940,7 @@ impl FoldedSchema {
     ///
     /// `project_field_defs` is now a MAP over this, so the two cannot disagree about
     /// what the fold recovered. The flattening is the only difference between them,
-    /// and `descriptor_to_sdk_schema` reads `fields` alone — so populating `indexes`
+    /// and `descriptor_to_sdk_schema` reads `fields` alone - so populating `indexes`
     /// and `runtime_options` here (which the discarded intermediate left empty) cannot
     /// move a byte of `schema.runtime.json`.
     ///
@@ -1045,8 +1044,8 @@ impl FoldedSchema {
     }
 
     /// **Projection 3: the authoring tables.** The source model `env.db.ts` is
-    /// rendered from, and LIVE since step 4 consumer 2 - `render_artifacts` reads this
-    /// and `authoring_tables_from_ops`, which used to produce it, is deleted.
+    /// rendered from, and LIVE - `render_artifacts` reads this, and
+    /// `authoring_tables_from_ops`, which used to produce it, is deleted.
     #[must_use]
     pub(crate) fn project_authoring_tables(&self) -> BTreeMap<String, AuthoringTable> {
         self.authored

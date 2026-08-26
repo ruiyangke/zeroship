@@ -1,4 +1,4 @@
-//! The versioned executor — the apply flow.
+//! The versioned executor - the apply flow.
 //!
 //! The heart of the engine. Given a backend, an [`ExecutorConfig`], and the
 //! project's full migration set, the apply shell
@@ -8,8 +8,8 @@
 //! 1. acquires the project advisory lock `pg_advisory_lock(hashtext(project_id))`
 //!    (serialize all migration activity; released at end);
 //! 2. bootstraps the journal (idempotent);
-//! 3. computes `pending = set − applied`, in `UUIDv7` version order;
-//! 4. re-verifies the checksums of already-applied migrations — a mismatch is a
+//! 3. computes `pending = set - applied`, in `UUIDv7` version order;
+//! 4. re-verifies the checksums of already-applied migrations - a mismatch is a
 //!    hard abort (drift / tamper);
 //! 5. **first pass (static, all-up-front):** runs the dialect-selected
 //!    **[`MigrationGuard`](crate::guard::MigrationGuard)** over the
@@ -21,12 +21,12 @@
 //!    the whole apply before ANY migration executes - a denied batch applies
 //!    *nothing* (no earlier migration half-commits);
 //! 6. **second pass (execute):** for each pending migration, applies either:
-//!    - **transactionally** (default): `BEGIN; SET LOCAL …; <up>; INSERT
-//!      journal; COMMIT` — DDL + journal atomic, so a crash leaves
+//!    - **transactionally** (default): `BEGIN; SET LOCAL ...; <up>; INSERT
+//!      journal; COMMIT` - DDL + journal atomic, so a crash leaves
 //!      applied+recorded *or* neither. The `SET LOCAL` timeouts/`search_path` are
 //!      transaction-scoped, so they never leak onto the session;
 //!    - **non-transactionally** (opt-in, e.g. `CREATE INDEX CONCURRENTLY IF NOT
-//!      EXISTS`): two-phase `started` marker → run `<up>` → `completed` row +
+//!      EXISTS`): two-phase `started` marker -> run `<up>` -> `completed` row +
 //!      marker deletion, the last two in one transaction. A lone `started` marker
 //!      on a re-run means the `up` may or may not have committed, and the journal
 //!      cannot say which. The backend then classifies the `up`: the shapes it can
@@ -38,7 +38,7 @@
 //! 7. restores the session GUCs it touched and releases the lock.
 //!
 //! Runs out-of-band at deploy. The apply futures are driven by the host
-//! (the napi `block_on` worker + JS host) — ZERO tokio, ZERO compio.
+//! (the napi `block_on` worker + JS host) - ZERO tokio, ZERO compio.
 
 use std::collections::{HashMap, HashSet};
 use zero_migrate_backend::registry::VendorSet;
@@ -46,7 +46,7 @@ use zero_migrate_backend::registry::VendorSet;
 use crate::approval::Approval;
 // The orchestration below is driver-neutral AND vendor-neutral: it names the
 // dialect seam and nothing behind it. A backend arrives as a `&B` parameter,
-// constructed by whoever knows which vendor this deploy targets — never here.
+// constructed by whoever knows which vendor this deploy targets - never here.
 use crate::apply::backend::MigrationBackend;
 use crate::apply::journal::{AppliedEntry, Phase};
 use crate::conn::ExecutorConfig;
@@ -54,10 +54,10 @@ use crate::model::migration::{Migration, MigrationId};
 use crate::render::plan::AppliedPlan;
 use crate::render::step::PlanStep;
 
-// ── The apply/rollback VOCABULARY moved down to the backend contract, whose
-// `MigrationBackend` signatures name every one of these. The ORCHESTRATION — the
-// two-pass apply body, the topological ordering, the rollback selection — stays
-// here. Re-exported so every `crate::apply::executor::…` path (and the flattened
+// -- The apply/rollback VOCABULARY moved down to the backend contract, whose
+// `MigrationBackend` signatures name every one of these. The ORCHESTRATION - the
+// two-pass apply body, the topological ordering, the rollback selection - stays
+// here. Re-exported so every `crate::apply::executor::...` path (and the flattened
 // root re-exports in `lib.rs`) resolves unchanged.
 pub use zero_migrate_backend::executor::{
     ApplyError, ApplyOutcome, BackendError, LockMode, PreconditionVerdict, RollbackError,
@@ -88,28 +88,28 @@ pub(crate) use zero_migrate_backend::executor::unmet_halt_error;
 /// defense-in-depth approval gate: if any pending migration is
 /// flagged [`destructive`](crate::model::migration::MigrationFlags::destructive) and
 /// `approval != Approval::Approved`, the apply is refused with
-/// [`ApplyError::ApprovalRequired`] before any migration executes — independent
+/// [`ApplyError::ApprovalRequired`] before any migration executes - independent
 /// of (and additional to) the engine's gate, so a caller driving this directly
 /// cannot bypass approval. A non-destructive batch runs with [`Approval::None`].
 ///
 /// # It takes a backend, not a session, and that is the point
 ///
 /// This used to take `&D: SqlSession` and build a `PostgresBackend` from it, which
-/// made a neutral orchestration entry silently PostgreSQL-only — the dialect was
+/// made a neutral orchestration entry silently PostgreSQL-only - the dialect was
 /// decided here, by this file, for every caller. It now takes whatever backend the
 /// caller resolved. The body is otherwise byte-identical: same shell, same scope,
 /// same lock mode.
 ///
 /// # Errors
-/// - [`ApplyError::ApprovalRequired`] — a destructive migration without approval;
+/// - [`ApplyError::ApprovalRequired`] - a destructive migration without approval;
 ///   aborts before any migration runs.
-/// - [`ApplyError::Guard`] — a pending migration's `up` SQL was denied; the
+/// - [`ApplyError::Guard`] - a pending migration's `up` SQL was denied; the
 ///   whole apply aborts (all-up-front, before any migration runs).
-/// - [`ApplyError::NonIdempotentNonTxn`] — a non-transactional migration's `up`
+/// - [`ApplyError::NonIdempotentNonTxn`] - a non-transactional migration's `up`
 ///   is not idempotent (missing `IF NOT EXISTS`); aborts before any run.
-/// - [`ApplyError::ChecksumDrift`] — an already-applied migration was tampered.
-/// - [`ApplyError::MigrationFailed`] — a migration's SQL failed (rolled back).
-/// - [`ApplyError::Db`] / [`ApplyError::Journal`] — infrastructure failures.
+/// - [`ApplyError::ChecksumDrift`] - an already-applied migration was tampered.
+/// - [`ApplyError::MigrationFailed`] - a migration's SQL failed (rolled back).
+/// - [`ApplyError::Db`] / [`ApplyError::Journal`] - infrastructure failures.
 pub async fn apply<B: MigrationBackend>(
     vendors: VendorSet,
     backend: &B,
@@ -132,13 +132,13 @@ pub async fn apply<B: MigrationBackend>(
 }
 
 /// The lock + session-hygiene shell around [`apply_locked`], generic over the
-/// dialect seam. Every caller — the engine's declarative path, the engine's flat
+/// dialect seam. Every caller - the engine's declarative path, the engine's flat
 /// [`apply`](crate::engine::MigrationEngine::apply) path, and each backend's own
-/// tests — CONSTRUCTS or FORWARDS its backend and calls this.
+/// tests - CONSTRUCTS or FORWARDS its backend and calls this.
 ///
 /// It takes `&B` and never builds one. That is the whole reason this file names no
 /// vendor: choosing between PostgreSQL, MySQL and SQLite is knowledge about which
-/// vendors exist, and it lives with whoever knows the deploy's target — the host —
+/// vendors exist, and it lives with whoever knows the deploy's target - the host -
 /// not in the orchestration. Two `pub` entries used to sit here doing exactly that
 /// (`apply_with_lock` built a `PostgresBackend`, `apply_with_lock_mysql` built a
 /// `MysqlBackend`); both were dead, and deleting them is what made core neutral
@@ -153,11 +153,11 @@ pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
     applied_by: &str,
     lock_mode: LockMode,
 ) -> Result<ApplyOutcome, ApplyError> {
-    // Defense-in-depth approval gate — refuse a destructive batch
+    // Defense-in-depth approval gate - refuse a destructive batch
     // without explicit approval BEFORE doing anything (not even the lock). The
     // engine has its own gate; this is the independent executor-layer check so a
     // direct caller cannot bypass it. It is dialect-agnostic (reads only
-    // `flags.destructive`), so it sits in the generic core — running identically for
+    // `flags.destructive`), so it sits in the generic core - running identically for
     // PG and the engine path.
     if approval != Approval::Approved
         && migrations
@@ -201,7 +201,7 @@ pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
         backend.acquire_project_lock(cfg).await?;
     }
     // Capture the session GUCs we will override so we can restore them on exit
-    // — the executor's search_path / statement_timeout / lock_timeout must NOT
+    // - the executor's search_path / statement_timeout / lock_timeout must NOT
     // leak onto the (pooled / long-lived) connection after apply. This runs
     // regardless of lock mode: every sub-batch is responsible for its own session
     // hygiene even when the lock is owned outside it.
@@ -225,7 +225,7 @@ pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
         }
     };
     let result = apply_locked(vendors, backend, cfg, migrations, applied_by).await;
-    // RESET ROLE UNCONDITIONALLY — regardless of whether `snapshot_session`
+    // RESET ROLE UNCONDITIONALLY - regardless of whether `snapshot_session`
     // succeeded. The non-txn path's `SET ROLE` mutates the session; if the
     // snapshot had failed we would otherwise skip `restore_session` entirely and
     // leak the migrator role onto the pooled/long-lived connection. So drop the
@@ -267,7 +267,7 @@ pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
 /// Pre-flight over the FULL supplied set: reject malformed
 /// repeatable/versioned combinations BEFORE the partition or any apply, so a
 /// dropped or misrouted facet can never silently apply. Fail-closed per the
-/// no-back-compat stance — these shapes are author errors, not legacy inputs.
+/// no-back-compat stance - these shapes are author errors, not legacy inputs.
 ///
 /// Three rejections, each before any execution (nothing applied):
 ///
@@ -291,7 +291,7 @@ pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
 fn check_repeatable_wellformed(migrations: &[Migration]) -> Result<(), ApplyError> {
     use std::collections::BTreeSet;
 
-    // The set of versions whose SUPPLIED flag marks them repeatable — used by the
+    // The set of versions whose SUPPLIED flag marks them repeatable - used by the
     // once-only-depends-on-repeatable check.
     let repeatable_versions: BTreeSet<&str> = migrations
         .iter()
@@ -336,8 +336,8 @@ fn check_repeatable_wellformed(migrations: &[Migration]) -> Result<(), ApplyErro
 /// The apply body, run while holding the project advisory lock.
 ///
 /// Generic over the dialect seam ([`MigrationBackend`]): the orchestration here
-/// — partition, drift/tamper gate, squash/expand gates, `order_pending`, the
-/// FIRST/SECOND pass, the repeatable phase — is dialect-agnostic; every
+/// - partition, drift/tamper gate, squash/expand gates, `order_pending`, the
+/// FIRST/SECOND pass, the repeatable phase - is dialect-agnostic; every
 /// dialect-coupled leaf (journal reads, the checksum-drift report, the confined
 /// `up`, the non-txn idempotency parse) goes through `backend`.
 async fn apply_locked<B: MigrationBackend>(
@@ -384,12 +384,12 @@ async fn apply_locked<B: MigrationBackend>(
     // phase (`apply_repeatables`) with their own re-run-on-change rule.
     // The FULL set is retained as `all_migrations` for the drift check, which must
     // SEE the repeatables (so it recognizes their journaled versions and EXEMPTS
-    // them — see `check_checksum_drift` — rather than flagging them as orphans).
+    // them - see `check_checksum_drift` - rather than flagging them as orphans).
     //
     // The partition routes by the SUPPLIED `flags.repeatable`, but a version whose
     // supplied flag DISAGREES with its journaled kind (the flip-flag tamper class)
-    // is aborted by the kind-mismatch arm of `check_checksum_drift` BELOW — which
-    // runs before any re-run — so a mis-routed (flipped) version can never reach the
+    // is aborted by the kind-mismatch arm of `check_checksum_drift` BELOW - which
+    // runs before any re-run - so a mis-routed (flipped) version can never reach the
     // repeatable re-apply phase. The drift check is the single fail-closed gate; the
     // partition does not need to (and must not) silently re-route by the flag.
     let all_migrations = migrations;
@@ -420,7 +420,7 @@ async fn apply_locked<B: MigrationBackend>(
 
     // Drift / tamper check: every migration in the set that
     // the journal records as net-applied must still match its recorded checksum.
-    // This is the SHARED comparison — `crate::apply::drift::compare_applied_to_set` builds
+    // This is the SHARED comparison - `crate::apply::drift::compare_applied_to_set` builds
     // the full report (used read-only by the status/drift API), and apply aborts
     // on the FIRST checksum mismatch it surfaces. One implementation, two callers:
     // the report and the abort-on-drift gate cannot diverge.
@@ -454,29 +454,30 @@ async fn apply_locked<B: MigrationBackend>(
     // and `status`, whose `unexpected_journal` is computed against the full
     // supplied manifest set and trips `status --strict`.
 
-    // EXPAND/CONTRACT GATE — refuse a pending contract whose expand
+    // EXPAND/CONTRACT GATE - refuse a pending contract whose expand
     // is not net-applied in the journal. Run BEFORE `order_pending` so it beats
     // the generic MissingDependency with a precise error.
     check_expand_contract_gate(migrations, &completed)?;
 
     // Supersession: a version superseded by a net-applied squash (read
     // from the journal) OR by an in-set squash that will run this batch is SATISFIED
-    // — it must not (re-)run. `compute_superseded` unions both sources; the squash
+    // - it must not (re-)run. `compute_superseded` unions both sources; the squash
     // `S` itself is never in this set (it runs / is already applied). Computed
     // BEFORE the all-or-none gate so the gate can classify each squash's superseded
     // set against the SAME satisfied set the pending computation uses.
     let journal_superseded = backend.superseded_versions(cfg).await?;
     let superseded_owned = compute_superseded(migrations, &journal_superseded);
 
-    // SQUASH ALL-OR-NONE GATE — a pending squash may run its `up` only
+    // SQUASH ALL-OR-NONE GATE - a pending squash may run its `up` only
     // when NONE of its superseded versions are SATISFIED (fresh DB). All-satisfied
     // => use squash() (record without running); partial => inconsistent. A version
     // is satisfied when it is directly net-applied (`completed`) OR covered by a
     // net-applied squash (`journal_superseded`): a chained/overlapping
     // squash over a prefix already covered by an EARLIER net-applied squash (whose
     // members were superseded-not-journaled) was miscounted `applied=0` and re-ran
-    // its `up`, double-applying. We classify against `completed ∪ journal_superseded`
-    // (net-applied coverage only — NOT in-set pending edges, which would wrongly mark
+    // its `up`, double-applying. We classify against `completed` plus
+    // `journal_superseded`
+    // (net-applied coverage only - NOT in-set pending edges, which would wrongly mark
     // a squash's own targets as satisfied on the genuine fresh path). Refused before
     // any execution, before order_pending hides the superseded versions.
     let satisfied: std::collections::HashSet<&str> = completed
@@ -486,27 +487,27 @@ async fn apply_locked<B: MigrationBackend>(
         .collect();
     // Two PENDING in-set squashes superseding the same version is malformed (a
     // version may be collapsed by at most one squash). Neither is net-applied yet,
-    // so the all-or-none gate cannot catch it — refuse up-front, fail-closed. An
+    // so the all-or-none gate cannot catch it - refuse up-front, fail-closed. An
     // ALREADY-APPLIED squash re-supplied alongside a new one (the legitimate
-    // chained case) is excluded — that is handled by the all-or-none gate.
+    // chained case) is excluded - that is handled by the all-or-none gate.
     check_no_overlapping_squashes(migrations, &completed)?;
     check_squash_all_or_none(migrations, &completed, &satisfied)?;
     let superseded: std::collections::HashSet<&str> =
         superseded_owned.iter().map(String::as_str).collect();
 
-    // Pending = set − completed − superseded. Ordered by `depends_on` when present
+    // Pending = set - completed - superseded. Ordered by `depends_on` when present
     // (topological, version-tiebroken & stable), else pure UUIDv7 version order.
     let pending: Vec<&Migration> = order_pending(migrations, &completed, &superseded)?;
 
-    // Multi-engine — run the **per-engine** first-line
+    // Multi-engine - run the **per-engine** first-line
     // guard through the [`MigrationGuard`] seam, NOT an `if dialect == Sqlite`
     // branch. The guard is selected for `cfg`'s dialect (which equals
     // `backend.dialect()`) via [`guard_for`], so it carries the apply's project +
     // trust profile from `cfg.guard_config_for(..)` (the trust profile lives on
     // `ExecutorConfig`, not the backend):
-    //   - Postgres → `PgGuard` (libpg_query deny-list) — byte-identical to the
+    //   - Postgres -> `PgGuard` (libpg_query deny-list) - byte-identical to the
     //     pre-seam `SqlGuard::new(cfg.guard_config_for(..))`;
-    //   - SQLite → `SqliteGuard` (from `zero-migrate-sqlite`) — the trusted descriptor-diff path
+    //   - SQLite -> `SqliteGuard` (from `zero-migrate-sqlite`) - the trusted descriptor-diff path
     //     (`check` returns the empty clean outcome: `libpg_query` cannot vet SQLite,
     //     the first-line vet is the descriptor emitter at the author boundary and the
     //     second-line defense is the backend authorizer applied per statement at apply).
@@ -515,17 +516,17 @@ async fn apply_locked<B: MigrationBackend>(
     let guard =
         crate::render::backends::guard_for(vendors, &cfg.guard_config_for(&backend.dialect()));
 
-    // FIRST PASS — static validation over EVERY pending migration BEFORE any
+    // FIRST PASS - static validation over EVERY pending migration BEFORE any
     // execution. The guard runs per-migration inside the apply loop in the
     // original design, which means an earlier migration could commit before a
     // later one is denied (a half-applied batch). Hoisting the static checks
     // (guard deny-list + non-txn idempotency) up front makes a denial apply
     // NOTHING. (A migration failing at EXECUTION still legitimately leaves the
-    // earlier ones applied — standard migration semantics; only the STATIC
+    // earlier ones applied - standard migration semantics; only the STATIC
     // checks are all-or-nothing.)
     for m in &pending {
         let version = m.version.as_str();
-        // GUARD GATE — first-line per engine: PG denies RCE / priv-esc / cross-tenant /
+        // GUARD GATE - first-line per engine: PG denies RCE / priv-esc / cross-tenant /
         // file / network; SQLite trusts the descriptor-diff DDL (vetted by the
         // descriptor emitter + the backend authorizer).
         guard.check(&m.up).map_err(|source| ApplyError::Guard {
@@ -556,7 +557,7 @@ async fn apply_locked<B: MigrationBackend>(
         recovered: Vec::new(),
     };
 
-    // SECOND PASS — execute (precondition gate + apply). All static checks have
+    // SECOND PASS - execute (precondition gate + apply). All static checks have
     // already passed.
     execute_pending(backend, cfg, &pending, &started, applied_by, &mut outcome).await?;
 
@@ -600,7 +601,7 @@ fn supplied_skipped_versions(
 /// Precondition outcomes:
 /// - all met => apply normally;
 /// - an `OnUnmet::Skip` check unmet => skip this migration (not applied, not
-///   journaled — stays pending); a SKIPPED migration's dependents are also
+///   journaled - stays pending); a SKIPPED migration's dependents are also
 ///   skipped this batch (their `up`'s object was never created);
 /// - an `OnUnmet::Halt` check unmet, or ANY inevaluable check => fail-closed via
 ///   [`ApplyError::PreconditionFailed`] (the `?` propagates, aborting the batch
@@ -618,7 +619,7 @@ async fn execute_pending<B: MigrationBackend>(
     outcome: &mut ApplyOutcome,
 ) -> Result<(), ApplyError> {
     // Versions SKIPPED this run because an `OnUnmet::Skip` precondition was unmet.
-    // A skipped migration is NOT applied and NOT journaled — it stays
+    // A skipped migration is NOT applied and NOT journaled - it stays
     // pending for the next deploy. Its dependents must also not run this batch: a
     // dependent's depended-on object does not exist (the dep did not run), so we
     // transitively skip any pending migration whose `depends_on` includes a
@@ -655,7 +656,7 @@ async fn execute_pending<B: MigrationBackend>(
         let had_inflight = inflight.is_some();
 
         // A dependent of a Skip'd (still-pending) migration cannot run
-        // this batch — the object its `up` needs was never created. Transitively
+        // this batch - the object its `up` needs was never created. Transitively
         // skip it (and record it so ITS dependents skip too).
         let dep_skipped = m
             .depends_on
@@ -697,12 +698,12 @@ async fn execute_pending<B: MigrationBackend>(
         // `[v1..vN]`. The all-or-none gate already proved NONE of the superseded
         // versions were satisfied, so this is the fresh path. The edges are
         // written in the SAME transaction that journals `S`'s `completed` row (not a
-        // separate post-commit statement) — a crash between would otherwise leave `S`
+        // separate post-commit statement) - a crash between would otherwise leave `S`
         // net-applied with edges missing, re-entering `v1..vN` into pending and
         // re-running them on top of `S`'s schema (double-apply).
         let sups: Vec<&str> = m.supersedes.iter().map(MigrationId::as_str).collect();
         // Versioned once-only path: `'squash'` for a fresh-path squash (non-empty
-        // supersedes), else the ordinary `'apply'`. Never `'repeatable'` here — a
+        // supersedes), else the ordinary `'apply'`. Never `'repeatable'` here - a
         // repeatable never reaches the versioned pipeline (it is partitioned out).
         let kind = if sups.is_empty() { "apply" } else { "squash" };
 
@@ -729,29 +730,29 @@ async fn execute_pending<B: MigrationBackend>(
 /// in dependency order ([`order_repeatables`]):
 ///
 /// 1. read the LATEST journaled `completed` checksum for its identity (its stable
-///    `version`); if it equals the migration's current checksum ⇒ **SKIP** (no
-///    change since the last apply) — appended to `outcome.skipped`;
-/// 2. otherwise (never applied, OR checksum DIFFERS) ⇒ **RE-APPLY**: run the SQL
-///    guard over `up` (cross-schema / RCE / priv-esc denials — a repeatable's `up`
+///    `version`); if it equals the migration's current checksum => **SKIP** (no
+///    change since the last apply) - appended to `outcome.skipped`;
+/// 2. otherwise (never applied, OR checksum DIFFERS) => **RE-APPLY**: run the SQL
+///    guard over `up` (cross-schema / RCE / priv-esc denials - a repeatable's `up`
 ///    is held to the SAME security bar as a versioned one), evaluate its
 ///    preconditions read-only under the lock, then run `up` under the
 ///    least-privilege migrator role inside a transaction and append a NEW
 ///    `completed` event carrying the new checksum (via [`MigrationBackend::apply_one`],
 ///    whose transactional leg the repeatable always takes).
 ///
-/// A repeatable is ALWAYS transactional (replace-style `CREATE OR REPLACE …`,
+/// A repeatable is ALWAYS transactional (replace-style `CREATE OR REPLACE ...`,
 /// `down: None`), so it never takes the non-txn two-phase path. Its `supersedes`
 /// is always empty, and the `completed` event is stamped `kind='repeatable'`.
 ///
 /// The destructive/approval gate is enforced uniformly at the top of [`apply`]
 /// over the FULL set, so a (rare) destructive repeatable without approval is
-/// already refused before the lock — this phase does not need to re-check it.
+/// already refused before the lock - this phase does not need to re-check it.
 ///
 /// # Errors
-/// - [`ApplyError::Guard`] — a repeatable's `up` was denied by the SQL guard.
-/// - [`ApplyError::MissingDependency`] / [`ApplyError::DependencyCycle`] — the
+/// - [`ApplyError::Guard`] - a repeatable's `up` was denied by the SQL guard.
+/// - [`ApplyError::MissingDependency`] / [`ApplyError::DependencyCycle`] - the
 ///   repeatables' `depends_on` edges are unsatisfiable.
-/// - [`ApplyError::PreconditionFailed`] — a repeatable's precondition was unmet
+/// - [`ApplyError::PreconditionFailed`] - a repeatable's precondition was unmet
 ///   (Halt) or inevaluable.
 /// - [`ApplyError::MigrationFailed`] / journal / db errors from the apply itself.
 async fn apply_repeatables<B: MigrationBackend>(
@@ -766,7 +767,7 @@ async fn apply_repeatables<B: MigrationBackend>(
         return Ok(());
     }
 
-    // The latest journaled `completed` checksum per identity — the re-run oracle.
+    // The latest journaled `completed` checksum per identity - the re-run oracle.
     let latest = backend.latest_completed_checksums(cfg).await?;
 
     // Re-read satisfied state after the versioned phase. A supplied versioned
@@ -798,15 +799,15 @@ async fn apply_repeatables<B: MigrationBackend>(
     // durably satisfied.
     let ordered = order_repeatables(repeatables, &satisfied)?;
 
-    // FIRST PASS — guard EVERY repeatable's `up` before any execution, mirroring
+    // FIRST PASS - guard EVERY repeatable's `up` before any execution, mirroring
     // the versioned all-up-front static gate: a denial applies NOTHING.
     guard_repeatable_batch(vendors, cfg, &backend.dialect(), &ordered)?;
 
-    // SECOND PASS — re-apply each changed repeatable; skip the unchanged ones.
+    // SECOND PASS - re-apply each changed repeatable; skip the unchanged ones.
     for &m in &ordered {
         let version = m.version.as_str();
         let current = m.checksum.as_str();
-        // Re-run rule: never applied OR checksum DIFFERS ⇒ re-apply; MATCHES ⇒ skip.
+        // Re-run rule: never applied OR checksum DIFFERS => re-apply; MATCHES => skip.
         let unchanged = latest.get(version).is_some_and(|prev| prev == current);
         if unchanged {
             outcome.skipped.push(version.to_string());
@@ -826,7 +827,7 @@ async fn apply_repeatables<B: MigrationBackend>(
 
         // Replace-style: always transactional on today's PG/SQLite backends, never
         // superseding. `apply_one` runs `up` under the migrator role and appends a
-        // fresh `completed` event with the NEW checksum — exactly the re-apply record
+        // fresh `completed` event with the NEW checksum - exactly the re-apply record
         // the next deploy compares against.
         // Stamped `kind='repeatable'`: the journaled kind is the
         // tamper anchor, so the drift exemption can distinguish a genuine repeatable
@@ -882,7 +883,7 @@ fn guard_repeatable_batch(
 /// # Errors
 /// - [`ApplyError::MissingDependency`]: an external dependency is not durably
 ///   satisfied.
-/// - [`ApplyError::DependencyCycle`] — the inter-repeatable edges form a cycle.
+/// - [`ApplyError::DependencyCycle`] - the inter-repeatable edges form a cycle.
 fn order_repeatables<'a>(
     repeatables: &[&'a Migration],
     satisfied: &std::collections::HashSet<String>,
@@ -916,7 +917,7 @@ fn order_repeatables<'a>(
         }
     }
 
-    // Kahn with a version-ordered ready set — deterministic, version-tiebroken.
+    // Kahn with a version-ordered ready set - deterministic, version-tiebroken.
     let mut ready: BTreeSet<&str> = indeg
         .iter()
         .filter(|(_, &d)| d == 0)
@@ -950,7 +951,7 @@ fn order_repeatables<'a>(
 }
 
 /// The per-migration precondition verdict loop now lives in
-/// `zero_migrate_postgres::backend::precondition::evaluate_all` — the **Postgres** leaf reached only via
+/// `zero_migrate_postgres::backend::precondition::evaluate_all` - the **Postgres** leaf reached only via
 /// [`MigrationBackend::evaluate_preconditions`]
 /// (multi-engine abstraction). The generic apply body calls the backend method
 /// (`backend.evaluate_preconditions(cfg, m)`); it holds no `&Client` and runs no
@@ -958,7 +959,7 @@ fn order_repeatables<'a>(
 ///
 /// The EXPAND/CONTRACT gate. A `phase: Contract` online migration
 /// may apply only when every `phase: Expand` migration it `depends_on` is
-/// NET-APPLIED (`completed`) in the journal — the single source of truth.
+/// NET-APPLIED (`completed`) in the journal - the single source of truth.
 ///
 /// The contract tears down the dual-write trigger + drops the old column; if it
 /// landed before the expand was fully applied + recorded, old/new shapes would
@@ -970,9 +971,9 @@ fn order_repeatables<'a>(
 /// NOT journaled is refused here with a precise [`ApplyError::ExpandNotApplied`].
 ///
 /// Rule per depended-on version `dep` of a PENDING contract `m`:
-/// - `dep` net-applied in the journal               ⇒ OK (the expand is done);
-/// - `dep` is an Expand in THIS set, not completed   ⇒ refuse (expand pending);
-/// - `dep` absent from this set AND not completed    ⇒ refuse (cross-deploy
+/// - `dep` net-applied in the journal               => OK (the expand is done);
+/// - `dep` is an Expand in THIS set, not completed   => refuse (expand pending);
+/// - `dep` absent from this set AND not completed    => refuse (cross-deploy
 ///   contract whose expand has not landed).
 ///
 /// A `dep` that is a NON-expand present in the set imposes no expand/contract
@@ -983,7 +984,7 @@ fn order_repeatables<'a>(
 /// vacuously).
 ///
 /// # Errors
-/// [`ApplyError::ExpandNotApplied`] — a pending contract's expand dependency is
+/// [`ApplyError::ExpandNotApplied`] - a pending contract's expand dependency is
 /// not net-applied, or the contract declares no dependency at all.
 fn check_expand_contract_gate(
     migrations: &[Migration],
@@ -1003,7 +1004,7 @@ fn check_expand_contract_gate(
         }
         // Fail closed: a Contract migration MUST declare the expand it depends on.
         // With an empty `depends_on` the loop below would check nothing and the
-        // contract would vacuously pass — dropping a column/trigger with no
+        // contract would vacuously pass - dropping a column/trigger with no
         // journaled expand. A contract that declares no expand is malformed.
         if m.depends_on.is_empty() {
             return Err(ApplyError::ExpandNotApplied {
@@ -1014,11 +1015,11 @@ fn check_expand_contract_gate(
         for dep in &m.depends_on {
             let dep_v = dep.as_str();
             if completed.contains_key(dep_v) {
-                continue; // expand net-applied — OK.
+                continue; // expand net-applied - OK.
             }
             let dep_is_expand_or_absent = match phase_by_version.get(dep_v) {
                 Some(Some(OnlinePhase::Expand)) => true, // expand in set, not done.
-                Some(_) => false, // a non-expand dep in the set — not our concern.
+                Some(_) => false, // a non-expand dep in the set - not our concern.
                 None => true,     // absent from the set AND not completed.
             };
             if dep_is_expand_or_absent {
@@ -1032,14 +1033,14 @@ fn check_expand_contract_gate(
     Ok(())
 }
 
-// The migration-graph vocabulary — `order_pending`, the shared version-tiebroken
-// topological core beneath it, `canonical_set_order` and `compute_superseded` — moved
+// The migration-graph vocabulary - `order_pending`, the shared version-tiebroken
+// topological core beneath it, `canonical_set_order` and `compute_superseded` - moved
 // down to the backend contract. Every line of it reads `depends_on`/`supersedes` off a
 // `Migration` and a journal `AppliedEntry`; none of it names a dialect, a vendor or a
 // statement. It had to travel because a vendor journal reader answers the same
 // "what is pending?" question apply answers and must reuse the ONE implementation:
 // `zero-migrate-postgres`'s `status_sql` says so in its own comment, "so the two views
-// never diverge". Re-exported so every `crate::apply::executor::…` path resolves
+// never diverge". Re-exported so every `crate::apply::executor::...` path resolves
 // unchanged.
 pub(crate) use zero_migrate_backend::executor::{
     canonical_set_order, compute_superseded, order_pending, topo_order_version_tiebroken,
@@ -1047,13 +1048,13 @@ pub(crate) use zero_migrate_backend::executor::{
 /// Refuse a malformed set in which two distinct squashes both supersede the same
 /// version. A version may be collapsed by at most one
 /// squash; two in-set squashes over an overlapping prefix would both be pending
-/// on a fresh DB (neither net-applied → the all-or-none gate sees nothing
+/// on a fresh DB (neither net-applied -> the all-or-none gate sees nothing
 /// satisfied and lets both run), so the second's `up` would re-create what the
-/// first's already built. Caught here, before any execution — fail-closed on
+/// first's already built. Caught here, before any execution - fail-closed on
 /// nonsensical authoring rather than erroring mid-batch.
 ///
 /// # Errors
-/// - [`ApplyError::OverlappingSquashes`] — two squashes in the set supersede the
+/// - [`ApplyError::OverlappingSquashes`] - two squashes in the set supersede the
 ///   same version.
 fn check_no_overlapping_squashes(
     migrations: &[Migration],
@@ -1063,7 +1064,7 @@ fn check_no_overlapping_squashes(
     let mut owner: HashMap<&str, &str> = HashMap::new();
     for m in migrations {
         // Only PENDING squashes conflict; an already-net-applied squash re-supplied
-        // in the set is settled (its supersession is recorded) — the all-or-none
+        // in the set is settled (its supersession is recorded) - the all-or-none
         // gate routes a new overlapping squash to SquashAlreadyApplied.
         if m.supersedes.is_empty() || completed.contains_key(m.version.as_str()) {
             continue;
@@ -1090,7 +1091,7 @@ fn check_no_overlapping_squashes(
 /// squash in the set, BEFORE any execution.
 ///
 /// A squash `S` (`supersedes = [v1..vN]`) that is about to RUN its `up` (it is in
-/// the set and NOT net-applied) requires that NONE of `[v1..vN]` are SATISFIED —
+/// the set and NOT net-applied) requires that NONE of `[v1..vN]` are SATISFIED -
 /// the fresh-DB path, where `S.up` builds the schema and the superseded versions
 /// are skipped. If ALL of `[v1..vN]` are satisfied, `S.up` would re-create existing
 /// objects (double-apply): the correct path is [`crate::ops::squash`] (record the
@@ -1111,9 +1112,9 @@ fn check_no_overlapping_squashes(
 /// supersession is settled; `compute_superseded` already covers its versions).
 ///
 /// # Errors
-/// - [`ApplyError::SquashAlreadyApplied`] — a pending squash whose superseded set
+/// - [`ApplyError::SquashAlreadyApplied`] - a pending squash whose superseded set
 ///   is fully satisfied (use [`crate::ops::squash`] instead of apply).
-/// - [`ApplyError::SquashPartialOverlap`] — a pending squash whose superseded set
+/// - [`ApplyError::SquashPartialOverlap`] - a pending squash whose superseded set
 ///   is partially satisfied.
 fn check_squash_all_or_none(
     migrations: &[Migration],
@@ -1131,7 +1132,7 @@ fn check_squash_all_or_none(
             .filter(|d| satisfied.contains(d.as_str()))
             .count();
         if applied == 0 {
-            continue; // fresh path: S runs, supersedes skipped — OK.
+            continue; // fresh path: S runs, supersedes skipped - OK.
         }
         if applied == total {
             return Err(ApplyError::SquashAlreadyApplied {
@@ -1592,7 +1593,7 @@ pub fn plan_rollback_with_inverse_plans<'a>(
             // A SQUASH is never skippable. For any other migration a skip only
             // forgoes that migration's own undo; for a squash it leaves the
             // supersession standing over versions this same rollback unwinds, and
-            // `superseded_versions` honours a net-applied squash's edges — so the
+            // `superseded_versions` honours a net-applied squash's edges - so the
             // covered versions are journaled as satisfied while none of them are
             // present, and a later apply skips them and reports success having
             // created nothing. Refused ahead of the force check: this is not a
@@ -2065,7 +2066,7 @@ mod rollback_selection_tests {
         }
 
         // The gate tests drive `apply`/`rollback`, which never lower a raw island and
-        // never derive flags from SQL text — those run in `render::lower` and
+        // never derive flags from SQL text - those run in `render::lower` and
         // `plan::author`. Panicking rather than answering keeps this double from
         // silently standing in for a posture it was never written to express.
         fn check_raw_island_sql(&self, _sql: &str) -> Result<(), crate::guard::GuardError> {
@@ -2102,7 +2103,7 @@ mod rollback_selection_tests {
         }
 
         // The gate tests drive `apply`/`rollback`, which never lower a raw island and
-        // never derive flags from SQL text — those run in `render::lower` and
+        // never derive flags from SQL text - those run in `render::lower` and
         // `plan::author`. Panicking rather than answering keeps this double from
         // silently standing in for a posture it was never written to express.
         fn check_raw_island_sql(&self, _sql: &str) -> Result<(), crate::guard::GuardError> {
@@ -2479,7 +2480,7 @@ mod rollback_selection_tests {
     /// sorts after it, so a version-ordered filter selects the empty set and the
     /// rollback reports success having unwound nothing.
     ///
-    /// Version order carries no ordering information at all — `AppliedEntry::
+    /// Version order carries no ordering information at all - `AppliedEntry::
     /// event_seq` documents that `MigrationId::derive` stamps the high bits with
     /// an `0xFF` marker and fills the rest from a SHA-256, so derived ids sort in
     /// hash order among themselves and above every generated id. Three migrations
@@ -2782,7 +2783,7 @@ mod rollback_selection_ordering_tests {
         }
 
         // The gate tests drive `apply`/`rollback`, which never lower a raw island and
-        // never derive flags from SQL text — those run in `render::lower` and
+        // never derive flags from SQL text - those run in `render::lower` and
         // `plan::author`. Panicking rather than answering keeps this double from
         // silently standing in for a posture it was never written to express.
         fn check_raw_island_sql(&self, _sql: &str) -> Result<(), crate::guard::GuardError> {

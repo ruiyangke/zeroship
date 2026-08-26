@@ -48,8 +48,8 @@
 //!   schema model and CANNOT BE, because the blocker set includes objects this
 //!   engine never created: a DBA's view, another application's foreign key, an
 //!   inheritance child. The effect model can prove a plan REMOVES a named blocker.
-//!   It cannot ENUMERATE the blocker set. **A live query at step 0 is still
-//!   required**, and that is what this phase does. It can only be repaired by
+//!   It cannot ENUMERATE the blocker set. **A live query before the plan runs is
+//!   still required**, and that is what this module does. It can only be repaired by
 //!   REMOVING something, so a prefix that removes nothing leaves the pre-plan
 //!   answer valid. (An earlier step can BREAK one - `CREATE VIEW` over the column
 //!   does - but that direction is met-to-unmet, which the per-migration seam still
@@ -58,13 +58,13 @@
 //!   [`Precondition::TableNotExists`], [`Precondition::ColumnExists`],
 //!   [`Precondition::ColumnNotExists`], [`Precondition::RowCount`] - ranges over
 //!   objects the model NAMES. `render::fold::effects::state_at` answers them
-//!   exactly, given the introspected schema at step 0 and the ops the prefix
-//!   replays. They are STILL `Answerability::PlanDependent` here, and still never
-//!   hoisted, because hoisting them is a NEW GATE that can refuse a plan which
-//!   previously applied - step 6 of the proposal, deliberately behind a flag and
-//!   deliberately after `state_at` has been trusted in production. What changed at
-//!   step 5 is that they became ANSWERABLE; what has not changed is that this
-//!   module does not yet answer them. They stay `Answerability::PlanDependent`.
+//!   exactly, given the schema introspected before the plan runs and the ops the
+//!   prefix replays. They are STILL `Answerability::PlanDependent` here, and still
+//!   never hoisted, because hoisting them is a NEW GATE that can refuse a plan which
+//!   previously applied - the proposal puts that behind a flag, and behind `state_at`
+//!   having been trusted in production. The effect model made them ANSWERABLE; this
+//!   module still does not answer them, so they stay
+//!   `Answerability::PlanDependent`.
 //! - [`Precondition::SqlBoolean`] is untrusted opaque SQL. The engine cannot
 //!   enumerate what it reads, so no earlier step can be proven not to repair it,
 //!   and hoisting would run untrusted SQL an extra time. Undecidable, permanently.
@@ -128,7 +128,7 @@ use crate::render::step::PlanStep;
 /// cannot make the two obstruction variants answerable, because their blocker set
 /// includes objects the model never carried. So the classification survives, its
 /// axis is redrawn, and its effect inverts: the variants that used to be excluded
-/// for being repairable are now excluded only until step 6 turns them on.
+/// for being repairable are now excluded only until hoisting is turned on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Answerability {
     /// "Nothing is in the way." Ranges over catalog EDGES the model does not carry,
@@ -191,7 +191,7 @@ pub(crate) struct PlanStableCheck<'a> {
 ///    carry a `preconditions` field that NOTHING evaluates today; judging one
 ///    here would invent a gate rather than move one;
 /// 5. its version is not already satisfied in the journal (`satisfied`). The
-///    executor's pending set is `set − completed − superseded`, and a migration
+///    executor's pending set is `set - completed - superseded`, and a migration
 ///    outside it never has its preconditions evaluated at all. Judging one here
 ///    would refuse a RETRY that succeeds today - see the retry deadlock the
 ///    single-variant retype preflight shipped with;

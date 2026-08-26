@@ -30,11 +30,11 @@
 //! stable default (`DEFAULT NOW()`, `DEFAULT gen_random_uuid()`) forces
 //! a full table rewrite under `ACCESS EXCLUSIVE`. The classifier inspects
 //! `pg_get_expr` + `pg_proc.provolatile`: only `'i'` (immutable) takes the
-//! fast path; `'v'` and `'s'` escalate to destructive. For now we apply a
-//! literal-only heuristic on declared defaults (we never emit a volatile
-//! default — `default()` values are JS literals). A real `pg_get_expr`
-//! inspection would read the live catalog over the `driver::SqlSession`
-//! seam, the way the rest of the engine introspects.
+//! fast path; `'v'` and `'s'` escalate to destructive. What this module applies
+//! is a literal-only heuristic on declared defaults, which is sound because the
+//! engine never emits a volatile default - `default()` values are JS literals. A
+//! real `pg_get_expr` inspection would read the live catalog over the
+//! `driver::SqlSession` seam, the way the rest of the engine introspects.
 
 use serde_json::Value;
 use zero_migrate_backend::registry::VendorSet;
@@ -52,14 +52,14 @@ use crate::model::table_shape::ResolvedInject;
 /// the conversion at the plugin-db boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeClass {
-    /// Add column nullable, add index, relax constraint — auto-apply.
+    /// Add column nullable, add index, relax constraint - auto-apply.
     Additive,
     /// Add column with constant default, type widening, add unique
-    /// after validation passes — auto-apply with backfill if needed.
+    /// after validation passes - auto-apply with backfill if needed.
     Compatible,
     /// Drop column, type narrowing, tighten constraint, drop index,
     /// add NOT NULL to non-empty table, add column with volatile default
-    /// — refused; user-approval workflow.
+    /// - refused; user-approval workflow.
     Destructive,
 }
 
@@ -69,14 +69,14 @@ pub enum ChangeClass {
 pub struct DiffOp {
     /// The user-visible collection (table) name this change affects.
     pub collection: String,
-    /// The change kind — written to the migration journal's `change_kind`.
+    /// The change kind - written to the migration journal's `change_kind`.
     pub change_kind: ChangeKind,
     /// Classification, drives apply / refuse / backfill routing.
     pub class: ChangeClass,
     /// SQL to run when the op is applied. `None` for destructive ops
     /// that are surfaced via the error envelope without being executed.
     pub sql: Option<String>,
-    /// Structured metadata — copied into `details` JSONB.
+    /// Structured metadata - copied into `details` JSONB.
     pub details: Value,
     /// Field name involved, if any. Used by validation pass.
     pub field: Option<String>,
@@ -85,12 +85,12 @@ pub struct DiffOp {
 /// Specific change kinds the diff engine recognises.
 #[derive(Debug, Clone)]
 pub enum ChangeKind {
-    /// Brand-new table — emitted when the table is absent from the live
+    /// Brand-new table - emitted when the table is absent from the live
     /// snapshot. Carries the full `CREATE TABLE` body for application.
     CreateTable,
-    /// `ALTER TABLE … ADD COLUMN` for a field that doesn't exist yet.
+    /// `ALTER TABLE ... ADD COLUMN` for a field that doesn't exist yet.
     AddColumn,
-    /// `ALTER TABLE … DROP COLUMN` — destructive, never auto-applied.
+    /// `ALTER TABLE ... DROP COLUMN` - destructive, never auto-applied.
     DropColumn,
     /// `CREATE INDEX CONCURRENTLY` for a new index marker.
     AddIndex,
@@ -100,21 +100,21 @@ pub enum ChangeKind {
         reason = "DropIndex remains part of the diff model for strictness tests even though the default release build does not construct it."
     )]
     DropIndex,
-    /// `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY`. Emitted when a
+    /// `ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY`. Emitted when a
     /// column already exists but no FK constraint is attached, or when
     /// the table was created with FK emission deferred (cross-table
     /// declaration order).
     AddForeignKey,
-    /// `ALTER TABLE … DROP CONSTRAINT` for a FK no longer declared.
+    /// `ALTER TABLE ... DROP CONSTRAINT` for a FK no longer declared.
     DropForeignKey,
     /// Backfill the sibling `<col>_masked` column for
     /// every row of an existing column that just gained a
     /// `.mask({...})` declaration. The accompanying
-    /// `ALTER TABLE … ADD COLUMN <col>_masked TEXT NULL` op is emitted
+    /// `ALTER TABLE ... ADD COLUMN <col>_masked TEXT NULL` op is emitted
     /// as a separate `AddColumn` immediately before this one; the
     /// backfill itself is driven by the data plane's `run_mask_backfill`. After the
     /// backfill is fully drained (two consecutive clean polls), the
-    /// final step is `ALTER TABLE … ALTER COLUMN <col>_masked SET NOT
+    /// final step is `ALTER TABLE ... ALTER COLUMN <col>_masked SET NOT
     /// NULL`. Carries the kind + classification so the audit row
     /// records what mask was installed.
     MaskBackfill {
@@ -146,12 +146,12 @@ pub enum ChangeKind {
     /// `strictness == "lenient"`, applies under `strictness == "off"`.
     MaskRemove { collection: String, column: String },
     /// A column's physical storage type changed on an **existing**
-    /// column — the declared SDK type maps to a different SQL type than
+    /// column - the declared SDK type maps to a different SQL type than
     /// the live column carries. The motivating (and only currently
     /// detected) case is the **encryption toggle**: a `t.string()`
-    /// column becoming `t.encrypted(...)` (TEXT → BYTEA) or the reverse
-    /// (BYTEA → TEXT). Both directions require rewriting every stored
-    /// value — encrypt-backfill or decrypt-backfill — because the data
+    /// column becoming `t.encrypted(...)` (TEXT -> BYTEA) or the reverse
+    /// (BYTEA -> TEXT). Both directions require rewriting every stored
+    /// value - encrypt-backfill or decrypt-backfill - because the data
     /// plane writes `decode($N,'base64')::bytea` into the column the
     /// moment the schema says "encrypted", which corrupts a column that
     /// is still TEXT (and vice-versa).
@@ -163,7 +163,7 @@ pub enum ChangeKind {
     /// a deliberate expand-contract migration (add a new BYTEA column,
     /// encrypt-backfill, swap, drop the old) following the
     /// `MaskBackfill`/`MaskRewrite` precedent. The point of this op is
-    /// that the transition is *visible* — it must not vanish as a
+    /// that the transition is *visible* - it must not vanish as a
     /// zero-op diff (the bytes-encrypted-transition silent no-op case).
     RewriteColumnType {
         collection: String,
@@ -171,7 +171,7 @@ pub enum ChangeKind {
         from_type: String,
         to_type: String,
         /// `Some(true)` when the column is gaining encryption
-        /// (TEXT→BYTEA), `Some(false)` when losing it (BYTEA→TEXT),
+        /// (TEXT->BYTEA), `Some(false)` when losing it (BYTEA->TEXT),
         /// `None` for a non-encryption type rewrite.
         encryption_toggle: Option<bool>,
     },
@@ -236,7 +236,7 @@ pub struct ColumnInfo {
     /// Vector dimensionality observed from the live
     /// column. `Some(N)` when the column is a `vector(N)` (PG) or a
     /// BLOB column with a `length("col") = 4 * N` CHECK constraint
-    /// (SQLite); `None` otherwise (the default — every existing
+    /// (SQLite); `None` otherwise (the default - every existing
     /// non-vector column). Populated from
     /// `information_schema` / `sqlite_master.sql` introspection
     /// (regex on DDL today, sidecar `__zero_migrate_schema_meta` is
@@ -279,15 +279,14 @@ pub struct ColumnInfo {
     /// reads route through `<col>_masked AS <col>` aliasing,
     /// and writes dual-bind both columns atomically. The
     /// sibling column is NEVER part of the creator-visible SDK
-    /// surface — `Row<S>` only contains the parent column wrapped
+    /// surface - `Row<S>` only contains the parent column wrapped
     /// in `MaskedValue<T>`.
     ///
-    /// Live-schema introspection on PG/SQLite does NOT yet populate
-    /// this from existing tables; the sibling-column-existence
-    /// check + sentinel-comment parse is a later step. For now `mask`
-    /// always reads as `None` from live introspection — the diff
-    /// classifier treats schema-mask vs live-no-mask as Recoverable
-    /// Additive (the mask backfill is safe to apply).
+    /// Live-schema introspection on PG/SQLite does NOT populate this from
+    /// existing tables: nothing runs the sibling-column-existence check or
+    /// parses the sentinel comment, so `mask` always reads as `None` from live
+    /// introspection. The diff classifier treats schema-mask against
+    /// live-no-mask as Recoverable Additive (the mask backfill is safe to apply).
     pub mask: Option<MaskMeta>,
 }
 
@@ -330,8 +329,8 @@ impl Default for ColumnInfo {
 /// `Classification::from_sql`. The other three came with them because they are the
 /// same vocabulary and `mask_codec` names all five.
 ///
-/// The CLASSIFIER stayed. Everything below this line — `compute_diff`,
-/// `LiveSchema`, `ChangeKind`, `IndexInfo` — decides something ABOUT a vendor
+/// The CLASSIFIER stayed. Everything below this line - `compute_diff`,
+/// `LiveSchema`, `ChangeKind`, `IndexInfo` - decides something ABOUT a vendor
 /// rather than asking a vendor how to spell something, which is the boundary rule
 /// `render::backends` states at length.
 pub use zero_migrate_backend::mask_meta::{
@@ -373,7 +372,7 @@ pub struct ForeignKeyInfo {
     pub column: String,
     /// Referenced table name (relative to the same app schema).
     pub target_table: String,
-    /// Referenced column on the target table — typically `id`.
+    /// Referenced column on the target table - typically `id`.
     #[allow(
         dead_code,
         reason = "Foreign-key metadata is wider than the current release diff consumer but is kept for tests and future orchestration work."
@@ -543,7 +542,7 @@ pub fn compute_diff(
     // First-time CREATE TABLE inlines the FK in the same statement (see
     // build_create_table_with_fks_for_dialect's Deferred mode), so when the table is
     // brand new (`live_cols.is_none()`) we only emit AddForeignKey ops
-    // for refs whose target *doesn't* exist yet — but currently
+    // for refs whose target *doesn't* exist yet - but currently
     // build_create_table emits FKs inline always. To stay safe and
     // explicit, we let the orchestrator decide: when the table already
     // exists, the FK might need to be attached; when it's a fresh
@@ -555,7 +554,7 @@ pub fn compute_diff(
     //   the FK is part of CREATE TABLE; no AddForeignKey op.
     // - existing column + new FK (was bare number, now t.ref): the FK
     //   needs ALTER TABLE ADD CONSTRAINT. Classification is **compatible**
-    //   — we'd need to validate every existing row before turning the
+    //   - we'd need to validate every existing row before turning the
     //   constraint on, but Postgres' `NOT VALID` + `VALIDATE` two-step
     //   makes this safe (deferred to follow-up; today we attempt the add
     //   and Postgres will refuse if data is bad).
@@ -585,7 +584,7 @@ pub fn compute_diff(
             if !column_exists {
                 // The column itself doesn't exist yet.
                 if live_cols.is_some() {
-                    // Existing table — AddColumn already emitted above;
+                    // Existing table - AddColumn already emitted above;
                     // emit AddForeignKey as a separate op so the
                     // orchestrator can run ALTER TABLE ADD CONSTRAINT
                     // after the column is created.
@@ -609,7 +608,7 @@ pub fn compute_diff(
                         field: Some(field.clone()),
                     });
                 }
-                // First-time CREATE TABLE — FK is inlined in CREATE TABLE;
+                // First-time CREATE TABLE - FK is inlined in CREATE TABLE;
                 // skip standalone op.
                 continue;
             }
@@ -637,7 +636,7 @@ pub fn compute_diff(
                     field: Some(field.clone()),
                 });
             } else if let Some(fk) = live_fk {
-                // Detect policy mismatch — surfaced as paired DROP+ADD.
+                // Detect policy mismatch - surfaced as paired DROP+ADD.
                 let declared_on_delete = crate::schema::query::normalize_fk_action_for_dialect(
                     vendors,
                     def.get("onDelete").and_then(|v| v.as_str()),
@@ -708,17 +707,17 @@ pub fn compute_diff(
     // introspectors) against the declared `mask` block. Three
     // transitions:
     //
-    //   - 6a: live=None,         declared=Some(_)            → MaskBackfill
-    //   - 6b: live=Some(a),      declared=Some(b) where a≠b  → MaskRewrite
-    //   - 6c: live=Some(_),      declared=None or kind=none  → MaskRemove
+    //   - 6a: live=None,         declared=Some(_)            -> MaskBackfill
+    //   - 6b: live=Some(a),      declared=Some(b) where a!=b  -> MaskRewrite
+    //   - 6c: live=Some(_),      declared=None or kind=none  -> MaskRemove
     //
     // 6a additionally emits an `AddColumn` for the sibling BEFORE the
     // `MaskBackfill` op so the column exists when the backfill writes
-    // to it. The sibling ADD is nullable on purpose — backfill flips
+    // to it. The sibling ADD is nullable on purpose - backfill flips
     // it to NOT NULL after the last batch (see
     // `crate::crud::mask_backfill::run_mask_backfill`).
     //
-    // Brand-new columns with a mask declaration are NOT routed here —
+    // Brand-new columns with a mask declaration are NOT routed here -
     // `build_create_table_with_fks_for_dialect` (CreateTable op) and
     // `build_add_column` (AddColumn op) already emit the sibling at
     // CREATE / ALTER ADD time. Only EXISTING columns whose mask state
@@ -729,7 +728,7 @@ pub fn compute_diff(
                 continue;
             }
             let Some(live_col) = live_cols.get(field) else {
-                // Column doesn't exist on the live side — handled by
+                // Column doesn't exist on the live side - handled by
                 // the column-additions branch above (it emits the
                 // sibling at ALTER ADD time when present).
                 continue;
@@ -737,13 +736,13 @@ pub fn compute_diff(
 
             let declared_mask = mask_meta_from_schema_def(def);
             match (live_col.mask.as_ref(), declared_mask) {
-                // No mask on either side — nothing to do.
+                // No mask on either side - nothing to do.
                 (None, None) => {}
 
-                // 6a — new mask declaration on existing column.
+                // 6a - new mask declaration on existing column.
                 (None, Some(new_meta)) => {
                     // (1) ALTER ADD COLUMN <col>_masked TEXT NULL +
-                    //     `COMMENT ON COLUMN` sentinel attachment —
+                    //     `COMMENT ON COLUMN` sentinel attachment -
                     //     emitted as a regular `AddColumn` op so the
                     //     existing apply pipeline runs it. Both
                     //     statements ride in the same multi-statement
@@ -790,7 +789,7 @@ pub fn compute_diff(
                         },
                         class: ChangeClass::Additive,
                         // Backfill SQL is multi-statement and
-                        // resumable — there is no single "the SQL" to
+                        // resumable - there is no single "the SQL" to
                         // store on the op. The apply layer dispatches
                         // to `mask_backfill::run_mask_backfill`.
                         sql: None,
@@ -805,7 +804,7 @@ pub fn compute_diff(
                     });
                 }
 
-                // 6b — mask-kind change on existing masked column.
+                // 6b - mask-kind change on existing masked column.
                 (Some(old_meta), Some(new_meta))
                     if old_meta.kind != new_meta.kind
                         || old_meta.classification != new_meta.classification =>
@@ -833,10 +832,10 @@ pub fn compute_diff(
                     });
                 }
 
-                // 6b no-op — same kind + classification.
+                // 6b no-op - same kind + classification.
                 (Some(_), Some(_)) => {}
 
-                // 6c — mask removal (destructive).
+                // 6c - mask removal (destructive).
                 (Some(_), None) => {
                     ops.push(DiffOp {
                         collection: collection.to_string(),
@@ -863,18 +862,18 @@ pub fn compute_diff(
     // The column-additions branch above is NAME-ONLY: it skips any field
     // that already exists on the live side, no matter how its declared
     // type has changed. That silently dropped the
-    // `bytes-encrypted-transition-silent-noop` case — a `t.string()`
+    // `bytes-encrypted-transition-silent-noop` case - a `t.string()`
     // column flipped to `t.encrypted(...)` (or back) keeps the same
     // NAME, so AddColumn never fires and DropColumn never fires, yet the
-    // physical type must change (TEXT ↔ BYTEA). Worse, the data plane
+    // physical type must change (TEXT to BYTEA, or back). Worse, the data plane
     // starts writing `decode($N,'base64')::bytea` into a still-TEXT
-    // column the instant the schema says "encrypted" → corruption.
+    // column the instant the schema says "encrypted" -> corruption.
     //
     // Detect the transition by comparing the LIVE encryption state
     // (introspected from the `zero-migrate:enc:` sentinel into `ColumnInfo.encryption`)
     // against the DECLARED encryption state (`def.encrypted`). When they
     // disagree we emit a `RewriteColumnType` op classified Destructive so
-    // the transition is VISIBLE — refused by validation and routed to a
+    // the transition is VISIBLE - refused by validation and routed to a
     // deliberate encrypt/decrypt-backfill expand-contract rather than
     // vanishing as a zero-op diff.
     //
@@ -891,7 +890,7 @@ pub fn compute_diff(
                 continue;
             }
             let Some(live_col) = live_cols.get(field) else {
-                // Column doesn't exist live — handled by the
+                // Column doesn't exist live - handled by the
                 // column-additions branch (AddColumn) above.
                 continue;
             };
@@ -899,7 +898,7 @@ pub fn compute_diff(
             let declared_encrypted = def.get("encrypted").is_some();
             let live_encrypted = live_col.encryption.is_some();
             if declared_encrypted == live_encrypted {
-                // No encryption toggle — nothing for this op to do.
+                // No encryption toggle - nothing for this op to do.
                 // (Non-encryption type rewrites are not detected here.)
                 continue;
             }
@@ -977,7 +976,7 @@ pub fn compute_diff(
 /// kind is not the explicit opt-out (`"none"`). Returns `None` for
 /// fields without a mask block, with `kind: "none"`, or with a
 /// malformed kind / classification string (the diff classifier treats
-/// an unparseable declared mask as "no mask" — the introspection
+/// an unparseable declared mask as "no mask" - the introspection
 /// layer's `mask_sentinel_malformed` is what fences a malformed live
 /// sentinel; this helper just needs to round-trip the declared shape).
 pub(crate) fn mask_meta_from_schema_def(def: &Value) -> Option<MaskMeta> {
@@ -995,7 +994,7 @@ pub(crate) fn mask_meta_from_schema_def(def: &Value) -> Option<MaskMeta> {
         .and_then(|v| v.as_str())
         .unwrap_or("pii");
     let classification = Classification::from_sql(class_str)?;
-    // The sibling is always `<field>_masked` — the schema_def doesn't
+    // The sibling is always `<field>_masked` - the schema_def doesn't
     // carry the field name, so the helper returns `String::new()` here
     // and callers that need the sibling name format it from the field
     // name themselves. We keep the field on `MaskMeta` so
@@ -1008,14 +1007,14 @@ pub(crate) fn mask_meta_from_schema_def(def: &Value) -> Option<MaskMeta> {
 }
 
 /// Classify an `ADD COLUMN` change. Inputs:
-/// - Adding a nullable column → additive.
-/// - Adding a NOT NULL column to an empty table → additive (Postgres
+/// - Adding a nullable column -> additive.
+/// - Adding a NOT NULL column to an empty table -> additive (Postgres
 ///   accepts it).
-/// - Adding a NOT NULL column to a non-empty table without a default →
+/// - Adding a NOT NULL column to a non-empty table without a default ->
 ///   destructive.
 /// - Adding a NOT NULL column to a non-empty table with an *immutable*
-///   default → compatible (Postgres fast-path).
-/// - Adding a column with a volatile/stable default → destructive
+///   default -> compatible (Postgres fast-path).
+/// - Adding a column with a volatile/stable default -> destructive
 ///   (forces table rewrite under ACCESS EXCLUSIVE).
 fn classify_add_column(def: &Value, live: &LiveSchema, collection: &str) -> ChangeClass {
     let required = def
@@ -1180,7 +1179,7 @@ mod tests {
         );
         live.tables.insert("posts".to_string(), cols);
 
-        let declared = json!({}); // Empty declared schema — drop everything user-side
+        let declared = json!({}); // Empty declared schema - drop everything user-side
         let ops = compute_diff(
             crate::test_fixtures::VENDORS,
             &live,
@@ -1201,7 +1200,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Encryption type-transition: TEXT ↔ BYTEA must NOT silently no-op.
+    // Encryption type-transition: TEXT to BYTEA, and back, must NOT silently no-op.
     // Regression for `bytes-encrypted-transition-silent-noop`.
     // -----------------------------------------------------------------
 
@@ -1241,7 +1240,7 @@ mod tests {
     fn string_to_encrypted_transition_emits_rewrite_op() {
         // Live column is a plaintext TEXT `ssn`; the redeployed schema
         // declares it `t.encrypted(...)` (BYTEA). The diff MUST surface a
-        // type rewrite — emitting ZERO ops here is the corruption bug,
+        // type rewrite - emitting ZERO ops here is the corruption bug,
         // because the data plane would start writing
         // `decode($N,'base64')::bytea` into a still-TEXT column.
         let live = live_with_cols("users", vec![("ssn", plaintext_text_col())]);
@@ -1338,7 +1337,7 @@ mod tests {
 
     #[test]
     fn unchanged_encrypted_column_is_no_op() {
-        // Live encrypted + declared encrypted with the same shape → no
+        // Live encrypted + declared encrypted with the same shape -> no
         // RewriteColumnType op (must not churn on every deploy).
         let live = live_with_cols("users", vec![("ssn", encrypted_bytea_col())]);
         let declared = json!({
@@ -1362,7 +1361,7 @@ mod tests {
 
     #[test]
     fn unchanged_plaintext_column_is_no_op() {
-        // Live plaintext + declared plaintext → no rewrite.
+        // Live plaintext + declared plaintext -> no rewrite.
         let live = live_with_cols("users", vec![("name", plaintext_text_col())]);
         let declared = json!({ "name": { "type": "string" } });
         let ops = compute_diff(
@@ -1518,7 +1517,7 @@ mod tests {
 
     #[test]
     fn b2_add_fk_to_existing_column_is_compatible() {
-        // Existing table with a bare INTEGER column — now declared with
+        // Existing table with a bare INTEGER column - now declared with
         // t.ref("users"). The FK must be added as a separate op.
         let mut live = LiveSchema::default();
         let mut cols = std::collections::HashMap::new();
@@ -1691,7 +1690,7 @@ mod tests {
     //
     // SCOPE NOTE: CHECK-constraint evolution (extending the
     // discriminator's IN-list, adding per-variant integrity CHECKs)
-    // is NOT yet diffed — it is additive-by-construction, so skipping it
+    // is NOT yet diffed - it is additive-by-construction, so skipping it
     // is safe: this diff engine does not model constraints at all, so it
     // never emits an op that amends an existing CHECK and a re-deploy
     // leaves the live ones as first created.
@@ -1752,7 +1751,7 @@ mod tests {
             &[],
         );
         // Adds: `name` and `value` (new-variant fields). Both nullable
-        // → additive.
+        // -> additive.
         let new_field_ops: Vec<&DiffOp> = ops
             .iter()
             .filter(|o| matches!(o.change_kind, ChangeKind::AddColumn))
@@ -1773,7 +1772,7 @@ mod tests {
     fn c2_removed_variant_field_classifies_as_destructive() {
         // Live includes a `legacy_metric_value` from a now-removed
         // variant. After removal the declared schema no longer
-        // includes that column → DropColumn (destructive).
+        // includes that column -> DropColumn (destructive).
         let mut live = LiveSchema::default();
         let mut cols = std::collections::HashMap::new();
         for c in ["id", "kind", "userId", "legacy_metric_value"] {
@@ -1850,7 +1849,7 @@ mod tests {
         live
     }
 
-    /// Live has no mask, schema declares one → emit the
+    /// Live has no mask, schema declares one -> emit the
     /// sibling `AddColumn` + `MaskBackfill` ops.
     #[test]
     fn mask_backfill_emits_alter_then_backfill_ops() {
@@ -1916,7 +1915,7 @@ mod tests {
     }
 
     /// Live has mask kind=Full, schema declares kind=Last4
-    /// → emit MaskRewrite op, no AddColumn.
+    /// -> emit MaskRewrite op, no AddColumn.
     #[test]
     fn mask_rewrite_emits_when_kind_changes() {
         let live_mask = MaskMeta {
@@ -1958,7 +1957,7 @@ mod tests {
         );
     }
 
-    /// No-op: same kind + classification both sides →
+    /// No-op: same kind + classification both sides ->
     /// neither MaskRewrite nor MaskBackfill is emitted.
     #[test]
     fn mask_no_op_when_unchanged() {
@@ -1992,7 +1991,7 @@ mod tests {
         );
     }
 
-    /// Live has mask, schema removes it → MaskRemove op
+    /// Live has mask, schema removes it -> MaskRemove op
     /// classified Destructive.
     #[test]
     fn mask_remove_emits_destructive_op() {
@@ -2022,7 +2021,7 @@ mod tests {
         assert_eq!(removes[0].class, ChangeClass::Destructive);
     }
 
-    /// Live has mask, schema sets `kind: "none"` → also
+    /// Live has mask, schema sets `kind: "none"` -> also
     /// MaskRemove (since `none` opts the sibling out entirely).
     #[test]
     fn mask_kind_none_is_treated_as_removal() {
@@ -2085,7 +2084,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        // The sibling sits alongside (live-only — the SDK never
+        // The sibling sits alongside (live-only - the SDK never
         // declares it).
         cols.insert(
             "ssn_masked".to_string(),

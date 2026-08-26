@@ -7,7 +7,7 @@
 //! and the obstacle was never `PlanStep` itself. It was one FIELD, four types down:
 //! `PlanStep::OnlineRename` carries a [`RenameStep`], whose `TableRebuild` arm
 //! carries a [`TableRebuild`], whose [`TableRebuildSpec`] had a `sequence_policy`
-//! typed `zero_migrate_sqlite::SqliteSequencePolicy` — a VENDOR type, in the shared
+//! typed `zero_migrate_sqlite::SqliteSequencePolicy` - a VENDOR type, in the shared
 //! plan vocabulary, pointing the dependency the wrong way through the whole chain.
 //! That field carries a neutral
 //! [`SequenceHighWaterPolicy`](zero_migrate_backend::table_rebuild::SequenceHighWaterPolicy)
@@ -19,7 +19,7 @@
 /// It is the currency of
 /// [`DmlRenderer::bind_bytes`](zero_migrate_backend::renderer::DmlRenderer::bind_bytes),
 /// so a vendor crate cannot implement the contract without naming it. It carries
-/// nothing but scalars, so it was the first of this module to travel — alone, and
+/// nothing but scalars, so it was the first of this module to travel - alone, and
 /// long before the rest could follow.
 pub use zero_migrate_backend::step::BindValue;
 

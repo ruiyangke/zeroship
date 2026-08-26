@@ -1,8 +1,8 @@
 //! The fail-closed IR envelope load gate (the POLICY-bound half).
 //!
-//! The policy-free pieces of the load gate — [`IrLoadError`], the ownership
+//! The policy-free pieces of the load gate - [`IrLoadError`], the ownership
 //! checker [`enforce_ir_ownership`], the checksum helpers, and the table-collection
-//! walkers — live in the [`zero_migrate_ir::load`] leaf crate and are re-exported
+//! walkers - live in the [`zero_migrate_ir::load`] leaf crate and are re-exported
 //! below. THIS module keeps [`load_ir_document`]: the full load chain, which
 //! threads a [`SchemaScope`](crate::model::policy::SchemaScope) into the POLICY
 //! validator ([`validate_ir_scoped`](crate::model::validate::validate_ir_scoped))
@@ -25,7 +25,7 @@ pub use zero_migrate_ir::load::*;
 
 /// Load + GATE an IR envelope document (the fail-closed chain). Returns the
 /// validated, ownership-checked [`MigrationIr`] with its `owner_app` STAMPED to
-/// `deploying_app` (a spoofed/absent value in the artifact is discarded) — ready
+/// `deploying_app` (a spoofed/absent value in the artifact is discarded) - ready
 /// for `IrAuthor::lower`.
 ///
 /// The steps run in the security-critical order: deserialize, then `ir_version`,
@@ -33,7 +33,7 @@ pub use zero_migrate_ir::load::*;
 /// ownership, then the checksum-hint compare. Every step is fail-closed; lowering
 /// NEVER sees an artifact that failed any gate.
 ///
-/// `registry` is the project's table→owner map; `target_dialect` is threaded from
+/// `registry` is the project's table->owner map; `target_dialect` is threaded from
 /// the deploy backend selection (`deploy_migrate.rs` / `--engine`).
 ///
 /// # Errors
@@ -83,14 +83,14 @@ pub fn load_ir_document_authorized(
     let mut ir: MigrationIr =
         serde_json::from_str(bytes).map_err(|e| IrLoadError::Deserialize(e.to_string()))?;
 
-    // 2. ir_version fail-closed — BEFORE any checksum/lower.
+    // 2. ir_version fail-closed - BEFORE any checksum/lower.
     ir.check_ir_version()?;
 
-    // 3. structural validation — the authoritative gate over every Expr slot, plus
+    // 3. structural validation - the authoritative gate over every Expr slot, plus
     //    the schema-confinement + guard-direction gate threaded with the active
     //    [`SchemaScope`]: a Confined cross-schema op is REFUSED here, fail-closed,
     //    BEFORE lower. (The author-PK CONFORMANCE re-check is no longer
-    //    threaded through a `PolicyProfile` here — that conformance is owned by the
+    //    threaded through a `PolicyProfile` here - that conformance is owned by the
     //    injection resolver `resolve_create_table_policy`, which the server runs
     //    over the operator's `EffectivePolicy` before this load.)
     validate_ir_authorized(vendors, &ir, target_dialect, schema_scope, authority)?;
@@ -124,7 +124,7 @@ pub fn load_ir_document_authorized(
     //    a hand-built `Migration` also arrives.
     enforce_ir_finite_timeouts(&ir)?;
 
-    // 4. ownership — over the ARTIFACT's claimed owner is irrelevant; the check is
+    // 4. ownership - over the ARTIFACT's claimed owner is irrelevant; the check is
     //    against the deploying app + the project registry (fail-closed unknown).
     enforce_ir_ownership(&ir, deploying_app, registry)?;
     // The inverse touches real tables too. Without this an author could reach a
@@ -155,7 +155,7 @@ pub fn load_ir_document_authorized(
     //     author named the function (F656).
     enforce_ir_forward_data_protocol(&ir)?;
 
-    // 5. advisory checksum-hint compare — recompute + compare, then
+    // 5. advisory checksum-hint compare - recompute + compare, then
     //    DROP the hint (it never folds into the authoritative checksum). Done
     //    against the artifact's claimed hint BEFORE we stamp owner_app, since the
     //    hint domain excludes owner_app anyway.
@@ -229,7 +229,7 @@ mod tests {
         format!(r#"{{"ir_version": 1, "name": "m", "ops": {ops_json}{extra}}}"#)
     }
 
-    // ── ir_version fail-closed on the PRODUCTION path ───────────────────────
+    // -- ir_version fail-closed on the PRODUCTION path -----------------------
 
     #[test]
     fn load_rejects_future_ir_version_before_anything_else() {
@@ -247,7 +247,7 @@ mod tests {
         assert!(matches!(err, IrLoadError::Version(_)), "got: {err}");
     }
 
-    // ── phase-free data-migration protocol ─────────────────────────────────
+    // -- phase-free data-migration protocol ---------------------------------
 
     #[test]
     fn load_refuses_forward_dml_without_a_reverse_declaration() {
@@ -366,13 +366,13 @@ mod tests {
         .expect("schema migrations do not acquire a reverse requirement");
     }
 
-    // ── validate_ir wired as the loader's gate ──────────────────────────────
+    // -- validate_ir wired as the loader's gate ------------------------------
     // A hostile IR envelope driven through the REAL loader (not the validator unit
     // test) must have the structural gate FIRE on the production path.
 
     #[test]
     fn load_runs_validate_ir_on_the_production_path() {
-        // A createTable whose Check references a column NOT on the table — rule
+        // A createTable whose Check references a column NOT on the table - rule
         // (c). The gate must reject it via validate_ir on the real load path.
         let ops = r#"[{"op":"createTable","name":"users","columns":[{"name":"first","type":"text"}],"constraints":[{"kind":{"kind":"check","expr":{"node":"unaryOp","op":"isNotNull","operand":{"node":"colRef","name":"ghost"}}}}]}]"#;
         let bytes = envelope_json(ops, "");
@@ -427,7 +427,7 @@ mod tests {
         assert!(matches!(err, IrLoadError::Validate(_)), "got: {err}");
     }
 
-    // ── deserialize gate: unknown node tag / out-of-domain scalar ───────────
+    // -- deserialize gate: unknown node tag / out-of-domain scalar -----------
 
     // -- finite timeout budgets on the PRODUCTION load path ------------------
 
@@ -512,7 +512,7 @@ mod tests {
         }
     }
 
-    // ── ownership fail-closed ───────────────────────────────────────────────
+    // -- ownership fail-closed -----------------------------------------------
 
     #[test]
     fn load_refuses_op_on_another_apps_table() {
@@ -574,10 +574,10 @@ mod tests {
     #[test]
     fn load_refuses_bare_name_drop_index_fail_closed() {
         // fail-closed: a bare-name DropIndex (`table: None`) has no
-        // ownership-checkable target, so the ownership pass `continue`d over it —
+        // ownership-checkable target, so the ownership pass `continue`d over it -
         // letting a hostile IR envelope `{op:"dropIndex", name:"<other_app_index>"}`
         // (no table hint) DROP another app's index cross-tenant. The fix refuses a
-        // bare-name DropIndex at validate time (no name→owner registry resolver
+        // bare-name DropIndex at validate time (no name->owner registry resolver
         // exists), so the bypass is closed. An intruder targeting another app's
         // index by NAME is now REFUSED, not silently applied.
         let ops = r#"[{"op":"dropIndex","name":"victim_secret_idx"}]"#;
@@ -611,7 +611,7 @@ mod tests {
     fn load_allows_table_hinted_drop_index_owned_by_deployer() {
         // The remedy: a DropIndex carrying its owning-table hint IS ownership-
         // checkable (the table's owner resolves through the registry), so a
-        // table-hinted drop on a table the deployer owns is allowed — the fix
+        // table-hinted drop on a table the deployer owns is allowed - the fix
         // refuses ONLY the un-checkable bare-name form.
         let ops = r#"[{"op":"dropIndex","name":"mine_idx","table":"mine"}]"#;
         let bytes = envelope_json(ops, "");
@@ -658,7 +658,7 @@ mod tests {
         // a following op on that same new table is then allowed.
         let ops = r#"[{"op":"createTable","name":"fresh","columns":[{"name":"first","type":"text"}]},{"op":"addColumn","table":"fresh","column":"x","type":"int"}]"#;
         let bytes = envelope_json(ops, "");
-        let reg = registry(&[]); // `fresh` is brand new — not in the project registry
+        let reg = registry(&[]); // `fresh` is brand new - not in the project registry
         let ir = load_ir_document(
             crate::test_fixtures::VENDORS,
             &bytes,
@@ -907,7 +907,7 @@ mod tests {
     #[test]
     fn load_refuses_create_table_colliding_with_another_apps_table() {
         // A createTable for a table ALREADY owned by another app does not silently
-        // take ownership — the per-op check refuses it (the working registry only
+        // take ownership - the per-op check refuses it (the working registry only
         // inserts when ABSENT).
         let ops =
             r#"[{"op":"createTable","name":"users","columns":[{"name":"first","type":"text"}]}]"#;
@@ -954,7 +954,7 @@ mod tests {
         assert!(enforce_ir_ownership(&ir, "app_a", &registry(&[])).is_ok());
     }
 
-    // ── checksum-hint compare wired ─────────────────────────────────────────
+    // -- checksum-hint compare wired -----------------------------------------
 
     /// FROZEN-HEX hint golden: pin the hint-domain
     /// checksum for a FIXED IR to a hard-coded literal, then drive the loader
@@ -962,12 +962,12 @@ mod tests {
     /// self-reference of [`load_accepts_a_correct_checksum_hint`] (which computes
     /// the "correct" hint with the very function under test): here the accepted
     /// value is an INDEPENDENT literal captured once, so a drift in EITHER
-    /// `recompute_hint_domain_checksum` (the hint-domain fold — incl. how it
+    /// `recompute_hint_domain_checksum` (the hint-domain fold - incl. how it
     /// folds `MigrationFlags::default()` when the override is all-None) OR the
     /// loader's compare is caught. The JS builder MUST emit this same hex for
     /// this IR; this frozen literal is the independent oracle.
     ///
-    /// If this hex changes, the hint-domain wire format drifted — the JS `op.*`
+    /// If this hex changes, the hint-domain wire format drifted - the JS `op.*`
     /// author would emit a hint the engine rejects. Not allowed without a
     /// deliberate, matched break on both sides.
     ///
@@ -975,16 +975,16 @@ mod tests {
     /// `MigrationFlags`: the hint domain folds `MigrationFlags::default()`, whose
     /// canonical-JSON image gained the `lock_timeout_ms: null` key, so this hex
     /// moved BY CONSTRUCTION. The JS author reuses this same Rust crate's
-    /// serialization, so both sides move together — a DELIBERATE, matched break.
+    /// serialization, so both sides move together - a DELIBERATE, matched break.
     #[test]
     fn load_accepts_a_frozen_checksum_hint_golden() {
         // A fixed dropTable IR with all-default flags/deps/supersedes/precond.
         let ops = r#"[{"op":"dropTable","table":"users"}]"#;
-        // Hard-coded literal — NOT computed by the function under test.
+        // Hard-coded literal - NOT computed by the function under test.
         // Re-captured when the IR checksum domain-separator tag was set to
         // `zero-migrate/of_ir/v1` (`model/migration.rs`): the hint-domain fold
         // hashes that tag, so this hex moved BY CONSTRUCTION. The JS author reuses
-        // this same Rust crate's serialization, so both sides move together — a
+        // this same Rust crate's serialization, so both sides move together - a
         // deliberate, matched break.
         const FROZEN_HINT: &str =
             "8adb4d9360aa90f73145071a2ce0c769793beee4cc17d136af7e52098c766bb4";
@@ -1082,7 +1082,7 @@ mod tests {
         .is_ok());
     }
 
-    // ── hint domain is not yet fully computable (deps/supersedes/flags) ──────
+    // -- hint domain is not yet fully computable (deps/supersedes/flags) ------
     // The recompute currently folds ONLY ops+preconditions (neutral flags, empty
     // deps). A hint-bearing IR that ALSO carries depends_on/supersedes or
     // non-default flags must NOT be silently compared against a PARTIAL domain
@@ -1167,7 +1167,7 @@ mod tests {
     fn load_allows_depends_on_when_no_hint_is_present() {
         // The fail-closed gate is HINT-SPECIFIC: a depends_on-bearing IR with NO
         // advisory hint is fine (nothing to compare), so authoring deps is not
-        // blocked — only a hint OVER an uncomputable domain is.
+        // blocked - only a hint OVER an uncomputable domain is.
         let ops = r#"[{"op":"dropTable","table":"users"}]"#;
         let bytes = envelope_json(ops, r#", "depends_on": ["m_0001"]"#);
         let reg = registry(&[("users", "app_a")]);
@@ -1185,7 +1185,7 @@ mod tests {
         );
     }
 
-    // ── order: ir_version is checked BEFORE validate/ownership/checksum ──────
+    // -- order: ir_version is checked BEFORE validate/ownership/checksum ------
 
     #[test]
     fn version_gate_precedes_ownership_and_checksum() {

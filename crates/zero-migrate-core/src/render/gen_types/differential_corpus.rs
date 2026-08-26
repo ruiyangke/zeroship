@@ -1,17 +1,18 @@
-//! **The differential corpus.** Step 1 of `docs/proposals/single-fold-and-effects.md`.
+//! **The differential corpus.** The falsifiability floor under
+//! `docs/proposals/single-fold-and-effects.md`.
 //!
 //! One op stream is replayed through all four independent answers -
 //! [`fold_ops`], the wire `FieldDef` map, the authoring tables and the runtime
 //! collection metadata - and what each one produces is recorded.
 //!
 //! TWO of the four no longer have a private walker behind them. The runtime metadata
-//! was `super::runtime_metadata_from_ops` until step 4 consumer 1 of that proposal
-//! deleted it, and the authoring tables were `super::authoring_tables_from_ops` until
-//! consumer 2 did the same; their entry points are now
+//! was `super::runtime_metadata_from_ops` and the authoring tables were
+//! `super::authoring_tables_from_ops`; both walkers are deleted and their entry points
+//! are now
 //! `FoldedSchema::project_runtime_metadata` and
 //! `FoldedSchema::project_authoring_tables`. So this corpus keeps cross-checking the
 //! same four QUESTIONS, two of them against a different producer. It fixes nothing. It
-//! makes every later step of that proposal falsifiable, and it turns into a suite the
+//! makes every later move of that proposal falsifiable, and it turns into a suite the
 //! comparison the review log has been running BY HAND for every row of the proposal's
 //! section B.
 //!
@@ -44,12 +45,12 @@
 //! Part 1 is a REACH matrix: for every `Op` variant and every dialect, whether
 //! appending that op moved each walker's answer, measured by prefix sweep over
 //! the whole corpus. It is a behavioural measurement, not an arm count. Section
-//! A of the proposal counted `match` arms and reported that
-//! `runtime_metadata_from_ops` handled 12 of 56 and `authoring_tables_from_ops`
-//! 15 of 56; [`REACH`] is the measured answer to the same question, and where
-//! the two differ the measurement wins. Both of those arm counts are now
-//! HISTORICAL: the two answers come from `AuthoredState::advance`, whose match is
-//! exhaustive over all 56, so their columns of [`REACH`] moved when the walkers
+//! A of the proposal counted `match` arms and reported that each of
+//! `runtime_metadata_from_ops` and `authoring_tables_from_ops` handled a small
+//! fraction of the `Op` variants; [`REACH`] is the measured answer to the same
+//! question, and where the two differ the measurement wins. Both of those arm counts
+//! are now HISTORICAL: the two answers come from `AuthoredState::advance`, whose match
+//! is exhaustive over every variant, so their columns of [`REACH`] moved when the walkers
 //! went - upward where the exhaustive traversal interprets an op the walker
 //! swallowed, and to `refused` where the fold fails closed and the walker did not.
 //!
@@ -130,8 +131,8 @@ pub(super) struct Stream {
 /// So the path reaches SIDEWAYS, out of `zero-migrate-core` and into the composing
 /// crate's test tree, and that is worth seeing rather than hiding behind a helper. It
 /// is a `#[cfg(test)]` DATA read: no Cargo edge, no `use`, nothing in the compiled
-/// engine. Moving the corpus down here instead would have repointed seven readers —
-/// including a hard-coded path in a published JS package's tests — to make one
+/// engine. Moving the corpus down here instead would have repointed seven readers -
+/// including a hard-coded path in a published JS package's tests - to make one
 /// `#[cfg(test)]` path shorter.
 fn fixtures_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -500,17 +501,17 @@ fn variant(op: &Op) -> String {
 enum Walker {
     /// `fold_ops` -> `SchemaSnapshot`.
     Fo,
-    /// The per-table wire `FieldDef` map. Since step 4 consumer 3 moved that consumer,
-    /// its real entry point is `FoldedSchema::project_field_defs` and the walker it
-    /// replaced (`fold_to_field_defs`) is gone.
+    /// The per-table wire `FieldDef` map. Its real entry point is
+    /// `FoldedSchema::project_field_defs` and the walker it replaced
+    /// (`fold_to_field_defs`) is gone.
     Ffd,
-    /// The `env.db.ts` source model. Since step 4 consumer 2 moved that consumer, its
-    /// real entry point is `FoldedSchema::project_authoring_tables` and the walker it
-    /// replaced (`authoring_tables_from_ops`) is gone.
+    /// The `env.db.ts` source model. Its real entry point is
+    /// `FoldedSchema::project_authoring_tables` and the walker it replaced
+    /// (`authoring_tables_from_ops`) is gone.
     Ato,
-    /// The runtime collection metadata - options and plain indexes. Since step 4
-    /// moved the consumer, its real entry point is
-    /// `FoldedSchema::project_runtime_metadata` and the walker it replaced is gone.
+    /// The runtime collection metadata - options and plain indexes. Its real entry
+    /// point is `FoldedSchema::project_runtime_metadata` and the walker it replaced is
+    /// gone.
     Rmo,
 }
 
@@ -1244,7 +1245,7 @@ const A_TEXT_PROBE_CANNOT_SEE_AN_EMPTY_VOCABULARY: &str =
 // finding thirteen verdicts silently rewritten.
 //
 // The rows read `AGREED refused` / `Consistent` where they used to read
-// `DIVERGENT FO=refused FFD=refused ATO={…} RMO=refused` under one of:
+// `DIVERGENT FO=refused FFD=refused ATO={...} RMO=refused` under one of:
 //
 //   ONLY_THE_FOLD_BACKED_WALKERS_FAIL_CLOSED (3 rows)
 //     -- c_retype_of_a_value_format_column|{Postgres,Sqlite,Mysql}|tables
@@ -1256,10 +1257,10 @@ const A_TEXT_PROBE_CANNOT_SEE_AN_EMPTY_VOCABULARY: &str =
 //     -- c_rename_column_index_include_and_predicate|Mysql|carries(legacy_qty)
 //
 // The mechanism is one line: `authoring_tables_from_ops` applied no coherence gate
-// and answered about streams the structural catalog replay refuses; step 4 consumer 2
-// deleted it, and `FoldedSchema::project_authoring_tables` reads a fold that fails
-// closed. The runtime metadata made the same move under consumer 1, which is what
-// turned those rows' `RMO=` cells into `refused` a commit earlier.
+// and answered about streams the structural catalog replay refuses; it is deleted, and
+// `FoldedSchema::project_authoring_tables` reads a fold that fails closed. The runtime
+// metadata made the same move earlier, which is what turned those rows' `RMO=` cells
+// into `refused`.
 //
 // BE HONEST ABOUT WHAT THIS COST. An `AGREED refused` row cross-checks NOTHING about
 // content - four refusals agreeing is four walkers declining to answer, and the ATO
@@ -1515,8 +1516,8 @@ const ROWS: &[Row] = &[
 /// per `variant|dialect`. Cells are `FO FFD ATO RMO`, `R`eaches / `S`ilent /
 /// `-` unobserved.
 ///
-/// Step 4 consumer 2 moved EIGHTEEN cells - six variants across three dialects -
-/// from `S` to `R` in the ATO column, and every one of them is the same mechanism:
+/// Retiring the authoring-tables walker moved every cell for six variants, on every
+/// dialect, from `S` to `R` in the ATO column, and every one is the same mechanism:
 /// `alterPrimaryKey`, `attachPartition`, `dropPartition`, `dropSequence`, `dropView`
 /// and `synchronizeIdentity`. `S` means the walker's answer was byte-identical
 /// before and after the op, which for the deleted walker meant its `_ => {}` swallowed
@@ -1607,8 +1608,8 @@ const REACH: &[&str] = &[
     "dropColumnNotNull|Mysql|RRRS",
     "dropColumnNotNull|Postgres|RRRS",
     "dropColumnNotNull|Sqlite|RRRS",
-    // FFD S -> R on Sqlite and Mysql, moved by step 4 consumer 3 and the ONLY reach
-    // cell that move touches. `fold_to_field_defs`'s `Op::DropConstraint` arm reached
+    // FFD S -> R on Sqlite and Mysql, moved by retiring the `FieldDef` walker and the
+    // ONLY reach cell that move touches. `fold_to_field_defs`'s `Op::DropConstraint` arm reached
     // into its recovered-FK side map and nothing else, so a `dropConstraint` that
     // removed a UNIQUE changed the `FieldDef` map on no dialect and the op read as
     // SILENT off Postgres. The projection derives every lifted facet from the

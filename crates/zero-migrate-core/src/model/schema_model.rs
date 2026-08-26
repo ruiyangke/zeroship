@@ -1,8 +1,8 @@
 //! The NEUTRAL schema model, and the vendor side table that keeps it neutral.
 //!
-//! This is step 2 of `docs/proposals/single-fold-and-effects.md` section G, shared with
-//! `docs/proposals/pluggable-backends.md` step 2. **No consumer moves here and no fold
-//! is written here.** What lands is the TYPE and the COMPARATORS, plus the lossless
+//! Specified by `docs/proposals/single-fold-and-effects.md` section G, shared with
+//! `docs/proposals/pluggable-backends.md`. **No consumer moves here and no fold
+//! is written here.** What lives here is the TYPE and the COMPARATORS, plus the lossless
 //! bridge to today's [`crate::model::snapshot`] types that makes both falsifiable
 //! against a live server.
 //!
@@ -49,7 +49,7 @@
 //! should be extracted into. It is not: `apply/drift.rs` contains no use of `PartialEq`
 //! on `ColumnSnapshot`, `IndexSnapshot`, `ConstraintSnapshot`, `TableSnapshot` or
 //! `ViewSnapshot`, and `ColumnSnapshot::eq` has exactly ONE production consumer -
-//! `TableSnapshot::eq` at `model/snapshot.rs:1279`. The two definitions of "the same
+//! `TableSnapshot::eq`. The two definitions of "the same
 //! column" already differ by a field, and naming them apart is what stops the next
 //! reader assuming they are one.
 //!
@@ -211,8 +211,8 @@ impl IndexElementKey {
 ///
 /// # The families are named for the FACT, not for the backend that answers
 ///
-/// Six of them used to carry a vendor prefix — `sqlite_stored_create_sql` and five
-/// `pg_index_*` — while the other five already used the contract's own spelling. That
+/// Six of them used to carry a vendor prefix - `sqlite_stored_create_sql` and five
+/// `pg_index_*` - while the other five already used the contract's own spelling. That
 /// was not a distinction, it was an inconsistency inside one struct: every family here
 /// is a straight split of a field the neutral
 /// [`zero_migrate_backend::snapshot`] surface ALREADY names neutrally
@@ -892,8 +892,8 @@ impl SchemaModel {
     /// vendor term.
     ///
     /// This is the function `tests/schema_model_comparator_equivalence_pg.rs` proves
-    /// equal to `TableSnapshot::eq` on live data, and therefore the one a consumer would
-    /// move onto in step 4.
+    /// equal to `TableSnapshot::eq` on live data, and therefore the one a consumer
+    /// moves onto.
     #[must_use]
     pub fn table_shape_identity(
         &self,
@@ -941,9 +941,9 @@ impl SchemaModel {
 //   * `apply/drift.rs` contains NO use of `PartialEq` on `ColumnSnapshot`,
 //     `IndexSnapshot`, `ConstraintSnapshot`, `TableSnapshot` or `ViewSnapshot`. Its
 //     column pass matches by name into a `BTreeMap` and then compares named fields by
-//     hand (`diff_attrs`, `apply/drift.rs:2846-3141`).
+//     hand, in `apply::drift::diff_attrs`.
 //   * `ColumnSnapshot::eq` has exactly ONE production consumer, and it is
-//     `TableSnapshot::eq` (`model/snapshot.rs:1279`). No production code compares two
+//     `TableSnapshot::eq`. No production code compares two
 //     columns directly.
 //
 // So `ColumnSnapshot::eq` is not the drift comparator; it is the TABLE-SHAPE
@@ -1041,10 +1041,9 @@ pub fn column_shape_identity(left: &Column, right: &Column) -> bool {
 /// a change to their schema?
 ///
 /// A DIFFERENT question from [`column_shape_identity`], and today a different ANSWER.
-/// This is the neutral field set `apply::drift::diff_attrs` compares
-/// (`apply/drift.rs:2901-3011`), and it is [`column_shape_identity`] plus exactly one
-/// field: `generated_kind`, compared at `apply/drift.rs:2919` through
-/// `comparable_generated_column`.
+/// This is the neutral field set `apply::drift::diff_attrs` compares, and it is
+/// [`column_shape_identity`] plus exactly one field: `generated_kind`, which that
+/// function compares through `comparable_generated_column`.
 ///
 /// So `column_shape_identity(a, b) == true` does NOT imply the drift pass is quiet, and
 /// `drift_identity(a, b) => column_shape_identity(a, b)` is the implication that DOES
@@ -1106,11 +1105,10 @@ pub fn drift_identity(left: &Column, right: &Column) -> bool {
 ///
 /// The extraction of `IndexSnapshot::same_definition_except_name`. Measured, this is the
 /// one comparator that already has two consumers agreeing through a shared function:
-/// `render::declarative::pair_indexes` (`declarative.rs:4560`) adopts an alias-matched
-/// live index only if it holds, and `apply::drift::diff_indexes` (`drift.rs:3627`)
-/// delegates to that same `pair_indexes`, so drift and the plan cannot disagree about
-/// WHICH live index a desired one meant. `diff_with_known_fk_targets`
-/// (`declarative.rs:6461`) asks the same question through the sibling
+/// `render::declarative::pair_indexes` adopts an alias-matched live index only if it
+/// holds, and `apply::drift::diff_indexes` delegates to that same `pair_indexes`, so
+/// drift and the plan cannot disagree about WHICH live index a desired one meant.
+/// `diff_with_known_fk_targets` asks the same question through the sibling
 /// `definition_differences_except_name`, for the refusal message.
 ///
 /// It ignores the NAME, which is the whole point, and it ignores `expr_cascade_columns`
