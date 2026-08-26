@@ -65,7 +65,8 @@ use crate::client::Addr;
 use crate::codec::FrontendMessage;
 use crate::config::{Config, ReplicationMode};
 use crate::connect::{
-    Endpoint, Resolver, SystemResolver, endpoints, first_encryption_for_addr, with_connect_timeout,
+    Endpoint, Resolver, SystemResolver, endpoints, first_encryption_for_addr, tls_server_name,
+    with_connect_timeout,
 };
 use crate::connect_socket::connect_socket;
 use crate::connect_tls::negotiate_tls;
@@ -240,8 +241,9 @@ where
     // enough: the peer must observe this physical session end immediately.
     let mut release = socket.release_handle();
 
+    let server_name = tls_server_name(&addr, hostname);
     let tls_inst = tls
-        .make_tls_connect(hostname.unwrap_or(""))
+        .make_tls_connect(&server_name)
         .map_err(|e| Error::tls(e.into()))?;
     let has_hostname = hostname.is_some();
     let encryption = first_encryption_for_addr(&addr, cfg.get_ssl_mode());

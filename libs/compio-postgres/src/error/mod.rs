@@ -383,10 +383,14 @@ enum Kind {
     Config,
     RowCount,
     Connect,
-    /// A post-startup target-session probe proved that the endpoint does not
-    /// meet the requested property. This stays distinct from a transport
-    /// failure so `sslmode=allow` does not retry the same endpoint.
+    /// A post-startup target-session probe produced a valid rejection, an SQL
+    /// error, or an unusable result. This rejects the current configured host,
+    /// skipping its other transports and addresses, but permits the next host.
     TargetSessionAttrs,
+    /// Sending or reading the post-startup target-session probe failed.
+    /// libpq treats this as a broken connection request, so no transport,
+    /// address, configured host, or `prefer-standby` pass may be retried.
+    TargetSessionAttrsFatal,
     /// A deadline configured by the caller around a pooled client command
     /// expired. This is local policy, not `PostgreSQL`'s `57014` response.
     CommandTimeout,
@@ -453,6 +457,9 @@ impl fmt::Display for Error {
             Kind::RowCount => fmt.write_str("query returned an unexpected number of rows"),
             Kind::Connect => fmt.write_str("error connecting to server"),
             Kind::TargetSessionAttrs => fmt.write_str("error checking target session attributes"),
+            Kind::TargetSessionAttrsFatal => {
+                fmt.write_str("error communicating during target session attribute check")
+            }
             Kind::CommandTimeout => fmt.write_str("client command timeout expired"),
             Kind::ReadTimeout => fmt.write_str("socket read timeout expired"),
             Kind::TransactionRolledBack => fmt.write_str(
@@ -546,11 +553,22 @@ impl Error {
         self.0.kind == Kind::TlsUnattested
     }
 
-    /// Whether the post-startup session-property check proved that the
-    /// endpoint does not meet the requirement. Transport fallback must not
-    /// reinterpret this as a TLS failure.
+    /// Whether authentication failed locally while processing the server's
+    /// challenge, before the server could report an SQLSTATE.
+    pub(crate) fn is_authentication(&self) -> bool {
+        self.0.kind == Kind::Authentication
+    }
+
+    /// Whether the post-startup session-property check rejected the current
+    /// configured host while permitting the next configured host.
     pub(crate) fn is_target_session_attrs(&self) -> bool {
         self.0.kind == Kind::TargetSessionAttrs
+    }
+
+    /// Whether sending or reading the post-startup session-property check
+    /// failed and therefore ends the entire connection request.
+    pub(crate) fn is_target_session_attrs_fatal(&self) -> bool {
+        self.0.kind == Kind::TargetSessionAttrsFatal
     }
 
     /// Returns the SQLSTATE error code associated with the error.
@@ -655,6 +673,10 @@ impl Error {
 
     pub(crate) fn target_session_attrs(e: Error) -> Error {
         Error::new(Kind::TargetSessionAttrs, e.into_source())
+    }
+
+    pub(crate) fn target_session_attrs_fatal(e: Error) -> Error {
+        Error::new(Kind::TargetSessionAttrsFatal, e.into_source())
     }
 
     pub(crate) fn command_timeout(cause: Option<Box<dyn error::Error + Sync + Send>>) -> Error {

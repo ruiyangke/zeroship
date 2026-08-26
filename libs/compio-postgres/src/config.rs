@@ -19,7 +19,6 @@ use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::net::IpAddr;
 use std::num::NonZeroUsize;
-use std::ops::Deref;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
@@ -620,9 +619,9 @@ pub enum Host {
 ///     fail loudly until their peer-credential API is implemented. As in
 ///     libpq, the setting is ignored on TCP connections.
 /// * `host` - The host to connect to. On Unix platforms, if the host starts with a `/` character it is treated as the
-///     path to the directory containing Unix domain sockets. Otherwise, it is treated as a hostname. Multiple hosts
-///     can be specified, separated by commas. Each host will be tried in turn when connecting. Required if connecting
-///     with the `connect` method.
+///     path to the directory containing Unix domain sockets. On Linux, `@` selects the abstract Unix-socket namespace.
+///     Otherwise, it is treated as a hostname. Multiple hosts can be specified, separated by commas. Each host will be
+///     tried in turn when connecting. Required if connecting with the `connect` method.
 /// * `sslnegotiation` - TLS negotiation method. If set to `direct`, the client
 ///     will perform direct TLS handshake, this only works for PostgreSQL 17 and
 ///     newer.
@@ -634,6 +633,7 @@ pub enum Host {
 ///     wire protocol to perform the negotiation.
 /// * `hostaddr` - Numeric IP address of host to connect to. This should be in the standard IPv4 address format,
 ///     e.g., 172.28.40.9. If your machine supports IPv6, you can also use those addresses.
+///     In a comma-separated list, an empty item selects the corresponding `host` item.
 ///     If this parameter is not specified, the value of `host` will be looked up to find the corresponding IP address,
 ///     or if host specifies an IP address, that value will be used directly.
 ///     Using `hostaddr` allows the application to avoid a host name look-up, which might be important in applications
@@ -771,6 +771,9 @@ pub struct Config {
     pub(crate) statement_cache_capacity: usize,
     pub(crate) statement_cache_execution_threshold: NonZeroUsize,
     pub(crate) ssl_mode: SslMode,
+    /// Whether the caller selected `sslmode`, as opposed to observing its
+    /// compiled default. `sslrootcert=system` may strengthen only the latter.
+    pub(crate) ssl_mode_explicit: bool,
     pub(crate) ssl_negotiation: SslNegotiation,
     pub(crate) ssl_root_cert: SslRootCert,
     pub(crate) ssl_cert: Option<String>,
@@ -786,7 +789,10 @@ pub struct Config {
     pub(crate) ssl_sni: bool,
     pub(crate) require_peer: Option<String>,
     pub(crate) host: Vec<Host>,
-    pub(crate) hostaddr: Vec<IpAddr>,
+    /// Positional `hostaddr` entries. `None` is an explicitly empty slot,
+    /// which tells libpq-compatible endpoint selection to use the matching
+    /// `host` entry instead.
+    pub(crate) hostaddr: Vec<Option<IpAddr>>,
     pub(crate) port: Vec<u16>,
     pub(crate) connect_timeout: Option<Duration>,
     /// Programmatic-only post-startup socket-read policy. It is deliberately
@@ -827,6 +833,7 @@ impl Config {
             statement_cache_capacity: 0,
             statement_cache_execution_threshold: NonZeroUsize::MIN,
             ssl_mode: SslMode::Prefer,
+            ssl_mode_explicit: false,
             ssl_negotiation: SslNegotiation::Postgres,
             ssl_root_cert: SslRootCert::Unset,
             ssl_cert: None,
@@ -866,7 +873,8 @@ impl Config {
     ///
     /// Defaults to the user executing this process.
     pub fn user(&mut self, user: impl Into<String>) -> &mut Config {
-        self.user = Some(user.into());
+        let user = user.into();
+        self.user = (!user.is_empty()).then_some(user);
         self
     }
 
@@ -881,7 +889,8 @@ impl Config {
     where
         T: AsRef<[u8]>,
     {
-        self.password = Some(password.as_ref().to_vec());
+        let password = password.as_ref();
+        self.password = (!password.is_empty()).then(|| password.to_vec());
         self
     }
 
@@ -1029,7 +1038,21 @@ impl Config {
             if key == "service" {
                 return Err(Error::config(Box::new(NestedService)));
             }
-            if explicit.iter().any(|given| given == key) || applied.contains(&key.as_str()) {
+            if let Some(key) = match key.as_str() {
+                "requiressl" => Some("requiressl"),
+                "servicefile" => Some("servicefile"),
+                _ => None,
+            } {
+                return Err(Error::config(Box::new(InvalidServiceOption(key))));
+            }
+            let canonical_key = canonical_parameter_key(key);
+            if explicit
+                .iter()
+                .any(|given| canonical_parameter_key(given) == canonical_key)
+                || applied
+                    .iter()
+                    .any(|given| canonical_parameter_key(given) == canonical_key)
+            {
                 continue;
             }
             self.param(key, value)?;
@@ -1043,7 +1066,8 @@ impl Config {
     ///
     /// Defaults to the user.
     pub fn dbname(&mut self, dbname: impl Into<String>) -> &mut Config {
-        self.dbname = Some(dbname.into());
+        let dbname = dbname.into();
+        self.dbname = (!dbname.is_empty()).then_some(dbname);
         self
     }
 
@@ -1181,9 +1205,11 @@ impl Config {
 
     /// Sets the SSL configuration.
     ///
-    /// Defaults to `prefer`.
+    /// Defaults to `prefer`, except that `sslrootcert=system` strengthens an
+    /// otherwise implicit default to `verify-full` as libpq does.
     pub fn ssl_mode(&mut self, ssl_mode: SslMode) -> &mut Config {
         self.ssl_mode = ssl_mode;
+        self.ssl_mode_explicit = true;
         self
     }
 
@@ -1210,6 +1236,13 @@ impl Config {
     /// Defaults to [`SslRootCert::Unset`].
     pub fn ssl_root_cert(&mut self, ssl_root_cert: SslRootCert) -> &mut Config {
         self.ssl_root_cert = ssl_root_cert;
+        if !self.ssl_mode_explicit {
+            self.ssl_mode = if self.ssl_root_cert == SslRootCert::System {
+                SslMode::VerifyFull
+            } else {
+                SslMode::Prefer
+            };
+        }
         self
     }
 
@@ -1417,6 +1450,7 @@ impl Config {
     ///
     /// Multiple hosts can be specified by calling this method multiple times, and each will be tried in order. On Unix
     /// systems, a host starting with a `/` is interpreted as a path to a directory containing Unix domain sockets.
+    /// On Linux, a host starting with `@` selects the abstract Unix-socket namespace.
     /// There must be either no hosts, or the same number of hosts as hostaddrs.
     pub fn host(&mut self, host: impl Into<String>) -> &mut Config {
         let host = host.into();
@@ -1428,6 +1462,11 @@ impl Config {
             }
         }
 
+        #[cfg(target_os = "linux")]
+        if let Some(name) = host.strip_prefix('@') {
+            return self.host_abstract(name.as_bytes());
+        }
+
         self.host.push(Host::Tcp(host));
         self
     }
@@ -1437,9 +1476,13 @@ impl Config {
         &self.host
     }
 
-    /// Gets the hostaddrs that have been added to the configuration with `hostaddr`.
-    pub fn get_hostaddrs(&self) -> &[IpAddr] {
-        self.hostaddr.deref()
+    /// Gets the positional hostaddr entries in the configuration.
+    ///
+    /// An explicitly empty item in a parsed comma-separated list is `None` and
+    /// selects the corresponding `host`. Programmatic calls to
+    /// [`Config::hostaddr`] always append `Some`.
+    pub fn get_hostaddrs(&self) -> &[Option<IpAddr>] {
+        &self.hostaddr
     }
 
     /// Adds a Unix socket host to the configuration.
@@ -1454,12 +1497,20 @@ impl Config {
         self
     }
 
+    #[cfg(target_os = "linux")]
+    fn host_abstract(&mut self, name: &[u8]) -> &mut Config {
+        let mut path = Vec::with_capacity(name.len() + 1);
+        path.push(0);
+        path.extend_from_slice(name);
+        self.host_path(OsStr::from_bytes(&path))
+    }
+
     /// Adds a hostaddr to the configuration.
     ///
     /// Multiple hostaddrs can be specified by calling this method multiple times, and each will be tried in order.
     /// There must be either no hostaddrs, or the same number of hostaddrs as hosts.
     pub fn hostaddr(&mut self, hostaddr: IpAddr) -> &mut Config {
-        self.hostaddr.push(hostaddr);
+        self.hostaddr.push(Some(hostaddr));
         self
     }
 
@@ -1484,9 +1535,9 @@ impl Config {
     /// Hostnames can resolve to multiple IP addresses, and this timeout
     /// restarts for each one, as libpq's does. It is also applied once to each
     /// host entry's name resolution, which libpq leaves unbounded. Defaults to
-    /// no limit.
+    /// no limit. A zero duration likewise clears the limit.
     pub fn connect_timeout(&mut self, connect_timeout: Duration) -> &mut Config {
-        self.connect_timeout = Some(connect_timeout);
+        self.connect_timeout = (!connect_timeout.is_zero()).then_some(connect_timeout);
         self
     }
 
@@ -1537,7 +1588,7 @@ impl Config {
     /// TCP_USER_TIMEOUT is available and will default to the system default if omitted or set to 0;
     /// on other systems, it has no effect.
     pub fn tcp_user_timeout(&mut self, tcp_user_timeout: Duration) -> &mut Config {
-        self.tcp_user_timeout = Some(tcp_user_timeout);
+        self.tcp_user_timeout = (!tcp_user_timeout.is_zero()).then_some(tcp_user_timeout);
         self
     }
 
@@ -1684,12 +1735,47 @@ impl Config {
         self.replication
     }
 
+    /// NO CALLER EVER DELIVERS THE SAME KEY TWICE, so an arm here cannot
+    /// "override an earlier occurrence" and a test shaped `key=A key=B` cannot
+    /// prove that it does. Measured 2026-08-26 across all three routes:
+    ///
+    /// * keyword strings collapse duplicates to the LAST value - `host=a host=b`
+    ///   yields ONE host, and `application_name=first application_name=second`
+    ///   yields `"second"`, so the first value is never applied at all;
+    /// * `fill_unset` (service files) skips a key already in `applied` or
+    ///   `explicit`, deliberately, because libpq takes the FIRST of a repeated
+    ///   service key;
+    /// * a URI's query replaces the authority before anything reaches here, so
+    ///   `postgres://h:5455/db?port=` is one `port` application, not two.
+    ///
+    /// The consequence is a live trap: revert an override arm and its
+    /// `key=A key=B` test still passes, which reads as a proved regression
+    /// guard. Two such tests are marked NON-DISCRIMINATING below.
+    ///
+    /// THEY WERE NOT WRITTEN THAT WAY. The collapse arrived with
+    /// `ParsedParameters::insert`, which removes an existing key before
+    /// pushing; before it, the DSN loop called `param` once per OCCURRENCE.
+    /// Both tests were measured failing against their own fix reverted, at the
+    /// commits that introduced them - so each was a working guard that a later
+    /// refactor in the same series silently disarmed, with the suite green the
+    /// whole way. That is the durable hazard here: collapsing duplicates is
+    /// correct, and it costs coverage somewhere far from the change.
+    ///
+    /// To exercise an override now, drive the SETTER
+    /// (`Config::connect_timeout`) - that path is still reachable and its
+    /// tests do discriminate.
     fn param(&mut self, key: &str, value: &str) -> Result<(), Error> {
         // libpq's treatment of `key=` is per-OPTION, not uniform. `port=` uses
         // the compiled default, while the six socket integer options reject an
         // empty value. Enums reject it too; strings generally keep it.
-        const EMPTY_MEANS_UNSET: &[&str] =
-            &["port", "statement_cache_capacity", "max_message_size"];
+        if value.is_empty() && key == "port" {
+            // Empty selects the compiled default. Clearing is observable when
+            // it overrides an earlier occurrence in the same string.
+            self.port.clear();
+            return Ok(());
+        }
+
+        const EMPTY_MEANS_UNSET: &[&str] = &["statement_cache_capacity", "max_message_size"];
         if value.is_empty() && EMPTY_MEANS_UNSET.contains(&key) {
             return Ok(());
         }
@@ -1706,14 +1792,10 @@ impl Config {
             // "password authentication failed" where libpq says
             // "no password supplied".
             "user" => {
-                if !value.is_empty() {
-                    self.user(value);
-                }
+                self.user(value);
             }
             "password" => {
-                if !value.is_empty() {
-                    self.password(value);
-                }
+                self.password(value);
             }
             "dbname" => {
                 self.dbname(value);
@@ -1986,17 +2068,25 @@ impl Config {
             // key is an override.
             "host" => {
                 self.host.clear();
-                for host in value.split(',') {
-                    self.host(host);
+                if !value.is_empty() {
+                    for host in value.split(',') {
+                        self.host(host);
+                    }
                 }
             }
             "hostaddr" => {
                 self.hostaddr.clear();
-                for hostaddr in value.split(',') {
-                    let addr = hostaddr
-                        .parse()
-                        .map_err(|_| Error::config_parse(Box::new(InvalidValue("hostaddr"))))?;
-                    self.hostaddr(addr);
+                if !value.is_empty() {
+                    for hostaddr in value.split(',') {
+                        if hostaddr.is_empty() {
+                            self.hostaddr.push(None);
+                            continue;
+                        }
+                        let addr = hostaddr
+                            .parse()
+                            .map_err(|_| Error::config_parse(Box::new(InvalidValue("hostaddr"))))?;
+                        self.hostaddr(addr);
+                    }
                 }
             }
             "port" => {
@@ -2008,7 +2098,8 @@ impl Config {
                     let port = if port.is_empty() {
                         5432
                     } else {
-                        match port.parse() {
+                        let port = parse_libpq_integer(port, "port")?;
+                        match u16::try_from(port) {
                             Ok(0) | Err(_) => {
                                 return Err(Error::config_parse(Box::new(InvalidValue("port"))));
                             }
@@ -2019,26 +2110,20 @@ impl Config {
                 }
             }
             "connect_timeout" => {
-                let timeout = value
-                    .parse::<i64>()
-                    .map_err(|_| Error::config_parse(Box::new(InvalidValue("connect_timeout"))))?;
+                let timeout = parse_libpq_integer(value, "connect_timeout")?;
                 if timeout > 0 {
-                    // TAKEN LITERALLY, INCLUDING 1. libpq is widely described as
-                    // clamping this to a 2 second floor, so `from_secs(1)` reads
-                    // like a parity bug and invites a "fix" that would introduce
-                    // one. MEASURED 2026-08-26 against real libpq by dialling
-                    // 192.0.2.1:5432, which blackholes, so the client's own
-                    // timeout is the only thing that ends the wait: values 1/2/3/5
-                    // returned after 1.1/2.1/3.1/5.1s (the constant 0.1 is
-                    // `docker exec` startup). One second is honoured as one
-                    // second, on libpq 16.15 AND 18.4. There is no floor to match.
+                    // TAKEN LITERALLY, INCLUDING 1. PostgreSQL 16 and older
+                    // documented and implemented a two-second floor, but
+                    // PostgreSQL 18 removed it. This crate's parity oracle is
+                    // PostgreSQL 18, whose source uses the positive integer as
+                    // supplied.
                     self.connect_timeout(Duration::from_secs(timeout as u64));
+                } else {
+                    self.connect_timeout(Duration::ZERO);
                 }
             }
             "tcp_user_timeout" => {
-                let timeout = value
-                    .parse::<i64>()
-                    .map_err(|_| Error::config_parse(Box::new(InvalidValue("tcp_user_timeout"))))?;
+                let timeout = parse_libpq_integer(value, "tcp_user_timeout")?;
                 if timeout > 0 {
                     // MILLISECONDS, and it is the only member of this family
                     // that is not seconds: libpq documents `keepalives_idle`,
@@ -2065,6 +2150,11 @@ impl Config {
                     // oracle for a unit question - it can be confidently wrong in
                     // a way no differential against it will ever surface.
                     self.tcp_user_timeout(Duration::from_millis(timeout as u64));
+                } else {
+                    // libpq clamps a negative value to zero, and zero restores
+                    // the system default. This must also clear an earlier
+                    // occurrence of the same key.
+                    self.tcp_user_timeout(Duration::ZERO);
                 }
             }
             #[cfg(not(target_arch = "wasm32"))]
@@ -2074,9 +2164,7 @@ impl Config {
                 // ON. Parsing it as unsigned refuses a value the reference
                 // implementation accepts, which turns a DSN psql connects with
                 // into a config error here.
-                let keepalives = value
-                    .parse::<i64>()
-                    .map_err(|_| Error::config_parse(Box::new(InvalidValue("keepalives"))))?;
+                let keepalives = parse_libpq_integer(value, "keepalives")?;
                 self.keepalives(keepalives != 0);
             }
             // ZERO must reach `KeepaliveConfig`; a NEGATIVE must not get
@@ -2122,9 +2210,7 @@ impl Config {
             }
             #[cfg(not(target_arch = "wasm32"))]
             "keepalives_count" => {
-                let keepalives_count = value
-                    .parse::<u32>()
-                    .map_err(|_| Error::config_parse(Box::new(InvalidValue("keepalives_count"))))?;
+                let keepalives_count = parse_nonnegative_libpq_integer(value, "keepalives_count")?;
                 self.keepalives_count(keepalives_count);
             }
             "target_session_attrs" => {
@@ -2180,13 +2266,20 @@ impl Config {
                 // (`database` / `true` / `false`) plus a permissive
                 // off-equivalent set, matching libpq:
                 // https://www.postgresql.org/docs/16/libpq-connect.html#LIBPQ-CONNECT-REPLICATION
-                let mode = match value {
-                    "database" => Some(ReplicationMode::Logical),
-                    "true" | "on" | "1" | "yes" => Some(ReplicationMode::Physical),
-                    "false" | "off" | "0" | "no" => None,
-                    _ => {
-                        return Err(Error::config_parse(Box::new(InvalidValue("replication"))));
-                    }
+                let mode = if value.eq_ignore_ascii_case("database") {
+                    Some(ReplicationMode::Logical)
+                } else if ["true", "on", "1", "yes"]
+                    .iter()
+                    .any(|candidate| value.eq_ignore_ascii_case(candidate))
+                {
+                    Some(ReplicationMode::Physical)
+                } else if ["false", "off", "0", "no"]
+                    .iter()
+                    .any(|candidate| value.eq_ignore_ascii_case(candidate))
+                {
+                    None
+                } else {
+                    return Err(Error::config_parse(Box::new(InvalidValue("replication"))));
                 };
                 self.replication = mode;
             }
@@ -2500,18 +2593,87 @@ impl fmt::Display for NestedService {
 
 impl error::Error for NestedService {}
 
+#[derive(Debug)]
+struct InvalidServiceOption(&'static str);
+
+impl fmt::Display for InvalidServiceOption {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            fmt,
+            "connection option `{}` is not valid in a service file",
+            self.0
+        )
+    }
+}
+
+impl error::Error for InvalidServiceOption {}
+
+/// The deprecated `requiressl` spelling occupies libpq's `sslmode` slot.
+/// Precedence and repeated-key replacement therefore operate across the two
+/// names, not independently for each spelling.
+fn canonical_parameter_key(key: &str) -> &str {
+    match key {
+        "requiressl" => "sslmode",
+        _ => key,
+    }
+}
+
+/// The final string value for each connection option, before that value is
+/// interpreted.
+///
+/// libpq's conninfo parser stores strings in option slots and validates those
+/// slots only after the whole connection string has been read. Consequently,
+/// an invalid earlier value is harmless when a later occurrence replaces it.
+/// Keeping the original spelling matters for `requiressl`, whose value parser
+/// differs from `sslmode` even though the two names share one precedence slot.
+#[derive(Default)]
+struct ParsedParameters(Vec<(String, String)>);
+
+impl ParsedParameters {
+    fn insert(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        let key = key.into();
+        let canonical_key = canonical_parameter_key(&key);
+        if let Some(index) = self
+            .0
+            .iter()
+            .position(|(given, _)| canonical_parameter_key(given) == canonical_key)
+        {
+            self.0.remove(index);
+        }
+        self.0.push((key, value.into()));
+    }
+
+    fn apply(self, config: &mut Config) -> Result<(), Error> {
+        for (key, value) in self.0 {
+            config.param(&key, &value)?;
+        }
+        Ok(())
+    }
+}
+
+/// Parse libpq's integer grammar: a signed C `int`, surrounded only by C
+/// whitespace. Rust's integer parser has the right digit and sign grammar once
+/// those six whitespace bytes have been removed.
+fn parse_libpq_integer(value: &str, option: &'static str) -> Result<i32, Error> {
+    value
+        .trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{000b}' | '\u{000c}'))
+        .parse::<i32>()
+        .map_err(|_| Error::config_parse(Box::new(InvalidValue(option))))
+}
+
+fn parse_nonnegative_libpq_integer(value: &str, option: &'static str) -> Result<u32, Error> {
+    u32::try_from(parse_libpq_integer(value, option)?)
+        .map_err(|_| Error::config_parse(Box::new(InvalidValue(option))))
+}
+
 /// Parse a keepalive duration in seconds: zero allowed, negative refused.
 ///
-/// The unsigned parse IS the refusal - `"-1".parse::<u64>()` fails - and that
-/// is the point rather than an accident of the type. A zero survives because
-/// this crate reads it as "use the system default" and drops it in
-/// [`crate::keepalive`]'s `TcpKeepalive` conversion, so discarding it here
-/// would leave that conversion nothing to drop.
+/// A zero survives because this crate reads it as "use the system default" and
+/// drops it in [`crate::keepalive`]'s `TcpKeepalive` conversion, so discarding
+/// it here would leave that conversion nothing to drop.
 #[cfg(not(target_arch = "wasm32"))]
 fn keepalive_seconds(value: &str, option: &'static str) -> Result<u64, Error> {
-    value
-        .parse::<u64>()
-        .map_err(|_| Error::config_parse(Box::new(InvalidValue(option))))
+    parse_nonnegative_libpq_integer(value, option).map(u64::from)
 }
 
 /// Whether `value` names the only text encoding this driver can decode.
@@ -2601,11 +2763,14 @@ impl<'a> Parser<'a> {
 
         let mut config = Config::new();
         let mut explicit = Vec::new();
+        let mut parameters = ParsedParameters::default();
 
         while let Some((key, value)) = parser.parameter()? {
-            config.param(key, &value)?;
+            parameters.insert(key, value);
             explicit.push(key.to_owned());
         }
+
+        parameters.apply(&mut config)?;
 
         // A `service` names parameters to fall back on, so it is expanded once
         // the string is fully read and every explicitly given key is known.
@@ -2796,6 +2961,9 @@ impl<'a> Parser<'a> {
 struct UrlParser<'a> {
     s: &'a str,
     config: Config,
+    /// Query parameters and the authority's port list, kept as strings until
+    /// every possible override has been seen.
+    parameters: ParsedParameters,
     /// Every key the URL itself supplied, so a `service` cannot override one.
     explicit: Vec<String>,
 }
@@ -2810,6 +2978,7 @@ impl<'a> UrlParser<'a> {
         let mut parser = UrlParser {
             s,
             config: Config::new(),
+            parameters: ParsedParameters::default(),
             explicit: Vec::new(),
         };
 
@@ -2817,6 +2986,8 @@ impl<'a> UrlParser<'a> {
         parser.parse_host()?;
         parser.parse_path()?;
         parser.parse_params()?;
+
+        std::mem::take(&mut parser.parameters).apply(&mut parser.config)?;
 
         let explicit = std::mem::take(&mut parser.explicit);
         parser.config.apply_service(&explicit)?;
@@ -2915,9 +3086,8 @@ impl<'a> UrlParser<'a> {
         if host.is_empty() {
             return Ok(());
         }
-        // The authority named hosts, so a service must not supply its own.
-        self.explicit.push("host".to_owned());
-        self.explicit.push("port".to_owned());
+        let mut hosts = Vec::new();
+        let mut ports = Vec::new();
 
         for chunk in host.split(',') {
             let (host, port) = if chunk.starts_with('[') {
@@ -2942,29 +3112,32 @@ impl<'a> UrlParser<'a> {
                 (it.next().unwrap(), it.next())
             };
 
-            self.host_param(host)?;
-            // APPEND, and do not route through `param("port", ..)`, which
-            // clears so that a repeated keyword overrides. This loop runs once
-            // per host in the authority, so clearing here would leave only the
-            // LAST host's port and dial every earlier host on the wrong one.
-            // `host_param` above appends for the same reason.
-            //
-            // A `?port=` in the query string still overrides the whole list,
-            // because that arrives through `param` and the query is parsed
-            // after the authority -- which is libpq's precedence.
-            let port = self.decode(port.unwrap_or("5432"))?;
-            let port: u16 = if port.is_empty() {
-                5432
-            } else {
-                match port.parse() {
-                    // Port 0 is refused here too; see the `"port"` arm above.
-                    Ok(0) | Err(_) => {
-                        return Err(Error::config_parse(Box::new(InvalidValue("port"))));
-                    }
-                    Ok(port) => port,
-                }
-            };
-            self.config.port(port);
+            hosts.push(host);
+            // Keep the authority ports as strings until the query has been
+            // parsed. A later `?port=` owns the same libpq option slot, so it
+            // can replace even an authority value that would be invalid if it
+            // survived. The joined value preserves one port per authority
+            // host; applying each one separately would make only the last win.
+            ports.push(self.decode(port.unwrap_or(""))?.into_owned());
+        }
+
+        // libpq stores an authority option only when its assembled buffer is
+        // nonempty. This matters for a single empty slot: `postgresql://h/db`
+        // leaves `port` unset and `postgresql://:5455/db` leaves `host` unset,
+        // so a service may supply the missing value. In a multi-host authority
+        // the comma itself makes the buffer nonempty, preserving positional
+        // empty slots such as `host=a,b port=,`.
+        if !hosts.join(",").is_empty() {
+            for host in hosts {
+                self.host_param(host)?;
+            }
+            self.explicit.push("host".to_owned());
+        }
+
+        let ports = ports.join(",");
+        if !ports.is_empty() {
+            self.parameters.insert("port", ports);
+            self.explicit.push("port".to_owned());
         }
 
         Ok(())
@@ -3029,8 +3202,8 @@ impl<'a> UrlParser<'a> {
                     self.host_param(host)?;
                 }
             } else {
-                let value = self.decode(value)?;
-                self.config.param(&key, &value)?;
+                let value = self.decode(value)?.into_owned();
+                self.parameters.insert(key.into_owned(), value);
             }
         }
 
@@ -3056,6 +3229,12 @@ impl<'a> UrlParser<'a> {
         #[cfg(unix)]
         if decoded.first() == Some(&b'/') {
             self.config.host_path(OsStr::from_bytes(&decoded));
+            return Ok(());
+        }
+
+        #[cfg(target_os = "linux")]
+        if decoded.first() == Some(&b'@') {
+            self.config.host_abstract(&decoded[1..]);
             return Ok(());
         }
 
@@ -3249,6 +3428,37 @@ mod tests {
             assert_eq!(config.keepalive_config.retries, Some(5));
         }
 
+        #[test]
+        fn socket_integers_use_libpqs_whitespace_and_i32_range() {
+            let mut whitespace_refused = Vec::new();
+            let mut out_of_range_accepted = Vec::new();
+            for key in [
+                "port",
+                "connect_timeout",
+                "tcp_user_timeout",
+                "keepalives",
+                "keepalives_idle",
+                "keepalives_interval",
+                "keepalives_count",
+            ] {
+                if format!("host=h {key}=' 1 '").parse::<Config>().is_err() {
+                    whitespace_refused.push(key);
+                }
+                for value in ["2147483648", "-2147483649"] {
+                    if format!("host=h {key}={value}").parse::<Config>().is_ok() {
+                        out_of_range_accepted.push(format!("{key}={value}"));
+                    }
+                }
+            }
+
+            assert!(
+                whitespace_refused.is_empty() && out_of_range_accepted.is_empty(),
+                "C whitespace refused: {}; values outside C int accepted: {}",
+                whitespace_refused.join(", "),
+                out_of_range_accepted.join(", ")
+            );
+        }
+
         /// libpq reads `keepalives` with `strtol` and tests the result against
         /// zero, so a NEGATIVE value means on. Parsing it as unsigned would
         /// refuse a DSN psql accepts.
@@ -3266,6 +3476,41 @@ mod tests {
         fn a_zero_timeout_is_left_unset_so_the_default_applies() {
             assert_eq!(parse("connect_timeout=0").get_connect_timeout(), None);
             assert_eq!(parse("tcp_user_timeout=0").get_tcp_user_timeout(), None);
+        }
+
+        #[test]
+        fn a_programmatic_zero_connect_timeout_is_indefinite() {
+            let mut config = Config::new();
+            config.connect_timeout(Duration::ZERO);
+            assert_eq!(config.get_connect_timeout(), None);
+        }
+
+        // NON-DISCRIMINATING NOW, for the same duplicate-collapse reason; it DID
+        // fail at d51ae16ff, the commit that added it. See `Config::param`. The
+        // programmatic peer, `a_programmatic_zero_connect_timeout_is_indefinite`,
+        // still discriminates.
+        #[test]
+        fn a_later_indefinite_connect_timeout_clears_an_earlier_limit() {
+            for value in ["0", "-1"] {
+                let config = parse(&format!("connect_timeout=5 connect_timeout={value}"));
+                assert_eq!(
+                    config.get_connect_timeout(),
+                    None,
+                    "the later connect_timeout={value} did not override the earlier limit"
+                );
+            }
+        }
+
+        #[test]
+        fn a_later_system_tcp_user_timeout_clears_an_earlier_limit() {
+            for value in ["0", "-1"] {
+                let config = parse(&format!("tcp_user_timeout=5000 tcp_user_timeout={value}"));
+                assert_eq!(
+                    config.get_tcp_user_timeout(),
+                    None,
+                    "the later tcp_user_timeout={value} did not override the earlier limit"
+                );
+            }
         }
     }
 
@@ -3511,6 +3756,28 @@ mod tests {
             );
         }
 
+        #[test]
+        fn empty_identity_values_restore_their_defaults() {
+            let parsed = "user=alice user='' password=secret password='' dbname=app dbname=''"
+                .parse::<Config>()
+                .expect("empty identity values are default selections");
+            assert_eq!(parsed.get_user(), None);
+            assert_eq!(parsed.get_password(), None);
+            assert_eq!(parsed.get_dbname(), None);
+
+            let mut built = Config::new();
+            built
+                .user("alice")
+                .user("")
+                .password("secret")
+                .password([])
+                .dbname("app")
+                .dbname("");
+            assert_eq!(built.get_user(), None);
+            assert_eq!(built.get_password(), None);
+            assert_eq!(built.get_dbname(), None);
+        }
+
         /// Port is the one integer option whose documented empty value selects
         /// the compiled default.
         #[test]
@@ -3519,6 +3786,21 @@ mod tests {
                 .parse()
                 .expect("libpq documents an empty port as the compiled default");
             assert!(config.get_ports().is_empty(), "port= must not set a port");
+        }
+
+        // NON-DISCRIMINATING NOW: passes with the `port` arm in `param` reverted,
+        // because duplicates collapse to the last value. It DID fail that way at
+        // 618825f82, the commit that added it; `ParsedParameters` disarmed it
+        // later. See the note on `Config::param`.
+        #[test]
+        fn a_later_empty_port_restores_the_compiled_default() {
+            let config: Config = "host=x.invalid port=5455 port="
+                .parse()
+                .expect("the last non-null port value wins in libpq");
+            assert!(
+                config.get_ports().is_empty(),
+                "the empty override retained the earlier explicit port"
+            );
         }
 
         #[test]
@@ -3654,6 +3936,26 @@ mod tests {
             assert_eq!(config.get_user(), Some("service_user"));
         }
 
+        #[test]
+        fn explicit_requiressl_blocks_the_service_sslmode_alias() {
+            let mut config = Config::new();
+            config
+                .param("requiressl", "0")
+                .expect("requiressl=0 is sslmode=prefer");
+            config
+                .fill_unset(
+                    vec![("sslmode".to_owned(), "require".to_owned())],
+                    &["requiressl".to_owned()],
+                )
+                .expect("the service sslmode must be shadowed");
+
+            assert_eq!(
+                config.get_ssl_mode(),
+                crate::config::SslMode::Prefer,
+                "the service overrode an explicit spelling of the same option"
+            );
+        }
+
         /// A section may name one key twice, and libpq takes the FIRST. Probed
         /// against 16.14 with two `host` lines: it resolved `first.invalid`.
         /// Applying every pair in order takes the last instead, which is the
@@ -3695,6 +3997,38 @@ mod tests {
             );
         }
 
+        /// `requiressl` is a conninfo-parser compatibility alias, not an
+        /// entry in libpq's connection-option table. Its service-file parser
+        /// therefore rejects it instead of translating it to `sslmode`.
+        #[test]
+        fn requiressl_is_not_accepted_from_a_service() {
+            let mut config = Config::new();
+            let error = config
+                .fill_unset(vec![("requiressl".to_owned(), "0".to_owned())], &[])
+                .expect_err("requiressl is not a valid service-file key");
+
+            assert!(
+                error_chain_contains(&error, "requiressl"),
+                "the rejection must name the invalid service key: {error:?}"
+            );
+        }
+
+        /// `servicefile` is this driver's explicit replacement for libpq's
+        /// process-environment search. Once a service is being expanded it is
+        /// too late for the value to select that service's source file.
+        #[test]
+        fn servicefile_is_not_accepted_from_a_service() {
+            let mut config = Config::new();
+            let error = config
+                .fill_unset(vec![("servicefile".to_owned(), "/ignored".to_owned())], &[])
+                .expect_err("servicefile inside a service would be ignored");
+
+            assert!(
+                error_chain_contains(&error, "servicefile"),
+                "the rejection must name the ineffective service key: {error:?}"
+            );
+        }
+
         #[test]
         fn an_unknown_key_in_a_service_is_rejected_by_name() {
             let mut config = Config::new();
@@ -3710,11 +4044,16 @@ mod tests {
                 "the error does not name the offending key: {error:?}"
             );
         }
+
+        fn error_chain_contains(error: &(dyn std::error::Error + 'static), needle: &str) -> bool {
+            std::iter::successors(Some(error), |error| std::error::Error::source(*error))
+                .any(|cause| cause.to_string().contains(needle))
+        }
     }
 
     use crate::config::{
-        AuthMethod, AuthMethods, RequireAuth, SslCertMode, SslMode, SslNegotiation,
-        SslProtocolVersion, SslRootCert, TargetSessionAttrs,
+        AuthMethod, AuthMethods, ReplicationMode, RequireAuth, SslCertMode, SslMode,
+        SslNegotiation, SslProtocolVersion, SslRootCert, TargetSessionAttrs,
     };
     use crate::{Config, config::Host};
 
@@ -3843,6 +4182,20 @@ mod tests {
         assert_target_session_attrs_parses("prefer-standby", TargetSessionAttrs::PreferStandby);
     }
 
+    #[test]
+    fn replication_values_are_case_insensitive() {
+        for (value, expected) in [
+            ("TrUe", Some(ReplicationMode::Physical)),
+            ("DaTaBaSe", Some(ReplicationMode::Logical)),
+            ("OfF", None),
+        ] {
+            let config = format!("host=h replication={value}")
+                .parse::<Config>()
+                .unwrap_or_else(|error| panic!("replication={value} was refused: {error}"));
+            assert_eq!(config.get_replication(), expected, "replication={value}");
+        }
+    }
+
     /// All six libpq spellings parse, to the six distinct modes.
     ///
     /// `allow`, `verify-ca` and `verify-full` used to be parse errors, which is
@@ -3921,6 +4274,29 @@ mod tests {
             .expect("verify-full is the mode sslrootcert=system exists for");
     }
 
+    #[test]
+    fn sslrootcert_system_strengthens_only_the_implicit_sslmode() {
+        let implicit = "host=h sslrootcert=system".parse::<Config>().unwrap();
+        assert_eq!(implicit.get_ssl_mode(), SslMode::VerifyFull);
+        implicit
+            .validate_connection_settings()
+            .expect("system roots derive verify-full when sslmode is omitted");
+
+        let mut built = Config::new();
+        built.ssl_root_cert(SslRootCert::System);
+        assert_eq!(built.get_ssl_mode(), SslMode::VerifyFull);
+
+        for dsn in [
+            "host=h sslmode=prefer sslrootcert=system",
+            "host=h sslrootcert=system sslmode=prefer",
+        ] {
+            dsn.parse::<Config>()
+                .unwrap()
+                .validate_connection_settings()
+                .expect_err("an explicitly weak sslmode must remain an error");
+        }
+    }
+
     /// A direct TLS handshake sends no `SSLRequest`, so there is no negotiation
     /// to fall back from; libpq refuses to pair it with a mode that permits
     /// plaintext.
@@ -3969,13 +4345,35 @@ mod tests {
 
         assert_eq!(
             [
-                "127.0.0.1".parse::<IpAddr>().unwrap(),
-                "127.0.0.2".parse::<IpAddr>().unwrap()
+                Some("127.0.0.1".parse::<IpAddr>().unwrap()),
+                Some("127.0.0.2".parse::<IpAddr>().unwrap())
             ],
             config.get_hostaddrs(),
         );
 
         assert_eq!(1, 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn at_prefixed_hosts_use_the_abstract_unix_namespace() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        for dsn in [
+            "host=@zeroship",
+            "postgresql:///db?host=%40zeroship",
+            "postgresql://%40zeroship/db",
+        ] {
+            let config = dsn
+                .parse::<Config>()
+                .unwrap_or_else(|error| panic!("{dsn} did not parse: {error}"));
+            match config.get_hosts() {
+                [Host::Unix(path)] => {
+                    assert_eq!(path.as_os_str().as_bytes(), b"\0zeroship", "{dsn}");
+                }
+                hosts => panic!("{dsn} was not an abstract Unix socket host: {hosts:?}"),
+            }
+        }
     }
 
     #[test]
@@ -4481,6 +4879,170 @@ mod tests {
 #[cfg(test)]
 mod dsn_parse_tests {
     use super::*;
+
+    fn service_file_with_host_and_port() -> tempfile::NamedTempFile {
+        use std::io::Write as _;
+
+        let mut file = tempfile::NamedTempFile::new().expect("create service file");
+        writeln!(file, "[uri-defaults]\nhost=service.example\nport=6543")
+            .expect("write service file");
+        file.flush().expect("flush service file");
+        file
+    }
+
+    #[test]
+    fn single_uri_authority_omissions_are_filled_by_the_service() {
+        let service_file = service_file_with_host_and_port();
+        let query = format!(
+            "servicefile={}&service=uri-defaults",
+            service_file.path().display()
+        );
+
+        for (authority, expected_host, expected_port) in [
+            ("authority.example", "authority.example", 6543),
+            ("authority.example:", "authority.example", 6543),
+            (":5455", "service.example", 5455),
+            (":", "service.example", 6543),
+        ] {
+            let dsn = format!("postgresql://{authority}/db?{query}");
+            let config = dsn.parse::<Config>().unwrap_or_else(|error| {
+                panic!("service defaults did not complete {dsn:?}: {error:?}")
+            });
+
+            assert_eq!(
+                config.get_hosts(),
+                [Host::Tcp(expected_host.to_owned())],
+                "wrong host for authority {authority:?}"
+            );
+            assert_eq!(
+                config.get_ports(),
+                [expected_port],
+                "wrong port for authority {authority:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn multi_host_uri_authority_keeps_its_empty_port_slots() {
+        let service_file = service_file_with_host_and_port();
+        let dsn = format!(
+            "postgresql://first.example,second.example/db?servicefile={}&service=uri-defaults",
+            service_file.path().display()
+        );
+        let config = dsn.parse::<Config>().expect("parse multi-host URI");
+
+        assert_eq!(
+            config.get_hosts(),
+            [
+                Host::Tcp("first.example".to_owned()),
+                Host::Tcp("second.example".to_owned()),
+            ]
+        );
+        assert_eq!(
+            config.get_ports(),
+            [5432, 5432],
+            "the multi-host port buffer is nonempty because it contains a comma"
+        );
+    }
+
+    #[test]
+    fn only_the_last_keyword_value_is_semantically_validated() {
+        let cases = [
+            ("host=h port=abc port=5455", "port"),
+            ("host=h sslmode=bogus sslmode=disable", "sslmode"),
+            (
+                "host=h hostaddr=not-an-address hostaddr=127.0.0.1",
+                "hostaddr",
+            ),
+            ("host=h gssencmode=require gssencmode=disable", "gssencmode"),
+            ("host=h requiressl=1 sslmode=disable", "requiressl/sslmode"),
+        ];
+
+        for (dsn, parameter) in cases {
+            dsn.parse::<Config>().unwrap_or_else(|error| {
+                panic!("the later valid {parameter} did not shadow the earlier value: {error:?}")
+            });
+        }
+
+        let port = "host=h port=abc port=5455".parse::<Config>().unwrap();
+        assert_eq!(port.get_ports(), [5455]);
+
+        let hostaddr = "host=h hostaddr=bad hostaddr=127.0.0.1"
+            .parse::<Config>()
+            .unwrap();
+        assert_eq!(
+            hostaddr.get_hostaddrs(),
+            [Some("127.0.0.1".parse::<IpAddr>().unwrap())]
+        );
+
+        let sslmode = "host=h requiressl=1 sslmode=disable"
+            .parse::<Config>()
+            .unwrap();
+        assert_eq!(sslmode.get_ssl_mode(), SslMode::Disable);
+    }
+
+    #[test]
+    fn only_the_last_uri_query_value_is_semantically_validated() {
+        let cases = [
+            "postgresql://h/db?port=abc&port=5455",
+            "postgresql://h/db?sslmode=bogus&sslmode=disable",
+            "postgresql://h/db?hostaddr=bad&hostaddr=127.0.0.1",
+            "postgresql://h/db?gssencmode=require&gssencmode=disable",
+            "postgresql://h/db?requiressl=1&sslmode=disable",
+        ];
+
+        for dsn in cases {
+            dsn.parse::<Config>().unwrap_or_else(|error| {
+                panic!("a later valid query value did not shadow the earlier value in {dsn:?}: {error:?}")
+            });
+        }
+
+        let port = cases[0].parse::<Config>().unwrap();
+        assert_eq!(port.get_ports(), [5455]);
+
+        let hostaddr = cases[2].parse::<Config>().unwrap();
+        assert_eq!(
+            hostaddr.get_hostaddrs(),
+            [Some("127.0.0.1".parse::<IpAddr>().unwrap())]
+        );
+
+        let sslmode = cases[4].parse::<Config>().unwrap();
+        assert_eq!(sslmode.get_ssl_mode(), SslMode::Disable);
+    }
+
+    #[test]
+    fn a_query_port_can_shadow_an_invalid_authority_port() {
+        let config = "postgresql://h:not-a-port/db?port=5455"
+            .parse::<Config>()
+            .expect("the query port is the final value");
+        assert_eq!(config.get_ports(), [5455]);
+    }
+
+    #[test]
+    fn uri_authority_ports_use_libpq_integer_grammar() {
+        for port in ["%20+5455%20", "%095455%0A"] {
+            let dsn = format!("postgresql://h:{port}/db");
+            let config = dsn.parse::<Config>().unwrap_or_else(|error| {
+                panic!("the percent-decoded C integer port in {dsn:?} was refused: {error:?}")
+            });
+            assert_eq!(config.get_ports(), [5455]);
+        }
+    }
+
+    #[test]
+    fn an_unknown_parameter_is_not_shadowed() {
+        let error = "host=h unknown_connection_option=bad sslmode=disable"
+            .parse::<Config>()
+            .expect_err("an unknown name must still be refused");
+        let named = std::iter::successors(std::error::Error::source(&error), |cause| {
+            std::error::Error::source(*cause)
+        })
+        .any(|cause| cause.to_string().contains("unknown_connection_option"));
+        assert!(
+            named,
+            "the refusal did not name the unknown parameter: {error:?}"
+        );
+    }
 
     /// A keyword/value string that cannot be parsed must be REFUSED, not
     /// truncated at the bad token.
