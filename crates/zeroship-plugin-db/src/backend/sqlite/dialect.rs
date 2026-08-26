@@ -47,31 +47,6 @@ impl DialectBuilder for SqliteDialect {
         format!("\"{}\"", name.replace('"', "\"\""))
     }
 
-    /// Build the SQL that idempotently provisions a per-app namespace.
-    ///
-    /// **NOTE**: this trait-level builder cannot produce the full
-    /// SQLite ATTACH statement because the per-app file path is a
-    /// backend-instance concern (it lives in
-    /// [`crate::backend::sqlite::SqliteBackend::db_dir`]) — the
-    /// dialect has no knowledge of `db_dir`. The
-    /// `SqliteBackend::attach_app_file` impl
-    /// constructs the ATTACH SQL inline using this hook only to quote
-    /// the alias. This builder returns a *template* string with the
-    /// alias quoted and a `:file_path` placeholder; a future change
-    /// may decide whether to keep this template shape or fold the
-    /// helper back into the backend impl.
-    fn build_ensure_app_schema(&self, app_id: &str) -> String {
-        // Template form — the `:file_path` placeholder is not a SQLite
-        // bind parameter (ATTACH does not accept binds for path or
-        // alias); the backend impl substitutes it via `format!` after
-        // quoting the path string. Documented so a reader of the
-        // template doesn't mistake it for a bound-parameter site.
-        format!(
-            "ATTACH DATABASE 'file::file_path' AS {}",
-            self.quote_ident(app_id)
-        )
-    }
-
     /// Build a `CREATE INDEX` statement for a SQLite collection.
     ///
     /// SQLite has no `CREATE INDEX CONCURRENTLY`; the `online` flag is a
@@ -243,22 +218,6 @@ mod tests {
         assert_eq!(d.quote_ident(""), "\"\"");
     }
 
-    #[test]
-    fn build_ensure_app_schema_quotes_alias() {
-        let d = SqliteDialect;
-        // The template carries a `:file_path` placeholder the backend
-        // substitutes inline (ATTACH does not accept bound params for
-        // path or alias). The alias is quoted via `quote_ident`.
-        let sql = d.build_ensure_app_schema("app_demo");
-        assert!(
-            sql.contains("ATTACH DATABASE 'file::file_path'"),
-            "missing path placeholder: {sql}"
-        );
-        assert!(
-            sql.contains("AS \"app_demo\""),
-            "alias not double-quoted: {sql}"
-        );
-    }
 
     #[test]
     fn map_zs_type_covers_p1_vocabulary() {

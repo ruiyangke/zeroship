@@ -231,7 +231,7 @@ CREATE INDEX IF NOT EXISTS "{collection}_created_by_idx" ON "{MATRIX_APP_ID}"."{
 /// It no longer drops a journal schema: nothing here writes one now.
 fn apply_matrix_schema_ahead_of_postgres(url: &str, collection: &str) {
     // project_schema == app_id: plugin-db's PG data plane resolves a collection
-    // to `"<app_id>"."<collection>"` (`backend/postgres.rs::build_ensure_app_schema`),
+    // to `"<app_id>"."<collection>"` (the PG data plane's own qualification),
     // and this DDL qualifies into that same schema, so the runtime reads the
     // table this created rather than a different one.
     let ddl = matrix_ddl_postgres(collection);

@@ -685,10 +685,9 @@ impl SqliteBackend {
         // actor's `run_attach` constructs the formatted ATTACH SQL
         // inline (the alias is double-quote-escaped — matches the
         // dialect's `quote_ident` byte-for-byte — and the path's
-        // single quotes are doubled). The dialect's
-        // `build_ensure_app_schema` is a template that pairs with
-        // this helper; no PR-3 consumer routes through the template
-        // path because the actor needs the file_path substituted
+        // single quotes are doubled). The ATTACH is spelled ONLY there:
+        // a dialect-level template for it used to exist alongside, with
+        // no consumer, because the actor needs the file_path substituted
         // upstream anyway.
         match self.session.attach(app_id, &path_str).await {
             Ok(()) => {
@@ -1366,9 +1365,6 @@ impl DialectBuilder for SqliteBackend {
         SqliteDialect.quote_ident(name)
     }
 
-    fn build_ensure_app_schema(&self, app_id: &str) -> String {
-        SqliteDialect.build_ensure_app_schema(app_id)
-    }
 
     #[cfg(any(test, feature = "test-helpers"))]
     fn build_create_index(&self, spec: &IndexSpec, online: bool) -> String {
