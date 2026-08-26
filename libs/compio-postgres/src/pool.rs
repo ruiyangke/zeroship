@@ -993,6 +993,19 @@ impl Pool {
                 }
             }
         });
+        // Assigning THROUGH the guard is deliberate here, and is the one place
+        // in this file that does not carry the replaced value out first. A
+        // previous handle destroyed inside this borrow runs nothing arbitrary:
+        // `compio::runtime::JoinHandle` is an `async_task::Task`, and its
+        // `Drop` does not destroy the future inline - when the task is neither
+        // scheduled nor running it RE-SCHEDULES the runnable "so that its
+        // future gets dropped by the executor" (async-task 4.7.1,
+        // src/task.rs:211-215), so the housekeeper's locals, and any pool entry
+        // it holds across an await, are released on a later executor turn with
+        // this borrow long gone. The only destructor `Task::drop` can run
+        // inline is a COMPLETED task's output, which for this handle is
+        // `Result<(), Box<dyn Any + Send>>` - a panic payload raised by this
+        // crate's own housekeeper body, never a value a caller supplies.
         *self.housekeeper.borrow_mut() = Some(handle);
     }
 
