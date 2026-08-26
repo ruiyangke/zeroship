@@ -99,23 +99,25 @@
 //! that ends connections badly on purpose". A count that grows elsewhere is
 //! the finding.
 //!
-//! The rustls session is therefore an `Arc<Mutex<TlsSession>>` shared with
+//! The rustls session therefore lives in a `SharedSession` also held by
 //! `ConnectionRelease`. `TlsSession` owns both `ClientConnection` and the
-//! ordered ciphertext queue; locking only the former would let queued records
-//! be overtaken by the alert. `Drop` locks that pair, serializes the queued
-//! records plus `close_notify`, and sends them on the dup before shutting the
-//! socket down. The `Arc` also keeps `Client` `Send`, unlike compio's default
-//! `Rc`-backed `SharedFd`. If an earlier record has already left the queue for
-//! an async socket write, release skips the alert rather than sending a later
-//! TLS sequence number first. Teardown is best effort, but never misordered.
+//! ordered ciphertext queue; serializing only the former would let queued
+//! records be overtaken by the alert. A lease takes that pair out of its state
+//! mutex, serializes the queued records plus `close_notify`, and sends them on
+//! the dup before making the pair available again. The `Arc` inside the shared
+//! handle also keeps `Client` `Send`, unlike compio's default `Rc`-backed
+//! `SharedFd`. If an earlier record has already left the queue for an async
+//! socket write, release skips the alert rather than sending a later TLS
+//! sequence number first. Teardown is best effort, but never misordered.
 
 use compio::buf::{BufResult, IoBuf, IoBufMut};
 use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use rustls::ClientConnection;
 use std::io::{self, Read, Write};
 use std::sync::Arc;
+use std::thread::ThreadId;
 
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 
 /// Bytes requested per socket read while handshaking.
 ///
@@ -356,11 +358,134 @@ impl TlsSession {
     }
 }
 
+struct SharedSessionState {
+    session: Option<TlsSession>,
+    owner: Option<ThreadId>,
+    poisoned: bool,
+}
+
+struct SharedSessionInner {
+    state: Mutex<SharedSessionState>,
+    available: Condvar,
+}
+
 /// The handle both halves share.
-pub(crate) type SharedSession = Arc<Mutex<TlsSession>>;
+///
+/// A lease serializes access to rustls without holding `state` while rustls is
+/// running. `ClientConfig` accepts caller implementations for session storage,
+/// key logging, and cryptography, and rustls invokes those traits synchronously.
+/// Keeping a non-reentrant mutex locked around the call would deadlock if one of
+/// those callbacks dropped or otherwise re-entered the client.
+///
+/// Other threads wait for the current lease just as they waited for the old
+/// mutex guard. Same-thread re-entry returns `WouldBlock`, because waiting for
+/// a lease owned by the current callback could never make progress.
+#[derive(Clone)]
+pub(crate) struct SharedSession {
+    inner: Arc<SharedSessionInner>,
+}
+
+struct SessionLease<'a> {
+    shared: &'a SharedSession,
+    session: Option<TlsSession>,
+    poisoned: bool,
+}
+
+impl SharedSession {
+    fn lease(&self) -> io::Result<SessionLease<'_>> {
+        let owner = std::thread::current().id();
+        let mut state = self.inner.state.lock();
+        loop {
+            if state.poisoned {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "the TLS session was poisoned by a panicking callback",
+                ));
+            }
+            if let Some(session) = state.session.take() {
+                debug_assert!(
+                    state.owner.is_none(),
+                    "available TLS session still had an owner"
+                );
+                state.owner = Some(owner);
+                return Ok(SessionLease {
+                    shared: self,
+                    session: Some(session),
+                    poisoned: false,
+                });
+            }
+            if state.owner.as_ref() == Some(&owner) {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "the TLS session was re-entered from one of its callbacks",
+                ));
+            }
+            self.inner.available.wait(&mut state);
+        }
+    }
+
+    pub(crate) fn with<R>(
+        &self,
+        f: impl FnOnce(&mut TlsSession) -> io::Result<R>,
+    ) -> io::Result<R> {
+        let mut lease = self.lease()?;
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(lease.session_mut()))) {
+            Ok(result) => result,
+            Err(payload) => {
+                lease.poisoned = true;
+                drop(lease);
+                std::panic::resume_unwind(payload)
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn mutex_is_locked(&self) -> bool {
+        self.inner.state.try_lock().is_none()
+    }
+}
+
+impl SessionLease<'_> {
+    fn session_mut(&mut self) -> &mut TlsSession {
+        self.session
+            .as_mut()
+            .expect("a live TLS lease owns a session")
+    }
+}
+
+impl Drop for SessionLease<'_> {
+    fn drop(&mut self) {
+        let session = self
+            .session
+            .take()
+            .expect("a TLS lease restores its session exactly once");
+        let mut state = self.shared.inner.state.lock();
+        let replaced = state.session.replace(session);
+        state.owner = None;
+        state.poisoned |= self.poisoned;
+        let poisoned = state.poisoned;
+        drop(state);
+        debug_assert!(replaced.is_none(), "TLS lease restored over a live session");
+        drop(replaced);
+        if poisoned {
+            self.shared.inner.available.notify_all();
+        } else {
+            self.shared.inner.available.notify_one();
+        }
+    }
+}
 
 pub(crate) fn share(conn: ClientConnection) -> SharedSession {
-    Arc::new(Mutex::new(TlsSession::new(conn)))
+    SharedSession {
+        inner: Arc::new(SharedSessionInner {
+            state: Mutex::new(SharedSessionState {
+                session: Some(TlsSession::new(conn)),
+                owner: None,
+                poisoned: false,
+            }),
+            available: Condvar::new(),
+        }),
+    }
 }
 
 /// Copy `src` into a compio buffer and declare that many bytes valid.
@@ -479,7 +604,9 @@ where
             // fresh socket chunk, or another step through one already held -
             // returns to the reader before giving rustls more, which is the
             // condition `feed_ciphertext_step` documents.
-            let n = self.session.lock().read_plaintext(&mut self.plain[..cap])?;
+            let n = self
+                .session
+                .with(|session| session.read_plaintext(&mut self.plain[..cap]))?;
             if n > 0 {
                 return Ok(n);
             }
@@ -489,7 +616,9 @@ where
             if self.cipher_read < self.cipher_len {
                 let mut src = &self.cipher[self.cipher_read..self.cipher_len];
                 let before = src.len();
-                let outcome = self.session.lock().feed_ciphertext_step(&mut src);
+                let outcome = self
+                    .session
+                    .with(|session| session.feed_ciphertext_step(&mut src));
                 self.cipher_read += before - src.len();
                 let peer_has_closed = outcome?;
                 if before == src.len() {
@@ -501,7 +630,9 @@ where
                     // second turns an orderly shutdown with trailing buffered
                     // ciphertext into a spurious error.
                     if peer_has_closed {
-                        return self.session.lock().read_plaintext(&mut self.plain[..cap]);
+                        return self
+                            .session
+                            .with(|session| session.read_plaintext(&mut self.plain[..cap]));
                     }
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -527,7 +658,9 @@ where
                 // The socket is done, but anything rustls decrypted before the
                 // close is still owed to the caller. Only after that is this a
                 // real end of stream.
-                return self.session.lock().read_plaintext(&mut self.plain[..cap]);
+                return self
+                    .session
+                    .with(|session| session.read_plaintext(&mut self.plain[..cap]));
             }
             self.cipher_read = 0;
             self.cipher_len = read;
@@ -557,7 +690,7 @@ where
 /// again. Topping up each pass keeps the cap as a bound on what is held AT ONE
 /// MOMENT rather than a bound on what is ever sent.
 ///
-/// The queue is taken by value so the mutex guard ends before the write is
+/// The queue is taken by value so the session lease ends before the write is
 /// awaited; anything the read path appends meanwhile is picked up by the next
 /// pass. `write_in_flight` records the gap where the bytes are owned by the
 /// async operation, so synchronous release never overtakes them.
@@ -566,18 +699,20 @@ where
     W: AsyncWrite + Unpin,
 {
     loop {
-        let pending = {
-            let mut guard = session.lock();
-            guard.collect_outgoing()?;
-            let pending = guard.take_outgoing();
-            guard.write_in_flight = !pending.is_empty();
-            pending
-        };
+        let pending = session.with(|session| {
+            session.collect_outgoing()?;
+            let pending = session.take_outgoing();
+            session.write_in_flight = !pending.is_empty();
+            Ok(pending)
+        })?;
         if pending.is_empty() {
             return Ok(());
         }
         let BufResult(result, _) = socket.write_all(pending).await;
-        session.lock().write_in_flight = false;
+        session.with(|session| {
+            session.write_in_flight = false;
+            Ok(())
+        })?;
         result?;
     }
 }
@@ -586,7 +721,7 @@ async fn write_through<W>(socket: &mut W, session: &SharedSession, src: &[u8]) -
 where
     W: AsyncWrite + Unpin,
 {
-    let n = session.lock().write_plaintext(src)?;
+    let n = session.with(|session| session.write_plaintext(src))?;
     flush_outgoing(socket, session).await?;
     Ok(n)
 }
@@ -595,7 +730,7 @@ async fn shutdown_through<W>(socket: &mut W, session: &SharedSession) -> io::Res
 where
     W: AsyncWrite + Unpin,
 {
-    session.lock().send_close_notify()?;
+    session.with(TlsSession::send_close_notify)?;
     flush_outgoing(socket, session).await?;
     socket.shutdown().await
 }
@@ -709,6 +844,12 @@ where
 mod tests {
     use super::*;
     use compio::buf::{IoBuf, IoBufMut};
+    use rustls::NamedGroup;
+    use rustls::client::{
+        ClientSessionStore, Resumption, Tls12ClientSessionValue, Tls13ClientSessionValue,
+    };
+    use rustls::pki_types::ServerName;
+    use std::cell::{Cell, RefCell};
     use std::sync::Arc;
 
     /// A peer that accepts every byte and answers every read with EOF.
@@ -786,17 +927,26 @@ mod tests {
         // The state described above: a queue already at the cap, and ciphertext
         // that arrived afterwards. `writer()` directly, not `write_plaintext`,
         // because the latter collects and would hide the very gap under test.
-        session.lock().outgoing = vec![0u8; OUTGOING_SOFT_CAP];
-        {
-            let mut guard = session.lock();
-            guard
-                .conn
-                .writer()
-                .write_all(b"held back by the cap")
-                .expect("queue application data");
-        }
+        session
+            .with(|session| {
+                session.outgoing = vec![0u8; OUTGOING_SOFT_CAP];
+                Ok(())
+            })
+            .expect("fill the outgoing queue");
+        session
+            .with(|session| {
+                session
+                    .conn
+                    .writer()
+                    .write_all(b"held back by the cap")
+                    .expect("queue application data");
+                Ok(())
+            })
+            .expect("queue application data in rustls");
         assert!(
-            session.lock().conn.wants_write(),
+            session
+                .with(|session| Ok(session.conn.wants_write()))
+                .expect("inspect rustls outgoing state"),
             "the fixture must leave ciphertext inside rustls, or this asserts nothing"
         );
 
@@ -805,11 +955,15 @@ mod tests {
             .expect("flush the session");
 
         assert!(
-            !session.lock().conn.wants_write(),
+            !session
+                .with(|session| Ok(session.conn.wants_write()))
+                .expect("inspect rustls outgoing state"),
             "the flush returned success with ciphertext still inside the session"
         );
         assert!(
-            session.lock().outgoing.is_empty(),
+            session
+                .with(|session| Ok(session.outgoing.is_empty()))
+                .expect("inspect the outgoing queue"),
             "the outbound queue is not empty after a flush"
         );
         assert!(
@@ -853,6 +1007,13 @@ mod tests {
     /// (`read_tls` answering `Ok(0)` forever once `close_notify` has arrived)
     /// only exists behind live keys.
     fn handshaken_pair() -> (ClientConnection, rustls::ServerConnection) {
+        handshaken_pair_with_store(None)
+    }
+
+    fn handshaken_pair_with_store(
+        store: Option<Arc<dyn ClientSessionStore>>,
+    ) -> (ClientConnection, rustls::ServerConnection) {
+        let stop_before_tickets = store.is_some();
         let issued = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
             .expect("generate a self-signed certificate");
         let cert = rustls::pki_types::CertificateDer::from(issued.cert.der().to_vec());
@@ -869,11 +1030,14 @@ mod tests {
 
         let mut roots = rustls::RootCertStore::empty();
         roots.add(cert).expect("trust the test certificate");
-        let client_config = rustls::ClientConfig::builder_with_provider(provider)
+        let mut client_config = rustls::ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
             .expect("client protocol versions")
             .with_root_certificates(roots)
             .with_no_client_auth();
+        if let Some(store) = store {
+            client_config.resumption = Resumption::store(store);
+        }
 
         let mut client = ClientConnection::new(
             Arc::new(client_config),
@@ -896,6 +1060,11 @@ mod tests {
                     server.process_new_packets().expect("server process");
                 }
             }
+            // Stop before draining the post-handshake ticket flight. Tests that
+            // need it can feed that ciphertext after the client is shared.
+            if stop_before_tickets && !client.is_handshaking() && !server.is_handshaking() {
+                return (client, server);
+            }
             let mut to_client = Vec::new();
             while server.wants_write() {
                 server.write_tls(&mut to_client).expect("server write_tls");
@@ -912,6 +1081,130 @@ mod tests {
             }
         }
         panic!("the in-memory handshake did not converge");
+    }
+
+    thread_local! {
+        static SESSION_STORE_PROBE: RefCell<Option<SharedSession>> = const { RefCell::new(None) };
+        static SESSION_STORE_MUTEX_LOCKED: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+
+    #[derive(Debug)]
+    struct SessionStoreProbe {
+        panic_on_ticket: bool,
+    }
+
+    impl ClientSessionStore for SessionStoreProbe {
+        fn set_kx_hint(&self, _server_name: ServerName<'static>, _group: NamedGroup) {}
+
+        fn kx_hint(&self, _server_name: &ServerName<'_>) -> Option<NamedGroup> {
+            None
+        }
+
+        fn set_tls12_session(
+            &self,
+            _server_name: ServerName<'static>,
+            _value: Tls12ClientSessionValue,
+        ) {
+        }
+
+        fn tls12_session(&self, _server_name: &ServerName<'_>) -> Option<Tls12ClientSessionValue> {
+            None
+        }
+
+        fn remove_tls12_session(&self, _server_name: &ServerName<'static>) {}
+
+        fn insert_tls13_ticket(
+            &self,
+            _server_name: ServerName<'static>,
+            _value: Tls13ClientSessionValue,
+        ) {
+            SESSION_STORE_PROBE.with(|slot| {
+                if let Some(session) = slot.borrow().as_ref() {
+                    SESSION_STORE_MUTEX_LOCKED
+                        .with(|locked| locked.set(Some(session.mutex_is_locked())));
+                }
+            });
+            assert!(
+                !self.panic_on_ticket,
+                "session-store callback panic fixture"
+            );
+        }
+
+        fn take_tls13_ticket(
+            &self,
+            _server_name: &ServerName<'static>,
+        ) -> Option<Tls13ClientSessionValue> {
+            None
+        }
+    }
+
+    #[test]
+    fn a_rustls_session_store_callback_runs_without_the_session_mutex() {
+        let (client, mut server) = handshaken_pair_with_store(Some(Arc::new(SessionStoreProbe {
+            panic_on_ticket: false,
+        })));
+        let session = share(client);
+        SESSION_STORE_PROBE.with(|slot| *slot.borrow_mut() = Some(session.clone()));
+        SESSION_STORE_MUTEX_LOCKED.with(|locked| locked.set(None));
+
+        let mut tickets = Vec::new();
+        while server.wants_write() {
+            server
+                .write_tls(&mut tickets)
+                .expect("serialize post-handshake tickets");
+        }
+        assert!(
+            !tickets.is_empty(),
+            "the server produced no post-handshake ticket callback fixture"
+        );
+        let mut ciphertext = tickets.as_slice();
+        session
+            .with(|session| session.feed_ciphertext_step(&mut ciphertext))
+            .expect("process post-handshake tickets");
+
+        let observed = SESSION_STORE_MUTEX_LOCKED.with(Cell::get);
+        SESSION_STORE_PROBE.with(|slot| *slot.borrow_mut() = None);
+        assert_eq!(
+            observed,
+            Some(false),
+            "rustls invoked the caller session store while the TLS session mutex was locked"
+        );
+        session
+            .with(|_| Ok(()))
+            .expect("the session was not returned after the callback");
+    }
+
+    #[test]
+    fn a_panicking_rustls_callback_poisons_the_shared_session() {
+        let (client, mut server) = handshaken_pair_with_store(Some(Arc::new(SessionStoreProbe {
+            panic_on_ticket: true,
+        })));
+        let session = share(client);
+        SESSION_STORE_PROBE.with(|slot| *slot.borrow_mut() = Some(session.clone()));
+        SESSION_STORE_MUTEX_LOCKED.with(|locked| locked.set(None));
+
+        let mut tickets = Vec::new();
+        while server.wants_write() {
+            server
+                .write_tls(&mut tickets)
+                .expect("serialize post-handshake tickets");
+        }
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut ciphertext = tickets.as_slice();
+            let _ = session.with(|session| session.feed_ciphertext_step(&mut ciphertext));
+        }));
+
+        SESSION_STORE_PROBE.with(|slot| *slot.borrow_mut() = None);
+        assert!(panic.is_err(), "the caller callback did not panic");
+        assert_eq!(
+            SESSION_STORE_MUTEX_LOCKED.with(Cell::get),
+            Some(false),
+            "the panicking caller callback ran while the state mutex was locked"
+        );
+        let error = session
+            .with(|_| Ok(()))
+            .expect_err("a partially unwound rustls session was reused");
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
     }
 
     /// An orderly `close_notify` with ciphertext still buffered behind it is

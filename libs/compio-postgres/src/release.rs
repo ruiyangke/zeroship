@@ -60,13 +60,13 @@
 //! A TLS session must send an encrypted `close_notify` before the socket is
 //! shut down. The record cannot be prepared during the handshake because its
 //! sequence number follows every application write. The rustls connection and
-//! its ordered ciphertext queue are therefore shared as an
-//! `Arc<Mutex<TlsSession>>`. `ConnectionRelease::drop` locks that live state,
-//! serializes the alert, sends it nonblocking on the owned dup, and only then
-//! calls `shutdown(Both)`. It skips the alert if an earlier TLS write is still
-//! in flight, because overtaking that record would make the alert invalid.
-//! Every step remains best effort because `Drop` has no caller to report an
-//! error to and the physical session is ending regardless.
+//! its ordered ciphertext queue are therefore shared through `SharedSession`.
+//! `ConnectionRelease::drop` leases that live state without holding its state
+//! mutex, serializes the alert, sends it nonblocking on the owned dup, and only
+//! then calls `shutdown(Both)`. It skips the alert if an earlier TLS write is
+//! still in flight, because overtaking that record would make the alert
+//! invalid. Every step remains best effort because `Drop` has no caller to
+//! report an error to and the physical session is ending regardless.
 
 use std::{
     fmt,
@@ -145,27 +145,33 @@ fn send_close_notify_on(
         return;
     }
 
-    // Keep the lock through the synchronous sends so no connection-task write
-    // can change the record sequence between serialization and delivery.
-    let mut session = session.lock();
-    let Ok(ciphertext) = session.take_close_notify() else {
-        return;
-    };
-    let mut remaining = ciphertext.as_slice();
-    while !remaining.is_empty() {
-        #[cfg(target_os = "linux")]
-        let sent =
-            socket.send_with_flags(remaining, nix::sys::socket::MsgFlags::MSG_NOSIGNAL.bits());
-        #[cfg(not(target_os = "linux"))]
-        let sent = socket.send(remaining);
+    // Keep the exclusive lease through the synchronous sends so no
+    // connection-task write can change the record sequence between
+    // serialization and delivery. `with` does not keep its state mutex locked
+    // while rustls invokes caller-supplied crypto or logging callbacks. A
+    // callback panic poisons the rustls state; catch it here because this
+    // best-effort Drop path must still reach the socket shutdown.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        session.with(|session| {
+            let ciphertext = session.take_close_notify()?;
+            let mut remaining = ciphertext.as_slice();
+            while !remaining.is_empty() {
+                #[cfg(target_os = "linux")]
+                let sent = socket
+                    .send_with_flags(remaining, nix::sys::socket::MsgFlags::MSG_NOSIGNAL.bits());
+                #[cfg(not(target_os = "linux"))]
+                let sent = socket.send(remaining);
 
-        match sent {
-            Ok(0) => break,
-            Ok(count) => remaining = &remaining[count..],
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(_) => break,
-        }
-    }
+                match sent {
+                    Ok(0) => break,
+                    Ok(count) => remaining = &remaining[count..],
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
+            Ok(())
+        })
+    }));
 }
 
 /// Duplicates the descriptor behind `handle` and takes ownership of the copy.
