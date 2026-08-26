@@ -257,6 +257,16 @@ machine and the workload mix.
 | acquire timeouts | 0 | 0 |
 | bad connections / cancellations | 233 / 198 | 3,488 / 2,961 |
 
+### Against PostgreSQL 18, where protocol 3.2 is actually negotiated
+
+Every run above used the 16.14 fixture, where the driver requests 3.2 and the
+server negotiates it DOWN to 3.0 - so none of them exercised the 3.2 code. A
+600s run against 18.4 on 5459 did **131,817 operations** across 41 samples,
+rises 20 and falls 16 for a net **-108 KiB**, and returned server backends and
+driver connections to zero. That is the negotiation exchange and the
+variable-length cancel key under sustained load, including thousands of
+cancellations, which is the path the longer key runs through.
+
 The long run is the informative one. +120 KiB across 199,664 operations is
 about 0.6 bytes per operation, with rises and falls in near-equal number - a
 sawtooth, which is what an allocator does, not what a leak does. Final RSS
