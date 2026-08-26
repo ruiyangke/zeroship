@@ -36,14 +36,14 @@ fn emit_ir_envelope_schema() {
     let on_disk = std::fs::read_to_string(&path).unwrap_or_else(|e| {
         panic!(
             "ir-envelope.schema.json missing or unreadable at {}: {e}. \
-             Run `UPDATE_SCHEMA=1 cargo test -p zero-migrate --test ir_contract ir_envelope_schema` to generate it.",
+             Run `UPDATE_SCHEMA=1 cargo test -p zeroship-migrate --test ir_contract ir_envelope_schema` to generate it.",
             path.display()
         )
     });
     assert_eq!(
         on_disk, generated,
         "ir-envelope.schema.json is stale. Regenerate with \
-         `UPDATE_SCHEMA=1 cargo test -p zero-migrate --test ir_contract ir_envelope_schema` and commit it."
+         `UPDATE_SCHEMA=1 cargo test -p zeroship-migrate --test ir_contract ir_envelope_schema` and commit it."
     );
 }
 
