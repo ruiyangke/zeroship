@@ -60,7 +60,7 @@ fn tcp_endpoint(url: &str) -> (String, u16) {
     let config: Config = url.parse().expect("parse PG_TEST_URL");
     let port = config.get_ports().first().copied().unwrap_or(5432);
 
-    if let Some(address) = config.get_hostaddrs().first() {
+    if let Some(Some(address)) = config.get_hostaddrs().first() {
         return (address.to_string(), port);
     }
 

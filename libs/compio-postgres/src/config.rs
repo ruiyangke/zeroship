@@ -19,7 +19,6 @@ use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::net::IpAddr;
 use std::num::NonZeroUsize;
-use std::ops::Deref;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
@@ -634,6 +633,7 @@ pub enum Host {
 ///     wire protocol to perform the negotiation.
 /// * `hostaddr` - Numeric IP address of host to connect to. This should be in the standard IPv4 address format,
 ///     e.g., 172.28.40.9. If your machine supports IPv6, you can also use those addresses.
+///     In a comma-separated list, an empty item selects the corresponding `host` item.
 ///     If this parameter is not specified, the value of `host` will be looked up to find the corresponding IP address,
 ///     or if host specifies an IP address, that value will be used directly.
 ///     Using `hostaddr` allows the application to avoid a host name look-up, which might be important in applications
@@ -789,7 +789,10 @@ pub struct Config {
     pub(crate) ssl_sni: bool,
     pub(crate) require_peer: Option<String>,
     pub(crate) host: Vec<Host>,
-    pub(crate) hostaddr: Vec<IpAddr>,
+    /// Positional `hostaddr` entries. `None` is an explicitly empty slot,
+    /// which tells libpq-compatible endpoint selection to use the matching
+    /// `host` entry instead.
+    pub(crate) hostaddr: Vec<Option<IpAddr>>,
     pub(crate) port: Vec<u16>,
     pub(crate) connect_timeout: Option<Duration>,
     /// Programmatic-only post-startup socket-read policy. It is deliberately
@@ -1473,9 +1476,13 @@ impl Config {
         &self.host
     }
 
-    /// Gets the hostaddrs that have been added to the configuration with `hostaddr`.
-    pub fn get_hostaddrs(&self) -> &[IpAddr] {
-        self.hostaddr.deref()
+    /// Gets the positional hostaddr entries in the configuration.
+    ///
+    /// An explicitly empty item in a parsed comma-separated list is `None` and
+    /// selects the corresponding `host`. Programmatic calls to
+    /// [`Config::hostaddr`] always append `Some`.
+    pub fn get_hostaddrs(&self) -> &[Option<IpAddr>] {
+        &self.hostaddr
     }
 
     /// Adds a Unix socket host to the configuration.
@@ -1503,7 +1510,7 @@ impl Config {
     /// Multiple hostaddrs can be specified by calling this method multiple times, and each will be tried in order.
     /// There must be either no hostaddrs, or the same number of hostaddrs as hosts.
     pub fn hostaddr(&mut self, hostaddr: IpAddr) -> &mut Config {
-        self.hostaddr.push(hostaddr);
+        self.hostaddr.push(Some(hostaddr));
         self
     }
 
@@ -2039,6 +2046,10 @@ impl Config {
             "hostaddr" => {
                 self.hostaddr.clear();
                 for hostaddr in value.split(',') {
+                    if hostaddr.is_empty() {
+                        self.hostaddr.push(None);
+                        continue;
+                    }
                     let addr = hostaddr
                         .parse()
                         .map_err(|_| Error::config_parse(Box::new(InvalidValue("hostaddr"))))?;
@@ -4293,8 +4304,8 @@ mod tests {
 
         assert_eq!(
             [
-                "127.0.0.1".parse::<IpAddr>().unwrap(),
-                "127.0.0.2".parse::<IpAddr>().unwrap()
+                Some("127.0.0.1".parse::<IpAddr>().unwrap()),
+                Some("127.0.0.2".parse::<IpAddr>().unwrap())
             ],
             config.get_hostaddrs(),
         );
@@ -4923,7 +4934,7 @@ mod dsn_parse_tests {
             .unwrap();
         assert_eq!(
             hostaddr.get_hostaddrs(),
-            ["127.0.0.1".parse::<IpAddr>().unwrap()]
+            [Some("127.0.0.1".parse::<IpAddr>().unwrap())]
         );
 
         let sslmode = "host=h requiressl=1 sslmode=disable"
@@ -4954,7 +4965,7 @@ mod dsn_parse_tests {
         let hostaddr = cases[2].parse::<Config>().unwrap();
         assert_eq!(
             hostaddr.get_hostaddrs(),
-            ["127.0.0.1".parse::<IpAddr>().unwrap()]
+            [Some("127.0.0.1".parse::<IpAddr>().unwrap())]
         );
 
         let sslmode = cases[4].parse::<Config>().unwrap();
