@@ -132,6 +132,14 @@ pub(crate) mod apply;
 pub(crate) mod bootstrap;
 #[cfg(any(test, feature = "test-helpers"))]
 pub(crate) mod plan;
+// Gated for the same reason its three siblings are: every path into it is a test.
+// `run_sqlite_via_engine` has no production call site — the SQLite arm creates
+// nothing, and the dev server applies committed migrations ahead of the worker
+// through the addon's `applyIrSqlite`. Leaving this one module ungated was the
+// only thing making `zeroship-migrate` a hard dependency of a crate that never
+// calls it in production, which is why the cfg belongs here rather than in a doc
+// sentence — the doc above already went stale on exactly this point once.
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) mod sqlite_engine;
 #[cfg(any(test, feature = "test-helpers"))]
 pub(crate) mod validate;
