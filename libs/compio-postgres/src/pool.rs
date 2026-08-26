@@ -1571,20 +1571,38 @@ impl Pool {
         // Take counts and do all mutations inside tight borrows. Release
         // every borrow before awaiting.
 
-        let (before, evicted_expired, evicted_idle) = {
+        let (before, evicted_expired, evicted_idle, discarded) = {
             let mut idle = pool.idle.borrow_mut();
             let before = idle.len();
 
+            // Evicted entries are CARRIED OUT, not dropped here. Dropping a
+            // `PoolEntry` inside this borrow runs arbitrary user code: the entry
+            // owns a `Client`, whose `QueryObserver` owns the `QueryEvent`
+            // sender, and dropping the last sender calls
+            // `recv_task.wake()` (futures-channel 0.3.32, mpsc/mod.rs:969 ->
+            // :515). That waker belongs to whoever polls the PUBLIC
+            // `Client::query_events`, so it is user code reachable from safe
+            // Rust via `impl Wake`.
+            //
+            // A waker that touches the pool would panic here with
+            // `BorrowMutError`, and the unwind would escape BEFORE the
+            // accounting below - so `total` would never be decremented for
+            // entries that are already gone, and the pool would permanently
+            // believe it holds capacity it does not.
+            let mut discarded: Vec<PoolEntry> = Vec::new();
+
             // 1. Evict expired (max_lifetime reached).
             let mut evicted_expired = 0usize;
-            idle.retain(|entry| {
+            let mut kept = Vec::with_capacity(idle.len());
+            for entry in idle.drain(..) {
                 if entry.is_expired() {
                     evicted_expired += 1;
-                    false
+                    discarded.push(entry);
                 } else {
-                    true
+                    kept.push(entry);
                 }
-            });
+            }
+            *idle = kept;
 
             // 2. Evict idle-too-long, keeping at least min_idle.
             let target = pool.config.min_idle;
@@ -1597,14 +1615,14 @@ impl Pool {
                     .map(|(i, _)| i);
                 match lru_idx {
                     Some(idx) if idle[idx].is_idle_too_long(pool.config.idle_timeout) => {
-                        idle.swap_remove(idx);
+                        discarded.push(idle.swap_remove(idx));
                         evicted_idle += 1;
                     }
                     _ => break,
                 }
             }
 
-            (before, evicted_expired, evicted_idle)
+            (before, evicted_expired, evicted_idle, discarded)
         };
 
         let evicted = evicted_expired + evicted_idle;
@@ -1616,6 +1634,10 @@ impl Pool {
             }
             pool.wake_one_waiter();
         }
+        // Destroyed here: the `idle` borrow is released AND the accounting
+        // above is committed, so a destructor that unwinds cannot leave `total`
+        // claiming capacity these entries no longer represent.
+        drop(discarded);
 
         // 3. Refill to min_idle. No retry here - if connect fails, back off
         // until the next 30s tick. Reserve the slot before the await so
