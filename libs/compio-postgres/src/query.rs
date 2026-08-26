@@ -137,8 +137,7 @@ pub async fn query_text_params(
         frontend::parse("", query, std::iter::empty::<u32>(), buf).map_err(Error::encode)?;
 
         // Bind: text format for parameters (code 0), binary format for results (code 1).
-        let param_refs: Vec<Option<&[u8]>> =
-            params.iter().map(|s| Some(s.as_bytes())).collect();
+        let param_refs: Vec<Option<&[u8]>> = params.iter().map(|s| Some(s.as_bytes())).collect();
         frontend::bind(
             "",
             "",
@@ -225,8 +224,10 @@ pub async fn execute_text_params(
 ) -> Result<u64, Error> {
     let buf = client.with_buf(|buf| {
         frontend::parse("", query, std::iter::empty::<u32>(), buf).map_err(Error::encode)?;
-        let param_refs: Vec<Option<&[u8]>> =
-            params.iter().map(|s| s.as_ref().map(|v| v.as_bytes())).collect();
+        let param_refs: Vec<Option<&[u8]>> = params
+            .iter()
+            .map(|s| s.as_ref().map(|v| v.as_bytes()))
+            .collect();
         frontend::bind(
             "",
             "",

@@ -539,10 +539,9 @@ mod tests {
         let values: Vec<&(dyn ToSql + Sync)> = Vec::new();
         let error = encode_row(&mut buf, &types, values.into_iter())
             .expect_err("a column count past i16::MAX must be refused, not wrapped");
-        let chain = std::iter::successors(
-            std::error::Error::source(&error),
-            |e| std::error::Error::source(*e),
-        )
+        let chain = std::iter::successors(std::error::Error::source(&error), |e| {
+            std::error::Error::source(*e)
+        })
         .fold(format!("{error}"), |acc, e| format!("{acc}: {e}"));
         assert!(
             chain.contains("at most") && chain.contains("columns"),

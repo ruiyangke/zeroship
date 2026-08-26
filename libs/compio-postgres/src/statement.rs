@@ -28,9 +28,7 @@ pub(crate) fn close_statement(client: &InnerClient, name: &str) {
             // so there is nothing to send and the statement stays on the server
             // until the session ends. Report that rather than drop the cause:
             // silence here is indistinguishable from a successful DEALLOCATE.
-            log::error!(
-                "compio-postgres: cannot encode Close for prepared statement {name}: {e}"
-            );
+            log::error!("compio-postgres: cannot encode Close for prepared statement {name}: {e}");
             return None;
         }
         frontend::sync(buf);

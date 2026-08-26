@@ -355,7 +355,7 @@ fn generate_handshake(rng: &mut Rng) -> Vec<u8> {
                 let code = rng.below(16);
                 out.extend_from_slice(&backend_frame(b'R', &code.to_be_bytes()));
             }
-            // BackendKeyData with a body that is not the required eight bytes.
+            // BackendKeyData with an arbitrary fixed or variable-length key.
             1 => {
                 let len = rng.below(16) as usize;
                 let mut body = Vec::with_capacity(len);
