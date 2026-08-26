@@ -140,7 +140,24 @@ impl fmt::Debug for Row {
 
 impl Row {
     pub(crate) fn new(statement: Statement, body: DataRowBody) -> Result<Row, Error> {
-        let ranges: Vec<Option<Range<usize>>> = body.ranges().collect().map_err(Error::parse)?;
+        // Reserve for what the row can CONTAIN, not for the count it declares.
+        // `DataRowRanges::size_hint` returns the peer's u16 field count
+        // verbatim (postgres-protocol 0.6.12, backend.rs), and `collect`
+        // reserves exactly that, so a DataRow declaring 65535 fields with a
+        // short body reserved about 1.6 MB before a single field was read. The
+        // arity check below is what rejects such a row, and it runs only AFTER
+        // the collect, so it cannot prevent the reservation.
+        //
+        // Every field costs at least its 4-byte length prefix, so
+        // `buffer().len() / 4` can never bind on a valid row: N fields imply a
+        // buffer of at least 4N, and an all-NULL row hits that bound exactly.
+        // Same clamp as the pgoutput column counts in `replication.rs`.
+        let mut fields = body.ranges();
+        let mut ranges: Vec<Option<Range<usize>>> =
+            Vec::with_capacity(fields.size_hint().0.min(body.buffer().len() / 4));
+        while let Some(range) = fields.next().map_err(Error::parse)? {
+            ranges.push(range);
+        }
         // The accessors index `ranges` with an index bounds-checked against
         // the COLUMNS, so the two lists have to agree. The protocol says they
         // do - a `DataRow` carries exactly as many fields as the
@@ -336,7 +353,14 @@ impl SimpleQueryRow {
         columns: Arc<[SimpleColumn]>,
         body: DataRowBody,
     ) -> Result<SimpleQueryRow, Error> {
-        let ranges: Vec<Option<Range<usize>>> = body.ranges().collect().map_err(Error::parse)?;
+        // Same clamp, same reason as `Row::new` above: the declared field count
+        // is the peer's, and the reservation happens before anything checks it.
+        let mut fields = body.ranges();
+        let mut ranges: Vec<Option<Range<usize>>> =
+            Vec::with_capacity(fields.size_hint().0.min(body.buffer().len() / 4));
+        while let Some(range) = fields.next().map_err(Error::parse)? {
+            ranges.push(range);
+        }
         // Same reconciliation as `Row::new`, for the same reason: `get_inner`
         // indexes `ranges` with an index bounds-checked against the columns.
         if ranges.len() != columns.len() {
