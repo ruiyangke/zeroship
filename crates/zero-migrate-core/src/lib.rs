@@ -450,8 +450,8 @@ pub use plan::manifest::{
 };
 // The `op.*` portable IR: the migration document, the closed
 // `Op` enum, the constrained numeric scalar, and the canonical op-list the
-// `Checksum::of_ir` front door folds. There is NO `Raw`/`RawDown`;
-// every transform/predicate is the closed [`expr::Expr`] AST.
+// `Checksum::of_ir` front door folds. There is no raw-SQL escape hatch in either
+// direction; every transform/predicate is the closed [`expr::Expr`] AST.
 pub use model::ir::{
     validate_type_id_prefix, BackfillSetValue, CanonicalOpList, ColType, ColumnOrExpr,
     CommentTarget, CursorStability, EmptyContainerKind, ExclusionElement, ExclusionMethod,

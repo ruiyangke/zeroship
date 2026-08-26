@@ -76,8 +76,8 @@ pub struct Column {
 /// trivial **additive** operations it can emit without AI.
 ///
 /// Every variant is non-destructive by construction; there is deliberately no
-/// `DropTable` / `RenameColumn` / `ChangeType` variant - those are destructive
-/// or ambiguous and belong to the AI author (fed via [`RawSqlAuthor`]).
+/// `DropTable` / `RenameColumn` variant and no way to retype a column - those are
+/// destructive or ambiguous and belong to the AI author (fed via [`RawSqlAuthor`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthorRequest {
     /// `CREATE TABLE <schema>.<name> (<columns...>)` - scenario 1.

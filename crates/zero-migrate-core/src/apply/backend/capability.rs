@@ -18,8 +18,8 @@ pub use zero_migrate_backend::backfill::{BackfillError, BackfillOutcome, Backfil
 // has to name the orchestrator.
 // -- The shadow dry-run's neutral half travelled too: `ShadowConfig` in,
 // `DryRunReport`/`MigrationResult` out. The `ShadowDryRun` TRAIT stayed, because
-// `dry_run_declarative` takes a `DeclarativeDeployPlan` and a `DesiredSchema` and
-// `SeedError` carries an `EngineError` - three engine orchestration results.
+// `dry_run_declarative` takes a `DeclarativeDeployPlan` and a `DesiredSchema` -
+// engine orchestration results, not vocabulary a backend speaks.
 // Re-exported so every historical `capability::...` path still resolves.
 pub use zero_migrate_backend::capability::{
     BackendCapability, DryRunReport, MigrationResult, OnlineError, OnlineSchemaChange, ShadowConfig,

@@ -974,8 +974,9 @@ impl MigrationEngine {
         //
         // We acquire the lock BEFORE the gate's denial/approval check is performed
         // inside `apply_inner`; that check still runs (with `AlreadyHeld`) and can
-        // return early - every such early return runs through `release_or_warn`
-        // below, so the lock is never held forever on a gate rejection.
+        // return early - every such early return lands on the single release below,
+        // which warns rather than masking the deploy's own error, so the lock is
+        // never held forever on a gate rejection.
         //
         // The lock is acquired/released through the dialect seam
         // (`backend.acquire/release_project_lock`) rather than the PG `*_outer`
@@ -2274,7 +2275,7 @@ impl MigrationEngine {
             //
             // EXEMPTIONS match the touched-table loop: a deploy that IS discharging
             // an obligation (contract-apply) or re-running its own EXPAND
-            // (`self_expand`) or explicitly resolving it must NOT be blocked by
+            // (`self_expand_versions`) or explicitly resolving it must NOT be blocked by
             // *that* obligation via a self-referential `depends_on` (applying the
             // contract is exactly how the dependency becomes satisfied). Such
             // obligations are keyed by `plan_version` here.
@@ -2816,9 +2817,9 @@ impl MigrationEngine {
                     } = &rename.intent;
                     let pending_version = rename.trigger_version.as_str().to_string();
                     // The rename's PLAN-GROUP version - the stable identity the
-                    // SUPPLIED set / `depends_on` key on for orphan/blocked. It is E1's deterministic id (the
-                    // `ExpandContract` plan anchors its plan version on E1, see
-                    // `render::lower::plan_step_version`). Deterministic per rename,
+                    // SUPPLIED set / `depends_on` key on for orphan/blocked. The lower
+                    // stamps it on the `ExpandContract` step; the fallback below
+                    // anchors it on E1. Deterministic per rename,
                     // so a re-lowered IR reproduces it - which is exactly
                     // what `status` re-derives from the supplied set to decide
                     // orphan/present. Fail closed if the author somehow produced an

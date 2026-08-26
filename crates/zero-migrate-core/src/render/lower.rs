@@ -6312,7 +6312,7 @@ impl IrAuthor {
         // a widened scope admits a gate-approved foreign schema, which flows
         // through. So the batched-backfill executor now threads `spec.schema =
         // eff_schema` (the executor qualifies its windowed UPDATE + anchors its
-        // search_path on it and guards via its profile-derived `guard_config`).
+        // search_path on it and guards via its policy-derived `guard_config_for`).
         // There is NO lower-time refusal here anymore - confinement is enforced by
         // the scope gate, not by pinning the backfill to the project schema.
         let mut ordinary = std::collections::BTreeMap::new();
@@ -8597,11 +8597,11 @@ pub(crate) fn render_view_query(
     }
 }
 
-/// The structured view-query walk. It carries BOTH a dialect and a backend, the
-/// same split `dml::render_expr_inline_walk` uses: `backend` answers anything the
-/// vendor spells, `dialect` is still needed for the sibling core doors this walk
-/// calls (`render_expr_inline`, `quote_bare_ident_for_dialect`), which have callers
-/// in `apply::` and `model::` and so have not been converted.
+/// The structured view-query walk. It carries BOTH a dialect and a backend:
+/// `backend` answers anything the vendor spells, and `dialect` is still needed for
+/// the sibling core doors this walk calls (`render_expr_inline`,
+/// `quote_bare_ident_for_dialect`), which have callers in `apply::` and `model::`
+/// and so have not been converted.
 fn render_select_ast(
     vendors: VendorSet,
     select: &SelectAst,
@@ -12748,8 +12748,8 @@ mod tests {
     /// schema is a gate-APPROVED foreign schema now LOWERS to a `PlanStep::Backfill`
     /// whose `spec.schema` is that foreign schema (it no longer fails closed). The
     /// resumable backfill executor threads the per-spec schema, so the windowed
-    /// UPDATE qualifies into `app2`, NOT silently into `app1`. Before this fix (it
-    /// returned `BackfillSchemaUnsupported`).
+    /// UPDATE qualifies into `app2`, NOT silently into `app1`. There is no lower-time
+    /// refusal on a foreign schema any more - confinement is the scope gate's job.
     ///
     /// A widened scope: the foreign schema "app2" is ADMITTED by the scope
     /// (a Confined creator could never name it - the cross-schema confinement gate
@@ -12904,8 +12904,9 @@ mod tests {
 
     /// a guarded op now LOWERS (the executor
     /// probe is implemented), and the resulting `Migration` carries the stamped
-    /// `existence_guard` probe with the right variant/fields. RED on the pre-Part-B
-    /// code, which REFUSED the lower with `ExistenceGuardNotYetSupported`.
+    /// `existence_guard` probe with the right variant/fields. RED on the code that
+    /// preceded the executor probe, which REFUSED a guarded op at lower time
+    /// instead of stamping one.
     #[test]
     fn existence_guard_lowers_and_stamps_probe() {
         let mut ir = create_table_ir(

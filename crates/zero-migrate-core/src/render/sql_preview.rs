@@ -13,7 +13,7 @@
 //! # The honest boundary (the load-bearing design point)
 //!
 //! DB-INDEPENDENT ops - `createTable`/`dropTable`/`addColumn`/`dropColumn`/
-//! `addForeignKey`/`addUnique`/`addCheck`/`dropConstraint`/`createIndex`/
+//! `addConstraint`/`dropConstraint`/`createIndex`/
 //! `dropIndex` + one-shot `insert`/`update`/`delete` - render their REAL SQL: their
 //! `up`/`template` is fully determined offline (`IrAuthor::lower_*` lowers them with
 //! an EMPTY [`LiveSchema`], needing no DB).
@@ -31,7 +31,7 @@
 //! - **any DDL migration carrying an existence-guard probe**
 //!   (`ifNotExists`/`ifExists`): apply is a
 //!   runtime catalog probe + run / satisfied-noop / fail-drift decision
-//!   ([`guard_probe`](crate::render::existence_probe), explicitly NOT offline-renderable). The
+//!   ([`decide`](crate::render::existence_probe::decide), explicitly NOT offline-renderable). The
 //!   bare DDL `up` IS real SQL the apply runs when the probe says "run", so we
 //!   print it under the label - but we do NOT invent an `IF [NOT] EXISTS` clause
 //!   the engine never emits. MySQL additionally refuses a present createTable or

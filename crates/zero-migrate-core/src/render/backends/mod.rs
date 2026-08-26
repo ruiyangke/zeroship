@@ -63,8 +63,8 @@
 //!
 //! # The OTHER half of the class: emission that reaches no renderer at all
 //!
-//! The larger instance was the engine reaching NO renderer: `dml::escape_quote_ident`
-//! was a `pub(crate)` raw `format!` that any module could call to spell `"x"` without
+//! The larger instance was the engine reaching NO renderer: `render::dml` held a
+//! `pub(crate)` raw `format!` that any module could call to spell `"x"` without
 //! naming a dialect. Correct bytes, absent routing, invisible to every behaviour test
 //! for the same reason as above.
 //!

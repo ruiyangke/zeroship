@@ -9,19 +9,15 @@
 //! a `Vec<DiffOp>` that an orchestrator sequences with the advisory lock,
 //! audit writes, and validation pass.
 //!
-//! That orchestrator is NOT in this workspace, and the `crate::`-rooted path
-//! this comment used to carry (`crate::register_model::exec_register_model_with_pool`)
-//! never resolved here. This kernel was extracted from appbase's `zeroship-schema`,
-//! where the sentence is true: `exec_register_model_with_pool` is a live `pub async
-//! fn` in that project's register-model module, confirmed by them on 2026-08-08.
-//! Nothing in this repository consumes the diff that way.
+//! That orchestrator is NOT in this workspace. This kernel was extracted from
+//! appbase's `zeroship-schema`, where `exec_register_model_with_pool` is a live
+//! `pub async fn` in that project's register-model module, confirmed by them on
+//! 2026-08-08. Nothing in this repository consumes the diff that way.
 //!
-//! The line number that used to sit on that citation is gone deliberately. It read
-//! `:341`, and over the day it was written the function moved to `:372` and then to
-//! `:388` in their tree - a coordinate into a repository this one does not build
-//! cannot be kept true, and the reader who follows a stale one lands on unrelated
-//! code believing they arrived. The date is what makes the claim checkable; the
-//! function name is what makes it findable.
+//! No line number sits on that citation, deliberately. A coordinate into a
+//! repository this one does not build cannot be kept true, and the reader who
+//! follows a stale one lands on unrelated code believing they arrived. The date is
+//! what makes the claim checkable; the function name is what makes it findable.
 //!
 //! ## Volatile-default trap
 //!
@@ -467,7 +463,7 @@ pub fn compute_diff(
             // Skip top-level metadata keys (`_meta`,
             // `_indexes`). The runtime reads these out-of-band; they
             // are NOT column declarations and must not reach the
-            // `field_name` validator (which now reserves the `_`
+            // `validate_field_name` validator (which reserves the `_`
             // prefix for synthetic-result columns).
             if crate::schema::query::is_schema_metadata_key(field) {
                 continue;
@@ -714,8 +710,8 @@ pub fn compute_diff(
     // 6a additionally emits an `AddColumn` for the sibling BEFORE the
     // `MaskBackfill` op so the column exists when the backfill writes
     // to it. The sibling ADD is nullable on purpose - backfill flips
-    // it to NOT NULL after the last batch (see
-    // `crate::crud::mask_backfill::run_mask_backfill`).
+    // it to NOT NULL after the last batch (the data plane's
+    // `run_mask_backfill`).
     //
     // Brand-new columns with a mask declaration are NOT routed here -
     // `build_create_table_with_fks_for_dialect` (CreateTable op) and
@@ -790,8 +786,8 @@ pub fn compute_diff(
                         class: ChangeClass::Additive,
                         // Backfill SQL is multi-statement and
                         // resumable - there is no single "the SQL" to
-                        // store on the op. The apply layer dispatches
-                        // to `mask_backfill::run_mask_backfill`.
+                        // store on the op. The data plane's apply layer
+                        // dispatches to its `run_mask_backfill`.
                         sql: None,
                         details: serde_json::json!({
                             "kind": "mask_backfill",

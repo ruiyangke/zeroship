@@ -1890,8 +1890,9 @@ impl<'a> CatalogFold<'a> {
                 //
                 // PostgreSQL and SQLite are untouched here and must be: PostgreSQL
                 // stores the constraint name independently of the table, so
-                // `ALTER TABLE tags RENAME TO labels` genuinely leaves `tags_pkey`
-                // named `tags_pkey`, and `fold_roundtrip_pg.rs` pins exactly that.
+                // `ALTER TABLE ... RENAME TO` genuinely leaves the primary key under
+                // the name it already had, and `fold_roundtrip_pg.rs` pins exactly
+                // that against a live server.
                 // Applying MySQL's re-derivation there would invent a rename the
                 // server does not perform.
                 //
@@ -5772,7 +5773,7 @@ fn index_descriptor_to_ir(d: &crate::render::declarative::IndexDescriptor) -> Ir
 /// Parse a descriptor FK-action token (`cascade`/`restrict`/`setNull`/`setDefault`/
 /// `noAction`) back to the closed [`RefAction`]. An out-of-set token yields `None`
 /// (no action emitted - checksum-neutral, the SQL default). Mirrors the SDK's
-/// camelCase `FkAction` spelling.
+/// camelCase `RefAction` spelling.
 fn parse_ref_action(token: &str) -> Option<RefAction> {
     match token {
         "cascade" => Some(RefAction::Cascade),
