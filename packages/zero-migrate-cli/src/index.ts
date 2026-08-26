@@ -17,8 +17,8 @@
 //      the authoritative `Checksum::of_ir`), then drives `executor::apply` over the
 //      chosen host driver (`driver-pg.ts` / `driver-mysql2.ts`).
 //
-// NO `dryRun` verb in v1: the host-side shadow harness is deferred; for the
-// host-driven backends `backend.shadow()` is `None`, so a shadow dry-run would
+// NO shadow dry-run verb in v1: the host-side shadow harness is deferred, and no
+// backend implements the `ShadowDryRun` capability, so a shadow dry-run would
 // return `DryRunError::ShadowUnsupported`. `plan`/`validate` (the DB-free
 // pre-checks) ARE provided.
 
@@ -425,8 +425,8 @@ function validateEnvelope(
 
 /**
  * The DB-free plan pre-check: {@link validate} the migration, then project the
- * verdict + authored ops into a `PlanReport`. This is the fast pre-apply gate;
- * `dryRun` (the full shadow verification) is deferred.
+ * verdict + authored ops into a `PlanReport`. This is the fast pre-apply gate; the
+ * full shadow verification is deferred.
  */
 export function plan(opts: HostPlanOptions): PlanReport {
   const addon = loadAddon();

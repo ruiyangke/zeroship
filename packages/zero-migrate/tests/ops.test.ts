@@ -45,8 +45,8 @@ import {
 import { __begin, __drain } from "../src/ops.js";
 // The engine-embedded recorder is the COMPILED artifact
 // (`dist/embedded-recorder.js`) this suite and two sibling suites import -
-// the same `tsup` build output of `src/ops.ts`. Importing it here (instead
-// of the deleted `migrate_ops.js` twin) makes this an artifact-identity oracle:
+// the same `tsup` build output of `src/ops.ts`. Importing the artifact itself,
+// rather than a hand-kept second recorder, makes this an artifact-identity oracle:
 // the SDK source and the shipped engine artifact record byte-identically.
 import {
   __begin as engBegin,

@@ -157,9 +157,9 @@ const fn affected(reply: &JsReply) -> u64 {
     }
 }
 
-/// The one-in-flight guard - the exact discipline the `MySQL` `JsDriverBackend`
-/// uses (`transport.rs` `in_flight`), lifted to `AtomicBool` because the seam is
-/// `&self`.
+/// The one-in-flight guard - ONE verb at a time on the pinned host connection, the
+/// same discipline every driver over this seam keeps. A plain `bool` would carry it
+/// if the seam took `&mut self`; it takes `&self`, so the flag is an `AtomicBool`.
 struct InFlightGuard<'a>(&'a AtomicBool);
 
 impl<'a> InFlightGuard<'a> {

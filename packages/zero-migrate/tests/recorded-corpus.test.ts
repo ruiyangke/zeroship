@@ -13,9 +13,9 @@
 // `*.golden.json` and skipped everything else, and this file re-authored six
 // migration bodies INLINE in TypeScript and compared those against the goldens. A
 // fixture and the golden it claimed to produce could therefore disagree forever in
-// silence. The inline re-authorings and their `authorProjection` helper are gone:
-// that helper derived the expected column set FROM the recorder output and then
-// filtered the golden down to it, so a recorder that silently dropped a column
+// silence. The inline re-authorings and the projection helper they leaned on are
+// gone: that helper derived the expected column set FROM the recorder output and
+// then filtered the golden down to it, so a recorder that silently dropped a column
 // still passed.
 //
 // There is deliberately NO re-bless environment variable here or in the Rust half.

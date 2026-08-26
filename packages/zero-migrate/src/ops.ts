@@ -29,7 +29,7 @@
 //
 // `table()` is the reusable table DDL/DML entry. The flat op-functions are GONE
 // from the public API; their op-construction logic survives as the internal
-// `recordX` helpers the handle delegates to (so the IR is unchanged). Every terminal
+// `record*` helpers the handle delegates to (so the IR is unchanged). Every terminal
 // RECORDS one canonical op object onto the ambient per-migration recorder
 // synchronously, returning the handle. Recording OUTSIDE an active recorder
 // throws a structured `OP_OUTSIDE_RECORDER`.
@@ -217,7 +217,7 @@ export interface RawArgs {
 // Capture the native nondeterministic function symbols before a migration module
 // can mutate globals. A bare symbol (`crypto.randomUUID` without parens) is an
 // opt-in to DB-side evaluation, matched by IDENTITY below. In the constrained
-// engine V8 recorder isolate (the `FrontendGlobals::Migration` profile installs
+// engine V8 recorder isolate (an authoring profile that installs
 // no Web Crypto), `globalThis.crypto` may be absent, so a bare `crypto.randomUUID`
 // in the migration source would be a `ReferenceError`; install an identity-only
 // stub so the symbol resolves (its `randomUUID` throws if CALLED — the symbol form
@@ -3014,11 +3014,11 @@ function indexIncludeToIr(include: readonly string[] | undefined): string[] | un
 /**
  * Flatten an index's vendor namespaces into the wire form.
  *
- * REPLACES `indexWithToIr`, which typed exactly two PostgreSQL storage parameters
- * (`pagesPerRange`, `fillfactor`) into a neutral `with` object. Those are now ordinary
+ * PostgreSQL storage parameters such as `pagesPerRange` and `fillfactor` are ordinary
  * declarations in the PostgreSQL package, reached through the same
- * `<dialect>: { … }` surface a table's options use, so this function names no vendor and
- * no parameter.
+ * `<dialect>: { ... }` surface a table's options use. So this function names no vendor
+ * and no parameter: it flattens whatever namespaces it is handed, and a new storage
+ * parameter needs no edit here.
  */
 function indexAttributesToIr(args: object): Record<string, unknown> | undefined {
   const namespaces: Record<string, unknown> = {};

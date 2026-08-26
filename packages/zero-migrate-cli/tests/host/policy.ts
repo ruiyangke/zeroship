@@ -64,12 +64,14 @@ scope = "all"
  * `global_knob_narrow_scope_rejects` in crates/zero-migrate-policy/tests/loader.rs:288.
  * An extension is a database-wide object, so there is no schema to confine it to.
  *
- * The value is the allowlist, not a toggle: the guard reads the `StrSet` grant and
- * treats a non-empty list AS the capability, so naming zero extensions grants
- * nothing (`granted_extension_capability` at
- * crates/zero-migrate-postgres/src/guard/sql.rs). `FORBIDDEN_EXTENSIONS` overrides
- * the allowlist regardless, so a name from that denylist cannot be granted here -
- * `citext` is not on it.
+ * The value is the allowlist, not a toggle: the guard matches the extension a
+ * statement NAMES against the `StrSet` grant, so listing zero extensions permits
+ * none and listing one permits only that one - there is deliberately no scalar
+ * "holds the capability" beside it, because a non-empty list would otherwise answer
+ * yes for every extension in the database (`granted_extension_allowlist`, read by
+ * the create and drop sides in crates/zero-migrate-postgres/src/guard/sql.rs).
+ * `FORBIDDEN_EXTENSIONS` overrides the allowlist regardless, so a name from that
+ * denylist cannot be granted here - `citext` is not on it.
  *
  * @param projectSchema the schema the suite is confined to.
  * @param extension the extension name the migration creates and drops.

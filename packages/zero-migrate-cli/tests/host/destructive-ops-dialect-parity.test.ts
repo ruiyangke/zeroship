@@ -16,8 +16,9 @@
 //
 // Sharing the descriptor guard is right for the TEXT rules: the deny-list scans
 // raw SQL for file, program, privilege and session behaviour, and neither MySQL
-// nor SQLite has a raw door (`SqlGuard::check` refuses non-Postgres outright with
-// `SqliteRawSqlRejected` / `MysqlRawSqlRejected`). Those rules have no surface
+// nor SQLite has a raw door (`SqlGuard::check` refuses a non-PostgreSQL dialect
+// outright with `GuardError::RawSqlRejected`, carrying the refusing dialect's own
+// id rather than mis-vetting the text). Those rules have no surface
 // there. The destructive posture is different in kind: it is a property of the
 // OPERATION, not of any SQL text, so it belongs where every dialect can see it.
 //
