@@ -802,6 +802,72 @@ mod type_cache_tests {
         });
     }
 
+    /// `with_buf` runs user code: `encode_bind` reaches `ToSql::to_sql_checked`
+    /// on caller-supplied parameters. A `ToSql` impl holding a `Client` can
+    /// re-enter through the safe, public `Client::__private_api_rollback`,
+    /// which encodes its ROLLBACK through `with_buf` too - and `buffer` is a
+    /// non-reentrant `parking_lot::Mutex`.
+    ///
+    /// The assertion is on the LOCK STATE observed from inside the closure,
+    /// not on the deadlock: a test that waited for the deadlock would hang the
+    /// suite instead of reporting it. That also means this test does NOT prove
+    /// the nested call succeeds - `a_nested_encoder_gets_its_own_scratch_buffer`
+    /// does, and can only be run once the lock is released.
+    #[test]
+    fn the_scratch_buffer_lock_is_not_held_while_the_encoder_runs() {
+        let client = client_with_statement_cache();
+        let inner = client.inner();
+
+        let held = inner.with_buf(|_buf| inner.buffer.try_lock().is_none());
+
+        assert!(
+            !held,
+            "the scratch-buffer mutex was still held while the encoder ran, so a \
+             re-entrant ToSql deadlocks instead of erroring"
+        );
+    }
+
+    /// Re-entering `with_buf` is merely wasteful, never corrupting: the nested
+    /// encoder gets a buffer of its own and neither sees the other's bytes.
+    ///
+    /// This test DEADLOCKS against a `with_buf` that holds the lock across the
+    /// closure, so it cannot serve as the red-before-green probe for that
+    /// change - `the_scratch_buffer_lock_is_not_held_while_the_encoder_runs`
+    /// is the one that reports rather than hangs. This one pins the behaviour
+    /// the release makes reachable.
+    #[test]
+    fn a_nested_encoder_gets_its_own_scratch_buffer() {
+        let client = client_with_statement_cache();
+        let inner = client.inner();
+
+        inner.with_buf(|outer| {
+            outer.extend_from_slice(b"outer frontend bytes");
+
+            let nested_len = inner.with_buf(|nested| {
+                assert!(
+                    nested.is_empty(),
+                    "the nested encoder inherited the outer encoder's bytes: {nested:?}"
+                );
+                nested.extend_from_slice(b"n");
+                nested.len()
+            });
+            assert_eq!(nested_len, 1);
+
+            assert_eq!(
+                &outer[..],
+                b"outer frontend bytes",
+                "the nested encoder clobbered the outer encoder's buffer"
+            );
+        });
+
+        inner.with_buf(|buf| {
+            assert!(
+                buf.is_empty(),
+                "a nested encoder left stale bytes for the next message: {buf:?}"
+            );
+        });
+    }
+
     #[test]
     fn late_cached_error_does_not_evict_newer_same_sql_statement() {
         const SQL: &str = "SELECT 1";
@@ -1043,14 +1109,6 @@ impl Drop for InnerClient {
         // `sender` first and let the connection task race this synchronous TLS
         // release. Take it while every request-channel handle is still alive.
         drop(self.release.take());
-    }
-}
-
-struct ClearBufferOnDrop<'a>(&'a mut BytesMut);
-
-impl Drop for ClearBufferOnDrop<'_> {
-    fn drop(&mut self) {
-        self.0.clear();
     }
 }
 
@@ -1542,16 +1600,40 @@ impl InnerClient {
         drop(removed_typeinfo);
     }
 
-    /// Lock the shared scratch buffer, run `f`, and clear the buffer on
-    /// exit. Used by encoders that want to build a frontend message
-    /// without allocating a fresh `BytesMut` each time.
+    /// Borrow the shared scratch buffer, run `f`, and return the cleared
+    /// buffer for the next caller. Used by encoders that want to build a
+    /// frontend message without allocating a fresh `BytesMut` each time.
+    ///
+    /// The buffer is TAKEN OUT of the mutex for the duration of `f`, and
+    /// the lock is released before `f` runs. `f` reaches user code -
+    /// `encode_bind` calls `ToSql::to_sql_checked` on caller-supplied
+    /// parameters (`query.rs`, `encode_parameter`) - and a `ToSql` impl
+    /// holding a `Client` can re-enter this type through the safe, public
+    /// `Client::__private_api_rollback`, which encodes its ROLLBACK through
+    /// this very method. `buffer` is a `parking_lot::Mutex` and is NOT
+    /// reentrant, so running `f` under the guard deadlocks rather than
+    /// panicking.
+    ///
+    /// Taking the buffer out keeps the allocation reuse this exists for
+    /// while making that re-entry merely wasteful: a nested call finds the
+    /// slot holding a default `BytesMut`, encodes into a fresh allocation of
+    /// its own, and puts it back, after which the outer call's put-back wins.
+    /// The only cost is the nested caller's allocation, never bytes crossing
+    /// between two encoders.
+    ///
+    /// A panic in `f` drops the borrowed buffer with it, so the slot keeps
+    /// the empty default and the next caller still sees a fresh buffer -
+    /// which is what `encoder_panic_does_not_leak_bytes_into_the_next_message`
+    /// pins. Only the allocation is lost.
     pub fn with_buf<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut BytesMut) -> R,
     {
-        let mut buffer = self.buffer.lock();
-        let clear = ClearBufferOnDrop(&mut buffer);
-        f(&mut *clear.0)
+        let mut buf = std::mem::take(&mut *self.buffer.lock());
+        let result = f(&mut buf);
+        buf.clear();
+        *self.buffer.lock() = buf;
+        result
     }
 
     /// Mark the connection as "dirty" - a fire-and-forget message (e.g.
