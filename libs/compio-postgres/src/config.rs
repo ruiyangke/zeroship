@@ -2064,6 +2064,8 @@ impl Config {
                     // PostgreSQL 18, whose source uses the positive integer as
                     // supplied.
                     self.connect_timeout(Duration::from_secs(timeout as u64));
+                } else {
+                    self.connect_timeout(Duration::ZERO);
                 }
             }
             "tcp_user_timeout" => {
@@ -3368,6 +3370,20 @@ mod tests {
             let mut config = Config::new();
             config.connect_timeout(Duration::ZERO);
             assert_eq!(config.get_connect_timeout(), None);
+        }
+
+        #[test]
+        fn a_later_indefinite_connect_timeout_clears_an_earlier_limit() {
+            for value in ["0", "-1"] {
+                let config = parse(&format!(
+                    "connect_timeout=5 connect_timeout={value}"
+                ));
+                assert_eq!(
+                    config.get_connect_timeout(),
+                    None,
+                    "the later connect_timeout={value} did not override the earlier limit"
+                );
+            }
         }
     }
 
