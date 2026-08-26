@@ -4,7 +4,7 @@
 //! are `pub(crate)`, and no visibility widening can make a `pub(crate)` reachable
 //! across a crate boundary - so when the PostgreSQL execution half moved here, the
 //! tests that came with it needed a sibling. This is it, and it is the same shape
-//! `zero-migrate-sqlite`'s and `zero-migrate-mysql`'s `src/test_fixtures.rs` have.
+//! `zeroship-migrate-sqlite`'s and `zeroship-migrate-mysql`'s `src/test_fixtures.rs` have.
 //!
 //! What it does NOT do is restate the composition algebra. The real one is
 //! `zeroship_migrate_ir::policy_registry`, so this builds the charter TOML and hands it

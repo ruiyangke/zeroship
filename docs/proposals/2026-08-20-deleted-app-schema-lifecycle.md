@@ -90,7 +90,7 @@ only by code with no production caller.
 | Object | Verdict | Deciding code |
 | --- | --- | --- |
 | `"<uuid>"` - the creator's tables, holding END USERS' rows | **survives** | `crates/plugin-db/src/drop_namespace.rs:161` is the only production-shaped `DROP SCHEMA`, and the module is `#![allow(dead_code)]` with test-only callers |
-| `"<uuid>_migrations"` - the migration engine journal | **survives** | named by nothing; created at `third_party/zero-migrate/crates/zero-migrate/src/conn.rs:188` |
+| `"<uuid>_migrations"` - the migration engine journal | **survives** | named by nothing; created at `third_party/zero-migrate/crates/zeroship-migrate/src/conn.rs:188` |
 | `"app_<uuid>"` - the workflow journal's 5 `__zeroship_workflow_*` tables | **survives** | named by nothing; `crates/control/src/cron/workflow_engine.rs:306-311` states it outright |
 | role `app_<uuid>_role`, its template membership, grants and default privileges | **survives** | `drop_per_app_role` (`crates/plugin-db/src/auth/bootstrap.rs:1671`) has exactly one caller, the dead `drop_namespace` |
 | `env.kv` keys | **survives** | scoped `{<app_id>}:<key>` (`crates/plugin-kv/src/backend/mod.rs:150`); the `KvBackend` trait has per-key ops only, no namespace drop |

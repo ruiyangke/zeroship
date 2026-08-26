@@ -16,7 +16,7 @@
 //
 // There is also no compose-DSN fallback. A default that happens to answer on one
 // machine is not evidence that a run was configured for live coverage, and a
-// fallback is just a gate that decides silently. `crates/zero-migrate/tests/support/
+// fallback is just a gate that decides silently. `crates/zeroship-migrate/tests/support/
 // mod.rs` holds the same requirement for the Rust side.
 
 import type { Client } from "pg";

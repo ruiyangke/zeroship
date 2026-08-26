@@ -119,7 +119,7 @@ pub(super) struct Stream {
 
 /// The recorded op corpus, which lives with the PRODUCT rather than with this crate.
 ///
-/// `crates/zero-migrate/tests/op_fixtures/` is 26 `<stem>.mig.js` inputs paired with
+/// `crates/zeroship-migrate/tests/op_fixtures/` is 26 `<stem>.mig.js` inputs paired with
 /// `<stem>.golden.json` envelopes plus one `recorded.json`, and it has six other
 /// readers: four integration suites in that crate, one PostgreSQL live test, and
 /// `packages/zero-migrate/tests/recorded-corpus.test.ts`, which drives the `.mig.js`
@@ -127,7 +127,7 @@ pub(super) struct Stream {
 /// product's corpus, not the engine's, and this module is its newest consumer rather
 /// than its owner.
 ///
-/// So the path reaches SIDEWAYS, out of `zero-migrate-core` and into the composing
+/// So the path reaches SIDEWAYS, out of `zeroship-migrate-core` and into the composing
 /// crate's test tree, and that is worth seeing rather than hiding behind a helper. It
 /// is a `#[cfg(test)]` DATA read: no Cargo edge, no `use`, nothing in the compiled
 /// engine. Moving the corpus down here instead would have repointed seven readers -
@@ -137,7 +137,7 @@ fn fixtures_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("this crate lives at <workspace>/crates/<name>")
-        .join("zero-migrate")
+        .join("zeroship-migrate")
         .join("tests")
         .join("op_fixtures")
 }
@@ -1371,7 +1371,7 @@ const ROWS: &[Row] = &[
     // backend's parsed physical contract, which that row never looked at, and the fold
     // now re-derives the contract from the column the replay finished with rather than
     // from the type it briefly had. (The contract was a named field on the neutral
-    // snapshot then; it is a `ColumnSnapshot::vendor` leg owned by `zero-migrate-mysql`
+    // snapshot then; it is a `ColumnSnapshot::vendor` leg owned by `zeroship-migrate-mysql`
     // now.) The three walkers needed no matching change:
     // FFD and ATO already answered `no` here, and only FO was wrong.
     Row { key: "c_retype_type_parameters|Postgres|column_carries(shapes.narrow ~ 24)", verdict: "AGREED no", status: Status::Consistent },

@@ -4,7 +4,7 @@
 //! # Why this is not a field on the neutral column snapshot
 //!
 //! It used to be one - a named field on the neutral `ColumnSnapshot`, in
-//! `zero-migrate-backend` - and the engine `match`ed on its variants in three
+//! `zeroship-migrate-backend` - and the engine `match`ed on its variants in three
 //! places. That put both halves of the hard limit in the wrong crate: the neutral
 //! vocabulary spelled a vendor's name, and neutral code resolved a vendor's type
 //! grammar to decide whether two columns were the same.

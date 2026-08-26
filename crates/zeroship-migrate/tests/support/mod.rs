@@ -129,7 +129,7 @@ pub fn confined_charter() -> EffectivePolicy {
 /// These tests used to write `zeroship_migrate::SqliteGuard::new()`, naming a vendor
 /// crate's guard TYPE through a re-export at the engine's crate root. That re-export
 /// is gone; the guard is not. [`zeroship_migrate::guard_for`] resolves the SAME factory
-/// the apply path resolves — `zero-migrate-sqlite`'s `BackendVendor::guard`, which is
+/// the apply path resolves — `zeroship-migrate-sqlite`'s `BackendVendor::guard`, which is
 /// literally `Box::new(SqliteGuard::new())` — so this is the same guard object,
 /// chosen through the registry instead of by name.
 ///

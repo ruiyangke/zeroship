@@ -11,15 +11,15 @@ dependency:
 
 ```toml
 [dependencies]
-zero-migrate = { path = "crates/zero-migrate" }
+zero-migrate = { path = "crates/zeroship-migrate" }
 ```
 
 When building custom policy documents and the built-in registry, add the two
 public policy packages as well:
 
 ```toml
-zero-migrate-policy = { path = "crates/zero-migrate-policy" }
-zero-migrate-ir = { path = "crates/zero-migrate-ir" }
+zeroship-migrate-policy = { path = "crates/zeroship-migrate-policy" }
+zeroship-migrate-ir = { path = "crates/zeroship-migrate-ir" }
 ```
 
 Adjust the relative paths if your host's `Cargo.toml` is outside the repository
@@ -412,7 +412,7 @@ onto the catalog snapshot and refuses anything the fold cannot resolve, reportin
 `failed to project pending schema after envelope "<name>": ...`. A host embedding
 `zero-migrate` directly never builds one: `ProjectionGuardVerdict` exists only in
 `crates/zeroship-migrate-node/src/lower.rs`, and nothing in `zero-migrate`,
-`zero-migrate-postgres`, `zero-migrate-ir` or `zero-migrate-policy` references it.
+`zeroship-migrate-postgres`, `zeroship-migrate-ir` or `zeroship-migrate-policy` references it.
 
 That is a difference in strategy rather than a missing check. `MigrationEngine`
 re-reads the live catalog as it goes, so it decides each envelope against the
@@ -420,7 +420,7 @@ database rather than against a projection built ahead of time.
 
 What it means in practice, measured rather than assumed
 (`a_rust_embedding_refuses_an_absent_view_drop_at_the_database` in
-`crates/zero-migrate/tests/drop_view_rollback_pg.rs`): a migration dropping a view
+`crates/zeroship-migrate/tests/drop_view_rollback_pg.rs`): a migration dropping a view
 nothing created is refused on both hosts. The Node host refuses it during
 lowering; a Rust host refuses it when PostgreSQL rejects the statement. **The
 refusal moves layers; it does not disappear.**

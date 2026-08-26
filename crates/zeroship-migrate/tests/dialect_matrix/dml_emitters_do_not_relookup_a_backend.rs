@@ -50,8 +50,8 @@
 //! `backends/mysql.rs::render_in_list` each called
 //! `dml::render_in_list_elem_portable(elem, DIALECT)`, handing core their own
 //! dialect const; core then resolved that dialect back through the registry to reach
-//! the very backend that had called in. After step 4 that is `zero-migrate-sqlite`
-//! depending on core depending on `zero-migrate-sqlite` — a dependency cycle in
+//! the very backend that had called in. After step 4 that is `zeroship-migrate-sqlite`
+//! depending on core depending on `zeroship-migrate-sqlite` — a dependency cycle in
 //! exactly the shape the crate split exists to remove.
 //!
 //! `backends/postgres.rs` was already free of it, but NOT because PostgreSQL is
@@ -185,14 +185,14 @@
 #[test]
 fn a_dml_emitter_holding_a_backend_never_resolves_another() {
     // THE SUBJECT MOVED. Fourteen of the nineteen carriers below were in
-    // `zero-migrate-core/src/render/dml.rs`; the crate extraction took that module into
-    // `zero-migrate-backend`, leaving a thin engine-side shim at the old path whose
+    // `zeroship-migrate-core/src/render/dml.rs`; the crate extraction took that module into
+    // `zeroship-migrate-backend`, leaving a thin engine-side shim at the old path whose
     // functions take a `dialect` and resolve ONE backend at the door. This census
     // scans all three, so it still sees every carrier AND it now watches the shim
     // for a carrier that starts re-resolving.
-    const BACKEND_DML: &str = include_str!("../../../zero-migrate-backend/src/dml.rs");
-    const ENGINE_DML: &str = include_str!("../../../zero-migrate-core/src/render/dml.rs");
-    const LOWER: &str = include_str!("../../../zero-migrate-core/src/render/lower.rs");
+    const BACKEND_DML: &str = include_str!("../../../zeroship-migrate-backend/src/dml.rs");
+    const ENGINE_DML: &str = include_str!("../../../zeroship-migrate-core/src/render/dml.rs");
+    const LOWER: &str = include_str!("../../../zeroship-migrate-core/src/render/lower.rs");
     const CARRIER_NAME: &str = "backend:";
     // Deliberately NOT `"dyn DmlRenderer"`. Writing this test found two carriers in
     // `render/lower.rs` spelled `&dyn crate::render::renderer::DmlRenderer` that a
@@ -210,41 +210,41 @@ fn a_dml_emitter_holding_a_backend_never_resolves_another() {
     // can be diffed against what the conversion produced rather than guessed at.
     const KNOWN: &[&str] = &[
         // `render/dml.rs`, threading a backend down the bound and inline walks.
-        "zero-migrate-backend/src/dml.rs::qualify_table",
-        "zero-migrate-backend/src/dml.rs::in_list_text_literal",
-        "zero-migrate-backend/src/dml.rs::render_in_list_elem_portable",
-        "zero-migrate-backend/src/dml.rs::render_in_list",
-        "zero-migrate-backend/src/dml.rs::render_regex_match_node",
-        "zero-migrate-backend/src/dml.rs::render_extract",
-        "zero-migrate-backend/src/dml.rs::render_binop",
-        "zero-migrate-backend/src/dml.rs::render_distinct_from",
-        "zero-migrate-backend/src/dml.rs::render_scalar_fn_call",
-        "zero-migrate-backend/src/dml.rs::cast_target_sql",
-        "zero-migrate-backend/src/dml.rs::render_concat_ws",
-        "zero-migrate-backend/src/dml.rs::render_split_part",
-        "zero-migrate-backend/src/dml.rs::render_unary",
-        "zero-migrate-backend/src/dml.rs::render_expr_inline_walk_for_backend",
+        "zeroship-migrate-backend/src/dml.rs::qualify_table",
+        "zeroship-migrate-backend/src/dml.rs::in_list_text_literal",
+        "zeroship-migrate-backend/src/dml.rs::render_in_list_elem_portable",
+        "zeroship-migrate-backend/src/dml.rs::render_in_list",
+        "zeroship-migrate-backend/src/dml.rs::render_regex_match_node",
+        "zeroship-migrate-backend/src/dml.rs::render_extract",
+        "zeroship-migrate-backend/src/dml.rs::render_binop",
+        "zeroship-migrate-backend/src/dml.rs::render_distinct_from",
+        "zeroship-migrate-backend/src/dml.rs::render_scalar_fn_call",
+        "zeroship-migrate-backend/src/dml.rs::cast_target_sql",
+        "zeroship-migrate-backend/src/dml.rs::render_concat_ws",
+        "zeroship-migrate-backend/src/dml.rs::render_split_part",
+        "zeroship-migrate-backend/src/dml.rs::render_unary",
+        "zeroship-migrate-backend/src/dml.rs::render_expr_inline_walk_for_backend",
         // `render/lower.rs`: the two that already carried, plus the view-query
         // subtree below its `render_view_query` door.
-        "zero-migrate-core/src/render/lower.rs::trigger_inverse_from_history",
+        "zeroship-migrate-core/src/render/lower.rs::trigger_inverse_from_history",
         // Added when the vendor-op surface went behind
         // `DmlRenderer::render_vendor_op`: this one used to call
         // `crate::render::vendor::render_vendor_op` — a re-export of one vendor
         // crate — where its trigger sibling directly above had always taken the
         // resolved backend. It takes one now too.
-        "zero-migrate-core/src/render/lower.rs::vendor_inverse_from_history",
-        "zero-migrate-core/src/render/lower.rs::render_view_op",
-        "zero-migrate-core/src/render/lower.rs::render_select_ast",
-        "zero-migrate-core/src/render/lower.rs::render_join",
-        "zero-migrate-core/src/render/lower.rs::render_table_ref",
+        "zeroship-migrate-core/src/render/lower.rs::vendor_inverse_from_history",
+        "zeroship-migrate-core/src/render/lower.rs::render_view_op",
+        "zeroship-migrate-core/src/render/lower.rs::render_select_ast",
+        "zeroship-migrate-core/src/render/lower.rs::render_join",
+        "zeroship-migrate-core/src/render/lower.rs::render_table_ref",
     ];
 
     let mut carriers: Vec<(&str, &str, Vec<&str>)> = Vec::new();
 
     for (file, src) in [
-        ("zero-migrate-backend/src/dml.rs", BACKEND_DML),
-        ("zero-migrate-core/src/render/dml.rs", ENGINE_DML),
-        ("zero-migrate-core/src/render/lower.rs", LOWER),
+        ("zeroship-migrate-backend/src/dml.rs", BACKEND_DML),
+        ("zeroship-migrate-core/src/render/dml.rs", ENGINE_DML),
+        ("zeroship-migrate-core/src/render/lower.rs", LOWER),
     ] {
         let lines: Vec<&str> = src.lines().collect();
 
@@ -300,8 +300,8 @@ fn a_dml_emitter_holding_a_backend_never_resolves_another() {
              per-vendor crate extraction. In the DML tree it is worse than in the \
              schema tree, because the emitters here are reachable FROM the backend \
              modules: a backend that hands core its own `DIALECT` and has core \
-             resolve it back is `zero-migrate-sqlite` -> core -> \
-             `zero-migrate-sqlite`, a dependency cycle in the exact shape step 4 \
+             resolve it back is `zeroship-migrate-sqlite` -> core -> \
+             `zeroship-migrate-sqlite`, a dependency cycle in the exact shape step 4 \
              exists to remove. It also emits byte-identical SQL, so no behaviour \
              test can see it — this is the only check that can.\n\
              \n\

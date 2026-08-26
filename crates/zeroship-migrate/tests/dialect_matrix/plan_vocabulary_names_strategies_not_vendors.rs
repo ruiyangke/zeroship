@@ -48,7 +48,7 @@
 //! A type that really is one vendor's SHOULD say so; renaming that would be dishonest
 //! in the other direction. `SqliteSequencePolicy` models the `sqlite_sequence` table
 //! and the `AUTOINCREMENT` high-water mark — artifacts no other engine has — so it
-//! lives in `zero-migrate-sqlite`, outside the shared vocabulary scanned here.
+//! lives in `zeroship-migrate-sqlite`, outside the shared vocabulary scanned here.
 //!
 //! The surrounding rebuild vocabulary is not vendor-shaped and is not exempt. Of the
 //! nine fields on the rebuild spec, eight (`table`, `tmp_table`, `new_table_create`,
@@ -61,7 +61,7 @@
 //! `SqliteSequencePolicy` — so the shared vocabulary did not merely NAME a vendor,
 //! it HELD a vendor type, one level below the names this scan reads. That inverted
 //! the dependency the extraction exists to establish: the backend CONTRACT, which
-//! every vendor sits above, would have had to depend on `zero-migrate-sqlite`, and
+//! every vendor sits above, would have had to depend on `zeroship-migrate-sqlite`, and
 //! it kept `TableRebuildSpec`, `TableRebuild`, `RenameStep` and `PlanStep` stranded
 //! in the engine. The field carries a neutral `SequenceHighWaterPolicy` now and the
 //! vendor converts at its own boundary. `SqliteSequencePolicy` still exists, still
@@ -75,7 +75,7 @@
 //! and `requirements.rs`, plus the engine's `render/plan.rs` — and within those, only
 //! `RenameStep`'s variants and
 //! column-zero `pub` type declarations. It follows the vocabulary as it moves
-//! down into `zero-migrate-backend` — the scan is over a NAMED file list, so a
+//! down into `zeroship-migrate-backend` — the scan is over a NAMED file list, so a
 //! type that leaves one of them without being added to another silently stops
 //! being scanned, and only the floor below would notice. It is blind to
 //! vendor names on FIELDS, on private types, on types declared elsewhere that are not
@@ -114,8 +114,8 @@ fn the_lowered_plan_vocabulary_names_no_vendor() {
     /// `zeroship_migrate::render::step` is re-exports now, so reading it here scanned
     /// ZERO arms — which the floor below caught, and which is the entire reason the
     /// floor is written as a floor and not as a comment.
-    const STEP_SRC: &str = include_str!("../../../zero-migrate-backend/src/step.rs");
-    const PLAN_SRC: &str = include_str!("../../../zero-migrate-core/src/render/plan.rs");
+    const STEP_SRC: &str = include_str!("../../../zeroship-migrate-backend/src/step.rs");
+    const PLAN_SRC: &str = include_str!("../../../zeroship-migrate-core/src/render/plan.rs");
     /// `DatabaseFeature` and `DatabaseRequirements` moved OUT of `render/plan.rs`
     /// and into the backend contract crate, beside the
     /// `MigrationBackend::verify_database_requirements` signature that asks the
@@ -125,7 +125,7 @@ fn the_lowered_plan_vocabulary_names_no_vendor() {
     /// was in the engine, not less. The floor below is unchanged because nothing
     /// left the vocabulary.
     const REQUIREMENTS_SRC: &str =
-        include_str!("../../../zero-migrate-backend/src/requirements.rs");
+        include_str!("../../../zeroship-migrate-backend/src/requirements.rs");
     /// `TableRebuildSpec` followed, and it is the one whose arrival this rule most
     /// wanted. Its `sequence_policy` field was typed
     /// `zeroship_migrate_sqlite::SqliteSequencePolicy` — the shared plan vocabulary
@@ -135,7 +135,7 @@ fn the_lowered_plan_vocabulary_names_no_vendor() {
     /// now. Scanning the file it landed in keeps the spelling rule on it and picks
     /// up the rebuild vocabulary beside it.
     const TABLE_REBUILD_SRC: &str =
-        include_str!("../../../zero-migrate-backend/src/table_rebuild.rs");
+        include_str!("../../../zeroship-migrate-backend/src/table_rebuild.rs");
 
     /// Vendor spellings as they appear inside a CamelCase identifier. `Pg` is listed
     /// separately from `Postgres` because both spellings are live in this crate.
@@ -186,10 +186,10 @@ fn the_lowered_plan_vocabulary_names_no_vendor() {
     let mut plan_types = 0usize;
     for (src, file) in [
         (PLAN_SRC, "render/plan.rs"),
-        (REQUIREMENTS_SRC, "zero-migrate-backend/src/requirements.rs"),
+        (REQUIREMENTS_SRC, "zeroship-migrate-backend/src/requirements.rs"),
         (
             TABLE_REBUILD_SRC,
-            "zero-migrate-backend/src/table_rebuild.rs",
+            "zeroship-migrate-backend/src/table_rebuild.rs",
         ),
     ] {
         for line in src.lines() {

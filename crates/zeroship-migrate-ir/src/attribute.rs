@@ -18,7 +18,7 @@
 //! # Why the key carries its dialect
 //!
 //! An [`AttrKey`] is `<dialect>.<name>` - `postgres.fillfactor`, `mysql.row_format` -
-//! parsed exactly like `KnobKey` (in `zero-migrate-policy`) parses a charter knob,
+//! parsed exactly like `KnobKey` (in `zeroship-migrate-policy`) parses a charter knob,
 //! because it is the same problem and the charter solved it first.
 //!
 //! The prefix is not decoration. It buys four things a nested
@@ -118,7 +118,7 @@ impl AttrKey {
     /// Parse and validate `<dialect>.<name>`.
     ///
     /// Deliberately the same rule as
-    /// `KnobKey::parse` in `zero-migrate-policy` applies to charter keys -
+    /// `KnobKey::parse` in `zeroship-migrate-policy` applies to charter keys -
     /// one dot, both parts non-empty, `[a-z0-9_]` only. Not a shared implementation
     /// because that type lives in the policy crate, which this leaf does not depend on;
     /// the RULE is shared and this doc is the link between them.

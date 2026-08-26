@@ -1,7 +1,7 @@
 // Generate the single-source dialect-support table.
 //
 // Reads the hand-authored sidecar
-// `crates/zero-migrate/dialect-support.toml` — one row per (op-kind,
+// `crates/zeroship-migrate/dialect-support.toml` — one row per (op-kind,
 // variant) with a per-dialect disposition — and emits BOTH review/parity
 // artifacts from that one source. Production support decisions live in each
 // registered backend's required ValidationPolicy instead.
@@ -12,7 +12,7 @@
 // fourth backend adds a column to the sidecar and this script does not change.
 //
 // The artifacts:
-//   (a) crates/zero-migrate/tests/dialect_matrix/dialect_table.rs - the Rust
+//   (a) crates/zeroship-migrate/tests/dialect_matrix/dialect_table.rs - the Rust
 //       integration-test review artifact; its parity gate compares every generated
 //       cell with the registered backend policies.
 //   (b) packages/zero-migrate/src/generated/dialect-table.ts - the TS mirror,
@@ -29,7 +29,7 @@
 // This script only transcribes the sidecar into the two typed artifacts. What
 // proves the sidecar itself is split across three tests, and naming one of them
 // for all three is how a gap hides:
-//   * `crates/zero-migrate/tests/dialect_matrix/dialect_table_faithfulness.rs` —
+//   * `crates/zeroship-migrate/tests/dialect_matrix/dialect_table_faithfulness.rs` —
 //     corpus ⟷ table bijection and sidecar ⟷ table transcription.
 //   * `generated_cells_match_registered_backend_policies` in the generated Rust
 //     artifact — all generated cells ⟷ the registered backends' required policy
@@ -50,14 +50,14 @@ const here = dirname(fileURLToPath(import.meta.url));
 // generator it is supposed to be testing.
 const sidecarPath = process.env.GEN_DIALECT_SIDECAR
   ? resolve(process.env.GEN_DIALECT_SIDECAR)
-  : resolve(here, "../../../crates/zero-migrate/dialect-support.toml");
+  : resolve(here, "../../../crates/zeroship-migrate/dialect-support.toml");
 
 // Output paths default to the committed artifacts; the drift test overrides them
 // via env vars to regenerate into temp files and byte-compare (the "regenerate +
 // diff" freshness gate, matching gen-ir-types' GEN_IR_OUT).
 const rustOut = process.env.GEN_DIALECT_RUST_OUT
   ? resolve(process.env.GEN_DIALECT_RUST_OUT)
-  : resolve(here, "../../../crates/zero-migrate/tests/dialect_matrix/dialect_table.rs");
+  : resolve(here, "../../../crates/zeroship-migrate/tests/dialect_matrix/dialect_table.rs");
 const tsOut = process.env.GEN_DIALECT_TS_OUT
   ? resolve(process.env.GEN_DIALECT_TS_OUT)
   : resolve(here, "../src/generated/dialect-table.ts");
@@ -194,7 +194,7 @@ function esc(s) {
 
 function emitRust(rows) {
   const banner = `//! GENERATED FILE — do not edit by hand.
-//! Source: crates/zero-migrate/dialect-support.toml (the single-source
+//! Source: crates/zeroship-migrate/dialect-support.toml (the single-source
 //! dialect-support sidecar). Regenerate with:
 //!   pnpm --filter zero-migrate gen:dialect-table
 //!
@@ -357,13 +357,13 @@ mod tests {
 function emitTs(rows) {
   const banner = `/* eslint-disable */
 // GENERATED FILE — do not edit by hand.
-// Source: crates/zero-migrate/dialect-support.toml (the single-source
+// Source: crates/zeroship-migrate/dialect-support.toml (the single-source
 // dialect-support sidecar). Regenerate with:
 //   pnpm --filter zero-migrate gen:dialect-table
 //
 // One row per (op-kind, variant) recording the token's disposition on each
 // dialect, KEYED BY DIALECT ID — the TS mirror of
-// crates/zero-migrate/tests/dialect_matrix/dialect_table.rs.
+// crates/zeroship-migrate/tests/dialect_matrix/dialect_table.rs.
 //
 // There is deliberately NO \`Dialect\` union here. A closed union of the shipping
 // dialect names is the same "core enumerates the vendors" shape as a struct field

@@ -544,7 +544,7 @@ fn validate_single_select(sql: &str) -> Result<(), PreconditionError> {
 /// The doc here used to argue for the arrangement as a compromise, because this file
 /// lived in neutral core and importing a vendor crate to walk a parse tree would have
 /// made core name a vendor. It named relocating the file as the honest fix. That
-/// relocation happened: the file IS `zero-migrate-postgres` now, so the helper is
+/// relocation happened: the file IS `zeroship-migrate-postgres` now, so the helper is
 /// simply local code beside its caller.
 fn first_dml_node(v: &Value) -> Option<&'static str> {
     fn first_matching(v: &Value) -> Option<&'static str> {

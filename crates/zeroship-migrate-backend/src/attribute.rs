@@ -262,7 +262,7 @@ pub struct AttrDef {
 /// and the carrier cannot disagree about what op they mean.
 ///
 /// This does not retire `every_declared_op_is_a_real_op` - the op string still originates
-/// in `op_attributes!` over in `zero-migrate-ir`, and a typo THERE is still just a string.
+/// in `op_attributes!` over in `zeroship-migrate-ir`, and a typo THERE is still just a string.
 /// It moves that test's exposed surface from every vendor declaration to the six carrier
 /// definitions in one file.
 ///

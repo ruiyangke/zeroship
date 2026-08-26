@@ -58,7 +58,7 @@ scope = "all"
 #
 # The refusal is CORRECT and is the engine's II.6 gate. Every `runtime.*` knob is
 # registered `DeclaredOnly` in the vendored engine
-# (third_party/zero-migrate/crates/zero-migrate-ir/src/policy_registry.rs:432-439):
+# (third_party/zero-migrate/crates/zeroship-migrate-ir/src/policy_registry.rs:432-439):
 # no guard, executor or validator path reads one, so a charter raising one above
 # its default would seal a policy ADVERTISING AUTHORITY THE ENGINE LACKS. A 30s
 # "ceiling" that nothing applies is worse than no ceiling, because it reads like a
@@ -71,7 +71,7 @@ scope = "all"
 # that bounds an apply. The executor bounds it, from `PgConfinement`, which the
 # apply path takes at its defaults (`ExecutorConfig::new` in src/apply.rs sets no
 # override): `SET statement_timeout` = 60s and `SET lock_timeout` = 3s
-# (third_party/zero-migrate/crates/zero-migrate/src/conn.rs:124-125), applied per
+# (third_party/zero-migrate/crates/zeroship-migrate/src/conn.rs:124-125), applied per
 # migration on the apply connection. A single migration may raise its OWN lock
 # budget through `MigrationFlags::lock_timeout_ms`, which IS read.
 #

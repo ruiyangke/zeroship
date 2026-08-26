@@ -12,11 +12,11 @@
 //!
 //! It is tempting to read the no-provenance case as defensive, because two of the
 //! three backends can never produce it: PostgreSQL stamps `ddl_type_override` on
-//! EVERY column it reads (`zero-migrate-postgres/src/backend/drift_sql.rs` writes
+//! EVERY column it reads (`zeroship-migrate-postgres/src/backend/drift_sql.rs` writes
 //! `ddl_type_override: Some(format_type)` unconditionally), and SQLite's snapshot is
 //! built out of the stored CREATE text it also retains.
 //!
-//! MySQL is the one that can. `zero-migrate-mysql/src/backend/drift_sql.rs` writes
+//! MySQL is the one that can. `zeroship-migrate-mysql/src/backend/drift_sql.rs` writes
 //! `ddl_type_override: None` and `stored_create_sql: None` unconditionally, so MySQL's
 //! whole claim rests on `text_storage`, which `information_schema` populates
 //! only for columns that HAVE a character set. A table whose columns are all numeric

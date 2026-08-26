@@ -1,8 +1,8 @@
 //! A later policy layer cannot grant authority the root charter did not hand it, checked
 //! through the composition path the product actually uses.
 //!
-//! `crates/zero-migrate-policy/src/boundary.rs` proves this per key in `admit`, and
-//! `crates/zero-migrate-policy/tests/compose_oracle.rs` exercises `admit` directly. What
+//! `crates/zeroship-migrate-policy/src/boundary.rs` proves this per key in `admit`, and
+//! `crates/zeroship-migrate-policy/tests/compose_oracle.rs` exercises `admit` directly. What
 //! nothing pinned was the same property at `effective_policy_from_charter_layers`, the
 //! one composition any shipped code path performs: the CLI passes a repeated `--policy`
 //! stack straight into it, and the JavaScript verbs pass an ordered charter stack.

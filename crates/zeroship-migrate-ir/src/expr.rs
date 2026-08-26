@@ -613,7 +613,7 @@ mod dialectal_tests {
     };
 
     /// PostgreSQL's id, built rather than imported: the crate that DECLARES it is
-    /// `zero-migrate-postgres`, which depends on this one, so the dependency cannot
+    /// `zeroship-migrate-postgres`, which depends on this one, so the dependency cannot
     /// run the other way. `DialectId` compares by content, so this IS that id.
     const POSTGRES: DialectId = DialectId::new("postgres");
 

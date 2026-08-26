@@ -8,7 +8,7 @@
 //! lives in the engine, because the engine already depends on every vendor.
 //!
 //! NO VENDOR IS LEFT IN THIS MODULE. All three execution halves live in
-//! `zero-migrate-postgres`, `zero-migrate-sqlite` and `zero-migrate-mysql`, and core
+//! `zeroship-migrate-postgres`, `zeroship-migrate-sqlite` and `zeroship-migrate-mysql`, and core
 //! re-exports none of them, because a `pub use zeroship_migrate_postgres::...` here would
 //! be core NAMING a vendor outside the registry - the thing
 //! `tests/dialect_matrix/core_names_no_vendor_crate.rs` exists to forbid. A caller
@@ -67,7 +67,7 @@ pub use capability::{
 // `apply::backend::BackfillProgressEntry` resolves unchanged.
 pub use zeroship_migrate_backend::backfill::BackfillProgressEntry;
 // THE SEAM ITSELF, and the vocabulary its signatures name. `MigrationBackend` is
-// declared in `zero-migrate-backend` now - the crate every vendor already depends
+// declared in `zeroship-migrate-backend` now - the crate every vendor already depends
 // on - so a backend crate can implement it without depending on the engine that
 // depends on every backend. That inversion is the whole point of the contract
 // crate, and this module is what is left of the trait's old home: the optional

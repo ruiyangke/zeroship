@@ -1206,9 +1206,9 @@ jobs:
       # i.e. that a committed artifact CARRYING `maxLength: 255` was the stale one.
       # The opposite is true, verified by reading the pinned commit rather than
       # HEAD:
-      #   git show cb1bcb59:crates/zero-migrate/src/model/table_shape.rs :413
+      #   git show cb1bcb59:crates/zeroship-migrate/src/model/table_shape.rs :413
       #       "text" => ColType::String { length: 255 },
-      #   git show cb1bcb59:crates/zero-migrate/src/render/lower.rs  :9242-9245
+      #   git show cb1bcb59:crates/zeroship-migrate/src/render/lower.rs  :9242-9245
       #       ColType::String { length } => Some(i64::from(*length)),
       #   render/declarative.rs :2035 emits that as `"maxLength": <len>`.
       # So a policy-INJECTED system string column (`id`, `created_by`,

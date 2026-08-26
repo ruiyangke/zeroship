@@ -466,7 +466,7 @@ fn guarded_op_labeled_and_bare_ddl_has_no_fabricated_clause() {
 /// Does NOT assert apply behaviour (no DB is opened here); the behaviour the label
 /// describes is asserted against live servers by `pg_scenarios.rs` on PostgreSQL and
 /// by `existence_guard_sqlite.rs` in process on SQLite, and through the MySQL
-/// recording seam in `zero-migrate-mysql/src/backend/mod.rs`. Does NOT cover the op-less `.sql`
+/// recording seam in `zeroship-migrate-mysql/src/backend/mod.rs`. Does NOT cover the op-less `.sql`
 /// plan path, which is exercised by the goldens instead.
 #[test]
 fn guard_label_is_truthful_per_dialect() {

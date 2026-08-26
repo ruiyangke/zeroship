@@ -3,7 +3,7 @@
 //! # What this test is for
 //!
 //! `DmlRenderer::dialect` and `SchemaRenderer::dialect` used to return
-//! a closed enum owned by `zero-migrate-ir`. A vendor crate cannot construct a
+//! a closed enum owned by `zeroship-migrate-ir`. A vendor crate cannot construct a
 //! variant of a closed enum it does not own, so the only body that type-checked
 //! in a fourth backend was
 //! `todo!()`: the crate compiled and then panicked the first time anything asked

@@ -26,7 +26,7 @@
 //! 3. `a_show_create_table_restate_preserves_every_facet` - the LOSSLESS design,
 //!    priced. The same hostile column, retyped by restating the clause
 //!    `SHOW CREATE TABLE` reports with only its type token replaced. This is the
-//!    shape `zero-migrate-mysql/src/backend/primary_key_sql.rs` already uses for
+//!    shape `zeroship-migrate-mysql/src/backend/primary_key_sql.rs` already uses for
 //!    `dropIdentityFrom`, measured here before being adopted.
 //!
 //! 4. `an_authored_set_column_type_applies_on_mysql_and_keeps_every_facet` - the
@@ -450,7 +450,7 @@ async fn an_authored_set_column_type_applies_on_mysql_and_keeps_every_facet() {
 
 /// The `label` clause of a `SHOW CREATE TABLE` body, found by its backticked name.
 ///
-/// SPIKE-GRADE. `zero-migrate-mysql/src/backend/primary_key_sql.rs::create_table_clauses` is the
+/// SPIKE-GRADE. `zeroship-migrate-mysql/src/backend/primary_key_sql.rs::create_table_clauses` is the
 /// quote- and comment-aware scanner this would REUSE; this is a line scan so the
 /// measurement does not depend on making that private function public before the
 /// design is settled.

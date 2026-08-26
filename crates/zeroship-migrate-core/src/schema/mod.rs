@@ -49,7 +49,7 @@ pub(crate) mod backends;
 pub mod diff;
 pub mod query;
 
-// -- Three leaf modules moved into `zero-migrate-backend` and re-exported under
+// -- Three leaf modules moved into `zeroship-migrate-backend` and re-exported under
 // their historical `crate::schema::*` paths.
 //
 // `mask_codec` is the sentinel CODEC PostgreSQL's `SchemaRenderer::

@@ -11,7 +11,7 @@
 // Node apply lowering seeds its pending-schema fold from exactly that snapshot
 // (`crates/zeroship-migrate-node/src/lower.rs:578`, folded at `:607`), and the fold's
 // `DropView` arm treats an absent view as an error rather than a no-op
-// (`crates/zero-migrate/src/render/fold.rs:2348`). The deploy failed with
+// (`crates/zeroship-migrate/src/render/fold.rs:2348`). The deploy failed with
 // `fold: view <name> does not exist`. MySQL now populates the map from
 // `information_schema.VIEWS`.
 //
@@ -252,7 +252,7 @@ function replaceTheView(): NamedMigration {
 //
 // The VIEW entry is inert and kept only so the map reads as the whole authored surface.
 // View names are not ownership-tracked at all: `CreateView` and `DropView` return no
-// target at crates/zero-migrate-ir/src/load.rs:280, structured creation checks only the
+// target at crates/zeroship-migrate-ir/src/load.rs:280, structured creation checks only the
 // SOURCE tables at :310, and the registry advance tracks tables and partitions rather
 // than views at crates/zeroship-migrate-node/src/lower.rs:1574. Whether one app should be
 // able to replace another app's view is an open question, not a settled permission.

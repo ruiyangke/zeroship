@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use crate::analysis::tree_walk::first_matching_node;
 
-// `ParseError` moved to `zero-migrate-backend` because
+// `ParseError` moved to `zeroship-migrate-backend` because
 // `zeroship_migrate_backend::guard::GuardError::Parse` carries it, and `GuardError` is the
 // vocabulary every vendor's guard reports in. The PARSER that raises it stayed here.
 // Re-exported so `zeroship_migrate_postgres::analysis::classify::ParseError` keeps resolving.

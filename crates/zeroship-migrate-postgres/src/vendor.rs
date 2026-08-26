@@ -11,7 +11,7 @@
 //! which SQLite and MySQL each construct, and
 //! [`VendorError`] is a `#[from]` variant
 //! of `IrLowerError`. Moving the whole file into this crate would have made
-//! `zero-migrate-sqlite` and `zero-migrate-mysql` depend on `zero-migrate-postgres`
+//! `zeroship-migrate-sqlite` and `zeroship-migrate-mysql` depend on `zeroship-migrate-postgres`
 //! to name their own return type - precisely the vendor-to-vendor edge the split
 //! exists to remove.
 //!

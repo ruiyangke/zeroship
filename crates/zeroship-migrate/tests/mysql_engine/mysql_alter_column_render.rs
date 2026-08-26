@@ -22,7 +22,7 @@
 //! So the definition is not rendered from the op; it is READ, at apply, from
 //! `SHOW CREATE TABLE`, and reproduced with only its type token replaced. That is
 //! what `PlanStep::AlterColumnType` is for, and it is the shape
-//! `zero-migrate-mysql/src/backend/primary_key_sql.rs` already used for `dropIdentityFrom`.
+//! `zeroship-migrate-mysql/src/backend/primary_key_sql.rs` already used for `dropIdentityFrom`.
 //!
 //! REFUSED - the nullability change (`setColumnNotNull` / `dropColumnNotNull`). The
 //! same restate would serve it, and this file does NOT claim otherwise: the ops are

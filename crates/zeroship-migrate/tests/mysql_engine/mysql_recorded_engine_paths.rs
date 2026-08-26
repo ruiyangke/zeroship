@@ -4,9 +4,9 @@
 //!
 //! They arrived from `zero-migrate/src/apply/backend/mysql/mod.rs`, where all
 //! sixty-nine were unit tests beside the backend, and they came HERE rather than to
-//! `zero-migrate-mysql` because of what they name: `apply`/`apply_with_lock_backend`,
+//! `zeroship-migrate-mysql` because of what they name: `apply`/`apply_with_lock_backend`,
 //! `MigrationEngine`, `AppliedPlan`, `diff_snapshots` and `fold_ops` are the ENGINE's,
-//! and `zero-migrate` depends on `zero-migrate-mysql`, so a vendor crate reaching back
+//! and `zero-migrate` depends on `zeroship-migrate-mysql`, so a vendor crate reaching back
 //! for them is a cycle Cargo refuses. That is not a technicality about where a file
 //! sits: a test that drives the engine over a MySQL backend IS an integration test of
 //! the engine, and this is the engine's test tree.
@@ -44,7 +44,7 @@ use crate::support;
 /// The dialect these snapshots are folded and diffed under.
 ///
 /// Spelled from the IR's open dialect identity rather than reached through the
-/// backend's `DIALECT` const, which is `pub(crate)` to `zero-migrate-mysql` and stays
+/// backend's `DIALECT` const, which is `pub(crate)` to `zeroship-migrate-mysql` and stays
 /// that way: exactly one line in that crate names the vendor, and a test on this side
 /// of the boundary is not a reason to make it two.
 const DIALECT: zeroship_migrate_ir::dialect::DialectId = zeroship_migrate_mysql::DIALECT;
@@ -54,7 +54,7 @@ const DIALECT: zeroship_migrate_ir::dialect::DialectId = zeroship_migrate_mysql:
 /// The engine's `render::value_format` doors are a PRIVATE module: they resolve a
 /// renderer from a `DialectId` for the engine's own callers, and nothing outside the
 /// crate reaches them. These tests hold the vendor, so they name the neutral seam in
-/// `zero-migrate-backend` and hand it MySQL's pair directly — the same `&'static`
+/// `zeroship-migrate-backend` and hand it MySQL's pair directly — the same `&'static`
 /// objects `VENDOR` registers, so the metadata is byte-for-byte what the backend
 /// itself renders.
 const MYSQL_VALUE_FORMAT: &dyn zeroship_migrate_backend::value_format::ValueFormatRenderer =

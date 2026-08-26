@@ -3,7 +3,7 @@
 //! # Why this is not a field on the neutral connection config
 //!
 //! It was one: `ConfinementConfig::postgres`, a `PostgresConfinement` declared in
-//! `zero-migrate-backend`. The doc beside it argued - correctly - that these are
+//! `zeroship-migrate-backend`. The doc beside it argued - correctly - that these are
 //! "genuinely one vendor's" rather than a shared concept wearing a vendor hat, and
 //! that the reason they stayed was that no carrier for RUN-TIME vendor data existed:
 //! [`BackendVendor`](zeroship_migrate_backend::registry::BackendVendor) holds
@@ -43,7 +43,7 @@ use zeroship_migrate_backend::dialectal::{DialectalValue, VendorConfinement};
 /// `apply/backend/postgres/` and the precondition evaluator". Half of that has
 /// become true - the precondition evaluator IS the PostgreSQL backend now - and the
 /// other half was never true, which is why the claim is replaced by the measurement
-/// rather than trimmed. (That backend is `zero-migrate-postgres/src/backend/` since
+/// rather than trimmed. (That backend is `zeroship-migrate-postgres/src/backend/` since
 /// the execution half left the engine; the paths below are relative to it.)
 ///
 /// `migrator_role` is read only from the PostgreSQL backend

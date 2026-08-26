@@ -122,7 +122,7 @@ pub trait TableRebuildPolicy: std::fmt::Debug + Sync {
 /// The vendor still owns the BEHAVIOUR. This says only which of the two
 /// transitions a rebuild is performing; what a high-water mark IS, where it is
 /// stored, how it is captured and how it is restored are the backend's, and
-/// `zero-migrate-sqlite` converts this into its own `SqliteSequencePolicy` at its
+/// `zeroship-migrate-sqlite` converts this into its own `SqliteSequencePolicy` at its
 /// own boundary. A backend with no such counter ignores it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SequenceHighWaterPolicy {

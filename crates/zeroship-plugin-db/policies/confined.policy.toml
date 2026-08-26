@@ -50,7 +50,7 @@ scope = "all"
 # fix was half-applied and only the plugin-db half stayed broken.
 #
 # The refusal is CORRECT. Both keys are registered `declared_only` in the vendored
-# engine (third_party/zero-migrate/crates/zero-migrate-ir/src/policy_registry.rs,
+# engine (third_party/zero-migrate/crates/zeroship-migrate-ir/src/policy_registry.rs,
 # "Declared only - no execution path applies it"), so a charter raising either
 # above its default advertises authority the engine does not have.
 #

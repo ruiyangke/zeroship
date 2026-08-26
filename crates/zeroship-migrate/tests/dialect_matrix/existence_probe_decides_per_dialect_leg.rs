@@ -1,7 +1,7 @@
 //! The existence-guard decider's PER-DIALECT LEGS.
 //!
 //! These 39 cases were `existence_probe.rs`'s own `#[cfg(test)] mod tests` until the
-//! decider moved down to `zero-migrate-backend`. They could not go with it: every
+//! decider moved down to `zeroship-migrate-backend`. They could not go with it: every
 //! one of them drives `decide` against a REAL vendor — PostgreSQL's raw
 //! `information_schema` compare, SQLite's affinity fold, MySQL's constraint-first
 //! catalog resolution — and the contract crate sits BELOW all three, so it cannot

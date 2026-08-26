@@ -1,13 +1,13 @@
-//! # `zero-migrate-backend` - the backend CONTRACT
+//! # `zeroship-migrate-backend` - the backend CONTRACT
 //!
 //! The crate `zeroship_migrate::render::renderer` and `zeroship_migrate::schema::backends`
-//! have both called "the future `zero-migrate-backend`" in their headers since the
+//! have both called "the future `zeroship-migrate-backend`" in their headers since the
 //! in-crate backend modules were written. This is it.
 //!
 //! It holds the per-vendor TRAITS, the vocabulary their signatures name, and
 //! the registry shape a vendor crate hands back. It deliberately holds no vendor:
 //! nothing here spells a keyword, quotes an identifier or names a dialect. Its
-//! wire-level target identity is the open `DialectId` from `zero-migrate-ir`.
+//! wire-level target identity is the open `DialectId` from `zeroship-migrate-ir`.
 //!
 //! | trait | question it answers |
 //! |---|---|
@@ -27,16 +27,16 @@
 //! vendor.
 //!
 //! ```text
-//!   zero-migrate-policy --+--> zero-migrate-ir --> zero-migrate-backend --+--> zero-migrate-postgres --+
+//!   zeroship-migrate-policy --+--> zeroship-migrate-ir --> zeroship-migrate-backend --+--> zeroship-migrate-postgres --+
 //!                         |                                               |                            |
-//!                         +-----------------------------------------------+--> zero-migrate-sqlite ----+--> zero-migrate
+//!                         +-----------------------------------------------+--> zeroship-migrate-sqlite ----+--> zero-migrate
 //!                                                                         |                            |
-//!                                                                         +--> zero-migrate-mysql -----+
+//!                                                                         +--> zeroship-migrate-mysql -----+
 //! ```
 //!
-//! # Why the traits are HERE and not in `zero-migrate-ir`
+//! # Why the traits are HERE and not in `zeroship-migrate-ir`
 //!
-//! `zero-migrate-ir` is the WIRE CONTRACT: `MigrationIr`, the closed `Op` enum, the
+//! `zeroship-migrate-ir` is the WIRE CONTRACT: `MigrationIr`, the closed `Op` enum, the
 //! closed `Expr` AST, the canonical checksum, the structural validator. Its own
 //! manifest calls it "pure data, zero I/O". This crate is SQL RENDERING - an
 //! expression-to-SQL lowerer, a PostgreSQL vendor-DDL renderer, an
@@ -120,7 +120,7 @@ pub mod attribute;
 pub mod approval;
 // Pure data for large-table backfill plan steps: the `BackfillSpec` a vendor's
 // backfill executor is handed, its cursor contract and its checksum. Depends on
-// `zero-migrate-ir` alone. The engine re-exports it at `zeroship_migrate::model::backfill`.
+// `zeroship-migrate-ir` alone. The engine re-exports it at `zeroship_migrate::model::backfill`.
 // THE APPLY/ROLLBACK SEAM: `MigrationBackend` itself, the `CrossDeployObligations`
 // capability, and the neutral values their signatures name (`PlaceholderStyle`,
 // `JournalFuture`, `ProjectLockHolder`, `ProjectLockAcquisition`,

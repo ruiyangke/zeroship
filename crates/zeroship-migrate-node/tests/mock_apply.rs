@@ -3,7 +3,7 @@
 //! [`VerbDispatch`] that answers with canned `driver::Row`s - NO Node host, NO DB.
 //!
 //! This is the addon's analogue of the in-crate `RecordingSession` proof
-//! (`crates/zero-migrate-postgres/src/backend/mod.rs`), but exercised through
+//! (`crates/zeroship-migrate-postgres/src/backend/mod.rs`), but exercised through
 //! the *addon's* bridge types (`NapiHostSession` + `VerbDispatch`), so it proves:
 //!
 //! 1. `executor::apply::<PostgresBackend<NapiHostSession<MockDispatch>>>`

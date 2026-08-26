@@ -1021,7 +1021,7 @@ pub fn authorize_existence_guard_schema(
 // because that is where the apply orchestration that calls them lives, not because
 // anything about them belongs above the vendors.
 //
-// A vendor journal reader needs them: `zero-migrate-postgres`'s `status_sql` reads
+// A vendor journal reader needs them: `zeroship-migrate-postgres`'s `status_sql` reads
 // its own journal and then answers the same "what is pending?" question apply
 // answers, and its own comment says why it must reuse rather than re-derive - "so
 // the two views never diverge". A second implementation on the vendor side IS that

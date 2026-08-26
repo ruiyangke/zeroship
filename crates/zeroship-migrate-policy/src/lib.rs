@@ -1,4 +1,4 @@
-//! `zero-migrate-policy` - the Policy Decision Point (PDP): the *mechanism* half
+//! `zeroship-migrate-policy` - the Policy Decision Point (PDP): the *mechanism* half
 //! of the zero-migrate policy system.
 //!
 //! This crate is a true LEAF: pure data + algebra, zero I/O, **no SQL deps**, no

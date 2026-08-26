@@ -4,8 +4,8 @@
 //! # Why this file exists, and why it is the last one written
 //!
 //! Five censuses guard the ENGINE (`zero-migrate/tests/dialect_matrix/`), and one
-//! guards the CONTRACT (`zero-migrate-backend/tests/the_contract_names_no_vendor.rs`).
-//! `zero-migrate-ir` had none, and it is the crate the rule matters most in: every
+//! guards the CONTRACT (`zeroship-migrate-backend/tests/the_contract_names_no_vendor.rs`).
+//! `zeroship-migrate-ir` had none, and it is the crate the rule matters most in: every
 //! other crate in the workspace depends on it, including all three vendors, so a
 //! vendor fact recorded here is a fact the other two vendors are compiled against.
 //!
@@ -24,7 +24,7 @@
 //!   closed 2-set is the engine's own security decision - plain SQL, or the target's
 //!   procedural language, nothing installed - so the set stayed and the variant became
 //!   `Procedural`, with the `plpgsql` token it renders to moving to
-//!   `zero-migrate-postgres`.
+//!   `zeroship-migrate-postgres`.
 //! * `IrLoadError::IndefiniteTimeoutFlag`'s `#[error]` string told every author that
 //!   "PostgreSQL and MySQL both read 0 as no limit" - on a gate that runs with NO
 //!   target resolved, so it said that to an author aimed at a third engine too. The
@@ -49,7 +49,7 @@
 //!
 //! It matches vendor product NAMES. It does not see vendor GRAMMAR, and that limit has
 //! already been paid for once: a twenty-line PL/pgSQL dual-write trigger body -
-//! `TG_OP`, `NEW`, `OLD`, `RETURN NEW` - sat in `zero-migrate-backend` and passed that
+//! `TG_OP`, `NEW`, `OLD`, `RETURN NEW` - sat in `zeroship-migrate-backend` and passed that
 //! crate's identical census for its entire life there, because PL/pgSQL contains no
 //! product name. Read a green here as "the vocabulary writes no vendor's NAME", never
 //! as "the vocabulary holds no vendor".
@@ -96,7 +96,7 @@
 //! One floor per matcher, not one shared floor over their `||`. That is not a
 //! precaution, it is a repair: core's census first asserted a single floor over the
 //! combined answer, and when the product-name needles were corrupted to prove the
-//! control fires, IT PASSED - `zero-migrate-postgres` is full of `PgGuard`/`PgCursor`,
+//! control fires, IT PASSED - `zeroship-migrate-postgres` is full of `PgGuard`/`PgCursor`,
 //! so the camel matcher cleared the floor alone while every product needle was dead.
 //!
 //! The needle control is deliberately NOT the [`ALLOWED`] entries. Here that is not
@@ -176,10 +176,10 @@ const PG_CAMEL_MATCH_FLOOR: usize = 20;
 /// names its vendor constantly in both spellings, it declares a `#[cfg(test)] mod`
 /// FILE ([`CFG_TEST_MODULE_FILE_CONTROL`]), and it has a file with more than one
 /// `#[cfg(test)]` attribute ([`MULTI_CFG_TEST_FILE_CONTROL`]).
-const NEEDLE_CONTROL_CRATE: &str = "zero-migrate-postgres";
+const NEEDLE_CONTROL_CRATE: &str = "zeroship-migrate-postgres";
 
 /// The file [`cfg_test_module_files`] must classify as entirely test code in the
-/// control crate: `zero-migrate-postgres/src/lib.rs` declares `#[cfg(test)] mod
+/// control crate: `zeroship-migrate-postgres/src/lib.rs` declares `#[cfg(test)] mod
 /// test_fixtures;` and nothing inside the file itself says it is a test.
 const CFG_TEST_MODULE_FILE_CONTROL: &str = "test_fixtures.rs";
 

@@ -1,6 +1,6 @@
 // The dialect-neutral IR STRUCTURAL types (`MigrationIr`, `Op`, `Expr`,
 // `ColType`, `IrConstraint`, …), HAND-AUTHORED as a faithful transcription of the
-// engine's single-source-of-truth schema `crates/zero-migrate/ir-envelope.schema.json`.
+// engine's single-source-of-truth schema `crates/zeroship-migrate/ir-envelope.schema.json`.
 //
 // WHY HAND-AUTHORED (not generated): these defs form a self-recursive `oneOf` AST
 // (`Expr` → `BinOp.lhs: Expr`; `ColType` → `encrypted.of: ColType`; `Op` carries

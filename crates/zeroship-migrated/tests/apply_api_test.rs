@@ -505,7 +505,7 @@ fn with_policy(mut request: Value, body: &str) -> Value {
     request
 }
 
-// The creator policy draft is now a `zero-migrate-policy` `PolicyDoc` (grant rules
+// The creator policy draft is now a `zeroship-migrate-policy` `PolicyDoc` (grant rules
 // against the operator ceiling), not the old `PolicyProfile` TOML. A draft may only
 // TIGHTEN: `safety.destructive_ops` orders forbid <= warn <= allow, so `forbid` is
 // admissible under the confined ceiling's `allow`.

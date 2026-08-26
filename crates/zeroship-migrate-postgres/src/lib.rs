@@ -1,8 +1,8 @@
-//! # `zero-migrate-postgres` - the PostgreSQL backend
+//! # `zeroship-migrate-postgres` - the PostgreSQL backend
 //!
 //! One vendor, no engine. This crate holds PostgreSQL's DML, schema, DDL, and
 //! value-format renderers plus its guard, and it
-//! depends on `zero-migrate-backend` and `zero-migrate-ir` - never on the engine.
+//! depends on `zeroship-migrate-backend` and `zeroship-migrate-ir` - never on the engine.
 //! That is the whole point of the split: the engine names this crate for its
 //! registry, so this crate must not name the engine back.
 //!
@@ -13,7 +13,7 @@
 //!
 //! The rule used to be per-MODULE: each renderer held its own
 //! `const DIALECT: DialectId = POSTGRES;` and imported that name from
-//! `zero-migrate-ir`, the neutral vocabulary crate, which declared the ids for all
+//! `zeroship-migrate-ir`, the neutral vocabulary crate, which declared the ids for all
 //! three shipping vendors. The ids moved into the vendors, so the rule tightened to
 //! per-crate: `"postgres"` is now spelled in exactly one place in this crate and in
 //! exactly one place in the workspace. It is ENFORCED, across the crate boundary, by
@@ -23,7 +23,7 @@
 //!
 //! A backend can still reach another vendor's spelling THROUGH a contract helper
 //! that hard-codes a dialect, and no grep of this crate can see it because the
-//! literal lives in `zero-migrate-backend`. That is measured, not hypothetical -
+//! literal lives in `zeroship-migrate-backend`. That is measured, not hypothetical -
 //! `zeroship_migrate_backend::dml`'s header carries the numbers. The identifier seam
 //! (`*_for_dialect(.., DIALECT)`) is how this crate stays clear of it.
 
@@ -36,7 +36,7 @@ pub mod attribute;
 ///
 /// This is the EXECUTION half. It arrived from `zero-migrate`'s
 /// `apply/backend/postgres/` - the LAST vendor backend inside the engine - and it
-/// reaches nothing but `zero-migrate-backend`, `zero-migrate-ir` and this crate's
+/// reaches nothing but `zeroship-migrate-backend`, `zeroship-migrate-ir` and this crate's
 /// own renderers, descriptor and guard.
 pub mod backend;
 // The confinement settings only this backend reads, and the host seam that sets
@@ -88,7 +88,7 @@ pub use backend::PostgresBackend;
 /// The engine's `zeroship_migrate::test_fixtures::no_inject` is `pub(crate)`, and no
 /// visibility widening can make a `pub(crate)` reachable across a crate boundary -
 /// so the execution half's tests needed a sibling when they moved here. This is it,
-/// and it is the same shape `zero-migrate-sqlite`'s and `zero-migrate-mysql`'s have.
+/// and it is the same shape `zeroship-migrate-sqlite`'s and `zeroship-migrate-mysql`'s have.
 #[cfg(test)]
 mod test_fixtures;
 
@@ -106,7 +106,7 @@ const NAME: &str = "postgres";
 
 /// This backend's identity, declared HERE for every shipping path.
 ///
-/// `zero-migrate-ir` is the neutral vocabulary crate and its own module doc says a
+/// `zeroship-migrate-ir` is the neutral vocabulary crate and its own module doc says a
 /// backend "declares its own - `DialectId::new(\"duckdb\")` - without editing this
 /// crate". It used to declare three anyway, and core re-exported them, so every
 /// consumer that wanted to name PostgreSQL reached a neutral crate to get it. This

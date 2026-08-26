@@ -506,7 +506,7 @@ async fn apply_locked<B: MigrationBackend>(
     // `ExecutorConfig`, not the backend):
     //   - Postgres -> `PgGuard` (libpg_query deny-list) - byte-identical to the
     //     pre-seam `SqlGuard::new(cfg.guard_config_for(..))`;
-    //   - SQLite -> `SqliteGuard` (from `zero-migrate-sqlite`) - the trusted descriptor-diff path
+    //   - SQLite -> `SqliteGuard` (from `zeroship-migrate-sqlite`) - the trusted descriptor-diff path
     //     (`check` returns the empty clean outcome: `libpg_query` cannot vet SQLite,
     //     the first-line vet is the descriptor emitter at the author boundary and the
     //     second-line defense is the backend authorizer applied per statement at apply).
@@ -1038,7 +1038,7 @@ fn check_expand_contract_gate(
 // `Migration` and a journal `AppliedEntry`; none of it names a dialect, a vendor or a
 // statement. It had to travel because a vendor journal reader answers the same
 // "what is pending?" question apply answers and must reuse the ONE implementation:
-// `zero-migrate-postgres`'s `status_sql` says so in its own comment, "so the two views
+// `zeroship-migrate-postgres`'s `status_sql` says so in its own comment, "so the two views
 // never diverge". Re-exported so every `crate::apply::executor::...` path resolves
 // unchanged.
 pub(crate) use zeroship_migrate_backend::executor::{

@@ -1,6 +1,6 @@
 //! Low-level lowered-plan step values.
 //!
-//! Every one of them now lives in `zero-migrate-backend` and is re-exported from
+//! Every one of them now lives in `zeroship-migrate-backend` and is re-exported from
 //! here, the path each has always been reached by.
 //!
 //! This module used to be the last thing keeping `MigrationBackend` in the engine,
@@ -11,7 +11,7 @@
 //! plan vocabulary, pointing the dependency the wrong way through the whole chain.
 //! That field carries a neutral
 //! [`SequenceHighWaterPolicy`](zeroship_migrate_backend::table_rebuild::SequenceHighWaterPolicy)
-//! now, `zero-migrate-sqlite` converts it at its own boundary, and the chain
+//! now, `zeroship-migrate-sqlite` converts it at its own boundary, and the chain
 //! travelled.
 
 /// A typed scalar bound into a parameterized [`PlanStep::Dml`] statement.

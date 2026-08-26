@@ -1,4 +1,4 @@
-//! # `zero-migrate-sqlite` - the SQLite backend
+//! # `zeroship-migrate-sqlite` - the SQLite backend
 //!
 //! One vendor, no engine. This crate holds BOTH halves of SQLite now:
 //!
@@ -10,7 +10,7 @@
 //!   journal, the `sqlite_master` + `PRAGMA` drift snapshot, the twelve-step table
 //!   rebuild, the batched backfill, and the OS-backed project lock.
 //!
-//! It depends on `zero-migrate-backend` and `zero-migrate-ir` - never on the engine.
+//! It depends on `zeroship-migrate-backend` and `zeroship-migrate-ir` - never on the engine.
 //! That is the whole point of the split: the engine names this crate for its
 //! registry, so this crate must not name the engine back.
 //!
@@ -55,7 +55,7 @@
 //!
 //! The rule used to be per-MODULE: each renderer held its own
 //! `const DIALECT: DialectId = SQLITE;` and imported that name from
-//! `zero-migrate-ir`, the neutral vocabulary crate, which declared the ids for all
+//! `zeroship-migrate-ir`, the neutral vocabulary crate, which declared the ids for all
 //! three shipping vendors. The ids moved into the vendors, so the rule tightened to
 //! per-crate: `"sqlite"` is now spelled in exactly one place in this crate and in
 //! exactly one place in the workspace.
@@ -68,7 +68,7 @@
 //!
 //! A backend can still reach another vendor's spelling THROUGH a contract helper
 //! that hard-codes a dialect, and no grep of this crate can see it because the
-//! literal lives in `zero-migrate-backend`. That is measured, not hypothetical -
+//! literal lives in `zeroship-migrate-backend`. That is measured, not hypothetical -
 //! `zeroship_migrate_backend::dml`'s header carries the numbers. The identifier seam
 //! (`*_for_dialect(.., DIALECT)`) is how this crate stays clear of it.
 
@@ -79,8 +79,8 @@ pub mod attribute;
 /// rollback SQL that runs on it.
 ///
 /// This is the EXECUTION half. It arrived from `zero-migrate`'s
-/// `apply/backend/sqlite/` and it reaches nothing but `zero-migrate-backend`,
-/// `zero-migrate-ir` and this crate's own renderers.
+/// `apply/backend/sqlite/` and it reaches nothing but `zeroship-migrate-backend`,
+/// `zeroship-migrate-ir` and this crate's own renderers.
 pub mod backend;
 mod ddl;
 mod descriptor;
@@ -104,7 +104,7 @@ pub use plan::SqliteSequencePolicy;
 /// The engine's `zeroship_migrate::test_fixtures::no_inject` is `pub(crate)`, and no
 /// visibility widening can make a `pub(crate)` reachable across a crate boundary -
 /// so the four project-lock tests that came with the execution half needed a
-/// sibling. This is it, and it is the same shape `zero-migrate-mysql`'s already has.
+/// sibling. This is it, and it is the same shape `zeroship-migrate-mysql`'s already has.
 #[cfg(test)]
 mod test_fixtures;
 
@@ -122,7 +122,7 @@ const NAME: &str = "sqlite";
 
 /// This backend's identity, declared HERE for every shipping path.
 ///
-/// `zero-migrate-ir` is the neutral vocabulary crate and its own module doc says a
+/// `zeroship-migrate-ir` is the neutral vocabulary crate and its own module doc says a
 /// backend "declares its own - `DialectId::new(\"duckdb\")` - without editing this
 /// crate". It used to declare three anyway, and core re-exported them, so every
 /// consumer that wanted to name `SQLite` reached a neutral crate to get it. This is

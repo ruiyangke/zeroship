@@ -16,7 +16,7 @@ const generatedPath = resolve(here, "../src/generated/attributes.ts");
 const scriptPath = resolve(here, "../scripts/gen-attributes.mjs");
 const vocabularyPath = resolve(
   here,
-  "../../../crates/zero-migrate-mysql/attribute-vocabulary.json",
+  "../../../crates/zeroship-migrate-mysql/attribute-vocabulary.json",
 );
 
 test("the committed typings match the Rust-exported vocabulary", () => {
@@ -27,7 +27,7 @@ test("the committed typings match the Rust-exported vocabulary", () => {
     after,
     before,
     "src/generated/attributes.ts is stale. Regenerate with:\n" +
-      "  UPDATE_VOCABULARY=1 cargo test -p zero-migrate-mysql --test attribute_vocabulary_export\n" +
+      "  UPDATE_VOCABULARY=1 cargo test -p zeroship-migrate-mysql --test attribute_vocabulary_export\n" +
       "  node packages/zero-migrate-mysql/scripts/gen-attributes.mjs\n" +
       "and commit both.",
   );

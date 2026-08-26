@@ -15,7 +15,7 @@
 // `ColType` space. There is exactly one mapping, defined once here.
 //
 // NOTE: this is NOT the inverse of the engine's Rust `col_type_to_token`
-// (`third_party/zero-migrate/crates/zero-migrate/src/render/lower.rs`). That
+// (`third_party/zero-migrate/crates/zeroship-migrate/src/render/lower.rs`). That
 // function emits engine-internal masked-sibling descriptor tokens
 // (`"int"` for `Int|BigInt`,
 // `"number"` for `Float|Decimal`, `"string"` for `Uuid|Text`, …) — a different,

@@ -29,7 +29,7 @@
 //! # The ratchet reached zero
 //!
 //! It is an EMPTY [`ALLOWED`] now, and an empty [`VENDOR_SUBTREES`] with it. Every
-//! vendor execution half has left `crates/zero-migrate-core/src` — MySQL at `6a7dc142`,
+//! vendor execution half has left `crates/zeroship-migrate-core/src` — MySQL at `6a7dc142`,
 //! SQLite at `11772209`, PostgreSQL here — so there is no vendor subtree to exempt,
 //! no composition root declaring a vendor submodule, and no file in core that names
 //! one. The ratchet only ever went DOWN, and this is the bottom.
@@ -57,7 +57,7 @@ use std::path::{Path, PathBuf};
 /// The three vendor backend module segments, as they appear in a Rust path.
 const VENDOR_MODULES: &[&str] = &["postgres::", "mysql::", "sqlite::"];
 
-/// The vendors' own subtrees, relative to `crates/zero-migrate-core/src`. A vendor
+/// The vendors' own subtrees, relative to `crates/zeroship-migrate-core/src`. A vendor
 /// naming itself inside its own module is not core resolving a vendor.
 ///
 /// NONE now. `apply/backend/mysql/`, then `apply/backend/sqlite/`, then
@@ -70,13 +70,13 @@ const VENDOR_SUBTREES: &[&str] = &[];
 
 /// The ratchet: which core files may name a vendor backend module, and how often.
 ///
-/// Paths are relative to `crates/zero-migrate-core/src`. Lowering an entry is the point of
+/// Paths are relative to `crates/zeroship-migrate-core/src`. Lowering an entry is the point of
 /// this file. RAISING one, or adding a file, is what it exists to make loud.
 ///
 /// EMPTY, and both entries that went are gone rather than moved:
 ///
 /// - `apply/backend/mod.rs` declared `pub mod postgres` and re-exported
-///   `PostgresBackend`. The module left for `zero-migrate-postgres` and the re-export
+///   `PostgresBackend`. The module left for `zeroship-migrate-postgres` and the re-export
 ///   was NOT repointed: a `pub use zeroship_migrate_postgres::PostgresBackend` here would
 ///   be core naming a vendor CRATE outside the registry, which is what the sibling
 ///   census `core_names_no_vendor_crate` forbids. Closing one coupling by opening the
@@ -88,7 +88,7 @@ const VENDOR_SUBTREES: &[&str] = &[];
 ///   the seam it can still see.
 const ALLOWED: &[(&str, usize)] = &[];
 
-/// The walk's floor. `crates/zero-migrate-core/src` holds 48 `.rs` files; the floor sits
+/// The walk's floor. `crates/zeroship-migrate-core/src` holds 48 `.rs` files; the floor sits
 /// under that with room for ordinary churn but nowhere near zero, so a walk that lost
 /// its root cannot pass.
 ///
@@ -172,7 +172,7 @@ fn walked_files(root: &Path) -> Vec<(String, PathBuf)> {
 
 /// FLOOR TWO — the NEEDLE, as a fixture.
 ///
-/// The corpus count is a real zero: no file in `crates/zero-migrate-core/src` names a
+/// The corpus count is a real zero: no file in `crates/zeroship-migrate-core/src` names a
 /// vendor backend module any more. So the control cannot be a corpus hit without
 /// core keeping a violation alive purely to be measured by, which would be the
 /// census demanding the defect it forbids. It runs the identical matcher over lines
@@ -207,7 +207,7 @@ fn needle_positive_control() {
     );
 }
 
-/// The ENGINE's source root, which is `zero-migrate-core/src` and no longer this
+/// The ENGINE's source root, which is `zeroship-migrate-core/src` and no longer this
 /// crate's own `src`.
 ///
 /// This crate is the COMPOSITION now: its `src` is one file that names the three
@@ -218,7 +218,7 @@ fn engine_src() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("this crate lives at <workspace>/crates/<name>")
-        .join("zero-migrate-core")
+        .join("zeroship-migrate-core")
         .join("src")
 }
 

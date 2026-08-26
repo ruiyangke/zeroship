@@ -1,14 +1,14 @@
 /* eslint-disable */
 // GENERATED FILE — do not edit by hand.
-// Source: third_party/zero-migrate/crates/zero-migrate/dialect-support.toml
+// Source: third_party/zero-migrate/crates/zeroship-migrate/dialect-support.toml
 // (the single-source dialect-support sidecar). Regenerate with:
 //   pnpm --filter @zeroship/migrate gen:dialect-table
 //
 // One row per (op-kind, variant) recording the token's disposition on each
 // dialect — the TS mirror of
-// third_party/zero-migrate/crates/zero-migrate/src/model/dialect_table.rs.
+// third_party/zero-migrate/crates/zeroship-migrate/src/model/dialect_table.rs.
 // Faithfulness to the engine's live Support::decision() is proven Rust-side by
-// third_party/zero-migrate/crates/zero-migrate/tests/dialect_table_faithfulness.rs
+// third_party/zero-migrate/crates/zeroship-migrate/tests/dialect_table_faithfulness.rs
 // - spelled from the repo root because the engine is a vendored submodule with
 // its own cargo workspace, so a bare tests/ path resolves nowhere from here.
 // The TS drift test pins THIS file against the sidecar, and nothing else. It

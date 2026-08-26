@@ -19,7 +19,7 @@
 //! `BackendVendor` it identifies. Nothing in this crate resolves a dialect by name,
 //! and nothing in it can - [`DialectId::new`] is `const` and `pub`, so a crate that
 //! must name one and cannot depend on a vendor (this one, and
-//! `zero-migrate-backend`, which all three vendors depend on) builds it. Equality is
+//! `zeroship-migrate-backend`, which all three vendors depend on) builds it. Equality is
 //! by CONTENT, so an id built that way IS the vendor's.
 
 use core::fmt;

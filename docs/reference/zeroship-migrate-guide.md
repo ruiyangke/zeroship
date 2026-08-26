@@ -222,7 +222,7 @@ Supporting modules complete the pipeline: `render/lower.rs` (`IrAuthor` — the 
 
 ### 2.5 The engine does NOT depend on `zeroship-runtime`, and embeds no V8
 
-`third_party/zero-migrate/crates/zero-migrate/Cargo.toml` declares no zeroship
+`third_party/zero-migrate/crates/zeroship-migrate/Cargo.toml` declares no zeroship
 dependency at all, and its own package description states the engine ships no
 embedded V8. Both of the jobs a V8 dependency used to do now run in the Node
 process instead:
@@ -784,7 +784,7 @@ The platform's authoring layer holds a creator's **declared schema** — the per
 1. **`desired_snapshot(...)`** reduces the declared descriptor to a deterministic `SchemaSnapshot` (`TableSnapshot`/`ColumnSnapshot`/`IndexSnapshot`/`ConstraintSnapshot`). Declared-only facets (typed-id `prefix`, vector `metric`, `mask` brand, encrypted/geoPoint/literal) are carried because the model layer **adopted `zeroship-schema`** for full type capability ([§2.2](#2-crate-architecture)).
 2. **`DeclarativeAuthor::diff(...)`** introspects the **live** schema into a snapshot and diffs desired-vs-live, emitting the minimal `Migration` set (create tables, add columns/indexes/constraints; a destructive drop/type-change is *gated* through the approval path, never silently applied). The differ is the imperative `IrAuthor::lower` path's peer — both route through the **same shared snapshot-builder** (`build_table_snapshot`) and the **same render methods** (`DeclarativeAuthor::lower_*` → `render_create_table`/`DdlEmitter`), so the emitted SQL is byte-identical **by construction** and a cross-path golden guards it (`render/lower.rs:7-19`).
 
-**Trust boundary.** Descriptor field/table names and types are **untrusted** (a prompt-injectable AI authored them). They are validated at the author boundary (`validate_ident`/`validate_type`, mirroring `render/expand_contract.rs`) *and* re-checked by the guard as the second line (`declarative.rs:20-27`). The DSL-type→Postgres-type table here is *deliberately replicated* from `plugin-db/src/query.rs` — the two crates are different trust domains and the migrate crate must not depend on the runtime plugin; the `desired_snapshot`-round-trips-to-live test guards the two copies against drift (`declarative.rs:28-45`); it survives in the standalone engine as `third_party/zero-migrate/crates/zero-migrate/tests/pg_declarative.rs`.
+**Trust boundary.** Descriptor field/table names and types are **untrusted** (a prompt-injectable AI authored them). They are validated at the author boundary (`validate_ident`/`validate_type`, mirroring `render/expand_contract.rs`) *and* re-checked by the guard as the second line (`declarative.rs:20-27`). The DSL-type→Postgres-type table here is *deliberately replicated* from `plugin-db/src/query.rs` — the two crates are different trust domains and the migrate crate must not depend on the runtime plugin; the `desired_snapshot`-round-trips-to-live test guards the two copies against drift (`declarative.rs:28-45`); it survives in the standalone engine as `third_party/zero-migrate/crates/zeroship-migrate/tests/pg_declarative.rs`.
 
 ### 5.2 `generate --schema` and `DeclarativeDeployPlan`
 
@@ -832,7 +832,7 @@ it, `installSchema` *installs* it. See
 
 ## §6 The IR & its wire contract
 
-A `zeroship-migrate` migration authored in the JS `op.*` DSL never ships SQL. It ships a small, **dialect-neutral, checksummed JSON document** — the `.ir.json` — whose Rust mirror is `MigrationIr`. The engine loads that document, lowers each `Op` to per-dialect SQL ([§8](#8-one-ir-three-dialects-render--portability)) at apply time, and hashes the *neutral* op-list so a single portable migration has exactly **one** identity checksum across every render target. IR types lived in `model/ir.rs`, the expression AST in `model/expr.rs`, the migration unit + checksum in `model/migration.rs`; all three now sit in the engine's leaf wire-contract crate, `third_party/zero-migrate/crates/zero-migrate-ir/src/`. `CURRENT_IR_VERSION` is **6** (`ir.rs:91`).
+A `zeroship-migrate` migration authored in the JS `op.*` DSL never ships SQL. It ships a small, **dialect-neutral, checksummed JSON document** — the `.ir.json` — whose Rust mirror is `MigrationIr`. The engine loads that document, lowers each `Op` to per-dialect SQL ([§8](#8-one-ir-three-dialects-render--portability)) at apply time, and hashes the *neutral* op-list so a single portable migration has exactly **one** identity checksum across every render target. IR types lived in `model/ir.rs`, the expression AST in `model/expr.rs`, the migration unit + checksum in `model/migration.rs`; all three now sit in the engine's leaf wire-contract crate, `third_party/zero-migrate/crates/zeroship-migrate-ir/src/`. `CURRENT_IR_VERSION` is **6** (`ir.rs:91`).
 
 ### 6.1 The core concept: a dialect-neutral, checksummed IR
 
@@ -959,7 +959,7 @@ The IR is a canonical example of the AGENTS.md wire-format discipline. `ir_versi
 
 ## §7 The validate gate & error taxonomy
 
-The **validate gate** is the authoritative *structural* layer: a purely in-memory allow-list walk over a deserialized `MigrationIr` that runs **before any DB connection, before checksum, before lower/render**. It lives in `third_party/zero-migrate/crates/zero-migrate/src/model/validate.rs` (which re-exports the structural half from the `zero-migrate-ir` leaf crate) and produces a single machine-actionable rejection envelope — `AuthoringError` — so the author/AI loop gets a stable `code`, a human `reason`, and a `suggested_fix`. It is placed here (before render/apply in [§8](#8-one-ir-three-dialects-render--portability)–[§9](#9-the-apply-engine--durability)) because it is the pre-connect gate.
+The **validate gate** is the authoritative *structural* layer: a purely in-memory allow-list walk over a deserialized `MigrationIr` that runs **before any DB connection, before checksum, before lower/render**. It lives in `crates/zeroship-migrate/src/model/validate.rs` (which re-exports the structural half from the `zeroship-migrate-ir` leaf crate) and produces a single machine-actionable rejection envelope — `AuthoringError` — so the author/AI loop gets a stable `code`, a human `reason`, and a `suggested_fix`. It is placed here (before render/apply in [§8](#8-one-ir-three-dialects-render--portability)–[§9](#9-the-apply-engine--durability)) because it is the pre-connect gate.
 
 ### 7.1 Why validate is structural, not a SQL parser
 
@@ -1141,7 +1141,7 @@ pub enum Disposition {
 
 `Op::support()` **reads** `DIALECT_TABLE` at runtime keyed on `Op::op_kind_and_variant()` (`ir.rs:3412-3425`); `support_cell` maps `Unsupported → unsupported(CODE_UNSUPPORTED, reason)` and `Portable|Vendor|TransparentDegradable → supported(render_mode)`. Only the dialect gate is table-sourced; the *render strategy* (`RenderMode::Offline` vs `LiveResolved`) and diagnostic wording stay in Rust because they are not dialect truth.
 
-`third_party/zero-migrate/crates/zero-migrate/tests/dialect_table_faithfulness.rs` pins that `Op::support` and the generated table agree.
+`third_party/zero-migrate/crates/zeroship-migrate/tests/dialect_table_faithfulness.rs` pins that `Op::support` and the generated table agree.
 
 **Notable dispositions** (P=Portable, V=Vendor, U=Unsupported, TD=TransparentDegradable), `dialect_table.rs:59-146`:
 
@@ -1176,14 +1176,14 @@ The per-target refusal lives in `validate_op_support` (`validate.rs:1912`): it f
 
 ### 8.5 How ops render — the lower phase (`render/lower.rs`)
 
-The `render/lower.rs` `IrAuthor` (the largest file in the crate) is the DDL **Lower** phase (§6/§6.4/§6.5). `IrAuthor::lower` compiles a validated, ownership-checked `MigrationIr` into the same `Migration` shape the declarative differ produces — it is the IR-path peer of `DeclarativeAuthor::diff` ([§5.1](#5-authoring-declarative-desired-state--the-fold)). Its **single-source-of-truth mandate** (§6.5, `render/lower.rs:7-19`): `IrAuthor` does **not** hand-construct snapshots and does **not** re-spell the default/system-field/encryption/comment-sentinel logic — it routes every op's fields through the **shared** dialect-parameterized snapshot-builder `render::declarative::build_table_snapshot` (the SAME builder the differ's `desired_snapshot_for_dialect` calls) and renders the resulting `TableSnapshot`/`ColumnSnapshot`/`IndexSnapshot` through the SAME render methods (`DeclarativeAuthor::lower_*` → `render_create_table`/`DdlEmitter`). So the emitted SQL is byte-identical to the declarative path **by construction**, guarded by the §6.4 cross-path golden (`third_party/zero-migrate/crates/zero-migrate/tests/ir_author_render_parity.rs`).
+The `render/lower.rs` `IrAuthor` (the largest file in the crate) is the DDL **Lower** phase (§6/§6.4/§6.5). `IrAuthor::lower` compiles a validated, ownership-checked `MigrationIr` into the same `Migration` shape the declarative differ produces — it is the IR-path peer of `DeclarativeAuthor::diff` ([§5.1](#5-authoring-declarative-desired-state--the-fold)). Its **single-source-of-truth mandate** (§6.5, `render/lower.rs:7-19`): `IrAuthor` does **not** hand-construct snapshots and does **not** re-spell the default/system-field/encryption/comment-sentinel logic — it routes every op's fields through the **shared** dialect-parameterized snapshot-builder `render::declarative::build_table_snapshot` (the SAME builder the differ's `desired_snapshot_for_dialect` calls) and renders the resulting `TableSnapshot`/`ColumnSnapshot`/`IndexSnapshot` through the SAME render methods (`DeclarativeAuthor::lower_*` → `render_create_table`/`DdlEmitter`). So the emitted SQL is byte-identical to the declarative path **by construction**, guarded by the §6.4 cross-path golden (`third_party/zero-migrate/crates/zeroship-migrate/tests/ir_author_render_parity.rs`).
 
 A lowered plan is a sequence of `PlanStep` (`render/step.rs:48`). The dialect-distinct shapes:
 
 - A **rename** lowers to `RenameStep::PgExpandContract(ExpandContractPlan)` on PG vs `RenameStep::SqliteRebuild(SqliteRebuild)` on SQLite (`render/step.rs:23-27`). The PG expand-contract path is non-destructive (`PlanStep::OnlineRename(PgExpandContract) → destructive == false`, `step.rs:87`); the SQLite 12-step rebuild carries the migration's own `destructive` flag (`step.rs:86`).
 - **DML** routes through one of three renderer singletons — `POSTGRES_DML_RENDERER` / `SQLITE_DML_RENDERER` / `MYSQL_DML_RENDERER` (`render/renderer.rs:164`).
 
-Every `PlanStep` carries a `DialectScope` facet (§8.6). The offline `render_plan_sql` / `--sql` preview (`render/sql_preview.rs`) surfaces exactly this lowered SQL — a surfacing layer, not a reimplementation (proven byte-identical against `IrAuthor::lower_steps` by `third_party/zero-migrate/crates/zero-migrate/tests/sql_preview.rs`), and DB-state-dependent ops emit a `-- [runtime-resolved]` label rather than fabricated SQL.
+Every `PlanStep` carries a `DialectScope` facet (§8.6). The offline `render_plan_sql` / `--sql` preview (`render/sql_preview.rs`) surfaces exactly this lowered SQL — a surfacing layer, not a reimplementation (proven byte-identical against `IrAuthor::lower_steps` by `third_party/zero-migrate/crates/zeroship-migrate/tests/sql_preview.rs`), and DB-state-dependent ops emit a `-- [runtime-resolved]` label rather than fabricated SQL.
 
 ### 8.6 `dialect_scope` — fail-closed off-target + `PgOnly` opt-in
 
@@ -1218,7 +1218,7 @@ The runtime `plugin-db` divergences (vector metrics, full-text scoring, `ST_DWit
 
 ### 8.8 Why this shape
 
-One IR gated per target keeps authoring portable-by-default while letting PG-native power surface through an explicit journaled `PgOnly` opt-in rather than silent lowest-common-denominator emulation; the generated dialect table from a hand-reviewed sidecar makes "which token is supported where" a single reviewable source of truth (proven consistent with the live engine by `third_party/zero-migrate/crates/zero-migrate/tests/dialect_table_faithfulness.rs`); the `MigrationBackend` static-dispatch seam lets Postgres remain the richest regression bar while SQLite and MySQL provide dialect-specific behavior without forking the generic executor; and zero `compio-mysql` keeps MySQL a network-confined, TLS-pinned, timeout-poisoned JS-driver isolate inside the platform security boundary.
+One IR gated per target keeps authoring portable-by-default while letting PG-native power surface through an explicit journaled `PgOnly` opt-in rather than silent lowest-common-denominator emulation; the generated dialect table from a hand-reviewed sidecar makes "which token is supported where" a single reviewable source of truth (proven consistent with the live engine by `third_party/zero-migrate/crates/zeroship-migrate/tests/dialect_table_faithfulness.rs`); the `MigrationBackend` static-dispatch seam lets Postgres remain the richest regression bar while SQLite and MySQL provide dialect-specific behavior without forking the generic executor; and zero `compio-mysql` keeps MySQL a network-confined, TLS-pinned, timeout-poisoned JS-driver isolate inside the platform security boundary.
 
 ---
 
@@ -1661,7 +1661,7 @@ production recorder
 (`third_party/zero-migrate/packages/zero-migrate/tests/recorded-corpus.test.ts`)
 and the Rust half resolves those recorded ops through the real policy resolver
 and compares against `<stem>.golden.json`
-(`third_party/zero-migrate/crates/zero-migrate/tests/op_fixture_goldens.rs`).
+(`third_party/zero-migrate/crates/zeroship-migrate/tests/op_fixture_goldens.rs`).
 Run them from the standalone project's own workspace when changing that corpus;
 the removed appbase package cannot be selected with `cargo -p`.
 
@@ -1689,7 +1689,7 @@ the removed appbase package cannot be selected with `cargo -p`.
 
 ### 12.7 Other golden/preview gates
 
-- **SQL preview goldens** (`third_party/zero-migrate/crates/zero-migrate/tests/sql_preview.rs`, DB-free): renders a `REPRESENTATIVE_IR` for all three dialects, byte-compares against `tests/golden/sql_preview_{pg,sqlite,mysql}.txt`, and asserts **faithfulness** (each statement byte-identical to `IrAuthor::lower_steps`), **no fabrication** (DB-state-dependent ops emit `-- [runtime-resolved]`), and **no DB connection**. `UPDATE_PREVIEW_GOLDENS=1` regenerates.
+- **SQL preview goldens** (`third_party/zero-migrate/crates/zeroship-migrate/tests/sql_preview.rs`, DB-free): renders a `REPRESENTATIVE_IR` for all three dialects, byte-compares against `tests/golden/sql_preview_{pg,sqlite,mysql}.txt`, and asserts **faithfulness** (each statement byte-identical to `IrAuthor::lower_steps`), **no fabrication** (DB-state-dependent ops emit `-- [runtime-resolved]`), and **no DB connection**. `UPDATE_PREVIEW_GOLDENS=1` regenerates.
 - **Golden execution traces** (`golden_trace_pg.rs`/`golden_trace_sqlite.rs` → `tests/golden-traces/*.txt`): capture a full apply trace + resulting schema against live PG/SQLite. `assert_frozen` panics if the fixture is absent (a first-run capture is reviewed + committed, never self-blessed). The PG destructive-refusal trace is asserted identical across an oracle leg and a live leg.
 - **Generated-TS `.d.ts` goldens** (`gen_types_dts_golden.rs`) + a `tsc` gate (`gen_types_dts_tsc_gate.rs`).
 

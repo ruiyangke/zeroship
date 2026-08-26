@@ -8,8 +8,8 @@
 //! `fk_definition_for_dialect` was private to that file. They are now `pub` in
 //! `zeroship_migrate_backend::constraint_definition`, because MySQL's drift path BUILDS
 //! the constraint body — its `information_schema` stores no rendered constraint text
-//! — and `crates/zero-migrate/src/apply/backend/mysql/` has been extracted into
-//! `zero-migrate-mysql`, which cannot depend on the engine.
+//! — and `crates/zeroship-migrate/src/apply/backend/mysql/` has been extracted into
+//! `zeroship-migrate-mysql`, which cannot depend on the engine.
 //!
 //! `pub(crate)` DOES NOT SURVIVE A CRATE BOUNDARY, and there is no modifier meaning
 //! "visible to the engine and to a vendor's DRIFT path but not to its EMISSION
@@ -36,7 +36,7 @@
 //! A vendor that reached for `quote_ident_if_needed` to spell an identifier it was
 //! about to EMIT would be using a PostgreSQL-shaped codec as a quoting helper. On
 //! MySQL that is simply wrong — InnoDB delimits identifiers with backticks, so the
-//! emitted statement would carry `"x"` where it needs `` `x` ``. `zero-migrate-mysql`
+//! emitted statement would carry `"x"` where it needs `` `x` ``. `zeroship-migrate-mysql`
 //! already keeps the two apart the correct way: `ddl.rs` takes the body it is handed
 //! and re-spells it through `mysql_requote_sql`, precisely because building and
 //! emitting are different jobs.
@@ -77,7 +77,7 @@
 //!    dead ones.
 //!
 //! The comment filter earns its keep here rather than hypothetically:
-//! `zero-migrate-mysql/src/ddl.rs` names `constraintdef_cols` in a doc comment
+//! `zeroship-migrate-mysql/src/ddl.rs` names `constraintdef_cols` in a doc comment
 //! today, explaining the re-spelling above. That line is prose about the rule, not a
 //! breach of it, and [`is_code`] is what tells them apart.
 
@@ -100,9 +100,9 @@ const CODEC_ITEMS: &[&str] = &[
 
 /// The vendor crates, relative to the workspace `crates/` directory.
 const VENDOR_CRATES: &[&str] = &[
-    "zero-migrate-postgres",
-    "zero-migrate-sqlite",
-    "zero-migrate-mysql",
+    "zeroship-migrate-postgres",
+    "zeroship-migrate-sqlite",
+    "zeroship-migrate-mysql",
 ];
 
 /// The EMISSION modules inside each vendor crate — the files whose output a server
@@ -114,7 +114,7 @@ const VENDOR_CRATES: &[&str] = &[
 const EMISSION_MODULES: &[&str] = &["ddl.rs", "dml.rs"];
 
 /// The codec's own home, used as the needle's positive control.
-const CODEC_HOME: &str = "zero-migrate-backend/src/constraint_definition.rs";
+const CODEC_HOME: &str = "zeroship-migrate-backend/src/constraint_definition.rs";
 
 /// How many CODE lines in [`CODEC_HOME`] must name each item, per item.
 ///
@@ -151,7 +151,7 @@ fn hits(path: &Path, item: &str) -> usize {
 fn crates_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("crates/zero-migrate has a parent")
+        .expect("crates/zeroship-migrate has a parent")
         .to_path_buf()
 }
 
@@ -223,7 +223,7 @@ fn no_vendor_emission_module_spells_the_comparison_codec() {
          MySQL statement needs backticks, so emitting from here is wrong in a way \
          PostgreSQL and SQLite cannot show you, because both spell an identifier the \
          same as the comparison form does. Build the body, then re-spell it for \
-         emission the way `zero-migrate-mysql`'s `mysql_requote_sql` does.",
+         emission the way `zeroship-migrate-mysql`'s `mysql_requote_sql` does.",
         violations
             .iter()
             .map(|(f, items)| format!("  {f}: {}", items.join(", ")))

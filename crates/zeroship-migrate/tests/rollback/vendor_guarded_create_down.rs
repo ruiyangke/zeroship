@@ -16,7 +16,7 @@ use zeroship_migrate::render::vendor::{VendorError, VendorStatement};
 /// This file used to `use zeroship_migrate::render::vendor::render_vendor_op`, a
 /// re-export of `zeroship_migrate_postgres::render_vendor_op` at the engine's crate root.
 /// Both are gone: the function is `pub(crate)` behind a private module now, so no
-/// caller outside `zero-migrate-postgres` can name it, and the only door is
+/// caller outside `zeroship-migrate-postgres` can name it, and the only door is
 /// `DmlRenderer::render_vendor_op`.
 ///
 /// A test naming the vendor whose spelling it asserts on is the legitimate case — the

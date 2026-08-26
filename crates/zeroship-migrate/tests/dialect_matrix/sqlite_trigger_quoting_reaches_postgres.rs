@@ -42,11 +42,11 @@
 //! and the anchor is what makes the next move fail loudly instead of silently.
 //!
 //! VERIFIED, not inferred. A crate-extraction spike moved `backends/sqlite.rs` and
-//! `apply/backend/sqlite/` into a real `zero-migrate-sqlite` crate, replaced
+//! `apply/backend/sqlite/` into a real `zeroship-migrate-sqlite` crate, replaced
 //! `PostgresDmlRenderer::quote_ident` with a marker string, and rendered a
 //! `createTrigger` op from inside the extracted crate. The marker came back in the
-//! SQLite trigger SQL. Had `zero-migrate-postgres` been a crate too,
-//! `zero-migrate-sqlite` would have needed it at runtime to quote a trigger
+//! SQLite trigger SQL. Had `zeroship-migrate-postgres` been a crate too,
+//! `zeroship-migrate-sqlite` would have needed it at runtime to quote a trigger
 //! identifier — which is the premise of step 4 ("mechanical once step 3 is done")
 //! failing on its own terms.
 //!
@@ -79,34 +79,34 @@ use std::path::{Path, PathBuf};
 /// functions carried. Nothing about the emitted SQL moved — it could not, for the
 /// reason the second test below pins — so this file is now the "must never come back"
 /// guard its own flip note promised it would become, and the module header's
-/// `zero-migrate-sqlite would need zero-migrate-postgres` finding is FALSE.
+/// `zeroship-migrate-sqlite would need zeroship-migrate-postgres` finding is FALSE.
 const PINNED_CALLS_IN_THE_TRIGGER_PATH: usize = 0;
 
 /// The file the SQLite trigger spelling lives in, and the file it LEFT.
 ///
 /// Both are named because the anchor is two-sided: "it is here" alone would pass on a
 /// copy, and "it is not there" alone would pass on a deletion.
-const SUBJECT_FILE: &str = "zero-migrate-sqlite/src/dml.rs";
-const FORMER_SUBJECT_FILE: &str = "zero-migrate-core/src/render/lower.rs";
+const SUBJECT_FILE: &str = "zeroship-migrate-sqlite/src/dml.rs";
+const FORMER_SUBJECT_FILE: &str = "zeroship-migrate-core/src/render/lower.rs";
 
 /// The census floor for the crate-wide half below.
 ///
 /// That half must WALK the tree, because `include_str!` cannot express "no other
 /// file". A walk fails OPEN: narrow its root and it iterates nothing, finds nothing,
 /// and reports clean. Rooted at `CARGO_MANIFEST_DIR` it was MEASURED blind — a pinned
-/// call planted in `zero-migrate-ir` did not register — and after the backend crates
+/// call planted in `zeroship-migrate-ir` did not register — and after the backend crates
 /// are extracted it would go blind to the very modules this file exists to watch.
 ///
 /// So the walk covers every crate, and this floor asserts the walk FOUND them. Raise
 /// it when a crate is added. If one is genuinely removed, lower it deliberately and
 /// say so — never to get green.
 ///
-/// LOWERED 9 → 8: `zero-migrate-guard` was dissolved into `zero-migrate-postgres`
+/// LOWERED 9 → 8: `zero-migrate-guard` was dissolved into `zeroship-migrate-postgres`
 /// (all of it needed `libpg_query`, so all of it was one vendor's) and deleted from
 /// the workspace. The walk still reaches every line it used to reach, at a different
 /// root — this is a real removal, not a narrowed discovery.
 ///
-/// RAISED 8 -> 9: `zero-migrate-core` was ADDED. The engine and the composition that
+/// RAISED 8 -> 9: `zeroship-migrate-core` was ADDED. The engine and the composition that
 /// names the vendors are two crates now, so `crates/` holds nine entries and the walk
 /// must find all of them.
 const WORKSPACE_CRATE_FLOOR: usize = 9;
@@ -153,8 +153,8 @@ fn no_sqlite_render_path_is_quoted_by_the_postgres_pinned_wrapper() {
     // `include_str!` is a compile-time dependency: editing either file rebuilds this
     // binary, so neither the count nor the anchor can silently drift out from under
     // the pin.
-    let subject = include_str!("../../../zero-migrate-sqlite/src/dml.rs");
-    let former = include_str!("../../../zero-migrate-core/src/render/lower.rs");
+    let subject = include_str!("../../../zeroship-migrate-sqlite/src/dml.rs");
+    let former = include_str!("../../../zeroship-migrate-core/src/render/lower.rs");
     assert_subject_is_where_this_file_says_it_is(subject, former);
 
     let in_subject = count_pinned_calls(subject);
@@ -172,7 +172,7 @@ fn no_sqlite_render_path_is_quoted_by_the_postgres_pinned_wrapper() {
          dialect ONCE per module as `lower.rs` and `backends/*.rs` both do.\n\
          \n\
          DO NOT RAISE THIS CONST TO MAKE THE BUILD GREEN. Raising it re-admits the \
-         `zero-migrate-sqlite needs zero-migrate-postgres at runtime` dependency \
+         `zeroship-migrate-sqlite needs zeroship-migrate-postgres at runtime` dependency \
          that the module header measured and this commit removed, and it does so \
          silently, because both vendors still spell an identifier `\"x\"` and no \
          SQL-output test can tell you."
@@ -184,10 +184,10 @@ fn no_sqlite_render_path_is_quoted_by_the_postgres_pinned_wrapper() {
     // IT WALKS EVERY CRATE, NOT JUST THIS ONE'S `src`, AND THAT IS THE POINT. A walk
     // rooted at `CARGO_MANIFEST_DIR` is a census whose UNIVERSE SHRINKS when the
     // thing it guards moves away: once the backend crates are extracted,
-    // `zero-migrate-core/src` simply stops containing the vendor modules, the walk finds
+    // `zeroship-migrate-core/src` simply stops containing the vendor modules, the walk finds
     // zero in a smaller tree, and this half passes while guarding nothing. That is
     // not a hypothetical - the crate-scoped version was MEASURED blind, reporting
-    // clean with a pinned call planted in `zero-migrate-ir`.
+    // clean with a pinned call planted in `zeroship-migrate-ir`.
     //
     // Generalised, because this file is the worked example: ANY assertion that scans
     // a DIRECTORY rather than a NAMED SET reports success when its subject leaves
@@ -334,8 +334,8 @@ fn assert_subject_is_where_this_file_says_it_is(subject: &str, former: &str) {
 /// red is the escalation.
 #[test]
 fn postgres_and_sqlite_still_spell_an_identifier_identically() {
-    let pg = quote_ident_body(include_str!("../../../zero-migrate-postgres/src/dml.rs"));
-    let sqlite = quote_ident_body(include_str!("../../../zero-migrate-sqlite/src/dml.rs"));
+    let pg = quote_ident_body(include_str!("../../../zeroship-migrate-postgres/src/dml.rs"));
+    let sqlite = quote_ident_body(include_str!("../../../zeroship-migrate-sqlite/src/dml.rs"));
 
     assert_eq!(
         pg, sqlite,

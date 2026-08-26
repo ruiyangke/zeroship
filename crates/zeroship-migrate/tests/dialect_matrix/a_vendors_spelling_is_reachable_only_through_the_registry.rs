@@ -73,7 +73,7 @@ const ALLOWED_PUBLIC_MODULES: &[&str] = &[
 const LIB_RS_LINE_FLOOR: usize = 80;
 
 fn vendor_lib_rs(crate_name: &str) -> (PathBuf, String) {
-    // CARGO_MANIFEST_DIR is `crates/zero-migrate`; the vendor crates are its siblings.
+    // CARGO_MANIFEST_DIR is `crates/zeroship-migrate`; the vendor crates are its siblings.
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join(crate_name)
@@ -107,9 +107,9 @@ fn declared_modules(src: &str) -> Vec<(String, bool)> {
 }
 
 const VENDOR_CRATES: &[&str] = &[
-    "zero-migrate-postgres",
-    "zero-migrate-mysql",
-    "zero-migrate-sqlite",
+    "zeroship-migrate-postgres",
+    "zeroship-migrate-mysql",
+    "zeroship-migrate-sqlite",
 ];
 
 #[test]

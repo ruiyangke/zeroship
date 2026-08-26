@@ -8,7 +8,7 @@
 //! `dialect_matrix/core_names_no_vendor_crate.rs` (core may not reach a vendor
 //! CRATE), `core_does_not_spell_a_vendors_bytes.rs` (core may not call a raw
 //! spelling primitive) and `core_names_no_vendor_backend_module.rs`. Nothing guarded
-//! `zero-migrate-backend`, and the cost of that gap was measured rather than guessed:
+//! `zeroship-migrate-backend`, and the cost of that gap was measured rather than guessed:
 //! the brief that commissioned the neutrality pass this file lands with recorded
 //! **28** code-level vendor names in this crate, taken by hand. A non-comment sweep
 //! found **72**. The 44 it missed were not obscure - they included a `POSTGRES`
@@ -108,13 +108,13 @@ const SRC_FILE_FLOOR: usize = 32;
 /// every line, and still reports zero violations, because it finds zero of anything.
 /// A census with no positive control cannot tell "clean" from "blind".
 ///
-/// Measured at well over this in `zero-migrate-postgres/src`, which names its own
+/// Measured at well over this in `zeroship-migrate-postgres/src`, which names its own
 /// vendor in nearly every file. Set low and blunt on purpose: the number only has to
 /// prove the matcher is alive.
 const VENDOR_CRATE_MATCH_FLOOR: usize = 40;
 
 /// The vendor crate the needle control runs over.
-const NEEDLE_CONTROL_CRATE: &str = "zero-migrate-postgres";
+const NEEDLE_CONTROL_CRATE: &str = "zeroship-migrate-postgres";
 
 /// Whether a source line is CODE rather than a comment, and the code half of it.
 ///

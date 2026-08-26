@@ -76,7 +76,7 @@ fn is_code(line: &str) -> bool {
 fn shadow_dry_run_has_no_implementor() {
     let crates_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("crates/zero-migrate has a parent");
+        .expect("crates/zeroship-migrate has a parent");
 
     let mut files = Vec::new();
     walk(crates_dir, &mut files);

@@ -7,7 +7,7 @@
 //! kinds — roles, grants, RLS, policies, functions, extensions, schemas, `raw` —
 //! none of which touch `DmlRenderer`. `render/vendor.rs` recorded that honestly as
 //! "the vendor-op surface is not behind the contract", and
-//! `zero-migrate-sqlite/src/dml.rs` recorded the mirror image: "PostgreSQL is STILL
+//! `zeroship-migrate-sqlite/src/dml.rs` recorded the mirror image: "PostgreSQL is STILL
 //! in the position SQLite just left, via `render::vendor`".
 //!
 //! It is behind the contract now: `DmlRenderer::render_vendor_op`, answered by each
@@ -17,7 +17,7 @@
 //!
 //! MEASURED before it was designed, not reasoned from the shape:
 //!
-//! * `crates/zero-migrate-sqlite/src` and `crates/zero-migrate-mysql/src` contain no
+//! * `crates/zeroship-migrate-sqlite/src` and `crates/zeroship-migrate-mysql/src` contain no
 //!   vendor-op renderer and never did — `dml`, `guard`, `lib`, `schema` (+ `collation`
 //!   on MySQL) and nothing else.
 //! * Exactly one registered backend renders each of the sixteen op kinds, so an

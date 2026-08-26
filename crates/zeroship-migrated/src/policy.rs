@@ -15,7 +15,7 @@
 //! - the EFFECTIVE policy is [`admit`]`(ceiling, draft)` — operator ⊓ creator
 //!   with ESCALATION-REJECT (a draft grant looser than the ceiling permits is
 //!   rejected, never clamped). This is the direct replacement for `meet_ceiling_draft`.
-//! - the SEAL is the `zero-migrate-policy` HMAC over the composed [`EffectivePolicy`]
+//! - the SEAL is the `zeroship-migrate-policy` HMAC over the composed [`EffectivePolicy`]
 //!   ([`zeroship_migrate::seal`] / [`SealedPolicy::verify`]).
 //!
 //! The composed engine [`EffectivePolicy`] drives table-shape injection

@@ -24,7 +24,7 @@
 //! (E0063), neither `OperationalAdvisor` method has a default body (E0046), and
 //! `AdvisoryVerdict` has no `From<Vec<Advisory>>`, so a backend cannot acquire the
 //! not-analyzed posture by omission and a caller cannot flatten a verdict without
-//! meeting the absence. `crates/zero-migrate-backend/src/registry.rs` carries the
+//! meeting the absence. `crates/zeroship-migrate-backend/src/registry.rs` carries the
 //! `compile_fail` doctests for those.
 //!
 //! What the compiler cannot check is CONSISTENCY: a vendor whose

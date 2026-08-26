@@ -15,7 +15,7 @@
 //! The header is phrased in terms of the RULE and not the current file layout,
 //! because the layout changed underneath it exactly as it warned it would. The
 //! composition is `zeroship_migrate::shipping_vendors()` now, in the crate that names the
-//! vendors; the engine is `zero-migrate-core` and can no longer see it.
+//! vendors; the engine is `zeroship-migrate-core` and can no longer see it.
 //!
 //! # THE SPLIT HAPPENED, AND IT COST NOTHING — WHICH IS THIS FILE'S RESULT
 //!
@@ -33,7 +33,7 @@
 //! # Why the compiler still will NOT catch this for you
 //!
 //! For PRODUCTION code it now does, and that half of the rule has been handed over:
-//! `zero-migrate-core` declares no vendor dependency, so it cannot compose a set.
+//! `zeroship-migrate-core` declares no vendor dependency, so it cannot compose a set.
 //!
 //! What is left is the `#[cfg(test)]` half. The vendor crates ARE dev-dependencies of
 //! the engine — several hundred unit tests need a real `VendorSet` to hand the
@@ -123,14 +123,14 @@ const ACCESSOR_CONTROL_CRATE: &str = "zeroship-migrate-node";
 const ACCESSOR_CONTROL_FLOOR: usize = 5;
 
 /// Where the composition may be named OR declared, relative to
-/// `crates/zero-migrate-core/src`, and what each site is for.
+/// `crates/zeroship-migrate-core/src`, and what each site is for.
 ///
 /// ONE ENTRY, and the fall from three to one is what the crate split bought.
 ///
 /// The list used to hold `render/backends/mod.rs` (which composed the set and folded
 /// the identifier budget from it) and `lib.rs` (which handed it to a host). Both left
 /// the engine with the composition: the shipping list is
-/// `crates/zero-migrate/src/lib.rs` now, and so are `shipping_vendors` and
+/// `crates/zeroship-migrate/src/lib.rs` now, and so are `shipping_vendors` and
 /// `shipping_backends`. Neither entry was lowered — both became unrepresentable,
 /// because the engine cannot name a vendor crate it does not depend on.
 ///
@@ -145,7 +145,7 @@ const ALLOWED: &[(&str, &str)] = &[(
     "composes the `#[cfg(test)]` set and hands it to core's own unit tests",
 )];
 
-/// Files the walk MUST reach, relative to `crates/zero-migrate-core/src`.
+/// Files the walk MUST reach, relative to `crates/zeroship-migrate-core/src`.
 ///
 /// The real defence against a census that fails open, because they bound WHICH
 /// files were seen rather than how many. `lib.rs` is the walk root and cannot move;
@@ -328,7 +328,7 @@ fn src_files(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// The ENGINE's source root, which is `zero-migrate-core/src` and no longer this
+/// The ENGINE's source root, which is `zeroship-migrate-core/src` and no longer this
 /// crate's own `src`.
 ///
 /// This crate is the COMPOSITION now: its `src` is one file that names the three
@@ -339,7 +339,7 @@ fn engine_src() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("this crate lives at <workspace>/crates/<name>")
-        .join("zero-migrate-core")
+        .join("zeroship-migrate-core")
         .join("src")
 }
 
@@ -430,7 +430,7 @@ fn the_engine_receives_the_registry_instead_of_reaching_for_it() {
     // being `pub`.
     let host_src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("crates/zero-migrate has a parent")
+        .expect("crates/zeroship-migrate has a parent")
         .join(ACCESSOR_CONTROL_CRATE)
         .join("src");
     assert!(
@@ -532,8 +532,8 @@ fn the_engine_receives_the_registry_instead_of_reaching_for_it() {
 /// # Why this test exists, and why it is textual
 ///
 /// The crate split left the workspace with TWO `VendorSet` compositions where it had
-/// one. The shipping list is `crates/zero-migrate/src/lib.rs`. The other is
-/// `crates/zero-migrate-core/src/test_fixtures.rs`, which composes a set for the
+/// one. The shipping list is `crates/zeroship-migrate/src/lib.rs`. The other is
+/// `crates/zeroship-migrate-core/src/test_fixtures.rs`, which composes a set for the
 /// engine's own unit tests from the same three crates reached through
 /// `[dev-dependencies]` — because the engine cannot see the shipping one, and a
 /// hand-rolled fake would make several hundred unit tests assert against a double
@@ -561,8 +561,8 @@ fn the_engine_receives_the_registry_instead_of_reaching_for_it() {
 #[test]
 fn the_two_compositions_list_the_same_vendors() {
     /// The shipping composition, and the engine's test composition.
-    const SHIPPING_SITE: &str = "zero-migrate/src/lib.rs";
-    const FIXTURE_SITE: &str = "zero-migrate-core/src/test_fixtures.rs";
+    const SHIPPING_SITE: &str = "zeroship-migrate/src/lib.rs";
+    const FIXTURE_SITE: &str = "zeroship-migrate-core/src/test_fixtures.rs";
 
     /// The idents to look for. The ORDER is not asserted from this list — it is read
     /// out of each file, so a reordering in one and not the other is a red.

@@ -61,7 +61,7 @@ scope = "all"
  * Shaped differently from {@link createSchemaPolicy}, and copying that one would not
  * load. `code.extension` is a GLOBAL knob: the loader accepts `scope = "all"` and
  * REJECTS a narrow `scope = { include = [...] }`, which is pinned by
- * `global_knob_narrow_scope_rejects` in crates/zero-migrate-policy/tests/loader.rs:288.
+ * `global_knob_narrow_scope_rejects` in crates/zeroship-migrate-policy/tests/loader.rs:288.
  * An extension is a database-wide object, so there is no schema to confine it to.
  *
  * The value is the allowlist, not a toggle: the guard matches the extension a
@@ -69,7 +69,7 @@ scope = "all"
  * none and listing one permits only that one - there is deliberately no scalar
  * "holds the capability" beside it, because a non-empty list would otherwise answer
  * yes for every extension in the database (`granted_extension_allowlist`, read by
- * the create and drop sides in crates/zero-migrate-postgres/src/guard/sql.rs).
+ * the create and drop sides in crates/zeroship-migrate-postgres/src/guard/sql.rs).
  * `FORBIDDEN_EXTENSIONS` overrides the allowlist regardless, so a name from that
  * denylist cannot be granted here - `citext` is not on it.
  *

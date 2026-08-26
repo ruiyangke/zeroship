@@ -18,7 +18,7 @@
 //! [`crate::analysis`] holds the classifier and the operational analyzers.
 //!
 //! This crate is the sole PRODUCTION owner of `libpg_query`. The shape gates that
-//! once justified a second `[dependencies]` entry in `crates/zero-migrate/Cargo.toml`
+//! once justified a second `[dependencies]` entry in `crates/zeroship-migrate/Cargo.toml`
 //! - the precondition boolean-SELECT gate, the idempotence/txn scans, the backfill
 //! cursor check - are `src/backend/{precondition,session,backfill_sql}.rs` in THIS
 //! crate. The engine's remaining entry is `[dev-dependencies]`, for test parses.

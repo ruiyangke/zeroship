@@ -27,7 +27,7 @@
 //! `PostgresBackend` three times in code. It moved to
 //! `apply/backend/postgres/precondition.rs`, which was the only place it could go
 //! at the time — it needs `SqlSession`/`ExecutorConfig`/`ApplyError`/`Migration`, and
-//! all four were the engine's. All four moved down to `zero-migrate-backend`
+//! all four were the engine's. All four moved down to `zeroship-migrate-backend`
 //! afterwards, so the evaluator DID follow the renderers out: it is
 //! `zeroship_migrate_postgres::backend::precondition` now, and that crate still does not
 //! depend on the engine.
@@ -40,7 +40,7 @@
 //! `SessionSnapshot` is `()`), so it kept a vendor name and moved to
 //! `apply/backend/postgres/mod.rs` beside the sibling, spelled out the way the
 //! dialect id spells it rather than abbreviated. (That file is
-//! `zero-migrate-postgres/src/backend/mod.rs` now; the type went with it.)
+//! `zeroship-migrate-postgres/src/backend/mod.rs` now; the type went with it.)
 //!
 //! # What this does NOT catch
 //!
@@ -107,7 +107,7 @@ fn neutral_layer_files() -> Vec<PathBuf> {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("this crate lives at <workspace>/crates/<name>")
-        .join("zero-migrate-core")
+        .join("zeroship-migrate-core")
         .join("src")
         .join("apply");
     let mut out: Vec<PathBuf> = std::fs::read_dir(&dir)
@@ -198,7 +198,7 @@ fn the_neutral_apply_layer_names_no_vendor_backend() {
 #[test]
 fn the_backend_contract_declares_no_vendor_named_item() {
     const CONTRACT: &str = "apply/backend/mod.rs";
-    let src = include_str!("../../../zero-migrate-core/src/apply/backend/mod.rs");
+    let src = include_str!("../../../zeroship-migrate-core/src/apply/backend/mod.rs");
 
     let mut offenders: Vec<(usize, String)> = Vec::new();
     for (i, line) in src.lines().enumerate() {
@@ -242,7 +242,7 @@ fn the_backend_contract_declares_no_vendor_named_item() {
          DIALECT-NEUTRAL contract every backend implements; a type named after one \
          vendor belongs in that vendor's own module beside its impl, the way \
          `MysqlSessionSnapshot` is declared beside `MysqlBackend` in \
-         zero-migrate-mysql/src/backend/mod.rs. Moving it \
+         zeroship-migrate-mysql/src/backend/mod.rs. Moving it \
          there is the fix — keeping the vendor name is correct once it lives in the \
          vendor's module, as long as the name is the one the dialect id uses."
     );

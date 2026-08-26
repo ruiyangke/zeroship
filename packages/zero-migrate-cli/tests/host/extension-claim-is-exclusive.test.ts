@@ -4,7 +4,7 @@
 // `extension-claim.ts` is the reason `rollback-live.test.ts` and
 // `citext-prerequisite.test.ts` can install - or require the absence of - a
 // DATABASE-GLOBAL object while a sibling gate run does the same. Its Rust counterpart
-// is guarded by `crates/zero-migrate/tests/rollback/extension_claim_is_exclusive.rs`
+// is guarded by `crates/zeroship-migrate/tests/rollback/extension_claim_is_exclusive.rs`
 // and this file is the matching guard on this side, plus the one property neither
 // language can assert alone:
 //
@@ -56,7 +56,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 /** The Rust half of the claim, whose key this file is pinned against. */
 const RUST_CLAIM = resolve(
   HERE,
-  "../../../../crates/zero-migrate/tests/support/extension_claim.rs",
+  "../../../../crates/zeroship-migrate/tests/support/extension_claim.rs",
 );
 
 /** A lock name of this run's own, distinct per case. See the header. */

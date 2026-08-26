@@ -19,7 +19,7 @@
 //! had already corrected. So there is ONE recorder, and the engine's test tree reaches
 //! it through the `testing` feature, which `zero-migrate` turns on in its
 //! `[dev-dependencies]` only. Resolver 3 keeps dev-dependency features out of the
-//! normal build, so nothing here is compiled into a shipping `zero-migrate-mysql`.
+//! normal build, so nothing here is compiled into a shipping `zeroship-migrate-mysql`.
 //!
 //! It returns canned rows for the reads the MySQL apply path issues: `GET_LOCK(...)`
 //! -> a single `got=1` row (lock acquired); the `information_schema.triggers`

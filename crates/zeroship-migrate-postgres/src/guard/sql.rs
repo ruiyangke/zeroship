@@ -123,10 +123,10 @@ pub mod namespace_rule {
 /// # Why this is a free function here rather than a `GuardConfig` method
 ///
 /// `remove_type` is a raw `libpg_query` `ObjectType` discriminant, and the body
-/// decodes it. [`GuardConfig`] moved to `zero-migrate-backend`, which sits below every
+/// decodes it. [`GuardConfig`] moved to `zeroship-migrate-backend`, which sits below every
 /// vendor and carries no SQL parser - so keeping this as a method would have dragged
-/// `pg_query` down there with it, and from there under `zero-migrate-sqlite` and
-/// `zero-migrate-mysql`, which build without it today. Translating one vendor's parse
+/// `pg_query` down there with it, and from there under `zeroship-migrate-sqlite` and
+/// `zeroship-migrate-mysql`, which build without it today. Translating one vendor's parse
 /// enum was never the neutral config's job anyway; it is the PostgreSQL guard's. The
 /// three policy questions it asks are unchanged.
 fn grants_drop_object(cfg: &GuardConfig, remove_type: i32, object: Option<&ObjectName>) -> bool {
@@ -585,7 +585,7 @@ impl GuardDecisions for BodyScopeDecisions<'_> {
     ///
     /// `check_raw_view_body_text` is the sole constructor of this adapter, and it DOES
     /// have a production caller: `validate_raw_view_body_sql`, in
-    /// `zero-migrate-core`'s `model::validate`, on every raw `viewBody`.
+    /// `zeroship-migrate-core`'s `model::validate`, on every raw `viewBody`.
     ///
     /// What bounds the damage is the gate directly above that call, not the caller's
     /// absence. A raw view body is refused unless it parses as a single top-level
@@ -2297,7 +2297,7 @@ pub fn check_raw_view_body_text(
 /// without a parser, and it must not acquire one - reaching `pg_query` from
 /// neutral core is what made a MySQL or SQLite raw view body get vetted against
 /// PostgreSQL's grammar. So the fact is derived HERE, mapped to operator-facing
-/// text by `zero-migrate-postgres` (the vendor owns its own wording), and wrapped
+/// text by `zeroship-migrate-postgres` (the vendor owns its own wording), and wrapped
 /// in the authoring envelope by the engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RawViewBodyDefect {

@@ -2,7 +2,7 @@
 //!
 //! # What was lost, exactly
 //!
-//! `format_mysql_physical_type` was a bare `fn` in `zero-migrate-core/src/apply/drift.rs`:
+//! `format_mysql_physical_type` was a bare `fn` in `zeroship-migrate-core/src/apply/drift.rs`:
 //! a MySQL type-text renderer, one arm per family, module-private, so `render/`,
 //! `schema/` and every other part of the engine were PHYSICALLY UNABLE TO NAME IT.
 //! That unreachability was the invariant, and it survived one move only partly. When
@@ -19,7 +19,7 @@
 //! `VendorColumnFacts::type_drift_report` and the vendor spells them.
 //!
 //! So the allowance is gone. The engine may no longer spell a MySQL type ANYWHERE,
-//! and this file asserts a flat zero over `crates/zero-migrate-core/src` rather than a
+//! and this file asserts a flat zero over `crates/zeroship-migrate-core/src` rather than a
 //! zero-outside-one-file. Core may not even name the type: `core_names_no_vendor_
 //! crate.rs` is the ratchet that says so, and this census is the narrower statement
 //! about the SPELLING specifically, which would survive a future where the type
@@ -35,7 +35,7 @@
 //! 2. NO FORMER HOME KEPT A COPY. Two of them now: the engine file the renderer
 //!    started in, and the neutral `snapshot.rs` it passed through. A leftover in
 //!    either is a second physical home for MySQL type text, and the two will drift.
-//! 3. THE ENGINE REACHES IT FROM NOWHERE. Nothing under `crates/zero-migrate-core/src`
+//! 3. THE ENGINE REACHES IT FROM NOWHERE. Nothing under `crates/zeroship-migrate-core/src`
 //!    may spell a MySQL type. A vendor crate spelling for itself is fine and
 //!    deliberately unconstrained — it is the only thing a vendor is for.
 //!
@@ -67,14 +67,14 @@ const SPELLER: &str = "type_text";
 const PARSER: &str = "fn parse(";
 
 /// The one physical home: the vendor crate that owns the type.
-const SPELLER_HOME: &str = "crates/zero-migrate-mysql/src/physical_type.rs";
+const SPELLER_HOME: &str = "crates/zeroship-migrate-mysql/src/physical_type.rs";
 
 /// The two files the speller LEFT, in order. `drift.rs` is where the renderer was a
 /// module-private `fn`; `snapshot.rs` is the neutral crate it lived in while the type
 /// was still a field on `ColumnSnapshot`.
 const FORMER_SPELLER_HOMES: [&str; 2] = [
-    "crates/zero-migrate-core/src/apply/drift.rs",
-    "crates/zero-migrate-backend/src/snapshot.rs",
+    "crates/zeroship-migrate-core/src/apply/drift.rs",
+    "crates/zeroship-migrate-backend/src/snapshot.rs",
 ];
 
 /// The ident of the renderer that used to live in the former home. Its ABSENCE there
@@ -92,7 +92,7 @@ const FORMER_SPELLER: &str = "format_mysql_physical_type";
 /// carries meaning — a walk above its floor can still miss its subject.
 const ENGINE_SUBJECT_FILE: &str = "apply/drift.rs";
 
-/// The walk's floor over `crates/zero-migrate-core/src` — the WEAKER of this file's two
+/// The walk's floor over `crates/zeroship-migrate-core/src` — the WEAKER of this file's two
 /// anti-blindness checks, and the one to distrust first.
 ///
 /// A floor ALONE is not enough and this one is not trusted alone: a narrowed walk in
@@ -104,7 +104,7 @@ const ENGINE_SUBJECT_FILE: &str = "apply/drift.rs";
 /// **The instruction this comment used to carry was backwards, and the sibling census
 /// `core_names_no_vendor_crate.rs` already says why.** It read "raise it deliberately as
 /// the engine grows" — but the engine is deliberately SHRINKING. Vendor code is being
-/// moved out of it on purpose: `crates/zero-migrate-core/src` fell 79 -> 77 files in the two
+/// moved out of it on purpose: `crates/zeroship-migrate-core/src` fell 79 -> 77 files in the two
 /// commits that landed underneath this one, and `apply/backend/**` is ~30 more files
 /// scheduled to leave. A count that falls is the project WORKING, so a floor written to
 /// catch growth will fire on a correct tree, and "never lower it to get green" would
@@ -119,14 +119,14 @@ const ENGINE_SUBJECT_FILE: &str = "apply/drift.rs";
 /// of.
 ///
 /// - `apply/backend/mysql/` — eight files, the whole MySQL execution half — became
-///   `zero-migrate-mysql/src/backend/`, taking core from 77 `.rs` files to 69.
+///   `zeroship-migrate-mysql/src/backend/`, taking core from 77 `.rs` files to 69.
 ///   Lowered to 60.
 /// - `apply/backend/sqlite/` — ELEVEN files, the whole SQLite execution half —
-///   became `zero-migrate-sqlite/src/backend/`, taking core from 69 to 58.
+///   became `zeroship-migrate-sqlite/src/backend/`, taking core from 69 to 58.
 ///   Lowered to 50.
 ///
 /// - `apply/backend/postgres/` — TEN files, the whole PostgreSQL execution half —
-///   became `zero-migrate-postgres/src/backend/`, taking core from 58 to 48.
+///   became `zeroship-migrate-postgres/src/backend/`, taking core from 58 to 48.
 ///   Lowered to 42.
 ///
 /// All three times the anchor passed, which is what said the walk was intact and the
@@ -205,9 +205,9 @@ fn mysql_type_text_lives_with_its_parser() {
     // `include_str!` is a compile-time dependency: editing either file rebuilds this
     // binary, so the anchor cannot drift out from under an edit, and a dangling path
     // is a build error rather than a quiet pass.
-    let home = include_str!("../../../zero-migrate-mysql/src/physical_type.rs");
-    let former_drift = include_str!("../../../zero-migrate-core/src/apply/drift.rs");
-    let former_snapshot = include_str!("../../../zero-migrate-backend/src/snapshot.rs");
+    let home = include_str!("../../../zeroship-migrate-mysql/src/physical_type.rs");
+    let former_drift = include_str!("../../../zeroship-migrate-core/src/apply/drift.rs");
+    let former_snapshot = include_str!("../../../zeroship-migrate-backend/src/snapshot.rs");
 
     // ANCHOR, side one: the pair is together in the new home.
     assert!(
@@ -260,7 +260,7 @@ fn mysql_type_text_lives_with_its_parser() {
     let engine_src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("this crate lives at <workspace>/crates/<name>")
-        .join("zero-migrate-core")
+        .join("zeroship-migrate-core")
         .join("src");
     let files = src_files(&engine_src);
 

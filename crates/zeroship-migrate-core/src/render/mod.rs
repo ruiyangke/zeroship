@@ -1,7 +1,7 @@
 pub(crate) mod backends;
 pub mod declarative;
 pub mod dml;
-// -- The existence-guard DECIDER moved into `zero-migrate-backend`. It had to: the
+// -- The existence-guard DECIDER moved into `zeroship-migrate-backend`. It had to: the
 // only production callers are the three backends' session paths, and a backend in
 // its own crate cannot reach an engine module. Nothing about it was engine-shaped -
 // every private helper below `decide` was already parameterized by
@@ -55,7 +55,7 @@ pub mod step;
 pub(crate) mod value_format;
 pub mod vendor;
 
-// -- The backend CONTRACT moved into `zero-migrate-backend` and is re-exported under
+// -- The backend CONTRACT moved into `zeroship-migrate-backend` and is re-exported under
 // its historical `crate::render::*` paths, so every in-crate `render::dml::...`,
 // `render::renderer::...` and `render::vendor::...` reference resolves unchanged.
 //

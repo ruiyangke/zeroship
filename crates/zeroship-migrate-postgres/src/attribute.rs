@@ -12,7 +12,7 @@
 //! # The two that used to live in the neutral IR
 //!
 //! `IndexStorageParams` held `fillfactor` and `pages_per_range` as named fields in
-//! `zero-migrate-ir` and in the neutral contract crate's `IndexSnapshot` - PostgreSQL
+//! `zeroship-migrate-ir` and in the neutral contract crate's `IndexSnapshot` - PostgreSQL
 //! storage parameters living in the crates whose purpose is to name no vendor. Core's
 //! own drift pass then formatted them BY THOSE TWO SPELLINGS. They were the reason this
 //! mechanism exists.

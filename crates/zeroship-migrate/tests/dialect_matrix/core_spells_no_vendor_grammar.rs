@@ -58,10 +58,10 @@ use crate::core_names_no_vendor_at_all::{
 
 /// The engine crate. Cargo already forbids it from DEPENDING on a vendor; this file is
 /// about what it writes, which Cargo cannot see.
-const ENGINE_CRATE: &str = "zero-migrate-core";
+const ENGINE_CRATE: &str = "zeroship-migrate-core";
 
 /// The crate the needles are proved live against: grammar SHOULD be dense here.
-const NEEDLE_CONTROL_CRATE: &str = "zero-migrate-postgres";
+const NEEDLE_CONTROL_CRATE: &str = "zeroship-migrate-postgres";
 
 /// Upper-case SQL keywords only one shipping vendor can execute.
 const KEYWORD_NEEDLES: &[&str] = &[

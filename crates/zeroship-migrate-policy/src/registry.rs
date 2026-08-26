@@ -89,7 +89,7 @@ impl PolicyRegistry {
         let mut hasher = Sha256::new();
         // Domain separator + count, so the empty registry has a well-defined digest
         // distinct from other structures hashing raw def bytes.
-        hasher.update(b"zero-migrate-policy/registry/v1");
+        hasher.update(b"zeroship-migrate-policy/registry/v1");
         hasher.update((self.defs.len() as u32).to_be_bytes());
         for def in self.defs.values() {
             let enc = def.canonical_encoding();

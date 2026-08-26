@@ -12,7 +12,7 @@
 //! assertions below name PostgreSQL's deny-list rule ids
 //! (`zeroship_migrate_postgres::guard::denylist::rule`), and
 //! `dialect_matrix/core_names_no_vendor_crate.rs` forbids ANY file under
-//! `crates/zero-migrate-core/src` from naming a vendor crate — a test asserting one
+//! `crates/zeroship-migrate-core/src` from naming a vendor crate — a test asserting one
 //! vendor's rule ids is exactly the coupling that census exists to catch, whether or
 //! not it is `#[cfg(test)]`.
 //!

@@ -62,14 +62,14 @@ use crate::model::expr::{CaseBranch, Expr, ScalarFn};
 use zeroship_migrate_backend::registry::VendorSet;
 use zeroship_migrate_ir::backend::Capability;
 use zeroship_migrate_ir::dialect::DialectId;
-// The PG argument-type alias fold. It moved to `zero-migrate-backend` with the
+// The PG argument-type alias fold. It moved to `zeroship-migrate-backend` with the
 // snapshot value types, whose `canonical_signature_type` is its other caller;
 // re-imported here under its historical name so this module's two call sites and
 // `crate::apply::drift` read unchanged.
 use std::collections::{BTreeMap, BTreeSet};
 pub(crate) use zeroship_migrate_backend::snapshot::canonical_arg_type;
 
-// The structural, policy-free validator moved to the `zero-migrate-ir` leaf crate.
+// The structural, policy-free validator moved to the `zeroship-migrate-ir` leaf crate.
 // Re-export its full surface so this policy-bound module (and the engine root)
 // name `AuthoringError`, `validate_expr`, the `CODE_*` codes, `TargetScope`,
 // `validate_immutable_expr_context`, etc. exactly as before.

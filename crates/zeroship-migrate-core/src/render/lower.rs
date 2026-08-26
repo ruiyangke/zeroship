@@ -1280,7 +1280,7 @@ pub struct IrAuthor {
 
 /// A failure lowering an IR op to SQL.
 ///
-/// MOVED to `zero-migrate-backend`, and re-exported here so every
+/// MOVED to `zeroship-migrate-backend`, and re-exported here so every
 /// `render::lower::IrLowerError` caller and every `match` arm resolves unchanged.
 ///
 /// It had to move: it is the `Err` half of
@@ -6420,7 +6420,7 @@ impl IrAuthor {
     /// trusted descriptor-/intent-driven producers (no untrusted raw SQL), exactly
     /// like the declarative path that emits the same shapes, and `apply_plan`
     /// re-runs the Confined guard on every rendered statement at execution time.
-    /// The SQLite leg's guard (`SqliteGuard`, supplied by `zero-migrate-sqlite` and
+    /// The SQLite leg's guard (`SqliteGuard`, supplied by `zeroship-migrate-sqlite` and
     /// selected through [`crate::guard_for`]) trusts
     /// descriptor-/IR-generated DDL (no string deny-list), so it never denies - but
     /// the fragment split + reassembly invariant still runs, so the round trip between `up` and its fragment

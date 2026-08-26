@@ -57,7 +57,7 @@
 //!
 //! # What only a LIVE MySQL server can prove
 //!
-//! `zero-migrate-mysql/src/backend/identity_sql.rs` already has four unit tests over a
+//! `zeroship-migrate-mysql/src/backend/identity_sql.rs` already has four unit tests over a
 //! `RecordingSession` fake, and they DO pin the emitted DDL text
 //! (``ALTER TABLE `app`.`orders` AUTO_INCREMENT = 23``) and its ordering against the
 //! lock. Four things are out of a fake's reach, and each has a test here:

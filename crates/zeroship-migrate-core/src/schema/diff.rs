@@ -315,7 +315,7 @@ impl Default for ColumnInfo {
 
 /// The mask / encryption column-metadata vocabulary.
 ///
-/// MOVED to `zero-migrate-backend` and re-exported here, so every
+/// MOVED to `zeroship-migrate-backend` and re-exported here, so every
 /// `schema::diff::{EncryptionMeta, WrappedType, MaskMeta, MaskKind, Classification}`
 /// caller resolves unchanged.
 ///

@@ -4,7 +4,7 @@
 //!
 //! # CARGO SUBSUMED THIS CENSUS'S PRODUCTION HALF, AND THAT IS WHY IT NARROWED
 //!
-//! `zero-migrate-core` declares no vendor `[dependencies]`. Writing
+//! `zeroship-migrate-core` declares no vendor `[dependencies]`. Writing
 //! `zeroship_migrate_postgres` in its production source is an unresolved-crate error, so
 //! the rule this file used to hold over production code is now held by the build. That
 //! is strictly stronger than a census: it is checked at every compile, it cannot go
@@ -34,7 +34,7 @@
 //!
 //! Its previous single entry was `render/backends/mod.rs`, the PRODUCTION registry
 //! composition, at the same count of three. That file names no vendor crate now — the
-//! composition is `crates/zero-migrate/src/lib.rs` — so the ratchet did not move
+//! composition is `crates/zeroship-migrate/src/lib.rs` — so the ratchet did not move
 //! sideways, it moved from a rule Cargo could not enforce to the residue of one it can.
 //!
 //! # Why a ratchet and not an assertion of the target
@@ -52,7 +52,7 @@
 //!
 //! `render/vendor.rs` closed by putting the vendor-op surface behind
 //! `DmlRenderer::render_vendor_op`. That one is now ALSO a privacy rule — `mod vendor`
-//! is private in `zero-migrate-postgres` and the crate-root `pub use` is gone, so
+//! is private in `zeroship-migrate-postgres` and the crate-root `pub use` is gone, so
 //! naming it is an E0603 rather than a finding here. Where a rule can be a privacy it
 //! should be; this census is the backstop for the ones that cannot, which is why its
 //! entry came off rather than being kept as a duplicate. The registry entry fell
@@ -73,7 +73,7 @@
 //!
 //! # Mentions are not names, and that distinction is LIVE in this tree
 //!
-//! `crates/zero-migrate-core/src` is dense with prose about the vendor crates — the
+//! `crates/zeroship-migrate-core/src` is dense with prose about the vendor crates — the
 //! registry module alone spends eighty lines explaining which coupling it removed and
 //! which it could not. A census that counted every occurrence would be red on day one
 //! for exactly the wrong reason, and the only way to green it would be deleting the
@@ -102,7 +102,7 @@ use std::path::{Path, PathBuf};
 /// The three vendor crate idents, as they appear in Rust code.
 ///
 /// The underscore spelling is the only one that can be a PATH. A hyphenated
-/// `zero-migrate-postgres` can only ever be prose or a `Cargo.toml` key, so matching
+/// `zeroship-migrate-postgres` can only ever be prose or a `Cargo.toml` key, so matching
 /// the underscore form is what separates "core reached this crate" from "core talked
 /// about it".
 const VENDOR_CRATES: &[&str] = &[
@@ -113,7 +113,7 @@ const VENDOR_CRATES: &[&str] = &[
 
 /// The ratchet: which core files may name a vendor crate, and exactly how many times.
 ///
-/// Paths are relative to `crates/zero-migrate-core/src`. See the module header for what
+/// Paths are relative to `crates/zeroship-migrate-core/src`. See the module header for what
 /// each entry is and which of them is permanent.
 const ALLOWED: &[(&str, usize)] = &[
     // The `#[cfg(test)]` fixture module's three-vendor composition. It is the ONE
@@ -141,14 +141,14 @@ const ALLOWED: &[(&str, usize)] = &[
 /// It has now fired exactly that way three times, on consecutive extractions.
 ///
 /// - The MySQL execution half — `apply/backend/mysql/`, eight files — moved into
-///   `zero-migrate-mysql`, taking core from 77 `.rs` files to 69 and under the 70
+///   `zeroship-migrate-mysql`, taking core from 77 `.rs` files to 69 and under the 70
 ///   this said. Lowered to 60.
 /// - The SQLite execution half — `apply/backend/sqlite/`, ELEVEN files — moved into
-///   `zero-migrate-sqlite/src/backend/`, taking core from 69 to 58 and under that 60.
+///   `zeroship-migrate-sqlite/src/backend/`, taking core from 69 to 58 and under that 60.
 ///   Lowered to 50.
 ///
 /// - The PostgreSQL execution half — `apply/backend/postgres/`, TEN files — moved
-///   into `zero-migrate-postgres/src/backend/`, taking core from 58 to 48 and under
+///   into `zeroship-migrate-postgres/src/backend/`, taking core from 58 to 48 and under
 ///   that 50. Lowered to 42.
 ///
 /// All three times [`WALK_ANCHORS`] passed, which is what said the walk was intact
@@ -206,7 +206,7 @@ fn src_files(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// The ENGINE's source root, which is `zero-migrate-core/src` and no longer this
+/// The ENGINE's source root, which is `zeroship-migrate-core/src` and no longer this
 /// crate's own `src`.
 ///
 /// This crate is the COMPOSITION now: its `src` is one file that names the three
@@ -217,7 +217,7 @@ fn engine_src() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("this crate lives at <workspace>/crates/<name>")
-        .join("zero-migrate-core")
+        .join("zeroship-migrate-core")
         .join("src")
 }
 
@@ -344,12 +344,12 @@ fn core_names_no_vendor_crate_outside_the_registry() {
 ///
 /// The census above is a source scan. It measures what the engine's code NAMES. The
 /// thing that makes naming a vendor impossible in production code is one level down
-/// and is not source at all: `crates/zero-migrate-core/Cargo.toml` lists
-/// `zero-migrate-backend`, `zero-migrate-ir` and `zero-migrate-policy` under
+/// and is not source at all: `crates/zeroship-migrate-core/Cargo.toml` lists
+/// `zeroship-migrate-backend`, `zeroship-migrate-ir` and `zeroship-migrate-policy` under
 /// `[dependencies]` and no backend implementation, so `zeroship_migrate_postgres` does not
 /// resolve there.
 ///
-/// ONE LINE IN THAT MANIFEST UNDOES IT. Add `zero-migrate-postgres = { workspace =
+/// ONE LINE IN THAT MANIFEST UNDOES IT. Add `zeroship-migrate-postgres = { workspace =
 /// true }` to `[dependencies]` and the whole structural argument evaporates silently:
 /// nothing fails, the tree stays green, and the rule quietly reverts to being whatever
 /// this file's ratchet happens to allow. That is the shape of failure this repository
@@ -365,7 +365,7 @@ fn core_names_no_vendor_crate_outside_the_registry() {
 #[test]
 fn the_engine_manifest_declares_no_vendor_dependency() {
     /// The engine's manifest, relative to `crates/`.
-    const ENGINE_MANIFEST: &str = "zero-migrate-core/Cargo.toml";
+    const ENGINE_MANIFEST: &str = "zeroship-migrate-core/Cargo.toml";
 
     /// The section a vendor edge may appear under, and only that one.
     const ALLOWED_SECTION: &str = "[dev-dependencies]";
