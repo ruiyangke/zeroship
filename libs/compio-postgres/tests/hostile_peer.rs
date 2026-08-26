@@ -425,6 +425,72 @@ fn row_description(columns: &[&str]) -> Vec<u8> {
 /// This peer inspects rustls' processed record state. A bare EOF, a reset, or
 /// arbitrary bytes cannot set `peer_has_closed`, so the assertion observes the
 /// real encrypted `close_notify` rather than a teardown helper being called.
+/// A cancel key whose length the server chose must be REFUSED when it is
+/// outside what the protocol allows.
+///
+/// Protocol 3.2 made the cancel key variable-length, so its size now comes
+/// from server input rather than being fixed at four bytes. That is the one
+/// field in startup a hostile peer gets to size, and `CancelKey::new` bounds
+/// it at 4..=256. The frame limit alone is not the answer: `max_message_size`
+/// defaults far above 256, so a 300-byte key arrives intact and is rejected
+/// only if something checks the key itself.
+///
+/// The fuzzer reaches this shape too, but asserts termination without a panic;
+/// this asserts the driver REFUSES and says why, which is the standard the
+/// rest of this file holds malformed input to.
+#[compio::test]
+async fn a_cancel_key_outside_the_allowed_length_is_refused() {
+    for (label, key_len) in [("over-long", 300usize), ("too-short", 3usize)] {
+        let server = StubServer::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+
+            let mut length = [0u8; 4];
+            stream.read_exact(&mut length).expect("startup length");
+            let length = u32::from_be_bytes(length) as usize;
+            let mut body = vec![0u8; length - 4];
+            stream.read_exact(&mut body).expect("startup body");
+
+            let mut key_data = Vec::new();
+            key_data.extend_from_slice(&99i32.to_be_bytes());
+            key_data.extend(std::iter::repeat_n(0xABu8, key_len));
+
+            let mut response = backend_frame(b'R', &0u32.to_be_bytes());
+            response.extend_from_slice(&backend_frame(b'K', &key_data));
+            response.extend_from_slice(&backend_frame(b'Z', b"I"));
+            let _ = stream.write_all(&response);
+            let _ = stream.flush();
+
+            // Stay open so a hang is the driver's doing, not an EOF it could
+            // read as the session simply ending.
+            thread::sleep(Duration::from_millis(300));
+        });
+
+        let error = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            stub_config(server.addr).connect(common::suite_tls()),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{label} cancel key hung the handshake"))
+        .err()
+        .unwrap_or_else(|| panic!("{label} cancel key was accepted"));
+
+        let mut chain = error.to_string();
+        let mut source = std::error::Error::source(&error);
+        while let Some(cause) = source {
+            chain.push_str(" | ");
+            chain.push_str(&cause.to_string());
+            source = std::error::Error::source(cause);
+        }
+        assert!(
+            chain.contains("cancel key length"),
+            "the {label} key was refused without saying the length was wrong, \
+             so a caller cannot tell it from any other handshake failure: {chain}"
+        );
+
+        server.finish();
+    }
+}
+
 /// A peer that sends the RIGHT bytes, one at a time.
 ///
 /// Every other case in this file sends wrong bytes promptly. This one is the
