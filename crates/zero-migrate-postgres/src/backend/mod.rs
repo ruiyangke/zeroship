@@ -2,7 +2,7 @@
 //! implementation.
 //!
 //! Generic over the dialect-neutral
-//! [`SqlSession`](zero_migrate_backend::driver::SqlSession) seam — a host driver (the
+//! [`SqlSession`](zero_migrate_backend::driver::SqlSession) seam - a host driver (the
 //! napi `pg` shell) supplies the impl. SQLite does NOT ride this seam (it is an
 //! in-process rusqlite actor).
 
@@ -23,11 +23,11 @@ pub mod journal_sql;
 /// The Postgres precondition evaluator: the `pg_query` shape gate that proves a
 /// `SqlBoolean` cannot mutate state, and the `information_schema` catalog reads the
 /// structured checks run. `pub(crate)` because the crate root re-exports its two
-/// public entry points at their historical `zero_migrate::…` paths.
+/// public entry points at their historical `zero_migrate::...` paths.
 pub(crate) mod precondition;
 mod primary_key_sql;
 /// The Postgres dialect SQL leaves (session/lock/txn/journal/DML/rollback) this
-/// backend drives — relocated out of the generic `apply::executor` so no
+/// backend drives - relocated out of the generic `apply::executor` so no
 /// dialect-specific SQL lives in the shared executor.
 pub(crate) mod session;
 /// The PostgreSQL `REPEATABLE READ READ ONLY` status snapshot, relocated out of
@@ -95,8 +95,8 @@ pub struct PostgresSessionSnapshot {
 /// This server's `server_version_num` floor for a plan-required database feature,
 /// or `0` for a feature it has had throughout the engine's supported range.
 ///
-/// A version FLOOR is this backend's own knowledge — its numbering scheme, its
-/// release history — so it lives here rather than as a method on the neutral
+/// A version FLOOR is this backend's own knowledge - its numbering scheme, its
+/// release history - so it lives here rather than as a method on the neutral
 /// [`DatabaseFeature`]. It was
 /// `DatabaseFeature::minimum_postgres_version_num` in the contract crate, whose only
 /// production caller was `verify_database_requirements` below: the engine asks WHAT a
@@ -503,7 +503,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
 
     /// The retype-blocking predicate, MEASURED against a live server by
     /// `tests/pg_column_retype_dependency_oracle.rs`, which calls THIS function and
-    /// attempts a real `ALTER COLUMN … TYPE` per shape.
+    /// attempts a real `ALTER COLUMN ... TYPE` per shape.
     ///
     /// It is NOT the drop predicate with a filter bolted on, even though it reads
     /// the same `pg_depend` join. Three differences, each a counterexample the
@@ -778,7 +778,7 @@ impl<D: SqlSession> OnlineSchemaChange for PostgresBackend<'_, D> {
     ///
     /// This is the whole of PostgreSQL's online capability now. It used to be the
     /// whole online DRIVE: it applied E1/E2 by calling `apply_with_lock_backend`
-    /// — the engine's orchestrator — back across the backend boundary, tripped an
+    /// - the engine's orchestrator - back across the backend boundary, tripped an
     /// engine fault point, and read the journal to decide whether the marker still
     /// needed running. Those phases were neutral in every line and the engine owns
     /// them now; what is left here is the one phase that is irreducibly Postgres:
@@ -787,8 +787,8 @@ impl<D: SqlSession> OnlineSchemaChange for PostgresBackend<'_, D> {
     ///
     /// The trigger identity is derived from the `intent`, not accepted from the
     /// caller. `run_backfill` refuses to mirror rows under any trigger it was not
-    /// told to expect, so deriving it here — from the same intent the trigger was
-    /// authored from — is what keeps a caller from pointing the mirror at a
+    /// told to expect, so deriving it here - from the same intent the trigger was
+    /// authored from - is what keeps a caller from pointing the mirror at a
     /// trigger the engine never wrote.
     fn run_online_backfill<'a>(
         &'a self,
@@ -959,11 +959,11 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
 
 /// Genericity proof: the apply path monomorphizes over a
 /// **non-compio** [`SqlSession`] driver. An in-crate recording driver records the
-/// SQL of every WRITE verb, and — now that the read side is widened to the
-/// driver-neutral [`Row`]/[`DbError`] — RETURNS canned `Row`s from
+/// SQL of every WRITE verb, and - now that the read side is widened to the
+/// driver-neutral [`Row`]/[`DbError`] - RETURNS canned `Row`s from
 /// its read verbs. This proves `PostgresBackend<'a, D>` is genuinely generic AND
 /// that a host driver can build return values without a `compio_postgres::Row`,
-/// closing the old `unreachable!("read verbs…")` gap.
+/// closing the old `unreachable!("read verbs...")` gap.
 #[cfg(test)]
 #[cfg(test)]
 mod recording_session_genericity {
@@ -1160,7 +1160,7 @@ mod recording_session_genericity {
 
         let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
 
-        // Lock acquire/release + RESET ROLE — all write/DDL verbs, run through the
+        // Lock acquire/release + RESET ROLE - all write/DDL verbs, run through the
         // generic MigrationBackend surface, recorded by the non-compio driver.
         backend
             .acquire_project_lock(&cfg)
@@ -1187,7 +1187,7 @@ mod recording_session_genericity {
         );
 
         // The advisory-lock verbs bound the project id through the neutral
-        // Bind path — the param widening ran, not just the return one.
+        // Bind path - the param widening ran, not just the return one.
         let binds = rec.binds.borrow();
         assert!(
             binds
@@ -1199,8 +1199,8 @@ mod recording_session_genericity {
 
     /// The read side is now RUN, not merely compiled: the generic journal read
     /// (`applied`) is driven against canned neutral `Row`s and its decode
-    /// (`Row → AppliedEntry`) runs end-to-end over a non-compio driver — the
-    /// closure of the old `unreachable!("read verbs…")` gap.
+    /// (`Row -> AppliedEntry`) runs end-to-end over a non-compio driver - the
+    /// closure of the old `unreachable!("read verbs...")` gap.
     #[compio::test]
     async fn read_path_runs_generically_over_canned_seam_rows() {
         let rec =

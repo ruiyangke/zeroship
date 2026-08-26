@@ -16,11 +16,11 @@
 //!
 //!     CREATE TABLE other.t                          direct
 //!     WITH x AS (SELECT * FROM other.secrets) ...   CTE
-//!     CREATE VIEW v AS SELECT (SELECT ... other.…)  scalar subquery
+//!     CREATE VIEW v AS SELECT (SELECT ... other....)  scalar subquery
 //!     ... JOIN other.secrets ON true                join target
 //!     CREATE TABLE app1.t (id int REFERENCES
 //!       other.parent(id))                           foreign-key target
-//!     ... DEFAULT (SELECT max(id) FROM other.…)     column default
+//!     ... DEFAULT (SELECT max(id) FROM other....)     column default
 //!     CREATE FUNCTION app1.f() ... other.secrets    function body
 //!     DO $$ EXECUTE 'DROP TABLE other.secrets' $$   string-literal payload
 //!     SET search_path = other                       reached via search_path

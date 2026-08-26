@@ -27,7 +27,7 @@ pub enum DdlKind {
     AddColumn,
     DropColumn,
     AlterColumnType,
-    /// `ALTER COLUMN … SET NOT NULL` — gated (a full-table validating scan +
+    /// `ALTER COLUMN ... SET NOT NULL` - gated (a full-table validating scan +
     /// ACCESS EXCLUSIVE lock, and it ABORTS if any existing row is NULL; the
     /// row-less shadow cannot catch that). See `crate::guard::flags_for`.
     SetNotNull,
@@ -99,7 +99,7 @@ pub struct StatementClass {
     /// Definite trichotomy used by `data_security.destructive_ops`.
     pub data_security: DataSecurityClass,
     /// Cannot run inside a transaction block (CONCURRENTLY, ALTER TYPE ADD
-    /// VALUE, VACUUM) — needs the two-phase apply path.
+    /// VALUE, VACUUM) - needs the two-phase apply path.
     pub non_transactional: bool,
     /// Every explicitly schema-qualified object the statement references
     /// (deduped, in first-seen order). Drives the cross-schema confinement
@@ -618,7 +618,7 @@ const fn is_concurrent_drop_index(node: &NodeEnum) -> bool {
     matches!(node, NodeEnum::DropStmt(d) if d.concurrent)
 }
 
-/// `ALTER TYPE … ADD VALUE` cannot run in a transaction block (pre-PG12
+/// `ALTER TYPE ... ADD VALUE` cannot run in a transaction block (pre-PG12
 /// behaviour the engine still honours conservatively).
 const fn is_alter_type_add_value(node: &NodeEnum) -> bool {
     matches!(node, NodeEnum::AlterEnumStmt(e) if !e.new_val.is_empty())
@@ -638,7 +638,7 @@ pub fn referenced_schemas(node: &NodeEnum) -> Vec<String> {
 /// Collect every explicitly schema-qualified object name referenced anywhere
 /// in the statement tree (deduped, first-seen order).
 ///
-/// Walks all `RangeVar` nodes via the `libpg_query` node iterator — this catches
+/// Walks all `RangeVar` nodes via the `libpg_query` node iterator - this catches
 /// schema qualification in FROM/JOIN, DML targets, ALTER/DROP targets, etc.
 fn collect_schemas(node: &NodeEnum) -> Vec<String> {
     let mut seen: Vec<String> = Vec::new();
@@ -666,7 +666,7 @@ fn collect_qualified_object_schemas(node: &NodeEnum, seen: &mut Vec<String>) {
         for obj in &d.objects {
             // For DROP TABLE the object is a List of String nodes
             // [schema, table]; for DROP SCHEMA it is a single String (the
-            // schema name itself — which IS a cross-schema target).
+            // schema name itself - which IS a cross-schema target).
             if let Some(NodeEnum::List(list)) = obj.node.as_ref() {
                 let parts: Vec<String> = list
                     .items
@@ -733,23 +733,23 @@ fn node_variant_name(node: &NodeEnum) -> String {
 // ---------------------------------------------------------------------------
 
 /// Whether a statement **establishes** ownership of the relation it targets (a
-/// `CREATE TABLE` — the deploying app becomes the owner) or **requires** existing
-/// ownership of it (an `ALTER`/`DROP`/`RENAME`/DML — a non-owner may not touch it).
+/// `CREATE TABLE` - the deploying app becomes the owner) or **requires** existing
+/// ownership of it (an `ALTER`/`DROP`/`RENAME`/DML - a non-owner may not touch it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OwnershipNeed {
-    /// `CREATE TABLE` — establishes ownership for the deploying app.
+    /// `CREATE TABLE` - establishes ownership for the deploying app.
     Establishes,
-    /// `ALTER` / `RENAME` / DML (INSERT/UPDATE/DELETE/TRUNCATE) / `CREATE INDEX` —
+    /// `ALTER` / `RENAME` / DML (INSERT/UPDATE/DELETE/TRUNCATE) / `CREATE INDEX` -
     /// requires the deploying app to already own the target relation.
     RequiresOwnership,
-    /// `DROP TABLE` — requires ownership; a target of UNKNOWN ownership fails
+    /// `DROP TABLE` - requires ownership; a target of UNKNOWN ownership fails
     /// closed (distinct so the caller can raise `DropOfUnownedTable`, mirroring the
     /// declarative differ).
     RequiresOwnershipForDrop,
 }
 
 /// One ownership-relevant relation a statement touches: the BARE relation name
-/// (schema qualifier stripped — ownership maps are keyed by table name, as in the
+/// (schema qualifier stripped - ownership maps are keyed by table name, as in the
 /// declarative differ) and the [`OwnershipNeed`] the statement places on it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TouchedRelation {
@@ -763,32 +763,32 @@ pub struct TouchedRelation {
 /// in source order, for the submit-path ownership enforcement (the
 /// adapter peer of the declarative differ's `enforce_ownership`).
 ///
-/// The submit path takes a raw `up` script, so — unlike the declarative differ,
-/// which diffs structured snapshots — it must read the targets back out of the
+/// The submit path takes a raw `up` script, so - unlike the declarative differ,
+/// which diffs structured snapshots - it must read the targets back out of the
 /// parse tree. This is the SAME real-Postgres parse the guard uses (`pg_query`),
 /// so it cannot be bypassed by exotic syntax a hand-rolled parser would misread.
 ///
 /// # Shapes covered (the ownership check is enforced on these)
-/// - `CREATE TABLE t` ⇒ [`OwnershipNeed::Establishes`] for `t`.
-/// - `ALTER TABLE t …` ⇒ [`OwnershipNeed::RequiresOwnership`].
-/// - `DROP TABLE t` ⇒ [`OwnershipNeed::RequiresOwnershipForDrop`] (per table).
-/// - `RENAME TABLE`/`RENAME COLUMN` (a `RenameStmt` whose `relation` is set) ⇒
+/// - `CREATE TABLE t` => [`OwnershipNeed::Establishes`] for `t`.
+/// - `ALTER TABLE t ...` => [`OwnershipNeed::RequiresOwnership`].
+/// - `DROP TABLE t` => [`OwnershipNeed::RequiresOwnershipForDrop`] (per table).
+/// - `RENAME TABLE`/`RENAME COLUMN` (a `RenameStmt` whose `relation` is set) =>
 ///   [`OwnershipNeed::RequiresOwnership`].
-/// - `INSERT`/`UPDATE`/`DELETE` into a relation, and `TRUNCATE t [, …]` ⇒
+/// - `INSERT`/`UPDATE`/`DELETE` into a relation, and `TRUNCATE t [, ...]` =>
 ///   [`OwnershipNeed::RequiresOwnership`] (per target relation).
-/// - `CREATE INDEX … ON t` ⇒ [`OwnershipNeed::RequiresOwnership`] of `t`.
+/// - `CREATE INDEX ... ON t` => [`OwnershipNeed::RequiresOwnership`] of `t`.
 ///
 /// # Shapes intentionally NOT producing an ownership target (PUNTED)
 /// These touch no project table or are confinement-checked elsewhere, so they
 /// yield NO [`TouchedRelation`] (the caller does not gate them on ownership):
 /// - relation-less DDL: `CREATE EXTENSION`/`FUNCTION`/`TRIGGER`, `CREATE SCHEMA`,
-///   `COMMENT`, enum `ALTER TYPE … ADD VALUE`, etc. (the guard's deny-list +
+///   `COMMENT`, enum `ALTER TYPE ... ADD VALUE`, etc. (the guard's deny-list +
 ///   cross-schema confinement own these).
-/// - `SELECT` (read-only — no ownership write semantics).
-/// - `MERGE` (not modelled as `DdlKind::Dml` target here — punted; a MERGE that
+/// - `SELECT` (read-only - no ownership write semantics).
+/// - `MERGE` (not modelled as `DdlKind::Dml` target here - punted; a MERGE that
 ///   writes a foreign table is NOT caught by this pass and falls to the line-2
 ///   least-privilege `migrator` role; noted, not silently narrowed).
-/// - DROP of a non-table object (index/view/sequence/…): the table-ownership map
+/// - DROP of a non-table object (index/view/sequence/...): the table-ownership map
 ///   keys on tables, so a non-table DROP yields no target (guard + role govern it).
 /// - relations named only via a string literal passed to a name-resolving builtin
 ///   (`to_regclass('other.t')`, `nextval`): invisible to the structural walk
@@ -797,7 +797,7 @@ pub struct TouchedRelation {
 ///
 /// # Errors
 /// [`ParseError::Syntax`] if `libpg_query` cannot parse the input (deny-by-default
-/// upstream — the guard already rejects unparseable SQL before this is reached).
+/// upstream - the guard already rejects unparseable SQL before this is reached).
 pub fn relations_touched(sql: &str) -> Result<Vec<TouchedRelation>, ParseError> {
     let parsed = pg_query::parse(sql).map_err(|e| ParseError::Syntax(e.to_string()))?;
     let mut out = Vec::new();
@@ -886,7 +886,7 @@ fn push_touched(out: &mut Vec<TouchedRelation>, relname: &str, need: OwnershipNe
         // Keep the strongest need: a RequiresOwnership* never downgrades to
         // Establishes (a CREATE then ALTER of the same table in one script still
         // establishes; but an ALTER of a foreign table is never excused by a
-        // sibling CREATE of a DIFFERENT-but-same-named relation — same name folds).
+        // sibling CREATE of a DIFFERENT-but-same-named relation - same name folds).
         if existing.need == OwnershipNeed::Establishes && need != OwnershipNeed::Establishes {
             existing.need = need;
         }

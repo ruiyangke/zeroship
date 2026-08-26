@@ -32,7 +32,7 @@ pub const POSTGRES_CAPABILITIES: CapabilitySet = CapabilitySet::empty()
     .with(Capability::TransactionalDdl)
     .with(Capability::DeferrableConstraint)
     .with(Capability::UniqueConstraintDistinctFromIndex)
-    // A partition here is a relation: `CREATE TABLE … PARTITION OF`, `ATTACH`,
+    // A partition here is a relation: `CREATE TABLE ... PARTITION OF`, `ATTACH`,
     // `DETACH` (yielding a standalone table) and `DROP` all name one. The four
     // `DdlEmitter` partition methods below spell every one of them.
     .with(Capability::PartitionRelationDdl);

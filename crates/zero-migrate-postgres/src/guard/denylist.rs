@@ -1,4 +1,4 @@
-//! The enumerated dangerous-construct rules — **data, not logic**.
+//! The enumerated dangerous-construct rules - **data, not logic**.
 //!
 //! Every constant here names a vector from the threat model. The guard
 //! (`crate::guard`) consults these; keeping them as flat data makes the
@@ -14,7 +14,7 @@ pub const TRUSTED_LANGUAGES: &[&str] = &["plpgsql", "sql"];
 /// Extensions that are *never* allowed regardless of the per-project allowlist.
 ///
 /// They grant filesystem, network (SSRF), or RCE reach even if a creator's
-/// allowlist is misconfigured — a belt over the deny-by-default allowlist.
+/// allowlist is misconfigured - a belt over the deny-by-default allowlist.
 pub const FORBIDDEN_EXTENSIONS: &[&str] = &[
     "dblink",
     "postgres_fdw",
@@ -67,13 +67,13 @@ pub const NETWORK_FUNCTIONS: &[&str] = &[
     "dblink_get_result",
 ];
 
-/// The `reg*` pseudo-type family (a `text → reg*` cast resolves a named object).
+/// The `reg*` pseudo-type family (a `text -> reg*` cast resolves a named object).
 ///
-/// A `text → reg*` cast resolves the named object
-/// (relation/schema/function/type/role/…) by name at runtime. A
+/// A `text -> reg*` cast resolves the named object
+/// (relation/schema/function/type/role/...) by name at runtime. A
 /// schema-qualified name inside the *string literal* being cast
 /// (`'control.users'::regclass`) is an `A_Const`, invisible to the structural
-/// schema walker — so its leading `schema.` qualifier must be re-checked for
+/// schema walker - so its leading `schema.` qualifier must be re-checked for
 /// cross-schema confinement. Matched on the trailing (bare) type name.
 pub const REG_TYPES: &[&str] = &[
     "regclass",
@@ -92,14 +92,14 @@ pub const REG_TYPES: &[&str] = &[
 /// Name-resolving builtins that take a text object name (the same leak in `FuncCall` form).
 ///
 /// These take a text object name and resolve it (by
-/// name) to a catalog object — the same string-literal-carried-schema leak as
+/// name) to a catalog object - the same string-literal-carried-schema leak as
 /// the [`REG_TYPES`] casts, in `FuncCall` form. `setval`/`nextval`/`currval`
 /// are cross-tenant *mutations* of a foreign sequence; the `to_reg*` family and
 /// `pg_get_serial_sequence` are foreign-object resolvers/reads. The object name
 /// is the FIRST argument; its leading `schema.` qualifier is re-checked for
 /// cross-schema confinement. (`lastval` takes no argument and is omitted.)
 ///
-/// Matched on the trailing (bare) function name — `pg_catalog.nextval(...)`
+/// Matched on the trailing (bare) function name - `pg_catalog.nextval(...)`
 /// resolves the same builtin.
 pub const NAME_RESOLVER_FUNCTIONS: &[&str] = &[
     "nextval",
@@ -122,16 +122,16 @@ pub const NAME_RESOLVER_FUNCTIONS: &[&str] = &[
 ///
 /// A schema-qualified relation passed as a bare string
 /// literal here reaches a foreign-tenant object the structural schema walker
-/// never sees — the same leak class as [`NAME_RESOLVER_FUNCTIONS`], so the
+/// never sees - the same leak class as [`NAME_RESOLVER_FUNCTIONS`], so the
 /// literal's leading `schema.` qualifier is re-checked for confinement.
 ///
 /// `pg_relation_size`/`pg_total_relation_size`/`pg_table_size`/`pg_indexes_size`
 /// disclose a foreign table's on-disk size; the `has_*_privilege` family
 /// discloses access bits on a foreign table. (`pg_relation_size('s.t'::regclass)`
-/// goes through the [`REG_TYPES`] cast path instead — a non-literal/runtime arg
+/// goes through the [`REG_TYPES`] cast path instead - a non-literal/runtime arg
 /// is out of parse-time scope, the line-2 role's job.)
 ///
-/// Matched on the trailing (bare) function name — `pg_catalog.pg_relation_size`
+/// Matched on the trailing (bare) function name - `pg_catalog.pg_relation_size`
 /// resolves the same builtin.
 pub const TEXT_RELATION_NAME_FUNCTIONS: &[&str] = &[
     "pg_relation_size",
@@ -142,7 +142,7 @@ pub const TEXT_RELATION_NAME_FUNCTIONS: &[&str] = &[
     "has_any_column_privilege",
     "has_column_privilege",
     // The XML table-export family takes a `regclass`-coercible relation NAME
-    // and dumps the relation's rows as XML — a foreign-table exfil vector.
+    // and dumps the relation's rows as XML - a foreign-table exfil vector.
     "table_to_xml",
     "table_to_xmlschema",
     "table_to_xml_and_xmlschema",
@@ -151,14 +151,14 @@ pub const TEXT_RELATION_NAME_FUNCTIONS: &[&str] = &[
 /// Builtins whose first `text` argument is a bare **schema name**.
 ///
 /// The `schema_to_xml` family dumps an ENTIRE schema's contents as XML; pointed
-/// at a foreign schema (`schema_to_xml('control', …)`) it exfiltrates the whole
+/// at a foreign schema (`schema_to_xml('control', ...)`) it exfiltrates the whole
 /// platform/other-tenant schema. The literal IS the bare schema name (no
-/// `schema.object` split — like `regnamespace`/`to_regnamespace`), so it is
+/// `schema.object` split - like `regnamespace`/`to_regnamespace`), so it is
 /// re-checked as a namespace name for cross-schema confinement. Matched on the
 /// trailing (bare) function name.
 ///
-/// (`database_to_xml`/`database_to_xmlschema` carry NO schema literal — they
-/// dump everything the role can see — so they are out of parse-time scope and
+/// (`database_to_xml`/`database_to_xmlschema` carry NO schema literal - they
+/// dump everything the role can see - so they are out of parse-time scope and
 /// rely on the line-2 least-priv `migrator` role.)
 pub const NAMESPACE_NAME_FUNCTIONS: &[&str] = &[
     "schema_to_xml",
@@ -171,13 +171,13 @@ pub const NAMESPACE_NAME_FUNCTIONS: &[&str] = &[
 ///
 /// The embedded SQL is never re-parsed
 /// by the structural walks, so a cross-schema read, a file-access function, or
-/// a DDL hidden in that literal slips past — it must be re-parsed and run
+/// a DDL hidden in that literal slips past - it must be re-parsed and run
 /// through the SAME guard recursively.
 ///
-/// `query_to_xml(text query, …)` / `query_to_xmlschema` /
+/// `query_to_xml(text query, ...)` / `query_to_xmlschema` /
 /// `query_to_xml_and_xmlschema` take the SQL as arg 0;
-/// `cursor_to_xml(refcursor, …)` / `cursor_to_xmlschema` take a cursor, but the
-/// string-literal call form `cursor_to_xml('SELECT …', …)` still carries SQL.
+/// `cursor_to_xml(refcursor, ...)` / `cursor_to_xmlschema` take a cursor, but the
+/// string-literal call form `cursor_to_xml('SELECT ...', ...)` still carries SQL.
 /// Only the literal (`A_Const`) form is in parse-scope; a runtime-constructed
 /// query argument is the line-2 role's job. Matched on the trailing (bare) name.
 pub const SQL_STRING_ARG_FUNCTIONS: &[&str] = &[
@@ -188,19 +188,19 @@ pub const SQL_STRING_ARG_FUNCTIONS: &[&str] = &[
     "cursor_to_xmlschema",
 ];
 
-/// The `set_config()` builtin — the function-call form of `SET <param>`.
+/// The `set_config()` builtin - the function-call form of `SET <param>`.
 ///
 /// `set_config(<param>, <value>, <is_local>)` is the function-call form of
 /// `SET <param> = <value>`. The structural `VariableSetStmt` gate denies a
 /// `SET search_path`/`role`/`session_authorization`, but `set_config()` is a
-/// `FuncCall` that slips past it — so its FIRST string-literal argument is
+/// `FuncCall` that slips past it - so its FIRST string-literal argument is
 /// checked against [`FORBIDDEN_SET_PARAMS`] and denied identically.
 pub const SET_CONFIG_FUNCTION: &str = "set_config";
 
 /// Object-name resolvers whose object name is a Postgres ARRAY literal.
 ///
 /// The object name is a Postgres array literal whose FIRST element is the
-/// schema (`pg_get_object_address('table','{schema,obj}', …)`). The schema is
+/// schema (`pg_get_object_address('table','{schema,obj}', ...)`). The schema is
 /// value-carried inside the array text, invisible to the structural walker; its
 /// first element is re-checked for cross-schema confinement. Matched on the
 /// trailing (bare) function name.
@@ -244,8 +244,8 @@ pub mod rule {
     pub const EXTENSION_NOT_ALLOWLISTED: &str = "extension_not_allowlisted";
     pub const ALTER_SYSTEM: &str = "alter_system";
     pub const ROLE_MANAGEMENT: &str = "role_management";
-    /// `CREATE/ALTER ROLE … SUPERUSER` — host-reaching privilege escalation
-    /// (a superuser bypasses RLS, reads/writes arbitrary files, runs `COPY …
+    /// `CREATE/ALTER ROLE ... SUPERUSER` - host-reaching privilege escalation
+    /// (a superuser bypasses RLS, reads/writes arbitrary files, runs `COPY ...
     /// PROGRAM`). Denied for EVERY charter, INCLUDING Platform (Platform widens
     /// privilege *within* the DB, never *host* reach), and there is no longer any
     /// posture that skips the deny-list to reach it.
@@ -270,20 +270,20 @@ pub mod rule {
     /// the same shapes first with richer diagnostics; this is the boundary check
     /// for a host calling the scanner directly.
     pub const VIEW_BODY_NOT_A_SELECT: &str = "view_body_not_a_select";
-    /// `CREATE/ALTER FUNCTION … SECURITY DEFINER` — runs with the definer's
+    /// `CREATE/ALTER FUNCTION ... SECURITY DEFINER` - runs with the definer's
     /// (migrator) privileges, an escalation primitive once installed.
     pub const SECURITY_DEFINER: &str = "security_definer_function";
-    /// `ALTER FUNCTION … SET search_path = …` — pins a confinement-escaping
+    /// `ALTER FUNCTION ... SET search_path = ...` - pins a confinement-escaping
     /// `search_path` into a persisted function.
     pub const FUNCTION_SET_SEARCH_PATH: &str = "function_set_search_path";
-    /// `ALTER … OWNER TO <privileged role>` — reparent an object to a
+    /// `ALTER ... OWNER TO <privileged role>` - reparent an object to a
     /// platform/superuser role (privilege transfer).
     pub const OWNER_CHANGE: &str = "owner_change_to_privileged_role";
     /// An `ALTER TABLE` subcommand outside the safe migration set (e.g. OWNER
     /// TO, INHERIT, REPLICA IDENTITY, generic options).
     pub const UNSAFE_ALTER_TABLE_CMD: &str = "unsafe_alter_table_subcommand";
     /// A relation read/write targeting a system catalog
-    /// (`pg_catalog.*` / unqualified `pg_*` / `information_schema.*`) — leaks
+    /// (`pg_catalog.*` / unqualified `pg_*` / `information_schema.*`) - leaks
     /// roles/passwords/function source/cross-tenant metadata.
     pub const SYSTEM_CATALOG_ACCESS: &str = "system_catalog_access";
 }

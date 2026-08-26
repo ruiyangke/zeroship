@@ -32,9 +32,10 @@ fn assert_namespace_denied(guard: &SqlGuard, sql: &str, want_rule: &str) {
     }
 }
 
-// ── a charter that mandatorily injects over the whole app-schema universe ───────
-// `schema.create_table` / `schema.rename` are granted only inside `app` (creatable ⊑
-// injected). `deleted_at` is an injected column; the PK is pinned to `id`.
+// -- a charter that mandatorily injects over the whole app-schema universe -------
+// `schema.create_table` / `schema.rename` are granted only inside `app`, so the
+// creatable region sits inside the injected one. `deleted_at` is an injected
+// column; the PK is pinned to `id`.
 const INJECT_APP_CHARTER: &str = r#"policy_version = 1
 [[grant]]
 key = "safety.destructive_ops"
@@ -69,9 +70,9 @@ columns = [
 indexes = [ { name = "ix_deleted_at", columns = ["deleted_at"] } ]
 "#;
 
-// ════════════════════════════════════════════════════════════════════════════════
-// 1. Raw CREATE TABLE inside an inject scope → RawCreateInInjectScope (DENY)
-// ════════════════════════════════════════════════════════════════════════════════
+// ================================================================================
+// 1. Raw CREATE TABLE inside an inject scope -> RawCreateInInjectScope (DENY)
+// ================================================================================
 
 #[test]
 fn raw_create_table_in_inject_scope_is_denied() {
@@ -94,7 +95,7 @@ fn raw_ctas_and_select_into_in_inject_scope_are_denied() {
         "CREATE TABLE app.t AS SELECT 1 AS id",
         namespace_rule::RAW_CREATE_IN_INJECT_SCOPE,
     );
-    // SELECT … INTO spelling — same target, same denial.
+    // SELECT ... INTO spelling - same target, same denial.
     assert_namespace_denied(
         &g,
         "SELECT 1 AS id INTO app.t",
@@ -474,14 +475,14 @@ fn a_case_varying_quoted_dotted_column_does_not_satisfy_the_injected_column() {
         .expect("a create declaring the injected dotted column conforms");
 }
 
-// ════════════════════════════════════════════════════════════════════════════════
-// 2. Structured/raw create OUTSIDE the schema.create_table grant → denied
-// ════════════════════════════════════════════════════════════════════════════════
+// ================================================================================
+// 2. Structured/raw create OUTSIDE the schema.create_table grant -> denied
+// ================================================================================
 
 #[test]
 fn create_outside_the_create_table_grant_is_denied() {
     // A charter that grants create only in `app`, injects nothing (so no
-    // RawCreateInInjectScope) — a create in `staging` is not granted.
+    // RawCreateInInjectScope) - a create in `staging` is not granted.
     let charter = r#"policy_version = 1
 [[grant]]
 key = "schema.cross_schema"
@@ -493,7 +494,7 @@ value = true
 scope = { include = ["app"] }
 "#;
     // `staging` is in cross-schema scope (so `staging.t` is not a CrossSchema
-    // violation) but NOT in the create grant (`app`-only) → CreateTableNotGranted.
+    // violation) but NOT in the create grant (`app`-only) -> CreateTableNotGranted.
     let g = SqlGuard::new(GuardConfig::from_policy(
         support::effective_policy_from_charter_toml(charter),
         POSTGRES,
@@ -505,9 +506,9 @@ scope = { include = ["app"] }
     );
 }
 
-// ════════════════════════════════════════════════════════════════════════════════
-// 3. ALTER TABLE … DROP COLUMN <injected> → InjectedShapeImmutable (DENY)
-// ════════════════════════════════════════════════════════════════════════════════
+// ================================================================================
+// 3. ALTER TABLE ... DROP COLUMN <injected> -> InjectedShapeImmutable (DENY)
+// ================================================================================
 
 #[test]
 fn drop_injected_column_is_immutable() {
@@ -524,7 +525,7 @@ fn drop_injected_column_is_immutable() {
 #[test]
 fn drop_non_injected_column_is_allowed() {
     let g = guard_with(INJECT_APP_CHARTER);
-    // A plain author column is not injected → the immutability rule does not fire.
+    // A plain author column is not injected -> the immutability rule does not fire.
     g.check("ALTER TABLE app.t DROP COLUMN title")
         .expect("dropping a non-injected column is allowed");
 }
@@ -532,7 +533,7 @@ fn drop_non_injected_column_is_allowed() {
 #[test]
 fn drop_pinned_pk_constraint_is_immutable() {
     let g = guard_with(INJECT_APP_CHARTER);
-    // The covering inject rule pins the PK → any DROP CONSTRAINT is fail-closed
+    // The covering inject rule pins the PK -> any DROP CONSTRAINT is fail-closed
     // immutable (the guard cannot always tell which constraint is the PK by name).
     assert_namespace_denied(
         &g,
@@ -541,11 +542,11 @@ fn drop_pinned_pk_constraint_is_immutable() {
     );
 }
 
-// ════════════════════════════════════════════════════════════════════════════════
-// 4. SET search_path / CREATE FUNCTION under a Scoped sql.raw grant → DENY
-// ════════════════════════════════════════════════════════════════════════════════
+// ================================================================================
+// 4. SET search_path / CREATE FUNCTION under a Scoped sql.raw grant -> DENY
+// ================================================================================
 
-// A charter with `sql.raw` granted only in `app` (Scoped, non-⊤) + a ⊤ create
+// A charter with `sql.raw` granted only in `app` (Scoped, non-Top) + a Top create
 // grant so ordinary DDL is not incidentally denied by creation-gating.
 const SCOPED_RAW_SQL_CHARTER: &str = r#"policy_version = 1
 [[grant]]
@@ -590,7 +591,7 @@ fn create_function_under_scoped_raw_sql_is_denied() {
 fn unqualified_reference_under_scoped_raw_sql_is_denied() {
     let g = guard_with(SCOPED_RAW_SQL_CHARTER);
     // An unqualified relation reference cannot be attributed (no live search_path to
-    // resolve it) → matches only a ⊤-scoped grant → deny.
+    // resolve it) -> matches only a Top-scoped grant -> deny.
     assert_namespace_denied(
         &g,
         "INSERT INTO widgets (id) VALUES ('x')",
@@ -598,15 +599,15 @@ fn unqualified_reference_under_scoped_raw_sql_is_denied() {
     );
 }
 
-// ════════════════════════════════════════════════════════════════════════════════
-// 5. Raw rename INTO an inject scope with a nonconforming shape → denied
-// ════════════════════════════════════════════════════════════════════════════════
+// ================================================================================
+// 5. Raw rename INTO an inject scope with a nonconforming shape -> denied
+// ================================================================================
 
 #[test]
 fn rename_into_scope_without_rename_grant_is_denied() {
     // A same-schema `RENAME TO` that crosses an inject/rename sub-boundary within the
     // pinned schema (so cross-schema confinement does NOT fire). `schema.rename`
-    // is granted only over `app.keep_*`; renaming `app.t` → `app.other` lands outside
+    // is granted only over `app.keep_*`; renaming `app.t` -> `app.other` lands outside
     // the rename grant and (no inject covers `app.other`) is denied for lack of it.
     let charter = r#"policy_version = 1
 [[grant]]
@@ -676,9 +677,9 @@ columns = [ { name = "id", type = "text", nullable = false } ]
     );
 }
 
-// ════════════════════════════════════════════════════════════════════════════════
-// ACCEPT cases — the enforcement is not over-broad
-// ════════════════════════════════════════════════════════════════════════════════
+// ================================================================================
+// ACCEPT cases - the enforcement is not over-broad
+// ================================================================================
 
 #[test]
 fn granted_create_outside_any_inject_scope_is_allowed() {
@@ -732,7 +733,7 @@ columns = [ { name = "id", type = "text", nullable = false } ]
 
 #[test]
 fn top_raw_sql_admits_search_path_and_opaque_body() {
-    // A ⊤-scoped sql.raw grant is the fully-trusted raw posture: SET search_path
+    // A Top-scoped sql.raw grant is the fully-trusted raw posture: SET search_path
     // and CREATE FUNCTION are admitted (the deny-list still runs, so use a benign
     // trusted-language body + a benign GUC).
     let charter = r#"policy_version = 1
@@ -753,18 +754,18 @@ scope = "all"
         support::effective_policy_from_charter_toml(charter),
         POSTGRES,
     ));
-    // SET search_path is NOT refused under a ⊤ grant.
+    // SET search_path is NOT refused under a Top grant.
     match g.check("SET search_path TO app, public") {
         Ok(_) => {}
         Err(GuardError::NamespacePolicy { rule, .. }) => {
             panic!("⊤ raw_sql must admit SET search_path, got {rule}")
         }
-        // The deny-list may still classify SET search_path (FORBIDDEN_SET) — that is a
+        // The deny-list may still classify SET search_path (FORBIDDEN_SET) - that is a
         // separate Denied belt, not a NamespacePolicy refusal. Accept either non-namespace
         // outcome; the point is the SCOPED-raw-SQL namespace rule does not fire.
         Err(_) => {}
     }
-    // A trusted-language CREATE FUNCTION is not refused as an opaque body under ⊤.
+    // A trusted-language CREATE FUNCTION is not refused as an opaque body under Top.
     if let Err(GuardError::NamespacePolicy { rule, .. }) =
         g.check("CREATE FUNCTION app.f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$")
     {

@@ -20,15 +20,15 @@ use zero_migrate_ir::ir::{
 };
 use zero_migrate_ir::validate::{ExprDialectFeature, ExprDialectRejection, ExprDialectValidator};
 
-// This module's vendor identity. It names NO dialect literal of its own — the one
+// This module's vendor identity. It names NO dialect literal of its own - the one
 // declaration is `crate::DIALECT` in `lib.rs`, and the one-dialect rule is a
 // per-CRATE rule now rather than a per-module one. See `render/backends/mod.rs`.
 use crate::DIALECT;
 
 /// A validated text operand in this backend's explicitly-typed spelling.
 ///
-/// The `::text` cast is not decoration. Both positions that reach this — a regex
-/// pattern and an `IN`-list element — put the literal next to an operator whose
+/// The `::text` cast is not decoration. Both positions that reach this - a regex
+/// pattern and an `IN`-list element - put the literal next to an operator whose
 /// overload resolution would otherwise see an untyped literal, so the cast is what
 /// pins which operator runs.
 ///
@@ -55,7 +55,7 @@ fn text_literal(s: &str, what: &'static str) -> Result<String, DmlError> {
 ///
 /// It takes no backend, and that is the difference from the shared
 /// `zero_migrate_backend::dml::render_in_list_elem_portable`: every spelling here is
-/// FIXED — `'x'::text` for a string, the decimal verbatim — so there is no vendor to
+/// FIXED - `'x'::text` for a string, the decimal verbatim - so there is no vendor to
 /// resolve. The two backends whose in-list needs one (a quoted decimal, a hex string)
 /// call the portable helper and hand it `self`.
 ///
@@ -139,7 +139,7 @@ impl ExprDialectValidator for PostgresDmlRenderer {
             | ExprDialectFeature::StorageSize
             | ExprDialectFeature::Interval => Ok(()),
             // PostgreSQL renders the whole EXTRACT field set, so every part is
-            // accepted — asserted through its own renderer rather than restated,
+            // accepted - asserted through its own renderer rather than restated,
             // so the two can never disagree.
             ExprDialectFeature::Extract(field) => DmlRenderer::render_extract(self, field, "x")
                 .map(|_| ())
@@ -330,7 +330,7 @@ impl DmlRenderer for PostgresDmlRenderer {
                 if set.is_empty() {
                     return Ok(format!(" {target} DO NOTHING"));
                 }
-                // BTreeMap ⇒ deterministic column order (canonical).
+                // BTreeMap => deterministic column order (canonical).
                 let mut assigns = Vec::with_capacity(set.len());
                 for (col, val) in set {
                     let qc = dml::quote_ident_for_backend("column", col, self)?;
@@ -419,7 +419,7 @@ impl DmlRenderer for PostgresDmlRenderer {
 
     fn render_extract(&self, field: ExtractField, expr: &str) -> Result<String, DmlError> {
         // PostgreSQL implements the whole field set, so there is no refusal arm
-        // here — and that is a fact about PostgreSQL, stated by PostgreSQL,
+        // here - and that is a fact about PostgreSQL, stated by PostgreSQL,
         // rather than a shape the IR was built around.
         Ok(format!(
             "EXTRACT({} FROM {expr})",
@@ -551,12 +551,12 @@ impl DmlRenderer for PostgresDmlRenderer {
     }
 
     /// This vendor OWNS the vendor-op surface: all sixteen op kinds are this crate's
-    /// spelling, and it is the only registered backend that renders them — so an
+    /// spelling, and it is the only registered backend that renders them - so an
     /// artifact carrying one measures a `DialectScope::Only` reach naming this
     /// dialect, and apply declines it against every other target.
     ///
     /// A one-line delegation to the module that already held them. Nothing about the
-    /// rendering changed when the engine stopped naming it — `crate::vendor` is the
+    /// rendering changed when the engine stopped naming it - `crate::vendor` is the
     /// same ~720 lines it was, and this method exists so that reaching them requires
     /// going through the registry.
     fn render_vendor_op(

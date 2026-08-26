@@ -2,7 +2,7 @@
 //!
 //! The engine's `zero_migrate::test_fixtures::{no_inject, operator_with_data_security}`
 //! are `pub(crate)`, and no visibility widening can make a `pub(crate)` reachable
-//! across a crate boundary — so when the PostgreSQL execution half moved here, the
+//! across a crate boundary - so when the PostgreSQL execution half moved here, the
 //! tests that came with it needed a sibling. This is it, and it is the same shape
 //! `zero-migrate-sqlite`'s and `zero-migrate-mysql`'s `src/test_fixtures.rs` have.
 //!
@@ -14,7 +14,7 @@
 //! The charter TEXT is a copy of the engine's, deliberately: these fixtures exist to
 //! keep the moved tests asserting against the same policy they asserted against
 //! before the move, so a divergence here would be a silent change of premise.
-//! `toml::Value` does the schema-name escaping for the same reason — the same
+//! `toml::Value` does the schema-name escaping for the same reason - the same
 //! escaping, not merely equivalent escaping.
 
 use zero_migrate_ir::policy::DestructiveOps;

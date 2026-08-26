@@ -1,8 +1,8 @@
-//! PostgreSQL's line-1 defense — the `libpg_query` deny-list, behind the contract.
+//! PostgreSQL's line-1 defense - the `libpg_query` deny-list, behind the contract.
 //!
 //! This is the vendor half of `zero_migrate_backend::guard::MigrationGuard`: [`PgGuard`]
 //! is the adapter that files this vendor's machinery under its `BackendVendor`, so
-//! the engine reaches it the same way it reaches this vendor's two renderers —
+//! the engine reaches it the same way it reaches this vendor's two renderers -
 //! through the registry, never by naming a dialect.
 //!
 //! # Why the machinery itself is HERE now
@@ -25,7 +25,7 @@
 //! check). Two crates declare it; no other crate in the workspace does. Sole
 //! ownership needs those files to relocate here, which is a separate move.
 //!
-//! What did NOT come with it is the neutral seam — [`GuardConfig`], [`GuardError`],
+//! What did NOT come with it is the neutral seam - [`GuardConfig`], [`GuardError`],
 //! [`GuardOutcome`], [`MigrationGuard`] and the structured-IR data-security walk all
 //! live in `zero_migrate_backend::guard`, below every vendor, because every vendor's
 //! guard is configured by the same policy and reports in the same vocabulary.
@@ -44,7 +44,7 @@ use zero_migrate_ir::migration::MigrationFlags;
 /// The PostgreSQL line-1: the `libpg_query` deny-list + cross-schema confinement +
 /// classify + analyze, mapped onto the neutral `GuardOutcome`.
 ///
-/// Behavior-identical to calling `SqlGuard::check` — `check` only drops the
+/// Behavior-identical to calling `SqlGuard::check` - `check` only drops the
 /// PostgreSQL-specific `classes` from the returned report, because `DdlKind` is a
 /// `libpg_query` vocabulary no other engine could populate. The consumers that DO
 /// want `classes` (`flags_for`, the author/submit/loader flag derivation, the
@@ -79,7 +79,7 @@ impl MigrationGuard for PgGuard {
 
     /// The full deny-walk's narrower sibling: the "even trusted text may not do THIS"
     /// set, run over one rendered raw island when the posture has already skipped the
-    /// belt. Nothing is waved through here — a non-PostgreSQL dialect handed this
+    /// belt. Nothing is waved through here - a non-PostgreSQL dialect handed this
     /// guard is refused outright rather than mis-vetted against PG grammar.
     fn check_raw_island_sql(&self, sql: &str) -> Result<(), GuardError> {
         self.0.check_raw_island_sql_backstop(sql)
@@ -96,12 +96,12 @@ impl MigrationGuard for PgGuard {
     /// parser: an island is attributed to the relations its parse names, and one
     /// naming only unobligated relations is admitted. Unparseable text, an unpinnable
     /// schema, and a statement naming no relation at all are all treated as inside the
-    /// reach — fail-closed, because none of them can be proved harmless.
+    /// reach - fail-closed, because none of them can be proved harmless.
     fn raw_island_escapes_rls_net_state(&self, sql: &str) -> bool {
         self.0.raw_island_within_require_rls(sql)
     }
 
-    /// `true` — this guard reads `data_security.destructive_ops` in its own SQL-text
+    /// `true` - this guard reads `data_security.destructive_ops` in its own SQL-text
     /// walk and refuses there, naming the rendered statement.
     ///
     /// The neutral posture walk in
@@ -115,10 +115,10 @@ impl MigrationGuard for PgGuard {
     }
 
     /// PostgreSQL can classify its own statements, so the flags are read back out of
-    /// the text: destructive ⇒ `requires_approval`, any non-transactional statement ⇒
+    /// the text: destructive => `requires_approval`, any non-transactional statement =>
     /// `transactional: false`, plus the bare-rename and `SET NOT NULL` gates.
     ///
-    /// A *denial* is not raised here — the engine's `plan()` re-runs the guard and
+    /// A *denial* is not raised here - the engine's `plan()` re-runs the guard and
     /// records denials so a caller sees every problem at once. A denied-but-parseable
     /// migration gets conservative flags and is still minted, so `plan` can report the
     /// denial precisely. Only an UNPARSEABLE `up` errors.

@@ -3,7 +3,7 @@
 //! # Why this is not a field on the neutral connection config
 //!
 //! It was one: `ConfinementConfig::postgres`, a `PostgresConfinement` declared in
-//! `zero-migrate-backend`. The doc beside it argued — correctly — that these are
+//! `zero-migrate-backend`. The doc beside it argued - correctly - that these are
 //! "genuinely one vendor's" rather than a shared concept wearing a vendor hat, and
 //! that the reason they stayed was that no carrier for RUN-TIME vendor data existed:
 //! [`BackendVendor`](zero_migrate_backend::registry::BackendVendor) holds
@@ -12,13 +12,13 @@
 //! That argument was about the absence of a mechanism, not about the name being
 //! right. A vendor name in a neutral crate is a violation however well the comment
 //! beside it reads. The mechanism now exists and does not need to live in the static
-//! vendor table — it only needs to be keyed the same way, by
+//! vendor table - it only needs to be keyed the same way, by
 //! [`DialectId`](zero_migrate_ir::dialect::DialectId).
 //!
 //! # What an absent leg means
 //!
 //! The host supplied no PostgreSQL settings, and [`of`] answers with this crate's own
-//! [`PostgresConfinement::default`] — no `SET ROLE`, `public` as the extension
+//! [`PostgresConfinement::default`] - no `SET ROLE`, `public` as the extension
 //! resolution schema. That is exactly what the neutral `ConfinementConfig::default`
 //! used to install eagerly, so a miss reproduces the old default rather than
 //! inventing one, and it cannot be a silently wrong answer because only this crate
@@ -34,14 +34,14 @@ use zero_migrate_backend::dialectal::{DialectalValue, VendorConfinement};
 /// The confinement settings **only the PostgreSQL backend reads**.
 ///
 /// The MySQL and SQLite backends read neither field, and would have nothing to do
-/// with them if they did — MySQL has no `SET ROLE`-per-transaction confinement
+/// with them if they did - MySQL has no `SET ROLE`-per-transaction confinement
 /// model and SQLite has neither roles nor schemas.
 ///
 /// # Where they are read from, measured
 ///
 /// This doc used to claim every field was referenced "solely from
 /// `apply/backend/postgres/` and the precondition evaluator". Half of that has
-/// become true — the precondition evaluator IS the PostgreSQL backend now — and the
+/// become true - the precondition evaluator IS the PostgreSQL backend now - and the
 /// other half was never true, which is why the claim is replaced by the measurement
 /// rather than trimmed. (That backend is `zero-migrate-postgres/src/backend/` since
 /// the execution half left the engine; the paths below are relative to it.)
@@ -54,13 +54,13 @@ use zero_migrate_backend::dialectal::{DialectalValue, VendorConfinement};
 /// PostgreSQL backend too: `search_path_clause`, in that crate's
 /// `backend/session.rs`. It used to be a method on the neutral
 /// [`ExecutorConfig`] in this file, and this doc named that as the real reason the
-/// neutral [`ConfinementConfig`](zero_migrate_backend::conn::ConfinementConfig) still carried a vendor-typed field — "relocating
+/// neutral [`ConfinementConfig`](zero_migrate_backend::conn::ConfinementConfig) still carried a vendor-typed field - "relocating
 /// the field without first relocating `search_path_clause` would only move the
 /// coupling". That relocation has happened: a `search_path` is PostgreSQL's
 /// concept, all three callers were already in that file, and all three passed
 /// `POSTGRES` as the dialect.
 ///
-/// So what is left here is only DATA, and only the vendor that reads it reads it —
+/// So what is left here is only DATA, and only the vendor that reads it reads it -
 /// which is why the type is HERE now rather than on the neutral `ConfinementConfig`.
 /// The blocker this doc used to name was real and is gone: `BackendVendor` holds
 /// `&'static dyn` policy objects and these are per-project host input, so they could
@@ -73,7 +73,7 @@ pub struct PostgresConfinement {
     /// The least-privilege `migrator` role the apply flow runs each migration's
     /// DDL + journal writes under, via `SET ROLE` / `RESET ROLE` (the
     /// DB-privilege defense layer). `None` runs as the connecting
-    /// (admin) role — used only by tests / single-tenant dev where the role
+    /// (admin) role - used only by tests / single-tenant dev where the role
     /// model is not provisioned. In the platform this is always `Some`, matching
     /// the deterministic name returned by the PostgreSQL backend crate's
     /// `role::migrator_role_name` and provisioned by the host.
@@ -93,7 +93,7 @@ pub struct PostgresConfinement {
     /// SECURITY: `USAGE` permits *resolving* objects in the schema; it does NOT
     /// permit creating objects there (that needs `CREATE`, which stays revoked)
     /// nor writing existing tables (that needs per-table grants the migrator never
-    /// receives). So the cross-schema **write** confinement is unchanged — these
+    /// receives). So the cross-schema **write** confinement is unchanged - these
     /// schemas are resolution-only.
     pub extension_schemas: Vec<String>,
 }
@@ -109,7 +109,7 @@ impl Default for PostgresConfinement {
             migrator_role: None,
             // Extension types/functions (pgvector `vector`, PostGIS `geography`)
             // live in `public` on the platform/dev image. Resolution-only; the
-            // migrator gets USAGE (not CREATE) on these — see the field doc.
+            // migrator gets USAGE (not CREATE) on these - see the field doc.
             extension_schemas: vec!["public".to_string()],
         }
     }
@@ -134,7 +134,7 @@ impl VendorConfinement for PostgresConfinement {}
 ///
 /// A `static` rather than a fresh `default()` per call so [`of`] can hand back a
 /// borrow, which keeps every caller reading a `&PostgresConfinement` whether the host
-/// supplied one or not — the miss is invisible at the call site, which is what makes
+/// supplied one or not - the miss is invisible at the call site, which is what makes
 /// it safe to have one.
 static ABSENT: LazyLock<PostgresConfinement> = LazyLock::new(PostgresConfinement::default);
 

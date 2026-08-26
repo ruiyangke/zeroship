@@ -176,7 +176,7 @@ impl SchemaRenderer for PostgresSchemaRenderer {
     /// column have.
     ///
     /// MEASURED on PostgreSQL 18.4, and the set is exactly three: `numeric(10,0)` is
-    /// refused, and so is a DOMAIN over `integer` — the server checks the type itself,
+    /// refused, and so is a DOMAIN over `integer` - the server checks the type itself,
     /// not what it is built on. So this compares the catalog spelling the snapshot
     /// carries rather than trying to reason about a type's underlying family.
     fn identity_column_type_allowed(&self, data_type: &str) -> bool {
@@ -513,7 +513,7 @@ pub fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
         // Returning the bare `"vector"` token would lose the dims, so
         // this arm is unused; column DDL composes the dims back in via
         // `column_type_for_def`. Kept here to keep the
-        // enumeration exhaustive at the type-vocabulary level — a
+        // enumeration exhaustive at the type-vocabulary level - a
         // future caller that ignores dims (e.g. a generic introspection
         // path) gets the un-parameterised type.
         Some("vector") => "vector",
@@ -530,13 +530,13 @@ pub fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
         // `registerModel` JSON declares `{ type: "int" }`). Before this arm the PG
         // map degraded them to the `_ => TEXT` fallback, so the engine's
         // dialect-agnostic `desired_snapshot` (which spells types via the PG map)
-        // recorded `integer` while this emitter would have written TEXT — a
+        // recorded `integer` while this emitter would have written TEXT - a
         // permanent drift. Mapping to `INTEGER` here makes the snapshot and the
         // emitter agree on BOTH dialects. PG stays byte-identical for every
         // existing column: the SDK's `t.*` surface never emits a bare `int` on PG
-        // (`t.number()` → DOUBLE PRECISION, `t.bigInteger()` → BIGINT), so no
+        // (`t.number()` -> DOUBLE PRECISION, `t.bigInteger()` -> BIGINT), so no
         // previously-emitted PG column changes type. The PG type *names*
-        // (`bigint`/`int4`/`int8`) are deliberately NOT accepted — they are not DSL
+        // (`bigint`/`int4`/`int8`) are deliberately NOT accepted - they are not DSL
         // tokens and stay on the TEXT fallback so they remain typo-rejected.
         Some("int") | Some("integer") => "INTEGER",
         Some("smallInt") => "SMALLINT",

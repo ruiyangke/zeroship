@@ -10,14 +10,14 @@
 //! `SET LOCAL search_path`/`statement_timeout`/`lock_timeout` + `SET [LOCAL] ROLE`
 //! confinement clauses, the transactional/non-transactional/DML apply paths, the
 //! crash-recovery drop-of-INVALID-index residue, the fresh-path squash
-//! supersession-edge writes, and the transactional rollback — every one of them
+//! supersession-edge writes, and the transactional rollback - every one of them
 //! Postgres-flavoured (`$N` placeholders, `hashtext`, `pg_index`), so they live
 //! in the Postgres backend, not the shared executor.
 //!
 //! The generic orchestration (partition, drift gate, `order_pending`, the
 //! two-pass apply loop, the repeatable phase, rollback selection) stays in
 //! [`zero_migrate_backend::executor`] and reaches every one of these through the
-//! [`MigrationBackend`](zero_migrate_backend::backend::MigrationBackend) trait — never by
+//! [`MigrationBackend`](zero_migrate_backend::backend::MigrationBackend) trait - never by
 //! naming a leaf below directly.
 
 use std::time::Instant;
@@ -52,8 +52,8 @@ pub(super) const AUTHOR_SQL_LITERAL_MODE: &str = "SET LOCAL standard_conforming_
 ///
 /// Known limitation: `hashtext` yields a 32-bit hash, so two *unrelated*
 /// project ids can collide onto the same advisory-lock key. The consequence is
-/// liveness-only — two unrelated projects would serialize against each other
-/// (one waits for the other's apply) — never a correctness/cross-tenant defect,
+/// liveness-only - two unrelated projects would serialize against each other
+/// (one waits for the other's apply) - never a correctness/cross-tenant defect,
 /// since each apply still operates strictly within its own meta + project
 /// schema. Acceptable for v1. Revisit at scale with a 64-bit key
 /// (`pg_advisory_lock(int4, int4)` from a SHA-256 prefix, or two keys).
@@ -353,9 +353,9 @@ fn effective_lock_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> Result<u64,
     )
 }
 
-/// `SET LOCAL …` clauses (transaction-scoped) for the **txn path** — they
+/// `SET LOCAL ...` clauses (transaction-scoped) for the **txn path** - they
 /// vanish at COMMIT/ROLLBACK, so nothing leaks onto the session. Pins the
-/// project `search_path` (project schema **only** — the meta schema is
+/// project `search_path` (project schema **only** - the meta schema is
 /// deliberately OFF the migration-time path so an unqualified name in the `up`
 /// can never resolve to the journal, defense-in-depth) and the mandatory
 /// timeouts, with the per-migration timeout override applied.
@@ -363,7 +363,7 @@ fn effective_lock_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> Result<u64,
 /// This intentionally does **not** switch role: the role scoping is done
 /// explicitly in [`apply_transactional`] so that `SET LOCAL ROLE migrator`
 /// brackets ONLY the `<up>` and is `RESET` (back to admin) before the journal
-/// INSERT — the migrator can no longer write the journal (its grant is revoked),
+/// INSERT - the migrator can no longer write the journal (its grant is revoked),
 /// so the journal write must run as the admin, atomically in the SAME
 /// transaction as the `up`.
 pub(super) fn set_local_session_sql(
@@ -386,7 +386,7 @@ pub(super) fn set_local_session_sql(
 ///
 /// The migrator role is an engine-supplied identifier, so it is quoted through
 /// the explicit backend seam
-/// ([`zero_migrate_backend::dml::quote_ident_checked_for_backend`]) — fail-closed
+/// ([`zero_migrate_backend::dml::quote_ident_checked_for_backend`]) - fail-closed
 /// on an empty / NUL name, byte-identical to the prior `escape_quote_ident` for
 /// every real role.
 pub(super) fn set_local_role_sql(
@@ -437,7 +437,7 @@ fn dml_set_local_session_sql(cfg: &ExecutorConfig, version: &str) -> Result<Stri
     ))
 }
 
-/// Session-level `SET …` for the **non-txn path** (no transaction to scope to).
+/// Session-level `SET ...` for the **non-txn path** (no transaction to scope to).
 /// These DO mutate the session, but `zero_migrate::apply::executor::apply` restores the
 /// original GUCs on exit via [`restore_session`] so they never leak.
 /// Per-migration timeout override applied.
@@ -447,7 +447,7 @@ fn dml_set_local_session_sql(cfg: &ExecutorConfig, version: &str) -> Result<Stri
 /// runs as admin, and
 /// only the `<up>` is bracketed by an explicit `SET ROLE migrator` / `RESET ROLE`
 /// in [`apply_non_transactional`]. `search_path` is the project schema
-/// **only** — the meta schema is off the migration-time path so an unqualified
+/// **only** - the meta schema is off the migration-time path so an unqualified
 /// name in the `up` can never resolve to the journal.
 pub(crate) async fn configure_session_non_txn<D: SqlSession>(
     conn: &D,
@@ -478,18 +478,18 @@ pub(crate) async fn configure_session_non_txn<D: SqlSession>(
 ///
 /// What is refused here:
 ///
-/// - `CREATE INDEX CONCURRENTLY …` MUST be `CREATE INDEX CONCURRENTLY IF NOT
-///   EXISTS …`.
-/// - `ALTER TYPE … ADD VALUE …` MUST be `… ADD VALUE IF NOT EXISTS …`.
+/// - `CREATE INDEX CONCURRENTLY ...` MUST be `CREATE INDEX CONCURRENTLY IF NOT
+///   EXISTS ...`.
+/// - `ALTER TYPE ... ADD VALUE ...` MUST be `... ADD VALUE IF NOT EXISTS ...`.
 ///
 /// (`DROP INDEX CONCURRENTLY` and `VACUUM`, the other non-txn ops the classifier
 /// recognizes, are themselves naturally re-runnable.)
 ///
-/// Bare DML — `INSERT` / `UPDATE` / `DELETE` / `MERGE` / `TRUNCATE` — is
+/// Bare DML - `INSERT` / `UPDATE` / `DELETE` / `MERGE` / `TRUNCATE` - is
 /// **forbidden** on the non-txn path. The guard admits DML (it is safe data
 /// access), and `transaction:false` will happily route a pure-DML `up` onto the
 /// two-phase path; but recovery re-runs the `up` VERBATIM, and a bare
-/// `INSERT`/`UPDATE`/`DELETE`/`MERGE` is NOT re-runnable — a success-then-crash
+/// `INSERT`/`UPDATE`/`DELETE`/`MERGE` is NOT re-runnable - a success-then-crash
 /// (the op committed, the `completed` row did not) double-applies it on recovery.
 /// `TRUNCATE` is technically re-runnable, but it cannot run on the non-txn path
 /// at all (recovery would have to re-run it AFTER the real op, wiping a table the
@@ -498,7 +498,7 @@ pub(crate) async fn configure_session_non_txn<D: SqlSession>(
 /// the whole `up` back atomically and re-apply is clean. There is no idempotent
 /// form we can mechanically assert for arbitrary DML, so it is rejected
 /// outright; an author who genuinely needs a non-txn data step must wrap it in an
-/// idempotent guard (e.g. `INSERT … ON CONFLICT DO NOTHING` driven from a DDL op)
+/// idempotent guard (e.g. `INSERT ... ON CONFLICT DO NOTHING` driven from a DDL op)
 /// rather than a bare statement.
 ///
 /// Why this migration's `down` cannot run inside the transaction the rollback leaf
@@ -601,7 +601,7 @@ pub(crate) fn validate_non_txn_idempotent(m: &Migration) -> Result<(), ApplyErro
                 });
             }
             // Bare DML re-applies on success-then-crash recovery (the up is
-            // re-run verbatim). Forbid it on the non-txn path — DML belongs in a
+            // re-run verbatim). Forbid it on the non-txn path - DML belongs in a
             // transactional migration where a crash rolls it back atomically.
             NodeEnum::InsertStmt(_)
             | NodeEnum::UpdateStmt(_)
@@ -637,15 +637,15 @@ const fn dml_keyword(node: &NodeEnum) -> &'static str {
 }
 
 /// Transactional apply: `BEGIN; <up>; INSERT journal; COMMIT`.
-/// DDL + journal are atomic — a failure rolls back leaving no partial DDL and
+/// DDL + journal are atomic - a failure rolls back leaving no partial DDL and
 /// no journal row.
 ///
 /// `kind` is the journaled `kind` to stamp on the `completed` event: `'apply'` for
 /// an ordinary once-only migration, `'squash'` for a fresh-path squash (non-empty
 /// `supersedes`), or `'repeatable'` for a re-applied repeatable. The
-/// caller passes it explicitly — the journaled kind is the tamper anchor, so it is
+/// caller passes it explicitly - the journaled kind is the tamper anchor, so it is
 /// never inferred from anything the migration set supplies at apply time. A debug
-/// assertion ties `'squash'` ⇔ non-empty `supersedes`.
+/// assertion ties `'squash'` <=> non-empty `supersedes`.
 pub(crate) async fn apply_transactional<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -658,7 +658,7 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
     // Render the fail-closed engine-identifier quote seams BEFORE `BEGIN`.
     // These are pure functions of `cfg`/`m` with no dependency on the open txn, so
     // computing them up front means a fail-closed `IdentQuoteError` returns before
-    // any transaction is opened — no dangling txn left behind on the `?` path. The
+    // any transaction is opened - no dangling txn left behind on the `?` path. The
     // rendered SQL still EXECUTES inside the txn below, exactly as before.
     let session_sql = set_local_session_sql(cfg, m)?;
     let role_sql = set_local_role_sql(cfg)?;
@@ -670,13 +670,13 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
     // so we take a short-lived mutable borrow via a raw pointer-free path:
     // callers pass `&Client`, so we cannot call `transaction()` directly. We
     // instead drive BEGIN/COMMIT/ROLLBACK explicitly over the shared `&Client`
-    // (still one physical session, still atomic) — this avoids requiring
+    // (still one physical session, still atomic) - this avoids requiring
     // `&mut` plumbing through the whole apply loop.
     conn.batch("BEGIN").await?;
 
     // Pin search_path + the mandatory timeouts (per-migration override applied)
     // with SET LOCAL so they are scoped to THIS transaction and vanish at
-    // COMMIT/ROLLBACK — nothing leaks onto the session. This runs as
+    // COMMIT/ROLLBACK - nothing leaks onto the session. This runs as
     // the admin (always permitted); the role switch is applied separately around
     // the `<up>` only.
     if let Err(e) = conn.batch(&session_sql).await {
@@ -688,16 +688,16 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
     // carries an existence-guard probe, read the LIVE catalog as the ADMIN
     // (`snapshot_schema` is a privileged catalog read; the migrator role is assumed
     // only AFTER the decision) inside THIS already-open transaction, under the
-    // project advisory lock the whole plan already holds — so no lock is acquired or
-    // released across probe→decide→act and there is no window for the catalog to
+    // project advisory lock the whole plan already holds - so no lock is acquired or
+    // released across probe->decide->act and there is no window for the catalog to
     // change between the verdict and the action. `decide` is pure Rust over the
-    // snapshot — never a SQL-level conditional.
+    // snapshot - never a SQL-level conditional.
     //
-    // - `RunBare`       → fall through: SET LOCAL ROLE + run `up` + journal (normal).
-    // - `SatisfiedNoop` → SKIP the `up` AND the role switch, but STILL journal the
+    // - `RunBare`       -> fall through: SET LOCAL ROLE + run `up` + journal (normal).
+    // - `SatisfiedNoop` -> SKIP the `up` AND the role switch, but STILL journal the
     //                     `completed` row so the version LANDS (a re-deploy sees it
     //                     net-applied and skips it via pending computation).
-    // - `FailDrift`     → ROLLBACK + a typed `ExistenceGuardDrift` error (never a
+    // - `FailDrift`     -> ROLLBACK + a typed `ExistenceGuardDrift` error (never a
     //                     silent skip over a divergence).
     let mut skip_up = false;
     if let Some(probe) = &m.existence_guard {
@@ -705,7 +705,7 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
             Ok(s) => s,
             Err(e) => {
                 let _ = conn.batch("ROLLBACK").await;
-                // Reuse the same DriftError → ApplyError mapping `apply_locked` uses.
+                // Reuse the same DriftError -> ApplyError mapping `apply_locked` uses.
                 return Err(match e {
                     zero_migrate_backend::drift::DriftError::Db(db) => ApplyError::Db(db),
                     zero_migrate_backend::drift::DriftError::Journal(j) => ApplyError::Journal(j),
@@ -739,12 +739,12 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
     // Drop to the least-privilege migrator role for the duration of the
     // `<up>` ONLY. `SET LOCAL ROLE` is transaction-scoped, so the role switch is
     // confined to this txn; we explicitly `RESET ROLE` (below) before the journal
-    // INSERT so the journal write runs as the admin — the migrator's journal
+    // INSERT so the journal write runs as the admin - the migrator's journal
     // grant is revoked (role.rs), so it could not write the journal even if it
     // tried. The up's DDL is thereby confined to the migrator's least privileges
     // while the journal stays unforgeable by the migration.
     // On a `SatisfiedNoop` verdict (`skip_up`) the role switch + `<up>` + RESET ROLE
-    // are all skipped — the object already has the declared shape (ifNotExists) or is
+    // are all skipped - the object already has the declared shape (ifNotExists) or is
     // already absent (ifExists), so there is nothing to run; only the journal row
     // below lands so the version is recorded net-applied.
     if !skip_up {
@@ -767,7 +767,7 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
             });
         }
 
-        // RESET ROLE back to the admin — still INSIDE the transaction — so the
+        // RESET ROLE back to the admin - still INSIDE the transaction - so the
         // journal INSERT below runs as the admin (the migrator cannot write the
         // journal). `RESET ROLE` mid-transaction is supported and does not end the
         // txn, so atomicity of `<up>` + journal is preserved.
@@ -795,7 +795,7 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
     let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
 
     // Journal the completed row in the SAME transaction, as the admin. The `kind`
-    // is passed by the caller (the journaled kind is the tamper anchor — never
+    // is passed by the caller (the journaled kind is the tamper anchor - never
     // inferred from the supplied set): `'apply'` for an ordinary migration,
     // `'squash'` for a fresh-path squash (non-empty `supersedes`, so its
     // supersession edges are honored by `super::journal_sql::superseded_versions`, which filters
@@ -836,7 +836,7 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
     }
 
     // Write the fresh-DB squash supersession edges in the SAME transaction
-    // as the `completed` row above (admin). Edges-last-but-same-txn — so `S`'s
+    // as the `completed` row above (admin). Edges-last-but-same-txn - so `S`'s
     // net-applied state and its full edge set commit atomically. A failure here
     // rolls back the entire apply (no `completed` row, no edges).
     if let Err(e) = insert_supersedes_edges(conn, cfg, m.version.as_str(), supersedes).await {
@@ -874,10 +874,10 @@ fn postgres_dml_params(
 }
 
 /// Transactional apply of a single **parameterized DML** step (`op.*` DSL)
-/// — the PG executor behind
+/// - the PG executor behind
 /// [`MigrationBackend::run_dml_step`](zero_migrate_backend::backend::MigrationBackend::run_dml_step).
 ///
-/// Mirrors [`apply_transactional`]'s `BEGIN; SET LOCAL …; SET LOCAL ROLE; <stmt>;
+/// Mirrors [`apply_transactional`]'s `BEGIN; SET LOCAL ...; SET LOCAL ROLE; <stmt>;
 /// RESET ROLE; INSERT journal; COMMIT` discipline, but the statement is the DML
 /// `template` executed with `binds` bound **natively** as `$n` parameters (never
 /// interpolated). The step journals a `completed` event under `version`/`name`
@@ -903,19 +903,19 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
     // Materialize each typed bind to its **text representation** for NULL-aware,
     // text-format binding. Every value is sent in PG text format with a
     // server-INFERRED parameter type (no fixed OID), so it implicit-casts to the
-    // target COLUMN type exactly as a quoted literal would — `'2026-01-01'` →
-    // `timestamptz`, `'1.5'` → `numeric`, `'t'`/`'f'`/`'true'` → `boolean`, a uuid
-    // string → `uuid`. This is the schema-blind coercion model the op.* assembler
+    // target COLUMN type exactly as a quoted literal would - `'2026-01-01'` ->
+    // `timestamptz`, `'1.5'` -> `numeric`, `'t'`/`'f'`/`'true'` -> `boolean`, a uuid
+    // string -> `uuid`. This is the schema-blind coercion model the op.* assembler
     // (names-are-strings) needs: a concrete-typed binary bind (`text`/`int8`/
     // `bool` OID) would make PG REFUSE a value against a different column type
-    // ("cannot bind text → timestamptz"). The value is STILL a native bind — never
-    // interpolated into the SQL — so the bind-safety property holds (a metacharacter
-    // value cannot alter the statement shape). `Null` → SQL NULL (no bytes).
+    // ("cannot bind text -> timestamptz"). The value is STILL a native bind - never
+    // interpolated into the SQL - so the bind-safety property holds (a metacharacter
+    // value cannot alter the statement shape). `Null` -> SQL NULL (no bytes).
     let params = postgres_dml_params(binds).map_err(ApplyError::Backend)?;
 
     // Render the fail-closed engine-identifier quote seams BEFORE `BEGIN`,
     // so a fail-closed `IdentQuoteError` returns before any transaction is opened
-    // (no dangling txn). Both are pure functions of `cfg` — no dependency on the
+    // (no dangling txn). Both are pure functions of `cfg` - no dependency on the
     // open txn. The rendered SQL still EXECUTES inside the txn below, as before.
     // `set_local` is built from cfg directly (a DML step has no per-migration
     // timeout override slot).
@@ -953,7 +953,7 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
         }
     }
     // Fault seam (test-only): a simulated crash AFTER the DML statement ran but
-    // BEFORE the journal row — the open txn rolls back the data write too, so the
+    // BEFORE the journal row - the open txn rolls back the data write too, so the
     // step left NOTHING (resume re-applies cleanly).
     if let Err(e) = zero_migrate_backend::fault::trip(
         zero_migrate_backend::fault::points::DML_AFTER_STMT_BEFORE_JOURNAL,
@@ -990,7 +990,7 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
         return Err(ApplyError::Journal(JournalError::Db(e.into())));
     }
     // Fault seam (test-only): a simulated crash AFTER the journal INSERT but
-    // BEFORE COMMIT — the INSERT is inside the uncommitted txn, so it rolls back
+    // BEFORE COMMIT - the INSERT is inside the uncommitted txn, so it rolls back
     // with the data write; the step still left NOTHING (resume re-applies).
     if let Err(e) = zero_migrate_backend::fault::trip(
         zero_migrate_backend::fault::points::DML_AFTER_JOURNAL_BEFORE_COMMIT,
@@ -1002,9 +1002,9 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
     Ok(())
 }
 
-/// Insert the `S → v_i` supersession edges for a squash whose `up` RAN this batch
+/// Insert the `S -> v_i` supersession edges for a squash whose `up` RAN this batch
 /// (fresh path). Each `conn.execute` participates in whatever transaction
-/// the caller has open — the txn apply path calls this INSIDE its `BEGIN…COMMIT`
+/// the caller has open - the txn apply path calls this INSIDE its `BEGIN...COMMIT`
 /// so the edges are atomic with `S`'s `completed` row. No-op for a non-squash
 /// (`supersedes` empty). Admin write (the migrator has no meta-schema grant).
 async fn insert_supersedes_edges<D: SqlSession>(
@@ -1131,7 +1131,7 @@ pub(crate) async fn apply_non_transactional<D: SqlSession>(
     // Bracket the `<up>` with SET ROLE / RESET ROLE so the migration's DDL
     // runs under least-privilege confinement, but the journal writes above/below run as
     // admin. `RESET ROLE` runs on ALL exit paths (including the error path) so
-    // the role never leaks onto the session even if the `<up>` fails — and
+    // the role never leaks onto the session even if the `<up>` fails - and
     // `apply`'s `restore_session` is an unconditional backstop.
     if let Some(role) = &crate::confinement::of(cfg).migrator_role {
         let role_q = zero_migrate_backend::dml::quote_ident_checked_for_backend(
@@ -1261,10 +1261,10 @@ async fn recover_non_transactional<D: SqlSession>(
     cfg: &ExecutorConfig,
     m: &Migration,
 ) -> Result<(), ApplyError> {
-    // Drop the INVALID residue of an interrupted CONCURRENTLY build — but ONLY
+    // Drop the INVALID residue of an interrupted CONCURRENTLY build - but ONLY
     // the index(es) this migration's `up` names (scoped by design). An INVALID
     // index satisfies `IF NOT EXISTS`, so the caller's re-run of `<up>` would
-    // never rebuild it; we must drop it first. We parse the `CREATE INDEX … name`
+    // never rebuild it; we must drop it first. We parse the `CREATE INDEX ... name`
     // out of the `up` and drop *that* name (if it is currently invalid), rather
     // than every invalid index in the schema.
     //
@@ -1274,7 +1274,7 @@ async fn recover_non_transactional<D: SqlSession>(
     // serializes the engine's own applies, but it does not stop a human's manual
     // session, so scoping is the correct fix.
     for idx in index_names_in_up(&m.up) {
-        // Only drop it if it is currently INVALID — a valid index named here means
+        // Only drop it if it is currently INVALID - a valid index named here means
         // the prior attempt actually succeeded (case (b): completed then crashed
         // before journaling), and the re-run of the idempotent `up`'s
         // `IF NOT EXISTS` will correctly no-op over it. Dropping a valid index
@@ -1411,11 +1411,11 @@ fn check_non_txn_up_replayable(up: &str) -> Result<(), String> {
     }
 }
 
-/// Parse the index name(s) created by `CREATE INDEX … name … ON …` statements in
+/// Parse the index name(s) created by `CREATE INDEX ... name ... ON ...` statements in
 /// a migration's `up`, via the real Postgres parser (so syntax we cannot parse
-/// simply yields no names — recovery then drops nothing, which is the safe
+/// simply yields no names - recovery then drops nothing, which is the safe
 /// default). Unnamed `CREATE INDEX` (no explicit name) is skipped: Postgres
-/// derives the name, and recovery cannot target a name it does not know — the
+/// derives the name, and recovery cannot target a name it does not know - the
 /// non-txn idempotency rule already forbids unnamed `CONCURRENTLY` indirectly
 /// (the author always emits a name; raw SQL must too to be re-runnable).
 fn index_names_in_up(up: &str) -> Vec<String> {
@@ -1434,7 +1434,7 @@ fn index_names_in_up(up: &str) -> Vec<String> {
     names
 }
 
-/// Roll back ONE migration transactionally: `BEGIN; SET LOCAL …; SET LOCAL ROLE
+/// Roll back ONE migration transactionally: `BEGIN; SET LOCAL ...; SET LOCAL ROLE
 /// migrator; <down>; RESET ROLE; INSERT rolled_back (as admin); COMMIT`.
 ///
 /// Atomic: the `down` + its `rolled_back` journal append commit together, so a
@@ -1479,14 +1479,14 @@ pub(crate) async fn rollback_one_transactional<D: SqlSession>(
     let started = Instant::now();
     // Render the fail-closed engine-identifier quote seams BEFORE `BEGIN`,
     // so a fail-closed `IdentQuoteError` returns before any transaction is opened
-    // (no dangling txn). Both are pure functions of `cfg`/`m` — no dependency on
+    // (no dangling txn). Both are pure functions of `cfg`/`m` - no dependency on
     // the open txn. The rendered SQL still EXECUTES inside the txn below, as before.
     let session_sql = set_local_session_sql(cfg, m)?;
     let role_sql = set_local_role_sql(cfg)?;
 
     conn.batch("BEGIN").await?;
 
-    // Pin search_path + mandatory timeouts (SET LOCAL — vanish at COMMIT/ROLLBACK).
+    // Pin search_path + mandatory timeouts (SET LOCAL - vanish at COMMIT/ROLLBACK).
     if let Err(e) = conn.batch(&session_sql).await {
         let _ = conn.batch("ROLLBACK").await;
         return Err(RollbackError::Db(e.into()));
@@ -1509,7 +1509,7 @@ pub(crate) async fn rollback_one_transactional<D: SqlSession>(
             source: e.into(),
         });
     }
-    // RESET ROLE back to admin — still inside the txn — so the journal append runs
+    // RESET ROLE back to admin - still inside the txn - so the journal append runs
     // as the admin (the migrator cannot write the journal).
     if crate::confinement::of(cfg).migrator_role.is_some() {
         if let Err(e) = conn.batch("RESET ROLE").await {
@@ -1637,11 +1637,11 @@ mod pg_confinement_shape_tests {
     //! Pins the confinement shape: the **PG** apply leaf still emits its
     //! `SET LOCAL search_path` / `SET LOCAL ROLE` / `SET LOCAL statement_timeout`
     //! and `SET LOCAL lock_timeout` bracket from the
-    //! [`ConfinementConfig`](zero_migrate_backend::conn::ConfinementConfig) block — the shared
+    //! [`ConfinementConfig`](zero_migrate_backend::conn::ConfinementConfig) block - the shared
     //! budgets from `cfg.confinement`, the role and extension schemas from the
     //! PG-only [`ConfinementConfig::postgres`](zero_migrate_backend::conn::ConfinementConfig::postgres)
-    //! sub-block — and a default (SQLite-shaped construction reuses this same
-    //! `new`) carries the INERT PG confinement — never PG role/cross-schema
+    //! sub-block - and a default (SQLite-shaped construction reuses this same
+    //! `new`) carries the INERT PG confinement - never PG role/cross-schema
     //! confinement of its own.
     use super::*;
     use zero_migrate_ir::migration::{Checksum, MigrationFlags, MigrationId};
@@ -1692,9 +1692,9 @@ mod pg_confinement_shape_tests {
 
         let session = set_local_session_sql(&cfg, &m).expect("session sql renders");
         // search_path is the project schema, then the `public` extension schema
-        // (the `new()` default) — pinned for confined resolution. The
+        // (the `new()` default) - pinned for confined resolution. The
         // statement_timeout is the long RUNNING budget (60s); the lock_timeout is
-        // the SHORT lock-ACQUISITION budget (3s) — split by construction.
+        // the SHORT lock-ACQUISITION budget (3s) - split by construction.
         assert_eq!(
             session,
             "SET LOCAL search_path TO \"proj_x\", \"public\"; \
@@ -1705,7 +1705,7 @@ mod pg_confinement_shape_tests {
         );
 
         // The lock-safety split is real: the short lock-acquisition budget must
-        // be strictly shorter than the long running-statement budget — never the
+        // be strictly shorter than the long running-statement budget - never the
         // same value (which would mean a blocking DDL waits the full statement
         // budget to acquire its lock, the outage this envelope prevents).
         assert!(
@@ -1741,7 +1741,7 @@ mod pg_confinement_shape_tests {
     /// The per-migration `lock_timeout_ms` override (the maintenance-window knob,
     /// mirroring `timeout_ms`) is honoured by the txn-path session render: a
     /// migration that sets its OWN lock budget renders THAT value, not the
-    /// executor-wide default — while a migration that sets none falls back to the
+    /// executor-wide default - while a migration that sets none falls back to the
     /// SHORT default. RED pre-change (the field did not exist and the render used
     /// `cfg.lock_timeout_ms()` unconditionally).
     #[test]
@@ -1773,7 +1773,7 @@ mod pg_confinement_shape_tests {
     }
 
     /// A default-constructed config (the SHAPE the SQLite engine builds via
-    /// `ExecutorConfig::new(app_id, app_id)`) carries NO migrator role — its
+    /// `ExecutorConfig::new(app_id, app_id)`) carries NO migrator role - its
     /// PG confinement is inert; SQLite confines via its runtime authorizer
     /// mode-flip, never these PG params.
     #[test]
@@ -1968,7 +1968,7 @@ mod non_txn_idempotency_tests {
     }
 
     // The legitimate non-txn ops (idempotent CONCURRENTLY / ADD VALUE IF NOT
-    // EXISTS, naturally-rerunnable DROP INDEX CONCURRENTLY / VACUUM) still pass —
+    // EXISTS, naturally-rerunnable DROP INDEX CONCURRENTLY / VACUUM) still pass -
     // the DML fence must not over-reject inherently-non-txn DDL.
     #[test]
     fn idempotent_non_txn_ddl_still_passes() {
@@ -2070,20 +2070,20 @@ mod non_txn_idempotency_tests {
 /// The `search_path` clause value pinned for every apply (a comma-joined,
 /// double-quoted schema list).
 ///
-/// - **Confined** ⇒ the project schema **only** (byte-identical to the old
+/// - **Confined** => the project schema **only** (byte-identical to the old
 ///   hardcoded single-schema pin; the meta schema stays OFF the path so an
 ///   unqualified `up` name can never resolve to the journal).
-/// - **Platform** ⇒ the full configured schema allowlist (e.g.
+/// - **Platform** => the full configured schema allowlist (e.g.
 ///   `"zero_migrate", "public"`). A multi-schema changelog relies on
 ///   this: a first migration's `CREATE EXTENSION citext` is deliberately unqualified and
-///   must resolve a creation target (`public`) — and at that point the
+///   must resolve a creation target (`public`) - and at that point the
 ///   project schema does not yet exist, so a project-schema-only path would
 ///   error `3F000 no schema has been selected to create in`. Cross-schema
 ///   resolution between the project schema and `public` also needs them all
 ///   on the path, matching a deployment where the `postgres`
 ///   principal runs with `search_path = <project>, public`.
-/// - **Trusted** ⇒ the project schema (the `_` fallback). Trusted has no
-///   confinement — pinning the project schema is merely the default
+/// - **Trusted** => the project schema (the `_` fallback). Trusted has no
+///   confinement - pinning the project schema is merely the default
 ///   resolution target; an explicitly-qualified reference to any other schema
 ///   still resolves (and is no longer guard-blocked), preserving dbmate
 ///   parity. The operator owns the DB, so this pin is convenience, not a
@@ -2093,7 +2093,7 @@ mod non_txn_idempotency_tests {
 /// schemas, extension schemas), so each is rendered through the ONE shared
 /// explicit backend seam
 /// ([`quote_ident_checked_for_dialect`](zero_migrate_backend::dml::quote_ident_checked_for_backend))
-/// — fail-closed on an empty / NUL name, byte-identical to the prior
+/// - fail-closed on an empty / NUL name, byte-identical to the prior
 /// `escape_quote_ident` for every real schema. So the whole quoting surface (not
 /// just the DDL/journal seams) is uniformly self-defending.
 ///
@@ -2104,7 +2104,7 @@ mod non_txn_idempotency_tests {
 /// block: "Relocating the field without first relocating `search_path_clause` would
 /// only move the coupling." This is that relocation. A `search_path` is
 /// PostgreSQL's concept, all three callers are in this file, and all three passed
-/// `POSTGRES` as the dialect — so the function belongs to the vendor, not to the
+/// `POSTGRES` as the dialect - so the function belongs to the vendor, not to the
 /// per-run config every dialect shares.
 ///
 /// Keeping it a method would have cost the invariant instead. `ExecutorConfig` now
@@ -2142,7 +2142,7 @@ pub(crate) fn search_path_clause(
         }
     }
     // Confined / Trusted: the project schema is first (the sole writable
-    // resolution target — `CREATE TABLE foo` lands here, not in an extension
+    // resolution target - `CREATE TABLE foo` lands here, not in an extension
     // schema), followed by the extension schema(s) so an UNQUALIFIED extension
     // type (`vector(N)`, `geography(...)`) resolves.
     let mut parts = vec![quote(&cfg.project_schema)?];

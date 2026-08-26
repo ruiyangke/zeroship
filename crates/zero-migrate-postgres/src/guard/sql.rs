@@ -1,4 +1,4 @@
-//! The SQL security guard — parse-time deny-list + cross-schema confinement.
+//! The SQL security guard - parse-time deny-list + cross-schema confinement.
 //! **The security heart of the engine.**
 //!
 //! Migrations are privileged arbitrary-SQL authored by untrusted creators AND a
@@ -6,14 +6,14 @@
 //! parses every statement with the real Postgres parser and rejects the
 //! dangerous set (RCE / privilege-escalation / cross-tenant / file / SSRF)
 //! *regardless of the submitted SQL*. The least-privilege `migrator` role
-//! (built later) is the second line — the DB rejects the same ops even if SQL
+//! (built later) is the second line - the DB rejects the same ops even if SQL
 //! slips past parse.
 //!
 //! Two postures, by threat class:
 //! - **Deny** (hard error): RCE, privilege escalation, cross-tenant access,
 //!   filesystem/network reach. These can never be auto-confirmed.
 //! - **Flag** (`GuardReport.destructive`): data loss (`DROP`/`TRUNCATE`/lossy
-//!   type change). The guard does not deny these — the gate (built later)
+//!   type change). The guard does not deny these - the gate (built later)
 //!   decides on data loss. The guard only surfaces them.
 //!
 //! **Deny-by-default:** an unrecognized statement that *could* be dangerous is
@@ -42,7 +42,7 @@ use zero_migrate_policy::{normalize_object_name, GrantRegion, ObjectName, ShapeE
 // `SqlGuard`, the deny-walk, the classifier, the analyzers.
 //
 // `check_ir_data_security_policy` used to be the exception that pinned this crate in
-// place — dialect-neutral enforcement that nevertheless reached `pg_query::parse` for
+// place - dialect-neutral enforcement that nevertheless reached `pg_query::parse` for
 // a raw island. It now lives in the backend contract and asks the vendor that owns
 // the raw door, through `MigrationGuard::raw_island_escapes_rls_net_state`. The
 // PostgreSQL answer is `SqlGuard::raw_island_within_require_rls` below.
@@ -65,52 +65,52 @@ use crate::DIALECT;
 /// raw-SQL create/DDL classification, per-op creation-gating, and injected-shape
 /// immutability. Each fails closed with the design's named error code.
 pub mod namespace_rule {
-    /// II.2.5 — a raw create (`CREATE TABLE` / CTAS / `SELECT INTO` / `LIKE` /
+    /// II.2.5 - a raw create (`CREATE TABLE` / CTAS / `SELECT INTO` / `LIKE` /
     /// `PARTITION OF` / `CREATE TABLE AS EXECUTE` / `INHERITS`) targets an object an
     /// `inject` rule covers and its own text does not carry the injected shape.
     /// Injection cannot rewrite raw text, so a create that does not already declare
     /// every injected column and exactly the pinned primary key would land a table
     /// the inject rule was supposed to shape.
     pub const RAW_CREATE_IN_INJECT_SCOPE: &str = "RawCreateInInjectScope";
-    /// II.2.6a — a create (`CREATE TABLE`, structured or classified-raw) is not
+    /// II.2.6a - a create (`CREATE TABLE`, structured or classified-raw) is not
     /// covered by a `schema.create_table` grant (default-deny namespace anchor).
     pub const CREATE_TABLE_NOT_GRANTED: &str = "CreateTableNotGranted";
-    /// II.2.6a — a `CREATE SCHEMA` (structured or classified-raw) is not covered by
+    /// II.2.6a - a `CREATE SCHEMA` (structured or classified-raw) is not covered by
     /// a `schema.create_schema` grant.
     pub const CREATE_SCHEMA_NOT_GRANTED: &str = "CreateSchemaNotGranted";
-    /// II.2.5 — a raw rename / `SET SCHEMA` moves a table INTO an inject scope; the
+    /// II.2.5 - a raw rename / `SET SCHEMA` moves a table INTO an inject scope; the
     /// engine cannot re-inject over raw text, so the move is denied.
     pub const RAW_RENAME_INTO_INJECT_SCOPE: &str = "RawRenameIntoInjectScope";
-    /// II.2.6a — a rename/move into a scope is not covered by a `schema.rename`
+    /// II.2.6a - a rename/move into a scope is not covered by a `schema.rename`
     /// grant at the target.
     pub const RENAME_INTO_NOT_GRANTED: &str = "RenameIntoNotGranted";
-    /// II.2.5 — an unqualified object reference under a non-⊤ `sql.raw` grant is
-    /// unattributable (no live search_path to resolve it) → ⊤-only → deny.
+    /// II.2.5 - an unqualified object reference under a non-Top `sql.raw` grant is
+    /// unattributable (no live search_path to resolve it) -> Top-only -> deny.
     pub const UNQUALIFIED_NAME_UNDER_SCOPED_RAW_SQL: &str = "UnqualifiedNameUnderScopedRawSql";
-    /// II.2.5 — `SET search_path` (or equivalent) under a non-⊤ `sql.raw` grant
-    /// mutates the very name-resolution context attribution depends on → refused.
+    /// II.2.5 - `SET search_path` (or equivalent) under a non-Top `sql.raw` grant
+    /// mutates the very name-resolution context attribution depends on -> refused.
     pub const SEARCH_PATH_UNDER_SCOPED_RAW_SQL: &str = "SearchPathUnderScopedRawSql";
-    /// II.2.5 — an opaque-body construct (`CREATE FUNCTION`/`PROCEDURE`/`TRIGGER`/
-    /// `DO`) under a non-⊤ `sql.raw` grant defeats statement-level attribution.
+    /// II.2.5 - an opaque-body construct (`CREATE FUNCTION`/`PROCEDURE`/`TRIGGER`/
+    /// `DO`) under a non-Top `sql.raw` grant defeats statement-level attribution.
     pub const OPAQUE_BODY_UNDER_SCOPED_RAW_SQL: &str = "OpaqueBodyUnderScopedRawSql";
-    /// II.2.5 — a raw statement the parser cannot classify into exactly one shape,
-    /// or whose target is dynamic/unqualified, is unattributable under a non-⊤ grant.
+    /// II.2.5 - a raw statement the parser cannot classify into exactly one shape,
+    /// or whose target is dynamic/unqualified, is unattributable under a non-Top grant.
     pub const UNATTRIBUTABLE_RAW_UNDER_SCOPED_RAW_SQL: &str = "UnattributableRawUnderScopedRawSql";
-    /// II.2.6b — an `ALTER`/`DROP COLUMN`/`RENAME` touching a column the covering
+    /// II.2.6b - an `ALTER`/`DROP COLUMN`/`RENAME` touching a column the covering
     /// inject rule contributes, without an explicit `schema.alter_injected` grant.
     pub const INJECTED_SHAPE_IMMUTABLE: &str = "InjectedShapeImmutable";
-    /// II.2.6b — an index-mutating op on an injected index.
+    /// II.2.6b - an index-mutating op on an injected index.
     pub const INJECTED_INDEX_IMMUTABLE: &str = "InjectedIndexImmutable";
-    /// II.2.6b — a PK-replacing/dropping op on a table whose PK a covering inject
+    /// II.2.6b - a PK-replacing/dropping op on a table whose PK a covering inject
     /// rule pins.
     pub const INJECTED_PRIMARY_KEY_IMMUTABLE: &str = "InjectedPrimaryKeyImmutable";
-    /// II.2.6b (H3) — a rename-into where a name-matching element diverges
+    /// II.2.6b (H3) - a rename-into where a name-matching element diverges
     /// structurally from the injected shape (type/nullability/default/key/PK-columns).
     pub const INJECTED_SHAPE_CONFORMANCE_MISMATCH: &str = "InjectedShapeConformanceMismatch";
 }
 
 /// Whether the effective policy admits a DROP object class beyond
-/// [`is_safe_drop_object`] (the `.down.sql`-only reverses: schema/extension/policy —
+/// [`is_safe_drop_object`] (the `.down.sql`-only reverses: schema/extension/policy -
 /// DROP ROLE is handled by its own arm). Reproduces `platform_drop_object_allowed`
 /// via the PDP.
 ///
@@ -124,7 +124,7 @@ pub mod namespace_rule {
 ///
 /// `remove_type` is a raw `libpg_query` `ObjectType` discriminant, and the body
 /// decodes it. [`GuardConfig`] moved to `zero-migrate-backend`, which sits below every
-/// vendor and carries no SQL parser — so keeping this as a method would have dragged
+/// vendor and carries no SQL parser - so keeping this as a method would have dragged
 /// `pg_query` down there with it, and from there under `zero-migrate-sqlite` and
 /// `zero-migrate-mysql`, which build without it today. Translating one vendor's parse
 /// enum was never the neutral config's job anyway; it is the PostgreSQL guard's. The
@@ -163,7 +163,7 @@ fn grants_drop_object(cfg: &GuardConfig, remove_type: i32, object: Option<&Objec
 /// a name that does not fold to a single segment. The answer there is no, with no
 /// fallback to a coarser question. `code.extension` has no whole-universe spelling -
 /// its value is an enumerated set of names, never a glob - so unlike the Bool knobs
-/// beside it there is no `⊤` grant an unnamed target could still be provably inside.
+/// beside it there is no `Top` grant an unnamed target could still be provably inside.
 /// Refusing is the only sound answer, and it is the one that stays sound if the
 /// grammar ever grows a spelling this resolver has not seen.
 ///
@@ -425,7 +425,7 @@ pub struct GuardReport {
     pub classes: Vec<StatementClass>,
     /// True if *any* statement is destructive (data loss). The gate decides.
     pub destructive: bool,
-    /// Operational [`Advisory`]s — lock-heavy ops,
+    /// Operational [`Advisory`]s - lock-heavy ops,
     /// destructive/backward-incompatible shapes, missing FK indexes, etc.
     /// **Advisory-only:** these never deny or gate (the deny-list +
     /// least-privilege role own security; the engine gate owns data-loss
@@ -643,14 +643,14 @@ impl SqlGuard {
     /// first dangerous/cross-tenant/unparseable construct.
     ///
     /// # Errors
-    /// - [`GuardError::Denied`] — a hard-denied construct (incl. ones nested
-    ///   inside `DO $$…$$` blocks and function bodies).
-    /// - [`GuardError::CrossSchema`] — a reference outside the project schema.
-    /// - [`GuardError::Parse`] — unparseable SQL (deny-by-default).
+    /// - [`GuardError::Denied`] - a hard-denied construct (incl. ones nested
+    ///   inside `DO $$...$$` blocks and function bodies).
+    /// - [`GuardError::CrossSchema`] - a reference outside the project schema.
+    /// - [`GuardError::Parse`] - unparseable SQL (deny-by-default).
     ///
     /// There used to be a posture under which the deny-list, cross-schema and body
     /// walks were SKIPPED entirely, leaving only `classify` + `analyze` to derive the
-    /// destructive/transactional/approval flags — a config selected it through a
+    /// destructive/transactional/approval flags - a config selected it through a
     /// root/host-set guard mode, not through anything the policy could grant. It is
     /// gone: every config runs every walk, and how far a caller's SQL gets is decided
     /// by the composed policy alone.
@@ -658,7 +658,7 @@ impl SqlGuard {
         // Non-Postgres fail-closed backstop. `SqlGuard` is the **Postgres** line-1
         // (libpg_query below); it is the PG arm of the per-engine
         // [`MigrationGuard`] seam ([`PgGuard`] wraps it). The engine never selects
-        // `SqlGuard` for SQLite OR MySQL — each routes through its own registered
+        // `SqlGuard` for SQLite OR MySQL - each routes through its own registered
         // descriptor guard, the trusted descriptor-diff path. The arm just below
         // defends against a wrong caller for either shipping or future backends.
         // This arm is the defensive fail-closed for the *wrong caller*: if a raw,
@@ -701,7 +701,7 @@ impl SqlGuard {
         }
 
         // Collect operational advisories (lock-heavy / destructive / rename /
-        // missing-FK-index shapes). These are ADVISORY ONLY — see
+        // missing-FK-index shapes). These are ADVISORY ONLY - see
         // `crate::analysis::analyze`; they never deny or gate. We reuse the single parse
         // already done above by re-running the analyzer engine over the SQL.
         let mut advisories = crate::analysis::analyze::analyze(sql);
@@ -811,12 +811,12 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
     /// Check one top-level statement node (and everything nested under it).
     ///
     /// `json` is the `serde_json` serialization of the statement's `RawStmt`
-    /// subtree — used by the generic full-tree walks (Root Cause 2 fix) so we
+    /// subtree - used by the generic full-tree walks (Root Cause 2 fix) so we
     /// visit EVERY node, including the slots `pg_query::nodes()` skips (column
-    /// DEFAULT, CHECK, VALUES lists, RULE actions, SET SCHEMA targets, …).
+    /// DEFAULT, CHECK, VALUES lists, RULE actions, SET SCHEMA targets, ...).
     fn check_node(&self, node: &NodeEnum, json: &Value, raw: &str) -> Result<(), GuardError> {
         // 0. Scoped-raw-SQL refusals (II.2.5) run FIRST, but ONLY under a Scoped
-        //    (non-⊤) `sql.raw` grant — the posture that HAS relaxed raw SQL, so
+        //    (non-Top) `sql.raw` grant - the posture that HAS relaxed raw SQL, so
         //    the refined namespace refusal (SearchPathUnderScopedRawSql /
         //    OpaqueBodyUnderScopedRawSql / UnqualifiedNameUnderScopedRawSql) owns the
         //    diagnostic instead of the deny-list belt. Under the plain confined path
@@ -829,11 +829,11 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
         //    known-safe migration statements passes; everything else is denied.
         self.check_statement_kind(node, raw)?;
 
-        // 2. Cross-schema confinement — any explicit foreign schema, anywhere
+        // 2. Cross-schema confinement - any explicit foreign schema, anywhere
         //    in the full tree (RangeVar, SET SCHEMA newschema, CreateSchema,
-        //    trigger/CALL funcname, COMMENT object, INHERIT target, …). Owns the
+        //    trigger/CALL funcname, COMMENT object, INHERIT target, ...). Owns the
         //    diagnostic for a foreign-schema reference (`CrossSchema`), so it runs
-        //    before the namespace creation-gating below — a cross-tenant `CREATE TABLE
+        //    before the namespace creation-gating below - a cross-tenant `CREATE TABLE
         //    other.t` is a cross-schema violation first, not a creation-gating one.
         self.check_cross_schema(json, raw)?;
 
@@ -846,7 +846,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
         //     Runs AFTER cross-schema so a foreign-schema target reports `CrossSchema`.
         self.check_namespace_structural(node, raw)?;
 
-        // 2b. System-catalog relation reads/writes — `pg_catalog.pg_authid`,
+        // 2b. System-catalog relation reads/writes - `pg_catalog.pg_authid`,
         //     unqualified `pg_shadow`/`pg_user`, `information_schema.*`. These
         //     leak roles/passwords/source and are never a project's own table.
         Self::check_system_catalog_relations(json, raw)?;
@@ -861,27 +861,27 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
 
         // 3c. Cross-schema via a STRING LITERAL argument: a schema-qualified
         //     object named inside a literal passed to a `reg*` cast or a
-        //     name-resolving builtin (`nextval`/`setval`/`to_regclass`/…) is an
+        //     name-resolving builtin (`nextval`/`setval`/`to_regclass`/...) is an
         //     `A_Const`, invisible to the structural schema walker. Re-check the
         //     literal's leading `schema.` qualifier for confinement.
         self.check_literal_schema_refs(json, raw)?;
 
-        // 3d. `set_config('search_path'|'role'|…, …)` is the function form of a
-        //     `SET <param>` the structural VariableSetStmt gate denies — deny
+        // 3d. `set_config('search_path'|'role'|..., ...)` is the function form of a
+        //     `SET <param>` the structural VariableSetStmt gate denies - deny
         //     the call form identically.
         Self::check_set_config_calls(json, raw)?;
 
-        // 3e. `query_to_xml('SELECT … FROM control.users', …)` & family take a
+        // 3e. `query_to_xml('SELECT ... FROM control.users', ...)` & family take a
         //     free-form SQL string the server executes; the embedded SQL is
         //     never re-parsed by the walks above, so a cross-schema read,
         //     file-access function, or DDL hidden in the literal slips past.
         //     Re-parse each such literal and run the SAME guard recursively
         //     (reusing `check_body_text`, the body re-parse machinery).
-        //     A non-literal/runtime query arg is out of parse-scope — line-2
+        //     A non-literal/runtime query arg is out of parse-scope - line-2
         //     (least-priv `migrator` role) defense, same limit as `set_config`.
         self.check_sql_string_arg_calls(json, raw)?;
 
-        // 4. Recurse into DO blocks and function bodies — the must-inspect
+        // 4. Recurse into DO blocks and function bodies - the must-inspect
         //    case. A dangerous construct hidden in a body is still dangerous.
         self.check_bodies(node, raw)?;
 
@@ -900,7 +900,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
     ///
     /// - a **create** (`CreateStmt` incl. `LIKE`/`INHERITS`/`PARTITION OF`,
     ///   `CreateTableAsStmt` = CTAS / `CREATE TABLE AS EXECUTE`, `SelectStmt` with an
-    ///   `into_clause` = `SELECT … INTO`) must pass `schema.create_table` at the target
+    ///   `into_clause` = `SELECT ... INTO`) must pass `schema.create_table` at the target
     ///   AND, wherever an inject rule covers it, must declare every injected column and
     ///   exactly the pinned primary key (`RawCreateInInjectScope`). A create whose
     ///   columns the parse cannot enumerate (`LIKE`/`INHERITS`/`PARTITION OF`/`OF
@@ -914,12 +914,12 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
     ///   (`InjectedShapeImmutable`/`InjectedPrimaryKeyImmutable`).
     fn check_namespace_structural(&self, node: &NodeEnum, raw: &str) -> Result<(), GuardError> {
         match node {
-            // ── raw create: CREATE TABLE (incl. LIKE / INHERITS / PARTITION OF) ──
+            // -- raw create: CREATE TABLE (incl. LIKE / INHERITS / PARTITION OF) --
             NodeEnum::CreateStmt(c) => {
                 let target = self.resolve_relation_target(c.relation.as_ref(), raw)?;
                 self.gate_raw_create(&target, raw, Some(c))?;
             }
-            // ── CTAS / CREATE TABLE AS EXECUTE ──────────────────────────────────
+            // -- CTAS / CREATE TABLE AS EXECUTE ----------------------------------
             NodeEnum::CreateTableAsStmt(cta) => {
                 // A materialized view is not a table create; only OBJECT_TABLE /
                 // SELECT INTO bring a table into existence. Other objtypes fall
@@ -930,8 +930,8 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                     self.gate_raw_create(&target, raw, None)?;
                 }
             }
-            // ── SELECT … INTO <table> ───────────────────────────────────────────
-            // pg_query parses `SELECT … INTO t` as a `SelectStmt` carrying an
+            // -- SELECT ... INTO <table> -------------------------------------------
+            // pg_query parses `SELECT ... INTO t` as a `SelectStmt` carrying an
             // `into_clause`, NOT a `CreateTableAsStmt`. It still brings a table into
             // existence, so it is a raw create and gets the same gate.
             NodeEnum::SelectStmt(s) => {
@@ -940,10 +940,10 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                     self.gate_raw_create(&target, raw, None)?;
                 }
             }
-            // ── CREATE SCHEMA ───────────────────────────────────────────────────
+            // -- CREATE SCHEMA ---------------------------------------------------
             NodeEnum::CreateSchemaStmt(cs) => {
-                // An unqualified/dynamic schema name is unattributable → fail closed
-                // unless create_schema is ⊤. `schemaname` empty ⇒ AUTHORIZATION-only
+                // An unqualified/dynamic schema name is unattributable -> fail closed
+                // unless create_schema is Top. `schemaname` empty => AUTHORIZATION-only
                 // form; treat as unattributable.
                 let name = cs.schemaname.trim();
                 let obj = if name.is_empty() {
@@ -971,11 +971,11 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                     }
                 }
             }
-            // ── RENAME (table / column) ─────────────────────────────────────────
+            // -- RENAME (table / column) -----------------------------------------
             NodeEnum::RenameStmt(r) => self.check_rename(r, raw)?,
-            // ── SET SCHEMA (move a table across schemas) ────────────────────────
+            // -- SET SCHEMA (move a table across schemas) ------------------------
             NodeEnum::AlterObjectSchemaStmt(a) => self.check_set_schema(a, raw)?,
-            // ── ALTER TABLE (injected-shape immutability) ───────────────────────
+            // -- ALTER TABLE (injected-shape immutability) -----------------------
             NodeEnum::AlterTableStmt(at) => self.check_alter_table_injected(at, raw)?,
             _ => {}
         }
@@ -1060,7 +1060,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
         Ok(())
     }
 
-    /// `ALTER TABLE … RENAME TO` (table move) / `RENAME COLUMN` (injected-column
+    /// `ALTER TABLE ... RENAME TO` (table move) / `RENAME COLUMN` (injected-column
     /// immutability). A bare same-schema table rename still re-anchors under
     /// `schema.rename` at the target and is denied into any inject scope.
     fn check_rename(&self, r: &protobuf::RenameStmt, raw: &str) -> Result<(), GuardError> {
@@ -1108,7 +1108,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
         // The object being renamed (its current name).
         let source = self.resolve_relation_target(r.relation.as_ref(), raw)?;
         if is_column {
-            // RENAME COLUMN <subname> — immutable if the OLD column name is injected.
+            // RENAME COLUMN <subname> - immutable if the OLD column name is injected.
             let col = r.subname.trim();
             if !col.is_empty()
                 && self
@@ -1142,7 +1142,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
         self.gate_rename_into(&source, &target, raw)
     }
 
-    /// `ALTER TABLE … SET SCHEMA <newschema>` — a cross-schema table move.
+    /// `ALTER TABLE ... SET SCHEMA <newschema>` - a cross-schema table move.
     fn check_set_schema(
         &self,
         a: &protobuf::AlterObjectSchemaStmt,
@@ -1172,7 +1172,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
 
     /// Shared rename/move gate (II.2.5/II.2.6b/d). Only fires when the move CROSSES a
     /// scope boundary (the covering inject/rename-grant set differs before vs after):
-    /// - denied into ANY inject scope (`RawRenameIntoInjectScope` — the moved table
+    /// - denied into ANY inject scope (`RawRenameIntoInjectScope` - the moved table
     ///   would owe an injection the raw path cannot supply);
     /// - otherwise requires `schema.rename` at the target.
     fn gate_rename_into(
@@ -1214,7 +1214,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
         at: &protobuf::AlterTableStmt,
         raw: &str,
     ) -> Result<(), GuardError> {
-        // ALTER TABLE only — a matview/index objtype carries no injected table shape.
+        // ALTER TABLE only - a matview/index objtype carries no injected table shape.
         if at.objtype != ObjectType::ObjectTable as i32
             && at.objtype != ObjectType::ObjectType as i32
         {
@@ -1260,7 +1260,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                     raw,
                 ));
             }
-            // DROP CONSTRAINT — may drop the pinned PK. We cannot always tell which
+            // DROP CONSTRAINT - may drop the pinned PK. We cannot always tell which
             // constraint is the PK from the name alone, so if the table's PK is
             // pinned by a covering inject rule, a DROP CONSTRAINT is immutable
             // (fail-closed) unless granted.
@@ -1279,11 +1279,11 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
         Ok(())
     }
 
-    /// Scoped-raw-SQL refusals (II.2.5): under a Scoped (non-⊤) `sql.raw` grant,
+    /// Scoped-raw-SQL refusals (II.2.5): under a Scoped (non-Top) `sql.raw` grant,
     /// an opaque-body construct (`CREATE FUNCTION`/`PROCEDURE`/`TRIGGER`/`DO`), a
-    /// `SET search_path` (or `set_config`/`ALTER ROLE|DATABASE … SET search_path`),
-    /// and any unqualified object reference are unattributable and DENIED — only a
-    /// ⊤-scoped grant may carry them.
+    /// `SET search_path` (or `set_config`/`ALTER ROLE|DATABASE ... SET search_path`),
+    /// and any unqualified object reference are unattributable and DENIED - only a
+    /// Top-scoped grant may carry them.
     fn check_scoped_raw_sql(&self, node: &NodeEnum, raw: &str) -> Result<(), GuardError> {
         match node {
             // Opaque bodies: the outer parse cannot see what the body touches.
@@ -1306,7 +1306,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                     ));
                 }
             }
-            // ALTER ROLE / ALTER DATABASE … SET search_path — a persisted GUC.
+            // ALTER ROLE / ALTER DATABASE ... SET search_path - a persisted GUC.
             NodeEnum::AlterRoleSetStmt(_) | NodeEnum::AlterDatabaseSetStmt(_)
                 if raw.to_ascii_lowercase().contains("search_path") =>
             {
@@ -1317,7 +1317,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
             }
             _ => {}
         }
-        // `set_config('search_path', …)` (the function form) + any UNQUALIFIED object
+        // `set_config('search_path', ...)` (the function form) + any UNQUALIFIED object
         // reference are both unattributable under a scoped grant: re-serialize the
         // statement and walk it structurally. An `A_Const` first arg to `set_config`
         // naming `search_path` refuses; a `RangeVar` with an empty schemaname and a
@@ -1389,13 +1389,13 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
     /// A curated allowlist of known-safe migration statement kinds passes;
     /// every other statement node is denied (`UNRECOGNIZED_DANGEROUS`). The
     /// recognized-dangerous kinds are matched first so they get a precise rule
-    /// id (better diagnostics) — but the *default* arm is DENY, not allow.
+    /// id (better diagnostics) - but the *default* arm is DENY, not allow.
     #[allow(clippy::too_many_lines)]
     fn check_statement_kind(&self, node: &NodeEnum, raw: &str) -> Result<(), GuardError> {
         match node {
             // ---- Recognized-dangerous: precise rule ids ----
-            // COPY … PROGRAM = shell RCE; COPY … <file> = filesystem.
-            // COPY … TO STDOUT / FROM STDIN (no program, no filename) is fine.
+            // COPY ... PROGRAM = shell RCE; COPY ... <file> = filesystem.
+            // COPY ... TO STDOUT / FROM STDIN (no program, no filename) is fine.
             NodeEnum::CopyStmt(c) => {
                 if c.is_program {
                     return Err(denied(rule::COPY_PROGRAM, raw));
@@ -1403,20 +1403,20 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                 if !c.filename.is_empty() {
                     return Err(denied(rule::COPY_FILE, raw));
                 }
-                // Plain COPY … TO STDOUT / FROM STDIN — safe.
+                // Plain COPY ... TO STDOUT / FROM STDIN - safe.
                 return Ok(());
             }
-            // ALTER SYSTEM — cluster-wide config, always denied (BOTH profiles).
+            // ALTER SYSTEM - cluster-wide config, always denied (BOTH profiles).
             NodeEnum::AlterSystemStmt(_) => return Err(denied(rule::ALTER_SYSTEM, raw)),
-            // Role management — privilege escalation. ALLOW iff Platform:
+            // Role management - privilege escalation. ALLOW iff Platform:
             // the platform schema migrations must CREATE/ALTER/DROP roles and
             // pin their search_path (0025/0027). Confined still hard-denies.
             //
             // SUPERUSER is the ONE role attribute that stays HARD-DENIED even
             // under Platform: a superuser bypasses RLS and
-            // reaches the host (file I/O, `COPY … PROGRAM`). Platform widens
-            // privilege *within* the DB, never *host* reach — so a
-            // `CREATE/ALTER ROLE … SUPERUSER` is refused before the Platform
+            // reaches the host (file I/O, `COPY ... PROGRAM`). Platform widens
+            // privilege *within* the DB, never *host* reach - so a
+            // `CREATE/ALTER ROLE ... SUPERUSER` is refused before the Platform
             // allow. This guards the vendor `createRole({ superuser: true })`
             // render-here-refuse-at-guard backstop.
             NodeEnum::CreateRoleStmt(s) => {
@@ -1445,7 +1445,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                 }
                 return Err(denied(rule::ROLE_MANAGEMENT, raw));
             }
-            // GRANT / REVOKE / role-membership grants — privilege management.
+            // GRANT / REVOKE / role-membership grants - privilege management.
             // ALLOW iff Platform: the platform schema migrations grant
             // CONNECT/USAGE/etc. (0025/0027). Confined still hard-denies.
             NodeEnum::GrantStmt(s) => {
@@ -1475,7 +1475,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                 }
                 return Err(denied(rule::PRIVILEGE_MANAGEMENT, raw));
             }
-            // Database / FDW management — out of a project migrator's remit.
+            // Database / FDW management - out of a project migrator's remit.
             NodeEnum::CreatedbStmt(_)
             | NodeEnum::AlterDatabaseStmt(_)
             | NodeEnum::AlterDatabaseSetStmt(_)
@@ -1487,7 +1487,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
             | NodeEnum::ImportForeignSchemaStmt(_) => {
                 return Err(denied(rule::FDW_MANAGEMENT, raw))
             }
-            // LOAD <library> — loads a shared object into the backend (RCE).
+            // LOAD <library> - loads a shared object into the backend (RCE).
             NodeEnum::LoadStmt(_) => return Err(denied(rule::LOAD_LIBRARY, raw)),
 
             // ---- Allowlisted-safe (with per-kind sub-checks) ----
@@ -1495,15 +1495,15 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                 // The funcname is the CREATION TARGET, not a call qualifier:
                 // defining a function INTO `public`/`pg_catalog`/
                 // `information_schema`/another tenant schema is denied (no
-                // shared-schema exemption — that applies only to call sites).
+                // shared-schema exemption - that applies only to call sites).
                 self.check_func_def_target(&f.funcname, raw)?;
-                // Untrusted language (plpythonu/plperlu/c/…) — RCE.
+                // Untrusted language (plpythonu/plperlu/c/...) - RCE.
                 if let Some(lang) = function_language(&f.options) {
                     if !crate::guard::denylist::is_trusted_language(&lang) {
                         return Err(denied(rule::UNTRUSTED_LANGUAGE, raw));
                     }
                 }
-                // SECURITY DEFINER — runs with the migrator's privilege once
+                // SECURITY DEFINER - runs with the migrator's privilege once
                 // installed; an escalation primitive. Deny.
                 if function_is_security_definer(&f.options) {
                     return Err(denied(rule::SECURITY_DEFINER, raw));
@@ -1521,7 +1521,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                 if let Some(func) = a.func.as_ref() {
                     self.check_func_def_target(&func.objname, raw)?;
                 }
-                // ALTER FUNCTION … SECURITY DEFINER / SET search_path = …
+                // ALTER FUNCTION ... SECURITY DEFINER / SET search_path = ...
                 if alter_function_is_security_definer(&a.actions) {
                     return Err(denied(rule::SECURITY_DEFINER, raw));
                 }
@@ -1571,7 +1571,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                 self.check_alter_table_cmds(at, raw)?;
             }
             NodeEnum::DropStmt(d) => {
-                // DROP ROLE via the DropStmt spelling — ALLOW iff Platform
+                // DROP ROLE via the DropStmt spelling - ALLOW iff Platform
                 // (the `.down.sql` reverse of CREATE ROLE), else deny.
                 if d.remove_type == ObjectType::ObjectRole as i32 {
                     if self.cfg.grants_global_bool(policy_registry::KEY_ACCESS_ROLE) {
@@ -1580,7 +1580,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                     return Err(denied(rule::ROLE_MANAGEMENT, raw));
                 }
                 // DROP is safe only for the enumerated object types. Under
-                // Platform the extra set (schema/extension/policy — the
+                // Platform the extra set (schema/extension/policy - the
                 // `.down.sql`-only reverses) is also admitted.
                 //
                 // Every member of that set is name-scoped, so each named target is
@@ -1622,7 +1622,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                     }
                 }
             }
-            // CREATE SCHEMA — deny-by-default for Confined; ALLOW iff Platform
+            // CREATE SCHEMA - deny-by-default for Confined; ALLOW iff Platform
             // (platform migrations create platform schemas). When
             // Platform, fall through to the cross-schema confinement below (the
             // schema being created is checked against the allowlist there).
@@ -1639,7 +1639,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                     return Err(denied(rule::UNRECOGNIZED_DANGEROUS, raw));
                 }
             }
-            // CREATE POLICY (RLS) — deny-by-default for Confined; ALLOW iff
+            // CREATE POLICY (RLS) - deny-by-default for Confined; ALLOW iff
             // Platform (0025 RLS policies). When Platform, fall through;
             // cross-schema confinement on the policy's table still runs below.
             NodeEnum::CreatePolicyStmt(p) => {
@@ -1653,7 +1653,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                     return Err(denied(rule::UNRECOGNIZED_DANGEROUS, raw));
                 }
             }
-            // DROP OWNED BY <role> — deny-by-default for Confined; ALLOW iff
+            // DROP OWNED BY <role> - deny-by-default for Confined; ALLOW iff
             // Platform (0025 rollback DO-block).
             NodeEnum::DropOwnedStmt(_) => {
                 if self.cfg.grants_global_bool(policy_registry::KEY_ACCESS_ROLE) {
@@ -1665,7 +1665,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                 // BEGIN/START/COMMIT/ROLLBACK/SAVEPOINT/RELEASE/ROLLBACK TO are
                 // fine; two-phase PREPARE TRANSACTION / COMMIT PREPARED /
                 // ROLLBACK PREPARED reach the cluster's prepared-xact namespace
-                // and are out of remit — denied.
+                // and are out of remit - denied.
                 if !is_safe_transaction_kind(t.kind) {
                     return Err(denied(rule::UNRECOGNIZED_DANGEROUS, raw));
                 }
@@ -1684,9 +1684,9 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
             | NodeEnum::CreateRangeStmt(_)
             | NodeEnum::AlterEnumStmt(_)
             | NodeEnum::AlterTypeStmt(_)
-            // CREATE DOMAIN / ALTER DOMAIN — a domain is a constrained base
-            // type (`CREATE DOMAIN d AS text CHECK (…)`); altering one is
-            // `ADD`/`DROP CONSTRAINT`/`SET`. No privilege, RCE, or host reach —
+            // CREATE DOMAIN / ALTER DOMAIN - a domain is a constrained base
+            // type (`CREATE DOMAIN d AS text CHECK (...)`); altering one is
+            // `ADD`/`DROP CONSTRAINT`/`SET`. No privilege, RCE, or host reach -
             // ordinary schema DDL, safe under BOTH profiles, same class as
             // CREATE ENUM / CREATE TYPE above. The domain's CREATION TARGET
             // schema (`domainname`) and its base-type schema (`type_name`) are
@@ -1750,7 +1750,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                 }
             }
 
-            // `DO [LANGUAGE lang] $$…$$` runs an anonymous block in an arbitrary
+            // `DO [LANGUAGE lang] $$...$$` runs an anonymous block in an arbitrary
             // procedural language, so it needs the same language check as
             // `CREATE FUNCTION`: the language is a `DefElem` in exactly the same
             // shape. Without it, `DO LANGUAGE plpythonu $$ import os $$` was admitted
@@ -1810,10 +1810,10 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
     /// Deny a function-DEFINING statement whose funcname targets a schema
     /// other than the project's own. The funcname here is a *creation target*
     /// (`CREATE FUNCTION public.evil()` / `ALTER FUNCTION control.f()`), NOT a
-    /// call qualifier — so the `public`/`pg_catalog`/`information_schema`
+    /// call qualifier - so the `public`/`pg_catalog`/`information_schema`
     /// exemptions that apply at call sites do NOT apply: defining into any
     /// non-project schema is denied. `name` is the funcname/objname list of
-    /// protobuf String nodes; an unqualified name (single part) is fine — it
+    /// protobuf String nodes; an unqualified name (single part) is fine - it
     /// resolves under the pinned `search_path`.
     fn check_func_def_target(&self, name: &[protobuf::Node], raw: &str) -> Result<(), GuardError> {
         let parts: Vec<&str> = name
@@ -1840,7 +1840,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
     /// Catches both spellings the cross-schema walk cannot:
     ///   - qualified `pg_catalog.pg_authid` / `information_schema.tables`
     ///     (a `pg_catalog`/`information_schema` `RangeVar.schemaname`);
-    ///   - **unqualified** `pg_shadow` / `pg_user` / `pg_authid` — the schema
+    ///   - **unqualified** `pg_shadow` / `pg_user` / `pg_authid` - the schema
     ///     is empty so the cross-schema walk sees nothing, but the `pg_`
     ///     prefix is reserved for system catalogs (a creator relation may not
     ///     use it), so an unqualified `pg_*` relation resolves to the catalog.
@@ -1889,7 +1889,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
 
     /// Deny a `<literal>::regprocedure` / `::regproc` cast whose literal names a
     /// `FILE_ACCESS` / `NETWORK` function. `'pg_read_file'::regprocedure` resolves
-    /// the named function by OID at runtime — a dangerous capability the
+    /// the named function by OID at runtime - a dangerous capability the
     /// `FuncCall` walk misses because the function name is a bare string
     /// literal, not a call node. The literal may carry an argument signature
     /// (`'pg_read_file(text)'`); we match on the leading identifier.
@@ -1925,19 +1925,19 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
     /// `setval('control.billing_seq', 0)`, `to_regclass('control.users')`,
     /// `pg_get_serial_sequence('control.t','id')` all reach (read *or*
     /// mutate) a foreign-tenant object whose schema lives in an `A_Const`
-    /// string literal — invisible to [`foreign_schema_in_tree`], which only
+    /// string literal - invisible to [`foreign_schema_in_tree`], which only
     /// sees structural qualified-name nodes. Here we parse the literal's
     /// leading `schema.` qualifier and run it through the SAME cross-schema
-    /// policy (own-schema OK; otherwise denied — these are concrete object
+    /// policy (own-schema OK; otherwise denied - these are concrete object
     /// targets, so no shared-schema exemption, same as
     /// [`SchemaSlot::Object`]).
     ///
     /// SCOPE: only LITERAL arguments in these specific positions. A plain data
-    /// literal (`INSERT … VALUES ('control.t')`) is untouched. A
+    /// literal (`INSERT ... VALUES ('control.t')`) is untouched. A
     /// runtime-constructed argument (`nextval(some_var)`, `nextval('a'||'b')`)
-    /// is NOT an `A_Const` and cannot be resolved at parse time — that is the
+    /// is NOT an `A_Const` and cannot be resolved at parse time - that is the
     /// line-2 (least-priv `migrator` role) defense's job, same limit the
-    /// `format('%I', …)` arm acknowledges.
+    /// `format('%I', ...)` arm acknowledges.
     fn check_literal_schema_refs(&self, json: &Value, raw: &str) -> Result<(), GuardError> {
         let mut found: Option<String> = None;
         walk_literal_schema_refs(json, &mut |literal, is_namespace_resolver| {
@@ -1959,7 +1959,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
             if self.cfg.grants_cross_schema(&schema) {
                 return false;
             }
-            // Concrete object target — Object-slot policy: no shared-schema
+            // Concrete object target - Object-slot policy: no shared-schema
             // exemption (`public.t`/`pg_catalog.t`/`control.t` all denied).
             found = Some(schema);
             true
@@ -1973,16 +1973,16 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
         Ok(())
     }
 
-    /// Deny `set_config('search_path'|'role'|'session_authorization', …)`.
+    /// Deny `set_config('search_path'|'role'|'session_authorization', ...)`.
     ///
     /// `set_config(param, value, is_local)` is the function-call form of `SET
     /// param = value`. The structural [`NodeEnum::VariableSetStmt`] gate denies
     /// a `SET search_path`/`role`/`session_authorization`, but a `FuncCall`
-    /// slips past it — so the call form is denied identically by matching the
+    /// slips past it - so the call form is denied identically by matching the
     /// first string-literal argument against [`crate::guard::denylist::FORBIDDEN_SET_PARAMS`].
     /// A benign GUC (`statement_timeout`) stays allowed, mirroring the
     /// structural SET allowance. (Runtime-constructed param names are not
-    /// literals and are out of parse-time scope — the line-2 role defense.)
+    /// literals and are out of parse-time scope - the line-2 role defense.)
     fn check_set_config_calls(json: &Value, raw: &str) -> Result<(), GuardError> {
         let mut denied_param = false;
         walk_set_config_calls(json, &mut |param| {
@@ -2008,7 +2008,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
     /// executes. The structural func-walk and cross-schema walk are blind to it
     /// (the SQL lives in an `A_Const` text literal, not a parse subtree). We
     /// extract each such literal and run the SAME guard recursively via
-    /// [`Self::check_body_text`] — re-parse + recurse (catching cross-schema
+    /// [`Self::check_body_text`] - re-parse + recurse (catching cross-schema
     /// reads, file/network funcs, embedded DDL) plus the token-scan + body
     /// cross-schema backstops. Only the literal (`A_Const`) form is in
     /// parse-scope; a runtime-constructed query arg is the line-2 role's job.
@@ -2064,7 +2064,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
             }
         }
 
-        // (b) Re-parse embedded string literals (EXECUTE 'CREATE ROLE …') —
+        // (b) Re-parse embedded string literals (EXECUTE 'CREATE ROLE ...') -
         //     find single-quoted SQL fragments and re-check them.
         for literal in extract_string_literals(body) {
             if let Ok(parsed) = pg_query::parse(&literal) {
@@ -2077,7 +2077,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
             }
         }
 
-        // (c) Token-scan backstop — catch dangerous names a partial parse of a
+        // (c) Token-scan backstop - catch dangerous names a partial parse of a
         //     PL/pgSQL body would never surface as a FuncCall/Stmt node.
         let lower = body.to_ascii_lowercase();
         for &f in crate::guard::denylist::FILE_ACCESS_FUNCTIONS {
@@ -2092,8 +2092,8 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
         }
         // search_path escape / alter system / role mgmt hidden in EXECUTE text.
         // Under Platform the role-management + search_path needles are
-        // relaxed — 0025's bootstrap DO-block legitimately EXECUTEs
-        // `CREATE ROLE …` / `ALTER ROLE … SET search_path …` — but `ALTER
+        // relaxed - 0025's bootstrap DO-block legitimately EXECUTEs
+        // `CREATE ROLE ...` / `ALTER ROLE ... SET search_path ...` - but `ALTER
         // SYSTEM` and `SUPERUSER` STAY hard in BOTH profiles (neither has any
         // place in any migration). The recursion arm (a) has already admitted
         // the genuinely parsed CREATE ROLE / GRANT nodes under Platform; this
@@ -2103,7 +2103,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
             return Err(denied(rule::BODY_INSPECTION, raw));
         }
         // The role-management body needles are relaxed for a config holding the
-        // `access.role` capability — an INTERNAL guard vendor-lower rule, not an
+        // `access.role` capability - an INTERNAL guard vendor-lower rule, not an
         // operator-authorable knob. Platform holds it and is relaxed; Confined does
         // not and is denied.
         //
@@ -2152,7 +2152,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
         if !allow_role && lower.contains("search_path") {
             return Err(denied(rule::BODY_INSPECTION, raw));
         }
-        // COPY … PROGRAM hidden in a body.
+        // COPY ... PROGRAM hidden in a body.
         if lower.contains("program") && lower.contains("copy") {
             return Err(denied(rule::BODY_INSPECTION, raw));
         }
@@ -2174,11 +2174,11 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
             });
         }
         // (e) Runtime-constructed SQL: a PL/pgSQL body that builds a
-        //     schema-qualified name via `format('%I.…', s)` never shows the
-        //     target schema as a `schema.ident` adjacency — it's a bare
+        //     schema-qualified name via `format('%I....', s)` never shows the
+        //     target schema as a `schema.ident` adjacency - it's a bare
         //     string literal (`s := 'control'`) or a `format()` arg. Flag any
-        //     bare literal that names a platform schema, and — when the body
-        //     uses an `%I` identifier template — any bare-identifier literal
+        //     bare literal that names a platform schema, and - when the body
+        //     uses an `%I` identifier template - any bare-identifier literal
         //     that is not the project schema (reaching ANOTHER project's
         //     schema). Deny-by-default for the dynamic-SQL class.
         if let Some(schema) =
@@ -2292,7 +2292,7 @@ pub fn check_raw_view_body_text(
 /// Every variant is something only a PARSER can establish. That is precisely why
 /// this shape exists: the engine's authoring validator holds the op index, the
 /// target dialect and the error code, but it cannot derive any of these facts
-/// without a parser, and it must not acquire one — reaching `pg_query` from
+/// without a parser, and it must not acquire one - reaching `pg_query` from
 /// neutral core is what made a MySQL or SQLite raw view body get vetted against
 /// PostgreSQL's grammar. So the fact is derived HERE, mapped to operator-facing
 /// text by `zero-migrate-postgres` (the vendor owns its own wording), and wrapped
@@ -2305,7 +2305,7 @@ pub enum RawViewBodyDefect {
     /// The body carries a statement count other than exactly one (a
     /// semicolon-chained second statement, or none at all). Carries the count.
     NotExactlyOneStatement(usize),
-    /// The single statement parsed, but is not a `SELECT` — DDL, DML, `COPY` and
+    /// The single statement parsed, but is not a `SELECT` - DDL, DML, `COPY` and
     /// the utility statements all land here.
     NotASelect,
     /// The `SELECT` carries an `INTO` clause, which creates a table and is
@@ -2355,22 +2355,22 @@ pub fn check_raw_view_body(
 }
 
 /// Scan a PL/pgSQL body's **bare string literals** for a cross-tenant schema
-/// name that `format('%I.…', s)`-style dynamic SQL would interpolate.
+/// name that `format('%I....', s)`-style dynamic SQL would interpolate.
 ///
-/// The structural/`schema.ident` checks never see these — the schema is a
+/// The structural/`schema.ident` checks never see these - the schema is a
 /// runtime value (`s := 'control'`) or a `format()` argument, not an adjacency.
 /// Two postures, both deny-by-default for the dynamic-SQL class:
 ///   1. Any bare literal that *is* a platform schema (`control`/`auth`/
-///      `billing`) — these have no legitimate use as data in a creator body.
+///      `billing`) - these have no legitimate use as data in a creator body.
 ///   2. If the body uses an `%I` identifier-format template (the tell of
 ///      dynamic schema/relation interpolation), any bare *identifier* literal
-///      that is not the project schema — reaching another project's schema.
+///      that is not the project schema - reaching another project's schema.
 fn foreign_schema_literal_in_body(body: &str, permits: &dyn Fn(&str) -> bool) -> Option<String> {
     let uses_ident_template = body.to_ascii_lowercase().contains("%i");
     for literal in extract_string_literals(body) {
         let lit = literal.trim();
         // A schema the PDP admits (`grants(schema.cross_schema, lit)`) is never a
-        // violation — the project schema(s) a confined/platform posture owns, plus
+        // violation - the project schema(s) a confined/platform posture owns, plus
         // any operator-supplied schema.
         if permits(lit) {
             continue;
@@ -2403,7 +2403,7 @@ fn is_bare_identifier(s: &str) -> bool {
 
 /// Heuristic: does a bare identifier look like a schema name a migration would
 /// target? We flag the platform schemas plus anything matching the project
-/// prefix convention (`project_…`) — the multi-tenant schemas a body could
+/// prefix convention (`project_...`) - the multi-tenant schemas a body could
 /// reach. A short data token like `'active'` does not match, avoiding
 /// false-positives on legitimate seed data passed through `%I`-bearing bodies.
 fn looks_like_schema_name(s: &str) -> bool {
@@ -2413,7 +2413,7 @@ fn looks_like_schema_name(s: &str) -> bool {
 }
 
 /// Scan a body string for a `<schema>.<object>` qualifier that names a known
-/// **platform schema** (`control`/`auth`/`billing`) — the cross-tenant target
+/// **platform schema** (`control`/`auth`/`billing`) - the cross-tenant target
 /// a prompt-injected migration would aim at. Returns that schema.
 ///
 /// This is a lexical backstop for PL/pgSQL bodies that do not parse as plain
@@ -2460,20 +2460,20 @@ fn foreign_schema_in_body(body: &str, permits: &dyn Fn(&str) -> bool) -> Option<
 
 /// Derive the migration flags from a passing [`GuardReport`].
 ///
-/// - `destructive` (data loss) ⇒ `requires_approval` (the gate must confirm;
+/// - `destructive` (data loss) => `requires_approval` (the gate must confirm;
 ///   AI never auto-applies destructive ops).
 /// - any non-transactional statement (CONCURRENTLY, ALTER TYPE ADD VALUE,
-///   VACUUM) ⇒ `transactional = false` (the two-phase apply path).
-/// - a `RENAME COLUMN` / `RENAME TABLE` ⇒ `requires_approval` even though it is
+///   VACUUM) => `transactional = false` (the two-phase apply path).
+/// - a `RENAME COLUMN` / `RENAME TABLE` => `requires_approval` even though it is
 ///   NOT data-loss `destructive`: a rename is app-breaking /
 ///   backward-incompatible (it silently breaks every reader of the old name), so
 ///   it must be operator-confirmed, never auto-applied. (The declarative
-///   expand-contract rename path does NOT emit a bare `RenameStmt` — it emits
-///   ADD COLUMN + trigger + backfill + DROP via `ExpandContractAuthor` — so this
+///   expand-contract rename path does NOT emit a bare `RenameStmt` - it emits
+///   ADD COLUMN + trigger + backfill + DROP via `ExpandContractAuthor` - so this
 ///   gate is scoped to a literal `RENAME` in a submitted `up`.)
-/// - an `ALTER COLUMN … SET NOT NULL` ⇒ `requires_approval`: it takes an
+/// - an `ALTER COLUMN ... SET NOT NULL` => `requires_approval`: it takes an
 ///   ACCESS EXCLUSIVE lock + a full-table validating scan and ABORTS if any
-///   existing row is NULL — and the row-less shadow CANNOT catch that abort/lock,
+///   existing row is NULL - and the row-less shadow CANNOT catch that abort/lock,
 ///   so it is gated regardless of the (necessarily clean) dry-run.
 ///
 /// `online` is an authoring-time facet (expand-contract sequencing), not
@@ -2503,14 +2503,14 @@ pub fn flags_for(report: &GuardReport) -> MigrationFlags {
         // sets it explicitly when a long backfill/index needs a higher ceiling.
         timeout_ms: None,
         // Likewise the per-migration lock-acquisition budget (the maintenance-
-        // window override) is authoring-time, never inferred from a SQL blob —
+        // window override) is authoring-time, never inferred from a SQL blob -
         // defaults to the SHORT executor-wide lock-safety default.
         lock_timeout_ms: None,
         // A guard-derived flag set is for one-shot SQL; the online expand/contract
         // phase is set by the ExpandContractAuthor, never inferred from SQL.
         phase: None,
         // Repeatable is an authoring-time facet (a stable-identity, replace-style
-        // R__ migration), not derivable from a single SQL blob — defaults off.
+        // R__ migration), not derivable from a single SQL blob - defaults off.
         repeatable: false,
         // Engine-goodie DDL is an authoring-time facet; a guard-derived flag set for
         // an arbitrary SQL blob never carries it. Nothing sets it true any more (its
@@ -2525,7 +2525,7 @@ pub fn flags_for(report: &GuardReport) -> MigrationFlags {
 // ---------------------------------------------------------------------------
 
 /// The `ObjectType`s a creator migration may `DROP`. Anything else (role,
-/// schema, extension, FDW, subscription, publication, …) is denied-by-default.
+/// schema, extension, FDW, subscription, publication, ...) is denied-by-default.
 fn is_safe_drop_object(remove_type: i32) -> bool {
     [
         ObjectType::ObjectTable,
@@ -2592,7 +2592,7 @@ fn is_safe_alter_table_subtype(subtype: i32) -> bool {
         A::AtAddIdentity,
         // Partition (de)attach. The partition's RangeVar is walked by
         // `check_cross_schema` independently, so an own-schema partition is
-        // safe and a cross-schema one (`… ATTACH PARTITION control.x`) is
+        // safe and a cross-schema one (`... ATTACH PARTITION control.x`) is
         // still denied there.
         A::AtAttachPartition,
         A::AtDetachPartition,
@@ -2621,8 +2621,8 @@ fn is_safe_transaction_kind(kind: i32) -> bool {
 
 /// True if a `CREATE ROLE` / `ALTER ROLE` options list grants the `SUPERUSER`
 /// attribute. The attribute is a `DefElem` named `superuser`
-/// with a boolean arg (`SUPERUSER` ⇒ true, `NOSUPERUSER` ⇒ false). Denied in
-/// ALL profiles including Platform — superuser is host-reaching, not merely
+/// with a boolean arg (`SUPERUSER` => true, `NOSUPERUSER` => false). Denied in
+/// ALL profiles including Platform - superuser is host-reaching, not merely
 /// in-DB privilege.
 fn role_grants_superuser(options: &[protobuf::Node]) -> bool {
     options.iter().any(|opt| {
@@ -2704,7 +2704,7 @@ fn alter_function_sets_forbidden_param(actions: &[protobuf::Node]) -> bool {
     })
 }
 
-/// A function `DefElem` of the form `SET <param> = …` whose param is in
+/// A function `DefElem` of the form `SET <param> = ...` whose param is in
 /// [`crate::guard::denylist::FORBIDDEN_SET_PARAMS`] (e.g. `SET search_path = control`). The
 /// nested arg is a `VariableSetStmt` carrying the target param name.
 fn def_elem_is_forbidden_set(d: &protobuf::DefElem) -> bool {
@@ -2721,7 +2721,7 @@ fn def_elem_is_forbidden_set(d: &protobuf::DefElem) -> bool {
 }
 
 /// Read a boolean-valued `DefElem` (the `security` option carries a `Boolean`
-/// arg: `SECURITY DEFINER` → true, `SECURITY INVOKER` → false).
+/// arg: `SECURITY DEFINER` -> true, `SECURITY INVOKER` -> false).
 fn def_elem_bool(d: &protobuf::DefElem) -> Option<bool> {
     match d.arg.as_ref().and_then(|a| a.node.as_ref()) {
         Some(NodeEnum::Boolean(b)) => Some(b.boolval),
@@ -2736,7 +2736,7 @@ fn def_elem_bool(d: &protobuf::DefElem) -> Option<bool> {
 
 /// Walk the ENTIRE serialized parse tree and invoke `visit` with the trailing
 /// name part of every `FuncCall` / `CallStmt` function name found anywhere
-/// (column DEFAULT, CHECK, VALUES lists, RULE actions, sub-selects — every
+/// (column DEFAULT, CHECK, VALUES lists, RULE actions, sub-selects - every
 /// slot, unlike `pg_query::nodes()`). `visit` returns `true` to short-circuit.
 fn walk_func_names(v: &Value, visit: &mut dyn FnMut(&str) -> bool) -> bool {
     match v {
@@ -2818,7 +2818,7 @@ fn walk_regproc_casts(v: &Value, visit: &mut dyn FnMut(&str) -> bool) -> bool {
 /// `is_namespace_resolver` is `true` for `regnamespace` / `to_regnamespace`,
 /// where the literal IS a bare schema name (no `schema.object` split); `false`
 /// for object resolvers where the schema is the leading `schema.` qualifier.
-/// Only literal (`A_Const`) arguments are inspected — runtime-constructed names
+/// Only literal (`A_Const`) arguments are inspected - runtime-constructed names
 /// are not visible at parse time.
 fn walk_literal_schema_refs(v: &Value, visit: &mut dyn FnMut(&str, bool) -> bool) -> bool {
     match v {
@@ -2843,7 +2843,7 @@ fn walk_literal_schema_refs(v: &Value, visit: &mut dyn FnMut(&str, bool) -> bool
                 // Stat/predicate builtins whose first `text` arg is a relation
                 // NAME (`pg_relation_size('control.t')`,
                 // `has_table_privilege('control.users','SELECT')`). The schema
-                // is the literal's leading `schema.` qualifier — an object
+                // is the literal's leading `schema.` qualifier - an object
                 // resolver, not a namespace one.
                 if func_is_text_relation_name(call.get("funcname")) {
                     if let Some(lit) = first_arg_string_literal(call.get("args")) {
@@ -2852,8 +2852,8 @@ fn walk_literal_schema_refs(v: &Value, visit: &mut dyn FnMut(&str, bool) -> bool
                         }
                     }
                 }
-                // Schema-export builtins (`schema_to_xml('control', …)`) whose
-                // first `text` arg is a bare SCHEMA NAME — a namespace resolver,
+                // Schema-export builtins (`schema_to_xml('control', ...)`) whose
+                // first `text` arg is a bare SCHEMA NAME - a namespace resolver,
                 // like `regnamespace`/`to_regnamespace`.
                 if func_is_namespace_name(call.get("funcname")) {
                     if let Some(lit) = first_arg_string_literal(call.get("args")) {
@@ -2864,7 +2864,7 @@ fn walk_literal_schema_refs(v: &Value, visit: &mut dyn FnMut(&str, bool) -> bool
                 }
                 // Object-address resolvers carry the schema as the FIRST element
                 // of an array literal in the SECOND argument
-                // (`pg_get_object_address('table', '{control,t}', …)`). That
+                // (`pg_get_object_address('table', '{control,t}', ...)`). That
                 // element IS the schema (like a namespace resolver).
                 if func_is_object_address(call.get("funcname")) {
                     if let Some(schema) = object_address_array_schema(call.get("args")) {
@@ -2945,7 +2945,7 @@ fn func_is_namespace_name(funcname: Option<&Value>) -> bool {
 }
 
 /// The schema element of an object-address call's name array: the SECOND
-/// argument is a Postgres array text literal `'{schema,object,…}'` whose first
+/// argument is a Postgres array text literal `'{schema,object,...}'` whose first
 /// element is the schema. Returns that first element, or `None` if absent.
 fn object_address_array_schema(args: Option<&Value>) -> Option<String> {
     let Some(Value::Array(arr)) = args else {
@@ -2963,8 +2963,8 @@ fn object_address_array_schema(args: Option<&Value>) -> Option<String> {
     parse_pg_array_first_element(lit)
 }
 
-/// First element of a Postgres array text literal (`{a,b}` → `a`, `{"a b",c}`
-/// → `a b`). Best-effort: handles the unquoted and double-quoted element forms.
+/// First element of a Postgres array text literal (`{a,b}` -> `a`, `{"a b",c}`
+/// -> `a b`). Best-effort: handles the unquoted and double-quoted element forms.
 fn parse_pg_array_first_element(lit: &str) -> Option<String> {
     let inner = lit.trim().strip_prefix('{')?;
     let inner = inner.strip_suffix('}').unwrap_or(inner);
@@ -2998,7 +2998,7 @@ fn parse_pg_array_first_element(lit: &str) -> Option<String> {
     Some(out)
 }
 
-/// Walk the tree for `set_config(<param-literal>, …)` calls, invoking `visit`
+/// Walk the tree for `set_config(<param-literal>, ...)` calls, invoking `visit`
 /// with the first string-literal argument (the GUC name). `visit` returns
 /// `true` to short-circuit.
 fn walk_set_config_calls(v: &Value, visit: &mut dyn FnMut(&str) -> bool) -> bool {
@@ -3088,12 +3088,12 @@ fn first_arg_string_literal(args: Option<&Value>) -> Option<String> {
 /// The leading `schema.` qualifier of an object-name string literal, or `None`
 /// if the literal is unqualified (a bare name) or carries no schema part.
 ///
-/// Drops any argument signature (`schema.f(text)` → schema part of `schema.f`)
+/// Drops any argument signature (`schema.f(text)` -> schema part of `schema.f`)
 /// before splitting, then returns the first dotted component. Honors a
-/// double-quoted leading component (`"My Schema".t` → `My Schema`); a leading
+/// double-quoted leading component (`"My Schema".t` -> `My Schema`); a leading
 /// dot or empty schema yields `None`.
 fn literal_schema_qualifier(lit: &str) -> Option<String> {
-    // Strip a trailing argument signature (`f(int, text)`) — reg*procedure
+    // Strip a trailing argument signature (`f(int, text)`) - reg*procedure
     // literals may carry one; the schema is in the head before `(`.
     let head = lit.split('(').next().unwrap_or("").trim();
     if head.is_empty() {
@@ -3101,7 +3101,7 @@ fn literal_schema_qualifier(lit: &str) -> Option<String> {
     }
     let (schema, rest) = split_first_qualifier(head);
     // A schema is present only when there is a trailing component after the
-    // first dot (`control.t` → `control`; bare `t` → no schema).
+    // first dot (`control.t` -> `control`; bare `t` -> no schema).
     if rest.is_empty() {
         return None;
     }
@@ -3174,8 +3174,8 @@ fn type_cast_string_literal(arg: Option<&Value>) -> Option<String> {
 }
 
 /// The leading identifier of a regproc literal, dropping any argument signature
-/// and schema qualifier: `pg_read_file(text)` → `pg_read_file`,
-/// `pg_catalog.pg_read_file` → `pg_read_file`.
+/// and schema qualifier: `pg_read_file(text)` -> `pg_read_file`,
+/// `pg_catalog.pg_read_file` -> `pg_read_file`.
 fn regproc_leading_ident(lit: &str) -> &str {
     let head = lit.trim().split('(').next().unwrap_or("").trim();
     head.rsplit('.').next().unwrap_or(head).trim()
@@ -3186,22 +3186,22 @@ fn regproc_leading_ident(lit: &str) -> &str {
 /// The walker is **typed by slot** (not a key-string allowlist): each
 /// schema-qualified-name-bearing node contributes its schema with the
 /// [`SchemaSlot`] that fixes the per-slot exemption policy. The slots:
-///   - [`SchemaSlot::RangeVar`] — `RangeVar.schemaname` (FROM/DML/ALTER/DROP/
+///   - [`SchemaSlot::RangeVar`] - `RangeVar.schemaname` (FROM/DML/ALTER/DROP/
 ///     partition/INHERIT relation targets). Catalog reads
 ///     (`pg_catalog.pg_authid`, `information_schema.tables`) are NOT exempt.
-///   - [`SchemaSlot::Object`] — `newschema` (SET SCHEMA), `CreateSchemaStmt`
+///   - [`SchemaSlot::Object`] - `newschema` (SET SCHEMA), `CreateSchemaStmt`
 ///     `schemaname`, `CommentStmt`/`DropStmt` object lists, index `opclass`,
-///     `COLLATE` `collname`, sequence `OWNED BY` — concrete object targets.
+///     `COLLATE` `collname`, sequence `OWNED BY` - concrete object targets.
 ///     No exemption beyond own-schema.
-///   - [`SchemaSlot::TypeRef`] — `TypeName.names` (column/return/param/cast/
+///   - [`SchemaSlot::TypeRef`] - `TypeName.names` (column/return/param/cast/
 ///     `OF` type). Builtins desugar to `pg_catalog.<t>`, so `pg_catalog` (+
 ///     catalog/`public`) stay exempt here; a foreign tenant type is flagged.
-///   - [`SchemaSlot::FuncCall`] — `FuncCall`/trigger/CALL `funcname` *call*
+///   - [`SchemaSlot::FuncCall`] - `FuncCall`/trigger/CALL `funcname` *call*
 ///     qualifier. `pg_catalog`/`information_schema`/`public` calls are routine
 ///     and exempt; a tenant-schema call is flagged.
 ///
 /// Function *definition* targets (`CreateFunctionStmt`/`AlterFunctionStmt`
-/// funcname) are NOT walked here — they are a *creation target*, never a call
+/// funcname) are NOT walked here - they are a *creation target*, never a call
 /// qualifier, so they are checked directly against the project schema in
 /// [`GuardWalker::check_func_def_target`] with NO shared-schema exemption
 /// (`public.evil`, `pg_catalog.evil`, `information_schema.evil` all denied).
@@ -3226,14 +3226,14 @@ fn foreign_schema_in_tree(v: &Value, permits: &dyn Fn(&str) -> bool) -> Option<S
 }
 
 /// Per-slot schema exemption. A neutral schema is exempt only in the slots
-/// where naming it is routine and benign — never as a broad whitelist.
+/// where naming it is routine and benign - never as a broad whitelist.
 fn slot_exempts_schema(slot: SchemaSlot, schema: &str) -> bool {
     match slot {
         // Nothing is exempt:
         //   - RangeVar/Object: concrete relation/object targets reach a real
         //     object outside the pinned schema (catalog reads denied here);
         //   - CreationTarget: planting/altering a type INTO a schema (CREATE
-        //     TYPE … AS ENUM/RANGE, ALTER TYPE …) — mirrors a function
+        //     TYPE ... AS ENUM/RANGE, ALTER TYPE ...) - mirrors a function
         //     *definition* target, so `public`/`pg_catalog`/`control` are all
         //     denied, same as any other tenant schema.
         SchemaSlot::RangeVar | SchemaSlot::Object | SchemaSlot::CreationTarget => false,
@@ -3241,7 +3241,7 @@ fn slot_exempts_schema(slot: SchemaSlot, schema: &str) -> bool {
         // `collname` routinely name a `pg_catalog` builtin
         // (`pg_catalog.text_ops`, `pg_catalog."C"`). `pg_catalog` ONLY is
         // exempt here (not `public`, not other catalog schemas, not a tenant
-        // schema — `control.myops` stays denied).
+        // schema - `control.myops` stays denied).
         SchemaSlot::BuiltinObject => schema.eq_ignore_ascii_case("pg_catalog"),
         // Type references (builtins desugar to `pg_catalog.<type>`) and
         // function *call* qualifiers: catalog + `public` are routine and
@@ -3253,7 +3253,7 @@ fn slot_exempts_schema(slot: SchemaSlot, schema: &str) -> bool {
     }
 }
 
-/// The server's own catalog/temp schemas — never a cross-tenant target. Used
+/// The server's own catalog/temp schemas - never a cross-tenant target. Used
 /// only for the slots where naming them is benign (type refs, function calls);
 /// table reads from them are caught via [`SchemaSlot::RangeVar`].
 fn is_neutral_catalog_schema(schema: &str) -> bool {
@@ -3267,7 +3267,8 @@ fn is_neutral_catalog_schema(schema: &str) -> bool {
 ///
 /// Compares raw bytes. Identifiers reach here verbatim from the parse tree, so a
 /// `&str` slice at index 3 panics whenever the third byte lands inside a
-/// multi-byte character: `"abé"` is four bytes, and `[..3]` splits the `é`.
+/// multi-byte character: a three-character name whose last character is a
+/// two-byte letter is four bytes long, and `[..3]` splits that letter.
 fn has_pg_catalog_prefix(relname: &str) -> bool {
     relname
         .as_bytes()
@@ -3279,7 +3280,7 @@ fn has_pg_catalog_prefix(relname: &str) -> bool {
 /// per-slot exemption policy in [`slot_exempts_schema`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SchemaSlot {
-    /// `RangeVar.schemaname` — a relation read/write/target. Catalog reads are
+    /// `RangeVar.schemaname` - a relation read/write/target. Catalog reads are
     /// NOT exempt here.
     RangeVar,
     /// A concrete object/schema target: `newschema`, `CreateSchemaStmt`
@@ -3289,7 +3290,7 @@ enum SchemaSlot {
     /// A creation/alter target carried in a `type_name` qualified-name *list*
     /// (`CreateEnumStmt`/`CreateRangeStmt`/`AlterEnumStmt`/`AlterTypeStmt`):
     /// planting/altering a type INTO a schema. Like a function-definition
-    /// target, NO shared-schema exemption — `public.e`/`pg_catalog.e`/
+    /// target, NO shared-schema exemption - `public.e`/`pg_catalog.e`/
     /// `control.e` are all denied. (Distinct from [`SchemaSlot::TypeRef`],
     /// which is a `TypeName.names` *reference* where builtins are exempt.)
     CreationTarget,
@@ -3301,7 +3302,7 @@ enum SchemaSlot {
     /// A type reference (`TypeName.names`): column/return/param/cast/`OF` type.
     TypeRef,
     /// A function-name *call* qualifier (`FuncCall`/trigger/CALL `funcname`).
-    /// Function *definition* targets are NOT this slot — they are checked
+    /// Function *definition* targets are NOT this slot - they are checked
     /// against the project schema directly in [`GuardWalker::check_func_def_target`]
     /// (no shared-schema exemption).
     FuncCall,
@@ -3317,7 +3318,7 @@ fn walk_schema_names(v: &Value, visit: &mut dyn FnMut(&str, SchemaSlot) -> bool)
     match v {
         Value::Object(map) => {
             // A `RangeVar` (relation target) carries its schema in
-            // `schemaname` AND a `relname` sibling — the relation slot.
+            // `schemaname` AND a `relname` sibling - the relation slot.
             if map.contains_key("relname") {
                 if let Some(Value::String(s)) = map.get("schemaname") {
                     if !s.is_empty() && visit(s, SchemaSlot::RangeVar) {
@@ -3325,19 +3326,19 @@ fn walk_schema_names(v: &Value, visit: &mut dyn FnMut(&str, SchemaSlot) -> bool)
                     }
                 }
             } else if let Some(Value::String(s)) = map.get("schemaname") {
-                // `CreateSchemaStmt.schemaname` (no `relname` sibling) — a
+                // `CreateSchemaStmt.schemaname` (no `relname` sibling) - a
                 // concrete schema target.
                 if !s.is_empty() && visit(s, SchemaSlot::Object) {
                     return true;
                 }
             }
-            // `AlterObjectSchemaStmt.newschema` (`… SET SCHEMA control`).
+            // `AlterObjectSchemaStmt.newschema` (`... SET SCHEMA control`).
             if let Some(Value::String(s)) = map.get("newschema") {
                 if !s.is_empty() && visit(s, SchemaSlot::Object) {
                     return true;
                 }
             }
-            // `TypeName.names` — column/return/param/cast/OF type reference.
+            // `TypeName.names` - column/return/param/cast/OF type reference.
             // The presence of the `names` key alongside type-name siblings is
             // the TypeName tell.
             if let Some(schema) = qualified_list_schema(map.get("names")) {
@@ -3349,15 +3350,15 @@ fn walk_schema_names(v: &Value, visit: &mut dyn FnMut(&str, SchemaSlot) -> bool)
             // object): the creation/alter target of CreateEnumStmt /
             // CreateRangeStmt / AlterEnumStmt / AlterTypeStmt. (`CreateStmt`/
             // `ColumnDef` carry `type_name` as a nested `TypeName` *object*
-            // whose schema lives under `names`, handled above — a non-array
+            // whose schema lives under `names`, handled above - a non-array
             // `type_name` yields no parts here, so this is target-only.)
             if let Some(schema) = qualified_list_schema(map.get("type_name")) {
                 if visit(&schema, SchemaSlot::CreationTarget) {
                     return true;
                 }
             }
-            // `CreateDomainStmt.domainname` — the schema-qualified creation
-            // target of `CREATE DOMAIN <schema>.<name> AS …`. Same confinement
+            // `CreateDomainStmt.domainname` - the schema-qualified creation
+            // target of `CREATE DOMAIN <schema>.<name> AS ...`. Same confinement
             // class as the type-creation `type_name` target above: a Confined
             // migrator may not plant a domain into a foreign/system schema.
             if let Some(schema) = qualified_list_schema(map.get("domainname")) {
@@ -3372,7 +3373,7 @@ fn walk_schema_names(v: &Value, visit: &mut dyn FnMut(&str, SchemaSlot) -> bool)
                 }
             }
             // COMMENT/RENAME/DEPENDS `object` (singular) + `ObjectWithArgs`
-            // `objname` — a concrete object target ([schema, object]).
+            // `objname` - a concrete object target ([schema, object]).
             for key in ["object", "objname"] {
                 if let Some(schema) = qualified_list_schema(map.get(key)) {
                     if visit(&schema, SchemaSlot::Object) {
@@ -3382,7 +3383,7 @@ fn walk_schema_names(v: &Value, visit: &mut dyn FnMut(&str, SchemaSlot) -> bool)
             }
             // DROP/GRANT `objects` (PLURAL): a list whose *items* are each a
             // qualified-name node (`List`/`TypeName`/`ObjectWithArgs`). Walk
-            // each item's own qualifier — flattening the outer array would
+            // each item's own qualifier - flattening the outer array would
             // mis-read it. (`DROP TYPE control.t` carries a `TypeName` item,
             // already covered by the `names` walk above; tables/indexes/
             // views/sequences/triggers/functions carry a `List`/`ObjectWithArgs`
@@ -3407,10 +3408,10 @@ fn walk_schema_names(v: &Value, visit: &mut dyn FnMut(&str, SchemaSlot) -> bool)
                 }
             }
             // DefElem object slots:
-            //   - `owned_by`: `OWNED BY <schema>.<table>.<column>` — 2-part
+            //   - `owned_by`: `OWNED BY <schema>.<table>.<column>` - 2-part
             //     (`table.col`, no schema) or 3-part (`schema.table.col`);
             //     schema present only at 3 parts.
-            //   - `sequence_name`: identity `… (SEQUENCE NAME <schema>.s)` —
+            //   - `sequence_name`: identity `... (SEQUENCE NAME <schema>.s)` -
             //     a `List[schema, name]` (schema present at 2+ parts).
             match map.get("defname").and_then(Value::as_str) {
                 Some("owned_by") => {
@@ -3428,7 +3429,7 @@ fn walk_schema_names(v: &Value, visit: &mut dyn FnMut(&str, SchemaSlot) -> bool)
                     }
                 }
                 Some("schema") => {
-                    // `CreateExtensionStmt … WITH SCHEMA <name>` — a bare String DefElem
+                    // `CreateExtensionStmt ... WITH SCHEMA <name>` - a bare String DefElem
                     // arg. Confine the WITH SCHEMA target so the rendered-SQL guard
                     // (gate 2) independently scopes it, restoring gate-1/gate-2 parity
                     // with `createSchema` (SA-20). Strictly tighter: anything passing
@@ -3458,10 +3459,10 @@ fn walk_schema_names(v: &Value, visit: &mut dyn FnMut(&str, SchemaSlot) -> bool)
 /// schema) and returns `None`.
 ///
 /// Handles both spellings the parse tree uses:
-///   - a bare array (`CreateTrigStmt.funcname`, `CallStmt…funcname`,
+///   - a bare array (`CreateTrigStmt.funcname`, `CallStmt...funcname`,
 ///     `TypeName.names`, `IndexElem.opclass`, `CollateClause.collname`):
-///     `[{node:{String}}, …]`
-///   - a `List` node (`CommentStmt.object`): `{node:{List:{items:[…]}}}`
+///     `[{node:{String}}, ...]`
+///   - a `List` node (`CommentStmt.object`): `{node:{List:{items:[...]}}}`
 fn qualified_list_schema(v: Option<&Value>) -> Option<String> {
     let parts = qualified_list_parts(v)?;
     if parts.len() >= 2 {
@@ -3472,7 +3473,7 @@ fn qualified_list_schema(v: Option<&Value>) -> Option<String> {
 }
 
 /// The schema of an `OWNED BY` target. The list is `[table, col]` (no schema,
-/// 2 parts) or `[schema, table, col]` (3 parts) — so a schema is present only
+/// 2 parts) or `[schema, table, col]` (3 parts) - so a schema is present only
 /// at 3+ parts, and is `parts[0]`.
 fn owned_by_schema(v: Option<&Value>) -> Option<String> {
     let parts = qualified_list_parts(v)?;
@@ -3506,7 +3507,7 @@ fn json_last_string_part(parts: &[Value]) -> Option<String> {
     parts.iter().rev().find_map(json_string_node)
 }
 
-/// Extract the inner string of a `{"node":{"String":{"sval":"…"}}}` value.
+/// Extract the inner string of a `{"node":{"String":{"sval":"..."}}}` value.
 fn json_string_node(v: &Value) -> Option<String> {
     v.get("node")?
         .get("String")?
@@ -3551,7 +3552,7 @@ fn function_language(options: &[protobuf::Node]) -> Option<String> {
     None
 }
 
-/// Extract the body string(s) of a CREATE FUNCTION (`AS $$…$$`). The `as`
+/// Extract the body string(s) of a CREATE FUNCTION (`AS $$...$$`). The `as`
 /// `DefElem`'s arg is a List of String nodes.
 fn function_body_strings(options: &[protobuf::Node]) -> Vec<String> {
     let mut out = Vec::new();
@@ -3595,7 +3596,7 @@ fn def_elem_string_args(args: &[protobuf::Node]) -> Vec<String> {
 ///
 /// Iterates real `char`s (not raw bytes): a `bytes[j] as char` cast truncates
 /// every non-ASCII UTF-8 byte to a Latin-1 codepoint, corrupting any multi-byte
-/// character inside a literal — which could split a dangerous token off from its
+/// character inside a literal - which could split a dangerous token off from its
 /// adjacent multi-byte char and let the backstop's word-scan miss it. The primary
 /// defense is the `pg_query` parse + least-priv role; this is the body token-scan
 /// backstop, so its extraction must be byte-faithful.
@@ -3688,7 +3689,7 @@ mod white_box_tests {
 
     /// The body token-scan backstop's literal extractor must preserve multi-byte
     /// UTF-8 verbatim. Pre-fix it built each literal via `bytes[j] as char`, which
-    /// truncates every non-ASCII byte to a Latin-1 codepoint — corrupting the
+    /// truncates every non-ASCII byte to a Latin-1 codepoint - corrupting the
     /// literal and potentially splitting a dangerous token off from its adjacent
     /// multi-byte char so the word-scan misses it. This pins faithful extraction.
     #[test]

@@ -3,7 +3,7 @@
 //!
 //! This body used to live in `zero_migrate::ops::status` under the neutral name `status`,
 //! and from there it reached `apply::backend::postgres::journal_sql` five times.
-//! Core's status verb WAS PostgreSQL's status verb — nothing about the signature
+//! Core's status verb WAS PostgreSQL's status verb - nothing about the signature
 //! (`&D: SqlSession`, a `dialect` argument) could have routed it anywhere else, and
 //! the SQL it drives is PostgreSQL's: `BEGIN ISOLATION LEVEL REPEATABLE READ READ
 //! ONLY` is not a statement MySQL or SQLite accepts.
@@ -30,7 +30,7 @@ use zero_migrate_ir::migration::{Migration, MigrationId};
 
 use super::journal_sql;
 
-/// Compute the [`MigrationStatus`] of `migrations` against the journal — what is
+/// Compute the [`MigrationStatus`] of `migrations` against the journal - what is
 /// applied, pending, current, and rolled back (design scenarios 45/46).
 ///
 /// **Read-only.** Bootstraps the journal idempotently (so a fresh project reports
@@ -45,7 +45,7 @@ use super::journal_sql;
 /// an inconsistent applied-vs-rolled-back bucketing. The transaction is driven
 /// explicitly through the shared [`SqlSession`], mirroring how the
 /// executor drives its apply/rollback transactions. `ensure_journal` (which emits
-/// `CREATE … IF NOT EXISTS` DDL) runs BEFORE the snapshot, since a `READ ONLY`
+/// `CREATE ... IF NOT EXISTS` DDL) runs BEFORE the snapshot, since a `READ ONLY`
 /// transaction forbids DDL and bootstrap must stay idempotent regardless.
 ///
 /// "Current" = highest-VERSION net-applied (`UUIDv7`/`MigrationId` total order),
@@ -117,7 +117,7 @@ async fn read_status_snapshot<D: SqlSession>(
     migrations: &[Migration],
 ) -> Result<MigrationStatus, StatusError> {
     let entries = journal_sql::applied(conn, cfg).await?;
-    // NET-applied entries only (drop lone `started` inflight markers — those are
+    // NET-applied entries only (drop lone `started` inflight markers - those are
     // crash-recovery keys, not settled applied state).
     let applied: Vec<AppliedEntry> = entries
         .iter()
@@ -131,14 +131,14 @@ async fn read_status_snapshot<D: SqlSession>(
         .filter_map(|e| MigrationId::parse(&e.version).ok())
         .max();
 
-    // pending = set − net-applied − superseded, in the SAME order apply uses.
+    // pending = set - net-applied - superseded, in the SAME order apply uses.
     // order_pending wants a map of completed entries keyed by version; build it from
-    // the net-applied entries (NOT the raw rows — a rolled-back version must count
+    // the net-applied entries (NOT the raw rows - a rolled-back version must count
     // as pending, and net state already excludes it).
     let completed: HashMap<&str, &AppliedEntry> =
         applied.iter().map(|e| (e.version.as_str(), e)).collect();
     // Supersession (squash): a version superseded by a net-applied squash OR
-    // by an in-set squash is NOT pending — status must agree with apply. Reuses the
+    // by an in-set squash is NOT pending - status must agree with apply. Reuses the
     // executor's `compute_superseded` so the two views never diverge.
     let journal_superseded = journal_sql::superseded_versions(conn, cfg).await?;
     let superseded_owned =

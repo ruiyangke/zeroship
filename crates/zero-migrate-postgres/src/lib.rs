@@ -1,14 +1,14 @@
-//! # `zero-migrate-postgres` — the PostgreSQL backend
+//! # `zero-migrate-postgres` - the PostgreSQL backend
 //!
 //! One vendor, no engine. This crate holds PostgreSQL's DML, schema, DDL, and
 //! value-format renderers plus its guard, and it
-//! depends on `zero-migrate-backend` and `zero-migrate-ir` — never on the engine.
+//! depends on `zero-migrate-backend` and `zero-migrate-ir` - never on the engine.
 //! That is the whole point of the split: the engine names this crate for its
 //! registry, so this crate must not name the engine back.
 //!
 //! # The one-dialect-literal rule
 //!
-//! This CRATE names its dialect exactly ONCE — [`DIALECT`] in this file — and no
+//! This CRATE names its dialect exactly ONCE - [`DIALECT`] in this file - and no
 //! module names another vendor at all. Everything else reads `crate::DIALECT`.
 //!
 //! The rule used to be per-MODULE: each renderer held its own
@@ -23,7 +23,7 @@
 //!
 //! A backend can still reach another vendor's spelling THROUGH a contract helper
 //! that hard-codes a dialect, and no grep of this crate can see it because the
-//! literal lives in `zero-migrate-backend`. That is measured, not hypothetical —
+//! literal lives in `zero-migrate-backend`. That is measured, not hypothetical -
 //! `zero_migrate_backend::dml`'s header carries the numbers. The identifier seam
 //! (`*_for_dialect(.., DIALECT)`) is how this crate stays clear of it.
 
@@ -35,7 +35,7 @@ pub mod attribute;
 /// precondition and status SQL.
 ///
 /// This is the EXECUTION half. It arrived from `zero-migrate`'s
-/// `apply/backend/postgres/` — the LAST vendor backend inside the engine — and it
+/// `apply/backend/postgres/` - the LAST vendor backend inside the engine - and it
 /// reaches nothing but `zero-migrate-backend`, `zero-migrate-ir` and this crate's
 /// own renderers, descriptor and guard.
 pub mod backend;
@@ -86,7 +86,7 @@ pub use backend::PostgresBackend;
 /// TEST-ONLY charter fixtures, shared by this crate's unit tests.
 ///
 /// The engine's `zero_migrate::test_fixtures::no_inject` is `pub(crate)`, and no
-/// visibility widening can make a `pub(crate)` reachable across a crate boundary —
+/// visibility widening can make a `pub(crate)` reachable across a crate boundary -
 /// so the execution half's tests needed a sibling when they moved here. This is it,
 /// and it is the same shape `zero-migrate-sqlite`'s and `zero-migrate-mysql`'s have.
 #[cfg(test)]
@@ -107,7 +107,7 @@ const NAME: &str = "postgres";
 /// This backend's identity, declared HERE and nowhere else in the workspace.
 ///
 /// `zero-migrate-ir` is the neutral vocabulary crate and its own module doc says a
-/// backend "declares its own — `DialectId::new(\"duckdb\")` — without editing this
+/// backend "declares its own - `DialectId::new(\"duckdb\")` - without editing this
 /// crate". It used to declare three anyway, and core re-exported them, so every
 /// consumer that wanted to name PostgreSQL reached a neutral crate to get it. This
 /// is the declaration that ended that: the `NAME` const above is the workspace's only
@@ -136,7 +136,7 @@ const _: () = assert!(DialectId::is_well_formed_name(NAME));
 /// away at exactly the moment the vendor became separately linkable.
 ///
 /// `value_format`, `validation`, `ddl`, `guard` and `advisor` are REQUIRED. Delete any line and this literal stops
-/// compiling, here, with this crate named — which is the point: a backend cannot
+/// compiling, here, with this crate named - which is the point: a backend cannot
 /// inherit another backend's DDL, acquire a trusting guard, or acquire a silently
 /// empty advisory report by omission. See
 /// `zero_migrate_backend::registry::BackendVendor`.

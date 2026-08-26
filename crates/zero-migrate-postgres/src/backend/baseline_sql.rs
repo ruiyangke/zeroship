@@ -2,10 +2,10 @@
 //! `completed` journal event WITHOUT running its `up`.
 //!
 //! This body used to live in `zero_migrate_backend::baseline`, next to the dialect-neutral
-//! [`BaselineOutcome`]/[`BaselineError`] vocabulary it returns — and from there it
+//! [`BaselineOutcome`]/[`BaselineError`] vocabulary it returns - and from there it
 //! called `apply::backend::postgres::journal_sql` by name. That made core's baseline
 //! verb PostgreSQL's baseline verb: SQLite has its own body in
-//! `zero_migrate_sqlite::backend::journal_sql` (named in prose, not linked — that
+//! `zero_migrate_sqlite::backend::journal_sql` (named in prose, not linked - that
 //! crate is below this one in the graph, so this crate's docs cannot resolve into
 //! it), MySQL refuses, and neither could ever have been reached through the module
 //! that named this one.
@@ -24,7 +24,7 @@ use zero_migrate_ir::migration::Migration;
 use super::journal_sql;
 
 /// Record `baseline_migration` as the project's baseline
-/// — a `completed` journal event WITHOUT running its `up`.
+/// - a `completed` journal event WITHOUT running its `up`.
 ///
 /// This is the **Postgres impl behind**
 /// [`MigrationBackend::baseline_one`](zero_migrate_backend::backend::MigrationBackend::baseline_one)
@@ -32,7 +32,7 @@ use super::journal_sql;
 /// [`PostgresBackend::baseline_one`](super::PostgresBackend), which keeps the
 /// `&Client`/`pg_advisory_lock` confined to the PG backend. There is no longer a
 /// top-level PG-`&Client`-typed `baseline` on the public surface; callers go through
-/// `backend.baseline_one(…)`.
+/// `backend.baseline_one(...)`.
 ///
 /// Idempotent for the same baseline version (a retried deploy is safe); refuses a
 /// *different* baseline once one exists, and refuses entirely if the engine
@@ -41,12 +41,12 @@ use super::journal_sql;
 /// `applied_by` is the actor recorded in the journal (operator / admin).
 ///
 /// # Errors
-/// - [`BaselineError::Guard`] — the baseline SQL was denied (held to the same
+/// - [`BaselineError::Guard`] - the baseline SQL was denied (held to the same
 /// deny-list as any `up`).
-/// - [`BaselineError::AlreadyManaged`] — the journal already records net-applied
+/// - [`BaselineError::AlreadyManaged`] - the journal already records net-applied
 /// migrations (not a first-entry DB).
-/// - [`BaselineError::ConflictingBaseline`] — a different baseline already exists.
-/// - [`BaselineError::Db`] / [`BaselineError::Journal`] — infrastructure failures.
+/// - [`BaselineError::ConflictingBaseline`] - a different baseline already exists.
+/// - [`BaselineError::Db`] / [`BaselineError::Journal`] - infrastructure failures.
 pub(crate) async fn baseline<B: zero_migrate_backend::backend::MigrationBackend, D: SqlSession>(
     backend: &B,
     conn: &D,
@@ -55,7 +55,7 @@ pub(crate) async fn baseline<B: zero_migrate_backend::backend::MigrationBackend,
     baseline_migration: &Migration,
     applied_by: &str,
 ) -> Result<BaselineOutcome, BaselineError> {
-    // GUARD (defense in depth) — BEFORE the lock, no DB needed. A baseline that
+    // GUARD (defense in depth) - BEFORE the lock, no DB needed. A baseline that
     // carries a denied/cross-schema construct is refused even though it never runs.
     let guard = crate::guard::guard(&cfg.guard_config_for(dialect));
     guard
@@ -100,7 +100,7 @@ async fn baseline_locked<D: SqlSession>(
         .map(|e| e.version.as_str())
         .collect();
 
-    // Same baseline already present ⇒ idempotent no-op (retried deploy).
+    // Same baseline already present => idempotent no-op (retried deploy).
     if net_applied.contains(&version) {
         return Ok(BaselineOutcome {
             version: version.to_string(),
@@ -108,7 +108,7 @@ async fn baseline_locked<D: SqlSession>(
         });
     }
 
-    // A DIFFERENT net-applied migration exists ⇒ the engine already manages this
+    // A DIFFERENT net-applied migration exists => the engine already manages this
     // DB. If it is itself a baseline, surface the precise conflict; otherwise the
     // generic already-managed error.
     if !net_applied.is_empty() {

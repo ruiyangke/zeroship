@@ -1,8 +1,8 @@
 //! PostgreSQL's operational analyzers, behind the contract.
 //!
 //! This is the vendor half of `zero_migrate_backend::advisory::OperationalAdvisor`.
-//! The analyzers themselves — the Atlas-style advisory lint suite that reads a
-//! `libpg_query` parse tree — live in [`crate::analysis::analyze`], alongside the
+//! The analyzers themselves - the Atlas-style advisory lint suite that reads a
+//! `libpg_query` parse tree - live in [`crate::analysis::analyze`], alongside the
 //! parser they depend on. What lives HERE is the adapter that files them under this
 //! vendor's
 //! `BackendVendor`, so the engine reaches an analysis the same way it reaches this
@@ -11,13 +11,13 @@
 //! # Why this adapter is the point of the exercise
 //!
 //! Before it, the engine called `analyze` directly. Three call sites in
-//! `render/declarative.rs` reached `crate::analysis::analyze::…`, which resolved
-//! through a re-export straight into the `libpg_query` crate — so the engine ran the
+//! `render/declarative.rs` reached `crate::analysis::analyze::...`, which resolved
+//! through a re-export straight into the `libpg_query` crate - so the engine ran the
 //! PostgreSQL parser over MySQL and SQLite DDL and reported the resulting parse
 //! failures as an empty, clean-looking advisory list. That coupling is also what
 //! pinned `zero-migrate-guard` in place: the analyzers could not move under this
 //! vendor while core called them by name, because core naming a vendor crate is
-//! forbidden. With this adapter in place they did move — that crate is gone, and
+//! forbidden. With this adapter in place they did move - that crate is gone, and
 //! `crate::analysis` is where its analyzers landed.
 //!
 //! # This module names no dialect
@@ -43,7 +43,7 @@ impl OperationalAdvisor for PgAdvisor {
     fn advise(&self, sql: &str) -> AdvisoryVerdict {
         // Unparseable SQL yields no advisories rather than a refusal: the guard
         // already denies it, and the analyzers are best-effort enrichment on top of
-        // a statement that parses. `Analyzed` is still the honest arm — PostgreSQL
+        // a statement that parses. `Analyzed` is still the honest arm - PostgreSQL
         // HAS an analyzer and it ran.
         AdvisoryVerdict::Analyzed(analyze(sql))
     }

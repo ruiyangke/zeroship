@@ -1,10 +1,10 @@
-//! Operational safety analyzers — Atlas-style **advisory** lint suite (v3 Plan B).
+//! Operational safety analyzers - Atlas-style **advisory** lint suite (v3 Plan B).
 //!
 //! These analyzers flag migrations that are *operationally risky but not a
 //! security threat*: data loss, backward-incompatible renames, lock-heavy DDL,
 //! full-table rewrites, un-validated constraints, missing FK indexes. They emit
-//! [`Advisory`]s — a `Warning`/`Notice` severity carrying a human message and a
-//! safer-alternative `suggestion` — so the AI/creator (and the declarative
+//! [`Advisory`]s - a `Warning`/`Notice` severity carrying a human message and a
+//! safer-alternative `suggestion` - so the AI/creator (and the declarative
 //! differ) can see the footgun and the expand-contract path before applying.
 //!
 //! # These are ADVISORY, NEVER load-bearing for security
@@ -14,7 +14,7 @@
 //! destructive-data-loss gate is the engine's approval gate
 //! (the engine `MigrationEngine::apply`). **Nothing here denies, blocks,
 //! or gates anything.** An analyzer that fails to fire (a false negative) is a
-//! quality regression, NOT a security hole — the guard and the role still reject
+//! quality regression, NOT a security hole - the guard and the role still reject
 //! the dangerous *security* surface, and the approval gate still confirms data
 //! loss. Conversely, a spurious advisory (false positive) is noise, never a
 //! denial. Do not move a security check here, and do not rely on an analyzer to
@@ -25,7 +25,7 @@
 //! - [`analyze`] runs every analyzer over a SQL string and returns the
 //!   advisories. It is the engine for the guard's `GuardReport.advisories` and
 //!   for [`analyze_migration`].
-//! - [`analyze_migration`] runs [`analyze`] over a [`Migration`]'s `up` — the
+//! - [`analyze_migration`] runs [`analyze`] over a [`Migration`]'s `up` - the
 //!   seam the declarative differ (and a future plan UI) uses to attach
 //!   operational advisories to each generated migration (e.g. a gated `DROP` or
 //!   a `SET NOT NULL` surfaces the expand-contract suggestion).
@@ -36,8 +36,8 @@ use pg_query::protobuf::{self, AlterTableType, ConstrType, ObjectType};
 use zero_migrate_ir::migration::Migration;
 
 // The advisory VOCABULARY moved to `zero-migrate-backend`, because
-// `zero_migrate_backend::guard::GuardOutcome` — the neutral seam every vendor's guard
-// returns — carries `Vec<Advisory>`, so the type has to sit below every vendor. The
+// `zero_migrate_backend::guard::GuardOutcome` - the neutral seam every vendor's guard
+// returns - carries `Vec<Advisory>`, so the type has to sit below every vendor. The
 // ANALYZERS did not move: they read a `libpg_query` parse tree and belong with the
 // parser. Re-exported so `zero_migrate_postgres::analysis::analyze::{Advisory, Severity,
 // rule}` keeps resolving.
@@ -46,7 +46,7 @@ pub use zero_migrate_backend::advisory::{rule, Advisory, Severity};
 /// Run every analyzer over `sql` and return the advisories (in source order,
 /// then analyzer order within a statement).
 ///
-/// Unparseable SQL yields no advisories — the guard already denies it; the
+/// Unparseable SQL yields no advisories - the guard already denies it; the
 /// analyzers are a *best-effort enrichment* on top of a parseable statement.
 #[must_use]
 pub fn analyze(sql: &str) -> Vec<Advisory> {
@@ -62,7 +62,7 @@ pub fn analyze(sql: &str) -> Vec<Advisory> {
     out
 }
 
-/// Run [`analyze`] over a migration's forward (`up`) SQL — the seam the
+/// Run [`analyze`] over a migration's forward (`up`) SQL - the seam the
 /// declarative differ and a future plan UI use to attach operational advisories
 /// to each generated migration.
 ///
@@ -76,8 +76,8 @@ pub fn analyze_migration(migration: &Migration) -> Vec<Advisory> {
 /// Every column that gains a **covering index** anywhere in `sql`.
 ///
 /// Sources: a leading index column from a `CREATE INDEX`, an inline `PRIMARY
-/// KEY`/`UNIQUE` (on `CREATE TABLE` or `ALTER TABLE … ADD COLUMN`), an `ALTER
-/// TABLE … ADD CONSTRAINT PRIMARY KEY/UNIQUE`, or an `ALTER TABLE … ADD INDEX`
+/// KEY`/`UNIQUE` (on `CREATE TABLE` or `ALTER TABLE ... ADD COLUMN`), an `ALTER
+/// TABLE ... ADD CONSTRAINT PRIMARY KEY/UNIQUE`, or an `ALTER TABLE ... ADD INDEX`
 /// subcommand.
 ///
 /// This is the **plan-aware** seam: the per-statement
@@ -85,7 +85,7 @@ pub fn analyze_migration(migration: &Migration) -> Vec<Advisory> {
 /// for an index in the SAME statement. A the engine `DeclarativePlan`
 /// aggregates this across *every* migration (plus the desired snapshot) so an FK
 /// whose covering index is created in a SEPARATE migration of the same plan is no
-/// longer flagged. [`analyze`] itself is unchanged — it has no plan view.
+/// longer flagged. [`analyze`] itself is unchanged - it has no plan view.
 #[must_use]
 pub fn indexed_columns(sql: &str) -> Vec<String> {
     let Ok(parsed) = pg_query::parse(sql) else {
@@ -134,7 +134,7 @@ pub fn fk_columns_needing_index(sql: &str) -> Vec<String> {
 }
 
 /// Collect covering-index columns from a single top-level node (CREATE INDEX,
-/// CREATE TABLE inline / table-level PK·UNIQUE, ALTER TABLE inline / ADD
+/// CREATE TABLE inline / table-level PK/UNIQUE, ALTER TABLE inline / ADD
 /// CONSTRAINT / ADD INDEX). The plan-aware index-coverage counterpart to
 /// [`analyze_node`].
 fn collect_indexed_columns_in_node(node: &NodeEnum, cols: &mut Vec<String>) {
@@ -170,8 +170,8 @@ fn collect_indexed_columns_in_node(node: &NodeEnum, cols: &mut Vec<String>) {
 /// This is TOP-LEVEL-only by design: unlike [`crate::guard`] (which walks
 /// `DO`-block / function bodies to enforce the security deny-list), the analyzers
 /// do NOT recurse into nested statement bodies. Advisories are non-security
-/// enrichment, so a footgun buried inside a `DO $$ … $$` block is simply not
-/// flagged — it is not a security hole (the guard + role still cover the
+/// enrichment, so a footgun buried inside a `DO $$ ... $$` block is simply not
+/// flagged - it is not a security hole (the guard + role still cover the
 /// dangerous surface). `CreateStmt` (`CREATE TABLE`) is intentionally NOT
 /// dispatched: its inline `PRIMARY KEY`/`UNIQUE`/`NOT NULL` constraints apply to
 /// a brand-new empty table and would otherwise false-positive the
@@ -196,7 +196,7 @@ fn analyze_node(node: &NodeEnum, out: &mut Vec<Advisory>) {
     }
 }
 
-/// `NON_CONCURRENT_INDEX` — a plain `CREATE INDEX` holds a SHARE lock that
+/// `NON_CONCURRENT_INDEX` - a plain `CREATE INDEX` holds a SHARE lock that
 /// blocks writes for the whole build; suggest `CONCURRENTLY` on a populated
 /// table.
 fn analyze_create_index(idx: &protobuf::IndexStmt, out: &mut Vec<Advisory>) {
@@ -216,7 +216,7 @@ fn analyze_create_index(idx: &protobuf::IndexStmt, out: &mut Vec<Advisory>) {
     ));
 }
 
-/// `TRUNCATE_DATA_LOSS` — `TRUNCATE` removes every row at once; it is
+/// `TRUNCATE_DATA_LOSS` - `TRUNCATE` removes every row at once; it is
 /// irreversible and (unlike a `DELETE`) resets the table's storage.
 fn analyze_truncate(out: &mut Vec<Advisory>) {
     out.push(Advisory::warning(
@@ -229,7 +229,7 @@ fn analyze_truncate(out: &mut Vec<Advisory>) {
     ));
 }
 
-/// `LOCK_HEAVY_MAINTENANCE` — `CLUSTER` rewrites the table under an ACCESS
+/// `LOCK_HEAVY_MAINTENANCE` - `CLUSTER` rewrites the table under an ACCESS
 /// EXCLUSIVE lock for its whole duration.
 fn analyze_cluster(out: &mut Vec<Advisory>) {
     out.push(Advisory::warning(
@@ -241,7 +241,7 @@ fn analyze_cluster(out: &mut Vec<Advisory>) {
     ));
 }
 
-/// `LOCK_HEAVY_MAINTENANCE` — `VACUUM FULL` (the `full` option) rewrites the
+/// `LOCK_HEAVY_MAINTENANCE` - `VACUUM FULL` (the `full` option) rewrites the
 /// table under an ACCESS EXCLUSIVE lock. A plain `VACUUM` does NOT and is silent.
 fn analyze_vacuum(v: &protobuf::VacuumStmt, out: &mut Vec<Advisory>) {
     if !def_elem_present(&v.options, "full") {
@@ -257,8 +257,8 @@ fn analyze_vacuum(v: &protobuf::VacuumStmt, out: &mut Vec<Advisory>) {
     ));
 }
 
-/// `LOCK_HEAVY_MAINTENANCE` — a non-concurrent `REINDEX` holds a lock that blocks
-/// writes (and, for some forms, reads) while it rebuilds. `REINDEX … CONCURRENTLY`
+/// `LOCK_HEAVY_MAINTENANCE` - a non-concurrent `REINDEX` holds a lock that blocks
+/// writes (and, for some forms, reads) while it rebuilds. `REINDEX ... CONCURRENTLY`
 /// (the `concurrently` param) is the safe form and is silent.
 fn analyze_reindex(r: &protobuf::ReindexStmt, out: &mut Vec<Advisory>) {
     if def_elem_present(&r.params, "concurrently") {
@@ -275,15 +275,15 @@ fn analyze_reindex(r: &protobuf::ReindexStmt, out: &mut Vec<Advisory>) {
 }
 
 /// Is a `DefElem` with `defname == name` present in a `DefElem` option list?
-/// (`VACUUM FULL` ⇒ a `full` option; `REINDEX … CONCURRENTLY` ⇒ a `concurrently`
-/// param — both arrive as `DefElem`s rather than struct flags.)
+/// (`VACUUM FULL` => a `full` option; `REINDEX ... CONCURRENTLY` => a `concurrently`
+/// param - both arrive as `DefElem`s rather than struct flags.)
 fn def_elem_present(opts: &[protobuf::Node], name: &str) -> bool {
     opts.iter().any(|n| {
         matches!(n.node.as_ref(), Some(NodeEnum::DefElem(d)) if d.defname.eq_ignore_ascii_case(name))
     })
 }
 
-/// `DESTRUCTIVE_DROP` — `DROP TABLE`/`VIEW`/`SEQUENCE`/… via the `DropStmt`
+/// `DESTRUCTIVE_DROP` - `DROP TABLE`/`VIEW`/`SEQUENCE`/... via the `DropStmt`
 /// form. `DROP COLUMN`/`DROP CONSTRAINT` arrive as `AlterTableCmd`s, handled in
 /// [`analyze_alter_table`].
 fn analyze_drop_stmt(d: &protobuf::DropStmt, out: &mut Vec<Advisory>) {
@@ -307,7 +307,7 @@ fn analyze_drop_stmt(d: &protobuf::DropStmt, out: &mut Vec<Advisory>) {
     ));
 }
 
-/// `BACKWARD_INCOMPATIBLE_RENAME` — `RENAME COLUMN`/`RENAME TABLE` breaks any
+/// `BACKWARD_INCOMPATIBLE_RENAME` - `RENAME COLUMN`/`RENAME TABLE` breaks any
 /// running code reading the old name.
 fn analyze_rename_stmt(r: &protobuf::RenameStmt, out: &mut Vec<Advisory>) {
     let what = if r.rename_type == ObjectType::ObjectColumn as i32 {
@@ -359,9 +359,9 @@ fn analyze_alter_table(at: &protobuf::AlterTableStmt, out: &mut Vec<Advisory>) {
     }
 }
 
-/// `ADD COLUMN` analyzers: `ADD_NOT_NULL_NO_DEFAULT` (NOT NULL — incl. inline
-/// PRIMARY KEY — with no default), `TABLE_REWRITE` (volatile default or a STORED
-/// generated expression ⇒ ACCESS EXCLUSIVE rewrite), and the lock advisory for an
+/// `ADD COLUMN` analyzers: `ADD_NOT_NULL_NO_DEFAULT` (NOT NULL - incl. inline
+/// PRIMARY KEY - with no default), `TABLE_REWRITE` (volatile default or a STORED
+/// generated expression => ACCESS EXCLUSIVE rewrite), and the lock advisory for an
 /// inline `PRIMARY KEY`/`UNIQUE` (each builds an index under ACCESS EXCLUSIVE).
 fn analyze_add_column(c: &protobuf::AlterTableCmd, out: &mut Vec<Advisory>) {
     let Some(NodeEnum::ColumnDef(col)) = c.def.as_ref().and_then(|d| d.node.as_ref()) else {
@@ -369,7 +369,7 @@ fn analyze_add_column(c: &protobuf::AlterTableCmd, out: &mut Vec<Advisory>) {
     };
 
     // An inline PRIMARY KEY / UNIQUE builds a (unique) index under ACCESS
-    // EXCLUSIVE on a populated table — the same footgun as ADD CONSTRAINT
+    // EXCLUSIVE on a populated table - the same footgun as ADD CONSTRAINT
     // UNIQUE. Emit the lock advisory and point at the CONCURRENTLY-index path.
     if let Some(kind) = inline_index_constraint_kind(col) {
         out.push(Advisory::warning(
@@ -388,7 +388,7 @@ fn analyze_add_column(c: &protobuf::AlterTableCmd, out: &mut Vec<Advisory>) {
     let default = column_default_kind(col);
 
     match (not_null, default) {
-        // NOT NULL with NO default — fails outright on any non-empty table.
+        // NOT NULL with NO default - fails outright on any non-empty table.
         (true, DefaultKind::None) => out.push(Advisory::warning(
             rule::ADD_NOT_NULL_NO_DEFAULT,
             format!(
@@ -399,7 +399,7 @@ fn analyze_add_column(c: &protobuf::AlterTableCmd, out: &mut Vec<Advisory>) {
             "add the column nullable, backfill it, then SET NOT NULL (or add it NOT NULL \
              with a constant DEFAULT)",
         )),
-        // NOT NULL + volatile default — full table rewrite under ACCESS
+        // NOT NULL + volatile default - full table rewrite under ACCESS
         // EXCLUSIVE (the constant-default fast path does NOT rewrite).
         (true, DefaultKind::Volatile) => out.push(Advisory::warning(
             rule::TABLE_REWRITE,
@@ -426,7 +426,7 @@ fn analyze_add_column(c: &protobuf::AlterTableCmd, out: &mut Vec<Advisory>) {
     }
 }
 
-/// `DESTRUCTIVE_DROP` for `ALTER TABLE … DROP COLUMN`.
+/// `DESTRUCTIVE_DROP` for `ALTER TABLE ... DROP COLUMN`.
 fn analyze_drop_column(c: &protobuf::AlterTableCmd, out: &mut Vec<Advisory>) {
     out.push(Advisory::warning(
         rule::DESTRUCTIVE_DROP,
@@ -440,7 +440,7 @@ fn analyze_drop_column(c: &protobuf::AlterTableCmd, out: &mut Vec<Advisory>) {
     ));
 }
 
-/// `DESTRUCTIVE_DROP` for `ALTER TABLE … DROP CONSTRAINT` — drops a
+/// `DESTRUCTIVE_DROP` for `ALTER TABLE ... DROP CONSTRAINT` - drops a
 /// data-integrity guarantee.
 fn analyze_drop_constraint(c: &protobuf::AlterTableCmd, out: &mut Vec<Advisory>) {
     out.push(Advisory::warning(
@@ -455,7 +455,7 @@ fn analyze_drop_constraint(c: &protobuf::AlterTableCmd, out: &mut Vec<Advisory>)
     ));
 }
 
-/// `SET_NOT_NULL_FULL_SCAN` — `ALTER COLUMN … SET NOT NULL` scans the whole
+/// `SET_NOT_NULL_FULL_SCAN` - `ALTER COLUMN ... SET NOT NULL` scans the whole
 /// table under an ACCESS EXCLUSIVE lock to verify no existing NULLs.
 fn analyze_set_not_null(c: &protobuf::AlterTableCmd, out: &mut Vec<Advisory>) {
     out.push(Advisory::warning(
@@ -470,7 +470,7 @@ fn analyze_set_not_null(c: &protobuf::AlterTableCmd, out: &mut Vec<Advisory>) {
     ));
 }
 
-/// `LOSSY_TYPE_CHANGE` — `ALTER COLUMN … TYPE` may lose data and usually
+/// `LOSSY_TYPE_CHANGE` - `ALTER COLUMN ... TYPE` may lose data and usually
 /// rewrites the table under an ACCESS EXCLUSIVE lock.
 fn analyze_alter_column_type(c: &protobuf::AlterTableCmd, out: &mut Vec<Advisory>) {
     out.push(Advisory::warning(
@@ -486,10 +486,10 @@ fn analyze_alter_column_type(c: &protobuf::AlterTableCmd, out: &mut Vec<Advisory
 }
 
 /// `CONSTRAINT_NOT_VALIDATED` (and `FK_WITHOUT_INDEX`) for
-/// `ALTER TABLE … ADD CONSTRAINT`.
+/// `ALTER TABLE ... ADD CONSTRAINT`.
 ///
 /// A FK/UNIQUE/CHECK added without `NOT VALID` validates against every existing
-/// row while holding a lock — and can fail outright on dirty data. A FK whose
+/// row while holding a lock - and can fail outright on dirty data. A FK whose
 /// referencing column has no supporting index makes every cascade/lookup a scan.
 fn analyze_add_constraint(
     c: &protobuf::AlterTableCmd,
@@ -506,8 +506,8 @@ fn analyze_add_constraint(
     let is_check = contype == ConstrType::ConstrCheck as i32;
 
     // CONSTRAINT_NOT_VALIDATED: FK and CHECK support `NOT VALID` (skip_validation
-    // true ⇒ NOT VALID specified). UNIQUE/PRIMARY do NOT support NOT VALID — they
-    // always build a validating index under lock — so we still advise the
+    // true => NOT VALID specified). UNIQUE/PRIMARY do NOT support NOT VALID - they
+    // always build a validating index under lock - so we still advise the
     // CONCURRENTLY-index path for those. Attaching a pre-built index
     // (`USING INDEX`, `con.indexname` set) is the SAFE path we recommend, so we
     // skip the advisory there (false-positive fix).
@@ -644,7 +644,7 @@ fn inline_index_constraint_kind(col: &protobuf::ColumnDef) -> Option<&'static st
 }
 
 /// Whether a `ColumnDef` carries a NOT NULL: the `is_not_null` flag, an explicit
-/// NOT NULL constraint node, or an inline `PRIMARY KEY` (which implies NOT NULL —
+/// NOT NULL constraint node, or an inline `PRIMARY KEY` (which implies NOT NULL -
 /// so `ADD COLUMN x int PRIMARY KEY` on a non-empty table fails exactly like an
 /// explicit NOT NULL with no default).
 fn column_is_not_null(col: &protobuf::ColumnDef) -> bool {
@@ -663,9 +663,9 @@ fn column_is_not_null(col: &protobuf::ColumnDef) -> bool {
 enum DefaultKind {
     /// No DEFAULT clause.
     None,
-    /// A constant DEFAULT (literal) — the PG11+ metadata-only fast path.
+    /// A constant DEFAULT (literal) - the PG11+ metadata-only fast path.
     Constant,
-    /// A DEFAULT whose expression contains a function call — treated as volatile
+    /// A DEFAULT whose expression contains a function call - treated as volatile
     /// (forces a table rewrite). Conservative: we cannot prove stability without
     /// a catalog lookup.
     Volatile,
@@ -673,15 +673,15 @@ enum DefaultKind {
 
 /// Classify a column's DEFAULT clause.
 ///
-/// A `GENERATED ALWAYS AS (…) STORED` column (`ConstrGenerated`) is materialised
+/// A `GENERATED ALWAYS AS (...) STORED` column (`ConstrGenerated`) is materialised
 /// for every existing row, so adding one rewrites the table under an ACCESS
-/// EXCLUSIVE lock — classified as [`DefaultKind::Volatile`] so it surfaces a
+/// EXCLUSIVE lock - classified as [`DefaultKind::Volatile`] so it surfaces a
 /// `TABLE_REWRITE` advisory.
 fn column_default_kind(col: &protobuf::ColumnDef) -> DefaultKind {
     for con in &col.constraints {
         if let Some(NodeEnum::Constraint(c)) = con.node.as_ref() {
             if c.contype == ConstrType::ConstrGenerated as i32 {
-                // A STORED generated column is computed for every row on ADD →
+                // A STORED generated column is computed for every row on ADD ->
                 // full table rewrite.
                 return DefaultKind::Volatile;
             }
@@ -689,7 +689,7 @@ fn column_default_kind(col: &protobuf::ColumnDef) -> DefaultKind {
                 return match c.raw_expr.as_ref().and_then(|e| e.node.as_ref()) {
                     Some(expr) if expr_contains_func_call(expr) => DefaultKind::Volatile,
                     // A bare constant DEFAULT (or no expr node) is the PG11+
-                    // metadata-only fast path — not a rewrite.
+                    // metadata-only fast path - not a rewrite.
                     Some(_) | None => DefaultKind::Constant,
                 };
             }

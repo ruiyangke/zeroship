@@ -1,9 +1,9 @@
-//! The least-privilege per-project `migrator` role — **second-line DB-privilege
+//! The least-privilege per-project `migrator` role - **second-line DB-privilege
 //! defense**.
 //!
 //! The SQL guard ([`crate::guard::PgGuard`]) is the first line: it parses every `up`
 //! and denies the dangerous surface at submission. But a parser can be evaded
-//! by **runtime-constructed SQL** — e.g. `DO $$ … EXECUTE format('… %I …', s) …`
+//! by **runtime-constructed SQL** - e.g. `DO $$ ... EXECUTE format('... %I ...', s) ...`
 //! where the target schema is computed at execution and never appears as a
 //! parseable identifier the guard can confine. The guard documents these as
 //! residuals. **The second line backstops them:** the migration's DDL runs under a
@@ -11,7 +11,7 @@
 //! on `control` / `auth` / `billing` / other projects' schemas, so the same op
 //! that slips past parse **fails with `permission denied` at execution**.
 //!
-//! # Role model — `NOLOGIN` + `SET ROLE` (not a login role)
+//! # Role model - `NOLOGIN` + `SET ROLE` (not a login role)
 //!
 //! The role is a deterministic `migrator_<project>_<hash>`, created as
 //! **`NOLOGIN`**.
@@ -19,7 +19,7 @@
 //! WHAT THIS MODULE ACTUALLY CONTAINS, because the rest of this header reads like
 //! it describes code that is here and it does not: [`migrator_role_name`], the NAME
 //! derivation, and nothing else. There is no `provision_migrator` in this
-//! repository — the two mentions of it were both in this header, describing a
+//! repository - the two mentions of it were both in this header, describing a
 //! function that ran over a `&Client` and left with the native PostgreSQL driver.
 //! **The grant set below is the SPEC the host implements**, and it is kept because
 //! `ExecutorConfig::with_migrator_role` is the seam the host's provisioned role
@@ -45,7 +45,7 @@
 //!   the project advisory lock; switching the *effective* role inside it keeps
 //!   the lock and the journal writes on one session.
 //! - **Same DB-enforced confinement.** `SET ROLE` to a `NOSUPERUSER` role makes
-//!   privilege checks run as that role — a superuser admin that `SET ROLE`s to
+//!   privilege checks run as that role - a superuser admin that `SET ROLE`s to
 //!   a non-superuser is fully constrained by the target role's grants (a
 //!   superuser only bypasses checks while it is *itself* the effective role).
 //!
@@ -53,7 +53,7 @@
 //!
 //! The migrator role gets **exactly**:
 //!
-//! - `NOSUPERUSER NOCREATEROLE NOCREATEDB NOLOGIN NOBYPASSRLS` — cannot escalate
+//! - `NOSUPERUSER NOCREATEROLE NOCREATEDB NOLOGIN NOBYPASSRLS` - cannot escalate
 //!   (`CREATE ROLE`, `ALTER SYSTEM`, `CREATE DATABASE` all denied by attribute).
 //! - **owns** the project schema (so its DDL + `ALTER DEFAULT PRIVILEGES`
 //!   targets work and objects it creates are owned/usable by it), with
@@ -62,9 +62,9 @@
 //!   migrator must not be able to forge the journal. A migration's `up` runs as
 //!   the migrator, so if the migrator could `INSERT` into the journal it could
 //!   plant a `completed` row (silently suppressing a future legitimate
-//!   migration: `pending = set − completed`) or a bogus checksum (wedging the
+//!   migration: `pending = set - completed`) or a bogus checksum (wedging the
 //!   apply on `ChecksumDrift`). All journal / inflight I/O is therefore done by
-//!   the **executor as the admin role** — the migrator gets neither `USAGE` on
+//!   the **executor as the admin role** - the migrator gets neither `USAGE` on
 //!   the meta schema nor any grant on `schema_migrations` /
 //!   `schema_migrations_inflight`. The journal is unforgeable by deny-by-absence.
 //! - `search_path` set to the project schema **first**, then the extension
@@ -72,24 +72,24 @@
 //!   sole writable resolution target; the extension schema(s) ride at the end
 //!   purely so an unqualified extension TYPE/function the engine emits
 //!   (pgvector's `vector(N)`, `PostGIS`'s `geography(...)`) resolves. The meta
-//!   schema is off the migrator's path — defense-in-depth so an unqualified name
+//!   schema is off the migrator's path - defense-in-depth so an unqualified name
 //!   in an `up` can never resolve to the journal even if a grant were ever
 //!   reintroduced.
 //! - **`REVOKE ALL` then `GRANT USAGE` on the extension schema(s) (`public`)**:
 //!   the migrator cannot stage objects there (no `CREATE`) nor reach existing
 //!   tables (no per-object grant), but `USAGE` lets it *resolve* the shared
-//!   extension types. USAGE is resolution-only — it relaxes nothing about
+//!   extension types. USAGE is resolution-only - it relaxes nothing about
 //!   cross-schema **write** confinement. (Matches a data-plane runtime, which
 //!   references the same unqualified `vector`/`geography` types with `public`
 //!   reachable on its connection path.)
-//! - **No grant whatsoever** on any other project schema — any schema outside
+//! - **No grant whatsoever** on any other project schema - any schema outside
 //!   the migrator's own. Deny-by-absence: a role only has what it is
 //!   granted, so an unmentioned schema is unreachable. This is the second-line
 //!   backstop.
 //!
 //! # Known residuals (tracked, no behavior change)
 //!
-//! - **`CREATE FUNCTION … SET search_path`** is denied by the guard but is
+//! - **`CREATE FUNCTION ... SET search_path`** is denied by the guard but is
 //!   NOT role-backstopped. This is harmless: functions the migrator creates are
 //!   `INVOKER` by default, so they run with the *caller's* privileges (no
 //!   escalation), and `SECURITY DEFINER` (which would run as the function owner,
@@ -117,7 +117,7 @@ use zero_migrate_ir::id::base62_encode_bytes;
 /// restated, so the number the role name truncates to and the number this backend
 /// declares cannot drift apart. The `Bytes` arm is not incidental: MySQL's cap is 64
 /// CHARACTERS and SQLite has none, which is why this bound is PostgreSQL's and not
-/// everyone's — and it is one more reason the derivation belongs here.
+/// everyone's - and it is one more reason the derivation belongs here.
 const IDENT_MAX_BYTES: usize = match crate::descriptor::POSTGRES_DESCRIPTOR.limits.identifier {
     IdentifierLimit::Bytes(n) => n,
     IdentifierLimit::Unbounded | IdentifierLimit::Characters(_) => {
@@ -133,7 +133,7 @@ pub enum RoleError {
     BadRoleName(String),
     /// An engine-supplied identifier (role / project schema / meta schema /
     /// extension schema) was not quotable (empty or NUL-bearing) at a render
-    /// seam — fail-closed rather than interpolate it. Maps
+    /// seam - fail-closed rather than interpolate it. Maps
     /// [`IdentQuoteError`].
     #[error("role provisioning: {0}")]
     IdentQuote(#[from] IdentQuoteError),
@@ -143,7 +143,7 @@ pub enum RoleError {
 /// role name is never interpolated as raw SQL. Routes through the ONE crate-shared
 /// explicit backend seam
 /// ([`quote_ident_checked_for_backend`](zero_migrate_backend::dml::quote_ident_checked_for_backend))
-/// — byte-identical to (and uniformly self-defending with)
+/// - byte-identical to (and uniformly self-defending with)
 /// `author`/`backfill`/`journal`/`dml`: fail-closed on an empty / NUL identifier.
 ///
 /// It takes this vendor's own `dml::RENDERER` rather than a dialect id, so this
@@ -202,7 +202,7 @@ mod tests {
     /// The leg `zero-migrate`'s `dml::tests::all_engine_seams_render_uniformly`
     /// used to hold for this seam, moved here with the seam. It cannot stay in the
     /// engine: `quote_ident` is crate-private and this crate is no longer part of
-    /// that one. The invariant is unchanged — the role seam renders BYTE-IDENTICALLY
+    /// that one. The invariant is unchanged - the role seam renders BYTE-IDENTICALLY
     /// to a bare escape-and-quote and fails closed on a NUL.
     #[test]
     fn the_role_seam_renders_uniformly_and_fails_closed() {

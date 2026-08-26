@@ -15,9 +15,9 @@
 //! MEASURED, each raising a NAMED rule:
 //!
 //!     SET NOT NULL without a default      SET_NOT_NULL_FULL_SCAN
-//!     ADD COLUMN … DEFAULT gen_random_uuid()  TABLE_REWRITE
+//!     ADD COLUMN ... DEFAULT gen_random_uuid()  TABLE_REWRITE
 //!     CREATE INDEX (non-concurrent)       NON_CONCURRENT_INDEX
-//!     ALTER COLUMN … TYPE bigint          LOSSY_TYPE_CHANGE
+//!     ALTER COLUMN ... TYPE bigint          LOSSY_TYPE_CHANGE
 //!     ADD FOREIGN KEY (validated)         CONSTRAINT_NOT_VALIDATED + FK_WITHOUT_INDEX
 //!     ADD CHECK (validated)               CONSTRAINT_NOT_VALIDATED
 //!     DROP COLUMN                         DESTRUCTIVE_DROP

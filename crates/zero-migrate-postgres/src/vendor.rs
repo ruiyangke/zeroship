@@ -1,4 +1,4 @@
-//! The VENDOR (`zero-migrate`) PostgreSQL render seam — the privileged `Op`
+//! The VENDOR (`zero-migrate`) PostgreSQL render seam - the privileged `Op`
 //! variants (roles, grants, policies, functions, triggers, RLS, `raw`) lowered to
 //! structured PostgreSQL DDL.
 //!
@@ -12,7 +12,7 @@
 //! [`VendorError`] is a `#[from]` variant
 //! of `IrLowerError`. Moving the whole file into this crate would have made
 //! `zero-migrate-sqlite` and `zero-migrate-mysql` depend on `zero-migrate-postgres`
-//! to name their own return type — precisely the vendor-to-vendor edge the split
+//! to name their own return type - precisely the vendor-to-vendor edge the split
 //! exists to remove.
 //!
 //! So it was SPLIT rather than moved or left: the two types stayed in
@@ -25,12 +25,12 @@
 //! `qid` used to call `dml::quote_ident_checked`, a PostgreSQL-PINNED wrapper that
 //! wrote a closed PostgreSQL target into its own body and resolved a renderer from it.
 //! That is a vendor asking a registry to hand it back to itself. It now asks
-//! `self`. The bytes are identical — `PostgresDmlRenderer::quote_ident` was always
-//! what that lookup resolved to — and the round trip is gone.
+//! `self`. The bytes are identical - `PostgresDmlRenderer::quote_ident` was always
+//! what that lookup resolved to - and the round trip is gone.
 //!
 //! This module is the only vendor-op renderer any registered backend ships, so an
 //! artifact carrying one of these ops measures a `DialectScope::Only` reach naming
-//! this dialect — and apply declines that plan against every other target. The lower
+//! this dialect - and apply declines that plan against every other target. The lower
 //! seam (`zero_migrate::render::lower`) hard-rejects a target without
 //! `Capability::PrivilegedCatalogObjects` before reaching here. The render is pure
 //! (no DB, no live schema).
@@ -55,7 +55,7 @@ fn qid(ident: &str) -> Result<String, VendorError> {
     )?)
 }
 
-/// `"schema"."name"` — both parts quoted.
+/// `"schema"."name"` - both parts quoted.
 fn qualified(schema: &str, name: &str) -> Result<String, VendorError> {
     Ok(format!("{}.{}", qid(schema)?, qid(name)?))
 }
@@ -73,7 +73,7 @@ fn role_ref(name: &str) -> Result<String, VendorError> {
 /// Pick a dollar-quote tag that does NOT occur in `body`, so a function body
 /// containing the literal `$zsfn$` cannot prematurely terminate the dollar-quoted
 /// literal. Returns the canonical `$zsfn$` when the body is collision-free
-/// (so existing renders / goldens are byte-stable), else `$zsfn0$`, `$zsfn1$`, …
+/// (so existing renders / goldens are byte-stable), else `$zsfn0$`, `$zsfn1$`, ...
 fn function_body_dollar_tag(body: &str) -> String {
     let mut tag = String::from("$zsfn$");
     let mut i = 0u64;
@@ -86,8 +86,8 @@ fn function_body_dollar_tag(body: &str) -> String {
 
 /// This server's `LANGUAGE <token>` spelling for a neutral [`FuncLanguage`].
 ///
-/// The IR names the two languages it will accept — the target's own procedural
-/// language, or plain SQL — and stops there, because what the procedural one is
+/// The IR names the two languages it will accept - the target's own procedural
+/// language, or plain SQL - and stops there, because what the procedural one is
 /// CALLED is a fact about the server. Here it is `plpgsql`, the name this server
 /// registers it under and the name
 /// [`crate::guard::denylist::TRUSTED_LANGUAGES`] already had to spell to scan a
@@ -99,7 +99,7 @@ const fn func_language_sql(language: FuncLanguage) -> &'static str {
     }
 }
 
-/// Single-quote-escape a SQL string literal (`'` ⇒ `''`).
+/// Single-quote-escape a SQL string literal (`'` => `''`).
 fn sql_str(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
@@ -111,7 +111,7 @@ fn search_path_list(items: &[String]) -> Result<String, VendorError> {
     Ok(parts?.join(", "))
 }
 
-/// Render a GRANT/REVOKE target to its `ON …` SQL clause + a default schema for
+/// Render a GRANT/REVOKE target to its `ON ...` SQL clause + a default schema for
 /// table targets.
 fn grant_target_sql(target: &GrantTarget, default_schema: &str) -> Result<String, VendorError> {
     Ok(match target {
@@ -149,12 +149,12 @@ fn grant_target_sql(target: &GrantTarget, default_schema: &str) -> Result<String
     })
 }
 
-/// Render the comma-joined privilege list (`All` ⇒ `ALL PRIVILEGES`).
+/// Render the comma-joined privilege list (`All` => `ALL PRIVILEGES`).
 fn privileges_sql(privs: &[Privilege]) -> Result<String, VendorError> {
     if privs.is_empty() {
         return Err(VendorError::EmptyList { what: "privileges" });
     }
-    // `All` subsumes everything — render it alone.
+    // `All` subsumes everything - render it alone.
     if privs.contains(&Privilege::All) {
         return Ok("ALL PRIVILEGES".to_string());
     }
@@ -193,7 +193,7 @@ fn type_ref_sql<'a>(value: &'a str, slot: &'static str) -> Result<&'a str, Vendo
 
 /// Render a VENDOR op to its ordered Postgres statement list.
 /// `eff_schema` is the effective schema the lower seam resolved (the op's own
-/// `schema` qualifier → connection default → project schema), used to qualify
+/// `schema` qualifier -> connection default -> project schema), used to qualify
 /// table-/policy-/trigger-scoped objects.
 ///
 /// `pub(crate)` DELIBERATELY: the one door to this is
@@ -213,7 +213,7 @@ pub(crate) fn render_vendor_op(
     eff_schema: &str,
 ) -> Result<Vec<VendorStatement>, VendorError> {
     Ok(match op {
-        // ── Schemas ──────────────────────────────────────────────────────────
+        // -- Schemas ----------------------------------------------------------
         Op::CreateSchema {
             name,
             if_not_exists,
@@ -260,7 +260,7 @@ pub(crate) fn render_vendor_op(
                 down: None,
             }]
         }
-        // ── Extensions ───────────────────────────────────────────────────────
+        // -- Extensions -------------------------------------------------------
         Op::CreateExtension {
             name,
             if_not_exists,
@@ -297,7 +297,7 @@ pub(crate) fn render_vendor_op(
                 down: None,
             }]
         }
-        // ── Roles ────────────────────────────────────────────────────────────
+        // -- Roles ------------------------------------------------------------
         Op::CreateRole {
             name,
             login,
@@ -331,7 +331,7 @@ pub(crate) fn render_vendor_op(
                 opts.push_str(" CREATEDB");
             }
             // SUPERUSER renders verbatim; the guard deny-list REFUSES it in all
-            // profiles — render-here, refuse-at-guard.
+            // profiles - render-here, refuse-at-guard.
             if superuser.unwrap_or(false) {
                 opts.push_str(" SUPERUSER");
             }
@@ -366,7 +366,7 @@ pub(crate) fn render_vendor_op(
                     Some(format!("DROP ROLE IF EXISTS {qname}"))
                 },
             }];
-            // The `ALTER ROLE … SET search_path` the platform needs (×17, 0025).
+            // The `ALTER ROLE ... SET search_path` the platform needs (x17, 0025).
             if let Some(sp) = set_search_path {
                 if !sp.is_empty() {
                     out.push(VendorStatement {
@@ -465,7 +465,7 @@ pub(crate) fn render_vendor_op(
                 down: None,
             }]
         }
-        // ── Grants ───────────────────────────────────────────────────────────
+        // -- Grants -----------------------------------------------------------
         Op::Grant {
             privileges,
             on,
@@ -500,14 +500,14 @@ pub(crate) fn render_vendor_op(
                 down: None,
             }]
         }
-        // ── Row-Level Security ────────────────────────────────────────────────
+        // -- Row-Level Security ------------------------------------------------
         Op::SetRls {
             table,
             enabled,
             forced,
             ..
         } => set_rls_stmts(eff_schema, table, *enabled, *forced)?,
-        // ── Policies ─────────────────────────────────────────────────────────
+        // -- Policies ---------------------------------------------------------
         Op::CreatePolicy {
             name,
             table,
@@ -553,7 +553,7 @@ pub(crate) fn render_vendor_op(
                 down: None,
             }]
         }
-        // ── Triggers ─────────────────────────────────────────────────────────
+        // -- Triggers ---------------------------------------------------------
         Op::CreateTrigger {
             name,
             table,
@@ -624,7 +624,7 @@ pub(crate) fn render_vendor_op(
                 down: None,
             }]
         }
-        // ── Functions ────────────────────────────────────────────────────────
+        // -- Functions --------------------------------------------------------
         Op::CreateFunction {
             name,
             schema,
@@ -670,10 +670,10 @@ pub(crate) fn render_vendor_op(
                 .map(|v| format!(" {}", v.as_sql()))
                 .unwrap_or_default();
             let returns = type_ref_sql(returns, "createFunction.returns")?;
-            // The raw `body` is embedded VERBATIM inside a `$zsfn$ … $zsfn$` dollar
+            // The raw `body` is embedded VERBATIM inside a `$zsfn$ ... $zsfn$` dollar
             // tag; the WHOLE statement is `pg_query`-parsed + deny-scanned by the
             // guard at the lower seam. The tag is chosen to not
-            // collide with the body — a body literally containing `$zsfn$`
+            // collide with the body - a body literally containing `$zsfn$`
             // would otherwise terminate the quote early.
             let tag = function_body_dollar_tag(body);
             let up = format!(
@@ -739,7 +739,7 @@ pub(crate) fn render_vendor_op(
                 down: None,
             }]
         }
-        // ── The gated raw escape ──────────────────────────────────────────────
+        // -- The gated raw escape ----------------------------------------------
         Op::Raw { sql, .. } => {
             // The verbatim SQL is embedded as-is and the WHOLE statement is
             // `pg_query`-parsed + deny-scanned by the guard.
@@ -784,7 +784,7 @@ fn set_rls_stmts(
     Ok(stmts)
 }
 
-/// Render an `ALTER TABLE … <verb> ROW LEVEL SECURITY` RLS statement + its inverse.
+/// Render an `ALTER TABLE ... <verb> ROW LEVEL SECURITY` RLS statement + its inverse.
 fn rls_stmt(
     eff_schema: &str,
     table: &str,

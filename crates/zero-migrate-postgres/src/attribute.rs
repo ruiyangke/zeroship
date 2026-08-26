@@ -1,7 +1,7 @@
 //! The vendor attributes PostgreSQL declares.
 //!
-//! Each entry is one knob from PostgreSQL's own `CREATE TABLE` grammar — a storage
-//! parameter or a table-level clause — that the neutral [`Op`](zero_migrate_ir::ir::Op)
+//! Each entry is one knob from PostgreSQL's own `CREATE TABLE` grammar - a storage
+//! parameter or a table-level clause - that the neutral [`Op`](zero_migrate_ir::ir::Op)
 //! set does not model and should not.
 //!
 //! This is a STARTER SET, not the full grammar. The point of the
@@ -12,7 +12,7 @@
 //! # The two that used to live in the neutral IR
 //!
 //! `IndexStorageParams` held `fillfactor` and `pages_per_range` as named fields in
-//! `zero-migrate-ir` and in the neutral contract crate's `IndexSnapshot` — PostgreSQL
+//! `zero-migrate-ir` and in the neutral contract crate's `IndexSnapshot` - PostgreSQL
 //! storage parameters living in the crates whose purpose is to name no vendor. Core's
 //! own drift pass then formatted them BY THOSE TWO SPELLINGS. They were the reason this
 //! mechanism exists.
@@ -60,7 +60,7 @@ static DEFS: &[AttrDef] = declare_attributes! {
         = AttrShape::Int {
             min: 128,
             // CONSERVATIVE, and knowingly so. The manual says "between 128 bytes and the
-            // (block size - header), by default 8160 bytes" — the ceiling is derived from
+            // (block size - header), by default 8160 bytes" - the ceiling is derived from
             // the server's BLOCK SIZE, which is a compile-time choice. On a server built
             // with a 16kB or 32kB block this refuses values the server would accept.
             // A declaration cannot ask the server, and refusing a legal value is the
@@ -78,7 +78,7 @@ static DEFS: &[AttrDef] = declare_attributes! {
             min: 0,
             // The manual states NO upper bound for this storage parameter, so neither
             // does this declaration. An earlier version said 1024, which was invented
-            // rather than read — it would have refused a legal value with a bound
+            // rather than read - it would have refused a legal value with a bound
             // PostgreSQL never imposed. `i32::MAX` is the storage parameter's own integer
             // ceiling; the server clamps the effective count against `max_parallel_workers`
             // at run time, which is not a plan-time fact.
@@ -87,8 +87,8 @@ static DEFS: &[AttrDef] = declare_attributes! {
 
     // ---- `createIndex`: the two knobs `IndexStorageParams` holds today --------------
     //
-    // `fillfactor` appears TWICE in this file — once for the table ops above and once
-    // for `createIndex` here — and that is the point rather than an oversight. It is
+    // `fillfactor` appears TWICE in this file - once for the table ops above and once
+    // for `createIndex` here - and that is the point rather than an oversight. It is
     // legal on both and means the same thing in each. On the op axis this needs no
     // special machinery: a declaration lists the ops it is legal on, and two knobs that
     // share a key but not an op list are simply two rows.
@@ -102,8 +102,8 @@ static DEFS: &[AttrDef] = declare_attributes! {
 
     /// BRIN only: how many table blocks each index entry summarises. A smaller
     /// range makes a larger but more selective index.
-    // BRIN only. The manual states 1..=131072, so unlike `parallel_workers` — where
-    // an earlier version of this file invented a ceiling — this bound is read, not
+    // BRIN only. The manual states 1..=131072, so unlike `parallel_workers` - where
+    // an earlier version of this file invented a ceiling - this bound is read, not
     // guessed.
     pages_per_range on [CreateIndexAttributes] = AttrShape::Int { min: 1, max: 131_072 };
 };

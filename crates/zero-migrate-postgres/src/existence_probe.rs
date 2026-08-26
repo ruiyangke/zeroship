@@ -3,7 +3,7 @@ use zero_migrate_backend::existence_probe::ExistenceProbePolicy;
 /// This crate's DECLARED identifier cap, read off its own descriptor rather than
 /// restated as a literal. A second `63` in the same crate as
 /// [`crate::descriptor`]'s `IdentifierLimit::Bytes(63)` is two definitions of one
-/// fact, and they drift silently — which is the defect the one-definition rule
+/// fact, and they drift silently - which is the defect the one-definition rule
 /// closed for the three core sites.
 const PG_MAX_IDENT_BYTES: usize = match crate::VENDOR.descriptor.limits.identifier {
     zero_migrate_ir::backend::IdentifierLimit::Bytes(n) => n,
@@ -52,14 +52,14 @@ fn normalize_fk_definition(def: &str) -> String {
                                   // Keep only the FINAL dotted segment (the table), dropping any `<schema>.` prefix.
                                   // Handles quoted identifiers by splitting on the last `.`.
                                   //
-                                  // **SAFE post-validation** — `rsplit('.')` would mis-split a referenced table
+                                  // **SAFE post-validation** - `rsplit('.')` would mis-split a referenced table
                                   // whose own (quoted) identifier contained a literal dot (e.g. `"a.b"`). That
                                   // case is UNREACHABLE here: the declared side is built by
                                   // [`crate::render::declarative::fk_definition_pg`] from a `target` that has already
                                   // passed `validate_ident` (rejects `.` in identifiers) and `reject_cross_app_ref`
                                   // (rejects dotted FK targets, `declarative.rs`), so the referenced table is
                                   // ALWAYS a single dot-free segment. The live side comes from
-                                  // `pg_get_constraintdef`, which double-quotes such a name — but the catalog only
+                                  // `pg_get_constraintdef`, which double-quotes such a name - but the catalog only
                                   // ever holds names this same author path created, so it is dot-free too. The
                                   // debug_assert pins that invariant; if identifier rules ever loosen this must
                                   // become a quote-aware split.
@@ -79,7 +79,7 @@ fn normalize_fk_definition(def: &str) -> String {
 /// PostgreSQL's OWN spelling of an over-long identifier: the longest prefix of WHOLE
 /// characters that fits in [`PG_MAX_IDENT_BYTES`].
 ///
-/// The budget is bytes (NAMEDATALEN) but the clip is on a character boundary — verified
+/// The budget is bytes (NAMEDATALEN) but the clip is on a character boundary - verified
 /// against a live PostgreSQL 18 server, where a 62-ASCII-byte prefix plus a two-byte
 /// character (64 bytes) becomes the 62 ASCII bytes rather than a 63rd byte that would
 /// split the codepoint.

@@ -20,8 +20,8 @@ use crate::DIALECT;
 
 /// The value half of one storage parameter, in PostgreSQL's spelling.
 ///
-/// Every reloption is written as a quoted string — `fillfactor='85'`, not `fillfactor=85`
-/// — which the server accepts for every type and which is already how this crate spells an
+/// Every reloption is written as a quoted string - `fillfactor='85'`, not `fillfactor=85`
+/// - which the server accepts for every type and which is already how this crate spells an
 /// index's `fillfactor`. One form for all four shapes means no per-shape branch and no
 /// chance of an unquoted value colliding with the grammar.
 fn attribute_value_pg(value: &IrScalar) -> String {
@@ -32,7 +32,7 @@ fn attribute_value_pg(value: &IrScalar) -> String {
         IrScalar::Decimal(d) => d.clone(),
         // `AttrShape` offers bool / int / enum / text only, so neither of these can be
         // DECLARED. They are reachable only through a hand-built `Attributes`, and
-        // rendering nothing for them would silently drop an authored value — so they
+        // rendering nothing for them would silently drop an authored value - so they
         // render their debug form and fail loudly at the server instead.
         IrScalar::Null => "NULL".to_string(),
         IrScalar::Bytes(bytes) => bytes.iter().fold(String::from("\\x"), |mut out, byte| {
@@ -46,7 +46,7 @@ fn attribute_value_pg(value: &IrScalar) -> String {
 /// them with.
 ///
 /// `tablespace` is NOT a storage parameter: the grammar gives it its own `TABLESPACE
-/// name` clause, and putting it inside `WITH ( … )` is an error the server reports as an
+/// name` clause, and putting it inside `WITH ( ... )` is an error the server reports as an
 /// unrecognised parameter. Every other declared table attribute IS a reloption. That split
 /// is PostgreSQL's, which is why it lives here and not in any shared helper.
 ///
@@ -69,7 +69,7 @@ fn table_attribute_clauses(attributes: &Attributes) -> (String, String) {
     }
     let with = if reloptions.is_empty() {
         // An empty `WITH ()` is a syntax error, and a create carrying no attributes is the
-        // overwhelmingly common case — so the clause is absent, not empty.
+        // overwhelmingly common case - so the clause is absent, not empty.
         String::new()
     } else {
         format!(" WITH ({})", reloptions.join(", "))
@@ -282,7 +282,7 @@ fn fk_ddl_referenced_cols(cols: &[String]) -> String {
         .join(", ")
 }
 
-/// Postgres DDL emitter — schema-qualified, access-method / `WITH`-aware, with
+/// Postgres DDL emitter - schema-qualified, access-method / `WITH`-aware, with
 /// trailing `COMMENT ON COLUMN` sentinels. Holds the project schema for
 /// qualification. Byte-identical to the former PG arm of each render method.
 struct PgEmitter {
@@ -299,8 +299,8 @@ impl PgEmitter {
         )
     }
 
-    /// Render a `CONSTRAINT … FOREIGN KEY (…) REFERENCES <schema>.<tgt> (…)
-    /// [<policy>]` clause for inline `CREATE TABLE` / `ALTER … ADD CONSTRAINT` use.
+    /// Render a `CONSTRAINT ... FOREIGN KEY (...) REFERENCES <schema>.<tgt> (...)
+    /// [<policy>]` clause for inline `CREATE TABLE` / `ALTER ... ADD CONSTRAINT` use.
     /// (Was the non-MySQL branch of `DeclarativeAuthor::fk_clause`, moved VERBATIM.)
     ///
     /// The `ON UPDATE` / `ON DELETE` / `DEFERRABLE` policy tail is carried in the
@@ -358,13 +358,13 @@ impl DdlEmitter for PgEmitter {
     }
 
     /// The `USING <col>::<type>` cast is emitted so a compatible widening (e.g.
-    /// `integer` → `double precision`) applies without a manual cast; an
+    /// `integer` -> `double precision`) applies without a manual cast; an
     /// incompatible change still fails loudly at apply (never silently).
     ///
     /// A GENERATED column takes NO `USING`, and this is the server's rule rather
     /// than a preference. MEASURED on PostgreSQL 18.4: the cast this statement used
     /// to attach unconditionally is answered with `cannot specify USING when
-    /// altering type of generated column` — for `int → bigint` as much as for
+    /// altering type of generated column` - for `int -> bigint` as much as for
     /// anything else, so the clause made even the otherwise-legal widening
     /// undeployable. WITHOUT it the same `ALTER` is ACCEPTED and
     /// `pg_attribute.attgenerated` survives: the server recomputes the expression
@@ -452,7 +452,7 @@ impl DdlEmitter for PgEmitter {
             // legacy `__fts` generated-column sentinel path.
             let default = default_clause(c.default.as_deref());
             let checks = inline_checks_clause(c);
-            // the inline `/* zero-migrate:enc:… */` sentinel rides between
+            // the inline `/* zero-migrate:enc:... */` sentinel rides between
             // the type and the constraints, exactly as the shared kernel's
             // `field_to_column_for_dialect` bakes it, so a `generate`d encrypted
             // column is byte-identical to a `registerModel`-created one.
@@ -512,16 +512,16 @@ impl DdlEmitter for PgEmitter {
             self.qualified(table),
             parts.join(", "),
             partition,
-            // Clause ORDER is the grammar's, not ours: `CREATE TABLE … ( … ) [PARTITION BY
-            // …] [WITH ( … )] [TABLESPACE …]`. Emitting `WITH` before `PARTITION BY` is a
+            // Clause ORDER is the grammar's, not ours: `CREATE TABLE ... ( ... ) [PARTITION BY
+            // ...] [WITH ( ... )] [TABLESPACE ...]`. Emitting `WITH` before `PARTITION BY` is a
             // syntax error, so the order here is fixed rather than incidental.
             with,
             tablespace,
         );
         let mut statements: Vec<String> = vec![create];
-        // append `COMMENT ON COLUMN … '<sentinel>'` for every
-        // column carrying a comment sentinel (`zero-migrate:mask:…` on a masked sibling,
-        // `zero-migrate:enc:…` on an encrypted column), so the runtime sentinel is part of
+        // append `COMMENT ON COLUMN ... '<sentinel>'` for every
+        // column carrying a comment sentinel (`zero-migrate:mask:...` on a masked sibling,
+        // `zero-migrate:enc:...` on an encrypted column), so the runtime sentinel is part of
         // the same migration as the table create (an interrupted apply never
         // leaves a column without its sentinel). The comment body is built by
         // the shared codecs; we only quote it into the statement here. Each
@@ -561,8 +561,8 @@ impl DdlEmitter for PgEmitter {
             checks,
         );
         let mut up: Vec<String> = vec![add];
-        // (PG only) — a column added via ADD COLUMN carries its comment
-        // sentinel (`zero-migrate:mask:…` for a masked sibling, `zero-migrate:enc:…` for an
+        // (PG only) - a column added via ADD COLUMN carries its comment
+        // sentinel (`zero-migrate:mask:...` for a masked sibling, `zero-migrate:enc:...` for an
         // encrypted column) in the same migration (atomic with the column), as its
         // OWN structural statement.
         if let Some(stmt) = self.comment_stmt(table, c) {
@@ -595,7 +595,7 @@ impl DdlEmitter for PgEmitter {
         let col_list = render_index_elements_pg(idx, &opclass_suffix);
         let include_clause = render_index_include_pg(&idx.include);
         // PG 15+ `NULLS NOT DISTINCT` sits after INCLUDE and before WITH, and is
-        // only meaningful on a UNIQUE index. Absent ⇒ byte-identical to before.
+        // only meaningful on a UNIQUE index. Absent => byte-identical to before.
         let nulls_not_distinct_clause = if idx.nulls_not_distinct {
             " NULLS NOT DISTINCT"
         } else {
@@ -632,7 +632,7 @@ impl DdlEmitter for PgEmitter {
 
     fn rename_table(&self, table: &str, to: &str) -> (String, String) {
         // The SOURCE table is schema-qualified; the TARGET is a BARE name (PG
-        // rejects a schema-qualified RENAME TARGET — the table stays in its schema).
+        // rejects a schema-qualified RENAME TARGET - the table stays in its schema).
         (
             format!(
                 "ALTER TABLE {} RENAME TO {}",

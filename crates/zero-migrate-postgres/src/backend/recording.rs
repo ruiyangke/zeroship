@@ -5,10 +5,10 @@
 //!
 //! Two suites need this one double, and they cannot be in the same crate.
 //!
-//! Most of what it proves is vendor-internal — which SQL this backend emits, in
+//! Most of what it proves is vendor-internal - which SQL this backend emits, in
 //! which order, with which binds, and that the generic apply path is genuinely
-//! driver-neutral — and that stays here, as unit tests beside the code. Five of them
-//! additionally drive the ENGINE (`MigrationEngine::apply_plan_with_…`,
+//! driver-neutral - and that stays here, as unit tests beside the code. Five of them
+//! additionally drive the ENGINE (`MigrationEngine::apply_plan_with_...`,
 //! `AppliedPlan`, `ops::status::history_via_backend`), and those cannot live in a
 //! vendor crate at all: `zero-migrate` depends on this crate, so the edge back is a
 //! cycle Cargo refuses. They are integration tests OF THE ENGINE driving a
@@ -16,7 +16,7 @@
 //!
 //! A second copy of the recorder over there would be the real hazard: its canned
 //! catalog and journal rows are the shared premise of both suites, and two copies
-//! drift silently — one suite would go on asserting against a row shape the other
+//! drift silently - one suite would go on asserting against a row shape the other
 //! had already corrected. So there is ONE recorder, and the engine's test tree
 //! reaches it through the `testing` feature, which `zero-migrate` turns on in its
 //! `[dev-dependencies]` only. Resolver 3 keeps dev-dependency features out of the
@@ -36,7 +36,7 @@ use zero_migrate_ir::migration::{Checksum, ChecksumInput, MigrationFlags, Migrat
 /// driver rather than trusted by analogy. Every verb `compare_exchange(false,
 /// true)`s on entry and clears via [`InFlightGuard`]'s `Drop` on the way out
 /// (so error paths clear too). A second verb entered while the first's future
-/// is still alive **panics** — turning "the engine issues one verb at a time"
+/// is still alive **panics** - turning "the engine issues one verb at a time"
 /// from a claim into a checked invariant. On a real pinned host connection this
 /// would otherwise deadlock (the second `tsfn.call` blocks on a socket the
 /// first hasn't released); the panic surfaces the bug loudly instead.
@@ -66,7 +66,7 @@ impl<'a> InFlightGuard<'a> {
 impl Drop for InFlightGuard<'_> {
     fn drop(&mut self) {
         // Clear in the completion arm (RAII) so an error/early-return path also
-        // releases — a leaked `true` would deadlock every later verb.
+        // releases - a leaked `true` would deadlock every later verb.
         self.0.store(false, Ordering::Release);
     }
 }
@@ -75,7 +75,7 @@ impl Drop for InFlightGuard<'_> {
 /// every verb, (b) returns canned neutral rows for the read verbs, routed by a
 /// substring match on the SQL so a full apply/introspection sweep decodes, and
 /// (c) enforces the one-in-flight guard on every verb. This is NOT a
-/// napi bridge — it is the in-crate host-shaped producer that
+/// napi bridge - it is the in-crate host-shaped producer that
 /// proves the generic PG apply path is genuinely driver-neutral, and converts
 /// the one-in-flight invariant from by-analogy to mechanically-checked.
 #[derive(Debug)]
@@ -139,11 +139,11 @@ impl RecordingSession {
 
     /// Route a read to its canned rows by SQL shape. ONLY the journal net-state
     /// read (`journal_sql::applied`, recognisable by its `union_all` CTE + the
-    /// `schema_migrations_inflight` UNION leg — a shape no other query has) gets
+    /// `schema_migrations_inflight` UNION leg - a shape no other query has) gets
     /// the canned (version, checksum, mig_kind, event_seq, phase) journal rows; every other
     /// read (catalog introspection in `snapshot_schema`, the `superseded_versions`
     /// squash read whose only column is `v`, drift probes) gets an EMPTY result,
-    /// which yields an empty-but-valid decode — enough to drive every path
+    /// which yields an empty-but-valid decode - enough to drive every path
     /// end-to-end without feeding a wrong-shaped row into a decoder.
     fn rows_for(&self, sql: &str) -> Vec<Row> {
         if sql.contains("current_setting('server_version_num')") {
@@ -214,7 +214,7 @@ impl SqlSession for RecordingSession {
 }
 
 /// A single completed journal event, shaped like the `applied()` CTE output:
-/// (version, checksum, mig_kind, event_seq, phase) — exactly what a host `pg` driver would
+/// (version, checksum, mig_kind, event_seq, phase) - exactly what a host `pg` driver would
 /// return for that read.
 pub fn canned_journal_row(version: &str, checksum: &str) -> Row {
     Row::new(

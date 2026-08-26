@@ -5,13 +5,13 @@
 //! dialect-blind half: the snapshot/report types, the pure `diff_snapshots`, and the
 //! `compare_applied_to_set` every backend shares. Everything here names
 //! `pg_catalog` / `information_schema`, parses what those return, or exists only to
-//! serve something that does — the same division `mysql::drift_sql` and
+//! serve something that does - the same division `mysql::drift_sql` and
 //! `sqlite::drift_sql` already sit on, so all three introspectors hand the neutral
 //! differ the same `SchemaSnapshot` shape.
 //!
 //! The helpers below are PostgreSQL catalog parsers, and `backend::postgres` is
 //! their only caller. They live beside that caller rather than in core precisely
-//! so the module boundary — not a build flag — is what keeps them off the neutral
+//! so the module boundary - not a build flag - is what keeps them off the neutral
 //! path.
 
 use std::collections::BTreeMap;
@@ -56,13 +56,13 @@ use zero_migrate_backend::value_format::{
 /// [`journal_sql::applied`]):
 ///
 /// - the supplied set has a migration with that version whose checksum differs
-/// ⇒ [`ChecksumDrift`](zero_migrate_backend::drift::ChecksumDrift) (the migration SQL was mutated after apply, or the
-/// journal row was tampered — scenario 36);
-/// - the supplied set has NO migration with that version ⇒ [`OrphanJournal`](zero_migrate_backend::drift::OrphanJournal).
+/// => [`ChecksumDrift`](zero_migrate_backend::drift::ChecksumDrift) (the migration SQL was mutated after apply, or the
+/// journal row was tampered - scenario 36);
+/// - the supplied set has NO migration with that version => [`OrphanJournal`](zero_migrate_backend::drift::OrphanJournal).
 ///
 /// The recorded checksum used is the one [`journal_sql::applied`] returns, which is
-/// the **latest `completed` event's** checksum for the version — correct across
-/// rollback↔re-apply cycles (a re-applied migration's checksum is its newest
+/// the **latest `completed` event's** checksum for the version - correct across
+/// rollback<->re-apply cycles (a re-applied migration's checksum is its newest
 /// incarnation, not a stale earlier one).
 ///
 /// This is the canonical comparison; `MigrationEngine::apply` calls it as its
@@ -88,7 +88,7 @@ pub async fn check_checksum_drift<D: SqlSession>(
 /// mutates nothing. Run as the admin/read connection (NOT the `migrator` role).
 ///
 /// **Injection-safe.** `project_schema` is passed as a **bind parameter** to
-/// every catalog query — never interpolated into SQL text — so a schema name
+/// every catalog query - never interpolated into SQL text - so a schema name
 /// containing a quote, a semicolon, or any SQL metacharacter selects zero rows
 /// rather than altering the query.
 ///
@@ -103,7 +103,7 @@ pub async fn check_checksum_drift<D: SqlSession>(
 /// vector is sorted by name, so the snapshot is stable across catalog scan order.
 ///
 /// # Preconditions
-/// The caller MUST pass an **admin/read** connection — this function takes
+/// The caller MUST pass an **admin/read** connection - this function takes
 /// whatever [`SqlSession`] it is handed and never elevates to the `migrator` role.
 /// Binding `project_schema` by `$1` prevents cross-schema leakage regardless of
 /// the connection, but choosing a least-privileged read connection is the
@@ -127,7 +127,7 @@ fn canonical_extension_type(format_type: &str) -> String {
     if is_citext_extension_type(trimmed) {
         return "text".to_string();
     }
-    // PostGIS geography point: `geography(Point,4326)` → `geography(POINT, 4326)`
+    // PostGIS geography point: `geography(Point,4326)` -> `geography(POINT, 4326)`
     // (the engine's descriptor-to-column spelling). Match on
     // the lowercased form so we are robust to PG capitalisation changes, and
     // re-emit the exact engine spelling rather than echoing PG's.
@@ -136,7 +136,7 @@ fn canonical_extension_type(format_type: &str) -> String {
     }
     // pgvector: `vector(N)` already matches the engine's spelling byte-for-byte.
     // Return `format_type`'s output verbatim for vector (and any other extension
-    // type) — it is the precise live spelling.
+    // type) - it is the precise live spelling.
     trimmed.to_string()
 }
 
@@ -562,7 +562,7 @@ async fn resolve_view_bodies_in_transaction<D: SqlSession>(
         let view_schema = exp_view.authored_schema.as_deref().unwrap_or(schema);
         // The authored body rendered the same way `createView` rendered it when the
         // migration ran. Anything else would be comparing the differ's idea of the
-        // body against the engine's — which is why the printer is HANDED IN rather
+        // body against the engine's - which is why the printer is HANDED IN rather
         // than reached for: printing a typed `ViewQuery` is the engine's lowering,
         // and a backend crate cannot call into the engine that depends on it.
         let Some(body) = authored.render(query, view_schema) else {
@@ -1070,7 +1070,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
     // `information_schema.columns.data_type` reports `USER-DEFINED` for any
     // extension / composite type (pgvector's `vector(N)`, PostGIS's
     // `geography(POINT, 4326)`), which loses the precise spelling the desired
-    // snapshot carries — so those columns would phantom-drift forever. We also
+    // snapshot carries - so those columns would phantom-drift forever. We also
     // pull `pg_catalog.format_type(atttypid, atttypmod)` (the canonical PG
     // spelling, e.g. `vector(384)` / `geography(Point,4326)`) and, for a
     // `USER-DEFINED` column, normalise it back to the engine's DDL spelling
@@ -1326,7 +1326,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
     // leading `indnkeyatts` entries of `indkey`) are recovered IN ORDER by
     // `unnest(indkey) WITH ORDINALITY` joined to `pg_attribute`, so a composite
     // / custom-named index carries its real column list (recovering columns from
-    // the index NAME is unsound — 1a). Expression keys (`attnum = 0`) are kept
+    // the index NAME is unsound - 1a). Expression keys (`attnum = 0`) are kept
     // in an ordered `elements` list via `pg_get_indexdef(index, ord)`, and any
     // INCLUDE columns (ordinal beyond `indnkeyatts`) are excluded.
     //
@@ -1403,7 +1403,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
     for r in &idx_rows {
         let table: String = r.try_get("table_name")?;
         if let Some(t) = tables.get_mut(&table) {
-            // `array_agg` over an empty/all-expression key set is SQL NULL → an
+            // `array_agg` over an empty/all-expression key set is SQL NULL -> an
             // empty column list (a wholly-expression index has no plain columns).
             let columns: Vec<String> = r.try_get("columns").unwrap_or_default();
             let include: Vec<String> = r.try_get("include").unwrap_or_default();
