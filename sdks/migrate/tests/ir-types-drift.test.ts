@@ -2,7 +2,7 @@
 // + the generated enum tokens (`src/generated/enums.ts`): every `Op` variant tag,
 // every `Expr` node tag, the `ColType` token set, and every closed string-enum
 // token in the TS types is pinned against the engine's single-source-of-truth
-// schema `third_party/zero-migrate/crates/zero-migrate/ir-envelope.schema.json`. A schema change that adds /
+// schema `crates/zero-migrate/ir-envelope.schema.json`. A schema change that adds /
 // renames a variant or token FAILS here, forcing the manual transcription to be
 // updated in lockstep (so the ergonomics types cannot silently rot vs the
 // contract). The golden `.ir.json` corpus remains the authoritative contract.
@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const schemaPath = resolve(here, "../../../third_party/zero-migrate/crates/zero-migrate/ir-envelope.schema.json");
+const schemaPath = resolve(here, "../../../crates/zero-migrate/ir-envelope.schema.json");
 const schema = JSON.parse(await readFile(schemaPath, "utf8"));
 
 // The SELECTION RULE of each extractor, factored out so that the

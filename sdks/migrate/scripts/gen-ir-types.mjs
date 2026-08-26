@@ -1,5 +1,5 @@
 // Generate the dialect-neutral IR *enum* token types from the engine's
-// single-source-of-truth schema `third_party/zero-migrate/crates/zero-migrate/ir-envelope.schema.json` via
+// single-source-of-truth schema `crates/zero-migrate/ir-envelope.schema.json` via
 // `json-schema-to-typescript`.
 //
 // SCOPE — codegen covers the CLOSED STRING-ENUM defs only (BinaryOp, UnaryOp,
@@ -14,7 +14,7 @@
 //
 // These types are ERGONOMICS for an advanced caller; the golden `.ir.json` corpus
 // + the `Checksum::of_ir` round-trip (in
-// `third_party/zero-migrate/crates/zero-migrate/tests`)
+// `crates/zero-migrate/tests`)
 // remain the contract source of truth (§4.3 / PR3). Regenerate with:
 //
 //   pnpm --filter @zeroship/migrate gen:ir-types
@@ -27,7 +27,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const schemaPath = resolve(here, "../../../third_party/zero-migrate/crates/zero-migrate/ir-envelope.schema.json");
+const schemaPath = resolve(here, "../../../crates/zero-migrate/ir-envelope.schema.json");
 // The output path defaults to the committed enums.ts, but the freshness CI gate
 // (`tests/ir-types-drift.test.ts`) overrides it via `GEN_IR_OUT` to regenerate
 // into a temp file and byte-compare against the committed copy — the "regenerate
@@ -86,7 +86,7 @@ const ENUM_DEFS = [
 
 const banner = `/* eslint-disable */
 // GENERATED FILE — do not edit by hand.
-// Source: third_party/zero-migrate/crates/zero-migrate/ir-envelope.schema.json (the engine's single-source-of-
+// Source: crates/zero-migrate/ir-envelope.schema.json (the engine's single-source-of-
 // truth IR schema). Regenerate with: pnpm --filter @zeroship/migrate gen:ir-types
 //
 // Covers the CLOSED STRING-ENUM IR defs only; the recursive structural types live

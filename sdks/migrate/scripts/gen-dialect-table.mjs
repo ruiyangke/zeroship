@@ -1,10 +1,10 @@
 // Generate the single-source dialect-support table.
 //
 // Reads the hand-authored sidecar
-// `third_party/zero-migrate/crates/zero-migrate/dialect-support.toml` — one
+// `crates/zero-migrate/dialect-support.toml` — one
 // row per (op-kind, variant) with a per-dialect disposition — and emits BOTH
 // downstream artifacts from that one source:
-//   (a) third_party/zero-migrate/crates/zero-migrate/src/model/dialect_table.rs
+//   (a) crates/zero-migrate/src/model/dialect_table.rs
 //       - a const lookup for the Rust engine. NOTHING consumes it yet; this
 //       generator is additive.
 //   (b) sdks/migrate/src/generated/dialect-table.ts — the TS mirror for the SDK
@@ -19,7 +19,7 @@
 //
 // The faithfulness of the sidecar itself (that it mirrors the engine's live
 // `Support::decision()`) is proven by the Rust test
-// `third_party/zero-migrate/crates/zero-migrate/tests/dialect_table_faithfulness.rs`;
+// `crates/zero-migrate/tests/dialect_table_faithfulness.rs`;
 // this script only transcribes the sidecar into the two typed artifacts.
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -27,7 +27,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const sidecarPath = resolve(here, "../../../third_party/zero-migrate/crates/zero-migrate/dialect-support.toml");
+const sidecarPath = resolve(here, "../../../crates/zero-migrate/dialect-support.toml");
 
 // The TS mirror defaults to the committed artifact; the drift test overrides it
 // via env var to regenerate into a temp file and byte-compare (the "regenerate +
@@ -128,7 +128,7 @@ function esc(s) {
 
 function emitRust(rows) {
   const banner = `//! GENERATED FILE — do not edit by hand.
-//! Source: third_party/zero-migrate/crates/zero-migrate/dialect-support.toml
+//! Source: crates/zero-migrate/dialect-support.toml
 //! (the single-source dialect-support sidecar). Regenerate with:
 //!   pnpm --filter @zeroship/migrate gen:dialect-table
 //!
@@ -208,15 +208,15 @@ pub fn lookup(kind: &str, variant: &str) -> Option<&'static DispositionRow> {
 function emitTs(rows) {
   const banner = `/* eslint-disable */
 // GENERATED FILE — do not edit by hand.
-// Source: third_party/zero-migrate/crates/zero-migrate/dialect-support.toml
+// Source: crates/zero-migrate/dialect-support.toml
 // (the single-source dialect-support sidecar). Regenerate with:
 //   pnpm --filter @zeroship/migrate gen:dialect-table
 //
 // One row per (op-kind, variant) recording the token's disposition on each
 // dialect — the TS mirror of
-// third_party/zero-migrate/crates/zero-migrate/src/model/dialect_table.rs.
+// crates/zero-migrate/src/model/dialect_table.rs.
 // Faithfulness to the engine's live Support::decision() is proven Rust-side by
-// third_party/zero-migrate/crates/zero-migrate/tests/dialect_table_faithfulness.rs
+// crates/zero-migrate/tests/dialect_table_faithfulness.rs
 // - spelled from the repo root because the engine is a vendored submodule with
 // its own cargo workspace, so a bare tests/ path resolves nowhere from here.
 // The TS drift test pins THIS file against the sidecar, and nothing else. It

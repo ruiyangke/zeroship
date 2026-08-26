@@ -1,10 +1,10 @@
 // Drift guard for the generated dialect table.
 //
 // The single source is
-// `third_party/zero-migrate/crates/zero-migrate/dialect-support.toml`; the
+// `crates/zero-migrate/dialect-support.toml`; the
 // generator (`scripts/gen-dialect-table.mjs`) emits BOTH the committed TS mirror
 // (`src/generated/dialect-table.ts`) and the committed Rust table
-// (`third_party/zero-migrate/crates/zero-migrate/src/model/dialect_table.rs`).
+// (`crates/zero-migrate/src/model/dialect_table.rs`).
 // This test is the
 // "regenerate + diff" freshness gate (the same shape as ir-types-drift's enums
 // gate): re-run the generator into temp files and assert byte-equality with both
@@ -25,7 +25,7 @@ import { test } from "node:test";
 import { DIALECT_TABLE, lookupDisposition } from "../src/generated/dialect-table.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const sidecarPath = resolve(here, "../../../third_party/zero-migrate/crates/zero-migrate/dialect-support.toml");
+const sidecarPath = resolve(here, "../../../crates/zero-migrate/dialect-support.toml");
 const genScript = resolve(here, "../scripts/gen-dialect-table.mjs");
 const committedTs = resolve(here, "../src/generated/dialect-table.ts");
 // NOTE: there is deliberately no `committedRust` path here. One existed and was

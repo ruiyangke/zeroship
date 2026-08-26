@@ -42,7 +42,7 @@ const RECORDER_GLUE_JS: &str = include_str!("recorder_glue.js");
 const STANDALONE_RECORDER_JS: &str =
     include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../third_party/zero-migrate/packages/zero-migrate/dist/embedded-recorder.js"
+        "/../../packages/zero-migrate/dist/embedded-recorder.js"
     ));
 
 /// The deserialized adapter result mirroring the JSON the glue emits.

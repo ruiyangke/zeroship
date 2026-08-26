@@ -93,7 +93,7 @@ const STAGE2_RECORDER_JS: &str = include_str!("stage2_recorder.js");
 /// `@zeroship/migrate` to THIS file is what makes the authored envelope v1.
 const STANDALONE_RECORDER_JS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../third_party/zero-migrate/packages/zero-migrate/dist/embedded-recorder.js"
+    "/../../packages/zero-migrate/dist/embedded-recorder.js"
 ));
 
 /// The deserialized adapter result mirroring the JSON the glue emits.
