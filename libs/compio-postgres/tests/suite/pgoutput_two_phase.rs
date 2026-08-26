@@ -357,6 +357,7 @@ async fn prepared_transactions_expose_every_two_phase_frame() {
             let mut decoder = pgoutput::Decoder::new();
             let mut messages = Vec::new();
             let mut first_error = None;
+            let mut stream_prepares_inside_a_chunk = 0usize;
             loop {
                 match stream.next().await.expect("replication stream failed") {
                     Some(ReplicationMessage::XLogData { body, .. }) => {
@@ -365,8 +366,19 @@ async fn prepared_transactions_expose_every_two_phase_frame() {
                         // That lets the producer finish and the fixture clean
                         // up before the stored decoder error fails the test.
                         let done = body.first() == Some(&b'C');
+                        // Sampled BEFORE decoding, because decode is what
+                        // clears it. See the StreamPrepare placement assertion
+                        // below for why this is worth recording.
+                        let chunk_open_before = decoder.stream_xid().is_some();
                         match decoder.decode(&body) {
-                            Ok(message) => messages.push(message),
+                            Ok(message) => {
+                                if chunk_open_before
+                                    && matches!(message, PgOutputMessage::StreamPrepare { .. })
+                                {
+                                    stream_prepares_inside_a_chunk += 1;
+                                }
+                                messages.push(message);
+                            }
                             Err(error) => {
                                 eprintln!(
                                     "OBSERVED two-phase tag 0x{:02x} ({:?}), len={}, \
@@ -381,11 +393,11 @@ async fn prepared_transactions_expose_every_two_phase_frame() {
                             }
                         }
                         if done {
-                            return (messages, first_error);
+                            return (messages, first_error, stream_prepares_inside_a_chunk);
                         }
                     }
                     Some(ReplicationMessage::PrimaryKeepalive { .. }) => {}
-                    None => return (messages, first_error),
+                    None => return (messages, first_error, stream_prepares_inside_a_chunk),
                 }
             }
         };
@@ -393,7 +405,7 @@ async fn prepared_transactions_expose_every_two_phase_frame() {
         let (produced, observed) = futures_util::future::join(produce, observe).await;
         let (commit_xid, rollback_xid, stream_commit_xid, stream_rollback_xid) =
             produced.expect("two-phase transaction sequence failed");
-        let (messages, decode_error) = observed;
+        let (messages, decode_error, stream_prepares_inside_a_chunk) = observed;
         drop(stream);
         let slot_dropped = drop_slot_when_released(&setup, &slot).await;
         setup
@@ -541,6 +553,27 @@ async fn prepared_transactions_expose_every_two_phase_frame() {
         assert_eq!(
             stream_prepares.keys().cloned().collect::<BTreeSet<_>>(),
             streamed_gids
+        );
+
+        // WHERE a StreamPrepare lands, not just what it carries. `decode`
+        // clears `stream_xid` on StreamPrepare, and `stream_xid` decides a
+        // WIRE-FORMAT question: between StreamStart and StreamStop every
+        // `R/Y/I/U/D/T/M` frame carries a leading u32 xid and outside a chunk
+        // it does not. Clearing it inside an open chunk would therefore read
+        // the next frame four bytes out of phase and take its relation oid
+        // from the xid bytes - silent misattribution rather than a decode
+        // error, which is why the field assertions above cannot see it.
+        //
+        // The `stream_prepares` check above is the floor: it already requires
+        // every streamed gid to have produced one, so this cannot pass by
+        // observing nothing. MEASURED on 16.14, 2026-08-26: 0 inside a chunk, and
+        // inverting the condition counts 2, so the detector demonstrably fires
+        // and the zero is a verdict rather than a counter that never ran.
+        assert_eq!(
+            stream_prepares_inside_a_chunk, 0,
+            "{stream_prepares_inside_a_chunk} StreamPrepare messages arrived \
+             between StreamStart and StreamStop, so every frame after one is \
+             parsed without its leading xid"
         );
         for gid in [&commit_gid, &rollback_gid] {
             assert_eq!(
