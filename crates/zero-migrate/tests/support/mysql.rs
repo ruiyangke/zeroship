@@ -293,6 +293,10 @@ fn bind_to_value(bind: &Bind) -> MyValue {
         Bind::Bool(b) => MyValue::Int(i64::from(*b)),
         Bind::Int(n) => MyValue::Int(*n),
         Bind::Decimal(s) | Bind::Text(s) => MyValue::Bytes(s.as_bytes().to_vec()),
+        // MySQL declares no parameter types, so an inferred bind is byte-identical
+        // to a text one here. The variant exists for PostgreSQL's benefit.
+        Bind::Inferred(Some(s)) => MyValue::Bytes(s.as_bytes().to_vec()),
+        Bind::Inferred(None) => MyValue::NULL,
         // `Bind` is `#[non_exhaustive]`; a future variant maps to SQL NULL rather
         // than panicking, exactly as the host driver's `default` arm does.
         _ => MyValue::NULL,

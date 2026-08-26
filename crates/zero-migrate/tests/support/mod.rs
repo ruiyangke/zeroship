@@ -775,6 +775,8 @@ enum ToSqlHolder {
     Bool(bool),
     Int(i64),
     Text(String),
+    /// A value sent with no declared type, for [`Bind::Inferred`].
+    Inferred(TextParam),
 }
 
 impl ToSqlHolder {
@@ -784,6 +786,7 @@ impl ToSqlHolder {
             Self::Bool(b) => b,
             Self::Int(n) => n,
             Self::Text(s) => s,
+            Self::Inferred(p) => p,
         }
     }
 }
@@ -796,6 +799,11 @@ fn to_holder(bind: &Bind) -> ToSqlHolder {
         // Decimal carried as text — PG infers the numeric target from context.
         Bind::Decimal(s) => ToSqlHolder::Text(s.clone()),
         Bind::Text(s) => ToSqlHolder::Text(s.clone()),
+        // The whole point of the variant: `TextParam` accepts EVERY inferred type
+        // and encodes text-format, where `String`'s `accepts` admits only the text
+        // family and so makes the server's inferred `timestamptz` a hard error.
+        // That difference is the reason this variant exists.
+        Bind::Inferred(v) => ToSqlHolder::Inferred(TextParam(v.clone())),
         // `Bind` is #[non_exhaustive]; a future variant maps to a text NULL rather
         // than panicking.
         _ => ToSqlHolder::Null,
@@ -894,17 +902,12 @@ impl SqlSession for PgDevSession {
         // `exec_text` contract requires. A concrete-OID binary bind would make PG
         // refuse `text → timestamptz`. `None` → SQL NULL. Drains the row iterator to
         // read `rows_affected`.
-        let typed: Vec<(TextParam, Type)> = params
-            .iter()
-            .map(|p| (TextParam(p.clone()), Type::UNKNOWN))
-            .collect();
-        let mut client = self.client.borrow_mut();
-        let iter = client
-            .query_typed_raw(sql, typed)
-            .map_err(|e| to_db_error(&e))?;
-        // Drain to completion so `rows_affected` is populated (the statement ran).
-        let (_rows, affected) = drain_row_iter(iter)?;
-        Ok(affected)
+        // Expressed through `exec` and `Bind::Inferred` rather than a second bind
+        // path. This is the equivalence claim made executable: if the two ever
+        // diverged, the live PostgreSQL suite - which drives every DML step through
+        // here - would say so.
+        let binds: Vec<Bind> = params.iter().cloned().map(Bind::Inferred).collect();
+        self.exec(sql, &binds).await
     }
 
     async fn query(&self, sql: &str, binds: &[Bind]) -> Result<Vec<Row>, DbError> {

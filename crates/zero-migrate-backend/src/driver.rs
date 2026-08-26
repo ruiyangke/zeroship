@@ -110,6 +110,28 @@ pub enum Bind {
     Decimal(String),
     /// A UTF-8 text value (schema/version/checksum/actor/ident/cursor).
     Text(String),
+    /// Send with NO declared type and let the server infer one from context.
+    /// `None` is a SQL `NULL`.
+    ///
+    /// This is not a formatting preference, it is the difference between a
+    /// statement running and failing. PostgreSQL refuses to assign a parameter
+    /// DECLARED as text into a `timestamptz` column - there is no automatic cast -
+    /// and accepts the identical bytes when the client declares nothing, because
+    /// it then infers the parameter's type from the column it lands in and parses
+    /// the text with that type's input function.
+    ///
+    /// The engine renders DML from the IR, where an instant is a string and the
+    /// target column's type is unknown to it. So for those values "declare
+    /// nothing" is the only correct choice, and this variant is how the caller
+    /// says it - per VALUE, so a statement can mix an inferred instant with a
+    /// typed key.
+    ///
+    /// A driver that declares parameter types must map this to its
+    /// unspecified-type, text-format spelling (`Type::UNKNOWN` for
+    /// rust-postgres). A driver that never declares types - node-pg, mysql2 -
+    /// sends the string as-is, which makes this indistinguishable from
+    /// [`Bind::Text`] there.
+    Inferred(Option<String>),
 }
 
 impl From<&str> for Bind {

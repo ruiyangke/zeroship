@@ -40,6 +40,14 @@ pub fn bind_to_cell(bind: &Bind) -> JsCell {
         Bind::Int(n) => cell_int_str(n.to_string()),
         Bind::Decimal(s) => cell_text(s.clone()),
         Bind::Text(s) => cell_text(s.clone()),
+        // `Inferred` folds to the SAME cell as `Text`, and that is correct rather
+        // than lossy: this wire carries no declared types at all. Every cell
+        // reaches node-pg / mysql2 as a plain JS value and both send it
+        // text-format with no OID, so on this path every bind is already inferred.
+        // The distinction only has teeth for a driver that declares types, which
+        // is an in-process Rust one, not a host across this bridge.
+        Bind::Inferred(Some(s)) => cell_text(s.clone()),
+        Bind::Inferred(None) => cell_null(),
         // `Bind` is `#[non_exhaustive]` (it covers the closed IR value universe; a
         // future variant would be added engine-side). Fold any unknown bind to a
         // JSON null rather than fail - the recorder never emits a variant the
