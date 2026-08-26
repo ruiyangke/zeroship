@@ -201,6 +201,28 @@ CREATE INDEX IF NOT EXISTS "notes_created_by_idx" ON "{APP_SCHEMA}"."notes" ("cr
         ))
         .await
         .expect("deploy stand-in must create the notes table");
+
+        // Re-establish the per-app role and its grants.
+        //
+        // The `DROP SCHEMA ... CASCADE` above destroys every GRANT on the
+        // schema and its tables along with the schema itself. Recreating the
+        // schema does not bring them back, so the data path - which runs
+        // `SET LOCAL ROLE app_<id>_role` - was denied with
+        // `permission denied for schema default`, and the sanitization rail
+        // reported it as a bare `internal error`. That is what made these four
+        // tests fail while every test expecting a REFUSAL passed.
+        //
+        // This runs AFTER the table exists because the grant covers
+        // `ALL TABLES IN SCHEMA` at call time.
+        //
+        // The same hazard is a real one in production, on the restore path:
+        // `DROP SCHEMA CASCADE` there destroys the per-app grants AND the
+        // schema's `ALTER DEFAULT PRIVILEGES` entries, and `pg_restore
+        // --no-privileges` puts none back.
+        zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, APP_SCHEMA)
+            .await
+            .expect("per-app role + grants must be re-established after the CASCADE");
+
         drain_open_connections().await;
     });
 }
