@@ -587,15 +587,24 @@ where
     };
 
     let mut buf = BytesMut::new();
-    frontend::query(probe.query(), &mut buf).map_err(Error::encode)?;
-    handshake.send(FrontendMessage::Raw(buf.freeze())).await?;
+    frontend::query(probe.query(), &mut buf)
+        .map_err(Error::encode)
+        .map_err(Error::target_session_attrs_fatal)?;
+    handshake
+        .send(FrontendMessage::Raw(buf.freeze()))
+        .await
+        .map_err(Error::target_session_attrs_fatal)?;
 
     let mut saw_row_description = false;
     let mut state = None;
     let mut saw_command_complete = false;
 
     loop {
-        match handshake.next().await? {
+        let message = handshake
+            .next()
+            .await
+            .map_err(Error::target_session_attrs_fatal)?;
+        match message {
             Some(Message::RowDescription(_))
                 if !saw_row_description && state.is_none() && !saw_command_complete =>
             {
@@ -604,7 +613,7 @@ where
             Some(Message::DataRow(row))
                 if saw_row_description && state.is_none() && !saw_command_complete =>
             {
-                state = Some(probe.parse(&row)?);
+                state = Some(probe.parse(&row).map_err(Error::target_session_attrs)?);
             }
             Some(Message::CommandComplete(_))
                 if saw_row_description && state.is_some() && !saw_command_complete =>
@@ -612,19 +621,30 @@ where
                 saw_command_complete = true;
             }
             Some(Message::ParameterStatus(body)) => {
-                record_parameter_status(
-                    parameters,
-                    body.name().map_err(Error::parse)?.to_string(),
-                    body.value().map_err(Error::parse)?.to_string(),
-                )?;
+                let name = body
+                    .name()
+                    .map_err(Error::parse)
+                    .map_err(Error::target_session_attrs_fatal)?
+                    .to_string();
+                let value = body
+                    .value()
+                    .map_err(Error::parse)
+                    .map_err(Error::target_session_attrs_fatal)?
+                    .to_string();
+                record_parameter_status(parameters, name, value)
+                    .map_err(Error::target_session_attrs_fatal)?;
             }
             Some(Message::ReadyForQuery(_)) if saw_row_description && saw_command_complete => {
-                let state = state.ok_or_else(Error::unexpected_message)?;
+                let state = state
+                    .ok_or_else(Error::unexpected_message)
+                    .map_err(Error::target_session_attrs)?;
                 return require_target_session_attrs(target, state);
             }
-            Some(Message::ErrorResponse(body)) => return Err(Error::db(body)),
-            Some(_) => return Err(Error::unexpected_message()),
-            None => return Err(Error::closed()),
+            Some(Message::ErrorResponse(body)) => {
+                return Err(Error::target_session_attrs(Error::db(body)));
+            }
+            Some(_) => return Err(Error::target_session_attrs(Error::unexpected_message())),
+            None => return Err(Error::target_session_attrs_fatal(Error::closed())),
         }
     }
 }

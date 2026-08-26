@@ -305,10 +305,18 @@ fn advances_to_next_host(error: &Error) -> bool {
     error.code() == Some(&crate::error::SqlState::CANNOT_CONNECT_NOW)
 }
 
-/// Whether a completed startup/authentication exchange ends the entire host
-/// walk rather than behaving like an unreachable endpoint.
+/// Whether an error ends the entire configured-host walk.
+///
+/// A target-session SQL/result rejection is the exception among database
+/// errors: libpq advances to the next configured host for that classification.
+/// Failure to communicate during the same probe is globally terminal.
 fn stops_host_walk(error: &Error) -> bool {
-    error.is_authentication()
+    if error.is_target_session_attrs() {
+        return false;
+    }
+
+    error.is_target_session_attrs_fatal()
+        || error.is_authentication()
         || error
             .code()
             .is_some_and(|code| code != &crate::error::SqlState::CANNOT_CONNECT_NOW)
@@ -457,6 +465,7 @@ where
             // address returned for this one.
             Err(e)
                 if e.is_target_session_attrs()
+                    || e.is_target_session_attrs_fatal()
                     || advances_to_next_host(&e)
                     || stops_host_walk(&e) =>
             {
@@ -563,14 +572,19 @@ where
         Err(e) => e,
     };
 
-    // Three failures bypass `sslmode=allow`'s alternate TLS leg. A completed
-    // target-session mismatch is a property of the endpoint. SQLSTATE 57P03
-    // advances directly to the next configured host. A local authentication
-    // failure goes straight to libpq's error_return path. Other server
-    // ErrorResponses do NOT appear here: libpq may retry those under a
-    // different encryption method before treating the final result as
-    // terminal, and the policy below preserves that behavior.
-    if err.is_target_session_attrs() || advances_to_next_host(&err) || err.is_authentication() {
+    // Four failure classes bypass `sslmode=allow`'s alternate TLS leg. A
+    // target-session SQL/result rejection advances to the next configured
+    // host, while a communication failure during that probe ends the whole
+    // request. SQLSTATE 57P03 advances directly to the next configured host.
+    // A local authentication failure goes straight to libpq's error_return
+    // path. Other startup ErrorResponses do NOT appear here: libpq may retry
+    // those under a different encryption method before treating the final
+    // result as terminal, and the policy below preserves that behavior.
+    if err.is_target_session_attrs()
+        || err.is_target_session_attrs_fatal()
+        || advances_to_next_host(&err)
+        || err.is_authentication()
+    {
         return Err(err);
     }
 
@@ -796,7 +810,9 @@ mod tests {
     enum ProbeReply {
         Close,
         CloseThenTls(oneshot::Sender<u32>),
+        ErrorThenTls(oneshot::Sender<u32>),
         Stall,
+        TransactionReadOnly(bool),
         Recovery(bool),
     }
 
@@ -872,7 +888,36 @@ mod tests {
                     result.unwrap();
                     socket.flush().await.unwrap();
                 }
+                ProbeReply::ErrorThenTls(opening_seen) => {
+                    let reply = frame(
+                        b'E',
+                        b"SERROR\0CXX000\0Mscripted target-session probe failure\0\0",
+                    );
+                    let compio::BufResult(result, _) = socket.write_all(reply).await;
+                    result.unwrap();
+                    socket.flush().await.unwrap();
+                    drop(socket);
+
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let compio::BufResult(result, opening) = socket.read_exact(vec![0u8; 8]).await;
+                    result.unwrap();
+                    assert_eq!(u32::from_be_bytes(opening[..4].try_into().unwrap()), 8);
+                    let code = u32::from_be_bytes(opening[4..].try_into().unwrap());
+                    let _ = opening_seen.send(code);
+
+                    let compio::BufResult(result, _) = socket.write_all(vec![b'S']).await;
+                    result.unwrap();
+                    socket.flush().await.unwrap();
+                }
                 ProbeReply::Stall => {
+                    let compio::BufResult(_, _) = socket.read(vec![0u8; 1]).await;
+                }
+                ProbeReply::TransactionReadOnly(read_only) => {
+                    let value = if read_only { "on" } else { "off" };
+                    let reply = probe_result(b"transaction_read_only", value, b"SHOW\0");
+                    let compio::BufResult(result, _) = socket.write_all(reply).await;
+                    result.unwrap();
+                    socket.flush().await.unwrap();
                     let compio::BufResult(_, _) = socket.read(vec![0u8; 1]).await;
                 }
                 ProbeReply::Recovery(in_recovery) => {
@@ -1427,44 +1472,132 @@ mod tests {
     }
 
     #[compio::test]
-    async fn allow_retries_tls_after_probe_transport_failure() {
-        let (tls_seen, tls_observed) = oneshot::channel();
-        let (addr, query_observed) =
-            scripted_probe_server(ProbeReply::CloseThenTls(tls_seen)).await;
+    async fn probe_sql_error_skips_transport_and_address_before_next_host() {
+        let (tls_seen, mut tls_observed) = oneshot::channel();
+        let (first, first_query_observed) =
+            scripted_probe_server(ProbeReply::ErrorThenTls(tls_seen)).await;
+        let sibling_bind = SocketAddr::from(([127, 0, 0, 2], first.port()));
+        let (sibling, mut sibling_startup_observed) =
+            scripted_server_bound(sibling_bind, Some(successful_handshake())).await;
+        let (second, second_query_observed) =
+            scripted_probe_server(ProbeReply::TransactionReadOnly(false)).await;
+
         let mut config = Config::new();
         config
             .user("scripted-user")
-            .host("localhost")
-            .hostaddr(addr.ip())
-            .port(addr.port())
+            .host("probe-error.example")
+            .host("healthy.example")
+            .port(first.port())
+            .port(second.port())
             .ssl_mode(SslMode::Allow)
-            .target_session_attrs(TargetSessionAttrs::ReadWrite);
+            .target_session_attrs(TargetSessionAttrs::ReadWrite)
+            .connect_timeout(Duration::from_secs(2));
+        let mut resolver = ProbeRoutingResolver {
+            first: vec![first, sibling],
+            second: vec![second],
+        };
 
-        let connect =
-            compio::runtime::spawn(async move { config.connect(HandshakeFailingTls).await });
+        let connected = compio::time::timeout(
+            Duration::from_secs(5),
+            connect_with_resolver(HandshakeFailingTls, &config, &mut resolver),
+        )
+        .await
+        .expect("the probe SQL error host walk hung")
+        .expect("a probe SQL error did not advance to the healthy configured host");
+
+        assert_eq!(
+            first_query_observed
+                .await
+                .expect("the first host closed without receiving the probe"),
+            b"SHOW transaction_read_only\0"
+        );
+        assert_eq!(
+            second_query_observed
+                .await
+                .expect("the healthy host closed without receiving the probe"),
+            b"SHOW transaction_read_only\0"
+        );
+        assert!(
+            tls_observed
+                .try_recv()
+                .expect("the first-host fixture disappeared")
+                .is_none(),
+            "a probe SQL error retried another transport on the same address"
+        );
+        assert!(
+            sibling_startup_observed
+                .try_recv()
+                .expect("the sibling-address fixture disappeared")
+                .is_none(),
+            "a probe SQL error retried another address for the same configured host"
+        );
+        drop(connected);
+    }
+
+    #[compio::test]
+    async fn probe_transport_failure_stops_every_retry_path() {
+        let (tls_seen, mut tls_observed) = oneshot::channel();
+        let (first, query_observed) =
+            scripted_probe_server(ProbeReply::CloseThenTls(tls_seen)).await;
+        let sibling_bind = SocketAddr::from(([127, 0, 0, 2], first.port()));
+        let (sibling, mut sibling_startup_observed) =
+            scripted_server_bound(sibling_bind, Some(successful_handshake())).await;
+        let (second, mut second_query_observed) =
+            scripted_probe_server(ProbeReply::TransactionReadOnly(false)).await;
+        let mut config = Config::new();
+        config
+            .user("scripted-user")
+            .host("broken-probe.example")
+            .host("healthy.example")
+            .port(first.port())
+            .port(second.port())
+            .ssl_mode(SslMode::Allow)
+            .target_session_attrs(TargetSessionAttrs::ReadWrite)
+            .connect_timeout(Duration::from_secs(2));
+        let mut resolver = ProbeRoutingResolver {
+            first: vec![first, sibling],
+            second: vec![second],
+        };
+
+        let result = compio::time::timeout(
+            Duration::from_secs(5),
+            connect_with_resolver(HandshakeFailingTls, &config, &mut resolver),
+        )
+        .await
+        .expect("the probe transport failure host walk hung");
         let query = compio::time::timeout(Duration::from_secs(2), query_observed)
             .await
             .expect("the plaintext target-session probe was never sent")
             .expect("the plaintext connection closed before the target-session probe");
         assert_eq!(query, b"SHOW transaction_read_only\0");
 
-        let opening = compio::time::timeout(Duration::from_secs(2), tls_observed)
-            .await
-            .expect("sslmode=allow did not retry the probe transport failure over TLS")
-            .expect("the TLS retry closed before sending its SSLRequest");
-        assert_eq!(opening, SSL_REQUEST_CODE);
-
-        let result = compio::time::timeout(Duration::from_secs(2), connect)
-            .await
-            .expect("the scripted TLS handshake failure hung connect")
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-        let error = match result {
-            Ok(_) => panic!("the scripted TLS handshake unexpectedly succeeded"),
-            Err(error) => error,
+        let Err(error) = result else {
+            panic!("a probe transport failure advanced to the healthy configured host");
         };
         assert!(
-            error.is_tls_handshake(),
-            "the TLS retry must report its handshake failure: {error:?}"
+            error.is_target_session_attrs_fatal(),
+            "the probe transport failure was not globally terminal: {error:?}"
+        );
+        assert!(
+            tls_observed
+                .try_recv()
+                .expect("the first-host fixture disappeared")
+                .is_none(),
+            "a probe transport failure retried another transport"
+        );
+        assert!(
+            sibling_startup_observed
+                .try_recv()
+                .expect("the sibling-address fixture disappeared")
+                .is_none(),
+            "a probe transport failure retried another address"
+        );
+        assert!(
+            second_query_observed
+                .try_recv()
+                .expect("the healthy-host fixture disappeared")
+                .is_none(),
+            "a probe transport failure retried another configured host"
         );
     }
 
@@ -1724,6 +1857,24 @@ mod tests {
     impl Resolver for ListResolver {
         async fn resolve(&mut self, _host: &str, _port: u16) -> io::Result<Vec<SocketAddr>> {
             Ok(self.0.clone())
+        }
+    }
+
+    struct ProbeRoutingResolver {
+        first: Vec<SocketAddr>,
+        second: Vec<SocketAddr>,
+    }
+
+    impl Resolver for ProbeRoutingResolver {
+        async fn resolve(&mut self, host: &str, _port: u16) -> io::Result<Vec<SocketAddr>> {
+            match host {
+                "probe-error.example" | "broken-probe.example" => Ok(self.first.clone()),
+                "healthy.example" => Ok(self.second.clone()),
+                _ => Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("unexpected scripted host {host}"),
+                )),
+            }
         }
     }
 
