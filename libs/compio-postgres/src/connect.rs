@@ -184,22 +184,34 @@ pub(crate) fn endpoints(config: &Config) -> Result<Vec<Endpoint>, Error> {
         indices.shuffle(&mut rand::rng());
     }
 
-    Ok(indices
+    indices
         .into_iter()
-        .map(|i| {
+        .map(|i| -> Result<Endpoint, Error> {
             let host = config.get_hosts().get(i);
             let hostname = match host {
-                Some(Host::Tcp(host)) => Some(host.clone()),
+                Some(Host::Tcp(host)) if !host.is_empty() => Some(host.clone()),
+                Some(Host::Tcp(_)) => None,
                 #[cfg(unix)]
                 Some(Host::Unix(_)) => None,
                 None => None,
             };
-            let target = match config.get_hostaddrs().get(i) {
-                Some(ip) => EndpointTarget::Ip(*ip),
-                None => match host.expect("one of host / hostaddr is present at this index") {
-                    Host::Tcp(host) => EndpointTarget::Name(host.clone()),
+            let target = match config.get_hostaddrs().get(i).copied().flatten() {
+                Some(ip) => EndpointTarget::Ip(ip),
+                None => match host {
+                    Some(Host::Tcp(host)) if !host.is_empty() => {
+                        EndpointTarget::Name(host.clone())
+                    }
+                    Some(Host::Tcp(_)) | None => {
+                        return Err(Error::config(
+                            format!(
+                                "host and hostaddr entry {} are both empty; this driver does not infer libpq's compiled default Unix socket directory",
+                                i + 1
+                            )
+                            .into(),
+                        ));
+                    }
                     #[cfg(unix)]
-                    Host::Unix(path) => EndpointTarget::Unix(path.clone()),
+                    Some(Host::Unix(path)) => EndpointTarget::Unix(path.clone()),
                 },
             };
             let port = config
@@ -209,13 +221,13 @@ pub(crate) fn endpoints(config: &Config) -> Result<Vec<Endpoint>, Error> {
                 .copied()
                 .unwrap_or(5432);
 
-            Endpoint {
+            Ok(Endpoint {
                 target,
                 hostname,
                 port,
-            }
+            })
         })
-        .collect())
+        .collect()
 }
 
 pub(crate) async fn with_connect_timeout<T, F>(
@@ -789,6 +801,71 @@ mod tests {
         assert_eq!(
             with_password.get_password(),
             Some(b"from-passfile".as_slice())
+        );
+    }
+
+    #[test]
+    fn empty_hostaddr_slots_fall_back_to_the_corresponding_hosts() {
+        let config = "host=first.example,second.example hostaddr=,127.0.0.2"
+            .parse::<Config>()
+            .expect("empty hostaddr slots are positional defaults");
+        assert_eq!(
+            config.get_hostaddrs(),
+            [None, Some("127.0.0.2".parse().unwrap())]
+        );
+
+        let endpoints = endpoints(&config).expect("build the two positional endpoints");
+        assert_eq!(endpoints.len(), 2);
+        assert!(matches!(
+            &endpoints[0].target,
+            EndpointTarget::Name(host) if host == "first.example"
+        ));
+        assert_eq!(endpoints[0].hostname(), Some("first.example"));
+        assert!(matches!(
+            endpoints[1].target,
+            EndpointTarget::Ip(ip) if ip == "127.0.0.2".parse::<IpAddr>().unwrap()
+        ));
+        assert_eq!(endpoints[1].hostname(), Some("second.example"));
+    }
+
+    #[test]
+    fn empty_host_uses_hostaddr_for_tls_and_passfile_identity() {
+        let config = "host='' hostaddr=127.0.0.3"
+            .parse::<Config>()
+            .expect("an empty host may be paired with hostaddr");
+        let endpoint = endpoints(&config)
+            .expect("hostaddr supplies the network target")
+            .pop()
+            .expect("one endpoint");
+
+        assert!(matches!(
+            &endpoint.target,
+            EndpointTarget::Ip(ip) if *ip == "127.0.0.3".parse::<IpAddr>().unwrap()
+        ));
+        assert_eq!(endpoint.hostname(), None);
+        assert_eq!(endpoint.passfile_host(), "127.0.0.3");
+    }
+
+    #[test]
+    fn empty_default_host_is_refused_instead_of_resolved_as_an_empty_name() {
+        let config = "host=''"
+            .parse::<Config>()
+            .expect("libpq syntax permits its default host slot");
+        let error = match endpoints(&config) {
+            Ok(_) => panic!("an empty host was sent to DNS instead of being refused"),
+            Err(error) => error,
+        };
+
+        let mut text = error.to_string();
+        let mut source = error.source();
+        while let Some(cause) = source {
+            text.push_str(" | ");
+            text.push_str(&cause.to_string());
+            source = cause.source();
+        }
+        assert!(
+            text.contains("hostaddr entry 1") && text.contains("compiled default Unix socket"),
+            "the intentional default-host refusal was not clear: {text}"
         );
     }
 
