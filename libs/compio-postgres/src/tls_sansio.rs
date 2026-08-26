@@ -396,8 +396,23 @@ fn commit<B: IoBufMut>(buf: &mut B, src: &[u8]) {
     // SAFETY: `set_len` requires (1) `n <= as_uninit().len()`, which the `min`
     // above guarantees, and (2) that every byte in `[buf_len(), n)` is
     // initialized - the loop just wrote all n of them through
-    // `MaybeUninit::write`, and `buf_len() <= n` because a freshly handed-over
-    // read buffer reports length 0.
+    // `MaybeUninit::write`, starting at index 0 because `as_uninit` spans the
+    // whole buffer rather than the spare tail (checked in compio-buf 0.8.1,
+    // the resolved version: the `[u8]` impl is `as_mut_ptr()` over `len()`).
+    // Writing `[0, n)` therefore covers `[buf_len(), n)` for ANY `buf_len` up
+    // to n, and a `buf_len` above n only makes `set_len` shrink.
+    //
+    // So the fresh-buffer property callers happen to have - a handed-over read
+    // buffer reports length 0 - is what keeps this CORRECT, not what keeps it
+    // SOUND. A caller passing a buffer with a meaningful prefix would have it
+    // silently overwritten, which is data loss rather than undefined
+    // behaviour. Worth separating, because a future caller change can break
+    // the first without touching the second.
+    //
+    // Nothing here reads session state, which is why the 2026-08-26 move of
+    // the rustls session from `Rc<RefCell<..>>` to `Arc<Mutex<..>>` could not
+    // affect this block: it never relied on single-threaded access or on a
+    // unique borrow of anything but its own two arguments.
     #[allow(unsafe_code)]
     unsafe {
         buf.set_len(n);
