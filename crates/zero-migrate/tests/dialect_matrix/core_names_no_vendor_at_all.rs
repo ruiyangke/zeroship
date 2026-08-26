@@ -14,8 +14,8 @@
 //! That gap was not theoretical and it was not cosmetic. What the sweep behind this
 //! file found, and the commits it lands with fixed:
 //!
-//! * `GENERATED_IDENT_MAX_BYTES` — the one budget every generated constraint, index
-//!   and trigger name is minted against — read `POSTGRES_VENDOR`'s declared cap while
+//! * `generated_ident_max_bytes` - the one budget every generated constraint, index
+//!   and trigger name is minted against - read `POSTGRES_VENDOR`'s declared cap while
 //!   the doc directly above it said it read "the registered backend that imposes the
 //!   limiting byte-counted cap". A backend declaring a tighter cap was read past.
 //! * `authored_name_within_bound` told EVERY target "PostgreSQL truncates identifiers

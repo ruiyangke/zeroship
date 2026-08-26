@@ -205,7 +205,7 @@ pub struct FieldDescriptor {
     pub deferrable: Option<bool>,
     /// For a `literal` field, the single accepted value (`literalValue` on the
     /// wire `FieldDef`). Drives both the column's primitive type
-    /// (text/numeric/boolean - see `literal_pg_data_type`) and a
+    /// (text/numeric/boolean, taken from the JSON value's own kind) and a
     /// `CHECK (<col> = <value>)` constraint, mirroring plugin-db, which maps the
     /// type in `def_to_pg_type` and pins the value in `def_to_constraints`.
     #[serde(rename = "literalValue", default)]

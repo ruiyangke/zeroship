@@ -97,8 +97,7 @@ pub struct PostgresSessionSnapshot {
 ///
 /// A version FLOOR is this backend's own knowledge - its numbering scheme, its
 /// release history - so it lives here rather than as a method on the neutral
-/// [`DatabaseFeature`]. It was
-/// `DatabaseFeature::minimum_postgres_version_num` in the contract crate, whose only
+/// [`DatabaseFeature`]. It was a method on that enum in the contract crate, whose only
 /// production caller was `verify_database_requirements` below: the engine asks WHAT a
 /// plan needs, and each target answers whether it has it, in whatever terms its own
 /// versions come in.
@@ -1297,8 +1296,7 @@ mod recording_session_genericity {
     /// The `server_version_num` floors this backend enforces, pinned in the crate
     /// that owns them.
     ///
-    /// RELOCATED, not written fresh: `render::lower`'s
-    /// `postgres_plan_records_uuid_server_requirements` asserted these two numbers
+    /// RELOCATED, not written fresh: a `render::lower` test asserted these two numbers
     /// while the floor table was a method on the neutral `DatabaseFeature`. The engine
     /// cannot reach a private `const fn` here, so the assertions came with the table
     /// rather than being dropped. What stayed in the engine is the half that is

@@ -8974,8 +8974,8 @@ columns = [
     // -----------------------------------------------------------------------
 
     /// REGRESSION: the fold and the lower spell the UNIQUE `definition`
-    /// IDENTICALLY (both via the shared `constraintdef_cols`). Pre-fix the lower used
-    /// `quote_cols` -> `UNIQUE ("handle")` while the fold used the conditional-quote
+    /// IDENTICALLY (both via the shared `constraintdef_cols`). Pre-fix the lower quoted
+    /// unconditionally -> `UNIQUE ("handle")` while the fold used the conditional-quote
     /// helper -> `UNIQUE (handle)`; the catalog's `pg_get_constraintdef` spells it
     /// bare, so the fold's form is correct and the lower now matches it.
     #[test]

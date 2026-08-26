@@ -4,7 +4,8 @@
 //! # The defect this pins closed
 //!
 //! `render::declarative`'s rename author used to have no dialect guard. The only gate
-//! in the diff span was `if is_sqlite`, which `continue`s past the author; PostgreSQL
+//! in the diff span asked whether the target was SQLite and `continue`d past the
+//! author; PostgreSQL
 //! AND MySQL both reached `ExpandContractAuthor::author` and both pushed an
 //! `ExpandContractPlan` into the plan's `renames`. `engine.rs`'s shape-adapter then
 //! mapped EVERY `renames` entry to `RenameStep::PgExpandContract` unconditionally, so

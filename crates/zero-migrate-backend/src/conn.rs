@@ -116,8 +116,8 @@ pub struct ConfinementConfig {
     ///
     /// Coupling them meant tightening the DDL budget to protect application
     /// traffic also shortened the deploy queue, and 3 seconds is shorter than
-    /// many real migrations. The default matches the value MySQL already used for
-    /// this concept (`PROJECT_LOCK_TIMEOUT_SECS`, zero-migrate-mysql/src/backend/session.rs).
+    /// many real migrations. The default matches the value MySQL already hardcoded
+    /// for this concept before it became a setting every backend reads.
     ///
     /// Read by the SQLite application-file lock directly, and by MySQL's
     /// `GET_LOCK` rounded UP to whole seconds (MySQL's unit) - so a value under a
@@ -259,7 +259,7 @@ impl ExecutorConfig {
         crate::guard::GuardConfig::from_policy(self.effective.clone(), dialect.clone())
     }
 
-    // A `platform()` constructor stood here. It took an `OperatorCapability` token and
+    // A Platform-trust constructor stood here. It took a capability token and
     // its whole body was `Self::new(project_id, project_schema, effective)` - the token
     // was bound to a discarded parameter and never read. Its doc claimed the token
     // could be minted "only through named in-crate seams", which was false: the mint

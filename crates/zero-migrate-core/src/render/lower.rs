@@ -6984,7 +6984,7 @@ impl IrAuthor {
                         // Shared `pg_get_constraintdef`-matching spelling (conditional
                         // quoting) - the SAME helper the offline fold uses, so the
                         // lower's snapshot half and the fold cannot drift on the UNIQUE
-                        // `definition` body. (Unconditional `quote_cols` would emit
+                        // `definition` body. (Quoting unconditionally would emit
                         // `UNIQUE ("handle")`, phantom-diffing the catalog's
                         // `UNIQUE (handle)`.)
                         definition: format!(
@@ -7106,7 +7106,8 @@ impl IrAuthor {
     /// standalone `.mask()` OR an encrypted auto-mask). The ADD path lowers BOTH the
     /// main column and the sibling as `ADD COLUMN`s - otherwise a masked added column
     /// would grow the main column but NOT the sibling the runtime mask read-pass writes
-    /// to (the bug the `mask_addcol_pg` round-trip caught). A non-masked column returns
+    /// to (the bug that shipped before the sibling was lowered alongside the main
+    /// column). A non-masked column returns
     /// `(main, None)`.
     #[allow(clippy::too_many_arguments)]
     fn add_column_snapshot_with_sibling(
@@ -11843,7 +11844,7 @@ mod tests {
     /// uses - so the lower's snapshot half and the fold cannot drift on the body. The
     /// CREATE DDL inlines that definition (`CONSTRAINT <name> UNIQUE (cols)`), so a
     /// safe lowercase column renders BARE (`UNIQUE (handle)`), matching live
-    /// `pg_get_constraintdef`. RED before the fix: the lower used `quote_cols` ->
+    /// `pg_get_constraintdef`. RED before the fix: the lower quoted unconditionally ->
     /// `UNIQUE ("handle")`, phantom-diffing the catalog AND disagreeing with the fold.
     #[test]
     fn create_table_level_unique_definition_spelling_matches_fold_pg() {
@@ -14497,10 +14498,11 @@ columns = [
     // RED before the fix: this source-shape assertion FAILS against the pre-fix code
     // (an `if let Some` wrapper around a fresh `table_snapshots` lookup around the
     // collision check). Post-fix the guard reuses the single fail-closed
-    // `live_snapshot` binding, so no such conditional exists. Pairs with the behavioral
-    // collision tests
-    // (`ir_renamecolumn_pg_rejects_rename_to_existing_column` /
-    // `renamecolumn_sqlite_rejects_rename_to_existing_column`).
+    // `live_snapshot` binding, so no such conditional exists. Pairs with the ONE
+    // behavioural collision test the tree has,
+    // `renamecolumn_sqlite_rejects_rename_to_existing_column`. The guard itself takes no
+    // dialect, so that test exercises it for every target - but only the SQLite leg is
+    // driven end to end, and no test asks a PostgreSQL rename to collide.
     #[test]
     fn rename_collision_guard_is_unconditional_not_if_let_some_snapshot() {
         let src = include_str!("lower.rs");

@@ -14,7 +14,7 @@
 // Nothing in this repository collects that orphan. The declarative differ would
 // propose dropping it (`schema/diff.rs` classifies a live-but-undeclared column as a
 // destructive DropColumn), but that differ does not run here: its live-schema reader
-// `read_live_schema` was permanently-off dead code naming a driver this workspace
+// was permanently-off dead code naming a driver this workspace
 // does not depend on, and has been deleted; `compute_diff` has no caller outside its
 // own in-module tests. So the orphan is permanent.
 //

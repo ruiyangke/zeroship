@@ -192,7 +192,8 @@ impl DialectScope {
 /// The arms name the strategy, not a vendor, and that is load-bearing rather than
 /// stylistic: the spellings `PgExpandContract` / `SqliteRebuild` asserted a
 /// one-vendor guarantee the lowering does not enforce. The differ's only gate here
-/// is `is_sqlite`, so a MySQL rename fell through to the expand-contract author and
+/// asked whether the target was SQLite, so a MySQL rename fell through to the
+/// expand-contract author and
 /// was wrapped in a variant named for PostgreSQL. That is a MISSING PLAN-TIME
 /// REFUSAL, not MySQL support - `docs/dialects.md`, MySQL's registered validation
 /// policy, and `lower_ir_rename` all declare MySQL column rename unsupported, and the

@@ -7,8 +7,8 @@
 //!
 //! # Why this is an integration test and not an in-`src` module
 //!
-//! It used to be `crates/zero-migrate/src/guard_vendor_lower_tests.rs`, included as a
-//! `#[cfg(test)] mod` so it could reach engine internals. It cannot stay there: the
+//! An in-`src` `#[cfg(test)] mod` is how a suite reaches engine internals, and this one
+//! must not live that way: the
 //! assertions below name PostgreSQL's deny-list rule ids
 //! (`zero_migrate_postgres::guard::denylist::rule`), and
 //! `dialect_matrix/core_names_no_vendor_crate.rs` forbids ANY file under
@@ -16,15 +16,15 @@
 //! vendor's rule ids is exactly the coupling that census exists to catch, whether or
 //! not it is `#[cfg(test)]`.
 //!
-//! Nothing was weakened to move it. Everything it needed from the engine
+//! Nothing is weakened by living here. Everything it needs from the engine
 //! (`render::lower`, `conn::ExecutorConfig`, `model::*`) is already `pub`; the only
-//! genuinely crate-private dependency was the `#[cfg(test)] pub(crate) test_fixtures`
-//! module, whose four charter builders are mirrored in `tests/support/mod.rs` — they
+//! genuinely crate-private dependency is the `#[cfg(test)] pub(crate) test_fixtures`
+//! module, whose four charter builders are mirrored in `tests/support/mod.rs` - they
 //! are built from the PUBLIC `effective_policy_from_charter_toml`, so the mirror is a
 //! second CALLER of the public API rather than a second copy of engine logic.
 //!
 //! Coverage map:
-//!   - capability minting is named-seam-only by convention.
+//!   - the Platform posture is carried by the composed policy and by nothing else.
 //!   - Platform widening is correct AND bounded (privileged constructs pass;
 //!     RCE/host-escape/cross-schema-to-creator still denied).
 //!   - DO-block privileged DDL applies under Platform; the RCE token-scan
@@ -50,9 +50,8 @@ use zero_migrate_sqlite::DIALECT as SQLITE;
 /// the two ported extensions.
 ///
 /// It is built straight from a composed `EffectivePolicy`, which is where the Platform
-/// posture lives. No token is involved — this doc used to describe one being minted
-/// through a `for_test` seam, which this function never did even while that seam
-/// existed, and the seam is now deleted.
+/// posture lives. No capability token is involved, and none ever was here: the posture
+/// is a property of the policy argument, not of anything the caller holds.
 fn platform_guard() -> SqlGuard {
     SqlGuard::new(platform_guard_config())
 }
@@ -776,12 +775,12 @@ fn m2_stage2_superuser_belt_sites_stay_hard_denied() {
 /// The Platform posture is carried by the composed `EffectivePolicy` and by nothing
 /// else, and both readers of that policy agree about it.
 ///
-/// This test used to be named for capability minting and passed an
-/// `OperatorCapability` token to an `ExecutorConfig::platform` seam. Both are deleted:
-/// the token's mint was public, so holding one proved nothing, and `platform` bound it
-/// to a discarded parameter and returned exactly what `new` returns. The assertions
-/// never depended on the token - they read the schema scope off the composed policy -
-/// so they are unchanged here, and the name now says what they check.
+/// This test used to be named for capability minting and passed a capability token to
+/// a Platform-trust executor-config seam. Both are deleted:
+/// the token's mint was public, so holding one proved nothing, and the seam bound it
+/// to a discarded parameter and returned exactly what `ExecutorConfig::new` returns.
+/// The assertions never depended on the token - they read the schema scope off the
+/// composed policy - so they are unchanged here, and the name now says what they check.
 ///
 /// The boundary that IS pinned is the unforgeable `EffectivePolicy`, held by the T8
 /// `compile_fail` doctests in `zero_migrate_backend::guard`.
@@ -1326,8 +1325,8 @@ fn schema_scope_permits_is_case_insensitive() {
 // pointed at it: they measure how far the composable grants widen the guard, now that
 // no posture can switch the guard off.
 
-/// A guard over the unconfined operator charter, minted via the same `for_test`
-/// operator-token seam.
+/// A guard over the unconfined operator charter, built straight from a composed
+/// `EffectivePolicy` like every other guard here.
 fn unconfined_operator_guard() -> SqlGuard {
     SqlGuard::new(unconfined_operator_guard_config())
 }

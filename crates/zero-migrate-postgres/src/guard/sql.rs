@@ -111,8 +111,8 @@ pub mod namespace_rule {
 
 /// Whether the effective policy admits a DROP object class beyond
 /// [`is_safe_drop_object`] (the `.down.sql`-only reverses: schema/extension/policy -
-/// DROP ROLE is handled by its own arm). Reproduces `platform_drop_object_allowed`
-/// via the PDP.
+/// DROP ROLE is handled by its own arm). Every arm is a PDP question about the
+/// composed policy; none of it is a hardcoded platform-posture allowance.
 ///
 /// `object` is the concrete target the statement names, resolved by
 /// [`drop_object_targets`]: the schema for `DROP SCHEMA`, the policy's table for
@@ -3682,7 +3682,7 @@ fn stmt_text(sql: &str, raw_stmt: &protobuf::RawStmt) -> String {
 // extractor's UTF-8 faithfulness + the fail-closed statement-JSON serializer).
 // These probe private fns (`word_present`, `guard_stmt_json`), so they MUST live
 // in-crate. The behaviour-lock suite that drives the guard through the engine's
-// lower pipeline lives in `zero-migrate/src/guard_vendor_lower_tests.rs`.
+// lower pipeline lives in `zero-migrate/tests/policy_charter/guard_vendor_lower.rs`.
 // ===========================================================================
 #[cfg(test)]
 mod white_box_tests {

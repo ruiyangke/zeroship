@@ -195,7 +195,7 @@ fn check_grant_key(
 /// decides.
 ///
 /// A layer DECIDES wherever any of its rules covers, because the query falls through
-/// top-down and stops at the first layer that covers (`layered_value_at`). So per layer:
+/// top-down and stops at the first layer that covers. So per layer:
 /// prove the covered part of the residual satisfies the draft's value, then subtract
 /// everything that layer covers - INCLUDING rules at or below default, which grant
 /// nothing but still mask - and carry the rest to the next layer down. A residual that

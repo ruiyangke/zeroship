@@ -29,7 +29,8 @@
 // the refusal (a regression that lets the shape through fails here) AND a bounded
 // control (a gate that starts refusing every keyed string column fails here too).
 // An over-refusing gate is worse than the bug it closes, and this one came close:
-// the catalog field the check reads, `mysql_physical_type`, was chosen precisely
+// the catalog fact the check reads - MySQL's own physical-type leg on the column
+// snapshot - was chosen precisely
 // because the neighbouring `data_type` canonicalises `varchar(n)` to `"text"` and
 // would have refused every bounded key in the project.
 //

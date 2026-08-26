@@ -17,8 +17,9 @@
 /// A database feature whose exact IR lowering has live target requirements.
 ///
 /// A VERSION FLOOR IS NOT HERE, and its absence is the point. The enum carried a
-/// `minimum_postgres_version_num` for a while: one backend's version-number scheme,
-/// one backend's release history, as a method on the neutral question. Its only
+/// method answering one backend's minimum server version for a while: that backend's
+/// version-number scheme, that backend's release history, hung on the neutral
+/// question. Its only
 /// production caller was that backend's own `verify_database_requirements`, which is
 /// exactly the seam the trait exists to route through - the engine asks WHAT a plan
 /// needs, and each target answers whether it has it, in whatever terms its own

@@ -954,8 +954,8 @@ impl Ctx<'_> {
         match expr {
             // Unqualified ref: resolve against the enclosing single target table
             // (rule (c)). Qualified ref (`c("t","col")`): the full
-            // "qualified-ref table must be in the FROM set" scope check
-            // (`QUALIFIED_REF_UNKNOWN_TABLE`) is coupled with the view/FROM
+            // "qualified-ref table must be in the FROM set" scope check is
+            // coupled with the view/FROM
             // builder; for this additive slice accept the qualified form
             // structurally (lenient pass).
             Expr::ColRef { name, table } => match table {

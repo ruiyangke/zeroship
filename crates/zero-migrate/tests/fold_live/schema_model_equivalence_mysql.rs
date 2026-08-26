@@ -4,7 +4,7 @@
 //! the ONLY leg that exercises the vendor side table with real values.
 //!
 //! On PostgreSQL every family in `VendorFacts` is at its default - `rowid_alias` false,
-//! `catalog_uuid_format_check` false, `pg_index_only` false (PostgreSQL introspection
+//! `catalog_uuid_format_check` false, `index_only` false (PostgreSQL introspection
 //! hardcodes it), `mysql_*` absent - so a round trip that silently dropped a vendor
 //! family would still pass there. MySQL populates its physical-contract leg,
 //! `text_storage` and `expression_default` from

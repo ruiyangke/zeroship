@@ -2157,8 +2157,8 @@ impl MigrationEngine {
         // NOT discharged and the table stays gated).
         let recognizes_contract_apply = |pc: &crate::apply::journal::PendingContract| -> bool {
             // The recognizer is the shared module-level
-            // [`recognizes_contract_apply`] so the control-plane PRE-APPLY interlock
-            // gate (`prevalidate_bundle_scope`) and this APPLY-time loop decide
+            // [`recognizes_contract_apply`] so the control-plane PRE-APPLY bundle
+            // interlock gate and this APPLY-time loop decide
             // "is this deploy the legitimate contract-apply?" by the SAME
             // re-author-compare - no drift between the bundle-level pre-check and
             // the per-file apply.

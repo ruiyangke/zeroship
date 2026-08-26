@@ -69,8 +69,7 @@
 //!
 //! # Where this lives, and why
 //!
-//! In-crate rather than under `tests/`, for the same reason as
-//! `guard_vendor_lower_tests`: `super::AuthoringTable` and
+//! In-crate rather than under `tests/`, and it has to be: `super::AuthoringTable` and
 //! `crate::render::fold::single_fold` are crate-private, and the alternative to a
 //! child module is widening a production item's visibility so a test can reach it.
 //! This module is `cfg(test)` and ships in nothing.
@@ -1371,9 +1370,9 @@ const ROWS: &[Row] = &[
     // row shipped, and FIXED on MySQL afterwards - the MySQL half rode on that
     // backend's parsed physical contract, which that row never looked at, and the fold
     // now re-derives the contract from the column the replay finished with rather than
-    // from the type it briefly had. (The contract was the `mysql_physical_type` field
-    // then; it is a `ColumnSnapshot::vendor` leg owned by `zero-migrate-mysql` now.
-    // The history is left as it happened, with the current home named beside it.) The three walkers needed no matching change:
+    // from the type it briefly had. (The contract was a named field on the neutral
+    // snapshot then; it is a `ColumnSnapshot::vendor` leg owned by `zero-migrate-mysql`
+    // now.) The three walkers needed no matching change:
     // FFD and ATO already answered `no` here, and only FO was wrong.
     Row { key: "c_retype_type_parameters|Postgres|column_carries(shapes.narrow ~ 24)", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_retype_type_parameters|Sqlite|column_carries(shapes.narrow ~ 24)", verdict: "AGREED no", status: Status::Consistent },

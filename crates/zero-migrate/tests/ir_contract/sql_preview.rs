@@ -1,7 +1,8 @@
 //! **The OFFLINE `--sql` plan preview gate.**
 //!
-//! These tests run with NO DB connection (no `_pg`/`_sqlite` suffix, not gated on
-//! `MIGRATE_REQUIRE_DB`): the preview's whole point is to render the SQL the engine
+//! These tests run with NO DB connection (no `_pg`/`_sqlite` suffix, and they demand
+//! no DSN through `support::require_live_db_dsn`): the preview's whole point
+//! is to render the SQL the engine
 //! WOULD run WITHOUT a live DB. They assert:
 //!
 //! 1. GOLDEN: a representative migration set (createTable + addColumn + a guarded

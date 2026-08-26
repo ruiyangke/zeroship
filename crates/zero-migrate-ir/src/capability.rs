@@ -29,11 +29,11 @@
 
 use crate::policy::{SchemaScope, TrustProfile};
 
-// There was an `OperatorCapability` token here, aliased as `SealApplier`, and an
-// `ExecutorConfig::platform` seam that took one. Both are deleted.
+// A capability TOKEN stood here, under two names, together with the executor-config
+// seam that took one. Both are deleted.
 //
 // The token was a zero-sized struct with a private field, which blocks only the
-// struct-literal form - `new`, `Default` and `for_test` were all public, all the same
+// struct-literal form - every one of its three constructors was public, all the same
 // mint, and reachable from any dependent crate. So holding one proved nothing about
 // the holder, and the one function that took it bound it to a discarded parameter and
 // never read it, returning exactly what the public `ExecutorConfig::new` returns.
@@ -338,9 +338,9 @@ mod tests {
         }
     }
 
-    // `local_is_in_between_no_role_no_raw` stood here. Despite the name it asserted no
-    // ordering between the presets - every assertion read `local()` alone - so it tested
-    // the deleted preset and nothing else, and went with it.
+    // A test named for an ORDERING between the presets stood here. Despite that name
+    // every assertion in it read the deleted preset alone and compared it to nothing, so
+    // it tested that preset and nothing else, and went with it.
 
     #[test]
     fn for_trust_maps_profiles_onto_presets() {

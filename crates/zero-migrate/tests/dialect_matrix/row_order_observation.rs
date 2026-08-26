@@ -110,8 +110,8 @@ const OWNER: &str = "app_row_order";
 const TABLE: &str = "t";
 const KEY: &str = "id";
 
-/// The observation's third argument, `inserted_rows`, and simultaneously the value a
-/// bytewise column must give back.
+/// The rows the observation inserts, and simultaneously the value a bytewise column
+/// must give back.
 ///
 /// Four ids in a consumer's shape - a prefix plus base62 - listed in CREATION order,
 /// which for base62 of a monotonic UUIDv7 is BYTE order. The suffixes vary only in

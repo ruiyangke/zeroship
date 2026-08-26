@@ -25,7 +25,7 @@
 //! params, `COMMENT ON COLUMN` sentinels), SQLite (unqualified `main` DDL: inline
 //! `/* ... */` sentinels, plain B-tree indexes), and MySQL (backtick-qualified DDL,
 //! native enum folding, and inline foreign-key-supporting indexes). Each method body is
-//! the EXACT former `if is_sqlite { ... } else { ... }` arm, moved VERBATIM - code
+//! the EXACT former arm of a two-way SQLite-or-not branch, moved VERBATIM - code
 //! motion, not a rewrite, so the bytes are unchanged (the goldens prove
 //! it). The ROUTING branches (FK inline-vs-defer, rebuild-vs-ALTER, policy-injected
 //! index skip, the unreachable guard) stay in `diff()` - they are diff-logic.

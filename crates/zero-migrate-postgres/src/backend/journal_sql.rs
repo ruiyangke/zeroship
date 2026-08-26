@@ -308,8 +308,9 @@ pub async fn ensure_journal<D: SqlSession>(
     // the dual-write trigger keeps both in sync, and the drop-old-column contract
     // has not run.
     //
-    // The tempting inverse - born `open`, stamped `reached_success`, recover
-    // anything unstamped - was implemented here and torn out, because its
+    // The tempting inverse - a marker born unprotected, stamped only once the go-live
+    // reaches its success arm, recovering anything left unstamped - was implemented
+    // here and torn out, because its
     // stamp-failure direction leaves the marker PROTECTED, and a later deploy then
     // silently reverts a live contract it cannot distinguish from a crash. Anyone
     // building the driver should read that as settled rather than rediscovering it:

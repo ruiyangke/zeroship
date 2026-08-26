@@ -3,13 +3,13 @@
 //!
 //! # Why this is not a field on the neutral column snapshot
 //!
-//! It used to be one - `ColumnSnapshot::mysql_physical_type`, in
+//! It used to be one - a named field on the neutral `ColumnSnapshot`, in
 //! `zero-migrate-backend` - and the engine `match`ed on its variants in three
 //! places. That put both halves of the hard limit in the wrong crate: the neutral
 //! vocabulary spelled a vendor's name, and neutral code resolved a vendor's type
 //! grammar to decide whether two columns were the same.
 //!
-//! The type now lives here, where its parser and its speller already had to be, and
+//! The type lives here, where its parser and its speller already had to be, and
 //! reaches the neutral snapshot as an opaque leg of
 //! [`Dialectal<dyn VendorColumnFacts>`](zero_migrate_backend::dialectal::Dialectal)
 //! keyed by [`crate::DIALECT`]. The engine carries it, clones it and compares it by ASKING

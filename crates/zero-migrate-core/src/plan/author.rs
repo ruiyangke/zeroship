@@ -167,12 +167,12 @@ fn column_def(vendors: VendorSet, c: &Column, dialect: &DialectId) -> Result<Str
     ))
 }
 
-// `pub(crate) const GENERATED_IDENT_MAX_BYTES` USED TO LIVE HERE, aliasing a `const`
-// in the registry module so this file could spell the budget without naming the
-// composition. The budget is a query on the carried registry now -
-// `crate::render::backends::generated_ident_max_bytes(vendors)` - so an alias would be
-// a second door onto one call, and every reader here takes the set as an argument
-// anyway. See that function for what the lost compile-time evaluation cost.
+// NO local alias for the generated-identifier budget lives here, deliberately. One
+// used to, as a `const` pointing at the registry module, so this file could spell the
+// budget without naming the composition. The budget is a query on the carried registry
+// now - `crate::render::backends::generated_ident_max_bytes(vendors)` - so an alias
+// would be a second door onto one call, and every reader here takes the set as an
+// argument anyway. See that function for what the lost compile-time evaluation cost.
 //
 // An index name longer than the budget is silently truncated *by the server* on
 // `CREATE` for a backend that truncates, which would break `IF NOT EXISTS` /

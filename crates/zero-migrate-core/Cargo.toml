@@ -105,9 +105,10 @@ uuid = { workspace = true }
 # combinator crate, not a runtime.
 futures = { workspace = true }
 tracing = { workspace = true }
-# The `.migrate/dialect_table.toml` portability tables + the policy-profile
-# `from_toml`/`to_string` round-trip (`model/{profile,dialect_table,op_support}.rs`).
-# SYNC + leaf — zero tokio; the library trust domain is unchanged.
+# The crate's own charter fixtures, which build a policy document as TOML text and
+# compose it through the public loader - so a fixture's schema and extension names are
+# escaped by the serializer rather than by hand.
+# SYNC + leaf - zero tokio; the library trust domain is unchanged.
 toml = { workspace = true }
 
 [dev-dependencies]

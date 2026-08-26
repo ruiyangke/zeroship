@@ -507,8 +507,8 @@ pub(crate) fn pin_layer_key_to_default(
 /// an [`AssembledCharter`], which must clear [`finalize_charter`] and then be
 /// `admit`'s charter before any `EffectivePolicy` exists. Holding one is proof it was
 /// composed under the host's root charter - this
-/// is the type-level boundary that replaces the old forgeable `OperatorCapability`
-/// token (E6).
+/// is the type-level boundary that replaces the forgeable capability token an earlier
+/// design carried (E6).
 ///
 /// It carries:
 /// - the pointwise grant model (per key, the covering rules + default);

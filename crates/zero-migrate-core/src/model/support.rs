@@ -163,9 +163,9 @@ impl DialectSupport {
     /// MEASURED, not inferred: returning every registered dialect for each op that
     /// supports anything - wrong members for `raw` and every other PG-only op,
     /// right emptiness bit - leaves the lib suite and the whole `dialect_matrix`
-    /// suite reporting clean. Predates this shape (the same hole existed when
-    /// this was `from_bools` over three fields); recorded so the next reader does
-    /// not take the message for the guarantee.
+    /// suite reporting clean. Predates this shape - the same hole existed when the
+    /// set was built from one bool per shipping dialect - and is recorded so the next
+    /// reader does not take the message for the guarantee.
     ///
     /// ONE MEMBER IS NOW COVERED, and only one. `dialect_scope_for_ir` derives an
     /// artifact's dialect reach from this set, so

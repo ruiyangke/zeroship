@@ -254,9 +254,10 @@ mod schema_renderer_tests {
 
 /* THE ENCRYPTED-BLOB SENTINEL IS DELETED, AND ITS DOC WAS FALSE.
  *
- * `pub const SQLITE_ENC_BLOB_PREFIX` claimed that "the SQLite session strips the
- * prefix and base64-decodes the remainder". The literal it defined appeared EXACTLY
- * ONCE in the entire repository - in that definition - so no session stripped it,
+ * A `pub const` here carried a SQLite blob prefix, and claimed that "the SQLite
+ * session strips the prefix and base64-decodes the remainder". The literal it defined
+ * appeared EXACTLY ONCE in the entire repository - in that definition - so no session
+ * stripped it,
  * and none ever had. Its only reader in code was one of the two encryption methods the
  * `SchemaRenderer` trait no longer declares, itself dead (see the trait's header), so
  * the constant, its one reader, and the decode step it promised are all gone together.
@@ -615,12 +616,12 @@ fn validate_schema(name: &str) -> Result<(), QueryError> {
 // DDL builders for registerModel
 // ---------------------------------------------------------------------------
 
-/* `pub fn build_create_schema` IS DELETED. It had ZERO callers: one mention in the
- * whole repository across every `.rs` and `.ts` file, and that mention was its own
- * definition. A previous pass routed its identifier through the PostgreSQL door
- * rather than delete it, because removing public API was outside that brief; the
- * routing was correct and the function was still dead. `CREATE SCHEMA` is emitted
- * by the apply layer, not from here. */
+/* THE `pub fn` THAT BUILT A `CREATE SCHEMA` STATEMENT IS DELETED. It had ZERO callers:
+ * one mention in the whole repository across every `.rs` and `.ts` file, and that
+ * mention was its own definition. A previous pass routed its identifier through the
+ * PostgreSQL door rather than delete it, because removing public API was outside that
+ * brief; the routing was correct and the function was still dead. `CREATE SCHEMA` is
+ * emitted by the apply layer, not from here. */
 
 // The production CREATE path passes the orchestrator's live table set through
 // `FkEmission::Deferred` so an FK to a not-yet-created target becomes a separate
@@ -1947,7 +1948,7 @@ fn short_hash_base32(input: &str) -> String {
 /// the `BYTEA`/`BLOB` type) and the migration engine's declarative differ (which
 /// appends it to its own snapshot-rendered column) call it, so the sentinel the
 /// engine `generate`s is byte-identical to the one `registerModel` writes. The
-/// parser side lives in `read_live_schema` (PG `pg_attribute` comment regex) /
+/// parser side lives in the live-catalog readers (PG `pg_attribute` comment regex) /
 /// the SQLite `sqlite_master.sql` regex.
 ///
 /// The returned string INCLUDES the surrounding `/* ... */` comment delimiters so

@@ -760,7 +760,8 @@ fn oracle_restrict_commutative() {
     // `restrict` is a lattice MEET, hence commutative: restrict(a,b) and restrict(b,a)
     // denote the same effective grants. (True 3-way associativity is not expressible
     // with the 2-ary `TrustedDoc` signature - the meet output is not a `TrustedDoc` -
-    // and the exact-meet property is already proven by `oracle_restrict_is_exact_meet`,
+    // and the exact-meet property is already proven by
+    // `oracle_restrict_is_exact_pointwise_meet`,
     // from which associativity follows by the meet laws.)
     let univ = universe();
     let reg = registry();

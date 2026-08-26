@@ -610,7 +610,7 @@ async fn a_drop_whose_blocker_the_same_plan_removes_still_applies() {
 
 /// The same shape for the RETYPE assertion, which is ALREADY hoisted on `main`.
 ///
-/// `preflight_plan_column_retypes` asks `ColumnTypeChangeHasNoBlockers` against
+/// The retype hoist asks `ColumnTypeChangeHasNoBlockers` against
 /// the PRE-PLAN database with no reading of what the plan itself does, so
 /// `[dropView, setColumnType]` is refused today even though every step of it
 /// succeeds when run.

@@ -16,11 +16,12 @@
 //! commit before this file existed:
 //!
 //! * `render/declarative.rs` authors the expand-contract rename with no dialect
-//!   guard. The only gate in that span is `if is_sqlite`, which `continue`s past the
-//!   author entirely; PostgreSQL and MySQL both fall through to `renames.push(plan)`.
+//!   guard. The only gate in that span asks whether the target is SQLite and
+//!   `continue`s past the author entirely; PostgreSQL and MySQL both fall through to
+//!   `renames.push(plan)`.
 //! * `engine.rs`'s `apply_declarative_locked` maps EVERY `plan.renames` entry to the
 //!   variant unconditionally. The only dialect mentioned in that whole function is a
-//!   COMMENT claiming "Empty `rebuilds` on PG and empty `renames` on SQLite" — a
+//!   COMMENT claiming "Empty `rebuilds` on PG and empty `renames` on SQLite" - a
 //!   two-dialect claim in a three-dialect codebase, silent on MySQL.
 //! * Through the real public differ: Postgres `renames` = 1, SQLite `renames` = 0,
 //!   **MySQL `renames` = 1**.

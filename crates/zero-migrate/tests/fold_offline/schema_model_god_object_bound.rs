@@ -250,14 +250,14 @@ fn the_unified_model_would_grow_eighteen_fields_and_has_no_projection_private_st
         + routing.would_join_the_model.len()
         + routing.vendor_fact.len()
         + routing.projection_local.len();
-    // 28 → 30: `precision` and `scale`, added because the `number` token cannot say
+    // 28 -> 30: `precision` and `scale`, added because the `number` token cannot say
     // whether a column is a float or a fixed-precision decimal and the SQLite emitter
     // was answering `REAL` for both. That is the case this file demands be made in a
     // diff that moves a visible number, and this is it.
     //
-    // 30 → 28: `fts` and `fts_language` removed with full-text support. Both were
-    // routed as `would_join_the_model`, so the whole movement lands on that bucket
-    // (20 → 18) and none of it on the other three.
+    // 30 -> 28: the two full-text descriptor fields went with full-text support. Both
+    // were routed as `would_join_the_model`, so the whole movement lands on that bucket
+    // (20 -> 18) and none of it on the other three.
     assert_eq!(
         total, 28,
         "`FieldDescriptor` changed field count; every field must be routed: {routing:#?}"

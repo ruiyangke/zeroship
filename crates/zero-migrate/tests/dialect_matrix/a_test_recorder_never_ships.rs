@@ -58,10 +58,11 @@
 //! A manifest walk that finds nothing reports clean, and a needle that never matches
 //! reports clean. So:
 //!
-//! 1. [`MANIFEST_ANCHORS`] — the two manifests that must be found and parsed. Naming
-//!    them bounds WHICH were read, which a count cannot do.
+//! 1. The two manifests that must be found and parsed, each named in source
+//!    ([`ENGINE_MANIFEST`] plus the recorder's own). Naming them bounds WHICH were
+//!    read, which a count cannot do.
 //! 2. The `testing` edge itself is a positive control: exactly one enabling edge must
-//!    EXIST. Zero would mean the feature is dead — or, far more likely, that the
+//!    EXIST. Zero would mean the feature is dead - or, far more likely, that the
 //!    matcher stopped recognizing the line it is supposed to police.
 
 use std::path::{Path, PathBuf};

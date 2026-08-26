@@ -511,7 +511,7 @@ pub fn string_enum_values(def: &serde_json::Value) -> Option<Vec<String>> {
 /// comment BODY is built by the shared codec
 /// ([`crate::mask_codec::build_encryption_sentinel`]) so it is byte-identical to
 /// what the migration engine emits and what the runtime parser
-/// ([`crate::mask_codec::parse_encryption_sentinel`], via `read_live_schema`)
+/// ([`crate::mask_codec::parse_encryption_sentinel`], reading the live catalog)
 /// expects. Returns the empty vector when no column is encrypted.
 #[must_use]
 pub fn build_encryption_sentinel_comments(

@@ -166,9 +166,8 @@ use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
 ///
 /// # IT WAS A `const`, AND THE COMPILE-TIME EVALUATION IS GONE
 ///
-/// This was `pub(crate) const GENERATED_IDENT_MAX_BYTES: usize =
-/// tightest_identifier_budget(VENDORS);` - a `const`, folded by the compiler over the
-/// shipping set, consumed by five files that never saw a registry. It was the ONE
+/// This was a `pub(crate) const`, folded by the compiler over the shipping set at its
+/// definition, consumed by five files that never saw a registry. It was the ONE
 /// reader of the composition that did not take it as an argument, and that is exactly
 /// why it could not survive the composition leaving the crate: an engine that cannot
 /// name the vendors cannot fold over them at compile time either.

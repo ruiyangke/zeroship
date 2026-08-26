@@ -258,9 +258,9 @@ fn seg_from_normalized(seg: &NormalizedSegment) -> Option<SegGlob> {
 /// # It is ONE fold, and it is the CHARTER's, not a target's
 ///
 /// The fold this applies - an unquoted segment lowercases, a quoted one is verbatim
-/// - is spelled the way PostgreSQL spells identifier resolution, and it was called
-/// `normalize_pg_identifier` for that reason. The name was doing real harm: this
-/// function is not a target's, it is the CHARTER's, and both sides of every scope
+/// - is spelled the way PostgreSQL spells identifier resolution, and naming it after
+/// that target would do real harm: this function is not a target's, it is the
+/// CHARTER's, and both sides of every scope
 /// comparison go through it precisely so a charter written for one project matches
 /// the same objects on every target it is deployed against. A target-shaped name on a
 /// charter-shaped fold invites a second one "for the other dialects", and a second

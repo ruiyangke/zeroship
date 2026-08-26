@@ -1262,8 +1262,9 @@ impl SequenceDataTypeSnapshot {
     /// standalone sequences today, so only one backend's catalog spelling reaches
     /// this - but the DIALECT-BLIND differ compares a snapshot whose producer it does
     /// not know, so a second copy of this fold on either side would not report a
-    /// difference, it would MANUFACTURE one. It was `from_pg_type_name`, which read
-    /// as a target's private parser rather than as the one both sides must share.
+    /// difference, it would MANUFACTURE one. The name says CATALOG for that reason: a
+    /// name carrying one target's would read as that target's private parser rather
+    /// than as the one both sides must share.
     pub fn from_catalog_type_name(name: &str) -> Self {
         match name {
             "smallint" | "int2" => Self::SmallInt,
