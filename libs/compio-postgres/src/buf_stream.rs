@@ -200,12 +200,22 @@ impl ReadDeadline {
         // `wake_reader` below already takes the waker OUT before waking, for
         // exactly this reason. The drop is the same hazard reached through the
         // destructor instead of the wake, and it was the half this file missed.
+        // Cloned before the borrow for the SAME reason the drop is carried out
+        // after it: a `RawWakerVTable` has three arbitrary-code entry points -
+        // wake, drop and clone - and all three must stay outside. Fixing only
+        // the drop here, as the first pass did, is the same half-applied
+        // invariant that let two earlier defects in this family survive a fix
+        // each; `pool.rs` had the identical miss and was corrected first.
+        //
+        // Unconditional, so it costs one refcount pair on the re-registration
+        // where `will_wake` matches and the clone goes unused.
+        let fresh = waker.clone();
         let replaced = {
             let mut slot = self.inner.reader_waker.borrow_mut();
             if slot.as_ref().is_some_and(|saved| saved.will_wake(waker)) {
                 None
             } else {
-                slot.replace(waker.clone())
+                slot.replace(fresh)
             }
         };
         drop(replaced);
