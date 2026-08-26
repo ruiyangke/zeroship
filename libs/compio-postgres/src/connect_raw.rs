@@ -673,9 +673,27 @@ fn target_session_state_from_parameters(
         TargetSessionAttrs::Primary
         | TargetSessionAttrs::Standby
         | TargetSessionAttrs::PreferStandby => {
-            Some(TargetSessionState::InRecovery(in_hot_standby?))
+            // Servers before 9.0 predate hot standby and cannot be in
+            // recovery as a queryable standby. libpq therefore treats them as
+            // primary without sending pg_is_in_recovery(), a function those
+            // servers do not have.
+            let in_hot_standby = in_hot_standby.or_else(|| {
+                server_major_version(parameters)
+                    .is_some_and(|major| major < 9)
+                    .then_some(false)
+            })?;
+            Some(TargetSessionState::InRecovery(in_hot_standby))
         }
     }
+}
+
+fn server_major_version(parameters: &HashMap<String, String>) -> Option<u32> {
+    parameters
+        .get("server_version")?
+        .split('.')
+        .next()?
+        .parse()
+        .ok()
 }
 
 fn parameter_status_bool(parameters: &HashMap<String, String>, name: &str) -> Option<bool> {
@@ -1432,6 +1450,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[compio::test]
+    async fn pre_nine_servers_are_primary_without_an_unsupported_probe() {
+        connect_with_startup_parameters(
+            TargetSessionAttrs::Primary,
+            &[("server_version", "8.4.22")],
+        )
+        .await
+        .expect("a server predating hot standby is necessarily primary");
+
+        let error = connect_with_startup_parameters(
+            TargetSessionAttrs::Standby,
+            &[("server_version", "8.4.22")],
+        )
+        .await
+        .expect_err("a server predating hot standby cannot be a standby");
+        assert!(
+            error.is_target_session_attrs(),
+            "the pre-9 standby mismatch was not classified: {error:?}"
+        );
     }
 
     /// The default has to exercise both halves of protocol negotiation: ask
