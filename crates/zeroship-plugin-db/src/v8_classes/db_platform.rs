@@ -125,7 +125,10 @@ impl DbPlatform {
                 "db.registerModel: collection must be a non-empty string",
             ));
         }
-        let schema_v = read_json_arg(scope, Some(schema));
+        let schema_v = match read_json_arg(scope, Some(schema)) {
+            Ok(v) => v,
+            Err(e) => return Ok(crate::v8_bridge::throw_decode_error(scope, &e)),
+        };
         // `indexes` and `declared` are read by nobody, so they are not parsed
         // either. Parsing them would still be dead work, and a parse that no
         // consumer can disagree with cannot fail usefully - a malformed value
@@ -144,7 +147,10 @@ impl DbPlatform {
         scope: &mut v8::PinScope<'s, '_>,
         policy: v8::Local<v8::Value>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
-        let policy_v = read_json_arg(scope, Some(policy));
+        let policy_v = match read_json_arg(scope, Some(policy)) {
+            Ok(v) => v,
+            Err(e) => return Ok(crate::v8_bridge::throw_decode_error(scope, &e)),
+        };
         Ok(dispatch_set_mask_policy_field(scope, &self.app_id, policy_v).into())
     }
 

@@ -189,7 +189,11 @@ impl Db {
                     "db.transaction: opts must be an object, got {got}"
                 )));
             }
-            let parsed = v8_value_to_serde_json(scope, opts);
+            let parsed = v8_value_to_serde_json(scope, opts).map_err(|e| {
+                OpError::type_error(format!(
+                    "db.transaction: opts could not be decoded ({e:?})"
+                ))
+            })?;
             let raw = parsed
                 .as_object()
                 .and_then(|o| o.get("isolationLevel"))
