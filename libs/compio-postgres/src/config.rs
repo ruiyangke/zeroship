@@ -659,7 +659,7 @@ pub enum Host {
 /// * `keepalives` - Controls the use of TCP keepalive. A value of 0 disables keepalive and nonzero integers enable it.
 ///     This option is ignored when connecting with Unix sockets. Defaults to on.
 /// * `keepalives_idle` - The number of seconds of inactivity after which a keepalive message is sent to the server.
-///     This option is ignored when connecting with Unix sockets. Defaults to 2 hours.
+///     This option is ignored when connecting with Unix sockets. By default the operating-system setting is left unchanged.
 /// * `keepalives_interval` - The time interval between TCP keepalive probes.
 ///     This option is ignored when connecting with Unix sockets.
 /// * `keepalives_count` - The maximum number of TCP keepalive probes that will be sent before dropping a connection.
@@ -850,7 +850,7 @@ impl Config {
             keepalives: true,
             #[cfg(not(target_arch = "wasm32"))]
             keepalive_config: KeepaliveConfig {
-                idle: Duration::from_secs(2 * 60 * 60),
+                idle: Duration::ZERO,
                 interval: None,
                 retries: None,
             },
@@ -1026,10 +1026,10 @@ impl Config {
         let mut applied: Vec<&str> = Vec::new();
 
         for (key, value) in &parameters {
-            if key == "service"
-                || explicit.iter().any(|given| given == key)
-                || applied.contains(&key.as_str())
-            {
+            if key == "service" {
+                return Err(Error::config(Box::new(NestedService)));
+            }
+            if explicit.iter().any(|given| given == key) || applied.contains(&key.as_str()) {
                 continue;
             }
             self.param(key, value)?;
@@ -1562,7 +1562,8 @@ impl Config {
 
     /// Sets the amount of idle time before a keepalive packet is sent on the connection.
     ///
-    /// This is ignored for Unix domain sockets, or if the `keepalives` option is disabled. Defaults to 2 hours.
+    /// This is ignored for Unix domain sockets, or if the `keepalives` option is disabled.
+    /// By default the operating-system setting is left unchanged.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn keepalives_idle(&mut self, keepalives_idle: Duration) -> &mut Config {
         self.keepalive_config.idle = keepalives_idle;
@@ -1684,22 +1685,11 @@ impl Config {
     }
 
     fn param(&mut self, key: &str, value: &str) -> Result<(), Error> {
-        // libpq's treatment of `key=` is per-TYPE, not uniform. A NUMERIC
-        // option takes an empty value as "not given" and keeps its default; an
-        // ENUM refuses it (`invalid sslmode value: ""`), which the arms below
-        // already do by not matching it; a STRING keeps the empty string.
-        // Measured against 16.14 for every key listed here.
-        const EMPTY_MEANS_UNSET: &[&str] = &[
-            "port",
-            "connect_timeout",
-            "tcp_user_timeout",
-            "keepalives",
-            "keepalives_idle",
-            "keepalives_interval",
-            "keepalives_count",
-            "statement_cache_capacity",
-            "max_message_size",
-        ];
+        // libpq's treatment of `key=` is per-OPTION, not uniform. `port=` uses
+        // the compiled default, while the six socket integer options reject an
+        // empty value. Enums reject it too; strings generally keep it.
+        const EMPTY_MEANS_UNSET: &[&str] =
+            &["port", "statement_cache_capacity", "max_message_size"];
         if value.is_empty() && EMPTY_MEANS_UNSET.contains(&key) {
             return Ok(());
         }
@@ -1834,13 +1824,16 @@ impl Config {
                     ))));
                 }
             },
-            // The pre-`sslmode` spelling. `0` means "do not require TLS",
-            // which is this driver's default posture, so it is satisfied. `1`
-            // means `sslmode=require`, and that IS supported - under that
-            // name, which is what the error says rather than leaving the
-            // caller to guess.
+            // The pre-`sslmode` spelling. libpq stores `0` as
+            // `sslmode=prefer`, rather than treating it as a no-op, so it must
+            // override an earlier sslmode in the same string. `1` means
+            // `sslmode=require`, and that IS supported - under that name,
+            // which is what the error says rather than leaving the caller to
+            // guess.
             "requiressl" => match value {
-                "0" => {}
+                "0" => {
+                    self.ssl_mode(SslMode::Prefer);
+                }
                 "1" => {
                     return Err(Error::config_parse(Box::new(UnsupportedOption(
                         "requiressl (use sslmode=require)",
@@ -2495,6 +2488,17 @@ impl fmt::Display for UnsupportedOption {
 }
 
 impl error::Error for UnsupportedOption {}
+
+#[derive(Debug)]
+struct NestedService;
+
+impl fmt::Display for NestedService {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt.write_str("nested service specifications are not supported: option `service`")
+    }
+}
+
+impl error::Error for NestedService {}
 
 /// Parse a keepalive duration in seconds: zero allowed, negative refused.
 ///
@@ -3162,7 +3166,7 @@ mod tests {
     /// than `Prefer` would silently stop negotiating encryption at all, and
     /// nothing else here would notice.
     ///
-    /// Checked against the PostgreSQL 18 documentation on 2026-08-24; all ten
+    /// Checked against the PostgreSQL 18 documentation on 2026-08-26; all eleven
     /// matched.
     mod parameter_defaults {
         use super::super::{
@@ -3182,6 +3186,9 @@ mod tests {
             assert_eq!(config.get_target_session_attrs(), TargetSessionAttrs::Any);
             assert_eq!(config.get_channel_binding(), ChannelBinding::Prefer);
             assert_eq!(config.get_load_balance_hosts(), LoadBalanceHosts::Disable);
+            // An omitted keepalives_idle leaves the operating-system default
+            // untouched. Zero is how this Config represents that absence.
+            assert_eq!(config.get_keepalives_idle(), std::time::Duration::ZERO);
             // "Zero, negative, or not specified means wait indefinitely."
             assert_eq!(config.get_connect_timeout(), None);
             // Empty means "the port PostgreSQL was built with"; the connect
@@ -3451,6 +3458,14 @@ mod tests {
             }
         }
 
+        #[test]
+        fn requiressl_zero_overrides_an_earlier_sslmode() {
+            let config = "host=h sslmode=require requiressl=0"
+                .parse::<Config>()
+                .expect("requiressl=0 is the legacy spelling of sslmode=prefer");
+            assert_eq!(config.get_ssl_mode(), crate::config::SslMode::Prefer);
+        }
+
         /// THE CONTROL: turning these ON must still be refused, or the test
         /// above is satisfied by a parser that swallows the whole family.
         #[test]
@@ -3496,19 +3511,54 @@ mod tests {
             );
         }
 
-        /// ONE trailing empty numeric - only the last parameter in a string can
-        /// actually be empty, for the swallowing reason below.
+        /// Port is the one integer option whose documented empty value selects
+        /// the compiled default.
         #[test]
-        fn an_empty_numeric_value_leaves_the_default() {
+        fn an_empty_port_value_leaves_the_default() {
             let config: Config = "host=x.invalid port="
                 .parse()
-                .expect("libpq accepts an empty numeric value");
+                .expect("libpq documents an empty port as the compiled default");
             assert!(config.get_ports().is_empty(), "port= must not set a port");
+        }
 
-            let config: Config = "host=x.invalid connect_timeout="
-                .parse()
-                .expect("libpq accepts an empty numeric value");
-            assert_eq!(config.get_connect_timeout(), None);
+        #[test]
+        fn empty_libpq_integer_values_are_refused_by_name() {
+            let mut accepted = Vec::new();
+            let mut unnamed = Vec::new();
+            for key in [
+                "connect_timeout",
+                "tcp_user_timeout",
+                "keepalives",
+                "keepalives_idle",
+                "keepalives_interval",
+                "keepalives_count",
+            ] {
+                let dsn = format!("host=x.invalid {key}=");
+                match dsn.parse::<Config>() {
+                    Ok(_) => accepted.push(key),
+                    Err(error) => {
+                        let mut names_key = error.to_string().contains(key);
+                        let mut source = std::error::Error::source(&error);
+                        while let Some(cause) = source {
+                            names_key |= cause.to_string().contains(key);
+                            source = std::error::Error::source(cause);
+                        }
+                        if !names_key {
+                            unnamed.push(key);
+                        }
+                    }
+                }
+            }
+            assert!(
+                accepted.is_empty(),
+                "empty integer values were silently accepted: {}",
+                accepted.join(", ")
+            );
+            assert!(
+                unnamed.is_empty(),
+                "empty integer values were refused without naming: {}",
+                unnamed.join(", ")
+            );
         }
 
         /// And so `port= connect_timeout=` is NOT two empty numerics: `port`
@@ -3624,15 +3674,25 @@ mod tests {
             assert_eq!(config.get_dbname(), Some("first_db"));
         }
 
-        /// A `service` key inside a service section would otherwise recurse or
-        /// re-select; it is simply not a parameter the section can set.
+        /// Libpq rejects a service that selects another service instead of
+        /// silently dropping the nested selection.
         #[test]
-        fn a_service_key_inside_a_service_is_ignored() {
+        fn a_service_key_inside_a_service_is_rejected() {
             let mut config = Config::new();
-            config
+            let error = config
                 .fill_unset(vec![("service".to_owned(), "another".to_owned())], &[])
-                .expect("a nested service key is skipped, not rejected");
-            assert_eq!(config.get_service(), None);
+                .expect_err("a nested service specification must be rejected");
+            let mut text = error.to_string();
+            let mut source = std::error::Error::source(&error);
+            while let Some(cause) = source {
+                text.push_str(" | ");
+                text.push_str(&cause.to_string());
+                source = std::error::Error::source(cause);
+            }
+            assert!(
+                text.contains("nested service") && text.contains("service"),
+                "the rejection must explain and name the nested key: {text}"
+            );
         }
 
         #[test]
