@@ -318,6 +318,42 @@ sawtooth, which is what an allocator does, not what a leak does. Final RSS
 after shutdown was 6,392 KiB, BELOW every sample in the series, so the pages
 were returned rather than merely stable.
 
+## Chaos: restarting the server underneath the load
+
+The workload kills individual backends with `pg_terminate_backend`, which is
+NOT the same event as the server going away. A restart drops every connection
+at once, refuses new ones for several seconds, and returns with different
+backend PIDs. `tests/connection_churn.rs` and the pool's mass-termination test
+cover the first; nothing covers the second, because a suite test cannot restart
+a server other tests are using.
+
+Do it by hand:
+
+```bash
+PG_TEST_URL=postgres://postgres:zeroship@127.0.0.1:5455/zeroship \
+  SOAK_DURATION_SECS=180 SOAK_SAMPLE_INTERVAL_SECS=10 \
+  libs/compio-postgres/tests/soak.sh &
+# once `phase=measure` is running:
+docker restart zs-cpg-review-5455
+```
+
+MEASURED 2026-08-26. The soak FAILS, and that is not the finding - its floors
+and baseline checks assume a stable server. What matters is HOW:
+
+```text
+soak result=failed: pooled query worker: run pooled scalar query failed: db error
+live_connections_at_failure=0
+```
+
+A db error reached the caller, no watchdog fired, and the driver's live
+connection count was ZERO at the failure - connections were released rather
+than leaked. Separately, a pool asked for work again after the server came
+back recovered on the FIRST attempt.
+
+So the shape to look for is: errors surface, `live_connections_at_failure=0`,
+no watchdog message. A hang, a panic, or a non-zero live count would each be a
+defect, and each looks different from the ordinary failure above.
+
 ## Limits of the measurement
 
 **The RSS rule fails only on a MONOTONIC climb** - the check is
