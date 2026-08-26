@@ -388,6 +388,33 @@ this path and the query waits for as long as the freeze lasts - which is the
 correct behaviour for a driver told to wait indefinitely, and is why the
 parameter exists.
 
+## Chaos: a healthy server with no connection slots left
+
+The third shape, and the one a platform running many apps against one
+PostgreSQL meets first. The server is up and answering; it just will not take
+you. Reproduce with a small server rather than by exhausting a shared one:
+
+```bash
+docker run -d --name zs-cpg-small-5461 -p 127.0.0.1:5461:5432 \
+  -e POSTGRES_PASSWORD=zeroship -e POSTGRES_DB=zeroship \
+  postgres:16 postgres -c max_connections=15
+```
+
+Hold connections until the server REFUSES - counting to a number is not the
+same as reaching exhaustion, and `postgres` is a superuser so it can also take
+the `superuser_reserved_connections` slots. MEASURED 2026-08-26 with 15 slots
+held:
+
+```text
+EX2 pool build refused after 505.325358ms: db error | FATAL: sorry, too many clients already
+EX2 recovered: SELECT 42 = 42, live=1
+```
+
+Refused in half a second rather than hanging, the CAUSE names the real reason
+rather than a generic failure, and the server served again as soon as the
+slots freed. Read the chain, not the top line: `Error`'s own `Display` is the
+terse `db error` by design, and the actionable text is in the source.
+
 ## Limits of the measurement
 
 **The RSS rule fails only on a MONOTONIC climb** - the check is
