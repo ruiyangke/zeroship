@@ -96,9 +96,10 @@
 //!   seam asked every vendor to declare a harness none of them had - while
 //!   `ShadowDryRun::dry_run_declarative` names the engine's `DeclarativeDeployPlan`
 //!   and `DesiredSchema`. The harness is a parameter to the engine's `dry_run` now.
-//! * **An error variant nobody built.** `SeedError` dragged the engine's whole
-//!   `EngineError` into the dry-run capability's signature for two variants that
-//!   had zero constructors workspace-wide. Deleted.
+//! * **An error variant nobody built.** The dry-run refusal carried a
+//!   seed-failure arm whose own enum dragged the engine's whole `EngineError`
+//!   into the capability's signature, for arms nothing in the workspace ever
+//!   constructed. Deleted.
 //!
 //! What deliberately did NOT come down: `EngineError`, `DeclarativeDeployPlan` and
 //! `DesiredSchema`. Those are ORCHESTRATION RESULTS - what the engine DECIDED,

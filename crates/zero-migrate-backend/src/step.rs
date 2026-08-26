@@ -190,7 +190,7 @@ impl DialectScope {
 /// by what the deploy target can express.
 ///
 /// The arms name the strategy, not a vendor, and that is load-bearing rather than
-/// stylistic: the spellings `PgExpandContract` / `SqliteRebuild` asserted a
+/// stylistic: naming one arm for PostgreSQL and the other for SQLite asserted a
 /// one-vendor guarantee the lowering does not enforce. The differ's only gate here
 /// asked whether the target was SQLite, so a MySQL rename fell through to the
 /// expand-contract author and

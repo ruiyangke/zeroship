@@ -21,7 +21,7 @@
 //!    bind-safety property). The expression renderer (`render_expr_bound`) walks
 //!    the closed AST and appends a placeholder for each [`Expr::Literal`].
 //!
-//! 2. **Batched backfill** (`assemble_backfill`). The existing
+//! 2. **Batched backfill** (`assemble_backfill_clauses_for_backend`). The existing
 //!    `BackfillSpec` executor (PG `backfill.rs`)
 //!    consumes a `set_clause` / `filter` SQL *string* (it assembles a windowed
 //!    `UPDATE ... WHERE cursor > $last ... AND (<filter>)` and guard-checks the WHOLE
@@ -96,9 +96,10 @@
 //! `renderer(dialect)` lookup nothing performed look like a dialect boundary, and it
 //! was counted as one. See the tombstone above its old home below.
 //!
-//! A `sqlite_placeholder` sat beside it with two real callers, both inside one vendor
-//! crate. Two callers in one crate is that crate's helper; it is `crate::dml::placeholder`
-//! in `zero-migrate-sqlite` now, and this module names no backend's placeholder spelling.
+//! A SQLite-named placeholder helper sat beside it with two real callers, both inside
+//! one vendor crate. Two callers in one crate is that crate's helper; it is
+//! `crate::dml::placeholder` in `zero-migrate-sqlite` now, and this module names no
+//! backend's placeholder spelling.
 //!
 //! The transport-safe bind mirror
 //! (`zero_migrate_sqlite::backend::actor::SqliteBind`) is the single
@@ -400,26 +401,25 @@ pub fn quote_ident_checked_for_backend(
     Ok(escape_quote_ident_for_backend(ident, backend))
 }
 
-/* THE RAW SPELLING PRIMITIVE IS GONE FROM CORE.
+/* THERE IS NO UNROUTED RAW SPELLING PRIMITIVE IN THIS MODULE.
  *
- * It used to live here as `escape_quote_ident`, `pub(crate)`, and any module in
- * the crate could call it to spell `"x"` without ever naming a vendor. Two of the
- * three shipping dialects agree on that spelling, so such a call is BYTE-CORRECT
- * AND SILENT: no assertion about emitted SQL can distinguish "SQLite quoted this"
- * from "nobody quoted this and it happened to look right". That is the whole
- * defect class - an emission that reaches NO renderer at all.
+ * A crate-private helper here that spelled `"x"` could be called by any module in
+ * the crate without ever naming a vendor. Two of the three shipping dialects agree
+ * on that spelling, so such a call is BYTE-CORRECT AND SILENT: no assertion about
+ * emitted SQL can distinguish "SQLite quoted this" from "nobody quoted this and it
+ * happened to look right". That is the whole defect class - an emission that
+ * reaches NO renderer at all.
  *
- * The bytes now live in `render::backends::ansi_double_quote_ident`, which is
- * `pub(in crate::render::backends)`. Core cannot name it, so core must pick a
- * DOOR, and the door records the vendor:
+ * The bytes have exactly one home, `crate::spelling::ansi_double_quote_ident`, and
+ * a caller that wants them must pick a DOOR instead, because the door records the
+ * vendor:
  *
  *   - EMIT for a named dialect  -> `escape_quote_ident_for_backend(x, d)`
  *   - constraint-definition normal form -> snapshot codec
  *
- * The visibility IS the census. Deleting the old name turned "which sites in this
- * crate spell an identifier without routing" from a grep that cannot see through
- * a helper into compiler output that enumerates every one of them, at the
- * DEFINITION rather than at each call site.
+ * That rule was a privacy error while the primitive was module-private; across the
+ * crate split it is a textual census instead, and the downgrade is recorded where
+ * the primitive lives.
  */
 
 /// EMIT an identifier in `dialect`'s own spelling, decided by that dialect's
@@ -472,7 +472,7 @@ fn scalar_to_bind(s: &IrScalar) -> BindValue {
  * `crates/`, `sdks/` or `packages/`, and had had none for as long as the two
  * places it named have existed. The one-shot assembler emits through
  * `BindCtx::push`, which asks its RESOLVED backend (`self.backend.placeholder(n)`);
- * the SQLite executor uses `sqlite_placeholder` below.
+ * the SQLite executor uses its own crate's helper, described below.
  *
  * It was `pub`, so the compiler could not report it unused, and it was counted as
  * one of the crate's dialect boundaries on the strength of that doc comment. It was
@@ -480,10 +480,10 @@ fn scalar_to_bind(s: &IrScalar) -> BindValue {
  * performed. 0.1.0 was never published and nothing outside this repo consumes the
  * crate, so deleting it costs nothing and stops the miscount recurring.
  *
- * `sqlite_placeholder` sat here too and its callers WERE real - both of them inside
- * `zero-migrate-sqlite`, one the `DmlRenderer::placeholder` impl and one the batched
- * backfill executor. Two callers in one vendor crate is that crate's shared helper,
- * not the contract's, so it is `crate::dml::placeholder` there now.
+ * A SQLite-named placeholder helper sat here too and its callers WERE real - both of
+ * them inside `zero-migrate-sqlite`, one the `DmlRenderer::placeholder` impl and one
+ * the batched backfill executor. Two callers in one vendor crate is that crate's
+ * shared helper, not the contract's, so it is `crate::dml::placeholder` there now.
  */
 
 /// Render a single inline SQL literal for the **backfill** string path

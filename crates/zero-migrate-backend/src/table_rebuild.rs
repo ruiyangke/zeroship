@@ -185,9 +185,9 @@ impl TableRebuildSpec {
 /// `MigrationEngine::apply_declarative` drives each through
 /// `MigrationBackend::rebuild_one` under the destructive/approval gate (the journal
 /// migration is `destructive + requires_approval`, so an un-approved rebuild is
-/// refused before any DDL). The old `plan_declarative` fail-close
-/// (a `DeclarativeError::SqliteRebuildRequired` that has since been deleted, having
-/// outlived its last constructor) is gone. The direct, executor-internal
+/// refused before any DDL). The old `plan_declarative` fail-close - a
+/// `DeclarativeError` arm that refused the rebuild the engine now drives, deleted
+/// after it outlived its last constructor - is gone. The direct, executor-internal
 /// `SqliteBackend::rebuild_one` seam remains for tests; the engine path is the gated
 /// production drive.
 #[derive(Debug, Clone)]

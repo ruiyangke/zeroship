@@ -693,7 +693,7 @@ mod tests {
     }
 
     /// A column knob written on a table is refused BY SCOPE - and note what the call
-    /// looks like: the scope is never named, it comes from `TableAttributes`.
+    /// looks like: the scope is never named, it comes from `CreateTableAttributes`.
     #[test]
     fn a_column_attribute_written_on_a_table_is_refused_by_scope() {
         let a = table(&[(&STORAGE, IrScalar::Str("EXTENDED".into()))]);

@@ -1496,7 +1496,7 @@ pub enum RefAction {
 }
 
 impl RefAction {
-    /// The SDK `FkAction` token (the camelCase spelling
+    /// The SDK's referential-action token (the camelCase spelling
     /// `zero_migrate::schema::query::normalize_fk_action` maps to the per-dialect
     /// SQL clause). Kept in lock-step with the `serde(rename_all = "camelCase")`
     /// wire image so the render seam consumes the same string the wire carries.

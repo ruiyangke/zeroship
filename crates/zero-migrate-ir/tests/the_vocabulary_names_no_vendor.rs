@@ -16,10 +16,10 @@
 //!   variant "a PostgreSQL `nextval('<sequence>'::regclass)` default" - a spelling, in
 //!   a carrier that holds a structured `SequenceRef` and no SQL at all. The second of
 //!   those two shipped in the published `ir-envelope.schema.json`.
-//! * `RaiseLevel::as_sqlite_sql` handed out four SQL tokens from the neutral enum. Its
-//!   only caller was the SQLite renderer; the MySQL renderer reads the SAME level,
-//!   discards it, and emits `SIGNAL SQLSTATE`. The tokens moved to the backend that
-//!   spells them.
+//! * `RaiseLevel` handed out four SQL tokens from the neutral enum, through an
+//!   accessor named for one backend. Its only caller was the SQLite renderer; the
+//!   MySQL renderer reads the SAME level, discards it, and emits `SIGNAL SQLSTATE`.
+//!   The tokens moved to the backend that spells them.
 //! * `FuncLanguage::Plpgsql` was one server's product name used as a WIRE TAG. The
 //!   closed 2-set is the engine's own security decision - plain SQL, or the target's
 //!   procedural language, nothing installed - so the set stayed and the variant became
@@ -96,8 +96,8 @@
 //! One floor per matcher, not one shared floor over their `||`. That is not a
 //! precaution, it is a repair: core's census first asserted a single floor over the
 //! combined answer, and when the product-name needles were corrupted to prove the
-//! control fires, IT PASSED - `zero-migrate-postgres` is full of `PgRaw`/`PgDml`, so
-//! the camel matcher cleared the floor alone while every product needle was dead.
+//! control fires, IT PASSED - `zero-migrate-postgres` is full of `PgGuard`/`PgCursor`,
+//! so the camel matcher cleared the floor alone while every product needle was dead.
 //!
 //! The needle control is deliberately NOT the [`ALLOWED`] entries. Here that is not
 //! even arguable: [`ALLOWED`] is EMPTY, so a control built on it would assert nothing
@@ -167,7 +167,7 @@ const VENDOR_NEEDLE_MATCH_FLOOR: usize = 40;
 /// Separate from [`VENDOR_NEEDLE_MATCH_FLOOR`] because two matchers sharing one floor
 /// can satisfy it for each other - see this file's header for the run where exactly
 /// that happened. Measured well above this in the control crate, which names types
-/// `PgRaw`, `PgDml` and so on throughout.
+/// `PgGuard`, `PgCursor` and so on throughout.
 const PG_CAMEL_MATCH_FLOOR: usize = 20;
 
 /// The vendor crate every instrument's positive control runs over.

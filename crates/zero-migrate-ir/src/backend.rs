@@ -16,9 +16,10 @@
 //!
 //! # What is NOT here
 //!
-//! The `Backend` trait itself (`introspect` / `render` / `execute`). Those
-//! signatures name `SchemaModel`, `ChangeSet` and `ExecutionPlan`, which are
-//! engine types; naming them here would invert the crate graph. This module
+//! The `Backend` trait itself (`introspect` / `render` / `execute`) as
+//! `docs/proposals/pluggable-backends.md` sketches it. Those signatures take the
+//! engine's schema model, the diff it computes and the plan it orders - engine
+//! types every one; naming them here would invert the crate graph. This module
 //! promotes IDENTITY and CAPABILITY to public vocabulary and nothing else.
 
 use core::fmt;

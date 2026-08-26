@@ -348,10 +348,10 @@ impl FromIterator<(AttrKey, IrScalar)> for Attributes {
 ///
 /// # Why the carrier is per-OP and not per-scope
 ///
-/// An earlier design keyed attributes by an `AttrScope` enum - `Table`, `Column`,
+/// An earlier design keyed attributes by a SCOPE enum - `Table`, `Column`,
 /// `Index`, `Constraint` - with one wrapper per scope shared across every op at that
 /// scope. That axis was an INVENTION: a second taxonomy shadowing the op set, which then
-/// had to be kept honest against it by hand. It was not kept honest - `AttrScope::Index`
+/// had to be kept honest against it by hand. It was not kept honest - the `Index` scope
 /// shipped with no carrier at all, declarable and permanently unmatchable, and only a
 /// test written specially for the purpose caught it.
 ///
