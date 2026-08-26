@@ -274,6 +274,21 @@ machine and the workload mix.
 | acquire timeouts | 0 | 0 |
 | bad connections / cancellations | 233 / 198 | 3,488 / 2,961 |
 
+### With the prepared-statement cache on
+
+The cache is off by default, so every run above left the driver's most
+stateful component - admission, LRU eviction, stale-plan retry, the generation
+counter - almost untouched. It needs no code change to exercise: append
+`?statement_cache_capacity=32` to the URL. MEASURED 2026-08-25, 600s:
+**135,050 operations**, 41 samples with 15 rises and 15 falls for a net
+**+104 KiB**, 282 pool evictions, and both baselines returned.
+
+READ THE BASELINE, NOT ONLY THE DRIFT. Final RSS was 8,752 KiB against roughly
+6,400 KiB with the cache off. That is the cache doing its job - it retains
+prepared statements per connection - and it is a higher resident floor, not a
+leak. The leak question is answered by the SHAPE of the series, which is as
+balanced here as anywhere else.
+
 ### Over TLS, where the teardown changed most
 
 MEASURED 2026-08-25 against the encrypted fixture on 5447, 120s: **26,507
