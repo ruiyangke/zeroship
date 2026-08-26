@@ -620,9 +620,9 @@ pub enum Host {
 ///     fail loudly until their peer-credential API is implemented. As in
 ///     libpq, the setting is ignored on TCP connections.
 /// * `host` - The host to connect to. On Unix platforms, if the host starts with a `/` character it is treated as the
-///     path to the directory containing Unix domain sockets. Otherwise, it is treated as a hostname. Multiple hosts
-///     can be specified, separated by commas. Each host will be tried in turn when connecting. Required if connecting
-///     with the `connect` method.
+///     path to the directory containing Unix domain sockets. On Linux, `@` selects the abstract Unix-socket namespace.
+///     Otherwise, it is treated as a hostname. Multiple hosts can be specified, separated by commas. Each host will be
+///     tried in turn when connecting. Required if connecting with the `connect` method.
 /// * `sslnegotiation` - TLS negotiation method. If set to `direct`, the client
 ///     will perform direct TLS handshake, this only works for PostgreSQL 17 and
 ///     newer.
@@ -1433,6 +1433,7 @@ impl Config {
     ///
     /// Multiple hosts can be specified by calling this method multiple times, and each will be tried in order. On Unix
     /// systems, a host starting with a `/` is interpreted as a path to a directory containing Unix domain sockets.
+    /// On Linux, a host starting with `@` selects the abstract Unix-socket namespace.
     /// There must be either no hosts, or the same number of hosts as hostaddrs.
     pub fn host(&mut self, host: impl Into<String>) -> &mut Config {
         let host = host.into();
@@ -1442,6 +1443,11 @@ impl Config {
             if host.starts_with('/') {
                 return self.host_path(host);
             }
+        }
+
+        #[cfg(target_os = "linux")]
+        if let Some(name) = host.strip_prefix('@') {
+            return self.host_abstract(name.as_bytes());
         }
 
         self.host.push(Host::Tcp(host));
@@ -1468,6 +1474,14 @@ impl Config {
     {
         self.host.push(Host::Unix(host.as_ref().to_path_buf()));
         self
+    }
+
+    #[cfg(target_os = "linux")]
+    fn host_abstract(&mut self, name: &[u8]) -> &mut Config {
+        let mut path = Vec::with_capacity(name.len() + 1);
+        path.push(0);
+        path.extend_from_slice(name);
+        self.host_path(OsStr::from_bytes(&path))
     }
 
     /// Adds a hostaddr to the configuration.
@@ -3081,6 +3095,12 @@ impl<'a> UrlParser<'a> {
             return Ok(());
         }
 
+        #[cfg(target_os = "linux")]
+        if decoded.first() == Some(&b'@') {
+            self.config.host_abstract(&decoded[1..]);
+            return Ok(());
+        }
+
         let decoded = str::from_utf8(&decoded).map_err(|e| Error::config_parse(Box::new(e)))?;
         self.config.host(decoded);
         Ok(())
@@ -4095,6 +4115,28 @@ mod tests {
         );
 
         assert_eq!(1, 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn at_prefixed_hosts_use_the_abstract_unix_namespace() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        for dsn in [
+            "host=@zeroship",
+            "postgresql:///db?host=%40zeroship",
+            "postgresql://%40zeroship/db",
+        ] {
+            let config = dsn
+                .parse::<Config>()
+                .unwrap_or_else(|error| panic!("{dsn} did not parse: {error}"));
+            match config.get_hosts() {
+                [Host::Unix(path)] => {
+                    assert_eq!(path.as_os_str().as_bytes(), b"\0zeroship", "{dsn}");
+                }
+                hosts => panic!("{dsn} was not an abstract Unix socket host: {hosts:?}"),
+            }
+        }
     }
 
     #[test]
