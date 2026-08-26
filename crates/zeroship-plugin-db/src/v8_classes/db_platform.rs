@@ -97,19 +97,19 @@ impl DbPlatform {
         Err(OpError::type_error("Illegal constructor"))
     }
 
-    /// `__platform.registerModel(collection, schema, indexes?, declared?)` —
-    /// DDL orchestrator entry. Idempotent. Moved off `Db`; the
-    /// [`register_model_dispatch`] pipeline is unchanged — only the JS
-    /// carrier relocated behind the capability handle.
+    /// `__platform.registerModel(collection, schema, indexes?, declared?)`
     ///
-    /// `declared` is the FULL set of collection names the descriptor
-    /// declares — `installSchema` passes `Object.keys(schemas)` on every
-    /// per-collection call. The dev SQLite drop pass uses it to tell a
-    /// not-yet-registered sibling (declared, must NOT be dropped) from a
-    /// genuinely-removed collection (not declared, a real drop candidate). It
-    /// is inert on PG (registerModel issues no DDL there). Optional: omitted
-    /// (raw deploys / older callers) → empty set → each collection is
-    /// evaluated independently, unaware of its declared siblings.
+    /// Registers a collection's METADATA. It issues no DDL: the schema
+    /// authority is a separate process, and the table must already exist.
+    /// Idempotent, and cheap after the first call per app+collection.
+    ///
+    /// `schema` is the one argument with an effect - it is cached so the CRUD
+    /// encryption pass can find `t.encrypted(...)` columns without a round
+    /// trip. `indexes` and `declared` are ACCEPTED AND IGNORED: they fed the
+    /// DDL orchestrator that used to live here, and nothing reads them now.
+    /// They stay in the signature because `installSchema` and older raw
+    /// deploys pass them positionally, and narrowing the arity of a shipped
+    /// JS API would break those callers for no gain.
     #[v8_method]
     #[v8_name = "registerModel"]
     fn register_model<'s>(
@@ -126,33 +126,12 @@ impl DbPlatform {
             ));
         }
         let schema_v = read_json_arg(scope, Some(schema));
-        let indexes_v = if indexes.is_null_or_undefined() {
-            serde_json::Value::Array(Vec::new())
-        } else {
-            read_json_arg(scope, Some(indexes))
-        };
-        // Parse the declared-collection-name set from the optional 4th arg. A
-        // JSON string array; anything else (null/undefined/non-array) → empty.
-        let declared_collections: Vec<String> = if declared.is_null_or_undefined() {
-            Vec::new()
-        } else {
-            match read_json_arg(scope, Some(declared)) {
-                serde_json::Value::Array(items) => items
-                    .into_iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect(),
-                _ => Vec::new(),
-            }
-        };
-        Ok(register_model_dispatch(
-            scope,
-            &self.app_id,
-            &collection,
-            schema_v,
-            indexes_v,
-            declared_collections,
-        )
-        .into())
+        // `indexes` and `declared` are read by nobody, so they are not parsed
+        // either. Parsing them would still be dead work, and a parse that no
+        // consumer can disagree with cannot fail usefully - a malformed value
+        // would be silently coerced to an empty default and then discarded.
+        let _ = (&indexes, &declared);
+        Ok(register_model_dispatch(scope, &self.app_id, &collection, schema_v).into())
     }
 
     /// `__platform.setMaskPolicy(policy)` — persist the
