@@ -993,20 +993,12 @@ impl Pool {
                 }
             }
         });
-        // Assigning THROUGH the guard is deliberate here, and is the one place
-        // in this file that does not carry the replaced value out first. A
-        // previous handle destroyed inside this borrow runs nothing arbitrary:
-        // `compio::runtime::JoinHandle` is an `async_task::Task`, and its
-        // `Drop` does not destroy the future inline - when the task is neither
-        // scheduled nor running it RE-SCHEDULES the runnable "so that its
-        // future gets dropped by the executor" (async-task 4.7.1,
-        // src/task.rs:211-215), so the housekeeper's locals, and any pool entry
-        // it holds across an await, are released on a later executor turn with
-        // this borrow long gone. The only destructor `Task::drop` can run
-        // inline is a COMPLETED task's output, which for this handle is
-        // `Result<(), Box<dyn Any + Send>>` - a panic payload raised by this
-        // crate's own housekeeper body, never a value a caller supplies.
-        *self.housekeeper.borrow_mut() = Some(handle);
+        // Carry a completed handle out before destroying it. `Task::drop` reads
+        // a completed output inline (async-task 4.7.1, task.rs:249-264), and a
+        // housekeeper panic can carry a caller-owned payload from `after_connect`.
+        // Its destructor is therefore arbitrary code and may re-enter the pool.
+        let replaced = self.housekeeper.borrow_mut().replace(handle);
+        drop(replaced);
     }
 
     /// Perform the synchronous, one-shot half of graceful shutdown. The closed
@@ -1986,16 +1978,20 @@ impl Drop for WeakPermitGuard {
 
 impl std::fmt::Debug for Pool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let idle = self.idle.borrow().len();
+        let waiters = self.waiters.borrow().len();
+        let handoffs = self.handoffs.borrow().len();
+        let close_waiters = self.close_waiters.borrow().len();
         f.debug_struct("Pool")
             .field("connection_config", &"***")
-            .field("idle", &self.idle.borrow().len())
+            .field("idle", &idle)
             .field("active", &self.active.get())
             .field("total", &self.total.get())
             .field("max_size", &self.config.max_size)
-            .field("waiters", &self.waiters.borrow().len())
-            .field("handoffs", &self.handoffs.borrow().len())
+            .field("waiters", &waiters)
+            .field("handoffs", &handoffs)
             .field("closed", &self.closed.get())
-            .field("close_waiters", &self.close_waiters.borrow().len())
+            .field("close_waiters", &close_waiters)
             .field("pool_config", &self.config)
             .finish()
     }
@@ -2742,6 +2738,66 @@ mod tests {
             housekeeper: RefCell::new(None),
             metrics: PoolMetrics::new(),
         }
+    }
+
+    thread_local! {
+        static HOUSEKEEPER_DROP_POOL: RefCell<Weak<Pool>> = RefCell::new(Weak::new());
+        static HOUSEKEEPER_DROP_BORROWED: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+
+    struct HousekeeperPanicPayload;
+
+    impl Drop for HousekeeperPanicPayload {
+        fn drop(&mut self) {
+            HOUSEKEEPER_DROP_POOL.with(|slot| {
+                let borrowed = slot
+                    .borrow()
+                    .upgrade()
+                    .map(|pool| pool.housekeeper.try_borrow_mut().is_err());
+                HOUSEKEEPER_DROP_BORROWED.with(|observed| observed.set(borrowed));
+            });
+        }
+    }
+
+    struct PoolDebugBorrowProbe<'a> {
+        pool: &'a Pool,
+        wrote: bool,
+        borrowed: [bool; 4],
+    }
+
+    impl std::fmt::Write for PoolDebugBorrowProbe<'_> {
+        fn write_str(&mut self, _text: &str) -> std::fmt::Result {
+            self.wrote = true;
+            let borrowed = [
+                self.pool.idle.try_borrow_mut().is_err(),
+                self.pool.waiters.try_borrow_mut().is_err(),
+                self.pool.handoffs.try_borrow_mut().is_err(),
+                self.pool.close_waiters.try_borrow_mut().is_err(),
+            ];
+            for (observed, now) in self.borrowed.iter_mut().zip(borrowed) {
+                *observed |= now;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn formatting_a_pool_does_not_borrow_its_state_while_the_caller_writer_runs() {
+        let pool = test_pool(PoolConfig::default(), Vec::new(), 0, 0);
+        let mut probe = PoolDebugBorrowProbe {
+            pool: &pool,
+            wrote: false,
+            borrowed: [false; 4],
+        };
+
+        std::fmt::write(&mut probe, format_args!("{pool:?}"))
+            .expect("formatting the pool into the probe failed");
+
+        assert!(probe.wrote, "the formatter never invoked the caller writer");
+        assert_eq!(
+            probe.borrowed, [false; 4],
+            "Pool::fmt held [idle, waiters, handoffs, close_waiters] borrows while the caller writer ran"
+        );
     }
 
     #[test]
@@ -3599,6 +3655,39 @@ mod tests {
         assert_eq!(pool.idle_count(), 0, "expired connection was not evicted");
         assert_eq!(pool.total_count(), 0, "eviction did not release capacity");
         assert_eq!(pool.metrics.evictions.get(), 1);
+    }
+
+    #[compio::test]
+    async fn replacing_a_completed_housekeeper_drops_its_panic_payload_outside_the_borrow() {
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            ..PoolConfig::default()
+        };
+        let pool = Rc::new(test_pool(config, Vec::new(), 0, 0));
+        HOUSEKEEPER_DROP_POOL.with(|slot| *slot.borrow_mut() = Rc::downgrade(&pool));
+        HOUSEKEEPER_DROP_BORROWED.with(|observed| observed.set(None));
+
+        let (completed_tx, completed_rx) = futures_channel::oneshot::channel();
+        let completed = compio::runtime::spawn(async move {
+            let _ = completed_tx.send(());
+            std::panic::panic_any(HousekeeperPanicPayload);
+        });
+        *pool.housekeeper.borrow_mut() = Some(completed);
+        completed_rx
+            .await
+            .expect("the completed housekeeper did not run");
+
+        pool.start_housekeeper_with_interval(Duration::from_secs(60));
+
+        let observed = HOUSEKEEPER_DROP_BORROWED.with(Cell::get);
+        HOUSEKEEPER_DROP_POOL.with(|slot| *slot.borrow_mut() = Weak::new());
+        assert_eq!(
+            observed,
+            Some(false),
+            "the completed housekeeper's caller panic payload was dropped while housekeeper was borrowed"
+        );
+        pool.begin_close();
     }
 
     #[compio::test]
