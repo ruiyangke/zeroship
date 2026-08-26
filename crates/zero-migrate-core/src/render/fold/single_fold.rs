@@ -19,8 +19,9 @@
 //! * `FoldedSchema::project_runtime_metadata` replaced `runtime_metadata_from_ops`;
 //! * `FoldedSchema::project_authoring_tables` replaced a standalone op walker,
 //!   and is the source model `env.db.ts` is rendered from;
-//! * `FoldedSchema::project_field_defs` replaced `fold_to_field_defs`, and is the wire
-//!   `FieldDef` map behind `schema.runtime.json` and behind `LiveSchema::sdk_schemas`.
+//! * `FoldedSchema::project_field_defs` replaced a standalone `FieldDef` walker, and is
+//!   the wire `FieldDef` map behind `schema.runtime.json` and behind
+//!   `LiveSchema::sdk_schemas`.
 //!
 //! (Backticks rather than intra-doc links on purpose, for a reason narrower than it
 //! first looks. A `//!` module-level comment here resolves paths in the PARENT
@@ -43,9 +44,10 @@
 //! section for why the `fold_ops_onto` extraction did not retire it.
 //!
 //! Moving `project_field_defs` also collapsed a duplicate: `render_artifacts` ran the
-//! structural catalog replay TWICE per render until that move - once through `fold`, once through
-//! `fold_to_field_defs` -> `fold_ops` - and the second one left with the walker. The
-//! `fold_ops_onto` extraction has since collapsed the second duplicate below it:
+//! structural catalog replay TWICE per render until that move - once through `fold`,
+//! once through the `FieldDef` walker's own `fold_ops` call - and the second one left
+//! with the walker. The `fold_ops_onto` extraction has since collapsed the second
+//! duplicate below it:
 //! `flatten_dialectal_ops` ran twice per `fold` and now runs once.
 //!
 //! # What the live projections cost the model
@@ -81,7 +83,7 @@
 //! had recorded ONE divergence for it; a sweep of the walker against it over every
 //! PREFIX of the corpus and of a carrier set written for the constraint LIFECYCLE found
 //! several more, and the recorded fixtures contributed none of them. They are all one
-//! rule: `fold_to_field_defs` lifted a constraint's facet onto a column eagerly
+//! rule: the walker it replaced lifted a constraint's facet onto a column eagerly
 //! and kept a private side map to un-lift from, and never kept that side map in step
 //! with the constraint - so a dropped `UNIQUE`, a dropped `CHECK` bound, a dropped
 //! `CHECK` membership, and a column re-added under a dropped column's name all carried
@@ -242,8 +244,8 @@ pub(crate) struct ImplicitUniqueIndex {
 /// object families `fold_ops` produces, so a type that claimed to be `SchemaModel`
 /// would be claiming a completeness nothing has.
 ///
-/// The TYPE is public because `fold_to_field_defs` was a public entry point and its
-/// replacement has to be reachable from outside the crate - but
+/// The TYPE is public because the `FieldDef` walker it replaced was a public entry
+/// point and its replacement has to be reachable from outside the crate - but
 /// every FIELD stays `pub(crate)`. A `pub` field would leak `AuthoredTable`,
 /// `SchemaModel` and `NamedTypeRegistry` into the public API, which is a far larger
 /// commitment than the one this move needs to make and is what `private_interfaces`
@@ -910,7 +912,7 @@ impl FoldedSchema {
     }
 
     /// **Projection 2: the per-table wire `FieldDef` map.** LIVE: it replaced the
-    /// deleted `fold_to_field_defs` walker that used to produce it, and it feeds
+    /// deleted op-stream walker that used to produce it, and it feeds
     /// `schema.runtime.json` and, on SQLite, `live.sdk_schemas`.
     ///
     /// The `live.sdk_schemas` half is READ by exactly one caller - `render/lower.rs`'s

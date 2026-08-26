@@ -5241,7 +5241,7 @@ fn resolved_injected_column_matches(
 // The `FieldDef` PROJECTION is the RECOVERY direction (ops -> FieldDef map); this is
 // its faithful INVERSE over the authoring surface (descriptor -> ops), the structural
 // inverse of `ir_column_to_field` + `recover_check_facet`. The recovery direction used
-// to be the `fold_to_field_defs` walker in this file; it is deleted
+// to be a standalone `FieldDef` walker in this file; it is deleted
 // (`docs/proposals/single-fold-and-effects.md` section G) and the answer is
 // now `single_fold::fold(ops)?.project_field_defs()`. The round-trip parity claim is
 // unchanged - only the name of the side that produces the right-hand column moved:
@@ -9013,9 +9013,10 @@ columns = [
 
     /// The wire `FieldDef` map for `ops`.
     ///
-    /// `fold_to_field_defs` is deleted (`docs/proposals/single-fold-and-effects.md`
-    /// section G); the map is a PROJECTION of the one fold now, and
-    /// this is the whole of the difference at a call site. The tests below are
+    /// The standalone `FieldDef` walker is deleted
+    /// (`docs/proposals/single-fold-and-effects.md` section G); the map is a PROJECTION
+    /// of the one fold now, and this is the whole of the difference at a call site.
+    /// The tests below are
     /// unchanged otherwise, which is the claim - they were written against the walker's
     /// answers and they still hold.
     fn field_defs_of(
