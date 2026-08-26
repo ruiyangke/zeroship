@@ -239,7 +239,38 @@ Use the 30-second smoke to reproduce wiring or immediate hangs. Reconfirm a
 memory or slow-release finding with the three-minute command, because a short
 run has too few cycles to characterize an over-time trend.
 
+## What a healthy run looked like, measured
+
+Two runs on 2026-08-25 against the usual 16.14 fixture, so there is a reference
+for what normal is. Re-measure rather than trusting these; they move with the
+machine and the workload mix.
+
+| | 60s, 5s samples | 900s, 15s samples |
+| --- | --- | --- |
+| operations | 13,358 | 199,664 |
+| RSS samples | 13 | 61 |
+| rises / falls | 3 / 5 | 27 / 24 |
+| RSS delta | -84 KiB | +120 KiB |
+| server backends, before -> after | 0 -> 0 | 0 -> 0 |
+| driver live connections, after | 0 | 0 |
+| pool created / evicted | 47 / 40 | 423 / 415 |
+| acquire timeouts | 0 | 0 |
+| bad connections / cancellations | 233 / 198 | 3,488 / 2,961 |
+
+The long run is the informative one. +120 KiB across 199,664 operations is
+about 0.6 bytes per operation, with rises and falls in near-equal number - a
+sawtooth, which is what an allocator does, not what a leak does. Final RSS
+after shutdown was 6,392 KiB, BELOW every sample in the series, so the pages
+were returned rather than merely stable.
+
 ## Limits of the measurement
+
+**The RSS rule fails only on a MONOTONIC climb** - the check is
+`nondecreasing && rises > 0`, so a series that rises fifty-nine times and dips
+once passes. That is deliberate: anything stricter fires on ordinary allocator
+sawtooth, and a check that cries wolf gets its floor lowered. But it means a
+leak with any jitter at all is invisible to the rule, and only the printed
+series shows it. READ THE SERIES; do not just look for `soak result=ok`.
 
 RSS is resident memory for the whole soak process. It includes the driver,
 compio runtime, allocator, Rust standard library, reporting buffers, and the
