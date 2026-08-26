@@ -120,6 +120,15 @@ the assignment-dependent temp-table case below, and
 `replacing_observer_preserves_the_in_flight_requests_receiver`. A name leaving
 the residue is not a regression; a name ENTERING it is the finding.
 
+RE-MEASURED 2026-08-26 again, after the libpq connection-parameter parity merge
+(`fdd1bdf7e`, 30 commits reworking connection defaults, empty values, service
+files, passfiles, host and hostaddr slots, and target-session selection):
+**900 passed, 55 failed, 55 distinct names, and the SET IS IDENTICAL** - nothing
+entered, nothing left. The passed total moved 840 -> 900 because the merge added
+tests, which is exactly why the set and not the count is the check. This run was
+also the first live exercise of the corrected recipe below: it reported 55, and
+the `FAILED` line count reported 55, so the two agree.
+
 THAT LINE READ "50 distinct names" UNTIL 2026-08-26, and the 50 was the recipe
 below under-reporting, not a smaller set. Re-measured the same day at 55 failed
 / 55 distinct: the count was always the number of `FAILED` lines, and every one
