@@ -2284,7 +2284,14 @@ impl Future for CloseWaiter<'_> {
             return Poll::Ready(());
         }
 
-        let new_waker = cx.waker();
+        // RawWaker's clone vtable is caller code. Clone before borrowing either
+        // registration container, then re-check the completion condition in
+        // case that callback returned the last active client.
+        let new_waker = cx.waker().clone();
+        if self.pool.active.get() == 0 {
+            return Poll::Ready(());
+        }
+
         let current_slot = self.slot.as_ref().map(Rc::clone);
         let mut close_waiters = self.pool.close_waiters.borrow_mut();
         // Carried out for the same reason as in `Waiter::poll`: a replaced
@@ -2298,11 +2305,11 @@ impl Future for CloseWaiter<'_> {
         {
             let mut waker = slot.waker.borrow_mut();
             match &*waker {
-                Some(existing) if existing.will_wake(new_waker) => {}
-                _ => replaced = waker.replace(new_waker.clone()),
+                Some(existing) if existing.will_wake(&new_waker) => {}
+                _ => replaced = waker.replace(new_waker),
             }
         } else {
-            let slot = CloseWaiterSlot::new(new_waker.clone());
+            let slot = CloseWaiterSlot::new(new_waker);
             close_waiters.push(Rc::clone(&slot));
             self.slot = Some(slot);
         }
@@ -3583,6 +3590,80 @@ mod tests {
             observed,
             Some([false, false]),
             "the caller waker's clone vtable ran while [waiters, slot.waker] was borrowed"
+        );
+    }
+
+    thread_local! {
+        static CLOSE_CLONE_POOL: RefCell<Option<Rc<Pool>>> = const { RefCell::new(None) };
+        static CLOSE_CLONE_SLOT: RefCell<Option<Rc<CloseWaiterSlot>>> = const { RefCell::new(None) };
+        static CLOSE_CLONE_BORROWED: Cell<Option<[bool; 2]>> = const { Cell::new(None) };
+    }
+
+    #[allow(unsafe_code)]
+    mod close_waiter_clone_probe {
+        use super::*;
+
+        fn record() {
+            let queue = CLOSE_CLONE_POOL.with(|pool| {
+                pool.borrow()
+                    .as_ref()
+                    .is_some_and(|pool| pool.close_waiters.try_borrow_mut().is_err())
+            });
+            let slot = CLOSE_CLONE_SLOT.with(|slot| {
+                slot.borrow()
+                    .as_ref()
+                    .is_some_and(|slot| slot.waker.try_borrow_mut().is_err())
+            });
+            CLOSE_CLONE_BORROWED.with(|borrowed| borrowed.set(Some([queue, slot])));
+        }
+
+        fn raw_waker() -> std::task::RawWaker {
+            unsafe fn clone(_: *const ()) -> std::task::RawWaker {
+                record();
+                raw_waker()
+            }
+
+            unsafe fn wake(_: *const ()) {}
+            unsafe fn wake_by_ref(_: *const ()) {}
+            unsafe fn drop(_: *const ()) {}
+
+            static VTABLE: std::task::RawWakerVTable =
+                std::task::RawWakerVTable::new(clone, wake, wake_by_ref, drop);
+            std::task::RawWaker::new(std::ptr::null(), &VTABLE)
+        }
+
+        pub(super) fn waker() -> Waker {
+            // The vtable owns no data and every operation preserves that.
+            unsafe { Waker::from_raw(raw_waker()) }
+        }
+    }
+
+    #[test]
+    fn cloning_a_close_waiter_waker_does_not_borrow_pool_state() {
+        let pool = Rc::new(test_pool(PoolConfig::default(), Vec::new(), 0, 1));
+        pool.active.set(1);
+        let mut waiter = Box::pin(CloseWaiter::new(&pool));
+        assert!(poll_once(waiter.as_mut()).is_pending());
+        let slot = pool
+            .close_waiters
+            .borrow()
+            .first()
+            .cloned()
+            .expect("the first poll registered a close-waiter slot");
+        CLOSE_CLONE_POOL.with(|stored| *stored.borrow_mut() = Some(Rc::clone(&pool)));
+        CLOSE_CLONE_SLOT.with(|stored| *stored.borrow_mut() = Some(slot));
+        CLOSE_CLONE_BORROWED.with(|borrowed| borrowed.set(None));
+
+        let probe = close_waiter_clone_probe::waker();
+        assert!(poll_with_waker(waiter.as_mut(), &probe).is_pending());
+
+        let observed = CLOSE_CLONE_BORROWED.with(Cell::get);
+        CLOSE_CLONE_POOL.with(|stored| *stored.borrow_mut() = None);
+        CLOSE_CLONE_SLOT.with(|stored| *stored.borrow_mut() = None);
+        assert_eq!(
+            observed,
+            Some([false, false]),
+            "the caller clone ran while [close_waiters, slot.waker] was borrowed"
         );
     }
 
