@@ -1771,6 +1771,39 @@ impl Config {
                 }
                 self.max_message_size(max);
             }
+            // This driver never uses GSSAPI, so a request to have it OFF is a
+            // request for the state it is permanently in, and refusing that
+            // rejects a connection string libpq accepts. `prefer` counts as
+            // off: it explicitly permits falling back to a non-GSS connection,
+            // which is the only thing that happens here.
+            //
+            // `require` is refused by name because it cannot be satisfied, and
+            // an unrecognised value is refused the way libpq refuses it
+            // (`invalid gssencmode value: "bogus"`) rather than being waved
+            // through as another way of saying off.
+            "gssencmode" => match value {
+                "disable" | "prefer" => {}
+                "require" => {
+                    return Err(Error::config_parse(Box::new(UnsupportedOption(
+                        "gssencmode",
+                    ))));
+                }
+                _ => return Err(Error::config_parse(Box::new(InvalidValue("gssencmode")))),
+            },
+            // Delegation only means anything once GSSAPI is in use. Asking for
+            // none is satisfied; asking for it is refused rather than accepted
+            // and quietly not done.
+            "gssdelegation" => match value {
+                "0" => {}
+                "1" => {
+                    return Err(Error::config_parse(Box::new(UnsupportedOption(
+                        "gssdelegation",
+                    ))));
+                }
+                _ => {
+                    return Err(Error::config_parse(Box::new(InvalidValue("gssdelegation"))));
+                }
+            },
             "sslmode" => {
                 let mode = match value {
                     "disable" => SslMode::Disable,
@@ -2382,6 +2415,26 @@ impl fmt::Display for InvalidValue {
 }
 
 impl error::Error for InvalidValue {}
+
+/// A recognised option asking for something this driver does not implement.
+///
+/// Distinct from `unknown option`, which says the key is not understood at
+/// all: this says the key IS understood and the value cannot be honoured, so
+/// the caller learns their setting was rejected rather than mistyped.
+#[derive(Debug)]
+struct UnsupportedOption(&'static str);
+
+impl fmt::Display for UnsupportedOption {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            fmt,
+            "option `{}` asks for a feature this driver does not implement",
+            self.0
+        )
+    }
+}
+
+impl error::Error for UnsupportedOption {}
 
 /// Parse a keepalive duration in seconds: zero allowed, negative refused.
 ///
@@ -3111,6 +3164,81 @@ mod tests {
     /// technique). The rule is per-TYPE, not uniform: every numeric option
     /// takes empty as "not given" and uses its default, every enum option
     /// REFUSES it, and string options keep the empty string.
+    /// GSSAPI is not implemented, but that is not a reason to refuse a request
+    /// to TURN IT OFF.
+    ///
+    /// This driver never uses GSSAPI encryption, so `gssencmode=disable` asks
+    /// for the state it is permanently in, and `prefer` explicitly permits
+    /// falling back to a non-GSS connection. Refusing either rejects a
+    /// connection string libpq accepts, for asking us to do what we already do
+    /// - measured 2026-08-25, libpq connects for `disable`, `prefer` and
+    /// `gssdelegation=0` alike.
+    ///
+    /// `require` and `gssdelegation=1` are different: they ask for something
+    /// this driver genuinely will not do, so they stay refused BY NAME. That
+    /// distinction is the whole point - accepting them would be the
+    /// "accepted and silently ignored" failure `libpq_parameter_parity.rs`
+    /// exists to prevent.
+    mod gssapi_parameters {
+        use crate::Config;
+
+        fn chain(dsn: &str) -> String {
+            let error = dsn.parse::<Config>().expect_err("this must be refused");
+            let mut chain = error.to_string();
+            let mut source = std::error::Error::source(&error);
+            while let Some(cause) = source {
+                chain.push_str(" | ");
+                chain.push_str(&cause.to_string());
+                source = std::error::Error::source(cause);
+            }
+            chain
+        }
+
+        #[test]
+        fn turning_gssapi_off_is_accepted() {
+            for dsn in [
+                "host=h gssencmode=disable",
+                "host=h gssencmode=prefer",
+                "host=h gssdelegation=0",
+            ] {
+                assert!(
+                    dsn.parse::<Config>().is_ok(),
+                    "libpq accepts this and it asks for what this driver already does: {dsn}"
+                );
+            }
+        }
+
+        /// THE CONTROL. Without it the test above would be satisfied by a
+        /// parser that accepted every GSSAPI setting and ignored all of them.
+        #[test]
+        fn asking_for_gssapi_is_still_refused_by_name() {
+            for (dsn, key) in [
+                ("host=h gssencmode=require", "gssencmode"),
+                ("host=h gssdelegation=1", "gssdelegation"),
+                ("host=h gsslib=gssapi", "gsslib"),
+                ("host=h krbsrvname=postgres", "krbsrvname"),
+            ] {
+                let chain = chain(dsn);
+                assert!(
+                    chain.contains(key),
+                    "refused without naming {key}, so the caller cannot tell which \
+                     option is unsupported: {chain}"
+                );
+            }
+        }
+
+        /// A value libpq itself rejects must not become acceptable here just
+        /// because this driver skips the feature.
+        #[test]
+        fn an_invalid_gssencmode_value_is_refused() {
+            let chain = chain("host=h gssencmode=bogus");
+            assert!(
+                chain.contains("gssencmode"),
+                "an invalid gssencmode value must be refused naming the key: {chain}"
+            );
+        }
+    }
+
     mod empty_parameter_values {
         use crate::Config;
 
