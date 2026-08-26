@@ -3042,9 +3042,7 @@ impl<'a> UrlParser<'a> {
         if host.is_empty() {
             return Ok(());
         }
-        // The authority named hosts, so a service must not supply its own.
-        self.explicit.push("host".to_owned());
-        self.explicit.push("port".to_owned());
+        let mut hosts = Vec::new();
         let mut ports = Vec::new();
 
         for chunk in host.split(',') {
@@ -3070,21 +3068,33 @@ impl<'a> UrlParser<'a> {
                 (it.next().unwrap(), it.next())
             };
 
-            self.host_param(host)?;
+            hosts.push(host);
             // Keep the authority ports as strings until the query has been
             // parsed. A later `?port=` owns the same libpq option slot, so it
             // can replace even an authority value that would be invalid if it
             // survived. The joined value preserves one port per authority
             // host; applying each one separately would make only the last win.
-            let port = self.decode(port.unwrap_or("5432"))?;
-            ports.push(if port.is_empty() {
-                "5432".to_owned()
-            } else {
-                port.into_owned()
-            });
+            ports.push(self.decode(port.unwrap_or(""))?.into_owned());
         }
 
-        self.parameters.insert("port", ports.join(","));
+        // libpq stores an authority option only when its assembled buffer is
+        // nonempty. This matters for a single empty slot: `postgresql://h/db`
+        // leaves `port` unset and `postgresql://:5455/db` leaves `host` unset,
+        // so a service may supply the missing value. In a multi-host authority
+        // the comma itself makes the buffer nonempty, preserving positional
+        // empty slots such as `host=a,b port=,`.
+        if !hosts.join(",").is_empty() {
+            for host in hosts {
+                self.host_param(host)?;
+            }
+            self.explicit.push("host".to_owned());
+        }
+
+        let ports = ports.join(",");
+        if !ports.is_empty() {
+            self.parameters.insert("port", ports);
+            self.explicit.push("port".to_owned());
+        }
 
         Ok(())
     }
@@ -4817,6 +4827,74 @@ mod tests {
 #[cfg(test)]
 mod dsn_parse_tests {
     use super::*;
+
+    fn service_file_with_host_and_port() -> tempfile::NamedTempFile {
+        use std::io::Write as _;
+
+        let mut file = tempfile::NamedTempFile::new().expect("create service file");
+        writeln!(
+            file,
+            "[uri-defaults]\nhost=service.example\nport=6543"
+        )
+        .expect("write service file");
+        file.flush().expect("flush service file");
+        file
+    }
+
+    #[test]
+    fn single_uri_authority_omissions_are_filled_by_the_service() {
+        let service_file = service_file_with_host_and_port();
+        let query = format!(
+            "servicefile={}&service=uri-defaults",
+            service_file.path().display()
+        );
+
+        for (authority, expected_host, expected_port) in [
+            ("authority.example", "authority.example", 6543),
+            ("authority.example:", "authority.example", 6543),
+            (":5455", "service.example", 5455),
+            (":", "service.example", 6543),
+        ] {
+            let dsn = format!("postgresql://{authority}/db?{query}");
+            let config = dsn.parse::<Config>().unwrap_or_else(|error| {
+                panic!("service defaults did not complete {dsn:?}: {error:?}")
+            });
+
+            assert_eq!(
+                config.get_hosts(),
+                [Host::Tcp(expected_host.to_owned())],
+                "wrong host for authority {authority:?}"
+            );
+            assert_eq!(
+                config.get_ports(),
+                [expected_port],
+                "wrong port for authority {authority:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn multi_host_uri_authority_keeps_its_empty_port_slots() {
+        let service_file = service_file_with_host_and_port();
+        let dsn = format!(
+            "postgresql://first.example,second.example/db?servicefile={}&service=uri-defaults",
+            service_file.path().display()
+        );
+        let config = dsn.parse::<Config>().expect("parse multi-host URI");
+
+        assert_eq!(
+            config.get_hosts(),
+            [
+                Host::Tcp("first.example".to_owned()),
+                Host::Tcp("second.example".to_owned()),
+            ]
+        );
+        assert_eq!(
+            config.get_ports(),
+            [5432, 5432],
+            "the multi-host port buffer is nonempty because it contains a comma"
+        );
+    }
 
     #[test]
     fn only_the_last_keyword_value_is_semantically_validated() {
