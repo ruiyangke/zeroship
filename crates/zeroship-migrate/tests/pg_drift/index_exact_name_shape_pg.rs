@@ -30,25 +30,25 @@ use std::collections::HashMap;
 
 use crate::support::PgDevSession;
 
-use zero_migrate::{
+use zeroship_migrate::{
     Approval, CollectionDescriptor, DeclarativeAuthor, DeclarativeError, EffectivePolicy,
     ExecutorConfig, FieldDescriptor, GuardConfig, IndexDescriptor, MigrationEngine,
 };
 
-use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zeroship_migrate_postgres::backend::drift_sql::snapshot_schema;
 
-use zero_migrate_postgres::PostgresBackend;
+use zeroship_migrate_postgres::PostgresBackend;
 
 fn desired_snapshot(
     project_schema: &str,
     descriptors: &[CollectionDescriptor],
     effective: &EffectivePolicy,
-) -> Result<zero_migrate::DesiredSchema, DeclarativeError> {
-    zero_migrate::desired_snapshot_for_dialect(
-        zero_migrate::shipping_vendors(),
+) -> Result<zeroship_migrate::DesiredSchema, DeclarativeError> {
+    zeroship_migrate::desired_snapshot_for_dialect(
+        zeroship_migrate::shipping_vendors(),
         project_schema,
         descriptors,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         effective,
     )
 }
@@ -96,7 +96,7 @@ async fn ensure_project_schema<'a>(
     session: &'a PgDevSession,
     cfg: &ExecutorConfig,
 ) -> support::SchemaGuard<'a> {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
     let guard = support::SchemaGuard::arm(
         session,
         [
@@ -115,7 +115,7 @@ async fn ensure_project_schema<'a>(
 }
 
 async fn drop_schemas(session: &PgDevSession, cfg: &ExecutorConfig) {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
     let _ = session
         .batch(&format!(
             "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
@@ -127,16 +127,16 @@ async fn drop_schemas(session: &PgDevSession, cfg: &ExecutorConfig) {
 fn guard_cfg(cfg: &ExecutorConfig) -> GuardConfig {
     GuardConfig::from_policy(
         support::no_inject(&cfg.project_schema),
-        zero_migrate_postgres::DIALECT,
+        zeroship_migrate_postgres::DIALECT,
     )
 }
 
 fn author_for(cfg: &ExecutorConfig) -> DeclarativeAuthor {
     DeclarativeAuthor::new_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         cfg.project_schema.clone(),
         "app_test",
-        zero_migrate_postgres::DIALECT,
+        zeroship_migrate_postgres::DIALECT,
     )
 }
 
@@ -213,7 +213,7 @@ async fn deploy(session: &PgDevSession, cfg: &ExecutorConfig, engine: &Migration
 /// Replace the live index with one carrying the same NAME and a different SHAPE.
 /// `tail` is spliced into `CREATE INDEX <name> ON <table> <tail>`.
 async fn recreate_index(session: &PgDevSession, cfg: &ExecutorConfig, tail: &str) {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
     session
         .batch(&format!(
             "DROP INDEX \"{schema}\".\"{INDEX}\"; \
@@ -227,7 +227,7 @@ async fn recreate_index(session: &PgDevSession, cfg: &ExecutorConfig, tail: &str
 /// The access method PostgreSQL reports for the live index, so an arm asserts the
 /// live shape it set up rather than assuming the DDL landed.
 async fn live_access_method(session: &PgDevSession, cfg: &ExecutorConfig) -> String {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
     let rows = session
         .query(
             "SELECT am.amname AS m FROM pg_class ic \
@@ -249,7 +249,7 @@ async fn replan(
     session: &PgDevSession,
     cfg: &ExecutorConfig,
     engine: &MigrationEngine,
-) -> Result<zero_migrate::DeclarativeDeployPlan, DeclarativeError> {
+) -> Result<zeroship_migrate::DeclarativeDeployPlan, DeclarativeError> {
     let author = author_for(cfg);
     let desc = descriptor();
     let desired = desired_snapshot(
@@ -274,7 +274,7 @@ async fn replan(
 
 /// Assert that re-planning refused, and that the refusal names the index.
 fn assert_refused(
-    result: Result<zero_migrate::DeclarativeDeployPlan, DeclarativeError>,
+    result: Result<zeroship_migrate::DeclarativeDeployPlan, DeclarativeError>,
     facet: &str,
 ) {
     match result {
@@ -312,7 +312,7 @@ async fn a_access_method_change_is_surfaced() {
     drop_schemas(&session, &cfg).await;
     let _schemas = ensure_project_schema(&session, &cfg).await;
 
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     deploy(&session, &cfg, &engine).await;
     assert_eq!(
         live_access_method(&session, &cfg).await,
@@ -346,7 +346,7 @@ async fn b_predicate_change_is_surfaced() {
     drop_schemas(&session, &cfg).await;
     let _schemas = ensure_project_schema(&session, &cfg).await;
 
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     deploy(&session, &cfg, &engine).await;
 
     recreate_index(
@@ -373,7 +373,7 @@ async fn c_include_change_is_surfaced() {
     drop_schemas(&session, &cfg).await;
     let _schemas = ensure_project_schema(&session, &cfg).await;
 
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     deploy(&session, &cfg, &engine).await;
 
     recreate_index(
@@ -400,7 +400,7 @@ async fn d_unchanged_index_still_plans_nothing() {
     drop_schemas(&session, &cfg).await;
     let _schemas = ensure_project_schema(&session, &cfg).await;
 
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     deploy(&session, &cfg, &engine).await;
 
     let plan = replan(&session, &cfg, &engine)

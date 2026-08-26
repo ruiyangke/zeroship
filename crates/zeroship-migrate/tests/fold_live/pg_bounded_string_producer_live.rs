@@ -67,16 +67,16 @@ use crate::support;
 use std::collections::HashMap;
 
 use crate::support::PgDevSession;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::driver::SqlSession;
-use zero_migrate::model::ir::Op;
-use zero_migrate::render::declarative::{CollectionDescriptor, DeclarativeAuthor, FieldDescriptor};
-use zero_migrate::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::model::ir::Op;
+use zeroship_migrate::render::declarative::{CollectionDescriptor, DeclarativeAuthor, FieldDescriptor};
+use zeroship_migrate::{
     descriptors_to_create_ops, desired_snapshot_for_dialect, render_schema_export_from_descriptors,
     resolve_create_table_policy, Approval, EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor,
     LiveSchema, LockMode, MigrationEngine, MigrationIr, TableRuntimeOptions,
 };
-use zero_migrate_postgres::PostgresBackend;
+use zeroship_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_bounded_string";
 const TABLE: &str = "profiles";
@@ -222,17 +222,17 @@ async fn apply_ops(
         .await
         .map_err(|error| format!("ensure the migration journal: {error}"))?;
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         policy,
     );
     let ir = ir_from_ops(ops);
     let steps = author
         .lower_steps(&ir, &LiveSchema::default())
         .map_err(|error| format!("lower the bounded-string ops: {error}"))?;
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &steps,
             Approval::Approved,
@@ -253,10 +253,10 @@ fn descriptors_from_ops(
     schema: &str,
     policy: &EffectivePolicy,
 ) -> Result<Vec<CollectionDescriptor>, String> {
-    let export = zero_migrate::render_schema_export(
-        zero_migrate::shipping_vendors(),
+    let export = zeroship_migrate::render_schema_export(
+        zeroship_migrate::shipping_vendors(),
         ops,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         schema,
         policy,
     )
@@ -430,9 +430,9 @@ async fn a_reimported_bounded_string_phantom_diffs_the_bound_off_a_live_column()
         let exported: Vec<CollectionDescriptor> =
             descriptors_from_ops(&ops, &cfg.project_schema, &policy)?;
         let reexport = render_schema_export_from_descriptors(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &exported,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &cfg.project_schema,
             &policy,
         )
@@ -449,10 +449,10 @@ async fn a_reimported_bounded_string_phantom_diffs_the_bound_off_a_live_column()
             })
             .collect();
         let desired = desired_snapshot_for_dialect(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &cfg.project_schema,
             &desired_descriptors,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &policy,
         )
         .map_err(|error| format!("resolve the re-imported descriptors: {error}"))?;
@@ -468,19 +468,19 @@ async fn a_reimported_bounded_string_phantom_diffs_the_bound_off_a_live_column()
             .keys()
             .map(|table| (table.clone(), OWNER.to_string()))
             .collect();
-        let plan = MigrationEngine::new(zero_migrate::shipping_vendors())
+        let plan = MigrationEngine::new(zeroship_migrate::shipping_vendors())
             .plan_declarative(
                 &desired,
                 &live,
                 &ownership,
                 &DeclarativeAuthor::new_for_dialect(
-                    zero_migrate::shipping_vendors(),
+                    zeroship_migrate::shipping_vendors(),
                     &cfg.project_schema,
                     OWNER,
-                    zero_migrate_postgres::DIALECT,
+                    zeroship_migrate_postgres::DIALECT,
                 ),
                 &[],
-                &GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT),
+                &GuardConfig::from_policy(policy.clone(), zeroship_migrate_postgres::DIALECT),
                 &policy,
             )
             .map_err(|error| format!("plan the re-imported schema declaratively: {error}"))?;

@@ -24,17 +24,17 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::apply::journal::{JournaledKind, Phase};
-use zero_migrate::model::migration::{
+use zeroship_migrate::apply::journal::{JournaledKind, Phase};
+use zeroship_migrate::model::migration::{
     Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
 };
-use zero_migrate::{
+use zeroship_migrate::{
     Approval, CollectionDescriptor, DeclarativeApplyError, DeclarativeAuthor, DryRunError,
     EffectivePolicy, EngineError, ExecutorConfig, FieldDescriptor, GuardConfig, IndexDescriptor,
     MigrationBackend, MigrationEngine, RenameHint, SchemaSnapshot, ShadowConfig,
 };
-use zero_migrate_sqlite::backend::Mode;
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate_sqlite::backend::Mode;
+use zeroship_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_demo";
 const APP: &str = "app_demo";
@@ -62,10 +62,10 @@ fn backend(p: &Paths) -> SqliteBackend {
 
 fn sqlite_author() -> DeclarativeAuthor {
     DeclarativeAuthor::new_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        zero_migrate_sqlite::DIALECT,
+        zeroship_migrate_sqlite::DIALECT,
     )
 }
 
@@ -76,7 +76,7 @@ fn exec_cfg() -> ExecutorConfig {
 }
 
 fn guard_cfg() -> GuardConfig {
-    GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate_sqlite::DIALECT)
+    GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_sqlite::DIALECT)
 }
 
 fn effective_policy() -> EffectivePolicy {
@@ -87,12 +87,12 @@ fn desired_snapshot(
     project_schema: &str,
     descriptors: &[CollectionDescriptor],
     effective: &EffectivePolicy,
-) -> Result<zero_migrate::DesiredSchema, zero_migrate::DeclarativeError> {
-    zero_migrate::desired_snapshot_for_dialect(
-        zero_migrate::shipping_vendors(),
+) -> Result<zeroship_migrate::DesiredSchema, zeroship_migrate::DeclarativeError> {
+    zeroship_migrate::desired_snapshot_for_dialect(
+        zeroship_migrate::shipping_vendors(),
         project_schema,
         descriptors,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         effective,
     )
 }
@@ -164,7 +164,7 @@ async fn engine_applies_sqlite_rebuild_end_to_end() {
 
     let p = paths("engine_rebuild_e2e");
     let be = backend(&p);
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let cfg = exec_cfg();
 
     // --- Deploy 1: create the table THROUGH THE ENGINE (plain additive set). ---
@@ -311,7 +311,7 @@ async fn engine_sqlite_rebuild_rerun_is_a_noop() {
 
     let p = paths("engine_rebuild_rerun");
     let be = backend(&p);
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let cfg = exec_cfg();
 
     // Deploy 1 (create) + seed a row.
@@ -475,7 +475,7 @@ async fn engine_sqlite_rename_routes_to_rebuild_not_run_expand() {
 
     let p = paths("engine_rename_rebuild");
     let be = backend(&p);
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let cfg = exec_cfg();
 
     // Deploy 1: create + seed a row whose `email` value must follow the rename.
@@ -634,7 +634,7 @@ async fn engine_sqlite_rebuild_refused_without_approval() {
 
     let p = paths("engine_rebuild_gate");
     let be = backend(&p);
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let cfg = exec_cfg();
 
     let desired1 = desired_snapshot(PROJECT, &v1, &effective_policy()).expect("v1 desired");
@@ -788,7 +788,7 @@ async fn roll_forward_over_destructive_history_on_sqlite() {
 
     let p = paths("roll_forward_destructive");
     let be = backend(&p);
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let cfg = exec_cfg();
 
     // --- v1: create + seed. ---
@@ -1006,7 +1006,7 @@ async fn warm_multi_collection_reboot_no_spurious_drop_both_usable() {
 
     let p = paths("warm_multi_boot");
     let be = backend(&p);
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let cfg = exec_cfg();
 
     // --- Cold deploy: create both collections. ---
@@ -1198,7 +1198,7 @@ fn baseline_migration(name: &str, up: &str) -> Migration {
 async fn sqlite_baseline_adopts_a_journal_less_file_then_additive_deploy_works() {
     let p = paths("baseline_adopt");
     let be = backend(&p);
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let cfg = exec_cfg();
 
     // Simulate a file a prior `run_sqlite_pipeline` populated: a real table on
@@ -1345,7 +1345,7 @@ async fn sqlite_baseline_adopts_a_journal_less_file_then_additive_deploy_works()
 async fn sqlite_baseline_refuses_when_engine_already_manages_the_file() {
     let p = paths("baseline_refuse");
     let be = backend(&p);
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let cfg = exec_cfg();
 
     // Apply a real (non-baseline) deploy through the engine first, so the journal
@@ -1411,7 +1411,7 @@ async fn sqlite_baseline_refuses_when_engine_already_manages_the_file() {
 async fn sqlite_backend_has_no_shadow_and_dry_run_is_explicitly_unsupported() {
     let p = paths("shadow_unsupported");
     let be = backend(&p);
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let cfg = exec_cfg();
 
     // The capability itself is absent — a deliberate absence, not a stub. It used to

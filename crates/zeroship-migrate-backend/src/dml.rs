@@ -3,7 +3,7 @@
 //! `IrAuthor::lower` compiles the DDL ops (`createTable`/`alter*`/...) into the
 //! same `Migration` shape the declarative differ
 //! emits. This module is the peer for the **DML** ops - `insert` / `update` /
-//! `del` / `backfill` - and for the closed expression AST ([`zero_migrate_ir::expr::Expr`])
+//! `del` / `backfill` - and for the closed expression AST ([`zeroship_migrate_ir::expr::Expr`])
 //! they carry in their `set` / `where` / `filter` positions.
 //!
 //! # Two rendering modes, one source of truth
@@ -60,7 +60,7 @@
 //! - A **batched** `backfill` targets the `BackfillSpec` executor, PORTABLE on
 //!   BOTH backends: PG via the
 //!   writable-CTE windowed `UPDATE` (`backfill.rs`), SQLite via the batched
-//!   per-batch-txn executor (`zero_migrate_sqlite::backend::backfill_sql`). The inline
+//!   per-batch-txn executor (`zeroship_migrate_sqlite::backend::backfill_sql`). The inline
 //!   `set`/`filter` differ per dialect (the `c.fn.splitPart` lowering,
 //!   NULL-skipping `concatWs`); the `BackfillSpec` shape is uniform.
 //!
@@ -102,20 +102,20 @@
 //! backend's placeholder spelling.
 //!
 //! The transport-safe bind mirror
-//! (`zero_migrate_sqlite::backend::actor::SqliteBind`) is the single
+//! (`zeroship_migrate_sqlite::backend::actor::SqliteBind`) is the single
 //! value-binding path the SQLite executor uses.
 
 use std::collections::BTreeMap;
 
 use crate::renderer::{Capability, DmlRenderer};
-use zero_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::dialect::DialectId;
 
 use crate::step::BindValue;
-use zero_migrate_ir::expr::{AggFunc, BinaryOp, Expr, ExtractField, ScalarFn, SynthFn, UnaryOp};
-use zero_migrate_ir::ir::{IrScalar, IrValue};
+use zeroship_migrate_ir::expr::{AggFunc, BinaryOp, Expr, ExtractField, ScalarFn, SynthFn, UnaryOp};
+use zeroship_migrate_ir::ir::{IrScalar, IrValue};
 
 /// A failure assembling a DML op into a statement (template + binds, or a backfill
-/// spec). Distinct from the structural [`zero_migrate_ir::validate::AuthoringError`]
+/// spec). Distinct from the structural [`zeroship_migrate_ir::validate::AuthoringError`]
 /// (which gates the expression AST *before* assembly): this carries the
 /// assembler-level rejections: a malformed identifier, an empty insert, an
 /// expression node the renderer cannot lower, or a MySQL conflict shape whose
@@ -381,7 +381,7 @@ pub struct IdentQuoteError {
 /// There is deliberately no dialect-free wrapper. Vendor code passes its own
 /// renderer, while engine code carrying a [`DialectId`]
 /// resolves that registered backend through
-/// `zero_migrate::render::dml::quote_ident_checked_for_dialect`.
+/// `zeroship_migrate::render::dml::quote_ident_checked_for_dialect`.
 pub fn quote_ident_checked_for_backend(
     ident: &str,
     backend: &dyn DmlRenderer,
@@ -841,7 +841,7 @@ fn render_agg(
 /// The portable cast-target SQL type per dialect. `bytes` is `BYTEA` on
 /// PG / `BLOB` on SQLite; the rest share spelling.
 fn cast_target_sql(
-    target: zero_migrate_ir::expr::CastTarget,
+    target: zeroship_migrate_ir::expr::CastTarget,
     backend: &dyn DmlRenderer,
 ) -> &'static str {
     backend.cast_target(target)
@@ -1739,7 +1739,7 @@ pub struct BackfillClauses {
 /// `BackfillSpec` executor consumes. Renders for
 /// EITHER dialect: the inline transform is dialect-rendered (the
 /// `c.fn.splitPart` lowering, NULL-skipping `concatWs`), and the PG (`backfill.rs`)
-/// or SQLite (`zero_migrate_sqlite::backend::backfill_sql`) executor consumes the result.
+/// or SQLite (`zeroship_migrate_sqlite::backend::backfill_sql`) executor consumes the result.
 ///
 /// # Errors
 /// [`DmlError`] on a malformed identifier / empty `set` / an unrenderable node.

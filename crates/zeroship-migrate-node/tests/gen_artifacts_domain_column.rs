@@ -41,9 +41,9 @@ mod support;
 
 use serde_json::{json, Value};
 
-use zero_migrate::model::ir::TableRuntimeOptions;
-use zero_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor};
-use zero_migrate_node::api::{gen_artifacts_from_descriptors, gen_artifacts_from_envelopes};
+use zeroship_migrate::model::ir::TableRuntimeOptions;
+use zeroship_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor};
+use zeroship_migrate_node::api::{gen_artifacts_from_descriptors, gen_artifacts_from_envelopes};
 
 const SCHEMA: &str = "public";
 const DIALECTS: [&str; 3] = ["sqlite", "postgres", "mysql"];

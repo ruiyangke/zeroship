@@ -38,19 +38,19 @@ use crate::support;
 use std::collections::BTreeMap;
 
 use crate::support::PgDevSession;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::driver::SqlSession;
-use zero_migrate::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::{
     diff_snapshots, fold_ops, resolve_create_table_policy, Approval, EffectivePolicy,
     ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr,
     StructuralDrift,
 };
-use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
-use zero_migrate_postgres::PostgresBackend;
+use zeroship_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zeroship_migrate_postgres::PostgresBackend;
 
 /// The test-side PostgreSQL identifier spelling, written out here rather than
 /// imported from the crate. It used to be
-/// `zero_migrate::schema::query::quote_ident`, which was `pub`, un-dialected, and a
+/// `zeroship_migrate::schema::query::quote_ident`, which was `pub`, un-dialected, and a
 /// SECOND physical home for the spelling `render::backends::ansi_double_quote_ident`
 /// owns; it is gone. A probe that builds its expectation by calling the emitter it is
 /// checking is not an oracle anyway, so the replacement is deliberately independent —
@@ -101,7 +101,7 @@ value = "allow"
 scope = "all"
 "#
     );
-    zero_migrate::effective_policy_from_charter_toml(&toml).expect("charter parses")
+    zeroship_migrate::effective_policy_from_charter_toml(&toml).expect("charter parses")
 }
 
 fn create_envelope(column: &str) -> String {
@@ -220,13 +220,13 @@ impl<'a> Deployment<'a> {
             .map_err(|error| format!("introspect the live PostgreSQL schema: {error}"))?;
         let live = LiveSchema::from_catalog_snapshot(catalog, OWNER);
         let author = IrAuthor::new(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &self.cfg.project_schema,
             OWNER,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &self.policy,
         );
-        let guard = GuardConfig::from_policy(self.policy.clone(), zero_migrate_postgres::DIALECT);
+        let guard = GuardConfig::from_policy(self.policy.clone(), zeroship_migrate_postgres::DIALECT);
         let artifact = author
             .load_and_lower_guarded(&resolved_source, OWNER, registry, &live, &guard)
             .map_err(|error| format!("AUTHORING REFUSED: {error}"))?;
@@ -235,11 +235,11 @@ impl<'a> Deployment<'a> {
             .steps
             .iter()
             .filter_map(|step| match step {
-                zero_migrate::PlanStep::Ddl(migration) => Some(migration.up.clone()),
+                zeroship_migrate::PlanStep::Ddl(migration) => Some(migration.up.clone()),
                 _ => None,
             })
             .collect();
-        MigrationEngine::new(zero_migrate::shipping_vendors())
+        MigrationEngine::new(zeroship_migrate::shipping_vendors())
             .apply_plan(
                 &artifact.plan.steps,
                 Approval::Approved,
@@ -284,11 +284,11 @@ impl<'a> Deployment<'a> {
     }
 
     /// The fold of every op applied so far, compared against the live catalog.
-    async fn drift(&self, ops: &[zero_migrate::model::ir::Op]) -> Result<StructuralDrift, String> {
+    async fn drift(&self, ops: &[zeroship_migrate::model::ir::Op]) -> Result<StructuralDrift, String> {
         let expected = fold_ops(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             ops,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &self.cfg.project_schema,
             &self.policy,
         )
@@ -297,7 +297,7 @@ impl<'a> Deployment<'a> {
             .await
             .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
         Ok(diff_snapshots(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &expected,
             &actual,
         ))
@@ -420,7 +420,7 @@ async fn a_retype_of_an_identity_column_within_the_integer_family_still_applies(
     // not reach them — and the identity property has to survive, or "it applied" is
     // not the same as "it worked".
     with_deployment("id_widen", async |deployment| {
-        let ops = |to_type: &str| -> Vec<zero_migrate::model::ir::Op> {
+        let ops = |to_type: &str| -> Vec<zeroship_migrate::model::ir::Op> {
             let create: MigrationIr =
                 serde_json::from_str(&create_envelope(IDENTITY_COL)).expect("create parses");
             let retype: MigrationIr =

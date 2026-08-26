@@ -8,12 +8,12 @@ use crate::support;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::apply::executor::RollbackError;
-use zero_migrate::apply::journal::Phase;
-use zero_migrate::model::migration::{
+use zeroship_migrate::apply::executor::RollbackError;
+use zeroship_migrate::apply::journal::Phase;
+use zeroship_migrate::model::migration::{
     Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
 };
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate_sqlite::SqliteBackend;
 
 struct Paths {
     _dir: TempDir,
@@ -218,7 +218,7 @@ async fn rollback_rebuild_needed_returns_p3b_deferred_error() {
             version,
             reason,
         } => {
-            assert_eq!(dialect, zero_migrate_sqlite::DIALECT);
+            assert_eq!(dialect, zeroship_migrate_sqlite::DIALECT);
             assert_eq!(version, m.version.as_str());
             assert!(
                 reason.contains("type or constraint change"),
@@ -320,7 +320,7 @@ async fn rollback_unwinds_every_selected_migration_in_reverse_order() {
     let p = paths("rb_orchestrator");
     let be = backend(&p);
     let cfg =
-        zero_migrate::ExecutorConfig::new("app_test", "app_test", support::no_inject("app_test"));
+        zeroship_migrate::ExecutorConfig::new("app_test", "app_test", support::no_inject("app_test"));
 
     let parent = mig(
         "create_parent",
@@ -348,12 +348,12 @@ async fn rollback_unwinds_every_selected_migration_in_reverse_order() {
     assert!(table_exists(&be, "child").await);
 
     let set = vec![parent.clone(), child.clone()];
-    let outcome = zero_migrate::rollback(
+    let outcome = zeroship_migrate::rollback(
         &be,
         &cfg,
-        &zero_migrate::RollbackRequest::new(zero_migrate::RollbackTarget::All),
+        &zeroship_migrate::RollbackRequest::new(zeroship_migrate::RollbackTarget::All),
         &set,
-        zero_migrate::Approval::Approved,
+        zeroship_migrate::Approval::Approved,
         "operator",
         &*support::sqlite_line1_guard(),
     )
@@ -380,23 +380,23 @@ async fn rollback_unwinds_every_selected_migration_in_reverse_order() {
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn rollback_refuses_while_another_holder_has_the_project_lock() {
-    use zero_migrate::MigrationBackend;
+    use zeroship_migrate::MigrationBackend;
 
     let p = paths("rb_lock_held");
     let be = backend(&p);
     let cfg =
-        zero_migrate::ExecutorConfig::new("app_test", "app_test", support::no_inject("app_test"));
+        zeroship_migrate::ExecutorConfig::new("app_test", "app_test", support::no_inject("app_test"));
 
     be.acquire_project_lock(&cfg)
         .await
         .expect("take the project lock first");
 
-    let err = zero_migrate::rollback(
+    let err = zeroship_migrate::rollback(
         &be,
         &cfg,
-        &zero_migrate::RollbackRequest::new(zero_migrate::RollbackTarget::All),
+        &zeroship_migrate::RollbackRequest::new(zeroship_migrate::RollbackTarget::All),
         &[],
-        zero_migrate::Approval::Approved,
+        zeroship_migrate::Approval::Approved,
         "operator",
         &*support::sqlite_line1_guard(),
     )

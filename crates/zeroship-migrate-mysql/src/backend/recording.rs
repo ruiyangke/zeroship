@@ -29,11 +29,11 @@
 
 use std::cell::RefCell;
 
-use zero_migrate_backend::driver::{Bind, DbError, Row, SqlSession, Value};
-use zero_migrate_backend::requirements::{DatabaseFeature, DatabaseRequirements};
-use zero_migrate_backend::step::BindValue;
-use zero_migrate_ir::migration::{Checksum, Migration, MigrationFlags, MigrationId};
-use zero_migrate_ir::probe::GuardProbe;
+use zeroship_migrate_backend::driver::{Bind, DbError, Row, SqlSession, Value};
+use zeroship_migrate_backend::requirements::{DatabaseFeature, DatabaseRequirements};
+use zeroship_migrate_backend::step::BindValue;
+use zeroship_migrate_ir::migration::{Checksum, Migration, MigrationFlags, MigrationId};
+use zeroship_migrate_ir::probe::GuardProbe;
 
 use super::MysqlInflightDdlMarker;
 
@@ -527,7 +527,7 @@ impl SqlSession for RecordingSession {
 pub fn trivial_migration() -> Migration {
     let flags = MigrationFlags::default();
     let version = MigrationId::generate();
-    let checksum = Checksum::of(&zero_migrate_ir::migration::ChecksumInput {
+    let checksum = Checksum::of(&zeroship_migrate_ir::migration::ChecksumInput {
         up: "CREATE TABLE t (id INT)",
         down: Some("DROP TABLE t"),
         flags: &flags,
@@ -557,7 +557,7 @@ pub fn guarded_migration(up: &str, probe: GuardProbe) -> Migration {
     migration.name = "guarded object".into();
     migration.up = up.into();
     migration.down = None;
-    migration.checksum = Checksum::of(&zero_migrate_ir::migration::ChecksumInput {
+    migration.checksum = Checksum::of(&zeroship_migrate_ir::migration::ChecksumInput {
         up: &migration.up,
         down: migration.down.as_deref(),
         flags: &migration.flags,
@@ -575,7 +575,7 @@ pub fn catalog_table(table: &str) -> Row {
 }
 
 pub fn step_checksum(label: &str) -> Checksum {
-    Checksum::of(&zero_migrate_ir::migration::ChecksumInput {
+    Checksum::of(&zeroship_migrate_ir::migration::ChecksumInput {
         up: label,
         down: None,
         flags: &MigrationFlags::default(),
@@ -884,7 +884,7 @@ pub fn catalog_foreign_key_part(
 pub fn plan_dml_step(
     label: &str,
     destructive: bool,
-) -> (zero_migrate_backend::step::PlanStep, MigrationId) {
+) -> (zeroship_migrate_backend::step::PlanStep, MigrationId) {
     let version = MigrationId::generate();
     let template = if destructive {
         "DELETE FROM `proj_x`.`users` WHERE `id` = ?"
@@ -892,7 +892,7 @@ pub fn plan_dml_step(
         "INSERT INTO `proj_x`.`users` (`id`) VALUES (?)"
     };
     (
-        zero_migrate_backend::step::PlanStep::Dml {
+        zeroship_migrate_backend::step::PlanStep::Dml {
             version: version.clone(),
             checksum: step_checksum(label),
             name: label.into(),

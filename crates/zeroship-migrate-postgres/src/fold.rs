@@ -1,18 +1,18 @@
 use std::collections::BTreeMap;
 
-use zero_migrate_backend::error::IrLowerError;
-use zero_migrate_backend::fold::{
+use zeroship_migrate_backend::error::IrLowerError;
+use zeroship_migrate_backend::fold::{
     AuthorTypeOverride, CatalogFoldPolicy, CatalogFoldRefusal, FoldCursorColumnContract,
     FoldCursorComparison, FoldCursorScalarType, FoldDatabaseFeature, ReferenceTextStorage,
     SnapshotProvenanceStrength,
 };
-use zero_migrate_backend::snapshot::{
+use zeroship_migrate_backend::snapshot::{
     ColumnSnapshot, IndexElementSnapshot, PartitionSnapshot, SequenceSnapshot, TableSnapshot,
     ViewSnapshot,
 };
-use zero_migrate_ir::expr::Expr;
-use zero_migrate_ir::ir::{ColType, ValueFormat};
-use zero_migrate_ir::precondition::{Precondition, PreconditionCheck};
+use zeroship_migrate_ir::expr::Expr;
+use zeroship_migrate_ir::ir::{ColType, ValueFormat};
+use zeroship_migrate_ir::precondition::{Precondition, PreconditionCheck};
 
 #[derive(Debug)]
 pub(crate) struct PostgresCatalogFoldPolicy;
@@ -129,7 +129,7 @@ impl CatalogFoldPolicy for PostgresCatalogFoldPolicy {
                         matches!(
                             element,
                             IndexElementSnapshot::Column {
-                                order: None | Some(zero_migrate_ir::ir::IndexSortOrder::Asc),
+                                order: None | Some(zeroship_migrate_ir::ir::IndexSortOrder::Asc),
                                 opclass: None,
                                 collation: None,
                                 ..
@@ -442,7 +442,7 @@ fn type_is_one_of(data_type: &str, candidates: &[&str]) -> bool {
 }
 
 fn quote_engine_ident(what: &'static str, ident: &str) -> Result<String, IrLowerError> {
-    zero_migrate_backend::dml::quote_ident_for_backend(what, ident, &crate::dml::RENDERER)
+    zeroship_migrate_backend::dml::quote_ident_for_backend(what, ident, &crate::dml::RENDERER)
         .map_err(IrLowerError::DmlAssemble)
 }
 

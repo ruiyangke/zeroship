@@ -9,7 +9,7 @@
 //! consumer reading the export cannot tell an absent facet from an undeclared one.
 //!
 //! The oracle is therefore a ROUND TRIP rather than a shape assertion. Both directions
-//! are hand-written conversions in [`zero_migrate_node::descriptors`] - the same
+//! are hand-written conversions in [`zeroship_migrate_node::descriptors`] - the same
 //! functions the addon calls, not test copies of them - so this is a genuine
 //! discovery instrument for the wire, not a serde tautology: a serde round trip would
 //! only prove the derive is symmetric with itself, while this compares an INDEPENDENT
@@ -42,15 +42,15 @@
 
 mod support;
 
-use zero_migrate::model::expr::{BinaryOp, Expr};
-use zero_migrate::model::ir::{ColType, GeneratedCol, IdentityCol, IrColumn, Op};
-use zero_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor, IndexDescriptor};
-use zero_migrate::{DialectId, TableRuntimeOptions};
-use zero_migrate_mysql::DIALECT as MYSQL;
-use zero_migrate_postgres::DIALECT as POSTGRES;
-use zero_migrate_sqlite::DIALECT as SQLITE;
+use zeroship_migrate::model::expr::{BinaryOp, Expr};
+use zeroship_migrate::model::ir::{ColType, GeneratedCol, IdentityCol, IrColumn, Op};
+use zeroship_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor, IndexDescriptor};
+use zeroship_migrate::{DialectId, TableRuntimeOptions};
+use zeroship_migrate_mysql::DIALECT as MYSQL;
+use zeroship_migrate_postgres::DIALECT as POSTGRES;
+use zeroship_migrate_sqlite::DIALECT as SQLITE;
 
-use zero_migrate_node::descriptors::{
+use zeroship_migrate_node::descriptors::{
     descriptor_dto_to_engine, descriptor_to_dto, field_dto_to_engine, field_to_dto,
 };
 
@@ -213,7 +213,7 @@ fn seed_descriptors() -> Vec<CollectionDescriptor> {
         runtime_options: TableRuntimeOptions {
             soft_delete: true,
             versioning: true,
-            strictness: zero_migrate::TableStrictness::Lenient,
+            strictness: zeroship_migrate::TableStrictness::Lenient,
         },
     };
 
@@ -257,7 +257,7 @@ fn width_and_generated_ops() -> Vec<Op> {
     });
 
     vec![Op::CreateTable {
-        attributes: zero_migrate::model::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate::model::attribute::CreateTableAttributes::new(),
         name: "widths".to_string(),
         columns: vec![
             column("id", ColType::Text),
@@ -289,8 +289,8 @@ fn folded_fields() -> Vec<(String, FieldDescriptor)> {
     let policy = support::no_inject(SCHEMA);
     let dialect = &POSTGRES;
 
-    let from_descriptors = zero_migrate::render_schema_export_from_descriptors(
-        zero_migrate::shipping_vendors(),
+    let from_descriptors = zeroship_migrate::render_schema_export_from_descriptors(
+        zeroship_migrate::shipping_vendors(),
         &seed_descriptors(),
         dialect,
         SCHEMA,
@@ -313,8 +313,8 @@ fn folded_fields() -> Vec<(String, FieldDescriptor)> {
 /// fold under every dialect.
 fn folded_portable_fields(dialect: &DialectId) -> Vec<(String, FieldDescriptor)> {
     let policy = support::no_inject(SCHEMA);
-    let export = zero_migrate::render_schema_export(
-        zero_migrate::shipping_vendors(),
+    let export = zeroship_migrate::render_schema_export(
+        zeroship_migrate::shipping_vendors(),
         &width_and_generated_ops(),
         dialect,
         SCHEMA,
@@ -486,11 +486,11 @@ fn every_folded_field_survives_the_export_round_trip() {
 /// A separate assertion because `assert_round_trips` is per-FIELD and would pass with
 /// every collection-level facet dropped. The strictness token in particular crosses as
 /// a STRING through a hand-written pair of match arms in
-/// [`zero_migrate_node::descriptors`], one per direction, and only one of its three
+/// [`zeroship_migrate_node::descriptors`], one per direction, and only one of its three
 /// values is exercised anywhere else - so all three are driven here.
 #[test]
 fn a_whole_collection_survives_the_export_round_trip() {
-    use zero_migrate::TableStrictness;
+    use zeroship_migrate::TableStrictness;
 
     let policy = support::no_inject(SCHEMA);
     for strictness in [
@@ -502,8 +502,8 @@ fn a_whole_collection_survives_the_export_round_trip() {
         for seed in &mut seeds {
             seed.runtime_options.strictness = strictness;
         }
-        let export = zero_migrate::render_schema_export_from_descriptors(
-            zero_migrate::shipping_vendors(),
+        let export = zeroship_migrate::render_schema_export_from_descriptors(
+            zeroship_migrate::shipping_vendors(),
             &seeds,
             &POSTGRES,
             SCHEMA,
@@ -567,8 +567,8 @@ fn the_check_bearing_corpus_is_postgres_only() {
     let policy = support::no_inject(SCHEMA);
     for dialect in [&MYSQL, &SQLITE] {
         let dialect_label = dialect_debug_label(dialect);
-        let refused = zero_migrate::render_schema_export_from_descriptors(
-            zero_migrate::shipping_vendors(),
+        let refused = zeroship_migrate::render_schema_export_from_descriptors(
+            zeroship_migrate::shipping_vendors(),
             &seed_descriptors(),
             dialect,
             SCHEMA,
@@ -591,8 +591,8 @@ fn the_check_bearing_corpus_is_postgres_only() {
 #[test]
 fn unbounded_text_is_re_derived_rather_than_carried() {
     let policy = support::no_inject(SCHEMA);
-    let export = zero_migrate::render_schema_export_from_descriptors(
-        zero_migrate::shipping_vendors(),
+    let export = zeroship_migrate::render_schema_export_from_descriptors(
+        zeroship_migrate::shipping_vendors(),
         &seed_descriptors(),
         &POSTGRES,
         SCHEMA,
@@ -618,8 +618,8 @@ fn unbounded_text_is_re_derived_rather_than_carried() {
         "unbounded_text is not on the wire; if it now is, delete this test's premise"
     );
 
-    let refolded = zero_migrate::render_schema_export_from_descriptors(
-        zero_migrate::shipping_vendors(),
+    let refolded = zeroship_migrate::render_schema_export_from_descriptors(
+        zeroship_migrate::shipping_vendors(),
         &[CollectionDescriptor {
             name: "refolded".to_string(),
             owner_app: "app_export".to_string(),
@@ -652,8 +652,8 @@ fn a_literal_field_is_unreachable_from_both_gen_artifacts_sources() {
     let policy = support::no_inject(SCHEMA);
 
     // Half one: the producer refuses the token, so the manual source cannot carry it.
-    let refused = zero_migrate::render_schema_export_from_descriptors(
-        zero_migrate::shipping_vendors(),
+    let refused = zeroship_migrate::render_schema_export_from_descriptors(
+        zeroship_migrate::shipping_vendors(),
         &[CollectionDescriptor {
             name: "literals".to_string(),
             owner_app: "app_export".to_string(),
@@ -704,8 +704,8 @@ fn a_literal_field_is_unreachable_from_both_gen_artifacts_sources() {
 #[test]
 fn a_varchar_width_survives_the_wire_and_the_producer() {
     let policy = support::no_inject(SCHEMA);
-    let export = zero_migrate::render_schema_export(
-        zero_migrate::shipping_vendors(),
+    let export = zeroship_migrate::render_schema_export(
+        zeroship_migrate::shipping_vendors(),
         &width_and_generated_ops(),
         &POSTGRES,
         SCHEMA,
@@ -731,8 +731,8 @@ fn a_varchar_width_survives_the_wire_and_the_producer() {
 
     // And the PRODUCER keeps it: re-importing the crossed descriptor yields a
     // VARCHAR(64) again, not an unbounded TEXT.
-    let refolded = zero_migrate::render_schema_export_from_descriptors(
-        zero_migrate::shipping_vendors(),
+    let refolded = zeroship_migrate::render_schema_export_from_descriptors(
+        zeroship_migrate::shipping_vendors(),
         &[CollectionDescriptor {
             name: "refolded".to_string(),
             owner_app: "app_export".to_string(),

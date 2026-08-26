@@ -17,12 +17,12 @@
 
 use crate::support;
 
-use zero_migrate::driver::SqlSession;
-use zero_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
-use zero_migrate::{
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
+use zeroship_migrate::{
     diff_snapshots, fold_ops, IrAuthor, LiveSchema, SchemaSnapshot, StructuralDrift,
 };
-use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zeroship_migrate_postgres::backend::drift_sql::snapshot_schema;
 
 const OWNER: &str = "app_drift_plain_default";
 
@@ -207,18 +207,18 @@ async fn live_postgres_reports_ordinary_column_default_drift() {
     let result: Result<(), String> = async {
         let ir = fixture(&schema);
         let expected = fold_ops(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &ir.ops,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &schema,
             &support::no_inject("app"),
         )
         .map_err(|error| format!("fold plain-default fixture: {error}"))?;
         let migrations = IrAuthor::new(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &schema,
             OWNER,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &support::no_inject(&schema),
         )
         .lower(&ir, &LiveSchema::default())
@@ -237,7 +237,7 @@ async fn live_postgres_reports_ordinary_column_default_drift() {
         let clean = snapshot_schema(&session, &schema)
             .await
             .map_err(|error| format!("introspect clean plain-default fixture: {error}"))?;
-        let clean_drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &clean);
+        let clean_drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &clean);
         if !clean_drift.is_clean() {
             return Err(format!(
                 "clean plain-default fixture drifted: {clean_drift:#?}"
@@ -288,7 +288,7 @@ async fn live_postgres_reports_ordinary_column_default_drift() {
         ] {
             let actual = snapshot_after_mutation(&session, &schema, &mutation).await?;
             require_altered(
-                &diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual),
+                &diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual),
                 column,
                 expected_key,
                 actual_key,
@@ -312,7 +312,7 @@ async fn live_postgres_reports_ordinary_column_default_drift() {
         ] {
             let actual = snapshot_after_mutation(&session, &schema, &mutation).await?;
             require_no_default_drift(
-                &diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual),
+                &diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual),
                 column,
             )?;
         }
@@ -328,7 +328,7 @@ async fn live_postgres_reports_ordinary_column_default_drift() {
             &format!("ALTER TABLE {table} ALTER COLUMN derived DROP EXPRESSION"),
         )
         .await?;
-        let dropped = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
+        let dropped = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual);
         if !dropped.altered_objects.iter().any(|altered| {
             altered.table == "plain_defaults"
                 && altered.object == "column derived"
@@ -362,7 +362,7 @@ async fn live_postgres_reports_ordinary_column_default_drift() {
         )
         .await?;
         require_no_generated_drift(
-            &diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual),
+            &diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual),
             "derived",
         )?;
 

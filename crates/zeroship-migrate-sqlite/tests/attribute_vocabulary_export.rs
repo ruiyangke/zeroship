@@ -2,7 +2,7 @@
 //! exported for its npm package's TypeScript generator.
 //!
 //! The rendering itself lives in
-//! [`zero_migrate_backend::attribute::vocabulary_json`], which names no vendor and is
+//! [`zeroship_migrate_backend::attribute::vocabulary_json`], which names no vendor and is
 //! shared by all three backends: three copies would be three chances for the artifacts
 //! to disagree in shape, at which point one package's generator reads a field another
 //! vendor never wrote. What stays here is what is genuinely this crate's - WHICH
@@ -24,8 +24,8 @@
 
 use std::path::PathBuf;
 
-use zero_migrate_backend::attribute::vocabulary_json;
-use zero_migrate_sqlite::{DIALECT, VENDOR};
+use zeroship_migrate_backend::attribute::vocabulary_json;
+use zeroship_migrate_sqlite::{DIALECT, VENDOR};
 
 /// Below this, the export is near-empty and every assertion over it goes vacuous. An
 /// artifact of zero attributes is valid JSON that generates an empty TypeScript

@@ -1,13 +1,13 @@
 //! PostgreSQL value-format spelling and catalog normalization.
 
-use zero_migrate_backend::dml::sql_string_literal;
-use zero_migrate_backend::snapshot::{ColumnCollationSnapshot, IdDefaultSnapshot};
-use zero_migrate_backend::value_format::{
+use zeroship_migrate_backend::dml::sql_string_literal;
+use zeroship_migrate_backend::snapshot::{ColumnCollationSnapshot, IdDefaultSnapshot};
+use zeroship_migrate_backend::value_format::{
     CatalogSqlContext, LiteralCastKind, ValueFormatColumnMetadata, ValueFormatRenderer,
 };
-use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_ir::expr::{BinaryOp, CastTarget, Expr, ScalarFn, SynthFn};
-use zero_migrate_ir::ir::{IrScalar, ValueFormat};
+use zeroship_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::expr::{BinaryOp, CastTarget, Expr, ScalarFn, SynthFn};
+use zeroship_migrate_ir::ir::{IrScalar, ValueFormat};
 
 use crate::DIALECT;
 

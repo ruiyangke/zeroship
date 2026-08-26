@@ -38,7 +38,7 @@
 //!    there is no collision to prevent. Capping would buy nothing.
 //! 2. **These names are a cross-repo byte-identical contract.** The vendored
 //!    migration engine carries its own copy of these builders
-//!    (`zero_migrate::schema::fts_sqlite`) and its SQLite drift introspector
+//!    (`zeroship_migrate::schema::fts_sqlite`) and its SQLite drift introspector
 //!    recognises an FTS5 vtable by the literal `__fts` suffix
 //!    (`apply/backend/sqlite/drift_sql.rs`). A cap applied on this side only
 //!    would make an engine-created vtable and a runtime-created one disagree,

@@ -5,9 +5,9 @@
 
 use crate::support;
 
-use zero_migrate::driver::SqlSession;
-use zero_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
-use zero_migrate::{IrAuthor, LiveSchema};
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
+use zeroship_migrate::{IrAuthor, LiveSchema};
 
 fn uuid_v4_ir(table: &str) -> MigrationIr {
     serde_json::from_value(serde_json::json!({
@@ -57,10 +57,10 @@ fn sqlite_uuid_v4_default_generates_exact_rfc_9562_values() {
     let table = "uuid_v4_samples";
     let ir = uuid_v4_ir(table);
     let migrations = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         "main",
         "app_uuid_samples",
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::no_inject("app"),
     )
     .lower(&ir, &LiveSchema::default())
@@ -94,10 +94,10 @@ fn sqlite_uuid_v4_default_generates_exact_rfc_9562_values() {
 fn mysql_uuid_v4_default_uses_exact_random_bytes_expression() {
     let ir = uuid_v4_ir("uuid_v4_samples");
     let migrations = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         "app",
         "app_uuid_samples",
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         &support::no_inject("app"),
     )
     .lower(&ir, &LiveSchema::default())
@@ -150,10 +150,10 @@ async fn postgres_uuid_v4_default_generates_exact_rfc_9562_values() {
     async {
         let ir = uuid_v4_ir(table);
         let migrations = IrAuthor::new(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &schema,
             "app_uuid_samples",
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &support::no_inject(&schema),
         )
         .lower(&ir, &LiveSchema::default())

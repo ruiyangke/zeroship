@@ -58,14 +58,14 @@
 
 use crate::support;
 
-use zero_migrate::driver::SqlSession;
-use zero_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
-use zero_migrate::render::lower::AuthoredViewBodyRenderer;
-use zero_migrate::{
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
+use zeroship_migrate::render::lower::AuthoredViewBodyRenderer;
+use zeroship_migrate::{
     diff_snapshots, fold_ops, IrAuthor, LiveSchema, SchemaSnapshot, StructuralDrift,
 };
-use zero_migrate_postgres::backend::drift_sql::resolve_view_bodies;
-use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zeroship_migrate_postgres::backend::drift_sql::resolve_view_bodies;
+use zeroship_migrate_postgres::backend::drift_sql::snapshot_schema;
 
 const OWNER: &str = "app_drift_view_body";
 
@@ -218,8 +218,8 @@ async fn snapshot_after_mutation(
             &mut expected,
             &mut actual,
             &AuthoredViewBodyRenderer {
-                vendors: zero_migrate::shipping_vendors(),
-                dialect: &zero_migrate_postgres::DIALECT,
+                vendors: zeroship_migrate::shipping_vendors(),
+                dialect: &zeroship_migrate_postgres::DIALECT,
             },
         )
         .await
@@ -243,18 +243,18 @@ async fn snapshot_after_mutation(
 async fn install(session: &support::PgDevSession, schema: &str) -> Result<SchemaSnapshot, String> {
     let ir = fixture(schema);
     let expected = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir.ops,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         schema,
         &support::no_inject(schema),
     )
     .map_err(|error| format!("fold view-body fixture: {error}"))?;
     let migrations = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         schema,
         OWNER,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &support::no_inject(schema),
     )
     .lower(&ir, &LiveSchema::default())
@@ -436,8 +436,8 @@ async fn live_postgres_reports_view_body_drift() {
             &mut clean_expected,
             &mut clean,
             &AuthoredViewBodyRenderer {
-                vendors: zero_migrate::shipping_vendors(),
-                dialect: &zero_migrate_postgres::DIALECT,
+                vendors: zeroship_migrate::shipping_vendors(),
+                dialect: &zeroship_migrate_postgres::DIALECT,
             },
         )
         .await
@@ -461,7 +461,7 @@ async fn live_postgres_reports_view_body_drift() {
             }
         }
 
-        let clean_drift = diff_snapshots(zero_migrate::shipping_vendors(), &clean_expected, &clean);
+        let clean_drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &clean_expected, &clean);
         if !clean_drift.is_clean() {
             return Err(format!("clean view-body fixture drifted: {clean_drift:#?}"));
         }
@@ -511,7 +511,7 @@ async fn live_postgres_reports_view_body_drift() {
             let (mutated_expected, actual) =
                 snapshot_after_mutation(&session, &schema, &expected, &mutation).await?;
             let drift =
-                diff_snapshots(zero_migrate::shipping_vendors(), &mutated_expected, &actual);
+                diff_snapshots(zeroship_migrate::shipping_vendors(), &mutated_expected, &actual);
             require_view_still_paired(&drift, view)?;
             require_body_drift(&drift, view, expected_key, actual_key)?;
 

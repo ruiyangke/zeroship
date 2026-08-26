@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_ir::ir::{CursorStability, IrScalar, PerRowGenerator};
+use zeroship_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::ir::{CursorStability, IrScalar, PerRowGenerator};
 
 use crate::guard::GuardError;
 use crate::journal::JournalError;
@@ -269,8 +269,8 @@ pub enum CursorTupleError {
 /// spec directly.
 ///
 /// ```compile_fail
-/// use zero_migrate::model::backfill::PerRowAssignment;
-/// use zero_migrate::PerRowGenerator;
+/// use zeroship_migrate::model::backfill::PerRowAssignment;
+/// use zeroship_migrate::PerRowGenerator;
 ///
 /// let _ = PerRowAssignment {
 ///     generator: PerRowGenerator::UuidV4,

@@ -14,10 +14,10 @@
 //! 3. **The over-refusal control.** Every distinct, well-formed id must still
 //!    register. A refusal that also refuses the working case is a regression.
 
-use zero_migrate_ir::backend::{
+use zeroship_migrate_ir::backend::{
     BackendDescriptor, BackendRegistry, CapabilitySet, IdentifierLimit, Limits, RegistryError,
 };
-use zero_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::dialect::DialectId;
 
 const NEUTRAL_LIMITS: Limits = Limits {
     identifier: IdentifierLimit::Unbounded,

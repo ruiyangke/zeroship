@@ -8,14 +8,14 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use zero_migrate_backend::approval::{Approval, ApprovalScope};
-use zero_migrate_backend::conn::ExecutorConfig;
-use zero_migrate_backend::dml::{quote_ident_checked_for_backend, IdentQuoteError};
-use zero_migrate_backend::driver::SqlSession;
-use zero_migrate_backend::executor::ApplyError;
-use zero_migrate_backend::journal::{self, JournalError, Phase};
-use zero_migrate_backend::step::AlterPrimaryKeyStep;
-use zero_migrate_ir::ir::AlterPrimaryKeyAction;
+use zeroship_migrate_backend::approval::{Approval, ApprovalScope};
+use zeroship_migrate_backend::conn::ExecutorConfig;
+use zeroship_migrate_backend::dml::{quote_ident_checked_for_backend, IdentQuoteError};
+use zeroship_migrate_backend::driver::SqlSession;
+use zeroship_migrate_backend::executor::ApplyError;
+use zeroship_migrate_backend::journal::{self, JournalError, Phase};
+use zeroship_migrate_backend::step::AlterPrimaryKeyStep;
+use zeroship_migrate_ir::ir::AlterPrimaryKeyAction;
 
 use super::session;
 
@@ -705,8 +705,8 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
-    use zero_migrate_backend::driver::{Bind, DbError, Row, Value};
-    use zero_migrate_ir::migration::{
+    use zeroship_migrate_backend::driver::{Bind, DbError, Row, Value};
+    use zeroship_migrate_ir::migration::{
         Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
     };
 

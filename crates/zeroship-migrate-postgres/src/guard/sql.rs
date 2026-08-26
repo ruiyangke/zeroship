@@ -30,11 +30,11 @@ use crate::analysis::analyze::Advisory;
 use crate::analysis::classify::{classify, DataSecurityClass, DdlKind, ParseError, StatementClass};
 use crate::guard::denylist::rule;
 use serde_json::Value;
-use zero_migrate_ir::migration::MigrationFlags;
-use zero_migrate_ir::policy::DestructiveOps;
-use zero_migrate_ir::policy::SchemaScope;
-use zero_migrate_ir::policy_registry;
-use zero_migrate_policy::{normalize_object_name, GrantRegion, ObjectName, ShapeElement};
+use zeroship_migrate_ir::migration::MigrationFlags;
+use zeroship_migrate_ir::policy::DestructiveOps;
+use zeroship_migrate_ir::policy::SchemaScope;
+use zeroship_migrate_ir::policy_registry;
+use zeroship_migrate_policy::{normalize_object_name, GrantRegion, ObjectName, ShapeElement};
 
 // The NEUTRAL guard seam lives in the backend contract crate, below every vendor, so
 // a vendor crate can implement `MigrationGuard` without depending on the engine that
@@ -48,13 +48,13 @@ use zero_migrate_policy::{normalize_object_name, GrantRegion, ObjectName, ShapeE
 // PostgreSQL answer is `SqlGuard::raw_island_within_require_rls` below.
 //
 // These are IMPORTED, not re-exported. This module's signatures name them, but a
-// caller wanting the neutral vocabulary must reach `zero_migrate_backend::guard` for
+// caller wanting the neutral vocabulary must reach `zeroship_migrate_backend::guard` for
 // it. They were `pub use` while this file lived in `zero-migrate-guard`, where the
 // engine depended on that crate directly and the re-export was how `GuardConfig` and
 // its neighbours resolved under that crate's own path. Keeping it here would have a
 // VENDOR crate handing out the neutral seam under its own name, which is the exact
 // confusion this move exists to remove - and it was measured to have no caller.
-use zero_migrate_backend::guard::{
+use zeroship_migrate_backend::guard::{
     data_security_rule, DeclaredCreateShape, GuardConfig, GuardError, InjectedCreateShape,
 };
 
@@ -724,7 +724,7 @@ impl SqlGuard {
     /// refused a host reach. That posture is gone and `render::lower` no longer routes
     /// anything here; see [`MigrationGuard::check_raw_island_sql`], which this backs.
     ///
-    /// [`MigrationGuard::check_raw_island_sql`]: zero_migrate_backend::guard::MigrationGuard::check_raw_island_sql
+    /// [`MigrationGuard::check_raw_island_sql`]: zeroship_migrate_backend::guard::MigrationGuard::check_raw_island_sql
     ///
     /// # Errors
     /// [`GuardError`] when parsing fails or a deny-listed construct is found.
@@ -757,9 +757,9 @@ impl SqlGuard {
     /// Is a raw island inside the reach of a `safety.require_rls` obligation?
     ///
     /// This is PostgreSQL's answer to
-    /// [`zero_migrate_backend::guard::MigrationGuard::raw_island_escapes_rls_net_state`].
+    /// [`zeroship_migrate_backend::guard::MigrationGuard::raw_island_escapes_rls_net_state`].
     /// The neutral net-state
-    /// walk in `zero_migrate_backend::guard::check_ir_data_security_policy` decides
+    /// walk in `zeroship_migrate_backend::guard::check_ir_data_security_policy` decides
     /// `require_rls` over structured ops for every dialect; the raw island is the one
     /// op whose net table state is not derivable from the IR, so it is asked HERE,
     /// where the parser is.

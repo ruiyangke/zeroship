@@ -8,10 +8,10 @@
 //! (`zero-migrate-ir`) and the policy PDP (`zero-migrate-policy`). It depends on NO
 //! backend implementation, so it cannot name PostgreSQL, SQLite or MySQL as crates at
 //! all. Which vendors exist is a value it is HANDED: every resolution takes a
-//! [`zero_migrate_backend::registry::VendorSet`] and every carrier holds one.
+//! [`zeroship_migrate_backend::registry::VendorSet`] and every carrier holds one.
 //!
 //! The crate that composes that value is `zero-migrate`. It depends on this one plus
-//! the three backends, re-exports this crate's whole root so `zero_migrate::...` paths
+//! the three backends, re-exports this crate's whole root so `zeroship_migrate::...` paths
 //! are unchanged, and is what a host actually depends on. `zero-migrate` also owns the
 //! integration suites - an integration test is a host, and a host composes.
 //!
@@ -93,19 +93,19 @@
 // it now lives in `zero-migrate-postgres`. Core reaches a guard the same way it
 // reaches a renderer: `render::backends::guard_for`, through the registry, by open
 // dialect id.
-pub use zero_migrate_backend::guard;
-use zero_migrate_backend::registry::VendorSet;
+pub use zeroship_migrate_backend::guard;
+use zeroship_migrate_backend::registry::VendorSet;
 pub mod apply;
 // The caller's approval decision now lives with the backend contract, whose
 // `OnlineSchemaChange::run_online_backfill` names it. Re-exported here so every
 // `crate::approval::{Approval, ApprovalScope}` reference resolves unchanged.
-pub use zero_migrate_backend::approval;
+pub use zeroship_migrate_backend::approval;
 // The per-run executor configuration. `ExecutorConfig` is the single most-named
 // type in the backend contract - every one of `MigrationBackend`'s I/O methods
 // takes a `&ExecutorConfig` - so it moved down to sit with the trait it is an
-// argument of. Re-exported so every `crate::conn::...` and `zero_migrate::conn::...`
+// argument of. Re-exported so every `crate::conn::...` and `zeroship_migrate::conn::...`
 // reference resolves unchanged.
-pub use zero_migrate_backend::conn;
+pub use zeroship_migrate_backend::conn;
 // A DSN-classifier module was removed from here. It held one function, a
 // classifier that decided which backend a URL selects by string-matching
 // `postgres://` / `sqlite:` / `file:` in core - the engine resolving a vendor without
@@ -121,12 +121,12 @@ pub mod engine;
 // The crash-simulation seam moved down to the backend contract: all three
 // `MigrationBackend` implementations trip it on their own apply paths, so it has to
 // sit below the vendors rather than above them. Re-exported so every
-// `zero_migrate::fault::...` path resolves unchanged.
+// `zeroship_migrate::fault::...` path resolves unchanged.
 #[doc(hidden)]
-pub use zero_migrate_backend::fault;
+pub use zeroship_migrate_backend::fault;
 // The typed-id (base62/UUIDv7) machinery lives in the `zero-migrate-ir` leaf crate;
 // re-export it under its historical `crate::id` path.
-pub use zero_migrate_ir::id;
+pub use zeroship_migrate_ir::id;
 // The deploy-bundle migration-file record + content-addressed hash, vendored
 // byte-identically from the upstream bundle layer so the build
 // front-end emits bundle entries without an upstream bundle-layer normal-graph dep.
@@ -146,9 +146,9 @@ pub mod render;
 //
 // It LIVES in `zero-migrate-backend` - it is a contract, not engine logic, and its
 // only dependency was `std`. Re-exported under its historical `crate::driver` path
-// (the same shim idiom `model/mod.rs` uses for `zero_migrate_ir::ir`) so every
-// `crate::driver::...` and `zero_migrate::driver::...` reference resolves unchanged.
-pub use zero_migrate_backend::driver;
+// (the same shim idiom `model/mod.rs` uses for `zeroship_migrate_ir::ir`) so every
+// `crate::driver::...` and `zeroship_migrate::driver::...` reference resolves unchanged.
+pub use zeroship_migrate_backend::driver;
 // The schema-authority core (DDL builders, diff classifier, sentinel codec,
 // schema-shape descriptors). The data-plane query language that used to ride
 // alongside had zero engine callers and was deleted; only the write/diff/describe
@@ -170,9 +170,9 @@ pub(crate) mod test_fixtures;
 // advisory list. `advisories_for_sql` below is the replacement - it asks the
 // REGISTERED backend, and a backend with no analyzer answers `NotAnalyzed` rather
 // than "nothing found". PostgreSQL's analyzers are still exactly where they were, at
-// `zero_migrate_postgres::analysis::analyze`.
+// `zeroship_migrate_postgres::analysis::analyze`.
 pub use approval::{Approval, ApprovalScope};
-pub use zero_migrate_backend::advisory::{Advisory, Severity};
+pub use zeroship_migrate_backend::advisory::{Advisory, Severity};
 // The ADVISORY seam: ask the registered backend for an analysis, never a vendor by
 // name. `advisories_for_sql` and `analyzer_absence` are the two entry points a host
 // needs; the verdict types come with them because a caller cannot handle
@@ -183,7 +183,7 @@ pub use zero_migrate_backend::advisory::{Advisory, Severity};
 // `zero-migrate-postgres`, so the parser-bearing entry point is gone from this root
 // exactly as this comment said it would be.
 pub use render::backends::{advisories_for_sql, analyzer_absence};
-pub use zero_migrate_backend::advisory::{
+pub use zeroship_migrate_backend::advisory::{
     AdvisoryVerdict, AnalyzerAbsent, IndexCoverage, OperationalAdvisor,
 };
 // V8-free, driver-neutral re-exports. Name no host-driver type and back the
@@ -195,13 +195,13 @@ pub use apply::backend::{
 };
 // `PostgresBackend` IS NOT RE-EXPORTED HERE, and neither is any other vendor's.
 // It lives in `zero-migrate-postgres` with the rest of the PostgreSQL execution
-// half, and a `pub use zero_migrate_postgres::PostgresBackend` at this root would be
+// half, and a `pub use zeroship_migrate_postgres::PostgresBackend` at this root would be
 // core naming a vendor CRATE outside the registry - the thing
 // `tests/dialect_matrix/core_names_no_vendor_crate.rs` exists to forbid. Closing one
 // coupling by opening the other would have been a wash. A host that wants a
-// PostgreSQL backend names `zero_migrate_postgres::PostgresBackend`, exactly as it
-// already names `zero_migrate_sqlite::SqliteBackend` and
-// `zero_migrate_mysql::MysqlBackend`.
+// PostgreSQL backend names `zeroship_migrate_postgres::PostgresBackend`, exactly as it
+// already names `zeroship_migrate_sqlite::SqliteBackend` and
+// `zeroship_migrate_mysql::MysqlBackend`.
 // The driver-neutral `SqlSession` seam types (the engine-root `crate::driver`
 // module). Public so a host (napi) driver can construct return values / binds,
 // and so error consumers read the neutral `DbError` (SQLSTATE in `.sqlstate`). The
@@ -213,13 +213,13 @@ pub use apply::backend::{
 // `relations_touched` and `drop_index_targets` are all `libpg_query` vocabulary that
 // only PostgreSQL can populate, so putting them on the neutral engine's public API
 // invited exactly one reading - that a `DdlKind` describes any backend's statement.
-// They live at `zero_migrate_postgres::analysis::classify`, which says whose they
+// They live at `zeroship_migrate_postgres::analysis::classify`, which says whose they
 // are.
 //
 // -- `SqliteBackend`, `SqliteActorError` and `RebuildError` are NOT re-exported here
 // any more, and they did not move to another path in core - they left the crate.
-// The SQLite execution half is `zero_migrate_sqlite::backend` now, and a
-// `pub use zero_migrate_sqlite::SqliteBackend` here would be core naming a vendor
+// The SQLite execution half is `zeroship_migrate_sqlite::backend` now, and a
+// `pub use zeroship_migrate_sqlite::SqliteBackend` here would be core naming a vendor
 // CRATE outside the registry, which is exactly what
 // `tests/dialect_matrix/core_names_no_vendor_crate.rs` forbids: closing one coupling
 // by opening the other would have been a wash. MySQL went the same way one commit
@@ -248,12 +248,12 @@ pub use render::declarative::{
 pub use render::expand_contract::{
     ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent,
 };
-pub use zero_migrate_backend::guard::ParseError;
+pub use zeroship_migrate_backend::guard::ParseError;
 // `check_checksum_drift`, `snapshot_schema` and `resolve_view_bodies` are NOT
 // re-exported here. They read `pg_catalog`/`information_schema` and drive a
 // PostgreSQL savepoint probe; promising them at the crate root said the engine
 // offers them, when what the engine offers is whatever the REGISTERED backend
-// implements. They live at `zero_migrate_postgres::backend::drift_sql`, reached by that
+// implements. They live at `zeroship_migrate_postgres::backend::drift_sql`, reached by that
 // name. The neutral surface is
 // `MigrationBackend::{check_checksum_drift, snapshot_schema}`.
 pub use apply::executor::{
@@ -281,7 +281,7 @@ pub use apply::executor::apply;
 // machinery, and re-exporting them here made the neutral engine's public API hand out
 // PostgreSQL's parser to every downstream caller - the same shape, and the same
 // mistake, as the `MysqlGuard`/`PgGuard`/`SqliteGuard` re-exports described below.
-// They are reachable at `zero_migrate_postgres::guard`, which says whose they are.
+// They are reachable at `zeroship_migrate_postgres::guard`, which says whose they are.
 // A caller that wants "this project's line-1" rather than "PostgreSQL's" asks the
 // registry through `render::backends::guard_for`.
 pub use guard::{GuardConfig, GuardError, GuardOutcome, MigrationGuard};
@@ -313,7 +313,7 @@ pub use guard::{GuardConfig, GuardError, GuardOutcome, MigrationGuard};
 /// crate.
 ///
 /// Kept as a crate-root function because it is public API: the napi addon calls
-/// `zero_migrate::guard_for` across the crate boundary, and the vendor registry it now
+/// `zeroship_migrate::guard_for` across the crate boundary, and the vendor registry it now
 /// delegates to is `pub(crate)`. What changed is not the signature but the OWNER of
 /// the dispatch - it is no longer a second closed-identity match inside the guard crate,
 /// able to disagree with the renderer registry, and it is no longer able to hand a
@@ -333,7 +333,7 @@ pub use model::table_shape::{
     effective_policy_from_charter_layers, effective_policy_from_charter_toml,
     resolve_create_table_policy, ResolvedInject, TableShapeError,
 };
-pub use zero_migrate_policy::{seal, SealError, SealedPolicy};
+pub use zeroship_migrate_policy::{seal, SealError, SealedPolicy};
 // The composed policy-decision point the injection + guard share. Re-exported at
 // the crate root so the napi addon (`gen_artifacts_*`, the schema-emit path) can
 // name it without reaching into the `zero-migrate-policy` crate directly.
@@ -347,7 +347,7 @@ pub use render::fold::{
     descriptors_to_create_ops, fold_ops, fold_ops_onto, history_carries_dialectal_ops,
     recover_check_facet, FoldError, ProduceError, RecoveredCheck,
 };
-pub use zero_migrate_policy::EffectivePolicy;
+pub use zeroship_migrate_policy::EffectivePolicy;
 // The `gen-types` schema-artifact emitter: fold a schema source (op.* migrations or
 // a declared `CollectionDescriptor` set) into the two co-emitted projections
 // (`schema.runtime.json` v1 descriptor + generated `env.db.ts`), plus the in-memory
@@ -363,7 +363,7 @@ pub use render::gen_types::{
 // named by a `DialectId`, describes itself with a `BackendDescriptor`, and is
 // admitted by a `BackendRegistry` that refuses a duplicate id rather than
 // picking a winner. Re-exported so an embedding host names one vocabulary.
-pub use zero_migrate_ir::backend::{
+pub use zeroship_migrate_ir::backend::{
     BackendDescriptor, BackendRegistry, Capability, CapabilitySet, IdentifierLimit, Limits,
     RegistryError,
 };
@@ -371,18 +371,18 @@ pub use zero_migrate_ir::backend::{
 // `{DialectId, DialectSet, MYSQL, POSTGRES, SQLITE}`, and those three were core
 // handing out identities it does not define, from a neutral crate that had no
 // business defining them either. A host names a backend through the crate that IS
-// that backend - `zero_migrate_postgres::DIALECT` - or builds one with
+// that backend - `zeroship_migrate_postgres::DIALECT` - or builds one with
 // `DialectId::new`, which is `const` and `pub` for exactly that. Re-adding them here
 // would put the engine back in the business of knowing which vendors exist.
-pub use zero_migrate_ir::dialect::{DialectId, DialectSet};
+pub use zeroship_migrate_ir::dialect::{DialectId, DialectSet};
 
 // `shipping_vendors()` AND `shipping_backends()` USED TO BE HERE, and they left with
 // the composition they read.
 //
 // Both returned the shipping list, so both are answers only a crate that knows which
-// vendors exist can give. They are `zero_migrate::shipping_vendors` and
-// `zero_migrate::shipping_backends` now - same names, same signatures, one crate up -
-// and every host that called them through `zero_migrate::` is unaffected, because that
+// vendors exist can give. They are `zeroship_migrate::shipping_vendors` and
+// `zeroship_migrate::shipping_backends` now - same names, same signatures, one crate up -
+// and every host that called them through `zeroship_migrate::` is unaffected, because that
 // crate re-exports this one's whole root.
 //
 // This crate TAKES the value instead. `MigrationEngine::new`, the authors, the fold
@@ -398,8 +398,8 @@ pub use apply::journal::{
 // root as if they were THE engine's journal, and most had no consumer outside this
 // crate at all - those are simply gone from the public surface. MySQL and SQLite
 // have their own peer `journal_sql.rs` modules, and no caller reaching
-// `zero_migrate::applied` could ever have got one. The ones with real callers live
-// at `zero_migrate_postgres::backend::journal_sql`, reached by that name; the neutral
+// `zeroship_migrate::applied` could ever have got one. The ones with real callers live
+// at `zeroship_migrate_postgres::backend::journal_sql`, reached by that name; the neutral
 // surface is `MigrationBackend`'s journal methods.
 // The structured pending-contract interlock payloads.
 pub use ops::squash::{squash, SquashError, SquashOutcome};
@@ -530,7 +530,7 @@ pub use render::sql_preview::{
 // in `docs/embedding.md` - USED TO BE HERE, and it moved to `zero-migrate`.
 //
 // It had to. Every example in that guide is a HOST embedding the product: it writes
-// `use zero_migrate::...` and calls `shipping_vendors()`, neither of which resolves in a
+// `use zeroship_migrate::...` and calls `shipping_vendors()`, neither of which resolves in a
 // crate that cannot see the composition. The guide is the Rust half of the PUBLIC
 // surface, and the public surface is the composing crate's.
 //

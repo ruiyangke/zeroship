@@ -7,8 +7,8 @@
 //! # `sqlite.strict` is NOT `TableStrictness`
 //!
 //! Read this before touching either. The neutral IR already has a field called
-//! `strictness` - [`TableStrictness`](zero_migrate_ir::ir::TableStrictness) on
-//! [`TableRuntimeOptions`](zero_migrate_ir::ir::TableRuntimeOptions) - and it is a
+//! `strictness` - [`TableStrictness`](zeroship_migrate_ir::ir::TableStrictness) on
+//! [`TableRuntimeOptions`](zeroship_migrate_ir::ir::TableRuntimeOptions) - and it is a
 //! DIFFERENT THING that happens to share a word:
 //!
 //! * `TableStrictness` is `Strict | Lenient | Off`: zero-migrate's own DEPLOY-TIME data
@@ -22,9 +22,9 @@
 //! meeting them a week apart will conflate them, so it is named here rather than left to
 //! be rediscovered.
 
-use zero_migrate_backend::attribute::{AttrDef, AttrShape, AttributeVocabulary};
-use zero_migrate_backend::declare_attributes;
-use zero_migrate_ir::attribute::{
+use zeroship_migrate_backend::attribute::{AttrDef, AttrShape, AttributeVocabulary};
+use zeroship_migrate_backend::declare_attributes;
+use zeroship_migrate_ir::attribute::{
     CreatePartitionAttributes, CreateTableAttributes, SetTableOptionsAttributes,
 };
 

@@ -6,9 +6,9 @@
 //! restored. These arms pin both readings so a future change that narrows the
 //! field has to break a test rather than a host.
 
-use zero_migrate::model::migration::Migration;
-use zero_migrate::model::migration::{Checksum, ChecksumInput, MigrationFlags, MigrationId};
-use zero_migrate::AppliedPlan;
+use zeroship_migrate::model::migration::Migration;
+use zeroship_migrate::model::migration::{Checksum, ChecksumInput, MigrationFlags, MigrationId};
+use zeroship_migrate::AppliedPlan;
 
 fn mig(up: &str, down: Option<&str>) -> Migration {
     let flags = MigrationFlags::default();

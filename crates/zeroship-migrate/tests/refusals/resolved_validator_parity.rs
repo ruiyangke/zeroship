@@ -19,9 +19,9 @@
 
 use std::collections::BTreeMap;
 
-use zero_migrate::model::expr::{AggFunc, BinaryOp, Expr};
-use zero_migrate::model::ir::{BackfillSetValue, CursorStability, IrScalar, IrValue, Op};
-use zero_migrate::model::validate::validate_op_resolved;
+use zeroship_migrate::model::expr::{AggFunc, BinaryOp, Expr};
+use zeroship_migrate::model::ir::{BackfillSetValue, CursorStability, IrScalar, IrValue, Op};
+use zeroship_migrate::model::validate::validate_op_resolved;
 
 /// A live column map that RESOLVES `events`, so the resolving branch is taken.
 fn live() -> BTreeMap<String, Vec<String>> {
@@ -33,9 +33,9 @@ fn live() -> BTreeMap<String, Vec<String>> {
 
 fn refusal(op: &Op) -> Option<String> {
     validate_op_resolved(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         op,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &live(),
         0,
     )
@@ -88,7 +88,7 @@ fn backfill_with(filter: Expr) -> Op {
         .into_iter()
         .collect(),
         filter: Some(filter),
-        batch_size: zero_migrate::model::ir::SafeU64::new(100).expect("a JS-safe batch size"),
+        batch_size: zeroship_migrate::model::ir::SafeU64::new(100).expect("a JS-safe batch size"),
         name: "backfill_parity".to_string(),
         schema: None,
     }

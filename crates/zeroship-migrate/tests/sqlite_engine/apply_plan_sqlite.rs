@@ -16,13 +16,13 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::{
+use zeroship_migrate::{
     Approval, CollectionDescriptor, DeclarativeAuthor, ExecutorConfig, FieldDescriptor,
     MigrationBackend, MigrationEngine, RenameHint, SchemaSnapshot,
 };
-use zero_migrate::{PlanStep, RenameStep};
-use zero_migrate_sqlite::backend::Mode;
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate::{PlanStep, RenameStep};
+use zeroship_migrate_sqlite::backend::Mode;
+use zeroship_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_demo";
 const APP: &str = "app_demo";
@@ -50,10 +50,10 @@ fn backend(p: &Paths) -> SqliteBackend {
 
 fn sqlite_author() -> DeclarativeAuthor {
     DeclarativeAuthor::new_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        zero_migrate_sqlite::DIALECT,
+        zeroship_migrate_sqlite::DIALECT,
     )
 }
 
@@ -61,20 +61,20 @@ fn exec_cfg() -> ExecutorConfig {
     ExecutorConfig::new(PROJECT, PROJECT, support::no_inject(PROJECT))
 }
 
-fn effective_policy() -> zero_migrate::EffectivePolicy {
+fn effective_policy() -> zeroship_migrate::EffectivePolicy {
     support::confined_charter()
 }
 
 fn desired_snapshot(
     project_schema: &str,
     descriptors: &[CollectionDescriptor],
-    effective: &zero_migrate::EffectivePolicy,
-) -> Result<zero_migrate::DesiredSchema, zero_migrate::DeclarativeError> {
-    zero_migrate::desired_snapshot_for_dialect(
-        zero_migrate::shipping_vendors(),
+    effective: &zeroship_migrate::EffectivePolicy,
+) -> Result<zeroship_migrate::DesiredSchema, zeroship_migrate::DeclarativeError> {
+    zeroship_migrate::desired_snapshot_for_dialect(
+        zeroship_migrate::shipping_vendors(),
         project_schema,
         descriptors,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         effective,
     )
 }
@@ -177,7 +177,7 @@ async fn sqlite_online_rename_executes_via_rebuild_one_through_apply_plan() {
     let steps = vec![PlanStep::OnlineRename(RenameStep::TableRebuild(
         rebuild.clone(),
     ))];
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let out = engine
         .apply_plan(
             &steps,
@@ -185,7 +185,7 @@ async fn sqlite_online_rename_executes_via_rebuild_one_through_apply_plan() {
             &be,
             &exec_cfg(),
             "deployer",
-            zero_migrate::apply::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("apply_plan drives the SQLite rebuild");
@@ -226,7 +226,7 @@ async fn sqlite_online_rename_executes_via_rebuild_one_through_apply_plan() {
     let applied = be.applied(&exec_cfg()).await.expect("read journal");
     assert!(
         applied.iter().any(|e| e.version == rebuild_version
-            && matches!(e.phase, zero_migrate::apply::journal::Phase::Completed)),
+            && matches!(e.phase, zeroship_migrate::apply::journal::Phase::Completed)),
         "the rebuild migration's version is journaled completed"
     );
 
@@ -240,7 +240,7 @@ async fn sqlite_online_rename_executes_via_rebuild_one_through_apply_plan() {
             &be,
             &exec_cfg(),
             "deployer",
-            zero_migrate::apply::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("re-run");
@@ -340,7 +340,7 @@ async fn rebuild_first_plan_against_fresh_journal_bootstraps_it() {
     // The FIRST (and only) step is the TableRebuild; the `_mig` journal does not
     // exist yet — the rebuild arm's net-applied-skip lookup reads it first.
     let steps = vec![PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild))];
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let out = engine
         .apply_plan(
             &steps,
@@ -348,7 +348,7 @@ async fn rebuild_first_plan_against_fresh_journal_bootstraps_it() {
             &be,
             &exec_cfg(),
             "deployer",
-            zero_migrate::apply::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("a rebuild-first plan against a fresh journal must bootstrap it up front");
@@ -416,7 +416,7 @@ async fn sqlite_rename_opens_no_obligation_and_never_gates_a_follow_on_deploy() 
         )
         .expect("rename diff");
     let rebuild = plan.rebuilds.into_iter().next().unwrap();
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     engine
         .apply_plan(
             &[PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild))],
@@ -424,7 +424,7 @@ async fn sqlite_rename_opens_no_obligation_and_never_gates_a_follow_on_deploy() 
             &be,
             &exec_cfg(),
             "deployer",
-            zero_migrate::apply::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("sqlite rebuild rename applies");
@@ -438,23 +438,23 @@ async fn sqlite_rename_opens_no_obligation_and_never_gates_a_follow_on_deploy() 
     // A follow-on deploy that TOUCHES the just-renamed `people` table is NOT gated
     // (on PG this would be refused while a contract is pending; on SQLite there is
     // no pending partition, so it proceeds — the interlock is structurally PG-only).
-    let add = zero_migrate::model::migration::Migration {
-        version: zero_migrate::model::migration::MigrationId::generate(),
+    let add = zeroship_migrate::model::migration::Migration {
+        version: zeroship_migrate::model::migration::MigrationId::generate(),
         name: "add_people_label".into(),
         up: "ALTER TABLE people ADD COLUMN label text".into(),
         down: None,
-        checksum: zero_migrate::model::migration::Checksum::of(
-            &zero_migrate::model::migration::ChecksumInput {
+        checksum: zeroship_migrate::model::migration::Checksum::of(
+            &zeroship_migrate::model::migration::ChecksumInput {
                 up: "addlabel",
                 down: None,
-                flags: &zero_migrate::model::migration::MigrationFlags::default(),
+                flags: &zeroship_migrate::model::migration::MigrationFlags::default(),
                 owner_app: APP,
                 depends_on: &[],
                 supersedes: &[],
                 preconditions: &[],
             },
         ),
-        flags: zero_migrate::model::migration::MigrationFlags::default(),
+        flags: zeroship_migrate::model::migration::MigrationFlags::default(),
         owner_app: APP.into(),
         depends_on: vec![],
         supersedes: vec![],
@@ -470,7 +470,7 @@ async fn sqlite_rename_opens_no_obligation_and_never_gates_a_follow_on_deploy() 
             &be,
             &exec_cfg(),
             "deployer",
-            zero_migrate::apply::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("a follow-on touch of the renamed table is NEVER gated on SQLite");
@@ -510,17 +510,17 @@ async fn sqlite_applies_a_zero_lock_budget_the_server_dialects_refuse() {
         .expect("mode");
 
     let up = "ALTER TABLE widgets ADD COLUMN note text";
-    let flags = zero_migrate::model::migration::MigrationFlags {
+    let flags = zeroship_migrate::model::migration::MigrationFlags {
         lock_timeout_ms: Some(0),
         ..Default::default()
     };
-    let add = zero_migrate::model::migration::Migration {
-        version: zero_migrate::model::migration::MigrationId::generate(),
+    let add = zeroship_migrate::model::migration::Migration {
+        version: zeroship_migrate::model::migration::MigrationId::generate(),
         name: "add_widgets_note".into(),
         up: up.into(),
         down: None,
-        checksum: zero_migrate::model::migration::Checksum::of(
-            &zero_migrate::model::migration::ChecksumInput {
+        checksum: zeroship_migrate::model::migration::Checksum::of(
+            &zeroship_migrate::model::migration::ChecksumInput {
                 up,
                 down: None,
                 flags: &flags,
@@ -539,14 +539,14 @@ async fn sqlite_applies_a_zero_lock_budget_the_server_dialects_refuse() {
         effect: None,
     };
 
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &[PlanStep::Ddl(add)],
             Approval::None,
             &be,
             &exec_cfg(),
             "deployer",
-            zero_migrate::apply::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("SQLite never resolves a server timeout budget, so a zero is not a refusal");
@@ -568,7 +568,7 @@ async fn sqlite_applies_a_zero_lock_budget_the_server_dialects_refuse() {
 /// change a number it agrees with.
 #[compio::test]
 async fn a_plan_ending_in_an_unsupported_online_rename_commits_none_of_its_earlier_ddl() {
-    use zero_migrate::{ExpandContractAuthor, OnlineIntent};
+    use zeroship_migrate::{ExpandContractAuthor, OnlineIntent};
 
     let v1 = vec![CollectionDescriptor {
         name: "people".into(),
@@ -593,17 +593,17 @@ async fn a_plan_ending_in_an_unsupported_online_rename_commits_none_of_its_earli
 
     // Two ordinary additive DDL steps, each of which SQLite applies happily on its
     // own. They are the steps that must not commit.
-    fn add_column(name: &str) -> zero_migrate::model::migration::Migration {
+    fn add_column(name: &str) -> zeroship_migrate::model::migration::Migration {
         let up = format!("ALTER TABLE people ADD COLUMN {name} text");
-        let flags = zero_migrate::model::migration::MigrationFlags::default();
-        zero_migrate::model::migration::Migration {
-            version: zero_migrate::model::migration::MigrationId::derive(
+        let flags = zeroship_migrate::model::migration::MigrationFlags::default();
+        zeroship_migrate::model::migration::Migration {
+            version: zeroship_migrate::model::migration::MigrationId::derive(
                 "sqlite_online_preflight",
                 name.as_bytes(),
             ),
             name: format!("add_people_{name}"),
-            checksum: zero_migrate::model::migration::Checksum::of(
-                &zero_migrate::model::migration::ChecksumInput {
+            checksum: zeroship_migrate::model::migration::Checksum::of(
+                &zeroship_migrate::model::migration::ChecksumInput {
                     up: &up,
                     down: None,
                     flags: &flags,
@@ -633,10 +633,10 @@ async fn a_plan_ending_in_an_unsupported_online_rename_commits_none_of_its_earli
     // `None`. The SQLite differ never authors this shape; it is constructed
     // directly because the defect is that nothing REFUSES such a plan up front.
     let rename = ExpandContractAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        zero_migrate_postgres::DIALECT,
+        zeroship_migrate_postgres::DIALECT,
     )
     .author(&OnlineIntent::RenameColumn {
         table: "people".into(),
@@ -652,14 +652,14 @@ async fn a_plan_ending_in_an_unsupported_online_rename_commits_none_of_its_earli
         PlanStep::OnlineRename(RenameStep::ExpandContract(rename)),
     ];
 
-    let err = MigrationEngine::new(zero_migrate::shipping_vendors())
+    let err = MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &steps,
             Approval::Approved,
             &be,
             &exec_cfg(),
             "deployer",
-            zero_migrate::apply::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect_err("a rename the target cannot perform must refuse the whole plan");

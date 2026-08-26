@@ -69,13 +69,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_ir::ir::{MigrationIr, Op};
-use zero_migrate_ir::migration::MigrationFlags;
-use zero_migrate_ir::policy::DestructiveOps;
-use zero_migrate_ir::policy::SchemaScope;
-use zero_migrate_ir::policy_registry;
-use zero_migrate_policy::{
+use zeroship_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::ir::{MigrationIr, Op};
+use zeroship_migrate_ir::migration::MigrationFlags;
+use zeroship_migrate_ir::policy::DestructiveOps;
+use zeroship_migrate_ir::policy::SchemaScope;
+use zeroship_migrate_ir::policy_registry;
+use zeroship_migrate_policy::{
     normalize_object_name, EffectivePolicy, GrantRegion, KnobKey, KnobValue, ObjectModel,
     ObjectName, ShapeElement,
 };
@@ -344,7 +344,7 @@ impl GuardConfig {
     /// rather than a built [`ObjectName`].
     ///
     /// The object is built THROUGH [`normalize_object_name`], the same way
-    /// `zero_migrate_ir::policy_approval` builds its own: the composer's scope matcher
+    /// `zeroship_migrate_ir::policy_approval` builds its own: the composer's scope matcher
     /// PG-folds both sides, so raw table bytes would let a table spelled `"Users"` slip
     /// past a scope of `app.users`.
     ///
@@ -488,7 +488,7 @@ impl GuardConfig {
 }
 
 /// T8 - the EXTERNAL trust boundary, pinned as `compile_fail` doctests. A doctest
-/// is compiled as a SEPARATE crate that `use`s `zero_migrate_backend`, so it
+/// is compiled as a SEPARATE crate that `use`s `zeroship_migrate_backend`, so it
 /// exercises exactly the boundary an external consumer of this crate sits behind.
 ///
 /// KEEP THE FIELD LISTS BELOW EXACT. A `compile_fail` doctest passes when the code
@@ -505,9 +505,9 @@ impl GuardConfig {
 /// unforgeable). This MUST fail to compile:
 ///
 /// ```compile_fail
-/// use zero_migrate_backend::guard::GuardConfig;
+/// use zeroship_migrate_backend::guard::GuardConfig;
 /// let _ = GuardConfig {
-///     dialect: zero_migrate_ir::dialect::DialectId::new("postgres"),
+///     dialect: zeroship_migrate_ir::dialect::DialectId::new("postgres"),
 ///     effective: unimplemented!(),
 /// };
 /// ```
@@ -518,7 +518,7 @@ impl GuardConfig {
 /// MUST fail to compile:
 ///
 /// ```compile_fail
-/// let _ = zero_migrate_policy::EffectivePolicy {
+/// let _ = zeroship_migrate_policy::EffectivePolicy {
 ///     registry: unimplemented!(),
 ///     layers: unimplemented!(),
 /// };
@@ -825,7 +825,7 @@ fn table_key_for_policy(
 ///
 /// `safety.require_rls` is registered `ObjectModel::PerTable`, so every one of those
 /// decisions resolves at the CONCRETE table it is about, the same way
-/// `zero_migrate_ir::policy_approval` resolves its sibling `safety.require_approval`.
+/// `zeroship_migrate_ir::policy_approval` resolves its sibling `safety.require_approval`.
 /// The net-state walk therefore runs unconditionally: whether an obligation covers a
 /// table is a property of that table, not of the migration.
 ///

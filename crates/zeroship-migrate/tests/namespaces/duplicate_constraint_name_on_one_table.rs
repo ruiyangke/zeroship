@@ -30,14 +30,14 @@
 //! creates a schema-level index and CHECK does not. `name_claimed_twice_in_one_
 //! migration.rs` carries the control that pins it.
 
-use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::model::validate::validate_ir;
-use zero_migrate::DialectId;
+use zeroship_migrate::model::ir::MigrationIr;
+use zeroship_migrate::model::validate::validate_ir;
+use zeroship_migrate::DialectId;
 
 fn verdict(dialect: &DialectId, ops: &str) -> Result<(), String> {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{ops}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
-    validate_ir(zero_migrate::shipping_vendors(), &ir, dialect)
+    validate_ir(zeroship_migrate::shipping_vendors(), &ir, dialect)
         .map_err(|e| format!("{}: {}", e.code, e.reason))
 }
 
@@ -84,7 +84,7 @@ fn expect_constraint_refusal(dialect: &DialectId, ops: &str, needle: &str, what:
 #[test]
 fn two_constraints_of_one_name_on_one_table_are_refused_on_postgres() {
     let refusal = verdict(
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &format!("{T},{},{}", check("same", "v"), check("same", "w")),
     )
     .expect_err("PostgreSQL rejects this with `constraint \"same\" ... already exists`");
@@ -103,7 +103,7 @@ fn the_clash_is_the_name_not_the_kind() {
     // PostgreSQL gives the SAME error for CHECK-then-UNIQUE, so a check keyed on
     // (kind, name) rather than name alone would miss this.
     expect_constraint_refusal(
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &format!(
             r#"{T},{},{{"op":"addConstraint","table":"a","constraint":{{"name":"same","kind":{{"kind":"unique","columns":["w"]}}}}}}"#,
             check("same", "v")
@@ -120,7 +120,7 @@ fn two_constraints_of_one_name_on_one_table_are_refused_on_mysql() {
     // MySQL test passes whatever this rule does. It would be green for the wrong
     // reason - the first draft of this fixture was.
     expect_constraint_refusal(
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         &format!("{T},{},{}", uniq("same", "v"), uniq("same", "w")),
         r#"this addConstraint claims the name "same""#,
         "MySQL rejects a repeated constraint name with ER_DUP_KEYNAME",
@@ -130,7 +130,7 @@ fn two_constraints_of_one_name_on_one_table_are_refused_on_mysql() {
 #[test]
 fn a_create_table_naming_one_constraint_twice_is_refused() {
     expect_constraint_refusal(
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         r#"{"op":"createTable","name":"a","columns":[{"name":"c0","type":"int","nullable":false},{"name":"v","type":"int","nullable":true}],"primaryKey":["c0"],"constraints":[{"name":"same","kind":{"kind":"unique","columns":["v"]}},{"name":"same","kind":{"kind":"unique","columns":["c0"]}}]}"#,
         r#"names constraint "same" more than once"#,
         "the same mistake authored inline in a createTable",
@@ -155,7 +155,7 @@ fn sqlite_still_accepts_what_sqlite_accepts() {
     // FK is the one `addConstraint` kind still authorable on SQLite, so the
     // duplicate-name rule is actually REACHED and can be observed not to fire.
     verdict(
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &format!("{T},{},{}", fk("same", "v"), fk("same", "w")),
     )
     .expect("SQLite accepts duplicate constraint names; the engine must too");
@@ -164,7 +164,7 @@ fn sqlite_still_accepts_what_sqlite_accepts() {
 #[test]
 fn two_differently_named_constraints_are_still_allowed() {
     verdict(
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &format!("{T},{},{}", check("one", "v"), check("two", "w")),
     )
     .expect("distinct names on one table are ordinary");
@@ -173,7 +173,7 @@ fn two_differently_named_constraints_are_still_allowed() {
 #[test]
 fn dropping_a_constraint_frees_its_name() {
     verdict(
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &format!(
             r#"{T},{},{{"op":"dropConstraint","table":"a","name":"same"}},{}"#,
             check("same", "v"),
@@ -186,7 +186,7 @@ fn dropping_a_constraint_frees_its_name() {
 #[test]
 fn dropping_the_table_frees_its_constraint_names() {
     verdict(
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &format!(
             r#"{T},{},{{"op":"dropTable","table":"a"}},{T},{}"#,
             check("same", "v"),
@@ -200,7 +200,7 @@ fn dropping_the_table_frees_its_constraint_names() {
 fn the_same_constraint_name_on_two_tables_is_still_allowed_on_postgres() {
     // The cross-table boundary, measured: PostgreSQL accepts this for CHECK.
     verdict(
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &format!(
             r#"{T},{{"op":"createTable","name":"b","columns":[{{"name":"c0","type":"int","nullable":false}},{{"name":"v","type":"int","nullable":true}}],"primaryKey":["c0"]}},{},{{"op":"addConstraint","table":"b","constraint":{{"name":"same","kind":{{"kind":"check","expr":{{"node":"binOp","op":"gt","lhs":{{"node":"colRef","name":"v"}},"rhs":{{"node":"literal","value":0}}}}}}}}}}"#,
             check("same", "v")
@@ -214,7 +214,7 @@ fn unnamed_constraints_do_not_collide() {
     // A constraint with no explicit name has its name derived later. Treating
     // absent names as equal would refuse two ordinary anonymous constraints.
     verdict(
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &format!(
             r#"{T},{{"op":"addConstraint","table":"a","constraint":{{"kind":{{"kind":"unique","columns":["v"]}}}}}},{{"op":"addConstraint","table":"a","constraint":{{"kind":{{"kind":"unique","columns":["w"]}}}}}}"#
         ),

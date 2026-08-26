@@ -26,8 +26,8 @@ use crate::guard::{GuardConfig, GuardError};
 use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId};
 use crate::render::backends::guard_for;
 use crate::EffectivePolicy;
-use zero_migrate_backend::registry::VendorSet;
-use zero_migrate_ir::dialect::DialectId;
+use zeroship_migrate_backend::registry::VendorSet;
+use zeroship_migrate_ir::dialect::DialectId;
 
 /// A pluggable source of versioned migrations.
 ///

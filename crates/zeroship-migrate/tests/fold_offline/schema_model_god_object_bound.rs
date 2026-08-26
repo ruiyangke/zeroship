@@ -42,8 +42,8 @@
 
 use crate::support;
 
-use zero_migrate::model::schema_model;
-use zero_migrate::FieldDescriptor;
+use zeroship_migrate::model::schema_model;
+use zeroship_migrate::FieldDescriptor;
 
 /// Where one runtime-descriptor field would land in a unified model. The `why` on each
 /// arm is not decoration: routing a field into the wrong class is exactly how the bound

@@ -28,13 +28,13 @@ use crate::support;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::apply::executor::LockMode;
-use zero_migrate::model::migration::{Checksum, ChecksumInput, MigrationFlags, MigrationId};
-use zero_migrate::model::precondition::{OnUnmet, Precondition, PreconditionCheck};
-use zero_migrate::render::step::PlanStep;
-use zero_migrate::{model::migration::Migration, Approval, ExecutorConfig, MigrationEngine};
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::apply::executor::LockMode;
+use zeroship_migrate::model::migration::{Checksum, ChecksumInput, MigrationFlags, MigrationId};
+use zeroship_migrate::model::precondition::{OnUnmet, Precondition, PreconditionCheck};
+use zeroship_migrate::render::step::PlanStep;
+use zeroship_migrate::{model::migration::Migration, Approval, ExecutorConfig, MigrationEngine};
+use zeroship_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_pc";
 const OWNER: &str = "app_test";
@@ -102,7 +102,7 @@ async fn guarded_table_exists(backend: &SqliteBackend) -> bool {
 }
 
 async fn apply(db: &Db, cfg: &ExecutorConfig, migration: Migration, tag: &str) -> bool {
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &[PlanStep::Ddl(migration)],
             Approval::Approved,

@@ -22,10 +22,10 @@
 //! pass. A joined view is the shape that would break if that opt-in were ever turned
 //! into a default, and the third test here is what would notice.
 
-use zero_migrate::model::expr::{BinaryOp, Expr};
-use zero_migrate::model::ir::{IrScalar, IrValue, MigrationIr, Op, CURRENT_IR_VERSION};
-use zero_migrate::model::validate::validate_ir_scoped;
-use zero_migrate::SchemaScope;
+use zeroship_migrate::model::expr::{BinaryOp, Expr};
+use zeroship_migrate::model::ir::{IrScalar, IrValue, MigrationIr, Op, CURRENT_IR_VERSION};
+use zeroship_migrate::model::validate::validate_ir_scoped;
+use zeroship_migrate::SchemaScope;
 
 fn refusal_for(op: Op) -> Option<String> {
     let ir = MigrationIr {
@@ -42,9 +42,9 @@ fn refusal_for(op: Op) -> Option<String> {
         checksum: None,
     };
     validate_ir_scoped(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         Some(&SchemaScope::Unconfined),
     )
     .err()
@@ -132,9 +132,9 @@ fn a_view_that_joins_keeps_its_lenient_pass() {
     .expect("the joined-view fixture parses");
 
     let outcome = validate_ir_scoped(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &create_view,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         Some(&SchemaScope::Unconfined),
     );
     assert!(

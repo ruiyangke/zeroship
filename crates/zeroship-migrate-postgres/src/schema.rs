@@ -1,15 +1,15 @@
 //! PostgreSQL schema/DDL spelling.
 
-use zero_migrate_backend::ddl::ExclusionConstraintRequest;
-use zero_migrate_backend::renderer::DmlRenderer;
-use zero_migrate_backend::schema::{
+use zeroship_migrate_backend::ddl::ExclusionConstraintRequest;
+use zeroship_migrate_backend::renderer::DmlRenderer;
+use zeroship_migrate_backend::schema::{
     build_encryption_sentinel_comments, build_mask_sentinel_comments, char_len,
     decimal_precision_scale, max_length, AddColumnDefinition, AddColumnIfNotExistsRequest,
     CreateIndexIfNotExistsRequest, SchemaRenderer,
 };
-use zero_migrate_backend::snapshot::ColumnSnapshot;
-use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_ir::ir::{ExclusionMethod, ExclusionOperator};
+use zeroship_migrate_backend::snapshot::ColumnSnapshot;
+use zeroship_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::ir::{ExclusionMethod, ExclusionOperator};
 
 // This module's vendor identity, read from the crate's ONE declaration of it.
 use crate::DIALECT;
@@ -34,13 +34,13 @@ impl SchemaRenderer for PostgresSchemaRenderer {
 
     /// PostgreSQL snapshots expose structured catalog facts rather than retaining
     /// a vendor CREATE statement for surgical rewrites.
-    fn stored_ddl(&self) -> Option<&'static dyn zero_migrate_backend::stored_ddl::StoredDdl> {
+    fn stored_ddl(&self) -> Option<&'static dyn zeroship_migrate_backend::stored_ddl::StoredDdl> {
         None
     }
 
     fn table_rebuild_policy(
         &self,
-    ) -> Option<&'static dyn zero_migrate_backend::table_rebuild::TableRebuildPolicy> {
+    ) -> Option<&'static dyn zeroship_migrate_backend::table_rebuild::TableRebuildPolicy> {
         // PostgreSQL reconciles the supported existing-table changes natively.
         None
     }
@@ -110,7 +110,7 @@ impl SchemaRenderer for PostgresSchemaRenderer {
     /// in its final catalog form.
     fn project_derived_ann_index(
         &self,
-        _index: &mut zero_migrate_backend::snapshot::IndexSnapshot,
+        _index: &mut zeroship_migrate_backend::snapshot::IndexSnapshot,
     ) -> bool {
         true
     }
@@ -118,8 +118,8 @@ impl SchemaRenderer for PostgresSchemaRenderer {
     /// PostgreSQL has no additional key-storage restriction at this seam.
     fn validate_key_storage(
         &self,
-        _desired: &zero_migrate_backend::snapshot::SchemaSnapshot,
-        _live: &zero_migrate_backend::snapshot::SchemaSnapshot,
+        _desired: &zeroship_migrate_backend::snapshot::SchemaSnapshot,
+        _live: &zeroship_migrate_backend::snapshot::SchemaSnapshot,
     ) -> Result<(), String> {
         Ok(())
     }
@@ -129,8 +129,8 @@ impl SchemaRenderer for PostgresSchemaRenderer {
         _position: &str,
         _table: &str,
         _column: &str,
-        _evidence: zero_migrate_backend::schema::KeyStorageEvidence<'_>,
-    ) -> Option<zero_migrate_backend::schema::StorageValidationRefusal> {
+        _evidence: zeroship_migrate_backend::schema::KeyStorageEvidence<'_>,
+    ) -> Option<zeroship_migrate_backend::schema::StorageValidationRefusal> {
         // PostgreSQL accepts the physical storage families this engine exposes as
         // key columns without a MySQL-style prefix-length requirement.
         None
@@ -141,7 +141,7 @@ impl SchemaRenderer for PostgresSchemaRenderer {
         _column: &str,
         _rendered_type: &str,
         _rendered_default: &str,
-    ) -> Option<zero_migrate_backend::schema::StorageValidationRefusal> {
+    ) -> Option<zeroship_migrate_backend::schema::StorageValidationRefusal> {
         // PostgreSQL accepts these literal defaults; it has no storage-family
         // exception corresponding to MySQL's LOB/JSON/spatial rule.
         None
@@ -149,8 +149,8 @@ impl SchemaRenderer for PostgresSchemaRenderer {
 
     fn dual_write_trigger(
         &self,
-        spec: &zero_migrate_backend::schema::DualWriteTriggerSpec<'_>,
-    ) -> Option<zero_migrate_backend::schema::DualWriteTriggerSql> {
+        spec: &zeroship_migrate_backend::schema::DualWriteTriggerSpec<'_>,
+    ) -> Option<zeroship_migrate_backend::schema::DualWriteTriggerSql> {
         // This backend answers `ColumnRenameStrategy::ExpandContract` below, so it
         // MUST answer here; the two are one decision stated twice, and a `None`
         // paired with `ExpandContract` would leave the engine with a rename it
@@ -160,12 +160,12 @@ impl SchemaRenderer for PostgresSchemaRenderer {
 
     fn existing_column_change_strategy(
         &self,
-    ) -> zero_migrate_backend::schema::ExistingColumnChangeStrategy {
-        zero_migrate_backend::schema::ExistingColumnChangeStrategy::Native
+    ) -> zeroship_migrate_backend::schema::ExistingColumnChangeStrategy {
+        zeroship_migrate_backend::schema::ExistingColumnChangeStrategy::Native
     }
 
-    fn column_rename_strategy(&self) -> zero_migrate_backend::schema::ColumnRenameStrategy {
-        zero_migrate_backend::schema::ColumnRenameStrategy::ExpandContract
+    fn column_rename_strategy(&self) -> zeroship_migrate_backend::schema::ColumnRenameStrategy {
+        zeroship_migrate_backend::schema::ColumnRenameStrategy::ExpandContract
     }
 
     fn supports_forward_inline_foreign_key(&self) -> bool {
@@ -234,7 +234,7 @@ impl SchemaRenderer for PostgresSchemaRenderer {
     }
 
     fn schema_grammar_string_literal(&self, value: &str) -> String {
-        zero_migrate_backend::dml::sql_string_literal(value)
+        zeroship_migrate_backend::dml::sql_string_literal(value)
     }
 
     fn empty_json_expr(&self, object: bool) -> &'static str {
@@ -252,7 +252,7 @@ impl SchemaRenderer for PostgresSchemaRenderer {
     fn json_value_default_expr(&self, json: &str) -> String {
         format!(
             "{}::jsonb",
-            zero_migrate_backend::dml::sql_string_literal(json)
+            zeroship_migrate_backend::dml::sql_string_literal(json)
         )
     }
 

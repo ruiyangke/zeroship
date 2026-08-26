@@ -58,7 +58,7 @@
 //! refusal change by construction.
 
 use std::collections::BTreeMap;
-use zero_migrate_backend::registry::VendorSet;
+use zeroship_migrate_backend::registry::VendorSet;
 
 use super::differential_corpus::{
     dialect_label, parse, policy, read_golden, CASES, DIALECTS, SCHEMA, STEMS, STREAMS,
@@ -70,7 +70,7 @@ use crate::model::snapshot::{
 use crate::render::fold::fold_ops;
 use crate::render::fold::single_fold;
 use crate::test_fixtures::POSTGRES;
-use zero_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::dialect::DialectId;
 
 /// The projections still measurable here, named for the walker each must reproduce.
 ///

@@ -51,8 +51,8 @@ fn best_of(run: impl Fn() -> f64) -> f64 {
     (0..REPEATS).map(|_| run()).fold(f64::INFINITY, f64::min)
 }
 
-use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::model::validate::validate_ir;
+use zeroship_migrate::model::ir::MigrationIr;
+use zeroship_migrate::model::validate::validate_ir;
 
 /// Validate `n` `createTable` ops of `c` columns each, returning seconds.
 fn validate_shape(n: usize, c: usize) -> f64 {
@@ -74,9 +74,9 @@ fn validate_shape(n: usize, c: usize) -> f64 {
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("envelope parses");
     let start = Instant::now();
     validate_ir(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
     )
     .expect("validates");
     start.elapsed().as_secs_f64()

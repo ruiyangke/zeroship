@@ -5,7 +5,7 @@
 //! The flow, over a REAL Postgres on :5440:
 //!   1. open a live `compio_postgres::Client` and wrap it in [`CompioPgSession`]
 //!      (this crate's `driver::SqlSession` adapter);
-//!   2. author a `zero_migrate` IR envelope (`createTable` + `addColumn`) and run
+//!   2. author a `zeroship_migrate` IR envelope (`createTable` + `addColumn`) and run
 //!      it through the REAL fail-closed load gate + lower (`IrAuthor::load_and_lower`,
 //!      Postgres dialect);
 //!   3. construct a `PostgresBackend<CompioPgSession>` + `MigrationEngine` and apply
@@ -19,8 +19,8 @@
 //! (suffixed by a unique token) so the shared DB stays clean and re-runs are
 //! independent.
 
-use zero_migrate::driver::SqlSession;
-use zero_migrate::{
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::{
     effective_policy_from_charter_toml, resolve_create_table_policy, Approval, EffectivePolicy,
     ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine, MigrationIr,
     PostgresBackend, SqlDialect,
@@ -190,7 +190,7 @@ async fn ir_envelope_lowers_and_applies_over_native_compio_seam() {
     ensure_project_schema(&session, &cfg).await;
 
     // A single IR envelope with BOTH ops: createTable notes(title, body) then
-    // addColumn notes.tag. Authored as a zero_migrate MigrationIr/envelope.
+    // addColumn notes.tag. Authored as a zeroship_migrate MigrationIr/envelope.
     let ir = resolved_envelope_json(
         r#"{"ir_version":1,"name":"create_notes_and_add_tag","ops":[
             {"op":"createTable","name":"notes","columns":[
@@ -254,7 +254,7 @@ async fn ir_envelope_lowers_and_applies_over_native_compio_seam() {
     // (The confined table-shape policy injects system-column/index migrations, so
     // the envelope lowers to `migrations.len()` migrations, not one — the journal
     // row count must match the number applied.)
-    let applied = zero_migrate::applied(&session, &cfg)
+    let applied = zeroship_migrate::applied(&session, &cfg)
         .await
         .expect("journal read over the seam");
     assert_eq!(
@@ -270,7 +270,7 @@ async fn ir_envelope_lowers_and_applies_over_native_compio_seam() {
         .await
         .expect("idempotent re-apply");
     assert!(out2.is_noop(), "second apply is a no-op");
-    let applied2 = zero_migrate::applied(&session, &cfg)
+    let applied2 = zeroship_migrate::applied(&session, &cfg)
         .await
         .expect("journal re-read");
     assert_eq!(

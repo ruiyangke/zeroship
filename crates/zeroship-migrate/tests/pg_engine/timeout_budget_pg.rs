@@ -30,8 +30,8 @@ use std::time::Duration;
 use crate::support::PgDevSession;
 
 use crate::support::apply_pg as apply;
-use zero_migrate::model::migration::Checksum;
-use zero_migrate::{Approval, ExecutorConfig, Migration, MigrationFlags, MigrationId, Phase};
+use zeroship_migrate::model::migration::Checksum;
+use zeroship_migrate::{Approval, ExecutorConfig, Migration, MigrationFlags, MigrationId, Phase};
 
 fn token() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -63,7 +63,7 @@ async fn ensure_project_schema<'a>(
     session: &'a PgDevSession,
     cfg: &ExecutorConfig,
 ) -> support::SchemaGuard<'a> {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
     let guard = support::SchemaGuard::arm(
         session,
         [
@@ -82,7 +82,7 @@ async fn ensure_project_schema<'a>(
 }
 
 async fn drop_schemas(session: &PgDevSession, cfg: &ExecutorConfig) {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
     let _ = session
         .batch(&format!(
             "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
@@ -94,7 +94,7 @@ async fn drop_schemas(session: &PgDevSession, cfg: &ExecutorConfig) {
 /// Whether the live catalog holds `schema.table` -- the evidence that a refused
 /// migration really did not run its `up`.
 async fn table_exists(session: &PgDevSession, schema: &str, table: &str) -> bool {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
     session
         .query(
             "SELECT to_regclass($1) IS NOT NULL AS present",
@@ -115,7 +115,7 @@ fn mig_with_flags(name: &str, up: &str, flags: MigrationFlags) -> Migration {
         name: name.to_string(),
         up: up.to_string(),
         down: None,
-        checksum: Checksum::of(&zero_migrate::ChecksumInput {
+        checksum: Checksum::of(&zeroship_migrate::ChecksumInput {
             up,
             down: None,
             flags: &flags,
@@ -139,7 +139,7 @@ fn mig_with_flags(name: &str, up: &str, flags: MigrationFlags) -> Migration {
 /// disables the very timeout it claims to set.
 #[compio::test]
 async fn postgres_reads_a_zero_timeout_as_no_limit_on_both_budgets() {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
@@ -378,7 +378,7 @@ async fn finite_timeout_overrides_still_apply() {
         "the applied migration really created its table"
     );
 
-    let journal = zero_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
+    let journal = zeroship_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
         .await
         .expect("read the journal");
     assert!(

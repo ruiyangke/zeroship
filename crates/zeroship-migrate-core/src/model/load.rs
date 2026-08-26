@@ -2,7 +2,7 @@
 //!
 //! The policy-free pieces of the load gate - [`IrLoadError`], the ownership
 //! checker [`enforce_ir_ownership`], the checksum helpers, and the table-collection
-//! walkers - live in the [`zero_migrate_ir::load`] leaf crate and are re-exported
+//! walkers - live in the [`zeroship_migrate_ir::load`] leaf crate and are re-exported
 //! below. THIS module keeps [`load_ir_document`]: the full load chain, which
 //! threads a [`SchemaScope`](crate::model::policy::SchemaScope) into the POLICY
 //! validator ([`validate_ir_scoped`](crate::model::validate::validate_ir_scoped))
@@ -11,17 +11,17 @@
 //! `crate::model::table_shape::resolve_create_table_policy`, and on nothing else.)
 
 use std::collections::BTreeMap;
-use zero_migrate_backend::registry::VendorSet;
+use zeroship_migrate_backend::registry::VendorSet;
 
 use crate::model::ir::MigrationIr;
 use crate::model::validate::validate_ir_authorized;
-use zero_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::dialect::DialectId;
 
 // The policy-free half of the load gate (ownership + checksum helpers + the
 // `IrLoadError` taxonomy) lives in the leaf; re-export it so the engine root and
 // this module name `enforce_ir_ownership`, `IrLoadError`, `UNKNOWN_OWNER`, the
 // checksum helpers, etc. unchanged.
-pub use zero_migrate_ir::load::*;
+pub use zeroship_migrate_ir::load::*;
 
 /// Load + GATE an IR envelope document (the fail-closed chain). Returns the
 /// validated, ownership-checked [`MigrationIr`] with its `owner_app` STAMPED to
@@ -197,7 +197,7 @@ mod tests {
 
     fn create_table(name: &str) -> Op {
         Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
             name: name.into(),
             columns: vec![IrColumn {
                 name: "first".into(),
@@ -756,7 +756,7 @@ mod tests {
             ops: vec![
                 create_table("fresh"),
                 Op::AddColumn {
-                    attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+                    attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
                     table: "fresh".into(),
                     column: "x".into(),
                     ty: ColType::Int,

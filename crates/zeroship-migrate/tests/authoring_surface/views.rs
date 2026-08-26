@@ -2,18 +2,18 @@ use crate::support;
 
 use std::collections::BTreeMap;
 
-use zero_migrate::guard::GuardConfig;
-use zero_migrate::model::expr::{AggFunc, BinaryOp, Expr, UnaryOp};
-use zero_migrate::model::ir::{
+use zeroship_migrate::guard::GuardConfig;
+use zeroship_migrate::model::expr::{AggFunc, BinaryOp, Expr, UnaryOp};
+use zeroship_migrate::model::ir::{
     IrFlagsOverride, IrScalar, MigrationIr, Op, OrderDir, OrderItem, SafeU64, SelectAst,
     SelectItem, TableRef, ViewQuery, CURRENT_IR_VERSION,
 };
-use zero_migrate::model::validate::{
+use zeroship_migrate::model::validate::{
     validate_ir_scoped, UnsupportedKind, CODE_AGGREGATE_IN_SCALAR_CONTEXT, CODE_UNSUPPORTED,
     CODE_VENDOR_OP_DENIED,
 };
-use zero_migrate::render::lower::{IrAuthor, IrGuardedLowerError, IrLowerError, LiveSchema};
-use zero_migrate::{fold_ops, SchemaScope, SchemaSnapshot, ViewSnapshot};
+use zeroship_migrate::render::lower::{IrAuthor, IrGuardedLowerError, IrLowerError, LiveSchema};
+use zeroship_migrate::{fold_ops, SchemaScope, SchemaSnapshot, ViewSnapshot};
 
 const SCHEMA: &str = "app";
 
@@ -247,12 +247,12 @@ fn raw_view(sql: &str, materialized: Option<bool>) -> Op {
     }
 }
 
-fn lower_up(dialect: &zero_migrate::DialectId, op: Op) -> Result<String, Box<IrLowerError>> {
+fn lower_up(dialect: &zeroship_migrate::DialectId, op: Op) -> Result<String, Box<IrLowerError>> {
     // The operator charter grants the vendor capabilities a materialized view / raw
     // view body needs; the widened scope stays because the view body's table
     // references are confined against it.
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         "app_a",
         dialect,
@@ -267,19 +267,19 @@ fn lower_up(dialect: &zero_migrate::DialectId, op: Op) -> Result<String, Box<IrL
 
 #[test]
 fn structured_select_supports_group_by_and_having_on_all_dialects() {
-    let pg = lower_up(&zero_migrate_postgres::DIALECT, grouped_order_totals_view()).unwrap();
+    let pg = lower_up(&zeroship_migrate_postgres::DIALECT, grouped_order_totals_view()).unwrap();
     assert_eq!(
         pg,
         "CREATE VIEW \"app\".\"order_totals\" AS SELECT \"customer_id\", count(*) AS \"n\", sum(\"amount\") AS \"revenue\" FROM \"app\".\"orders\" WHERE (\"status\" = 'paid') GROUP BY \"customer_id\" HAVING (count(\"id\") > 5) ORDER BY \"customer_id\" ASC LIMIT 10"
     );
 
-    let sqlite = lower_up(&zero_migrate_sqlite::DIALECT, grouped_order_totals_view()).unwrap();
+    let sqlite = lower_up(&zeroship_migrate_sqlite::DIALECT, grouped_order_totals_view()).unwrap();
     assert_eq!(
         sqlite,
         "CREATE VIEW \"order_totals\" AS SELECT \"customer_id\", count(*) AS \"n\", sum(\"amount\") AS \"revenue\" FROM \"orders\" WHERE (\"status\" = 'paid') GROUP BY \"customer_id\" HAVING (count(\"id\") > 5) ORDER BY \"customer_id\" ASC LIMIT 10"
     );
 
-    let mysql = lower_up(&zero_migrate_mysql::DIALECT, grouped_order_totals_view()).unwrap();
+    let mysql = lower_up(&zeroship_migrate_mysql::DIALECT, grouped_order_totals_view()).unwrap();
     assert_eq!(
         mysql,
         "CREATE VIEW `app`.`order_totals` AS SELECT `customer_id`, count(*) AS `n`, sum(`amount`) AS `revenue` FROM `app`.`orders` WHERE (`status` = _utf8mb4 X'70616964') GROUP BY `customer_id` HAVING (count(`id`) > 5) ORDER BY `customer_id` ASC LIMIT 10"
@@ -290,9 +290,9 @@ fn structured_select_supports_group_by_and_having_on_all_dialects() {
 fn structured_select_allows_aggregates_in_projection_and_having() {
     let trusted = SchemaScope::Unconfined;
     validate_ir_scoped(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir(grouped_order_totals_view()),
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         Some(&trusted),
     )
     .expect("projection and HAVING are grouped SELECT contexts and allow aggregates");
@@ -301,7 +301,7 @@ fn structured_select_allows_aggregates_in_projection_and_having() {
 #[test]
 fn pg_first_aggregate_view_renders_on_postgres_and_refuses_off_pg() {
     let pg = lower_up(
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         pg_first_aggregate_rollup_view(),
     )
     .unwrap();
@@ -311,9 +311,9 @@ fn pg_first_aggregate_view_renders_on_postgres_and_refuses_off_pg() {
     );
 
     let trusted = SchemaScope::Unconfined;
-    for dialect in [&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT] {
+    for dialect in [&zeroship_migrate_sqlite::DIALECT, &zeroship_migrate_mysql::DIALECT] {
         let err = validate_ir_scoped(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &ir(pg_first_aggregate_rollup_view()),
             dialect,
             Some(&trusted),
@@ -321,7 +321,7 @@ fn pg_first_aggregate_view_renders_on_postgres_and_refuses_off_pg() {
         .unwrap_err();
         assert_eq!(
             err.code,
-            zero_migrate::model::validate::CODE_DIALECT_UNSUPPORTED
+            zeroship_migrate::model::validate::CODE_DIALECT_UNSUPPORTED
         );
         assert_eq!(err.kind, Some(UnsupportedKind::Expr));
     }
@@ -341,9 +341,9 @@ fn structured_select_rejects_aggregate_group_by_item() {
 
     let trusted = SchemaScope::Unconfined;
     let err = validate_ir_scoped(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir(op),
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         Some(&trusted),
     )
     .unwrap_err();
@@ -357,7 +357,7 @@ fn structured_select_rejects_aggregate_group_by_item() {
 #[test]
 fn pg_structured_view_renders_exact_select_where() {
     let up = lower_up(
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         create_structured_view(None, None),
     )
     .unwrap();
@@ -370,7 +370,7 @@ fn pg_structured_view_renders_exact_select_where() {
 #[test]
 fn replace_renders_or_replace_on_pg_and_drop_create_on_sqlite() {
     let pg = lower_up(
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         create_structured_view(Some(true), None),
     )
     .unwrap();
@@ -380,7 +380,7 @@ fn replace_renders_or_replace_on_pg_and_drop_create_on_sqlite() {
     );
 
     let sqlite = lower_up(
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         create_structured_view(Some(true), None),
     )
     .unwrap();
@@ -393,7 +393,7 @@ fn replace_renders_or_replace_on_pg_and_drop_create_on_sqlite() {
 #[test]
 fn sqlite_structured_view_renders_dialect_quoted_select() {
     let up = lower_up(
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         create_structured_view(None, None),
     )
     .unwrap();
@@ -406,7 +406,7 @@ fn sqlite_structured_view_renders_dialect_quoted_select() {
 #[test]
 fn materialized_view_renders_on_pg_and_is_unsupported_on_sqlite() {
     let pg = lower_up(
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         create_structured_view(None, Some(true)),
     )
     .unwrap();
@@ -417,9 +417,9 @@ fn materialized_view_renders_on_pg_and_is_unsupported_on_sqlite() {
 
     let trusted = SchemaScope::Unconfined;
     let err = validate_ir_scoped(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir(create_structured_view(None, Some(true))),
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         Some(&trusted),
     )
     .unwrap_err();
@@ -435,9 +435,9 @@ fn replace_plus_materialized_is_rejected_on_pg_not_silently_dropped() {
     // (which would drop the `replace` request) or destructively DROP+CREATE.
     let trusted = SchemaScope::Unconfined;
     let err = validate_ir_scoped(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir(create_structured_view(Some(true), Some(true))),
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         Some(&trusted),
     )
     .unwrap_err();
@@ -446,12 +446,12 @@ fn replace_plus_materialized_is_rejected_on_pg_not_silently_dropped() {
     assert!(err.reason.contains("replace+materialized"));
     // The non-contradictory shapes still lower fine.
     assert!(lower_up(
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         create_structured_view(Some(true), None)
     )
     .is_ok());
     assert!(lower_up(
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         create_structured_view(None, Some(true))
     )
     .is_ok());
@@ -462,20 +462,20 @@ fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
     let structured = ir(create_structured_view(None, None));
     let confined = SchemaScope::Single(SCHEMA.to_string());
     validate_ir_scoped(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &structured,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         Some(&confined),
     )
     .unwrap();
 
     let guard_cfg =
-        GuardConfig::from_policy(support::no_inject(SCHEMA), zero_migrate_postgres::DIALECT);
+        GuardConfig::from_policy(support::no_inject(SCHEMA), zeroship_migrate_postgres::DIALECT);
     IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         "app_a",
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &support::no_inject("app"),
     )
     .lower_guarded(&structured, &guard_cfg, &LiveSchema::default())
@@ -483,19 +483,19 @@ fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
 
     let raw = ir(raw_view("SELECT id FROM app.users", None));
     let err = validate_ir_scoped(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &raw,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         Some(&confined),
     )
     .unwrap_err();
     assert_eq!(err.code, CODE_VENDOR_OP_DENIED);
 
     let err = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         "app_a",
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &support::no_inject("app"),
     )
     .lower_guarded(&raw, &guard_cfg, &LiveSchema::default())
@@ -503,26 +503,26 @@ fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
     assert!(matches!(
         err,
         IrGuardedLowerError::Lower(IrLowerError::VendorCapabilityDenied {
-            capability: zero_migrate::model::capability::VendorCapability::RawViewBody,
+            capability: zeroship_migrate::model::capability::VendorCapability::RawViewBody,
             ..
         })
     ));
 
     let operator = SchemaScope::Allowlist(vec![SCHEMA.to_string()]);
     validate_ir_scoped(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &raw,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         Some(&operator),
     )
     .unwrap();
     // The `sql.raw_view_body` GRANT is what admits this at lower - the same charter
     // the guard above would compose, not the widened scope beside it.
     IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         "app_a",
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &support::operator_charter("app"),
     )
     .with_schema_scope(operator)
@@ -535,9 +535,9 @@ fn raw_view_body_must_be_single_top_level_select_even_with_capability() {
     let operator = SchemaScope::Allowlist(vec![SCHEMA.to_string()]);
     for sql in ["DROP TABLE x", "SELECT 1; DROP TABLE x"] {
         let err = validate_ir_scoped(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &ir(raw_view(sql, None)),
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             Some(&operator),
         )
         .unwrap_err();
@@ -554,9 +554,9 @@ fn raw_view_body_must_be_single_top_level_select_even_with_capability() {
 fn raw_view_body_runs_function_body_deny_list_scan() {
     let operator = SchemaScope::Allowlist(vec![SCHEMA.to_string()]);
     let err = validate_ir_scoped(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir(raw_view("SELECT pg_read_file('/etc/passwd')", None)),
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         Some(&operator),
     )
     .unwrap_err();
@@ -581,11 +581,11 @@ fn raw_view_body_native_quoting_is_not_judged_by_the_postgres_parser() {
     // Each body uses the identifier quoting its OWN dialect spells natively, and
     // which libpg_query cannot parse.
     for (dialect, sql) in [
-        (&zero_migrate_mysql::DIALECT, "SELECT `id` FROM app.users"),
-        (&zero_migrate_sqlite::DIALECT, "SELECT [id] FROM app.users"),
+        (&zeroship_migrate_mysql::DIALECT, "SELECT `id` FROM app.users"),
+        (&zeroship_migrate_sqlite::DIALECT, "SELECT [id] FROM app.users"),
     ] {
         validate_ir_scoped(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &ir(raw_view(sql, None)),
             dialect,
             Some(&operator),
@@ -599,9 +599,9 @@ fn raw_view_body_native_quoting_is_not_judged_by_the_postgres_parser() {
         // PostgreSQL still refuses both — it is not that the check was deleted, it
         // is that the check belongs to whichever backend owns the grammar.
         let err = validate_ir_scoped(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &ir(raw_view(sql, None)),
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             Some(&operator),
         )
         .unwrap_err();
@@ -649,9 +649,9 @@ fn postgres_raw_view_body_gate_is_unchanged_behind_the_vendor_seam() {
         ),
     ] {
         let err = validate_ir_scoped(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &ir(raw_view(sql, None)),
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             Some(&operator),
         )
         .unwrap_err();
@@ -666,9 +666,9 @@ fn postgres_raw_view_body_gate_is_unchanged_behind_the_vendor_seam() {
 
     // Cross-schema confinement is part of the same gate and is still enforced.
     let err = validate_ir_scoped(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir(raw_view("SELECT id FROM other_tenant.users", None)),
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         Some(&operator),
     )
     .unwrap_err();
@@ -698,17 +698,17 @@ fn mysql_and_sqlite_bypass_the_raw_view_body_gate_for_now() {
     for sql in bypassed {
         // Refused on PostgreSQL...
         validate_ir_scoped(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &ir(raw_view(sql, None)),
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             Some(&operator),
         )
         .expect_err(sql);
         // ...and admitted, unchecked, on both bypassing backends.
-        for dialect in [&zero_migrate_mysql::DIALECT, &zero_migrate_sqlite::DIALECT] {
+        for dialect in [&zeroship_migrate_mysql::DIALECT, &zeroship_migrate_sqlite::DIALECT] {
             assert!(
                 validate_ir_scoped(
-                    zero_migrate::shipping_vendors(),
+                    zeroship_migrate::shipping_vendors(),
                     &ir(raw_view(sql, None)),
                     dialect,
                     Some(&operator)
@@ -760,7 +760,7 @@ fn structured_select_supports_order_limit_and_closed_expr_projection() {
         replace: None,
         materialized: None,
     };
-    let up = lower_up(&zero_migrate_postgres::DIALECT, op).unwrap();
+    let up = lower_up(&zeroship_migrate_postgres::DIALECT, op).unwrap();
     assert_eq!(
         up,
         "CREATE VIEW \"app\".\"user_names\" (\"display_name\") AS SELECT (\"first_name\" || \"last_name\") AS \"display_name\" FROM \"app\".\"users\" AS \"u\" ORDER BY \"u\".\"created_at\" DESC"
@@ -771,9 +771,9 @@ fn structured_select_supports_order_limit_and_closed_expr_projection() {
 fn fold_records_views_and_drop_removes_them() {
     let create = create_structured_view(None, None);
     let folded = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         std::slice::from_ref(&create),
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &support::no_inject("app"),
     )
@@ -817,13 +817,13 @@ fn fold_records_views_and_drop_removes_them() {
     let drop = Op::DropView {
         name: "active_users".to_string(),
         schema: None,
-        existence_guard: Some(zero_migrate::model::ir::ExistenceGuard::IfExists),
+        existence_guard: Some(zeroship_migrate::model::ir::ExistenceGuard::IfExists),
         materialized: None,
     };
     let folded = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &[create, drop],
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &support::no_inject("app"),
     )

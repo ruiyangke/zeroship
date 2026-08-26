@@ -49,8 +49,8 @@
 
 use crate::support;
 
-use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::model::validate::{validate_ir_authorized, VendorAuthority};
+use zeroship_migrate::model::ir::MigrationIr;
+use zeroship_migrate::model::validate::{validate_ir_authorized, VendorAuthority};
 
 fn verdict(ops: &str) -> Result<(), String> {
     let policy = support::operator_charter("public");
@@ -61,9 +61,9 @@ fn verdict(ops: &str) -> Result<(), String> {
         default_schema: "public",
     };
     validate_ir_authorized(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         None,
         Some(authority),
     )
@@ -74,10 +74,10 @@ fn verdict(ops: &str) -> Result<(), String> {
 fn confined_verdict(ops: &str) -> Result<(), String> {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{ops}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
-    zero_migrate::model::validate::validate_ir(
-        zero_migrate::shipping_vendors(),
+    zeroship_migrate::model::validate::validate_ir(
+        zeroship_migrate::shipping_vendors(),
         &ir,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
     )
     .map_err(|e| format!("{}: {}", e.code, e.reason))
 }

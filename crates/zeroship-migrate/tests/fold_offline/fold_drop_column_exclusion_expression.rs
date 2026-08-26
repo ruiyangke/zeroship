@@ -34,7 +34,7 @@
 
 use crate::support;
 
-use zero_migrate::{
+use zeroship_migrate::{
     fold_ops, ColType, ColumnOrExpr, ExclusionElement, ExclusionMethod, ExclusionOperator, Expr,
     IrColumn, IrConstraint, IrConstraintKind, Op, ScalarFn,
 };
@@ -85,7 +85,7 @@ fn exclusion_over_an_expression() -> IrConstraint {
 
 fn create_stays(constraints: Vec<IrConstraint>) -> Op {
     Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "stays".to_string(),
         columns: vec![
             col("lo", ColType::Timestamp),
@@ -116,12 +116,12 @@ fn the_fold_projects_a_drop_postgres_refuses_when_an_exclusion_expression_reads_
     let effective = support::confined_charter();
 
     let folded = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &[
             create_stays(vec![exclusion_over_an_expression()]),
             drop_column("note"),
         ],
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )
@@ -171,9 +171,9 @@ fn a_plain_column_exclusion_still_cascades_with_the_column_it_names() {
     };
 
     let folded = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &[create_stays(vec![plain]), drop_column("lo")],
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )

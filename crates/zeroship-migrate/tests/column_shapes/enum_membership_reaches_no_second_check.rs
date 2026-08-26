@@ -27,10 +27,10 @@
 
 use crate::support;
 
-use zero_migrate::model::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
-use zero_migrate::render::fold::single_fold;
-use zero_migrate::render::lower::{IrAuthor, LiveSchema};
-use zero_migrate::{fold_ops, PlanStep, RenameStep};
+use zeroship_migrate::model::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
+use zeroship_migrate::render::fold::single_fold;
+use zeroship_migrate::render::lower::{IrAuthor, LiveSchema};
+use zeroship_migrate::{fold_ops, PlanStep, RenameStep};
 
 const PROJECT: &str = "public";
 const APP: &str = "app_enum";
@@ -65,9 +65,9 @@ fn issues_ir() -> MigrationIr {
     .expect("issues IR deserializes")
 }
 
-fn lowered_sql(dialect: &zero_migrate::DialectId, ir: &MigrationIr, live: &LiveSchema) -> String {
+fn lowered_sql(dialect: &zeroship_migrate::DialectId, ir: &MigrationIr, live: &LiveSchema) -> String {
     IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
         dialect,
@@ -88,7 +88,7 @@ fn lowered_sql(dialect: &zero_migrate::DialectId, ir: &MigrationIr, live: &LiveS
 #[test]
 fn a_native_enum_column_gets_no_membership_check() {
     let sql = lowered_sql(
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &issues_ir(),
         &LiveSchema::default(),
     );
@@ -110,7 +110,7 @@ fn a_native_enum_column_gets_no_membership_check() {
 #[test]
 fn an_inlined_enum_column_gets_exactly_one_membership_check() {
     let sql = lowered_sql(
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &issues_ir(),
         &LiveSchema::default(),
     );
@@ -157,9 +157,9 @@ fn a_sqlite_rebuild_carries_the_membership_exactly_once() {
     let ops = issues_ir().ops;
     let effective = support::no_inject(PROJECT);
     let snapshot = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ops,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         PROJECT,
         &effective,
     )
@@ -167,13 +167,13 @@ fn a_sqlite_rebuild_carries_the_membership_exactly_once() {
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     // Seeded EXACTLY as `engine::refresh_historical_live` seeds it.
     live.sdk_schemas = single_fold::fold(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ops,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         PROJECT,
         &effective,
     )
-    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
+    .map(|folded| folded.project_field_defs(zeroship_migrate::shipping_vendors()))
     .expect("the field-def replay folds");
 
     let rename = MigrationIr {
@@ -198,10 +198,10 @@ fn a_sqlite_rebuild_carries_the_membership_exactly_once() {
     };
 
     let steps = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &effective,
     )
     .lower_steps(&rename, &live)

@@ -46,19 +46,19 @@
 //! `vacated`, not just reading names out of them, so it is separate work rather
 //! than something bundled in here.
 
-use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::model::validate::validate_ir;
-use zero_migrate::DialectId;
+use zeroship_migrate::model::ir::MigrationIr;
+use zeroship_migrate::model::validate::validate_ir;
+use zeroship_migrate::DialectId;
 
 fn verdict_on(dialect: &DialectId, ops: &str) -> Result<(), String> {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{ops}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
-    validate_ir(zero_migrate::shipping_vendors(), &ir, dialect)
+    validate_ir(zeroship_migrate::shipping_vendors(), &ir, dialect)
         .map_err(|e| format!("{}: {}", e.code, e.reason))
 }
 
 fn verdict(ops: &str) -> Result<(), String> {
-    verdict_on(&zero_migrate_postgres::DIALECT, ops)
+    verdict_on(&zeroship_migrate_postgres::DIALECT, ops)
 }
 
 /// Assert WHICH op named the column, not merely that a column was mentioned.
@@ -163,13 +163,13 @@ fn each_target_selects_only_its_exact_leg() {
     let ops = format!(
         r#"{A},{DROP_V},{{"op":"dialectal","legs":{{"sqlite":[{INDEX_V}],"postgres":[{{"op":"createIndex","name":"ix","table":"a","columns":[{{"kind":"column","name":"c0"}}]}}]}}}}"#
     );
-    let sqlite = verdict_on(&zero_migrate_sqlite::DIALECT, &ops)
+    let sqlite = verdict_on(&zeroship_migrate_sqlite::DIALECT, &ops)
         .expect_err("the sqlite leg runs and names a dropped column");
     assert!(
         sqlite.contains("this createIndex names column"),
         "the SQLite leg must be refused by the same rule as its PostgreSQL twin: {sqlite}"
     );
-    verdict_on(&zero_migrate_postgres::DIALECT, &ops)
+    verdict_on(&zeroship_migrate_postgres::DIALECT, &ops)
         .expect("PostgreSQL selects its own leg, which names a live column");
 }
 

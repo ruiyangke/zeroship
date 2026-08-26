@@ -28,8 +28,8 @@
 
 use std::collections::BTreeMap;
 
-use zero_migrate::model::ir::{ColType, IrColumn, IrScalar, MigrationIr, Op};
-use zero_migrate::model::load::{authoritative_ir_checksum, load_ir_document, IrLoadError};
+use zeroship_migrate::model::ir::{ColType, IrColumn, IrScalar, MigrationIr, Op};
+use zeroship_migrate::model::load::{authoritative_ir_checksum, load_ir_document, IrLoadError};
 
 const OWNER: &str = "app_reverse";
 const TABLE: &str = "acct";
@@ -59,10 +59,10 @@ fn delete_op() -> Op {
 fn delete_from(table: &str) -> Op {
     Op::Delete {
         table: table.to_string(),
-        r#where: zero_migrate::Expr::BinOp {
-            op: zero_migrate::BinaryOp::Eq,
-            lhs: Box::new(zero_migrate::Expr::col("id")),
-            rhs: Box::new(zero_migrate::Expr::lit(IrScalar::Int(1))),
+        r#where: zeroship_migrate::Expr::BinOp {
+            op: zeroship_migrate::BinaryOp::Eq,
+            lhs: Box::new(zeroship_migrate::Expr::col("id")),
+            rhs: Box::new(zeroship_migrate::Expr::lit(IrScalar::Int(1))),
         },
         limit: None,
         schema: None,
@@ -145,10 +145,10 @@ fn a_reverse_and_a_reason_it_has_none_cannot_both_be_declared() {
     ir.irreversible = Some("the source rows are gone".to_string());
 
     let error = load_ir_document(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &serde_json::to_string(&ir).expect("envelope serializes"),
         OWNER,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &registry(),
         None,
     )
@@ -174,10 +174,10 @@ fn an_inverse_reaching_a_table_the_app_does_not_own_is_refused() {
     ir.inverse_ops = Some(vec![delete_from("someone_elses")]);
 
     let error = load_ir_document(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &serde_json::to_string(&ir).expect("envelope serializes"),
         OWNER,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &registry(),
         None,
     )
@@ -198,25 +198,25 @@ fn an_inverse_that_could_never_apply_is_refused_when_the_migration_is_authored()
     let mut ir = envelope(vec![insert_op()]);
     ir.inverse_ops = Some(vec![Op::Delete {
         table: TABLE.to_string(),
-        r#where: zero_migrate::Expr::BinOp {
-            op: zero_migrate::BinaryOp::Gt,
-            lhs: Box::new(zero_migrate::Expr::Agg {
-                func: zero_migrate::model::expr::AggFunc::Count,
-                arg: Some(Box::new(zero_migrate::Expr::col("id"))),
+        r#where: zeroship_migrate::Expr::BinOp {
+            op: zeroship_migrate::BinaryOp::Gt,
+            lhs: Box::new(zeroship_migrate::Expr::Agg {
+                func: zeroship_migrate::model::expr::AggFunc::Count,
+                arg: Some(Box::new(zeroship_migrate::Expr::col("id"))),
                 delimiter: None,
                 distinct: false,
             }),
-            rhs: Box::new(zero_migrate::Expr::lit(IrScalar::Int(0))),
+            rhs: Box::new(zeroship_migrate::Expr::lit(IrScalar::Int(0))),
         },
         limit: None,
         schema: None,
     }]);
 
     let error = load_ir_document(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &serde_json::to_string(&ir).expect("envelope serializes"),
         OWNER,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &registry(),
         None,
     )
@@ -242,10 +242,10 @@ fn a_valid_reverse_loads_and_survives_the_round_trip() {
     let bytes = serde_json::to_string(&ir).expect("envelope serializes");
 
     let loaded = load_ir_document(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &bytes,
         OWNER,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &registry(),
         None,
     )
@@ -283,10 +283,10 @@ fn an_irreversible_reason_survives_the_boundary() {
     ir.irreversible = Some("the pre-image is not recoverable".to_string());
 
     let loaded = load_ir_document(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &serde_json::to_string(&ir).expect("serializes"),
         OWNER,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &registry(),
         None,
     )
@@ -311,10 +311,10 @@ fn a_declared_reverse_makes_an_advisory_hint_refuse_rather_than_compare() {
     ir.checksum = Some("0".repeat(64));
 
     let error = load_ir_document(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &serde_json::to_string(&ir).expect("serializes"),
         OWNER,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &registry(),
         None,
     )
@@ -335,7 +335,7 @@ fn a_declared_reverse_makes_an_advisory_hint_refuse_rather_than_compare() {
 #[test]
 fn the_create_table_ownership_rule_still_applies_with_a_reverse_present() {
     let mut ir = envelope(vec![Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "fresh".to_string(),
         columns: vec![IrColumn {
             name: "id".to_string(),
@@ -364,10 +364,10 @@ fn the_create_table_ownership_rule_still_applies_with_a_reverse_present() {
     ir.irreversible = Some("dropping the table would take the rows with it".to_string());
 
     load_ir_document(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &serde_json::to_string(&ir).expect("serializes"),
         OWNER,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &BTreeMap::new(),
         None,
     )

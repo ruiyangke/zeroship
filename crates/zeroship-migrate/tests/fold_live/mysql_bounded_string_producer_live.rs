@@ -43,16 +43,16 @@
 use crate::support;
 
 use crate::support::mysql::{quote_ident, DatabaseGuard, MysqlDevSession};
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::driver::SqlSession;
-use zero_migrate::model::ir::Op;
-use zero_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor};
-use zero_migrate::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::model::ir::Op;
+use zeroship_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor};
+use zeroship_migrate::{
     descriptors_to_create_ops, resolve_create_table_policy, Approval, EffectivePolicy,
     ExecutorConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr,
     TableRuntimeOptions,
 };
-use zero_migrate_mysql::MysqlBackend;
+use zeroship_migrate_mysql::MysqlBackend;
 
 const OWNER: &str = "app_bounded_string_mysql";
 const TABLE: &str = "profiles";
@@ -156,10 +156,10 @@ async fn measure(
             .await
             .map_err(|error| format!("ensure the migration journal: {error}"))?;
         let author = IrAuthor::new(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &cfg.project_schema,
             OWNER,
-            &zero_migrate_mysql::DIALECT,
+            &zeroship_migrate_mysql::DIALECT,
             &policy,
         );
         let ir: MigrationIr = serde_json::from_value(serde_json::json!({
@@ -171,7 +171,7 @@ async fn measure(
         let steps = author
             .lower_steps(&ir, &LiveSchema::default())
             .map_err(|error| format!("lower the bounded-string ops: {error}"))?;
-        MigrationEngine::new(zero_migrate::shipping_vendors())
+        MigrationEngine::new(zeroship_migrate::shipping_vendors())
             .apply_plan(
                 &steps,
                 Approval::Approved,

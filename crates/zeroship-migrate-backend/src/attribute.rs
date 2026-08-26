@@ -1,6 +1,6 @@
 //! The vendor-facing half of vendor attributes: what a backend DECLARES.
 //!
-//! [`zero_migrate_ir::attribute`] holds the neutral vocabulary - the key, the value
+//! [`zeroship_migrate_ir::attribute`] holds the neutral vocabulary - the key, the value
 //! carrier, the map, the scope. It knows no dialect ids and no attribute names, on
 //! purpose. This module is where a backend says which keys it actually owns.
 //!
@@ -48,14 +48,14 @@
 use serde::Serialize;
 use std::fmt;
 
-use zero_migrate_ir::attribute::{AttrKey, OpAttributes};
-use zero_migrate_ir::ir::IrScalar;
+use zeroship_migrate_ir::attribute::{AttrKey, OpAttributes};
+use zeroship_migrate_ir::ir::IrScalar;
 
 /// The shape of a legal value for one attribute - the "verification" half of a
 /// declaration.
 ///
 /// Closed, and small on purpose. A vendor knob is a scalar with a domain; anything
-/// needing more structure than this is an [`Op`](zero_migrate_ir::ir::Op) field, not an
+/// needing more structure than this is an [`Op`](zeroship_migrate_ir::ir::Op) field, not an
 /// attribute. Keeping the set closed is also what lets the TypeScript generator emit a
 /// precise type per attribute - an `Enum` becomes a union of string literals, an `Int`
 /// becomes `number` with its range in the doc comment.
@@ -83,7 +83,7 @@ pub enum AttrShape {
         /// is simply not the one declared.
         ///
         /// The IR solved this exact problem the same way:
-        /// [`IrScalar::Int64`](zero_migrate_ir::ir::IrScalar) travels as its canonical
+        /// [`IrScalar::Int64`](zeroship_migrate_ir::ir::IrScalar) travels as its canonical
         /// decimal string for precisely this reason. A generator reading these as strings
         /// cannot lose precision, because it never converts them at all.
         #[serde(serialize_with = "i64_as_decimal_string")]
@@ -258,7 +258,7 @@ pub struct AttrDef {
 /// Naming the op as a type moves that to the compiler: the misspelling is `E0425` in the
 /// vendor's own crate, alongside the `E0080` a malformed [`AttrKey`] already produces. The
 /// op STRING is then read back out of the carrier's own
-/// [`OpAttributes::OP`](zero_migrate_ir::attribute::OpAttributes), so the declaration
+/// [`OpAttributes::OP`](zeroship_migrate_ir::attribute::OpAttributes), so the declaration
 /// and the carrier cannot disagree about what op they mean.
 ///
 /// This does not retire `every_declared_op_is_a_real_op` - the op string still originates
@@ -276,8 +276,8 @@ pub struct AttrDef {
 /// # Example
 ///
 /// ```
-/// use zero_migrate_backend::{attribute::{AttrDef, AttrShape}, declare_attributes};
-/// use zero_migrate_ir::attribute::{CreateIndexAttributes, CreateTableAttributes};
+/// use zeroship_migrate_backend::{attribute::{AttrDef, AttrShape}, declare_attributes};
+/// use zeroship_migrate_ir::attribute::{CreateIndexAttributes, CreateTableAttributes};
 ///
 /// static DEFS: &[AttrDef] = declare_attributes! {
 ///     dialect: "acme";
@@ -294,8 +294,8 @@ pub struct AttrDef {
 /// A misspelled op is a compile error rather than a knob that silently matches nothing:
 ///
 /// ```compile_fail,E0425
-/// use zero_migrate_backend::{attribute::{AttrDef, AttrShape}, declare_attributes};
-/// use zero_migrate_ir::attribute::CreateTableAttributes;
+/// use zeroship_migrate_backend::{attribute::{AttrDef, AttrShape}, declare_attributes};
+/// use zeroship_migrate_ir::attribute::CreateTableAttributes;
 ///
 /// static DEFS: &[AttrDef] = declare_attributes! {
 ///     dialect: "acme";
@@ -312,14 +312,14 @@ macro_rules! declare_attributes {
     )+) => {
         &[$(
             $crate::attribute::AttrDef {
-                key: ::zero_migrate_ir::attribute::AttrKey::from_static(
+                key: ::zeroship_migrate_ir::attribute::AttrKey::from_static(
                     concat!($dialect, ".", stringify!($name)),
                 ),
                 // Read out of the carrier, not retyped. `OpAttributes` is in the bound
                 // position deliberately: a type that is not an op carrier fails here
                 // rather than contributing some other associated `OP`.
                 ops: &[$(
-                    <$carrier as ::zero_migrate_ir::attribute::OpAttributes>::OP
+                    <$carrier as ::zeroship_migrate_ir::attribute::OpAttributes>::OP
                 ),+],
                 shape: $shape,
                 // Each `///` line arrives with its leading space, which is what joins the
@@ -594,7 +594,7 @@ pub const VOCABULARY_FORMAT_VERSION: u32 = 1;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zero_migrate_ir::attribute::{Attributes, CreateTableAttributes};
+    use zeroship_migrate_ir::attribute::{Attributes, CreateTableAttributes};
 
     const FILLFACTOR: AttrKey = AttrKey::from_static("acme.fillfactor");
     const TABLESPACE: AttrKey = AttrKey::from_static("acme.tablespace");

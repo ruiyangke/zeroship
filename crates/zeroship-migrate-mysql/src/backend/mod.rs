@@ -1,8 +1,8 @@
-//! MySQL [`MigrationBackend`](zero_migrate_backend::backend::MigrationBackend)
+//! MySQL [`MigrationBackend`](zeroship_migrate_backend::backend::MigrationBackend)
 //! implementation.
 //!
-//! Generic over the dialect-neutral [`SqlSession`](zero_migrate_backend::driver::SqlSession) seam
-//! (engine root `zero_migrate_backend::driver`) - a host driver (the napi `mysql2` shell) supplies
+//! Generic over the dialect-neutral [`SqlSession`](zeroship_migrate_backend::driver::SqlSession) seam
+//! (engine root `zeroship_migrate_backend::driver`) - a host driver (the napi `mysql2` shell) supplies
 //! the `SqlSession` impl, exactly as the `pg` shell does for the PostgreSQL
 //! backend, which lives in its own vendor crate. MySQL rides the
 //! SAME seam as Postgres; only the dialect SQL (lock, session, journal DDL,
@@ -53,26 +53,26 @@ pub use journal_sql::BINARY_IDENTITY_COLUMNS;
 pub(crate) mod primary_key_sql;
 pub(crate) mod session;
 
-use zero_migrate_backend::backend::{
+use zeroship_migrate_backend::backend::{
     CrossDeployObligations, MigrationBackend, PlaceholderStyle, ProjectLockAcquisition,
     PROJECT_LOCK_TRY_ATTEMPTS, PROJECT_LOCK_TRY_BACKOFF,
 };
-use zero_migrate_backend::backfill::BackfillSpec;
-use zero_migrate_backend::baseline::{BaselineError, BaselineOutcome};
-use zero_migrate_backend::capability::OnlineSchemaChange;
-use zero_migrate_backend::conn::ExecutorConfig;
-use zero_migrate_backend::drift::DriftError;
-use zero_migrate_backend::driver::{Row, SqlSession};
-use zero_migrate_backend::executor::{ApplyError, RollbackError};
-use zero_migrate_backend::journal::{AppliedEntry, JournalError};
-use zero_migrate_backend::requirements::{DatabaseFeature, DatabaseRequirements};
-use zero_migrate_backend::snapshot::SchemaSnapshot;
-use zero_migrate_backend::step::{
+use zeroship_migrate_backend::backfill::BackfillSpec;
+use zeroship_migrate_backend::baseline::{BaselineError, BaselineOutcome};
+use zeroship_migrate_backend::capability::OnlineSchemaChange;
+use zeroship_migrate_backend::conn::ExecutorConfig;
+use zeroship_migrate_backend::drift::DriftError;
+use zeroship_migrate_backend::driver::{Row, SqlSession};
+use zeroship_migrate_backend::executor::{ApplyError, RollbackError};
+use zeroship_migrate_backend::journal::{AppliedEntry, JournalError};
+use zeroship_migrate_backend::requirements::{DatabaseFeature, DatabaseRequirements};
+use zeroship_migrate_backend::snapshot::SchemaSnapshot;
+use zeroship_migrate_backend::step::{
     AlterColumnTypeStep, AlterPrimaryKeyStep, BindValue, SynchronizeIdentityStep,
 };
-use zero_migrate_backend::table_rebuild::TableRebuildSpec;
-use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_ir::migration::{Checksum, Migration, MigrationId};
+use zeroship_migrate_backend::table_rebuild::TableRebuildSpec;
+use zeroship_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::migration::{Checksum, Migration, MigrationId};
 
 use crate::DIALECT;
 
@@ -195,7 +195,7 @@ fn completed_step_matches(
 ) -> Result<bool, ApplyError> {
     let completed = entries.into_iter().find(|entry| {
         entry.version == version.as_str()
-            && matches!(entry.phase, zero_migrate_backend::journal::Phase::Completed)
+            && matches!(entry.phase, zeroship_migrate_backend::journal::Phase::Completed)
     });
     let Some(entry) = completed else {
         return Ok(false);
@@ -421,7 +421,7 @@ impl<'a, D: SqlSession> MysqlBackend<'a, D> {
     }
 }
 
-fn recovery_db(error: zero_migrate_backend::driver::DbError) -> MysqlInflightRecoveryError {
+fn recovery_db(error: zeroship_migrate_backend::driver::DbError) -> MysqlInflightRecoveryError {
     MysqlInflightRecoveryError::Journal(JournalError::Db(error.into()))
 }
 
@@ -487,7 +487,7 @@ async fn recover_inflight_locked<D: SqlSession>(
                 journal_sql::append_completed(
                     conn,
                     cfg,
-                    zero_migrate_backend::journal::CompletedRecord {
+                    zeroship_migrate_backend::journal::CompletedRecord {
                         version,
                         name: &migration.name,
                         checksum: migration.checksum.as_str(),
@@ -786,7 +786,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         &self,
         cfg: &ExecutorConfig,
         forward: &Migration,
-        inverse_steps: &[zero_migrate_backend::step::PlanStep],
+        inverse_steps: &[zeroship_migrate_backend::step::PlanStep],
         applied_by: &str,
     ) -> Result<(), RollbackError> {
         session::rollback_dml_plan_transactional(self.conn, cfg, forward, inverse_steps, applied_by)
@@ -847,7 +847,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
     async fn unresolved_rollback_markers(
         &self,
         cfg: &ExecutorConfig,
-    ) -> Result<Vec<zero_migrate_backend::executor::RollbackMarker>, JournalError> {
+    ) -> Result<Vec<zeroship_migrate_backend::executor::RollbackMarker>, JournalError> {
         journal_sql::unresolved_rollback_markers(self.conn, cfg).await
     }
 
@@ -858,7 +858,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
     async fn history(
         &self,
         _cfg: &ExecutorConfig,
-    ) -> Result<Vec<zero_migrate_backend::journal::HistoryEvent>, JournalError> {
+    ) -> Result<Vec<zeroship_migrate_backend::journal::HistoryEvent>, JournalError> {
         // MySQL's journal table records the events; what it has never had is the
         // READER that projects them into `HistoryEvent`. Refusing by name is the
         // honest posture: an empty Vec would be indistinguishable from a project
@@ -881,7 +881,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
     async fn backfill_progress(
         &self,
         cfg: &ExecutorConfig,
-    ) -> Result<Vec<zero_migrate_backend::backfill::BackfillProgressEntry>, JournalError> {
+    ) -> Result<Vec<zeroship_migrate_backend::backfill::BackfillProgressEntry>, JournalError> {
         backfill_sql::read_progress_entries(self.conn, cfg).await
     }
 
@@ -900,7 +900,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         &self,
         cfg: &ExecutorConfig,
         migrations: &[Migration],
-    ) -> Result<zero_migrate_backend::drift::ChecksumDriftReport, DriftError> {
+    ) -> Result<zeroship_migrate_backend::drift::ChecksumDriftReport, DriftError> {
         // The drift/tamper comparison is dialect-agnostic
         // (`compare_applied_to_set`); only the journal read underneath is
         // dialect-coupled. Read the net-applied state through the MySQL journal and
@@ -908,7 +908,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         // repeatable-exemption / kind-mismatch / tamper rules never diverge across
         // dialects.
         let applied = journal_sql::applied(self.conn, cfg).await?;
-        Ok(zero_migrate_backend::drift::compare_applied_to_set(
+        Ok(zeroship_migrate_backend::drift::compare_applied_to_set(
             &applied, migrations,
         ))
     }
@@ -921,14 +921,14 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         &self,
         _cfg: &ExecutorConfig,
         m: &Migration,
-    ) -> Result<zero_migrate_backend::executor::PreconditionVerdict, ApplyError> {
+    ) -> Result<zeroship_migrate_backend::executor::PreconditionVerdict, ApplyError> {
         // The executor calls this for EVERY migration, precondition-bearing or not.
         // A migration with NO preconditions needs no evaluator at all - evaluating an
         // empty list is `AllMet` by construction (exactly what the PG evaluator's
         // `evaluate_all` returns for an empty `m.preconditions`), so it must apply
         // normally on MySQL rather than trip the v1 capability gap.
         if m.preconditions.is_empty() {
-            return Ok(zero_migrate_backend::executor::PreconditionVerdict::AllMet);
+            return Ok(zeroship_migrate_backend::executor::PreconditionVerdict::AllMet);
         }
         // A GENUINE precondition (boolean-SELECT probes gated by the `pg_query`
         // parser + PG-flavoured catalog reads) has no MySQL-native evaluator yet, so
@@ -964,7 +964,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         &self,
         spec: &TableRebuildSpec,
         _m: &Migration,
-        _scope: &zero_migrate_backend::approval::ApprovalScope,
+        _scope: &zeroship_migrate_backend::approval::ApprovalScope,
         _applied_by: &str,
     ) -> Result<(), ApplyError> {
         // A SQLite 12-step table rebuild reaching the MySQL backend is a routing bug
@@ -980,8 +980,8 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         &self,
         cfg: &ExecutorConfig,
         step: &AlterPrimaryKeyStep,
-        approval: zero_migrate_backend::approval::Approval,
-        scope: &zero_migrate_backend::approval::ApprovalScope,
+        approval: zeroship_migrate_backend::approval::Approval,
+        scope: &zeroship_migrate_backend::approval::ApprovalScope,
         applied_by: &str,
     ) -> Result<bool, ApplyError> {
         primary_key_sql::alter_primary_key(self.conn, cfg, step, approval, scope, applied_by).await
@@ -991,8 +991,8 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         &self,
         cfg: &ExecutorConfig,
         step: &AlterColumnTypeStep,
-        approval: zero_migrate_backend::approval::Approval,
-        scope: &zero_migrate_backend::approval::ApprovalScope,
+        approval: zeroship_migrate_backend::approval::Approval,
+        scope: &zeroship_migrate_backend::approval::ApprovalScope,
         applied_by: &str,
     ) -> Result<bool, ApplyError> {
         alter_column_type_sql::alter_column_type(self.conn, cfg, step, approval, scope, applied_by)
@@ -1014,13 +1014,13 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         version: &MigrationId,
         checksum: &Checksum,
         spec: &BackfillSpec,
-        approval: zero_migrate_backend::approval::Approval,
-        scope: &zero_migrate_backend::approval::ApprovalScope,
+        approval: zeroship_migrate_backend::approval::Approval,
+        scope: &zeroship_migrate_backend::approval::ApprovalScope,
         applied_by: &str,
-        _lock_mode: zero_migrate_backend::executor::LockMode,
-    ) -> Result<zero_migrate_backend::executor::ApplyOutcome, ApplyError> {
+        _lock_mode: zeroship_migrate_backend::executor::LockMode,
+    ) -> Result<zeroship_migrate_backend::executor::ApplyOutcome, ApplyError> {
         if completed_step_matches(self.applied(cfg).await?, version, checksum)? {
-            return Ok(zero_migrate_backend::executor::ApplyOutcome {
+            return Ok(zeroship_migrate_backend::executor::ApplyOutcome {
                 applied: Vec::new(),
                 skipped: vec![version.as_str().to_string()],
                 recovered: Vec::new(),
@@ -1030,7 +1030,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         // A pending backfill mutates table data. Refuse before progress
         // bootstrap or a target-table read. A completed matching step above is
         // an idempotent skip and does not need renewed approval.
-        if approval != zero_migrate_backend::approval::Approval::Approved {
+        if approval != zeroship_migrate_backend::approval::Approval::Approved {
             return Err(ApplyError::ApprovalRequired);
         }
         if !scope.admits(version.as_str()) {
@@ -1043,7 +1043,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         let result =
             backfill_sql::run_backfill(self.conn, cfg, version, checksum, spec, applied_by).await;
         let outcome = restore_after_data_step(self.conn, &snapshot, result).await?;
-        Ok(zero_migrate_backend::executor::ApplyOutcome {
+        Ok(zeroship_migrate_backend::executor::ApplyOutcome {
             applied: if outcome.complete {
                 vec![version.as_str().to_string()]
             } else {
@@ -1069,16 +1069,16 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         mutates_data: bool,
         destructive: bool,
         _owner_app: &str,
-        approval: zero_migrate_backend::approval::Approval,
-        scope: &zero_migrate_backend::approval::ApprovalScope,
+        approval: zeroship_migrate_backend::approval::Approval,
+        scope: &zeroship_migrate_backend::approval::ApprovalScope,
         applied_by: &str,
-        _lock_mode: zero_migrate_backend::executor::LockMode,
+        _lock_mode: zeroship_migrate_backend::executor::LockMode,
     ) -> Result<bool, ApplyError> {
         if completed_step_matches(self.applied(cfg).await?, version, checksum)? {
             return Ok(false);
         }
 
-        if destructive && approval != zero_migrate_backend::approval::Approval::Approved {
+        if destructive && approval != zeroship_migrate_backend::approval::Approval::Approved {
             return Err(ApplyError::ApprovalRequired);
         }
         if destructive && !scope.admits(version.as_str()) {
@@ -1161,7 +1161,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
 /// beside the live-PostgreSQL scenarios is a dependency fact, not an oversight, and
 /// the asymmetry is worth stating so it is not read as a hole. [`MysqlBackend`] has
 /// exactly one constructor - [`MysqlBackend::new_generic`], over the
-/// [`SqlSession`](zero_migrate_backend::driver::SqlSession) trait - and this crate depends on no
+/// [`SqlSession`](zeroship_migrate_backend::driver::SqlSession) trait - and this crate depends on no
 /// MySQL client; `postgres` is a dev-dependency carried solely so `tests/support`'s
 /// `PgDevSession` can drive the PG scenarios. A Rust-side MySQL harness would have
 /// to add a client and a second `SqlSession` over it in order to re-prove what the
@@ -1174,9 +1174,9 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
 mod render_tests {
     use super::recording::*;
     use super::*;
-    use zero_migrate_backend::backend::ProjectLockHolder;
-    use zero_migrate_backend::driver::{Bind, Row, Value};
-    use zero_migrate_ir::probe::{GuardDir, GuardProbe};
+    use zeroship_migrate_backend::backend::ProjectLockHolder;
+    use zeroship_migrate_backend::driver::{Bind, Row, Value};
+    use zeroship_migrate_ir::probe::{GuardDir, GuardProbe};
 
     /// The backend reports the MySQL dialect, the `?` placeholder style, and
     /// non-transactional DDL (auto-commit => two-phase path for every migration).
@@ -1973,7 +1973,7 @@ mod render_tests {
             &["proj_x", "reporting"],
             &[],
             false,
-            zero_migrate_ir::policy::DestructiveOps::Allow,
+            zeroship_migrate_ir::policy::DestructiveOps::Allow,
         );
         let cfg = ExecutorConfig::new("prj_x", "proj_x", effective);
         let up = "CREATE INDEX users_email_idx ON reporting.users (email)";
@@ -2270,7 +2270,7 @@ mod render_tests {
                 schema: "proj_x".into(),
                 table: "users".into(),
                 direction: GuardDir::IfNotExists,
-                expect_columns: vec![zero_migrate_ir::probe::ExpectColumn {
+                expect_columns: vec![zeroship_migrate_ir::probe::ExpectColumn {
                     name: "email".into(),
                     data_type: "character varying(255)".into(),
                     nullable: false,
@@ -3023,7 +3023,7 @@ mod render_tests {
 
         assert_eq!(
             progress,
-            vec![zero_migrate_backend::backfill::BackfillProgressEntry {
+            vec![zeroship_migrate_backend::backfill::BackfillProgressEntry {
                 version: "mig_progress".into(),
                 checksum: Some("checksum_a".into()),
                 complete: false,
@@ -3065,10 +3065,10 @@ mod render_tests {
                 true,
                 false,
                 "app_test",
-                zero_migrate_backend::approval::Approval::None,
-                &zero_migrate_backend::approval::ApprovalScope::All,
+                zeroship_migrate_backend::approval::Approval::None,
+                &zeroship_migrate_backend::approval::ApprovalScope::All,
                 "tester",
-                zero_migrate_backend::executor::LockMode::AlreadyHeld,
+                zeroship_migrate_backend::executor::LockMode::AlreadyHeld,
             )
             .await
             .expect("MySQL DML runs");
@@ -3167,10 +3167,10 @@ mod render_tests {
                 true,
                 false,
                 "app_test",
-                zero_migrate_backend::approval::Approval::None,
-                &zero_migrate_backend::approval::ApprovalScope::All,
+                zeroship_migrate_backend::approval::Approval::None,
+                &zeroship_migrate_backend::approval::ApprovalScope::All,
                 "tester",
-                zero_migrate_backend::executor::LockMode::AlreadyHeld,
+                zeroship_migrate_backend::executor::LockMode::AlreadyHeld,
             )
             .await
             .expect("legacy zero import runs under the pinned SQL mode");
@@ -3215,10 +3215,10 @@ mod render_tests {
                 true,
                 false,
                 "app_test",
-                zero_migrate_backend::approval::Approval::None,
-                &zero_migrate_backend::approval::ApprovalScope::All,
+                zeroship_migrate_backend::approval::Approval::None,
+                &zeroship_migrate_backend::approval::ApprovalScope::All,
                 "tester",
-                zero_migrate_backend::executor::LockMode::AlreadyHeld,
+                zeroship_migrate_backend::executor::LockMode::AlreadyHeld,
             )
             .await;
         assert!(result.is_err(), "mode-pin failure must reject the import");
@@ -3267,10 +3267,10 @@ mod render_tests {
                 true,
                 false,
                 "app_test",
-                zero_migrate_backend::approval::Approval::None,
-                &zero_migrate_backend::approval::ApprovalScope::All,
+                zeroship_migrate_backend::approval::Approval::None,
+                &zeroship_migrate_backend::approval::ApprovalScope::All,
                 "tester",
-                zero_migrate_backend::executor::LockMode::AlreadyHeld,
+                zeroship_migrate_backend::executor::LockMode::AlreadyHeld,
             )
             .await;
 
@@ -3323,10 +3323,10 @@ mod render_tests {
                 true,
                 false,
                 "app_test",
-                zero_migrate_backend::approval::Approval::None,
-                &zero_migrate_backend::approval::ApprovalScope::All,
+                zeroship_migrate_backend::approval::Approval::None,
+                &zeroship_migrate_backend::approval::ApprovalScope::All,
                 "tester",
-                zero_migrate_backend::executor::LockMode::AlreadyHeld,
+                zeroship_migrate_backend::executor::LockMode::AlreadyHeld,
             )
             .await;
 
@@ -3374,10 +3374,10 @@ mod render_tests {
                 true,
                 false,
                 "app_test",
-                zero_migrate_backend::approval::Approval::None,
-                &zero_migrate_backend::approval::ApprovalScope::All,
+                zeroship_migrate_backend::approval::Approval::None,
+                &zeroship_migrate_backend::approval::ApprovalScope::All,
                 "tester",
-                zero_migrate_backend::executor::LockMode::AlreadyHeld,
+                zeroship_migrate_backend::executor::LockMode::AlreadyHeld,
             )
             .await;
 
@@ -3422,10 +3422,10 @@ mod render_tests {
                 true,
                 true,
                 "app_test",
-                zero_migrate_backend::approval::Approval::None,
-                &zero_migrate_backend::approval::ApprovalScope::All,
+                zeroship_migrate_backend::approval::Approval::None,
+                &zeroship_migrate_backend::approval::ApprovalScope::All,
                 "tester",
-                zero_migrate_backend::executor::LockMode::AlreadyHeld,
+                zeroship_migrate_backend::executor::LockMode::AlreadyHeld,
             )
             .await;
         assert!(matches!(no_approval, Err(ApplyError::ApprovalRequired)));
@@ -3459,10 +3459,10 @@ mod render_tests {
                 true,
                 true,
                 "app_test",
-                zero_migrate_backend::approval::Approval::Approved,
-                &zero_migrate_backend::approval::ApprovalScope::Versions(Default::default()),
+                zeroship_migrate_backend::approval::Approval::Approved,
+                &zeroship_migrate_backend::approval::ApprovalScope::Versions(Default::default()),
                 "tester",
-                zero_migrate_backend::executor::LockMode::AlreadyHeld,
+                zeroship_migrate_backend::executor::LockMode::AlreadyHeld,
             )
             .await;
         assert!(matches!(
@@ -3490,15 +3490,15 @@ mod render_tests {
             schema: "proj_x".into(),
             table: "users".into(),
             cursor_columns: vec!["id".into()],
-            cursor_stability: zero_migrate_ir::ir::CursorStability::ExternalInvariant {
+            cursor_stability: zeroship_migrate_ir::ir::CursorStability::ExternalInvariant {
                 name: "users_id_immutable_during_backfill".into(),
             },
-            cursor_contract: Some(zero_migrate_backend::backfill::CursorContract {
-                columns: vec![zero_migrate_backend::backfill::CursorColumnContract {
+            cursor_contract: Some(zeroship_migrate_backend::backfill::CursorContract {
+                columns: vec![zeroship_migrate_backend::backfill::CursorColumnContract {
                     name: "id".into(),
-                    scalar_type: zero_migrate_backend::backfill::CursorScalarType::Int64,
+                    scalar_type: zeroship_migrate_backend::backfill::CursorScalarType::Int64,
                     database_type: "bigint".into(),
-                    comparison: zero_migrate_backend::backfill::CursorComparison::Default,
+                    comparison: zeroship_migrate_backend::backfill::CursorComparison::Default,
                 }],
             }),
             batch_size: 100,
@@ -3514,10 +3514,10 @@ mod render_tests {
                 &version,
                 &checksum,
                 &spec,
-                zero_migrate_backend::approval::Approval::None,
-                &zero_migrate_backend::approval::ApprovalScope::All,
+                zeroship_migrate_backend::approval::Approval::None,
+                &zeroship_migrate_backend::approval::ApprovalScope::All,
                 "tester",
-                zero_migrate_backend::executor::LockMode::AlreadyHeld,
+                zeroship_migrate_backend::executor::LockMode::AlreadyHeld,
             )
             .await;
         assert!(matches!(no_approval, Err(ApplyError::ApprovalRequired)));
@@ -3542,10 +3542,10 @@ mod render_tests {
                 &version,
                 &checksum,
                 &spec,
-                zero_migrate_backend::approval::Approval::Approved,
-                &zero_migrate_backend::approval::ApprovalScope::Versions(Default::default()),
+                zeroship_migrate_backend::approval::Approval::Approved,
+                &zeroship_migrate_backend::approval::ApprovalScope::Versions(Default::default()),
                 "tester",
-                zero_migrate_backend::executor::LockMode::AlreadyHeld,
+                zeroship_migrate_backend::executor::LockMode::AlreadyHeld,
             )
             .await;
         assert!(matches!(
@@ -3585,10 +3585,10 @@ mod render_tests {
                 true,
                 true,
                 "app_test",
-                zero_migrate_backend::approval::Approval::None,
-                &zero_migrate_backend::approval::ApprovalScope::All,
+                zeroship_migrate_backend::approval::Approval::None,
+                &zeroship_migrate_backend::approval::ApprovalScope::All,
                 "tester",
-                zero_migrate_backend::executor::LockMode::AlreadyHeld,
+                zeroship_migrate_backend::executor::LockMode::AlreadyHeld,
             )
             .await
             .expect("journal lookup succeeds");
@@ -3632,10 +3632,10 @@ mod render_tests {
                 true,
                 false,
                 "app_test",
-                zero_migrate_backend::approval::Approval::None,
-                &zero_migrate_backend::approval::ApprovalScope::All,
+                zeroship_migrate_backend::approval::Approval::None,
+                &zeroship_migrate_backend::approval::ApprovalScope::All,
                 "tester",
-                zero_migrate_backend::executor::LockMode::AlreadyHeld,
+                zeroship_migrate_backend::executor::LockMode::AlreadyHeld,
             )
             .await;
         assert!(matches!(
@@ -3680,13 +3680,13 @@ mod render_tests {
         // no evaluator needed - the executor calls this for every migration).
         assert_eq!(
             backend.evaluate_preconditions(&cfg, &m).await.unwrap(),
-            zero_migrate_backend::executor::PreconditionVerdict::AllMet,
+            zeroship_migrate_backend::executor::PreconditionVerdict::AllMet,
             "an empty precondition list is AllMet, not the v1 capability gap",
         );
         // A migration that DECLARES a precondition fails closed (no MySQL evaluator).
         let mut m_pc = trivial_migration();
-        m_pc.preconditions = vec![zero_migrate_ir::precondition::PreconditionCheck::halt(
-            zero_migrate_ir::precondition::Precondition::TableNotExists { table: "t".into() },
+        m_pc.preconditions = vec![zeroship_migrate_ir::precondition::PreconditionCheck::halt(
+            zeroship_migrate_ir::precondition::Precondition::TableNotExists { table: "t".into() },
         )];
         assert!(
             backend.evaluate_preconditions(&cfg, &m_pc).await.is_err(),
@@ -3702,14 +3702,14 @@ mod render_tests {
                 .evaluate_plan_precondition(
                     &cfg,
                     "v_any",
-                    &zero_migrate_ir::precondition::Precondition::ColumnHasNoBlockingDependents {
+                    &zeroship_migrate_ir::precondition::Precondition::ColumnHasNoBlockingDependents {
                         table: "t".into(),
                         column: "c".into(),
                     },
                 )
                 .await
                 .expect("abstaining is not an error"),
-            zero_migrate_backend::backend::PlanPreconditionVerdict::Abstain,
+            zeroship_migrate_backend::backend::PlanPreconditionVerdict::Abstain,
             "a backend with no precondition evaluator says nothing at plan level",
         );
         assert!(backend.baseline_one(&cfg, &m, "t").await.is_err());

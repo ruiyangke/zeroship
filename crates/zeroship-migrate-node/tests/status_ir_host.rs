@@ -29,12 +29,12 @@ mod support;
 
 use std::cell::RefCell;
 
-use zero_migrate::conn::ExecutorConfig;
-use zero_migrate_postgres::PostgresBackend;
+use zeroship_migrate::conn::ExecutorConfig;
+use zeroship_migrate_postgres::PostgresBackend;
 
-use zero_migrate_node::marshal::{JsCell, JsReply, JsRequest, JsRow};
-use zero_migrate_node::session::{NapiHostSession, VerbDispatch, VerbReply};
-use zero_migrate_node::verbs::status_ir_with_locked_backend;
+use zeroship_migrate_node::marshal::{JsCell, JsReply, JsRequest, JsRow};
+use zeroship_migrate_node::session::{NapiHostSession, VerbDispatch, VerbReply};
+use zeroship_migrate_node::verbs::status_ir_with_locked_backend;
 
 const COMPLETED: &str = "mig_0000000000000000000001";
 const INFLIGHT: &str = "mig_0000000000000000000002";
@@ -261,7 +261,7 @@ fn null_cell() -> JsCell {
 fn run_status(
     journal_carries_event_seq: bool,
 ) -> (
-    Result<zero_migrate_node::wire::StatusReply, String>,
+    Result<zeroship_migrate_node::wire::StatusReply, String>,
     Vec<String>,
 ) {
     futures::executor::block_on(async {

@@ -17,12 +17,12 @@ use crate::model::expr::{Expr, SynthFn};
 use crate::model::ir::{ColType, IndexElement, IrColumn, IrDefault, IrIndex};
 use crate::model::table_shape::ResolvedInject;
 use crate::render::renderer::{Capability, DialectSupports};
-use zero_migrate_backend::registry::VendorSet;
-use zero_migrate_backend::schema::{
+use zeroship_migrate_backend::registry::VendorSet;
+use zeroship_migrate_backend::schema::{
     AddColumnDefinition, AddColumnIfNotExistsRequest, CreateIndexIfNotExistsRequest,
 };
-use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_policy::EffectivePolicy;
+use zeroship_migrate_ir::dialect::DialectId;
+use zeroship_migrate_policy::EffectivePolicy;
 
 /// Errors from query building.
 #[derive(Debug)]
@@ -98,7 +98,7 @@ pub struct BuiltQuery {
 /// That is the boundary rule `render::backends` states at length, and it is what
 /// kept this move from dragging `render::declarative` and `render::lower` (and
 /// therefore the whole engine) into the leaf.
-pub use zero_migrate_backend::schema::{
+pub use zeroship_migrate_backend::schema::{
     char_len, decimal_precision_scale, def_case_sensitive, encryption_sentinel_body_for_field,
     is_schema_metadata_key, mask_sentinel_for_field, mask_sibling_column_for_field, max_length,
     string_enum_values, SchemaRenderer,
@@ -730,7 +730,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped(
 /// mask/encryption sentinels) instead of the `;\n`-joined string.
 ///
 /// `join(";\n")` over the returned vector is byte-identical to the joined form, so
-/// the two entry points never diverge. The `zero_migrate` engine's
+/// the two entry points never diverge. The `zeroship_migrate` engine's
 /// guard-per-statement lowering consumes this list so a string-literal column
 /// DEFAULT whose value itself contains `;\n` (e.g. `DEFAULT 'a;\nb'`) is NEVER
 /// split mid-statement - the split is structural, not a textual `;\n` heuristic.
@@ -1314,12 +1314,12 @@ fn build_fk_clause(
 
 /// Normalise an FK action to the SQL keyword form Postgres accepts.
 ///
-/// DELEGATES to [`zero_migrate_backend::constraint_definition::normalize_fk_action`],
+/// DELEGATES to [`zeroship_migrate_backend::constraint_definition::normalize_fk_action`],
 /// which is the single source of the mapping now that the FK `definition` body it
 /// feeds is built below the vendors. The engine's own copy is deleted; this stays as
 /// the import path the out-of-repo data plane already writes.
 fn normalize_fk_action_inner(s: Option<&str>) -> &'static str {
-    zero_migrate_backend::constraint_definition::normalize_fk_action(s)
+    zeroship_migrate_backend::constraint_definition::normalize_fk_action(s)
 }
 
 /// Normalise an FK action; used cross-module by the diff engine.
@@ -1336,7 +1336,7 @@ pub fn normalize_fk_action(s: Option<&str>) -> &'static str {
 ///
 /// The engine's entry point: it RESOLVES `dialect` and asks that vendor. A backend
 /// that already knows which vendor it is calls
-/// [`zero_migrate_backend::constraint_definition::normalize_fk_action_for_vendor`].
+/// [`zeroship_migrate_backend::constraint_definition::normalize_fk_action_for_vendor`].
 /// `render::declarative` used to carry a byte-identical private duplicate of this;
 /// the move that took the FK body below the vendors deleted it.
 pub fn normalize_fk_action_for_dialect(
@@ -1344,7 +1344,7 @@ pub fn normalize_fk_action_for_dialect(
     s: Option<&str>,
     dialect: &DialectId,
 ) -> &'static str {
-    zero_migrate_backend::constraint_definition::normalize_fk_action_for_vendor(
+    zeroship_migrate_backend::constraint_definition::normalize_fk_action_for_vendor(
         s,
         crate::render::backends::vendor(vendors, dialect),
     )

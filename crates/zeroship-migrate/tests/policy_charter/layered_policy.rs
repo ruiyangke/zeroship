@@ -1,9 +1,9 @@
 use std::collections::BTreeSet;
 
-use zero_migrate::{
+use zeroship_migrate::{
     effective_policy_from_charter_layers, effective_policy_from_charter_toml, EffectivePolicy,
 };
-use zero_migrate_policy::{KnobKey, KnobValue, ObjectName};
+use zeroship_migrate_policy::{KnobKey, KnobValue, ObjectName};
 
 const ROOT_GRANTS: &str = r#"policy_version = 1
 

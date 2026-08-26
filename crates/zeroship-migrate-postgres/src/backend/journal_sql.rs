@@ -1,10 +1,10 @@
 //! The PostgreSQL journal: schema, immutability trigger, and every statement
 //! that reads or writes `<meta>.schema_migrations`.
 //!
-//! This is the PostgreSQL analogue of the MySQL `zero_migrate_mysql::backend::journal_sql`
-//! and SQLite `zero_migrate_sqlite::backend::journal_sql` modules. The three backends
+//! This is the PostgreSQL analogue of the MySQL `zeroship_migrate_mysql::backend::journal_sql`
+//! and SQLite `zeroship_migrate_sqlite::backend::journal_sql` modules. The three backends
 //! share the journal's *vocabulary* - [`Phase`], [`EventKind`], [`AppliedEntry`],
-//! [`JournalError`], ... all live in the dialect-neutral [`zero_migrate_backend::journal`] -
+//! [`JournalError`], ... all live in the dialect-neutral [`zeroship_migrate_backend::journal`] -
 //! and nothing else. Every byte of SQL below is PostgreSQL's alone: `DO $do$`
 //! bodies, `pg_trigger`/`pg_proc`/`pg_class` catalog joins, `EXECUTE FUNCTION`,
 //! `GENERATED ALWAYS AS IDENTITY`, and `$1` placeholders.
@@ -31,9 +31,9 @@
 //!
 //! Bootstrap ([`ensure_journal`]) is idempotent.
 
-use zero_migrate_backend::conn::ExecutorConfig;
-use zero_migrate_backend::driver::SqlSession;
-use zero_migrate_backend::journal::{
+use zeroship_migrate_backend::conn::ExecutorConfig;
+use zeroship_migrate_backend::driver::SqlSession;
+use zeroship_migrate_backend::journal::{
     AppliedEntry, BaselineRecord, CompletedRecord, DeployRecovery, DeployRecoveryScope, EventKind,
     HistoryEvent, HistoryKind, JournalError, JournaledKind, PendingContract, PendingContractRecord,
     PendingContractShape, PendingState, Phase, Resolution, ResolvedPendingContract,
@@ -43,11 +43,11 @@ use zero_migrate_backend::journal::{
 /// Quote a SQL identifier by doubling embedded quotes and wrapping in
 /// double-quotes, so a schema name is never interpolated as raw SQL. Routes
 /// through the explicit backend seam
-/// ([`zero_migrate_backend::dml::quote_ident_checked_for_backend`])
+/// ([`zeroship_migrate_backend::dml::quote_ident_checked_for_backend`])
 /// - byte-identical to (and uniformly self-defending with)
 /// `author`/`backfill`/`role`/`dml`: fail-closed on an empty / NUL identifier.
 fn quote_ident(ident: &str) -> Result<String, JournalError> {
-    Ok(zero_migrate_backend::dml::quote_ident_checked_for_backend(
+    Ok(zeroship_migrate_backend::dml::quote_ident_checked_for_backend(
         ident,
         &crate::dml::RENDERER,
     )?)
@@ -114,7 +114,7 @@ pub async fn ensure_journal<D: SqlSession>(
     // ran), a `baseline` (the schema already existed; the `up` recorded NOT run -
     // adoption path), a `squash` (a supersession; the squash's `up` recorded NOT
     // run because `[v1..vN]` were already applied - see [`record_baseline`] /
-    // `zero_migrate::ops::squash`), or a `repeatable` (- a re-applied
+    // `zeroship_migrate::ops::squash`), or a `repeatable` (- a re-applied
     // repeatable's `up` ran, but the version's IDENTITY is a repeatable). The
     // `repeatable` kind is LOAD-BEARING for the tamper guard: the drift exemption
     // anchors on the JOURNALED kind, not the attacker-suppliable
@@ -161,7 +161,7 @@ pub async fn ensure_journal<D: SqlSession>(
     // 2a-bis. The append-only SUPERSESSION log. One row per
     // (squash_version -> superseded_version) edge, written by the ADMIN when a
     // squash migration `S` is journaled (whether via `apply` running its `up`
-    // on a fresh DB, or via `zero_migrate::ops::squash` recording it baseline-style on a
+    // on a fresh DB, or via `zeroship_migrate::ops::squash` recording it baseline-style on a
     // DB that already ran `[v1..vN]`). The pending computation joins this
     // against net-applied squashes to decide that a superseded version is
     // SATISFIED. Append-only + immutable (trigger below): a squash's
@@ -934,7 +934,7 @@ pub async fn pending_contract_shape<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     contract: &PendingContract,
-    catalog_fold: &dyn zero_migrate_backend::fold::CatalogFoldPolicy,
+    catalog_fold: &dyn zeroship_migrate_backend::fold::CatalogFoldPolicy,
 ) -> Result<PendingContractShape, JournalError> {
     let catalog = conn
         .query(
@@ -1011,13 +1011,13 @@ pub async fn pending_contract_shape<D: SqlSession>(
         false
     };
 
-    let trigger_name = zero_migrate_backend::capability::dual_write_trg_name(
+    let trigger_name = zeroship_migrate_backend::capability::dual_write_trg_name(
         &contract.table,
         &contract.from_col,
         &contract.to_col,
         super::IDENT_MAX_BYTES,
     );
-    let function_name = zero_migrate_backend::capability::dual_write_fn_name(
+    let function_name = zeroship_migrate_backend::capability::dual_write_fn_name(
         &contract.table,
         &contract.from_col,
         &contract.to_col,
@@ -1062,7 +1062,7 @@ pub async fn pending_contract_shape<D: SqlSession>(
 /// This keeps `numeric(20,4)` distinct from `numeric(20,2)` while accepting the
 /// equivalent spellings authors and `format_type` commonly use.
 fn canonical_pending_contract_type(
-    catalog_fold: &dyn zero_migrate_backend::fold::CatalogFoldPolicy,
+    catalog_fold: &dyn zeroship_migrate_backend::fold::CatalogFoldPolicy,
     ty: &str,
 ) -> String {
     catalog_fold.canonical_rename_type_spelling(ty)
@@ -1121,7 +1121,7 @@ pub async fn record_pending_contract_with_recovery<D: SqlSession>(
         pending = PendingState::Pending.as_str(),
         resolved = PendingState::Resolved.as_str()
     );
-    let obligation_params: [zero_migrate_backend::driver::Bind; 9] = [
+    let obligation_params: [zeroship_migrate_backend::driver::Bind; 9] = [
         rec.owner_app.into(),
         rec.table.into(),
         rec.from_col.into(),
@@ -1504,7 +1504,7 @@ pub async fn superseded_versions<D: SqlSession>(
 /// Read the **latest `completed` checksum per version** from the journal of
 /// record.
 ///
-/// A repeatable migration ([`MigrationFlags::repeatable`](zero_migrate_ir::migration::MigrationFlags::repeatable))
+/// A repeatable migration ([`MigrationFlags::repeatable`](zeroship_migrate_ir::migration::MigrationFlags::repeatable))
 /// has a STABLE identity (its `version`/name never changes across edits) and is
 /// re-applied whenever its definition checksum changes. Each re-apply appends a
 /// fresh `completed` event for the same version (append-only), so a repeatable
@@ -1570,9 +1570,9 @@ pub async fn latest_completed_checksums<D: SqlSession>(
 /// meta-schema grant), exactly like [`record_completed`]. `exec_ms` is recorded as
 /// 0 (no SQL ran).
 ///
-/// This is the journal-without-running primitive shared by [`zero_migrate_backend::baseline`]
+/// This is the journal-without-running primitive shared by [`zeroship_migrate_backend::baseline`]
 /// (the adoption path: the schema already physically exists, so the `up` is
-/// recorded not run) and `zero_migrate::ops::squash`'s existing-DB path (a supersession: the
+/// recorded not run) and `zeroship_migrate::ops::squash`'s existing-DB path (a supersession: the
 /// effect of `[v1..vN]` is already present, so the squash's `up` is recorded not
 /// run). #3 fix: the `completed` row + every supersession edge are inserted in ONE
 /// transaction THIS function brackets (`BEGIN ... COMMIT`, ROLLBACK on any error), so

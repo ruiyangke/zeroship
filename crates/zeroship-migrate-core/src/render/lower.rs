@@ -28,9 +28,9 @@
 //! descriptor bridge because descriptors cannot carry apply-time functions.
 
 use std::collections::{BTreeMap, BTreeSet};
-use zero_migrate_backend::registry::VendorSet;
-use zero_migrate_ir::attribute::CreateIndexAttributes;
-use zero_migrate_ir::attribute::OpAttributes;
+use zeroship_migrate_backend::registry::VendorSet;
+use zeroship_migrate_ir::attribute::CreateIndexAttributes;
+use zeroship_migrate_ir::attribute::OpAttributes;
 
 use crate::guard::{GuardConfig, GuardError, MigrationGuard};
 use crate::model::backfill::{
@@ -68,9 +68,9 @@ use crate::render::value_format::{
     column_metadata as value_format_column_metadata, uuid_column_metadata,
 };
 use crate::ResolvedInject;
-use zero_migrate_backend::advisory::Advisory;
-use zero_migrate_backend::ddl::{ExclusionConstraintRequest, ExclusionElementParts};
-use zero_migrate_backend::fold::{
+use zeroship_migrate_backend::advisory::Advisory;
+use zeroship_migrate_backend::ddl::{ExclusionConstraintRequest, ExclusionElementParts};
+use zeroship_migrate_backend::fold::{
     AuthorTypeOverride, FoldCursorComparison, FoldCursorScalarType, FoldDatabaseFeature,
 };
 // `POSTGRES` is deliberately NOT imported here. Lowering no longer names a vendor
@@ -78,8 +78,8 @@ use zero_migrate_backend::fold::{
 // now ask `Capability::PartitionRelationDdl`, and they were the last of them. The
 // constant is imported by the test module below, which legitimately targets named
 // dialects; re-adding it up here would be the first step back.
-use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_policy::EffectivePolicy;
+use zeroship_migrate_ir::dialect::DialectId;
+use zeroship_migrate_policy::EffectivePolicy;
 
 /// The result of lowering ONE IR op. A DDL op lowers to a list of
 /// [`LoweredUnit`]s (a `Migration` + its structural statement list); an online
@@ -296,7 +296,7 @@ pub struct LiveSchema {
     /// not re-derived, and because each one inverts a real design decision:
     /// - *"SQLite has no native online rename."* It has had `RENAME COLUMN` since
     ///   3.25; `render::declarative` says so in as many words and emits the
-    ///   statement, and `zero_migrate_sqlite::backend`'s `SQLITE_VERSION_FLOOR`
+    ///   statement, and `zeroship_migrate_sqlite::backend`'s `SQLITE_VERSION_FLOOR`
     ///   refuses to run against a server old enough to lack it. The rebuild
     ///   DELEGATES to that statement - it is not a workaround for its absence.
     /// - *"Needed ONLY on the SQLite leg"* / *"the PG leg never reads this map."*
@@ -1287,8 +1287,8 @@ pub struct IrAuthor {
 /// `DmlRenderer::render_trigger_op`
 /// and of the two view/table-ref methods beside it, so a vendor crate cannot
 /// implement the contract without naming it, and this module drags effectively all
-/// of the engine behind it. See `zero_migrate_backend::error` for the measurement.
-pub use zero_migrate_backend::error::IrLowerError;
+/// of the engine behind it. See `zeroship_migrate_backend::error` for the measurement.
+pub use zeroship_migrate_backend::error::IrLowerError;
 
 /// One rendered SQL FRAGMENT of a lowered op, carrying its attribution:
 /// the originating op INDEX (its position in `MigrationIr::ops`) and the op's kind.
@@ -1587,7 +1587,7 @@ pub(crate) fn render_domain_check(
         if name == "VALUE" {
             Ok(value_sql.to_string())
         } else {
-            zero_migrate_backend::dml::quote_ident_for_backend(
+            zeroship_migrate_backend::dml::quote_ident_for_backend(
                 "column",
                 name,
                 crate::render::backends::renderer(vendors, dialect),
@@ -3793,7 +3793,7 @@ impl IrAuthor {
 
     fn selected_dialectal_leg<'a>(
         &self,
-        legs: &'a BTreeMap<zero_migrate_ir::dialect::DialectId, Vec<Op>>,
+        legs: &'a BTreeMap<zeroship_migrate_ir::dialect::DialectId, Vec<Op>>,
     ) -> Option<&'a [Op]> {
         crate::render::fold::selected_dialectal_leg(&self.dialect, legs)
     }
@@ -6043,7 +6043,7 @@ impl IrAuthor {
     ///    remain the backstop.
     ///
     /// A **batched** `backfill` is PORTABLE on BOTH backends
-    /// (PG `backfill.rs`, SQLite `zero_migrate_sqlite::backend::backfill_sql`) - it is
+    /// (PG `backfill.rs`, SQLite `zeroship_migrate_sqlite::backend::backfill_sql`) - it is
     /// no longer a SQLite hard error.
     ///
     /// # Errors
@@ -6268,7 +6268,7 @@ impl IrAuthor {
     ///
     /// **PORTABLE on BOTH backends**: PG via the writable-CTE windowed
     /// `UPDATE` executor (`backfill.rs`), SQLite via the batched per-batch-txn
-    /// executor (`zero_migrate_sqlite::backend::backfill_sql`). The inline `set`/`filter`
+    /// executor (`zeroship_migrate_sqlite::backend::backfill_sql`). The inline `set`/`filter`
     /// are dialect-rendered (the `c.fn.splitPart` lowering, NULL-skipping
     /// `concatWs`, etc. differ per dialect) - but both legs consume the same
     /// `BackfillSpec` shape, so the plan step is uniform.
@@ -7464,7 +7464,7 @@ impl IrAuthor {
                     }
                 }
                 if let Some(check) = &def.check {
-                    let value_sql = zero_migrate_backend::dml::quote_ident_for_backend(
+                    let value_sql = zeroship_migrate_backend::dml::quote_ident_for_backend(
                         "column",
                         &source.name,
                         self.backend,
@@ -7648,7 +7648,7 @@ impl IrAuthor {
             .column_rename_strategy();
         let modifier_mismatch = matches!(
             rename_strategy,
-            zero_migrate_backend::schema::ColumnRenameStrategy::ExpandContract
+            zeroship_migrate_backend::schema::ColumnRenameStrategy::ExpandContract
         ) && !matches!(ty, ColType::Enum { .. } | ColType::Domain { .. })
             && ir_ddl_type.as_deref().is_some_and(|authored| {
                 policy.canonical_rename_type_spelling(authored)
@@ -7695,7 +7695,7 @@ impl IrAuthor {
         }
 
         match rename_strategy {
-            zero_migrate_backend::schema::ColumnRenameStrategy::ExpandContract => {
+            zeroship_migrate_backend::schema::ColumnRenameStrategy::ExpandContract => {
                 // The reconciled `information_schema` data_type, `ddl_type`-spelled
                 // - byte-equal to the declarative path's `ddl_type(&r.ty)`. Computed
                 // ONLY on the expand-contract leg (the rebuild leg takes affinity from
@@ -7721,7 +7721,7 @@ impl IrAuthor {
                     constraints: Vec::new(),
                     runtime_options: Default::default(),
                     // A placeholder snapshot for a rename, carrying no shape at all.
-                    attributes: zero_migrate_ir::attribute::Attributes::new(),
+                    attributes: zeroship_migrate_ir::attribute::Attributes::new(),
                     partition_by: None,
                     comment: None,
                     stored_create_sql: None,
@@ -7744,7 +7744,7 @@ impl IrAuthor {
                     )
                     .map_err(|e| IrLowerError::RenameLower(e.to_string()))
             }
-            zero_migrate_backend::schema::ColumnRenameStrategy::TableRebuild => {
+            zeroship_migrate_backend::schema::ColumnRenameStrategy::TableRebuild => {
                 // The SQLite rebuild needs the WHOLE live table shape (every column +
                 // the live SDK schema Value). Absent => fail closed. `expand_contract_ty` is unused
                 // on this leg (the rebuild's affinity comes from the SDK Value), so it
@@ -7789,7 +7789,7 @@ impl IrAuthor {
                     )
                     .map_err(|e| IrLowerError::RenameLower(e.to_string()))
             }
-            zero_migrate_backend::schema::ColumnRenameStrategy::Refuse(reason) => {
+            zeroship_migrate_backend::schema::ColumnRenameStrategy::Refuse(reason) => {
                 Err(IrLowerError::RenameLower(reason.to_string()))
             }
         }
@@ -8258,14 +8258,14 @@ fn vendor_inverse_from_history(
             let snapshot = live_schema.extensions.get(name)?;
             let mut sql = format!(
                 "CREATE EXTENSION {}",
-                zero_migrate_backend::dml::quote_ident_checked_for_backend(name, backend).ok()?
+                zeroship_migrate_backend::dml::quote_ident_checked_for_backend(name, backend).ok()?
             );
             // The placement comes from the recorded CREATE. A DROP EXTENSION has no
             // schema qualifier, so the drop's effective schema would be a guess.
             if let Some(schema) = &snapshot.schema {
                 sql.push_str(" WITH SCHEMA ");
                 sql.push_str(
-                    &zero_migrate_backend::dml::quote_ident_checked_for_backend(schema, backend)
+                    &zeroship_migrate_backend::dml::quote_ident_checked_for_backend(schema, backend)
                         .ok()?,
                 );
             }
@@ -8355,12 +8355,12 @@ fn vendor_inverse_from_history(
             let snapshot = live_schema.schemas.get(name)?;
             let mut sql = format!(
                 "CREATE SCHEMA {}",
-                zero_migrate_backend::dml::quote_ident_checked_for_backend(name, backend).ok()?
+                zeroship_migrate_backend::dml::quote_ident_checked_for_backend(name, backend).ok()?
             );
             if let Some(owner) = &snapshot.owner {
                 sql.push_str(" AUTHORIZATION ");
                 sql.push_str(
-                    &zero_migrate_backend::dml::quote_ident_checked_for_backend(owner, backend)
+                    &zeroship_migrate_backend::dml::quote_ident_checked_for_backend(owner, backend)
                         .ok()?,
                 );
             }
@@ -8380,7 +8380,7 @@ fn vendor_inverse_from_history(
 /// vendor being asked a question about ITSELF whose answer core already holds, so
 /// resolving a renderer to ask it was a tautology: core has the registered backend,
 /// which reads the same
-/// [`BackendDescriptor`](zero_migrate_ir::backend::BackendDescriptor) the vendor
+/// [`BackendDescriptor`](zeroship_migrate_ir::backend::BackendDescriptor) the vendor
 /// would have read. The vendor added nothing between the question and the answer.
 ///
 /// It is a cycle edge deleted rather than inverted, which matters for
@@ -8552,7 +8552,7 @@ fn render_view_op(
 /// the server and must hand the server the bytes the LOWERING would have written.
 /// A backend crate cannot call into the engine (the engine depends on every
 /// backend), so the printer travels to the probe as a
-/// [`AuthoredViewBody`](zero_migrate_backend::drift::AuthoredViewBody) instead.
+/// [`AuthoredViewBody`](zeroship_migrate_backend::drift::AuthoredViewBody) instead.
 #[derive(Debug)]
 pub struct AuthoredViewBodyRenderer<'a> {
     /// The dialect the probe is running against.
@@ -8560,12 +8560,12 @@ pub struct AuthoredViewBodyRenderer<'a> {
     /// The backends this build ships.
     ///
     /// A FIELD rather than a parameter because every use of it here is inside an
-    /// [`AuthoredViewBody`](zero_migrate_backend::drift::AuthoredViewBody) method,
+    /// [`AuthoredViewBody`](zeroship_migrate_backend::drift::AuthoredViewBody) method,
     /// and a trait the contract crate owns cannot grow an engine-shaped argument.
     pub vendors: VendorSet,
 }
 
-impl zero_migrate_backend::drift::AuthoredViewBody for AuthoredViewBodyRenderer<'_> {
+impl zeroship_migrate_backend::drift::AuthoredViewBody for AuthoredViewBodyRenderer<'_> {
     fn render(&self, query: &ViewQuery, eff_schema: &str) -> Option<String> {
         render_view_query(self.vendors, query, eff_schema, self.dialect, None).ok()
     }
@@ -9157,7 +9157,7 @@ fn restamp_ir_migration(
 /// question - which schemas a migration may touch - and deriving the capability set
 /// from it let a `schema.cross_schema` grant authorize `access.rls`, which no charter
 /// authored. Each required capability is read at the knob
-/// [`capability_knob_key`](zero_migrate_ir::policy_registry::capability_knob_key)
+/// [`capability_knob_key`](zeroship_migrate_ir::policy_registry::capability_knob_key)
 /// names, resolved at the concrete object the op targets; an op whose object cannot be
 /// named needs a whole-universe grant.
 fn enforce_vendor_capability_at_lower(
@@ -9169,9 +9169,9 @@ fn enforce_vendor_capability_at_lower(
     if capabilities.is_empty() {
         return Ok(());
     }
-    let object = zero_migrate_ir::policy_capability::capability_object_for_op(op, eff_schema);
+    let object = zeroship_migrate_ir::policy_capability::capability_object_for_op(op, eff_schema);
     for capability in capabilities {
-        if !zero_migrate_ir::policy_capability::policy_grants_capability(
+        if !zeroship_migrate_ir::policy_capability::policy_grants_capability(
             effective,
             capability,
             object.as_ref(),
@@ -10154,7 +10154,7 @@ fn render_exclusion_element_target(
     dialect: &DialectId,
 ) -> Result<String, IrLowerError> {
     let target = match &element.target {
-        ColumnOrExpr::Column { name } => zero_migrate_backend::dml::quote_ident_for_backend(
+        ColumnOrExpr::Column { name } => zeroship_migrate_backend::dml::quote_ident_for_backend(
             "column",
             name,
             crate::render::backends::renderer(vendors, dialect),
@@ -10172,7 +10172,7 @@ fn render_exclusion_element_target(
 // `exclusion_method_sql` and `exclusion_operator_sql` stood here, mapping the IR enums
 // onto `gist`/`spgist`/`btree` and onto `&&`/`=`/`<>`/`<`/`>`/`<=`/`>=`. Those are
 // PostgreSQL index access methods and PostgreSQL operator spellings, and they now live
-// in `zero_migrate_postgres::ddl` beside the frame that uses them. Core passes the IR
+// in `zeroship_migrate_postgres::ddl` beside the frame that uses them. Core passes the IR
 // enums through untouched and never learns what either spells.
 
 pub(crate) fn derived_exclusion_constraint_name(
@@ -10398,8 +10398,8 @@ mod dialect_scope_wire_spellings {
     };
     use crate::test_fixtures::{POSTGRES, SQLITE};
     use std::collections::{BTreeMap, BTreeSet};
-    use zero_migrate_ir::expr::Expr;
-    use zero_migrate_ir::ir::{IrScalar, Op};
+    use zeroship_migrate_ir::expr::Expr;
+    use zeroship_migrate_ir::ir::{IrScalar, Op};
 
     fn pinned_leg() -> Expr {
         Expr::Dialectal {
@@ -11242,7 +11242,7 @@ mod tests {
         // The two SERVER-VERSION FLOORS these features imply were asserted here
         // while the floor table was a method on the neutral `DatabaseFeature`. They
         // moved with the table into
-        // `zero_migrate_postgres::backend::the_uuid_generators_carry_this_servers_own_version_floors`,
+        // `zeroship_migrate_postgres::backend::the_uuid_generators_carry_this_servers_own_version_floors`,
         // which is the crate that knows what a `server_version_num` even is. What is
         // the ENGINE's to assert is the line above: that lowering these defaults
         // RECORDS the two requirements on the plan.
@@ -11489,7 +11489,7 @@ mod tests {
             name: "m".into(),
             owner_app: "app_a".into(),
             ops: vec![Op::CreateTable {
-                attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
                 name: table.into(),
                 columns: cols,
                 primary_key: None,
@@ -11803,7 +11803,7 @@ mod tests {
             name: "m".into(),
             owner_app: "app_a".into(),
             ops: vec![Op::AddColumn {
-                attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
                 table: "events".into(),
                 column: "seq".into(),
                 ty: ColType::BigInt,
@@ -12118,7 +12118,7 @@ mod tests {
             name: "m".into(),
             owner_app: "app_a".into(),
             ops: vec![Op::CreateTable {
-                attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
                 name: "widgets".into(),
                 columns: vec![TIrColumn {
                     name: "title".into(),
@@ -13861,7 +13861,7 @@ columns = [
             name: "m".into(),
             owner_app: "app_a".into(),
             ops: vec![Op::CreateTable {
-                attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
                 name: "events".into(),
                 columns: vec![
                     TIrColumn {
@@ -14008,7 +14008,7 @@ columns = [
             name: "m".into(),
             owner_app: "app_a".into(),
             ops: vec![Op::CreateTable {
-                attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
                 name: "limits".into(),
                 columns: vec![TIrColumn {
                     name: "net_policy_limits_json".into(),
@@ -14082,7 +14082,7 @@ columns = [
             name: "m".into(),
             owner_app: "app_a".into(),
             ops: vec![Op::CreateTable {
-                attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
                 name: "limits".into(),
                 columns: vec![TIrColumn {
                     name: "cfg".into(),
@@ -14152,7 +14152,7 @@ columns = [
             name: "m".into(),
             owner_app: "app_a".into(),
             ops: vec![Op::CreateTable {
-                attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
                 name: "events".into(),
                 columns: vec![TIrColumn {
                     name: "at".into(),
@@ -14205,7 +14205,7 @@ columns = [
             name: "m".into(),
             owner_app: "app_a".into(),
             ops: vec![Op::AddColumn {
-                attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
                 table: "events".into(),
                 column: "token".into(),
                 ty: ColType::Uuid,
@@ -14246,7 +14246,7 @@ columns = [
             name: "m".into(),
             owner_app: "app_a".into(),
             ops: vec![Op::AddColumn {
-                attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
                 table: "events".into(),
                 column: "kind".into(),
                 ty: ColType::Text,

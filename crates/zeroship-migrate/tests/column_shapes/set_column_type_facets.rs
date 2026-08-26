@@ -57,16 +57,16 @@
 //! `id_default`, and `fold_ops` left all four behind.
 //!
 //! THE VERDICT PER FACET is written where it is enforced - the `Op::SetColumnType`
-//! arm of [`zero_migrate::render::fold::single_fold`] holds the table and the
+//! arm of [`zeroship_migrate::render::fold::single_fold`] holds the table and the
 //! reason for each entry, measured against live PostgreSQL 18.4. This fixture
 //! pins the OBSERVABLE half of it, and pins the three replays to each other so a
 //! future divergence is a test failure rather than a discovery.
 
 use crate::support;
 
-use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::render::fold::fold_ops;
-use zero_migrate::render::fold::single_fold;
+use zeroship_migrate::model::ir::MigrationIr;
+use zeroship_migrate::render::fold::fold_ops;
+use zeroship_migrate::render::fold::single_fold;
 
 const SCHEMA: &str = "public";
 
@@ -90,13 +90,13 @@ fn descriptor(create_col: &str, to_type: &str) -> serde_json::Value {
     let ir = envelope(create_col, to_type);
     let effective = support::operator_charter(SCHEMA);
     single_fold::fold(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir.ops,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )
-    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
+    .map(|folded| folded.project_field_defs(zeroship_migrate::shipping_vendors()))
     .expect("the descriptor fold succeeds")
     .get("a")
     .and_then(|table| table.get("v"))
@@ -109,10 +109,10 @@ fn descriptor(create_col: &str, to_type: &str) -> serde_json::Value {
 fn authoring(create_col: &str, to_type: &str) -> String {
     let ir = envelope(create_col, to_type);
     let effective = support::operator_charter(SCHEMA);
-    zero_migrate::render::gen_types::render_artifacts(
-        zero_migrate::shipping_vendors(),
+    zeroship_migrate::render::gen_types::render_artifacts(
+        zeroship_migrate::shipping_vendors(),
         &ir.ops,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )
@@ -127,15 +127,15 @@ fn authoring(create_col: &str, to_type: &str) -> String {
 
 /// The `ColumnSnapshot` `fold_ops` folds for column `v`, on `dialect`.
 fn snapshot(
-    dialect: &zero_migrate::DialectId,
+    dialect: &zeroship_migrate::DialectId,
     project: &str,
     create_col: &str,
     to_type: &str,
-) -> Result<zero_migrate::model::snapshot::ColumnSnapshot, String> {
+) -> Result<zeroship_migrate::model::snapshot::ColumnSnapshot, String> {
     let ir = envelope(create_col, to_type);
     let effective = support::operator_charter(project);
     let folded = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir.ops,
         dialect,
         project,
@@ -153,8 +153,8 @@ fn snapshot(
 fn pg_snapshot(
     create_col: &str,
     to_type: &str,
-) -> Result<zero_migrate::model::snapshot::ColumnSnapshot, String> {
-    snapshot(&zero_migrate_postgres::DIALECT, SCHEMA, create_col, to_type)
+) -> Result<zeroship_migrate::model::snapshot::ColumnSnapshot, String> {
+    snapshot(&zeroship_migrate_postgres::DIALECT, SCHEMA, create_col, to_type)
 }
 
 const CI_TEXT: &str = r#"{"name":"v","type":"text","caseSensitive":false}"#;
@@ -414,9 +414,9 @@ fn a_retype_off_an_enum_column_drops_the_enum_check_it_left_behind() {
     .expect("the envelope parses");
     let effective = support::operator_charter("main");
     let folded = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir.ops,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         "main",
         &effective,
     )
@@ -510,9 +510,9 @@ fn a_retype_keeps_a_user_comment_the_alter_does_not_touch() {
     .expect("the envelope parses");
     let effective = support::operator_charter(SCHEMA);
     let folded = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir.ops,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )
@@ -557,20 +557,20 @@ fn the_value_format_refusal_reaches_both_artifact_replays() {
     let ir = envelope(TYPE_ID, TO_INT);
     let effective = support::operator_charter(SCHEMA);
     let error = single_fold::fold(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir.ops,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )
-    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
+    .map(|folded| folded.project_field_defs(zeroship_migrate::shipping_vendors()))
     .expect_err("the descriptor fold inherits the refusal");
     assert!(error.to_string().contains("value format"), "{error}");
 
-    let error = zero_migrate::render::gen_types::render_artifacts(
-        zero_migrate::shipping_vendors(),
+    let error = zeroship_migrate::render::gen_types::render_artifacts(
+        zeroship_migrate::shipping_vendors(),
         &ir.ops,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )
@@ -596,9 +596,9 @@ fn a_retype_that_touches_no_value_format_column_is_untouched_by_the_refusal() {
     .expect("the envelope parses");
     let effective = support::operator_charter(SCHEMA);
     let folded = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir.ops,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )
@@ -618,7 +618,7 @@ fn a_retype_that_touches_no_value_format_column_is_untouched_by_the_refusal() {
             .iter()
             .find(|c| c.name == "tid")
             .and_then(|c| c.value_format.clone()),
-        Some(zero_migrate::model::ir::ValueFormat::TypeId {
+        Some(zeroship_migrate::model::ir::ValueFormat::TypeId {
             prefix: "usr".to_string()
         }),
         "the untouched typed-id column keeps its format"

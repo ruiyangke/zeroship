@@ -33,19 +33,19 @@
 //!
 //! # The public surface did not move
 //!
-//! `pub use zero_migrate_core::*;` re-exports the engine's entire root, so every
-//! `zero_migrate::…` path a host already wrote resolves unchanged. The two composition
+//! `pub use zeroship_migrate_core::*;` re-exports the engine's entire root, so every
+//! `zeroship_migrate::…` path a host already wrote resolves unchanged. The two composition
 //! accessors below are what USED to be at the engine's root and could not stay there:
 //! they read the shipping list, and the engine no longer has one.
 
-pub use zero_migrate_core::*;
+pub use zeroship_migrate_core::*;
 
 // `BackendVendor` is what each vendor crate registers and `VendorSet` is what this
 // crate hands out; between them they are the whole vocabulary the composition is
 // written in. `BackendRegistry` is deliberately NOT imported here — the engine already
 // re-exports it at its root, so the glob above supplies it, and a second `use` would
 // shadow that public re-export with a private one.
-use zero_migrate_backend::registry::{BackendVendor, VendorSet};
+use zeroship_migrate_backend::registry::{BackendVendor, VendorSet};
 
 /// The shipping backends, named ONCE for the whole product.
 ///
@@ -56,11 +56,11 @@ use zero_migrate_backend::registry::{BackendVendor, VendorSet};
 /// the crates the list is made of.
 ///
 /// The set is a compile-time constant rather than a global a host fills at startup,
-/// and that is deliberate — see `zero_migrate_backend::registry` for why a growable
+/// and that is deliberate — see `zeroship_migrate_backend::registry` for why a growable
 /// registry would trade a compile error for a runtime one.
-const POSTGRES_VENDOR: &BackendVendor = &zero_migrate_postgres::VENDOR;
-const SQLITE_VENDOR: &BackendVendor = &zero_migrate_sqlite::VENDOR;
-const MYSQL_VENDOR: &BackendVendor = &zero_migrate_mysql::VENDOR;
+const POSTGRES_VENDOR: &BackendVendor = &zeroship_migrate_postgres::VENDOR;
+const SQLITE_VENDOR: &BackendVendor = &zeroship_migrate_sqlite::VENDOR;
+const MYSQL_VENDOR: &BackendVendor = &zeroship_migrate_mysql::VENDOR;
 
 static SHIPPING: [&BackendVendor; 3] = [POSTGRES_VENDOR, SQLITE_VENDOR, MYSQL_VENDOR];
 
@@ -114,7 +114,7 @@ pub fn shipping_backends() -> BackendRegistry {
 // This file names each vendor crate EXACTLY ONCE, in the three `*_VENDOR` consts, and
 // `tests/dialect_matrix/backend_modules_name_one_dialect.rs` asserts that count as the
 // positive control for its cross-vendor needle. A unit test here that reached
-// `zero_migrate_postgres::DIALECT` for an assertion would make the count two and turn
+// `zeroship_migrate_postgres::DIALECT` for an assertion would make the count two and turn
 // the one place designed to name a vendor into a place that names it for two different
 // reasons.
 //

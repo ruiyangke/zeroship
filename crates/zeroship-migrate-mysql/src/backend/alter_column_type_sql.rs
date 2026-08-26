@@ -20,12 +20,12 @@
 
 use std::time::Instant;
 
-use zero_migrate_backend::approval::{Approval, ApprovalScope};
-use zero_migrate_backend::conn::ExecutorConfig;
-use zero_migrate_backend::driver::SqlSession;
-use zero_migrate_backend::executor::ApplyError;
-use zero_migrate_backend::journal::Phase;
-use zero_migrate_backend::step::AlterColumnTypeStep;
+use zeroship_migrate_backend::approval::{Approval, ApprovalScope};
+use zeroship_migrate_backend::conn::ExecutorConfig;
+use zeroship_migrate_backend::driver::SqlSession;
+use zeroship_migrate_backend::executor::ApplyError;
+use zeroship_migrate_backend::journal::Phase;
+use zeroship_migrate_backend::step::AlterColumnTypeStep;
 
 use super::primary_key_sql::{column_clause_for, show_create_table};
 use super::{journal_sql, session};

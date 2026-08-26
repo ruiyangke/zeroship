@@ -2,14 +2,14 @@
 
 use crate::collation::{mysql_pin_collation, mysql_type_without_collation};
 use crate::physical_type::{self, MysqlPhysicalType};
-use zero_migrate_backend::ddl::ExclusionConstraintRequest;
-use zero_migrate_backend::renderer::DmlRenderer;
-use zero_migrate_backend::schema::{
+use zeroship_migrate_backend::ddl::ExclusionConstraintRequest;
+use zeroship_migrate_backend::renderer::DmlRenderer;
+use zeroship_migrate_backend::schema::{
     char_len, decimal_precision_scale, def_case_sensitive, AddColumnIfNotExistsRequest,
     CreateIndexIfNotExistsRequest, KeyStorageEvidence, SchemaRenderer, StorageValidationRefusal,
 };
-use zero_migrate_backend::snapshot::ColumnSnapshot;
-use zero_migrate_ir::dialect::DialectId;
+use zeroship_migrate_backend::snapshot::ColumnSnapshot;
+use zeroship_migrate_ir::dialect::DialectId;
 
 // This module's vendor identity, read from the crate's ONE declaration of it.
 use crate::DIALECT;
@@ -94,13 +94,13 @@ impl SchemaRenderer for MysqlSchemaRenderer {
 
     /// MySQL snapshots expose structured catalog facts rather than retaining a
     /// vendor CREATE statement for surgical rewrites.
-    fn stored_ddl(&self) -> Option<&'static dyn zero_migrate_backend::stored_ddl::StoredDdl> {
+    fn stored_ddl(&self) -> Option<&'static dyn zeroship_migrate_backend::stored_ddl::StoredDdl> {
         None
     }
 
     fn table_rebuild_policy(
         &self,
-    ) -> Option<&'static dyn zero_migrate_backend::table_rebuild::TableRebuildPolicy> {
+    ) -> Option<&'static dyn zeroship_migrate_backend::table_rebuild::TableRebuildPolicy> {
         // MySQL's declarative strategy refuses changes that require a complete
         // column/table restatement; it does not borrow SQLite's rebuild grammar.
         None
@@ -213,7 +213,7 @@ impl SchemaRenderer for MysqlSchemaRenderer {
     /// without additional author choices, so it explicitly omits them.
     fn project_derived_ann_index(
         &self,
-        _index: &mut zero_migrate_backend::snapshot::IndexSnapshot,
+        _index: &mut zeroship_migrate_backend::snapshot::IndexSnapshot,
     ) -> bool {
         false
     }
@@ -234,10 +234,10 @@ impl SchemaRenderer for MysqlSchemaRenderer {
     /// distinction between a bounded character column and a LOB.
     fn validate_key_storage(
         &self,
-        desired: &zero_migrate_backend::snapshot::SchemaSnapshot,
-        live: &zero_migrate_backend::snapshot::SchemaSnapshot,
+        desired: &zeroship_migrate_backend::snapshot::SchemaSnapshot,
+        live: &zeroship_migrate_backend::snapshot::SchemaSnapshot,
     ) -> Result<(), String> {
-        use zero_migrate_backend::ddl::{fk_local_columns, fk_referenced_columns, fk_target_table};
+        use zeroship_migrate_backend::ddl::{fk_local_columns, fk_referenced_columns, fk_target_table};
 
         let check = |position: &str, table: &str, columns: &[String]| -> Result<(), String> {
             let snapshot = desired.tables.get(table).or_else(|| live.tables.get(table));
@@ -355,8 +355,8 @@ impl SchemaRenderer for MysqlSchemaRenderer {
 
     fn dual_write_trigger(
         &self,
-        _spec: &zero_migrate_backend::schema::DualWriteTriggerSpec<'_>,
-    ) -> Option<zero_migrate_backend::schema::DualWriteTriggerSql> {
+        _spec: &zeroship_migrate_backend::schema::DualWriteTriggerSpec<'_>,
+    ) -> Option<zeroship_migrate_backend::schema::DualWriteTriggerSql> {
         // This backend REFUSES a live column rename (`ColumnRenameStrategy::Refuse`
         // below), so it never reaches an expand-contract sequence at all.
         None
@@ -364,12 +364,12 @@ impl SchemaRenderer for MysqlSchemaRenderer {
 
     fn existing_column_change_strategy(
         &self,
-    ) -> zero_migrate_backend::schema::ExistingColumnChangeStrategy {
-        zero_migrate_backend::schema::ExistingColumnChangeStrategy::Refuse
+    ) -> zeroship_migrate_backend::schema::ExistingColumnChangeStrategy {
+        zeroship_migrate_backend::schema::ExistingColumnChangeStrategy::Refuse
     }
 
-    fn column_rename_strategy(&self) -> zero_migrate_backend::schema::ColumnRenameStrategy {
-        zero_migrate_backend::schema::ColumnRenameStrategy::Refuse(
+    fn column_rename_strategy(&self) -> zeroship_migrate_backend::schema::ColumnRenameStrategy {
+        zeroship_migrate_backend::schema::ColumnRenameStrategy::Refuse(
             "renameColumn is render-only for MySQL, not live-rendered",
         )
     }
@@ -471,7 +471,7 @@ impl SchemaRenderer for MysqlSchemaRenderer {
     }
 
     fn suppress_string_enum_check(&self, def: &serde_json::Value) -> bool {
-        zero_migrate_backend::schema::string_enum_values(def).is_some()
+        zeroship_migrate_backend::schema::string_enum_values(def).is_some()
     }
 
     fn pin_collation(&self, rendered: &str, case_sensitive: Option<bool>) -> String {
@@ -818,7 +818,7 @@ pub fn mysql_base_column_type_for_def(def: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::{SchemaRenderer, RENDERER};
-    use zero_migrate_backend::snapshot::ColumnSnapshot;
+    use zeroship_migrate_backend::snapshot::ColumnSnapshot;
 
     const PIN: &str = "CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs";
 

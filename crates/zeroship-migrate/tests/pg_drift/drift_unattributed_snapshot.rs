@@ -62,15 +62,15 @@ use crate::support;
 use std::collections::BTreeMap;
 
 use crate::support::mysql::{quote_ident, DatabaseGuard, MysqlDevSession};
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::driver::SqlSession;
-use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::model::snapshot::TableSnapshot;
-use zero_migrate::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::model::ir::MigrationIr;
+use zeroship_migrate::model::snapshot::TableSnapshot;
+use zeroship_migrate::{
     diff_snapshots, fold_ops, model::ir::Op, resolve_create_table_policy, Approval, ExecutorConfig,
     GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, SchemaSnapshot, StructuralDrift,
 };
-use zero_migrate_mysql::MysqlBackend;
+use zeroship_migrate_mysql::MysqlBackend;
 
 const OWNER: &str = "app_drift_unattributed_snapshot";
 
@@ -110,18 +110,18 @@ async fn apply_doc(
     let resolved_source = serde_json::to_string(&resolved)
         .map_err(|error| format!("serialize resolved test IR: {error}"))?;
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         &policy,
     );
-    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate_mysql::DIALECT);
+    let guard = GuardConfig::from_policy(policy.clone(), zeroship_migrate_mysql::DIALECT);
     let artifact = author
         .load_and_lower_guarded(&resolved_source, OWNER, registry, live, &guard)
         .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;
 
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,
@@ -185,7 +185,7 @@ fn any_vendor_claims(snapshot: &SchemaSnapshot, name: &str) -> Result<bool, Stri
 fn default_line<'d>(
     drift: &'d StructuralDrift,
     name: &str,
-) -> Option<&'d zero_migrate::apply::drift::AlteredObject> {
+) -> Option<&'d zeroship_migrate::apply::drift::AlteredObject> {
     drift.altered_objects.iter().find(|a| {
         (a.table == name || a.table.ends_with(&format!(".{name}")))
             && a.object == "column id"
@@ -231,9 +231,9 @@ async fn live_mysql_reports_a_default_change_on_a_table_no_backend_claims() {
         .await?;
 
         let expected = fold_ops(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &ops,
-            &zero_migrate_mysql::DIALECT,
+            &zeroship_migrate_mysql::DIALECT,
             &cfg.project_schema,
             &support::no_inject(&cfg.project_schema),
         )
@@ -245,7 +245,7 @@ async fn live_mysql_reports_a_default_change_on_a_table_no_backend_claims() {
             .snapshot_schema(&cfg)
             .await
             .map_err(|error| format!("snapshot the untouched schema: {error}"))?;
-        let clean = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &untouched);
+        let clean = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &untouched);
         if !clean.is_clean() {
             return Err(format!(
                 "the tables were deployed by the engine and left alone, yet drift \
@@ -299,7 +299,7 @@ async fn live_mysql_reports_a_default_change_on_a_table_no_backend_claims() {
                 markers(&actual, BARE)
             ));
         }
-        let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
+        let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual);
 
         // THE ASSERTION. The unclaimed table first, then its claimed twin - the two
         // must reach the same verdict, which is what makes the missing provenance the

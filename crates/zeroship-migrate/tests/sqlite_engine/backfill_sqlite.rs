@@ -21,14 +21,14 @@
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::{apply::backend::BackfillError, BackfillSpec, CursorStability};
-use zero_migrate_sqlite::backend::Mode;
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate::{apply::backend::BackfillError, BackfillSpec, CursorStability};
+use zeroship_migrate_sqlite::backend::Mode;
+use zeroship_migrate_sqlite::SqliteBackend;
 
 /// A lock serializing every backfill test in this file.
 ///
 /// It is NOT what keeps an armed fault out of another test's backfill.
-/// `zero_migrate::fault::arm` writes a `thread_local!` registry, so a fault armed
+/// `zeroship_migrate::fault::arm` writes a `thread_local!` registry, so a fault armed
 /// by one test is scoped to the thread that armed it and cannot fire on another
 /// thread - `armed_fault_does_not_cross_thread_boundary` below pins that through
 /// the same `BACKFILL_MID_BATCHES` point the crash-fuzz test uses. The one
@@ -328,7 +328,7 @@ async fn sqlite_backfill_resumes_exactly_once_after_crash() {
 
 #[compio::test]
 async fn sqlite_backfill_fault_injected_crash_then_resume_exactly_once() {
-    use zero_migrate::fault;
+    use zeroship_migrate::fault;
 
     let _g = serial();
     let p = paths("bf_fault");
@@ -813,8 +813,8 @@ async fn sqlite_backfill_rejects_schema_qualified_table() {
 fn backfill_on_this_thread(
     tag: &str,
     arm_here: bool,
-) -> Result<zero_migrate::apply::backend::BackfillOutcome, BackfillError> {
-    use zero_migrate::fault;
+) -> Result<zeroship_migrate::apply::backend::BackfillOutcome, BackfillError> {
+    use zeroship_migrate::fault;
 
     futures::executor::block_on(async {
         let p = paths(tag);
@@ -831,7 +831,7 @@ fn backfill_on_this_thread(
 
 #[test]
 fn armed_fault_does_not_cross_thread_boundary() {
-    use zero_migrate::fault;
+    use zeroship_migrate::fault;
 
     let _g = serial();
     fault::disarm_all();
@@ -877,7 +877,7 @@ fn armed_fault_does_not_cross_thread_boundary() {
 // a no-op.
 #[test]
 fn armed_fault_fires_when_armed_on_the_applying_thread() {
-    use zero_migrate::fault;
+    use zeroship_migrate::fault;
 
     let _g = serial();
     fault::disarm_all();
@@ -906,7 +906,7 @@ fn armed_fault_fires_when_armed_on_the_applying_thread() {
 // thread killed without running destructors (process::exit/abort).
 #[test]
 fn armed_fault_claim_is_released_when_a_thread_exits_without_disarming() {
-    use zero_migrate::fault;
+    use zeroship_migrate::fault;
 
     let _g = serial();
     fault::disarm_all();

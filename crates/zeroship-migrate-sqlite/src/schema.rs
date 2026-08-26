@@ -1,13 +1,13 @@
 //! SQLite schema/DDL spelling.
 
-use zero_migrate_backend::ddl::ExclusionConstraintRequest;
-use zero_migrate_backend::renderer::DmlRenderer;
-use zero_migrate_backend::schema::{
+use zeroship_migrate_backend::ddl::ExclusionConstraintRequest;
+use zeroship_migrate_backend::renderer::DmlRenderer;
+use zeroship_migrate_backend::schema::{
     decimal_precision_scale, AddColumnIfNotExistsRequest, CreateIndexIfNotExistsRequest,
     SchemaRenderer,
 };
-use zero_migrate_backend::snapshot::ColumnSnapshot;
-use zero_migrate_ir::dialect::DialectId;
+use zeroship_migrate_backend::snapshot::ColumnSnapshot;
+use zeroship_migrate_ir::dialect::DialectId;
 
 // This module's vendor identity, read from the crate's ONE declaration of it.
 use crate::DIALECT;
@@ -43,13 +43,13 @@ impl SchemaRenderer for SqliteSchemaRenderer {
         '"'
     }
 
-    fn stored_ddl(&self) -> Option<&'static dyn zero_migrate_backend::stored_ddl::StoredDdl> {
+    fn stored_ddl(&self) -> Option<&'static dyn zeroship_migrate_backend::stored_ddl::StoredDdl> {
         Some(&crate::stored_ddl::PARSER)
     }
 
     fn table_rebuild_policy(
         &self,
-    ) -> Option<&'static dyn zero_migrate_backend::table_rebuild::TableRebuildPolicy> {
+    ) -> Option<&'static dyn zeroship_migrate_backend::table_rebuild::TableRebuildPolicy> {
         Some(&crate::table_rebuild::POLICY)
     }
 
@@ -97,7 +97,7 @@ impl SchemaRenderer for SqliteSchemaRenderer {
 
     fn project_derived_ann_index(
         &self,
-        index: &mut zero_migrate_backend::snapshot::IndexSnapshot,
+        index: &mut zeroship_migrate_backend::snapshot::IndexSnapshot,
     ) -> bool {
         index.access_method = "btree".to_string();
         index.opclass = None;
@@ -107,8 +107,8 @@ impl SchemaRenderer for SqliteSchemaRenderer {
     /// SQLite has no additional key-storage restriction at this seam.
     fn validate_key_storage(
         &self,
-        _desired: &zero_migrate_backend::snapshot::SchemaSnapshot,
-        _live: &zero_migrate_backend::snapshot::SchemaSnapshot,
+        _desired: &zeroship_migrate_backend::snapshot::SchemaSnapshot,
+        _live: &zeroship_migrate_backend::snapshot::SchemaSnapshot,
     ) -> Result<(), String> {
         Ok(())
     }
@@ -118,8 +118,8 @@ impl SchemaRenderer for SqliteSchemaRenderer {
         _position: &str,
         _table: &str,
         _column: &str,
-        _evidence: zero_migrate_backend::schema::KeyStorageEvidence<'_>,
-    ) -> Option<zero_migrate_backend::schema::StorageValidationRefusal> {
+        _evidence: zeroship_migrate_backend::schema::KeyStorageEvidence<'_>,
+    ) -> Option<zeroship_migrate_backend::schema::StorageValidationRefusal> {
         // SQLite has no prefix-length syntax or corresponding storage-family
         // restriction for the key shapes this engine authors.
         None
@@ -130,15 +130,15 @@ impl SchemaRenderer for SqliteSchemaRenderer {
         _column: &str,
         _rendered_type: &str,
         _rendered_default: &str,
-    ) -> Option<zero_migrate_backend::schema::StorageValidationRefusal> {
+    ) -> Option<zeroship_migrate_backend::schema::StorageValidationRefusal> {
         // SQLite accepts literal defaults independently of declared type affinity.
         None
     }
 
     fn dual_write_trigger(
         &self,
-        _spec: &zero_migrate_backend::schema::DualWriteTriggerSpec<'_>,
-    ) -> Option<zero_migrate_backend::schema::DualWriteTriggerSql> {
+        _spec: &zeroship_migrate_backend::schema::DualWriteTriggerSpec<'_>,
+    ) -> Option<zeroship_migrate_backend::schema::DualWriteTriggerSql> {
         // This backend reconciles a rename by REBUILDING the table
         // (`ColumnRenameStrategy::TableRebuild` below), so there is no window in which
         // two columns coexist and nothing for a dual-write trigger to keep equal.
@@ -147,12 +147,12 @@ impl SchemaRenderer for SqliteSchemaRenderer {
 
     fn existing_column_change_strategy(
         &self,
-    ) -> zero_migrate_backend::schema::ExistingColumnChangeStrategy {
-        zero_migrate_backend::schema::ExistingColumnChangeStrategy::TableRebuild
+    ) -> zeroship_migrate_backend::schema::ExistingColumnChangeStrategy {
+        zeroship_migrate_backend::schema::ExistingColumnChangeStrategy::TableRebuild
     }
 
-    fn column_rename_strategy(&self) -> zero_migrate_backend::schema::ColumnRenameStrategy {
-        zero_migrate_backend::schema::ColumnRenameStrategy::TableRebuild
+    fn column_rename_strategy(&self) -> zeroship_migrate_backend::schema::ColumnRenameStrategy {
+        zeroship_migrate_backend::schema::ColumnRenameStrategy::TableRebuild
     }
 
     fn supports_forward_inline_foreign_key(&self) -> bool {
@@ -224,7 +224,7 @@ impl SchemaRenderer for SqliteSchemaRenderer {
     }
 
     fn schema_grammar_string_literal(&self, value: &str) -> String {
-        zero_migrate_backend::dml::sql_string_literal(value)
+        zeroship_migrate_backend::dml::sql_string_literal(value)
     }
 
     fn empty_json_expr(&self, object: bool) -> &'static str {
@@ -242,7 +242,7 @@ impl SchemaRenderer for SqliteSchemaRenderer {
     }
 
     fn json_value_default_expr(&self, json: &str) -> String {
-        zero_migrate_backend::dml::sql_string_literal(json)
+        zeroship_migrate_backend::dml::sql_string_literal(json)
     }
 
     fn injected_column_ident(&self, name: &str, canonical_bare: bool) -> String {
@@ -460,7 +460,7 @@ fn sqlite_ddl_type(data_type: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{SchemaRenderer, RENDERER};
-    use zero_migrate_backend::snapshot::ColumnSnapshot;
+    use zeroship_migrate_backend::snapshot::ColumnSnapshot;
 
     #[test]
     fn collation_hooks_are_explicit_sqlite_pass_throughs() {

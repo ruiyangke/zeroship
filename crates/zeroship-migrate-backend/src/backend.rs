@@ -1,6 +1,6 @@
 //! The vocabulary the `MigrationBackend` dialect seam speaks.
 //!
-//! The trait itself is still `zero_migrate::apply::backend::MigrationBackend`.
+//! The trait itself is still `zeroship_migrate::apply::backend::MigrationBackend`.
 //! What lives here is the set of neutral VALUES its signatures name - the ones
 //! that reach nothing above this crate. They came down first because a vendor
 //! crate cannot implement a trait whose argument and return types live in the
@@ -9,7 +9,7 @@
 //! `PlanPreconditionVerdict` carry only `std` types, and `JournalFuture` carries
 //! only this crate's own `JournalError`.
 //!
-//! The engine re-exports all of them at `zero_migrate::apply::backend`, the path
+//! The engine re-exports all of them at `zeroship_migrate::apply::backend`, the path
 //! every existing caller uses.
 
 use std::future::Future;
@@ -26,8 +26,8 @@ use crate::requirements::DatabaseRequirements;
 use crate::snapshot::SchemaSnapshot;
 use crate::step::{AlterColumnTypeStep, AlterPrimaryKeyStep, BindValue, SynchronizeIdentityStep};
 use crate::table_rebuild::TableRebuildSpec;
-use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_ir::migration::{Checksum, Migration, MigrationId};
+use zeroship_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::migration::{Checksum, Migration, MigrationId};
 
 /// How a backend renders a positional bind placeholder in the SQL it issues.
 ///
@@ -570,7 +570,7 @@ pub trait MigrationBackend {
     /// Evaluate a migration's preconditions read-only under the apply lock.
     /// Behind the trait so the generic body never holds a concrete connection;
     /// the PG impl delegates to
-    /// `zero_migrate_postgres::backend::precondition::evaluate`. Named in prose rather
+    /// `zeroship_migrate_postgres::backend::precondition::evaluate`. Named in prose rather
     /// than linked: it is crate-private, and this method is the public way in.
     async fn evaluate_preconditions(
         &self,
@@ -591,7 +591,7 @@ pub trait MigrationBackend {
     /// ([`Self::evaluate_preconditions`]). Abstaining leaves SQLite and MySQL
     /// byte-identical: the same refusal, at the same seam, with the same wording.
     /// Only the PostgreSQL impl answers, routing to the SAME
-    /// `zero_migrate_postgres::backend::precondition` body the per-migration seam uses, so the two cannot
+    /// `zeroship_migrate_postgres::backend::precondition` body the per-migration seam uses, so the two cannot
     /// disagree about one assertion.
     ///
     /// # Errors
@@ -602,7 +602,7 @@ pub trait MigrationBackend {
         &self,
         _cfg: &ExecutorConfig,
         _version: &str,
-        _check: &zero_migrate_ir::precondition::Precondition,
+        _check: &zeroship_migrate_ir::precondition::Precondition,
     ) -> Result<PlanPreconditionVerdict, ApplyError> {
         Ok(PlanPreconditionVerdict::Abstain)
     }

@@ -16,28 +16,28 @@
 //!
 //! # The recorder is the SAME object, not a copy
 //!
-//! Both halves drive `zero_migrate_mysql::backend::recording::RecordingSession` and
+//! Both halves drive `zeroship_migrate_mysql::backend::recording::RecordingSession` and
 //! its canned `information_schema` rows. That shared premise is the whole reason it is
 //! published through the vendor crate's `testing` feature instead of copied over here:
 //! two copies of a canned catalog drift silently, and one suite would go on asserting
 //! against a table shape the other had already corrected.
 
 use serde_json::json;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::apply::drift::diff_snapshots;
-use zero_migrate::apply::executor::ApplyError;
-use zero_migrate::conn::ExecutorConfig;
-use zero_migrate::driver::Bind;
-use zero_migrate::driver::{Row, Value};
-use zero_migrate::model::expr::Expr;
-use zero_migrate::model::ir::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::apply::drift::diff_snapshots;
+use zeroship_migrate::apply::executor::ApplyError;
+use zeroship_migrate::conn::ExecutorConfig;
+use zeroship_migrate::driver::Bind;
+use zeroship_migrate::driver::{Row, Value};
+use zeroship_migrate::model::expr::Expr;
+use zeroship_migrate::model::ir::{
     ColType, IdentityCol, IrColumn, IrConstraint, IrConstraintKind, IrDefault, MigrationIr, Op,
     ValueFormat, CURRENT_IR_VERSION,
 };
-use zero_migrate::model::snapshot::{IdDefaultSnapshot, SchemaSnapshot};
-use zero_migrate::render::plan::DatabaseFeature;
-use zero_migrate_mysql::backend::recording::*;
-use zero_migrate_mysql::MysqlBackend;
+use zeroship_migrate::model::snapshot::{IdDefaultSnapshot, SchemaSnapshot};
+use zeroship_migrate::render::plan::DatabaseFeature;
+use zeroship_migrate_mysql::backend::recording::*;
+use zeroship_migrate_mysql::MysqlBackend;
 
 use crate::support;
 
@@ -47,7 +47,7 @@ use crate::support;
 /// backend's `DIALECT` const, which is `pub(crate)` to `zero-migrate-mysql` and stays
 /// that way: exactly one line in that crate names the vendor, and a test on this side
 /// of the boundary is not a reason to make it two.
-const DIALECT: zero_migrate_ir::dialect::DialectId = zero_migrate_mysql::DIALECT;
+const DIALECT: zeroship_migrate_ir::dialect::DialectId = zeroship_migrate_mysql::DIALECT;
 
 /// This vendor's own renderers, for the value-format doors these tests call.
 ///
@@ -57,9 +57,9 @@ const DIALECT: zero_migrate_ir::dialect::DialectId = zero_migrate_mysql::DIALECT
 /// `zero-migrate-backend` and hand it MySQL's pair directly — the same `&'static`
 /// objects `VENDOR` registers, so the metadata is byte-for-byte what the backend
 /// itself renders.
-const MYSQL_VALUE_FORMAT: &dyn zero_migrate_backend::value_format::ValueFormatRenderer =
-    zero_migrate_mysql::VENDOR.value_format;
-const MYSQL_DML: &dyn zero_migrate_backend::renderer::DmlRenderer = zero_migrate_mysql::VENDOR.dml;
+const MYSQL_VALUE_FORMAT: &dyn zeroship_migrate_backend::value_format::ValueFormatRenderer =
+    zeroship_migrate_mysql::VENDOR.value_format;
+const MYSQL_DML: &dyn zeroship_migrate_backend::renderer::DmlRenderer = zeroship_migrate_mysql::VENDOR.dml;
 
 #[compio::test]
 async fn uuid_v4_capability_failure_precedes_authored_sql() {
@@ -69,20 +69,20 @@ async fn uuid_v4_capability_failure_precedes_authored_sql() {
     let cfg = ExecutorConfig::new("prj_x", "proj_x", support::no_inject("proj_x"));
     let migration = trivial_migration();
     let authored_sql = migration.up.clone();
-    let mut plan = zero_migrate::AppliedPlan::single_step(migration);
+    let mut plan = zeroship_migrate::AppliedPlan::single_step(migration);
     plan.database_requirements
         .require(DatabaseFeature::UuidV4Generation);
 
-    let error = zero_migrate::MigrationEngine::new(zero_migrate::shipping_vendors())
+    let error = zeroship_migrate::MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_applied_plan_with_touched_and_depends(
             &plan,
             &[],
             &[],
-            zero_migrate::approval::Approval::None,
+            zeroship_migrate::approval::Approval::None,
             &backend,
             &cfg,
             "tester",
-            zero_migrate::apply::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect_err("the unsupported server must stop the complete plan");
@@ -291,7 +291,7 @@ async fn snapshot_schema_reads_canonical_columns_and_ordered_unique_indexes() {
         "FOREIGN KEY (tenant_id, email) REFERENCES proj_x.users(tenant_id, email) ON UPDATE CASCADE ON DELETE SET NULL"
     );
     assert!(
-        diff_snapshots(zero_migrate::shipping_vendors(), &snapshot, &snapshot).is_clean(),
+        diff_snapshots(zeroship_migrate::shipping_vendors(), &snapshot, &snapshot).is_clean(),
         "the exact single/composite FK catalog must stay clean"
     );
     let assert_fk_drop = |constraint_name: &str, scenario: &str| {
@@ -302,7 +302,7 @@ async fn snapshot_schema_reads_canonical_columns_and_ordered_unique_indexes() {
             .expect("users table")
             .constraints
             .retain(|constraint| constraint.name != constraint_name);
-        let drift = diff_snapshots(zero_migrate::shipping_vendors(), &snapshot, &changed);
+        let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &snapshot, &changed);
         assert!(
             drift
                 .missing_objects
@@ -322,7 +322,7 @@ async fn snapshot_schema_reads_canonical_columns_and_ordered_unique_indexes() {
             .find(|constraint| constraint.name == constraint_name)
             .expect("foreign key")
             .definition = definition.to_string();
-        let drift = diff_snapshots(zero_migrate::shipping_vendors(), &snapshot, &changed);
+        let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &snapshot, &changed);
         assert!(
             drift.altered_objects.iter().any(|altered| {
                 altered.object == format!("constraint {constraint_name}")
@@ -496,11 +496,11 @@ async fn mysql_single_and_composite_fk_mutations_drift_through_catalog_rows() {
     let expected = snapshot(baseline_rows()).await;
     let clean = snapshot(baseline_rows()).await;
     assert!(
-        diff_snapshots(zero_migrate::shipping_vendors(), &expected, &clean).is_clean(),
+        diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &clean).is_clean(),
         "unchanged catalog FK rows must stay clean"
     );
     let assert_missing = |actual: &SchemaSnapshot, constraint: &str, label: &str| {
-        let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, actual);
+        let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, actual);
         assert!(
             drift
                 .missing_objects
@@ -510,7 +510,7 @@ async fn mysql_single_and_composite_fk_mutations_drift_through_catalog_rows() {
         );
     };
     let assert_altered = |actual: &SchemaSnapshot, constraint: &str, label: &str| {
-        let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, actual);
+        let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, actual);
         assert!(
             drift.altered_objects.iter().any(|altered| {
                 altered.object == format!("constraint {constraint}")
@@ -569,7 +569,7 @@ async fn mysql_single_and_composite_fk_mutations_drift_through_catalog_rows() {
 
 #[compio::test]
 async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks() {
-    let uuid_generated_check = zero_migrate_backend::value_format::uuid_column_metadata(
+    let uuid_generated_check = zeroship_migrate_backend::value_format::uuid_column_metadata(
         "generated_uuid",
         MYSQL_VALUE_FORMAT,
         MYSQL_DML,
@@ -577,7 +577,7 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
     .expect("UUID metadata")
     .expect("MySQL UUID CHECK")
     .inline_check;
-    let uuid_supplied_check = zero_migrate_backend::value_format::uuid_column_metadata(
+    let uuid_supplied_check = zeroship_migrate_backend::value_format::uuid_column_metadata(
         "supplied_uuid",
         MYSQL_VALUE_FORMAT,
         MYSQL_DML,
@@ -585,7 +585,7 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
     .expect("UUID metadata")
     .expect("MySQL UUID CHECK")
     .inline_check;
-    let type_id_check = zero_migrate_backend::value_format::column_metadata(
+    let type_id_check = zeroship_migrate_backend::value_format::column_metadata(
         "type_id",
         &ValueFormat::TypeId {
             prefix: "user".to_string(),
@@ -595,7 +595,7 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
     )
     .expect("TypeID metadata")
     .inline_check;
-    let ulid_check = zero_migrate_backend::value_format::column_metadata(
+    let ulid_check = zeroship_migrate_backend::value_format::column_metadata(
         "ulid",
         &ValueFormat::Ulid,
         MYSQL_VALUE_FORMAT,
@@ -657,10 +657,10 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
     let mut ulid = id_column("ulid", ColType::Text);
     ulid.value_format = Some(ValueFormat::Ulid);
     let ordinary = id_column("ordinary", ColType::Text);
-    let expected = zero_migrate::render::fold::fold_ops(
-        zero_migrate::shipping_vendors(),
+    let expected = zeroship_migrate::render::fold::fold_ops(
+        zeroship_migrate::shipping_vendors(),
         &[Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "ids".to_string(),
             columns: vec![
                 auto_id,
@@ -736,7 +736,7 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
     assert_eq!(column("ulid").value_format, Some(ValueFormat::Ulid));
     assert_eq!(column("ulid").id_default, Some(IdDefaultSnapshot::Absent));
     assert_eq!(column("ordinary").id_default, None);
-    let clean_drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &snapshot);
+    let clean_drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &snapshot);
     assert!(
         clean_drift.is_clean(),
         "the portable auto-increment and exact format/default catalog shape must stay clean: {clean_drift:?}"
@@ -750,7 +750,7 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
         "MySQL 8.0.16+ must introspect enforced CHECK clauses"
     );
 
-    let account_type_id_check = zero_migrate_backend::value_format::column_metadata(
+    let account_type_id_check = zeroship_migrate_backend::value_format::column_metadata(
         "type_id",
         &ValueFormat::TypeId {
             prefix: "account".to_string(),
@@ -783,7 +783,7 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
         .await
         .expect("altered format snapshot");
     let format_drift = diff_snapshots(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &snapshot,
         &altered_formats,
     );
@@ -824,7 +824,7 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
         .await
         .expect("altered default snapshot");
     let default_drift = diff_snapshots(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &snapshot,
         &altered_defaults,
     );
@@ -852,7 +852,7 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
         .await
         .expect("swapped default snapshot");
     let swapped_default_drift = diff_snapshots(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &snapshot,
         &swapped_default,
     );
@@ -894,7 +894,7 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
             .await
             .expect("same-text literal UUID default without format CHECK");
     let marker_drift = diff_snapshots(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &snapshot,
         &literal_generator_without_check,
     );
@@ -928,7 +928,7 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
     let lowercase_literal = literal_uuid_snapshot("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").await;
     let uppercase_literal = literal_uuid_snapshot("AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA").await;
     let case_drift = diff_snapshots(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &lowercase_literal,
         &uppercase_literal,
     );
@@ -954,7 +954,7 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
         .expect("ordinary")
         .identity = Some(IdentityCol { always: false });
     let identity_drift = diff_snapshots(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &snapshot,
         &altered_identity,
     );
@@ -977,7 +977,7 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
         .identity = Some(IdentityCol { always: true });
     assert!(
         diff_snapshots(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &snapshot,
             &altered_identity
         )
@@ -1007,10 +1007,10 @@ async fn mysql_auto_increment_add_and_drop_are_recovered_from_catalog_extra() {
         identity,
     };
     let expected = |identity| {
-        zero_migrate::render::fold::fold_ops(
-            zero_migrate::shipping_vendors(),
+        zeroship_migrate::render::fold::fold_ops(
+            zeroship_migrate::shipping_vendors(),
             &[Op::CreateTable {
-                attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
                 name: "identity_probe".to_string(),
                 columns: vec![column(identity)],
                 primary_key: Some(vec!["id".to_string()]),
@@ -1071,18 +1071,18 @@ async fn mysql_auto_increment_add_and_drop_are_recovered_from_catalog_extra() {
     let expected_auto = expected(Some(IdentityCol { always: false }));
     let expected_plain = expected(None);
     assert!(
-        diff_snapshots(zero_migrate::shipping_vendors(), &expected_auto, &auto).is_clean(),
+        diff_snapshots(zeroship_migrate::shipping_vendors(), &expected_auto, &auto).is_clean(),
         "portable AUTO_INCREMENT must match catalog EXTRA"
     );
     assert!(
-        diff_snapshots(zero_migrate::shipping_vendors(), &expected_plain, &plain).is_clean(),
+        diff_snapshots(zeroship_migrate::shipping_vendors(), &expected_plain, &plain).is_clean(),
         "portable non-identity key must remain clean"
     );
     for (expected_snapshot, actual_snapshot, label) in
         [(&auto, &plain, "drop"), (&plain, &auto, "add")]
     {
         let drift = diff_snapshots(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             expected_snapshot,
             actual_snapshot,
         );
@@ -1142,8 +1142,8 @@ async fn snapshot_schema_compares_mysql_literal_defaults_on_format_typed_referen
         ]
     }))
     .expect("typed-reference literal fixture must deserialize");
-    let expected = zero_migrate::render::fold::fold_ops(
-        zero_migrate::shipping_vendors(),
+    let expected = zeroship_migrate::render::fold::fold_ops(
+        zeroship_migrate::shipping_vendors(),
         &ir.ops,
         &DIALECT,
         "proj_x",
@@ -1157,7 +1157,7 @@ async fn snapshot_schema_compares_mysql_literal_defaults_on_format_typed_referen
         .expect("typed reference folds to a foreign key")
         .name
         .clone();
-    let type_id_check = zero_migrate_backend::value_format::column_metadata(
+    let type_id_check = zeroship_migrate_backend::value_format::column_metadata(
         "id",
         &ValueFormat::TypeId {
             prefix: "account".to_string(),
@@ -1262,7 +1262,7 @@ async fn snapshot_schema_compares_mysql_literal_defaults_on_format_typed_referen
         )),
         "a non-expression MySQL COLUMN_DEFAULT must recover as a string literal"
     );
-    let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &clean);
+    let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &clean);
     assert!(
         drift.is_clean(),
         "bare MySQL COLUMN_DEFAULT literals must match authored typed literals: {drift:#?}"
@@ -1284,7 +1284,7 @@ async fn snapshot_schema_compares_mysql_literal_defaults_on_format_typed_referen
             ))
             .await
             .unwrap_or_else(|error| panic!("{label} literal snapshot: {error}"));
-        let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
+        let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual);
         assert!(
             drift.altered_objects.iter().any(|altered| {
                 altered.object == "column parent_id" && altered.field == "default"
@@ -1381,7 +1381,7 @@ async fn snapshot_schema_preserves_mysql_expression_markers_on_fk_columns() {
                 .expect("literal generator spelling serializes")
         ))
     );
-    let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expression, &literal);
+    let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expression, &literal);
     assert!(
         drift
             .altered_objects
@@ -1427,15 +1427,15 @@ async fn mysql_key_format_checks_drop_prefix_and_clause_changes_drift_from_catal
         ]
     }))
     .expect("MySQL key-format fixture must deserialize");
-    let expected = zero_migrate::render::fold::fold_ops(
-        zero_migrate::shipping_vendors(),
+    let expected = zeroship_migrate::render::fold::fold_ops(
+        zeroship_migrate::shipping_vendors(),
         &ir.ops,
         &DIALECT,
         "proj_x",
         &support::no_inject("app"),
     )
     .expect("MySQL key-format fixture must fold");
-    let type_check = zero_migrate_backend::value_format::column_metadata(
+    let type_check = zeroship_migrate_backend::value_format::column_metadata(
         "id",
         &ValueFormat::TypeId {
             prefix: "account".to_string(),
@@ -1445,7 +1445,7 @@ async fn mysql_key_format_checks_drop_prefix_and_clause_changes_drift_from_catal
     )
     .expect("TypeID key metadata")
     .inline_check;
-    let team_check = zero_migrate_backend::value_format::column_metadata(
+    let team_check = zeroship_migrate_backend::value_format::column_metadata(
         "id",
         &ValueFormat::TypeId {
             prefix: "team".to_string(),
@@ -1455,7 +1455,7 @@ async fn mysql_key_format_checks_drop_prefix_and_clause_changes_drift_from_catal
     )
     .expect("altered TypeID key metadata")
     .inline_check;
-    let ulid_check = zero_migrate_backend::value_format::column_metadata(
+    let ulid_check = zeroship_migrate_backend::value_format::column_metadata(
         "id",
         &ValueFormat::Ulid,
         MYSQL_VALUE_FORMAT,
@@ -1520,7 +1520,7 @@ async fn mysql_key_format_checks_drop_prefix_and_clause_changes_drift_from_catal
         check("ulid_keys", &ulid_check),
     ])
     .await;
-    let clean_drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &clean);
+    let clean_drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &clean);
     assert!(
         clean_drift.is_clean(),
         "authored key formats must match MySQL catalog CHECKs: {clean_drift:#?}"
@@ -1560,7 +1560,7 @@ async fn mysql_key_format_checks_drop_prefix_and_clause_changes_drift_from_catal
     ] {
         let actual_snapshot = snapshot(checks).await;
         let drift = diff_snapshots(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &expected,
             &actual_snapshot,
         );
@@ -1600,15 +1600,15 @@ async fn snapshot_schema_rejects_semantically_regrouped_mysql_format_check() {
         }]
     }))
     .expect("regrouped TypeID fixture must deserialize");
-    let expected = zero_migrate::render::fold::fold_ops(
-        zero_migrate::shipping_vendors(),
+    let expected = zeroship_migrate::render::fold::fold_ops(
+        zeroship_migrate::shipping_vendors(),
         &ir.ops,
         &DIALECT,
         "proj_x",
         &support::no_inject("app"),
     )
     .expect("regrouped TypeID fixture must fold");
-    let canonical = zero_migrate_backend::value_format::column_metadata(
+    let canonical = zeroship_migrate_backend::value_format::column_metadata(
         "id",
         &value_format,
         MYSQL_VALUE_FORMAT,
@@ -1665,7 +1665,7 @@ async fn snapshot_schema_rejects_semantically_regrouped_mysql_format_check() {
         actual.tables["ids"].columns[0].value_format, None,
         "a regrouped nullable guard is not the canonical TypeID contract"
     );
-    let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
+    let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual);
     assert!(
         drift
             .altered_objects
@@ -1700,7 +1700,7 @@ async fn named_table_unique_candidate_and_composite_fk_have_clean_mysql_drift() 
     let child_fk_name = "children_parent_fkey";
     let ops = vec![
         Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "parents".to_string(),
             columns: vec![
                 bigint_column("tenant_id", false),
@@ -1720,7 +1720,7 @@ async fn named_table_unique_candidate_and_composite_fk_have_clean_mysql_drift() 
             existence_guard: None,
         },
         Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "children".to_string(),
             columns: vec![
                 bigint_column("parent_tenant", true),
@@ -1747,8 +1747,8 @@ async fn named_table_unique_candidate_and_composite_fk_have_clean_mysql_drift() 
             existence_guard: None,
         },
     ];
-    let expected = zero_migrate::render::fold::fold_ops(
-        zero_migrate::shipping_vendors(),
+    let expected = zeroship_migrate::render::fold::fold_ops(
+        zeroship_migrate::shipping_vendors(),
         &ops,
         &DIALECT,
         "proj_x",
@@ -1876,7 +1876,7 @@ async fn named_table_unique_candidate_and_composite_fk_have_clean_mysql_drift() 
         ["tenant_id", "external_id"],
         "candidate-key tuple order must survive MySQL introspection"
     );
-    let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
+    let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual);
     assert!(
         drift.is_clean(),
         "named table UNIQUE + composite FK must round-trip without false MySQL drift: {drift:?}"
@@ -1890,12 +1890,12 @@ async fn snapshot_failure_aborts_before_author_sql_and_releases_lock() {
     let cfg = ExecutorConfig::new("prj_x", "proj_x", support::no_inject("proj_x"));
     let migration = trivial_migration();
 
-    let result = zero_migrate::apply::executor::apply(
-        zero_migrate::shipping_vendors(),
+    let result = zeroship_migrate::apply::executor::apply(
+        zeroship_migrate::shipping_vendors(),
         &backend,
         &cfg,
         &[migration],
-        zero_migrate::Approval::Approved,
+        zeroship_migrate::Approval::Approved,
         "tester",
     )
     .await;
@@ -1920,12 +1920,12 @@ async fn active_caller_transaction_is_rejected_before_autocommit_or_author_sql()
     let cfg = ExecutorConfig::new("prj_x", "proj_x", support::no_inject("proj_x"));
     let migration = trivial_migration();
 
-    let result = zero_migrate::apply::executor::apply(
-        zero_migrate::shipping_vendors(),
+    let result = zeroship_migrate::apply::executor::apply(
+        zeroship_migrate::shipping_vendors(),
         &backend,
         &cfg,
         &[migration],
-        zero_migrate::Approval::Approved,
+        zeroship_migrate::Approval::Approved,
         "tester",
     )
     .await;
@@ -1957,12 +1957,12 @@ async fn successful_apply_surfaces_restore_failure_after_releasing_lock() {
     let cfg = ExecutorConfig::new("prj_x", "proj_x", support::no_inject("proj_x"));
     let migration = trivial_migration();
 
-    let result = zero_migrate::apply::executor::apply(
-        zero_migrate::shipping_vendors(),
+    let result = zeroship_migrate::apply::executor::apply(
+        zeroship_migrate::shipping_vendors(),
         &backend,
         &cfg,
         &[migration],
-        zero_migrate::Approval::Approved,
+        zeroship_migrate::Approval::Approved,
         "tester",
     )
     .await;
@@ -1992,25 +1992,25 @@ async fn whole_plan_preflight_refuses_delete_before_earlier_insert() {
     let (insert, _) = plan_dml_step("insert user", false);
     let (delete, delete_version) = plan_dml_step("delete user", true);
 
-    let result = zero_migrate::MigrationEngine::new(zero_migrate::shipping_vendors())
+    let result = zeroship_migrate::MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan_with_touched_and_depends_scoped(
             &[insert, delete],
             &["users".into()],
             &[],
-            zero_migrate::approval::Approval::Approved,
-            &zero_migrate::approval::ApprovalScope::Versions(Default::default()),
+            zeroship_migrate::approval::Approval::Approved,
+            &zeroship_migrate::approval::ApprovalScope::Versions(Default::default()),
             &backend,
             &cfg,
             "tester",
-            zero_migrate::apply::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
             None,
         )
         .await;
 
     assert!(matches!(
         result,
-        Err(zero_migrate::engine::DeclarativeApplyError::Plain(
-            zero_migrate::engine::EngineError::ApprovalNotScoped { ref version }
+        Err(zeroship_migrate::engine::DeclarativeApplyError::Plain(
+            zeroship_migrate::engine::EngineError::ApprovalNotScoped { ref version }
         )) if version == delete_version.as_str()
     ));
     let log = rec.log.borrow();

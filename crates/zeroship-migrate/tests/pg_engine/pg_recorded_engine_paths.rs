@@ -15,30 +15,30 @@
 use crate::support;
 
 use std::sync::atomic::Ordering;
-use zero_migrate::engine::{DeclarativeApplyError, EngineError, MigrationEngine};
-use zero_migrate::render::plan::AppliedPlan;
+use zeroship_migrate::engine::{DeclarativeApplyError, EngineError, MigrationEngine};
+use zeroship_migrate::render::plan::AppliedPlan;
 
-use zero_migrate_backend::approval::{Approval, ApprovalScope};
-use zero_migrate_backend::backend::MigrationBackend;
-use zero_migrate_backend::conn::ExecutorConfig;
-use zero_migrate_backend::driver::{Bind, Row, Value};
-use zero_migrate_backend::executor::{ApplyError, LockMode};
-use zero_migrate_backend::requirements::DatabaseFeature;
-use zero_migrate_backend::step::PlanStep;
-use zero_migrate_ir::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
-use zero_migrate_postgres::backend::recording::{
+use zeroship_migrate_backend::approval::{Approval, ApprovalScope};
+use zeroship_migrate_backend::backend::MigrationBackend;
+use zeroship_migrate_backend::conn::ExecutorConfig;
+use zeroship_migrate_backend::driver::{Bind, Row, Value};
+use zeroship_migrate_backend::executor::{ApplyError, LockMode};
+use zeroship_migrate_backend::requirements::DatabaseFeature;
+use zeroship_migrate_backend::step::PlanStep;
+use zeroship_migrate_ir::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
+use zeroship_migrate_postgres::backend::recording::{
     canned_journal_row, plan_backfill_step, plan_dml_step, RecordingSession,
 };
-use zero_migrate_postgres::backend::{journal_sql, status_sql, PostgresBackend};
+use zeroship_migrate_postgres::backend::{journal_sql, status_sql, PostgresBackend};
 
 async fn apply_recorded_plan(
     rec: &RecordingSession,
     steps: &[PlanStep],
     approval: Approval,
     scope: &ApprovalScope,
-) -> Result<zero_migrate::engine::DeclarativeDeployOutcome, DeclarativeApplyError> {
+) -> Result<zeroship_migrate::engine::DeclarativeDeployOutcome, DeclarativeApplyError> {
     let backend = PostgresBackend::<'_, RecordingSession>::new_generic(rec);
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan_with_touched_and_depends_scoped(
             steps,
             &["users".into()],
@@ -212,7 +212,7 @@ async fn plan_requirement_refuses_before_authored_sql_runs() {
     plan.database_requirements
         .require(DatabaseFeature::UuidV7Generation);
 
-    let result = MigrationEngine::new(zero_migrate::shipping_vendors())
+    let result = MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_applied_plan_with_touched_and_depends(
             &plan,
             &[],
@@ -303,7 +303,7 @@ async fn full_surface_runs_generically_with_in_flight_guard_never_tripping() {
         "status decoded the net-applied version over Row: {:?}",
         st.applied
     );
-    let hist = zero_migrate::ops::status::history_via_backend(&backend, &cfg)
+    let hist = zeroship_migrate::ops::status::history_via_backend(&backend, &cfg)
         .await
         .expect("history over host driver");
     // history() over the empty canned history read returns an empty log without

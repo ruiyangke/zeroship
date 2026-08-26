@@ -23,37 +23,37 @@
 //! that asks a renderer who it is gets an honest answer instead of a panic.
 
 use std::collections::BTreeMap;
-use zero_migrate_backend::dml::{
+use zeroship_migrate_backend::dml::{
     BindCtx, DmlError, LimitedDeleteRenderRequest, OnConflict, OnConflictRenderRequest,
 };
-use zero_migrate_backend::error::IrLowerError;
-use zero_migrate_backend::existence_probe::ExistenceProbePolicy;
-use zero_migrate_backend::fold::{
+use zeroship_migrate_backend::error::IrLowerError;
+use zeroship_migrate_backend::existence_probe::ExistenceProbePolicy;
+use zeroship_migrate_backend::fold::{
     AuthorTypeOverride, CatalogFoldPolicy, CatalogFoldRefusal, FoldCursorColumnContract,
     FoldDatabaseFeature, ReferenceTextStorage, SnapshotProvenanceStrength,
 };
-use zero_migrate_backend::renderer::{DmlRenderer, FeatureSupportKey, MaterializedNamedTypeOp};
-use zero_migrate_backend::schema::{
+use zeroship_migrate_backend::renderer::{DmlRenderer, FeatureSupportKey, MaterializedNamedTypeOp};
+use zeroship_migrate_backend::schema::{
     AddColumnIfNotExistsRequest, CreateIndexIfNotExistsRequest, SchemaRenderer,
 };
-use zero_migrate_backend::snapshot::{
+use zeroship_migrate_backend::snapshot::{
     ColumnCollationSnapshot, ColumnSnapshot, IdDefaultSnapshot, PartitionSnapshot,
     SequenceSnapshot, TableSnapshot, ViewSnapshot,
 };
-use zero_migrate_backend::step::BindValue;
-use zero_migrate_backend::validation::{Disposition, ValidationPolicy, ValidationRefusal};
-use zero_migrate_backend::value_format::{
+use zeroship_migrate_backend::step::BindValue;
+use zeroship_migrate_backend::validation::{Disposition, ValidationPolicy, ValidationRefusal};
+use zeroship_migrate_backend::value_format::{
     CatalogSqlContext, LiteralCastKind, ValueFormatColumnMetadata, ValueFormatRenderer,
 };
-use zero_migrate_backend::vendor::VendorStatement;
-use zero_migrate_ir::backend::{
+use zeroship_migrate_backend::vendor::VendorStatement;
+use zeroship_migrate_ir::backend::{
     BackendDescriptor, Capability, CapabilitySet, IdentifierLimit, Limits,
 };
-use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_ir::expr::{AggFunc, CastTarget, Duration, Expr, ExtractField, ScalarFn};
-use zero_migrate_ir::ir::{ColType, IrScalar, IrValue, Op, TableRef, ValueFormat};
-use zero_migrate_ir::precondition::PreconditionCheck;
-use zero_migrate_ir::validate::{
+use zeroship_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::expr::{AggFunc, CastTarget, Duration, Expr, ExtractField, ScalarFn};
+use zeroship_migrate_ir::ir::{ColType, IrScalar, IrValue, Op, TableRef, ValueFormat};
+use zeroship_migrate_ir::precondition::PreconditionCheck;
+use zeroship_migrate_ir::validate::{
     validate_expr, ExprDialectFeature, ExprDialectRejection, ExprDialectValidator,
     ExprDialectValidatorSet, TargetScope,
 };
@@ -133,7 +133,7 @@ impl ValidationPolicy for DuckDbValidationPolicy {
 
     fn vendor_capability_refusal(
         &self,
-        capability: zero_migrate_ir::capability::VendorCapability,
+        capability: zeroship_migrate_ir::capability::VendorCapability,
     ) -> Option<ValidationRefusal> {
         Some(ValidationRefusal {
             reason: format!(
@@ -200,7 +200,7 @@ impl ValidationPolicy for DuckDbValidationPolicy {
     fn raw_view_body_refusal(
         &self,
         _sql: &str,
-        _scope: Option<&zero_migrate_ir::policy::SchemaScope>,
+        _scope: Option<&zeroship_migrate_ir::policy::SchemaScope>,
     ) -> Option<ValidationRefusal> {
         Some(ValidationRefusal {
             reason: "DuckDB stub has no parser and refuses raw view bodies".to_string(),
@@ -512,7 +512,7 @@ impl DmlRenderer for DuckDbDmlRenderer {
         &DUCKDB_DESCRIPTOR
     }
 
-    fn supports(&self, cap: zero_migrate_ir::backend::Capability) -> bool {
+    fn supports(&self, cap: zeroship_migrate_ir::backend::Capability) -> bool {
         self.descriptor().capabilities.contains(cap)
     }
 
@@ -828,13 +828,13 @@ impl DmlRenderer for DuckDbDmlRenderer {
     /// SQLite and MySQL renderers do.
     fn render_vendor_op(
         &self,
-        _op: &zero_migrate_ir::ir::Op,
+        _op: &zeroship_migrate_ir::ir::Op,
         _eff_schema: &str,
     ) -> Result<
-        Vec<zero_migrate_backend::vendor::VendorStatement>,
-        zero_migrate_backend::vendor::VendorError,
+        Vec<zeroship_migrate_backend::vendor::VendorStatement>,
+        zeroship_migrate_backend::vendor::VendorError,
     > {
-        Err(zero_migrate_backend::vendor::VendorError::VendorOpsUnsupported(DUCKDB))
+        Err(zeroship_migrate_backend::vendor::VendorError::VendorOpsUnsupported(DUCKDB))
     }
 }
 
@@ -852,13 +852,13 @@ impl SchemaRenderer for DuckDbSchemaRenderer {
     }
 
     /// DuckDB deliberately offers no catalog-stored DDL parser in this stub.
-    fn stored_ddl(&self) -> Option<&'static dyn zero_migrate_backend::stored_ddl::StoredDdl> {
+    fn stored_ddl(&self) -> Option<&'static dyn zeroship_migrate_backend::stored_ddl::StoredDdl> {
         None
     }
 
     fn table_rebuild_policy(
         &self,
-    ) -> Option<&'static dyn zero_migrate_backend::table_rebuild::TableRebuildPolicy> {
+    ) -> Option<&'static dyn zeroship_migrate_backend::table_rebuild::TableRebuildPolicy> {
         None
     }
 
@@ -886,15 +886,15 @@ impl SchemaRenderer for DuckDbSchemaRenderer {
 
     fn project_derived_ann_index(
         &self,
-        _index: &mut zero_migrate_backend::snapshot::IndexSnapshot,
+        _index: &mut zeroship_migrate_backend::snapshot::IndexSnapshot,
     ) -> bool {
         false
     }
 
     fn validate_key_storage(
         &self,
-        _desired: &zero_migrate_backend::snapshot::SchemaSnapshot,
-        _live: &zero_migrate_backend::snapshot::SchemaSnapshot,
+        _desired: &zeroship_migrate_backend::snapshot::SchemaSnapshot,
+        _live: &zeroship_migrate_backend::snapshot::SchemaSnapshot,
     ) -> Result<(), String> {
         Ok(())
     }
@@ -904,8 +904,8 @@ impl SchemaRenderer for DuckDbSchemaRenderer {
         _position: &str,
         _table: &str,
         _column: &str,
-        _evidence: zero_migrate_backend::schema::KeyStorageEvidence<'_>,
-    ) -> Option<zero_migrate_backend::schema::StorageValidationRefusal> {
+        _evidence: zeroship_migrate_backend::schema::KeyStorageEvidence<'_>,
+    ) -> Option<zeroship_migrate_backend::schema::StorageValidationRefusal> {
         None
     }
 
@@ -914,25 +914,25 @@ impl SchemaRenderer for DuckDbSchemaRenderer {
         _column: &str,
         _rendered_type: &str,
         _rendered_default: &str,
-    ) -> Option<zero_migrate_backend::schema::StorageValidationRefusal> {
+    ) -> Option<zeroship_migrate_backend::schema::StorageValidationRefusal> {
         None
     }
 
     fn dual_write_trigger(
         &self,
-        _spec: &zero_migrate_backend::schema::DualWriteTriggerSpec<'_>,
-    ) -> Option<zero_migrate_backend::schema::DualWriteTriggerSql> {
+        _spec: &zeroship_migrate_backend::schema::DualWriteTriggerSpec<'_>,
+    ) -> Option<zeroship_migrate_backend::schema::DualWriteTriggerSql> {
         None
     }
 
     fn existing_column_change_strategy(
         &self,
-    ) -> zero_migrate_backend::schema::ExistingColumnChangeStrategy {
-        zero_migrate_backend::schema::ExistingColumnChangeStrategy::Refuse
+    ) -> zeroship_migrate_backend::schema::ExistingColumnChangeStrategy {
+        zeroship_migrate_backend::schema::ExistingColumnChangeStrategy::Refuse
     }
 
-    fn column_rename_strategy(&self) -> zero_migrate_backend::schema::ColumnRenameStrategy {
-        zero_migrate_backend::schema::ColumnRenameStrategy::Refuse(
+    fn column_rename_strategy(&self) -> zeroship_migrate_backend::schema::ColumnRenameStrategy {
+        zeroship_migrate_backend::schema::ColumnRenameStrategy::Refuse(
             "DuckDB rename lowering is outside this stub",
         )
     }
@@ -1099,7 +1099,7 @@ impl SchemaRenderer for DuckDbSchemaRenderer {
     /// claiming a constraint kind it cannot enforce.
     fn exclusion_constraint_body(
         &self,
-        _req: &zero_migrate_backend::ddl::ExclusionConstraintRequest<'_>,
+        _req: &zeroship_migrate_backend::ddl::ExclusionConstraintRequest<'_>,
     ) -> Option<String> {
         None
     }
@@ -1442,28 +1442,28 @@ fn a_fourth_backend_names_its_own_implicit_primary_key() {
 
     let snapshot = TableSnapshot {
         columns: Vec::new(),
-        indexes: vec![zero_migrate_backend::snapshot::IndexSnapshot::btree(
+        indexes: vec![zeroship_migrate_backend::snapshot::IndexSnapshot::btree(
             pk_name.clone(),
             true,
             vec!["id".to_string()],
         )],
         constraints: Vec::new(),
         runtime_options: Default::default(),
-        attributes: zero_migrate_ir::attribute::Attributes::new(),
+        attributes: zeroship_migrate_ir::attribute::Attributes::new(),
         partition_by: None,
         comment: None,
         stored_create_sql: None,
     };
 
     assert!(
-        zero_migrate_backend::ddl::is_pk_index(policy, "items", &pk_name),
+        zeroship_migrate_backend::ddl::is_pk_index(policy, "items", &pk_name),
         "the contract crate's primary-key-index predicate must recognise the name \
          the REGISTERED backend gives the relation; a predicate that spells one \
          vendor's convention forces every other backend to report a name its own \
          catalog does not have"
     );
     assert_eq!(
-        zero_migrate_backend::ddl::primary_key_columns(policy, "items", &snapshot),
+        zeroship_migrate_backend::ddl::primary_key_columns(policy, "items", &snapshot),
         Some(&["id".to_string()][..]),
         "the contract crate reads a table's primary-key columns off the index the \
          REGISTERED backend named, so an outsider's inline-versus-table-level PK \

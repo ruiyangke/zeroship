@@ -23,8 +23,8 @@
 
 use crate::support;
 
-use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::{IrAuthor, LiveSchema};
+use zeroship_migrate::model::ir::MigrationIr;
+use zeroship_migrate::{IrAuthor, LiveSchema};
 
 const PROJECT: &str = "app";
 const APP: &str = "app";
@@ -34,10 +34,10 @@ fn lower_error(ops_json: &str) -> Option<String> {
     let raw = format!(r#"{{"ir_version":1,"name":"renames","ops":{ops_json}}}"#);
     let ir: MigrationIr = serde_json::from_str(&raw).expect("the rename test IR parses");
     IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::no_inject("app"),
     )
     .lower_steps(&ir, &LiveSchema::default())

@@ -2,13 +2,13 @@
 
 use std::collections::BTreeMap;
 
-use zero_migrate_backend::table_rebuild::SequenceHighWaterPolicy;
-use zero_migrate_backend::table_rebuild::TableRebuildSpec;
-use zero_migrate_ir::ir::AlterPrimaryKeyAction;
+use zeroship_migrate_backend::table_rebuild::SequenceHighWaterPolicy;
+use zeroship_migrate_backend::table_rebuild::TableRebuildSpec;
+use zeroship_migrate_ir::ir::AlterPrimaryKeyAction;
 
 use super::actor::{MigrationActor, SqliteActorError};
 use super::authorizer::Mode;
-use zero_migrate_backend::stored_ddl::StoredDdl;
+use zeroship_migrate_backend::stored_ddl::StoredDdl;
 
 #[derive(Debug, Clone)]
 struct Column {
@@ -30,7 +30,7 @@ fn lit(value: &str) -> String {
 }
 
 fn ident(value: &str) -> String {
-    zero_migrate_backend::dml::escape_quote_ident_for_backend(value, &crate::dml::RENDERER)
+    zeroship_migrate_backend::dml::escape_quote_ident_for_backend(value, &crate::dml::RENDERER)
 }
 
 fn cell(row: &[Option<String>], index: usize, field: &str) -> Result<String, SqliteActorError> {

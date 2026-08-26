@@ -23,12 +23,12 @@
 //! earns its place - it shows neither boolean grant unlocks a capability of a
 //! different SHAPE.
 
-use zero_migrate::effective_policy_from_charter_toml;
-use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::model::validate::{validate_ir_authorized, VendorAuthority};
+use zeroship_migrate::effective_policy_from_charter_toml;
+use zeroship_migrate::model::ir::MigrationIr;
+use zeroship_migrate::model::validate::{validate_ir_authorized, VendorAuthority};
 
 /// A charter granting ordinary table creation plus exactly ONE vendor capability.
-fn granting(key: &str) -> zero_migrate::EffectivePolicy {
+fn granting(key: &str) -> zeroship_migrate::EffectivePolicy {
     let charter = format!(
         r#"policy_version = 1
 
@@ -46,7 +46,7 @@ scope = "all"
     effective_policy_from_charter_toml(&charter).expect("single-capability charter composes")
 }
 
-fn allowed(policy: &zero_migrate::EffectivePolicy, op: &str) -> bool {
+fn allowed(policy: &zeroship_migrate::EffectivePolicy, op: &str) -> bool {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{op}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
     let authority = VendorAuthority {
@@ -54,9 +54,9 @@ fn allowed(policy: &zero_migrate::EffectivePolicy, op: &str) -> bool {
         default_schema: "app1",
     };
     validate_ir_authorized(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         None,
         Some(authority),
     )

@@ -3,18 +3,18 @@ pub mod backend;
 // contract, beside the `MigrationBackend::baseline_one` signature that is its
 // only reason to exist. Re-exported so every `crate::apply::baseline::...`
 // reference resolves unchanged.
-pub use zero_migrate_backend::baseline;
+pub use zeroship_migrate_backend::baseline;
 pub mod drift;
 pub mod executor;
 // The journal's dialect-neutral vocabulary moved down to the backend contract,
 // where the three per-vendor journal writers can see it. Re-exported so every
 // `crate::apply::journal::...` reference resolves unchanged.
-pub use zero_migrate_backend::journal;
+pub use zeroship_migrate_backend::journal;
 pub mod plan_precondition;
 // The precondition EVALUATOR was PostgreSQL's alone - `pg_query` shape validation,
 // `information_schema` catalog reads, and a `&Client`-bound `SqlBoolean` run, with
 // `PostgresBackend` named in its own body. It is
-// `zero_migrate_postgres::backend::precondition` now, beside the backend that was its
+// `zeroship_migrate_postgres::backend::precondition` now, beside the backend that was its
 // only caller. This comment used to say it COULD NOT follow the renderers into the
 // PostgreSQL crate, because it needs `SqlSession`/`ExecutorConfig`/`ApplyError`/
 // `Migration` and that crate must not depend on the engine. All four of those moved
@@ -28,4 +28,4 @@ pub mod plan_precondition;
 // vendors that resolve a budget can see it. Re-exported so
 // `crate::apply::timeout::{resolve_timeout_ms, IndefiniteTimeoutError, TimeoutOrigin}`
 // still resolve.
-pub use zero_migrate_backend::timeout;
+pub use zeroship_migrate_backend::timeout;

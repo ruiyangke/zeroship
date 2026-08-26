@@ -11,7 +11,7 @@
 //! column is contributed, which is a table escaping a column the charter says is not
 //! optional.
 
-use zero_migrate::model::table_shape::effective_policy_from_charter_layers;
+use zeroship_migrate::model::table_shape::effective_policy_from_charter_layers;
 
 /// `schema.create_table` granted over everything while the mandatory inject covers only
 /// `app_*`, so the creatable region is not contained by the inject.

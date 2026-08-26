@@ -37,8 +37,8 @@
 
 use crate::support;
 
-use zero_migrate::render::lower::IrAuthor;
-use zero_migrate::{
+use zeroship_migrate::render::lower::IrAuthor;
+use zeroship_migrate::{
     ColType, Expr, IrDefault, IrFlagsOverride, IrScalar, LiveSchema, MigrationIr, Op, ScalarFn,
     SynthFn, CURRENT_IR_VERSION,
 };
@@ -67,7 +67,7 @@ fn add_column_ir(default: IrDefault, ty: ColType) -> MigrationIr {
         name: "add_label".to_string(),
         owner_app: APP.to_string(),
         ops: vec![Op::AddColumn {
-            attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
             table: "accounts".to_string(),
             column: "label".to_string(),
             ty,
@@ -92,10 +92,10 @@ fn add_column_ir(default: IrDefault, ty: ColType) -> MigrationIr {
 
 fn rendered_up(ir: &MigrationIr) -> String {
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         &support::confined_charter(),
     );
     let steps = author
@@ -104,7 +104,7 @@ fn rendered_up(ir: &MigrationIr) -> String {
     steps
         .iter()
         .filter_map(|step| match step {
-            zero_migrate::render::step::PlanStep::Ddl(m) => Some(m.up.clone()),
+            zeroship_migrate::render::step::PlanStep::Ddl(m) => Some(m.up.clone()),
             _ => None,
         })
         .collect::<Vec<_>>()

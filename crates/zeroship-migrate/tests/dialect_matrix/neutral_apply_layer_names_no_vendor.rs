@@ -29,7 +29,7 @@
 //! at the time — it needs `SqlSession`/`ExecutorConfig`/`ApplyError`/`Migration`, and
 //! all four were the engine's. All four moved down to `zero-migrate-backend`
 //! afterwards, so the evaluator DID follow the renderers out: it is
-//! `zero_migrate_postgres::backend::precondition` now, and that crate still does not
+//! `zeroship_migrate_postgres::backend::precondition` now, and that crate still does not
 //! depend on the engine.
 //!
 //! [`the_backend_contract_declares_no_vendor_named_item`] caught

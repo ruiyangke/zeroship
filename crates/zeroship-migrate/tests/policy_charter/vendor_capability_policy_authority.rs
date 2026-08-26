@@ -9,16 +9,16 @@
 
 use std::collections::BTreeMap;
 
-use zero_migrate::guard::GuardConfig;
-use zero_migrate::model::capability::{VendorCapabilities, VendorCapability};
-use zero_migrate::model::load::{load_ir_document, IrLoadError};
-use zero_migrate::model::table_shape::resolve_create_table_policy;
-use zero_migrate::model::validate::CODE_VENDOR_OP_DENIED;
-use zero_migrate::render::lower::{
+use zeroship_migrate::guard::GuardConfig;
+use zeroship_migrate::model::capability::{VendorCapabilities, VendorCapability};
+use zeroship_migrate::model::load::{load_ir_document, IrLoadError};
+use zeroship_migrate::model::table_shape::resolve_create_table_policy;
+use zeroship_migrate::model::validate::CODE_VENDOR_OP_DENIED;
+use zeroship_migrate::render::lower::{
     IrAuthor, IrGuardedLowerError, IrLowerError, LiveSchema, LoadAndLowerGuardedError,
     LoweredArtifact,
 };
-use zero_migrate::{effective_policy_from_charter_toml, EffectivePolicy, PlanStep, SchemaScope};
+use zeroship_migrate::{effective_policy_from_charter_toml, EffectivePolicy, PlanStep, SchemaScope};
 
 const SCHEMA: &str = "app";
 const OWNER: &str = "app_a";
@@ -128,12 +128,12 @@ fn lower_rls_envelope(
     let resolved =
         resolve_create_table_policy(&authored, policy, SCHEMA).expect("table shape resolves");
     let resolved_json = serde_json::to_string(&resolved).expect("resolved IR serializes");
-    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT);
+    let guard = GuardConfig::from_policy(policy.clone(), zeroship_migrate_postgres::DIALECT);
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         OWNER,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         policy,
     );
     author.load_and_lower_guarded(
@@ -226,7 +226,7 @@ fn charter_granting_cross_schema_but_not_access_rls_still_refuses_set_rls() {
 #[test]
 fn cross_schema_alone_composes_to_a_scope_that_would_grant_every_capability() {
     let policy = cross_schema_only_charter();
-    let scope = GuardConfig::from_policy(policy, zero_migrate_postgres::DIALECT)
+    let scope = GuardConfig::from_policy(policy, zeroship_migrate_postgres::DIALECT)
         .schema_scope()
         .expect("the guard derives a schema scope");
     assert_eq!(
@@ -261,10 +261,10 @@ fn the_load_gate_without_a_charter_still_refuses_set_rls() {
     let resolved_json = serde_json::to_string(&resolved).expect("resolved IR serializes");
     let scope = SchemaScope::Single(SCHEMA.to_string());
     let error = load_ir_document(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &resolved_json,
         OWNER,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &BTreeMap::new(),
         Some(&scope),
     )

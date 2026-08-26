@@ -3,22 +3,22 @@ use crate::support;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use zero_migrate::model::capability::VendorCapability;
-use zero_migrate::model::ir::{
+use zeroship_migrate::model::capability::VendorCapability;
+use zeroship_migrate::model::ir::{
     ColType, IdentityCol, IndexElement, IndexMethod, IrColumn, IrConstraintKind, IrDefault, Op,
     PartitionBounds, PartitionSpec, SequenceRef, TriggerAction, ViewQuery,
 };
-use zero_migrate::model::op_support;
-use zero_migrate::model::support::{RenderMode, SupportDecision, SupportTier};
-use zero_migrate::model::validate::{validate_ir_scoped, CODE_DIALECT_UNSUPPORTED};
-use zero_migrate::{
+use zeroship_migrate::model::op_support;
+use zeroship_migrate::model::support::{RenderMode, SupportDecision, SupportTier};
+use zeroship_migrate::model::validate::{validate_ir_scoped, CODE_DIALECT_UNSUPPORTED};
+use zeroship_migrate::{
     IrAuthor, IrFlagsOverride, LiveSchema, MigrationIr, SchemaScope, CURRENT_IR_VERSION,
 };
 
-const DIALECTS: [&zero_migrate::DialectId; 3] = [
-    &zero_migrate_postgres::DIALECT,
-    &zero_migrate_sqlite::DIALECT,
-    &zero_migrate_mysql::DIALECT,
+const DIALECTS: [&zeroship_migrate::DialectId; 3] = [
+    &zeroship_migrate_postgres::DIALECT,
+    &zeroship_migrate_sqlite::DIALECT,
+    &zeroship_migrate_mysql::DIALECT,
 ];
 
 const EXPECTED_OPS: &[&str] = &[
@@ -161,13 +161,13 @@ fn one_op_ir(op: Op) -> MigrationIr {
     }
 }
 
-const fn sql_dialect(dialect: &zero_migrate::DialectId) -> &zero_migrate::DialectId {
+const fn sql_dialect(dialect: &zeroship_migrate::DialectId) -> &zeroship_migrate::DialectId {
     dialect
 }
 
-fn validate_current(op: &Op, dialect: &zero_migrate::DialectId) -> bool {
+fn validate_current(op: &Op, dialect: &zeroship_migrate::DialectId) -> bool {
     validate_ir_scoped(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &one_op_ir(op.clone()),
         dialect,
         Some(&SchemaScope::Unconfined),
@@ -175,13 +175,13 @@ fn validate_current(op: &Op, dialect: &zero_migrate::DialectId) -> bool {
     .is_ok()
 }
 
-fn lower_current(op: &Op, dialect: &zero_migrate::DialectId) -> bool {
+fn lower_current(op: &Op, dialect: &zeroship_migrate::DialectId) -> bool {
     let default_schema = op.schema().unwrap_or("app");
     // The matrix asks whether an op RENDERS, so the corpus runs under a charter that
     // grants every vendor capability. Authority at lower is that grant; the unconfined
     // scope only lets the corpus name any schema.
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         default_schema,
         "app_corpus",
         sql_dialect(dialect),
@@ -214,9 +214,9 @@ fn assert_decision_well_formed(decision: SupportDecision, label: &str) {
     }
 }
 
-fn assert_current_cell_matches(op: &Op, dialect: &zero_migrate::DialectId) {
-    let support = op_support::support(zero_migrate::shipping_vendors(), op);
-    let decision = support.decision(zero_migrate::shipping_vendors(), dialect);
+fn assert_current_cell_matches(op: &Op, dialect: &zeroship_migrate::DialectId) {
+    let support = op_support::support(zeroship_migrate::shipping_vendors(), op);
+    let decision = support.decision(zeroship_migrate::shipping_vendors(), dialect);
     let label = format!("{} {dialect:?}", op_tag(op));
 
     match decision {
@@ -289,20 +289,20 @@ fn support_declarations_cover_every_op_and_dialect() {
 
     for op in &ops {
         let tag = op_tag(op);
-        let support = op_support::support(zero_migrate::shipping_vendors(), op);
+        let support = op_support::support(zeroship_migrate::shipping_vendors(), op);
         assert_eq!(
             support
-                .supported_dialects(zero_migrate::shipping_vendors())
+                .supported_dialects(zeroship_migrate::shipping_vendors())
                 .is_empty(),
             DIALECTS.iter().all(|dialect| !support
-                .decision(zero_migrate::shipping_vendors(), dialect)
+                .decision(zeroship_migrate::shipping_vendors(), dialect)
                 .is_supported()),
             "{tag}: DialectSet must agree with per-dialect decisions"
         );
 
         for dialect in DIALECTS {
             assert_decision_well_formed(
-                support.decision(zero_migrate::shipping_vendors(), dialect),
+                support.decision(zeroship_migrate::shipping_vendors(), dialect),
                 &format!("{tag} {dialect:?}"),
             );
         }
@@ -310,7 +310,7 @@ fn support_declarations_cover_every_op_and_dialect() {
         for feature in support.features {
             for dialect in DIALECTS {
                 assert_decision_well_formed(
-                    feature.decision(zero_migrate::shipping_vendors(), dialect),
+                    feature.decision(zeroship_migrate::shipping_vendors(), dialect),
                     &format!("{tag} feature {:?} {dialect:?}", feature.feature),
                 );
             }
@@ -364,14 +364,14 @@ fn support_declarations_cover_every_op_and_dialect() {
                 assert!(
                     !support
                         .decision(
-                            zero_migrate::shipping_vendors(),
-                            &zero_migrate_sqlite::DIALECT
+                            zeroship_migrate::shipping_vendors(),
+                            &zeroship_migrate_sqlite::DIALECT
                         )
                         .is_supported()
                         && !support
                             .decision(
-                                zero_migrate::shipping_vendors(),
-                                &zero_migrate_mysql::DIALECT
+                                zeroship_migrate::shipping_vendors(),
+                                &zeroship_migrate_mysql::DIALECT
                             )
                             .is_supported(),
                     "{tag}: vendor-tier ops must be non-PG unsupported"
@@ -386,14 +386,14 @@ fn support_declarations_cover_every_op_and_dialect() {
 /// This fixture used to build `IndexStorageParams { pages_per_range: Some(16), .. }`. The
 /// same value is now an ordinary declared attribute, so the case still exercises "this
 /// index has storage parameters" rather than quietly becoming an empty one.
-fn brin_pages_per_range(value: i64) -> zero_migrate_ir::attribute::CreateIndexAttributes {
-    let mut carried = zero_migrate_ir::attribute::Attributes::new();
+fn brin_pages_per_range(value: i64) -> zeroship_migrate_ir::attribute::CreateIndexAttributes {
+    let mut carried = zeroship_migrate_ir::attribute::Attributes::new();
     carried.insert(
-        zero_migrate_ir::attribute::AttrKey::parse("postgres.pages_per_range")
+        zeroship_migrate_ir::attribute::AttrKey::parse("postgres.pages_per_range")
             .expect("a well-formed key"),
-        zero_migrate::IrScalar::Int(value),
+        zeroship_migrate::IrScalar::Int(value),
     );
-    zero_migrate_ir::attribute::CreateIndexAttributes::from(carried)
+    zeroship_migrate_ir::attribute::CreateIndexAttributes::from(carried)
 }
 
 fn idx_col(name: &str) -> IndexElement {
@@ -407,7 +407,7 @@ fn idx_col(name: &str) -> IndexElement {
 
 fn partitioned_create_table() -> Op {
     Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "events".into(),
         columns: vec![IrColumn {
             name: "created_at".into(),
@@ -441,7 +441,7 @@ fn partitioned_create_table() -> Op {
 fn partition_feature_ops() -> Vec<Op> {
     vec![
         Op::CreatePartition {
-            attributes: zero_migrate_ir::attribute::CreatePartitionAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::CreatePartitionAttributes::new(),
             name: "events_default".into(),
             of: "events".into(),
             bounds: PartitionBounds::Default,
@@ -548,7 +548,7 @@ fn nextval_default_ops() -> Vec<Op> {
     };
     vec![
         Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "events".into(),
             columns: vec![col.clone()],
             primary_key: None,
@@ -560,7 +560,7 @@ fn nextval_default_ops() -> Vec<Op> {
             existence_guard: None,
         },
         Op::AddColumn {
-            attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
             table: "events".into(),
             column: "id".into(),
             ty: ColType::BigInt,
@@ -604,7 +604,7 @@ fn identity_always_ops() -> Vec<Op> {
     };
     vec![
         Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "events".into(),
             columns: vec![col.clone()],
             primary_key: Some(vec!["id".into()]),
@@ -616,7 +616,7 @@ fn identity_always_ops() -> Vec<Op> {
             existence_guard: None,
         },
         Op::AddColumn {
-            attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
             table: "events".into(),
             column: "id".into(),
             ty: ColType::BigInt,
@@ -641,10 +641,10 @@ fn partition_ops_and_partition_index_feature_support_matches_current_matrix() {
             continue;
         }
         let tag = op_tag(&op);
-        let support = op_support::support(zero_migrate::shipping_vendors(), &op);
+        let support = op_support::support(zeroship_migrate::shipping_vendors(), &op);
         for dialect in DIALECTS {
             let decision_supported = support
-                .decision(zero_migrate::shipping_vendors(), dialect)
+                .decision(zeroship_migrate::shipping_vendors(), dialect)
                 .is_supported();
             let validates = validate_current(&op, dialect);
             assert_eq!(
@@ -652,7 +652,7 @@ fn partition_ops_and_partition_index_feature_support_matches_current_matrix() {
                 "{tag} {dialect:?}: support decision and validate() must agree"
             );
             let expected_supported = matches!(op, Op::DropPartition { .. })
-                || dialect == &zero_migrate_postgres::DIALECT;
+                || dialect == &zeroship_migrate_postgres::DIALECT;
             assert_eq!(decision_supported, expected_supported, "{tag} {dialect:?}");
         }
     }
@@ -662,13 +662,13 @@ fn partition_ops_and_partition_index_feature_support_matches_current_matrix() {
 fn partitioned_create_table_validates_pg_and_refuses_sqlite_mysql() {
     let op = partitioned_create_table();
     assert!(
-        validate_current(&op, &zero_migrate_postgres::DIALECT),
+        validate_current(&op, &zeroship_migrate_postgres::DIALECT),
         "partitioned createTable must validate on PostgreSQL"
     );
 
-    for dialect in [&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT] {
+    for dialect in [&zeroship_migrate_sqlite::DIALECT, &zeroship_migrate_mysql::DIALECT] {
         let err = validate_ir_scoped(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &one_op_ir(op.clone()),
             dialect,
             Some(&SchemaScope::Unconfined),
@@ -686,10 +686,10 @@ fn partitioned_create_table_validates_pg_and_refuses_sqlite_mysql() {
 fn identity_always_support_decision_matches_validate_and_is_pg_only() {
     for op in identity_always_ops() {
         let tag = op_tag(&op);
-        let support = op_support::support(zero_migrate::shipping_vendors(), &op);
+        let support = op_support::support(zeroship_migrate::shipping_vendors(), &op);
         for dialect in DIALECTS {
             let decision_supported = support
-                .decision(zero_migrate::shipping_vendors(), dialect)
+                .decision(zeroship_migrate::shipping_vendors(), dialect)
                 .is_supported();
             let validates = validate_current(&op, dialect);
             assert_eq!(
@@ -698,7 +698,7 @@ fn identity_always_support_decision_matches_validate_and_is_pg_only() {
             );
             assert_eq!(
                 decision_supported,
-                dialect == &zero_migrate_postgres::DIALECT,
+                dialect == &zeroship_migrate_postgres::DIALECT,
                 "{tag} {dialect:?}: identity(always:true) is PostgreSQL-only"
             );
         }
@@ -709,10 +709,10 @@ fn identity_always_support_decision_matches_validate_and_is_pg_only() {
 fn nextval_default_support_decision_matches_validate_and_is_pg_only() {
     for op in nextval_default_ops() {
         let tag = op_tag(&op);
-        let support = op_support::support(zero_migrate::shipping_vendors(), &op);
+        let support = op_support::support(zeroship_migrate::shipping_vendors(), &op);
         for dialect in DIALECTS {
             let decision_supported = support
-                .decision(zero_migrate::shipping_vendors(), dialect)
+                .decision(zeroship_migrate::shipping_vendors(), dialect)
                 .is_supported();
             let validates = validate_current(&op, dialect);
             assert_eq!(
@@ -721,7 +721,7 @@ fn nextval_default_support_decision_matches_validate_and_is_pg_only() {
             );
             assert_eq!(
                 decision_supported,
-                dialect == &zero_migrate_postgres::DIALECT,
+                dialect == &zeroship_migrate_postgres::DIALECT,
                 "{tag} {dialect:?}: nextval defaults are PostgreSQL-only"
             );
         }

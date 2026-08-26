@@ -1,5 +1,5 @@
 //! Host-authoring lower: turn a pure-JS IR envelope into the engine's ordered
-//! [`AppliedPlan`](zero_migrate::AppliedPlan), **folding the single authoritative
+//! [`AppliedPlan`](zeroship_migrate::AppliedPlan), **folding the single authoritative
 //! `Checksum::of_ir` in Rust** (never in JS).
 //!
 //! ## Why the addon lowers (not the facade)
@@ -22,18 +22,18 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use zero_migrate::apply::journal::{AppliedEntry, Phase};
-use zero_migrate::model::ir::{MigrationIr, Op};
-use zero_migrate::model::migration::Migration;
-use zero_migrate::ops::status::{
+use zeroship_migrate::apply::journal::{AppliedEntry, Phase};
+use zeroship_migrate::model::ir::{MigrationIr, Op};
+use zeroship_migrate::model::migration::Migration;
+use zeroship_migrate::ops::status::{
     AppliedPlanStatus, PlanStatusManifest, PlanStatusStepState, ReconciledPlanState,
 };
-use zero_migrate::{
+use zeroship_migrate::{
     effective_policy_from_charter_layers, fold_ops_onto, resolve_create_table_policy, DialectId,
     EffectivePolicy, FoldError, GuardConfig, IrAuthor, LiveSchema, LoweredArtifact,
 };
-use zero_migrate_mysql::DIALECT as MYSQL;
-use zero_migrate_postgres::DIALECT as POSTGRES;
+use zeroship_migrate_mysql::DIALECT as MYSQL;
+use zeroship_migrate_postgres::DIALECT as POSTGRES;
 
 /// Map the wire dialect spelling to its open [`DialectId`]. Unknown -> `Err`.
 fn parse_sql_dialect(s: &str) -> Result<DialectId, String> {
@@ -161,7 +161,7 @@ pub(crate) fn require_applied_prefix(
 }
 
 /// Run the fail-closed IR envelope LOAD GATE + LOWER over an envelope, returning the
-/// complete guarded artifact. Its [`AppliedPlan`](zero_migrate::AppliedPlan) retains
+/// complete guarded artifact. Its [`AppliedPlan`](zeroship_migrate::AppliedPlan) retains
 /// every ordered `Ddl`, `Dml`, `Backfill`, and `OnlineRename` step.
 ///
 /// - `envelope_json` - the pure-JS IR envelope bytes (`{ ir_version, name,
@@ -264,7 +264,7 @@ fn lower_envelope_to_plan_with_live_and_resolved_ir(
         .map_err(|e| format!("resolved IR failed to serialize: {e}"))?;
 
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         project_schema,
         owner_app,
         &dialect,
@@ -299,9 +299,9 @@ pub fn lower_ordered_envelopes_to_plans(
     dialect: &str,
     registry_json: &str,
     charter_layers: &[&str],
-    snapshot: zero_migrate::model::snapshot::SchemaSnapshot,
+    snapshot: zeroship_migrate::model::snapshot::SchemaSnapshot,
     journal_entries: &[AppliedEntry],
-    resolved_contracts: &[zero_migrate::apply::journal::ResolvedPendingContract],
+    resolved_contracts: &[zeroship_migrate::apply::journal::ResolvedPendingContract],
 ) -> Result<Vec<LoweredArtifact>, String> {
     lower_ordered_envelopes_to_plans_inner(
         envelope_json,
@@ -332,9 +332,9 @@ pub fn lower_ordered_envelopes_to_plans_for_apply(
     dialect: &str,
     registry_json: &str,
     charter_layers: &[&str],
-    snapshot: zero_migrate::model::snapshot::SchemaSnapshot,
+    snapshot: zeroship_migrate::model::snapshot::SchemaSnapshot,
     journal_entries: &[AppliedEntry],
-    resolved_contracts: &[zero_migrate::apply::journal::ResolvedPendingContract],
+    resolved_contracts: &[zeroship_migrate::apply::journal::ResolvedPendingContract],
 ) -> Result<Vec<LoweredArtifact>, String> {
     lower_ordered_envelopes_to_plans_inner(
         envelope_json,
@@ -373,9 +373,9 @@ pub fn lower_ordered_envelopes_to_plans_for_rollback(
     dialect: &str,
     registry_json: &str,
     charter_layers: &[&str],
-    snapshot: zero_migrate::model::snapshot::SchemaSnapshot,
+    snapshot: zeroship_migrate::model::snapshot::SchemaSnapshot,
     journal_entries: &[AppliedEntry],
-    resolved_contracts: &[zero_migrate::apply::journal::ResolvedPendingContract],
+    resolved_contracts: &[zeroship_migrate::apply::journal::ResolvedPendingContract],
 ) -> Result<Vec<LoweredArtifact>, String> {
     let dialect = parse_sql_dialect(dialect)?;
     let effective = effective_policy_from_charter_layers(charter_layers)?;
@@ -445,13 +445,13 @@ fn merge_recovered_definitions(
     history_ops: &[Op],
     dialect: &DialectId,
     project_schema: &str,
-    effective: &zero_migrate::EffectivePolicy,
+    effective: &zeroship_migrate::EffectivePolicy,
 ) {
     // Onto an EXPLICITLY empty snapshot, which is what makes this a reconstruction of what the
     // history created rather than a second application of it over the catalog.
-    let empty = zero_migrate::model::snapshot::SchemaSnapshot::default();
+    let empty = zeroship_migrate::model::snapshot::SchemaSnapshot::default();
     let Ok(recovered) = fold_ops_onto(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &empty,
         history_ops,
         dialect,
@@ -575,17 +575,17 @@ fn op_may_have_been_skipped(op: &Op) -> bool {
 /// ran as written, and `Repeatable` is the one kind whose checksum legitimately changes between
 /// runs - none can stand as evidence that THIS text executed.
 fn step_ran_under_its_own_checksum(
-    step: &zero_migrate::PlanStep,
+    step: &zeroship_migrate::PlanStep,
     journal_entries: &[AppliedEntry],
 ) -> bool {
-    let zero_migrate::PlanStep::Ddl(migration) = step else {
+    let zeroship_migrate::PlanStep::Ddl(migration) = step else {
         return false;
     };
     journal_entries.iter().any(|entry| {
         entry.version == migration.version.as_str()
             && entry.checksum == migration.checksum.as_str()
             && entry.phase == Phase::Completed
-            && entry.kind == Some(zero_migrate::apply::journal::JournaledKind::Apply)
+            && entry.kind == Some(zeroship_migrate::apply::journal::JournaledKind::Apply)
     })
 }
 
@@ -597,9 +597,9 @@ fn lower_ordered_envelopes_to_plans_inner(
     dialect: &str,
     registry_json: &str,
     charter_layers: &[&str],
-    snapshot: zero_migrate::model::snapshot::SchemaSnapshot,
+    snapshot: zeroship_migrate::model::snapshot::SchemaSnapshot,
     journal_entries: &[AppliedEntry],
-    resolved_contracts: &[zero_migrate::apply::journal::ResolvedPendingContract],
+    resolved_contracts: &[zeroship_migrate::apply::journal::ResolvedPendingContract],
     strict_historical_apply: bool,
 ) -> Result<Vec<LoweredArtifact>, String> {
     let dialect = parse_sql_dialect(dialect)?;
@@ -635,7 +635,7 @@ fn lower_ordered_envelopes_to_plans_inner(
                 let mut candidate = pending_ops.clone();
                 candidate.push(op.clone());
                 match fold_ops_onto(
-                    zero_migrate::shipping_vendors(),
+                    zeroship_migrate::shipping_vendors(),
                     &base_snapshot,
                     &candidate,
                     &dialect,
@@ -759,7 +759,7 @@ fn lower_ordered_envelopes_to_plans_inner(
                 );
             }
             let projected = fold_ops_onto(
-                zero_migrate::shipping_vendors(),
+                zeroship_migrate::shipping_vendors(),
                 &base_snapshot,
                 &pending_ops,
                 &dialect,
@@ -777,7 +777,7 @@ fn lower_ordered_envelopes_to_plans_inner(
             live.logical_columns = logical_columns;
         }
         live.advance_logical_columns(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &resolved,
             &dialect,
             project_schema,
@@ -805,18 +805,18 @@ pub fn validate_historical_apply_evidence(
     artifact: &LoweredArtifact,
     live: &LiveSchema,
     journal_entries: &[AppliedEntry],
-    resolved: &[zero_migrate::apply::journal::ResolvedPendingContract],
+    resolved: &[zeroship_migrate::apply::journal::ResolvedPendingContract],
 ) -> Result<(), String> {
     let mut saw_historical_rename = false;
     for step in &artifact.plan.steps {
-        let zero_migrate::PlanStep::OnlineRename(zero_migrate::RenameStep::ExpandContract(rename)) =
+        let zeroship_migrate::PlanStep::OnlineRename(zeroship_migrate::RenameStep::ExpandContract(rename)) =
             step
         else {
             continue;
         };
         let migration_is_exact = |migration: &Migration| {
             journal_entries.iter().any(|entry| {
-                entry.phase == zero_migrate::Phase::Completed
+                entry.phase == zeroship_migrate::Phase::Completed
                     && entry.version == migration.version.as_str()
                     && entry.checksum == migration.checksum.as_str()
             })
@@ -836,10 +836,10 @@ pub fn validate_historical_apply_evidence(
         let (source_exists, destination_exists) = live
             .table_snapshots
             .get(match &rename.intent {
-                zero_migrate::OnlineIntent::RenameColumn { table, .. } => table,
+                zeroship_migrate::OnlineIntent::RenameColumn { table, .. } => table,
             })
             .map_or((false, false), |table| match &rename.intent {
-                zero_migrate::OnlineIntent::RenameColumn { from, to, .. } => (
+                zeroship_migrate::OnlineIntent::RenameColumn { from, to, .. } => (
                     table.columns.iter().any(|column| column.name == *from),
                     table.columns.iter().any(|column| column.name == *to),
                 ),
@@ -915,7 +915,7 @@ fn lower_envelope_recovering_historical_renames(
     charter_layers: &[&str],
     live: &LiveSchema,
     journal_entries: &[AppliedEntry],
-    resolved_contracts: &[zero_migrate::apply::journal::ResolvedPendingContract],
+    resolved_contracts: &[zeroship_migrate::apply::journal::ResolvedPendingContract],
     effective: &EffectivePolicy,
     strict_historical_apply: bool,
 ) -> Result<(LoweredArtifact, MigrationIr), String> {
@@ -1009,7 +1009,7 @@ fn is_historical_rename_lower_error(error: &str) -> bool {
 fn ops_contain_contract_rename(
     ops: &[Op],
     dialect: &DialectId,
-    contract: &zero_migrate::apply::journal::PendingContract,
+    contract: &zeroship_migrate::apply::journal::PendingContract,
 ) -> bool {
     ops.iter().any(|op| match op {
         Op::RenameColumn {
@@ -1030,7 +1030,7 @@ fn normalize_historical_renames(
     dialect: &DialectId,
     project_schema: &str,
     owner_app: &str,
-    resolved_contracts: &[zero_migrate::apply::journal::ResolvedPendingContract],
+    resolved_contracts: &[zeroship_migrate::apply::journal::ResolvedPendingContract],
     effective: &EffectivePolicy,
 ) -> Result<bool, String> {
     let mut changed = false;
@@ -1129,24 +1129,24 @@ fn normalize_historical_renames(
 }
 
 fn synthetic_rename_source_column(
-    existing_table: Option<&zero_migrate::model::snapshot::TableSnapshot>,
+    existing_table: Option<&zeroship_migrate::model::snapshot::TableSnapshot>,
     table: &str,
     from: &str,
-    ty: &zero_migrate::model::ir::ColType,
+    ty: &zeroship_migrate::model::ir::ColType,
     durable_ddl_type: &str,
     dialect: &DialectId,
     project_schema: &str,
     effective: &EffectivePolicy,
-) -> Result<zero_migrate::model::snapshot::ColumnSnapshot, String> {
-    if let Some((data_type, _authored_ddl_type)) = zero_migrate::render::lower::named_type_metadata(
-        zero_migrate::shipping_vendors(),
+) -> Result<zeroship_migrate::model::snapshot::ColumnSnapshot, String> {
+    if let Some((data_type, _authored_ddl_type)) = zeroship_migrate::render::lower::named_type_metadata(
+        zeroship_migrate::shipping_vendors(),
         ty,
         dialect,
         project_schema,
     )
     .map_err(|error| format!("failed to reconstruct historical named type: {error}"))?
     {
-        return Ok(zero_migrate::model::snapshot::ColumnSnapshot {
+        return Ok(zeroship_migrate::model::snapshot::ColumnSnapshot {
             name: from.to_string(),
             data_type,
             ddl_type_override: Some(durable_ddl_type.to_string()),
@@ -1155,13 +1155,13 @@ fn synthetic_rename_source_column(
         });
     }
 
-    let mut base = zero_migrate::model::snapshot::SchemaSnapshot::default();
+    let mut base = zeroship_migrate::model::snapshot::SchemaSnapshot::default();
     base.tables.insert(
         table.to_string(),
         existing_table.cloned().unwrap_or_else(empty_table_snapshot),
     );
     let add = Op::AddColumn {
-        attributes: zero_migrate::model::attribute::AddColumnAttributes::new(),
+        attributes: zeroship_migrate::model::attribute::AddColumnAttributes::new(),
         table: table.to_string(),
         column: from.to_string(),
         ty: ty.clone(),
@@ -1177,7 +1177,7 @@ fn synthetic_rename_source_column(
         existence_guard: None,
     };
     let projected = fold_ops_onto(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &base,
         &[add],
         dialect,
@@ -1195,8 +1195,8 @@ fn synthetic_rename_source_column(
     Ok(column)
 }
 
-fn empty_table_snapshot() -> zero_migrate::model::snapshot::TableSnapshot {
-    zero_migrate::model::snapshot::TableSnapshot {
+fn empty_table_snapshot() -> zeroship_migrate::model::snapshot::TableSnapshot {
+    zeroship_migrate::model::snapshot::TableSnapshot {
         columns: Vec::new(),
         indexes: Vec::new(),
         constraints: Vec::new(),
@@ -1216,7 +1216,7 @@ fn selected_dialectal_leg<'a>(
 }
 
 fn live_schema_with_ownership(
-    snapshot: zero_migrate::model::snapshot::SchemaSnapshot,
+    snapshot: zeroship_migrate::model::snapshot::SchemaSnapshot,
     owner_app: &str,
     registry: &BTreeMap<String, String>,
 ) -> LiveSchema {
@@ -1294,7 +1294,7 @@ fn ops_without_completed_journal_evidence(
 }
 
 fn step_has_journal_phase(
-    step: &zero_migrate::PlanStep,
+    step: &zeroship_migrate::PlanStep,
     journal_entries: &[AppliedEntry],
     phase: Phase,
 ) -> bool {
@@ -1304,26 +1304,26 @@ fn step_has_journal_phase(
             .any(|entry| entry.version == version && entry.phase == phase)
     };
     match step {
-        zero_migrate::PlanStep::Ddl(migration) => has_version(migration.version.as_str()),
-        zero_migrate::PlanStep::Dml { version, .. }
-        | zero_migrate::PlanStep::Backfill { version, .. } => has_version(version.as_str()),
-        zero_migrate::PlanStep::AlterPrimaryKey(step) => {
+        zeroship_migrate::PlanStep::Ddl(migration) => has_version(migration.version.as_str()),
+        zeroship_migrate::PlanStep::Dml { version, .. }
+        | zeroship_migrate::PlanStep::Backfill { version, .. } => has_version(version.as_str()),
+        zeroship_migrate::PlanStep::AlterPrimaryKey(step) => {
             has_version(step.migration.version.as_str())
         }
-        zero_migrate::PlanStep::AlterColumnType(step) => {
+        zeroship_migrate::PlanStep::AlterColumnType(step) => {
             has_version(step.migration.version.as_str())
         }
-        zero_migrate::PlanStep::SynchronizeIdentity(step) => {
+        zeroship_migrate::PlanStep::SynchronizeIdentity(step) => {
             has_version(step.migration.version.as_str())
         }
-        zero_migrate::PlanStep::OnlineRename(zero_migrate::RenameStep::ExpandContract(rename)) => {
+        zeroship_migrate::PlanStep::OnlineRename(zeroship_migrate::RenameStep::ExpandContract(rename)) => {
             rename
                 .expand
                 .iter()
                 .chain(&rename.contract)
                 .any(|migration| has_version(migration.version.as_str()))
         }
-        zero_migrate::PlanStep::OnlineRename(zero_migrate::RenameStep::TableRebuild(rename)) => {
+        zeroship_migrate::PlanStep::OnlineRename(zeroship_migrate::RenameStep::TableRebuild(rename)) => {
             has_version(rename.migration.version.as_str())
         }
     }
@@ -1344,14 +1344,14 @@ enum ProjectionGuardVerdict {
     AllUnitsSatisfied,
     /// A unit's object exists with a shape that diverges from the declared one, or
     /// with a shape that cannot be proven equal to it.
-    Divergent(zero_migrate::render::existence_probe::Divergence),
+    Divergent(zeroship_migrate::render::existence_probe::Divergence),
     /// A unit is unguarded, is not a DDL step, or its guard still has work to do.
     NotSatisfied,
 }
 
 /// Decide the per-unit existence-guard verdict for `span` against `snapshot`.
 ///
-/// This runs the SAME [`decide`](zero_migrate::render::existence_probe::decide) the
+/// This runs the SAME [`decide`](zeroship_migrate::render::existence_probe::decide) the
 /// executor runs, so the projection and the apply-time probe cannot disagree about
 /// whether an object is already present. It deliberately does NOT read the fold's
 /// error kind: `FoldError::DuplicateTable` reports NAME presence alone, and acting
@@ -1364,11 +1364,11 @@ enum ProjectionGuardVerdict {
 /// at apply time.
 fn projection_guard_verdict(
     artifact: &LoweredArtifact,
-    span: &zero_migrate::render::lower::LoweredOpSpan,
-    snapshot: &zero_migrate::model::snapshot::SchemaSnapshot,
+    span: &zeroship_migrate::render::lower::LoweredOpSpan,
+    snapshot: &zeroship_migrate::model::snapshot::SchemaSnapshot,
     dialect: &DialectId,
 ) -> Result<ProjectionGuardVerdict, String> {
-    use zero_migrate::render::existence_probe::{decide, GuardVerdict};
+    use zeroship_migrate::render::existence_probe::{decide, GuardVerdict};
 
     let mut units = 0usize;
     let mut all_satisfied = true;
@@ -1385,11 +1385,11 @@ fn projection_guard_verdict(
         for step in steps {
             units += 1;
             let probe = match step {
-                zero_migrate::PlanStep::Ddl(migration) => migration.existence_guard.as_ref(),
+                zeroship_migrate::PlanStep::Ddl(migration) => migration.existence_guard.as_ref(),
                 _ => None,
             };
             match probe
-                .map(|probe| decide(zero_migrate::shipping_vendors(), probe, snapshot, dialect))
+                .map(|probe| decide(zeroship_migrate::shipping_vendors(), probe, snapshot, dialect))
             {
                 Some(GuardVerdict::SatisfiedNoop) => {}
                 Some(GuardVerdict::FailDrift(found)) => {
@@ -1410,7 +1410,7 @@ fn projection_guard_verdict(
 }
 
 fn inflight_projection_already_reflected(
-    snapshot: &zero_migrate::model::snapshot::SchemaSnapshot,
+    snapshot: &zeroship_migrate::model::snapshot::SchemaSnapshot,
     op: &Op,
     error: &FoldError,
 ) -> bool {
@@ -1676,9 +1676,9 @@ pub fn lower_envelope_to_migrations(
     if artifact.plan.steps.iter().any(|step| {
         matches!(
             step,
-            zero_migrate::PlanStep::AlterPrimaryKey(_)
-                | zero_migrate::PlanStep::AlterColumnType(_)
-                | zero_migrate::PlanStep::SynchronizeIdentity(_)
+            zeroship_migrate::PlanStep::AlterPrimaryKey(_)
+                | zeroship_migrate::PlanStep::AlterColumnType(_)
+                | zeroship_migrate::PlanStep::SynchronizeIdentity(_)
         )
     }) {
         return Err(
@@ -1720,7 +1720,7 @@ pub fn lower_envelope_to_migrations_json(
 mod tests {
     use super::*;
     use crate::test_fixtures::{no_inject, CONFINED_CHARTER_TOML};
-    use zero_migrate::{BindValue, PlanStep};
+    use zeroship_migrate::{BindValue, PlanStep};
 
     const NO_INJECT_CHARTER_TOML: &str = r#"policy_version = 1
 
@@ -1821,7 +1821,7 @@ value = true
 scope = "all"
 "#;
 
-    fn no_inject_policy(schema: &str) -> zero_migrate::EffectivePolicy {
+    fn no_inject_policy(schema: &str) -> zeroship_migrate::EffectivePolicy {
         no_inject(schema)
     }
 
@@ -1871,7 +1871,7 @@ scope = "all"
     fn rollback_replay_recovers_a_dropped_function_definition() {
         let owner = "app_function_history";
         let create = serde_json::json!({
-            "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+            "ir_version": zeroship_migrate::model::ir::CURRENT_IR_VERSION,
             "name": "create_format_value",
             "ops": [{
                 "op": "createFunction",
@@ -1885,7 +1885,7 @@ scope = "all"
         })
         .to_string();
         let drop = serde_json::json!({
-            "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+            "ir_version": zeroship_migrate::model::ir::CURRENT_IR_VERSION,
             "name": "drop_format_value",
             "ops": [{
                 "op": "dropFunction",
@@ -1901,8 +1901,8 @@ scope = "all"
         let create_ir: MigrationIr = serde_json::from_str(&create).expect("the create IR parses");
         let effective =
             effective_policy_from_charter_layers(charter).expect("the function charter composes");
-        let history = zero_migrate::fold_ops(
-            zero_migrate::shipping_vendors(),
+        let history = zeroship_migrate::fold_ops(
+            zeroship_migrate::shipping_vendors(),
             &create_ir.ops,
             &POSTGRES,
             owner,
@@ -1928,7 +1928,7 @@ scope = "all"
                     version: migration.version.as_str().to_string(),
                     checksum: migration.checksum.as_str().to_string(),
                     phase: Phase::Completed,
-                    kind: Some(zero_migrate::apply::journal::JournaledKind::Apply),
+                    kind: Some(zeroship_migrate::apply::journal::JournaledKind::Apply),
                     event_seq: 0,
                 }),
                 _ => None,
@@ -1942,7 +1942,7 @@ scope = "all"
             "postgres",
             "{}",
             charter,
-            zero_migrate::model::snapshot::SchemaSnapshot::default(),
+            zeroship_migrate::model::snapshot::SchemaSnapshot::default(),
             &journal_entries,
             &[],
         )
@@ -1963,7 +1963,7 @@ scope = "all"
     fn rollback_replay_recovers_a_dropped_policy_definition() {
         let owner = "app_policy_history";
         let create = serde_json::json!({
-            "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+            "ir_version": zeroship_migrate::model::ir::CURRENT_IR_VERSION,
             "name": "create_tenant_isolation_policy",
             "ops": [{
                 "op": "createPolicy",
@@ -1977,7 +1977,7 @@ scope = "all"
         })
         .to_string();
         let drop = serde_json::json!({
-            "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+            "ir_version": zeroship_migrate::model::ir::CURRENT_IR_VERSION,
             "name": "drop_tenant_isolation_policy",
             "ops": [{
                 "op": "dropPolicy",
@@ -1994,8 +1994,8 @@ scope = "all"
         let create_ir: MigrationIr = serde_json::from_str(&create).expect("the create IR parses");
         let effective =
             effective_policy_from_charter_layers(charter).expect("the policy charter composes");
-        let history = zero_migrate::fold_ops(
-            zero_migrate::shipping_vendors(),
+        let history = zeroship_migrate::fold_ops(
+            zeroship_migrate::shipping_vendors(),
             &create_ir.ops,
             &POSTGRES,
             owner,
@@ -2021,7 +2021,7 @@ scope = "all"
                     version: migration.version.as_str().to_string(),
                     checksum: migration.checksum.as_str().to_string(),
                     phase: Phase::Completed,
-                    kind: Some(zero_migrate::apply::journal::JournaledKind::Apply),
+                    kind: Some(zeroship_migrate::apply::journal::JournaledKind::Apply),
                     event_seq: 0,
                 }),
                 _ => None,
@@ -2035,7 +2035,7 @@ scope = "all"
             "postgres",
             registry,
             charter,
-            zero_migrate::model::snapshot::SchemaSnapshot::default(),
+            zeroship_migrate::model::snapshot::SchemaSnapshot::default(),
             &journal_entries,
             &[],
         )
@@ -2056,7 +2056,7 @@ scope = "all"
     fn rollback_replay_recovers_a_dropped_trigger_definition() {
         let owner = "app_trigger_history";
         let create = serde_json::json!({
-            "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+            "ir_version": zeroship_migrate::model::ir::CURRENT_IR_VERSION,
             "name": "create_audit_trigger",
             "ops": [{
                 "op": "createTrigger",
@@ -2070,7 +2070,7 @@ scope = "all"
         })
         .to_string();
         let drop = serde_json::json!({
-            "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+            "ir_version": zeroship_migrate::model::ir::CURRENT_IR_VERSION,
             "name": "drop_audit_trigger",
             "ops": [{
                 "op": "dropTrigger",
@@ -2087,8 +2087,8 @@ scope = "all"
         let create_ir: MigrationIr = serde_json::from_str(&create).expect("the create IR parses");
         let effective =
             effective_policy_from_charter_layers(charter).expect("the trigger charter composes");
-        let history = zero_migrate::fold_ops(
-            zero_migrate::shipping_vendors(),
+        let history = zeroship_migrate::fold_ops(
+            zeroship_migrate::shipping_vendors(),
             &create_ir.ops,
             &POSTGRES,
             owner,
@@ -2114,7 +2114,7 @@ scope = "all"
                     version: migration.version.as_str().to_string(),
                     checksum: migration.checksum.as_str().to_string(),
                     phase: Phase::Completed,
-                    kind: Some(zero_migrate::apply::journal::JournaledKind::Apply),
+                    kind: Some(zeroship_migrate::apply::journal::JournaledKind::Apply),
                     event_seq: 0,
                 }),
                 _ => None,
@@ -2128,7 +2128,7 @@ scope = "all"
             "postgres",
             registry,
             charter,
-            zero_migrate::model::snapshot::SchemaSnapshot::default(),
+            zeroship_migrate::model::snapshot::SchemaSnapshot::default(),
             &journal_entries,
             &[],
         )
@@ -2257,30 +2257,30 @@ scope = "all"
 
     const CHARTER: &str = CONFINED_CHARTER_TOML;
 
-    fn primary_key_projection(columns: &[&str]) -> zero_migrate::model::snapshot::SchemaSnapshot {
+    fn primary_key_projection(columns: &[&str]) -> zeroship_migrate::model::snapshot::SchemaSnapshot {
         let columns = columns
             .iter()
             .map(|column| (*column).to_string())
             .collect::<Vec<_>>();
-        zero_migrate::model::snapshot::SchemaSnapshot {
+        zeroship_migrate::model::snapshot::SchemaSnapshot {
             tables: BTreeMap::from([(
                 "items".to_string(),
-                zero_migrate::model::snapshot::TableSnapshot {
+                zeroship_migrate::model::snapshot::TableSnapshot {
                     columns: columns
                         .iter()
-                        .map(|name| zero_migrate::model::snapshot::ColumnSnapshot {
+                        .map(|name| zeroship_migrate::model::snapshot::ColumnSnapshot {
                             name: name.clone(),
                             data_type: "integer".to_string(),
                             nullable: false,
                             ..Default::default()
                         })
                         .collect(),
-                    indexes: vec![zero_migrate::model::snapshot::IndexSnapshot::btree(
+                    indexes: vec![zeroship_migrate::model::snapshot::IndexSnapshot::btree(
                         "items_pkey",
                         true,
                         columns.clone(),
                     )],
-                    constraints: vec![zero_migrate::model::snapshot::ConstraintSnapshot {
+                    constraints: vec![zeroship_migrate::model::snapshot::ConstraintSnapshot {
                         name: "items_pkey".to_string(),
                         kind: "PRIMARY KEY".to_string(),
                         definition: format!("PRIMARY KEY ({})", columns.join(", ")),
@@ -2302,7 +2302,7 @@ scope = "all"
     fn inflight_primary_key_projection_recognizes_only_the_exact_postcondition() {
         let replace = Op::AlterPrimaryKey {
             table: "items".to_string(),
-            action: zero_migrate::model::ir::AlterPrimaryKeyAction::Replace {
+            action: zeroship_migrate::model::ir::AlterPrimaryKeyAction::Replace {
                 expected_columns: vec!["id".to_string()],
                 columns: vec!["tenant_id".to_string(), "id".to_string()],
                 drop_identity_from: Some(vec!["id".to_string()]),
@@ -2327,17 +2327,17 @@ scope = "all"
 
         let drop = Op::AlterPrimaryKey {
             table: "items".to_string(),
-            action: zero_migrate::model::ir::AlterPrimaryKeyAction::Drop {
+            action: zeroship_migrate::model::ir::AlterPrimaryKeyAction::Drop {
                 expected_columns: vec!["id".to_string()],
                 drop_identity_from: None,
             },
             schema: None,
         };
-        let dropped = zero_migrate::model::snapshot::SchemaSnapshot {
+        let dropped = zeroship_migrate::model::snapshot::SchemaSnapshot {
             tables: BTreeMap::from([(
                 "items".to_string(),
-                zero_migrate::model::snapshot::TableSnapshot {
-                    columns: vec![zero_migrate::model::snapshot::ColumnSnapshot {
+                zeroship_migrate::model::snapshot::TableSnapshot {
+                    columns: vec![zeroship_migrate::model::snapshot::ColumnSnapshot {
                         name: "id".to_string(),
                         data_type: "integer".to_string(),
                         nullable: false,
@@ -2364,7 +2364,7 @@ scope = "all"
     #[test]
     fn historical_chained_renames_reconstruct_the_original_column() {
         let ir: MigrationIr = serde_json::from_value(serde_json::json!({
-            "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+            "ir_version": zeroship_migrate::model::ir::CURRENT_IR_VERSION,
             "name": "rename_chain",
             "ops": [
                 { "op": "renameColumn", "table": "items", "from": "a", "to": "b", "type": "text" },
@@ -2372,11 +2372,11 @@ scope = "all"
             ]
         }))
         .expect("rename chain parses");
-        let snapshot = zero_migrate::model::snapshot::SchemaSnapshot {
+        let snapshot = zeroship_migrate::model::snapshot::SchemaSnapshot {
             tables: BTreeMap::from([(
                 "items".to_string(),
-                zero_migrate::model::snapshot::TableSnapshot {
-                    columns: vec![zero_migrate::model::snapshot::ColumnSnapshot {
+                zeroship_migrate::model::snapshot::TableSnapshot {
+                    columns: vec![zeroship_migrate::model::snapshot::ColumnSnapshot {
                         name: "c".to_string(),
                         data_type: "text".to_string(),
                         nullable: true,
@@ -2414,13 +2414,13 @@ scope = "all"
     }
 
     fn rename_live(columns: &[&str]) -> LiveSchema {
-        let snapshot = zero_migrate::model::snapshot::SchemaSnapshot {
+        let snapshot = zeroship_migrate::model::snapshot::SchemaSnapshot {
             tables: BTreeMap::from([(
                 "items".to_string(),
-                zero_migrate::model::snapshot::TableSnapshot {
+                zeroship_migrate::model::snapshot::TableSnapshot {
                     columns: columns
                         .iter()
-                        .map(|name| zero_migrate::model::snapshot::ColumnSnapshot {
+                        .map(|name| zeroship_migrate::model::snapshot::ColumnSnapshot {
                             name: (*name).to_string(),
                             data_type: "text".to_string(),
                             nullable: true,
@@ -2442,11 +2442,11 @@ scope = "all"
     }
 
     fn named_type_rename_live(data_type: &str, ddl_type: &str) -> LiveSchema {
-        let snapshot = zero_migrate::model::snapshot::SchemaSnapshot {
+        let snapshot = zeroship_migrate::model::snapshot::SchemaSnapshot {
             tables: BTreeMap::from([(
                 "items".to_string(),
-                zero_migrate::model::snapshot::TableSnapshot {
-                    columns: vec![zero_migrate::model::snapshot::ColumnSnapshot {
+                zeroship_migrate::model::snapshot::TableSnapshot {
+                    columns: vec![zeroship_migrate::model::snapshot::ColumnSnapshot {
                         name: "state".to_string(),
                         data_type: data_type.to_string(),
                         ddl_type_override: Some(ddl_type.to_string()),
@@ -2469,7 +2469,7 @@ scope = "all"
 
     fn named_type_rename_envelope(name: &str, ty: serde_json::Value) -> String {
         serde_json::json!({
-            "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+            "ir_version": zeroship_migrate::model::ir::CURRENT_IR_VERSION,
             "name": name,
             "ops": [{
                 "op": "renameColumn",
@@ -2518,13 +2518,13 @@ scope = "all"
                 .steps
                 .iter()
                 .find_map(|step| match step {
-                    PlanStep::OnlineRename(zero_migrate::RenameStep::ExpandContract(rename)) => {
+                    PlanStep::OnlineRename(zeroship_migrate::RenameStep::ExpandContract(rename)) => {
                         Some(rename)
                     }
                     _ => None,
                 })
                 .expect("plan contains the named type rename");
-            let zero_migrate::OnlineIntent::RenameColumn { ty, .. } = &rename.intent;
+            let zeroship_migrate::OnlineIntent::RenameColumn { ty, .. } = &rename.intent;
             assert_eq!(ty, ddl_type);
             assert!(rename.expand[0].up.ends_with(ddl_type));
         }
@@ -2565,13 +2565,13 @@ scope = "all"
                 .steps
                 .iter()
                 .find_map(|step| match step {
-                    PlanStep::OnlineRename(zero_migrate::RenameStep::ExpandContract(rename)) => {
+                    PlanStep::OnlineRename(zeroship_migrate::RenameStep::ExpandContract(rename)) => {
                         Some(rename)
                     }
                     _ => None,
                 })
                 .expect("plan contains the mixed-case named type rename");
-            let zero_migrate::OnlineIntent::RenameColumn { ty, .. } = &rename.intent;
+            let zeroship_migrate::OnlineIntent::RenameColumn { ty, .. } = &rename.intent;
             assert_eq!(ty, ddl_type);
         }
     }
@@ -2616,7 +2616,7 @@ scope = "all"
                 "postgres",
                 "{}",
                 &[NO_INJECT_CHARTER_TOML],
-                zero_migrate::model::snapshot::SchemaSnapshot::default(),
+                zeroship_migrate::model::snapshot::SchemaSnapshot::default(),
                 &entries,
                 std::slice::from_ref(&terminal),
             )
@@ -2629,7 +2629,7 @@ scope = "all"
 
     fn decimal_rename_envelope() -> String {
         serde_json::json!({
-            "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+            "ir_version": zeroship_migrate::model::ir::CURRENT_IR_VERSION,
             "name": "rename_decimal_amount",
             "ops": [{
                 "op": "renameColumn",
@@ -2643,11 +2643,11 @@ scope = "all"
     }
 
     fn decimal_rename_live(ddl_type: &str) -> LiveSchema {
-        let snapshot = zero_migrate::model::snapshot::SchemaSnapshot {
+        let snapshot = zeroship_migrate::model::snapshot::SchemaSnapshot {
             tables: BTreeMap::from([(
                 "items".to_string(),
-                zero_migrate::model::snapshot::TableSnapshot {
-                    columns: vec![zero_migrate::model::snapshot::ColumnSnapshot {
+                zeroship_migrate::model::snapshot::TableSnapshot {
+                    columns: vec![zeroship_migrate::model::snapshot::ColumnSnapshot {
                         name: "amount".to_string(),
                         data_type: "numeric".to_string(),
                         ddl_type_override: Some(ddl_type.to_string()),
@@ -2702,13 +2702,13 @@ scope = "all"
             .steps
             .iter()
             .find_map(|step| match step {
-                PlanStep::OnlineRename(zero_migrate::RenameStep::ExpandContract(rename)) => {
+                PlanStep::OnlineRename(zeroship_migrate::RenameStep::ExpandContract(rename)) => {
                     Some(rename)
                 }
                 _ => None,
             })
             .expect("plan contains decimal rename");
-        let zero_migrate::OnlineIntent::RenameColumn { ty, .. } = &rename.intent;
+        let zeroship_migrate::OnlineIntent::RenameColumn { ty, .. } = &rename.intent;
         assert_eq!(ty, "decimal(20,4)");
     }
 
@@ -2716,9 +2716,9 @@ scope = "all"
         artifact: &LoweredArtifact,
     ) -> (
         Vec<AppliedEntry>,
-        zero_migrate::apply::journal::ResolvedPendingContract,
+        zeroship_migrate::apply::journal::ResolvedPendingContract,
     ) {
-        use zero_migrate::apply::journal::{
+        use zeroship_migrate::apply::journal::{
             JournaledKind, PendingContract, ResolvedPendingContract,
         };
 
@@ -2727,7 +2727,7 @@ scope = "all"
             .steps
             .iter()
             .find_map(|step| match step {
-                PlanStep::OnlineRename(zero_migrate::RenameStep::ExpandContract(rename)) => {
+                PlanStep::OnlineRename(zeroship_migrate::RenameStep::ExpandContract(rename)) => {
                     Some(rename)
                 }
                 _ => None,
@@ -2740,7 +2740,7 @@ scope = "all"
                 down: None,
                 version: migration.version.as_str().to_string(),
                 checksum: migration.checksum.as_str().to_string(),
-                phase: zero_migrate::Phase::Completed,
+                phase: zeroship_migrate::Phase::Completed,
                 kind: Some(JournaledKind::Apply),
                 event_seq: 0,
             })
@@ -2749,16 +2749,16 @@ scope = "all"
             contract: PendingContract {
                 owner_app: Some("app_test".to_string()),
                 table: match &rename.intent {
-                    zero_migrate::OnlineIntent::RenameColumn { table, .. } => table.clone(),
+                    zeroship_migrate::OnlineIntent::RenameColumn { table, .. } => table.clone(),
                 },
                 from_col: match &rename.intent {
-                    zero_migrate::OnlineIntent::RenameColumn { from, .. } => from.clone(),
+                    zeroship_migrate::OnlineIntent::RenameColumn { from, .. } => from.clone(),
                 },
                 to_col: match &rename.intent {
-                    zero_migrate::OnlineIntent::RenameColumn { to, .. } => to.clone(),
+                    zeroship_migrate::OnlineIntent::RenameColumn { to, .. } => to.clone(),
                 },
                 ty: match &rename.intent {
-                    zero_migrate::OnlineIntent::RenameColumn { ty, .. } => ty.clone(),
+                    zeroship_migrate::OnlineIntent::RenameColumn { ty, .. } => ty.clone(),
                 },
                 pending_version: rename.trigger_version.as_str().to_string(),
                 plan_version: rename
@@ -2773,7 +2773,7 @@ scope = "all"
                     .map(|migration| migration.version.as_str().to_string())
                     .collect(),
             },
-            resolution: zero_migrate::Resolution::Applied,
+            resolution: zeroship_migrate::Resolution::Applied,
         };
         (entries, terminal)
     }
@@ -2781,7 +2781,7 @@ scope = "all"
     #[test]
     fn terminal_decimal_rename_reconstructs_after_its_table_disappears() {
         let envelope = serde_json::json!({
-            "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+            "ir_version": zeroship_migrate::model::ir::CURRENT_IR_VERSION,
             "name": "rename_items_amount",
             "ops": [{
                 "op": "renameColumn",
@@ -2792,11 +2792,11 @@ scope = "all"
             }]
         })
         .to_string();
-        let initial_snapshot = zero_migrate::model::snapshot::SchemaSnapshot {
+        let initial_snapshot = zeroship_migrate::model::snapshot::SchemaSnapshot {
             tables: BTreeMap::from([(
                 "items".to_string(),
-                zero_migrate::model::snapshot::TableSnapshot {
-                    columns: vec![zero_migrate::model::snapshot::ColumnSnapshot {
+                zeroship_migrate::model::snapshot::TableSnapshot {
+                    columns: vec![zeroship_migrate::model::snapshot::ColumnSnapshot {
                         name: "amount".to_string(),
                         data_type: "numeric".to_string(),
                         ddl_type_override: Some("numeric(20,4)".to_string()),
@@ -2834,7 +2834,7 @@ scope = "all"
             "postgres",
             "{}",
             &[NO_INJECT_CHARTER_TOML],
-            zero_migrate::model::snapshot::SchemaSnapshot::default(),
+            zeroship_migrate::model::snapshot::SchemaSnapshot::default(),
             &entries,
             std::slice::from_ref(&terminal),
         )
@@ -2847,7 +2847,7 @@ scope = "all"
     #[test]
     fn separately_resolved_rename_chain_replays_from_the_final_catalog() {
         let first = serde_json::json!({
-            "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+            "ir_version": zeroship_migrate::model::ir::CURRENT_IR_VERSION,
             "name": "rename_items_a_to_b",
             "ops": [{
                 "op": "renameColumn",
@@ -2859,7 +2859,7 @@ scope = "all"
         })
         .to_string();
         let second = serde_json::json!({
-            "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+            "ir_version": zeroship_migrate::model::ir::CURRENT_IR_VERSION,
             "name": "rename_items_b_to_c",
             "ops": [{
                 "op": "renameColumn",
@@ -2894,7 +2894,7 @@ scope = "all"
         let (second_entries, second_terminal) = completed_rename_lifecycle(&second_original);
         entries.extend(second_entries);
         let terminals = vec![first_terminal, second_terminal];
-        let final_snapshot = zero_migrate::model::snapshot::SchemaSnapshot {
+        let final_snapshot = zeroship_migrate::model::snapshot::SchemaSnapshot {
             tables: rename_live(&["c"]).table_snapshots,
             ..Default::default()
         };
@@ -2919,12 +2919,12 @@ scope = "all"
 
     #[test]
     fn historical_apply_requires_exact_lifecycle_evidence() {
-        use zero_migrate::apply::journal::{
+        use zeroship_migrate::apply::journal::{
             JournaledKind, PendingContract, ResolvedPendingContract,
         };
 
         let envelope = serde_json::json!({
-            "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+            "ir_version": zeroship_migrate::model::ir::CURRENT_IR_VERSION,
             "name": "rename_items_label",
             "ops": [{
                 "op": "renameColumn",
@@ -2950,7 +2950,7 @@ scope = "all"
             .steps
             .iter()
             .find_map(|step| match step {
-                PlanStep::OnlineRename(zero_migrate::RenameStep::ExpandContract(rename)) => {
+                PlanStep::OnlineRename(zeroship_migrate::RenameStep::ExpandContract(rename)) => {
                     Some(rename)
                 }
                 _ => None,
@@ -2963,7 +2963,7 @@ scope = "all"
                 down: None,
                 version: migration.version.as_str().to_string(),
                 checksum: migration.checksum.as_str().to_string(),
-                phase: zero_migrate::Phase::Completed,
+                phase: zeroship_migrate::Phase::Completed,
                 kind: Some(JournaledKind::Apply),
                 event_seq: 0,
             })
@@ -2988,7 +2988,7 @@ scope = "all"
                     .map(|migration| migration.version.as_str().to_string())
                     .collect(),
             },
-            resolution: zero_migrate::Resolution::Applied,
+            resolution: zeroship_migrate::Resolution::Applied,
         };
 
         assert!(
@@ -3025,7 +3025,7 @@ scope = "all"
 
     #[test]
     fn unknown_dialect_is_an_err_not_a_panic() {
-        let env = create_widgets_envelope(zero_migrate::model::ir::CURRENT_IR_VERSION);
+        let env = create_widgets_envelope(zeroship_migrate::model::ir::CURRENT_IR_VERSION);
         let r = lower_envelope_to_migrations(&env, "app_x", "app_x", "oracle", "{}", &[CHARTER]);
         assert!(r.is_err());
         assert!(r.unwrap_err().contains("unknown dialect"));
@@ -3033,7 +3033,7 @@ scope = "all"
 
     #[test]
     fn malformed_registry_is_an_err() {
-        let env = create_widgets_envelope(zero_migrate::model::ir::CURRENT_IR_VERSION);
+        let env = create_widgets_envelope(zeroship_migrate::model::ir::CURRENT_IR_VERSION);
         let r =
             lower_envelope_to_migrations(&env, "app_x", "app_x", "postgres", "[1,2,3]", &[CHARTER]);
         assert!(r.is_err());
@@ -3042,7 +3042,7 @@ scope = "all"
 
     #[test]
     fn malformed_policy_charter_is_an_err() {
-        let env = create_widgets_envelope(zero_migrate::model::ir::CURRENT_IR_VERSION);
+        let env = create_widgets_envelope(zeroship_migrate::model::ir::CURRENT_IR_VERSION);
         let r = lower_envelope_to_migrations(
             &env,
             "app_x",
@@ -3057,7 +3057,7 @@ scope = "all"
 
     #[test]
     fn empty_charter_layers_preserve_the_loader_error() {
-        let env = create_widgets_envelope(zero_migrate::model::ir::CURRENT_IR_VERSION);
+        let env = create_widgets_envelope(zeroship_migrate::model::ir::CURRENT_IR_VERSION);
         let error = lower_envelope_to_migrations(&env, "app_x", "app_x", "postgres", "{}", &[])
             .expect_err("an empty charter layer list must fail closed");
         assert_eq!(error, "at least one policy charter is required");
@@ -3066,7 +3066,7 @@ scope = "all"
     #[test]
     fn flat_migration_projection_refuses_structured_primary_key_operation() {
         let envelope = serde_json::json!({
-            "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+            "ir_version": zeroship_migrate::model::ir::CURRENT_IR_VERSION,
             "name": "add_items_primary_key",
             "ops": [{
                 "op": "alterPrimaryKey",
@@ -3097,14 +3097,14 @@ scope = "all"
         .expect("the complete plan retains the structured operation");
         assert!(matches!(
             plan.plan.steps.as_slice(),
-            [zero_migrate::PlanStep::AlterPrimaryKey(_)]
+            [zeroship_migrate::PlanStep::AlterPrimaryKey(_)]
         ));
     }
 
     #[test]
     fn flat_migration_projection_refuses_identity_synchronization() {
         let envelope = serde_json::json!({
-            "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+            "ir_version": zeroship_migrate::model::ir::CURRENT_IR_VERSION,
             "name": "synchronize_imported_items",
             "ops": [{
                 "op": "synchronizeIdentity",
@@ -3136,7 +3136,7 @@ scope = "all"
         .expect("the complete plan retains identity synchronization");
         assert!(matches!(
             plan.plan.steps.as_slice(),
-            [zero_migrate::PlanStep::SynchronizeIdentity(_)]
+            [zeroship_migrate::PlanStep::SynchronizeIdentity(_)]
         ));
     }
 
@@ -3148,7 +3148,7 @@ scope = "all"
         // whose sole migration carries a NON-empty `up` SQL + a folded checksum, or
         // fails closed with a message (never a panic). Both are acceptable proofs the
         // lower path is wired; the DB-backed oracle asserts journal identity.
-        let env = create_widgets_envelope(zero_migrate::model::ir::CURRENT_IR_VERSION);
+        let env = create_widgets_envelope(zeroship_migrate::model::ir::CURRENT_IR_VERSION);
         match lower_envelope_to_migrations(
             &env,
             "app_widgets",
@@ -3183,7 +3183,7 @@ scope = "all"
     #[test]
     fn complete_dml_surface_retains_order_identity_checksum_and_approval_classification() {
         let lower = |inserted_id| {
-            let env = data_steps_envelope(zero_migrate::model::ir::CURRENT_IR_VERSION, inserted_id);
+            let env = data_steps_envelope(zeroship_migrate::model::ir::CURRENT_IR_VERSION, inserted_id);
             lower_envelope_to_plan(
                 &env,
                 "app_widgets",
@@ -3207,7 +3207,7 @@ scope = "all"
             } => (version.as_str().to_string(), checksum.as_str().to_string()),
             other => panic!("expected a data step, got {other:?}"),
         };
-        let identities = |artifact: &zero_migrate::LoweredArtifact| {
+        let identities = |artifact: &zeroship_migrate::LoweredArtifact| {
             artifact
                 .plan
                 .steps
@@ -3305,7 +3305,7 @@ scope = "all"
 
     #[test]
     fn ordered_status_lowering_projects_create_before_live_dependent_default() {
-        let envelopes = ordered_status_envelopes(zero_migrate::model::ir::CURRENT_IR_VERSION);
+        let envelopes = ordered_status_envelopes(zeroship_migrate::model::ir::CURRENT_IR_VERSION);
 
         let plans = lower_ordered_envelopes_to_plans(
             &envelopes,
@@ -3314,7 +3314,7 @@ scope = "all"
             "postgres",
             "{}",
             &[NO_INJECT_CHARTER_TOML],
-            zero_migrate::model::snapshot::SchemaSnapshot::default(),
+            zeroship_migrate::model::snapshot::SchemaSnapshot::default(),
             &[],
             &[],
         )
@@ -3328,7 +3328,7 @@ scope = "all"
     fn ordered_lowering_carries_logical_id_contracts_across_artifacts() {
         let owner = "app_cross_artifact_ids";
         let declaration = serde_json::json!({
-            "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+            "ir_version": zeroship_migrate::model::ir::CURRENT_IR_VERSION,
             "name": "declare_cross_artifact_ids",
             "ops": [{
                 "op": "createTable",
@@ -3350,7 +3350,7 @@ scope = "all"
         })
         .to_string();
         let backfill = serde_json::json!({
-            "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+            "ir_version": zeroship_migrate::model::ir::CURRENT_IR_VERSION,
             "name": "backfill_cross_artifact_ids",
             "irreversible": "test fixture exercises forward backfill lowering only",
             "ops": [{
@@ -3376,7 +3376,7 @@ scope = "all"
             "postgres",
             "{}",
             &[NO_INJECT_CHARTER_TOML],
-            zero_migrate::model::snapshot::SchemaSnapshot::default(),
+            zeroship_migrate::model::snapshot::SchemaSnapshot::default(),
             &[],
             &[],
         )
@@ -3384,7 +3384,7 @@ scope = "all"
         assert_eq!(plans.len(), 2);
         assert!(matches!(
             plans[1].plan.steps.as_slice(),
-            [zero_migrate::PlanStep::Backfill { .. }]
+            [zeroship_migrate::PlanStep::Backfill { .. }]
         ));
 
         let declaration_artifact = lower_envelope_to_plan(
@@ -3413,8 +3413,8 @@ scope = "all"
             .collect::<Vec<_>>();
         let declaration_ir: MigrationIr =
             serde_json::from_str(&declaration).expect("the declaration IR parses");
-        let live_snapshot = zero_migrate::fold_ops(
-            zero_migrate::shipping_vendors(),
+        let live_snapshot = zeroship_migrate::fold_ops(
+            zeroship_migrate::shipping_vendors(),
             &declaration_ir.ops,
             &POSTGRES,
             owner,
@@ -3435,7 +3435,7 @@ scope = "all"
         .expect("an applied declaration still advances logical metadata for the backfill");
         assert!(matches!(
             applied_prefix_plans[1].plan.steps.as_slice(),
-            [zero_migrate::PlanStep::Backfill { .. }]
+            [zeroship_migrate::PlanStep::Backfill { .. }]
         ));
 
         let error = lower_envelope_to_plan(
@@ -3455,10 +3455,10 @@ scope = "all"
 
     #[test]
     fn ordered_status_lowering_projects_an_inflight_create_that_has_not_landed() {
-        use zero_migrate::apply::journal::Phase;
+        use zeroship_migrate::apply::journal::Phase;
 
         let owner = "app_status_inflight_absent";
-        let envelopes = ordered_status_envelopes(zero_migrate::model::ir::CURRENT_IR_VERSION);
+        let envelopes = ordered_status_envelopes(zeroship_migrate::model::ir::CURRENT_IR_VERSION);
         let create = lower_envelope_to_plan(
             &envelopes[0],
             owner,
@@ -3487,7 +3487,7 @@ scope = "all"
             "mysql",
             "{}",
             &[NO_INJECT_CHARTER_TOML],
-            zero_migrate::model::snapshot::SchemaSnapshot::default(),
+            zeroship_migrate::model::snapshot::SchemaSnapshot::default(),
             &journal_entries,
             &[],
         )
@@ -3499,14 +3499,14 @@ scope = "all"
 
     #[test]
     fn ordered_status_lowering_uses_live_shape_when_an_inflight_create_landed() {
-        use zero_migrate::apply::journal::Phase;
+        use zeroship_migrate::apply::journal::Phase;
 
         let owner = "app_status_inflight_landed";
-        let envelopes = ordered_status_envelopes(zero_migrate::model::ir::CURRENT_IR_VERSION);
+        let envelopes = ordered_status_envelopes(zeroship_migrate::model::ir::CURRENT_IR_VERSION);
         let create_ir: MigrationIr =
             serde_json::from_str(&envelopes[0]).expect("create envelope parses");
-        let live_snapshot = zero_migrate::fold_ops(
-            zero_migrate::shipping_vendors(),
+        let live_snapshot = zeroship_migrate::fold_ops(
+            zeroship_migrate::shipping_vendors(),
             &create_ir.ops,
             &MYSQL,
             owner,
@@ -3552,7 +3552,7 @@ scope = "all"
     }
 
     fn assert_inflight_then_pending(plans: &[LoweredArtifact], journal_entries: &[AppliedEntry]) {
-        use zero_migrate::ops::status::{
+        use zeroship_migrate::ops::status::{
             reconcile_applied_plans, PlanStatusStepState, ReconciledPlanState,
         };
 
@@ -3576,13 +3576,13 @@ scope = "all"
 
     #[test]
     fn ordered_status_lowering_does_not_replay_an_applied_prefix() {
-        use zero_migrate::apply::journal::{JournaledKind, Phase};
+        use zeroship_migrate::apply::journal::{JournaledKind, Phase};
 
-        let envelopes = ordered_status_envelopes(zero_migrate::model::ir::CURRENT_IR_VERSION);
+        let envelopes = ordered_status_envelopes(zeroship_migrate::model::ir::CURRENT_IR_VERSION);
         let create_ir: MigrationIr =
             serde_json::from_str(&envelopes[0]).expect("create envelope parses");
-        let live_snapshot = zero_migrate::fold_ops(
-            zero_migrate::shipping_vendors(),
+        let live_snapshot = zeroship_migrate::fold_ops(
+            zeroship_migrate::shipping_vendors(),
             &create_ir.ops,
             &POSTGRES,
             "app_status_ordered",
@@ -3636,11 +3636,11 @@ scope = "all"
 
     #[test]
     fn ordered_status_lowering_projects_pending_tail_of_partially_applied_envelope() {
-        use zero_migrate::apply::journal::{JournaledKind, Phase};
+        use zeroship_migrate::apply::journal::{JournaledKind, Phase};
 
         let owner = "app_status_partial";
         let mixed = serde_json::json!({
-            "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+            "ir_version": zeroship_migrate::model::ir::CURRENT_IR_VERSION,
             "name": "create_then_extend_status_widgets",
             "ops": [
                 {
@@ -3667,7 +3667,7 @@ scope = "all"
         })
         .to_string();
         let follow_up = serde_json::json!({
-            "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+            "ir_version": zeroship_migrate::model::ir::CURRENT_IR_VERSION,
             "name": "default_status_widgets_payload",
             "ops": [{
                 "op": "setColumnDefault",
@@ -3679,8 +3679,8 @@ scope = "all"
         .to_string();
 
         let mixed_ir: MigrationIr = serde_json::from_str(&mixed).expect("mixed envelope parses");
-        let live_snapshot = zero_migrate::fold_ops(
-            zero_migrate::shipping_vendors(),
+        let live_snapshot = zeroship_migrate::fold_ops(
+            zeroship_migrate::shipping_vendors(),
             &mixed_ir.ops[..2],
             &POSTGRES,
             owner,
@@ -3743,7 +3743,7 @@ scope = "all"
         .into_iter()
         .map(|(name, table)| {
             let envelope = serde_json::json!({
-                "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
+                "ir_version": zeroship_migrate::model::ir::CURRENT_IR_VERSION,
                 "name": name,
                 "ops": [{
                     "op": "createTable",
@@ -3802,7 +3802,7 @@ scope = "all"
 
     #[test]
     fn authored_prefix_requires_exact_net_applied_plans() {
-        use zero_migrate::ops::status::reconcile_applied_plans;
+        use zeroship_migrate::ops::status::reconcile_applied_plans;
 
         let manifests = prefix_gate_manifests();
         let completed = sequenced(prefix_gate_entries(&manifests[0], Phase::Completed));
@@ -3835,8 +3835,8 @@ scope = "all"
 
     #[test]
     fn incomplete_authored_history_only_allows_an_applied_current_replay() {
-        use zero_migrate::model::migration::MigrationId;
-        use zero_migrate::ops::status::reconcile_applied_plans;
+        use zeroship_migrate::model::migration::MigrationId;
+        use zeroship_migrate::ops::status::reconcile_applied_plans;
 
         let manifests = prefix_gate_manifests();
         let omitted = AppliedEntry {

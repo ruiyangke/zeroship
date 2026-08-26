@@ -52,16 +52,16 @@ use crate::support;
 use std::collections::{BTreeMap, HashMap};
 
 use crate::support::mysql::{quote_ident, DatabaseGuard, MysqlDevSession};
-use zero_migrate::driver::SqlSession;
-use zero_migrate::model::snapshot::SchemaSnapshot;
-use zero_migrate::render::declarative::{
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::model::snapshot::SchemaSnapshot;
+use zeroship_migrate::render::declarative::{
     desired_snapshot_for_dialect, CollectionDescriptor, DeclarativeAuthor, FieldDescriptor,
 };
-use zero_migrate::{
+use zeroship_migrate::{
     diff_snapshots, fold_ops, resolve_create_table_policy, Approval, ExecutorConfig, GuardConfig,
     IrAuthor, LiveSchema, LockMode, MigrationBackend, MigrationEngine, MigrationIr,
 };
-use zero_migrate_mysql::MysqlBackend;
+use zeroship_migrate_mysql::MysqlBackend;
 
 const OWNER: &str = "app_enum_collation";
 
@@ -92,7 +92,7 @@ fn cfg_for(database: &str) -> ExecutorConfig {
 /// Lower one IR doc for `dialect` and return the statements, so a test can show the
 /// server the SAME DDL the engine would deploy.
 fn lower(
-    dialect: &zero_migrate::DialectId,
+    dialect: &zeroship_migrate::DialectId,
     schema: &str,
     values: &str,
 ) -> Result<Vec<String>, String> {
@@ -100,7 +100,7 @@ fn lower(
     let authored: MigrationIr =
         serde_json::from_str(&source(values)).map_err(|e| format!("parse the test IR: {e}"))?;
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         schema,
         OWNER,
         dialect,
@@ -120,7 +120,7 @@ async fn deploy_mysql(
     session: &MysqlDevSession,
     cfg: &ExecutorConfig,
     values: &str,
-) -> Result<Vec<zero_migrate::model::ir::Op>, String> {
+) -> Result<Vec<zeroship_migrate::model::ir::Op>, String> {
     let policy = support::no_inject(&cfg.project_schema);
     let authored: MigrationIr =
         serde_json::from_str(&source(values)).map_err(|e| format!("parse the test IR: {e}"))?;
@@ -129,13 +129,13 @@ async fn deploy_mysql(
     let resolved_source =
         serde_json::to_string(&resolved).map_err(|e| format!("serialize resolved IR: {e}"))?;
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         &policy,
     );
-    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate_mysql::DIALECT);
+    let guard = GuardConfig::from_policy(policy.clone(), zeroship_migrate_mysql::DIALECT);
     let registry: BTreeMap<String, String> = BTreeMap::new();
     let artifact = author
         .load_and_lower_guarded(
@@ -146,7 +146,7 @@ async fn deploy_mysql(
             &guard,
         )
         .map_err(|e| format!("load and lower the guarded plan: {e}"))?;
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,
@@ -174,7 +174,7 @@ async fn database_collation(session: &MysqlDevSession, database: &str) -> Result
         .query_one(
             "SELECT DEFAULT_COLLATION_NAME AS c FROM information_schema.schemata \
              WHERE SCHEMA_NAME = ?",
-            &[zero_migrate::driver::Bind::Text(database.to_string())],
+            &[zeroship_migrate::driver::Bind::Text(database.to_string())],
         )
         .await
         .map_err(|e| format!("read the database default collation: {e}"))?;
@@ -185,7 +185,7 @@ async fn database_collation(session: &MysqlDevSession, database: &str) -> Result
 /// The collation the SERVER gave `column`, read from the catalog.
 ///
 /// `information_schema.COLUMNS` is the relation the SHIPPED drift path reads
-/// (`zero_migrate_mysql::backend::drift_sql`), so reading it here measures the same surface
+/// (`zeroship_migrate_mysql::backend::drift_sql`), so reading it here measures the same surface
 /// the engine measures. It is privilege-filtered - MySQL shows a row only for a column
 /// the connected user holds some privilege on - so an "absent" row would be
 /// indistinguishable from an invisible one. The caller therefore treats a missing row
@@ -203,9 +203,9 @@ async fn catalog_collation(
             "SELECT COLLATION_NAME AS c FROM information_schema.COLUMNS \
              WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?",
             &[
-                zero_migrate::driver::Bind::Text(database.to_string()),
-                zero_migrate::driver::Bind::Text(table.to_string()),
-                zero_migrate::driver::Bind::Text(column.to_string()),
+                zeroship_migrate::driver::Bind::Text(database.to_string()),
+                zeroship_migrate::driver::Bind::Text(table.to_string()),
+                zeroship_migrate::driver::Bind::Text(column.to_string()),
             ],
         )
         .await
@@ -369,7 +369,7 @@ async fn a_wrong_case_enum_member_is_refused_on_postgres() {
             .await
             .map_err(|e| format!("create the probe schema: {e}"))?;
         for statement in lower(
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &schema,
             r#"["active","archived"]"#,
         )? {
@@ -421,8 +421,8 @@ async fn an_enum_whose_members_differ_only_in_case_deploys_on_mysql() {
         // native type; both accept the pair. Lowering them here keeps the claim about
         // the AUTHORED schema rather than about one dialect's SQL.
         for dialect in [
-            &zero_migrate_postgres::DIALECT,
-            &zero_migrate_sqlite::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
+            &zeroship_migrate_sqlite::DIALECT,
         ] {
             lower(dialect, "app", r#"["active","Active"]"#).map_err(|e| {
                 format!("{dialect:?} could not even render the case-pair enum: {e}")
@@ -515,9 +515,9 @@ async fn a_deployed_enum_column_does_not_drift_against_its_own_fold() {
         }
         let ops = deploy_mysql(&session, &cfg, r#"["active","archived"]"#).await?;
         let expected = fold_ops(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &ops,
-            &zero_migrate_mysql::DIALECT,
+            &zeroship_migrate_mysql::DIALECT,
             &cfg.project_schema,
             &support::no_inject(&cfg.project_schema),
         )
@@ -528,7 +528,7 @@ async fn a_deployed_enum_column_does_not_drift_against_its_own_fold() {
                 .snapshot_schema(&cfg)
                 .await
                 .map_err(|e| format!("snapshot the deployed schema on pass {pass}: {e}"))?;
-            let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
+            let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual);
             if !drift.is_clean() {
                 return Err(format!(
                     "pass {pass}: the engine deployed this table and nobody touched it, \
@@ -574,13 +574,13 @@ fn an_ir_enum_column_cannot_declare_case_insensitivity() {
     ]}}"#
     );
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         "app",
         OWNER,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         &policy,
     );
-    let guard = GuardConfig::from_policy(policy, zero_migrate_mysql::DIALECT);
+    let guard = GuardConfig::from_policy(policy, zeroship_migrate_mysql::DIALECT);
     let registry: BTreeMap<String, String> = BTreeMap::new();
     let refusal = author
         .load_and_lower_guarded(&src, OWNER, &registry, &LiveSchema::default(), &guard)
@@ -652,18 +652,18 @@ fn descriptor_create_ddl(
 ) -> Result<String, String> {
     let effective = support::no_inject(project);
     let desired = desired_snapshot_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         project,
         std::slice::from_ref(descriptor),
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         &effective,
     )
     .map_err(|e| format!("build the desired snapshot: {e}"))?;
     let plan = DeclarativeAuthor::new_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         project,
         OWNER,
-        zero_migrate_mysql::DIALECT,
+        zeroship_migrate_mysql::DIALECT,
     )
     .diff(
         &desired,

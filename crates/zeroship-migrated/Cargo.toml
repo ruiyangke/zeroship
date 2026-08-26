@@ -29,27 +29,27 @@ uuid = { workspace = true }
 zeroship-authz = { workspace = true }
 zeroship-authn = { workspace = true }
 zeroship-core = { workspace = true }
-# Phase F Stage 3: this service consumes ONLY the published `zero-migrate` engine
-# (vendored as a submodule at third_party/zero-migrate) plus the monorepo's
+# Phase F Stage 3: this service consumes ONLY the published `zeroship-migrate` engine
+# (vendored as a submodule at third_party/zeroship-migrate) plus the monorepo's
 # `zeroship-migrate-adapter` (the `CompioPgSession` mapping the platform's io_uring
 # PG driver onto the engine's driver-neutral `SqlSession` seam). The in-tree
 # `zeroship-migrate` (v6) dependency is GONE: this crate no longer links the
 # platform's migration source.
 #
 # The engine ships NO native Rust network PG driver — its PG apply path is generic
-# over `SqlSession`. `zero-migrate`'s default features light `host-pg` → the
+# over `SqlSession`. `zeroship-migrate`'s default features light `host-pg` → the
 # `pg_seam` cfg (the generic `PostgresBackend<D>`, `IrAuthor::load_and_lower*`, the
 # `<D: SqlSession>` apply/journal/snapshot free functions). The adapter supplies the
 # concrete `CompioPgSession` producer; migrator-role + schema provisioning runs
 # inline over the wrapped raw compio `Client`.
-zero-migrate = { workspace = true }
+zeroship-migrate = { workspace = true }
 # The managed-policy server composes the monorepo-owned confined/platform ceilings
 # against untrusted creator drafts. That requires the engine's Policy Decision Point
 # directly (`compose_strict`, `RootCeiling`, `PolicyDoc`, `LoadContext`, the builtin
-# knob registry) — the `zero-migrate` facade re-exports only the seal +
+# knob registry) — the `zeroship-migrate` facade re-exports only the seal +
 # `resolve_create_table_policy`, not the composition algebra.
-zero-migrate-policy = { workspace = true }
-zero-migrate-ir = { workspace = true }
+zeroship-migrate-policy = { workspace = true }
+zeroship-migrate-ir = { workspace = true }
 toml = { workspace = true }
 zeroship-migrate-adapter = { workspace = true }
 

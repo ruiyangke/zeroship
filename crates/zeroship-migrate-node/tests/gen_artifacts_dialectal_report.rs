@@ -25,7 +25,7 @@ mod support;
 
 use serde_json::{json, Value};
 
-use zero_migrate_node::api::gen_artifacts_from_envelopes;
+use zeroship_migrate_node::api::gen_artifacts_from_envelopes;
 
 const SCHEMA: &str = "public";
 

@@ -25,11 +25,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::{
+use zeroship_migrate::{
     desired_snapshot_for_dialect, CollectionDescriptor, DeclarativeAuthor, DeclarativeError,
     FieldDescriptor,
 };
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_demo";
 const APP: &str = "app_demo";
@@ -51,7 +51,7 @@ fn paths(app_id: &str) -> Paths {
     }
 }
 
-fn effective_policy() -> zero_migrate::EffectivePolicy {
+fn effective_policy() -> zeroship_migrate::EffectivePolicy {
     support::confined_charter()
 }
 
@@ -90,16 +90,16 @@ fn seed(app: &std::path::Path, statements: &[&str]) {
 /// the deploying app — the ownership map that sails through the ownership guard.
 async fn diff_with_total_ownership(
     be: &SqliteBackend,
-) -> Result<zero_migrate::DeclarativePlan, DeclarativeError> {
+) -> Result<zeroship_migrate::DeclarativePlan, DeclarativeError> {
     let live = be
         .snapshot_schema_sqlite()
         .await
         .expect("introspect the live schema");
     let desired = desired_snapshot_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         &[posts_descriptor()],
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &effective_policy(),
     )
     .expect("desired");
@@ -109,10 +109,10 @@ async fn diff_with_total_ownership(
         .map(|t| (t.clone(), APP.to_string()))
         .collect();
     DeclarativeAuthor::new_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        zero_migrate_sqlite::DIALECT,
+        zeroship_migrate_sqlite::DIALECT,
     )
     .diff(&desired, &live, &ownership, &[], &effective_policy())
 }

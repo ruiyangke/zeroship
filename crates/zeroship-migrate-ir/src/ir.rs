@@ -1094,7 +1094,7 @@ impl VectorMetric {
 
 /// The CLOSED column-masking transform lexicon (`.mask({ kind })`), mirroring the
 /// db SDK's `MaskKind` union (not vendored here) and the runtime/diff
-/// `zero_migrate::schema::diff::MaskKind` EXACTLY. A CLOSED enum - like every other IR
+/// `zeroship_migrate::schema::diff::MaskKind` EXACTLY. A CLOSED enum - like every other IR
 /// token-set - so serde REJECTS an out-of-set kind at DESERIALIZE (a hand-crafted
 /// IR envelope cannot smuggle an arbitrary mask-kind string into the `zero-migrate:mask`
 /// sentinel render seam).
@@ -1102,8 +1102,8 @@ impl VectorMetric {
 /// **Wire spelling.** Most variants are camelCase (`full`, `last4`, `name`, ...); the
 /// two date forms are KEBAB (`date-year`, `date-decade`) to match the SDK wire form
 /// that `t.string().mask()` emits and that
-/// `zero_migrate::schema::query::mask_sentinel_for_field` reads via
-/// `zero_migrate::schema::diff::MaskKind::from_sql` (which accepts the kebab form). The
+/// `zeroship_migrate::schema::query::mask_sentinel_for_field` reads via
+/// `zeroship_migrate::schema::diff::MaskKind::from_sql` (which accepts the kebab form). The
 /// on-DB sentinel itself uses the camelCase `as_sql` (`dateYear`/`dateDecade`); that
 /// spelling lives in the codec, NOT here - this enum carries the SDK/IR wire form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1132,7 +1132,7 @@ pub enum IrMaskKind {
 impl IrMaskKind {
     /// The SDK/IR-wire `kind` token (kebab for the two date forms; camelCase
     /// otherwise). Kept in lock-step with the `serde` wire image above and aligned
-    /// with what `zero_migrate::schema::diff::MaskKind::from_sql` accepts.
+    /// with what `zeroship_migrate::schema::diff::MaskKind::from_sql` accepts.
     #[must_use]
     pub const fn as_token(self) -> &'static str {
         match self {
@@ -1149,7 +1149,7 @@ impl IrMaskKind {
 }
 
 /// The CLOSED sensitivity-classification lexicon (`.mask({ classification })`),
-/// mirroring the SDK `Classification` union and `zero_migrate::schema::diff::Classification`
+/// mirroring the SDK `Classification` union and `zeroship_migrate::schema::diff::Classification`
 /// EXACTLY. CLOSED so serde REJECTS an out-of-set token at DESERIALIZE.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -1188,7 +1188,7 @@ impl IrClassification {
 /// **Why CARRIED, not recovered (unlike the runtime path).** The runtime recovers a
 /// mask from the LIVE `zero-migrate:mask` COMMENT sentinel on the `_masked` sibling
 /// (`crates/plugin-db .../introspect_schema.rs`). But the OFFLINE op fold - the wire
-/// `FieldDef` map, produced by `zero_migrate`'s single-fold `project_field_defs`
+/// `FieldDef` map, produced by `zeroship_migrate`'s single-fold `project_field_defs`
 /// projection that replaced a deleted op-stream `FieldDef` walker
 /// (`docs/proposals/single-fold-and-effects.md`) - and `gen-types` have NO live DB, so there
 /// is no sentinel to read. So a STANDALONE `.mask()` on a plaintext column must be carried
@@ -1224,7 +1224,7 @@ pub struct IrMask {
 impl IrMask {
     /// Convert to the `{ kind, classification }` JSON sub-object that
     /// `field_to_sdk_def` / the `zero-migrate:mask` sentinel codec
-    /// (`zero_migrate::schema::query::mask_sentinel_for_field`) expect on `def.mask`.
+    /// (`zeroship_migrate::schema::query::mask_sentinel_for_field`) expect on `def.mask`.
     #[must_use]
     pub fn to_sdk_json(self) -> serde_json::Value {
         serde_json::json!({
@@ -1479,7 +1479,7 @@ pub struct IrColumn {
 /// injection-shaped action string into the FK render seam. Camel-cased on the
 /// wire (`"cascade"`, `"setNull"`, `"noAction"`, ...); the per-dialect SQL spelling
 /// (`SET NULL`, `NO ACTION`, ...) is the render seam's job via
-/// `zero_migrate::schema::query::normalize_fk_action`.
+/// `zeroship_migrate::schema::query::normalize_fk_action`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum RefAction {
@@ -1497,7 +1497,7 @@ pub enum RefAction {
 
 impl RefAction {
     /// The SDK's referential-action token (the camelCase spelling
-    /// `zero_migrate::schema::query::normalize_fk_action` maps to the per-dialect
+    /// `zeroship_migrate::schema::query::normalize_fk_action` maps to the per-dialect
     /// SQL clause). Kept in lock-step with the `serde(rename_all = "camelCase")`
     /// wire image so the render seam consumes the same string the wire carries.
     #[must_use]

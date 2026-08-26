@@ -29,10 +29,10 @@
 //!   which is the value that lookup returned;
 //! * the four identifier-quoting seams (`escape_quote_ident_for_dialect`,
 //!   `quote_ident_checked_for_dialect`) pass `&crate::dml::RENDERER` to the neutral
-//!   `*_for_backend` entry points `zero_migrate_backend::dml`'s header describes;
+//!   `*_for_backend` entry points `zeroship_migrate_backend::dml`'s header describes;
 //! * the catalog value-format comparison (`catalog_id_default`,
 //!   `catalog_uuid_id_default`, `recover_format_check`, `column_metadata`) calls
-//!   `zero_migrate_backend::value_format` with this vendor's own two renderers -
+//!   `zeroship_migrate_backend::value_format` with this vendor's own two renderers -
 //!   the engine's doors are a `pub(crate)` module whose bodies are exactly that;
 //! * `schema::query::normalize_fk_action_for_dialect` and the engine's FK-snapshot
 //!   wrapper became `normalize_fk_action_for_vendor` / `fk_constraint_snapshot`
@@ -43,7 +43,7 @@
 //!
 //! Nothing in `zero-migrate` was widened to `pub` to make this compile, and core
 //! re-exports nothing from here: `apply::backend::sqlite` is gone rather than
-//! repointed, because a `pub use zero_migrate_sqlite::SqliteBackend` in core would
+//! repointed, because a `pub use zeroship_migrate_sqlite::SqliteBackend` in core would
 //! be core naming a vendor CRATE outside the registry - trading one coupling for
 //! another. Consumers name this crate directly.
 //!
@@ -69,7 +69,7 @@
 //! A backend can still reach another vendor's spelling THROUGH a contract helper
 //! that hard-codes a dialect, and no grep of this crate can see it because the
 //! literal lives in `zero-migrate-backend`. That is measured, not hypothetical -
-//! `zero_migrate_backend::dml`'s header carries the numbers. The identifier seam
+//! `zeroship_migrate_backend::dml`'s header carries the numbers. The identifier seam
 //! (`*_for_dialect(.., DIALECT)`) is how this crate stays clear of it.
 
 mod advisory;
@@ -101,15 +101,15 @@ pub use plan::SqliteSequencePolicy;
 
 /// TEST-ONLY charter fixtures, shared by this crate's unit tests.
 ///
-/// The engine's `zero_migrate::test_fixtures::no_inject` is `pub(crate)`, and no
+/// The engine's `zeroship_migrate::test_fixtures::no_inject` is `pub(crate)`, and no
 /// visibility widening can make a `pub(crate)` reachable across a crate boundary -
 /// so the four project-lock tests that came with the execution half needed a
 /// sibling. This is it, and it is the same shape `zero-migrate-mysql`'s already has.
 #[cfg(test)]
 mod test_fixtures;
 
-use zero_migrate_backend::registry::BackendVendor;
-use zero_migrate_ir::dialect::DialectId;
+use zeroship_migrate_backend::registry::BackendVendor;
+use zeroship_migrate_ir::dialect::DialectId;
 
 /// This backend's id STRING, spelled once for the whole crate.
 ///
@@ -161,7 +161,7 @@ const _: () = assert!(DialectId::is_well_formed_name(NAME));
 /// compiling, here, with this crate named - which is the point: a backend cannot
 /// inherit another backend's DDL, acquire a trusting guard, or acquire a silently
 /// empty advisory report by omission. See
-/// `zero_migrate_backend::registry::BackendVendor`.
+/// `zeroship_migrate_backend::registry::BackendVendor`.
 pub static VENDOR: BackendVendor = BackendVendor {
     attributes: attribute::VOCABULARY,
     descriptor: &descriptor::SQLITE_DESCRIPTOR,

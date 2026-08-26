@@ -2,7 +2,7 @@
 //! are on the same wire.
 //!
 //!   `zeroship_core::typed_id`                     the platform's typed ids
-//!   `zero_migrate_ir::id` (third_party/zero-migrate)  the engine's MigrationId
+//!   `zeroship_migrate_ir::id` (third_party/zero-migrate)  the engine's MigrationId
 //!
 //! The engine's copy opens by calling the encoding a wire contract and citing a
 //! `tests/core_id_parity.rs` drift guard that "asserts these copies stay
@@ -38,10 +38,10 @@ fn vectors() -> Vec<Uuid> {
 fn core_and_engine_encode_ids_identically() {
     for id in vectors() {
         let core = zeroship_core::typed_id::uuid_to_base62(&id);
-        let engine = zero_migrate_ir::id::uuid_to_base62(&id);
+        let engine = zeroship_migrate_ir::id::uuid_to_base62(&id);
         assert_eq!(
             core, engine,
-            "typed-id ENCODE diverged between zeroship_core and zero_migrate_ir for {id}"
+            "typed-id ENCODE diverged between zeroship_core and zeroship_migrate_ir for {id}"
         );
     }
 }
@@ -52,11 +52,11 @@ fn core_and_engine_decode_each_others_ids() {
     // direction would still let each side round-trip its own output.
     for id in vectors() {
         let core = zeroship_core::typed_id::uuid_to_base62(&id);
-        let engine = zero_migrate_ir::id::uuid_to_base62(&id);
+        let engine = zeroship_migrate_ir::id::uuid_to_base62(&id);
 
         let core_reads_engine = zeroship_core::typed_id::base62_to_uuid(&engine)
             .expect("core must parse an engine-encoded id");
-        let engine_reads_core = zero_migrate_ir::id::base62_to_uuid(&core)
+        let engine_reads_core = zeroship_migrate_ir::id::base62_to_uuid(&core)
             .expect("engine must parse a core-encoded id");
 
         assert_eq!(core_reads_engine, id, "core misread an engine-encoded id");
@@ -90,7 +90,7 @@ fn both_sides_use_the_same_alphabet_in_the_same_order() {
         .collect();
     let engine: Vec<String> = ascending
         .iter()
-        .map(zero_migrate_ir::id::uuid_to_base62)
+        .map(zeroship_migrate_ir::id::uuid_to_base62)
         .collect();
 
     assert_eq!(core, engine, "encoded sequences differ");

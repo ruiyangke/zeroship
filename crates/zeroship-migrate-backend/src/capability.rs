@@ -28,7 +28,7 @@ use crate::backfill::{BackfillOutcome, BackfillSpec};
 use crate::conn::ExecutorConfig;
 use crate::drift::StructuralDrift;
 use crate::executor::ApplyError;
-use zero_migrate_ir::migration::{Migration, MigrationId};
+use zeroship_migrate_ir::migration::{Migration, MigrationId};
 
 /// A high-level online-migration intent the engine's `ExpandContractAuthor`
 /// expands into an ordered, phased [`Migration`] sequence.

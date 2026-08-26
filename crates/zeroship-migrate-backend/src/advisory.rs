@@ -209,7 +209,7 @@ pub mod rule {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalyzerAbsent {
     /// Which backend has no analyzer.
-    pub dialect: zero_migrate_ir::dialect::DialectId,
+    pub dialect: zeroship_migrate_ir::dialect::DialectId,
     /// That backend's own statement of what is NOT being checked. Written at the
     /// vendor's definition site, so the sentence an operator reads is attributable
     /// to the backend it is about.
@@ -358,7 +358,7 @@ pub trait OperationalAdvisor: std::fmt::Debug + Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zero_migrate_ir::dialect::DialectId;
+    use zeroship_migrate_ir::dialect::DialectId;
 
     fn absent() -> AnalyzerAbsent {
         AnalyzerAbsent {

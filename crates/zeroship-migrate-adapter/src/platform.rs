@@ -32,14 +32,14 @@
 
 use std::path::{Path, PathBuf};
 
-use zero_migrate::driver::SqlSession;
-use zero_migrate::guard::GuardConfig;
-use zero_migrate::{
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::guard::GuardConfig;
+use zeroship_migrate::{
     effective_policy_from_charter_toml, resolve_create_table_policy, Approval, ApprovalScope,
     ExecutorConfig, IrAuthor, LiveSchema, LockMode, MigrationBackend, MigrationEngine, MigrationId,
     MigrationIr, Phase, PlanStep, PostgresBackend, RenameStep, SqlDialect,
 };
-use zero_migrate_policy::EffectivePolicy as PdpPolicy;
+use zeroship_migrate_policy::EffectivePolicy as PdpPolicy;
 
 /// The platform (author-owned, no-inject) ceiling. `resolve_create_table_policy` over
 /// its composed effective policy is a pass-through (no injects) and carries the
@@ -75,7 +75,7 @@ mod policy_tests {
     fn platform_charter_retains_the_project_and_public_schema_allowlist() {
         let policy = platform_effective("zeroship");
         let guard = GuardConfig::from_policy(policy, SqlDialect::Postgres);
-        let Some(zero_migrate::SchemaScope::Allowlist(mut schemas)) = guard.schema_scope() else {
+        let Some(zeroship_migrate::SchemaScope::Allowlist(mut schemas)) = guard.schema_scope() else {
             panic!("platform charter must produce a schema allowlist");
         };
         schemas.sort();
@@ -293,7 +293,7 @@ fn load_migration_file(path: PathBuf) -> Result<MigrationFile, PlatformMigrateEr
         path: path.display().to_string(),
         message: e.to_string(),
     })?;
-    let checksum = zero_migrate::manifest_entry::sha256_hex(&source);
+    let checksum = zeroship_migrate::manifest_entry::sha256_hex(&source);
     Ok(MigrationFile {
         path,
         filename,
@@ -351,7 +351,7 @@ async fn seed_state(
     project_schema: &str,
     owner_app: &str,
 ) -> Result<ApplyState, PlatformMigrateError> {
-    let live = zero_migrate::snapshot_schema(session, project_schema)
+    let live = zeroship_migrate::snapshot_schema(session, project_schema)
         .await
         .map_err(|e| PlatformMigrateError::Snapshot(e.to_string()))?;
     let registry: std::collections::BTreeMap<String, String> = live
@@ -427,7 +427,7 @@ fn lower_resolved_file(
     state: &ApplyState,
     file: &str,
     resolved: &MigrationIr,
-) -> Result<zero_migrate::render::lower::LoweredArtifact, PlatformMigrateError> {
+) -> Result<zeroship_migrate::render::lower::LoweredArtifact, PlatformMigrateError> {
     let bytes = serde_json::to_string(resolved).map_err(|e| PlatformMigrateError::Shape {
         file: file.to_string(),
         message: format!("re-serialize resolved IR envelope: {e}"),
@@ -462,7 +462,7 @@ fn author_and_lower_file(
     ctx: &LowerCtx,
     state: &ApplyState,
     migration: &MigrationFile,
-) -> Result<(MigrationIr, zero_migrate::render::lower::LoweredArtifact), PlatformMigrateError> {
+) -> Result<(MigrationIr, zeroship_migrate::render::lower::LoweredArtifact), PlatformMigrateError> {
     let resolved = author_and_resolve_file(ctx, migration)?;
     let lowered = lower_resolved_file(ctx, state, &migration.filename, &resolved)?;
     Ok((resolved, lowered))
@@ -503,13 +503,13 @@ impl FileJournalState {
             .all(|(step_index, (numeric, version))| {
                 let expected = base + step_index as u64;
                 *numeric == expected
-                    && version == zero_migrate::migration_id_for_version(expected).as_str()
+                    && version == zeroship_migrate::migration_id_for_version(expected).as_str()
             })
     }
 }
 
 fn journal_state_by_file(
-    entries: &[zero_migrate::AppliedEntry],
+    entries: &[zeroship_migrate::AppliedEntry],
     file_count: usize,
 ) -> Result<Vec<FileJournalState>, PlatformMigrateError> {
     let mut states: Vec<FileJournalState> = (0..file_count).map(|_| Default::default()).collect();
@@ -743,7 +743,7 @@ async fn insert_completion_ledger_row(
 /// other step kind is an unexpected shape for the platform path; we fail closed
 /// rather than silently leave a non-deterministic (or unremapped) version behind.
 fn restamp_stable_versions(
-    lowered: &mut zero_migrate::render::lower::LoweredArtifact,
+    lowered: &mut zeroship_migrate::render::lower::LoweredArtifact,
     file_ordinal: usize,
     version_prefix: &str,
 ) -> Result<(), PlatformMigrateError> {
@@ -764,7 +764,7 @@ fn restamp_stable_versions(
                 );
                 remap.insert(
                     m.version.as_str().to_string(),
-                    zero_migrate::migration_id_for_version(version),
+                    zeroship_migrate::migration_id_for_version(version),
                 );
             }
             PlanStep::Dml { .. }
@@ -846,7 +846,7 @@ fn advance_authored_logical_columns(
 pub fn author_and_lower_all(
     migrations_dir: &Path,
     project_schema: &str,
-) -> Result<Vec<(String, zero_migrate::render::lower::LoweredArtifact)>, PlatformMigrateError> {
+) -> Result<Vec<(String, zeroship_migrate::render::lower::LoweredArtifact)>, PlatformMigrateError> {
     let files = discover_ts_files(migrations_dir)?
         .into_iter()
         .map(load_migration_file)
@@ -917,7 +917,7 @@ pub async fn run_platform_migrations(
         })?;
 
     let result: Result<PlatformMigrateReport, PlatformMigrateError> = async {
-        let journal_entries = zero_migrate::applied(&session, &exec_cfg)
+        let journal_entries = zeroship_migrate::applied(&session, &exec_cfg)
             .await
             .map_err(|e| PlatformMigrateError::Ledger(format!("read engine journal: {e}")))?;
         let journal = journal_state_by_file(&journal_entries, files.len())?;
@@ -1149,7 +1149,7 @@ pub async fn run_platform_migrations(
                 .filter(|v| file_versions.contains(v))
                 .collect();
             let completed: std::collections::HashSet<String> =
-                zero_migrate::applied(&session, &exec_cfg)
+                zeroship_migrate::applied(&session, &exec_cfg)
                     .await
                     .map_err(|e| {
                         PlatformMigrateError::Ledger(format!(

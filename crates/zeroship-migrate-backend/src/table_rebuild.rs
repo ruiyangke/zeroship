@@ -7,9 +7,9 @@
 
 use crate::error::{DeclarativeError, IrLowerError};
 use crate::snapshot::TableSnapshot;
-use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_ir::ir::Op;
-use zero_migrate_ir::migration::Migration;
+use zeroship_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::ir::Op;
+use zeroship_migrate_ir::migration::Migration;
 
 /// A rename hint that has been **verified** against the desired/live snapshots
 /// (matched an actual drop+add pair with identical types). The diff routes each
@@ -113,7 +113,7 @@ pub trait TableRebuildPolicy: std::fmt::Debug + Sync {
 /// How a table rebuild treats the table's AUTOINCREMENT-style high-water mark.
 ///
 /// NEUTRAL on purpose, and it did not used to be. This field on
-/// [`TableRebuildSpec`] was typed `zero_migrate_sqlite::SqliteSequencePolicy` -
+/// [`TableRebuildSpec`] was typed `zeroship_migrate_sqlite::SqliteSequencePolicy` -
 /// a type from a crate that sits ABOVE this one - which is what kept the whole
 /// lowered-plan vocabulary (`TableRebuildSpec`, `TableRebuild`, `RenameStep`,
 /// `PlanStep`) stranded in the engine. One field inverted the dependency for all

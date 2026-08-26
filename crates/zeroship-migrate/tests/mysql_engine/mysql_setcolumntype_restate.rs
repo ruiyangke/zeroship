@@ -41,12 +41,12 @@ use crate::support;
 use std::collections::BTreeMap;
 
 use crate::support::mysql::{quote_ident, DatabaseGuard, MysqlDevSession};
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::driver::{Bind, SqlSession};
-use zero_migrate::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::driver::{Bind, SqlSession};
+use zeroship_migrate::{
     Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine,
 };
-use zero_migrate_mysql::MysqlBackend;
+use zeroship_migrate_mysql::MysqlBackend;
 
 const OWNER: &str = "app_mysql_setcolumntype_restate";
 
@@ -249,7 +249,7 @@ async fn the_engine_snapshot_of_a_mysql_column_is_lossy_against_show_create_tabl
             "the DEFAULT must reach the snapshot"
         );
         assert!(
-            zero_migrate_mysql::physical_type::recorded(label).is_some(),
+            zeroship_migrate_mysql::physical_type::recorded(label).is_some(),
             "the modifier-bearing physical type must reach the snapshot"
         );
         // The exact COLLATE arrives, but NOT on `ColumnSnapshot::collation` - that
@@ -407,13 +407,13 @@ async fn an_authored_set_column_type_applies_on_mysql_and_keeps_every_facet() {
         ]}"#;
         let policy = support::no_inject(&cfg.project_schema);
         let author = IrAuthor::new(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &cfg.project_schema,
             OWNER,
-            &zero_migrate_mysql::DIALECT,
+            &zeroship_migrate_mysql::DIALECT,
             &policy,
         );
-        let guard = GuardConfig::from_policy(policy.clone(), zero_migrate_mysql::DIALECT);
+        let guard = GuardConfig::from_policy(policy.clone(), zeroship_migrate_mysql::DIALECT);
         let registry: BTreeMap<String, String> = [("facets".to_string(), OWNER.to_string())]
             .into_iter()
             .collect();
@@ -421,7 +421,7 @@ async fn an_authored_set_column_type_applies_on_mysql_and_keeps_every_facet() {
             .load_and_lower_guarded(source, OWNER, &registry, &live, &guard)
             .map_err(|error| format!("load and lower the authored setColumnType: {error}"))?;
 
-        MigrationEngine::new(zero_migrate::shipping_vendors())
+        MigrationEngine::new(zeroship_migrate::shipping_vendors())
             .apply_plan(
                 &artifact.plan.steps,
                 Approval::Approved,

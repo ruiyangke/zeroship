@@ -10,11 +10,11 @@
 
 mod support;
 
-use zero_migrate_backend::guard::{GuardConfig, GuardError};
-use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_ir::policy::SchemaScope;
-use zero_migrate_postgres::guard::{check_raw_view_body_text, extract_string_literals, SqlGuard};
-use zero_migrate_postgres::DIALECT as POSTGRES;
+use zeroship_migrate_backend::guard::{GuardConfig, GuardError};
+use zeroship_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::policy::SchemaScope;
+use zeroship_migrate_postgres::guard::{check_raw_view_body_text, extract_string_literals, SqlGuard};
+use zeroship_migrate_postgres::DIALECT as POSTGRES;
 
 const DUCKDB: DialectId = DialectId::new("duckdb");
 
@@ -175,9 +175,9 @@ fn non_ascii_relation_name_reaches_a_verdict_instead_of_panicking() {
 fn analysis_reexports_are_reachable() {
     // This vendor owns the analyzers now; assert they resolve at its own paths.
     let advisories =
-        zero_migrate_postgres::analysis::analyze::analyze("CREATE INDEX i ON app1.t (a)");
+        zeroship_migrate_postgres::analysis::analyze::analyze("CREATE INDEX i ON app1.t (a)");
     let _ = advisories; // shape-only: analysis never denies.
-    let classified = zero_migrate_postgres::analysis::classify::classify("SELECT 1");
+    let classified = zeroship_migrate_postgres::analysis::classify::classify("SELECT 1");
     assert!(
         classified.is_ok(),
         "a plain SELECT must classify without a parse error"

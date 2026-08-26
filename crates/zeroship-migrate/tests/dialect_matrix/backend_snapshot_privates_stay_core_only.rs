@@ -56,7 +56,7 @@
 //!   "PostgreSQL's default for this type and increment". Both sides of a drift check
 //!   have to reduce to that same `None`: the engine's authored fold
 //!   (`render::fold::fold_create_sequence_snapshot`) and the vendor's catalog read
-//!   (`zero_migrate_postgres::backend::drift_sql`). A vendor calling these is not
+//!   (`zeroship_migrate_postgres::backend::drift_sql`). A vendor calling these is not
 //!   deciding difference — it is refusing to re-derive the normal form, which is the
 //!   only way the two sides can agree. A SECOND implementation is the defect, and it
 //!   is the defect this half now measures.
@@ -122,7 +122,7 @@ const SHARED_NORMAL_FORM_ITEMS: &[&str] = &[
     "sequence_default_max_value",
     "normalize_sequence_bound",
     // The `nextval` default's ONE spelling and ONE parse, added when they came down
-    // from `zero_migrate::render::declarative` and `zero_migrate::apply::drift`. They
+    // from `zeroship_migrate::render::declarative` and `zeroship_migrate::apply::drift`. They
     // are the same kind as the bounds above and by the same argument: the vendor
     // WRITES `nextval('<seq>'::regclass)` and the dialect-blind differ has to READ it,
     // so a second copy on either side does not report a difference, it manufactures
@@ -306,7 +306,7 @@ fn no_vendor_crate_calls_an_engine_snapshot_comparison() {
          These were `pub(crate)` in `zero-migrate` before the snapshot types moved to \
          `zero-migrate-backend`; the crate boundary made them `pub` and this census is \
          what stands in for the modifier. A vendor decides how to SPELL something, \
-         never whether two schemas DIFFER — see `zero_migrate::render::backends`'s \
+         never whether two schemas DIFFER — see `zeroship_migrate::render::backends`'s \
          header for the rule.",
         violations
             .iter()

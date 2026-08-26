@@ -14,10 +14,10 @@
 
 mod support;
 
-use zero_migrate_backend::guard::{GuardConfig, GuardError};
-use zero_migrate_postgres::guard::denylist::rule;
-use zero_migrate_postgres::guard::SqlGuard;
-use zero_migrate_postgres::DIALECT as POSTGRES;
+use zeroship_migrate_backend::guard::{GuardConfig, GuardError};
+use zeroship_migrate_postgres::guard::denylist::rule;
+use zeroship_migrate_postgres::guard::SqlGuard;
+use zeroship_migrate_postgres::DIALECT as POSTGRES;
 
 /// A charter owning the `app` schema whose `code.extension` allowlist is exactly
 /// `names`. An empty `names` authors no grant at all, which is the deny-by-default

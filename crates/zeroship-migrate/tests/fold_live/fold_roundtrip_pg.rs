@@ -27,15 +27,15 @@ use crate::support;
 use std::collections::BTreeMap;
 
 use crate::support::PgDevSession;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::driver::SqlSession;
-use zero_migrate::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::{
     diff_snapshots, effective_policy_from_charter_toml, fold_ops, resolve_create_table_policy,
     Approval, EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode,
     MigrationEngine, MigrationIr, StructuralDrift,
 };
-use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
-use zero_migrate_postgres::PostgresBackend;
+use zeroship_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zeroship_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_fold_roundtrip_pg";
 
@@ -172,13 +172,13 @@ async fn apply_ir(
     let resolved_source = serde_json::to_string(&resolved)
         .map_err(|error| format!("serialize resolved test IR: {error}"))?;
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &policy,
     );
-    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT);
+    let guard = GuardConfig::from_policy(policy.clone(), zeroship_migrate_postgres::DIALECT);
     let artifact = author
         .load_and_lower_guarded(
             &resolved_source,
@@ -189,7 +189,7 @@ async fn apply_ir(
         )
         .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;
 
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,
@@ -234,9 +234,9 @@ async fn assert_roundtrip(
         precondition(&catalog)?;
 
         let expected = fold_ops(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &ir.ops,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &cfg.project_schema,
             &support::no_inject(&cfg.project_schema),
         )
@@ -245,7 +245,7 @@ async fn assert_roundtrip(
             .await
             .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
         Ok(diff_snapshots(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &expected,
             &actual,
         ))
@@ -427,13 +427,13 @@ async fn assert_lifecycle_roundtrip(
         let resolved_source = serde_json::to_string(&resolved)
             .map_err(|error| format!("serialize resolved test IR: {error}"))?;
         let author = IrAuthor::new(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &cfg.project_schema,
             OWNER,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &policy,
         );
-        let guard = GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT);
+        let guard = GuardConfig::from_policy(policy.clone(), zeroship_migrate_postgres::DIALECT);
         let artifact = author
             .load_and_lower_guarded(
                 &resolved_source,
@@ -452,7 +452,7 @@ async fn assert_lifecycle_roundtrip(
             ));
         }
 
-        let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+        let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
         let mut applied_ops = Vec::new();
         let mut next_checkpoint = 0;
         for (op_index, span) in artifact.op_spans.iter().enumerate() {
@@ -488,9 +488,9 @@ async fn assert_lifecycle_roundtrip(
             {
                 let (checkpoint, _) = checkpoints[next_checkpoint];
                 let expected = fold_ops(
-                    zero_migrate::shipping_vendors(),
+                    zeroship_migrate::shipping_vendors(),
                     &applied_ops,
-                    &zero_migrate_postgres::DIALECT,
+                    &zeroship_migrate_postgres::DIALECT,
                     &cfg.project_schema,
                     &policy,
                 )
@@ -502,7 +502,7 @@ async fn assert_lifecycle_roundtrip(
                     .map_err(|error| {
                         format!("{checkpoint}: snapshot the live PostgreSQL schema: {error}")
                     })?;
-                let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
+                let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual);
                 if !drift.is_clean() {
                     return Err(format!(
                         "{checkpoint}: folded and live PostgreSQL schemas must have clean drift: \

@@ -11,7 +11,7 @@
 //! `CREATE TRIGGER ... BEFORE INSERT OR UPDATE ... EXECUTE FUNCTION`, and - twice -
 //! `DROP TRIGGER <t> ON <table>; DROP FUNCTION <f>()`, which is not portable syntax in
 //! either direction. The BODY sat one crate lower still, as
-//! `zero_migrate_backend::capability::dual_write_function_body`.
+//! `zeroship_migrate_backend::capability::dual_write_function_body`.
 //!
 //! Only ONE token of that was catchable by a vendor-name census: `plpgsql`. The other
 //! four statements name no vendor and are no less this backend's SQL, and the body
@@ -27,14 +27,14 @@
 //! opaque body for the same reason; a dual-write trigger that ran as its definer
 //! would be a privilege escalation attached to an ordinary column rename.
 
-use zero_migrate_backend::schema::{DualWriteTriggerSpec, DualWriteTriggerSql};
+use zeroship_migrate_backend::schema::{DualWriteTriggerSpec, DualWriteTriggerSql};
 
 /// The PL/pgSQL body of the managed dual-write trigger function.
 ///
 /// Public within this crate so ONE speller is reached by both the author that writes
 /// the trigger (this crate's `SchemaRenderer::dual_write_trigger` impl) and the
 /// backfill guard that proves the LIVE trigger's source still matches it. It was
-/// `zero_migrate_backend::capability::dual_write_function_body` - this grammar in the
+/// `zeroship_migrate_backend::capability::dual_write_function_body` - this grammar in the
 /// neutral contract crate - until the engine stopped spelling the wrapper around it.
 ///
 /// `CREATE OR REPLACE FUNCTION ... LANGUAGE plpgsql` (SECURITY INVOKER - the

@@ -90,9 +90,9 @@
 //! it could.
 
 use std::collections::BTreeMap;
-use zero_migrate_backend::dialectal::{Dialectal, VendorColumnFacts};
+use zeroship_migrate_backend::dialectal::{Dialectal, VendorColumnFacts};
 
-use zero_migrate_ir::attribute::Attributes;
+use zeroship_migrate_ir::attribute::Attributes;
 
 use crate::model::ir::{
     IdentityCol, IndexSortOrder, PartitionSpec, TableRuntimeOptions, ValueFormat,
@@ -215,7 +215,7 @@ impl IndexElementKey {
 /// text and five for index facets - while the other five already used the contract's
 /// own spelling. That was not a distinction, it was an inconsistency inside one
 /// struct: every family here is a straight split of a field the neutral
-/// [`zero_migrate_backend::snapshot`] surface ALREADY names neutrally
+/// [`zeroship_migrate_backend::snapshot`] surface ALREADY names neutrally
 /// (`TableSnapshot::stored_create_sql`, `IndexSnapshot::only` / `opclass` /
 /// `nulls_not_distinct`, `IndexElementSnapshot::Column::opclass` / `collation`), and
 /// this side table is the only place in the round trip where core reached for a vendor
@@ -358,9 +358,9 @@ impl VendorFacts {
     /// vendor that cannot ESTABLISH a difference.
     ///
     /// [`Dialectal::physical_identity`]:
-    ///     zero_migrate_backend::dialectal::Dialectal::physical_identity
+    ///     zeroship_migrate_backend::dialectal::Dialectal::physical_identity
     /// [`VendorColumnFacts::physical_identity`]:
-    ///     zero_migrate_backend::dialectal::VendorColumnFacts::physical_identity
+    ///     zeroship_migrate_backend::dialectal::VendorColumnFacts::physical_identity
     #[must_use]
     pub fn column_drift_identity(&self, left: &ColumnKey, right: &ColumnKey) -> bool {
         if !self.column_shape_identity(left, right) {

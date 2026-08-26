@@ -8,16 +8,16 @@ use std::path::PathBuf;
 
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::apply::drift::{diff_snapshots, StructuralDrift};
-use zero_migrate::conn::ExecutorConfig;
-use zero_migrate::model::ir::{MigrationIr, ValueFormat, CURRENT_IR_VERSION};
-use zero_migrate::model::migration::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::apply::drift::{diff_snapshots, StructuralDrift};
+use zeroship_migrate::conn::ExecutorConfig;
+use zeroship_migrate::model::ir::{MigrationIr, ValueFormat, CURRENT_IR_VERSION};
+use zeroship_migrate::model::migration::{
     Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
 };
-use zero_migrate::model::snapshot::IdDefaultSnapshot;
-use zero_migrate::{fold_ops, fold_ops_onto, IrAuthor, LiveSchema, SchemaSnapshot};
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate::model::snapshot::IdDefaultSnapshot;
+use zeroship_migrate::{fold_ops, fold_ops_onto, IrAuthor, LiveSchema, SchemaSnapshot};
+use zeroship_migrate_sqlite::SqliteBackend;
 
 struct Paths {
     _dir: TempDir,
@@ -106,10 +106,10 @@ fn lower_id_table_sql(
     }))
     .expect("ID table IR must deserialize");
     let migrations = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         "main",
         "app_sqlite_drift",
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::no_inject("main"),
     )
     .lower(&ir, &LiveSchema::default())
@@ -254,7 +254,7 @@ async fn clean_schema_zero_structural_drift() {
 
     let snap = be.snapshot_schema_sqlite().await.expect("snapshot");
     // The snapshot diffed against itself is clean.
-    let drift = diff_snapshots(zero_migrate::shipping_vendors(), &snap, &snap);
+    let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &snap, &snap);
     assert!(drift.is_clean(), "self-diff must be clean: {drift:?}");
 }
 
@@ -281,7 +281,7 @@ async fn rowid_and_autoincrement_identity_are_introspected_and_drift_compared() 
         let expected = be.snapshot_schema_sqlite().await.expect("first snapshot");
         let actual = be.snapshot_schema_sqlite().await.expect("second snapshot");
         assert!(
-            diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual).is_clean(),
+            diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual).is_clean(),
             "an unchanged identity fixture must stay clean"
         );
         let id = expected.tables["items"]
@@ -329,7 +329,7 @@ async fn rowid_and_autoincrement_identity_are_introspected_and_drift_compared() 
             .await
             .expect("actual snapshot");
         let drift = diff_snapshots(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &expected_snapshot,
             &actual_snapshot,
         );
@@ -358,7 +358,7 @@ async fn rowid_and_autoincrement_identity_are_introspected_and_drift_compared() 
             .await
             .expect("actual rowid snapshot");
         let drift = diff_snapshots(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &expected_snapshot,
             &actual_snapshot,
         );
@@ -428,7 +428,7 @@ async fn uuid_id_defaults_detect_add_remove_and_swap_without_cosmetic_drift() {
         );
         let clean = be.snapshot_schema_sqlite().await.expect("clean snapshot");
         assert!(
-            diff_snapshots(zero_migrate::shipping_vendors(), &expected_snapshot, &clean).is_clean(),
+            diff_snapshots(zeroship_migrate::shipping_vendors(), &expected_snapshot, &clean).is_clean(),
             "unchanged UUID defaults must stay clean"
         );
         drop(be);
@@ -439,7 +439,7 @@ async fn uuid_id_defaults_detect_add_remove_and_swap_without_cosmetic_drift() {
             .await
             .expect("actual snapshot");
         let drift = diff_snapshots(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &expected_snapshot,
             &actual_snapshot,
         );
@@ -472,7 +472,7 @@ async fn uuid_id_defaults_detect_add_remove_and_swap_without_cosmetic_drift() {
         .await
         .expect("uppercase UUID literal snapshot");
     assert_column_drift(
-        &diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual),
+        &diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual),
         "id",
         "default",
         "\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\"",
@@ -513,7 +513,7 @@ async fn uuid_id_defaults_detect_add_remove_and_swap_without_cosmetic_drift() {
         .await
         .expect("cosmetic default snapshot");
     assert!(
-        diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual).is_clean(),
+        diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual).is_clean(),
         "ordinary default spelling alone must not create drift"
     );
 
@@ -527,7 +527,7 @@ async fn uuid_id_defaults_detect_add_remove_and_swap_without_cosmetic_drift() {
         .await
         .expect("changed default snapshot");
     assert_column_drift(
-        &diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual),
+        &diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual),
         "label",
         "default",
         "\"draft\"",
@@ -624,7 +624,7 @@ async fn type_id_and_ulid_format_checks_are_introspected_and_drift_compared() {
         }
         let clean = be.snapshot_schema_sqlite().await.expect("clean snapshot");
         assert!(
-            diff_snapshots(zero_migrate::shipping_vendors(), &expected_snapshot, &clean).is_clean(),
+            diff_snapshots(zeroship_migrate::shipping_vendors(), &expected_snapshot, &clean).is_clean(),
             "unchanged format CHECK must stay clean"
         );
         drop(be);
@@ -635,7 +635,7 @@ async fn type_id_and_ulid_format_checks_are_introspected_and_drift_compared() {
             .await
             .expect("actual snapshot");
         let drift = diff_snapshots(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &expected_snapshot,
             &actual_snapshot,
         );
@@ -761,18 +761,18 @@ async fn authored_identity_default_and_format_snapshot_matches_live_sqlite() {
     }))
     .expect("portable SQLite ID fixture must deserialize");
     let mut expected = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir.ops,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         "main",
         &support::no_inject("app"),
     )
     .expect("portable SQLite ID fixture must fold");
     let migrations = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         "main",
         "app_sqlite_drift",
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::no_inject("main"),
     )
     .lower(&ir, &LiveSchema::default())
@@ -789,7 +789,7 @@ async fn authored_identity_default_and_format_snapshot_matches_live_sqlite() {
     strip_sqlite_primary_key_catalog_noise(&mut expected);
     strip_sqlite_primary_key_catalog_noise(&mut actual);
 
-    let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
+    let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual);
     assert!(
         drift.is_clean(),
         "authored portable ID facets must round-trip without phantom drift: {drift:#?}"
@@ -807,7 +807,7 @@ async fn authored_identity_default_and_format_snapshot_matches_live_sqlite() {
         .expect("boolean non-rowid snapshot");
     strip_sqlite_primary_key_catalog_noise(&mut changed);
     assert_column_drift(
-        &diff_snapshots(zero_migrate::shipping_vendors(), &expected, &changed),
+        &diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &changed),
         "id",
         "identity",
         "rowid alias",
@@ -838,15 +838,15 @@ async fn catalog_seeded_fold_preserves_non_rowid_integer_primary_keys() {
         );
     }
     let projected = fold_ops_onto(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &live,
         &[],
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         "main",
         &support::no_inject("app"),
     )
     .expect("empty catalog-seeded fold");
-    let drift = diff_snapshots(zero_migrate::shipping_vendors(), &live, &projected);
+    let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &live, &projected);
     assert!(
         drift.is_clean(),
         "an empty fold must preserve WITHOUT ROWID and PRIMARY KEY DESC exclusions: {drift:#?}"
@@ -900,18 +900,18 @@ async fn typed_reference_literal_defaults_use_expected_driven_catalog_comparison
     }))
     .expect("typed-reference literal fixture must deserialize");
     let mut expected = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir.ops,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         "main",
         &support::no_inject("app"),
     )
     .expect("typed-reference literal fixture must fold");
     let migrations = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         "main",
         "app_sqlite_drift",
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::no_inject("main"),
     )
     .lower(&ir, &LiveSchema::default())
@@ -960,7 +960,7 @@ async fn typed_reference_literal_defaults_use_expected_driven_catalog_comparison
     let mut clean = actual;
     strip_sqlite_primary_key_catalog_noise(&mut expected);
     strip_sqlite_primary_key_catalog_noise(&mut clean);
-    let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &clean);
+    let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &clean);
     assert!(
         drift.is_clean(),
         "authored typed-reference default must match its raw live catalog value: {drift:#?}"
@@ -981,7 +981,7 @@ async fn typed_reference_literal_defaults_use_expected_driven_catalog_comparison
         .await
         .expect("regrouped literal snapshot");
     strip_sqlite_primary_key_catalog_noise(&mut regrouped);
-    let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &regrouped);
+    let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &regrouped);
     assert!(
         drift.is_clean(),
         "catalog-only default parentheses must normalize without drift: {drift:#?}"
@@ -995,7 +995,7 @@ async fn typed_reference_literal_defaults_use_expected_driven_catalog_comparison
         .await
         .expect("changed literal snapshot");
     strip_sqlite_primary_key_catalog_noise(&mut changed);
-    let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &changed);
+    let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &changed);
     assert_column_drift(
         &drift,
         "parent_id",
@@ -1042,7 +1042,7 @@ async fn out_of_band_alter_detected_as_structural_drift() {
     // Re-open the backend, re-snapshot the LIVE schema, and diff.
     let be2 = backend(&p);
     let actual = be2.snapshot_schema_sqlite().await.expect("actual snapshot");
-    let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
+    let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual);
     assert!(!drift.is_clean(), "drift must be detected");
     assert!(
         drift
@@ -1262,7 +1262,7 @@ async fn composite_fk_introspection_round_trips_name_policy_and_detects_drift() 
 
     let be = backend(&p);
     let actual = be.snapshot_schema_sqlite().await.expect("changed snapshot");
-    let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
+    let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual);
     assert!(
         drift.altered_objects.iter().any(|altered| {
             altered.object == "constraint fk_child_parent"
@@ -1326,18 +1326,18 @@ async fn authored_composite_reference_snapshot_matches_live_sqlite() {
     }))
     .expect("authored composite-reference fixture must deserialize");
     let mut expected = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir.ops,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         "main",
         &support::no_inject("app"),
     )
     .expect("authored composite-reference fixture must fold");
     let migrations = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         "main",
         "app_sqlite_drift",
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::no_inject("main"),
     )
     .lower(&ir, &LiveSchema::default())
@@ -1352,7 +1352,7 @@ async fn authored_composite_reference_snapshot_matches_live_sqlite() {
     let mut actual = be.snapshot_schema_sqlite().await.expect("live snapshot");
     strip_sqlite_primary_key_catalog_noise(&mut expected);
     strip_sqlite_primary_key_catalog_noise(&mut actual);
-    let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
+    let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual);
     assert!(
         drift.is_clean(),
         "authored composite FK must round-trip through SQLite catalog introspection: {drift:#?}"
@@ -1441,7 +1441,7 @@ async fn single_and_composite_reference_drop_repoint_reorder_and_actions_drift()
         );
         let clean = be.snapshot_schema_sqlite().await.expect("clean snapshot");
         assert!(
-            diff_snapshots(zero_migrate::shipping_vendors(), &expected, &clean).is_clean(),
+            diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &clean).is_clean(),
             "unchanged single-column FK must stay clean"
         );
         drop(be);
@@ -1451,7 +1451,7 @@ async fn single_and_composite_reference_drop_repoint_reorder_and_actions_drift()
             .snapshot_schema_sqlite()
             .await
             .expect("actual snapshot");
-        let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
+        let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual);
         if dropped {
             assert!(
                 drift
@@ -1537,7 +1537,7 @@ async fn single_and_composite_reference_drop_repoint_reorder_and_actions_drift()
             .expect("expected snapshot");
         let clean = be.snapshot_schema_sqlite().await.expect("clean snapshot");
         assert!(
-            diff_snapshots(zero_migrate::shipping_vendors(), &expected, &clean).is_clean(),
+            diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &clean).is_clean(),
             "unchanged composite FK must stay clean"
         );
         drop(be);
@@ -1547,7 +1547,7 @@ async fn single_and_composite_reference_drop_repoint_reorder_and_actions_drift()
             .snapshot_schema_sqlite()
             .await
             .expect("actual snapshot");
-        let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
+        let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual);
         if dropped {
             assert!(
                 drift

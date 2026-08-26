@@ -4,14 +4,14 @@ use std::path::PathBuf;
 
 use serde_json::json;
 use tempfile::TempDir;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::conn::ExecutorConfig;
-use zero_migrate::model::ir::CURRENT_IR_VERSION;
-use zero_migrate::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::conn::ExecutorConfig;
+use zeroship_migrate::model::ir::CURRENT_IR_VERSION;
+use zeroship_migrate::{
     AlterPrimaryKeyStep, Approval, ApprovalScope, IrAuthor, LiveSchema, MigrationEngine, PlanStep,
 };
-use zero_migrate_sqlite::backend::Mode;
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate_sqlite::backend::Mode;
+use zeroship_migrate_sqlite::SqliteBackend;
 
 struct Paths {
     _dir: TempDir,
@@ -37,7 +37,7 @@ fn cfg() -> ExecutorConfig {
 }
 
 fn step(name: &str, action: serde_json::Value) -> AlterPrimaryKeyStep {
-    let ir: zero_migrate::MigrationIr = serde_json::from_value(json!({
+    let ir: zeroship_migrate::MigrationIr = serde_json::from_value(json!({
         "ir_version": CURRENT_IR_VERSION,
         "name": name,
         "owner_app": "app_test",
@@ -49,10 +49,10 @@ fn step(name: &str, action: serde_json::Value) -> AlterPrimaryKeyStep {
     }))
     .expect("primary-key IR parses");
     let plan = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         "app",
         "app_test",
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::no_inject("app"),
     )
     .lower_plan(&ir, &LiveSchema::default())
@@ -150,14 +150,14 @@ async fn add_and_replace_both_directions_enforce_exact_expected_columns() {
     )
     .await;
     let add = step("add_pk", json!({"kind": "add", "columns": ["code"]}));
-    let outcome = MigrationEngine::new(zero_migrate::shipping_vendors())
+    let outcome = MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &[PlanStep::AlterPrimaryKey(add.clone())],
             Approval::Approved,
             &backend,
             &cfg(),
             "tester",
-            zero_migrate::apply::executor::LockMode::Acquire,
+            zeroship_migrate::apply::executor::LockMode::Acquire,
         )
         .await
         .expect("apply_plan routes AlterPrimaryKey to the SQLite backend");

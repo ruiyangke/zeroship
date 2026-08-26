@@ -154,7 +154,7 @@ const CONFINED_CEILING_TOML: &str = concat!(
 /// It also cannot silently stop applying: `effective_policy_from_charter_toml`
 /// refuses an unknown key, and a ceiling that ever grows its own cross-schema
 /// grant would make this a duplicate rather than a no-op.
-fn matrix_effective_policy() -> zero_migrate::EffectivePolicy {
+fn matrix_effective_policy() -> zeroship_migrate::EffectivePolicy {
     let charter = format!(
         "{CONFINED_CEILING_TOML}\n\
          [[grant]]\n\
@@ -162,7 +162,7 @@ fn matrix_effective_policy() -> zero_migrate::EffectivePolicy {
          value = true\n\
          scope = {{ include = [\"{MATRIX_APP_ID}\"] }}\n"
     );
-    zero_migrate::effective_policy_from_charter_toml(&charter)
+    zeroship_migrate::effective_policy_from_charter_toml(&charter)
         .expect("plugin-db's confined ceiling composes once bound to the matrix app schema")
 }
 
@@ -200,9 +200,9 @@ fn matrix_effective_policy() -> zero_migrate::EffectivePolicy {
 /// `crates/zeroship-migrate-adapter/tests/smoke_apply_pg.rs` opens with, and it
 /// touches only the two schemas this function itself creates.
 fn apply_matrix_schema_ahead_of_postgres(url: &str, collection: &str) {
-    use zero_migrate::apply::backend::MigrationBackend;
-    use zero_migrate::driver::SqlSession;
-    use zero_migrate::{
+    use zeroship_migrate::apply::backend::MigrationBackend;
+    use zeroship_migrate::driver::SqlSession;
+    use zeroship_migrate::{
         desired_snapshot_for_dialect, Approval, DeclarativeAuthor, ExecutorConfig, GuardConfig,
         MigrationEngine, PostgresBackend, SqlDialect,
     };

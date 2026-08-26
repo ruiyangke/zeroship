@@ -2,7 +2,7 @@
 //!
 //! # What this replaces
 //!
-//! `zero_migrate::render::vendor` used to re-export `zero_migrate_postgres::render_vendor_op`,
+//! `zeroship_migrate::render::vendor` used to re-export `zeroship_migrate_postgres::render_vendor_op`,
 //! and the engine called it BY NAME at three sites covering sixteen privileged op
 //! kinds — roles, grants, RLS, policies, functions, extensions, schemas, `raw` —
 //! none of which touch `DmlRenderer`. `render/vendor.rs` recorded that honestly as
@@ -36,7 +36,7 @@
 //! # Why this test is not redundant with the census
 //!
 //! `core_names_no_vendor_crate.rs` proves the engine does not NAME
-//! `zero_migrate_postgres`. It cannot prove the dispatch is real. A refactor that
+//! `zeroship_migrate_postgres`. It cannot prove the dispatch is real. A refactor that
 //! routed all three vendors to PostgreSQL's renderer would satisfy the census
 //! completely and be exactly the defect the crate split exists to prevent — the same
 //! shape as the SQLite-identifiers-quoted-by-PostgreSQL bug this repo already had,
@@ -44,7 +44,7 @@
 //! agreed on the bytes. Here they do not agree: two of them have no answer at all, and
 //! that disagreement is what makes it testable.
 
-use zero_migrate::model::ir::Op;
+use zeroship_migrate::model::ir::Op;
 
 /// One privileged op, used for every leg so the only variable is the vendor.
 fn create_schema() -> Op {
@@ -59,12 +59,12 @@ fn create_schema() -> Op {
 ///
 /// The positive control. Reached through `BackendVendor::dml` — the same
 /// `&'static dyn DmlRenderer` the engine's registry hands out — rather than through
-/// `zero_migrate_postgres::render_vendor_op`, which is no longer reachable from
+/// `zeroship_migrate_postgres::render_vendor_op`, which is no longer reachable from
 /// outside that crate at all (`mod vendor` is private and the `pub use` is gone, so
 /// this is a privacy error rather than a convention).
 #[test]
 fn postgres_renders_a_vendor_op_through_the_contract() {
-    let stmts = zero_migrate_postgres::VENDOR
+    let stmts = zeroship_migrate_postgres::VENDOR
         .dml
         .render_vendor_op(&create_schema(), "app")
         .expect("PostgreSQL owns the vendor-op surface");
@@ -87,7 +87,7 @@ fn postgres_renders_a_vendor_op_through_the_contract() {
 /// SQLite REFUSES, in its own crate, in writing.
 #[test]
 fn sqlite_refuses_a_vendor_op() {
-    let err = zero_migrate_sqlite::VENDOR
+    let err = zeroship_migrate_sqlite::VENDOR
         .dml
         .render_vendor_op(&create_schema(), "app")
         .expect_err(
@@ -97,7 +97,7 @@ fn sqlite_refuses_a_vendor_op() {
     assert!(
         matches!(
             err,
-            zero_migrate_backend::vendor::VendorError::VendorOpsUnsupported(_)
+            zeroship_migrate_backend::vendor::VendorError::VendorOpsUnsupported(_)
         ),
         "expected the vendor's own refusal, got: {err:?}"
     );
@@ -106,14 +106,14 @@ fn sqlite_refuses_a_vendor_op() {
 /// MySQL REFUSES, for the same reason and in the same shape.
 #[test]
 fn mysql_refuses_a_vendor_op() {
-    let err = zero_migrate_mysql::VENDOR
+    let err = zeroship_migrate_mysql::VENDOR
         .dml
         .render_vendor_op(&create_schema(), "app")
         .expect_err("MySQL has no vendor-op renderer and must say so");
     assert!(
         matches!(
             err,
-            zero_migrate_backend::vendor::VendorError::VendorOpsUnsupported(_)
+            zeroship_migrate_backend::vendor::VendorError::VendorOpsUnsupported(_)
         ),
         "expected the vendor's own refusal, got: {err:?}"
     );
@@ -130,9 +130,9 @@ fn mysql_refuses_a_vendor_op() {
 fn exactly_one_shipping_vendor_renders_the_vendor_ops() {
     let op = create_schema();
     let renders: Vec<&str> = [
-        ("postgres", zero_migrate_postgres::VENDOR.dml),
-        ("sqlite", zero_migrate_sqlite::VENDOR.dml),
-        ("mysql", zero_migrate_mysql::VENDOR.dml),
+        ("postgres", zeroship_migrate_postgres::VENDOR.dml),
+        ("sqlite", zeroship_migrate_sqlite::VENDOR.dml),
+        ("mysql", zeroship_migrate_mysql::VENDOR.dml),
     ]
     .into_iter()
     .filter(|(_, dml)| dml.render_vendor_op(&op, "app").is_ok())

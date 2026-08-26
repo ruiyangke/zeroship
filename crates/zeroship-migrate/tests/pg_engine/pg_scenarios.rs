@@ -53,20 +53,20 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::support::PgDevSession;
 
 use crate::support::apply_pg as apply;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::model::migration::Checksum;
-use zero_migrate::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::model::migration::Checksum;
+use zeroship_migrate::{
     ops::status::history_via_backend, resolve_create_table_policy, ApplyError, Approval,
     ApprovalScope, BackfillSpec, BindValue, DeclarativeApplyError, EngineError, ExecutorConfig,
     ExpandContractAuthor, GuardConfig, IrAuthor, LiveSchema, LockMode, Migration, MigrationEngine,
     MigrationFlags, MigrationId, MigrationIr, OnlineIntent, PlanStep, RenameStep, Resolution,
 };
-use zero_migrate_postgres::backend::drift_sql::check_checksum_drift;
-use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
-use zero_migrate_postgres::backend::journal_sql::ensure_journal;
-use zero_migrate_postgres::backend::status_sql::status;
-use zero_migrate_postgres::PostgresBackend;
-use zero_migrate_postgres::DIALECT as POSTGRES;
+use zeroship_migrate_postgres::backend::drift_sql::check_checksum_drift;
+use zeroship_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zeroship_migrate_postgres::backend::journal_sql::ensure_journal;
+use zeroship_migrate_postgres::backend::status_sql::status;
+use zeroship_migrate_postgres::PostgresBackend;
+use zeroship_migrate_postgres::DIALECT as POSTGRES;
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -77,7 +77,7 @@ fn pg_expand_contract_author(
     owner_app: impl Into<String>,
 ) -> ExpandContractAuthor {
     ExpandContractAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         project_schema,
         owner_app,
         POSTGRES,
@@ -117,7 +117,7 @@ async fn ensure_project_schema<'a>(
     session: &'a PgDevSession,
     cfg: &ExecutorConfig,
 ) -> support::SchemaGuard<'a> {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
     let guard = support::SchemaGuard::arm(
         session,
         [
@@ -136,7 +136,7 @@ async fn ensure_project_schema<'a>(
 }
 
 async fn drop_schemas(session: &PgDevSession, cfg: &ExecutorConfig) {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
     let _ = session
         .batch(&format!(
             "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
@@ -152,7 +152,7 @@ fn mig(version: MigrationId, name: &str, up: &str) -> Migration {
         name: name.to_string(),
         up: up.to_string(),
         down: None,
-        checksum: Checksum::of(&zero_migrate::ChecksumInput {
+        checksum: Checksum::of(&zeroship_migrate::ChecksumInput {
             up,
             down: None,
             flags: &MigrationFlags::default(),
@@ -175,7 +175,7 @@ fn mig(version: MigrationId, name: &str, up: &str) -> Migration {
 fn mig_with_down(version: MigrationId, name: &str, up: &str, down: &str) -> Migration {
     let mut m = mig(version, name, up);
     m.down = Some(down.to_string());
-    m.checksum = Checksum::of(&zero_migrate::ChecksumInput {
+    m.checksum = Checksum::of(&zeroship_migrate::ChecksumInput {
         up,
         down: Some(down),
         flags: &MigrationFlags::default(),
@@ -191,7 +191,7 @@ fn mig_with_down(version: MigrationId, name: &str, up: &str, down: &str) -> Migr
 fn mig_nontxn(version: MigrationId, name: &str, up: &str) -> Migration {
     let mut m = mig(version, name, up);
     m.flags.transactional = false;
-    m.checksum = Checksum::of(&zero_migrate::ChecksumInput {
+    m.checksum = Checksum::of(&zeroship_migrate::ChecksumInput {
         up,
         down: None,
         flags: &m.flags,
@@ -205,7 +205,7 @@ fn mig_nontxn(version: MigrationId, name: &str, up: &str) -> Migration {
 
 /// Does `schema.table` exist?
 async fn table_exists(session: &PgDevSession, schema: &str, table: &str) -> bool {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
     let row = session
         .query_one(
             "SELECT EXISTS (SELECT 1 FROM information_schema.tables \
@@ -218,7 +218,7 @@ async fn table_exists(session: &PgDevSession, schema: &str, table: &str) -> bool
 }
 
 async fn column_exists(session: &PgDevSession, schema: &str, table: &str, column: &str) -> bool {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
     let row = session
         .query_one(
             "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
@@ -231,7 +231,7 @@ async fn column_exists(session: &PgDevSession, schema: &str, table: &str, column
 }
 
 fn step_checksum(label: &str) -> Checksum {
-    Checksum::of(&zero_migrate::ChecksumInput {
+    Checksum::of(&zeroship_migrate::ChecksumInput {
         up: label,
         down: None,
         flags: &MigrationFlags::default(),
@@ -313,7 +313,7 @@ fn assert_per_row_ulid(value: &str) {
 }
 
 async fn standard_conforming_strings(session: &PgDevSession) -> String {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
     session
         .query_one("SHOW standard_conforming_strings", &[])
         .await
@@ -324,7 +324,7 @@ async fn standard_conforming_strings(session: &PgDevSession) -> String {
 
 #[compio::test]
 async fn structured_data_steps_pin_standard_strings_and_restore_the_session() {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
@@ -402,7 +402,7 @@ async fn structured_data_steps_pin_standard_strings_and_restore_the_session() {
         schema: cfg.project_schema.clone(),
         table: "literal_safety".into(),
         cursor_columns: vec!["id".into()],
-        cursor_stability: zero_migrate::CursorStability::GuardUpdates,
+        cursor_stability: zeroship_migrate::CursorStability::GuardUpdates,
         cursor_contract: None,
         batch_size: 10,
         set_clause: r#""value" = '\t'"#.into(),
@@ -459,7 +459,7 @@ async fn structured_data_steps_pin_standard_strings_and_restore_the_session() {
 #[compio::test]
 async fn a_backfill_refuses_a_config_timeout_that_truncates_to_zero() {
     use std::time::Duration;
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
@@ -485,7 +485,7 @@ async fn a_backfill_refuses_a_config_timeout_that_truncates_to_zero() {
         schema: cfg.project_schema.clone(),
         table: "zero_budget".into(),
         cursor_columns: vec!["id".into()],
-        cursor_stability: zero_migrate::CursorStability::GuardUpdates,
+        cursor_stability: zeroship_migrate::CursorStability::GuardUpdates,
         cursor_contract: None,
         batch_size: 10,
         set_clause: r#""value" = 'filled'"#.into(),
@@ -571,7 +571,7 @@ async fn a_backfill_refuses_a_config_timeout_that_truncates_to_zero() {
 
 #[compio::test]
 async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
@@ -604,7 +604,7 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
             .expect("resolve no-inject table policy");
     let ir = serde_json::to_string(&resolved).expect("serialize resolved per-row IR");
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         "app_test",
         &POSTGRES,
@@ -620,7 +620,7 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
             &guard_cfg,
         )
         .expect("the declaring schema envelope must lower on PostgreSQL");
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,
@@ -641,7 +641,7 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
     declared_live.tables.insert("samples".into());
     declared_live
         .advance_logical_columns(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &resolved,
             &POSTGRES,
             &cfg.project_schema,
@@ -668,7 +668,7 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
     let data_artifact = author
         .load_and_lower_guarded(data_ir, "app_test", &registry, &declared_live, &guard_cfg)
         .expect("declared perRow destination formats must lower on PostgreSQL");
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &data_artifact.plan.steps,
             Approval::Approved,
@@ -724,7 +724,7 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
     logical_live.tables.insert("samples".into());
     logical_live
         .advance_logical_columns(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &resolved,
             &POSTGRES,
             &cfg.project_schema,
@@ -771,7 +771,7 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
 
 #[compio::test]
 async fn backfill_rejects_a_before_update_trigger_that_rewrites_values() {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
@@ -810,7 +810,7 @@ async fn backfill_rejects_a_before_update_trigger_that_rewrites_values() {
         schema: cfg.project_schema.clone(),
         table: "items".into(),
         cursor_columns: vec!["id".into()],
-        cursor_stability: zero_migrate::CursorStability::GuardUpdates,
+        cursor_stability: zeroship_migrate::CursorStability::GuardUpdates,
         cursor_contract: None,
         batch_size: 10,
         set_clause: "\"value\" = 'done'".into(),
@@ -880,7 +880,7 @@ async fn backfill_rejects_a_before_update_trigger_that_rewrites_values() {
 
 #[compio::test]
 async fn backfill_rejects_a_stored_generated_unique_cursor_before_guard_or_cohort() {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
@@ -911,7 +911,7 @@ async fn backfill_rejects_a_stored_generated_unique_cursor_before_guard_or_cohor
         schema: cfg.project_schema.clone(),
         table: "generated_cursor_items".into(),
         cursor_columns: vec!["cursor_key".into()],
-        cursor_stability: zero_migrate::CursorStability::GuardUpdates,
+        cursor_stability: zeroship_migrate::CursorStability::GuardUpdates,
         cursor_contract: None,
         batch_size: 10,
         set_clause: "\"value\" = 'done'".into(),
@@ -991,14 +991,14 @@ async fn backfill_rejects_a_stored_generated_unique_cursor_before_guard_or_cohor
 
 #[compio::test]
 async fn backfill_rolls_back_when_update_policy_hides_a_selected_row() {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let mut cfg = cfg_for(&tok);
     let role = format!("bf_role_{tok}");
-    cfg = zero_migrate_postgres::confinement::PostgresConfinementExt::with_migrator_role(
+    cfg = zeroship_migrate_postgres::confinement::PostgresConfinementExt::with_migrator_role(
         cfg,
         role.clone(),
     );
@@ -1033,7 +1033,7 @@ async fn backfill_rolls_back_when_update_policy_hides_a_selected_row() {
         schema: cfg.project_schema.clone(),
         table: "items".into(),
         cursor_columns: vec!["id".into()],
-        cursor_stability: zero_migrate::CursorStability::GuardUpdates,
+        cursor_stability: zeroship_migrate::CursorStability::GuardUpdates,
         cursor_contract: None,
         batch_size: 10,
         set_clause: "\"value\" = 'done'".into(),
@@ -1110,7 +1110,7 @@ async fn backfill_rolls_back_when_update_policy_hides_a_selected_row() {
 
 #[compio::test]
 async fn composite_guard_backfill_survives_crash_and_cleans_up_after_resume() {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
@@ -1140,7 +1140,7 @@ async fn composite_guard_backfill_survives_crash_and_cleans_up_after_resume() {
         schema: cfg.project_schema.clone(),
         table: "guarded_items".into(),
         cursor_columns: vec!["tenant_id".into(), "id".into()],
-        cursor_stability: zero_migrate::CursorStability::GuardUpdates,
+        cursor_stability: zeroship_migrate::CursorStability::GuardUpdates,
         cursor_contract: None,
         batch_size: 2,
         set_clause: "\"value\" = 'done'".into(),
@@ -1149,7 +1149,7 @@ async fn composite_guard_backfill_survives_crash_and_cleans_up_after_resume() {
         name: "composite guarded cursor backfill".into(),
     };
 
-    zero_migrate::fault::arm(zero_migrate::fault::points::BACKFILL_MID_BATCHES, 0);
+    zeroship_migrate::fault::arm(zeroship_migrate::fault::points::BACKFILL_MID_BATCHES, 0);
     let error = backend
         .run_backfill_step(
             &cfg,
@@ -1333,7 +1333,7 @@ async fn composite_guard_backfill_survives_crash_and_cleans_up_after_resume() {
 /// With no guard, the persisted `end_cursor` is the ONLY thing holding the line.
 #[compio::test]
 async fn a_resumed_backfill_stops_at_the_boundary_its_first_run_captured() {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
@@ -1361,7 +1361,7 @@ async fn a_resumed_backfill_stops_at_the_boundary_its_first_run_captured() {
         schema: cfg.project_schema.clone(),
         table: "cohort_items".into(),
         cursor_columns: vec!["id".into()],
-        cursor_stability: zero_migrate::CursorStability::ExternalInvariant {
+        cursor_stability: zeroship_migrate::CursorStability::ExternalInvariant {
             name: "cohort_items_id_immutable".into(),
         },
         cursor_contract: None,
@@ -1428,7 +1428,7 @@ async fn a_resumed_backfill_stops_at_the_boundary_its_first_run_captured() {
 
     // Phase 1 — crash after the first committed batch, with the boundary already
     // durable at id 4.
-    zero_migrate::fault::arm(zero_migrate::fault::points::BACKFILL_MID_BATCHES, 0);
+    zeroship_migrate::fault::arm(zeroship_migrate::fault::points::BACKFILL_MID_BATCHES, 0);
     let error = run()
         .await
         .expect_err("the fault must abort the run after its first committed batch");
@@ -1516,7 +1516,7 @@ const CASE_GUARD_EXTENSION: &str = "citext";
 
 #[compio::test]
 async fn guard_detects_representation_changes_under_case_insensitive_cursor_semantics() {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
@@ -1562,7 +1562,7 @@ async fn guard_detects_representation_changes_under_case_insensitive_cursor_sema
             "id".into(),
             "label".into(),
         ],
-        cursor_stability: zero_migrate::CursorStability::GuardUpdates,
+        cursor_stability: zeroship_migrate::CursorStability::GuardUpdates,
         cursor_contract: None,
         batch_size: 1,
         set_clause: "\"value\" = 'done'".into(),
@@ -1570,7 +1570,7 @@ async fn guard_detects_representation_changes_under_case_insensitive_cursor_sema
         filter: Some("\"value\" = 'pending'".into()),
         name: "representation-sensitive cursor guard".into(),
     };
-    zero_migrate::fault::arm(zero_migrate::fault::points::BACKFILL_MID_BATCHES, 0);
+    zeroship_migrate::fault::arm(zeroship_migrate::fault::points::BACKFILL_MID_BATCHES, 0);
     let interrupted = backend
         .run_backfill_step(
             &cfg,
@@ -1583,7 +1583,7 @@ async fn guard_detects_representation_changes_under_case_insensitive_cursor_sema
             LockMode::AlreadyHeld,
         )
         .await;
-    zero_migrate::fault::disarm_all();
+    zeroship_migrate::fault::disarm_all();
     interrupted.expect_err("fault after the first committed batch");
 
     let blocked = session
@@ -1642,7 +1642,7 @@ async fn guard_detects_representation_changes_under_case_insensitive_cursor_sema
 
 #[compio::test]
 async fn backfill_resume_rejects_a_when_false_guard_replacement() {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
@@ -1669,7 +1669,7 @@ async fn backfill_resume_rejects_a_when_false_guard_replacement() {
         schema: cfg.project_schema.clone(),
         table: "guard_tamper_items".into(),
         cursor_columns: vec!["id".into()],
-        cursor_stability: zero_migrate::CursorStability::GuardUpdates,
+        cursor_stability: zeroship_migrate::CursorStability::GuardUpdates,
         cursor_contract: None,
         batch_size: 1,
         set_clause: "\"value\" = 'done'".into(),
@@ -1677,7 +1677,7 @@ async fn backfill_resume_rejects_a_when_false_guard_replacement() {
         filter: Some("\"value\" = 'pending'".into()),
         name: "guard WHEN-clause tamper".into(),
     };
-    zero_migrate::fault::arm(zero_migrate::fault::points::BACKFILL_MID_BATCHES, 0);
+    zeroship_migrate::fault::arm(zeroship_migrate::fault::points::BACKFILL_MID_BATCHES, 0);
     let interrupted = backend
         .run_backfill_step(
             &cfg,
@@ -1690,7 +1690,7 @@ async fn backfill_resume_rejects_a_when_false_guard_replacement() {
             LockMode::AlreadyHeld,
         )
         .await;
-    zero_migrate::fault::disarm_all();
+    zeroship_migrate::fault::disarm_all();
     interrupted.expect_err("fault after the guarded batch commits");
 
     let obligation = session
@@ -1751,7 +1751,7 @@ async fn backfill_resume_rejects_a_when_false_guard_replacement() {
 
 #[compio::test]
 async fn backfill_resume_rejects_cursor_metadata_and_cohort_bound_corruption() {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
@@ -1784,7 +1784,7 @@ async fn backfill_resume_rejects_cursor_metadata_and_cohort_bound_corruption() {
         schema: cfg.project_schema.clone(),
         table: "bound_items".into(),
         cursor_columns: vec!["id".into()],
-        cursor_stability: zero_migrate::CursorStability::GuardUpdates,
+        cursor_stability: zeroship_migrate::CursorStability::GuardUpdates,
         cursor_contract: None,
         batch_size: 1,
         set_clause: "\"value\" = 'done'".into(),
@@ -1792,7 +1792,7 @@ async fn backfill_resume_rejects_cursor_metadata_and_cohort_bound_corruption() {
         filter: Some("\"value\" = 'pending'".into()),
         name: "cohort bound corruption".into(),
     };
-    zero_migrate::fault::arm(zero_migrate::fault::points::BACKFILL_MID_BATCHES, 0);
+    zeroship_migrate::fault::arm(zeroship_migrate::fault::points::BACKFILL_MID_BATCHES, 0);
     let interrupted = backend
         .run_backfill_step(
             &cfg,
@@ -1805,7 +1805,7 @@ async fn backfill_resume_rejects_cursor_metadata_and_cohort_bound_corruption() {
             LockMode::AlreadyHeld,
         )
         .await;
-    zero_migrate::fault::disarm_all();
+    zeroship_migrate::fault::disarm_all();
     interrupted.expect_err("fault after the first committed bound batch");
     session
         .exec(
@@ -1845,7 +1845,7 @@ async fn backfill_resume_rejects_cursor_metadata_and_cohort_bound_corruption() {
         schema: cfg.project_schema.clone(),
         table: "metadata_items".into(),
         cursor_columns: vec!["id".into()],
-        cursor_stability: zero_migrate::CursorStability::GuardUpdates,
+        cursor_stability: zeroship_migrate::CursorStability::GuardUpdates,
         cursor_contract: None,
         batch_size: 1,
         set_clause: "\"value\" = 'done'".into(),
@@ -1853,7 +1853,7 @@ async fn backfill_resume_rejects_cursor_metadata_and_cohort_bound_corruption() {
         filter: Some("\"value\" = 'pending'".into()),
         name: "cursor metadata corruption".into(),
     };
-    zero_migrate::fault::arm(zero_migrate::fault::points::BACKFILL_MID_BATCHES, 0);
+    zeroship_migrate::fault::arm(zeroship_migrate::fault::points::BACKFILL_MID_BATCHES, 0);
     let interrupted = backend
         .run_backfill_step(
             &cfg,
@@ -1866,7 +1866,7 @@ async fn backfill_resume_rejects_cursor_metadata_and_cohort_bound_corruption() {
             LockMode::AlreadyHeld,
         )
         .await;
-    zero_migrate::fault::disarm_all();
+    zeroship_migrate::fault::disarm_all();
     interrupted.expect_err("fault after the first committed metadata batch");
     session
         .exec(
@@ -1924,7 +1924,7 @@ async fn backfill_resume_rejects_cursor_metadata_and_cohort_bound_corruption() {
 
 #[compio::test]
 async fn backfill_rejects_a_progress_table_with_any_extra_stale_column() {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
@@ -1951,7 +1951,7 @@ async fn backfill_rejects_a_progress_table_with_any_extra_stale_column() {
         schema: cfg.project_schema.clone(),
         table: "progress_shape_items".into(),
         cursor_columns: vec!["id".into()],
-        cursor_stability: zero_migrate::CursorStability::ExternalInvariant {
+        cursor_stability: zeroship_migrate::CursorStability::ExternalInvariant {
             name: "progress_shape_items_id_immutable".into(),
         },
         cursor_contract: None,
@@ -2040,7 +2040,7 @@ async fn backfill_rejects_a_progress_table_with_any_extra_stale_column() {
 
 #[compio::test]
 async fn external_cursor_invariant_requires_explicit_approval_and_is_recorded() {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
@@ -2064,7 +2064,7 @@ async fn external_cursor_invariant_requires_explicit_approval_and_is_recorded() 
         schema: cfg.project_schema.clone(),
         table: "external_items".into(),
         cursor_columns: vec!["id".into()],
-        cursor_stability: zero_migrate::CursorStability::ExternalInvariant {
+        cursor_stability: zeroship_migrate::CursorStability::ExternalInvariant {
             name: "external_items_id_is_immutable".into(),
         },
         cursor_contract: None,
@@ -2125,7 +2125,7 @@ async fn external_cursor_invariant_requires_explicit_approval_and_is_recorded() 
 
 #[compio::test]
 async fn online_rename_backfill_rejects_replica_only_and_body_tampered_dual_write_triggers() {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
@@ -2145,7 +2145,7 @@ async fn online_rename_backfill_rejects_replica_only_and_body_tampered_dual_writ
         .expect("create online-rename trigger proof target");
 
     let backend = PostgresBackend::new_generic(&session);
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let rename = pg_expand_contract_author(cfg.project_schema.clone(), "app_test")
         .author(&OnlineIntent::RenameColumn {
             table: "rename_guard_items".into(),
@@ -2162,8 +2162,8 @@ async fn online_rename_backfill_rejects_replica_only_and_body_tampered_dual_writ
         .clone();
     let step = PlanStep::OnlineRename(RenameStep::ExpandContract(rename));
 
-    zero_migrate::fault::arm(
-        zero_migrate::fault::points::EXPAND_BETWEEN_E2_AND_BACKFILL,
+    zeroship_migrate::fault::arm(
+        zeroship_migrate::fault::points::EXPAND_BETWEEN_E2_AND_BACKFILL,
         0,
     );
     let interrupted = engine
@@ -2178,7 +2178,7 @@ async fn online_rename_backfill_rejects_replica_only_and_body_tampered_dual_writ
             LockMode::Acquire,
         )
         .await;
-    zero_migrate::fault::disarm_all();
+    zeroship_migrate::fault::disarm_all();
     interrupted.expect_err("fault after the managed dual-write trigger commits");
 
     let trigger = session
@@ -2292,9 +2292,9 @@ async fn online_rename_backfill_rejects_replica_only_and_body_tampered_dual_writ
 }
 
 struct InterruptedOnlineRename {
-    policy: zero_migrate::EffectivePolicy,
+    policy: zeroship_migrate::EffectivePolicy,
     registry: BTreeMap<String, String>,
-    rename_plan: zero_migrate::ExpandContractPlan,
+    rename_plan: zeroship_migrate::ExpandContractPlan,
     envelopes: Vec<MigrationIr>,
 }
 
@@ -2302,7 +2302,7 @@ async fn interrupt_online_rename_deploy(
     session: &PgDevSession,
     cfg: &ExecutorConfig,
 ) -> InterruptedOnlineRename {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     session
         .batch(&format!(
@@ -2350,7 +2350,7 @@ async fn interrupt_online_rename_deploy(
     let resolved_rename_json =
         serde_json::to_string(&resolved_rename).expect("serialize resolved rename");
     let authored = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         "app_test",
         &POSTGRES,
@@ -2380,11 +2380,11 @@ async fn interrupt_online_rename_deploy(
         .collect();
     let envelopes = vec![rename_ir, later_ir];
 
-    zero_migrate::fault::arm(
-        zero_migrate::fault::points::APPLY_AFTER_UP_BEFORE_COMPLETED,
+    zeroship_migrate::fault::arm(
+        zeroship_migrate::fault::points::APPLY_AFTER_UP_BEFORE_COMPLETED,
         2,
     );
-    let interrupted = MigrationEngine::new(zero_migrate::shipping_vendors())
+    let interrupted = MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .deploy_envelopes(
             &envelopes,
             &backend,
@@ -2397,7 +2397,7 @@ async fn interrupt_online_rename_deploy(
             cfg,
         )
         .await;
-    zero_migrate::fault::disarm_all();
+    zeroship_migrate::fault::disarm_all();
 
     let interrupted_text = interrupted
         .expect_err("the injected fault must interrupt the later envelope")
@@ -2408,13 +2408,13 @@ async fn interrupt_online_rename_deploy(
     );
 
     let completed_after_interrupt =
-        zero_migrate_postgres::backend::journal_sql::applied(session, cfg)
+        zeroship_migrate_postgres::backend::journal_sql::applied(session, cfg)
             .await
             .expect("read journal after interruption");
     assert!(
         expand_versions.iter().all(|version| {
             completed_after_interrupt.iter().any(|entry| {
-                entry.version == *version && entry.phase == zero_migrate::Phase::Completed
+                entry.version == *version && entry.phase == zeroship_migrate::Phase::Completed
             })
         }),
         "the fault must land after every expand migration completes: {completed_after_interrupt:?}"
@@ -2487,7 +2487,7 @@ async fn interrupted_online_rename_is_guarded_until_explicitly_resolved() {
         ),
     );
     let touching_version = touching.version.as_str().to_string();
-    let touch_error = MigrationEngine::new(zero_migrate::shipping_vendors())
+    let touch_error = MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan_with_touched_and_depends(
             &[PlanStep::Ddl(touching)],
             &["same_deploy_users".to_string()],
@@ -2518,7 +2518,7 @@ async fn interrupted_online_rename_is_guarded_until_explicitly_resolved() {
         "the pending-contract refusal must run before the touching DDL"
     );
     let journal_after_refusal =
-        zero_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
+        zeroship_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
             .await
             .expect("read journal after refused same-table DDL");
     assert!(
@@ -2543,14 +2543,14 @@ async fn interrupted_online_rename_is_guarded_until_explicitly_resolved() {
     )
     .await
     .expect("apply a contract version for the rollback interlock proof");
-    let rollback_guard = zero_migrate::guard_for(
-        zero_migrate::shipping_vendors(),
-        &cfg.guard_config_for(&zero_migrate_postgres::DIALECT),
+    let rollback_guard = zeroship_migrate::guard_for(
+        zeroship_migrate::shipping_vendors(),
+        &cfg.guard_config_for(&zeroship_migrate_postgres::DIALECT),
     );
-    let rollback_error = zero_migrate::rollback(
+    let rollback_error = zeroship_migrate::rollback(
         &backend,
         &cfg,
-        &zero_migrate::RollbackRequest::new(zero_migrate::RollbackTarget::Steps(1)),
+        &zeroship_migrate::RollbackRequest::new(zeroship_migrate::RollbackTarget::Steps(1)),
         std::slice::from_ref(&contract_head),
         Approval::Approved,
         "operator",
@@ -2559,7 +2559,7 @@ async fn interrupted_online_rename_is_guarded_until_explicitly_resolved() {
     .await
     .expect_err("rollback must refuse a version held by the outstanding rename");
     match &rollback_error {
-        zero_migrate::RollbackError::PendingContractOutstanding {
+        zeroship_migrate::RollbackError::PendingContractOutstanding {
             version,
             table,
             plan_version,
@@ -2571,7 +2571,7 @@ async fn interrupted_online_rename_is_guarded_until_explicitly_resolved() {
         other => panic!("expected the typed pending-contract rollback refusal, got {other:?}"),
     }
 
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .resolve_pending_contract(
             &obligation.pending_version,
             Resolution::Applied,
@@ -2624,7 +2624,7 @@ async fn interrupted_online_rename_is_automatically_recovered_on_same_deploy_ret
     let interrupted = interrupt_online_rename_deploy(&session, &cfg).await;
     let backend = PostgresBackend::new_generic(&session);
 
-    let _retried = MigrationEngine::new(zero_migrate::shipping_vendors())
+    let _retried = MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .deploy_envelopes(
             &interrupted.envelopes,
             &backend,
@@ -2690,7 +2690,7 @@ async fn transactional_apply_creates_table_and_journals_completed() {
     );
 
     // The journal recorded a completed event, readable back over the seam.
-    let applied = zero_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
+    let applied = zeroship_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
         .await
         .expect("journal read");
     assert_eq!(applied.len(), 1, "one journal row");
@@ -2708,7 +2708,7 @@ async fn transactional_apply_creates_table_and_journals_completed() {
     .await
     .expect("re-apply no-op");
     assert!(out2.is_noop(), "second apply is a no-op");
-    let applied2 = zero_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
+    let applied2 = zeroship_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
         .await
         .expect("journal re-read");
     assert_eq!(applied2.len(), 1, "no duplicate journal row on re-apply");
@@ -2771,14 +2771,14 @@ async fn re_classifying_an_applied_once_only_migration_as_repeatable_is_refused(
     // The journal must have recorded it as a once-only kind. That recording is
     // what the guard trusts over the supplied flag, so an arm that never checked
     // it could be measuring a journal that said "repeatable" all along.
-    let applied = zero_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
+    let applied = zeroship_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
         .await
         .expect("journal read");
     assert_eq!(applied.len(), 1);
     assert!(
         !applied[0]
             .kind
-            .is_some_and(zero_migrate::apply::journal::JournaledKind::is_repeatable),
+            .is_some_and(zeroship_migrate::apply::journal::JournaledKind::is_repeatable),
         "the first apply must be journaled as a once-only kind, got {:?}",
         applied[0].kind
     );
@@ -2794,7 +2794,7 @@ async fn re_classifying_an_applied_once_only_migration_as_repeatable_is_refused(
     );
     let mut flipped = mig(version.clone(), "create_ledger", &mutated_up);
     flipped.flags.repeatable = true;
-    flipped.checksum = Checksum::of(&zero_migrate::ChecksumInput {
+    flipped.checksum = Checksum::of(&zeroship_migrate::ChecksumInput {
         up: &mutated_up,
         down: None,
         flags: &flipped.flags,
@@ -2828,7 +2828,7 @@ async fn re_classifying_an_applied_once_only_migration_as_repeatable_is_refused(
 
     // The journal is still the original single completed event - the refused
     // apply appended nothing and rewrote nothing.
-    let after = zero_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
+    let after = zeroship_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
         .await
         .expect("journal re-read");
     assert_eq!(after.len(), 1, "the refused apply appended no journal row");
@@ -2867,7 +2867,7 @@ async fn apply_acquires_and_releases_the_project_advisory_lock() {
     drop_schemas(&session, &cfg).await;
     let _schemas = ensure_project_schema(&session, &cfg).await;
 
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
     // Acquire directly through the shipped backend leaf, then confirm it is visible.
     let backend = PostgresBackend::new_generic(&session);
     backend.acquire_project_lock(&cfg).await.expect("acquire");
@@ -2973,7 +2973,7 @@ async fn non_transactional_two_phase_apply_and_recovery() {
         ),
     );
     // Arm a `started` marker directly (the pre-crash phase-1 write).
-    zero_migrate_postgres::backend::journal_sql::record_started(
+    zeroship_migrate_postgres::backend::journal_sql::record_started(
         &session,
         &cfg,
         v2.as_str(),
@@ -2999,7 +2999,7 @@ async fn non_transactional_two_phase_apply_and_recovery() {
             || out2.recovered.contains(&v2.as_str().to_string()),
         "the crashed non-txn migration was recovered + completed: {out2:?}"
     );
-    let applied = zero_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
+    let applied = zeroship_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
         .await
         .expect("journal read");
     assert!(
@@ -3075,7 +3075,7 @@ async fn a_mismatched_inflight_marker_aborts_instead_of_replaying() {
     );
 
     // Arm the marker for the body that half-ran, then supply the edited one.
-    zero_migrate_postgres::backend::journal_sql::record_started(
+    zeroship_migrate_postgres::backend::journal_sql::record_started(
         &session,
         &cfg,
         v1.as_str(),
@@ -3109,7 +3109,7 @@ async fn a_mismatched_inflight_marker_aborts_instead_of_replaying() {
     }
 
     // The marker survives the refusal, so the operator can still inspect it.
-    let applied = zero_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
+    let applied = zeroship_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
         .await
         .expect("journal read");
     assert!(
@@ -3132,7 +3132,7 @@ async fn inflight_marker_armed(
     cfg: &ExecutorConfig,
     version: &str,
 ) -> bool {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
     let row = session
         .query_one(
             &format!(
@@ -3176,8 +3176,8 @@ async fn a_committed_non_txn_create_table_is_refused_on_replay_with_the_marker_k
     );
 
     // Crash after the `up` auto-committed and before the completed row landed.
-    zero_migrate::fault::arm(
-        zero_migrate::fault::points::APPLY_AFTER_UP_BEFORE_COMPLETED,
+    zeroship_migrate::fault::arm(
+        zeroship_migrate::fault::points::APPLY_AFTER_UP_BEFORE_COMPLETED,
         0,
     );
     let crashed = apply(
@@ -3188,7 +3188,7 @@ async fn a_committed_non_txn_create_table_is_refused_on_replay_with_the_marker_k
         "app_test",
     )
     .await;
-    zero_migrate::fault::disarm_all();
+    zeroship_migrate::fault::disarm_all();
     assert!(
         crashed.is_err(),
         "the injected crash must abort the apply: {crashed:?}"
@@ -3304,8 +3304,8 @@ async fn a_committed_non_txn_concurrent_index_still_recovers_on_replay() {
         ),
     );
 
-    zero_migrate::fault::arm(
-        zero_migrate::fault::points::APPLY_AFTER_UP_BEFORE_COMPLETED,
+    zeroship_migrate::fault::arm(
+        zeroship_migrate::fault::points::APPLY_AFTER_UP_BEFORE_COMPLETED,
         0,
     );
     let crashed = apply(
@@ -3316,7 +3316,7 @@ async fn a_committed_non_txn_concurrent_index_still_recovers_on_replay() {
         "app_test",
     )
     .await;
-    zero_migrate::fault::disarm_all();
+    zeroship_migrate::fault::disarm_all();
     assert!(
         crashed.is_err(),
         "the injected crash must abort the apply: {crashed:?}"
@@ -3339,7 +3339,7 @@ async fn a_committed_non_txn_concurrent_index_still_recovers_on_replay() {
         out.recovered.contains(&v1.as_str().to_string()),
         "the replay is reported as a recovery: {out:?}"
     );
-    let applied = zero_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
+    let applied = zeroship_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
         .await
         .expect("journal read");
     assert!(
@@ -3378,8 +3378,8 @@ async fn a_transactional_create_table_rolls_back_at_the_same_boundary_and_replay
         ),
     );
 
-    zero_migrate::fault::arm(
-        zero_migrate::fault::points::APPLY_AFTER_UP_BEFORE_COMPLETED,
+    zeroship_migrate::fault::arm(
+        zeroship_migrate::fault::points::APPLY_AFTER_UP_BEFORE_COMPLETED,
         0,
     );
     let crashed = apply(
@@ -3390,7 +3390,7 @@ async fn a_transactional_create_table_rolls_back_at_the_same_boundary_and_replay
         "app_test",
     )
     .await;
-    zero_migrate::fault::disarm_all();
+    zeroship_migrate::fault::disarm_all();
     assert!(
         crashed.is_err(),
         "the injected crash must abort the apply: {crashed:?}"
@@ -3449,15 +3449,15 @@ async fn an_armed_marker_outranks_a_skip_precondition() {
     );
     // "Run this once the table is still absent" - met on the first attempt, unmet
     // the moment the crashed `up` has created it.
-    gated.preconditions = vec![zero_migrate::PreconditionCheck::skip(
-        zero_migrate::Precondition::TableNotExists {
+    gated.preconditions = vec![zeroship_migrate::PreconditionCheck::skip(
+        zeroship_migrate::Precondition::TableNotExists {
             table: "gated".to_string(),
         },
     )];
-    gated.checksum = Checksum::of(&zero_migrate::ChecksumInput::from_migration(&gated));
+    gated.checksum = Checksum::of(&zeroship_migrate::ChecksumInput::from_migration(&gated));
 
-    zero_migrate::fault::arm(
-        zero_migrate::fault::points::APPLY_AFTER_UP_BEFORE_COMPLETED,
+    zeroship_migrate::fault::arm(
+        zeroship_migrate::fault::points::APPLY_AFTER_UP_BEFORE_COMPLETED,
         0,
     );
     let crashed = apply(
@@ -3468,7 +3468,7 @@ async fn an_armed_marker_outranks_a_skip_precondition() {
         "app_test",
     )
     .await;
-    zero_migrate::fault::disarm_all();
+    zeroship_migrate::fault::disarm_all();
     assert!(
         crashed.is_err(),
         "the injected crash must abort the apply: {crashed:?}"
@@ -3528,10 +3528,10 @@ async fn journal_ensure_is_idempotent_and_records_read_back() {
         .expect("ensure_journal 2 (idempotent)");
 
     let v = MigrationId::generate();
-    zero_migrate_postgres::backend::journal_sql::record_completed(
+    zeroship_migrate_postgres::backend::journal_sql::record_completed(
         &session,
         &cfg,
-        zero_migrate::apply::journal::CompletedRecord {
+        zeroship_migrate::apply::journal::CompletedRecord {
             down: None,
             version: v.as_str(),
             name: "manual",
@@ -3544,7 +3544,7 @@ async fn journal_ensure_is_idempotent_and_records_read_back() {
     .await
     .expect("record_completed");
 
-    let applied = zero_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
+    let applied = zeroship_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
         .await
         .expect("journal read");
     assert_eq!(applied.len(), 1);
@@ -3665,7 +3665,7 @@ async fn snapshot_schema_reflects_the_live_catalog() {
 
 #[compio::test]
 async fn snapshot_schema_preserves_quoted_named_type_identity() {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
@@ -3732,7 +3732,7 @@ async fn second_session_blocks_on_the_held_project_lock() {
     let tok = token();
     let cfg = cfg_for(&tok);
 
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
     let backend = PostgresBackend::new_generic(&holder);
     backend
         .acquire_project_lock(&cfg)
@@ -3824,7 +3824,7 @@ async fn rollback_runs_down_appends_event_and_is_reappliable() {
 
     // The journal is append-only: the `applied` row is NOT deleted; a `rolled_back`
     // event is appended, so the version is net-rolled-back (pending again).
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
     let counts = session
         .query_one(
             &format!(
@@ -3895,7 +3895,7 @@ async fn baseline_records_completed_without_running_up() {
         .await
         .expect("ensure_journal");
 
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
     // Create the table DIRECTLY (as if the DB predates the engine).
     session
         .batch(&format!(
@@ -3922,7 +3922,7 @@ async fn baseline_records_completed_without_running_up() {
 
     // The version is journaled net-applied (via the baseline), and the table
     // survived (the up did NOT run).
-    let applied = zero_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
+    let applied = zeroship_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
         .await
         .expect("journal read");
     assert!(
@@ -4024,7 +4024,7 @@ async fn non_idempotent_non_txn_dml_aborts_before_any_apply() {
         "expected NonIdempotentNonTxn, got {err:?}"
     );
     // All-up-front: nothing applied (not even the valid base migration).
-    let applied = zero_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
+    let applied = zeroship_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
         .await
         .unwrap_or_default();
     assert!(
@@ -4037,7 +4037,7 @@ async fn non_idempotent_non_txn_dml_aborts_before_any_apply() {
 
 #[compio::test]
 async fn limited_delete_honors_its_cap_across_partitions() {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
@@ -4061,15 +4061,15 @@ async fn limited_delete_honors_its_cap_across_partitions() {
         .await
         .expect("create partitioned delete fixture");
 
-    let predicate: zero_migrate::model::expr::Expr = serde_json::from_value(serde_json::json!({
+    let predicate: zeroship_migrate::model::expr::Expr = serde_json::from_value(serde_json::json!({
         "node": "binOp",
         "op": "lt",
         "lhs": { "node": "colRef", "name": "code" },
         "rhs": { "node": "literal", "value": 0 }
     }))
     .expect("parse delete predicate");
-    let assembled = zero_migrate::render::dml::assemble_delete(
-        zero_migrate::shipping_vendors(),
+    let assembled = zeroship_migrate::render::dml::assemble_delete(
+        zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         &POSTGRES,
         "events",
@@ -4082,8 +4082,8 @@ async fn limited_delete_honors_its_cap_across_partitions() {
         .exec(
             &assembled.template,
             &[
-                zero_migrate::driver::Bind::Inferred(Some("0".to_string())),
-                zero_migrate::driver::Bind::Inferred(Some("1".to_string())),
+                zeroship_migrate::driver::Bind::Inferred(Some("0".to_string())),
+                zeroship_migrate::driver::Bind::Inferred(Some("1".to_string())),
             ],
         )
         .await
@@ -4108,7 +4108,7 @@ async fn limited_delete_honors_its_cap_across_partitions() {
 
 #[compio::test]
 async fn pending_online_renames_can_be_completed_or_aborted_safely() {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
@@ -4165,7 +4165,7 @@ async fn pending_online_renames_can_be_completed_or_aborted_safely() {
         .expect("create rename fixtures");
 
     let backend = PostgresBackend::new_generic(&session);
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let apply_plan = pg_expand_contract_author(cfg.project_schema.clone(), "app_test")
         .author(&OnlineIntent::RenameColumn {
             table: "apply_users".into(),
@@ -4852,7 +4852,7 @@ async fn pending_online_renames_can_be_completed_or_aborted_safely() {
 
 #[compio::test]
 async fn a_partially_journaled_resolution_cannot_switch_actions() {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
@@ -4872,7 +4872,7 @@ async fn a_partially_journaled_resolution_cannot_switch_actions() {
         .expect("create legacy partial-resolution fixtures");
 
     let backend = PostgresBackend::new_generic(&session);
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let author = pg_expand_contract_author(cfg.project_schema.clone(), "app_test");
 
     let apply_intent = OnlineIntent::RenameColumn {
@@ -5064,7 +5064,7 @@ async fn a_partially_journaled_resolution_cannot_switch_actions() {
 
 #[compio::test]
 async fn a_failed_resolution_tombstone_append_retries_without_repeating_cleanup() {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
@@ -5082,7 +5082,7 @@ async fn a_failed_resolution_tombstone_append_retries_without_repeating_cleanup(
         .expect("create tombstone retry fixture");
 
     let backend = PostgresBackend::new_generic(&session);
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let plan = pg_expand_contract_author(cfg.project_schema.clone(), "app_test")
         .author(&OnlineIntent::RenameColumn {
             table: "tombstone_retry_users".into(),
@@ -5146,7 +5146,7 @@ async fn a_failed_resolution_tombstone_append_retries_without_repeating_cleanup(
     );
     let atomic_version =
         MigrationId::derive("resolve_pending_apply_atomic", pending_version.as_bytes());
-    let journal = zero_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
+    let journal = zeroship_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
         .await
         .expect("read journal after append fault");
     assert!(
@@ -5254,7 +5254,7 @@ async fn a_guard_denied_down_is_refused_before_it_runs() {
         .await
         .expect_err("a guard-denied down must not reach the database");
     assert!(
-        matches!(err, zero_migrate::RollbackError::Guard { .. }),
+        matches!(err, zeroship_migrate::RollbackError::Guard { .. }),
         "expected a Guard refusal, got {err:?}"
     );
 
@@ -5295,7 +5295,7 @@ fn lower_masked_add_column(cfg: &ExecutorConfig, ir_name: &str, guarded: bool) -
         resolve_create_table_policy(&authored, &support::no_inject("app"), &cfg.project_schema)
             .expect("resolve the no-inject table policy");
     IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         "app_test",
         &POSTGRES,
@@ -5311,7 +5311,7 @@ async fn journal_applied(
     cfg: &ExecutorConfig,
     version: &MigrationId,
 ) -> bool {
-    zero_migrate_postgres::backend::journal_sql::applied(session, cfg)
+    zeroship_migrate_postgres::backend::journal_sql::applied(session, cfg)
         .await
         .expect("journal read")
         .iter()
@@ -5541,7 +5541,7 @@ async fn a_guarded_masked_add_column_is_a_clean_noop_when_both_columns_are_prese
 /// a `PARTITION BY RANGE (bucket)` parent, one range child, and one row that
 /// routes into that child. Returned as ops so the same list can be folded into the
 /// `LiveSchema` the LATER drop migration lowers against.
-fn partition_setup_ops() -> Vec<zero_migrate::model::ir::Op> {
+fn partition_setup_ops() -> Vec<zeroship_migrate::model::ir::Op> {
     let ir: MigrationIr = serde_json::from_str(
         r#"{"ir_version":1,"name":"partition_setup","ops":[
           {"op":"createTable","name":"events","columns":[
@@ -5576,7 +5576,7 @@ fn lower_partition_plan(
         resolve_create_table_policy(&authored, &support::no_inject("app"), &cfg.project_schema)
             .expect("resolve the no-inject table policy");
     IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         "app_test",
         &POSTGRES,
@@ -5590,8 +5590,8 @@ fn lower_partition_plan(
 /// against: the static projection of the setup ops, carrying both the parent table
 /// and the `events_0` child bound.
 fn partition_live_after_setup(cfg: &ExecutorConfig) -> LiveSchema {
-    let snap = zero_migrate::fold_ops(
-        zero_migrate::shipping_vendors(),
+    let snap = zeroship_migrate::fold_ops(
+        zeroship_migrate::shipping_vendors(),
         &partition_setup_ops(),
         &POSTGRES,
         &cfg.project_schema,
@@ -5607,7 +5607,7 @@ fn partition_live_after_setup(cfg: &ExecutorConfig) -> LiveSchema {
 /// Every relation the live catalog reports in the project schema, child partitions
 /// included (`relispartition` is NOT filtered - the point is to see the child).
 async fn project_relations(session: &PgDevSession, schema: &str) -> Vec<String> {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
     session
         .query(
             "SELECT c.relname AS name FROM pg_class c \
@@ -5624,7 +5624,7 @@ async fn project_relations(session: &PgDevSession, schema: &str) -> Vec<String> 
 
 /// The `bucket` values still readable through the partitioned parent.
 async fn event_buckets(session: &PgDevSession, schema: &str) -> Vec<i32> {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
     session
         .query(
             &format!("SELECT bucket FROM \"{schema}\".events ORDER BY bucket"),
@@ -5662,7 +5662,7 @@ async fn drop_partition_outcome(
 
     let setup_ops = serde_json::to_string(&partition_setup_ops()).expect("serialize setup ops");
     let setup = lower_partition_plan(cfg, "partition_setup", &setup_ops, &LiveSchema::default());
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &setup,
             Approval::Approved,
@@ -5687,7 +5687,7 @@ async fn drop_partition_outcome(
         "partition_drop_unguarded"
     };
     let drop_plan = lower_partition_plan(cfg, name, &drop_ops, &partition_live_after_setup(cfg));
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &drop_plan,
             Approval::Approved,
@@ -5791,7 +5791,7 @@ async fn apply_second_partition_plan(
     backend.ensure_journal(cfg).await.expect("ensure journal");
     let setup_ops = serde_json::to_string(&partition_setup_ops()).expect("serialize setup ops");
     let setup = lower_partition_plan(cfg, "partition_setup", &setup_ops, &LiveSchema::default());
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &setup,
             Approval::Approved,
@@ -5804,7 +5804,7 @@ async fn apply_second_partition_plan(
         .expect("the partitioned parent, its child, and the row apply");
 
     let steps = lower_partition_plan(cfg, ir_name, ops_json, live);
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &steps,
             Approval::Approved,
@@ -5995,7 +5995,7 @@ async fn a_guarded_partition_probe_fails_closed_on_a_divergent_child() {
 // preflight refusal from a C2 blow-up.
 #[compio::test]
 async fn a_pg_rename_read_by_a_generated_column_is_refused_before_the_chain_starts() {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
@@ -6015,7 +6015,7 @@ async fn a_pg_rename_read_by_a_generated_column_is_refused_before_the_chain_star
         .expect("create a table whose generated column reads the rename source");
 
     let backend = PostgresBackend::new_generic(&session);
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let rename = pg_expand_contract_author(cfg.project_schema.clone(), "app_test")
         .author(&OnlineIntent::RenameColumn {
             table: "dep_rename_items".into(),
@@ -6086,7 +6086,7 @@ async fn a_pg_rename_read_by_a_generated_column_is_refused_before_the_chain_star
 /// the first migration's table survives the refusal.
 #[compio::test]
 async fn a_plan_with_a_late_zero_budget_applies_none_of_its_earlier_steps() {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
@@ -6126,7 +6126,7 @@ async fn a_plan_with_a_late_zero_budget_applies_none_of_its_earlier_steps() {
         schema: cfg.project_schema.clone(),
         table: "late_zero_seed".into(),
         cursor_columns: vec!["id".into()],
-        cursor_stability: zero_migrate::CursorStability::GuardUpdates,
+        cursor_stability: zeroship_migrate::CursorStability::GuardUpdates,
         cursor_contract: None,
         batch_size: 10,
         set_clause: r#""value" = 'walked'"#.into(),
@@ -6143,7 +6143,7 @@ async fn a_plan_with_a_late_zero_budget_applies_none_of_its_earlier_steps() {
     );
     let mut last = mig(MigrationId::generate(), "create the run B marker", &last_up);
     last.flags.lock_timeout_ms = Some(0);
-    last.checksum = Checksum::of(&zero_migrate::ChecksumInput {
+    last.checksum = Checksum::of(&zeroship_migrate::ChecksumInput {
         up: &last_up,
         down: None,
         flags: &last.flags,
@@ -6163,7 +6163,7 @@ async fn a_plan_with_a_late_zero_budget_applies_none_of_its_earlier_steps() {
         PlanStep::Ddl(last),
     ];
 
-    let error = MigrationEngine::new(zero_migrate::shipping_vendors())
+    let error = MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &steps,
             Approval::Approved,
@@ -6253,13 +6253,13 @@ async fn rollback_unwinds_both_migrations_in_reverse_order_on_live_postgres() {
 
     let set = vec![parent.clone(), child.clone()];
     let guard_cfg = GuardConfig::from_policy(support::no_inject(&schema), POSTGRES);
-    let guard = zero_migrate::guard_for(zero_migrate::shipping_vendors(), &guard_cfg);
-    let outcome = zero_migrate::rollback(
+    let guard = zeroship_migrate::guard_for(zeroship_migrate::shipping_vendors(), &guard_cfg);
+    let outcome = zeroship_migrate::rollback(
         &backend,
         &cfg,
-        &zero_migrate::RollbackRequest::new(zero_migrate::RollbackTarget::All),
+        &zeroship_migrate::RollbackRequest::new(zeroship_migrate::RollbackTarget::All),
         &set,
-        zero_migrate::Approval::Approved,
+        zeroship_migrate::Approval::Approved,
         "operator",
         &*guard,
     )
@@ -6307,7 +6307,7 @@ async fn rollback_unwinds_both_migrations_in_reverse_order_on_live_postgres() {
 // Asserting a completed rename here would be asserting the wrong contract.
 #[compio::test]
 async fn a_pg_rename_whose_old_column_carries_a_check_is_not_refused() {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
@@ -6326,7 +6326,7 @@ async fn a_pg_rename_whose_old_column_carries_a_check_is_not_refused() {
         .expect("create a table whose rename source carries a CHECK constraint");
 
     let backend = PostgresBackend::new_generic(&session);
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let rename = pg_expand_contract_author(cfg.project_schema.clone(), "app_test")
         .author(&OnlineIntent::RenameColumn {
             table: "chk_rename_items".into(),
@@ -6400,7 +6400,7 @@ async fn a_pg_rename_whose_old_column_carries_a_check_is_not_refused() {
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn a_resumed_backfill_honours_a_filter_that_permanently_excludes_rows() {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
@@ -6433,7 +6433,7 @@ async fn a_resumed_backfill_honours_a_filter_that_permanently_excludes_rows() {
         schema: cfg.project_schema.clone(),
         table: "mixed_items".into(),
         cursor_columns: vec!["id".into()],
-        cursor_stability: zero_migrate::CursorStability::ExternalInvariant {
+        cursor_stability: zeroship_migrate::CursorStability::ExternalInvariant {
             name: "mixed_items_id_immutable".into(),
         },
         cursor_contract: None,
@@ -6481,7 +6481,7 @@ async fn a_resumed_backfill_honours_a_filter_that_permanently_excludes_rows() {
     };
 
     // Phase 1 — interrupt after the first committed batch.
-    zero_migrate::fault::arm(zero_migrate::fault::points::BACKFILL_MID_BATCHES, 0);
+    zeroship_migrate::fault::arm(zeroship_migrate::fault::points::BACKFILL_MID_BATCHES, 0);
     let error = run()
         .await
         .expect_err("the fault must abort the run after its first committed batch");
@@ -6554,7 +6554,7 @@ async fn a_resumed_backfill_honours_a_filter_that_permanently_excludes_rows() {
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn a_resumed_per_row_backfill_does_not_regenerate_values_it_already_wrote() {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
@@ -6579,7 +6579,7 @@ async fn a_resumed_per_row_backfill_does_not_regenerate_values_it_already_wrote(
             .expect("resolve no-inject table policy");
     let ir = serde_json::to_string(&resolved).expect("serialize resolved IR");
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         "app_test",
         &POSTGRES,
@@ -6599,7 +6599,7 @@ async fn a_resumed_per_row_backfill_does_not_regenerate_values_it_already_wrote(
     // The DDL and the DML are separate envelopes under the schema()/data() split.
     // Only the DATA plan is re-applied below: re-running it is the resume this
     // test measures, and the table must already exist for that to mean anything.
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     engine
         .apply_plan(
             &schema_artifact.plan.steps,
@@ -6616,7 +6616,7 @@ async fn a_resumed_per_row_backfill_does_not_regenerate_values_it_already_wrote(
     declared_live.tables.insert("samples".into());
     declared_live
         .advance_logical_columns(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &resolved,
             &POSTGRES,
             &cfg.project_schema,
@@ -6678,7 +6678,7 @@ async fn a_resumed_per_row_backfill_does_not_regenerate_values_it_already_wrote(
     };
 
     // Phase 1 — crash after the first committed batch.
-    zero_migrate::fault::arm(zero_migrate::fault::points::BACKFILL_MID_BATCHES, 0);
+    zeroship_migrate::fault::arm(zeroship_migrate::fault::points::BACKFILL_MID_BATCHES, 0);
     let error = apply()
         .await
         .expect_err("the fault must abort the run after its first committed batch");
@@ -6748,7 +6748,7 @@ async fn a_resumed_per_row_backfill_does_not_regenerate_values_it_already_wrote(
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn a_scope_naming_another_version_does_not_authorise_this_one() {
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
@@ -6775,7 +6775,7 @@ async fn a_scope_naming_another_version_does_not_authorise_this_one() {
         schema: cfg.project_schema.clone(),
         table: "scoped_items".into(),
         cursor_columns: vec!["id".into()],
-        cursor_stability: zero_migrate::CursorStability::ExternalInvariant {
+        cursor_stability: zeroship_migrate::CursorStability::ExternalInvariant {
             name: "scoped_items_id_immutable".into(),
         },
         cursor_contract: None,
@@ -6966,7 +6966,7 @@ async fn a_migration_edited_after_it_applied_aborts_the_next_deploy() {
         "the batch must be refused BEFORE the pending migration executes"
     );
     // And the tampered version must not have been re-journalled.
-    let journal = zero_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
+    let journal = zeroship_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
         .await
         .expect("journal read");
     assert_eq!(
@@ -7025,9 +7025,9 @@ async fn a_plan_carrying_the_contract_ids_with_other_sql_does_not_discharge() {
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
     let _schemas = ensure_project_schema(&session, &cfg).await;
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
     let backend = PostgresBackend::new_generic(&session);
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
 
     let base = mig(
         MigrationId::derive("forge_base", tok.as_bytes()),
@@ -7323,9 +7323,9 @@ async fn a_rename_whose_source_has_dependents_is_declined_before_the_expand() {
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
     let _schemas = ensure_project_schema(&session, &cfg).await;
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
     let backend = PostgresBackend::new_generic(&session);
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
 
     let base = mig(
         MigrationId::derive("dep_base", tok.as_bytes()),
@@ -7518,7 +7518,7 @@ async fn a_contract_whose_expand_never_landed_is_refused() {
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
     let _schemas = ensure_project_schema(&session, &cfg).await;
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let base = mig(
         MigrationId::derive("gate_base", tok.as_bytes()),
@@ -7646,7 +7646,7 @@ async fn a_contract_whose_expand_never_landed_is_refused() {
 
     // THE CONTROL. Apply the expand, then the very same contract steps that were
     // refused twice above. Now they are safe, and they run.
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let backend = PostgresBackend::new_generic(&session);
     engine
         .apply_plan_with_touched_and_depends(
@@ -7739,7 +7739,7 @@ async fn a_contract_whose_expand_never_landed_is_refused() {
 async fn a_squash_over_a_partly_applied_prefix_is_refused_and_records_nothing() {
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     /// `v1`/`v2` create one table each; the squash creates BOTH, which is what a
     /// real squash of the two would do.
@@ -7763,7 +7763,7 @@ async fn a_squash_over_a_partly_applied_prefix_is_refused_and_records_nothing() 
             ),
         );
         squash.supersedes = vec![v1.version.clone(), v2.version.clone()];
-        squash.checksum = Checksum::of(&zero_migrate::ChecksumInput::from_migration(&squash));
+        squash.checksum = Checksum::of(&zeroship_migrate::ChecksumInput::from_migration(&squash));
         (v1, v2, squash)
     }
 
@@ -7975,7 +7975,7 @@ async fn malformed_repeatable_shapes_are_refused_before_anything_runs() {
         ),
     );
     let reseal = |m: &mut Migration| {
-        m.checksum = Checksum::of(&zero_migrate::ChecksumInput::from_migration(m));
+        m.checksum = Checksum::of(&zeroship_migrate::ChecksumInput::from_migration(m));
     };
 
     // ARM 1: a repeatable that also claims to supersede something.
@@ -8144,7 +8144,7 @@ async fn malformed_repeatable_shapes_are_refused_before_anything_runs() {
 async fn two_pending_squashes_may_not_claim_the_same_superseded_version() {
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     async fn tables(session: &PgDevSession, schema: &str) -> Vec<String> {
         let rows = session
@@ -8180,7 +8180,7 @@ async fn two_pending_squashes_may_not_claim_the_same_superseded_version() {
             ),
         );
         m.supersedes = supersedes;
-        m.checksum = Checksum::of(&zero_migrate::ChecksumInput::from_migration(&m));
+        m.checksum = Checksum::of(&zeroship_migrate::ChecksumInput::from_migration(&m));
         m
     };
     // They overlap on `v2`.
@@ -8294,14 +8294,14 @@ async fn two_pending_squashes_may_not_claim_the_same_superseded_version() {
 async fn re_supplying_settled_work_is_a_no_op_rather_than_a_refusal() {
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
-    use zero_migrate::driver::SqlSession;
+    use zeroship_migrate::driver::SqlSession;
 
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
     let _guard = ensure_project_schema(&session, &cfg).await;
     let backend = PostgresBackend::new_generic(&session);
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
 
     let base = mig(
         MigrationId::derive("live_base", tok.as_bytes()),

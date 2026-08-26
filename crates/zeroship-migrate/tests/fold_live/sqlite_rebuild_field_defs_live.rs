@@ -60,7 +60,7 @@
 //! # What is asked of the server, and in what order
 //!
 //! Every case runs against a real SQLite file. The deploy-path cases go through the
-//! shipped [`zero_migrate::MigrationEngine::deploy_envelopes`] - the same entry point the
+//! shipped [`zeroship_migrate::MigrationEngine::deploy_envelopes`] - the same entry point the
 //! CLI uses, and the one that populates `live.sdk_schemas` from the fold; the
 //! content-reading case lowers and applies through `IrAuthor` + `apply_plan` against the
 //! fold-seeded live schema, which is the shape `engine::refresh_historical_live` builds.
@@ -83,16 +83,16 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::apply::executor::LockMode;
-use zero_migrate::model::ir::Op;
-use zero_migrate::render::fold::single_fold;
-use zero_migrate::{
+use zeroship_migrate::apply::executor::LockMode;
+use zeroship_migrate::model::ir::Op;
+use zeroship_migrate::render::fold::single_fold;
+use zeroship_migrate::{
     fold_ops, resolve_create_table_policy, Approval, ExecutorConfig, IrAuthor, LiveSchema,
     MigrationEngine, MigrationIr,
 };
-use zero_migrate_sqlite::backend::Mode;
-use zero_migrate_sqlite::SqliteBackend;
-use zero_migrate_sqlite::DIALECT as SQLITE;
+use zeroship_migrate_sqlite::backend::Mode;
+use zeroship_migrate_sqlite::SqliteBackend;
+use zeroship_migrate_sqlite::DIALECT as SQLITE;
 
 const PROJECT: &str = "prj_rebuild_field_defs";
 const APP: &str = "app_rebuild_field_defs";
@@ -133,7 +133,7 @@ async fn deploy(backend: &SqliteBackend, tables: &[&str], sources: &[&str]) -> R
         .iter()
         .map(|source| serde_json::from_str(source).expect("test envelope parses"))
         .collect();
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .deploy_envelopes(
             &envelopes,
             backend,
@@ -483,7 +483,7 @@ const RENAME_IR: &str = r#"{"ir_version":1,"name":"rename_note","owner_app":"app
 fn folded_live_schema(history: &[Op]) -> LiveSchema {
     let policy = support::no_inject(PROJECT);
     let snapshot = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         history,
         &SQLITE,
         PROJECT,
@@ -492,14 +492,14 @@ fn folded_live_schema(history: &[Op]) -> LiveSchema {
     .expect("the history folds");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     live.sdk_schemas = single_fold::fold(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         history,
         &SQLITE,
         PROJECT,
         &policy,
     )
     .expect("the history folds")
-    .project_field_defs(zero_migrate::shipping_vendors());
+    .project_field_defs(zeroship_migrate::shipping_vendors());
     live
 }
 
@@ -510,14 +510,14 @@ async fn apply(backend: &SqliteBackend, source: &str, live: &LiveSchema) -> Vec<
     let raw: MigrationIr = serde_json::from_str(source).expect("test IR parses");
     let resolved = resolve_create_table_policy(&raw, &policy, PROJECT).expect("the IR resolves");
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
         &SQLITE,
         &policy,
     );
     let steps = author.lower_steps(&resolved, live).expect("the IR lowers");
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &steps,
             Approval::Approved,
@@ -679,7 +679,7 @@ async fn the_deploy_path_depends_on_the_maps_PRESENCE_not_its_content() {
     let history = apply(&backend, CREATE, &LiveSchema::default()).await;
     let policy = support::no_inject(PROJECT);
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
         &SQLITE,
@@ -712,14 +712,14 @@ async fn the_deploy_path_depends_on_the_maps_PRESENCE_not_its_content() {
     // CONTENT is not: the same rename lowers identically whether the map is the real one
     // or a deliberately wrong one, because this arm replays SQLite's own stored text.
     live.sdk_schemas = single_fold::fold(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &history,
         &SQLITE,
         PROJECT,
         &policy,
     )
     .expect("the history folds")
-    .project_field_defs(zero_migrate::shipping_vendors());
+    .project_field_defs(zeroship_migrate::shipping_vendors());
     let real = format!(
         "{:?}",
         author.lower_steps(&resolved, &live).expect("lowers")

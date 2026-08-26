@@ -44,26 +44,26 @@
 
 use std::collections::BTreeMap;
 
-use zero_migrate::model::probe::{GuardDir, GuardProbe};
-use zero_migrate::model::snapshot::{
+use zeroship_migrate::model::probe::{GuardDir, GuardProbe};
+use zeroship_migrate::model::snapshot::{
     ConstraintSnapshot, IndexSnapshot, SchemaSnapshot, TableSnapshot,
 };
-use zero_migrate::model::validate::{validate_ir_scoped, AuthoringError};
-use zero_migrate::render::existence_probe::{decide, GuardVerdict};
-use zero_migrate::DialectId;
-use zero_migrate::{
+use zeroship_migrate::model::validate::{validate_ir_scoped, AuthoringError};
+use zeroship_migrate::render::existence_probe::{decide, GuardVerdict};
+use zeroship_migrate::DialectId;
+use zeroship_migrate::{
     ColType, IndexElement, IrAuthor, IrColumn, IrConstraint, IrConstraintKind, IrIndex, LiveSchema,
     MigrationIr, Op, SchemaScope,
 };
-use zero_migrate_postgres::DIALECT as POSTGRES;
-use zero_migrate_sqlite::DIALECT as SQLITE;
+use zeroship_migrate_postgres::DIALECT as POSTGRES;
+use zeroship_migrate_sqlite::DIALECT as SQLITE;
 
 use crate::support;
 
 const DIALECTS: [&DialectId; 3] = [
-    &zero_migrate_postgres::DIALECT,
-    &zero_migrate_mysql::DIALECT,
-    &zero_migrate_sqlite::DIALECT,
+    &zeroship_migrate_postgres::DIALECT,
+    &zeroship_migrate_mysql::DIALECT,
+    &zeroship_migrate_sqlite::DIALECT,
 ];
 
 /// PostgreSQL's NAMEDATALEN-derived identifier bound, in bytes.
@@ -87,7 +87,7 @@ fn ir(ops: Vec<Op>) -> MigrationIr {
 
 fn validate(op: Op, dialect: &DialectId) -> Result<(), AuthoringError> {
     validate_ir_scoped(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir(vec![op]),
         dialect,
         Some(&SchemaScope::Unconfined),
@@ -141,7 +141,7 @@ fn column_element() -> IndexElement {
 
 fn add_constraint(name: &str) -> Op {
     Op::AddConstraint {
-        attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
         table: "t".into(),
         constraint: IrConstraint {
             name: Some(name.into()),
@@ -156,7 +156,7 @@ fn add_constraint(name: &str) -> Op {
 
 fn create_table(constraints: Vec<IrConstraint>, indexes: Vec<IrIndex>) -> Op {
     Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "t".into(),
         columns: vec![column()],
         primary_key: Some(vec!["c".into()]),
@@ -255,8 +255,8 @@ type NamedOpFactory = (&'static str, fn(&str) -> Op);
 /// constraint` factory below, which is portable on all three dialects, so nothing
 /// this file exists to prove is lost.
 const ADD_CONSTRAINT_DIALECTS: [&DialectId; 2] = [
-    &zero_migrate_postgres::DIALECT,
-    &zero_migrate_mysql::DIALECT,
+    &zeroship_migrate_postgres::DIALECT,
+    &zeroship_migrate_mysql::DIALECT,
 ];
 
 /// Every CREATE-side op factory that carries an author-supplied identifier and is
@@ -369,7 +369,7 @@ fn create_table_refuses_a_64_byte_inline_index_name_on_every_dialect() {
 fn drop_side_refuses_a_64_byte_name_on_postgres() {
     let name = ascii_name(MAX + 1);
     for (label, factory) in drop_side_factories() {
-        assert_refused_for_length(label, &zero_migrate_postgres::DIALECT, factory(&name));
+        assert_refused_for_length(label, &zeroship_migrate_postgres::DIALECT, factory(&name));
     }
 }
 
@@ -379,7 +379,7 @@ fn drop_side_refuses_a_64_byte_name_on_postgres() {
 #[test]
 fn drop_side_accepts_a_64_byte_name_on_mysql_and_sqlite() {
     let name = ascii_name(MAX + 1);
-    for dialect in [&zero_migrate_mysql::DIALECT, &zero_migrate_sqlite::DIALECT] {
+    for dialect in [&zeroship_migrate_mysql::DIALECT, &zeroship_migrate_sqlite::DIALECT] {
         for (label, factory) in drop_side_factories() {
             assert_not_refused_for_length(label, dialect, factory(&name));
         }
@@ -424,7 +424,7 @@ fn a_multi_byte_name_over_63_bytes_is_refused_where_the_bound_applies() {
         }
     }
     for (label, factory) in drop_side_factories() {
-        assert_refused_for_length(label, &zero_migrate_postgres::DIALECT, factory(&name));
+        assert_refused_for_length(label, &zeroship_migrate_postgres::DIALECT, factory(&name));
     }
 }
 
@@ -437,7 +437,7 @@ fn a_multi_byte_name_over_63_bytes_is_refused_where_the_bound_applies() {
 /// Lower one op through the real `IrAuthor`, returning the rendered error text.
 fn lower_error(op: Op, dialect: &DialectId) -> Option<String> {
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         "app",
         "app_idents",
         dialect,
@@ -477,12 +477,12 @@ fn lower_refuses_a_64_byte_authored_constraint_name() {
     let name = ascii_name(MAX + 1);
     assert_lower_refused_for_length(
         "addConstraint",
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         add_constraint(&name),
     );
     assert_lower_refused_for_length(
         "dropConstraint",
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         drop_constraint(&name),
     );
 }
@@ -492,12 +492,12 @@ fn lower_accepts_a_63_byte_authored_constraint_name() {
     let name = ascii_name(MAX);
     assert_lower_not_refused_for_length(
         "addConstraint",
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         add_constraint(&name),
     );
     assert_lower_not_refused_for_length(
         "dropConstraint",
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         drop_constraint(&name),
     );
 }
@@ -518,7 +518,7 @@ fn the_load_gate_refuses_a_64_byte_name_nested_in_a_dialectal_leg() {
     let name = ascii_name(MAX + 1);
     assert_refused_for_length(
         "dialectal postgres dropConstraint",
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         dialectal_pg_drop_constraint(&name),
     );
 }
@@ -528,7 +528,7 @@ fn the_lower_seam_refuses_a_64_byte_name_nested_in_a_dialectal_leg() {
     let name = ascii_name(MAX + 1);
     assert_lower_refused_for_length(
         "dialectal postgres dropConstraint",
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         dialectal_pg_drop_constraint(&name),
     );
 }
@@ -546,7 +546,7 @@ fn an_unselected_dialectal_leg_is_not_bounded() {
     };
     assert_not_refused_for_length(
         "dialectal sqlite leg on postgres",
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         op,
     );
 }
@@ -675,8 +675,8 @@ fn assert_ifexists_miss(
     noop_reason: &str,
 ) {
     let mysql_constraint =
-        dialect == &zero_migrate_mysql::DIALECT && matches!(probe, GuardProbe::Constraint { .. });
-    let verdict = decide(zero_migrate::shipping_vendors(), probe, live, dialect);
+        dialect == &zeroship_migrate_mysql::DIALECT && matches!(probe, GuardProbe::Constraint { .. });
+    let verdict = decide(zeroship_migrate::shipping_vendors(), probe, live, dialect);
     if mysql_constraint {
         match verdict {
             GuardVerdict::FailDrift(divergence) => {
@@ -710,7 +710,7 @@ fn an_over_long_if_exists_name_whose_truncation_is_live_fails_closed_on_postgres
     let truncated = pg_truncation(&authored);
     for (label, probe, live) in probe_cases() {
         match decide(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &probe(&authored, GuardDir::IfExists),
             &live(&truncated),
             &POSTGRES,
@@ -743,7 +743,7 @@ fn the_derived_truncation_clips_on_a_character_boundary() {
     );
     for (label, probe, live) in probe_cases() {
         match decide(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &probe(&authored, GuardDir::IfExists),
             &live(&truncated),
             &POSTGRES,
@@ -763,7 +763,7 @@ fn an_over_long_if_exists_name_absent_in_every_spelling_still_noops() {
     for (label, probe, _live) in probe_cases() {
         assert_eq!(
             decide(
-                zero_migrate::shipping_vendors(),
+                zeroship_migrate::shipping_vendors(),
                 &probe(&authored, GuardDir::IfExists),
                 &empty_live(),
                 &POSTGRES,
@@ -781,7 +781,7 @@ fn an_over_long_if_not_exists_name_fails_closed_on_postgres() {
     let authored = ascii_name(MAX + 1);
     for (label, probe, _live) in probe_cases() {
         match decide(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &probe(&authored, GuardDir::IfNotExists),
             &empty_live(),
             &POSTGRES,
@@ -801,14 +801,14 @@ fn an_over_long_if_not_exists_name_fails_closed_on_postgres() {
 fn a_within_bound_name_keeps_the_truncation_backstop_invisible() {
     let name = ascii_name(MAX);
     for dialect in [
-        &zero_migrate_postgres::DIALECT,
-        &zero_migrate_mysql::DIALECT,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
     ] {
         for (label, probe, live) in probe_cases() {
             assert_eq!(
                 decide(
-                    zero_migrate::shipping_vendors(),
+                    zeroship_migrate::shipping_vendors(),
                     &probe(&name, GuardDir::IfExists),
                     &live(&name),
                     dialect,
@@ -825,7 +825,7 @@ fn a_within_bound_name_keeps_the_truncation_backstop_invisible() {
             );
             assert_eq!(
                 decide(
-                    zero_migrate::shipping_vendors(),
+                    zeroship_migrate::shipping_vendors(),
                     &probe(&name, GuardDir::IfNotExists),
                     &empty_live(),
                     dialect,
@@ -844,11 +844,11 @@ fn a_within_bound_name_keeps_the_truncation_backstop_invisible() {
 fn an_over_long_name_is_not_truncated_on_mysql_or_sqlite() {
     let authored = ascii_name(MAX + 1);
     let truncated = pg_truncation(&authored);
-    for dialect in [&zero_migrate_mysql::DIALECT, &zero_migrate_sqlite::DIALECT] {
+    for dialect in [&zeroship_migrate_mysql::DIALECT, &zeroship_migrate_sqlite::DIALECT] {
         for (label, probe, live) in probe_cases() {
             assert_eq!(
                 decide(
-                    zero_migrate::shipping_vendors(),
+                    zeroship_migrate::shipping_vendors(),
                     &probe(&authored, GuardDir::IfExists),
                     &live(&authored),
                     dialect,
@@ -865,7 +865,7 @@ fn an_over_long_name_is_not_truncated_on_mysql_or_sqlite() {
             );
             assert_eq!(
                 decide(
-                    zero_migrate::shipping_vendors(),
+                    zeroship_migrate::shipping_vendors(),
                     &probe(&authored, GuardDir::IfNotExists),
                     &empty_live(),
                     dialect,

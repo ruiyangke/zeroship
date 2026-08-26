@@ -1,19 +1,19 @@
 [package]
-name = "zero-migrate-mysql"
+name = "zeroship-migrate-mysql"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The MySQL backend for zero-migrate: this vendor's DML, schema, DDL, value-format and guard behavior. Implements the zero-migrate-backend contract; does NOT depend on the engine."
+description = "The MySQL backend for zeroship-migrate: this vendor's DML, schema, DDL, value-format and guard behavior. Implements the zeroship-migrate-backend contract; does NOT depend on the engine."
 
 [dependencies]
 # The CONTRACT: the required renderer traits, the render errors their signatures name,
 # the identifier/expression spelling seam this vendor calls, and the VendorSet shape
-# `VENDOR` below is registered through. This is the ONLY zero-migrate crate a
+# `VENDOR` below is registered through. This is the ONLY zeroship-migrate crate a
 # backend may depend on - depending on the engine is the cycle the split removed.
-zero-migrate-backend = { workspace = true }
+zeroship-migrate-backend = { workspace = true }
 # The closed `Op` / `Expr` / `IrScalar` vocabulary the trait methods are handed, plus
 # open dialect identity and this vendor's `BackendDescriptor`.
-zero-migrate-ir = { workspace = true }
+zeroship-migrate-ir = { workspace = true }
 # The schema-field shape `SchemaRenderer` reads is the SDK's field JSON.
 serde_json = { workspace = true }
 # MySQL and SQLite both spell a binary/string literal as a hex form.
@@ -31,7 +31,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 # `ExecutorConfig` carries an `EffectivePolicy`, so the execution half names the
 # PDP's types. A pure LEAF with no SQL dependencies.
-zero-migrate-policy = { workspace = true }
+zeroship-migrate-policy = { workspace = true }
 
 [features]
 # TEST-ONLY. Publishes `backend::recording`, the canned `SqlSession` this crate's
@@ -43,9 +43,9 @@ zero-migrate-policy = { workspace = true }
 # `information_schema` rows are the shared premise of both suites and two copies
 # drift silently.
 #
-# `zero-migrate` names it under `[dev-dependencies]` only. Resolver 3 keeps
+# `zeroship-migrate` names it under `[dev-dependencies]` only. Resolver 3 keeps
 # dev-dependency features out of the normal build, so a shipping
-# `zero-migrate-mysql` compiles none of it.
+# `zeroship-migrate-mysql` compiles none of it.
 testing = []
 
 [dev-dependencies]

@@ -43,13 +43,13 @@ use std::collections::BTreeMap;
 
 use crate::support::PgDevSession;
 use serde_json::json;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::apply::executor::LockMode;
-use zero_migrate::driver::SqlSession;
-use zero_migrate::model::ir::Op;
-use zero_migrate::{fold_ops, Approval, ExecutorConfig, IrAuthor, LiveSchema, MigrationEngine};
-use zero_migrate_postgres::PostgresBackend;
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::apply::executor::LockMode;
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::model::ir::Op;
+use zeroship_migrate::{fold_ops, Approval, ExecutorConfig, IrAuthor, LiveSchema, MigrationEngine};
+use zeroship_migrate_postgres::PostgresBackend;
+use zeroship_migrate_sqlite::SqliteBackend;
 
 const OWNER: &str = "app_instead_of_trigger_needs_a_view";
 
@@ -144,32 +144,32 @@ async fn pg_apply(
     let backend = PostgresBackend::new_generic(session);
     let policy = support::operator_charter(&cfg.project_schema);
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &policy,
     );
     // The charter is threaded as vendor authority: `createFunction` is a privileged
     // primitive, and the scope-derived fallback grants nothing outside an operator
     // posture, so without this the gate refuses before the trigger is reached.
-    let document = zero_migrate::model::load::load_ir_document_authorized(
-        zero_migrate::shipping_vendors(),
+    let document = zeroship_migrate::model::load::load_ir_document_authorized(
+        zeroship_migrate::shipping_vendors(),
         ir,
         OWNER,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &registry(),
         None,
-        Some(zero_migrate::model::validate::VendorAuthority {
+        Some(zeroship_migrate::model::validate::VendorAuthority {
             effective: &policy,
             default_schema: &cfg.project_schema,
         }),
     )
     .map_err(|error| format!("load gate (postgres): {error}"))?;
     let folded = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         history,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &cfg.project_schema,
         &policy,
     )
@@ -178,7 +178,7 @@ async fn pg_apply(
     let plan = author
         .lower_plan(&document, &live)
         .map_err(|error| format!("lower: {error}"))?;
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &plan.steps,
             Approval::Approved,
@@ -312,33 +312,33 @@ async fn sqlite_apply(
 ) -> Result<(), String> {
     let policy = support::operator_charter(&cfg.project_schema);
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &policy,
     );
     // Threaded exactly as the PostgreSQL half above threads it, and for the same
     // reason: a trigger op is capability-gated, and the scope-derived fallback grants
     // nothing outside an operator posture. Without the charter the load gate refuses
     // for want of a GRANT and this fixture's INSTEAD OF question is never reached.
-    let document = zero_migrate::model::load::load_ir_document_authorized(
-        zero_migrate::shipping_vendors(),
+    let document = zeroship_migrate::model::load::load_ir_document_authorized(
+        zeroship_migrate::shipping_vendors(),
         ir,
         OWNER,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &registry(),
         None,
-        Some(zero_migrate::model::validate::VendorAuthority {
+        Some(zeroship_migrate::model::validate::VendorAuthority {
             effective: &policy,
             default_schema: &cfg.project_schema,
         }),
     )
     .map_err(|error| format!("load gate (sqlite): {error}"))?;
     let folded = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         history,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &cfg.project_schema,
         &policy,
     )
@@ -347,7 +347,7 @@ async fn sqlite_apply(
     let plan = author
         .lower_plan(&document, &live)
         .map_err(|error| format!("lower: {error}"))?;
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &plan.steps,
             Approval::Approved,

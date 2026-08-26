@@ -30,7 +30,7 @@
 //! round-trip tests guard each vendor mapping against its live catalog.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use zero_migrate_backend::registry::VendorSet;
+use zeroship_migrate_backend::registry::VendorSet;
 
 use serde::Deserialize;
 
@@ -49,20 +49,20 @@ use crate::render::plan::TableRebuildSpec;
 use crate::render::renderer::{Capability, DialectSupports};
 #[cfg(test)]
 use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
-use zero_migrate_backend::advisory::Advisory;
-use zero_migrate_ir::dialect::DialectId;
+use zeroship_migrate_backend::advisory::Advisory;
+use zeroship_migrate_ir::dialect::DialectId;
 // The per-dialect DDL emission seam. Declared below the engine so the three impls
 // can leave it for the three vendor crates without Cargo seeing a cycle.
 // The column-clause spellings moved with it, for the same reason: all three impls
 // call every one of them, so a shared helper cannot stay above the vendors.
-use zero_migrate_backend::ddl::{
+use zeroship_migrate_backend::ddl::{
     constraint_supports_fk_columns, fk_target_table, index_supports_fk_columns, is_pk_index,
     CreateTableRequest, DdlEmitter,
 };
-use zero_migrate_backend::schema::{
+use zeroship_migrate_backend::schema::{
     ColumnRenameStrategy, ExistingColumnChangeStrategy, SchemaRenderer,
 };
-use zero_migrate_backend::table_rebuild::{InjectedPrimaryKey, ResolvedRename, TableRebuildPolicy};
+use zeroship_migrate_backend::table_rebuild::{InjectedPrimaryKey, ResolvedRename, TableRebuildPolicy};
 
 impl InjectedPrimaryKey for ResolvedInject {
     fn primary_key(&self) -> Option<&[String]> {
@@ -71,7 +71,7 @@ impl InjectedPrimaryKey for ResolvedInject {
 }
 
 // -- The canonical constraint-`definition` codec MOVED to
-// `zero_migrate_backend::constraint_definition`. It had to: MySQL's drift path
+// `zeroship_migrate_backend::constraint_definition`. It had to: MySQL's drift path
 // BUILDS this body (its `information_schema` stores no rendered constraint text),
 // and a backend in its own crate cannot reach an engine module.
 //
@@ -84,19 +84,19 @@ impl InjectedPrimaryKey for ResolvedInject {
 // COMPARISON text, never an emitted identifier route: `constraint_definition`'s
 // header states the rule and `constraint_definition_is_comparison_text` enforces it
 // now that `pub(crate)` cannot.
-pub(crate) use zero_migrate_backend::constraint_definition::{
+pub(crate) use zeroship_migrate_backend::constraint_definition::{
     constraintdef_cols, quote_ident_if_needed, NOT_VALID_DEFINITION_SUFFIX,
 };
 
 // `GENERATED_PREFIX`, `default_clause` and `generated_clause` MOVED to
-// `zero_migrate_backend::ddl` - all three `DdlEmitter` impls call them, so they had
+// `zeroship_migrate_backend::ddl` - all three `DdlEmitter` impls call them, so they had
 // to go below the vendors with the trait. Imported at the top of this module; the
 // engine's own non-emitter render paths are unchanged callers.
 
-// `sqlite_auto_increment_identity_pk` MOVED to `zero_migrate_sqlite::schema`,
+// `sqlite_auto_increment_identity_pk` MOVED to `zeroship_migrate_sqlite::schema`,
 // shared by that backend's schema and DDL renderers.
 
-// `inline_checks_clause` MOVED to `zero_migrate_backend::ddl`.
+// `inline_checks_clause` MOVED to `zeroship_migrate_backend::ddl`.
 
 // `primary_key_clause` and `null_clause` MOVED to each vendor's DDL module.
 
@@ -830,7 +830,7 @@ fn field_check_constraints(
     dialect: &DialectId,
 ) -> Vec<ConstraintSnapshot> {
     let mut out = Vec::new();
-    let col = zero_migrate_backend::snapshot::quote_constraint_definition_ident(&f.name);
+    let col = zeroship_migrate_backend::snapshot::quote_constraint_definition_ident(&f.name);
 
     // min/max (numeric only - matches plugin-db's `type == "number"` gate).
     if f.ty == "number" {
@@ -1110,7 +1110,7 @@ fn render_json_value_text(value: &IrJsonValue) -> String {
 // `nextval_default_expr` moved down beside the parse that reads what it writes. The
 // two are one spelling, and a vendor introspector needs both. Re-exported so
 // `crate::render::declarative::nextval_default_expr` resolves unchanged.
-pub(crate) use zero_migrate_backend::snapshot::nextval_default_expr;
+pub(crate) use zeroship_migrate_backend::snapshot::nextval_default_expr;
 
 fn generated_column_snapshot(
     vendors: VendorSet,
@@ -1710,7 +1710,7 @@ pub struct DesiredSchema {
     /// manual impl).
     pub sdk_schemas: BTreeMap<String, serde_json::Value>,
     /// The policy-resolved injection for each table, derived from the same
-    /// [`EffectivePolicy`](zero_migrate_policy::EffectivePolicy) that built the
+    /// [`EffectivePolicy`](zeroship_migrate_policy::EffectivePolicy) that built the
     /// table snapshot. Emission paths use this to distinguish injected indexes
     /// and constraints without a hardcoded system-field vocabulary.
     pub resolved_injects: BTreeMap<String, ResolvedInject>,
@@ -1833,7 +1833,7 @@ pub fn desired_snapshot_for_dialect(
     project_schema: &str,
     descriptors: &[CollectionDescriptor],
     dialect: &DialectId,
-    effective: &zero_migrate_policy::EffectivePolicy,
+    effective: &zeroship_migrate_policy::EffectivePolicy,
 ) -> Result<DesiredSchema, DeclarativeError> {
     // First pass: accumulate EVERY declaration per table as (owner_app, shape),
     // independent of order. Conflict detection + ownership are then derived from
@@ -1915,7 +1915,7 @@ pub(crate) fn build_table_snapshot(
     project_schema: &str,
     d: &CollectionDescriptor,
     dialect: &DialectId,
-    effective: &zero_migrate_policy::EffectivePolicy,
+    effective: &zeroship_migrate_policy::EffectivePolicy,
 ) -> Result<TableSnapshot, DeclarativeError> {
     let inject = ResolvedInject::for_table(effective, project_schema, &d.name)
         .map_err(|error| DeclarativeError::Invalid(error.to_string()))?;
@@ -2354,7 +2354,7 @@ fn build_table_snapshot_impl(
         // `Op::CreateTable`, which is the imperative surface; a schema DECLARATION has no
         // attribute field yet, so there is nothing to carry here rather than something
         // dropped.
-        attributes: zero_migrate_ir::attribute::Attributes::new(),
+        attributes: zeroship_migrate_ir::attribute::Attributes::new(),
         partition_by: None,
         comment: None,
         stored_create_sql: None,
@@ -2436,7 +2436,7 @@ fn desired_snapshot_second_pass(
 }
 
 // `primary_key_columns`, `inline_pk_for_column` and `should_render_table_pk` MOVED
-// to `zero_migrate_backend::ddl`. They READ the snapshot's implicit `<table>_pkey`
+// to `zeroship_migrate_backend::ddl`. They READ the snapshot's implicit `<table>_pkey`
 // index to decide whether a PK is inline or table-level, which every emitter needs
 // on every column clause.
 
@@ -2754,7 +2754,7 @@ fn fk_constraint_name(
 /// capped to the identifier budget by [`crate::plan::author::cap_ident_name`] - and
 /// it is why this takes a `table` the body never sees. A constraint read out of a
 /// live catalog always arrives named, so the backends call
-/// [`zero_migrate_backend::constraint_definition::fk_constraint_snapshot`] with the
+/// [`zeroship_migrate_backend::constraint_definition::fk_constraint_snapshot`] with the
 /// name they already hold, and this resolves `dialect` down to the same function.
 pub(crate) fn ir_fk_constraint_snapshot_for_columns(
     vendors: VendorSet,
@@ -2774,7 +2774,7 @@ pub(crate) fn ir_fk_constraint_snapshot_for_columns(
     let name = explicit_name.map(ToString::to_string).unwrap_or_else(|| {
         crate::render::lower::derived_fk_constraint_name(vendors, table, local_columns)
     });
-    zero_migrate_backend::constraint_definition::fk_constraint_snapshot(
+    zeroship_migrate_backend::constraint_definition::fk_constraint_snapshot(
         name,
         project_schema,
         local_columns,
@@ -3001,7 +3001,7 @@ fn validate_id_prefix(prefix: &str) -> Result<(), DeclarativeError> {
 /// canonical catalog spelling.
 ///
 /// The engine's entry point. The body itself, and every vendor fact in it, is
-/// [`zero_migrate_backend::constraint_definition::fk_definition`] - see there for
+/// [`zeroship_migrate_backend::constraint_definition::fk_definition`] - see there for
 /// the catalog normalisations the DDL spelling does not have. This is the single
 /// line that turns a `DialectId` into the vendor that answers them, which is why a
 /// backend that already knows which vendor it is calls that function directly.
@@ -3018,7 +3018,7 @@ fn fk_definition_for_dialect(
     not_valid: bool,
     dialect: &DialectId,
 ) -> String {
-    zero_migrate_backend::constraint_definition::fk_definition(
+    zeroship_migrate_backend::constraint_definition::fk_definition(
         local_columns,
         project_schema,
         target,
@@ -3091,7 +3091,7 @@ fn reject_cross_app_ref(table: &str, target: &str) -> Result<(), DeclarativeErro
 /// unchanged. It travelled with [`IrLowerError`](crate::render::lower::IrLowerError),
 /// whose `Snapshot` variant is `#[from] DeclarativeError`; every one of its payloads
 /// is a `String`, a `&'static str` or a `Vec<String>`, so nothing came with it.
-pub use zero_migrate_backend::error::DeclarativeError;
+pub use zeroship_migrate_backend::error::DeclarativeError;
 
 // ---------------------------------------------------------------------------
 // The structured diff result.
@@ -3150,7 +3150,7 @@ pub struct DeclarativePlan {
     /// flattened into `migrations`: a rebuild is not a single `up` statement - it is
     /// a structured engine-mode operation with `foreign_keys` toggles straddling the
     /// transaction (the SQLite in-txn no-op rule), driven by
-    /// `zero_migrate_sqlite::SqliteBackend::rebuild_one` (named in prose, not
+    /// `zeroship_migrate_sqlite::SqliteBackend::rebuild_one` (named in prose, not
     /// linked: the SQLite backend is its own crate and this one depends on it, so
     /// core cannot name it in a path). The
     /// destructive/approval gate keys on the paired migration's flags
@@ -3186,7 +3186,7 @@ pub struct DeclarativePlan {
 /// is handed the spec and `RenameStep::TableRebuild` carries this, so neither the
 /// trait nor the lowered-plan vocabulary could be stated without it. The DIFFER that
 /// produces these - every line of the SQLite rebuild-selection logic below - stayed.
-pub use zero_migrate_backend::table_rebuild::TableRebuild;
+pub use zeroship_migrate_backend::table_rebuild::TableRebuild;
 
 impl DeclarativePlan {
     /// True if the plan reconciles nothing - no plain migrations, no renames, AND
@@ -3253,10 +3253,10 @@ impl DeclarativePlan {
     /// reader who opens one migration's advisories must not find an empty list when
     /// the truth is that nobody looked.
     ///
-    /// [`Advisory`]: zero_migrate_backend::advisory::Advisory
-    /// [`IndexCoverage`]: zero_migrate_backend::advisory::IndexCoverage
-    /// [`rule::FK_WITHOUT_INDEX`]: zero_migrate_backend::advisory::rule::FK_WITHOUT_INDEX
-    /// [`rule::ANALYZER_DIALECT_UNSUPPORTED`]: zero_migrate_backend::advisory::rule::ANALYZER_DIALECT_UNSUPPORTED
+    /// [`Advisory`]: zeroship_migrate_backend::advisory::Advisory
+    /// [`IndexCoverage`]: zeroship_migrate_backend::advisory::IndexCoverage
+    /// [`rule::FK_WITHOUT_INDEX`]: zeroship_migrate_backend::advisory::rule::FK_WITHOUT_INDEX
+    /// [`rule::ANALYZER_DIALECT_UNSUPPORTED`]: zeroship_migrate_backend::advisory::rule::ANALYZER_DIALECT_UNSUPPORTED
     #[must_use]
     pub fn advisories(&self, vendors: VendorSet) -> Vec<(Migration, Vec<Advisory>)> {
         let all = self.all_migrations();
@@ -3298,7 +3298,7 @@ impl DeclarativePlan {
                         .all(|col| plan_indexed.iter().any(|i| i.eq_ignore_ascii_case(col)));
                     if all_covered {
                         advs.retain(|a| {
-                            a.rule != zero_migrate_backend::advisory::rule::FK_WITHOUT_INDEX
+                            a.rule != zeroship_migrate_backend::advisory::rule::FK_WITHOUT_INDEX
                         });
                     }
                 }
@@ -3424,7 +3424,7 @@ impl DeclarativeAuthor {
     /// table's implicit PRIMARY KEY relation is stated. The differ needs it on every
     /// index it considers emitting DDL for, because that one index is the one it
     /// must not.
-    fn catalog_fold(&self) -> &'static dyn zero_migrate_backend::fold::CatalogFoldPolicy {
+    fn catalog_fold(&self) -> &'static dyn zeroship_migrate_backend::fold::CatalogFoldPolicy {
         crate::render::backends::vendor(self.vendors, &self.dialect).catalog_fold
     }
 
@@ -3493,7 +3493,7 @@ impl DeclarativeAuthor {
         live: &SchemaSnapshot,
         live_ownership: &HashMap<String, String>,
         hints: &[RenameHint],
-        effective: &zero_migrate_policy::EffectivePolicy,
+        effective: &zeroship_migrate_policy::EffectivePolicy,
     ) -> Result<DeclarativePlan, DeclarativeError> {
         self.diff_with_known_fk_targets(
             desired,
@@ -3600,7 +3600,7 @@ impl DeclarativeAuthor {
         live: &SchemaSnapshot,
         live_ownership: &HashMap<String, String>,
         hints: &[RenameHint],
-        effective: &zero_migrate_policy::EffectivePolicy,
+        effective: &zeroship_migrate_policy::EffectivePolicy,
         known_fk_targets: &BTreeSet<String>,
     ) -> Result<DeclarativePlan, DeclarativeError> {
         // The ownership map travels alongside the union; the diff itself operates
@@ -4540,7 +4540,7 @@ impl DeclarativeAuthor {
         table: &str,
         tmp_table: &str,
         desired: &DesiredSchema,
-        effective: &zero_migrate_policy::EffectivePolicy,
+        effective: &zeroship_migrate_policy::EffectivePolicy,
         preserve_stored_shape: bool,
         column_renames: &[&ResolvedRename],
     ) -> Result<String, DeclarativeError> {
@@ -4814,7 +4814,7 @@ impl DeclarativeAuthor {
         dt: &TableSnapshot,
         table_renames: &[&ResolvedRename],
         reason: String,
-        effective: &zero_migrate_policy::EffectivePolicy,
+        effective: &zeroship_migrate_policy::EffectivePolicy,
     ) -> Result<TableRebuild, DeclarativeError> {
         // Render the body under the real table identity so derived constraint names
         // remain stable, while self-referential FKs target the temporary table for
@@ -5036,7 +5036,7 @@ impl DeclarativeAuthor {
         live_sdk_schema: &serde_json::Value,
         live_owner: &str,
         known_live_tables: &BTreeSet<String>,
-        effective: &zero_migrate_policy::EffectivePolicy,
+        effective: &zeroship_migrate_policy::EffectivePolicy,
     ) -> Result<crate::render::step::RenameStep, DeclarativeError> {
         match self.schema_renderer().column_rename_strategy() {
             ColumnRenameStrategy::ExpandContract => {
@@ -5116,7 +5116,7 @@ impl DeclarativeAuthor {
         live_sdk_schema: &serde_json::Value,
         live_owner: &str,
         known_live_tables: &BTreeSet<String>,
-        effective: &zero_migrate_policy::EffectivePolicy,
+        effective: &zeroship_migrate_policy::EffectivePolicy,
     ) -> Result<TableRebuild, DeclarativeError> {
         let backend = crate::render::backends::schema_renderer(self.vendors, &self.dialect);
         // ---- desired snapshot: live with `from`->`to` renamed (type unchanged) ----
@@ -6552,7 +6552,7 @@ mod snapshot_builder_refactor_safety_tests {
     //! field + a ref/FK + an encrypted+masked column + an FTS field + a named
     //! index) on BOTH dialects.
 
-    fn confined_policy() -> zero_migrate_policy::EffectivePolicy {
+    fn confined_policy() -> zeroship_migrate_policy::EffectivePolicy {
         crate::test_fixtures::confined_charter()
     }
 
@@ -7154,7 +7154,7 @@ mod snapshot_builder_refactor_safety_tests {
 #[cfg(test)]
 mod advisory_seam_tests {
     use super::*;
-    use zero_migrate_backend::advisory::rule;
+    use zeroship_migrate_backend::advisory::rule;
 
     /// Build a minimal plain migration carrying `up` SQL (advisory analysis only
     /// reads `up`; the other fields are inert for this seam).
@@ -7454,7 +7454,7 @@ mod mysql_storage_agreement_tests {
     //! [`a_bounded_case_insensitive_string_is_refused_before_this_renderer_sees_it`].
     use super::{column_snapshot_for_field, FieldDescriptor};
     use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
-    use zero_migrate_backend::schema::KeyStorageEvidence;
+    use zeroship_migrate_backend::schema::KeyStorageEvidence;
 
     fn field(name: &str, ty: &str) -> FieldDescriptor {
         FieldDescriptor {
@@ -7637,7 +7637,7 @@ mod mysql_storage_agreement_tests {
         // dialect where breaking it costs the width rather than the facet.
         for dialect in [&MYSQL, &POSTGRES, &SQLITE] {
             let op = Op::CreateTable {
-                attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
                 name: "things".into(),
                 columns: vec![bounded_ci_column()],
                 primary_key: None,
@@ -7701,7 +7701,7 @@ mod inline_check_rename_tests {
     //! rather than CORRUPT. Every one of them is a way a plain substring swap is wrong.
     use super::{rename_quoted_column_in_sql, SchemaRenderer};
     use crate::test_fixtures::{MYSQL, SQLITE};
-    use zero_migrate_ir::dialect::DialectId;
+    use zeroship_migrate_ir::dialect::DialectId;
 
     fn backend(dialect: &DialectId) -> &'static dyn SchemaRenderer {
         crate::render::backends::schema_renderer(crate::test_fixtures::VENDORS, dialect)
@@ -7838,9 +7838,9 @@ mod derived_index_alias_tests {
     };
     use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
     use std::collections::BTreeMap;
-    use zero_migrate_ir::dialect::DialectId;
+    use zeroship_migrate_ir::dialect::DialectId;
 
-    fn effective() -> zero_migrate_policy::EffectivePolicy {
+    fn effective() -> zeroship_migrate_policy::EffectivePolicy {
         crate::test_fixtures::no_inject("app")
     }
 

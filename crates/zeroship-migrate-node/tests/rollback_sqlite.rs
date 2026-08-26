@@ -27,14 +27,14 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::apply::executor::{RollbackOptions, RollbackTarget};
-use zero_migrate::approval::Approval;
-use zero_migrate::conn::ExecutorConfig;
-use zero_migrate::{MigrationEngine, MigrationIr};
-use zero_migrate_sqlite::SqliteBackend;
-use zero_migrate_sqlite::DIALECT as SQLITE;
+use zeroship_migrate::apply::executor::{RollbackOptions, RollbackTarget};
+use zeroship_migrate::approval::Approval;
+use zeroship_migrate::conn::ExecutorConfig;
+use zeroship_migrate::{MigrationEngine, MigrationIr};
+use zeroship_migrate_sqlite::SqliteBackend;
+use zeroship_migrate_sqlite::DIALECT as SQLITE;
 
-use zero_migrate_node::verbs::rollback_with_locked_backend;
+use zeroship_migrate_node::verbs::rollback_with_locked_backend;
 
 const OWNER_APP: &str = "app_rollback_host";
 const PROJECT_SCHEMA: &str = "app_rollback_host";
@@ -151,7 +151,7 @@ async fn deploy(be: &SqliteBackend, envelopes: &[&str]) -> Vec<String> {
         .map(|envelope| serde_json::from_str(envelope).expect("envelope parses as MigrationIr"))
         .collect();
     let policy = support::no_inject(PROJECT_SCHEMA);
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .deploy_envelopes(
             &parsed,
             be,
@@ -272,7 +272,7 @@ fn a_rollback_driven_through_the_verb_removes_the_table_the_deploy_created() {
         // A same-instance re-acquire is refused while the lock is held, so this
         // succeeding is the evidence the verb released what it took.
         let lock_free_after = {
-            use zero_migrate::MigrationBackend;
+            use zeroship_migrate::MigrationBackend;
             be.acquire_project_lock(&exec_cfg()).await.is_ok()
         };
         (

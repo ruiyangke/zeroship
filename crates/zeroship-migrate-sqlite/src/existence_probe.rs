@@ -1,4 +1,4 @@
-use zero_migrate_backend::existence_probe::ExistenceProbePolicy;
+use zeroship_migrate_backend::existence_probe::ExistenceProbePolicy;
 
 #[derive(Debug)]
 pub(crate) struct SqliteExistenceProbePolicy;

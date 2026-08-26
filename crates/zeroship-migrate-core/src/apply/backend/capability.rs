@@ -10,7 +10,7 @@ use crate::render::declarative::DesiredSchema;
 // now live with the backend contract, beside the `BackfillSpec` a vendor executor
 // is handed. Re-exported so `capability::{BackfillSpec, BackfillOutcome,
 // BackfillError}` still resolve.
-pub use zero_migrate_backend::backfill::{BackfillError, BackfillOutcome, BackfillSpec};
+pub use zeroship_migrate_backend::backfill::{BackfillError, BackfillOutcome, BackfillSpec};
 // -- The online capability, whole: the trait, the `OnlineIntent` it is handed and
 // the `OnlineError` it refuses with. Nothing in `run_online_backfill`'s signature
 // reaches the engine any more, and - since the phases were inverted and the engine
@@ -21,7 +21,7 @@ pub use zero_migrate_backend::backfill::{BackfillError, BackfillOutcome, Backfil
 // `dry_run_declarative` takes a `DeclarativeDeployPlan` and a `DesiredSchema` -
 // engine orchestration results, not vocabulary a backend speaks.
 // Re-exported so every historical `capability::...` path still resolves.
-pub use zero_migrate_backend::capability::{
+pub use zeroship_migrate_backend::capability::{
     BackendCapability, DryRunReport, MigrationResult, OnlineError, OnlineSchemaChange, ShadowConfig,
 };
 

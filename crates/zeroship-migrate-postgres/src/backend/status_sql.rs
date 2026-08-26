@@ -1,7 +1,7 @@
 //! The PostgreSQL status read: net journal state under a `REPEATABLE READ READ
 //! ONLY` snapshot.
 //!
-//! This body used to live in `zero_migrate::ops::status` under the neutral name `status`,
+//! This body used to live in `zeroship_migrate::ops::status` under the neutral name `status`,
 //! and from there it reached back into this backend's own `journal_sql` repeatedly.
 //! Core's status verb WAS PostgreSQL's status verb - nothing about the signature
 //! (`&D: SqlSession`, a `dialect` argument) could have routed it anywhere else, and
@@ -9,24 +9,24 @@
 //! ONLY` is not a statement MySQL or SQLite accepts.
 //!
 //! Its DIALECT-NEUTRAL peer is
-//! `zero_migrate::ops::status::status_via_backend`, which reads the
-//! same net state through [`MigrationBackend`](zero_migrate_backend::backend::MigrationBackend)
+//! `zeroship_migrate::ops::status::status_via_backend`, which reads the
+//! same net state through [`MigrationBackend`](zeroship_migrate_backend::backend::MigrationBackend)
 //! and is what the shipped CLI/addon path uses on every dialect including this one.
-//! The two differ in ONE field: [`MigrationStatus::rolled_back`](zero_migrate_backend::status::MigrationStatus::rolled_back) is populated here
+//! The two differ in ONE field: [`MigrationStatus::rolled_back`](zeroship_migrate_backend::status::MigrationStatus::rolled_back) is populated here
 //! and left empty there, because the neutral trait exposes rollback VERSION IDS
 //! (`net_rolled_back_versions`) while this path reads the full
-//! [`RolledBackEntry`](zero_migrate_backend::journal::RolledBackEntry) detail. MySQL and
+//! [`RolledBackEntry`](zeroship_migrate_backend::journal::RolledBackEntry) detail. MySQL and
 //! SQLite have no `net_rolled_back` returning that detail, so the two signatures do
 //! not unify and the field was not forced onto the contract.
 
 use std::collections::HashMap;
 
-use zero_migrate_backend::conn::ExecutorConfig;
-use zero_migrate_backend::driver::SqlSession;
-use zero_migrate_backend::executor::order_pending;
-use zero_migrate_backend::journal::{AppliedEntry, JournalError, Phase};
-use zero_migrate_backend::status::{derive_pending_contract_status, MigrationStatus, StatusError};
-use zero_migrate_ir::migration::{Migration, MigrationId};
+use zeroship_migrate_backend::conn::ExecutorConfig;
+use zeroship_migrate_backend::driver::SqlSession;
+use zeroship_migrate_backend::executor::order_pending;
+use zeroship_migrate_backend::journal::{AppliedEntry, JournalError, Phase};
+use zeroship_migrate_backend::status::{derive_pending_contract_status, MigrationStatus, StatusError};
+use zeroship_migrate_ir::migration::{Migration, MigrationId};
 
 use super::journal_sql;
 
@@ -142,7 +142,7 @@ async fn read_status_snapshot<D: SqlSession>(
     // executor's `compute_superseded` so the two views never diverge.
     let journal_superseded = journal_sql::superseded_versions(conn, cfg).await?;
     let superseded_owned =
-        zero_migrate_backend::executor::compute_superseded(migrations, &journal_superseded);
+        zeroship_migrate_backend::executor::compute_superseded(migrations, &journal_superseded);
     let superseded: std::collections::HashSet<&str> =
         superseded_owned.iter().map(String::as_str).collect();
     let ordered =
@@ -172,7 +172,7 @@ async fn read_status_snapshot<D: SqlSession>(
 mod legacy_snapshot_transaction_tests {
     use super::*;
     use std::cell::{Cell, RefCell};
-    use zero_migrate_backend::driver::{Bind, DbError, Row};
+    use zeroship_migrate_backend::driver::{Bind, DbError, Row};
 
     struct RecordingSession {
         batches: RefCell<Vec<String>>,

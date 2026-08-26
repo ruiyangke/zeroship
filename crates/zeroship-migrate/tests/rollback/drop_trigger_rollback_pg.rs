@@ -11,18 +11,18 @@ use crate::support;
 use std::collections::BTreeMap;
 
 use crate::support::PgDevSession;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::apply::executor::{rollback, LockMode, RollbackRequest, RollbackTarget};
-use zero_migrate::driver::SqlSession;
-use zero_migrate::model::expr::{Expr, UnaryOp};
-use zero_migrate::model::ir::{ForEach, Op, TriggerAction, TriggerEvent, TriggerTiming};
-use zero_migrate::model::migration::Migration;
-use zero_migrate::render::step::PlanStep;
-use zero_migrate::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::apply::executor::{rollback, LockMode, RollbackRequest, RollbackTarget};
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::model::expr::{Expr, UnaryOp};
+use zeroship_migrate::model::ir::{ForEach, Op, TriggerAction, TriggerEvent, TriggerTiming};
+use zeroship_migrate::model::migration::Migration;
+use zeroship_migrate::render::step::PlanStep;
+use zeroship_migrate::{
     fold_ops, guard_for, Approval, EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor,
     LiveSchema, MigrationEngine,
 };
-use zero_migrate_postgres::PostgresBackend;
+use zeroship_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_drop_trigger_rollback_pg";
 const PROJECT_SCHEMA: &str = "zero_migrate";
@@ -110,10 +110,10 @@ fn registry(tables: &[&str]) -> BTreeMap<String, String> {
 }
 
 fn lower_drop_from_history(history: &[Op], table: &str, if_exists: Option<bool>) -> Migration {
-    let dialect = &zero_migrate_postgres::DIALECT;
+    let dialect = &zeroship_migrate_postgres::DIALECT;
     let pol = policy(PROJECT_SCHEMA);
     let folded = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         history,
         dialect,
         PROJECT_SCHEMA,
@@ -139,7 +139,7 @@ fn lower_drop_from_history(history: &[Op], table: &str, if_exists: Option<bool>)
     .to_string();
     let guard = GuardConfig::from_policy(pol.clone(), (*dialect).clone());
     let artifact = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT_SCHEMA,
         OWNER,
         dialect,
@@ -221,17 +221,17 @@ async fn apply_doc(
     let backend = PostgresBackend::new_generic(session);
     let pol = policy(&cfg.project_schema);
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &pol,
     );
-    let guard = GuardConfig::from_policy(pol.clone(), zero_migrate_postgres::DIALECT);
+    let guard = GuardConfig::from_policy(pol.clone(), zeroship_migrate_postgres::DIALECT);
     let folded = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         history,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &cfg.project_schema,
         &pol,
     )
@@ -240,10 +240,10 @@ async fn apply_doc(
     let artifact = author
         .load_and_lower_guarded(ir, OWNER, &registry(&[LIVE_TABLE]), &live, &guard)
         .map_err(|error| format!("load and lower the guarded plan: {error}"))?;
-    let authored: zero_migrate::MigrationIr =
+    let authored: zeroship_migrate::MigrationIr =
         serde_json::from_str(ir).map_err(|error| format!("parse the authored IR: {error}"))?;
     history.extend(authored.ops);
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             approval,
@@ -286,10 +286,10 @@ async fn live_trigger_definition(
         .and_then(|row| row.try_get::<_, String>("definition").ok()))
 }
 
-fn pg_guard(cfg: &ExecutorConfig) -> Box<dyn zero_migrate::MigrationGuard> {
+fn pg_guard(cfg: &ExecutorConfig) -> Box<dyn zeroship_migrate::MigrationGuard> {
     guard_for(
-        zero_migrate::shipping_vendors(),
-        &GuardConfig::from_policy(policy(&cfg.project_schema), zero_migrate_postgres::DIALECT),
+        zeroship_migrate::shipping_vendors(),
+        &GuardConfig::from_policy(policy(&cfg.project_schema), zeroship_migrate_postgres::DIALECT),
     )
 }
 
@@ -299,8 +299,8 @@ async fn positive_unguarded_drop_trigger_from_folded_history_has_create_inverse(
 
     assert_eq!(migration.down.as_deref(), Some(orders_inverse()));
     guard_for(
-        zero_migrate::shipping_vendors(),
-        &GuardConfig::from_policy(policy(RECORDED_SCHEMA), zero_migrate_postgres::DIALECT),
+        zeroship_migrate::shipping_vendors(),
+        &GuardConfig::from_policy(policy(RECORDED_SCHEMA), zeroship_migrate_postgres::DIALECT),
     )
     .as_ref()
     .check(migration.down.as_deref().expect("the inverse exists"))
@@ -343,9 +343,9 @@ async fn positive_same_named_triggers_on_two_tables_restore_only_the_dropped_one
     let both = vec![orders.clone(), invoices.clone()];
 
     let folded_both = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &both,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         PROJECT_SCHEMA,
         &policy(PROJECT_SCHEMA),
     )
@@ -369,9 +369,9 @@ async fn positive_same_named_triggers_on_two_tables_restore_only_the_dropped_one
 
     let history_after_drop = vec![orders, invoices, drop_trigger_op(ORDERS, None)];
     let folded_after_drop = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &history_after_drop,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         PROJECT_SCHEMA,
         &policy(PROJECT_SCHEMA),
     )

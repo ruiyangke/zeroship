@@ -9,8 +9,8 @@
 //! `RecoveredFormatCheck`, `sql_literal_fingerprint`,
 //! `catalog_expression_fingerprint`, `id_default_from_literal_fingerprint`,
 //! `uuid_column_metadata` and `column_metadata` — was `pub(crate)` in
-//! `zero_migrate::render::value_format`. It moved into
-//! `zero_migrate_backend::value_format` because MySQL's drift path reads every column
+//! `zeroship_migrate::render::value_format`. It moved into
+//! `zeroship_migrate_backend::value_format` because MySQL's drift path reads every column
 //! default and format `CHECK` through it, and `pub(crate)` DOES NOT SURVIVE A CRATE
 //! BOUNDARY: the moved file's `crate` is the contract crate now, so `pub(crate)`
 //! there would have hidden the items from every caller including the engine.
@@ -93,7 +93,7 @@
 //! the failure mode the sibling censuses warn about when a per-item floor is replaced
 //! by a total.
 //!
-//! [`IdDefaultSnapshot`]: zero_migrate::model::snapshot::IdDefaultSnapshot
+//! [`IdDefaultSnapshot`]: zeroship_migrate::model::snapshot::IdDefaultSnapshot
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -342,7 +342,7 @@ fn the_catalog_comparison_is_never_reached_from_a_vendors_emitters() {
          answers the DESIRED shape the engine will compare an introspection against, \
          and it consults this vendor's own `ValueFormatRenderer` to do it, so a call \
          from `value_format.rs` is a cycle rather than a shortcut.\n\nThese items were \
-         `pub(crate)` in `zero_migrate::render::value_format` until the MySQL \
+         `pub(crate)` in `zeroship_migrate::render::value_format` until the MySQL \
          execution half moved into a vendor crate; `pub(crate)` cannot cross a crate \
          boundary, so this census is what is left of that refusal.",
         violations.join("\n")

@@ -1,7 +1,7 @@
 //! PostgreSQL live-catalog introspection for drift, and the PG journal read that
 //! feeds the checksum comparison.
 //!
-//! The VENDOR half of [`apply::drift`](zero_migrate_backend::drift), which keeps the
+//! The VENDOR half of [`apply::drift`](zeroship_migrate_backend::drift), which keeps the
 //! dialect-blind half: the snapshot/report types, the pure `diff_snapshots`, and the
 //! `compare_applied_to_set` every backend shares. Everything here names
 //! `pg_catalog` / `information_schema`, parses what those return, or exists only to
@@ -18,14 +18,14 @@ use std::collections::BTreeMap;
 
 use super::journal_sql;
 use crate::DIALECT;
-use zero_migrate_backend::attribute::AttrShape;
-use zero_migrate_backend::conn::ExecutorConfig;
-use zero_migrate_backend::drift::{
+use zeroship_migrate_backend::attribute::AttrShape;
+use zeroship_migrate_backend::conn::ExecutorConfig;
+use zeroship_migrate_backend::drift::{
     compare_applied_to_set, AuthoredViewBody, ChecksumDriftReport, DriftError,
 };
-use zero_migrate_backend::driver::SqlSession;
-use zero_migrate_backend::snapshot::parse_nextval_sequence_ref;
-use zero_migrate_backend::snapshot::{
+use zeroship_migrate_backend::driver::SqlSession;
+use zeroship_migrate_backend::snapshot::parse_nextval_sequence_ref;
+use zeroship_migrate_backend::snapshot::{
     normalize_sequence_max_value, normalize_sequence_min_value, ColumnCollationSnapshot,
     ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, FunctionIdentity, FunctionKey,
     GeneratedKindSnapshot, IdDefaultSnapshot, IndexElementSnapshot, IndexSnapshot,
@@ -33,18 +33,18 @@ use zero_migrate_backend::snapshot::{
     SchemaObjectSnapshot, SchemaSnapshot, SequenceDataTypeSnapshot, SequenceSnapshot,
     TableSnapshot, TriggerIdentity, TriggerKey, VendorObjectIdentities, ViewSnapshot,
 };
-use zero_migrate_ir::attribute::{AttrKey, Attributes};
-use zero_migrate_ir::ir::IrScalar;
-use zero_migrate_ir::ir::{
+use zeroship_migrate_ir::attribute::{AttrKey, Attributes};
+use zeroship_migrate_ir::ir::IrScalar;
+use zeroship_migrate_ir::ir::{
     IdentityCol, IndexSortOrder, PartitionBoundValue, PartitionBounds, PartitionSpec, PolicyCmd,
     SafeI64, SafeU64, SequenceOwnedBy, SequenceRef, TriggerEvent, TriggerTiming,
 };
-use zero_migrate_ir::migration::Migration;
+use zeroship_migrate_ir::migration::Migration;
 // The value-format comparison seam, entered with THIS vendor's own renderers. The
 // engine's `render::value_format` doors take a `&DialectId` and resolve a renderer
 // out of the registry, which is the round trip a vendor cannot participate in; the
 // contract crate's copies take the renderers directly, so a vendor passes its own.
-use zero_migrate_backend::value_format::{
+use zeroship_migrate_backend::value_format::{
     catalog_expression_fingerprint, catalog_id_default, catalog_uuid_id_default,
     recover_format_check, RecoveredFormatCheck, VendorRules,
 };
@@ -56,9 +56,9 @@ use zero_migrate_backend::value_format::{
 /// [`journal_sql::applied`]):
 ///
 /// - the supplied set has a migration with that version whose checksum differs
-/// => [`ChecksumDrift`](zero_migrate_backend::drift::ChecksumDrift) (the migration SQL was mutated after apply, or the
+/// => [`ChecksumDrift`](zeroship_migrate_backend::drift::ChecksumDrift) (the migration SQL was mutated after apply, or the
 /// journal row was tampered - scenario 36);
-/// - the supplied set has NO migration with that version => [`OrphanJournal`](zero_migrate_backend::drift::OrphanJournal).
+/// - the supplied set has NO migration with that version => [`OrphanJournal`](zeroship_migrate_backend::drift::OrphanJournal).
 ///
 /// The recorded checksum used is the one [`journal_sql::applied`] returns, which is
 /// the **latest `completed` event's** checksum for the version - correct across
@@ -425,7 +425,7 @@ const VIEW_BODY_PROBE_VIEW: &str = "zm_view_body_probe";
 /// Put a COMPARABLE view body on both sides of a drift check, using the server as
 /// the only normaliser.
 ///
-/// **WHY THIS EXISTS AS A SEPARATE STEP.** `zero_migrate::diff_snapshots` is pure and has no
+/// **WHY THIS EXISTS AS A SEPARATE STEP.** `zeroship_migrate::diff_snapshots` is pure and has no
 /// connection, and the two snapshots it compares do not carry the same
 /// representation of a view body. A folded snapshot carries
 /// [`ViewSnapshot::authored_query`] - the typed `SelectAst` an author wrote - and
@@ -618,7 +618,7 @@ async fn resolve_view_bodies_in_transaction<D: SqlSession>(
 /// the crate's raw escape primitive, which produced correct bytes for no stated
 /// dialect.
 fn pg_view_ident(ident: &str) -> String {
-    zero_migrate_backend::dml::escape_quote_ident_for_backend(ident, &crate::dml::RENDERER)
+    zeroship_migrate_backend::dml::escape_quote_ident_for_backend(ident, &crate::dml::RENDERER)
 }
 
 async fn probe_one_view_body<D: SqlSession>(
@@ -950,7 +950,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
                 // the live snapshot comparable to a folded one: `TableSnapshot::eq` excludes
                 // this field precisely because filling it on one side only would report every
                 // attribute-carrying table as drifted.
-                attributes: zero_migrate_ir::attribute::Attributes::new(),
+                attributes: zeroship_migrate_ir::attribute::Attributes::new(),
                 partition_by: None,
                 comment: r.try_get("comment").ok().flatten(),
                 // PG recovers CHECK / generated / partial-index references from the
@@ -1271,7 +1271,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
                 let schema: Option<String> = r.try_get("default_sequence_schema").ok().flatten();
                 let name: Option<String> = r.try_get("default_sequence_name").ok().flatten();
                 name.map(|name| {
-                    zero_migrate_backend::snapshot::nextval_default_expr(&SequenceRef {
+                    zeroship_migrate_backend::snapshot::nextval_default_expr(&SequenceRef {
                         name,
                         schema,
                     })
@@ -1843,7 +1843,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
 
 fn recover_nextval_default(expr: Option<String>) -> Option<String> {
     let sequence = parse_nextval_sequence_ref(expr.as_deref()?)?;
-    Some(zero_migrate_backend::snapshot::nextval_default_expr(
+    Some(zeroship_migrate_backend::snapshot::nextval_default_expr(
         &sequence,
     ))
 }
@@ -1950,10 +1950,10 @@ fn pg_foreign_key_definition(
 
     let mut definition = format!(
         "FOREIGN KEY ({}) REFERENCES {}.{}({})",
-        zero_migrate_backend::constraint_definition::constraintdef_cols(local_columns),
-        zero_migrate_backend::constraint_definition::quote_ident_if_needed(referenced_schema),
-        zero_migrate_backend::constraint_definition::quote_ident_if_needed(referenced_table),
-        zero_migrate_backend::constraint_definition::constraintdef_cols(referenced_columns),
+        zeroship_migrate_backend::constraint_definition::constraintdef_cols(local_columns),
+        zeroship_migrate_backend::constraint_definition::quote_ident_if_needed(referenced_schema),
+        zeroship_migrate_backend::constraint_definition::quote_ident_if_needed(referenced_table),
+        zeroship_migrate_backend::constraint_definition::constraintdef_cols(referenced_columns),
     );
 
     match match_type {
@@ -1991,7 +1991,7 @@ fn pg_foreign_key_definition(
             let _ = write!(
                 definition,
                 " ({})",
-                zero_migrate_backend::constraint_definition::constraintdef_cols(delete_set_columns)
+                zeroship_migrate_backend::constraint_definition::constraintdef_cols(delete_set_columns)
             );
         }
     } else if !delete_set_columns.is_empty() {

@@ -1,6 +1,6 @@
 //! A backend's spelling stays behind its `BackendVendor`, and privacy is what enforces it.
 //!
-//! [`BackendVendor`](zero_migrate_backend::registry::BackendVendor)'s own documentation
+//! [`BackendVendor`](zeroship_migrate_backend::registry::BackendVendor)'s own documentation
 //! makes this claim: "Nothing else of a vendor crate's surface is public API — the
 //! renderer structs themselves stay crate-private, so a caller cannot reach past this
 //! descriptor to a vendor's spelling without going through a registry."
@@ -14,7 +14,7 @@
 //! # Why a source census and not a compile check
 //!
 //! Privacy is invisible from outside the crate: a test cannot ask "is
-//! `zero_migrate_postgres::dml` private?", it can only fail to compile if it tries to use
+//! `zeroship_migrate_postgres::dml` private?", it can only fail to compile if it tries to use
 //! it — and a `compile_fail` doctest per module per vendor would pass for any reason at
 //! all, including a typo'd path. Reading the declaration is the only way to distinguish
 //! "private" from "absent", and the difference matters: see the liveness floor below.

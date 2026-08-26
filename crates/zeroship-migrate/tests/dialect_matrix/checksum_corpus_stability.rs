@@ -26,8 +26,8 @@
 use crate::dialect_corpus;
 
 use sha2::{Digest, Sha256};
-use zero_migrate::model::ir::CanonicalOpList;
-use zero_migrate::{Checksum, MigrationFlags};
+use zeroship_migrate::model::ir::CanonicalOpList;
+use zeroship_migrate::{Checksum, MigrationFlags};
 
 /// Frozen, dialect-neutral flags. `of_ir` takes no dialect parameter; these are
 /// the derived-then-overridden neutral flags its contract requires.

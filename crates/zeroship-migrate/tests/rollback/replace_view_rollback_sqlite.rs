@@ -30,14 +30,14 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::apply::executor::{
+use zeroship_migrate::apply::executor::{
     rollback, LockMode, RollbackError, RollbackRequest, RollbackTarget,
 };
-use zero_migrate::model::ir::Op;
-use zero_migrate::model::migration::Migration;
-use zero_migrate::render::step::PlanStep;
-use zero_migrate::{Approval, ExecutorConfig, IrAuthor, LiveSchema, MigrationEngine};
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate::model::ir::Op;
+use zeroship_migrate::model::migration::Migration;
+use zeroship_migrate::render::step::PlanStep;
+use zeroship_migrate::{Approval, ExecutorConfig, IrAuthor, LiveSchema, MigrationEngine};
+use zeroship_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "replace_view_rollback";
 const APP: &str = "app_replace_view_rollback";
@@ -152,25 +152,25 @@ async fn apply_doc(
     approval: Approval,
 ) -> Vec<Migration> {
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
-    let document = zero_migrate::model::load::load_ir_document(
-        zero_migrate::shipping_vendors(),
+    let document = zeroship_migrate::model::load::load_ir_document(
+        zeroship_migrate::shipping_vendors(),
         ir,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         reg,
         None,
     )
     .expect("load gate (sqlite)");
-    let folded = zero_migrate::fold_ops(
-        zero_migrate::shipping_vendors(),
+    let folded = zeroship_migrate::fold_ops(
+        zeroship_migrate::shipping_vendors(),
         history,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         PROJECT,
         &support::confined_charter(),
     )
@@ -180,7 +180,7 @@ async fn apply_doc(
     let plan = author
         .lower_plan(&document, &live)
         .expect("lower the doc plan on SQLite");
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &plan.steps,
             approval,

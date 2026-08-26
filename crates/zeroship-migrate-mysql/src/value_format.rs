@@ -1,13 +1,13 @@
 //! MySQL value-format spelling and catalog normalization.
 
 use crate::dml::grammar_string_literal;
-use zero_migrate_backend::snapshot::{ColumnCollationSnapshot, IdDefaultSnapshot};
-use zero_migrate_backend::value_format::{
+use zeroship_migrate_backend::snapshot::{ColumnCollationSnapshot, IdDefaultSnapshot};
+use zeroship_migrate_backend::value_format::{
     CatalogSqlContext, LiteralCastKind, ValueFormatColumnMetadata, ValueFormatRenderer,
 };
-use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_ir::expr::Expr;
-use zero_migrate_ir::ir::ValueFormat;
+use zeroship_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::expr::Expr;
+use zeroship_migrate_ir::ir::ValueFormat;
 
 use crate::DIALECT;
 
@@ -109,7 +109,7 @@ impl ValueFormatRenderer for MysqlValueFormatRenderer {
             "1".to_string()
         } else if fingerprint == "false" {
             "0".to_string()
-        } else if zero_migrate_ir::ir::is_decimal_string(&fingerprint) {
+        } else if zeroship_migrate_ir::ir::is_decimal_string(&fingerprint) {
             fingerprint
                 .strip_prefix('+')
                 .unwrap_or(&fingerprint)

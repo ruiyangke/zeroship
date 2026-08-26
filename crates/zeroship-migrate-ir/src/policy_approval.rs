@@ -20,7 +20,7 @@
 //! - `on_destructive` -> requires approval iff the op is [`Op::is_destructive`] (the
 //!   same destructive notion the guard's `safety.destructive_ops` classifier uses).
 
-use zero_migrate_policy::{normalize_object_name, EffectivePolicy, KnobKey, KnobValue, ObjectName};
+use zeroship_migrate_policy::{normalize_object_name, EffectivePolicy, KnobKey, KnobValue, ObjectName};
 
 use crate::ir::Op;
 use crate::policy_registry::{KEY_SAFETY_REQUIRE_APPROVAL, REQUIRE_APPROVAL_VARIANTS};
@@ -194,7 +194,7 @@ mod tests {
     use super::*;
     use crate::dialect::DialectId;
     use crate::policy_registry::builtin_registry;
-    use zero_migrate_policy::{admit, LoadContext, PolicyDoc, RootCharter};
+    use zeroship_migrate_policy::{admit, LoadContext, PolicyDoc, RootCharter};
 
     /// Compose an [`EffectivePolicy`] over the builtin registry from a charter TOML
     /// (the operator obligation) against an empty creator draft.

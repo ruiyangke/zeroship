@@ -24,23 +24,23 @@
 //! quoted identifiers are case-sensitive on PostgreSQL, and refusing it would
 //! break a legitimate migration. Only exact equality is a no-op.
 
-use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::model::validate::validate_ir;
-use zero_migrate::DialectId;
+use zeroship_migrate::model::ir::MigrationIr;
+use zeroship_migrate::model::validate::validate_ir;
+use zeroship_migrate::DialectId;
 
 fn verdict(op: &str, dialect: &DialectId) -> Result<(), String> {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{op}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
-    validate_ir(zero_migrate::shipping_vendors(), &ir, dialect)
+    validate_ir(zeroship_migrate::shipping_vendors(), &ir, dialect)
         .map_err(|e| format!("{}: {}", e.code, e.reason))
 }
 
 #[test]
 fn renaming_a_table_to_its_own_name_is_refused_on_every_dialect() {
     for dialect in [
-        &zero_migrate_postgres::DIALECT,
-        &zero_migrate_sqlite::DIALECT,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
     ] {
         let refusal =
             verdict(r#"{"op":"renameTable","table":"a","to":"a"}"#, dialect).expect_err(&format!(
@@ -62,9 +62,9 @@ fn renaming_a_table_to_a_different_name_is_still_allowed() {
     // The control. Without it, refusing every renameTable would satisfy the test
     // above while breaking the operation entirely.
     for dialect in [
-        &zero_migrate_postgres::DIALECT,
-        &zero_migrate_sqlite::DIALECT,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
     ] {
         verdict(r#"{"op":"renameTable","table":"a","to":"b"}"#, dialect)
             .unwrap_or_else(|e| panic!("{dialect:?}: an ordinary rename must pass: {e}"));
@@ -78,7 +78,7 @@ fn a_rename_that_only_changes_case_is_still_allowed() {
     // refuse a legitimate migration, which is why the fix compares exactly.
     verdict(
         r#"{"op":"renameTable","table":"a","to":"A"}"#,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
     )
     .expect("a case-only rename is a real rename on PostgreSQL and must pass");
 }
@@ -105,8 +105,8 @@ fn renaming_a_column_to_its_own_name_is_refused_on_every_dialect() {
     // distinguish this mistake from the op itself and a loop over it would be
     // asserting the wrong refusal.
     for dialect in [
-        &zero_migrate_postgres::DIALECT,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
     ] {
         let refusal = verdict(
             r#"{"op":"renameColumn","table":"a","from":"c","to":"c","type":"text"}"#,
@@ -127,8 +127,8 @@ fn renaming_a_column_to_its_own_name_is_refused_on_every_dialect() {
 #[test]
 fn renaming_a_column_to_a_different_name_is_still_allowed() {
     for dialect in [
-        &zero_migrate_postgres::DIALECT,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
     ] {
         verdict(
             r#"{"op":"renameColumn","table":"a","from":"c","to":"d","type":"text"}"#,
@@ -145,7 +145,7 @@ fn a_column_rename_that_only_changes_case_is_still_allowed() {
     // name and must not be swept up by an over-eager equality check.
     verdict(
         r#"{"op":"renameColumn","table":"a","from":"c","to":"C","type":"text"}"#,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
     )
     .expect("a case-only column rename is a real rename on PostgreSQL and must pass");
 }

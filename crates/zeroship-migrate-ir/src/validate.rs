@@ -63,7 +63,7 @@ pub const CODE_EXPR_NOT_PORTABLE: &str = "EXPR_NOT_PORTABLE";
 // backend and the target is another". That question is not an authoring one - a plan
 // reaching a single dialect is perfectly valid to author - so it has no place in a
 // taxonomy of authoring-time codes. It is answered at APPLY, by the typed
-// `zero_migrate::engine::EngineError::DialectScopeRefused`, which carries both
+// `zeroship_migrate::engine::EngineError::DialectScopeRefused`, which carries both
 // `DialectId`s as data.
 //
 // A dialect-scope code spelling ONE vendor into its name did sit here, emitted by

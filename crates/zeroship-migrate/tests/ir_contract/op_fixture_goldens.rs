@@ -27,8 +27,8 @@ use crate::support;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use zero_migrate::model::ir::Op;
-use zero_migrate::{resolve_create_table_policy, MigrationIr, CURRENT_IR_VERSION};
+use zeroship_migrate::model::ir::Op;
+use zeroship_migrate::{resolve_create_table_policy, MigrationIr, CURRENT_IR_VERSION};
 
 const MIG_SUFFIX: &str = ".mig.js";
 const GOLDEN_SUFFIX: &str = ".golden.json";

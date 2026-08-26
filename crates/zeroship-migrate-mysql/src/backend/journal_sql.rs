@@ -2,7 +2,7 @@
 //! the net-state reads/writes for [`MysqlBackend`](super::MysqlBackend).
 //!
 //! This is the MySQL analogue of the engine's PostgreSQL journal, spelled over the
-//! same neutral [`zero_migrate_backend::journal`] vocabulary:
+//! same neutral [`zeroship_migrate_backend::journal`] vocabulary:
 //! it carries the SAME logical journal shape - a SINGLE consolidated
 //! `schema_migrations` events table (one row per `applied`/`rolled_back` event,
 //! discriminated by `event_kind`), a `_supersedes` edge table, an inflight
@@ -23,7 +23,7 @@
 //! the meta database is admin-owned - defense-in-depth still holds through the
 //! UPDATE/DELETE triggers + privilege model);
 //! - **placeholders** - every bind is the anonymous positional `?`
-//! ([`PlaceholderStyle::Question`](zero_migrate_backend::backend::PlaceholderStyle::Question)),
+//! ([`PlaceholderStyle::Question`](zeroship_migrate_backend::backend::PlaceholderStyle::Question)),
 //! never Postgres' `$N`;
 //! - **net state** - a MySQL-8 window-function (`ROW_NUMBER OVER (PARTITION BY
 //! version ORDER BY event_seq DESC)`) replaces Postgres' `DISTINCT ON`, and
@@ -34,10 +34,10 @@
 //! reach, exactly as on Postgres - the journal is unforgeable by a confined
 //! creator `up`.
 
-use zero_migrate_backend::conn::ExecutorConfig;
-use zero_migrate_backend::driver::SqlSession;
-use zero_migrate_backend::executor::RollbackMarker;
-use zero_migrate_backend::journal::{
+use zeroship_migrate_backend::conn::ExecutorConfig;
+use zeroship_migrate_backend::driver::SqlSession;
+use zeroship_migrate_backend::executor::RollbackMarker;
+use zeroship_migrate_backend::journal::{
     AppliedEntry, CompletedRecord, EventKind, JournalError, JournaledKind, Phase,
 };
 
@@ -62,7 +62,7 @@ const IMMUTABLE_TRG_PREFIX: &str = "zm_immutable";
 /// crate-wide, so the backtick needle having two was an asymmetry rather than a
 /// difference of kind. The bytes come from this crate's own
 /// [`crate::dml::RENDERER`] now - the one physical home of the backtick spelling -
-/// reached through [`zero_migrate_backend::dml::escape_quote_ident_for_backend`];
+/// reached through [`zeroship_migrate_backend::dml::escape_quote_ident_for_backend`];
 /// the two refusals below are unchanged, including their messages, because they are
 /// semantics rather than spelling.
 ///
@@ -79,7 +79,7 @@ pub(crate) fn quote_ident_mysql(ident: &str) -> Result<String, JournalError> {
             "mysql journal: refusing to quote a NUL-bearing identifier".to_string(),
         ));
     }
-    Ok(zero_migrate_backend::dml::escape_quote_ident_for_backend(
+    Ok(zeroship_migrate_backend::dml::escape_quote_ident_for_backend(
         ident,
         &crate::dml::RENDERER,
     ))
@@ -87,7 +87,7 @@ pub(crate) fn quote_ident_mysql(ident: &str) -> Result<String, JournalError> {
 
 /// Bootstrap (idempotently) the meta database + journal table + supersedes edge
 /// table + inflight side-table + immutability triggers (the MySQL implementation
-/// behind [`zero_migrate_backend::backend::MigrationBackend::ensure_journal`]).
+/// behind [`zeroship_migrate_backend::backend::MigrationBackend::ensure_journal`]).
 ///
 /// Safe to call on every apply: `CREATE {DATABASE,TABLE} IF NOT EXISTS` and
 /// `information_schema.triggers`-guarded `CREATE TRIGGER`s make a re-bootstrap a
@@ -302,7 +302,7 @@ pub(crate) async fn ensure_journal<D: SqlSession>(
             // block is a single simple-query batch (no client-side statement
             // splitting of the trigger body needed - the guard + CREATE TRIGGER are
             // two batches).
-            let exists: Vec<zero_migrate_backend::driver::Row> = conn
+            let exists: Vec<zeroship_migrate_backend::driver::Row> = conn
                 .query(
                     "SELECT trigger_name FROM information_schema.triggers \
                      WHERE trigger_schema = ? AND trigger_name = ?",
@@ -409,7 +409,7 @@ async fn ensure_binary_identity_columns<D: SqlSession>(
 }
 
 fn is_exact_supersession_edge_index(
-    rows: &[zero_migrate_backend::driver::Row],
+    rows: &[zeroship_migrate_backend::driver::Row],
 ) -> Result<bool, JournalError> {
     if rows.len() != 2 {
         return Ok(false);
@@ -437,7 +437,7 @@ fn is_exact_supersession_edge_index(
 }
 
 /// Read the **net applied state** of the journal (the MySQL implementation behind
-/// [`zero_migrate_backend::backend::MigrationBackend::applied`]): the LATEST event per version (by the native
+/// [`zeroship_migrate_backend::backend::MigrationBackend::applied`]): the LATEST event per version (by the native
 /// `event_seq` order) kept only where that latest event is `applied`, UNIONed with
 /// the lone `started` inflight markers for versions that are not net-applied.
 ///
@@ -594,7 +594,7 @@ fn clear_marker_instruction(meta: &str, version: &str) -> String {
 }
 
 /// The versions covered by a net-applied squash (the MySQL implementation behind
-/// [`zero_migrate_backend::backend::MigrationBackend::superseded_versions`]). Only a GENUINE recorded squash
+/// [`zeroship_migrate_backend::backend::MigrationBackend::superseded_versions`]). Only a GENUINE recorded squash
 /// (latest event `applied` AND `kind='squash'`) can supersede.
 ///
 /// # Errors
@@ -632,7 +632,7 @@ pub(crate) async fn superseded_versions<D: SqlSession>(
 
 /// The latest `completed` checksum per **repeatable** version (the MySQL
 /// implementation behind
-/// [`zero_migrate_backend::backend::MigrationBackend::latest_completed_checksums`]) - the repeatable
+/// [`zeroship_migrate_backend::backend::MigrationBackend::latest_completed_checksums`]) - the repeatable
 /// re-run oracle. Only `event_kind='applied' AND kind='repeatable'` rows count.
 ///
 /// # Errors
@@ -766,7 +766,7 @@ pub(crate) async fn record_completed_in_transaction<D: SqlSession>(
 
 /// Append an immutable `rolled_back` event - the MySQL analogue of the PostgreSQL
 /// rollback journal INSERT. That peer is `record_rolled_back` in
-/// `zero_migrate_postgres::backend::journal_sql`, which this crate does not depend on and
+/// `zeroship_migrate_postgres::backend::journal_sql`, which this crate does not depend on and
 /// so cannot link; the contract has no method of its own for it. `?`
 /// placeholders. The applied-only columns stay NULL (the CHECK enforces the
 /// `rolled_back` shape).
@@ -803,7 +803,7 @@ pub(crate) async fn record_rolled_back<D: SqlSession>(
 }
 
 /// Clear the inflight `started` marker for a version - the MySQL analogue of
-/// `clear_inflight` in `zero_migrate_postgres::backend::journal_sql`, which
+/// `clear_inflight` in `zeroship_migrate_postgres::backend::journal_sql`, which
 /// this crate does not depend on and so cannot link. `?` placeholder.
 ///
 /// # Errors
@@ -968,7 +968,7 @@ mod tests {
 
     /// The refusal's operator repair is exactly what the CLI host suite matches on.
     ///
-    /// It was a `format!` inside `zero_migrate_backend::executor::ApplyError`'s
+    /// It was a `format!` inside `zeroship_migrate_backend::executor::ApplyError`'s
     /// `#[error]` attribute until this backend took ownership of it. That put one
     /// backend's table name and one backend's identifier quoting in the neutral
     /// vocabulary, where they would print at any target that reached the arm. The

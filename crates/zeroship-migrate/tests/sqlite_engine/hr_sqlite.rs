@@ -6,9 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::{Approval, ExecutorConfig, LiveSchema, MigrationEngine, MigrationIr};
-use zero_migrate_sqlite::SqliteBackend;
-use zero_migrate_sqlite::DIALECT as SQLITE;
+use zeroship_migrate::{Approval, ExecutorConfig, LiveSchema, MigrationEngine, MigrationIr};
+use zeroship_migrate_sqlite::SqliteBackend;
+use zeroship_migrate_sqlite::DIALECT as SQLITE;
 
 const PROJECT: &str = "app_hr";
 const APP: &str = "app_hr";
@@ -83,7 +83,7 @@ async fn hr_migrations_apply_in_sequence_on_real_sqlite() {
     let exec_cfg = ExecutorConfig::new(PROJECT, PROJECT, support::no_inject(PROJECT));
     let registry = registry();
     let no_inject = support::no_inject(PROJECT);
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
 
     let envelopes: Vec<MigrationIr> =
         serde_json::from_str(HR_PREVIEW_IR).expect("preview fixture is valid migration IR");

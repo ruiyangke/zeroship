@@ -7,7 +7,7 @@
 //! unreachable from the engine, so a core caller that wanted to spell `"x"` had to
 //! pick a named door in `render::dml` and put a vendor on the record. That
 //! visibility WAS the detector, and the reason is measured in
-//! `zero_migrate::render::backends`'s header - two of the three vendors agree on the
+//! `zeroship_migrate::render::backends`'s header - two of the three vendors agree on the
 //! ANSI spelling, so an unrouted emission produces correct bytes and no assertion
 //! about emitted SQL can see the missing routing.
 //!

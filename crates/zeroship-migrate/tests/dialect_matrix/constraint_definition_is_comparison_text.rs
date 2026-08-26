@@ -4,9 +4,9 @@
 //! # What was lost, exactly
 //!
 //! `quote_ident_if_needed`, `constraintdef_cols` and `NOT_VALID_DEFINITION_SUFFIX`
-//! were `pub(crate)` in `zero_migrate::render::declarative`, and
+//! were `pub(crate)` in `zeroship_migrate::render::declarative`, and
 //! `fk_definition_for_dialect` was private to that file. They are now `pub` in
-//! `zero_migrate_backend::constraint_definition`, because MySQL's drift path BUILDS
+//! `zeroship_migrate_backend::constraint_definition`, because MySQL's drift path BUILDS
 //! the constraint body — its `information_schema` stores no rendered constraint text
 //! — and `crates/zero-migrate/src/apply/backend/mysql/` has been extracted into
 //! `zero-migrate-mysql`, which cannot depend on the engine.
@@ -87,7 +87,7 @@ use std::path::{Path, PathBuf};
 /// The items whose visibility widened when the codec moved below the vendors.
 ///
 /// `normalize_fk_action` is deliberately absent: it was already `pub` in
-/// `zero_migrate::schema::query` before the move, so nothing about it degraded, and
+/// `zeroship_migrate::schema::query` before the move, so nothing about it degraded, and
 /// a bare FK-action keyword is not an identifier route.
 const CODEC_ITEMS: &[&str] = &[
     "quote_ident_if_needed",

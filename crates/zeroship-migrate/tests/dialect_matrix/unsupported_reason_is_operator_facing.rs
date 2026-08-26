@@ -31,16 +31,16 @@
 
 use crate::dialect_corpus::corpus;
 use crate::dialect_table::{Disposition, DIALECT_TABLE};
-use zero_migrate::model::op_support::INTERNAL_NO_REFUSAL_REASON;
-use zero_migrate::model::validate::validate_op;
+use zeroship_migrate::model::op_support::INTERNAL_NO_REFUSAL_REASON;
+use zeroship_migrate::model::validate::validate_op;
 
 /// The three dialects the sidecar declares. Both consumers take the same open
 /// dialect identity, so each row passes the same id to the sidecar lookup and the
 /// authoring gate.
-const DIALECTS: [(&str, &zero_migrate::DialectId); 3] = [
-    ("postgres", &zero_migrate_postgres::DIALECT),
-    ("sqlite", &zero_migrate_sqlite::DIALECT),
-    ("mysql", &zero_migrate_mysql::DIALECT),
+const DIALECTS: [(&str, &zeroship_migrate::DialectId); 3] = [
+    ("postgres", &zeroship_migrate_postgres::DIALECT),
+    ("sqlite", &zeroship_migrate_sqlite::DIALECT),
+    ("mysql", &zeroship_migrate_mysql::DIALECT),
 ];
 
 #[test]
@@ -64,7 +64,7 @@ fn no_unsupported_cell_shows_the_operator_an_internal_placeholder() {
             // The cell is declared unsupported, so the authoring gate must refuse.
             // This half is the tautology; it is asserted anyway so a refusal that
             // stops happening is not silently skipped by the message check below.
-            let Err(err) = validate_op(zero_migrate::shipping_vendors(), op, dialect, 0) else {
+            let Err(err) = validate_op(zeroship_migrate::shipping_vendors(), op, dialect, 0) else {
                 offenders.push(format!(
                     "  {kind}/{variant} [{name}] is declared `unsupported` but validate_op \
                      ACCEPTED it, so no message was produced to check"

@@ -23,7 +23,7 @@
 //! assertion it made would have gone on passing over a tree it could no longer see —
 //! the exact failure mode the floors below exist for. The needles are the
 //! DECLARATION (`DialectId::new(`) and the vendor CRATE IDENT
-//! (`zero_migrate_postgres`) now, and each has a positive control that is permanent
+//! (`zeroship_migrate_postgres`) now, and each has a positive control that is permanent
 //! rather than one of the things being ratcheted to zero.
 //!
 //! # Why it needs a test
@@ -96,17 +96,17 @@ use std::path::{Path, PathBuf};
 const VENDORS: &[Vendor] = &[
     Vendor {
         krate: "zero-migrate-postgres",
-        ident: "zero_migrate_postgres",
+        ident: "zeroship_migrate_postgres",
         name_decl: "const NAME: &str = \"postgres\";",
     },
     Vendor {
         krate: "zero-migrate-sqlite",
-        ident: "zero_migrate_sqlite",
+        ident: "zeroship_migrate_sqlite",
         name_decl: "const NAME: &str = \"sqlite\";",
     },
     Vendor {
         krate: "zero-migrate-mysql",
-        ident: "zero_migrate_mysql",
+        ident: "zeroship_migrate_mysql",
         name_decl: "const NAME: &str = \"mysql\";",
     },
 ];

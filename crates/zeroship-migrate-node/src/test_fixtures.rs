@@ -1,4 +1,4 @@
-use zero_migrate::{effective_policy_from_charter_toml, EffectivePolicy};
+use zeroship_migrate::{effective_policy_from_charter_toml, EffectivePolicy};
 
 pub(crate) const CONFINED_CHARTER_TOML: &str = r#"policy_version = 1
 

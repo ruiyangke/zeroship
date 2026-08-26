@@ -1,9 +1,9 @@
 [package]
-name = "zero-migrate-postgres"
+name = "zeroship-migrate-postgres"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The PostgreSQL backend for zero-migrate: this vendor's DML, schema, DDL, value-format and guard behavior, including the pg_query(libpg_query)-backed parse-time deny-list, cross-schema confinement, statement classification and operational advisories. Implements the zero-migrate-backend contract; does NOT depend on the engine."
+description = "The PostgreSQL backend for zeroship-migrate: this vendor's DML, schema, DDL, value-format and guard behavior, including the pg_query(libpg_query)-backed parse-time deny-list, cross-schema confinement, statement classification and operational advisories. Implements the zeroship-migrate-backend contract; does NOT depend on the engine."
 
 [dependencies]
 # Parse SQL with the REAL Postgres parser (libpg_query bindings) so this vendor's
@@ -13,7 +13,7 @@ description = "The PostgreSQL backend for zero-migrate: this vendor's DML, schem
 # (libpg_query).
 #
 # This crate is the SOLE production owner of that C dep now, which was the stated
-# goal. `crates/zero-migrate/Cargo.toml` used to declare `pg_query` independently for
+# goal. `crates/zeroship-migrate/Cargo.toml` used to declare `pg_query` independently for
 # the shape gates under `apply/backend/postgres/**`; those gates are
 # `src/backend/{session,backfill_sql,precondition}.rs` in THIS crate, and the engine's
 # entry moved to `[dev-dependencies]` for one remaining test parse. No other crate in
@@ -25,16 +25,16 @@ serde = { workspace = true }
 # The Policy Decision Point: the unforgeable EffectivePolicy the guard queries
 # (grants/obligations) for its capability + data-security gate, plus the KnobKey/
 # KnobValue vocabulary and the object model (ObjectName).
-zero-migrate-policy = { workspace = true }
+zeroship-migrate-policy = { workspace = true }
 
 # The CONTRACT: the required renderer traits, the render errors their signatures name,
 # the identifier/expression spelling seam this vendor calls, and the VendorSet shape
-# `VENDOR` below is registered through. This is the ONLY zero-migrate crate a
+# `VENDOR` below is registered through. This is the ONLY zeroship-migrate crate a
 # backend may depend on - depending on the engine is the cycle the split removed.
-zero-migrate-backend = { workspace = true }
+zeroship-migrate-backend = { workspace = true }
 # The closed `Op` / `Expr` / `IrScalar` vocabulary the trait methods are handed, plus
 # open dialect identity and this vendor's `BackendDescriptor`.
-zero-migrate-ir = { workspace = true }
+zeroship-migrate-ir = { workspace = true }
 # The schema-field shape `SchemaRenderer` reads is the SDK's field JSON.
 serde_json = { workspace = true }
 uuid = { workspace = true }
@@ -62,9 +62,9 @@ tracing = { workspace = true }
 # this avoids: its canned rows are the shared premise of both suites and two copies
 # drift silently.
 #
-# `zero-migrate` names it under `[dev-dependencies]` only. Resolver 3 keeps
+# `zeroship-migrate` names it under `[dev-dependencies]` only. Resolver 3 keeps
 # dev-dependency features out of the normal build, so a shipping
-# `zero-migrate-postgres` compiles none of it.
+# `zeroship-migrate-postgres` compiles none of it.
 testing = []
 
 [dev-dependencies]

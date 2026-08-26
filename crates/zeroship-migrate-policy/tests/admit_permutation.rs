@@ -10,7 +10,7 @@
 //! grant. The charter-side twin of this defect needs no custom registry and is pinned at
 //! the engine entry point in `crates/zero-migrate/tests/charter_root_bound.rs`.
 
-use zero_migrate_policy::{
+use zeroship_migrate_policy::{
     admit, ComposeError, Enforcement, KnobDef, KnobKey, KnobKind, KnobValue, LoadContext,
     ObjectModel, Polarity, PolicyDoc, PolicyRegistry, RootCharter,
 };

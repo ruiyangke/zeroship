@@ -1,7 +1,7 @@
 //! The status VOCABULARY - what a journal read reduces to, and the two derived
 //! cross-deploy views over it.
 //!
-//! The status VERBS are the engine's: `zero_migrate::ops::status` composes them over
+//! The status VERBS are the engine's: `zeroship_migrate::ops::status` composes them over
 //! `MigrationBackend`, and they stay there. What lives here is the shape those verbs
 //! and every vendor journal reader agree on.
 //!
@@ -14,7 +14,7 @@
 //!
 //! Nothing here names a dialect, opens a connection, or emits a statement.
 
-use zero_migrate_ir::migration::{Migration, MigrationId};
+use zeroship_migrate_ir::migration::{Migration, MigrationId};
 
 use crate::executor::ApplyError;
 use crate::journal::{AppliedEntry, JournalError, RolledBackEntry};
@@ -62,7 +62,7 @@ pub struct MigrationStatus {
 /// set:
 /// an obligation whose `pending_version` is NOT among the supplied set's versions
 /// is orphaned (the rename was removed after its EXPAND applied) and emits the
-/// `zero_migrate::plan::pending::OrphanedPendingContract` payload.
+/// `zeroship_migrate::plan::pending::OrphanedPendingContract` payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingContractStatus {
     /// The table whose online-rename contract is outstanding.

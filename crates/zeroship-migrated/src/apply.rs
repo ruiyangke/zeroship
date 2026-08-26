@@ -4,16 +4,16 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
-use zero_migrate::analysis::analyze::rule::DATA_SECURITY_UNCLASSIFIED_OPS_WARN;
-use zero_migrate::apply::journal::DeployRecoveryScope;
-use zero_migrate::{
+use zeroship_migrate::analysis::analyze::rule::DATA_SECURITY_UNCLASSIFIED_OPS_WARN;
+use zeroship_migrate::apply::journal::DeployRecoveryScope;
+use zeroship_migrate::{
     migrator_role_name, resolve_create_table_policy, snapshot_schema, Approval, ApprovalScope,
     DeclarativeApplyError, EngineError, ExecutorConfig, GuardConfig, IrAuthor,
     LiveSchema, LockMode, MigrationEngine, MigrationIr, PlanStep, PostgresBackend, SealError,
     SealedPolicy, SqlDialect,
 };
-use zero_migrate_ir::policy_approval::{migration_requires_approval, ApprovalLevel};
-use zero_migrate_policy::EffectivePolicy as PdpPolicy;
+use zeroship_migrate_ir::policy_approval::{migration_requires_approval, ApprovalLevel};
+use zeroship_migrate_policy::EffectivePolicy as PdpPolicy;
 use zeroship_migrate_adapter::CompioPgSession;
 
 use crate::migration_store::{
@@ -85,13 +85,13 @@ pub enum IrApplyError {
     Malformed { file: String, message: String },
     /// Introspecting the live schema failed.
     #[error("read Postgres catalog for live facts: {0}")]
-    Snapshot(#[source] zero_migrate::DriftError),
+    Snapshot(#[source] zeroship_migrate::DriftError),
     /// A `.ir.json` failed the fail-closed LOAD GATE or guarded lower.
     #[error("IR load/guarded-lower ({file}): {source}")]
     Ir {
         file: String,
         #[source]
-        source: zero_migrate::LoadAndLowerGuardedError,
+        source: zeroship_migrate::LoadAndLowerGuardedError,
     },
     /// The engine refused or failed the apply.
     ///
@@ -106,8 +106,8 @@ pub enum IrApplyError {
     },
 }
 
-impl From<zero_migrate::LoadAndLowerError> for IrApplyError {
-    fn from(_: zero_migrate::LoadAndLowerError) -> Self {
+impl From<zeroship_migrate::LoadAndLowerError> for IrApplyError {
+    fn from(_: zeroship_migrate::LoadAndLowerError) -> Self {
         // The service always lowers via the guarded path; the unguarded error is
         // unreachable here, but keep the conversion total.
         Self::Read {
@@ -868,7 +868,7 @@ async fn apply_sealed(
 /// Discover `*.ir.json` files in a directory, deterministically ordered by path
 /// (the service-owned replacement for the engine's removed `discover_ir_files`).
 // `IrApplyError` is ~152 bytes wide because it carries the vendored engine's
-// own error enums verbatim (`zero_migrate::LoadAndLowerGuardedError` etc).
+// own error enums verbatim (`zeroship_migrate::LoadAndLowerGuardedError` etc).
 // Boxing it would ripple through every `IrApplyError::Read { .. }` match arm
 // in this file and its callers; not doing that as part of a lint sweep.
 #[allow(clippy::result_large_err)]
@@ -954,7 +954,7 @@ async fn postgres_ir_apply_state(
     session: &CompioPgSession,
     exec_cfg: &ExecutorConfig,
     owner_app: &str,
-) -> Result<PostgresIrApplyState, zero_migrate::DriftError> {
+) -> Result<PostgresIrApplyState, zeroship_migrate::DriftError> {
     let live = snapshot_schema(session, &exec_cfg.project_schema).await?;
     let registry: BTreeMap<String, String> = live
         .tables

@@ -111,7 +111,7 @@
 #[test]
 fn the_lowered_plan_vocabulary_names_no_vendor() {
     /// `RenameStep` moved too, with the rest of the lowered-plan step vocabulary.
-    /// `zero_migrate::render::step` is re-exports now, so reading it here scanned
+    /// `zeroship_migrate::render::step` is re-exports now, so reading it here scanned
     /// ZERO arms — which the floor below caught, and which is the entire reason the
     /// floor is written as a floor and not as a comment.
     const STEP_SRC: &str = include_str!("../../../zero-migrate-backend/src/step.rs");
@@ -128,7 +128,7 @@ fn the_lowered_plan_vocabulary_names_no_vendor() {
         include_str!("../../../zero-migrate-backend/src/requirements.rs");
     /// `TableRebuildSpec` followed, and it is the one whose arrival this rule most
     /// wanted. Its `sequence_policy` field was typed
-    /// `zero_migrate_sqlite::SqliteSequencePolicy` — the shared plan vocabulary
+    /// `zeroship_migrate_sqlite::SqliteSequencePolicy` — the shared plan vocabulary
     /// literally holding a vendor type — which is the coupling the header calls
     /// "the coupling the whole refactor exists to remove", one level below the
     /// names this scan reads. It carries the neutral `SequenceHighWaterPolicy`

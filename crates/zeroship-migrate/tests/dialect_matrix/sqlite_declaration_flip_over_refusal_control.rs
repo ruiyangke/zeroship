@@ -35,14 +35,14 @@ use std::path::PathBuf;
 
 use serde_json::json;
 use tempfile::TempDir;
-use zero_migrate::model::ir::CURRENT_IR_VERSION;
-use zero_migrate_sqlite::backend::Mode;
+use zeroship_migrate::model::ir::CURRENT_IR_VERSION;
+use zeroship_migrate_sqlite::backend::Mode;
 
-use zero_migrate::{
+use zeroship_migrate::{
     CollectionDescriptor, DeclarativeAuthor, FieldDescriptor, GuardConfig, IrAuthor, LiveSchema,
     MigrationIr, PlanStep, RenameStep, SchemaSnapshot,
 };
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_control";
 const APP: &str = "app_control";
@@ -64,7 +64,7 @@ fn paths(app_id: &str) -> Paths {
     }
 }
 
-fn effective_policy() -> zero_migrate::EffectivePolicy {
+fn effective_policy() -> zeroship_migrate::EffectivePolicy {
     support::confined_charter()
 }
 
@@ -77,19 +77,19 @@ fn registry() -> BTreeMap<String, String> {
 
 /// First deploy of `descs` through the real declarative author + real backend.
 async fn apply_first_deploy(be: &SqliteBackend, descs: &[CollectionDescriptor]) {
-    let desired = zero_migrate::desired_snapshot_for_dialect(
-        zero_migrate::shipping_vendors(),
+    let desired = zeroship_migrate::desired_snapshot_for_dialect(
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         descs,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &effective_policy(),
     )
     .expect("desired snapshot");
     let plan = DeclarativeAuthor::new_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        zero_migrate_sqlite::DIALECT,
+        zeroship_migrate_sqlite::DIALECT,
     )
     .diff(
         &desired,
@@ -171,13 +171,13 @@ fn load_and_lower(ir: &MigrationIr, live: &LiveSchema) -> Vec<PlanStep> {
     let policy = effective_policy();
     let source = serde_json::to_string(ir).expect("serialize IR envelope");
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &policy,
     );
-    let guard = GuardConfig::from_policy(effective_policy(), zero_migrate_sqlite::DIALECT);
+    let guard = GuardConfig::from_policy(effective_policy(), zeroship_migrate_sqlite::DIALECT);
     author
         .load_and_lower_guarded(&source, APP, &registry(), live, &guard)
         .expect(

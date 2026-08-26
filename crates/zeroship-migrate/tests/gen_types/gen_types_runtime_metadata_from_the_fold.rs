@@ -74,16 +74,16 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use zero_migrate::manifest_entry::sha256_hex;
-use zero_migrate::model::ir::{MigrationIr, Op};
-use zero_migrate::{render_artifacts, EffectivePolicy};
+use zeroship_migrate::manifest_entry::sha256_hex;
+use zeroship_migrate::model::ir::{MigrationIr, Op};
+use zeroship_migrate::{render_artifacts, EffectivePolicy};
 
 const SCHEMA: &str = "public";
 
-const DIALECTS: [&zero_migrate::DialectId; 3] = [
-    &zero_migrate_postgres::DIALECT,
-    &zero_migrate_sqlite::DIALECT,
-    &zero_migrate_mysql::DIALECT,
+const DIALECTS: [&zeroship_migrate::DialectId; 3] = [
+    &zeroship_migrate_postgres::DIALECT,
+    &zeroship_migrate_sqlite::DIALECT,
+    &zeroship_migrate_mysql::DIALECT,
 ];
 
 fn parse(ops: &str) -> Vec<Op> {
@@ -92,11 +92,11 @@ fn parse(ops: &str) -> Vec<Op> {
 
 fn artifacts(
     ops: &[Op],
-    dialect: &zero_migrate::DialectId,
+    dialect: &zeroship_migrate::DialectId,
     policy: &EffectivePolicy,
 ) -> (Value, String) {
     let rendered = render_artifacts(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         ops,
         dialect,
         SCHEMA,
@@ -659,21 +659,21 @@ fn corpus_lines(
     stem: &str,
     ops: &[Op],
     policy: &EffectivePolicy,
-    dialect: &zero_migrate::DialectId,
+    dialect: &zeroship_migrate::DialectId,
     out: &mut Vec<String>,
 ) {
     // Preserve the closed enum's historical debug labels because these strings
     // are part of the corpus golden wire, not merely assertion context.
-    let d = if dialect == &zero_migrate_postgres::DIALECT {
+    let d = if dialect == &zeroship_migrate_postgres::DIALECT {
         "Postgres"
-    } else if dialect == &zero_migrate_sqlite::DIALECT {
+    } else if dialect == &zeroship_migrate_sqlite::DIALECT {
         "Sqlite"
     } else {
-        assert_eq!(dialect, &zero_migrate_mysql::DIALECT);
+        assert_eq!(dialect, &zeroship_migrate_mysql::DIALECT);
         "Mysql"
     };
     let rendered = match render_artifacts(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         ops,
         dialect,
         SCHEMA,
@@ -1019,11 +1019,11 @@ fn the_move_added_no_refusal_that_the_old_path_did_not_already_make() {
         for dialect in DIALECTS {
             // The RIGHT side is the whole of the old path's coherence gate, driven on
             // the same policy-resolved ops `render_artifacts` folds.
-            let resolved = zero_migrate::resolve_create_table_policy(
+            let resolved = zeroship_migrate::resolve_create_table_policy(
                 &MigrationIr {
                     inverse_ops: None,
                     irreversible: None,
-                    ir_version: zero_migrate::CURRENT_IR_VERSION,
+                    ir_version: zeroship_migrate::CURRENT_IR_VERSION,
                     name: "over_refusal_control".to_string(),
                     owner_app: String::new(),
                     ops: ops.clone(),
@@ -1048,15 +1048,15 @@ fn the_move_added_no_refusal_that_the_old_path_did_not_already_make() {
             // the biconditional compare `render_artifacts` to the very call it makes
             // first - a control that can only ever agree with itself. `fold_ops` is the
             // half of the old gate that still exists independently.
-            let old_gate = zero_migrate::fold_ops(
-                zero_migrate::shipping_vendors(),
+            let old_gate = zeroship_migrate::fold_ops(
+                zeroship_migrate::shipping_vendors(),
                 &resolved.ops,
                 dialect,
                 SCHEMA,
                 policy,
             );
             let now = render_artifacts(
-                zero_migrate::shipping_vendors(),
+                zeroship_migrate::shipping_vendors(),
                 ops,
                 dialect,
                 SCHEMA,
@@ -1116,9 +1116,9 @@ fn the_refusal_probes_still_exercise_the_named_type_arms() {
             .find(|(n, _)| *n == name)
             .unwrap_or_else(|| panic!("probe `{name}` exists"));
         render_artifacts(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &parse(source),
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             SCHEMA,
             &open,
         )

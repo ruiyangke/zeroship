@@ -30,7 +30,7 @@
 //!
 //! What could NOT be answered that way was the catalog value-format comparison,
 //! which is single-sourced on purpose: it moved DOWN into
-//! `zero_migrate_backend::value_format` and takes its renderers as parameters.
+//! `zeroship_migrate_backend::value_format` and takes its renderers as parameters.
 //!
 //! # The one-dialect-literal rule
 //!
@@ -50,7 +50,7 @@
 //! A backend can still reach another vendor's spelling THROUGH a contract helper
 //! that hard-codes a dialect, and no grep of this crate can see it because the
 //! literal lives in `zero-migrate-backend`. That is measured, not hypothetical -
-//! `zero_migrate_backend::dml`'s header carries the numbers. The identifier seam
+//! `zeroship_migrate_backend::dml`'s header carries the numbers. The identifier seam
 //! (`*_for_dialect(.., DIALECT)`) is how this crate stays clear of it.
 
 mod advisory;
@@ -88,14 +88,14 @@ pub use guard::MysqlGuard;
 ///
 /// The engine's `test_fixtures::no_inject` is `pub(crate)` and cannot cross a crate
 /// boundary, so this is the MySQL sibling of `zero-migrate-node`'s. It composes
-/// through the REAL `zero_migrate_ir::policy_registry` rather than restating the
+/// through the REAL `zeroship_migrate_ir::policy_registry` rather than restating the
 /// algebra, so what a vendor's tests compose and what production composes cannot
 /// drift.
 #[cfg(test)]
 mod test_fixtures;
 
-use zero_migrate_backend::registry::BackendVendor;
-use zero_migrate_ir::dialect::DialectId;
+use zeroship_migrate_backend::registry::BackendVendor;
+use zeroship_migrate_ir::dialect::DialectId;
 
 /// This backend's id STRING, spelled once for the whole crate.
 ///
@@ -147,7 +147,7 @@ const _: () = assert!(DialectId::is_well_formed_name(NAME));
 /// compiling, here, with this crate named - which is the point: a backend cannot
 /// inherit another backend's DDL, acquire a trusting guard, or acquire a silently
 /// empty advisory report by omission. See
-/// `zero_migrate_backend::registry::BackendVendor`.
+/// `zeroship_migrate_backend::registry::BackendVendor`.
 pub static VENDOR: BackendVendor = BackendVendor {
     attributes: attribute::VOCABULARY,
     descriptor: &descriptor::MYSQL_DESCRIPTOR,

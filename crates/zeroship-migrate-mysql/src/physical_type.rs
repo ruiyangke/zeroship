@@ -11,7 +11,7 @@
 //!
 //! The type lives here, where its parser and its speller already had to be, and
 //! reaches the neutral snapshot as an opaque leg of
-//! [`Dialectal<dyn VendorColumnFacts>`](zero_migrate_backend::dialectal::Dialectal)
+//! [`Dialectal<dyn VendorColumnFacts>`](zeroship_migrate_backend::dialectal::Dialectal)
 //! keyed by [`crate::DIALECT`]. The engine carries it, clones it and compares it by ASKING
 //! it; the engine cannot read it, because reading takes a `downcast_ref` to a type
 //! declared in this crate.
@@ -22,7 +22,7 @@
 //! the state of every column from another dialect's catalog and of every
 //! author-built desired snapshot that has not derived one. Both the identity
 //! comparison and the drift report require the leg on BOTH sides, which
-//! [`Dialectal::paired`](zero_migrate_backend::dialectal::Dialectal::paired)
+//! [`Dialectal::paired`](zeroship_migrate_backend::dialectal::Dialectal::paired)
 //! enforces - a contract compared against an absent one describes nothing about the
 //! database.
 
@@ -30,14 +30,14 @@ use std::any::Any;
 use std::sync::Arc;
 
 use crate::DIALECT;
-use zero_migrate_backend::dialectal::{Dialectal, DialectalValue, VendorColumnFacts};
-use zero_migrate_backend::snapshot::ColumnSnapshot;
+use zeroship_migrate_backend::dialectal::{Dialectal, DialectalValue, VendorColumnFacts};
+use zeroship_migrate_backend::snapshot::ColumnSnapshot;
 
 /// The physical identity of one MySQL column, as parsed VALUES rather than as
 /// rendered type text.
 ///
 /// The portable `data_type` cannot answer this: MySQL's
-/// [`SchemaRenderer::canonical_type`](zero_migrate_backend::schema::SchemaRenderer::canonical_type)
+/// [`SchemaRenderer::canonical_type`](zeroship_migrate_backend::schema::SchemaRenderer::canonical_type)
 /// folds every `varchar(n)` to the literal `text`, so a live `varchar(64)` and a
 /// declared `varchar(255)` are indistinguishable once stored. Both sides of a
 /// comparison fold the same way, so the blindness is symmetric and silent.
@@ -223,7 +223,7 @@ impl MysqlPhysicalType {
     /// one round trip, where changing either without the other is what silently
     /// breaks it. `Self::parse(x.type_text()) == x` holds for every family `parse` can
     /// produce, and that is what keeps two contracts that are NOT equal from rendering
-    /// to the same text - the property `zero_migrate::apply::drift`'s `data_type`
+    /// to the same text - the property `zeroship_migrate::apply::drift`'s `data_type`
     /// report rests on, because a collision there puts the difference straight back
     /// into the equal-strings hole the report exists to get out of.
     ///
@@ -406,7 +406,7 @@ pub fn carrier(physical: MysqlPhysicalType) -> Dialectal<dyn VendorColumnFacts> 
 mod mysql_physical_type_round_trip {
     //! `parse` and `type_text` are one contract read in two directions, so the tests
     //! that hold them to each other sit with them rather than with either consumer.
-    //! They moved here from `zero_migrate::apply::drift`, where the speller used to
+    //! They moved here from `zeroship_migrate::apply::drift`, where the speller used to
     //! live: they were never about the differ, and leaving them behind would have left
     //! the round trip asserted from a crate that no longer owns either half.
 
@@ -504,14 +504,14 @@ mod physical_contract_rules {
     //! What makes two MySQL physical contracts THE SAME COLUMN, and how a difference
     //! between them is spelled.
     //!
-    //! These moved out of `zero_migrate::apply::drift`'s in-src tests, where they
+    //! These moved out of `zeroship_migrate::apply::drift`'s in-src tests, where they
     //! asserted core's comparator against a MySQL rule core no longer holds. Core's
     //! half - that it asks a leg exactly when one is present on both sides, and falls
     //! through to the portable comparison otherwise - is asserted there still, against
     //! a stand-in contract. This is the vendor's half, asserted where the rule lives.
 
     use super::MysqlPhysicalType;
-    use zero_migrate_backend::dialectal::VendorColumnFacts;
+    use zeroship_migrate_backend::dialectal::VendorColumnFacts;
 
     fn same(left: &str, right: &str) -> bool {
         MysqlPhysicalType::parse(left).physical_identity(&MysqlPhysicalType::parse(right))

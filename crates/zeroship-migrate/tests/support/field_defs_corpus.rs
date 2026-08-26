@@ -23,7 +23,7 @@
 //! # Everything is read out of the ARTIFACT
 //!
 //! Nothing here names the retired walker or `project_field_defs`. Every line is
-//! derived from one [`zero_migrate::render_artifacts`] call, which is the real entry
+//! derived from one [`zeroship_migrate::render_artifacts`] call, which is the real entry
 //! point on both sides of the move, so this file is byte-identical before and after the
 //! switch and the capture measures the walker purely by having been run first.
 
@@ -31,19 +31,19 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde_json::Value;
-use zero_migrate::manifest_entry::sha256_hex;
-use zero_migrate::model::ir::{MigrationIr, Op};
-use zero_migrate::schema::query::{
+use zeroship_migrate::manifest_entry::sha256_hex;
+use zeroship_migrate::model::ir::{MigrationIr, Op};
+use zeroship_migrate::schema::query::{
     build_create_table_with_fks_for_dialect_scoped_statements, FkEmission,
 };
-use zero_migrate::{render_artifacts, DialectId, EffectivePolicy};
+use zeroship_migrate::{render_artifacts, DialectId, EffectivePolicy};
 
 pub const SCHEMA: &str = "public";
 
 pub const DIALECTS: [&DialectId; 3] = [
-    &zero_migrate_postgres::DIALECT,
-    &zero_migrate_sqlite::DIALECT,
-    &zero_migrate_mysql::DIALECT,
+    &zeroship_migrate_postgres::DIALECT,
+    &zeroship_migrate_sqlite::DIALECT,
+    &zeroship_migrate_mysql::DIALECT,
 ];
 
 /// The recorded op fixtures - the same 27 `tests/op_fixture_goldens.rs` owns and the
@@ -360,12 +360,12 @@ pub fn sqlite_rebuild_create(
     policy: &EffectivePolicy,
 ) -> Result<String, String> {
     build_create_table_with_fks_for_dialect_scoped_statements(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         table,
         schema,
         &FkEmission::Inline,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         true,
         policy,
     )
@@ -409,16 +409,16 @@ pub fn corpus_lines(
 ) {
     // Preserve the closed enum's historical debug labels because these strings
     // are part of the corpus golden wire, not merely assertion context.
-    let d = if dialect == &zero_migrate_postgres::DIALECT {
+    let d = if dialect == &zeroship_migrate_postgres::DIALECT {
         "Postgres"
-    } else if dialect == &zero_migrate_sqlite::DIALECT {
+    } else if dialect == &zeroship_migrate_sqlite::DIALECT {
         "Sqlite"
     } else {
-        assert_eq!(dialect, &zero_migrate_mysql::DIALECT);
+        assert_eq!(dialect, &zeroship_migrate_mysql::DIALECT);
         "Mysql"
     };
     let rendered = match render_artifacts(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         ops,
         dialect,
         SCHEMA,
@@ -449,7 +449,7 @@ pub fn corpus_lines(
                 serde_json::to_string(def).expect("a FieldDef serialises")
             ));
         }
-        if dialect == &zero_migrate_sqlite::DIALECT {
+        if dialect == &zeroship_migrate_sqlite::DIALECT {
             match sqlite_rebuild_create(table, schema, policy) {
                 Ok(sql) => out.push(format!("{label}|{d}|sqlite_create|{table}|{sql}")),
                 Err(error) => {

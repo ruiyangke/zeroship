@@ -49,17 +49,17 @@
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::apply::executor::LockMode;
-use zero_migrate::model::ir::IrFlagsOverride;
-use zero_migrate::render::fold::single_fold;
-use zero_migrate::render::lower::{IrAuthor, LiveSchema};
-use zero_migrate::{
+use zeroship_migrate::apply::executor::LockMode;
+use zeroship_migrate::model::ir::IrFlagsOverride;
+use zeroship_migrate::render::fold::single_fold;
+use zeroship_migrate::render::lower::{IrAuthor, LiveSchema};
+use zeroship_migrate::{
     fold_ops, resolve_create_table_policy, Approval, ColType, ExecutorConfig, Migration,
     MigrationEngine, MigrationIr, Op, PlanStep, RenameStep, TableRebuildSpec,
 };
-use zero_migrate_backend::table_rebuild::SequenceHighWaterPolicy;
-use zero_migrate_sqlite::backend::Mode;
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate_backend::table_rebuild::SequenceHighWaterPolicy;
+use zeroship_migrate_sqlite::backend::Mode;
+use zeroship_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_indexed_rename";
 const APP: &str = "app_indexed_rename";
@@ -267,8 +267,8 @@ value = "allow"
 scope = "all"
 "#;
 
-fn charter() -> zero_migrate::EffectivePolicy {
-    zero_migrate::effective_policy_from_charter_toml(CHARTER)
+fn charter() -> zeroship_migrate::EffectivePolicy {
+    zeroship_migrate::effective_policy_from_charter_toml(CHARTER)
         .expect("the indexed-rename test charter composes")
 }
 
@@ -283,21 +283,21 @@ fn exec_cfg() -> ExecutorConfig {
 fn folded_live_schema(history: &[Op]) -> LiveSchema {
     let effective = charter();
     let snapshot = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         history,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         PROJECT,
         &effective,
     )
     .expect("the history folds");
     let sdk_schemas = single_fold::fold(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         history,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         PROJECT,
         &effective,
     )
-    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
+    .map(|folded| folded.project_field_defs(zeroship_migrate::shipping_vendors()))
     .expect("the history folds to field defs");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     live.sdk_schemas = sdk_schemas;
@@ -311,10 +311,10 @@ fn insert_sql(id: &str, column: &str, qty: i64, label: &str) -> String {
 async fn deploy(backend: &SqliteBackend, engine: &MigrationEngine, ir: &MigrationIr) -> Vec<Op> {
     let effective = charter();
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &effective,
     );
     let create = resolve_create_table_policy(ir, &effective, PROJECT)
@@ -345,10 +345,10 @@ async fn apply_fold_seeded_rename(
 ) -> Result<(), String> {
     let effective = charter();
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &effective,
     );
     let live = folded_live_schema(create_ops);
@@ -476,7 +476,7 @@ async fn stored_index_sql(backend: &SqliteBackend, index: &str) -> String {
 async fn a_fold_seeded_rename_of_an_indexed_column_applies() {
     let p = paths("indexed_rename");
     let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let create_ops = deploy(&backend, &engine, &create_ir()).await;
 
     backend
@@ -557,7 +557,7 @@ async fn a_fold_seeded_rename_of_an_indexed_column_applies() {
 async fn the_rebuilt_unique_index_still_enforces_over_the_renamed_column() {
     let p = paths("indexed_rename_unique");
     let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let create_ops = deploy(&backend, &engine, &create_ir()).await;
 
     backend
@@ -630,7 +630,7 @@ async fn the_rebuilt_unique_index_still_enforces_over_the_renamed_column() {
 async fn a_partial_predicate_and_an_expression_key_follow_the_rename() {
     let p = paths("indexed_rename_partial");
     let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let create_ops = deploy(&backend, &engine, &create_ir()).await;
     apply_fold_seeded_rename(&backend, &engine, &create_ops)
         .await
@@ -709,7 +709,7 @@ async fn a_partial_predicate_and_an_expression_key_follow_the_rename() {
 async fn a_trigger_body_follows_the_rename_too() {
     let p = paths("indexed_rename_trigger");
     let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let create_ops = deploy(&backend, &engine, &create_ir_without_indexes()).await;
 
     backend
@@ -809,12 +809,12 @@ async fn a_catalog_sourced_rename_of_an_indexed_column_still_replays_the_stored_
     let effective = charter();
     let p = paths("indexed_rename_catalog");
     let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
-    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &effective,
     );
     let create_ops = deploy(&backend, &engine, &create_ir()).await;
@@ -846,13 +846,13 @@ async fn a_catalog_sourced_rename_of_an_indexed_column_still_replays_the_stored_
     );
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     live.sdk_schemas = single_fold::fold(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &create_ops,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         PROJECT,
         &effective,
     )
-    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
+    .map(|folded| folded.project_field_defs(zeroship_migrate::shipping_vendors()))
     .expect("the history folds to field defs");
 
     let steps = author
@@ -943,11 +943,11 @@ fn neither_postgres_nor_mysql_lowers_a_rename_into_a_sqlite_rebuild() {
     // and the point here is the ROUTING of the rename, not the index surface.
     let create_ir = plain_index_create_ir();
     for dialect in [
-        &zero_migrate_postgres::DIALECT,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
     ] {
         let author = IrAuthor::new(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             PROJECT,
             APP,
             dialect,
@@ -966,7 +966,7 @@ fn neither_postgres_nor_mysql_lowers_a_rename_into_a_sqlite_rebuild() {
         );
 
         let snapshot = fold_ops(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &create.ops,
             dialect,
             PROJECT,
@@ -993,7 +993,7 @@ fn neither_postgres_nor_mysql_lowers_a_rename_into_a_sqlite_rebuild() {
             }
             Err(error) => assert_eq!(
                 dialect,
-                &zero_migrate_mysql::DIALECT,
+                &zeroship_migrate_mysql::DIALECT,
                 "only MySQL declines to lower a live rename at all: {error:?}"
             ),
         }
@@ -1305,7 +1305,7 @@ columns = [
   { name = "created_at", type = "timestamptz", nullable = false },
 ]
 "#;
-    let effective = zero_migrate::effective_policy_from_charter_toml(INJECTED_CHARTER)
+    let effective = zeroship_migrate::effective_policy_from_charter_toml(INJECTED_CHARTER)
         .expect("the injected charter composes");
     // The same table, authored WITHOUT its own `id` (the inject forbids that).
     let create_ir: MigrationIr = serde_json::from_value(serde_json::json!({
@@ -1335,29 +1335,29 @@ columns = [
     let create = resolve_create_table_policy(&create_ir, &effective, PROJECT)
         .expect("the create resolves under the injected charter");
     let snapshot = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &create.ops,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         PROJECT,
         &effective,
     )
     .expect("the history folds");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     live.sdk_schemas = single_fold::fold(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &create.ops,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         PROJECT,
         &effective,
     )
-    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
+    .map(|folded| folded.project_field_defs(zeroship_migrate::shipping_vendors()))
     .expect("the history folds to field defs");
 
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &effective,
     );
     let error = author
@@ -1377,7 +1377,7 @@ columns = [
 /// A destructive journal migration for a directly-constructed rebuild spec (the same
 /// helper `sqlite_rebuild_apply.rs` uses).
 fn rebuild_migration(spec: &TableRebuildSpec) -> Migration {
-    use zero_migrate::model::migration::{Checksum, ChecksumInput, MigrationFlags, MigrationId};
+    use zeroship_migrate::model::migration::{Checksum, ChecksumInput, MigrationFlags, MigrationId};
     let flags = MigrationFlags {
         destructive: true,
         requires_approval: true,

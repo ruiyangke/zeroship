@@ -17,10 +17,10 @@ use crate::support;
 
 use std::collections::BTreeMap;
 
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::apply::executor::LockMode;
-use zero_migrate::{Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine};
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::apply::executor::LockMode;
+use zeroship_migrate::{Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine};
+use zeroship_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_ir";
 const APP: &str = "app_ir";
@@ -54,10 +54,10 @@ async fn a_plan_that_fails_halfway_leaves_the_journal_agreeing_with_the_database
     .into_iter()
     .collect();
     let artifact = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     )
     .load_and_lower_guarded(
@@ -65,7 +65,7 @@ async fn a_plan_that_fails_halfway_leaves_the_journal_agreeing_with_the_database
         APP,
         &registry,
         &LiveSchema::default(),
-        &GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate_sqlite::DIALECT),
+        &GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_sqlite::DIALECT),
     )
     .expect("the two-step plan lowers");
     assert_eq!(
@@ -74,7 +74,7 @@ async fn a_plan_that_fails_halfway_leaves_the_journal_agreeing_with_the_database
         "the fixture needs two steps for one of them to fail halfway"
     );
 
-    let applied = MigrationEngine::new(zero_migrate::shipping_vendors())
+    let applied = MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,
@@ -116,7 +116,7 @@ async fn a_plan_that_fails_halfway_leaves_the_journal_agreeing_with_the_database
     // THE RESUME. Re-applying must not trip over the step already journaled: it
     // fails again on the same conflicting table, and the journal still holds one
     // entry rather than gaining a duplicate.
-    let retried = MigrationEngine::new(zero_migrate::shipping_vendors())
+    let retried = MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,

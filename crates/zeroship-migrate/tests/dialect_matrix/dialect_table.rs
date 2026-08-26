@@ -18,8 +18,8 @@
 //! registered vendor and calls that vendor's required `ValidationPolicy`.
 //! This Rust table and its TypeScript mirror are generator/test artifacts only.
 
-pub use zero_migrate_backend::validation::Disposition;
-use zero_migrate_ir::dialect::DialectId;
+pub use zeroship_migrate_backend::validation::Disposition;
+use zeroship_migrate_ir::dialect::DialectId;
 
 /// One row of the generated dialect table: an (op-kind, variant) token and its
 /// per-dialect disposition.
@@ -39,7 +39,7 @@ pub struct DispositionRow {
     pub variant: &'static str,
     /// This token's disposition per dialect, sorted by [`DialectId`] and
     /// deduplicated — the same sorted-slice discipline
-    /// [`zero_migrate_ir::dialect::DialectSet`] uses — so lookup is a binary
+    /// [`zeroship_migrate_ir::dialect::DialectSet`] uses — so lookup is a binary
     /// search and the emitted order is stable.
     pub dispositions: &'static [(DialectId, Disposition)],
 }

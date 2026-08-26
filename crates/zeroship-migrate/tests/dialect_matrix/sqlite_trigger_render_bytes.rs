@@ -62,7 +62,7 @@
 //! test pins and the reason the coupling survived. This file is the byte half; that
 //! one is the provenance half. Neither replaces the other.
 
-use zero_migrate::render::sql_preview::{render_ir_envelope_sql_statements, PreviewOpts};
+use zeroship_migrate::render::sql_preview::{render_ir_envelope_sql_statements, PreviewOpts};
 
 /// A trigger whose body reaches every identifier quote in the SQLite trigger path.
 const TRIGGER_IR: &str = r#"{
@@ -80,7 +80,7 @@ const TRIGGER_IR: &str = r#"{
   ]
 }"#;
 
-fn statements(ir: &str, dialect: &zero_migrate::DialectId) -> Vec<String> {
+fn statements(ir: &str, dialect: &zeroship_migrate::DialectId) -> Vec<String> {
     let opts = PreviewOpts {
         default_schema: "public".to_string(),
         owner_app: "app_sqlite_trigger_render_bytes".to_string(),
@@ -91,7 +91,7 @@ fn statements(ir: &str, dialect: &zero_migrate::DialectId) -> Vec<String> {
         effective_policy: crate::support::operator_charter("public"),
     };
     let (_name, statements) =
-        render_ir_envelope_sql_statements(zero_migrate::shipping_vendors(), ir, dialect, &opts)
+        render_ir_envelope_sql_statements(zeroship_migrate::shipping_vendors(), ir, dialect, &opts)
             .unwrap_or_else(|e| panic!("rendering the trigger IR on {dialect:?}: {e}"));
     statements
 }
@@ -110,7 +110,7 @@ fn statements(ir: &str, dialect: &zero_migrate::DialectId) -> Vec<String> {
 /// that is already deployed.
 #[test]
 fn a_sqlite_trigger_renders_these_exact_bytes() {
-    let rendered = statements(TRIGGER_IR, &zero_migrate_sqlite::DIALECT);
+    let rendered = statements(TRIGGER_IR, &zeroship_migrate_sqlite::DIALECT);
 
     let create = rendered
         .iter()
@@ -146,7 +146,7 @@ fn a_sqlite_trigger_renders_these_exact_bytes() {
 /// the invariant that no such edit is allowed to drop.
 #[test]
 fn no_identifier_in_a_rendered_sqlite_trigger_is_left_bare() {
-    let rendered = statements(TRIGGER_IR, &zero_migrate_sqlite::DIALECT);
+    let rendered = statements(TRIGGER_IR, &zeroship_migrate_sqlite::DIALECT);
     let create = rendered
         .iter()
         .find(|s| s.contains("CREATE TRIGGER"))

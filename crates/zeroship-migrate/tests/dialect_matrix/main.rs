@@ -63,8 +63,8 @@ mod vendor_registry_owns_shipping_descriptors;
 /// Test-only composition used to compare the generated review artifact with the
 /// policies production resolves through its private registry. Keeping this here
 /// prevents the vendor matrix and a registry test hook from entering core.
-static SHIPPING_VENDORS: &[&zero_migrate_backend::registry::BackendVendor] = &[
-    &zero_migrate_mysql::VENDOR,
-    &zero_migrate_postgres::VENDOR,
-    &zero_migrate_sqlite::VENDOR,
+static SHIPPING_VENDORS: &[&zeroship_migrate_backend::registry::BackendVendor] = &[
+    &zeroship_migrate_mysql::VENDOR,
+    &zeroship_migrate_postgres::VENDOR,
+    &zeroship_migrate_sqlite::VENDOR,
 ];

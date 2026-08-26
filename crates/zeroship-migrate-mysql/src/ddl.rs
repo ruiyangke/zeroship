@@ -3,22 +3,22 @@
 use std::fmt::Write as _;
 
 use std::collections::BTreeSet;
-use zero_migrate_ir::attribute::Attributes;
-use zero_migrate_ir::ir::IrScalar;
+use zeroship_migrate_ir::attribute::Attributes;
+use zeroship_migrate_ir::ir::IrScalar;
 
-use zero_migrate_backend::ddl::{
+use zeroship_migrate_backend::ddl::{
     constraint_supports_fk_columns, fk_local_columns, fk_policy_tail, fk_referenced_columns,
     fk_target_table, generated_clause, index_supports_fk_columns, inline_checks_clause,
     inline_pk_for_column, render_index_order_suffix, should_render_table_pk, CreateTableRequest,
     DdlEmitter, GENERATED_PREFIX,
 };
-use zero_migrate_backend::schema::SchemaRenderer;
-use zero_migrate_backend::snapshot::{
+use zeroship_migrate_backend::schema::SchemaRenderer;
+use zeroship_migrate_backend::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, GeneratedColumnSnapshot, IndexElementSnapshot,
     IndexSnapshot, TableSnapshot,
 };
-use zero_migrate_backend::spelling::ansi_double_quote_ident;
-use zero_migrate_ir::dialect::DialectId;
+use zeroship_migrate_backend::spelling::ansi_double_quote_ident;
+use zeroship_migrate_ir::dialect::DialectId;
 
 // This module's vendor identity, read from the crate's ONE declaration of it.
 use crate::DIALECT;
@@ -556,7 +556,7 @@ impl DdlEmitter for MysqlEmitter {
         &self,
         _name: &str,
         _of: &str,
-        _bounds: &zero_migrate_ir::ir::PartitionBounds,
+        _bounds: &zeroship_migrate_ir::ir::PartitionBounds,
     ) -> Option<(String, String)> {
         // This backend's current engine projection collapses authored
         // partitions instead of emitting native partition-relation DDL.
@@ -567,7 +567,7 @@ impl DdlEmitter for MysqlEmitter {
         &self,
         _parent: &str,
         _name: &str,
-        _bounds: &zero_migrate_ir::ir::PartitionBounds,
+        _bounds: &zeroship_migrate_ir::ir::PartitionBounds,
     ) -> Option<(String, String)> {
         None
     }

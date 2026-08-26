@@ -14,7 +14,7 @@
 //!
 //! Reading only this file would suggest SQLite has no data-security posture at all.
 //! It does. `data_security.destructive_ops = forbid` is enforced for SQLite by
-//! `zero_migrate_backend::guard::check_ir_data_security_policy`, over the structured IR
+//! `zeroship_migrate_backend::guard::check_ir_data_security_policy`, over the structured IR
 //! rather than over SQL text, and its gate is written
 //! `if cfg.dialect() != &POSTGRES` - i.e. it exists precisely
 //! BECAUSE the guard here is empty and is handed no policy. Enforcement over the IR is
@@ -30,8 +30,8 @@
 //! lines and means a change to SQLite's posture cannot silently become a change to
 //! MySQL's.
 
-use zero_migrate_backend::guard::{GuardConfig, GuardError, GuardOutcome, MigrationGuard};
-use zero_migrate_ir::migration::MigrationFlags;
+use zeroship_migrate_backend::guard::{GuardConfig, GuardError, GuardOutcome, MigrationGuard};
+use zeroship_migrate_ir::migration::MigrationFlags;
 
 /// SQLite's line-1: trust the descriptor-diff output.
 #[derive(Debug, Clone, Copy, Default)]
@@ -94,7 +94,7 @@ impl MigrationGuard for SqliteGuard {
     /// read `data_security.destructive_ops` at all, let alone refuse on it.
     ///
     /// The neutral posture walk in
-    /// [`check_ir_data_security_policy`](zero_migrate_backend::guard::check_ir_data_security_policy)
+    /// [`check_ir_data_security_policy`](zeroship_migrate_backend::guard::check_ir_data_security_policy)
     /// is consequently the ONLY enforcement that knob has on this backend. Answering
     /// `true` would turn it off and make the knob silently inert - which is exactly
     /// what it was before that walk existed: a `DROP TABLE` applied under the default

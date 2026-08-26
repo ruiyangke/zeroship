@@ -21,9 +21,9 @@
 //! Adding a field to any of these types is a compile error here until a mutation exists
 //! for it, so neither consumer can silently stop covering it.
 
-use zero_migrate_mysql::physical_type::MysqlPhysicalType;
+use zeroship_migrate_mysql::physical_type::MysqlPhysicalType;
 
-use zero_migrate::{
+use zeroship_migrate::{
     ColumnCollationSnapshot, ColumnSnapshot, ConstraintSnapshot, GeneratedColumnSnapshot,
     GeneratedKindSnapshot, IdDefaultSnapshot, IdentityCol, IndexElementSnapshot, IndexSnapshot,
     TableSnapshot, TextStorageSnapshot, ValueFormat,
@@ -106,8 +106,8 @@ pub fn base_table_snapshot() -> TableSnapshot {
         columns: Vec::new(),
         indexes: Vec::new(),
         constraints: Vec::new(),
-        runtime_options: zero_migrate::TableRuntimeOptions::default(),
-        attributes: zero_migrate_ir::attribute::Attributes::new(),
+        runtime_options: zeroship_migrate::TableRuntimeOptions::default(),
+        attributes: zeroship_migrate_ir::attribute::Attributes::new(),
         partition_by: None,
         comment: None,
         stored_create_sql: None,
@@ -227,7 +227,7 @@ pub fn column_snapshot_probes() -> ProbeSet<ColumnSnapshot> {
     // to move a value the shipping comparators actually consult, and only a vendor
     // crate can construct one of its own contracts.
     set.probe("ColumnSnapshot::vendor", vendor, |c| {
-        c.vendor = zero_migrate_mysql::physical_type::carrier(MysqlPhysicalType::Character {
+        c.vendor = zeroship_migrate_mysql::physical_type::carrier(MysqlPhysicalType::Character {
             fixed: false,
             length: 40,
         });
@@ -265,8 +265,8 @@ pub fn table_snapshot_probes() -> ProbeSet<TableSnapshot> {
         columns: Vec::new(),
         indexes: Vec::new(),
         constraints: Vec::new(),
-        runtime_options: zero_migrate::TableRuntimeOptions::default(),
-        attributes: zero_migrate_ir::attribute::Attributes::new(),
+        runtime_options: zeroship_migrate::TableRuntimeOptions::default(),
+        attributes: zeroship_migrate_ir::attribute::Attributes::new(),
         partition_by: None,
         comment: None,
         stored_create_sql: None,
@@ -295,13 +295,13 @@ pub fn table_snapshot_probes() -> ProbeSet<TableSnapshot> {
     });
     table.probe("TableSnapshot::attributes", attributes, |t| {
         t.attributes.insert(
-            zero_migrate_ir::attribute::AttrKey::parse("acme.fillfactor")
+            zeroship_migrate_ir::attribute::AttrKey::parse("acme.fillfactor")
                 .expect("a well-formed key"),
-            zero_migrate::IrScalar::Int(70),
+            zeroship_migrate::IrScalar::Int(70),
         );
     });
     table.probe("TableSnapshot::partition_by", partition_by, |t| {
-        t.partition_by = Some(zero_migrate::PartitionSpec::Range {
+        t.partition_by = Some(zeroship_migrate::PartitionSpec::Range {
             columns: vec!["a".to_string()],
             collapse: false,
         });
@@ -357,9 +357,9 @@ pub fn index_snapshot_probes() -> ProbeSet<IndexSnapshot> {
     });
     index.probe("IndexSnapshot::attributes", attributes, |i| {
         i.attributes.insert(
-            zero_migrate_ir::attribute::AttrKey::parse("acme.fillfactor")
+            zeroship_migrate_ir::attribute::AttrKey::parse("acme.fillfactor")
                 .expect("a well-formed key"),
-            zero_migrate::IrScalar::Int(70),
+            zeroship_migrate::IrScalar::Int(70),
         );
     });
     index.probe("IndexSnapshot::only", only, |i| i.only = true);

@@ -40,15 +40,15 @@ use std::collections::BTreeMap;
 
 use crate::support::mysql::{quote_ident, DatabaseGuard, MysqlDevSession};
 use serde_json::{json, Value};
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::apply::executor::LockMode;
-use zero_migrate::driver::SqlSession;
-use zero_migrate::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::apply::executor::LockMode;
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::{
     resolve_create_table_policy, Approval, DialectId, ExecutorConfig, GuardConfig, IrAuthor,
     LiveSchema, MigrationEngine, MigrationIr,
 };
-use zero_migrate_mysql::MysqlBackend;
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate_mysql::MysqlBackend;
+use zeroship_migrate_sqlite::SqliteBackend;
 
 const OWNER: &str = "app_mysql_trigger_result_set";
 
@@ -121,7 +121,7 @@ async fn apply<B: MigrationBackend>(
         Err(error) => return Err(format!("snapshot the live schema: {error}")),
     };
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
         dialect,
@@ -131,7 +131,7 @@ async fn apply<B: MigrationBackend>(
     let artifact = author
         .load_and_lower_guarded(&source, OWNER, &registry(), &live, &guard)
         .map_err(|error| format!("lower: {error}"))?;
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,
@@ -171,7 +171,7 @@ async fn mysql_refuses_a_select_trigger_body_and_keeps_a_delete_one() {
         apply(
             &backend,
             &cfg,
-            &zero_migrate_mysql::DIALECT,
+            &zeroship_migrate_mysql::DIALECT,
             &envelope("setup", base_ops()),
         )
         .await?;
@@ -182,7 +182,7 @@ async fn mysql_refuses_a_select_trigger_body_and_keeps_a_delete_one() {
         let refusal = match apply(
             &backend,
             &cfg,
-            &zero_migrate_mysql::DIALECT,
+            &zeroship_migrate_mysql::DIALECT,
             &envelope("select_body", vec![trigger("tg_bad", select_statement())]),
         )
         .await
@@ -211,7 +211,7 @@ async fn mysql_refuses_a_select_trigger_body_and_keeps_a_delete_one() {
         apply(
             &backend,
             &cfg,
-            &zero_migrate_mysql::DIALECT,
+            &zeroship_migrate_mysql::DIALECT,
             &envelope("delete_body", vec![trigger("tg_good", delete_statement())]),
         )
         .await?;
@@ -262,7 +262,7 @@ async fn sqlite_still_accepts_a_select_trigger_body() {
     apply(
         &backend,
         &cfg,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &envelope("setup", base_ops()),
     )
     .await
@@ -273,7 +273,7 @@ async fn sqlite_still_accepts_a_select_trigger_body() {
     apply(
         &backend,
         &cfg,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &envelope("select_body", vec![trigger("tg_ok", select_statement())]),
     )
     .await

@@ -55,8 +55,8 @@
 
 use crate::support;
 
-use zero_migrate::model::ir::{PolicyCmd, TriggerEvent, TriggerTiming};
-use zero_migrate::model::snapshot::{
+use zeroship_migrate::model::ir::{PolicyCmd, TriggerEvent, TriggerTiming};
+use zeroship_migrate::model::snapshot::{
     FunctionIdentity, FunctionKey, PolicyIdentity, PolicyKey, SchemaSnapshot, TriggerIdentity,
     TriggerKey, VendorObjectIdentities,
 };
@@ -141,8 +141,8 @@ fn a_dropped_policy_is_reported_as_drift() {
     let expected = speaking(one_of_each());
     let mut actual_vendor = one_of_each();
     actual_vendor.policies.clear();
-    let drift = zero_migrate::diff_snapshots(
-        zero_migrate::shipping_vendors(),
+    let drift = zeroship_migrate::diff_snapshots(
+        zeroship_migrate::shipping_vendors(),
         &expected,
         &speaking(actual_vendor),
     );
@@ -167,8 +167,8 @@ fn a_dropped_function_and_trigger_are_reported_as_drift() {
     let mut actual_vendor = one_of_each();
     actual_vendor.functions.clear();
     actual_vendor.triggers.clear();
-    let drift = zero_migrate::diff_snapshots(
-        zero_migrate::shipping_vendors(),
+    let drift = zeroship_migrate::diff_snapshots(
+        zeroship_migrate::shipping_vendors(),
         &expected,
         &speaking(actual_vendor),
     );
@@ -195,8 +195,8 @@ fn a_dropped_function_and_trigger_are_reported_as_drift() {
 fn an_out_of_band_creation_is_reported_as_unexpected() {
     // The other direction: the live database holds objects no migration authored.
     let expected = speaking(VendorObjectIdentities::default());
-    let drift = zero_migrate::diff_snapshots(
-        zero_migrate::shipping_vendors(),
+    let drift = zeroship_migrate::diff_snapshots(
+        zeroship_migrate::shipping_vendors(),
         &expected,
         &speaking(one_of_each()),
     );
@@ -226,8 +226,8 @@ fn a_policy_whose_scope_roles_or_permissiveness_changed_is_reported_as_altered()
             permissive: false,
         },
     );
-    let drift = zero_migrate::diff_snapshots(
-        zero_migrate::shipping_vendors(),
+    let drift = zeroship_migrate::diff_snapshots(
+        zeroship_migrate::shipping_vendors(),
         &expected,
         &speaking(actual_vendor),
     );
@@ -266,8 +266,8 @@ fn a_trigger_whose_timing_or_events_changed_is_reported_as_altered() {
             events: vec![TriggerEvent::Delete],
         },
     );
-    let drift = zero_migrate::diff_snapshots(
-        zero_migrate::shipping_vendors(),
+    let drift = zeroship_migrate::diff_snapshots(
+        zeroship_migrate::shipping_vendors(),
         &expected,
         &speaking(actual_vendor),
     );
@@ -296,8 +296,8 @@ fn a_trigger_whose_timing_or_events_changed_is_reported_as_altered() {
 #[test]
 fn identical_vendor_objects_are_clean() {
     // The control that stops every test above passing because EVERYTHING drifts.
-    let drift = zero_migrate::diff_snapshots(
-        zero_migrate::shipping_vendors(),
+    let drift = zeroship_migrate::diff_snapshots(
+        zeroship_migrate::shipping_vendors(),
         &speaking(one_of_each()),
         &speaking(one_of_each()),
     );
@@ -325,8 +325,8 @@ fn a_re_ordered_trigger_event_list_is_not_drift() {
         },
     );
     assert!(
-        zero_migrate::diff_snapshots(
-            zero_migrate::shipping_vendors(),
+        zeroship_migrate::diff_snapshots(
+            zeroship_migrate::shipping_vendors(),
             &expected,
             &speaking(actual_vendor)
         )
@@ -352,8 +352,8 @@ fn an_alias_spelled_argument_type_is_not_drift() {
     );
 
     assert!(
-        zero_migrate::diff_snapshots(
-            zero_migrate::shipping_vendors(),
+        zeroship_migrate::diff_snapshots(
+            zeroship_migrate::shipping_vendors(),
             &speaking(expected_vendor),
             &speaking(actual_vendor)
         )
@@ -377,8 +377,8 @@ fn a_replaced_function_body_is_reported_as_drift() {
         .functions
         .insert(function("audit", &["int4"]), body("SELECT x + 999"));
 
-    let drift = zero_migrate::diff_snapshots(
-        zero_migrate::shipping_vendors(),
+    let drift = zeroship_migrate::diff_snapshots(
+        zeroship_migrate::shipping_vendors(),
         &speaking(expected_vendor),
         &speaking(actual_vendor),
     );
@@ -418,8 +418,8 @@ fn a_begin_atomic_body_declines_rather_than_reporting_false_drift() {
             .functions
             .insert(function("audit", &["int4"]), actual_fn);
 
-        let drift = zero_migrate::diff_snapshots(
-            zero_migrate::shipping_vendors(),
+        let drift = zeroship_migrate::diff_snapshots(
+            zeroship_migrate::shipping_vendors(),
             &speaking(expected_vendor),
             &speaking(actual_vendor),
         );
@@ -441,12 +441,12 @@ fn a_dialect_that_does_not_introspect_them_reports_nothing() {
     let expected = speaking(one_of_each());
     let silent = SchemaSnapshot::default();
     assert!(
-        zero_migrate::diff_snapshots(zero_migrate::shipping_vendors(), &expected, &silent)
+        zeroship_migrate::diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &silent)
             .is_clean(),
         "an engine that never reads pg_policy must not report policy drift"
     );
     assert!(
-        zero_migrate::diff_snapshots(zero_migrate::shipping_vendors(), &silent, &expected)
+        zeroship_migrate::diff_snapshots(zeroship_migrate::shipping_vendors(), &silent, &expected)
             .is_clean(),
         "and neither must the mirror case, where only the LIVE side speaks"
     );
@@ -463,12 +463,12 @@ fn looking_and_finding_none_is_not_the_same_claim_as_not_looking() {
     let did_not_look = SchemaSnapshot::default();
 
     assert!(
-        !zero_migrate::diff_snapshots(zero_migrate::shipping_vendors(), &has_one, &found_none)
+        !zeroship_migrate::diff_snapshots(zeroship_migrate::shipping_vendors(), &has_one, &found_none)
             .is_clean(),
         "a side that looked and found none contradicts a side that has one"
     );
     assert!(
-        zero_migrate::diff_snapshots(zero_migrate::shipping_vendors(), &has_one, &did_not_look)
+        zeroship_migrate::diff_snapshots(zeroship_migrate::shipping_vendors(), &has_one, &did_not_look)
             .is_clean(),
         "a side that did not look contradicts nothing"
     );
@@ -496,12 +496,12 @@ fn folding_onto_a_base_that_looked_does_not_erase_the_claim() {
         ..SchemaSnapshot::default()
     };
     for dialect in [
-        &zero_migrate_postgres::DIALECT,
-        &zero_migrate_sqlite::DIALECT,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
     ] {
-        let folded = zero_migrate::render::fold::fold_ops_onto(
-            zero_migrate::shipping_vendors(),
+        let folded = zeroship_migrate::render::fold::fold_ops_onto(
+            zeroship_migrate::shipping_vendors(),
             &base,
             &[],
             dialect,
@@ -519,12 +519,12 @@ fn folding_onto_a_base_that_looked_does_not_erase_the_claim() {
     // what keeps the SQLite and MySQL round-trip oracles comparing like with like.
     let silent = SchemaSnapshot::default();
     for (dialect, expected) in [
-        (&zero_migrate_postgres::DIALECT, true),
-        (&zero_migrate_sqlite::DIALECT, false),
-        (&zero_migrate_mysql::DIALECT, false),
+        (&zeroship_migrate_postgres::DIALECT, true),
+        (&zeroship_migrate_sqlite::DIALECT, false),
+        (&zeroship_migrate_mysql::DIALECT, false),
     ] {
-        let folded = zero_migrate::render::fold::fold_ops_onto(
-            zero_migrate::shipping_vendors(),
+        let folded = zeroship_migrate::render::fold::fold_ops_onto(
+            zeroship_migrate::shipping_vendors(),
             &silent,
             &[],
             dialect,

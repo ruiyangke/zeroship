@@ -14,8 +14,8 @@
 use crate::support;
 
 use serde_json::{json, Value};
-use zero_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
-use zero_migrate::{
+use zeroship_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
+use zeroship_migrate::{
     ColumnSnapshot, ConstraintSnapshot, IrAuthor, LiveSchema, SchemaSnapshot, TableSnapshot,
     TextStorageSnapshot, ValueFormat,
 };
@@ -25,7 +25,7 @@ const OWNER: &str = "app_catalog_format_proof";
 const PARENT: &str = "unmanaged_parents";
 const MISSING_METADATA: &str = "no authored value-format metadata";
 
-fn no_inject_policy() -> zero_migrate::EffectivePolicy {
+fn no_inject_policy() -> zeroship_migrate::EffectivePolicy {
     support::no_inject(PROJECT_SCHEMA)
 }
 
@@ -54,7 +54,7 @@ fn ascii_bin() -> TextStorageSnapshot {
     }
 }
 
-fn target_column(dialect: &zero_migrate::DialectId, evidence: Evidence) -> ColumnSnapshot {
+fn target_column(dialect: &zeroship_migrate::DialectId, evidence: Evidence) -> ColumnSnapshot {
     let mut column = ColumnSnapshot {
         name: "id".to_string(),
         nullable: false,
@@ -62,13 +62,13 @@ fn target_column(dialect: &zero_migrate::DialectId, evidence: Evidence) -> Colum
     };
     match evidence {
         Evidence::Uuid | Evidence::UuidWithoutCheck => {
-            if dialect == &zero_migrate_postgres::DIALECT {
+            if dialect == &zeroship_migrate_postgres::DIALECT {
                 column.data_type = "uuid".to_string();
-            } else if dialect == &zero_migrate_mysql::DIALECT {
+            } else if dialect == &zeroship_migrate_mysql::DIALECT {
                 column.data_type = "varchar(36)".to_string();
                 column.text_storage = Some(ascii_bin());
                 column.catalog_uuid_format_check = matches!(evidence, Evidence::Uuid);
-            } else if dialect == &zero_migrate_sqlite::DIALECT {
+            } else if dialect == &zeroship_migrate_sqlite::DIALECT {
                 column.data_type = "text".to_string();
                 column.catalog_uuid_format_check = matches!(evidence, Evidence::Uuid);
             } else {
@@ -76,11 +76,11 @@ fn target_column(dialect: &zero_migrate::DialectId, evidence: Evidence) -> Colum
             }
         }
         Evidence::TypeId(_) | Evidence::TypeIdWithoutCheck => {
-            if dialect == &zero_migrate_mysql::DIALECT {
+            if dialect == &zeroship_migrate_mysql::DIALECT {
                 column.data_type = "varchar(191)".to_string();
                 column.text_storage = Some(ascii_bin());
-            } else if dialect == &zero_migrate_postgres::DIALECT
-                || dialect == &zero_migrate_sqlite::DIALECT
+            } else if dialect == &zeroship_migrate_postgres::DIALECT
+                || dialect == &zeroship_migrate_sqlite::DIALECT
             {
                 column.data_type = "text".to_string();
             } else {
@@ -93,10 +93,10 @@ fn target_column(dialect: &zero_migrate::DialectId, evidence: Evidence) -> Colum
             }
         }
         Evidence::PlainText => {
-            if dialect == &zero_migrate_mysql::DIALECT {
+            if dialect == &zeroship_migrate_mysql::DIALECT {
                 column.data_type = "varchar(191)".to_string();
-            } else if dialect == &zero_migrate_postgres::DIALECT
-                || dialect == &zero_migrate_sqlite::DIALECT
+            } else if dialect == &zeroship_migrate_postgres::DIALECT
+                || dialect == &zeroship_migrate_sqlite::DIALECT
             {
                 column.data_type = "text".to_string();
             } else {
@@ -107,7 +107,7 @@ fn target_column(dialect: &zero_migrate::DialectId, evidence: Evidence) -> Colum
     column
 }
 
-fn live(dialect: &zero_migrate::DialectId, evidence: Evidence) -> LiveSchema {
+fn live(dialect: &zeroship_migrate::DialectId, evidence: Evidence) -> LiveSchema {
     let mut snapshot = SchemaSnapshot::default();
     snapshot.tables.insert(
         PARENT.to_string(),
@@ -200,11 +200,11 @@ fn table_constraint_ir(name: &str, ty: &str, value_format: Option<Value>) -> Mig
 
 fn lower(
     ir: &MigrationIr,
-    dialect: &zero_migrate::DialectId,
+    dialect: &zeroship_migrate::DialectId,
     live: &LiveSchema,
 ) -> Result<(), String> {
     IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT_SCHEMA,
         OWNER,
         dialect,
@@ -215,10 +215,10 @@ fn lower(
     .map_err(|error| error.to_string())
 }
 
-const DIALECTS: [&zero_migrate::DialectId; 3] = [
-    &zero_migrate_postgres::DIALECT,
-    &zero_migrate_mysql::DIALECT,
-    &zero_migrate_sqlite::DIALECT,
+const DIALECTS: [&zeroship_migrate::DialectId; 3] = [
+    &zeroship_migrate_postgres::DIALECT,
+    &zeroship_migrate_mysql::DIALECT,
+    &zeroship_migrate_sqlite::DIALECT,
 ];
 
 #[test]
@@ -333,7 +333,7 @@ fn a_chained_typed_reference_target_without_its_own_check_stays_rejected() {
     // contract, so a chained PostgreSQL UUID target is legitimately provable.
     let table_level = table_constraint_ir("table_level_chained_uuid", "uuid", None);
     let column_level = column_reference_ir("column_level_chained_uuid", "uuid", None);
-    for dialect in [&zero_migrate_mysql::DIALECT, &zero_migrate_sqlite::DIALECT] {
+    for dialect in [&zeroship_migrate_mysql::DIALECT, &zeroship_migrate_sqlite::DIALECT] {
         let live = live(dialect, Evidence::UuidWithoutCheck);
         for (surface, ir) in [
             ("table-level", &table_level),

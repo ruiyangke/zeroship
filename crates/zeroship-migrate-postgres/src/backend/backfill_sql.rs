@@ -7,21 +7,21 @@
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use zero_migrate_backend::approval::Approval;
-use zero_migrate_backend::backfill::{
+use zeroship_migrate_backend::approval::Approval;
+use zeroship_migrate_backend::backfill::{
     generate_per_row_value, CursorColumnContract, CursorComparison, CursorContract,
     CursorScalarType, CursorTuple,
 };
-use zero_migrate_backend::backfill::{
+use zeroship_migrate_backend::backfill::{
     BackfillError, BackfillOutcome, BackfillProgressEntry, BackfillSpec,
 };
-use zero_migrate_backend::conn::ExecutorConfig;
-use zero_migrate_backend::driver::{Bind, Row, SqlSession};
-use zero_migrate_backend::executor::ApplyError;
-use zero_migrate_backend::journal::{self, JournalError};
-use zero_migrate_backend::timeout::resolve_timeout_ms;
-use zero_migrate_ir::ir::{CursorStability, IrScalar, PerRowGenerator};
-use zero_migrate_ir::migration::{Checksum, MigrationId};
+use zeroship_migrate_backend::conn::ExecutorConfig;
+use zeroship_migrate_backend::driver::{Bind, Row, SqlSession};
+use zeroship_migrate_backend::executor::ApplyError;
+use zeroship_migrate_backend::journal::{self, JournalError};
+use zeroship_migrate_backend::timeout::resolve_timeout_ms;
+use zeroship_migrate_ir::ir::{CursorStability, IrScalar, PerRowGenerator};
+use zeroship_migrate_ir::migration::{Checksum, MigrationId};
 
 use super::session::AUTHOR_SQL_LITERAL_MODE;
 
@@ -44,7 +44,7 @@ fn validate_ident(what: &str, value: &str) -> Result<(), ApplyError> {
 }
 
 fn quote_ident(value: &str) -> Result<String, ApplyError> {
-    Ok(zero_migrate_backend::dml::quote_ident_checked_for_backend(
+    Ok(zeroship_migrate_backend::dml::quote_ident_checked_for_backend(
         value,
         &crate::dml::RENDERER,
     )?)
@@ -587,7 +587,7 @@ fn validate_spec(spec: &BackfillSpec) -> Result<Option<&CursorContract>, ApplyEr
             )));
         }
         if let PerRowGenerator::TypeId { prefix } = assignment.generator() {
-            zero_migrate_ir::ir::validate_type_id_prefix(prefix).map_err(|error| {
+            zeroship_migrate_ir::ir::validate_type_id_prefix(prefix).map_err(|error| {
                 backend_error(format!(
                     "invalid TypeID prefix for per-row destination {column:?}: {error}"
                 ))
@@ -1745,7 +1745,7 @@ pub(super) async fn read_progress_entries<D: SqlSession>(
     if !table_exists {
         return Ok(Vec::new());
     }
-    let meta = zero_migrate_backend::dml::quote_ident_checked_for_backend(
+    let meta = zeroship_migrate_backend::dml::quote_ident_checked_for_backend(
         &cfg.confinement.meta_schema,
         &crate::dml::RENDERER,
     )?;
@@ -2431,8 +2431,8 @@ pub(super) async fn run_backfill<D: SqlSession>(
             batches = batches.saturating_add(1);
             rows_updated = rows_updated.saturating_add(updated);
             last_cursor = next_cursor;
-            zero_migrate_backend::fault::trip(
-                zero_migrate_backend::fault::points::BACKFILL_MID_BATCHES,
+            zeroship_migrate_backend::fault::trip(
+                zeroship_migrate_backend::fault::points::BACKFILL_MID_BATCHES,
             )?;
             if selected < u64::from(spec.batch_size) {
                 break;
@@ -2466,7 +2466,7 @@ mod tuple_tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use zero_migrate_backend::driver::Value as DriverValue;
+    use zeroship_migrate_backend::driver::Value as DriverValue;
 
     fn contract() -> CursorContract {
         CursorContract {
@@ -2506,10 +2506,10 @@ mod tuple_tests {
     }
 
     fn checksum() -> Checksum {
-        Checksum::of(&zero_migrate_ir::migration::ChecksumInput {
+        Checksum::of(&zeroship_migrate_ir::migration::ChecksumInput {
             up: "postgres tuple backfill test",
             down: None,
-            flags: &zero_migrate_ir::migration::MigrationFlags::default(),
+            flags: &zeroship_migrate_ir::migration::MigrationFlags::default(),
             owner_app: "app",
             depends_on: &[],
             supersedes: &[],

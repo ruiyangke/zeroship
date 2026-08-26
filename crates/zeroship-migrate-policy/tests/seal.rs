@@ -8,7 +8,7 @@
 //! different document - exactly what an attacker who swapped the sealed policy would
 //! present.
 
-use zero_migrate_policy::{
+use zeroship_migrate_policy::{
     admit, finalize_charter, overlay, seal, Enforcement, KnobDef, KnobKey, KnobKind, KnobValue,
     Polarity, PolicyDoc, PolicyRegistry, RootCharter, SealError, TrustedDoc,
 };
@@ -25,7 +25,7 @@ fn def(key: &str, kind: KnobKind, polarity: Polarity, default: KnobValue) -> Kno
         polarity,
         default,
         enforcement: Enforcement::Enforced,
-        object_model: zero_migrate_policy::ObjectModel::PerTable,
+        object_model: zeroship_migrate_policy::ObjectModel::PerTable,
         requires_db_privilege: false,
         inherit: true,
         docs: String::new(),
@@ -111,12 +111,12 @@ predicate = { kind = "forbidden_columns", names = ["ssn"] }
 
 /// Compose the reference policy: the root charter against an empty draft (all charter
 /// rules survive union-up; the draft adds no grants so nothing escalates).
-fn reference_policy(reg: &PolicyRegistry) -> zero_migrate_policy::EffectivePolicy {
+fn reference_policy(reg: &PolicyRegistry) -> zeroship_migrate_policy::EffectivePolicy {
     let root = RootCharter::parse_toml(ROOT_TOML, reg).unwrap();
     let draft = PolicyDoc::parse_toml(
         "policy_version = 1\n",
         reg,
-        zero_migrate_policy::LoadContext::NonRootLayer,
+        zeroship_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
     admit(&root, &draft, reg).unwrap()
@@ -186,7 +186,7 @@ value = 600
 scope = { include = ["app_*"] }
 "#,
         &reg,
-        zero_migrate_policy::LoadContext::NonRootLayer,
+        zeroship_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
     let policy_600 = admit(&root, &draft_600, &reg).unwrap();
@@ -208,7 +208,7 @@ value = 60
 scope = { include = ["app_*"] }
 "#,
         &reg,
-        zero_migrate_policy::LoadContext::NonRootLayer,
+        zeroship_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
     let tampered = admit(&root, &draft_60, &reg).unwrap();
@@ -254,7 +254,7 @@ fn tampered_scope_fails() {
     let draft = PolicyDoc::parse_toml(
         "policy_version = 1\n",
         &reg,
-        zero_migrate_policy::LoadContext::NonRootLayer,
+        zeroship_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
     let tampered = admit(&root, &draft, &reg).unwrap();
@@ -290,7 +290,7 @@ fn tampered_inject_column_fails() {
     let draft = PolicyDoc::parse_toml(
         "policy_version = 1\n",
         &reg,
-        zero_migrate_policy::LoadContext::NonRootLayer,
+        zeroship_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
     let tampered = admit(&root, &draft, &reg).unwrap();
@@ -497,7 +497,7 @@ columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
     let empty = PolicyDoc::parse_toml(
         "policy_version = 1\n",
         &reg,
-        zero_migrate_policy::LoadContext::NonRootLayer,
+        zeroship_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
 
@@ -559,7 +559,7 @@ scope = { include = ["staging"] }
     let empty = PolicyDoc::parse_toml(
         "policy_version = 1\n",
         &reg,
-        zero_migrate_policy::LoadContext::NonRootLayer,
+        zeroship_migrate_policy::LoadContext::NonRootLayer,
     )
     .unwrap();
     let pa = admit(&charter_a, &empty, &reg).unwrap();
@@ -582,8 +582,8 @@ scope = { include = ["staging"] }
     let pb = admit(&flat_root, &empty, &reg).unwrap();
 
     // The two denote the SAME effective grants (sanity), but different layer stacks.
-    let staging_t = zero_migrate_policy::ObjectName::table(b"staging".to_vec(), b"t".to_vec());
-    let app_t = zero_migrate_policy::ObjectName::table(b"app_main".to_vec(), b"t".to_vec());
+    let staging_t = zeroship_migrate_policy::ObjectName::table(b"staging".to_vec(), b"t".to_vec());
+    let app_t = zeroship_migrate_policy::ObjectName::table(b"app_main".to_vec(), b"t".to_vec());
     let rk = KnobKey::parse("sql.raw").unwrap();
     assert_eq!(pa.grants(&rk, &staging_t), pb.grants(&rk, &staging_t));
     assert_eq!(pa.grants(&rk, &app_t), pb.grants(&rk, &app_t));
@@ -610,7 +610,7 @@ scope = { include = ["staging"] }
 /// `SegGlob::infix` can.
 #[test]
 fn globs_rendering_alike_but_matching_differently_seal_differently() {
-    use zero_migrate_policy::scope::glob::SegGlob;
+    use zeroship_migrate_policy::scope::glob::SegGlob;
 
     let a = SegGlob::infix(b"a*".to_vec(), b"b".to_vec());
     let b = SegGlob::infix(b"a".to_vec(), b"*b".to_vec());

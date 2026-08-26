@@ -31,11 +31,11 @@
 
 use std::collections::BTreeMap;
 
-use zero_migrate::model::schema_model::{
+use zeroship_migrate::model::schema_model::{
     self, column_shape_identity, constraint_shape_identity, drift_identity, index_pairing_identity,
     index_shape_identity, table_shape_identity, SchemaModel,
 };
-use zero_migrate::{ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, TableSnapshot};
+use zeroship_migrate::{ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, TableSnapshot};
 
 /// What one equivalence run actually looked at. Asserted by the callers so a shrinking
 /// fixture is a failure rather than a quieter pass.
@@ -461,8 +461,8 @@ pub fn assert_drift_sees_what_shape_does_not(
         .find(|column| {
             matches!(
                 column.generated_kind,
-                Some(zero_migrate::GeneratedKindSnapshot::Stored)
-                    | Some(zero_migrate::GeneratedKindSnapshot::Virtual)
+                Some(zeroship_migrate::GeneratedKindSnapshot::Stored)
+                    | Some(zeroship_migrate::GeneratedKindSnapshot::Virtual)
             )
         })
         .unwrap_or_else(|| {
@@ -476,7 +476,7 @@ pub fn assert_drift_sees_what_shape_does_not(
         .clone();
 
     let mut no_longer_generated = generated.clone();
-    no_longer_generated.generated_kind = Some(zero_migrate::GeneratedKindSnapshot::NotGenerated);
+    no_longer_generated.generated_kind = Some(zeroship_migrate::GeneratedKindSnapshot::NotGenerated);
 
     assert!(
         column_shape_identity(&generated, &no_longer_generated),

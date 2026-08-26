@@ -50,17 +50,17 @@
 //! `Option` on a step: a step with no op provenance carries no effect at all, which
 //! is a different question with the same fail-closed answer.
 
-use zero_migrate_backend::registry::VendorSet;
-use zero_migrate_ir::effect::Effect;
+use zeroship_migrate_backend::registry::VendorSet;
+use zeroship_migrate_ir::effect::Effect;
 
-use zero_migrate_policy::EffectivePolicy;
+use zeroship_migrate_policy::EffectivePolicy;
 
 use crate::model::ir::{MigrationIr, Op};
 use crate::model::snapshot::SchemaSnapshot;
 use crate::render::fold::{fold_ops_onto, FoldError};
 #[cfg(test)]
 use crate::test_fixtures::POSTGRES;
-use zero_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::dialect::DialectId;
 
 /// The state the plan's `n`th step meets: the live schema as it was before the plan
 /// started, advanced by the ops the first `n` steps replay.

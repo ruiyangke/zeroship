@@ -7,7 +7,7 @@
 //!
 //! | before                        | after                        |
 //! |-------------------------------|------------------------------|
-//! | `schema::query` (the trait)   | `zero_migrate_backend::schema` |
+//! | `schema::query` (the trait)   | `zeroship_migrate_backend::schema` |
 //! | `schema::backends::postgres`  | `zero-migrate-postgres`      |
 //! | `schema::backends::sqlite`    | `zero-migrate-sqlite`        |
 //! | `schema::backends::mysql`     | `zero-migrate-mysql`         |
@@ -47,8 +47,8 @@
 //! crate, one file apart, this warning matters more than it did.
 
 use crate::schema::query::SchemaRenderer;
-use zero_migrate_backend::registry::VendorSet;
-use zero_migrate_ir::dialect::DialectId;
+use zeroship_migrate_backend::registry::VendorSet;
+use zeroship_migrate_ir::dialect::DialectId;
 
 /// The schema renderer for a dialect.
 ///

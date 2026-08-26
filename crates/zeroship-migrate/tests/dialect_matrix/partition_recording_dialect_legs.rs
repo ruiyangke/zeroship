@@ -25,14 +25,14 @@
 //!
 //! No live database: this is load-time validation.
 
-use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::validate_ir;
+use zeroship_migrate::model::ir::MigrationIr;
+use zeroship_migrate::validate_ir;
 
 /// Validate under `dialect` and return the refusal text, or `None` when it passed.
-fn refusal(ops_json: &str, dialect: &zero_migrate::DialectId) -> Option<String> {
+fn refusal(ops_json: &str, dialect: &zeroship_migrate::DialectId) -> Option<String> {
     let raw = format!(r#"{{"ir_version":1,"name":"parts","ops":{ops_json}}}"#);
     let ir: MigrationIr = serde_json::from_str(&raw).expect("the partition test IR parses");
-    validate_ir(zero_migrate::shipping_vendors(), &ir, dialect)
+    validate_ir(zeroship_migrate::shipping_vendors(), &ir, dialect)
         .err()
         .map(|e| e.to_string())
 }
@@ -46,7 +46,7 @@ const ORPHAN_CHILD: &str = r#"{"op":"createPartition","name":"child_a","of":"abs
 /// measuring the wrapper rather than a check that never fires.
 #[test]
 fn a_top_level_orphan_partition_is_refused_on_sqlite() {
-    let error = refusal(&format!("[{ORPHAN_CHILD}]"), &zero_migrate_sqlite::DIALECT)
+    let error = refusal(&format!("[{ORPHAN_CHILD}]"), &zeroship_migrate_sqlite::DIALECT)
         .expect("SQLite refuses a partition whose parent nothing created");
     assert!(
         error.contains("absent_parent") || error.contains("child_a"),
@@ -60,7 +60,7 @@ fn a_top_level_orphan_partition_is_refused_on_sqlite() {
 fn an_orphan_partition_inside_the_selected_leg_is_refused() {
     let error = refusal(
         &format!(r#"[{{"op":"dialectal","legs":{{"sqlite":[{ORPHAN_CHILD}]}}}}]"#),
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
     )
     .expect("a dialect() wrapper must not hide a partition from the recording check");
     assert!(
@@ -77,7 +77,7 @@ fn an_orphan_partition_inside_the_selected_leg_is_refused() {
 fn an_orphan_partition_in_an_unselected_leg_is_not_refused() {
     let error = refusal(
         &format!(r#"[{{"op":"dialectal","legs":{{"postgres":[{ORPHAN_CHILD}],"sqlite":[]}}}}]"#),
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
     );
     assert!(
         error.is_none(),
@@ -101,7 +101,7 @@ fn a_top_level_parent_is_visible_to_a_child_inside_a_leg() {
         {"op":"createPartition","name":"events_rest","of":"events",
          "bounds":{"kind":"default"}}]}}
     ]"#;
-    let error = refusal(ops, &zero_migrate_sqlite::DIALECT);
+    let error = refusal(ops, &zeroship_migrate_sqlite::DIALECT);
     assert!(
         error.is_none(),
         "the leg's child must find the top-level parent, not start from empty state: \

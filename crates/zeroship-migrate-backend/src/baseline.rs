@@ -11,7 +11,7 @@
 //! The vocabulary sits HERE, below every vendor, for the reason every other item in
 //! this crate does: a type a backend's signature names cannot live in the engine
 //! that already depends on every backend. The engine re-exports it at
-//! `zero_migrate::apply::baseline`.
+//! `zeroship_migrate::apply::baseline`.
 //!
 //! A project DB may already physically carry its schema (created outside the
 //! engine, or a legacy DB being adopted). `baseline` records a baseline

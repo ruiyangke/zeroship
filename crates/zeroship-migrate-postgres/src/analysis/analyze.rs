@@ -33,15 +33,15 @@
 use pg_query::protobuf::node::Node as NodeEnum;
 use pg_query::protobuf::{self, AlterTableType, ConstrType, ObjectType};
 
-use zero_migrate_ir::migration::Migration;
+use zeroship_migrate_ir::migration::Migration;
 
 // The advisory VOCABULARY moved to `zero-migrate-backend`, because
-// `zero_migrate_backend::guard::GuardOutcome` - the neutral seam every vendor's guard
+// `zeroship_migrate_backend::guard::GuardOutcome` - the neutral seam every vendor's guard
 // returns - carries `Vec<Advisory>`, so the type has to sit below every vendor. The
 // ANALYZERS did not move: they read a `libpg_query` parse tree and belong with the
-// parser. Re-exported so `zero_migrate_postgres::analysis::analyze::{Advisory, Severity,
+// parser. Re-exported so `zeroship_migrate_postgres::analysis::analyze::{Advisory, Severity,
 // rule}` keeps resolving.
-pub use zero_migrate_backend::advisory::{rule, Advisory, Severity};
+pub use zeroship_migrate_backend::advisory::{rule, Advisory, Severity};
 
 /// Run every analyzer over `sql` and return the advisories (in source order,
 /// then analyzer order within a statement).

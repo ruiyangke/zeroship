@@ -6,14 +6,14 @@ use std::path::PathBuf;
 
 use serde_json::json;
 use tempfile::TempDir;
-use zero_migrate::driver::SqlSession;
-use zero_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
-use zero_migrate::model::migration::{
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
+use zeroship_migrate::model::migration::{
     Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
 };
-use zero_migrate::{diff_snapshots, IrAuthor, LiveSchema};
-use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate::{diff_snapshots, IrAuthor, LiveSchema};
+use zeroship_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zeroship_migrate_sqlite::SqliteBackend;
 
 const OWNER: &str = "app_collation_introspection";
 
@@ -139,7 +139,7 @@ async fn sqlite_exact_collation_is_introspected_drifted_and_rejected_for_composi
     assert_eq!(rtrim.schema, None);
     assert_eq!(rtrim.name, "RTRIM");
 
-    let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
+    let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual);
     assert!(
         drift.altered_objects.iter().any(|altered| {
             altered.object == "column parent_tenant"
@@ -152,10 +152,10 @@ async fn sqlite_exact_collation_is_introspected_drifted_and_rejected_for_composi
 
     let live = LiveSchema::from_catalog_snapshot(actual, OWNER);
     let error = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         "main",
         OWNER,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::no_inject("main"),
     )
     .lower(&composite_fk_ir("sqlite_collation_fk"), &live)
@@ -241,7 +241,7 @@ async fn postgres_exact_collation_is_introspected_drifted_and_rejected_for_compo
             return Err(format!("unexpected PostgreSQL POSIX identity: {posix:?}"));
         }
 
-        let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
+        let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual);
         if !drift.altered_objects.iter().any(|altered| {
             altered.object == "column parent_tenant"
                 && altered.field == "collation"
@@ -255,10 +255,10 @@ async fn postgres_exact_collation_is_introspected_drifted_and_rejected_for_compo
 
         let live = LiveSchema::from_catalog_snapshot(actual, OWNER);
         let error = IrAuthor::new(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &schema,
             OWNER,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &support::no_inject(&schema),
         )
         .lower(&composite_fk_ir("postgres_collation_fk"), &live)

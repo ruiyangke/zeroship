@@ -42,7 +42,7 @@
 
 use crate::support::extension_claim::{claim, claim_for, claim_key, release};
 use crate::support::PgDevSession;
-use zero_migrate::driver::{Bind, SqlSession};
+use zeroship_migrate::driver::{Bind, SqlSession};
 
 /// A lock name of this run's own, distinct per case. See the module doc.
 fn probe(tag: &str) -> String {

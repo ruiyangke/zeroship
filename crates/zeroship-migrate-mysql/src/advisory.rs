@@ -33,7 +33,7 @@
 //! destructive op. What is missing is the ADVISORY layer - the warnings an operator
 //! reads before choosing to deploy - and only that.
 
-use zero_migrate_backend::advisory::{
+use zeroship_migrate_backend::advisory::{
     AdvisoryVerdict, AnalyzerAbsent, IndexCoverage, OperationalAdvisor,
 };
 

@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 use crate::executor::BackendError;
 use crate::journal::{AppliedEntry, JournalError, Phase};
 use crate::snapshot::PartitionSnapshot;
-use zero_migrate_ir::migration::Migration;
+use zeroship_migrate_ir::migration::Migration;
 
 /// A net-applied version whose journal checksum no longer matches the supplied
 /// set's checksum for that version - tamper / edited-after-applied (scenario 36).
@@ -336,7 +336,7 @@ pub fn partition_divergences(
 ///
 /// A view-body drift check needs a body on both sides, and only one side can be
 /// read out of a catalog. The other side is a typed
-/// [`ViewQuery`](zero_migrate_ir::ir::ViewQuery) an author wrote, and printing it is
+/// [`ViewQuery`](zeroship_migrate_ir::ir::ViewQuery) an author wrote, and printing it is
 /// the engine's lowering - not a vendor's. A backend that re-printed it itself would
 /// be comparing the DIFFER's idea of the body against the ENGINE's, which is the one
 /// comparison a body check must never make.
@@ -350,5 +350,5 @@ pub fn partition_divergences(
 pub trait AuthoredViewBody {
     /// Render `query` as it would have been rendered when the view was created,
     /// with `eff_schema` as the effective schema for unqualified relations.
-    fn render(&self, query: &zero_migrate_ir::ir::ViewQuery, eff_schema: &str) -> Option<String>;
+    fn render(&self, query: &zeroship_migrate_ir::ir::ViewQuery, eff_schema: &str) -> Option<String>;
 }

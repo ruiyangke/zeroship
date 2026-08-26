@@ -19,7 +19,7 @@
 //!     PROVENANCE and has exactly one honest source: the id that was passed in.
 //!
 //! REACHABILITY. This is not a dead branch. The chain is entirely public:
-//! `zero_migrate::desired_snapshot_for_dialect` -> `build_table_snapshot_impl`
+//! `zeroship_migrate::desired_snapshot_for_dialect` -> `build_table_snapshot_impl`
 //! -> `column_snapshot_for_field` -> `generated_column_snapshot`. It is a
 //! DIFFERENT carrier from the IR op path (`model::validate` gates
 //! `IrColumn::generated` and produces its own vendor-authored refusal), so the
@@ -32,12 +32,12 @@
 //! Today that set is exactly `{postgres}` — the floor assertion says so out loud,
 //! because a walk over a discovered set passes vacuously when the set empties.
 
-use zero_migrate::render::declarative::{
+use zeroship_migrate::render::declarative::{
     desired_snapshot_for_dialect, CollectionDescriptor, FieldDescriptor,
 };
-use zero_migrate::{shipping_backends, BinaryOp, Capability, DialectId, Expr, GeneratedCol};
-use zero_migrate_postgres::DIALECT as POSTGRES;
-use zero_migrate_sqlite::DIALECT as SQLITE;
+use zeroship_migrate::{shipping_backends, BinaryOp, Capability, DialectId, Expr, GeneratedCol};
+use zeroship_migrate_postgres::DIALECT as POSTGRES;
+use zeroship_migrate_sqlite::DIALECT as SQLITE;
 
 use crate::support;
 
@@ -88,7 +88,7 @@ fn descriptors(stored: bool) -> Vec<CollectionDescriptor> {
 /// The public declarative entry point, reduced to its verdict.
 fn desired(dialect: &DialectId, stored: bool) -> Result<(), String> {
     desired_snapshot_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         &descriptors(stored),
         dialect,

@@ -18,10 +18,10 @@
 //!   canonicalization is reached through
 //!   [`query::SchemaRenderer::canonical_type`].
 //! - `backends` - the schema-renderer view of the one shipping
-//!   [`VendorSet`](zero_migrate_backend::registry::VendorSet)
+//!   [`VendorSet`](zeroship_migrate_backend::registry::VendorSet)
 //!   registry. Implementations live in the PostgreSQL, SQLite, and MySQL backend
 //!   crates; core performs an open
-//!   [`DialectId`](zero_migrate_ir::dialect::DialectId) lookup and no enum match
+//!   [`DialectId`](zeroship_migrate_ir::dialect::DialectId) lookup and no enum match
 //!   over them.
 //! - [`diff`] - the **diff classifier** ([`diff::compute_diff`],
 //!   [`diff::ChangeKind`], [`diff::ChangeClass`]) and the schema **metadata
@@ -56,6 +56,6 @@ pub mod query;
 // column_comment_statements` spells through, so a backend crate has to be able to
 // name it; `descriptors` and `error` are the vocabulary `mask_codec` itself names.
 // All three are pure data with no engine dependency, which is why they could go.
-pub use zero_migrate_backend::descriptors;
-pub use zero_migrate_backend::mask_codec;
-pub use zero_migrate_backend::schema_error as error;
+pub use zeroship_migrate_backend::descriptors;
+pub use zeroship_migrate_backend::mask_codec;
+pub use zeroship_migrate_backend::schema_error as error;

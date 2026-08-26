@@ -15,7 +15,7 @@
 //! spells it, and the guard matches it against the same allowlist on both the create
 //! and the drop side. Do not read the non-emptiness answer as authority over a name.
 
-use zero_migrate_policy::{EffectivePolicy, GrantRegion, KnobKey, KnobValue, ObjectName};
+use zeroship_migrate_policy::{EffectivePolicy, GrantRegion, KnobKey, KnobValue, ObjectName};
 
 use crate::capability::VendorCapability;
 use crate::ir::Op;
@@ -39,7 +39,7 @@ use crate::policy_registry::{capability_knob_key, KEY_CODE_EXTENSION};
 pub fn capability_object_for_op(op: &Op, default_schema: &str) -> Option<ObjectName> {
     match op {
         Op::CreateSchema { name, .. } | Op::DropSchema { name, .. } => {
-            zero_migrate_policy::normalize_object_name(name)
+            zeroship_migrate_policy::normalize_object_name(name)
         }
         _ => concrete_object_for_op(op, default_schema),
     }

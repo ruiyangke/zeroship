@@ -27,11 +27,11 @@
 
 use crate::support;
 
-use zero_migrate::descriptors_to_create_ops;
-use zero_migrate::render::declarative::{
+use zeroship_migrate::descriptors_to_create_ops;
+use zeroship_migrate::render::declarative::{
     descriptor_to_sdk_schema, CollectionDescriptor, FieldDescriptor,
 };
-use zero_migrate::render::fold::single_fold;
+use zeroship_migrate::render::fold::single_fold;
 
 const SCHEMA: &str = "public";
 
@@ -66,13 +66,13 @@ fn standalone_mask_on_plaintext_column_round_trips_through_the_fold() {
     let effective = support::confined_charter();
     let ops = descriptors_to_create_ops(&[descriptor], SCHEMA, &effective).expect("producer");
     let generated = single_fold::fold(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ops,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )
-    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
+    .map(|folded| folded.project_field_defs(zeroship_migrate::shipping_vendors()))
     .expect("fold");
     let ssn = &generated["people"]["ssn"];
 

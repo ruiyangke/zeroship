@@ -31,13 +31,13 @@ use crate::support::model_equivalence::{
     assert_roundtrip_is_lossless,
 };
 use crate::support::mysql::{quote_ident, DatabaseGuard, MysqlDevSession};
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::driver::SqlSession;
-use zero_migrate::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::{
     fold_ops, resolve_create_table_policy, Approval, ExecutorConfig, GuardConfig, IrAuthor,
     LiveSchema, LockMode, MigrationEngine, MigrationIr, SchemaSnapshot,
 };
-use zero_migrate_mysql::MysqlBackend;
+use zeroship_migrate_mysql::MysqlBackend;
 
 const OWNER: &str = "app_schema_model_equivalence_mysql";
 
@@ -91,13 +91,13 @@ async fn measure(session: &MysqlDevSession, cfg: &ExecutorConfig) -> Result<Meas
     let resolved_source = serde_json::to_string(&resolved)
         .map_err(|error| format!("serialize resolved IR: {error}"))?;
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         &policy,
     );
-    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate_mysql::DIALECT);
+    let guard = GuardConfig::from_policy(policy.clone(), zeroship_migrate_mysql::DIALECT);
     let artifact = author
         .load_and_lower_guarded(
             &resolved_source,
@@ -113,7 +113,7 @@ async fn measure(session: &MysqlDevSession, cfg: &ExecutorConfig) -> Result<Meas
         .ensure_journal(cfg)
         .await
         .map_err(|error| format!("ensure migration journal: {error}"))?;
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,
@@ -126,9 +126,9 @@ async fn measure(session: &MysqlDevSession, cfg: &ExecutorConfig) -> Result<Meas
         .map_err(|error| format!("apply IR plan: {error}"))?;
 
     let folded = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &resolved.ops,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         &cfg.project_schema,
         &policy,
     )
@@ -160,7 +160,7 @@ async fn the_neutral_model_preserves_mysql_behaviour_exactly() {
     // The reason this leg exists. If MySQL introspection stopped populating the physical
     // type, every assertion below would still pass while proving nothing about the
     // vendor side table, so the precondition is asserted rather than assumed.
-    let vendor = zero_migrate::SchemaModel::from_tables(&measured.live.tables).vendor;
+    let vendor = zeroship_migrate::SchemaModel::from_tables(&measured.live.tables).vendor;
     assert!(
         !vendor.column_vendor.is_empty(),
         "the live MySQL snapshot populated NO vendor leg, so this leg is not \

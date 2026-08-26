@@ -31,8 +31,8 @@
 
 use crate::support;
 
-use zero_migrate::model::ir::{MigrationIr, Op};
-use zero_migrate::render_artifacts;
+use zeroship_migrate::model::ir::{MigrationIr, Op};
+use zeroship_migrate::render_artifacts;
 
 const SCHEMA: &str = "public";
 
@@ -67,9 +67,9 @@ fn mid_expand_ops() -> Vec<Op> {
 #[test]
 fn generated_types_name_only_the_destination_column() {
     let artifacts = render_artifacts(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &mid_expand_ops(),
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &support::no_inject(SCHEMA),
     )
@@ -106,9 +106,9 @@ fn generated_types_name_only_the_destination_column() {
 #[test]
 fn the_destination_carries_the_source_constraints_which_is_what_writes_obey() {
     let artifacts = render_artifacts(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &mid_expand_ops(),
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         SCHEMA,
         &support::no_inject(SCHEMA),
     )

@@ -9,10 +9,10 @@
 //! functions an author may BUILD; they are distinct lists.
 
 use std::collections::BTreeMap;
-use zero_migrate::model::expr::{Expr, SynthFn};
-use zero_migrate::model::ir::{IrScalar, IrValue};
-use zero_migrate::model::load::load_ir_document;
-use zero_migrate::render::dml::assemble_backfill_clauses;
+use zeroship_migrate::model::expr::{Expr, SynthFn};
+use zeroship_migrate::model::ir::{IrScalar, IrValue};
+use zeroship_migrate::model::load::load_ir_document;
+use zeroship_migrate::render::dml::assemble_backfill_clauses;
 
 const APP: &str = "app_grammar";
 
@@ -56,11 +56,11 @@ fn raw_split_funcs_rejected_at_load_both_dialects() {
             ]}}"#
         );
         for dialect in [
-            &zero_migrate_postgres::DIALECT,
-            &zero_migrate_sqlite::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
+            &zeroship_migrate_sqlite::DIALECT,
         ] {
             let err = load_ir_document(
-                zero_migrate::shipping_vendors(),
+                zeroship_migrate::shipping_vendors(),
                 &ir,
                 APP,
                 dialect,
@@ -94,11 +94,11 @@ fn in_envelope_split_part_helper_accepted() {
     ],
     "irreversible":"grammar-boundary fixture: the pre-image of the overwritten column is not recorded"}"#;
     for dialect in [
-        &zero_migrate_postgres::DIALECT,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
     ] {
         load_ir_document(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             ir,
             APP,
             dialect,
@@ -121,19 +121,19 @@ fn out_of_envelope_split_part_pg_loads_sqlite_rejected() {
     ],
     "irreversible":"grammar-boundary fixture: the pre-image of the overwritten column is not recorded"}"#;
     load_ir_document(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         ir,
         APP,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &registry(),
         None,
     )
     .expect("out-of-envelope splitPart is PG-renderable → loads on PG");
     let err = load_ir_document(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         ir,
         APP,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &registry(),
         None,
     )
@@ -156,8 +156,8 @@ fn out_of_envelope_split_part_lowers_native_on_pg_rejects_on_sqlite() {
     // multi-char delimiter, the grammar-boundary example.
     let set = BTreeMap::from([("x".to_string(), IrValue::Expr(split("v", ", ", 1)))]);
     let c = assemble_backfill_clauses(
-        zero_migrate::shipping_vendors(),
-        &zero_migrate_postgres::DIALECT,
+        zeroship_migrate::shipping_vendors(),
+        &zeroship_migrate_postgres::DIALECT,
         "t",
         &set,
         None,
@@ -167,8 +167,8 @@ fn out_of_envelope_split_part_lowers_native_on_pg_rejects_on_sqlite() {
 
     // the same node is unrenderable on the SQLite leg (out of the byte-wise envelope).
     let err = assemble_backfill_clauses(
-        zero_migrate::shipping_vendors(),
-        &zero_migrate_sqlite::DIALECT,
+        zeroship_migrate::shipping_vendors(),
+        &zeroship_migrate_sqlite::DIALECT,
         "t",
         &set,
         None,

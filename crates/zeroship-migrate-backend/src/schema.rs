@@ -9,7 +9,7 @@
 //!
 //! # What is here and what stayed in the engine
 //!
-//! `zero_migrate::schema::query` is large and almost none of it is a vendor
+//! `zeroship_migrate::schema::query` is large and almost none of it is a vendor
 //! spelling. What lives here is exactly the neutral contract and the shared
 //! codecs its methods name:
 //!
@@ -24,10 +24,10 @@
 //! Composition and validation stay in the engine. Physical type and identifier
 //! spellings, including the vendor's catalog-type canonicalization, live in the
 //! backend that owns them. This is the boundary rule stated at length in
-//! `zero_migrate::render::backends`.
+//! `zeroship_migrate::render::backends`.
 //!
 use crate::snapshot::{ColumnSnapshot, IndexSnapshot, SchemaSnapshot};
-use zero_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::dialect::DialectId;
 
 /// How a backend reconciles an existing column whose type/nullability changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,7 +302,7 @@ pub trait SchemaRenderer: std::fmt::Debug + Sync {
     /// portable.
     ///
     /// The trigger BODY had the same problem one crate lower. It was
-    /// `zero_migrate_backend::capability::dual_write_function_body`, twenty lines of
+    /// `zeroship_migrate_backend::capability::dual_write_function_body`, twenty lines of
     /// PL/pgSQL - `TG_OP`, `NEW`, `OLD`, `IS DISTINCT FROM`, `RETURN NEW` - in the
     /// crate whose rule is that nothing in it spells a vendor's grammar. It passed
     /// that crate's neutrality census because the census looks for vendor NAMES and
@@ -677,7 +677,7 @@ pub fn encryption_sentinel_body_for_field(def: &serde_json::Value) -> Option<Str
 }
 
 /// The portable `caseSensitive` intent a field def carries, in the shape
-/// `zero_migrate::render::declarative::mysql_collation_clause` reads.
+/// `zeroship_migrate::render::declarative::mysql_collation_clause` reads.
 ///
 /// The SDK def only ever carries the key when it is FALSE (see
 /// `render::declarative::field_to_sdk_def`), so an absent key is the default

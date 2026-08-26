@@ -1,6 +1,6 @@
 //! # `zero-migrate-backend` - the backend CONTRACT
 //!
-//! The crate `zero_migrate::render::renderer` and `zero_migrate::schema::backends`
+//! The crate `zeroship_migrate::render::renderer` and `zeroship_migrate::schema::backends`
 //! have both called "the future `zero-migrate-backend`" in their headers since the
 //! in-crate backend modules were written. This is it.
 //!
@@ -85,7 +85,7 @@
 //! Three obstacles held it, and only one of them was about size:
 //!
 //! * **A direction error.** `TableRebuildSpec::sequence_policy` was typed
-//!   `zero_migrate_sqlite::SqliteSequencePolicy` - a VENDOR type, in the shared
+//!   `zeroship_migrate_sqlite::SqliteSequencePolicy` - a VENDOR type, in the shared
 //!   plan vocabulary, in a crate the vendors sit above. `PlanStep` reaches it
 //!   through `RenameStep::TableRebuild`, so one field stranded
 //!   `TableRebuildSpec`, `TableRebuild`, `RenameStep` and `PlanStep` together. The
@@ -110,31 +110,31 @@
 pub mod advisory;
 // What each backend DECLARES about its own vendor attributes: the keys it owns, the IR
 // node each attaches to, and what a legal value looks like. The neutral half - the key,
-// the map, the scope - is `zero_migrate_ir::attribute`; this is the vendor-facing half,
+// the map, the scope - is `zeroship_migrate_ir::attribute`; this is the vendor-facing half,
 // so it sits with the other things a `BackendVendor` hands over.
 pub mod attribute;
 // The caller's approval decision. Named by `OnlineSchemaChange::run_online_backfill` and by
 // every gated apply/rollback entry point, so it sits with the traits rather than
 // above them. Zero dependencies of its own. The engine re-exports it at
-// `zero_migrate::approval`.
+// `zeroship_migrate::approval`.
 pub mod approval;
 // Pure data for large-table backfill plan steps: the `BackfillSpec` a vendor's
 // backfill executor is handed, its cursor contract and its checksum. Depends on
-// `zero-migrate-ir` alone. The engine re-exports it at `zero_migrate::model::backfill`.
+// `zero-migrate-ir` alone. The engine re-exports it at `zeroship_migrate::model::backfill`.
 // THE APPLY/ROLLBACK SEAM: `MigrationBackend` itself, the `CrossDeployObligations`
 // capability, and the neutral values their signatures name (`PlaceholderStyle`,
 // `JournalFuture`, `ProjectLockHolder`, `ProjectLockAcquisition`,
 // `PlanPreconditionVerdict`). The three vendor IMPLEMENTATIONS are still in the
 // engine's `apply::backend::{postgres, mysql, sqlite}`; this is the trait they
 // implement, sitting below them so they can leave the engine. The engine
-// re-exports all of it at `zero_migrate::apply::backend`.
+// re-exports all of it at `zeroship_migrate::apply::backend`.
 pub mod backend;
 pub mod backfill;
 // The adoption path's dialect-neutral VOCABULARY: `BaselineOutcome` and the
 // `BaselineError` set every `MigrationBackend::baseline_one` impl speaks. No
 // implementation comes with it - PostgreSQL journals a recorded-not-run row,
 // SQLite does the same through its actor, and MySQL refuses. The engine
-// re-exports it at `zero_migrate::apply::baseline`.
+// re-exports it at `zeroship_migrate::apply::baseline`.
 pub mod baseline;
 // The optional capabilities: `OnlineSchemaChange` in full, with the `OnlineIntent`
 // an expand is handed, the `OnlineError` it refuses with and the
@@ -148,7 +148,7 @@ pub mod capability;
 // schema, which timeout budgets, and the composed policy every executor-path
 // guard is built from. `ExecutorConfig` is the single most-named type in the
 // contract - every `MigrationBackend` I/O method takes a `&ExecutorConfig` - so
-// it sits with the traits. The engine re-exports it at `zero_migrate::conn`.
+// it sits with the traits. The engine re-exports it at `zeroship_migrate::conn`.
 pub mod conn;
 // The canonical constraint-`definition` normal form: the conditional-quote codec,
 // the FK body, and the FK `ConstraintSnapshot` built on it. It sits here because
@@ -156,7 +156,7 @@ pub mod conn;
 // constraint text at all - so it has to be reachable from a vendor crate. The two
 // halves that need a vendor fact take a `&BackendVendor`; the rest names no dialect.
 // COMPARISON text, never an emitted identifier route. The engine re-exports the
-// neutral half and keeps dialect-taking shims at `zero_migrate::render::declarative`.
+// neutral half and keeps dialect-taking shims at `zeroship_migrate::render::declarative`.
 pub mod constraint_definition;
 pub mod ddl;
 pub mod descriptors;
@@ -170,12 +170,12 @@ pub mod dml;
 // The drift-report VOCABULARY a backend's drift query hands back: the checksum /
 // tamper / orphan shapes, the structural-divergence shapes, their aggregate and
 // the shared `DriftError`. The comparison algorithms that produce them stay in
-// the engine. The engine re-exports these at `zero_migrate::apply::drift`.
+// the engine. The engine re-exports these at `zeroship_migrate::apply::drift`.
 pub mod drift;
 // The dialect-neutral network driver seam (`SqlSession`) and its conformance
 // suite. A CONTRACT with no vendor in it: `std` is its only dependency, it
 // spells no keyword and names no dialect, and the network backends are generic
-// over it. The engine re-exports it at `zero_migrate::driver`.
+// over it. The engine re-exports it at `zeroship_migrate::driver`.
 pub mod driver;
 pub mod error;
 // The crash-simulation seam. It sits here for the same reason the trait does: all
@@ -183,14 +183,14 @@ pub mod error;
 // (after a DML statement, before a journal row, mid-backfill-batch), so a home above
 // the vendors is a home they cannot reach once they are separately linkable. It
 // names only `executor::ApplyError` and `std`, and it spells no SQL. The engine
-// re-exports it at `zero_migrate::fault`.
+// re-exports it at `zeroship_migrate::fault`.
 #[doc(hidden)]
 pub mod fault;
 // The apply/rollback VOCABULARY (not an executor): `LockMode`, `ApplyOutcome`,
 // `BackendError`, `ApplyError`, `PreconditionVerdict` and the `Rollback*` set. The
 // generic orchestration stays in the engine; these are the types every
 // `MigrationBackend` signature names. The engine re-exports them at
-// `zero_migrate::apply::executor`.
+// `zeroship_migrate::apply::executor`.
 pub mod executor;
 pub mod existence_probe;
 pub mod fold;
@@ -198,7 +198,7 @@ pub mod guard;
 // The migration journal's dialect-neutral vocabulary: the wire enums whose exact
 // literals are the CONTRACT between the three per-vendor journal writers, the row
 // shapes they read back, and the shared `JournalError`. It emits no SQL. The
-// engine re-exports it at `zero_migrate::apply::journal`.
+// engine re-exports it at `zeroship_migrate::apply::journal`.
 pub mod journal;
 pub mod mask_codec;
 pub mod mask_meta;
@@ -207,7 +207,7 @@ pub mod renderer;
 // What a lowered plan needs the LIVE target to be able to do - the closed
 // `DatabaseFeature` set and the deduplicated `DatabaseRequirements` a backend's
 // `verify_database_requirements` is handed. The engine re-exports both at
-// `zero_migrate::render::plan`.
+// `zeroship_migrate::render::plan`.
 pub mod requirements;
 pub mod schema;
 pub mod schema_error;
@@ -222,7 +222,7 @@ pub mod stored_ddl;
 pub mod table_rebuild;
 // The finite-timeout-budget rule every dialect's session render is bound by. Zero
 // dependencies of its own; the vendors are what resolve a budget, so the rule sits
-// with them. The engine re-exports it at `zero_migrate::apply::timeout`.
+// with them. The engine re-exports it at `zeroship_migrate::apply::timeout`.
 pub mod timeout;
 pub mod validation;
 pub mod value_format;

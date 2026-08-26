@@ -160,7 +160,7 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::{BTreeMap, BTreeSet};
-use zero_migrate_backend::registry::VendorSet;
+use zeroship_migrate_backend::registry::VendorSet;
 
 use indexmap::IndexMap;
 
@@ -182,8 +182,8 @@ use crate::render::gen_types::{
     RuntimeCollectionMetadata, RuntimeIndexDescriptor,
 };
 use crate::render::lower::{resolve_encrypted_inner_domain_in_column, NamedTypeRegistry};
-use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_policy::EffectivePolicy;
+use zeroship_migrate_ir::dialect::DialectId;
+use zeroship_migrate_policy::EffectivePolicy;
 
 // ---------------------------------------------------------------------------
 // The model

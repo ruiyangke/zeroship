@@ -17,12 +17,12 @@
 //! through a registry, at three sites covering sixteen op kinds that never touch
 //! `DmlRenderer`. So while the two renderers are fully behind the contract, the
 //! vendor-op surface is not."* It re-exported
-//! `zero_migrate_postgres::render_vendor_op` to do it, and
+//! `zeroship_migrate_postgres::render_vendor_op` to do it, and
 //! `zero-migrate-sqlite/src/dml.rs` recorded the mirror image - PostgreSQL being
 //! "still in the position SQLite just left, via `render::vendor`".
 //!
 //! Both notes are now discharged. The surface is
-//! [`DmlRenderer::render_vendor_op`](zero_migrate_backend::renderer::DmlRenderer::render_vendor_op),
+//! [`DmlRenderer::render_vendor_op`](zeroship_migrate_backend::renderer::DmlRenderer::render_vendor_op),
 //! answered by each vendor crate, and `render::lower` asks the backend it already
 //! resolved - `self.backend` at the lowering seam, and a threaded `backend` parameter
 //! in `vendor_inverse_from_history`, which is what its sibling
@@ -59,7 +59,7 @@
 //!
 //! `tests/dialect_matrix/vendor_ops_dispatch_per_vendor.rs` asserts that exactly ONE
 //! shipping vendor renders a vendor op and the other two refuse. A census proves core
-//! does not NAME `zero_migrate_postgres`; it cannot prove the dispatch is real, and a
+//! does not NAME `zeroship_migrate_postgres`; it cannot prove the dispatch is real, and a
 //! refactor that routed all three vendors to PostgreSQL's renderer would satisfy a
 //! census completely. That is not hypothetical in this tree - it is the shape of the
 //! SQLite-identifiers-quoted-by-PostgreSQL defect, which compiled clean and passed
@@ -67,4 +67,4 @@
 //! do not agree: two of them have no answer at all, and that disagreement is what
 //! makes it testable.
 
-pub use zero_migrate_backend::vendor::{VendorError, VendorStatement};
+pub use zeroship_migrate_backend::vendor::{VendorError, VendorStatement};

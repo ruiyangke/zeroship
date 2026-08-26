@@ -21,15 +21,15 @@
 
 use std::collections::BTreeMap;
 
-use zero_migrate_backend::registry::BackendVendor;
+use zeroship_migrate_backend::registry::BackendVendor;
 
 /// The vendors this file reaches through their OWN statics — the one place naming a
 /// vendor crate is the design rather than a leak.
 fn shipping_vendors() -> [&'static BackendVendor; 3] {
     [
-        &zero_migrate_postgres::VENDOR,
-        &zero_migrate_sqlite::VENDOR,
-        &zero_migrate_mysql::VENDOR,
+        &zeroship_migrate_postgres::VENDOR,
+        &zeroship_migrate_sqlite::VENDOR,
+        &zeroship_migrate_mysql::VENDOR,
     ]
 }
 

@@ -7,7 +7,7 @@
 //! and its `seal_effective_profile` HMAC are DELETED. This module rebuilds the
 //! managed server on the engine's surviving PDP:
 //!
-//! - the OPERATOR CEILING is a [`zero_migrate_policy::RootCharter`] — a [`PolicyDoc`]
+//! - the OPERATOR CEILING is a [`zeroship_migrate_policy::RootCharter`] — a [`PolicyDoc`]
 //!   loaded [`LoadContext::RootCharter`] (the only layer that may carry a `mandatory`
 //!   inject). The default ceiling is the monorepo-owned CONFINED document embedded
 //!   below; named tiers add more ceilings to the [`ProfileCatalog`].
@@ -16,7 +16,7 @@
 //!   with ESCALATION-REJECT (a draft grant looser than the ceiling permits is
 //!   rejected, never clamped). This is the direct replacement for `meet_ceiling_draft`.
 //! - the SEAL is the `zero-migrate-policy` HMAC over the composed [`EffectivePolicy`]
-//!   ([`zero_migrate::seal`] / [`SealedPolicy::verify`]).
+//!   ([`zeroship_migrate::seal`] / [`SealedPolicy::verify`]).
 //!
 //! The composed engine [`EffectivePolicy`] drives table-shape injection
 //! (`resolve_create_table_policy`) and escalation-reject. The rendered-DDL guard uses
@@ -27,13 +27,13 @@
 use std::collections::BTreeMap;
 
 use uuid::Uuid;
-use zero_migrate::{effective_policy_from_charter_toml, seal, DestructiveOps, SealError, SealedPolicy};
-use zero_migrate_ir::policy_approval::{require_approval_level, ApprovalLevel};
-use zero_migrate_ir::policy_registry::{
+use zeroship_migrate::{effective_policy_from_charter_toml, seal, DestructiveOps, SealError, SealedPolicy};
+use zeroship_migrate_ir::policy_approval::{require_approval_level, ApprovalLevel};
+use zeroship_migrate_ir::policy_registry::{
     builtin_registry, KEY_CODE_EXTENSION, KEY_SAFETY_DESTRUCTIVE_OPS, KEY_SAFETY_REQUIRE_RLS,
     KEY_SCHEMA_CREATE_SCHEMA, KEY_SCHEMA_CREATE_TABLE, KEY_SCHEMA_CROSS_SCHEMA, KEY_SCHEMA_RENAME,
 };
-use zero_migrate_policy::{
+use zeroship_migrate_policy::{
     admit, ComposeError, EffectivePolicy as PdpPolicy, KnobKey, KnobValue, LoadContext,
     LoadError, ObjectName, PolicyDoc, RootCharter,
 };
@@ -743,13 +743,13 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
         // No `safety.require_approval` obligation on the default confined ceiling.
         assert_eq!(effective.approval_level(&app_id.to_string()), ApprovalLevel::Never);
         let app_schema = app_id.to_string();
-        let guard = zero_migrate::guard::GuardConfig::confined_with_effective(
+        let guard = zeroship_migrate::guard::GuardConfig::confined_with_effective(
             app_schema.clone(),
             effective.policy.clone(),
         );
         assert_eq!(
             guard.schema_scope(),
-            Some(zero_migrate::SchemaScope::Single(app_schema)),
+            Some(zeroship_migrate::SchemaScope::Single(app_schema)),
             "the effective policy must retain the exact app-schema boundary"
         );
     }
@@ -838,13 +838,13 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
             guard_policy.injects_for(&owned_table).is_empty(),
             "rendered-DDL guard must not carry inject coverage"
         );
-        let guard = zero_migrate::guard::GuardConfig::from_policy(
+        let guard = zeroship_migrate::guard::GuardConfig::from_policy(
             guard_policy,
-            zero_migrate::SqlDialect::Postgres,
+            zeroship_migrate::SqlDialect::Postgres,
         );
         assert_eq!(
             guard.schema_scope(),
-            Some(zero_migrate::SchemaScope::Single(app_schema)),
+            Some(zeroship_migrate::SchemaScope::Single(app_schema)),
             "guard must remain confined to the exact app schema"
         );
     }
@@ -1104,7 +1104,7 @@ scope = {{ include = ["{app_schema}*"] }}
         let all = ObjectName::table(b"any".to_vec(), b"any".to_vec());
         // access.role is granted (privileged posture) — proves the platform grants loaded.
         assert!(matches!(
-            policy.grants(&key(zero_migrate_ir::policy_registry::KEY_ACCESS_ROLE), &all),
+            policy.grants(&key(zeroship_migrate_ir::policy_registry::KEY_ACCESS_ROLE), &all),
             Some(KnobValue::Bool(true))
         ));
     }

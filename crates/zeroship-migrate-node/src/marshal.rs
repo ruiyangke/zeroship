@@ -1,4 +1,4 @@
-//! napi <-> `zero_migrate` driver-type marshaling.
+//! napi <-> `zeroship_migrate` driver-type marshaling.
 //!
 //! The host driver (`pg`/`mysql2` in JS) speaks JS cells; the engine speaks the
 //! driver-neutral [`Bind`]/[`Value`]/[`Row`]/[`DbError`] types. This module is the
@@ -17,7 +17,7 @@
 //! round-trips exactly. `Text` covers the `to_char` timestamp
 //! and all text/name/varchar cells.
 
-use zero_migrate::driver::{Bind, DbError, Row, Value};
+use zeroship_migrate::driver::{Bind, DbError, Row, Value};
 
 pub use crate::wire::{JsCell, JsError, JsReply, JsRequest, JsRow};
 

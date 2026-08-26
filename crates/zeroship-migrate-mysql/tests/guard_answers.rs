@@ -37,10 +37,10 @@
 //! what keeps that split real: a body copied between the two crates without swapping the
 //! constant fails here rather than passing quietly.
 
-use zero_migrate_backend::guard::{GuardError, GuardOutcome, MigrationGuard};
-use zero_migrate_ir::migration::MigrationFlags;
-use zero_migrate_mysql::guard::MysqlGuard;
-use zero_migrate_mysql::DIALECT;
+use zeroship_migrate_backend::guard::{GuardError, GuardOutcome, MigrationGuard};
+use zeroship_migrate_ir::migration::MigrationFlags;
+use zeroship_migrate_mysql::guard::MysqlGuard;
+use zeroship_migrate_mysql::DIALECT;
 
 /// A raw island is refused, and refused as MySQL's mis-dispatch.
 #[test]
@@ -149,12 +149,12 @@ fn the_descriptor_path_is_granted_a_clean_outcome_and_nothing_more() {
 /// registry handed the engine something else entirely.
 #[test]
 fn the_registry_factory_yields_a_guard_that_gives_these_same_answers() {
-    let registry = zero_migrate_ir::policy_registry::builtin_registry();
-    let cfg = zero_migrate_backend::guard::GuardConfig::from_policy(
-        zero_migrate_policy::EffectivePolicy::deny_all(&registry),
+    let registry = zeroship_migrate_ir::policy_registry::builtin_registry();
+    let cfg = zeroship_migrate_backend::guard::GuardConfig::from_policy(
+        zeroship_migrate_policy::EffectivePolicy::deny_all(&registry),
         DIALECT,
     );
-    let guard = zero_migrate_mysql::guard::guard(&cfg);
+    let guard = zeroship_migrate_mysql::guard::guard(&cfg);
 
     assert!(
         !guard.refuses_destructive_ops_itself(),

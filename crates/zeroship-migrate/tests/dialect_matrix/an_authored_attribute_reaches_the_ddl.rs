@@ -20,11 +20,11 @@
 
 use crate::support;
 
-use zero_migrate::{
+use zeroship_migrate::{
     ColType, IrAuthor, IrColumn, IrFlagsOverride, IrScalar, LiveSchema, MigrationIr, Op,
     CURRENT_IR_VERSION,
 };
-use zero_migrate_ir::attribute::{AttrKey, Attributes, CreateTableAttributes};
+use zeroship_migrate_ir::attribute::{AttrKey, Attributes, CreateTableAttributes};
 
 const SCHEMA: &str = "app";
 const OWNER: &str = "app_a";
@@ -73,9 +73,9 @@ fn create_table_with(attrs: &[(&str, IrScalar)]) -> Op {
     }
 }
 
-fn create_table_sql(dialect: &zero_migrate::DialectId, op: Op) -> String {
+fn create_table_sql(dialect: &zeroship_migrate::DialectId, op: Op) -> String {
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         OWNER,
         dialect,
@@ -106,7 +106,7 @@ fn create_table_sql(dialect: &zero_migrate::DialectId, op: Op) -> String {
 #[test]
 fn postgres_renders_a_declared_storage_parameter_into_the_create() {
     let sql = create_table_sql(
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         create_table_with(&[("postgres.fillfactor", IrScalar::Int(85))]),
     );
     assert!(
@@ -126,7 +126,7 @@ fn postgres_renders_every_declared_table_attribute_it_was_given() {
     // More than one, because a renderer that handles a single knob by special-casing it
     // passes the test above and fails the moment a second is authored.
     let sql = create_table_sql(
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         create_table_with(&[
             ("postgres.fillfactor", IrScalar::Int(70)),
             ("postgres.autovacuum_enabled", IrScalar::Bool(false)),
@@ -148,7 +148,7 @@ fn postgres_renders_every_declared_table_attribute_it_was_given() {
 #[test]
 fn mysql_renders_a_declared_table_option_in_its_own_grammar() {
     let sql = create_table_sql(
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         create_table_with(&[
             ("mysql.row_format", IrScalar::Str("DYNAMIC".to_string())),
             ("mysql.engine", IrScalar::Str("InnoDB".to_string())),
@@ -175,7 +175,7 @@ fn mysql_renders_a_declared_table_option_in_its_own_grammar() {
 #[test]
 fn sqlite_renders_a_declared_valueless_clause() {
     let sql = create_table_sql(
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         create_table_with(&[("sqlite.strict", IrScalar::Bool(true))]),
     );
     // SQLite's STRICT is a bare trailing keyword. A renderer that emitted `strict='true'`
@@ -198,7 +198,7 @@ fn a_table_authored_with_no_attributes_renders_exactly_as_before() {
     // attribute map, so a renderer that appends an empty `WITH ()` or a stray space
     // would redden hundreds of byte-pinned tests elsewhere — but only if something
     // pins the empty case directly, which is what this does.
-    let sql = create_table_sql(&zero_migrate_postgres::DIALECT, create_table_with(&[]));
+    let sql = create_table_sql(&zeroship_migrate_postgres::DIALECT, create_table_with(&[]));
     assert!(
         !sql.contains("WITH ("),
         "a create carrying no attributes must emit no storage-parameter list at all. \
@@ -211,9 +211,9 @@ fn a_table_authored_with_no_attributes_renders_exactly_as_before() {
 /// halfway through an apply", which is worse.
 mod a_wrong_attribute_is_refused_before_any_connection {
     use super::{create_table_with, OWNER, SCHEMA};
-    use zero_migrate::{IrFlagsOverride, IrScalar, MigrationIr, Op, CURRENT_IR_VERSION};
+    use zeroship_migrate::{IrFlagsOverride, IrScalar, MigrationIr, Op, CURRENT_IR_VERSION};
 
-    fn validate(dialect: &zero_migrate::DialectId, op: Op) -> Result<(), String> {
+    fn validate(dialect: &zeroship_migrate::DialectId, op: Op) -> Result<(), String> {
         let ir = MigrationIr {
             inverse_ops: None,
             irreversible: None,
@@ -228,14 +228,14 @@ mod a_wrong_attribute_is_refused_before_any_connection {
             checksum: None,
         };
         let _ = SCHEMA;
-        zero_migrate::validate_ir(zero_migrate::shipping_vendors(), &ir, dialect)
+        zeroship_migrate::validate_ir(zeroship_migrate::shipping_vendors(), &ir, dialect)
             .map_err(|e| e.to_string())
     }
 
     #[test]
     fn a_misspelled_key_is_refused_and_the_message_names_it() {
         let err = validate(
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             create_table_with(&[("postgres.filfactor", IrScalar::Int(85))]),
         )
         .expect_err(
@@ -253,7 +253,7 @@ mod a_wrong_attribute_is_refused_before_any_connection {
         // `fillfactor` is declared 10..=100. A declaration that carries a range and never
         // enforces it is decoration.
         let err = validate(
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             create_table_with(&[("postgres.fillfactor", IrScalar::Int(5))]),
         )
         .expect_err("5 is below the declared minimum of 10");
@@ -266,7 +266,7 @@ mod a_wrong_attribute_is_refused_before_any_connection {
         // `createTable` is exactly the mistake the (key, op) identity exists to catch, and
         // it is INVISIBLE to a key-only check.
         let err = validate(
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             create_table_with(&[("postgres.pages_per_range", IrScalar::Int(64))]),
         )
         .expect_err("pages_per_range is not legal on createTable");
@@ -280,7 +280,7 @@ mod a_wrong_attribute_is_refused_before_any_connection {
         // each of them; judging every namespace against every backend would refuse a plan
         // for a target the author never deploys to.
         validate(
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             create_table_with(&[
                 ("postgres.fillfactor", IrScalar::Int(85)),
                 ("mysql.engine", IrScalar::Str("InnoDB".to_string())),
@@ -293,7 +293,7 @@ mod a_wrong_attribute_is_refused_before_any_connection {
     #[test]
     fn a_correctly_declared_attribute_validates() {
         validate(
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             create_table_with(&[("postgres.fillfactor", IrScalar::Int(85))]),
         )
         .expect("85 is inside the declared 10..=100");
@@ -311,11 +311,11 @@ mod a_wrong_attribute_is_refused_before_any_connection {
 /// two PostgreSQL spellings, inside the crate whose rule is to name no vendor.
 mod an_authored_index_attribute_reaches_the_ddl {
     use super::{col, OWNER, SCHEMA};
-    use zero_migrate::{
+    use zeroship_migrate::{
         IndexElement, IrAuthor, IrFlagsOverride, IrScalar, LiveSchema, MigrationIr, Op,
         CURRENT_IR_VERSION,
     };
-    use zero_migrate_ir::attribute::{AttrKey, Attributes, CreateIndexAttributes};
+    use zeroship_migrate_ir::attribute::{AttrKey, Attributes, CreateIndexAttributes};
 
     fn attrs(pairs: &[(&str, IrScalar)]) -> CreateIndexAttributes {
         let mut carried = Attributes::new();
@@ -328,9 +328,9 @@ mod an_authored_index_attribute_reaches_the_ddl {
         CreateIndexAttributes::from(carried)
     }
 
-    fn create_index_sql(dialect: &zero_migrate::DialectId, index: Op) -> String {
+    fn create_index_sql(dialect: &zeroship_migrate::DialectId, index: Op) -> String {
         let author = IrAuthor::new(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             SCHEMA,
             OWNER,
             dialect,
@@ -396,7 +396,7 @@ mod an_authored_index_attribute_reaches_the_ddl {
     #[test]
     fn postgres_renders_a_declared_index_storage_parameter() {
         let sql = create_index_sql(
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             index_op(attrs(&[("postgres.fillfactor", IrScalar::Int(90))])),
         );
         assert!(
@@ -413,7 +413,7 @@ mod an_authored_index_attribute_reaches_the_ddl {
         // than the order two struct fields happened to be declared in. Pinned because a
         // canonical order is the property that keeps rendered DDL reproducible.
         let sql = create_index_sql(
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             index_op(attrs(&[
                 ("postgres.pages_per_range", IrScalar::Int(64)),
                 ("postgres.fillfactor", IrScalar::Int(90)),
@@ -428,7 +428,7 @@ mod an_authored_index_attribute_reaches_the_ddl {
     #[test]
     fn an_index_carrying_no_attributes_emits_no_with_clause() {
         let sql = create_index_sql(
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             index_op(CreateIndexAttributes::new()),
         );
         assert!(
@@ -459,10 +459,10 @@ mod an_authored_index_attribute_reaches_the_ddl {
             preconditions: Vec::new(),
             checksum: None,
         };
-        let err = zero_migrate::validate_ir(
-            zero_migrate::shipping_vendors(),
+        let err = zeroship_migrate::validate_ir(
+            zeroship_migrate::shipping_vendors(),
             &ir,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
         )
         .expect_err("tablespace is not declared on createIndex");
         assert!(err.to_string().contains("tablespace"), "{err}");

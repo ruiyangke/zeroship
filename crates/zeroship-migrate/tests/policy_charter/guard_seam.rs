@@ -21,9 +21,9 @@
 
 use crate::support;
 
-use zero_migrate::guard::{GuardConfig, GuardError, MigrationGuard};
-use zero_migrate::guard_for;
-use zero_migrate_postgres::guard::SqlGuard;
+use zeroship_migrate::guard::{GuardConfig, GuardError, MigrationGuard};
+use zeroship_migrate::guard_for;
+use zeroship_migrate_postgres::guard::SqlGuard;
 
 /// A realistic PG project guard: project schema `project_acme`, extension
 /// allowlist = `pgcrypto` + `uuid-ossp` (mirrors the `guard_security` matrix).
@@ -36,10 +36,10 @@ use zero_migrate_postgres::guard::SqlGuard;
 /// constructor built, from the same config.
 fn pg_guard() -> Box<dyn MigrationGuard> {
     guard_for(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &GuardConfig::from_policy(
             support::no_inject_with_extensions("project_acme", &["pgcrypto", "uuid-ossp"]),
-            zero_migrate_postgres::DIALECT,
+            zeroship_migrate_postgres::DIALECT,
         ),
     )
 }
@@ -101,10 +101,10 @@ fn sqlite_descriptor_guard_passes_descriptor_create_table() {
     // `BackendVendor::guard` is `Box::new(SqliteGuard::new())` and ignores the config,
     // so the object under test is unchanged by the re-export's removal.
     let guard = guard_for(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &GuardConfig::from_policy(
             support::no_inject("project_acme"),
-            zero_migrate_sqlite::DIALECT,
+            zeroship_migrate_sqlite::DIALECT,
         ),
     );
     // Descriptor-generated DDL is trusted by construction (author-boundary line-1 +
@@ -133,7 +133,7 @@ fn sqlite_keyed_sqlguard_rejects_raw_sql_backstop() {
     // engine no longer relies on (it routes SQLite through SqliteGuard).
     let guard = SqlGuard::new(GuardConfig::from_policy(
         support::no_inject("project_acme"),
-        zero_migrate_sqlite::DIALECT,
+        zeroship_migrate_sqlite::DIALECT,
     ));
     let err = guard
         .check("CREATE TABLE users (id INTEGER PRIMARY KEY)")
@@ -142,7 +142,7 @@ fn sqlite_keyed_sqlguard_rejects_raw_sql_backstop() {
         matches!(
             err,
             GuardError::RawSqlRejected { ref dialect }
-                if dialect == &zero_migrate_sqlite::DIALECT
+                if dialect == &zeroship_migrate_sqlite::DIALECT
         ),
         "expected a SQLite-provenance RawSqlRejected, got: {err:?}"
     );
@@ -155,10 +155,10 @@ fn sqlite_keyed_sqlguard_rejects_raw_sql_backstop() {
 #[test]
 fn guard_for_pg_runs_the_deny_list() {
     let guard = guard_for(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &GuardConfig::from_policy(
             support::no_inject_with_extensions("project_acme", &["pgcrypto"]),
-            zero_migrate_postgres::DIALECT,
+            zeroship_migrate_postgres::DIALECT,
         ),
     );
     // The PG-selected guard denies the deny-list set …
@@ -177,10 +177,10 @@ fn guard_for_sqlite_trusts_descriptor_ddl() {
     // The SQLite-selected guard trusts descriptor-diff DDL (the apply/plan path),
     // so apply is NOT broken by a raw-rejection on legitimate descriptor SQL.
     let guard = guard_for(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &GuardConfig::from_policy(
             support::no_inject("project_acme"),
-            zero_migrate_sqlite::DIALECT,
+            zeroship_migrate_sqlite::DIALECT,
         ),
     );
     let outcome = guard

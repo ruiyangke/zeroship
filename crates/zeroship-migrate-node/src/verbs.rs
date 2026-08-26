@@ -8,15 +8,15 @@
 //! `napi` feature off. That is the configuration the workspace gate builds, so
 //! this logic is covered by tests that execute rather than only type-check.
 
-use zero_migrate::apply::backend::{MigrationBackend, ProjectLockAcquisition, ProjectLockHolder};
-use zero_migrate::apply::executor::{ApplyOutcome, LockMode, RollbackOptions, RollbackTarget};
-use zero_migrate::approval::Approval;
-use zero_migrate::conn::ExecutorConfig;
-use zero_migrate::model::migration::Migration;
-use zero_migrate::ops::status::{AppliedPlanStatus, MigrationStatus, PlanStatusManifest};
-use zero_migrate::{shipping_backends, DialectId, LiveSchema, MigrationEngine};
-use zero_migrate_mysql::DIALECT as MYSQL;
-use zero_migrate_postgres::DIALECT as POSTGRES;
+use zeroship_migrate::apply::backend::{MigrationBackend, ProjectLockAcquisition, ProjectLockHolder};
+use zeroship_migrate::apply::executor::{ApplyOutcome, LockMode, RollbackOptions, RollbackTarget};
+use zeroship_migrate::approval::Approval;
+use zeroship_migrate::conn::ExecutorConfig;
+use zeroship_migrate::model::migration::Migration;
+use zeroship_migrate::ops::status::{AppliedPlanStatus, MigrationStatus, PlanStatusManifest};
+use zeroship_migrate::{shipping_backends, DialectId, LiveSchema, MigrationEngine};
+use zeroship_migrate_mysql::DIALECT as MYSQL;
+use zeroship_migrate_postgres::DIALECT as POSTGRES;
 
 use crate::wire::{
     ApplyPendingContractDto, ApplyReply, BlockedPlanDto, PendingContractStatusDto, PlanStatusDto,
@@ -88,9 +88,9 @@ pub fn charter_layer_refs(charter_layers: &[String]) -> Vec<&str> {
 /// policy every verb runs under.
 pub fn effective_policy_from_wire_layers(
     charter_layers: &[String],
-) -> std::result::Result<zero_migrate::EffectivePolicy, String> {
+) -> std::result::Result<zeroship_migrate::EffectivePolicy, String> {
     let layers = charter_layer_refs(charter_layers);
-    zero_migrate::effective_policy_from_charter_layers(&layers)
+    zeroship_migrate::effective_policy_from_charter_layers(&layers)
 }
 
 /// Map the wire dialect spelling to the render dialect. Unlike
@@ -108,7 +108,7 @@ pub fn preview_dialect(s: &str) -> std::result::Result<DialectId, String> {
 /// the typed [`ApplyReply`].
 pub fn apply_reply(
     outcome: ApplyOutcome,
-    pending_contracts: &[zero_migrate::PendingContract],
+    pending_contracts: &[zeroship_migrate::PendingContract],
 ) -> ApplyReply {
     ApplyReply {
         applied: outcome.applied,
@@ -160,14 +160,14 @@ fn project_lock_busy_reply(holders: &[ProjectLockHolder]) -> StatusReply {
 }
 
 fn pending_contract_status_dto(
-    contract: &zero_migrate::ops::status::PendingContractStatus,
+    contract: &zeroship_migrate::ops::status::PendingContractStatus,
 ) -> PendingContractStatusDto {
     PendingContractStatusDto {
         table: contract.table.clone(),
         pending_version: contract.pending_version.clone(),
         orphaned: contract.orphaned,
         reason: Some(
-            zero_migrate::PendingContractRefusal::new(
+            zeroship_migrate::PendingContractRefusal::new(
                 contract.table.clone(),
                 contract.pending_version.clone(),
             )
@@ -176,13 +176,13 @@ fn pending_contract_status_dto(
     }
 }
 
-fn blocked_plan_dto(blocked: &zero_migrate::ops::status::BlockedPlan) -> BlockedPlanDto {
+fn blocked_plan_dto(blocked: &zeroship_migrate::ops::status::BlockedPlan) -> BlockedPlanDto {
     BlockedPlanDto {
         blocked: blocked.blocked.as_str().to_string(),
         dependency: blocked.dependency.as_str().to_string(),
         pending_version: blocked.pending_version.clone(),
         reason: Some(
-            zero_migrate::DependencyPendingContract::new(
+            zeroship_migrate::DependencyPendingContract::new(
                 blocked.blocked.as_str(),
                 blocked.dependency.as_str(),
                 blocked.pending_version.clone(),
@@ -407,7 +407,7 @@ pub async fn apply_ir_with_locked_backend<B: MigrationBackend>(
                         .map_err(|error| error.to_string())
                 })
                 .collect::<std::result::Result<Vec<_>, _>>()?;
-            let status = zero_migrate::ops::status::status_plans_via_backend_locked(
+            let status = zeroship_migrate::ops::status::status_plans_via_backend_locked(
                 backend, cfg, &manifests,
             )
             .await
@@ -424,7 +424,7 @@ pub async fn apply_ir_with_locked_backend<B: MigrationBackend>(
                 "lowering returned no plan for the current migration envelope".to_string()
             })?
         };
-        let outcome = MigrationEngine::new(zero_migrate::shipping_vendors())
+        let outcome = MigrationEngine::new(zeroship_migrate::shipping_vendors())
             .apply_applied_plan_with_touched_and_depends(
                 &artifact.plan,
                 &artifact.touched_tables,
@@ -485,7 +485,7 @@ pub fn parse_rollback_target(
             let version = version.ok_or_else(|| {
                 "rollback target \"toVersion\" needs the version to unwind down to".to_string()
             })?;
-            let id = zero_migrate::model::migration::MigrationId::parse(version)
+            let id = zeroship_migrate::model::migration::MigrationId::parse(version)
                 .map_err(|error| format!("invalid rollback target version: {error}"))?;
             Ok(RollbackTarget::ToVersion(id))
         }
@@ -515,7 +515,7 @@ struct RollbackSet {
     /// executable reverse remains structured in `inverse_plans`.
     migrations: Vec<Migration>,
     /// FORWARD journal version to the author's lowered inverse plan.
-    inverse_plans: std::collections::BTreeMap<String, zero_migrate::AppliedPlan>,
+    inverse_plans: std::collections::BTreeMap<String, zeroship_migrate::AppliedPlan>,
     /// Journaled step identity to the authored migration that owns it, for every
     /// step of a plan that lowered to more than one. These are the identities the
     /// engine refuses as `MissingFromSet`, and the map is what turns that refusal
@@ -560,8 +560,8 @@ enum RollbackRefusal {
 /// `MissingFromSet` before a single `down` runs, so the omission ends the rollback
 /// instead of hiding inside it.
 fn rollback_migration_set(
-    artifacts: &[zero_migrate::LoweredArtifact],
-    journal_entries: &[zero_migrate::apply::journal::AppliedEntry],
+    artifacts: &[zeroship_migrate::LoweredArtifact],
+    journal_entries: &[zeroship_migrate::apply::journal::AppliedEntry],
 ) -> std::result::Result<RollbackSet, String> {
     let mut set = RollbackSet {
         migrations: Vec::with_capacity(artifacts.len()),
@@ -775,16 +775,16 @@ pub async fn rollback_with_locked_backend<B: MigrationBackend>(
                     .cloned()
                     .unwrap_or_else(|| version.as_str().to_string());
                 RollbackTarget::ToVersion(
-                    zero_migrate::MigrationId::parse(&resolved).unwrap_or(version),
+                    zeroship_migrate::MigrationId::parse(&resolved).unwrap_or(version),
                 )
             }
             other => other,
         };
-        let request = zero_migrate::RollbackRequest::new(target).with_options(options);
+        let request = zeroship_migrate::RollbackRequest::new(target).with_options(options);
         // The guard the engine's own apply sites use. Composing one from the same
         // charter here would drop the config's host-selected mode.
-        let guard = zero_migrate::guard_for(zero_migrate::shipping_vendors(), &cfg.guard_config_for(&backend.dialect()));
-        let outcome = zero_migrate::rollback_with_lock_and_inverse_plans(
+        let guard = zeroship_migrate::guard_for(zeroship_migrate::shipping_vendors(), &cfg.guard_config_for(&backend.dialect()));
+        let outcome = zeroship_migrate::rollback_with_lock_and_inverse_plans(
             backend,
             cfg,
             &request,
@@ -841,8 +841,8 @@ pub async fn rollback_with_locked_backend<B: MigrationBackend>(
 /// set ... That version is `<name>`" - a sentence that denies the migration was
 /// supplied and then names it from the supplied set two clauses later. An operator
 /// reading the first half goes looking for a migration file that is not missing.
-fn describe_rollback_error(error: &zero_migrate::RollbackError, set: &RollbackSet) -> String {
-    let zero_migrate::RollbackError::MissingFromSet { version } = error else {
+fn describe_rollback_error(error: &zeroship_migrate::RollbackError, set: &RollbackSet) -> String {
+    let zeroship_migrate::RollbackError::MissingFromSet { version } = error else {
         return error.to_string();
     };
     set.unrepresentable.get(version.as_str()).map_or_else(
@@ -974,12 +974,12 @@ pub async fn status_ir_with_locked_backend<B: MigrationBackend>(
             })
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let status = if read_only {
-            zero_migrate::ops::status::status_plans_via_backend_read_only_locked(
+            zeroship_migrate::ops::status::status_plans_via_backend_read_only_locked(
                 backend, cfg, &manifests,
             )
             .await
         } else {
-            zero_migrate::ops::status::status_plans_via_backend_locked(backend, cfg, &manifests)
+            zeroship_migrate::ops::status::status_plans_via_backend_locked(backend, cfg, &manifests)
                 .await
         }
         .map_err(|error| error.to_string())?;
@@ -1054,7 +1054,7 @@ pub async fn legacy_status_with_locked_backend<B: MigrationBackend>(
             .ensure_journal(cfg)
             .await
             .map_err(|error| error.to_string())?;
-        let status = zero_migrate::ops::status::status_via_backend_locked(backend, cfg, migrations)
+        let status = zeroship_migrate::ops::status::status_via_backend_locked(backend, cfg, migrations)
             .await
             .map_err(|error| error.to_string())?;
         let rolled_back = backend
@@ -1084,7 +1084,7 @@ pub async fn resolve_pending_with_locked_backend<B: MigrationBackend>(
     backend: &B,
     cfg: &ExecutorConfig,
     pending_version: &str,
-    resolution: zero_migrate::Resolution,
+    resolution: zeroship_migrate::Resolution,
     owner_app: &str,
     approval: Approval,
     applied_by: &str,
@@ -1101,7 +1101,7 @@ pub async fn resolve_pending_with_locked_backend<B: MigrationBackend>(
         .map_err(|error| format!("failed to acquire project lock: {error}"))?;
 
     let result = async {
-        let outcome = MigrationEngine::new(zero_migrate::shipping_vendors())
+        let outcome = MigrationEngine::new(zeroship_migrate::shipping_vendors())
             .resolve_pending_contract_with_lock(
                 pending_version,
                 resolution,
@@ -1146,9 +1146,9 @@ pub fn owner_app_project(project_schema: &str) -> String {
 #[cfg(test)]
 mod status_projection_tests {
     use super::*;
-    use zero_migrate::apply::journal::JournaledKind;
-    use zero_migrate::model::migration::MigrationId;
-    use zero_migrate::ops::status::{BlockedPlan, PendingContractStatus, UnexpectedJournalEntry};
+    use zeroship_migrate::apply::journal::JournaledKind;
+    use zeroship_migrate::model::migration::MigrationId;
+    use zeroship_migrate::ops::status::{BlockedPlan, PendingContractStatus, UnexpectedJournalEntry};
 
     #[test]
     fn plan_status_reply_preserves_operator_details() {
@@ -1164,7 +1164,7 @@ mod status_projection_tests {
             plans: Vec::new(),
             unexpected_journal: vec![UnexpectedJournalEntry {
                 version: "mig_unexpected".to_string(),
-                state: zero_migrate::ops::status::PlanStatusStepState::Applied,
+                state: zeroship_migrate::ops::status::PlanStatusStepState::Applied,
                 journal_checksum: "checksum".to_string(),
                 journal_kind: Some(JournaledKind::Apply),
             }],
@@ -1189,7 +1189,7 @@ mod status_projection_tests {
         assert_eq!(
             reply.pending_contracts[0].reason,
             Some(
-                zero_migrate::PendingContractRefusal::new("widgets", "mig_pending_contract",)
+                zeroship_migrate::PendingContractRefusal::new("widgets", "mig_pending_contract",)
                     .to_string()
             )
         );
@@ -1198,7 +1198,7 @@ mod status_projection_tests {
         assert_eq!(
             reply.blocked[0].reason,
             Some(
-                zero_migrate::DependencyPendingContract::new(
+                zeroship_migrate::DependencyPendingContract::new(
                     blocked_version.as_str(),
                     dependency.as_str(),
                     "mig_pending_contract",
@@ -1230,7 +1230,7 @@ mod status_projection_tests {
         let unknown = ApplyDialect::parse("Postgres").expect_err("the spelling is exact");
         assert!(unknown.contains("unknown dialect"), "{unknown}");
         // The offline renderer has no host driver to route at, so it takes sqlite.
-        assert_eq!(preview_dialect("sqlite"), Ok(zero_migrate_sqlite::DIALECT));
+        assert_eq!(preview_dialect("sqlite"), Ok(zeroship_migrate_sqlite::DIALECT));
         assert!(preview_dialect("oracle").is_err());
     }
 
@@ -1273,7 +1273,7 @@ mod status_projection_tests {
             parse_rollback_target("steps", None, Some(2)),
             Ok(RollbackTarget::Steps(2))
         );
-        let version = zero_migrate::model::migration::MigrationId::generate();
+        let version = zeroship_migrate::model::migration::MigrationId::generate();
         assert_eq!(
             parse_rollback_target("toVersion", Some(version.as_str()), None),
             Ok(RollbackTarget::ToVersion(version.clone()))

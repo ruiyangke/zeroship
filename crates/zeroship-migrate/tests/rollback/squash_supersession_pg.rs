@@ -27,21 +27,21 @@ use crate::support;
 use std::collections::BTreeMap;
 
 use crate::support::PgDevSession;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::apply::executor::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::apply::executor::{
     rollback, LockMode, RollbackError, RollbackOptions, RollbackRequest, RollbackTarget,
 };
-use zero_migrate::driver::SqlSession;
-use zero_migrate::model::ir::Op;
-use zero_migrate::model::migration::{
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::model::ir::Op;
+use zeroship_migrate::model::migration::{
     Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
 };
-use zero_migrate::render::step::PlanStep;
-use zero_migrate::{
+use zeroship_migrate::render::step::PlanStep;
+use zeroship_migrate::{
     fold_ops, guard_for, squash, Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema,
     MigrationEngine, SquashError,
 };
-use zero_migrate_postgres::PostgresBackend;
+use zeroship_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_squash_supersession_pg";
 
@@ -60,7 +60,7 @@ fn quote_ident(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
-fn policy(schema: &str) -> zero_migrate::EffectivePolicy {
+fn policy(schema: &str) -> zeroship_migrate::EffectivePolicy {
     support::operator_charter(schema)
 }
 
@@ -94,17 +94,17 @@ async fn apply_doc(
     let backend = PostgresBackend::new_generic(session);
     let pol = policy(&cfg.project_schema);
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &pol,
     );
-    let guard = GuardConfig::from_policy(pol.clone(), zero_migrate_postgres::DIALECT);
+    let guard = GuardConfig::from_policy(pol.clone(), zeroship_migrate_postgres::DIALECT);
     let folded = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         history,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &cfg.project_schema,
         &pol,
     )
@@ -113,10 +113,10 @@ async fn apply_doc(
     let artifact = author
         .load_and_lower_guarded(ir, OWNER, &BTreeMap::new(), &live, &guard)
         .map_err(|error| format!("load and lower the guarded plan: {error}"))?;
-    let authored: zero_migrate::MigrationIr =
+    let authored: zeroship_migrate::MigrationIr =
         serde_json::from_str(ir).map_err(|error| format!("parse the authored IR: {error}"))?;
     history.extend(authored.ops);
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::None,
@@ -306,7 +306,7 @@ async fn squashing_a_fully_applied_prefix_records_a_supersession_and_is_idempote
         );
 
         let outcome = squash(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &backend,
             &cfg,
             &s,
@@ -364,7 +364,7 @@ async fn squashing_a_fully_applied_prefix_records_a_supersession_and_is_idempote
 
         // Re-squashing is idempotent, and writes nothing further.
         let again = squash(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &backend,
             &cfg,
             &s,
@@ -438,7 +438,7 @@ async fn squashing_a_partially_applied_prefix_is_refused_and_writes_nothing() {
         );
 
         let error = squash(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &backend,
             &cfg,
             &s,
@@ -522,7 +522,7 @@ async fn squashing_an_unapplied_prefix_is_refused_as_not_applied() {
             vec![MigrationId::generate(), MigrationId::generate()],
         );
         let error = squash(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &backend,
             &cfg,
             &s,
@@ -549,7 +549,7 @@ async fn squashing_an_unapplied_prefix_is_refused_as_not_applied() {
         // the migration being malformed.
         let empty = squash_migration("squash_empty", "SELECT 1", Vec::new());
         match squash(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &backend,
             &cfg,
             &empty,
@@ -659,7 +659,7 @@ async fn a_rollback_may_not_force_skip_an_irreversible_squash() {
         );
         let s = squash_migration("squash_all", &combined, versions.clone());
         squash(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &backend,
             &cfg,
             &s,
@@ -677,8 +677,8 @@ async fn a_rollback_may_not_force_skip_an_irreversible_squash() {
         let mut set = applied.clone();
         set.push(s.clone());
         let guard = guard_for(
-            zero_migrate::shipping_vendors(),
-            &GuardConfig::from_policy(policy(&cfg.project_schema), zero_migrate_postgres::DIALECT),
+            zeroship_migrate::shipping_vendors(),
+            &GuardConfig::from_policy(policy(&cfg.project_schema), zeroship_migrate_postgres::DIALECT),
         );
         let forced = RollbackRequest::new(RollbackTarget::All).with_options(RollbackOptions {
             force: true,
@@ -792,7 +792,7 @@ async fn a_squash_that_can_reverse_itself_still_rolls_back_under_force() {
             versions,
         );
         squash(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &backend,
             &cfg,
             &reversible,
@@ -804,8 +804,8 @@ async fn a_squash_that_can_reverse_itself_still_rolls_back_under_force() {
         let mut set = applied.clone();
         set.push(reversible.clone());
         let guard = guard_for(
-            zero_migrate::shipping_vendors(),
-            &GuardConfig::from_policy(policy(&cfg.project_schema), zero_migrate_postgres::DIALECT),
+            zeroship_migrate::shipping_vendors(),
+            &GuardConfig::from_policy(policy(&cfg.project_schema), zeroship_migrate_postgres::DIALECT),
         );
         let outcome = rollback(
             &backend,

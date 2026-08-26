@@ -14,9 +14,9 @@
 
 use crate::support;
 
-use zero_migrate::driver::SqlSession;
-use zero_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
-use zero_migrate::{effective_policy_from_charter_toml, EffectivePolicy, IrAuthor, LiveSchema};
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
+use zeroship_migrate::{effective_policy_from_charter_toml, EffectivePolicy, IrAuthor, LiveSchema};
 
 const OWNER: &str = "app_injected_collation";
 
@@ -86,16 +86,16 @@ fn authored_ir(table: &str) -> MigrationIr {
 /// the production path: `resolve_create_table_policy` is what the recorder and the
 /// descriptor fold both call before anything is lowered.
 fn injected_ddl(
-    dialect: &zero_migrate::DialectId,
+    dialect: &zeroship_migrate::DialectId,
     schema: &str,
     table: &str,
     collation: Option<&str>,
 ) -> String {
     let policy = charter(collation);
-    let resolved = zero_migrate::resolve_create_table_policy(&authored_ir(table), &policy, schema)
+    let resolved = zeroship_migrate::resolve_create_table_policy(&authored_ir(table), &policy, schema)
         .expect("the charter's injection resolves");
     let migrations = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         schema,
         OWNER,
         dialect,
@@ -119,7 +119,7 @@ fn injected_ddl(
 #[test]
 fn a_pinned_bytewise_collation_is_spelled_per_dialect() {
     let pg = injected_ddl(
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         "app",
         "notes",
         Some("bytewise"),
@@ -138,7 +138,7 @@ fn a_pinned_bytewise_collation_is_spelled_per_dialect() {
     );
 
     let sqlite = injected_ddl(
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         "app",
         "notes",
         Some("bytewise"),
@@ -161,7 +161,7 @@ fn a_pinned_bytewise_collation_is_spelled_per_dialect() {
     // ascii column would REJECT it. Trading a silent ordering bug for a loud
     // insert failure is not a fix.
     let mysql = injected_ddl(
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         "app",
         "notes",
         Some("bytewise"),
@@ -180,12 +180,12 @@ fn a_pinned_bytewise_collation_is_spelled_per_dialect() {
 fn an_unpinned_injected_column_emits_exactly_what_it_emitted_before() {
     // The facet is opt-in. A charter that does not name it must emit the same DDL
     // it emitted before the facet existed, on every dialect.
-    let pg = injected_ddl(&zero_migrate_postgres::DIALECT, "app", "notes", None);
+    let pg = injected_ddl(&zeroship_migrate_postgres::DIALECT, "app", "notes", None);
     assert!(
         !pg.contains("COLLATE"),
         "an unpinned charter must emit no collation on PostgreSQL; SQL was:\n{pg}"
     );
-    let sqlite = injected_ddl(&zero_migrate_sqlite::DIALECT, "app", "notes", None);
+    let sqlite = injected_ddl(&zeroship_migrate_sqlite::DIALECT, "app", "notes", None);
     assert!(
         !sqlite.contains("COLLATE"),
         "an unpinned charter must emit no collation on SQLite; SQL was:\n{sqlite}"
@@ -193,7 +193,7 @@ fn an_unpinned_injected_column_emits_exactly_what_it_emitted_before() {
     // MySQL is the exception, and not because of this facet: every character column
     // there already carries an explicit `utf8mb4_0900_as_cs` so equality matches the
     // other two dialects. What must not appear is the bytewise one.
-    let mysql = injected_ddl(&zero_migrate_mysql::DIALECT, "app", "notes", None);
+    let mysql = injected_ddl(&zeroship_migrate_mysql::DIALECT, "app", "notes", None);
     assert!(
         mysql.contains("`id` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs"),
         "an unpinned MySQL charter must keep the case-sensitive default; SQL was:\n{mysql}"
@@ -211,7 +211,7 @@ fn sqlite_orders_an_injected_id_by_creation_with_and_without_the_pin() {
     for (label, collation) in [("unpinned", None), ("pinned", Some("bytewise"))] {
         let conn = rusqlite::Connection::open_in_memory().expect("open SQLite");
         conn.execute_batch(&injected_ddl(
-            &zero_migrate_sqlite::DIALECT,
+            &zeroship_migrate_sqlite::DIALECT,
             "app",
             "notes",
             collation,
@@ -296,7 +296,7 @@ fn a_pinned_collation_is_part_of_the_policy_identity_the_seal_covers() {
     let plain = charter(None);
     let pinned = charter(Some("bytewise"));
     let digest = plain.registry().digest();
-    let sealed = zero_migrate::seal::seal(
+    let sealed = zeroship_migrate::seal::seal(
         &plain,
         MAC_KEY,
         [0u8; 16],
@@ -309,7 +309,7 @@ fn a_pinned_collation_is_part_of_the_policy_identity_the_seal_covers() {
         .expect("a seal verifies against the policy it was minted over");
     assert_eq!(
         sealed.verify(MAC_KEY, &pinned, &digest, DIALECT, MATCHER, CHARTER_VERSION),
-        Err(zero_migrate::SealError::TagMismatch),
+        Err(zeroship_migrate::SealError::TagMismatch),
         "a charter that adds an injected column's collation must not verify under the \
          seal minted before it"
     );
@@ -340,7 +340,7 @@ fn an_author_column_that_matches_every_field_but_the_collation_is_not_the_inject
         }]
     }))
     .expect("the author's near-miss create deserializes");
-    let error = zero_migrate::resolve_create_table_policy(&ir, &charter(Some("bytewise")), "app")
+    let error = zeroship_migrate::resolve_create_table_policy(&ir, &charter(Some("bytewise")), "app")
         .expect_err("a column short of the pinned collation must not pass as conforming");
     assert!(
         format!("{error}").contains("id"),
@@ -349,7 +349,7 @@ fn an_author_column_that_matches_every_field_but_the_collation_is_not_the_inject
 
     // The control: the SAME create against a charter pinning no collation IS the
     // injected shape, so the check did not simply become a blanket refusal.
-    zero_migrate::resolve_create_table_policy(&ir, &charter(None), "app")
+    zeroship_migrate::resolve_create_table_policy(&ir, &charter(None), "app")
         .expect("the same create conforms to the charter that pins no collation");
 }
 
@@ -373,7 +373,7 @@ columns = [
 "#;
     let policy = effective_policy_from_charter_toml(toml)
         .expect("the charter itself loads - the type check is the resolver's");
-    let error = zero_migrate::resolve_create_table_policy(&authored_ir("notes"), &policy, "app")
+    let error = zeroship_migrate::resolve_create_table_policy(&authored_ir("notes"), &policy, "app")
         .expect_err("a collation on a timestamp column must be refused");
     assert!(
         format!("{error}").contains("collation"),
@@ -412,7 +412,7 @@ async fn live_order(
         .batch(&format!("CREATE SCHEMA {quoted_schema}"))
         .await
         .map_err(|error| format!("create the probe schema: {error}"))?;
-    let ddl = injected_ddl(&zero_migrate_postgres::DIALECT, schema, "notes", collation);
+    let ddl = injected_ddl(&zeroship_migrate_postgres::DIALECT, schema, "notes", collation);
     session
         .batch(&ddl)
         .await
@@ -486,21 +486,21 @@ async fn injected_id_with_a_pinned_bytewise_collation_keeps_creation_order() {
         // a fix that emits the right DDL and then reports the schema as wrong.
         let policy = charter(Some("bytewise"));
         let resolved =
-            zero_migrate::resolve_create_table_policy(&authored_ir("notes"), &policy, &schema)
+            zeroship_migrate::resolve_create_table_policy(&authored_ir("notes"), &policy, &schema)
                 .map_err(|error| format!("resolve the injected create: {error}"))?;
-        let expected = zero_migrate::fold_ops(
-            zero_migrate::shipping_vendors(),
+        let expected = zeroship_migrate::fold_ops(
+            zeroship_migrate::shipping_vendors(),
             &resolved.ops,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &schema,
             &policy,
         )
         .map_err(|error| format!("fold the injected create: {error}"))?;
-        let live = zero_migrate_postgres::backend::drift_sql::snapshot_schema(&session, &schema)
+        let live = zeroship_migrate_postgres::backend::drift_sql::snapshot_schema(&session, &schema)
             .await
             .map_err(|error| format!("introspect the probe schema: {error}"))?;
         let drift =
-            zero_migrate::diff_snapshots(zero_migrate::shipping_vendors(), &expected, &live);
+            zeroship_migrate::diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &live);
         if !drift.is_clean() {
             return Err(format!(
                 "a freshly created collated table must not drift: {drift:#?}"
@@ -538,14 +538,14 @@ async fn live_order_mysql(
     database: &str,
     collation: Option<&str>,
 ) -> Result<Vec<String>, String> {
-    use zero_migrate::driver::SqlSession as _;
+    use zeroship_migrate::driver::SqlSession as _;
 
     let quoted = support::mysql::quote_ident(database);
     session
         .batch(&format!("CREATE DATABASE {quoted}"))
         .await
         .map_err(|error| format!("create the probe database: {error}"))?;
-    let ddl = injected_ddl(&zero_migrate_mysql::DIALECT, database, "notes", collation);
+    let ddl = injected_ddl(&zeroship_migrate_mysql::DIALECT, database, "notes", collation);
     session
         .batch(&ddl)
         .await
@@ -577,7 +577,7 @@ async fn live_order_mysql(
 /// bytewise, because then the pinned and the unpinned fixture agree and neither test
 /// proves anything.
 async fn server_collation(session: &support::mysql::MysqlDevSession) -> Result<String, String> {
-    use zero_migrate::driver::SqlSession as _;
+    use zeroship_migrate::driver::SqlSession as _;
 
     let row = session
         .query_one("SELECT @@collation_server AS collation_server", &[])

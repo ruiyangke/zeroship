@@ -19,11 +19,11 @@ use crate::support;
 
 use std::collections::{BTreeSet, HashMap};
 
-use zero_migrate::model::ir::{
+use zeroship_migrate::model::ir::{
     ColType, IndexElement, IrClassification, IrColumn, IrIndex, IrMask, IrMaskKind, MigrationIr, Op,
 };
-use zero_migrate::render::lower::IrAuthor;
-use zero_migrate::{
+use zeroship_migrate::render::lower::IrAuthor;
+use zeroship_migrate::{
     resolve_create_table_policy, CollectionDescriptor, DeclarativeAuthor, DesiredSchema,
     FieldDescriptor, IndexDescriptor, LiveSchema, SchemaSnapshot, TableSnapshot,
 };
@@ -55,19 +55,19 @@ fn idx_col(name: &str) -> IndexElement {
 const SCHEMA: &str = "app";
 const OWNER: &str = "app_test";
 
-fn effective_policy() -> zero_migrate::EffectivePolicy {
+fn effective_policy() -> zeroship_migrate::EffectivePolicy {
     support::confined_charter()
 }
 
 fn test_desired_snapshot(
     project_schema: &str,
     descs: &[CollectionDescriptor],
-) -> Result<DesiredSchema, zero_migrate::DeclarativeError> {
-    zero_migrate::render::declarative::desired_snapshot_for_dialect(
-        zero_migrate::shipping_vendors(),
+) -> Result<DesiredSchema, zeroship_migrate::DeclarativeError> {
+    zeroship_migrate::render::declarative::desired_snapshot_for_dialect(
+        zeroship_migrate::shipping_vendors(),
         project_schema,
         descs,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         &effective_policy(),
     )
 }
@@ -75,10 +75,10 @@ fn test_desired_snapshot(
 fn test_desired_snapshot_for_dialect(
     project_schema: &str,
     descs: &[CollectionDescriptor],
-    dialect: &zero_migrate::DialectId,
-) -> Result<DesiredSchema, zero_migrate::DeclarativeError> {
-    zero_migrate::render::declarative::desired_snapshot_for_dialect(
-        zero_migrate::shipping_vendors(),
+    dialect: &zeroship_migrate::DialectId,
+) -> Result<DesiredSchema, zeroship_migrate::DeclarativeError> {
+    zeroship_migrate::render::declarative::desired_snapshot_for_dialect(
+        zeroship_migrate::shipping_vendors(),
         project_schema,
         descs,
         dialect,
@@ -89,7 +89,7 @@ fn test_desired_snapshot_for_dialect(
 /// The `(up, down)` SQL pairs of a migration list — the byte-comparable render
 /// surface (the `UUIDv7` version + the human name are non-deterministic identity,
 /// excluded from the parity comparison).
-fn sql_pairs(migs: &[zero_migrate::Migration]) -> Vec<(String, Option<String>)> {
+fn sql_pairs(migs: &[zeroship_migrate::Migration]) -> Vec<(String, Option<String>)> {
     migs.iter()
         .map(|m| (m.up.clone(), m.down.clone()))
         .collect()
@@ -99,12 +99,12 @@ fn sql_pairs(migs: &[zero_migrate::Migration]) -> Vec<(String, Option<String>)> 
 /// empty live schema → the emitted migrations, on the given dialect.
 fn declarative_pairs_for(
     descs: &[CollectionDescriptor],
-    dialect: &zero_migrate::DialectId,
+    dialect: &zeroship_migrate::DialectId,
 ) -> Vec<(String, Option<String>)> {
     let desired: DesiredSchema =
         test_desired_snapshot_for_dialect(SCHEMA, descs, dialect).expect("desired snapshot");
     let author = DeclarativeAuthor::new_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         OWNER,
         dialect.clone(),
@@ -123,7 +123,7 @@ fn declarative_pairs_for(
 
 /// Run the declarative path on Postgres (the historical helper).
 fn declarative_pairs(descs: &[CollectionDescriptor]) -> Vec<(String, Option<String>)> {
-    declarative_pairs_for(descs, &zero_migrate_postgres::DIALECT)
+    declarative_pairs_for(descs, &zeroship_migrate_postgres::DIALECT)
 }
 
 /// Run the IR path: ops → `IrAuthor::lower` against the given live tables, on the
@@ -131,7 +131,7 @@ fn declarative_pairs(descs: &[CollectionDescriptor]) -> Vec<(String, Option<Stri
 fn ir_pairs_for(
     ops: Vec<Op>,
     live: &BTreeSet<String>,
-    dialect: &zero_migrate::DialectId,
+    dialect: &zeroship_migrate::DialectId,
 ) -> Vec<(String, Option<String>)> {
     let ir = MigrationIr {
         inverse_ops: None,
@@ -149,7 +149,7 @@ fn ir_pairs_for(
     let ir = resolve_create_table_policy(&ir, &support::confined_charter(), SCHEMA)
         .expect("parity IR resolves");
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         OWNER,
         dialect,
@@ -163,7 +163,7 @@ fn ir_pairs_for(
 
 /// Run the IR path on Postgres (the historical helper).
 fn ir_pairs(ops: Vec<Op>, live: &BTreeSet<String>) -> Vec<(String, Option<String>)> {
-    ir_pairs_for(ops, live, &zero_migrate_postgres::DIALECT)
+    ir_pairs_for(ops, live, &zeroship_migrate_postgres::DIALECT)
 }
 
 #[test]
@@ -199,7 +199,7 @@ fn create_table_render_is_byte_identical_pg() {
     };
 
     let ops = vec![Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "widgets".into(),
         columns: vec![
             IrColumn {
@@ -312,10 +312,10 @@ fn create_table_with_live_fk_render_is_byte_identical_pg() {
     let mut live_ownership = HashMap::new();
     live_ownership.insert("authors".to_string(), OWNER.to_string());
     let author = DeclarativeAuthor::new_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         OWNER,
-        zero_migrate_postgres::DIALECT,
+        zeroship_migrate_postgres::DIALECT,
     );
     let plan = author
         .diff(
@@ -329,7 +329,7 @@ fn create_table_with_live_fk_render_is_byte_identical_pg() {
     let decl = sql_pairs(&plan.migrations);
 
     let ops = vec![Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "posts".into(),
         columns: vec![IrColumn {
             name: "author".into(),
@@ -390,7 +390,7 @@ fn create_table_with_encrypted_column_render_is_byte_identical_pg() {
     // byte-identical BYTEA type + the `/* zero-migrate:enc:… */` inline sentinel + the
     // `COMMENT ON COLUMN … 'zero-migrate:enc:…'` side output + the encrypted default-mask
     // `<col>_masked` sibling / `zero-migrate:mask` sentinel — built by the shared kernel
-    // (`zero_migrate::schema::{query,mask_codec}`), NEVER re-spelled in IrAuthor.
+    // (`zeroship_migrate::schema::{query,mask_codec}`), NEVER re-spelled in IrAuthor.
     let desc = CollectionDescriptor {
         name: "vault".into(),
         owner_app: OWNER.into(),
@@ -407,7 +407,7 @@ fn create_table_with_encrypted_column_render_is_byte_identical_pg() {
         runtime_options: Default::default(),
     };
     let ops = vec![Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "vault".into(),
         columns: vec![IrColumn {
             // The IR carries an encrypted column wrapping a string.
@@ -495,7 +495,7 @@ fn create_table_with_explicit_masked_column_render_is_byte_identical_pg() {
         runtime_options: Default::default(),
     };
     let ops = vec![Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "people".into(),
         columns: vec![IrColumn {
             name: "ssn".into(),
@@ -574,10 +574,10 @@ fn add_column_render_is_byte_identical_pg() {
     let mut live_ownership = HashMap::new();
     live_ownership.insert("people".to_string(), OWNER.to_string());
     let author = DeclarativeAuthor::new_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         OWNER,
-        zero_migrate_postgres::DIALECT,
+        zeroship_migrate_postgres::DIALECT,
     );
     let plan = author
         .diff(
@@ -591,7 +591,7 @@ fn add_column_render_is_byte_identical_pg() {
     let decl = sql_pairs(&plan.migrations);
 
     let ops = vec![Op::AddColumn {
-        attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
         table: "people".into(),
         column: "nickname".into(),
         ty: ColType::Text,
@@ -652,10 +652,10 @@ fn create_index_render_is_byte_identical_pg() {
     let mut live_ownership = HashMap::new();
     live_ownership.insert("events".to_string(), OWNER.to_string());
     let author = DeclarativeAuthor::new_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         OWNER,
-        zero_migrate_postgres::DIALECT,
+        zeroship_migrate_postgres::DIALECT,
     );
     let plan = author
         .diff(
@@ -703,7 +703,7 @@ fn create_index_render_is_byte_identical_pg() {
 // SQLite leg — the SAME byte-identity gate on the SQLite dialect.
 //
 // The cross-path byte-identity golden holds on BOTH PG and SQLite.
-// The SQLite createTable routes through the SHARED `zero_migrate::schema::query`
+// The SQLite createTable routes through the SHARED `zeroship_migrate::schema::query`
 // emitter (the same call the differ makes - both reach the registered backend's
 // `DdlEmitter::create_table`, neither carries a SQLite-specific renderer), fed
 // the SDK schema `Value` IrAuthor builds from the op descriptor via the same
@@ -725,8 +725,8 @@ fn create_index_render_is_byte_identical_pg() {
 fn ir_lower_one(
     op: Op,
     live: &BTreeSet<String>,
-    dialect: &zero_migrate::DialectId,
-) -> Vec<zero_migrate::Migration> {
+    dialect: &zeroship_migrate::DialectId,
+) -> Vec<zeroship_migrate::Migration> {
     let ir = MigrationIr {
         inverse_ops: None,
         irreversible: None,
@@ -741,7 +741,7 @@ fn ir_lower_one(
         checksum: None,
     };
     IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         OWNER,
         dialect,
@@ -753,7 +753,7 @@ fn ir_lower_one(
 
 #[test]
 fn alter_column_type_render_is_byte_identical_pg() {
-    use zero_migrate::model::ir::{ColType, Op};
+    use zeroship_migrate::model::ir::{ColType, Op};
     // The differ emits an `ALTER COLUMN … TYPE` when a same-name column's type
     // changed live→desired. Live `qty` is `int`; desired is `number` (double
     // precision). Diff that one-column change.
@@ -784,10 +784,10 @@ fn alter_column_type_render_is_byte_identical_pg() {
     let mut own = HashMap::new();
     own.insert("widgets".to_string(), OWNER.to_string());
     let plan = DeclarativeAuthor::new_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         OWNER,
-        zero_migrate_postgres::DIALECT,
+        zeroship_migrate_postgres::DIALECT,
     )
     .diff(&desired, &live.snapshot, &own, &[], &effective_policy())
     .expect("diff");
@@ -808,7 +808,7 @@ fn alter_column_type_render_is_byte_identical_pg() {
             existence_guard: None,
         },
         &live_set,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
     ));
     assert_eq!(
         decl, ir,
@@ -821,7 +821,7 @@ fn alter_column_type_render_is_byte_identical_pg() {
 
 #[test]
 fn set_column_not_null_render_is_byte_identical_pg() {
-    use zero_migrate::model::ir::Op;
+    use zeroship_migrate::model::ir::Op;
     // SET NOT NULL: live `name` nullable, desired required. The differ emits
     // `ALTER COLUMN … SET NOT NULL`.
     let desired_desc = CollectionDescriptor {
@@ -853,10 +853,10 @@ fn set_column_not_null_render_is_byte_identical_pg() {
     let mut own = HashMap::new();
     own.insert("people".to_string(), OWNER.to_string());
     let plan = DeclarativeAuthor::new_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         OWNER,
-        zero_migrate_postgres::DIALECT,
+        zeroship_migrate_postgres::DIALECT,
     )
     .diff(&desired, &live.snapshot, &own, &[], &effective_policy())
     .expect("diff");
@@ -875,7 +875,7 @@ fn set_column_not_null_render_is_byte_identical_pg() {
             existence_guard: None,
         },
         &live_set,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
     ));
     assert_eq!(decl, ir, "setColumnNotNull render must be byte-identical");
     assert!(decl.iter().any(|(up, _)| up.contains("SET NOT NULL")));
@@ -883,7 +883,7 @@ fn set_column_not_null_render_is_byte_identical_pg() {
 
 #[test]
 fn add_constraint_fk_render_is_byte_identical_pg() {
-    use zero_migrate::model::ir::{IrConstraint, IrConstraintKind, Op};
+    use zeroship_migrate::model::ir::{IrConstraint, IrConstraintKind, Op};
     // A mutual-reference CYCLE (posts→authors, authors→posts) forces the differ
     // to DEFER the cycle-closing FK to a stand-alone `ALTER TABLE … ADD CONSTRAINT
     // … FOREIGN KEY` (it cannot inline both at CREATE). We compare the differ's
@@ -915,10 +915,10 @@ fn add_constraint_fk_render_is_byte_identical_pg() {
     };
     let desired = test_desired_snapshot(SCHEMA, &[posts, authors]).expect("desired");
     let plan = DeclarativeAuthor::new_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         OWNER,
-        zero_migrate_postgres::DIALECT,
+        zeroship_migrate_postgres::DIALECT,
     )
     .diff(
         &desired,
@@ -949,7 +949,7 @@ fn add_constraint_fk_render_is_byte_identical_pg() {
     live_set.insert("authors".to_string());
     let ir = sql_pairs(&ir_lower_one(
         Op::AddConstraint {
-            attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
             table: "authors".into(),
             constraint: IrConstraint {
                 name: None,
@@ -969,7 +969,7 @@ fn add_constraint_fk_render_is_byte_identical_pg() {
             existence_guard: None,
         },
         &live_set,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
     ));
     assert_eq!(
         decl, ir,
@@ -988,14 +988,14 @@ fn add_constraint_fk_render_is_byte_identical_pg() {
 /// `TableRebuildUnavailable`, unchanged).
 #[test]
 fn add_constraint_fk_renders_on_delete_cascade_pg() {
-    use zero_migrate::model::ir::{IrConstraint, IrConstraintKind, Op, RefAction};
+    use zeroship_migrate::model::ir::{IrConstraint, IrConstraintKind, Op, RefAction};
     let mut live = BTreeSet::new();
     live.insert("posts".to_string());
     live.insert("authors".to_string());
 
     let ir = sql_pairs(&ir_lower_one(
         Op::AddConstraint {
-            attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
             table: "authors".into(),
             constraint: IrConstraint {
                 name: Some("authors_pinned_fk".into()),
@@ -1015,7 +1015,7 @@ fn add_constraint_fk_renders_on_delete_cascade_pg() {
             existence_guard: None,
         },
         &live,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
     ));
     let up = &ir[0].0;
     assert_eq!(
@@ -1029,7 +1029,7 @@ fn add_constraint_fk_renders_on_delete_cascade_pg() {
     // what introduces the clause.
     let ir_none = sql_pairs(&ir_lower_one(
         Op::AddConstraint {
-            attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
             table: "authors".into(),
             constraint: IrConstraint {
                 name: Some("authors_pinned_fk".into()),
@@ -1049,7 +1049,7 @@ fn add_constraint_fk_renders_on_delete_cascade_pg() {
             existence_guard: None,
         },
         &live,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
     ));
     assert_eq!(
         ir_none[0].0,
@@ -1061,13 +1061,13 @@ fn add_constraint_fk_renders_on_delete_cascade_pg() {
 
 #[test]
 fn add_constraint_fk_renders_deferrable_tail_pg() {
-    use zero_migrate::model::ir::{IrConstraint, IrConstraintKind, Op};
+    use zeroship_migrate::model::ir::{IrConstraint, IrConstraintKind, Op};
 
     fn render_fk(deferrable: Option<bool>, initially_deferred: Option<bool>) -> String {
         let live = BTreeSet::from(["posts".to_string(), "authors".to_string()]);
         let ir = sql_pairs(&ir_lower_one(
             Op::AddConstraint {
-                attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
                 table: "authors".into(),
                 constraint: IrConstraint {
                     name: Some("authors_pinned_fk".into()),
@@ -1087,7 +1087,7 @@ fn add_constraint_fk_renders_deferrable_tail_pg() {
                 existence_guard: None,
             },
             &live,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
         ));
         ir[0].0.clone()
     }
@@ -1117,12 +1117,12 @@ fn add_constraint_fk_renders_deferrable_tail_pg() {
 
 #[test]
 fn add_constraint_fk_explicit_on_update_restrict_renders_pg() {
-    use zero_migrate::model::ir::{IrConstraint, IrConstraintKind, Op, RefAction};
+    use zeroship_migrate::model::ir::{IrConstraint, IrConstraintKind, Op, RefAction};
     let live = BTreeSet::from(["posts".to_string(), "authors".to_string()]);
 
     let ir = sql_pairs(&ir_lower_one(
         Op::AddConstraint {
-            attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
             table: "authors".into(),
             constraint: IrConstraint {
                 name: Some("authors_pinned_fk".into()),
@@ -1142,7 +1142,7 @@ fn add_constraint_fk_explicit_on_update_restrict_renders_pg() {
             existence_guard: None,
         },
         &live,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
     ));
     assert_eq!(
         ir[0].0,
@@ -1153,11 +1153,11 @@ fn add_constraint_fk_explicit_on_update_restrict_renders_pg() {
 
 #[test]
 fn standalone_add_constraint_fk_renders_non_id_reference_columns_pg() {
-    use zero_migrate::model::ir::{IrConstraint, IrConstraintKind, Op};
+    use zeroship_migrate::model::ir::{IrConstraint, IrConstraintKind, Op};
     let live = BTreeSet::from(["posts".to_string(), "authors".to_string()]);
     let ir = sql_pairs(&ir_lower_one(
         Op::AddConstraint {
-            attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
             table: "authors".into(),
             constraint: IrConstraint {
                 name: Some("authors_pinned_fk".into()),
@@ -1177,7 +1177,7 @@ fn standalone_add_constraint_fk_renders_non_id_reference_columns_pg() {
             existence_guard: None,
         },
         &live,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
     ));
     assert_eq!(
         ir[0].0,
@@ -1188,7 +1188,7 @@ fn standalone_add_constraint_fk_renders_non_id_reference_columns_pg() {
 
 #[test]
 fn add_constraint_unique_and_pk_and_drop_constraint_render_pg() {
-    use zero_migrate::model::ir::{IrConstraint, IrConstraintKind, Op};
+    use zeroship_migrate::model::ir::{IrConstraint, IrConstraintKind, Op};
     // UNIQUE has no stand-alone differ counterpart (the differ renders single-col
     // UNIQUE as an index), so this compares the IR lower against the shared
     // `lower_add_constraint` render seam directly. There is no addConstraint PK
@@ -1199,7 +1199,7 @@ fn add_constraint_unique_and_pk_and_drop_constraint_render_pg() {
 
     let uniq = sql_pairs(&ir_lower_one(
         Op::AddConstraint {
-            attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
             table: "widgets".into(),
             constraint: IrConstraint {
                 name: Some("widgets_slug_key".into()),
@@ -1211,7 +1211,7 @@ fn add_constraint_unique_and_pk_and_drop_constraint_render_pg() {
             existence_guard: None,
         },
         &live,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
     ));
     assert_eq!(
         uniq,
@@ -1233,7 +1233,7 @@ fn add_constraint_unique_and_pk_and_drop_constraint_render_pg() {
             existence_guard: None,
         },
         &live,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
     ));
     assert_eq!(
         drop,
@@ -1251,18 +1251,18 @@ fn add_constraint_unique_and_pk_and_drop_constraint_render_pg() {
 #[allow(clippy::result_large_err)]
 #[test]
 fn standalone_alter_and_constraint_are_sqlite_rebuild_only() {
-    use zero_migrate::model::ir::{ColType, IrConstraint, IrConstraintKind, Op};
-    use zero_migrate::render::lower::IrLowerError;
+    use zeroship_migrate::model::ir::{ColType, IrConstraint, IrConstraintKind, Op};
+    use zeroship_migrate::render::lower::IrLowerError;
     // SQLite has no native ALTER COLUMN / ADD|DROP CONSTRAINT — the stand-alone IR
     // lower fails closed (the differ reconciles these via the 12-step rebuild,
     // which is not this pure-render lower's path). Assert each op family.
     let mut live = BTreeSet::new();
     live.insert("widgets".to_string());
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         OWNER,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::no_inject("app"),
     );
     let one = |op: Op| {
@@ -1304,7 +1304,7 @@ fn standalone_alter_and_constraint_are_sqlite_rebuild_only() {
         ),
         (
             Op::AddConstraint {
-                attributes: zero_migrate_ir::attribute::AddConstraintAttributes::new(),
+                attributes: zeroship_migrate_ir::attribute::AddConstraintAttributes::new(),
                 table: "widgets".into(),
                 constraint: IrConstraint {
                     name: None,
@@ -1330,7 +1330,7 @@ fn standalone_alter_and_constraint_are_sqlite_rebuild_only() {
         match one(op).unwrap_err() {
             IrLowerError::TableRebuildUnavailable { op_kind, dialect } => {
                 assert_eq!(op_kind, tag);
-                assert_eq!(dialect, zero_migrate_sqlite::DIALECT);
+                assert_eq!(dialect, zeroship_migrate_sqlite::DIALECT);
             }
             other => panic!("expected TableRebuildUnavailable({tag}), got: {other}"),
         }
@@ -1365,7 +1365,7 @@ fn create_table_render_is_byte_identical_sqlite() {
         runtime_options: Default::default(),
     };
     let ops = vec![Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "widgets".into(),
         columns: vec![
             IrColumn {
@@ -1428,8 +1428,8 @@ fn create_table_render_is_byte_identical_sqlite() {
         existence_guard: None,
     }];
 
-    let decl = declarative_pairs_for(&[desc], &zero_migrate_sqlite::DIALECT);
-    let ir = ir_pairs_for(ops, &BTreeSet::new(), &zero_migrate_sqlite::DIALECT);
+    let decl = declarative_pairs_for(&[desc], &zeroship_migrate_sqlite::DIALECT);
+    let ir = ir_pairs_for(ops, &BTreeSet::new(), &zeroship_migrate_sqlite::DIALECT);
     assert_eq!(
         decl, ir,
         "SQLite createTable render must be byte-identical across policy-resolved paths"
@@ -1462,7 +1462,7 @@ fn create_table_with_authored_index_is_byte_identical_sqlite() {
         runtime_options: Default::default(),
     };
     let ops = vec![Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "events".into(),
         columns: vec![IrColumn {
             name: "kind".into(),
@@ -1499,8 +1499,8 @@ fn create_table_with_authored_index_is_byte_identical_sqlite() {
         existence_guard: None,
     }];
 
-    let decl = declarative_pairs_for(&[desc], &zero_migrate_sqlite::DIALECT);
-    let ir = ir_pairs_for(ops, &BTreeSet::new(), &zero_migrate_sqlite::DIALECT);
+    let decl = declarative_pairs_for(&[desc], &zeroship_migrate_sqlite::DIALECT);
+    let ir = ir_pairs_for(ops, &BTreeSet::new(), &zeroship_migrate_sqlite::DIALECT);
 
     assert_eq!(decl, ir);
     assert!(ir
@@ -1545,15 +1545,15 @@ fn create_table_with_live_fk_render_is_byte_identical_sqlite() {
         .insert("authors".into(), empty_table_snapshot());
 
     let desired =
-        test_desired_snapshot_for_dialect(SCHEMA, &[posts, authors], &zero_migrate_sqlite::DIALECT)
+        test_desired_snapshot_for_dialect(SCHEMA, &[posts, authors], &zeroship_migrate_sqlite::DIALECT)
             .expect("desired snapshot (sqlite)");
     let mut live_ownership = HashMap::new();
     live_ownership.insert("authors".to_string(), OWNER.to_string());
     let author = DeclarativeAuthor::new_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         OWNER,
-        zero_migrate_sqlite::DIALECT,
+        zeroship_migrate_sqlite::DIALECT,
     );
     let plan = author
         .diff(
@@ -1567,7 +1567,7 @@ fn create_table_with_live_fk_render_is_byte_identical_sqlite() {
     let decl = sql_pairs(&plan.migrations);
 
     let ops = vec![Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "posts".into(),
         columns: vec![IrColumn {
             name: "author".into(),
@@ -1599,7 +1599,7 @@ fn create_table_with_live_fk_render_is_byte_identical_sqlite() {
     }];
     let mut live = BTreeSet::new();
     live.insert("authors".to_string());
-    let ir = ir_pairs_for(ops, &live, &zero_migrate_sqlite::DIALECT);
+    let ir = ir_pairs_for(ops, &live, &zeroship_migrate_sqlite::DIALECT);
 
     // Compare only the `posts`-related render (the empty live `authors` snapshot
     // makes the differ also backfill `authors`' system fields — a test-setup
@@ -1640,7 +1640,7 @@ fn create_table_with_encrypted_column_render_is_byte_identical_sqlite() {
         runtime_options: Default::default(),
     };
     let ops = vec![Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "vault".into(),
         columns: vec![IrColumn {
             name: "secret".into(),
@@ -1670,8 +1670,8 @@ fn create_table_with_encrypted_column_render_is_byte_identical_sqlite() {
         schema: None,
         existence_guard: None,
     }];
-    let decl = declarative_pairs_for(&[desc], &zero_migrate_sqlite::DIALECT);
-    let ir = ir_pairs_for(ops, &BTreeSet::new(), &zero_migrate_sqlite::DIALECT);
+    let decl = declarative_pairs_for(&[desc], &zeroship_migrate_sqlite::DIALECT);
+    let ir = ir_pairs_for(ops, &BTreeSet::new(), &zeroship_migrate_sqlite::DIALECT);
     assert_eq!(
         decl, ir,
         "SQLite encrypted createTable must be byte-identical across policy-resolved paths"
@@ -1719,7 +1719,7 @@ fn create_table_with_explicit_masked_column_render_is_byte_identical_sqlite() {
         runtime_options: Default::default(),
     };
     let ops = vec![Op::CreateTable {
-        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
         name: "people".into(),
         columns: vec![IrColumn {
             name: "ssn".into(),
@@ -1751,8 +1751,8 @@ fn create_table_with_explicit_masked_column_render_is_byte_identical_sqlite() {
         existence_guard: None,
     }];
 
-    let decl = declarative_pairs_for(&[desc], &zero_migrate_sqlite::DIALECT);
-    let ir = ir_pairs_for(ops, &BTreeSet::new(), &zero_migrate_sqlite::DIALECT);
+    let decl = declarative_pairs_for(&[desc], &zeroship_migrate_sqlite::DIALECT);
+    let ir = ir_pairs_for(ops, &BTreeSet::new(), &zeroship_migrate_sqlite::DIALECT);
 
     assert_eq!(
         decl, ir,
@@ -1782,7 +1782,7 @@ fn add_column_render_is_byte_identical_sqlite() {
         indexes: vec![],
         runtime_options: Default::default(),
     };
-    let desired = test_desired_snapshot_for_dialect(SCHEMA, &[desc], &zero_migrate_sqlite::DIALECT)
+    let desired = test_desired_snapshot_for_dialect(SCHEMA, &[desc], &zeroship_migrate_sqlite::DIALECT)
         .expect("desired snapshot");
     let live_desc = CollectionDescriptor {
         name: "people".into(),
@@ -1792,15 +1792,15 @@ fn add_column_render_is_byte_identical_sqlite() {
         runtime_options: Default::default(),
     };
     let live_full =
-        test_desired_snapshot_for_dialect(SCHEMA, &[live_desc], &zero_migrate_sqlite::DIALECT)
+        test_desired_snapshot_for_dialect(SCHEMA, &[live_desc], &zeroship_migrate_sqlite::DIALECT)
             .expect("live snapshot");
     let mut live_ownership = HashMap::new();
     live_ownership.insert("people".to_string(), OWNER.to_string());
     let author = DeclarativeAuthor::new_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         OWNER,
-        zero_migrate_sqlite::DIALECT,
+        zeroship_migrate_sqlite::DIALECT,
     );
     let plan = author
         .diff(
@@ -1814,7 +1814,7 @@ fn add_column_render_is_byte_identical_sqlite() {
     let decl = sql_pairs(&plan.migrations);
 
     let ops = vec![Op::AddColumn {
-        attributes: zero_migrate_ir::attribute::AddColumnAttributes::new(),
+        attributes: zeroship_migrate_ir::attribute::AddColumnAttributes::new(),
         table: "people".into(),
         column: "nickname".into(),
         ty: ColType::Text,
@@ -1831,7 +1831,7 @@ fn add_column_render_is_byte_identical_sqlite() {
     }];
     let mut live = BTreeSet::new();
     live.insert("people".to_string());
-    let ir = ir_pairs_for(ops, &live, &zero_migrate_sqlite::DIALECT);
+    let ir = ir_pairs_for(ops, &live, &zeroship_migrate_sqlite::DIALECT);
 
     assert_eq!(
         decl, ir,
@@ -1867,21 +1867,21 @@ fn create_index_render_is_byte_identical_sqlite() {
     let desired = test_desired_snapshot_for_dialect(
         SCHEMA,
         std::slice::from_ref(&desc),
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
     )
     .expect("desired");
     let mut live_desc = desc;
     live_desc.indexes = vec![];
     let live_full =
-        test_desired_snapshot_for_dialect(SCHEMA, &[live_desc], &zero_migrate_sqlite::DIALECT)
+        test_desired_snapshot_for_dialect(SCHEMA, &[live_desc], &zeroship_migrate_sqlite::DIALECT)
             .expect("live");
     let mut live_ownership = HashMap::new();
     live_ownership.insert("events".to_string(), OWNER.to_string());
     let author = DeclarativeAuthor::new_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         OWNER,
-        zero_migrate_sqlite::DIALECT,
+        zeroship_migrate_sqlite::DIALECT,
     );
     let plan = author
         .diff(
@@ -1912,7 +1912,7 @@ fn create_index_render_is_byte_identical_sqlite() {
     }];
     let mut live = BTreeSet::new();
     live.insert("events".to_string());
-    let ir = ir_pairs_for(ops, &live, &zero_migrate_sqlite::DIALECT);
+    let ir = ir_pairs_for(ops, &live, &zeroship_migrate_sqlite::DIALECT);
 
     assert_eq!(
         decl, ir,

@@ -2,7 +2,7 @@
 //!
 //! These are the Postgres-specific session/lock/txn/journal/DML/rollback
 //! operations the [`PostgresBackend`](super::PostgresBackend)
-//! [`MigrationBackend`](zero_migrate_backend::backend::MigrationBackend) impl drives. They
+//! [`MigrationBackend`](zeroship_migrate_backend::backend::MigrationBackend) impl drives. They
 //! were relocated here **verbatim** from the generic `apply::executor` so the
 //! generic executor issues NO dialect-specific SQL: the
 //! `pg_advisory_lock`/`pg_advisory_unlock` project lock, the GUC
@@ -16,8 +16,8 @@
 //!
 //! The generic orchestration (partition, drift gate, `order_pending`, the
 //! two-pass apply loop, the repeatable phase, rollback selection) stays in
-//! [`zero_migrate_backend::executor`] and reaches every one of these through the
-//! [`MigrationBackend`](zero_migrate_backend::backend::MigrationBackend) trait - never by
+//! [`zeroship_migrate_backend::executor`] and reaches every one of these through the
+//! [`MigrationBackend`](zeroship_migrate_backend::backend::MigrationBackend) trait - never by
 //! naming a leaf below directly.
 
 use std::time::Instant;
@@ -26,13 +26,13 @@ use pg_query::protobuf::node::Node as NodeEnum;
 use pg_query::protobuf::ObjectType;
 
 use super::PostgresSessionSnapshot;
-use zero_migrate_backend::backend::ProjectLockHolder;
-use zero_migrate_backend::conn::ExecutorConfig;
-use zero_migrate_backend::driver::SqlSession;
-use zero_migrate_backend::executor::{authorize_existence_guard_schema, ApplyError, RollbackError};
-use zero_migrate_backend::journal::{self, JournalError};
-use zero_migrate_backend::timeout::{resolve_timeout_ms, IndefiniteTimeoutError as TimeoutError};
-use zero_migrate_ir::migration::Migration;
+use zeroship_migrate_backend::backend::ProjectLockHolder;
+use zeroship_migrate_backend::conn::ExecutorConfig;
+use zeroship_migrate_backend::driver::SqlSession;
+use zeroship_migrate_backend::executor::{authorize_existence_guard_schema, ApplyError, RollbackError};
+use zeroship_migrate_backend::journal::{self, JournalError};
+use zeroship_migrate_backend::timeout::{resolve_timeout_ms, IndefiniteTimeoutError as TimeoutError};
+use zeroship_migrate_ir::migration::Migration;
 
 /// PostgreSQL's author-side renderers use standard quote doubling for inline
 /// string literals. Pin their interpretation inside each transaction so an
@@ -293,7 +293,7 @@ pub(crate) async fn restore_session<D: SqlSession>(
 pub(super) enum SessionRenderError {
     /// An engine-supplied identifier was not quotable.
     #[error(transparent)]
-    IdentQuote(#[from] zero_migrate_backend::dml::IdentQuoteError),
+    IdentQuote(#[from] zeroship_migrate_backend::dml::IdentQuoteError),
     /// A timeout budget resolved to the database's "no limit" sentinel.
     #[error(transparent)]
     IndefiniteTimeout(#[from] TimeoutError),
@@ -318,10 +318,10 @@ impl From<SessionRenderError> for RollbackError {
 }
 
 /// The effective `statement_timeout` for a migration: its per-migration
-/// override ([`zero_migrate_ir::migration::MigrationFlags::timeout_ms`]) if set, else
+/// override ([`zeroship_migrate_ir::migration::MigrationFlags::timeout_ms`]) if set, else
 /// the executor-wide default.
 ///
-/// Zero is refused, not clamped; see [`zero_migrate_backend::timeout`] for why the rule
+/// Zero is refused, not clamped; see [`zeroship_migrate_backend::timeout`] for why the rule
 /// lives at this resolution rather than only at the IR load gate.
 fn effective_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> Result<u64, TimeoutError> {
     resolve_timeout_ms(
@@ -335,10 +335,10 @@ fn effective_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> Result<u64, Time
 }
 
 /// The effective `lock_timeout` for a migration: its per-migration override
-/// ([`zero_migrate_ir::migration::MigrationFlags::lock_timeout_ms`]) if set, else the
+/// ([`zeroship_migrate_ir::migration::MigrationFlags::lock_timeout_ms`]) if set, else the
 /// SHORT executor-wide default (the lock-safety envelope, 3s). This is the
 /// per-deploy maintenance-window knob that makes the doc on
-/// [`zero_migrate_backend::conn::ConfinementConfig::lock_timeout`] honest: a single planned migration
+/// [`zeroship_migrate_backend::conn::ConfinementConfig::lock_timeout`] honest: a single planned migration
 /// can legitimately raise ITS OWN lock-acquisition budget (run during a quiet
 /// window), while every other migration keeps the conservative fail-fast
 /// default. It mirrors [`effective_timeout_ms`] exactly, refusal included.
@@ -386,19 +386,19 @@ pub(super) fn set_local_session_sql(
 ///
 /// The migrator role is an engine-supplied identifier, so it is quoted through
 /// the explicit backend seam
-/// ([`zero_migrate_backend::dml::quote_ident_checked_for_backend`]) - fail-closed
+/// ([`zeroship_migrate_backend::dml::quote_ident_checked_for_backend`]) - fail-closed
 /// on an empty / NUL name, byte-identical to the hand-rolled quoting it replaced
 /// for every real role.
 pub(super) fn set_local_role_sql(
     cfg: &ExecutorConfig,
-) -> Result<Option<String>, zero_migrate_backend::dml::IdentQuoteError> {
+) -> Result<Option<String>, zeroship_migrate_backend::dml::IdentQuoteError> {
     crate::confinement::of(cfg)
         .migrator_role
         .as_ref()
         .map(|role| {
             Ok(format!(
                 "SET LOCAL ROLE {}",
-                zero_migrate_backend::dml::quote_ident_checked_for_backend(
+                zeroship_migrate_backend::dml::quote_ident_checked_for_backend(
                     role,
                     &crate::dml::RENDERER
                 )?
@@ -438,7 +438,7 @@ fn dml_set_local_session_sql(cfg: &ExecutorConfig, version: &str) -> Result<Stri
 }
 
 /// Session-level `SET ...` for the **non-txn path** (no transaction to scope to).
-/// These DO mutate the session, but `zero_migrate::apply::executor::apply` restores the
+/// These DO mutate the session, but `zeroship_migrate::apply::executor::apply` restores the
 /// original GUCs on exit via [`restore_session`] so they never leak.
 /// Per-migration timeout override applied.
 ///
@@ -525,7 +525,7 @@ pub(crate) async fn configure_session_non_txn<D: SqlSession>(
 ///
 /// Cluster-wide statements are not this function's business either. The line-1 guard
 /// runs over the same `down` before the `BEGIN` and denies `ALTER SYSTEM`
-/// (`zero_migrate_postgres::guard`, `rule::ALTER_SYSTEM`) and `CREATE`/`DROP DATABASE`
+/// (`zeroship_migrate_postgres::guard`, `rule::ALTER_SYSTEM`) and `CREATE`/`DROP DATABASE`
 /// (`rule::DATABASE_MANAGEMENT`) already.
 ///
 /// # Unparseable SQL
@@ -707,21 +707,21 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
                 let _ = conn.batch("ROLLBACK").await;
                 // Reuse the same DriftError -> ApplyError mapping `apply_locked` uses.
                 return Err(match e {
-                    zero_migrate_backend::drift::DriftError::Db(db) => ApplyError::Db(db),
-                    zero_migrate_backend::drift::DriftError::Journal(j) => ApplyError::Journal(j),
-                    zero_migrate_backend::drift::DriftError::Snapshot(s) => ApplyError::Backend(s),
-                    zero_migrate_backend::drift::DriftError::Backend(b) => ApplyError::Backend(b),
+                    zeroship_migrate_backend::drift::DriftError::Db(db) => ApplyError::Db(db),
+                    zeroship_migrate_backend::drift::DriftError::Journal(j) => ApplyError::Journal(j),
+                    zeroship_migrate_backend::drift::DriftError::Snapshot(s) => ApplyError::Backend(s),
+                    zeroship_migrate_backend::drift::DriftError::Backend(b) => ApplyError::Backend(b),
                 });
             }
         };
-        match zero_migrate_backend::existence_probe::decide(probe, &live, &crate::VENDOR) {
-            zero_migrate_backend::existence_probe::GuardVerdict::RunBare => { /* fall through */ }
-            zero_migrate_backend::existence_probe::GuardVerdict::SatisfiedNoop => {
+        match zeroship_migrate_backend::existence_probe::decide(probe, &live, &crate::VENDOR) {
+            zeroship_migrate_backend::existence_probe::GuardVerdict::RunBare => { /* fall through */ }
+            zeroship_migrate_backend::existence_probe::GuardVerdict::SatisfiedNoop => {
                 // Skip the `up` + the role switch; the journal block below still runs
                 // so the version lands as net-applied.
                 skip_up = true;
             }
-            zero_migrate_backend::existence_probe::GuardVerdict::FailDrift(d) => {
+            zeroship_migrate_backend::existence_probe::GuardVerdict::FailDrift(d) => {
                 if let Err(rb) = conn.batch("ROLLBACK").await {
                     tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after an existence-guard drift");
                 }
@@ -782,8 +782,8 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
         // crash test arms to compare the two apply shapes. Here it is still inside
         // the open transaction, so the ROLLBACK undoes the `up` too and the next
         // apply sees a migration that never ran.
-        if let Err(e) = zero_migrate_backend::fault::trip(
-            zero_migrate_backend::fault::points::APPLY_AFTER_UP_BEFORE_COMPLETED,
+        if let Err(e) = zeroship_migrate_backend::fault::trip(
+            zeroship_migrate_backend::fault::points::APPLY_AFTER_UP_BEFORE_COMPLETED,
         ) {
             if let Err(rb) = conn.batch("ROLLBACK").await {
                 tracing::warn!(error = %rb, version = %m.version.as_str(), "zero-migrate: ROLLBACK failed after an injected crash");
@@ -805,7 +805,7 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
         !supersedes.is_empty(),
         "kind='squash' iff supersedes is non-empty"
     );
-    let meta = zero_migrate_backend::dml::quote_ident_checked_for_backend(
+    let meta = zeroship_migrate_backend::dml::quote_ident_checked_for_backend(
         &cfg.confinement.meta_schema,
         &crate::dml::RENDERER,
     )?;
@@ -851,24 +851,24 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
 }
 
 fn postgres_dml_params(
-    binds: &[zero_migrate_backend::step::BindValue],
-) -> Result<Vec<zero_migrate_backend::driver::Bind>, String> {
-    use zero_migrate_backend::driver::Bind;
+    binds: &[zeroship_migrate_backend::step::BindValue],
+) -> Result<Vec<zeroship_migrate_backend::driver::Bind>, String> {
+    use zeroship_migrate_backend::driver::Bind;
     binds
         .iter()
         .map(|bind| match bind {
-            zero_migrate_backend::step::BindValue::Null => Ok(Bind::Inferred(None)),
-            zero_migrate_backend::step::BindValue::Bool(value) => Ok(Bind::Inferred(Some(
+            zeroship_migrate_backend::step::BindValue::Null => Ok(Bind::Inferred(None)),
+            zeroship_migrate_backend::step::BindValue::Bool(value) => Ok(Bind::Inferred(Some(
                 if *value { "true" } else { "false" }.to_string(),
             ))),
-            zero_migrate_backend::step::BindValue::Int(value) => {
+            zeroship_migrate_backend::step::BindValue::Int(value) => {
                 Ok(Bind::Inferred(Some(value.to_string())))
             }
-            zero_migrate_backend::step::BindValue::Decimal(value)
-            | zero_migrate_backend::step::BindValue::Text(value) => {
+            zeroship_migrate_backend::step::BindValue::Decimal(value)
+            | zeroship_migrate_backend::step::BindValue::Text(value) => {
                 Ok(Bind::Inferred(Some(value.clone())))
             }
-            zero_migrate_backend::step::BindValue::Bytes(_) => Err(
+            zeroship_migrate_backend::step::BindValue::Bytes(_) => Err(
                 "postgres DML: raw binary bind reached the backend without a decode wrapper"
                     .to_string(),
             ),
@@ -878,7 +878,7 @@ fn postgres_dml_params(
 
 /// Transactional apply of a single **parameterized DML** step (`op.*` DSL)
 /// - the PG executor behind
-/// [`MigrationBackend::run_dml_step`](zero_migrate_backend::backend::MigrationBackend::run_dml_step).
+/// [`MigrationBackend::run_dml_step`](zeroship_migrate_backend::backend::MigrationBackend::run_dml_step).
 ///
 /// Mirrors [`apply_transactional`]'s `BEGIN; SET LOCAL ...; SET LOCAL ROLE; <stmt>;
 /// RESET ROLE; INSERT journal; COMMIT` discipline, but the statement is the DML
@@ -896,10 +896,10 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     version: &str,
-    checksum: &zero_migrate_ir::migration::Checksum,
+    checksum: &zeroship_migrate_ir::migration::Checksum,
     name: &str,
     template: &str,
-    binds: &[zero_migrate_backend::step::BindValue],
+    binds: &[zeroship_migrate_backend::step::BindValue],
     applied_by: &str,
 ) -> Result<(), ApplyError> {
     let started = Instant::now();
@@ -958,14 +958,14 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
     // Fault seam (test-only): a simulated crash AFTER the DML statement ran but
     // BEFORE the journal row - the open txn rolls back the data write too, so the
     // step left NOTHING (resume re-applies cleanly).
-    if let Err(e) = zero_migrate_backend::fault::trip(
-        zero_migrate_backend::fault::points::DML_AFTER_STMT_BEFORE_JOURNAL,
+    if let Err(e) = zeroship_migrate_backend::fault::trip(
+        zeroship_migrate_backend::fault::points::DML_AFTER_STMT_BEFORE_JOURNAL,
     ) {
         let _ = conn.batch("ROLLBACK").await;
         return Err(e);
     }
     let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
-    let meta = zero_migrate_backend::dml::quote_ident_checked_for_backend(
+    let meta = zeroship_migrate_backend::dml::quote_ident_checked_for_backend(
         &cfg.confinement.meta_schema,
         &crate::dml::RENDERER,
     )?;
@@ -995,8 +995,8 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
     // Fault seam (test-only): a simulated crash AFTER the journal INSERT but
     // BEFORE COMMIT - the INSERT is inside the uncommitted txn, so it rolls back
     // with the data write; the step still left NOTHING (resume re-applies).
-    if let Err(e) = zero_migrate_backend::fault::trip(
-        zero_migrate_backend::fault::points::DML_AFTER_JOURNAL_BEFORE_COMMIT,
+    if let Err(e) = zeroship_migrate_backend::fault::trip(
+        zeroship_migrate_backend::fault::points::DML_AFTER_JOURNAL_BEFORE_COMMIT,
     ) {
         let _ = conn.batch("ROLLBACK").await;
         return Err(e);
@@ -1016,7 +1016,7 @@ async fn insert_supersedes_edges<D: SqlSession>(
     squash_version: &str,
     supersedes: &[&str],
 ) -> Result<(), JournalError> {
-    let meta = zero_migrate_backend::dml::quote_ident_checked_for_backend(
+    let meta = zeroship_migrate_backend::dml::quote_ident_checked_for_backend(
         &cfg.confinement.meta_schema,
         &crate::dml::RENDERER,
     )?;
@@ -1060,22 +1060,22 @@ pub(crate) async fn apply_non_transactional<D: SqlSession>(
             Ok(s) => s,
             Err(e) => {
                 return Err(match e {
-                    zero_migrate_backend::drift::DriftError::Db(db) => ApplyError::Db(db),
-                    zero_migrate_backend::drift::DriftError::Journal(j) => ApplyError::Journal(j),
-                    zero_migrate_backend::drift::DriftError::Snapshot(s) => ApplyError::Backend(s),
-                    zero_migrate_backend::drift::DriftError::Backend(b) => ApplyError::Backend(b),
+                    zeroship_migrate_backend::drift::DriftError::Db(db) => ApplyError::Db(db),
+                    zeroship_migrate_backend::drift::DriftError::Journal(j) => ApplyError::Journal(j),
+                    zeroship_migrate_backend::drift::DriftError::Snapshot(s) => ApplyError::Backend(s),
+                    zeroship_migrate_backend::drift::DriftError::Backend(b) => ApplyError::Backend(b),
                 });
             }
         };
-        match zero_migrate_backend::existence_probe::decide(probe, &live, &crate::VENDOR) {
-            zero_migrate_backend::existence_probe::GuardVerdict::RunBare => { /* continue below */ }
-            zero_migrate_backend::existence_probe::GuardVerdict::SatisfiedNoop => {
+        match zeroship_migrate_backend::existence_probe::decide(probe, &live, &crate::VENDOR) {
+            zeroship_migrate_backend::existence_probe::GuardVerdict::RunBare => { /* continue below */ }
+            zeroship_migrate_backend::existence_probe::GuardVerdict::SatisfiedNoop => {
                 let exec_ms =
                     i64::try_from(probe_started.elapsed().as_millis()).unwrap_or(i64::MAX);
                 finalize_non_txn(conn, cfg, m, applied_by, exec_ms, supersedes).await?;
                 return Ok(false);
             }
-            zero_migrate_backend::existence_probe::GuardVerdict::FailDrift(d) => {
+            zeroship_migrate_backend::existence_probe::GuardVerdict::FailDrift(d) => {
                 return Err(ApplyError::ExistenceGuardDrift {
                     version: version.to_string(),
                     object: d.object,
@@ -1137,7 +1137,7 @@ pub(crate) async fn apply_non_transactional<D: SqlSession>(
     // the role never leaks onto the session even if the `<up>` fails - and
     // `apply`'s `restore_session` is an unconditional backstop.
     if let Some(role) = &crate::confinement::of(cfg).migrator_role {
-        let role_q = zero_migrate_backend::dml::quote_ident_checked_for_backend(
+        let role_q = zeroship_migrate_backend::dml::quote_ident_checked_for_backend(
             role,
             &crate::dml::RENDERER,
         )?;
@@ -1165,8 +1165,8 @@ pub(crate) async fn apply_non_transactional<D: SqlSession>(
     // the `up` auto-committed, so an abort here leaves the schema changed, no
     // `completed` row, and the inflight marker armed. That is the exact state the
     // next apply's recovery has to converge from.
-    zero_migrate_backend::fault::trip(
-        zero_migrate_backend::fault::points::APPLY_AFTER_UP_BEFORE_COMPLETED,
+    zeroship_migrate_backend::fault::trip(
+        zeroship_migrate_backend::fault::points::APPLY_AFTER_UP_BEFORE_COMPLETED,
     )?;
 
     // Phase 2: the completed row, the marker's deletion, and any squash edges.
@@ -1298,11 +1298,11 @@ async fn recover_non_transactional<D: SqlSession>(
         if is_invalid {
             let stmt = format!(
                 "DROP INDEX IF EXISTS {}.{}",
-                zero_migrate_backend::dml::quote_ident_checked_for_backend(
+                zeroship_migrate_backend::dml::quote_ident_checked_for_backend(
                     &cfg.project_schema,
                     &crate::dml::RENDERER,
                 )?,
-                zero_migrate_backend::dml::quote_ident_checked_for_backend(
+                zeroship_migrate_backend::dml::quote_ident_checked_for_backend(
                     &idx,
                     &crate::dml::RENDERER
                 )?,
@@ -1541,7 +1541,7 @@ async fn append_rolled_back<D: SqlSession>(
     applied_by: &str,
     exec_ms: i64,
 ) -> Result<(), RollbackError> {
-    let meta = zero_migrate_backend::dml::quote_ident_checked_for_backend(
+    let meta = zeroship_migrate_backend::dml::quote_ident_checked_for_backend(
         &cfg.confinement.meta_schema,
         &crate::dml::RENDERER,
     )?;
@@ -1571,7 +1571,7 @@ pub(crate) async fn rollback_dml_plan_transactional<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     forward: &Migration,
-    inverse_steps: &[zero_migrate_backend::step::PlanStep],
+    inverse_steps: &[zeroship_migrate_backend::step::PlanStep],
     applied_by: &str,
 ) -> Result<(), RollbackError> {
     let version = forward.version.as_str();
@@ -1579,10 +1579,10 @@ pub(crate) async fn rollback_dml_plan_transactional<D: SqlSession>(
         .map_err(|error| RollbackError::Backend(error.to_string()))?;
     let role_sql =
         set_local_role_sql(cfg).map_err(|error| RollbackError::Backend(error.to_string()))?;
-    let params: Vec<Vec<zero_migrate_backend::driver::Bind>> = inverse_steps
+    let params: Vec<Vec<zeroship_migrate_backend::driver::Bind>> = inverse_steps
         .iter()
         .map(|step| {
-            let zero_migrate_backend::step::PlanStep::Dml { binds, .. } = step else {
+            let zeroship_migrate_backend::step::PlanStep::Dml { binds, .. } = step else {
                 return Err(RollbackError::RecordedInverseUnsupported {
                     version: version.to_string(),
                     reason: "non-DML step reached PostgreSQL recorded-inverse executor".to_string(),
@@ -1606,7 +1606,7 @@ pub(crate) async fn rollback_dml_plan_transactional<D: SqlSession>(
     }
 
     for (step, params) in inverse_steps.iter().zip(&params) {
-        let zero_migrate_backend::step::PlanStep::Dml { template, .. } = step else {
+        let zeroship_migrate_backend::step::PlanStep::Dml { template, .. } = step else {
             unreachable!("inverse shape was validated before BEGIN")
         };
         if let Err(error) = conn.exec(template, params).await {
@@ -1640,19 +1640,19 @@ mod pg_confinement_shape_tests {
     //! Pins the confinement shape: the **PG** apply leaf still emits its
     //! `SET LOCAL search_path` / `SET LOCAL ROLE` / `SET LOCAL statement_timeout`
     //! and `SET LOCAL lock_timeout` bracket from the
-    //! [`ConfinementConfig`](zero_migrate_backend::conn::ConfinementConfig) block - the shared
+    //! [`ConfinementConfig`](zeroship_migrate_backend::conn::ConfinementConfig) block - the shared
     //! budgets from `cfg.confinement`, the role and extension schemas from the
-    //! PG-only [`ConfinementConfig::postgres`](zero_migrate_backend::conn::ConfinementConfig::postgres)
+    //! PG-only [`ConfinementConfig::postgres`](zeroship_migrate_backend::conn::ConfinementConfig::postgres)
     //! sub-block - and a default (SQLite-shaped construction reuses this same
     //! `new`) carries the INERT PG confinement - never PG role/cross-schema
     //! confinement of its own.
     use super::*;
-    use zero_migrate_ir::migration::{Checksum, MigrationFlags, MigrationId};
+    use zeroship_migrate_ir::migration::{Checksum, MigrationFlags, MigrationId};
 
     fn trivial_migration() -> Migration {
         let flags = MigrationFlags::default();
         let version = MigrationId::generate();
-        let checksum = Checksum::of(&zero_migrate_ir::migration::ChecksumInput {
+        let checksum = Checksum::of(&zeroship_migrate_ir::migration::ChecksumInput {
             up: "CREATE TABLE t (id int)",
             down: None,
             flags: &flags,
@@ -1808,7 +1808,7 @@ mod pg_confinement_shape_tests {
 #[cfg(test)]
 mod non_transactional_down_tests {
     use super::*;
-    use zero_migrate_ir::migration::{Checksum, MigrationFlags, MigrationId};
+    use zeroship_migrate_ir::migration::{Checksum, MigrationFlags, MigrationId};
 
     /// A transactional migration whose `down` is `sql`. Transactional on purpose: the
     /// flag is what gate (5b) already checked, so a fixture declaring `false` would
@@ -1816,7 +1816,7 @@ mod non_transactional_down_tests {
     fn with_down(sql: &str) -> Migration {
         let flags = MigrationFlags::default();
         let up = "CREATE TABLE t()";
-        let checksum = Checksum::of(&zero_migrate_ir::migration::ChecksumInput {
+        let checksum = Checksum::of(&zeroship_migrate_ir::migration::ChecksumInput {
             up,
             down: Some(sql),
             flags: &flags,
@@ -1898,7 +1898,7 @@ mod non_transactional_down_tests {
 #[cfg(test)]
 mod non_txn_idempotency_tests {
     use super::*;
-    use zero_migrate_ir::migration::{Checksum, MigrationFlags, MigrationId};
+    use zeroship_migrate_ir::migration::{Checksum, MigrationFlags, MigrationId};
 
     /// Build a non-transactional migration whose `up` is `sql`.
     fn nontxn(sql: &str) -> Migration {
@@ -1907,7 +1907,7 @@ mod non_txn_idempotency_tests {
             ..MigrationFlags::default()
         };
         let version = MigrationId::generate();
-        let checksum = Checksum::of(&zero_migrate_ir::migration::ChecksumInput {
+        let checksum = Checksum::of(&zeroship_migrate_ir::migration::ChecksumInput {
             up: sql,
             down: None,
             flags: &flags,
@@ -2095,7 +2095,7 @@ mod non_txn_idempotency_tests {
 /// Every element is an **engine-supplied** identifier (project schema, platform
 /// schemas, extension schemas), so each is rendered through the ONE shared
 /// explicit backend seam
-/// ([`quote_ident_checked_for_dialect`](zero_migrate_backend::dml::quote_ident_checked_for_backend))
+/// ([`quote_ident_checked_for_dialect`](zeroship_migrate_backend::dml::quote_ident_checked_for_backend))
 /// - fail-closed on an empty / NUL name, byte-identical to the hand-rolled
 /// quoting it replaced for every real schema. So the whole quoting surface (not
 /// just the DDL/journal seams) is uniformly self-defending.
@@ -2118,22 +2118,22 @@ mod non_txn_idempotency_tests {
 ///
 /// # Errors
 ///
-/// [`IdentQuoteError`](zero_migrate_backend::dml::IdentQuoteError) if any configured
+/// [`IdentQuoteError`](zeroship_migrate_backend::dml::IdentQuoteError) if any configured
 /// schema is empty or carries a NUL byte (an engine-internal misconfiguration;
 /// never reachable from a well-formed `ExecutorConfig`).
 pub(crate) fn search_path_clause(
     cfg: &ExecutorConfig,
-) -> Result<String, zero_migrate_backend::dml::IdentQuoteError> {
+) -> Result<String, zeroship_migrate_backend::dml::IdentQuoteError> {
     let quote = |s: &str| {
-        zero_migrate_backend::dml::quote_ident_checked_for_backend(s, &crate::dml::RENDERER)
+        zeroship_migrate_backend::dml::quote_ident_checked_for_backend(s, &crate::dml::RENDERER)
     };
     if policy_grants_bool(
         cfg.effective(),
-        zero_migrate_ir::policy_registry::KEY_ACCESS_ROLE,
+        zeroship_migrate_ir::policy_registry::KEY_ACCESS_ROLE,
     ) {
         if let Some(schemas) = policy_literal_schema_includes(
             cfg.effective(),
-            zero_migrate_ir::policy_registry::KEY_SCHEMA_CREATE_TABLE,
+            zeroship_migrate_ir::policy_registry::KEY_SCHEMA_CREATE_TABLE,
         ) {
             if !schemas.is_empty() {
                 return schemas
@@ -2158,23 +2158,23 @@ pub(crate) fn search_path_clause(
     Ok(parts.join(", "))
 }
 
-fn policy_grants_bool(effective: &zero_migrate_policy::EffectivePolicy, key: &str) -> bool {
-    let Some(key) = zero_migrate_policy::KnobKey::parse(key).ok() else {
+fn policy_grants_bool(effective: &zeroship_migrate_policy::EffectivePolicy, key: &str) -> bool {
+    let Some(key) = zeroship_migrate_policy::KnobKey::parse(key).ok() else {
         return false;
     };
     matches!(
         effective.grants(
             &key,
-            &zero_migrate_policy::ObjectName::schema(b"zsg".to_vec())
+            &zeroship_migrate_policy::ObjectName::schema(b"zsg".to_vec())
         ),
-        Some(zero_migrate_policy::KnobValue::Bool(true))
+        Some(zeroship_migrate_policy::KnobValue::Bool(true))
     )
 }
 
 fn policy_literal_schema_includes(
-    effective: &zero_migrate_policy::EffectivePolicy,
+    effective: &zeroship_migrate_policy::EffectivePolicy,
     key: &str,
 ) -> Option<Vec<String>> {
-    let key = zero_migrate_policy::KnobKey::parse(key).ok()?;
+    let key = zeroship_migrate_policy::KnobKey::parse(key).ok()?;
     effective.grant_literal_schema_includes(&key)
 }

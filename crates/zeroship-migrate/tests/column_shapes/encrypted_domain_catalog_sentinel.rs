@@ -33,10 +33,10 @@ use crate::support;
 use std::collections::BTreeSet;
 
 use serde_json::json;
-use zero_migrate::model::ir::{MigrationIr, Op};
-use zero_migrate::render::fold::single_fold;
-use zero_migrate::render::lower::IrAuthor;
-use zero_migrate::{fold_ops, resolve_create_table_policy, LiveSchema};
+use zeroship_migrate::model::ir::{MigrationIr, Op};
+use zeroship_migrate::render::fold::single_fold;
+use zeroship_migrate::render::lower::IrAuthor;
+use zeroship_migrate::{fold_ops, resolve_create_table_policy, LiveSchema};
 
 const SCHEMA: &str = "app";
 const OWNER: &str = "app_test";
@@ -45,15 +45,15 @@ const OWNER: &str = "app_test";
 /// measured separately: it emits NO `zero-migrate:enc:` sentinel at all (see
 /// [`mysql_emits_no_encryption_sentinel_to_disagree_with`]), so there is nothing for the
 /// runtime descriptor to disagree with there.
-const SENTINEL_DIALECTS: [(&str, &zero_migrate::DialectId); 2] = [
-    ("postgres", &zero_migrate_postgres::DIALECT),
-    ("sqlite", &zero_migrate_sqlite::DIALECT),
+const SENTINEL_DIALECTS: [(&str, &zeroship_migrate::DialectId); 2] = [
+    ("postgres", &zeroship_migrate_postgres::DIALECT),
+    ("sqlite", &zeroship_migrate_sqlite::DIALECT),
 ];
 
-const ALL_DIALECTS: [(&str, &zero_migrate::DialectId); 3] = [
-    ("postgres", &zero_migrate_postgres::DIALECT),
-    ("sqlite", &zero_migrate_sqlite::DIALECT),
-    ("mysql", &zero_migrate_mysql::DIALECT),
+const ALL_DIALECTS: [(&str, &zeroship_migrate::DialectId); 3] = [
+    ("postgres", &zeroship_migrate_postgres::DIALECT),
+    ("sqlite", &zeroship_migrate_sqlite::DIALECT),
+    ("mysql", &zeroship_migrate_mysql::DIALECT),
 ];
 
 /// `createTable` with one encrypted column whose inner type is `inner`, preceded by a
@@ -96,7 +96,7 @@ fn add_column_ops(base: serde_json::Value, inner: serde_json::Value) -> Vec<Op> 
 }
 
 /// Render ops through the REAL lower and return every emitted `up` statement joined.
-fn rendered_sql(ops: Vec<Op>, dialect: &zero_migrate::DialectId) -> String {
+fn rendered_sql(ops: Vec<Op>, dialect: &zeroship_migrate::DialectId) -> String {
     let ir = MigrationIr {
         inverse_ops: None,
         irreversible: None,
@@ -113,7 +113,7 @@ fn rendered_sql(ops: Vec<Op>, dialect: &zero_migrate::DialectId) -> String {
     let ir = resolve_create_table_policy(&ir, &support::confined_charter(), SCHEMA)
         .expect("IR resolves against the test charter");
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         SCHEMA,
         OWNER,
         dialect,
@@ -282,7 +282,7 @@ fn mysql_emits_no_encryption_sentinel_to_disagree_with() {
     ] {
         let sql = rendered_sql(
             create_ops(json!("int"), inner.clone()),
-            &zero_migrate_mysql::DIALECT,
+            &zeroship_migrate_mysql::DIALECT,
         );
         assert!(
             enc_sentinels(&sql).is_empty(),
@@ -326,7 +326,7 @@ fn an_unrelated_rename_carries_the_encrypted_domain_columns_sentinel_unchanged()
         ]))
         .expect("create ops deserialize");
         let created = fold_ops(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &ops,
             dialect,
             SCHEMA,
@@ -355,7 +355,7 @@ fn an_unrelated_rename_carries_the_encrypted_domain_columns_sentinel_unchanged()
             .expect("rename op deserializes"),
         );
         let renamed = fold_ops(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &ops,
             dialect,
             SCHEMA,
@@ -413,7 +413,7 @@ fn the_lower_the_snapshot_fold_and_the_field_defs_agree_on_wraps() {
 
         // 2. The snapshot fold — the source the SQLite rebuild re-renders from.
         let snap = fold_ops(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &ops,
             dialect,
             SCHEMA,
@@ -440,13 +440,13 @@ fn the_lower_the_snapshot_fold_and_the_field_defs_agree_on_wraps() {
 
         // 3. The field-def replay — the runtime descriptor.
         let defs = single_fold::fold(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &ops,
             dialect,
             SCHEMA,
             &support::confined_charter(),
         )
-        .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
+        .map(|folded| folded.project_field_defs(zeroship_migrate::shipping_vendors()))
         .expect("field-def fold succeeds");
         let amounts = defs.get("amounts").expect("amounts in the field defs");
         assert_eq!(

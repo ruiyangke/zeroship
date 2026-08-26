@@ -43,12 +43,12 @@
 
 use crate::support;
 
-use zero_migrate::driver::SqlSession;
-use zero_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
-use zero_migrate::{
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
+use zeroship_migrate::{
     diff_snapshots, fold_ops, IrAuthor, LiveSchema, SchemaSnapshot, StructuralDrift,
 };
-use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zeroship_migrate_postgres::backend::drift_sql::snapshot_schema;
 
 const OWNER: &str = "app_drift_check_body";
 const TABLE: &str = "check_body_probe";
@@ -161,18 +161,18 @@ async fn live_postgres_reports_a_check_body_moved_to_another_column() {
     let result: Result<(), String> = async {
         let ir = fixture(&schema);
         let expected = fold_ops(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &ir.ops,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &schema,
             &support::operator_charter("app"),
         )
         .map_err(|error| format!("fold check-body fixture: {error}"))?;
         let migrations = IrAuthor::new(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &schema,
             OWNER,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &support::operator_charter(&schema),
         )
         .lower(&ir, &LiveSchema::default())
@@ -192,7 +192,7 @@ async fn live_postgres_reports_a_check_body_moved_to_another_column() {
         let clean = snapshot_schema(&session, &schema)
             .await
             .map_err(|error| format!("introspect clean check-body fixture: {error}"))?;
-        let clean_drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &clean);
+        let clean_drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &clean);
         if !clean_drift.is_clean() {
             return Err(format!(
                 "clean check-body fixture drifted: {clean_drift:#?}"
@@ -210,7 +210,7 @@ async fn live_postgres_reports_a_check_body_moved_to_another_column() {
             constraint = quote_ident(CONSTRAINT),
         );
         let mutated = snapshot_after_mutation(&session, &schema, &mutation).await?;
-        let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &mutated);
+        let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &mutated);
         if !drift_mentions_the_constraint(&drift) {
             return Err(format!(
                 "a CHECK moved from `qty` to `price` was NOT reported. The constraint \

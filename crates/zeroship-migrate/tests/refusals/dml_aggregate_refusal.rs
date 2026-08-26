@@ -19,15 +19,15 @@
 //! that an aggregate has no meaning without a grouping context and a DML statement
 //! has nowhere to put one, so it holds on every dialect and needs no database.
 
-use zero_migrate::model::expr::Expr;
-use zero_migrate::model::ir::{IrValue, MigrationIr, Op, CURRENT_IR_VERSION};
-use zero_migrate::model::validate::validate_ir_scoped;
-use zero_migrate::SchemaScope;
+use zeroship_migrate::model::expr::Expr;
+use zeroship_migrate::model::ir::{IrValue, MigrationIr, Op, CURRENT_IR_VERSION};
+use zeroship_migrate::model::validate::validate_ir_scoped;
+use zeroship_migrate::SchemaScope;
 
 /// `count(<column>)` - the aggregate an author reaches for by accident.
 fn count_of(column: &str) -> Expr {
     Expr::Agg {
-        func: zero_migrate::model::expr::AggFunc::Count,
+        func: zeroship_migrate::model::expr::AggFunc::Count,
         arg: Some(Box::new(Expr::col(column))),
         delimiter: None,
         distinct: false,
@@ -49,9 +49,9 @@ fn refusal_for(op: Op) -> Option<String> {
         checksum: None,
     };
     validate_ir_scoped(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         Some(&SchemaScope::Unconfined),
     )
     .err()
@@ -85,14 +85,14 @@ fn an_aggregate_in_a_dml_predicate_is_refused_in_both_update_and_delete() {
         table: "t".to_string(),
         set: [(
             "n".to_string(),
-            IrValue::Expr(Expr::lit(zero_migrate::model::ir::IrScalar::Int(1))),
+            IrValue::Expr(Expr::lit(zeroship_migrate::model::ir::IrScalar::Int(1))),
         )]
         .into_iter()
         .collect(),
         r#where: Some(Expr::BinOp {
-            op: zero_migrate::model::expr::BinaryOp::Gt,
+            op: zeroship_migrate::model::expr::BinaryOp::Gt,
             lhs: Box::new(count_of("n")),
-            rhs: Box::new(Expr::lit(zero_migrate::model::ir::IrScalar::Int(0))),
+            rhs: Box::new(Expr::lit(zeroship_migrate::model::ir::IrScalar::Int(0))),
         }),
         schema: None,
     };
@@ -106,9 +106,9 @@ fn an_aggregate_in_a_dml_predicate_is_refused_in_both_update_and_delete() {
     let delete = Op::Delete {
         table: "t".to_string(),
         r#where: Expr::BinOp {
-            op: zero_migrate::model::expr::BinaryOp::Gt,
+            op: zeroship_migrate::model::expr::BinaryOp::Gt,
             lhs: Box::new(count_of("n")),
-            rhs: Box::new(Expr::lit(zero_migrate::model::ir::IrScalar::Int(0))),
+            rhs: Box::new(Expr::lit(zeroship_migrate::model::ir::IrScalar::Int(0))),
         },
         limit: None,
         schema: None,
@@ -128,7 +128,7 @@ fn a_plain_dml_value_still_validates() {
     // measuring nothing, which is the failure this suite has hit more than once.
     assert_eq!(
         refusal_for(update_setting(Expr::lit(
-            zero_migrate::model::ir::IrScalar::Int(1)
+            zeroship_migrate::model::ir::IrScalar::Int(1)
         ))),
         None,
         "an ordinary literal assignment must still clear validate"

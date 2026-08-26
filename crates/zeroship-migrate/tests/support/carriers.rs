@@ -45,7 +45,7 @@
 
 use std::collections::BTreeMap;
 
-use zero_migrate::{
+use zeroship_migrate::{
     ColumnSnapshot, ConstraintSnapshot, GeneratedColumnSnapshot, IndexElementSnapshot,
     IndexSnapshot, SchemaSnapshot, TableSnapshot,
 };

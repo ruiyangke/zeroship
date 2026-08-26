@@ -5,10 +5,10 @@
 
 use std::collections::BTreeSet;
 
-use zero_migrate_backend::error::DeclarativeError;
-use zero_migrate_backend::schema::SchemaRenderer;
-use zero_migrate_backend::snapshot::{ColumnSnapshot, ConstraintSnapshot, TableSnapshot};
-use zero_migrate_backend::stored_ddl::StoredDdl;
+use zeroship_migrate_backend::error::DeclarativeError;
+use zeroship_migrate_backend::schema::SchemaRenderer;
+use zeroship_migrate_backend::snapshot::{ColumnSnapshot, ConstraintSnapshot, TableSnapshot};
+use zeroship_migrate_backend::stored_ddl::StoredDdl;
 
 /// True iff `b` is a SQL identifier byte (so a whole-word scan does not match a
 /// substring of a larger identifier). ASCII alphanumerics + `_` + `$`. A

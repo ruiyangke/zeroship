@@ -25,11 +25,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::{
+use zeroship_migrate::{
     desired_snapshot_for_dialect, CollectionDescriptor, DeclarativeAuthor, FieldDescriptor,
     SchemaSnapshot,
 };
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_demo";
 const APP: &str = "app_demo";
@@ -57,18 +57,18 @@ fn backend(p: &Paths) -> SqliteBackend {
 
 fn sqlite_author() -> DeclarativeAuthor {
     DeclarativeAuthor::new_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         APP,
-        zero_migrate_sqlite::DIALECT,
+        zeroship_migrate_sqlite::DIALECT,
     )
 }
 
-fn effective_policy() -> zero_migrate::EffectivePolicy {
+fn effective_policy() -> zeroship_migrate::EffectivePolicy {
     support::confined_charter()
 }
 
-fn ownership_of(d: &zero_migrate::DesiredSchema) -> HashMap<String, String> {
+fn ownership_of(d: &zeroship_migrate::DesiredSchema) -> HashMap<String, String> {
     d.ownership
         .iter()
         .map(|(t, a)| (t.clone(), a.clone()))
@@ -79,7 +79,7 @@ fn ownership_of(d: &zero_migrate::DesiredSchema) -> HashMap<String, String> {
 /// (engine mode lets the test issue the PRAGMA on `main`).
 async fn column_type(be: &SqliteBackend, table: &str, column: &str) -> String {
     be.actor()
-        .set_mode(zero_migrate_sqlite::backend::Mode::EngineJournal)
+        .set_mode(zeroship_migrate_sqlite::backend::Mode::EngineJournal)
         .await
         .expect("engine mode");
     let info = be
@@ -116,10 +116,10 @@ async fn vector_field_applies_as_blob_and_redfiff_is_zero_drift() {
     };
 
     let desired = desired_snapshot_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         &[mk()],
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &effective_policy(),
     )
     .expect("desired");
@@ -157,10 +157,10 @@ async fn vector_field_applies_as_blob_and_redfiff_is_zero_drift() {
     let live = be.snapshot_schema_sqlite().await.expect("introspect live");
     let own = ownership_of(&desired);
     let desired2 = desired_snapshot_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         &[mk()],
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &effective_policy(),
     )
     .expect("re-desired");
@@ -204,10 +204,10 @@ async fn vector_inner_product_metric_applies_no_metric_error_on_engine_path() {
         runtime_options: Default::default(),
     };
     let desired = desired_snapshot_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         &[mk()],
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &effective_policy(),
     )
     .expect("an innerProduct vector descriptor compiles (no author-time metric refusal)");
@@ -256,10 +256,10 @@ async fn geopoint_field_applies_as_blob_and_drift_round_trips() {
         runtime_options: Default::default(),
     };
     let desired = desired_snapshot_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         &[mk()],
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &effective_policy(),
     )
     .expect("desired");
@@ -292,7 +292,7 @@ async fn geopoint_field_applies_as_blob_and_drift_round_trips() {
     // spatial index object to assert here. We DO assert there is no *unexpected*
     // spatial vtable.)
     be.actor()
-        .set_mode(zero_migrate_sqlite::backend::Mode::EngineJournal)
+        .set_mode(zeroship_migrate_sqlite::backend::Mode::EngineJournal)
         .await
         .expect("engine mode");
     let vtables = be
@@ -309,10 +309,10 @@ async fn geopoint_field_applies_as_blob_and_drift_round_trips() {
     let live = be.snapshot_schema_sqlite().await.expect("introspect live");
     let own = ownership_of(&desired);
     let desired2 = desired_snapshot_for_dialect(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         PROJECT,
         &[mk()],
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &effective_policy(),
     )
     .expect("re-desired");

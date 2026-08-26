@@ -1,13 +1,13 @@
 //! TEST-ONLY charter fixtures for this crate's unit tests.
 //!
-//! The engine's `zero_migrate::test_fixtures::{no_inject, operator_with_data_security}`
+//! The engine's `zeroship_migrate::test_fixtures::{no_inject, operator_with_data_security}`
 //! are `pub(crate)`, and no visibility widening can make a `pub(crate)` reachable
 //! across a crate boundary - so when the PostgreSQL execution half moved here, the
 //! tests that came with it needed a sibling. This is it, and it is the same shape
 //! `zero-migrate-sqlite`'s and `zero-migrate-mysql`'s `src/test_fixtures.rs` have.
 //!
 //! What it does NOT do is restate the composition algebra. The real one is
-//! `zero_migrate_ir::policy_registry`, so this builds the charter TOML and hands it
+//! `zeroship_migrate_ir::policy_registry`, so this builds the charter TOML and hands it
 //! straight there. One composition, and a change to the algebra cannot leave a
 //! vendor's tests asserting against an older one.
 //!
@@ -17,9 +17,9 @@
 //! `toml::Value` does the schema-name escaping for the same reason - the same
 //! escaping, not merely equivalent escaping.
 
-use zero_migrate_ir::policy::DestructiveOps;
-use zero_migrate_ir::policy_registry::effective_policy_from_charter_toml;
-use zero_migrate_policy::EffectivePolicy;
+use zeroship_migrate_ir::policy::DestructiveOps;
+use zeroship_migrate_ir::policy_registry::effective_policy_from_charter_toml;
+use zeroship_migrate_policy::EffectivePolicy;
 
 pub(crate) fn no_inject(schema: &str) -> EffectivePolicy {
     no_inject_with_data_security(schema, false, DestructiveOps::Allow)

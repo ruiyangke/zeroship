@@ -1,6 +1,6 @@
 //! Shared integration-test policy fixtures and live-Postgres support.
 //!
-//! [`PgDevSession`] is a TEST-ONLY [`zero_migrate::driver::SqlSession`] implementation
+//! [`PgDevSession`] is a TEST-ONLY [`zeroship_migrate::driver::SqlSession`] implementation
 //! backed by the BLOCKING `postgres` crate. It lets the in-crate Rust tests drive the
 //! SHIPPED generic PG apply path — `PostgresBackend<PgDevSession>`, the `<D: SqlSession>`
 //! journal/drift/precondition/baseline free functions, `ops::status` — against a live
@@ -72,8 +72,8 @@ use bytes::BytesMut;
 use postgres::types::{Format, IsNull, Kind, ToSql, Type};
 use postgres::{Client, NoTls, Row as PgRow};
 
-use zero_migrate::driver::{Bind, DbError, Row, SqlSession, Value};
-use zero_migrate::{effective_policy_from_charter_toml, EffectivePolicy};
+use zeroship_migrate::driver::{Bind, DbError, Row, SqlSession, Value};
+use zeroship_migrate::{effective_policy_from_charter_toml, EffectivePolicy};
 
 pub const CONFINED_CHARTER_TOML: &str = r#"policy_version = 1
 
@@ -126,9 +126,9 @@ pub fn confined_charter() -> EffectivePolicy {
 
 /// The SQLite LINE-1 guard, selected the way the engine selects it.
 ///
-/// These tests used to write `zero_migrate::SqliteGuard::new()`, naming a vendor
+/// These tests used to write `zeroship_migrate::SqliteGuard::new()`, naming a vendor
 /// crate's guard TYPE through a re-export at the engine's crate root. That re-export
-/// is gone; the guard is not. [`zero_migrate::guard_for`] resolves the SAME factory
+/// is gone; the guard is not. [`zeroship_migrate::guard_for`] resolves the SAME factory
 /// the apply path resolves — `zero-migrate-sqlite`'s `BackendVendor::guard`, which is
 /// literally `Box::new(SqliteGuard::new())` — so this is the same guard object,
 /// chosen through the registry instead of by name.
@@ -137,12 +137,12 @@ pub fn confined_charter() -> EffectivePolicy {
 /// and its `check` returns the empty outcome for every input, so nothing here reads
 /// the charter. The dialect is the only field that selects anything.
 #[must_use]
-pub fn sqlite_line1_guard() -> Box<dyn zero_migrate::guard::MigrationGuard> {
-    zero_migrate::guard_for(
-        zero_migrate::shipping_vendors(),
-        &zero_migrate::guard::GuardConfig::from_policy(
+pub fn sqlite_line1_guard() -> Box<dyn zeroship_migrate::guard::MigrationGuard> {
+    zeroship_migrate::guard_for(
+        zeroship_migrate::shipping_vendors(),
+        &zeroship_migrate::guard::GuardConfig::from_policy(
             no_inject("main"),
-            zero_migrate_sqlite::DIALECT,
+            zeroship_migrate_sqlite::DIALECT,
         ),
     )
 }
@@ -152,7 +152,7 @@ pub fn no_inject(schema: &str) -> EffectivePolicy {
     no_inject_with_data_security(
         schema,
         false,
-        zero_migrate::model::policy::DestructiveOps::Allow,
+        zeroship_migrate::model::policy::DestructiveOps::Allow,
     )
 }
 
@@ -953,16 +953,16 @@ fn drain_row_iter(mut iter: postgres::RowIter<'_>) -> Result<(Vec<Row>, u64), Db
 /// The call sites read identically to the old free function on purpose: the PG
 /// suites import this as `apply`, so the ~70 live scenarios exercise the same
 /// path with the same arguments and remain a like-for-like regression bar.
-pub async fn apply_pg<D: zero_migrate::driver::SqlSession>(
+pub async fn apply_pg<D: zeroship_migrate::driver::SqlSession>(
     conn: &D,
-    cfg: &zero_migrate::ExecutorConfig,
-    migrations: &[zero_migrate::Migration],
-    approval: zero_migrate::Approval,
+    cfg: &zeroship_migrate::ExecutorConfig,
+    migrations: &[zeroship_migrate::Migration],
+    approval: zeroship_migrate::Approval,
     applied_by: &str,
-) -> Result<zero_migrate::ApplyOutcome, zero_migrate::ApplyError> {
-    zero_migrate::apply(
-        zero_migrate::shipping_vendors(),
-        &zero_migrate_postgres::PostgresBackend::new_generic(conn),
+) -> Result<zeroship_migrate::ApplyOutcome, zeroship_migrate::ApplyError> {
+    zeroship_migrate::apply(
+        zeroship_migrate::shipping_vendors(),
+        &zeroship_migrate_postgres::PostgresBackend::new_generic(conn),
         cfg,
         migrations,
         approval,
@@ -985,11 +985,11 @@ pub async fn apply_pg<D: zero_migrate::driver::SqlSession>(
 pub fn no_inject_with_data_security(
     schema: &str,
     require_rls: bool,
-    destructive_ops: zero_migrate::model::policy::DestructiveOps,
+    destructive_ops: zeroship_migrate::model::policy::DestructiveOps,
 ) -> EffectivePolicy {
     let schema = toml::Value::String(schema.to_string());
     let destructive_rule = match destructive_ops {
-        zero_migrate::model::policy::DestructiveOps::Allow => {
+        zeroship_migrate::model::policy::DestructiveOps::Allow => {
             r#"
 [[grant]]
 key = "safety.destructive_ops"
@@ -997,7 +997,7 @@ value = "allow"
 scope = "all"
 "#
         }
-        zero_migrate::model::policy::DestructiveOps::Warn => {
+        zeroship_migrate::model::policy::DestructiveOps::Warn => {
             r#"
 [[grant]]
 key = "safety.destructive_ops"
@@ -1005,7 +1005,7 @@ value = "warn"
 scope = "all"
 "#
         }
-        zero_migrate::model::policy::DestructiveOps::Forbid => "",
+        zeroship_migrate::model::policy::DestructiveOps::Forbid => "",
     };
     let require_rule = if require_rls {
         r#"
@@ -1046,7 +1046,7 @@ pub fn operator_no_inject(schema: &str) -> EffectivePolicy {
         &[schema],
         &[],
         false,
-        zero_migrate::model::policy::DestructiveOps::Allow,
+        zeroship_migrate::model::policy::DestructiveOps::Allow,
     )
 }
 
@@ -1055,7 +1055,7 @@ pub fn operator_with_data_security(
     schemas: &[&str],
     extensions: &[&str],
     require_rls: bool,
-    destructive_ops: zero_migrate::model::policy::DestructiveOps,
+    destructive_ops: zeroship_migrate::model::policy::DestructiveOps,
 ) -> EffectivePolicy {
     let schemas = toml::Value::Array(
         schemas
@@ -1087,7 +1087,7 @@ scope = "all"
         )
     };
     let destructive_rule = match destructive_ops {
-        zero_migrate::model::policy::DestructiveOps::Allow => {
+        zeroship_migrate::model::policy::DestructiveOps::Allow => {
             r#"
 [[grant]]
 key = "safety.destructive_ops"
@@ -1095,7 +1095,7 @@ value = "allow"
 scope = "all"
 "#
         }
-        zero_migrate::model::policy::DestructiveOps::Warn => {
+        zeroship_migrate::model::policy::DestructiveOps::Warn => {
             r#"
 [[grant]]
 key = "safety.destructive_ops"
@@ -1103,7 +1103,7 @@ value = "warn"
 scope = "all"
 "#
         }
-        zero_migrate::model::policy::DestructiveOps::Forbid => "",
+        zeroship_migrate::model::policy::DestructiveOps::Forbid => "",
     };
     let require_rule = if require_rls {
         r#"

@@ -31,7 +31,7 @@
 //! refuse for different reasons and at different cost, and a single shared type would
 //! make a change to one backend's posture silently become a change to the other's.
 
-use zero_migrate_backend::advisory::{
+use zeroship_migrate_backend::advisory::{
     AdvisoryVerdict, AnalyzerAbsent, IndexCoverage, OperationalAdvisor,
 };
 

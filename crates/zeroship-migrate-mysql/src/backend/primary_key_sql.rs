@@ -9,13 +9,13 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use zero_migrate_backend::approval::{Approval, ApprovalScope};
-use zero_migrate_backend::conn::ExecutorConfig;
-use zero_migrate_backend::driver::SqlSession;
-use zero_migrate_backend::executor::ApplyError;
-use zero_migrate_backend::journal::Phase;
-use zero_migrate_backend::step::AlterPrimaryKeyStep;
-use zero_migrate_ir::ir::AlterPrimaryKeyAction;
+use zeroship_migrate_backend::approval::{Approval, ApprovalScope};
+use zeroship_migrate_backend::conn::ExecutorConfig;
+use zeroship_migrate_backend::driver::SqlSession;
+use zeroship_migrate_backend::executor::ApplyError;
+use zeroship_migrate_backend::journal::Phase;
+use zeroship_migrate_backend::step::AlterPrimaryKeyStep;
+use zeroship_migrate_ir::ir::AlterPrimaryKeyAction;
 
 use super::{journal_sql, session};
 
@@ -922,9 +922,9 @@ fn strip_top_level_auto_increment(clause: &str) -> (String, bool) {
 mod tests {
     use std::cell::RefCell;
 
-    use zero_migrate_backend::backend::MigrationBackend;
-    use zero_migrate_backend::driver::{Bind, DbError, Row, Value};
-    use zero_migrate_ir::migration::{
+    use zeroship_migrate_backend::backend::MigrationBackend;
+    use zeroship_migrate_backend::driver::{Bind, DbError, Row, Value};
+    use zeroship_migrate_ir::migration::{
         Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
     };
 

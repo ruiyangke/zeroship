@@ -43,7 +43,7 @@ use std::ptr;
 /// Every shipping vendor answers both descriptor readers with the same row.
 #[test]
 fn a_vendors_two_descriptor_readers_reach_one_row() {
-    let vendors = zero_migrate::shipping_vendors();
+    let vendors = zeroship_migrate::shipping_vendors();
 
     // A census over a DISCOVERED set fails OPEN: an empty slice satisfies every
     // per-vendor claim below without checking anything. The floor is the shipping
@@ -80,7 +80,7 @@ fn a_vendors_two_descriptor_readers_reach_one_row() {
 /// the positive control proves the instrument sees the difference it claims to see.
 #[test]
 fn pointer_identity_separates_one_row_from_two_equal_ones() {
-    let vendors = zero_migrate::shipping_vendors();
+    let vendors = zeroship_migrate::shipping_vendors();
     let first = vendors
         .as_slice()
         .first()

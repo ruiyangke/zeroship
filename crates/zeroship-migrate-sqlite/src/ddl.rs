@@ -1,17 +1,17 @@
 //! SQLite DDL emission, moved verbatim from the engine.
 
-use zero_migrate_backend::ddl::{
+use zeroship_migrate_backend::ddl::{
     default_clause, fk_local_columns, fk_policy_tail, fk_referenced_columns, fk_target_table,
     generated_clause, inline_checks_clause, inline_pk_for_column, render_index_order_suffix,
     should_render_table_pk, CreateTableRequest, DdlEmitter,
 };
-use zero_migrate_backend::schema::SchemaRenderer;
-use zero_migrate_backend::snapshot::{
+use zeroship_migrate_backend::schema::SchemaRenderer;
+use zeroship_migrate_backend::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot,
 };
-use zero_migrate_ir::attribute::Attributes;
-use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_ir::ir::IrScalar;
+use zeroship_migrate_ir::attribute::Attributes;
+use zeroship_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::ir::IrScalar;
 
 // This module's vendor identity, read from the crate's ONE declaration of it.
 use crate::DIALECT;
@@ -412,7 +412,7 @@ impl DdlEmitter for SqliteEmitter {
         &self,
         _name: &str,
         _of: &str,
-        _bounds: &zero_migrate_ir::ir::PartitionBounds,
+        _bounds: &zeroship_migrate_ir::ir::PartitionBounds,
     ) -> Option<(String, String)> {
         // SQLite's engine projection collapses authored partitions into their
         // parent table; it has no partition-relation DDL to spell.
@@ -423,7 +423,7 @@ impl DdlEmitter for SqliteEmitter {
         &self,
         _parent: &str,
         _name: &str,
-        _bounds: &zero_migrate_ir::ir::PartitionBounds,
+        _bounds: &zeroship_migrate_ir::ir::PartitionBounds,
     ) -> Option<(String, String)> {
         None
     }

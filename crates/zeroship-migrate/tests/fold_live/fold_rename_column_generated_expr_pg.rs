@@ -37,20 +37,20 @@ use crate::support;
 use std::collections::BTreeMap;
 
 use crate::support::PgDevSession;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::driver::SqlSession;
-use zero_migrate::model::ir::IrFlagsOverride;
-use zero_migrate::render::fold::single_fold;
-use zero_migrate::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::model::ir::IrFlagsOverride;
+use zeroship_migrate::render::fold::single_fold;
+use zeroship_migrate::{
     fold_ops, resolve_create_table_policy, Approval, BinaryOp, ColType, EffectivePolicy,
     ExecutorConfig, Expr, GeneratedCol, GuardConfig, IrAuthor, IrColumn, IrScalar, LiveSchema,
     LockMode, MigrationEngine, MigrationIr, Op,
 };
-use zero_migrate_postgres::PostgresBackend;
+use zeroship_migrate_postgres::PostgresBackend;
 
 /// The test-side PostgreSQL identifier spelling, written out here rather than
 /// imported from the crate. It used to be
-/// `zero_migrate::schema::query::quote_ident`, which was `pub`, un-dialected, and a
+/// `zeroship_migrate::schema::query::quote_ident`, which was `pub`, un-dialected, and a
 /// SECOND physical home for the spelling `render::backends::ansi_double_quote_ident`
 /// owns; it is gone. A probe that builds its expectation by calling the emitter it is
 /// checking is not an oracle anyway, so the replacement is deliberately independent —
@@ -126,7 +126,7 @@ fn create_ir() -> MigrationIr {
     ir(
         "create_generated_body_rename",
         vec![Op::CreateTable {
-            attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+            attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
             name: TABLE.to_string(),
             columns: vec![col(OLD_COLUMN, ColType::Int), generated],
             primary_key: None,
@@ -181,13 +181,13 @@ async fn apply_create(
     let resolved_source = serde_json::to_string(resolved)
         .map_err(|error| format!("serialize resolved IR: {error}"))?;
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
         policy,
     );
-    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT);
+    let guard = GuardConfig::from_policy(policy.clone(), zeroship_migrate_postgres::DIALECT);
     let artifact = author
         .load_and_lower_guarded(
             &resolved_source,
@@ -197,7 +197,7 @@ async fn apply_create(
             &guard,
         )
         .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,
@@ -278,9 +278,9 @@ async fn measure() -> Measured {
         let mut ops = resolved.ops.clone();
         ops.push(rename_op());
         let folded = fold_ops(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &ops,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &cfg.project_schema,
             &policy,
         )
@@ -294,13 +294,13 @@ async fn measure() -> Measured {
             .ok_or_else(|| "the folded snapshot carries no generated body".to_string())?;
 
         let fields = single_fold::fold(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &ops,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &cfg.project_schema,
             &policy,
         )
-        .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
+        .map(|folded| folded.project_field_defs(zeroship_migrate::shipping_vendors()))
         .map_err(|error| format!("fold the ops to field defs: {error}"))?;
         let descriptor = fields
             .get(TABLE)

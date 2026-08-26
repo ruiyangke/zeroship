@@ -2,15 +2,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use zero_migrate_backend::ddl::{fk_local_columns, fk_target_table, is_pk_index};
-use zero_migrate_backend::error::{DeclarativeError, IrLowerError};
-use zero_migrate_backend::schema::SchemaRenderer;
-use zero_migrate_backend::snapshot::{
+use zeroship_migrate_backend::ddl::{fk_local_columns, fk_target_table, is_pk_index};
+use zeroship_migrate_backend::error::{DeclarativeError, IrLowerError};
+use zeroship_migrate_backend::schema::SchemaRenderer;
+use zeroship_migrate_backend::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, TableSnapshot,
 };
-use zero_migrate_backend::table_rebuild::{InjectedPrimaryKey, ResolvedRename, TableRebuildPolicy};
-use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_ir::ir::Op;
+use zeroship_migrate_backend::table_rebuild::{InjectedPrimaryKey, ResolvedRename, TableRebuildPolicy};
+use zeroship_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::ir::Op;
 
 #[derive(Debug)]
 pub(super) struct SqliteTableRebuildPolicy;

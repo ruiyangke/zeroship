@@ -37,13 +37,13 @@ use crate::support;
 use std::collections::BTreeMap;
 
 use crate::support::mysql::{quote_ident, DatabaseGuard, MysqlDevSession};
-use zero_migrate::driver::SqlSession;
-use zero_migrate::model::validate::validate_ir;
-use zero_migrate::{
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::model::validate::validate_ir;
+use zeroship_migrate::{
     Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine,
     MigrationIr,
 };
-use zero_migrate_mysql::MysqlBackend;
+use zeroship_migrate_mysql::MysqlBackend;
 
 const OWNER: &str = "app_mysql_text_key";
 
@@ -79,9 +79,9 @@ fn a_text_key_in_the_same_envelope_is_refused_at_the_gate() {
     // and not the other, from the same two operations.
     let ir: MigrationIr = serde_json::from_str(SAME_ENVELOPE).expect("same-envelope IR parses");
     let error = validate_ir(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
     )
     .expect_err("a key over a bare TEXT column must not pass the MySQL load gate");
     let rendered = format!("{error}");
@@ -93,15 +93,15 @@ fn a_text_key_in_the_same_envelope_is_refused_at_the_gate() {
     // And the same envelope is fine on the other two dialects, so the rule is scoped
     // to the server that actually refuses it.
     validate_ir(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir,
-        &zero_migrate_postgres::DIALECT,
+        &zeroship_migrate_postgres::DIALECT,
     )
     .expect("PostgreSQL indexes a text column");
     validate_ir(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
     )
     .expect("SQLite indexes a text column");
 }
@@ -113,9 +113,9 @@ fn the_second_envelope_alone_carries_nothing_the_gate_could_key_on() {
     // This is the mechanism, provable with no database at all.
     let ir: MigrationIr = serde_json::from_str(SECOND_ENVELOPE).expect("index-only IR parses");
     validate_ir(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
     )
     .expect("the index-only envelope passes the MySQL gate - it declares no column");
 }
@@ -190,19 +190,19 @@ async fn apply(
 ) -> Result<(), String> {
     let policy = support::no_inject(&cfg.project_schema);
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         &policy,
     );
-    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate_mysql::DIALECT);
+    let guard = GuardConfig::from_policy(policy.clone(), zeroship_migrate_mysql::DIALECT);
     let artifact = author
         .load_and_lower_guarded(source, OWNER, registry, live, &guard)
         .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;
 
     let backend = MysqlBackend::new_generic(session);
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,

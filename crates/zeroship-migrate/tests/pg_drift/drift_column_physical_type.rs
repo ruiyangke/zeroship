@@ -57,17 +57,17 @@ use std::path::PathBuf;
 
 use crate::support::mysql::{quote_ident, DatabaseGuard, MysqlDevSession};
 use tempfile::TempDir;
-use zero_migrate::apply::backend::MigrationBackend;
-use zero_migrate::driver::SqlSession;
-use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::{
+use zeroship_migrate::apply::backend::MigrationBackend;
+use zeroship_migrate::driver::SqlSession;
+use zeroship_migrate::model::ir::MigrationIr;
+use zeroship_migrate::{
     diff_snapshots, fold_ops, model::ir::Op, resolve_create_table_policy, Approval, ExecutorConfig,
     GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, SchemaSnapshot, StructuralDrift,
 };
-use zero_migrate_mysql::physical_type::{recorded, MysqlPhysicalType};
-use zero_migrate_mysql::MysqlBackend;
-use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
-use zero_migrate_sqlite::SqliteBackend;
+use zeroship_migrate_mysql::physical_type::{recorded, MysqlPhysicalType};
+use zeroship_migrate_mysql::MysqlBackend;
+use zeroship_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zeroship_migrate_sqlite::SqliteBackend;
 
 const OWNER: &str = "app_drift_column_physical_type";
 
@@ -103,18 +103,18 @@ async fn apply_doc(
     let resolved_source = serde_json::to_string(&resolved)
         .map_err(|error| format!("serialize resolved test IR: {error}"))?;
     let author = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         &policy,
     );
-    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate_mysql::DIALECT);
+    let guard = GuardConfig::from_policy(policy.clone(), zeroship_migrate_mysql::DIALECT);
     let artifact = author
         .load_and_lower_guarded(&resolved_source, OWNER, registry, live, &guard)
         .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;
 
-    MigrationEngine::new(zero_migrate::shipping_vendors())
+    MigrationEngine::new(zeroship_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,
@@ -165,7 +165,7 @@ fn data_type_line<'d>(
     drift: &'d StructuralDrift,
     table: &str,
     column: &str,
-) -> Option<&'d zero_migrate::apply::drift::AlteredObject> {
+) -> Option<&'d zeroship_migrate::apply::drift::AlteredObject> {
     let object = format!("column {column}");
     drift
         .altered_objects
@@ -231,9 +231,9 @@ async fn live_mysql_reports_a_physical_type_change_the_portable_type_cannot_see(
         .await?;
 
         let expected = fold_ops(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &ops,
-            &zero_migrate_mysql::DIALECT,
+            &zeroship_migrate_mysql::DIALECT,
             &cfg.project_schema,
             &support::no_inject(&cfg.project_schema),
         )
@@ -245,7 +245,7 @@ async fn live_mysql_reports_a_physical_type_change_the_portable_type_cannot_see(
             .snapshot_schema(&cfg)
             .await
             .map_err(|error| format!("snapshot the untouched schema: {error}"))?;
-        let clean = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &untouched);
+        let clean = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &untouched);
         if !clean.is_clean() {
             return Err(format!(
                 "the table was deployed by the engine and left alone, yet drift reported \
@@ -274,7 +274,7 @@ async fn live_mysql_reports_a_physical_type_change_the_portable_type_cannot_see(
             .snapshot_schema(&cfg)
             .await
             .map_err(|error| format!("snapshot the changed schema: {error}"))?;
-        let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
+        let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual);
 
         // `label` is the face that was DROPPED; `amount` is the face that survived as
         // a line naming nothing. `same_portable_type` records which is which so the
@@ -434,9 +434,9 @@ async fn assert_mysql_clean(
     stage: &str,
 ) -> Result<(), String> {
     let expected = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         ops,
-        &zero_migrate_mysql::DIALECT,
+        &zeroship_migrate_mysql::DIALECT,
         &cfg.project_schema,
         &support::no_inject(&cfg.project_schema),
     )
@@ -445,7 +445,7 @@ async fn assert_mysql_clean(
         .snapshot_schema(cfg)
         .await
         .map_err(|error| format!("{stage}: snapshot the live MySQL schema: {error}"))?;
-    let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
+    let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual);
     if drift.is_clean() {
         return Ok(());
     }
@@ -556,18 +556,18 @@ async fn an_untouched_postgres_table_reports_clean() {
             serde_json::json!(["id"]),
         );
         let expected = fold_ops(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &ir.ops,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &schema,
             &support::no_inject(&schema),
         )
         .map_err(|error| format!("fold the portable corpus: {error}"))?;
         let migrations = IrAuthor::new(
-            zero_migrate::shipping_vendors(),
+            zeroship_migrate::shipping_vendors(),
             &schema,
             OWNER,
-            &zero_migrate_postgres::DIALECT,
+            &zeroship_migrate_postgres::DIALECT,
             &support::no_inject(&schema),
         )
         .lower(&ir, &LiveSchema::default())
@@ -581,7 +581,7 @@ async fn an_untouched_postgres_table_reports_clean() {
         let actual = snapshot_schema(&session, &schema)
             .await
             .map_err(|error| format!("introspect the postgres control schema: {error}"))?;
-        let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
+        let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual);
         if drift.is_clean() {
             return Ok(());
         }
@@ -612,18 +612,18 @@ async fn an_untouched_sqlite_table_reports_clean() {
         serde_json::Value::Null,
     );
     let expected = fold_ops(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         &ir.ops,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         "main",
         &support::no_inject("main"),
     )
     .expect("portable corpus must fold on SQLite");
     let migrations = IrAuthor::new(
-        zero_migrate::shipping_vendors(),
+        zeroship_migrate::shipping_vendors(),
         "main",
         OWNER,
-        &zero_migrate_sqlite::DIALECT,
+        &zeroship_migrate_sqlite::DIALECT,
         &support::no_inject("main"),
     )
     .lower(&ir, &LiveSchema::default())
@@ -639,7 +639,7 @@ async fn an_untouched_sqlite_table_reports_clean() {
         .await
         .expect("introspect the sqlite control database");
 
-    let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
+    let drift = diff_snapshots(zeroship_migrate::shipping_vendors(), &expected, &actual);
     assert!(
         drift.is_clean(),
         "a SQLite database the engine deployed and nobody touched reported drift: \

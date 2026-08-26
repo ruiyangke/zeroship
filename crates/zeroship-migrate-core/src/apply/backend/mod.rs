@@ -1,7 +1,7 @@
 //! What is left of the `MigrationBackend` dialect seam's old home: the optional
 //! capability traits, and the re-exports.
 //!
-//! The seam itself is [`zero_migrate_backend::backend::MigrationBackend`],
+//! The seam itself is [`zeroship_migrate_backend::backend::MigrationBackend`],
 //! re-exported below at the `apply::backend::MigrationBackend` path it has always
 //! been reached by. It is declared in the contract crate rather than here for the
 //! reason every other item there is: a vendor crate cannot implement a trait that
@@ -9,7 +9,7 @@
 //!
 //! NO VENDOR IS LEFT IN THIS MODULE. All three execution halves live in
 //! `zero-migrate-postgres`, `zero-migrate-sqlite` and `zero-migrate-mysql`, and core
-//! re-exports none of them, because a `pub use zero_migrate_postgres::...` here would
+//! re-exports none of them, because a `pub use zeroship_migrate_postgres::...` here would
 //! be core NAMING a vendor outside the registry - the thing
 //! `tests/dialect_matrix/core_names_no_vendor_crate.rs` exists to forbid. A caller
 //! that wants `PostgresBackend` names the vendor crate, exactly as the registry
@@ -43,8 +43,8 @@
 //!   the checksum/tamper comparison itself is dialect-agnostic and stays generic
 //!   ([`check_checksum_drift`](crate::apply::backend::MigrationBackend::check_checksum_drift)).
 //!
-//! `zero_migrate_postgres::PostgresBackend`, `zero_migrate_sqlite::SqliteBackend`
-//! and `zero_migrate_mysql::MysqlBackend` are the live implementations. Postgres
+//! `zeroship_migrate_postgres::PostgresBackend`, `zeroship_migrate_sqlite::SqliteBackend`
+//! and `zeroship_migrate_mysql::MysqlBackend` are the live implementations. Postgres
 //! remains the richest regression bar; SQLite and MySQL provide dialect-specific
 //! session, journal, drift, and DML behavior behind the same orchestration trait,
 //! without forking the generic executor.
@@ -55,8 +55,8 @@
 
 pub mod capability;
 // PostgreSQL used to sit here, and SQLite and MySQL beside it. All three are
-// `zero_migrate_postgres::backend`, `zero_migrate_sqlite::backend` and
-// `zero_migrate_mysql::backend` now, and none is re-exported from here.
+// `zeroship_migrate_postgres::backend`, `zeroship_migrate_sqlite::backend` and
+// `zeroship_migrate_mysql::backend` now, and none is re-exported from here.
 
 pub use capability::{
     BackendCapability, BackfillError, BackfillOutcome, BackfillSpec, DryRunError, DryRunReport,
@@ -65,7 +65,7 @@ pub use capability::{
 // The progress row a resumable backfill reads back. It moved down beside the
 // `BackfillSpec` it describes progress THROUGH; re-exported so
 // `apply::backend::BackfillProgressEntry` resolves unchanged.
-pub use zero_migrate_backend::backfill::BackfillProgressEntry;
+pub use zeroship_migrate_backend::backfill::BackfillProgressEntry;
 // THE SEAM ITSELF, and the vocabulary its signatures name. `MigrationBackend` is
 // declared in `zero-migrate-backend` now - the crate every vendor already depends
 // on - so a backend crate can implement it without depending on the engine that
@@ -74,8 +74,8 @@ pub use zero_migrate_backend::backfill::BackfillProgressEntry;
 // capability traits and these re-exports.
 //
 // Re-exported so every historical `apply::backend::...` and
-// `zero_migrate::apply::backend::...` path resolves unchanged.
-pub use zero_migrate_backend::backend::{
+// `zeroship_migrate::apply::backend::...` path resolves unchanged.
+pub use zeroship_migrate_backend::backend::{
     CrossDeployObligations, JournalFuture, MigrationBackend, PlaceholderStyle,
     PlanPreconditionVerdict, ProjectLockAcquisition, ProjectLockHolder,
 };

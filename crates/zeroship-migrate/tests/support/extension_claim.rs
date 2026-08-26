@@ -58,7 +58,7 @@
 //! turned a lost claim into a quiet pass would have a test that reports green
 //! without asking its question, which this project treats as a defect in itself.
 
-use zero_migrate::driver::{Bind, SqlSession};
+use zeroship_migrate::driver::{Bind, SqlSession};
 
 use super::PgDevSession;
 

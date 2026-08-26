@@ -10,7 +10,7 @@
 //!
 //! # The shape, and why it is keyed rather than typed
 //!
-//! [`zero_migrate_ir::ir::Op::Dialectal`] is the precedent: a `BTreeMap` keyed by
+//! [`zeroship_migrate_ir::ir::Op::Dialectal`] is the precedent: a `BTreeMap` keyed by
 //! the open [`DialectId`], so a fourth backend selects its own key without any
 //! neutral crate naming it. A [`Dialectal`] is that same map, carrying an
 //! `Arc<dyn ...>` instead of an `Op` sequence, so the VALUE's type stays inside the
@@ -53,7 +53,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
-use zero_migrate_ir::dialect::DialectId;
+use zeroship_migrate_ir::dialect::DialectId;
 
 /// A value only the dialect that owns it can interpret.
 ///

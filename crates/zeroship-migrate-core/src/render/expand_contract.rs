@@ -65,8 +65,8 @@
 
 use crate::model::backfill::BackfillSpec;
 use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId, OnlinePhase};
-use zero_migrate_backend::registry::VendorSet;
-use zero_migrate_ir::dialect::DialectId;
+use zeroship_migrate_backend::registry::VendorSet;
+use zeroship_migrate_ir::dialect::DialectId;
 
 /// The neutral online-migration INTENT this author expands into a phased
 /// [`Migration`] sequence.
@@ -77,7 +77,7 @@ use zero_migrate_ir::dialect::DialectId;
 /// the capability without naming it. It carries four `String`s, so it travelled
 /// alone; the [`ExpandContractPlan`] that holds it stayed, because it also holds
 /// the authored `Migration` sequence and the `BackfillSpec`.
-pub use zero_migrate_backend::capability::OnlineIntent;
+pub use zeroship_migrate_backend::capability::OnlineIntent;
 
 /// A failure to author an online expand-contract sequence.
 ///
@@ -85,7 +85,7 @@ pub use zero_migrate_backend::capability::OnlineIntent;
 /// `Invalid(String)` and it travelled for one reason: `DeclarativeError::Rename` is
 /// `#[from] ExpandContractError`, and `DeclarativeError` had to go with
 /// `IrLowerError`. It brought nothing with it.
-pub use zero_migrate_backend::error::ExpandContractError;
+pub use zeroship_migrate_backend::error::ExpandContractError;
 
 /// The full ordered output of [`ExpandContractAuthor::author`].
 ///
@@ -95,7 +95,7 @@ pub use zero_migrate_backend::error::ExpandContractError;
 /// `Migration`s and the `MigrationId`s are `zero-migrate-ir`'s, the `BackfillSpec`
 /// and the [`OnlineIntent`] were already in the contract crate. The AUTHOR - every
 /// line of PostgreSQL trigger and function DDL below - stayed here.
-pub use zero_migrate_backend::capability::ExpandContractPlan;
+pub use zeroship_migrate_backend::capability::ExpandContractPlan;
 
 /// Quote an identifier through the explicitly selected registered backend.
 pub(crate) fn quote_ident(vendors: VendorSet, ident: &str, dialect: &DialectId) -> String {
@@ -104,7 +104,7 @@ pub(crate) fn quote_ident(vendors: VendorSet, ident: &str, dialect: &DialectId) 
 
 /// Validate a bare SQL identifier: non-empty, starts with a letter/underscore,
 /// and contains only `[A-Za-z0-9_]`. Mirrors the `validate_ident` in the
-/// module-private `crate::zero_migrate_postgres::backend::backfill_sql` (named in plain
+/// module-private `crate::zeroship_migrate_postgres::backend::backfill_sql` (named in plain
 /// text because a private module is not a linkable doc target)
 /// so `table`/`from`/`to` are safe-by-construction at the AUTHOR boundary - not
 /// only safe-by-quoting downstream. Rejects schema-qualified names
@@ -238,7 +238,7 @@ fn rename_id_seed(
 // These doors keep the engine's own call sites and its byte budget unchanged: the cap
 // is still read once, from the registered backend that imposes it.
 pub(crate) fn dual_write_fn_name(vendors: VendorSet, table: &str, from: &str, to: &str) -> String {
-    zero_migrate_backend::capability::dual_write_fn_name(
+    zeroship_migrate_backend::capability::dual_write_fn_name(
         table,
         from,
         to,
@@ -248,7 +248,7 @@ pub(crate) fn dual_write_fn_name(vendors: VendorSet, table: &str, from: &str, to
 
 /// Deterministically derive the dual-write trigger name (see [`dual_write_fn_name`]).
 pub(crate) fn dual_write_trg_name(vendors: VendorSet, table: &str, from: &str, to: &str) -> String {
-    zero_migrate_backend::capability::dual_write_trg_name(
+    zeroship_migrate_backend::capability::dual_write_trg_name(
         table,
         from,
         to,
@@ -679,7 +679,7 @@ impl ExpandContractAuthor {
     }
 }
 
-// `pub(crate) use zero_migrate_backend::capability::dual_write_function_body;` and
+// `pub(crate) use zeroship_migrate_backend::capability::dual_write_function_body;` and
 // `fn build_dual_write_sql(..)` USED TO LIVE HERE, and between them they made the
 // neutral engine spell four PostgreSQL statements: `CREATE OR REPLACE FUNCTION ...
 // LANGUAGE plpgsql`, `CREATE TRIGGER ... BEFORE INSERT OR UPDATE ... EXECUTE FUNCTION`,
@@ -700,9 +700,9 @@ fn dual_write_sql(
     tbl_q: &str,
     from_q: &str,
     to_q: &str,
-) -> Result<zero_migrate_backend::schema::DualWriteTriggerSql, ExpandContractError> {
+) -> Result<zeroship_migrate_backend::schema::DualWriteTriggerSql, ExpandContractError> {
     crate::render::backends::schema_renderer(vendors, dialect)
-        .dual_write_trigger(&zero_migrate_backend::schema::DualWriteTriggerSpec {
+        .dual_write_trigger(&zeroship_migrate_backend::schema::DualWriteTriggerSpec {
             function: fn_q,
             trigger: trg_q,
             table: tbl_q,

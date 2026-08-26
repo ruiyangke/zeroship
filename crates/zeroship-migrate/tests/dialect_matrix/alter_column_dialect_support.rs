@@ -32,33 +32,33 @@
 //! a "fix" that refused them everywhere would satisfy the SQLite and MySQL
 //! assertions while breaking the dialect that supports them.
 
-use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::model::validate::validate_ir;
+use zeroship_migrate::model::ir::MigrationIr;
+use zeroship_migrate::model::validate::validate_ir;
 
 /// The three operations whose alter-column rendering the lowerer gates, paired
 /// with the dialects that refuse them.
-const REFUSED: &[(&str, &[&zero_migrate::DialectId], &str)] = &[
+const REFUSED: &[(&str, &[&zeroship_migrate::DialectId], &str)] = &[
     (
         "setColumnNotNull",
-        &[&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT],
+        &[&zeroship_migrate_sqlite::DIALECT, &zeroship_migrate_mysql::DIALECT],
         r#"{"op":"setColumnNotNull","table":"t","column":"c1"}"#,
     ),
     (
         "dropColumnNotNull",
-        &[&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT],
+        &[&zeroship_migrate_sqlite::DIALECT, &zeroship_migrate_mysql::DIALECT],
         r#"{"op":"dropColumnNotNull","table":"t","column":"c1"}"#,
     ),
     (
         "dropColumnDefault",
-        &[&zero_migrate_sqlite::DIALECT],
+        &[&zeroship_migrate_sqlite::DIALECT],
         r#"{"op":"dropColumnDefault","table":"t","column":"c1"}"#,
     ),
 ];
 
-fn gate(op: &str, dialect: &zero_migrate::DialectId) -> Result<(), String> {
+fn gate(op: &str, dialect: &zeroship_migrate::DialectId) -> Result<(), String> {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{op}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("envelope parses");
-    validate_ir(zero_migrate::shipping_vendors(), &ir, dialect).map_err(|e| e.code)
+    validate_ir(zeroship_migrate::shipping_vendors(), &ir, dialect).map_err(|e| e.code)
 }
 
 #[test]
@@ -82,7 +82,7 @@ fn postgresql_still_accepts_every_one_of_them() {
     // CONTROL. These operations are genuinely portable on PostgreSQL. Without
     // this arm, refusing them on all three dialects would pass the test above.
     for (name, _, op) in REFUSED {
-        gate(op, &zero_migrate_postgres::DIALECT)
+        gate(op, &zeroship_migrate_postgres::DIALECT)
             .unwrap_or_else(|code| panic!("{name} must still pass the gate on PostgreSQL: {code}"));
     }
 }
