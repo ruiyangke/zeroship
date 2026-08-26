@@ -2866,9 +2866,7 @@ impl<'a> UrlParser<'a> {
         }
 
         if let Some(password) = it.next().filter(|password| !password.is_empty()) {
-            Self::validate_no_raw_spaces(password)?;
-            Self::validate_percent_escapes(password)?;
-            let password = Cow::from(percent_encoding::percent_decode(password.as_bytes()));
+            let password = Self::validated_percent_decode(password)?;
             self.config.password(password);
             self.explicit.push("password".to_owned());
         }
@@ -3021,9 +3019,7 @@ impl<'a> UrlParser<'a> {
     /// not the other. Only the `/`-prefixed socket path is genuinely
     /// Unix-only.
     fn host_param(&mut self, s: &str) -> Result<(), Error> {
-        Self::validate_no_raw_spaces(s)?;
-        Self::validate_percent_escapes(s)?;
-        let decoded = Cow::from(percent_encoding::percent_decode(s.as_bytes()));
+        let decoded = Self::validated_percent_decode(s)?;
 
         #[cfg(unix)]
         if decoded.first() == Some(&b'/') {
@@ -3092,12 +3088,31 @@ impl<'a> UrlParser<'a> {
         Ok(())
     }
 
-    fn decode(&self, s: &'a str) -> Result<Cow<'a, str>, Error> {
+    /// Validate one URL component and percent-decode it to BYTES.
+    ///
+    /// THE ONLY PLACE a component is validated, so a rule added here applies
+    /// to every one of them by construction. That matters because the three
+    /// callers cannot share a return type: a password need not be UTF-8 and a
+    /// Unix socket path is an `OsStr`, so only [`Self::decode`] can go on to
+    /// `decode_utf8`. Before this existed the two checks were copied at three
+    /// sites, and adding the raw-space rule on 2026-08-26 meant editing all
+    /// three by hand - miss one and that component silently accepts what the
+    /// others refuse.
+    fn validated_percent_decode(s: &str) -> Result<Cow<'_, [u8]>, Error> {
         Self::validate_no_raw_spaces(s)?;
         Self::validate_percent_escapes(s)?;
-        percent_encoding::percent_decode(s.as_bytes())
-            .decode_utf8()
-            .map_err(|e| Error::config_parse(e.into()))
+        Ok(Cow::from(percent_encoding::percent_decode(s.as_bytes())))
+    }
+
+    fn decode(&self, s: &'a str) -> Result<Cow<'a, str>, Error> {
+        match Self::validated_percent_decode(s)? {
+            Cow::Borrowed(bytes) => std::str::from_utf8(bytes)
+                .map(Cow::Borrowed)
+                .map_err(|e| Error::config_parse(e.into())),
+            Cow::Owned(bytes) => String::from_utf8(bytes)
+                .map(Cow::Owned)
+                .map_err(|e| Error::config_parse(e.into())),
+        }
     }
 }
 
@@ -3254,7 +3269,9 @@ mod tests {
         use crate::Config;
 
         fn chain(dsn: &str) -> String {
-            let error = dsn.parse::<Config>().expect_err("a raw space must be refused");
+            let error = dsn
+                .parse::<Config>()
+                .expect_err("a raw space must be refused");
             let mut chain = String::new();
             let mut source = std::error::Error::source(&error);
             while let Some(cause) = source {
@@ -3264,17 +3281,26 @@ mod tests {
             chain
         }
 
+        /// EVERY component, and the list is the point rather than the count.
+        ///
+        /// The PASSWORD and the HOST each had their own decode path, because
+        /// neither can be a `str` - a password need not be UTF-8 and a socket
+        /// path is an `OsStr`. So a rule added to the ordinary path reached
+        /// four components and silently missed those two. This test named only
+        /// four until 2026-08-26 and would have passed with the password
+        /// unchecked.
         #[test]
         fn a_raw_space_is_refused_in_every_component() {
             for dsn in [
                 "postgres://postgres@127.0.0.1:5432/zeroship read_timeout=5",
                 "postgres://post gres@127.0.0.1:5432/zeroship",
+                "postgres://postgres:pass word@127.0.0.1:5432/zeroship",
+                "postgres://postgres@127.0.0 .1:5432/zeroship",
                 "postgres://postgres@127.0.0.1:5432/zeroship?application_name=a b",
             ] {
                 let chain = chain(dsn);
                 assert!(
-                    chain.contains("unexpected spaces found")
-                        && chain.contains("%20"),
+                    chain.contains("unexpected spaces found") && chain.contains("%20"),
                     "the refusal does not tell the caller how to fix it: {chain}"
                 );
             }
