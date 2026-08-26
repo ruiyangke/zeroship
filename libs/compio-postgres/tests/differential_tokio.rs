@@ -29,6 +29,18 @@
 //! are implementing the same contract rather than one implementing it and the
 //! other approximating it.
 //!
+//! IS THERE A FEATURE GAP? Measured 2026-08-26 against tokio-postgres 0.7.18,
+//! the version Cargo.lock resolves (0.7.17 is also vendored on this machine and
+//! is NOT the one to read). Diffing the public surfaces by name: this crate
+//! exposes 262 public fns to tokio-postgres's 147 and 103 public types to its
+//! 61. Of tokio-postgres's surface, the only types with no counterpart here are
+//! `PostgresCodec`, `Response` and `StartupStream` - all internal framing types
+//! rather than application API - and the only absent `Config` setter is
+//! `keepalives_retries`, which exists here under libpq's name for it,
+//! `keepalives_count`, and is verified all the way to TCP_KEEPCNT in
+//! `connect_socket.rs`. So the answer is no functional gap, and a name diff is
+//! the whole of it. Re-derive rather than trusting this line if the pin moves.
+//!
 //! The two runtimes never mix: tokio-postgres runs on its own thread with a
 //! current-thread tokio runtime and returns plain data over a channel, so no
 //! tokio reactor is ever installed on a compio thread.
