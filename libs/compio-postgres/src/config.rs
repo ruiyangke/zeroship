@@ -1725,11 +1725,14 @@ impl Config {
         // libpq's treatment of `key=` is per-OPTION, not uniform. `port=` uses
         // the compiled default, while the six socket integer options reject an
         // empty value. Enums reject it too; strings generally keep it.
-        const EMPTY_MEANS_UNSET: &[&str] = &[
-            "port",
-            "statement_cache_capacity",
-            "max_message_size",
-        ];
+        if value.is_empty() && key == "port" {
+            // Empty selects the compiled default. Clearing is observable when
+            // it overrides an earlier occurrence in the same string.
+            self.port.clear();
+            return Ok(());
+        }
+
+        const EMPTY_MEANS_UNSET: &[&str] = &["statement_cache_capacity", "max_message_size"];
         if value.is_empty() && EMPTY_MEANS_UNSET.contains(&key) {
             return Ok(());
         }
@@ -3678,6 +3681,17 @@ mod tests {
                 .parse()
                 .expect("libpq documents an empty port as the compiled default");
             assert!(config.get_ports().is_empty(), "port= must not set a port");
+        }
+
+        #[test]
+        fn a_later_empty_port_restores_the_compiled_default() {
+            let config: Config = "host=x.invalid port=5455 port="
+                .parse()
+                .expect("the last non-null port value wins in libpq");
+            assert!(
+                config.get_ports().is_empty(),
+                "the empty override retained the earlier explicit port"
+            );
         }
 
         #[test]
