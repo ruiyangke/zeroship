@@ -459,6 +459,17 @@ pub(crate) async fn get_type(client: &Arc<InnerClient>, oid: Oid) -> Result<Type
 /// Without this guard, resolution recurses forever because `client.cached_type`
 /// only returns `Some` after `set_type` fires - so any OID currently
 /// being resolved is invisible to nested callers.
+///
+/// THERE IS NO LIVE TEST FOR THIS, AND THAT IS NOT AN OVERSIGHT. A well-behaved
+/// server will not serve a catalog containing such a cycle: PostgreSQL refuses
+/// to build one, transitively. MEASURED 2026-08-26 on 16.15 - a composite
+/// gaining an attribute of its own type, of an ARRAY of its own type, and a
+/// mutual cycle across two composites are each rejected with `composite type
+/// <t> cannot be made a member of itself`, and a domain over itself cannot be
+/// created because the name does not exist yet. So this guard defends against a
+/// hostile or corrupted catalog rather than an ordinary one, in the same spirit
+/// as `tests/suite/hostile_peer.rs`, and reaching it from live DDL is not
+/// possible. Do not go looking for the missing test.
 async fn get_type_inner(
     client: &Arc<InnerClient>,
     oid: Oid,
