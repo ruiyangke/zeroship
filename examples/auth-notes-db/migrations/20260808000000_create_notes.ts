@@ -9,7 +9,7 @@ import { table, t } from "@zeroship/migrate";
 // they are not declared here.
 export default {
   name: "create_notes",
-  up() {
+  schema() {
     table("notes").create({
       columns: {
         owner_id: t.text().notNull(),

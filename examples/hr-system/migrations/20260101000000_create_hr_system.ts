@@ -46,7 +46,7 @@ import { table, t } from "@zeroship/migrate";
 // written with no space after the colon.
 export default {
   name: "create_hr_system",
-  up() {
+  schema() {
     table("departments").create({
       columns: {
         name: t.text().notNull(),

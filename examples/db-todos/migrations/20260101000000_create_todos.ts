@@ -9,7 +9,7 @@ import { table, t } from "@zeroship/migrate";
 // `t.text().references(table, column)`.
 export default {
   name: "create_todos",
-  up() {
+  schema() {
     table("users").create({
       columns: {
         email: t.text().notNull().unique(),

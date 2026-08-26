@@ -33,7 +33,7 @@ import { table, t } from "@zeroship/migrate";
 // or a keyId -- see the comment in its migration.
 export default {
   name: "create_db_chat",
-  up() {
+  schema() {
     table("users").create({
       columns: {
         handle: t.text().notNull().unique(),
