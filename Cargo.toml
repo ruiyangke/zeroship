@@ -4,11 +4,18 @@ resolver = "3"
 exclude = [
     "crates/runtime/benches/ntex-bench",
     "refs",
-    # The vendored `zero-migrate` engine submodule is its OWN cargo workspace;
-    # exclude its tree so this workspace treats it as an external path-dep target
-    # (see `[workspace.dependencies]` zero-migrate*) rather than scanning it as a member.
-    "third_party/zero-migrate",
 ]
+
+# ---------------------------------------------------------------------------
+# Shared package metadata
+# ---------------------------------------------------------------------------
+# The migration-engine crates inherit these three keys rather than repeating
+# them nine times. Every other crate in this workspace states its own, so this
+# table serves the engine alone and adding it changed nothing for the rest.
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
 
 # ---------------------------------------------------------------------------
 # Shared dependency versions (single source of truth)
@@ -215,19 +222,29 @@ zeroship-schema = { path = "crates/zeroship-schema" }
 # with the published `zero-migrate` engine below — is the sole migration path now;
 # the in-tree `crates/zeroship-migrate` engine has been deleted.
 zeroship-migrate-adapter = { path = "crates/zeroship-migrate-adapter" }
-# The published, standalone `zero-migrate` engine, vendored as a git submodule at
-# `third_party/zero-migrate` (pinned to a commit recorded in this repo's tree). The
-# `zeroship-migrated` service consumes it (via the adapter) instead of the in-tree
-# `zeroship-migrate`. Init with `git submodule update --init --recursive`.
-zero-migrate = { path = "third_party/zero-migrate/crates/zero-migrate" }
+# The `zero-migrate` engine, a full member of this workspace. It was a git submodule
+# pinned to a commit recorded here; its history was grafted in so the engine and its
+# consumers move together and a wire-format change is one commit, not two repos in
+# lockstep. The `zeroship-migrated` service consumes it via the adapter.
+zero-migrate = { path = "crates/zero-migrate" }
 # The engine's Policy Decision Point (the knob/rule/document model + composition
 # algebra) and its IR-side builtin registry. The `zeroship-migrated` managed-policy
 # server composes the monorepo-owned confined/platform ceilings against untrusted
 # creator drafts through these directly (`compose_strict` + `RootCeiling` +
 # `builtin_registry`); the top-level `zero-migrate` facade re-exports only the seal +
 # `resolve_create_table_policy`, not the composition surface.
-zero-migrate-policy = { path = "third_party/zero-migrate/crates/zero-migrate-policy" }
-zero-migrate-ir = { path = "third_party/zero-migrate/crates/zero-migrate-ir" }
+zero-migrate-policy = { path = "crates/zero-migrate-policy" }
+zero-migrate-ir = { path = "crates/zero-migrate-ir" }
+# The rest of the engine's own crates. Nothing outside the engine names these -
+# consumers go through the `zero-migrate` facade above, or through the two
+# lower crates named directly for the reasons given there. They are declared
+# here only so the engine's members can inherit them by `workspace = true`, the
+# way they did under their own workspace root.
+zero-migrate-backend = { path = "crates/zero-migrate-backend" }
+zero-migrate-core = { path = "crates/zero-migrate-core" }
+zero-migrate-postgres = { path = "crates/zero-migrate-postgres" }
+zero-migrate-sqlite = { path = "crates/zero-migrate-sqlite" }
+zero-migrate-mysql = { path = "crates/zero-migrate-mysql" }
 zeroship-plugin-db = { path = "crates/plugin-db" }
 zeroship-plugin-storage = { path = "crates/plugin-storage" }
 zeroship-plugin-kv = { path = "crates/plugin-kv" }
