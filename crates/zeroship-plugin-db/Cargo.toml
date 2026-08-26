@@ -35,7 +35,18 @@ zeroship-schema = { workspace = true }
 # plugin-db uses solely the V8-free apply/render surface
 # (`apply::backend::{MigrationBackend, sqlite::SqliteBackend}` / `MigrationEngine` /
 # `render::declarative` / `desired_snapshot`) — no V8 host, no dependency cycle.
-zeroship-migrate = { workspace = true }
+#
+# OPTIONAL, and enabled only by `test-helpers`. Nothing in a production build of
+# this crate calls the engine: the SQLite `registerModel` arm creates nothing, and
+# the dev server applies committed migrations ahead of the worker through the
+# addon's `applyIrSqlite`. The only remaining callers are `register_model::
+# sqlite_engine` and the two `*_for_tests` wrappers over it, all three of which are
+# `#[cfg(any(test, feature = "test-helpers"))]`. Making the edge optional is what
+# stops a normal `cargo build -p zeroship-plugin-db` from compiling and linking a
+# migration engine it never invokes. The `[dev-dependencies]` entry below is the
+# same crate again, so `cargo test --lib` keeps working without the feature — the
+# arrangement the `test-helpers` comment further down already promises.
+zeroship-migrate = { workspace = true, optional = true }
 # Metering infrastructure: exec.rs emits a raw usage metric
 # (db_reads / db_writes / db_rows_written) in the success arm of each
 # query / mutation / count via a MeterHandle. Platform-measured,
@@ -105,6 +116,13 @@ tempfile = { workspace = true }
 zeroship-test-support = { workspace = true }
 compio = { workspace = true }
 serde_json = { workspace = true }
+# The same engine the OPTIONAL `[dependencies]` entry declares, repeated here so
+# the `#[cfg(test)]` half of `register_model::sqlite_engine`'s gate resolves under
+# a bare `cargo test --lib`. A `dep:`-activated optional dependency is NOT enabled
+# by `cfg(test)` alone, so without this line the in-crate unit tests would silently
+# require `--features test-helpers` — which is exactly what the feature's own
+# comment says they must not.
+zeroship-migrate = { workspace = true }
 # Test-only constructors (`row_for_test` / `column_for_test`) for the
 # `bench_row_to_json` harness — enables synthesising a `Row` without
 # hitting Postgres. Production builds of `compio-postgres` do not see
@@ -188,7 +206,12 @@ harness = false
 # downstream test crates (integration tests in `tests/integration.rs`).
 # The same symbols are visible to the in-crate unit tests via
 # `#[cfg(test)]` so `cargo test --lib` does NOT need this feature.
-test-helpers = []
+#
+# It also activates the migration engine, because `register_model::sqlite_engine`
+# — the only module that reaches it — carries this same gate. That makes the
+# engine edge a compiler fact: build without this feature and the dependency is
+# neither compiled nor linked.
+test-helpers = ["dep:zeroship-migrate"]
 # Live logical-decoding coverage is separate from the broader helper-gated
 # integration suite because it requires the compose Postgres on port 5440.
 live-db-tests = ["test-helpers"]
