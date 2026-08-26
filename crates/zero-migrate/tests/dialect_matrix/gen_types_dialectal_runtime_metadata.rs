@@ -4,7 +4,7 @@
 //! was a time when only one of the producers expanded `Op::Dialectal`.
 //! The `FieldDef` map and the authoring tables both route through
 //! `flatten_dialectal_ops`, so COLUMNS authored inside a `dialect()` leg reach the
-//! artifact. (That claim was first written of `fold_to_field_defs`, which produced the
+//! artifact. (That claim was first written of the standalone walker that produced the
 //! map until step 4 consumer 3 deleted it; the claim is unchanged because
 //! `FoldedSchema::project_field_defs` reads a traversal that makes the same call, one
 //! op earlier.) `runtime_metadata_from_ops` walked the raw list with a catch-all

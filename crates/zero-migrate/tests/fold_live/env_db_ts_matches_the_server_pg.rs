@@ -1,7 +1,7 @@
 //! **The oracle that adjudicates step 4 consumer 2, live.**
 //!
 //! `docs/proposals/single-fold-and-effects.md` section G step 4 moves `env.db.ts` off
-//! `authoring_tables_from_ops` and onto `FoldedSchema::project_authoring_tables`. Two
+//! a private op-stream walker and onto `FoldedSchema::project_authoring_tables`. Two
 //! ops answer differently across that move - `alterPrimaryKey`, which the walker had
 //! no arm for at all, and `dropPartition`, which the walker also ignored - and a
 //! differential gate can only say THAT they differ. Which side is right is a question

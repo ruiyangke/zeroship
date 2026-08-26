@@ -1,8 +1,8 @@
 //! **`gen-types` - the schema-artifact emitter.** Emit a typed authoring-schema
 //! artifact FROM the schema source (op.* migrations OR a declared
 //! `CollectionDescriptor` set). The runtime projection consumes the fold-and-recover
-//! seam - `FoldedSchema::project_field_defs`, which replaced the deleted
-//! `fold_to_field_defs` walker (`docs/proposals/single-fold-and-effects.md`) and reads
+//! seam - `FoldedSchema::project_field_defs`, which replaced a deleted op-stream
+//! `FieldDef` walker (`docs/proposals/single-fold-and-effects.md`) and reads
 //! the same value the other two projections are read from; the TypeScript projection
 //! replays the richer IR so physical types, defaults, value formats, and keys are
 //! not collapsed by the runtime `FieldDef` vocabulary.
@@ -331,10 +331,11 @@ pub fn render_schema_export(
     let ops = resolved.ops.as_slice();
     // Per `docs/proposals/single-fold-and-effects.md` section G: EVERY value both
     // artifacts are rendered from is a PROJECTION of ONE traversal, not a private
-    // replay of the op stream. `runtime_metadata_from_ops`, `authoring_tables_from_ops`
-    // and `fold_to_field_defs` are all gone.
+    // replay of the op stream. `runtime_metadata_from_ops` and the two private replays
+    // beside it - the one that built the authoring tables, the one that built the wire
+    // `FieldDef` map - are all gone.
     //
-    // Retiring the `FieldDef` walker changed no refusal. `fold_to_field_defs` ran
+    // Retiring the `FieldDef` walker changed no refusal. That walker ran
     // `fold_ops` itself as its fail-closed gate and `single_fold::fold` runs the same
     // catalog rules, so the two refusal sets are equal - measured over every
     // prefix/dialect pair in the corpus, with none on which one refused and the other
@@ -443,8 +444,8 @@ pub fn render_schema_export_from_descriptors(
 /// needs. `render_env_db_ts` is its only reader.
 ///
 /// This is a PROJECTION TARGET, not a walker's accumulator:
-/// `FoldedSchema::project_authoring_tables` produces it and
-/// `authoring_tables_from_ops` - the private replay that used to - is deleted.
+/// `FoldedSchema::project_authoring_tables` produces it and the private op-stream
+/// replay that used to produce it is deleted.
 /// `AuthoredState::advance` owns the op semantics, so the dialect that selects an
 /// `Op::Dialectal` leg is now necessarily the same one the runtime metadata folded
 /// under: both are reads of one traversal, and the "two artifacts under different
@@ -2132,7 +2133,8 @@ mod tests {
 // The differential corpus over the four op-stream answers -- an in-crate test
 // module because the items it drives are crate-private: `AuthoringTable` and
 // `RuntimeCollectionMetadata` here, `single_fold::fold` next door. It was
-// `authoring_tables_from_ops` and `runtime_metadata_from_ops` until both were deleted
+// `runtime_metadata_from_ops` and the authoring-table replay beside it until both
+// were deleted
 // (`docs/proposals/single-fold-and-effects.md`). The alternative to a
 // child module is widening a production item so a test can reach it.
 #[cfg(test)]

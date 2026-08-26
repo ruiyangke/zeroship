@@ -6,8 +6,8 @@
 //! collection metadata - and what each one produces is recorded.
 //!
 //! TWO of the four no longer have a private walker behind them. The runtime metadata
-//! was `super::runtime_metadata_from_ops` and the authoring tables were
-//! `super::authoring_tables_from_ops`; both walkers are deleted and their entry points
+//! was `super::runtime_metadata_from_ops` and the authoring tables had a private op
+//! walker of their own next to it; both walkers are deleted and their entry points
 //! are now
 //! `FoldedSchema::project_runtime_metadata` and
 //! `FoldedSchema::project_authoring_tables`. So this corpus keeps cross-checking the
@@ -46,7 +46,7 @@
 //! appending that op moved each walker's answer, measured by prefix sweep over
 //! the whole corpus. It is a behavioural measurement, not an arm count. Section
 //! A of the proposal counted `match` arms and reported that each of
-//! `runtime_metadata_from_ops` and `authoring_tables_from_ops` handled a small
+//! `runtime_metadata_from_ops` and the authoring-table walker handled a small
 //! fraction of the `Op` variants; [`REACH`] is the measured answer to the same
 //! question, and where the two differ the measurement wins. Both of those arm counts
 //! are now HISTORICAL: the two answers come from `AuthoredState::advance`, whose match
@@ -502,12 +502,10 @@ enum Walker {
     /// `fold_ops` -> `SchemaSnapshot`.
     Fo,
     /// The per-table wire `FieldDef` map. Its real entry point is
-    /// `FoldedSchema::project_field_defs` and the walker it replaced
-    /// (`fold_to_field_defs`) is gone.
+    /// `FoldedSchema::project_field_defs` and the walker it replaced is gone.
     Ffd,
     /// The `env.db.ts` source model. Its real entry point is
-    /// `FoldedSchema::project_authoring_tables` and the walker it replaced
-    /// (`authoring_tables_from_ops`) is gone.
+    /// `FoldedSchema::project_authoring_tables` and the walker it replaced is gone.
     Ato,
     /// The runtime collection metadata - options and plain indexes. Its real entry
     /// point is `FoldedSchema::project_runtime_metadata` and the walker it replaced is
@@ -1256,7 +1254,7 @@ const A_TEXT_PROBE_CANNOT_SEE_AN_EMPTY_VOCABULARY: &str =
 //     -- c_rename_column_index_expression|Mysql|carries(legacy_qty)
 //     -- c_rename_column_index_include_and_predicate|Mysql|carries(legacy_qty)
 //
-// The mechanism is one line: `authoring_tables_from_ops` applied no coherence gate
+// The mechanism is one line: the authoring-table walker applied no coherence gate
 // and answered about streams the structural catalog replay refuses; it is deleted, and
 // `FoldedSchema::project_authoring_tables` reads a fold that fails closed. The runtime
 // metadata made the same move earlier, which is what turned those rows' `RMO=` cells
@@ -1609,7 +1607,7 @@ const REACH: &[&str] = &[
     "dropColumnNotNull|Postgres|RRRS",
     "dropColumnNotNull|Sqlite|RRRS",
     // FFD S -> R on Sqlite and Mysql, moved by retiring the `FieldDef` walker and the
-    // ONLY reach cell that move touches. `fold_to_field_defs`'s `Op::DropConstraint` arm reached
+    // ONLY reach cell that move touches. That walker's `Op::DropConstraint` arm reached
     // into its recovered-FK side map and nothing else, so a `dropConstraint` that
     // removed a UNIQUE changed the `FieldDef` map on no dialect and the op read as
     // SILENT off Postgres. The projection derives every lifted facet from the

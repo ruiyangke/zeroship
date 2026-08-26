@@ -1189,7 +1189,7 @@ impl IrClassification {
 /// mask from the LIVE `zero-migrate:mask` COMMENT sentinel on the `_masked` sibling
 /// (`crates/plugin-db .../introspect_schema.rs`). But the OFFLINE op fold - the wire
 /// `FieldDef` map, produced by `zero_migrate`'s single-fold `project_field_defs`
-/// projection that replaced the deleted `fold_to_field_defs` walker
+/// projection that replaced a deleted op-stream `FieldDef` walker
 /// (`docs/proposals/single-fold-and-effects.md`) - and `gen-types` have NO live DB, so there
 /// is no sentinel to read. So a STANDALONE `.mask()` on a plaintext column must be carried
 /// on the IR or it is DROPPED through author->generate->fold (the creator's

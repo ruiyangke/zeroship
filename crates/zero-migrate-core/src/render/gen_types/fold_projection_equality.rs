@@ -45,7 +45,7 @@
 //! replay refuses produces no projection at all. The one walker still compared here -
 //! `fold_ops` - IS that replay, so [`Verdict::FoldRefused`] is **zero** and
 //! `BOTH_REFUSED` carries every refused prefix. That was not true while
-//! `authoring_tables_from_ops` was in this gate: it applied no coherence gate at all and
+//! the authoring-table walker was in this gate: it applied no coherence gate at all and
 //! answered about streams the fold refused, which is what the fold-refused prefixes
 //! were.
 //!
@@ -76,9 +76,9 @@ use zero_migrate_ir::dialect::DialectId;
 ///
 /// `RuntimeMetadata`, `AuthoringTables` and `FieldDefs` are NOT in this list any more,
 /// and their absence is the point rather than a gap. This gate compares a projection to
-/// the WALKER it replaces; `runtime_metadata_from_ops`, `authoring_tables_from_ops` and
-/// `fold_to_field_defs` are all deleted, so for each of those there is no second answer
-/// left and keeping
+/// the WALKER it replaces; `runtime_metadata_from_ops` and the authoring-table and
+/// `FieldDef` walkers beside it are all deleted, so for each of those there is no
+/// second answer left and keeping
 /// the leg would have compared the projection to itself. What replaces each is a gate at
 /// the ARTIFACT level - `tests/gen_types_runtime_metadata_from_the_fold.rs`,
 /// `tests/gen_types_authoring_tables_from_the_fold.rs` and
@@ -318,7 +318,7 @@ const DIVERGENCES: &[Divergence] = &[
     // SIX ROWS RETIRED WITH THEIR LEG, not fixed away and not lost.
     //
     // `v_primary_key|{Postgres,Sqlite,Mysql}|authoring_tables` recorded
-    // `line 45: fold "legacy_id," walker "id,"` - `authoring_tables_from_ops` had no
+    // `line 45: fold "legacy_id," walker "id,"` - the authoring-table walker had no
     // `Op::AlterPrimaryKey` arm, so `env.db.ts` kept the primary key the migration
     // replaced. That walker is deleted. The defect it named is now pinned
     // FIVE ways at the artifact level in
@@ -327,7 +327,7 @@ const DIVERGENCES: &[Divergence] = &[
     //
     // `v_index_and_constraint|{Postgres,Sqlite,Mysql}|field_defs` recorded
     // `line 9: fold "\"required\": true" walker "\"required\": true,"` -
-    // `fold_to_field_defs` lifted a single-column `UNIQUE` onto the column descriptor
+    // the `FieldDef` walker lifted a single-column `UNIQUE` onto the column descriptor
     // and had no arm that could take it back, so `schema.runtime.json` kept calling a
     // column unique after the `dropConstraint` that removed the constraint. (The FK half
     // of exactly that lift WAS un-lifted; the walker's `Op::DropConstraint` arm existed
@@ -542,7 +542,7 @@ const DIFFERING_COMPARISONS: usize = 0;
 const BOTH_REFUSED: usize = 196;
 /// Prefixes the fold refuses and a walker answers about.
 ///
-/// ZERO. `authoring_tables_from_ops` was the last walker in this gate with no coherence
+/// ZERO. The authoring-table walker was the last one in this gate with no coherence
 /// gate of its own, and it is deleted; the one walker left, `fold_ops`, IS the
 /// coherence gate the fold runs. Pinned rather than deleted, because a return to
 /// non-zero would mean the fold started refusing something the surviving walker still
@@ -1002,8 +1002,8 @@ fn corpus_stream(name: &str) -> Vec<Op> {
 /// **The retired `field_defs` divergence, restated as the agreement that replaced it.**
 ///
 /// This test used to assert the defect - `TODAY: the FieldDef map still calls the column
-/// unique after its constraint was dropped`. `fold_to_field_defs` lifted a single-column
-/// `UNIQUE` onto the column descriptor and had no arm that could take it back, so
+/// unique after its constraint was dropped`. The walker that produced the map lifted a
+/// single-column `UNIQUE` onto the column descriptor and had no arm that could take it back, so
 /// `schema.runtime.json` kept describing a database the catalog did not have. The
 /// walker that produced that answer is gone, so what is left to state is
 /// that the catalog oracle and the shipped artifact now say the same thing about the

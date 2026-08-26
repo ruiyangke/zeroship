@@ -3,7 +3,7 @@
 //! PostgreSQL holds a generated expression as a parse tree over ATTRIBUTE NUMBERS, so
 //! `pg_get_expr` deparses the NEW name the instant the rename commits. That makes the
 //! server the arbiter between the two offline replays that used to disagree: the
-//! descriptor fold (`fold_to_field_defs`) rewrote the expression to follow the rename,
+//! descriptor fold behind the `FieldDef` map rewrote the expression to follow the rename,
 //! while the snapshot fold (`fold_ops`) kept the old name. Measured on PostgreSQL 18.4,
 //! after `RENAME COLUMN qty_on_hand TO amount_on_hand`:
 //!
@@ -13,7 +13,7 @@
 //! | the `FieldDef` map *  | `amount_on_hand`          |
 //! | live `pg_get_expr`    | `(amount_on_hand + 1)`    |
 //!
-//! \* measured when `fold_to_field_defs` produced it; step 4 consumer 3 of
+//! \* measured when a standalone walker produced it; step 4 consumer 3 of
 //! `docs/proposals/single-fold-and-effects.md` deleted that walker and the map is a
 //! projection of the single fold now. The measurement stands - this test reads the
 //! catalog rather than either replay, which is the whole point of it.

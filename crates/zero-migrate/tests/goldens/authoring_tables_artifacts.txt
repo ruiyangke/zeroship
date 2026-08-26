@@ -4,8 +4,8 @@
 #
 # PROVENANCE, because a golden's worth is entirely its provenance.
 #
-# This file was CAPTURED from the OLD path - `render_artifacts` driven by
-# `authoring_tables_from_ops` - before the consumer was switched, and then 81 lines
+# This file was CAPTURED from the OLD path - `render_artifacts` driven by the
+# authoring-table walker - before the consumer was switched, and then 81 lines
 # were REMOVED and 72 ADDED by hand. Every one of those 153 lines belongs to one of
 # eight carrier streams, and every one is a place where the deleted walker described a
 # database the server does not have:
@@ -31,7 +31,7 @@
 # `partition_by`, `schema` or `options` line moved on any stream.
 #
 # SIX `sha|runtime.json` LINES MOVED LATER, under step 4 consumer 3, which replaced the
-# `fold_to_field_defs` walker that produced the `FieldDef` map. They are
+# walker that produced the `FieldDef` map. They are
 # `carrier:attached_partition_dropped` and `carrier:unique_constraint_lifecycle`, on
 # three dialects each - the two carriers here that cross a divergence that move fixed (a
 # dropped partition left in the map, and a dropped UNIQUE outliving its constraint). The

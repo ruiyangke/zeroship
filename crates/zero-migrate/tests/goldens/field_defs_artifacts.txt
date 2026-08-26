@@ -4,11 +4,11 @@
 #
 # PROVENANCE, because a golden's worth is entirely its provenance.
 #
-# CAPTURED from the OLD path - `render_artifacts` driven by `fold_to_field_defs` - by a
-# separate, since-deleted binary, BEFORE the consumer was switched. Then 41 lines were
-# REMOVED and 34 ADDED by hand. Every one of those 75 lines belongs to one of EIGHT
-# carrier streams, and every one is a place where the deleted walker described a
-# database the catalog does not have:
+# CAPTURED from the OLD path - `render_artifacts` driven by the retired `FieldDef`
+# walker - by a separate, since-deleted binary, BEFORE the consumer was switched.
+# Then 41 lines were REMOVED and 34 ADDED by hand. Every one of those 75 lines
+# belongs to one of EIGHT carrier streams, and every one is a place where the
+# deleted walker described a database the catalog does not have:
 #
 #   carrier:unique_constraint_dropped            `unique: true` outlived its dropped constraint
 #   carrier:unique_constraint_kept               the same, with the un-dropped one as control
