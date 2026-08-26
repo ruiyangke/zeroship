@@ -75,6 +75,32 @@ impl BackendMessages {
         BackendMessages(BytesMut::new())
     }
 
+    /// Consume one complete raw frame with `tag` from the head of this batch.
+    ///
+    /// Startup uses this only for protocol messages postgres-protocol 0.6.12
+    /// cannot represent: `NegotiateProtocolVersion` and protocol 3.2's
+    /// variable-length `BackendKeyData`. Every ordinary message continues
+    /// through its parser below.
+    pub(crate) fn take_raw_frame(&mut self, tag: u8) -> io::Result<Option<Bytes>> {
+        let Some(header) = backend::Header::parse(&self.0)? else {
+            return Ok(None);
+        };
+        if header.tag() != tag {
+            return Ok(None);
+        }
+
+        let total_len = header.len() as usize + 1;
+        if self.0.len() < total_len {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "incomplete PostgreSQL startup frame",
+            ));
+        }
+
+        let frame = self.0.split_to(total_len).freeze();
+        Ok(Some(frame.slice(5..)))
+    }
+
     /// Return the status byte from a trailing `ReadyForQuery` frame without
     /// consuming the messages that still belong to the response stream.
     pub(crate) fn ready_for_query_status(&self) -> Option<u8> {
@@ -108,7 +134,9 @@ impl BackendMessages {
                 return false;
             };
             let length = u32::from_be_bytes(header[1..5].try_into().unwrap()) as usize;
-            let Some(next) = offset.checked_add(1).and_then(|value| value.checked_add(length))
+            let Some(next) = offset
+                .checked_add(1)
+                .and_then(|value| value.checked_add(length))
             else {
                 return false;
             };
@@ -137,7 +165,9 @@ impl BackendMessages {
             if length < 4 {
                 break;
             }
-            let Some(next) = offset.checked_add(1).and_then(|value| value.checked_add(length))
+            let Some(next) = offset
+                .checked_add(1)
+                .and_then(|value| value.checked_add(length))
             else {
                 break;
             };
@@ -221,6 +251,8 @@ where
         let length = stream
             .peek_u32_be(1)
             .expect("fill(5) guarantees 5 bytes are buffered");
+        let tag = stream.buf()[0];
+        validate_startup_message_length(tag, length)?;
         stream.validate_length(length)?;
 
         // Walk the buffered bytes looking for a complete batch. Mirrors
@@ -291,6 +323,26 @@ where
             messages,
             request_complete,
         });
+    }
+}
+
+/// Apply the small, protocol-defined limits for startup-only messages before
+/// the decoder reads their bodies. The generic connection limit is 64 MiB by
+/// default, which is appropriate for rows but far too large for either of
+/// these unauthenticated messages.
+fn validate_startup_message_length(tag: u8, length: u32) -> Result<(), Error> {
+    match tag {
+        b'v' if length != 12 => Err(Error::io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "invalid NegotiateProtocolVersion length {length}; expected 12 when no protocol options were sent"
+            ),
+        ))),
+        b'K' if !(12..=264).contains(&length) => Err(Error::io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid BackendKeyData length {length}; expected 12 to 264"),
+        ))),
+        _ => Ok(()),
     }
 }
 
@@ -370,6 +422,55 @@ mod tests {
         out
     }
 
+    fn error_chain(error: &Error) -> String {
+        std::iter::successors(std::error::Error::source(error), |source| {
+            std::error::Error::source(*source)
+        })
+        .fold(error.to_string(), |chain, source| {
+            format!("{chain}: {source}")
+        })
+    }
+
+    /// The negotiation body is exactly two u32 values when the client sent no
+    /// `_pq_.` options. Its fixed limit must be enforced from the five-byte
+    /// header, before the decoder asks the socket for an attacker-sized body.
+    #[compio::test]
+    async fn an_oversized_negotiation_is_rejected_from_its_header() {
+        let mut frame = vec![b'v'];
+        frame.extend_from_slice(&13u32.to_be_bytes());
+        let mut framer = ScriptedFramer::new(vec![frame]);
+
+        let error = match read_backend(&mut framer).await {
+            Ok(_) => panic!("an oversized negotiation header was accepted"),
+            Err(error) => error,
+        };
+        let chain = error_chain(&error);
+        assert!(
+            chain.contains("NegotiateProtocolVersion") && chain.contains("12"),
+            "the header-specific limit was not enforced: {chain}"
+        );
+    }
+
+    /// A protocol 3.2 cancel key is at most 256 bytes, so `BackendKeyData`
+    /// cannot have a length field above 264. Reject that claim before reading
+    /// any body bytes from an unauthenticated peer.
+    #[compio::test]
+    async fn an_oversized_backend_key_is_rejected_from_its_header() {
+        let mut frame = vec![b'K'];
+        frame.extend_from_slice(&265u32.to_be_bytes());
+        let mut framer = ScriptedFramer::new(vec![frame]);
+
+        let error = match read_backend(&mut framer).await {
+            Ok(_) => panic!("an oversized BackendKeyData header was accepted"),
+            Err(error) => error,
+        };
+        let chain = error_chain(&error);
+        assert!(
+            chain.contains("BackendKeyData") && chain.contains("264"),
+            "the header-specific limit was not enforced: {chain}"
+        );
+    }
+
     /// A partial message at the tail must not make the decoder go back to the
     /// socket: the complete messages ahead of it are already deliverable.
     ///
@@ -419,6 +520,10 @@ mod tests {
                 _ => panic!("a message other than DataRow appeared in the batch"),
             }
         }
-        assert_eq!(payloads.len(), 2, "the complete prefix was not returned whole");
+        assert_eq!(
+            payloads.len(),
+            2,
+            "the complete prefix was not returned whole"
+        );
     }
 }

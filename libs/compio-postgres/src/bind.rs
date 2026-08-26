@@ -8,8 +8,8 @@ use crate::{Column, Error, Portal, Statement, prepare, query};
 use fallible_iterator::FallibleIterator;
 use postgres_protocol::message::backend::Message;
 use postgres_protocol::message::frontend;
-use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -68,8 +68,13 @@ where
     let name = format!("p{}", NEXT_ID.fetch_add(1, Ordering::SeqCst));
     let buf = client.with_buf(|buf| {
         if let Some(sql) = unnamed_sql {
-            frontend::parse("", sql, statement.params().iter().map(crate::types::Type::oid), buf)
-                .map_err(Error::encode)?;
+            frontend::parse(
+                "",
+                sql,
+                statement.params().iter().map(crate::types::Type::oid),
+                buf,
+            )
+            .map_err(Error::encode)?;
         }
         query::encode_bind(&statement, params, &name, buf)?;
         if unnamed_sql.is_some() {
@@ -160,7 +165,7 @@ mod tests {
             SslMode::Disable,
             SslNegotiation::Postgres,
             0,
-            0,
+            Some(0.into()),
             None,
             StatementCacheSettings::new(0, NonZeroUsize::MIN),
         );

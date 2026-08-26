@@ -21,6 +21,7 @@
 // Replaying removes both. It still adds no retry: there is nothing to retry
 // for, because the transport is no longer a guess.
 
+use crate::cancel_token::CancelKey;
 use crate::client::SocketConfig;
 use crate::config::{SslMode, SslNegotiation};
 use crate::connect::with_connect_timeout;
@@ -35,7 +36,7 @@ pub(crate) async fn cancel_query<T>(
     ssl_negotiation: SslNegotiation,
     mut tls: T,
     process_id: i32,
-    secret_key: i32,
+    secret_key: CancelKey,
 ) -> Result<(), Error>
 where
     T: MakeTlsConnect<Socket>,
@@ -108,7 +109,7 @@ pub(crate) async fn cancel_query_confirmed<T>(
     ssl_negotiation: SslNegotiation,
     mut tls: T,
     process_id: i32,
-    secret_key: i32,
+    secret_key: CancelKey,
 ) -> Result<(), Error>
 where
     T: MakeTlsConnect<Socket>,
@@ -178,9 +179,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::NoTls;
     use crate::client::Addr;
     use crate::tls::{ChannelBinding, TlsConnect, TlsStream};
-    use crate::NoTls;
     use compio::buf::{IoBuf, IoBufMut};
     use compio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
     use compio::net::TcpListener;
@@ -239,7 +240,7 @@ mod tests {
             SslNegotiation::Postgres,
             NoTls,
             PROCESS_ID,
-            SECRET_KEY,
+            SECRET_KEY.into(),
         ));
         let packet_seen = Box::pin(packet_seen_rx);
         let cancel = match select(cancel, packet_seen).await {
@@ -412,7 +413,7 @@ mod tests {
             let length = u32::from_be_bytes(length.try_into().expect("startup packet length"));
             assert!(length >= 8, "startup packet is too short: {length}");
             let startup = read_exact(&mut session, length as usize - 4).await;
-            assert_eq!(&startup[..4], &[0, 3, 0, 0]);
+            assert_eq!(&startup[..4], &[0, 3, 0, 2]);
             write_all(&mut session, startup_response()).await;
 
             let (mut cancel, _) = listener.accept().await.expect("accept cancel connection");
@@ -569,7 +570,7 @@ mod tests {
                     connected: connected.clone(),
                 },
                 PROCESS_ID,
-                SECRET_KEY,
+                SECRET_KEY.into(),
             ),
         )
         .await
@@ -849,28 +850,27 @@ mod tests {
         };
 
         // Bounded: without the gate this proceeds to dial a scripted server that
-            // never answers, so the failure mode of removing it is a HANG. The
-            // watchdog turns that into a clean, fast failure.
+        // never answers, so the failure mode of removing it is a HANG. The
+        // watchdog turns that into a clean, fast failure.
         let error = compio::time::timeout(
             Duration::from_secs(5),
             cancel_query(
-            Some(config),
-            SslMode::VerifyFull,
-            SslNegotiation::Postgres,
-            PassthroughTls {
-                connected: Arc::new(AtomicBool::new(false)),
-            },
-            PROCESS_ID,
-            SECRET_KEY,
-        ),
+                Some(config),
+                SslMode::VerifyFull,
+                SslNegotiation::Postgres,
+                PassthroughTls {
+                    connected: Arc::new(AtomicBool::new(false)),
+                },
+                PROCESS_ID,
+                SECRET_KEY.into(),
+            ),
         )
         .await
         .expect("the gate must refuse immediately, not dial the server")
         .expect_err("a cancel must not send the key through an unattesting connector");
-        let chain = std::iter::successors(
-            std::error::Error::source(&error),
-            |e| std::error::Error::source(*e),
-        )
+        let chain = std::iter::successors(std::error::Error::source(&error), |e| {
+            std::error::Error::source(*e)
+        })
         .fold(format!("{error}"), |acc, e| format!("{acc}: {e}"));
         assert!(
             chain.contains("does not attest"),
@@ -916,7 +916,7 @@ mod tests {
                     connected: Arc::new(AtomicBool::new(false)),
                 },
                 PROCESS_ID,
-                SECRET_KEY,
+                SECRET_KEY.into(),
             ),
         )
         .await

@@ -6,13 +6,12 @@
 // `AsyncWrite` method.
 
 use crate::Error;
+use crate::cancel_token::CancelKey;
 use crate::config::{SslMode, SslNegotiation};
 use crate::connect_tls;
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::tls::TlsConnect;
-use bytes::BytesMut;
 use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use postgres_protocol::message::frontend;
 use std::io;
 
 pub async fn cancel_query_raw<S, T>(
@@ -22,7 +21,7 @@ pub async fn cancel_query_raw<S, T>(
     tls: T,
     has_hostname: bool,
     process_id: i32,
-    secret_key: i32,
+    secret_key: CancelKey,
 ) -> Result<(), Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -76,7 +75,7 @@ pub(crate) async fn cancel_query_with_encryption<S, T>(
     tls: T,
     has_hostname: bool,
     process_id: i32,
-    secret_key: i32,
+    secret_key: CancelKey,
 ) -> Result<(), Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -110,7 +109,7 @@ pub(crate) async fn send_cancel_request_with_encryption<S, T>(
     tls: T,
     has_hostname: bool,
     process_id: i32,
-    secret_key: i32,
+    secret_key: CancelKey,
 ) -> Result<MaybeTlsStream<S, T::Stream>, Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -120,11 +119,15 @@ where
         connect_tls::negotiate_tls(stream, encryption, mode, negotiation, tls, has_hostname)
             .await?;
 
-    let mut buf = BytesMut::new();
-    frontend::cancel_request(process_id, secret_key, &mut buf);
+    let packet_len = 12 + secret_key.as_bytes().len();
+    let mut packet = Vec::with_capacity(packet_len);
+    packet.extend_from_slice(&(packet_len as u32).to_be_bytes());
+    packet.extend_from_slice(&80_877_102u32.to_be_bytes());
+    packet.extend_from_slice(&process_id.to_be_bytes());
+    packet.extend_from_slice(secret_key.as_bytes());
 
     // compio's write_all is owned-buffer. Throw away the buffer.
-    let compio::BufResult(res, _) = stream.write_all(buf.to_vec()).await;
+    let compio::BufResult(res, _) = stream.write_all(packet).await;
     res.map_err(Error::io)?;
     stream.flush().await.map_err(Error::io)?;
     stream.shutdown().await.map_err(Error::io)?;

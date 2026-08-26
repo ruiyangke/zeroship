@@ -211,8 +211,8 @@ fn complete_startup(stream: &mut (impl Read + Write), process_id: i32) {
         .expect("read startup packet body");
     assert_eq!(
         &body[..4],
-        &[0, 3, 0, 0],
-        "client did not request protocol 3"
+        &[0, 3, 0, 2],
+        "client did not request protocol 3.2"
     );
 
     let mut response = backend_frame(b'R', &0u32.to_be_bytes());

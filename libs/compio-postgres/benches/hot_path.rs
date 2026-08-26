@@ -266,7 +266,7 @@ fn make_client(
         SslMode::Disable,
         SslNegotiation::Postgres,
         0,
-        0,
+        None,
         None,
         StatementCacheSettings::new(cache_capacity, cache_threshold),
     );

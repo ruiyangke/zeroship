@@ -131,7 +131,7 @@ impl Endpoint {
 /// Validate and enumerate the configured host entries once for every
 /// connection path.
 pub(crate) fn endpoints(config: &Config) -> Result<Vec<Endpoint>, Error> {
-    config.validate_tls_settings()?;
+    config.validate_connection_settings()?;
 
     // A DIVERGENCE FROM libpq, and a deliberate one. `postgres:///db` parses
     // here exactly as it does there, but libpq then connects over a
@@ -292,15 +292,7 @@ where
         let from_passfile = password_from_passfile(config, endpoint);
         let config = from_passfile.as_ref().unwrap_or(config);
 
-        match connect_host(
-            endpoint,
-            resolver,
-            tls,
-            config,
-            target_session_attrs,
-        )
-        .await
-        {
+        match connect_host(endpoint, resolver, tls, config, target_session_attrs).await {
             Ok((client, connection)) => return Ok((client, connection)),
             Err(e) => error = Some(e),
         }
@@ -713,9 +705,7 @@ mod tests {
         script
     }
 
-    async fn scripted_probe_server(
-        reply: ProbeReply,
-    ) -> (SocketAddr, oneshot::Receiver<Vec<u8>>) {
+    async fn scripted_probe_server(reply: ProbeReply) -> (SocketAddr, oneshot::Receiver<Vec<u8>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (query_seen, query_observed) = oneshot::channel();
@@ -726,8 +716,7 @@ mod tests {
             let compio::BufResult(result, length) = socket.read_exact(vec![0u8; 4]).await;
             result.unwrap();
             let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
-            let compio::BufResult(result, _) =
-                socket.read_exact(vec![0u8; length - 4]).await;
+            let compio::BufResult(result, _) = socket.read_exact(vec![0u8; length - 4]).await;
             result.unwrap();
 
             let compio::BufResult(result, _) = socket.write_all(successful_handshake()).await;
@@ -744,8 +733,7 @@ mod tests {
                 return;
             }
             let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
-            let compio::BufResult(result, query) =
-                socket.read_exact(vec![0u8; length - 4]).await;
+            let compio::BufResult(result, query) = socket.read_exact(vec![0u8; length - 4]).await;
             if result.is_err() {
                 return;
             }
@@ -757,8 +745,7 @@ mod tests {
                     drop(socket);
 
                     let (mut socket, _) = listener.accept().await.unwrap();
-                    let compio::BufResult(result, opening) =
-                        socket.read_exact(vec![0u8; 8]).await;
+                    let compio::BufResult(result, opening) = socket.read_exact(vec![0u8; 8]).await;
                     result.unwrap();
                     assert_eq!(u32::from_be_bytes(opening[..4].try_into().unwrap()), 8);
                     let code = u32::from_be_bytes(opening[4..].try_into().unwrap());
@@ -773,8 +760,7 @@ mod tests {
                 }
                 ProbeReply::Recovery(in_recovery) => {
                     let value = if in_recovery { "t" } else { "f" };
-                    let reply =
-                        probe_result(b"pg_is_in_recovery", value, b"SELECT 1\0");
+                    let reply = probe_result(b"pg_is_in_recovery", value, b"SELECT 1\0");
                     let compio::BufResult(result, _) = socket.write_all(reply).await;
                     result.unwrap();
                     socket.flush().await.unwrap();
@@ -791,10 +777,8 @@ mod tests {
     /// correct two-host `prefer-standby` fallback makes. The first two report
     /// that they are not in recovery; the third completes startup for the
     /// `any` pass.
-    async fn scripted_prefer_standby_fallback_server() -> (
-        SocketAddr,
-        oneshot::Receiver<Vec<Vec<u8>>>,
-    ) {
+    async fn scripted_prefer_standby_fallback_server()
+    -> (SocketAddr, oneshot::Receiver<Vec<Vec<u8>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (fallback_seen, fallback_observed) = oneshot::channel();
@@ -804,8 +788,7 @@ mod tests {
             for _ in 0..2 {
                 let (mut candidate, _) = listener.accept().await.unwrap();
 
-                let compio::BufResult(result, length) =
-                    candidate.read_exact(vec![0u8; 4]).await;
+                let compio::BufResult(result, length) = candidate.read_exact(vec![0u8; 4]).await;
                 result.unwrap();
                 let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
                 let compio::BufResult(result, _) =
@@ -817,12 +800,10 @@ mod tests {
                 result.unwrap();
                 candidate.flush().await.unwrap();
 
-                let compio::BufResult(result, tag) =
-                    candidate.read_exact(vec![0u8; 1]).await;
+                let compio::BufResult(result, tag) = candidate.read_exact(vec![0u8; 1]).await;
                 result.unwrap();
                 assert_eq!(tag, b"Q");
-                let compio::BufResult(result, length) =
-                    candidate.read_exact(vec![0u8; 4]).await;
+                let compio::BufResult(result, length) = candidate.read_exact(vec![0u8; 4]).await;
                 result.unwrap();
                 let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
                 let compio::BufResult(result, query) =
@@ -840,8 +821,7 @@ mod tests {
             let compio::BufResult(result, length) = fallback.read_exact(vec![0u8; 4]).await;
             result.unwrap();
             let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
-            let compio::BufResult(result, _) =
-                fallback.read_exact(vec![0u8; length - 4]).await;
+            let compio::BufResult(result, _) = fallback.read_exact(vec![0u8; length - 4]).await;
             result.unwrap();
 
             let compio::BufResult(result, _) = fallback.write_all(successful_handshake()).await;
@@ -884,8 +864,7 @@ mod tests {
             let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
             assert!(length >= 4, "startup packet length must include its header");
 
-            let compio::BufResult(result, _) =
-                socket.read_exact(vec![0u8; length - 4]).await;
+            let compio::BufResult(result, _) = socket.read_exact(vec![0u8; length - 4]).await;
             result.unwrap();
             let _ = startup_seen.send(());
 
@@ -935,10 +914,7 @@ mod tests {
     /// Accept the rejected socket first and prove it receives zero PostgreSQL
     /// bytes, then complete a real startup exchange on the matching attempt.
     #[cfg(target_os = "linux")]
-    async fn scripted_requirepeer_server() -> (
-        TempSocketDir,
-        compio::runtime::JoinHandle<()>,
-    ) {
+    async fn scripted_requirepeer_server() -> (TempSocketDir, compio::runtime::JoinHandle<()>) {
         let socket_dir = TempSocketDir::create();
         let socket_path = socket_dir.0.join(".s.PGSQL.5432");
         let listener = compio::net::UnixListener::bind(&socket_path)
@@ -958,11 +934,9 @@ mod tests {
             result.expect("read matching startup length");
             let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
             assert!(length >= 8, "startup packet is too short: {length}");
-            let compio::BufResult(result, _) =
-                accepted.read_exact(vec![0u8; length - 4]).await;
+            let compio::BufResult(result, _) = accepted.read_exact(vec![0u8; length - 4]).await;
             result.expect("read matching startup packet");
-            let compio::BufResult(result, _) =
-                accepted.write_all(successful_handshake()).await;
+            let compio::BufResult(result, _) = accepted.write_all(successful_handshake()).await;
             result.expect("write matching startup response");
             accepted.flush().await.expect("flush startup response");
         });
@@ -999,9 +973,7 @@ mod tests {
         };
         let cause = error.source().map(ToString::to_string).unwrap_or_default();
         assert!(
-            cause.contains("requirepeer")
-                && cause.contains(&wrong)
-                && cause.contains(&actual),
+            cause.contains("requirepeer") && cause.contains(&wrong) && cause.contains(&actual),
             "the mismatch did not name both peer users: {error}: {cause}"
         );
 
@@ -1046,9 +1018,7 @@ mod tests {
 
     /// Accept one PostgreSQL SSLRequest, agree to TLS, and leave the
     /// connector's scripted handshake failure to end the address attempt.
-    async fn tls_handshake_server_bound(
-        bind: SocketAddr,
-    ) -> (SocketAddr, oneshot::Receiver<u32>) {
+    async fn tls_handshake_server_bound(bind: SocketAddr) -> (SocketAddr, oneshot::Receiver<u32>) {
         let listener = TcpListener::bind(bind).await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (opening_seen, opening_observed) = oneshot::channel();
@@ -1378,9 +1348,7 @@ mod tests {
 
         let result = compio::time::timeout(Duration::from_secs(2), connect)
             .await
-            .expect(
-                "the outer watchdog expired because the recovery probe escaped connect_timeout",
-            )
+            .expect("the outer watchdog expired because the recovery probe escaped connect_timeout")
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
         let Err(error) = result else {
             panic!("a server that never answered the recovery probe connected");
@@ -1514,7 +1482,10 @@ mod tests {
                     Addr::Tcp(ip) => ip,
                     #[cfg(unix)]
                     Addr::Unix(path) => {
-                        panic!("a hostname resolver returned a Unix path: {}", path.display())
+                        panic!(
+                            "a hostname resolver returned a Unix path: {}",
+                            path.display()
+                        )
                     }
                 })
                 .collect::<Vec<_>>();
@@ -1611,8 +1582,7 @@ mod tests {
     /// a healthy second PostgreSQL server must be allowed to win the walk.
     #[compio::test]
     async fn connect_succeeds_via_second_resolved_address() {
-        let (first, first_seen) =
-            scripted_server_after_startup(Some(refused_handshake())).await;
+        let (first, first_seen) = scripted_server_after_startup(Some(refused_handshake())).await;
         let second_bind = SocketAddr::from(([127, 0, 0, 2], first.port()));
         let (second, second_seen) =
             scripted_server_bound(second_bind, Some(successful_handshake())).await;

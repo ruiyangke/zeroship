@@ -584,11 +584,13 @@ where
         // formats THIS decoder implements, so they are ours to state.
         //
         if opts.proto_version > 4 {
-            return Err(Error::config(format!(
-                "proto_version {} is not supported; use proto_version 4 or lower",
-                opts.proto_version
-            )
-            .into()));
+            return Err(Error::config(
+                format!(
+                    "proto_version {} is not supported; use proto_version 4 or lower",
+                    opts.proto_version
+                )
+                .into(),
+            ));
         }
         for (needed, what) in [
             (opts.streaming.minimum_proto_version(), "streaming"),
@@ -1197,10 +1199,7 @@ where
     /// NOT CANCEL-SAFE. Dropping this future before it resolves can leave a
     /// fraction of the frame on the wire, which no later frame can repair;
     /// every later call on the stream then fails. See [`InFlight`].
-    pub async fn send_standby_status_update(
-        &mut self,
-        reply_requested: bool,
-    ) -> Result<(), Error> {
+    pub async fn send_standby_status_update(&mut self, reply_requested: bool) -> Result<(), Error> {
         self.in_flight.enter()?;
         let result = self.send_standby_status_update_inner(reply_requested).await;
         if result.is_err() {
@@ -1877,7 +1876,10 @@ pub mod pgoutput {
     impl std::error::Error for DecodeError {}
 
     fn read_cstr(buf: &mut &[u8]) -> Result<String, DecodeError> {
-        let pos = buf.iter().position(|&b| b == 0).ok_or(DecodeError::UnexpectedEof)?;
+        let pos = buf
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or(DecodeError::UnexpectedEof)?;
         let s = std::str::from_utf8(&buf[..pos]).map_err(|_| DecodeError::InvalidUtf8)?;
         let owned = s.to_string();
         *buf = &buf[pos + 1..];
@@ -2407,12 +2409,7 @@ pub mod pgoutput {
             buf
         }
 
-        pub fn commit(
-            flags: u8,
-            commit_lsn: u64,
-            end_lsn: u64,
-            commit_timestamp: i64,
-        ) -> Vec<u8> {
+        pub fn commit(flags: u8, commit_lsn: u64, end_lsn: u64, commit_timestamp: i64) -> Vec<u8> {
             let mut buf = Vec::new();
             buf.put_u8(b'C');
             buf.put_u8(flags);
@@ -2470,10 +2467,7 @@ mod tests {
     async fn scripted_replication_server_bound(
         bind: std::net::SocketAddr,
         response: Vec<u8>,
-    ) -> (
-        std::net::SocketAddr,
-        futures_channel::oneshot::Receiver<()>,
-    ) {
+    ) -> (std::net::SocketAddr, futures_channel::oneshot::Receiver<()>) {
         let listener = compio::net::TcpListener::bind(bind)
             .await
             .expect("bind scripted replication server");
@@ -2513,11 +2507,16 @@ mod tests {
         let listener = compio::net::TcpListener::bind(bind)
             .await
             .expect("bind TLS replication probe");
-        let addr = listener.local_addr().expect("TLS replication probe address");
+        let addr = listener
+            .local_addr()
+            .expect("TLS replication probe address");
         let (opening_seen, opening_observed) = futures_channel::oneshot::channel();
 
         compio::runtime::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept TLS replication probe");
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .expect("accept TLS replication probe");
             let compio::BufResult(result, opening) = socket.read_exact(vec![0u8; 8]).await;
             result.expect("read replication SSLRequest");
             assert_eq!(u32::from_be_bytes(opening[..4].try_into().unwrap()), 8);
@@ -2551,9 +2550,7 @@ mod tests {
         type Future = future::Ready<Result<NoTlsStream, std::io::Error>>;
 
         fn connect(self, _stream: S) -> Self::Future {
-            future::ready(Err(std::io::Error::other(
-                "scripted TLS handshake failure",
-            )))
+            future::ready(Err(std::io::Error::other("scripted TLS handshake failure")))
         }
     }
 
@@ -2589,11 +2586,11 @@ mod tests {
     }
 
     /// The protocol code in the first 8 bytes a client writes: either an
-    /// `SSLRequest` or a 3.0 `StartupMessage`. That single u32 is what says
+    /// `SSLRequest` or a 3.2 `StartupMessage`. That single u32 is what says
     /// which transport the driver chose, without needing a TLS stack.
     const SSL_REQUEST_CODE: u32 = 80_877_103;
     #[cfg(unix)]
-    const STARTUP_V3_CODE: u32 = 196_608;
+    const STARTUP_V3_2_CODE: u32 = 196_610;
     /// Not a protocol code: the client closed without writing anything.
     #[cfg(unix)]
     const NOTHING_WRITTEN: u32 = 0;
@@ -2671,13 +2668,7 @@ mod tests {
         // message, which has been written by then.
         let _ = compio::time::timeout(
             std::time::Duration::from_secs(5),
-            connect_replication_addr(
-                Addr::Unix(probe.dir.clone()),
-                None,
-                port,
-                &mut NoTls,
-                &cfg,
-            ),
+            connect_replication_addr(Addr::Unix(probe.dir.clone()), None, port, &mut NoTls, &cfg),
         )
         .await;
 
@@ -2688,13 +2679,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&probe.dir);
 
         assert_eq!(
-            code, STARTUP_V3_CODE,
+            code,
+            STARTUP_V3_2_CODE,
             "expected a plaintext StartupMessage over the unix socket, got {}",
             match code {
                 // What this test sees pre-fix, because `NoTls` cannot build the
                 // TLS transport that `sslmode=require` selected, so the attempt
                 // dies before a byte is written.
-                NOTHING_WRITTEN => "nothing: sslmode selected a transport this \
+                NOTHING_WRITTEN =>
+                    "nothing: sslmode selected a transport this \
                                     connector cannot build over a local socket",
                 // What a real TLS connector would send pre-fix.
                 SSL_REQUEST_CODE => "an SSLRequest: sslmode was applied to a local socket",
@@ -2723,8 +2716,7 @@ mod tests {
         let (first, first_opening) =
             replication_tls_handshake_server_bound("127.0.0.1:0".parse().unwrap()).await;
         let second_bind = std::net::SocketAddr::from(([127, 0, 0, 2], first.port()));
-        let (second, second_opening) =
-            replication_tls_handshake_server_bound(second_bind).await;
+        let (second, second_opening) = replication_tls_handshake_server_bound(second_bind).await;
 
         let mut config = Config::new();
         config
@@ -2799,17 +2791,12 @@ mod tests {
         .expect("the replication address walk hung")
         .expect("the healthy second address must complete replication startup");
 
-        async fn startup_seen(
-            seen: futures_channel::oneshot::Receiver<()>,
-            address: &str,
-        ) {
+        async fn startup_seen(seen: futures_channel::oneshot::Receiver<()>, address: &str) {
             compio::time::timeout(std::time::Duration::from_secs(2), seen)
                 .await
                 .unwrap_or_else(|_| panic!("the {address} replication server was never dialled"))
                 .unwrap_or_else(|_| {
-                    panic!(
-                        "the {address} replication server closed without observing startup"
-                    )
+                    panic!("the {address} replication server closed without observing startup")
                 });
         }
 
@@ -2833,8 +2820,7 @@ mod tests {
     /// pass here.
     #[compio::test]
     async fn replication_connect_timeout_restarts_for_each_resolved_address() {
-        let (first, first_seen) =
-            stalled_replication_server("127.0.0.1:0".parse().unwrap()).await;
+        let (first, first_seen) = stalled_replication_server("127.0.0.1:0".parse().unwrap()).await;
         let second_bind = std::net::SocketAddr::from(([127, 0, 0, 2], first.port()));
         let (second, second_seen) = stalled_replication_server(second_bind).await;
 
@@ -3127,10 +3113,7 @@ mod tests {
         assert_eq!(db.message(), "permission denied to start WAL sender");
 
         // The convenience accessor on Error must also expose the SQLSTATE.
-        assert_eq!(
-            err.code().map(crate::error::SqlState::code),
-            Some("42501")
-        );
+        assert_eq!(err.code().map(crate::error::SqlState::code), Some("42501"));
     }
 
     #[test]
@@ -3184,7 +3167,10 @@ mod tests {
     fn parse_lsn_round_trip() {
         assert_eq!(parse_lsn("0/16B3750").unwrap(), 0x16B3750);
         assert_eq!(parse_lsn("1/16B3750").unwrap(), (1u64 << 32) | 0x16B3750);
-        assert_eq!(parse_lsn("FF/FFFFFFFF").unwrap(), (0xFFu64 << 32) | 0xFFFFFFFF);
+        assert_eq!(
+            parse_lsn("FF/FFFFFFFF").unwrap(),
+            (0xFFu64 << 32) | 0xFFFFFFFF
+        );
         assert_eq!(format_lsn(0x16B3750), "0/16B3750");
         assert_eq!(format_lsn((1u64 << 32) | 0x16B3750), "1/16B3750");
     }
@@ -3249,8 +3235,8 @@ mod tests {
             "messages",
             b'd',
             &[
-                (1, "id", 20, -1),       // BIGINT, REPLICA IDENTITY KEY
-                (0, "title", 25, -1),    // TEXT
+                (1, "id", 20, -1),    // BIGINT, REPLICA IDENTITY KEY
+                (0, "title", 25, -1), // TEXT
             ],
         );
         let msg = pgoutput::decode(&bytes).unwrap();
@@ -3612,7 +3598,11 @@ mod tests {
         struct Rng(u64);
         impl Rng {
             fn new(seed: u64) -> Self {
-                Self(if seed == 0 { 0x9e37_79b9_7f4a_7c15 } else { seed })
+                Self(if seed == 0 {
+                    0x9e37_79b9_7f4a_7c15
+                } else {
+                    seed
+                })
             }
             fn next_u64(&mut self) -> u64 {
                 let mut x = self.0;
@@ -3733,7 +3723,9 @@ mod tests {
                     }
                     Err(error) => {
                         if error.is_cancelled() {
-                            if !refused { total_refused += 1; }
+                            if !refused {
+                                total_refused += 1;
+                            }
                             refused = true;
                         }
                     }
@@ -4014,9 +4006,8 @@ mod tests {
             .await
             .expect("bind loopback listener");
         let addr = listener.local_addr().expect("listener address");
-        let accepting = compio::runtime::spawn(async move {
-            listener.accept().await.expect("accept").0
-        });
+        let accepting =
+            compio::runtime::spawn(async move { listener.accept().await.expect("accept").0 });
         let client = compio::net::TcpStream::connect(addr)
             .await
             .expect("connect to the listener");

@@ -209,6 +209,44 @@ impl SslProtocolVersion {
     }
 }
 
+/// A PostgreSQL frontend/backend wire-protocol version.
+///
+/// Protocol 3.1 is reserved and was never implemented by PostgreSQL, so the
+/// supported set deliberately jumps from 3.0 to 3.2.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum ProtocolVersion {
+    /// Protocol 3.0, supported by PostgreSQL 7.4 and later.
+    V3_0,
+    /// Protocol 3.2, supported by PostgreSQL 18 and later.
+    V3_2,
+}
+
+impl ProtocolVersion {
+    /// The spelling libpq uses in a connection string.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::V3_0 => "3.0",
+            Self::V3_2 => "3.2",
+        }
+    }
+
+    pub(crate) const fn as_wire(self) -> u32 {
+        match self {
+            Self::V3_0 => 0x0003_0000,
+            Self::V3_2 => 0x0003_0002,
+        }
+    }
+
+    pub(crate) const fn from_wire(version: u32) -> Option<Self> {
+        match version {
+            0x0003_0000 => Some(Self::V3_0),
+            0x0003_0002 => Some(Self::V3_2),
+            _ => None,
+        }
+    }
+}
+
 /// Where the trust anchors for server-certificate verification come from.
 ///
 /// This is the `sslrootcert` connection parameter, and together with
@@ -538,6 +576,10 @@ pub enum Host {
 ///     Rust strings are UTF-8; any other encoding is refused rather than mis-decoded.
 /// * `statement_cache_capacity` - Maximum number of implicit raw-SQL prepared
 ///     statements retained per connection. Defaults to 0 (disabled).
+/// * `min_protocol_version` - Oldest PostgreSQL wire protocol the connection
+///     may use: `3.0`, `3.2`, or `latest`. Defaults to `3.0`.
+/// * `max_protocol_version` - PostgreSQL wire protocol requested at startup:
+///     `3.0`, `3.2`, or `latest`. Defaults to `3.2`.
 /// * `sslmode` - Controls usage of TLS, with libpq's six values and libpq's meanings: `disable`, `allow`, `prefer`
 ///     (the default), `require`, `verify-ca`, `verify-full`. See [`SslMode`] for what each one does, and
 ///     [`SslRootCert`] for the certificate-verification table - in particular, `require` encrypts but does *not*
@@ -737,6 +779,8 @@ pub struct Config {
     pub(crate) ssl_password: Option<Vec<u8>>,
     pub(crate) ssl_crl: Option<String>,
     pub(crate) ssl_crl_dir: Option<String>,
+    pub(crate) min_protocol_version: ProtocolVersion,
+    pub(crate) max_protocol_version: ProtocolVersion,
     pub(crate) ssl_min_protocol_version: SslProtocolVersion,
     pub(crate) ssl_max_protocol_version: Option<SslProtocolVersion>,
     pub(crate) ssl_sni: bool,
@@ -791,6 +835,8 @@ impl Config {
             ssl_password: None,
             ssl_crl: None,
             ssl_crl_dir: None,
+            min_protocol_version: ProtocolVersion::V3_0,
+            max_protocol_version: ProtocolVersion::V3_2,
             ssl_min_protocol_version: SslProtocolVersion::TlsV1_2,
             ssl_max_protocol_version: None,
             ssl_sni: true,
@@ -1262,6 +1308,33 @@ impl Config {
     /// Gets the hashed certificate revocation list directory, if one was set.
     pub fn get_ssl_crl_dir(&self) -> Option<&str> {
         self.ssl_crl_dir.as_deref()
+    }
+
+    /// Sets the oldest PostgreSQL wire protocol the connection may use.
+    ///
+    /// Defaults to [`ProtocolVersion::V3_0`], allowing a server that does not
+    /// support the requested maximum to negotiate the connection down to 3.0.
+    pub fn min_protocol_version(&mut self, version: ProtocolVersion) -> &mut Config {
+        self.min_protocol_version = version;
+        self
+    }
+
+    /// Gets the minimum permitted PostgreSQL wire-protocol version.
+    pub fn get_min_protocol_version(&self) -> ProtocolVersion {
+        self.min_protocol_version
+    }
+
+    /// Sets the PostgreSQL wire-protocol version requested at startup.
+    ///
+    /// Defaults to [`ProtocolVersion::V3_2`].
+    pub fn max_protocol_version(&mut self, version: ProtocolVersion) -> &mut Config {
+        self.max_protocol_version = version;
+        self
+    }
+
+    /// Gets the PostgreSQL wire-protocol version requested at startup.
+    pub fn get_max_protocol_version(&self) -> ProtocolVersion {
+        self.max_protocol_version
     }
 
     /// Sets the minimum TLS protocol version.
@@ -1765,9 +1838,7 @@ impl Config {
                     "allow" => SslCertMode::Allow,
                     "require" => SslCertMode::Require,
                     _ => {
-                        return Err(Error::config_parse(Box::new(InvalidValue(
-                            "sslcertmode",
-                        ))));
+                        return Err(Error::config_parse(Box::new(InvalidValue("sslcertmode"))));
                     }
                 };
                 self.ssl_cert_mode(mode);
@@ -1780,6 +1851,12 @@ impl Config {
             }
             "sslcrldir" => {
                 self.ssl_crl_dir(value);
+            }
+            "min_protocol_version" => {
+                self.min_protocol_version(parse_protocol_version("min_protocol_version", value)?);
+            }
+            "max_protocol_version" => {
+                self.max_protocol_version(parse_protocol_version("max_protocol_version", value)?);
             }
             "ssl_min_protocol_version" => {
                 let version = parse_ssl_protocol_version("ssl_min_protocol_version", value)?;
@@ -1943,9 +2020,9 @@ impl Config {
             }
             #[cfg(not(target_arch = "wasm32"))]
             "keepalives_count" => {
-                let keepalives_count = value.parse::<u32>().map_err(|_| {
-                    Error::config_parse(Box::new(InvalidValue("keepalives_count")))
-                })?;
+                let keepalives_count = value
+                    .parse::<u32>()
+                    .map_err(|_| Error::config_parse(Box::new(InvalidValue("keepalives_count"))))?;
                 self.keepalives_count(keepalives_count);
             }
             "target_session_attrs" => {
@@ -2021,7 +2098,7 @@ impl Config {
         Ok(())
     }
 
-    /// Reject TLS parameter combinations that contradict each other.
+    /// Reject connection-parameter combinations that contradict each other.
     ///
     /// libpq runs these in `connectOptions2`, before a socket is opened, and so
     /// do we: each rule describes a URL that can never work, so answering at
@@ -2031,8 +2108,11 @@ impl Config {
     /// The rules mirror libpq's validation and fail before an impossible
     /// configuration can be mistaken for a server error:
     ///
-    /// * A maximum TLS version below the minimum names an empty protocol set.
-    ///   rustls cannot honour it without crossing one of the caller's bounds.
+    /// * A maximum PostgreSQL wire-protocol version below the minimum names an
+    ///   empty protocol set the server cannot negotiate into.
+    /// * A maximum TLS version below the minimum likewise names an empty
+    ///   protocol set. rustls cannot honour it without crossing one of the
+    ///   caller's bounds.
     /// * `sslcertmode=require` cannot be combined with `sslmode=disable`,
     ///   because plaintext cannot carry a TLS client certificate.
     /// * `sslrootcert=system` demands `sslmode=verify-full`. Trusting the
@@ -2043,7 +2123,8 @@ impl Config {
     /// * `sslnegotiation=direct` demands a mode with no plaintext fallback. A
     ///   direct handshake sends no `SSLRequest`, so there is no negotiation to
     ///   fall back *from*; a mode that permits plaintext must not drive it.
-    pub(crate) fn validate_tls_settings(&self) -> Result<(), Error> {
+    pub(crate) fn validate_connection_settings(&self) -> Result<(), Error> {
+        self.validate_protocol_version_range()?;
         self.validate_ssl_protocol_version_range()?;
 
         if self.ssl_cert_mode == SslCertMode::Require && !self.ssl_mode.permits_tls() {
@@ -2071,6 +2152,21 @@ impl Config {
                     "weak sslmode \"{}\" may not be used with sslnegotiation=direct (use \
                      \"require\", \"verify-ca\", or \"verify-full\")",
                     self.ssl_mode.as_str()
+                )
+                .into(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn validate_protocol_version_range(&self) -> Result<(), Error> {
+        if self.min_protocol_version > self.max_protocol_version {
+            return Err(Error::config(
+                format!(
+                    "min_protocol_version={} cannot be higher than max_protocol_version={}",
+                    self.min_protocol_version.as_str(),
+                    self.max_protocol_version.as_str()
                 )
                 .into(),
             ));
@@ -2142,7 +2238,7 @@ impl Config {
                     .into(),
             ));
         }
-        self.validate_tls_settings()?;
+        self.validate_connection_settings()?;
         // No release handle: the stream is the caller's, `S` is unconstrained,
         // and a stream that is not a socket has no descriptor to shut down.
         // Such a connection keeps the pre-existing behaviour - it is released
@@ -2198,10 +2294,7 @@ impl fmt::Debug for Config {
             .field("dbname", &self.dbname)
             .field("options", &self.options)
             .field("application_name", &self.application_name)
-            .field(
-                "fallback_application_name",
-                &self.fallback_application_name,
-            )
+            .field("fallback_application_name", &self.fallback_application_name)
             .field("statement_cache_capacity", &self.statement_cache_capacity)
             .field(
                 "statement_cache_execution_threshold",
@@ -2219,6 +2312,8 @@ impl fmt::Debug for Config {
             )
             .field("ssl_crl", &self.ssl_crl)
             .field("ssl_crl_dir", &self.ssl_crl_dir)
+            .field("min_protocol_version", &self.min_protocol_version)
+            .field("max_protocol_version", &self.max_protocol_version)
             .field("ssl_min_protocol_version", &self.ssl_min_protocol_version)
             .field("ssl_max_protocol_version", &self.ssl_max_protocol_version)
             .field("ssl_sni", &self.ssl_sni)
@@ -2338,6 +2433,14 @@ fn parse_ssl_protocol_version(
     }
 
     Err(Error::config_parse(Box::new(InvalidValue(parameter))))
+}
+
+fn parse_protocol_version(parameter: &'static str, value: &str) -> Result<ProtocolVersion, Error> {
+    match value {
+        "3.0" => Ok(ProtocolVersion::V3_0),
+        "3.2" | "latest" => Ok(ProtocolVersion::V3_2),
+        _ => Err(Error::config_parse(Box::new(InvalidValue(parameter)))),
+    }
 }
 
 #[derive(Debug)]
@@ -2531,8 +2634,10 @@ impl<'a> Parser<'a> {
                 return match self.it.peek() {
                     None => Ok(None),
                     Some(&(i, c)) => Err(Error::config_parse(
-                        format!("unexpected character at byte {i}: expected a keyword but got `{c}`")
-                            .into(),
+                        format!(
+                            "unexpected character at byte {i}: expected a keyword but got `{c}`"
+                        )
+                        .into(),
                     )),
                 };
             }
@@ -3274,11 +3379,9 @@ mod tests {
             format!("host=h target_session_attrs={value}"),
             format!("postgresql://h/db?target_session_attrs={value}"),
         ] {
-            let config = dsn
-                .parse::<Config>()
-                .unwrap_or_else(|error| {
-                    panic!("target_session_attrs={value} did not parse: {error}")
-                });
+            let config = dsn.parse::<Config>().unwrap_or_else(|error| {
+                panic!("target_session_attrs={value} did not parse: {error}")
+            });
             assert_eq!(config.get_target_session_attrs(), expected, "{dsn}");
         }
     }
@@ -3295,10 +3398,7 @@ mod tests {
 
     #[test]
     fn target_session_attrs_prefer_standby_parses() {
-        assert_target_session_attrs_parses(
-            "prefer-standby",
-            TargetSessionAttrs::PreferStandby,
-        );
+        assert_target_session_attrs_parses("prefer-standby", TargetSessionAttrs::PreferStandby);
     }
 
     /// All six libpq spellings parse, to the six distinct modes.
@@ -3363,7 +3463,7 @@ mod tests {
                 .parse::<Config>()
                 .unwrap();
             let err = config
-                .validate_tls_settings()
+                .validate_connection_settings()
                 .expect_err("weaker than verify-full with sslrootcert=system must be rejected");
             let text = format!("{:?}", std::error::Error::source(&err));
             assert!(
@@ -3375,7 +3475,7 @@ mod tests {
         "host=h sslmode=verify-full sslrootcert=system"
             .parse::<Config>()
             .unwrap()
-            .validate_tls_settings()
+            .validate_connection_settings()
             .expect("verify-full is the mode sslrootcert=system exists for");
     }
 
@@ -3388,7 +3488,7 @@ mod tests {
             format!("host=h sslmode={mode} sslnegotiation=direct")
                 .parse::<Config>()
                 .unwrap()
-                .validate_tls_settings()
+                .validate_connection_settings()
                 .expect_err("a mode permitting plaintext must not drive a TLS-only handshake");
         }
         for mode in ["require", "verify-ca", "verify-full"] {
@@ -3399,7 +3499,7 @@ mod tests {
             };
             url.parse::<Config>()
                 .unwrap()
-                .validate_tls_settings()
+                .validate_connection_settings()
                 .unwrap_or_else(|e| panic!("sslmode={mode} may use direct negotiation: {e}"));
         }
         assert_eq!(
@@ -3551,18 +3651,8 @@ mod tests {
             );
         }
 
-        assert!(
-            "host=h sslsni=1"
-                .parse::<Config>()
-                .unwrap()
-                .get_ssl_sni()
-        );
-        assert!(
-            !"host=h sslsni=0"
-                .parse::<Config>()
-                .unwrap()
-                .get_ssl_sni()
-        );
+        assert!("host=h sslsni=1".parse::<Config>().unwrap().get_ssl_sni());
+        assert!(!"host=h sslsni=0".parse::<Config>().unwrap().get_ssl_sni());
         for value in ["", "2", "true", "10"] {
             assert!(
                 format!("host=h sslsni='{value}'")
@@ -3584,7 +3674,7 @@ mod tests {
             .parse::<Config>()
             .unwrap();
         let error = config
-            .validate_tls_settings()
+            .validate_connection_settings()
             .expect_err("plaintext cannot send a required TLS client certificate");
         let text = error.to_string()
             + &std::error::Error::source(&error)
@@ -3639,10 +3729,7 @@ mod tests {
     /// either one would be more dangerous than treating it as a typo.
     #[test]
     fn rustls_unsupported_protocol_versions_are_refused_by_key() {
-        for key in [
-            "ssl_min_protocol_version",
-            "ssl_max_protocol_version",
-        ] {
+        for key in ["ssl_min_protocol_version", "ssl_max_protocol_version"] {
             for version in ["TLSv1", "TLSv1.1"] {
                 let error = format!("host=h {key}={version}")
                     .parse::<Config>()
@@ -3667,7 +3754,7 @@ mod tests {
             let error = dsn
                 .parse::<Config>()
                 .unwrap()
-                .validate_tls_settings()
+                .validate_connection_settings()
                 .expect_err("a maximum below the minimum cannot be approximated");
             let cause = std::error::Error::source(&error)
                 .map(ToString::to_string)
@@ -3694,7 +3781,10 @@ mod tests {
     #[test]
     fn sslrootcert_system_is_a_keyword_and_the_default_is_unset() {
         assert_eq!(
-            "host=h sslrootcert=system".parse::<Config>().unwrap().get_ssl_root_cert(),
+            "host=h sslrootcert=system"
+                .parse::<Config>()
+                .unwrap()
+                .get_ssl_root_cert(),
             &SslRootCert::System
         );
         assert_eq!(
@@ -3731,11 +3821,7 @@ mod tests {
     /// variable that expanded to nothing - and must not read as "not set".
     #[test]
     fn empty_tls_file_parameters_are_rejected() {
-        for s in [
-            "host=h sslrootcert=",
-            "host=h sslcert=",
-            "host=h sslkey=",
-        ] {
+        for s in ["host=h sslrootcert=", "host=h sslcert=", "host=h sslkey="] {
             s.parse::<Config>()
                 .err()
                 .unwrap_or_else(|| panic!("{s} parsed, so an empty path reads as absent"));
@@ -3852,18 +3938,14 @@ mod tests {
                 .parse::<Config>()
                 .unwrap()
                 .get_require_auth(),
-            &RequireAuth::Reject(
-                AuthMethods::new(AuthMethod::Password).with(AuthMethod::None)
-            )
+            &RequireAuth::Reject(AuthMethods::new(AuthMethod::Password).with(AuthMethod::None))
         );
         assert_eq!(
             "host=h require_auth=!gss,!sspi"
                 .parse::<Config>()
                 .unwrap()
                 .get_require_auth(),
-            &RequireAuth::Reject(
-                AuthMethods::new(AuthMethod::Gss).with(AuthMethod::Sspi)
-            )
+            &RequireAuth::Reject(AuthMethods::new(AuthMethod::Gss).with(AuthMethod::Sspi))
         );
 
         let mut built = Config::new();
@@ -4057,7 +4139,9 @@ mod dsn_parse_tests {
         for spelling in ["UTF8", "utf8", "UNICODE", "utf-8"] {
             format!("host=h client_encoding={spelling}")
                 .parse::<Config>()
-                .unwrap_or_else(|error| panic!("client_encoding={spelling} did not parse: {error}"));
+                .unwrap_or_else(|error| {
+                    panic!("client_encoding={spelling} did not parse: {error}")
+                });
         }
 
         let refused = "host=h client_encoding=LATIN1"
@@ -4066,10 +4150,9 @@ mod dsn_parse_tests {
         // The top-level Display is only "invalid connection string", so the key
         // has to be reachable through the source chain or the caller cannot
         // tell which option they got wrong.
-        let named = std::iter::successors(
-            std::error::Error::source(&refused),
-            |error| std::error::Error::source(*error),
-        )
+        let named = std::iter::successors(std::error::Error::source(&refused), |error| {
+            std::error::Error::source(*error)
+        })
         .any(|cause| cause.to_string().contains("client_encoding"));
         assert!(named, "no cause names the offending key: {refused}");
     }

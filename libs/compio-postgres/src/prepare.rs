@@ -26,8 +26,8 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::io;
 use std::pin::{Pin, pin};
-use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
 
 const TYPEINFO_QUERY: &str = "\
 SELECT t.typname, t.typtype, t.typelem, r.rngsubtype, t.typbasetype, n.nspname, t.typrelid
@@ -225,10 +225,8 @@ pub async fn prepare(
         cleanup: cleanup.clone(),
         name: Some(name),
     };
-    let mut responses = client.send_prepare(
-        RequestMessages::Single(FrontendMessage::Raw(buf)),
-        cleanup,
-    )?;
+    let mut responses =
+        client.send_prepare(RequestMessages::Single(FrontendMessage::Raw(buf)), cleanup)?;
 
     let (parameters, columns) = read_prepare_response(client, &mut responses).await?;
     Ok(Statement::new(
