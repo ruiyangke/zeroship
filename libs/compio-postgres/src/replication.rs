@@ -284,6 +284,18 @@ where
 
     let mut stream = BufStream::new(stream);
     stream.set_read_timeout(cfg.get_read_timeout().copied());
+    // The ceiling has to be reapplied here for the same reason the read
+    // timeout does: this is a FRESH `BufStream`, so it starts at
+    // `DEFAULT_MAX_MESSAGE_SIZE` and anything the caller configured is lost.
+    // Applied after the handshake, exactly as `connect_raw` does it, so a
+    // caller's limit governs the data phase without making authentication
+    // unreachable. Leaving it out made `Config::max_message_size` accepted and
+    // ignored on replication connections in BOTH directions: a lowered ceiling
+    // still admitted 64 MiB, and a raised one still tore the stream down at
+    // 64 MiB when a legitimate large frame arrived.
+    if let Some(max) = cfg.get_max_message_size() {
+        stream.set_max_message_size(max);
+    }
     Ok(ReplicationConnection {
         stream,
         parameters,

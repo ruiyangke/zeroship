@@ -1467,3 +1467,84 @@ async fn a_fatal_identify_system_error_survives_the_close_that_follows_it() {
     .await
     .expect("FATAL IDENTIFY_SYSTEM test exceeded its outer watchdog");
 }
+
+/// `Config::max_message_size` must govern a REPLICATION connection too.
+///
+/// The ordinary query path applies the ceiling after the handshake
+/// (`connect_raw.rs`: "Applied after the handshake ... so a caller's limit
+/// governs the data phase and cannot make authentication unreachable").
+/// `connect_replication_addr` builds its OWN `BufStream`, which therefore
+/// starts at `DEFAULT_MAX_MESSAGE_SIZE`, and it reapplied only the read
+/// timeout. So the parameter was accepted and ignored in BOTH directions: a
+/// lowered ceiling still admitted 64 MiB, and a ceiling raised to carry large
+/// replication frames still had the stream torn down at 64 MiB.
+///
+/// Driven by a scripted peer rather than a live walsender for two reasons.
+/// PostgreSQL cannot be told to declare a frame of a chosen size, and the
+/// header alone is the whole point: validation must refuse on the DECLARED
+/// length before any body is buffered, so the stub writes five bytes and no
+/// more.
+///
+/// It also has to be START_REPLICATION rather than IDENTIFY_SYSTEM. Those take
+/// different read paths - `read_header` validates the length, while
+/// `read_one_message` parses whatever accumulates and never consults the
+/// ceiling at all - so an IDENTIFY_SYSTEM version of this test passes
+/// identically with the fix reverted.
+#[compio::test]
+async fn a_configured_ceiling_governs_the_replication_stream() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(|listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            assert_eq!(
+                expect_simple_query(&mut stream),
+                b"START_REPLICATION SLOT \"deadline_slot\" LOGICAL 0/0 (\"proto_version\" '1', \"publication_names\" '\"deadline_publication\"')\0"
+            );
+            // Declares 0x2000 bytes, far above the 64-byte ceiling below, and
+            // sends nothing after the header.
+            stream
+                .write_all(&[b'W', 0, 0, 0x20, 0])
+                .expect("write an oversized frame header");
+            stream.flush().expect("flush the oversized frame header");
+            expect_disconnect(&mut stream);
+        });
+
+        let mut config = stub_config(server.addr);
+        config.max_message_size(64);
+
+        let replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(common::suite_tls(), &config),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("a 64-byte data-phase ceiling must not block the handshake");
+
+        let start_result = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            replication.start_logical_replication(start_options()),
+        )
+        .await
+        .expect("START_REPLICATION exceeded its outer watchdog");
+
+        let error = match start_result {
+            Ok(_) => panic!("a frame declaring 0x2000 bytes passed a 64-byte ceiling"),
+            Err(error) => error,
+        };
+        let mut chain = String::new();
+        let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+        while let Some(err) = source {
+            chain.push_str(&err.to_string());
+            chain.push(' ');
+            source = err.source();
+        }
+        assert!(
+            chain.contains("message too large"),
+            "the configured ceiling never reached the replication stream; \
+             the caller was told: {chain}"
+        );
+        server.finish();
+    })
+    .await
+    .expect("replication ceiling test exceeded its outer watchdog");
+}
