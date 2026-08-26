@@ -32,7 +32,7 @@
 //! Both [`Bind`] and [`Value`] carry a `Decimal(String)` variant. They are
 //! `#[non_exhaustive]` so a driver author matches with a wildcard arm.
 //!
-//! The napi host (`zero-migrate-node`'s `NapiHostSession`) is the production
+//! The napi host (`zeroship-migrate-node`'s `NapiHostSession`) is the production
 //! producer of all four; the in-crate `RecordingSession` (a host-shaped,
 //! in-process driver) proves the generic PG apply path is genuinely
 //! driver-neutral before any dialect-specific SQL crosses the seam.

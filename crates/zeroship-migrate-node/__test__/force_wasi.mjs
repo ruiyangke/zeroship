@@ -7,8 +7,8 @@ const NATIVE_REQUEST = 'zero-migrate-loader-test-native';
 const NATIVE_AVAILABILITY = 'ZERO_MIGRATE_TEST_NATIVE_AVAILABILITY';
 const WASI_AVAILABILITY = 'ZERO_MIGRATE_TEST_WASI_AVAILABILITY';
 const WASI_REQUESTS = new Set([
-  './zero-migrate-node.wasi.cjs',
-  'zero-migrate-node-wasm32-wasi',
+  './zeroship-migrate-node.wasi.cjs',
+  'zeroship-migrate-node-wasm32-wasi',
 ]);
 
 function assert(condition, message) {

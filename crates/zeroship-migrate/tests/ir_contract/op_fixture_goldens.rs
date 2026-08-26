@@ -12,7 +12,7 @@
 //! toolchain: no new public API and no new CI step.
 //!
 //! The resolver used here is the SAME function the addon's production lowering
-//! calls (`zero-migrate-node/src/lower.rs`), not a reimplementation. A JS
+//! calls (`zeroship-migrate-node/src/lower.rs`), not a reimplementation. A JS
 //! re-derivation of the policy would only prove the test agrees with itself; the
 //! goldens are byte-identical to what the shipped path produces because the shipped
 //! path produced them.

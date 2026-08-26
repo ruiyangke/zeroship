@@ -1,11 +1,11 @@
 /**
- * `zero-migrate-node` addon loader — the single place the gen-types orchestrator
+ * `zeroship-migrate-node` addon loader — the single place the gen-types orchestrator
  * requires the napi `genArtifacts` verb.
  *
  * The addon is a napi-rs package whose `index.js` locates its prebuilt
  * `*.node` binary next to itself (or via `NAPI_RS_NATIVE_LIBRARY_PATH`). In a
  * *published* install the binary ships in the package tarball, so a bare
- * `require("zero-migrate-node")` resolves it.
+ * `require("zeroship-migrate-node")` resolves it.
  *
  * The paragraph that stood here described dev as "this monorepo linking the
  * standalone repo via a `file:` dep", whose tarball-pack omitted the gitignored
@@ -63,7 +63,7 @@ import type {
   RuntimeOptionsDto,
   ApplyIrSqliteRequest,
   ApplyReply,
-} from "zero-migrate-node";
+} from "zeroship-migrate-node";
 
 export type {
   CollectionDescriptorDto,
@@ -132,7 +132,7 @@ export type _NoUntriagedAddonReplyKeys = AssertNever<UntriagedReplyKeys>;
  *  worker's `registerModel` then never renders the descriptor into DDL - see
  *  docs/proposals/2026-08-09-dev-sqlite-migration-apply-ahead-of-runtime.md.
  *
- *  Its request/reply types are IMPORTED from `zero-migrate-node`, never
+ *  Its request/reply types are IMPORTED from `zeroship-migrate-node`, never
  *  re-declared here. A hand-mirrored copy is how a field the engine adds turns
  *  into a runtime failure instead of a compile error. */
 interface MigrateAddon {
@@ -148,7 +148,7 @@ interface MigrateAddon {
 let cached: MigrateAddon | undefined;
 
 /**
- * Load the `zero-migrate-node` addon, caching the module. Throws a descriptive
+ * Load the `zeroship-migrate-node` addon, caching the module. Throws a descriptive
  * error (never a bare napi "Cannot find native binding") when neither the normal
  * resolution nor the standalone-build fallback locate the binary.
  */
@@ -156,7 +156,7 @@ export function loadMigrateAddon(): MigrateAddon {
   if (cached) return cached;
 
   try {
-    cached = require("zero-migrate-node") as MigrateAddon;
+    cached = require("zeroship-migrate-node") as MigrateAddon;
     return cached;
   } catch (primary) {
     const bindingPath = findStandaloneBinding();
@@ -164,7 +164,7 @@ export function loadMigrateAddon(): MigrateAddon {
       const prev = process.env.NAPI_RS_NATIVE_LIBRARY_PATH;
       process.env.NAPI_RS_NATIVE_LIBRARY_PATH = bindingPath;
       try {
-        cached = require("zero-migrate-node") as MigrateAddon;
+        cached = require("zeroship-migrate-node") as MigrateAddon;
         return cached;
       } catch (retry) {
         throw addonLoadError(primary, retry, bindingPath);
@@ -179,17 +179,17 @@ export function loadMigrateAddon(): MigrateAddon {
 
 /**
  * Locate the standalone repo's prebuilt `*.node` binary. napi-rs names it
- * `zero-migrate-node.<platform>-<arch>[-<abi>].node`. Returns the first such file
+ * `zeroship-migrate-node.<platform>-<arch>[-<abi>].node`. Returns the first such file
  * found, or `null` when none is found.
  *
  * THE "PUBLISHED INSTALL" ARM DESCRIBED BELOW DOES NOT EXIST YET, and this
  * comment used to assert it as the reason `null` is safe ("published install,
  * where the bare require already succeeded"). Measured 2026-08-12:
- * `zero-migrate-node` is NOT published and is not in `publish_packages` in
+ * `zeroship-migrate-node` is NOT published and is not in `publish_packages` in
  * `deploy/scripts/publish-sdks.sh`, which REFUSES to publish
  * `@zeroship/vite-plugin` for exactly that reason -
  *   "2 dependency(ies) on workspace packages that are not published:
- *    @zeroship/vite-plugin [dependencies] zero-migrate-node@workspace:*"
+ *    @zeroship/vite-plugin [dependencies] zeroship-migrate-node@workspace:*"
  * So in a real registry install the bare `require` cannot succeed and this
  * fallback cannot find a binary either; the creator gets `addonLoadError`. The
  * monorepo arm below is the ONLY arm that works today. Tracked as the SDK
@@ -197,16 +197,16 @@ export function loadMigrateAddon(): MigrateAddon {
  * path is covered.
  *
  * One candidate dir is scanned: the RESOLVED addon package dir
- * (`require.resolve("zero-migrate-node/…")`). In a published install that is
+ * (`require.resolve("zeroship-migrate-node/…")`). In a published install that is
  * where the binary WOULD ship, next to `index.js` (unverified - see above); in
  * this monorepo the
  * `workspace:*` dep makes it a symlink straight to
- * `third_party/zero-migrate/crates/zero-migrate-node`, where a dev `napi build`
+ * `third_party/zero-migrate/crates/zeroship-migrate-node`, where a dev `napi build`
  * leaves the freshly-built `.node` in place. Verified 2026-08-10: it resolves to
- * that dir and `zero-migrate-node.linux-x64-gnu.node` is present.
+ * that dir and `zeroship-migrate-node.linux-x64-gnu.node` is present.
  *
  * There used to be a second candidate — the `file:` dep TARGET dir, recovered by
- * walking up for a `package.json` declaring `zero-migrate-node: file:<path>`. It
+ * walking up for a `package.json` declaring `zeroship-migrate-node: file:<path>`. It
  * existed because pnpm packs `file:` deps by their `files` list, which omits the
  * gitignored `.node`, so the store copy had no binary. `e4ad10373` replaced that
  * `file:` spec with `workspace:*`, which made the fallback both DEAD (no
@@ -218,7 +218,7 @@ function findStandaloneBinding(): string | null {
   return scanForBinding(resolvedAddonDir());
 }
 
-/** Scan one dir for a `zero-migrate-node.*.node` file; return its path or null. */
+/** Scan one dir for a `zeroship-migrate-node.*.node` file; return its path or null. */
 function scanForBinding(dir: string | null): string | null {
   if (!dir || !existsSync(dir)) return null;
   let names: string[];
@@ -228,15 +228,15 @@ function scanForBinding(dir: string | null): string | null {
     return null;
   }
   const hit = names.find(
-    (f) => f.startsWith("zero-migrate-node.") && f.endsWith(".node"),
+    (f) => f.startsWith("zeroship-migrate-node.") && f.endsWith(".node"),
   );
   return hit ? join(dir, hit) : null;
 }
 
-/** The resolved `zero-migrate-node` package dir (a workspace symlink in dev). */
+/** The resolved `zeroship-migrate-node` package dir (a workspace symlink in dev). */
 function resolvedAddonDir(): string | null {
   try {
-    return dirname(require.resolve("zero-migrate-node/package.json"));
+    return dirname(require.resolve("zeroship-migrate-node/package.json"));
   } catch {
     return null;
   }
@@ -254,7 +254,7 @@ function addonLoadError(
     .filter(Boolean)
     .join("; ");
   return new Error(
-    "gen-types: failed to load the zero-migrate-node addon — the schema-artifact " +
+    "gen-types: failed to load the zeroship-migrate-node addon — the schema-artifact " +
       "emitter cannot run. Ensure the addon's native binary is built/installed. " +
       `(${reasons})`,
   );

@@ -40,7 +40,7 @@
 // with no signal that anything went wrong.
 //
 // Scoped to `git ls-files` rather than a directory walk: a walk reaches the
-// gitignored compiled addon (`crates/zero-migrate-node/*.node`), which is a
+// gitignored compiled addon (`crates/zeroship-migrate-node/*.node`), which is a
 // legitimate binary and would be the gate's first false positive. There is no
 // allowlist and no extension filter, because every tracked file in this repo is
 // text - if that ever stops being true, the right response is a deliberate

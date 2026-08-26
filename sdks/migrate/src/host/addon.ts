@@ -16,7 +16,7 @@ import { createRequire } from "node:module";
  *  (§B.3). Shaped exactly by `driver-pg.ts`'s `HostDriver`. */
 export type AddonHostDriver = (args: [request: unknown, done: (err: unknown, reply: unknown) => void]) => void;
 
-/** The addon's exposed surface (mirrors `third_party/zero-migrate/crates/zero-migrate-node/index.d.ts`
+/** The addon's exposed surface (mirrors `third_party/zero-migrate/crates/zeroship-migrate-node/index.d.ts`
  *  plus the Phase-D `applyIr`). */
 export interface MigrateAddon {
   /** The IR-format version this addon was built against — the single source of

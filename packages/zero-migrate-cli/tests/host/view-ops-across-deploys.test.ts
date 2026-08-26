@@ -9,7 +9,7 @@
 //
 // The DROP row was FAILS on MySQL. Its catalog snapshot left the `views` map empty, the
 // Node apply lowering seeds its pending-schema fold from exactly that snapshot
-// (`crates/zero-migrate-node/src/lower.rs:578`, folded at `:607`), and the fold's
+// (`crates/zeroship-migrate-node/src/lower.rs:578`, folded at `:607`), and the fold's
 // `DropView` arm treats an absent view as an error rather than a no-op
 // (`crates/zero-migrate/src/render/fold.rs:2348`). The deploy failed with
 // `fold: view <name> does not exist`. MySQL now populates the map from
@@ -254,7 +254,7 @@ function replaceTheView(): NamedMigration {
 // View names are not ownership-tracked at all: `CreateView` and `DropView` return no
 // target at crates/zero-migrate-ir/src/load.rs:280, structured creation checks only the
 // SOURCE tables at :310, and the registry advance tracks tables and partitions rather
-// than views at crates/zero-migrate-node/src/lower.rs:1574. Whether one app should be
+// than views at crates/zeroship-migrate-node/src/lower.rs:1574. Whether one app should be
 // able to replace another app's view is an open question, not a settled permission.
 const OWNED = { [TABLE]: OWNER_APP, [VIEW]: OWNER_APP };
 
@@ -376,7 +376,7 @@ test("MySQL: an ifExists drop across two deploys removes the view, like the ungu
     // drop without consulting the guard at all. The guard itself is still not honoured
     // on this dialect: the fold's DropView arm destructures with `..`, which swallows
     // `existenceGuard`, and the absorbing path one layer up
-    // (crates/zero-migrate-node/src/lower.rs:638) hardcodes NotSatisfied for MySQL.
+    // (crates/zeroship-migrate-node/src/lower.rs:638) hardcodes NotSatisfied for MySQL.
     // The arm below measures the case that distinction governs.
     const outcome = await applyOne(dropTheViewIfExists(), database, driver, [created]).then(
       () => "ran",

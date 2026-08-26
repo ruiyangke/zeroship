@@ -4,7 +4,7 @@
 //   1. the pure-JS host recorder (`host-recorder.ts`) evals the migration DSL
 //      (`table()`/`t.*` from `zero-migrate`) into a `{ ir_version, name, ops }`
 //      op-IR envelope — NO embedded V8, NO in-Rust recorder;
-//   2. the `zero-migrate-node` napi addon LOWERs the envelope in Rust (stamps
+//   2. the `zeroship-migrate-node` napi addon LOWERs the envelope in Rust (stamps
 //      `owner_app`, folds the authoritative `Checksum::of_ir` + the confined system
 //      shape) and APPLIES it over the real `pg` npm driver via the `hostDriver`
 //      seam — exactly the napi-bridge path.

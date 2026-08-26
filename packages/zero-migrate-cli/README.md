@@ -16,7 +16,7 @@ npm install zero-migrate-cli zero-migrate mysql2   # MySQL 8
 `pg`, `mysql2`, and `tsx` are optional dependencies: install the driver for your
 database. `tsx` (installed by default) lets the CLI load TypeScript migration
 files directly. The matching native binary is pulled in automatically through
-`zero-migrate-node`.
+`zeroship-migrate-node`.
 
 ## CLI
 

@@ -3,7 +3,7 @@
 `@zeroship/db` is the database SDK for zeroship apps. The schema source of
 truth is the committed op.* migration set. `@zeroship/vite-plugin` records
 `migrations/*.ts` in-process through its pure-JS recorder, folds the resulting
-IR envelopes through `zero-migrate-node`, and emits
+IR envelopes through `zeroship-migrate-node`, and emits
 `generated/zeroship/env.db.ts`, which installs the TypeScript `Env.db`
 augmentation, plus `schema.runtime.json`, which the runtime consumes at boot.
 Handlers call CRUD methods on `env.db.<name>` directly.

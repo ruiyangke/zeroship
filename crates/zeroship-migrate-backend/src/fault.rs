@@ -68,12 +68,12 @@ thread_local! {
 /// THREAD ONLY; a [`trip`] of the same point on any other thread is unaffected.
 ///
 /// The shipping Node consumer runs every apply on a freshly spawned worker
-/// thread: `run_engine_blocking` in the `zero-migrate-node` runtime spawns the
+/// thread: `run_engine_blocking` in the `zeroship-migrate-node` runtime spawns the
 /// thread that drives the engine future, and that worker never calls `arm`.
 /// An external caller that arms a fault on its own thread therefore cannot reach
 /// a production apply through that consumer.
 ///
-/// That inertness is a property of the zero-migrate-node worker spawn, NOT of
+/// That inertness is a property of the zeroship-migrate-node worker spawn, NOT of
 /// this crate. This module carries no `cfg` gate and ships in release builds, and
 /// `arm` checks nothing about the build profile, the environment, or the caller.
 /// A Rust embedder that drives the engine future on a thread it also controls

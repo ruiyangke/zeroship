@@ -356,16 +356,16 @@ range yourself with `tests/commit_msg_gate.sh --range origin/main..HEAD`.
 # Root `pnpm build` respects the dependency graph (bootstrap → db);
 # cargo then sees the freshly emitted dist files.
 #
-# `sdks/vite-plugin` imports `zero-migrate-node`, a Rust N-API addon in
+# `sdks/vite-plugin` imports `zeroship-migrate-node`, a Rust N-API addon in
 # the vendored engine whose outputs are untracked and which `pnpm install`
 # does not build. Root `pnpm build` DOES build it -- it is the first
-# filter in the chain (package.json, `pnpm --filter zero-migrate-node
+# filter in the chain (package.json, `pnpm --filter zeroship-migrate-node
 # build && ...`), so one `pnpm build` on a clean checkout is enough and
 # the addon needs Rust on PATH.
 #
 # THIS NOTE SAID THE OPPOSITE UNTIL 2026-08-11 -- that root `pnpm build`
 # "filters to ./sdks/* and so NEVER builds it", with a separate
-# `pnpm --filter zero-migrate-node build` line above the sequence. That
+# `pnpm --filter zeroship-migrate-node build` line above the sequence. That
 # was true when written and stopped being true in d4a5fcd5d ("fix(build):
 # build the napi addon from the root pnpm build"), landed the same day.
 # Nothing re-ran the note, so it kept reading as current. If you are
@@ -373,10 +373,10 @@ range yourself with `tests/commit_msg_gate.sh --range origin/main..HEAD`.
 #
 # The original measurement still describes the FAILURE it protects
 # against, and is worth keeping: remove only index.js / index.d.ts /
-# *.node from third_party/zero-migrate/crates/zero-migrate-node and
+# *.node from third_party/zero-migrate/crates/zeroship-migrate-node and
 # `pnpm --filter @zeroship/vite-plugin build` fails with
 #   src/gen-types/addon.ts(66,8): error TS2307:
-#       Cannot find module 'zero-migrate-node'
+#       Cannot find module 'zeroship-migrate-node'
 # restore them and the same command reports 0 errors. It is invisible on
 # any machine that has already built the addon -- which is why the fix
 # is that the ROOT build produces it rather than a step you must know.

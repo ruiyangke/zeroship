@@ -62,7 +62,7 @@
   },
   "dependencies": {
     "zero-migrate": "workspace:*",
-    "zero-migrate-node": "workspace:*"
+    "zeroship-migrate-node": "workspace:*"
   },
   "optionalDependencies": {
     "mysql2": "^3.23.0",

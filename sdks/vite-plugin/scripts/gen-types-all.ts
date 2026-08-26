@@ -4,7 +4,7 @@
  *
  * WHY REPO-LEVEL. The gen-types emitter has generator INPUTS that live in this
  * package (`src/gen-types/confined-ceiling.ts`, `src/gen-types/render-env-db.ts`,
- * the `zero-migrate-node` fold). Changing one of them stales EVERY committed
+ * the `zeroship-migrate-node` fold). Changing one of them stales EVERY committed
  * artifact in the repo at once — that is exactly what 17cd17b46 did when it
  * added `default = "1"` to the injected `version` column. Only two of those
  * artifact sets are gated by a test (`test/gen-types/generated-source.test.ts`),

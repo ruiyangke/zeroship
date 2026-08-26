@@ -173,7 +173,7 @@ pub mod rule {
     /// The lower-case spelling is deliberate and is pinned by a host test
     /// (`packages/zero-migrate-cli/tests/host/locking-advisory-surface.test.ts`),
     /// which is why it is a named const rather than a literal typed at each site:
-    /// it used to be written out in `zero-migrate-node`'s bridge and nowhere else.
+    /// it used to be written out in `zeroship-migrate-node`'s bridge and nowhere else.
     pub const ANALYZER_DIALECT_UNSUPPORTED: &str = "analyzer_dialect_unsupported";
 }
 

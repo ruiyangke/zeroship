@@ -75,7 +75,7 @@ clean="$(sed -e 's/\x1b\[[0-9;]*m//g' "$LOG")"
 packages="$(printf '%s\n' "$clean" | grep -oP '^\S+(?= test\$)' | sort -u | wc -l)"
 
 # TAP assertions. NOTE this covers 12 of the 16 running packages: the other four
-# (the vendored zero-migrate-node addon, examples/db-todos, examples/ssr-blog,
+# (the vendored zeroship-migrate-node addon, examples/db-todos, examples/ssr-blog,
 # sdks/payments) do not emit a TAP summary line. The package count above is the
 # check that covers all sixteen; this one bounds mass deletion inside the
 # twelve that report.

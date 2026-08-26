@@ -25,13 +25,13 @@ import { fileURLToPath } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "../../../..");
 const CRATES = join(REPO_ROOT, "crates");
-const REBUILD = "pnpm --filter zero-migrate-node build";
+const REBUILD = "pnpm --filter zeroship-migrate-node build";
 
 /** The `.node` napi writes for this platform (its Linux triple carries `-gnu`). */
 function defaultAddonPath(): string {
   const { platform, arch } = process;
   const abi = platform === "linux" ? "-gnu" : "";
-  return join(CRATES, "zero-migrate-node", `zero-migrate-node.${platform}-${arch}${abi}.node`);
+  return join(CRATES, "zeroship-migrate-node", `zeroship-migrate-node.${platform}-${arch}${abi}.node`);
 }
 
 /** The most recently modified Rust source the addon is built from, or null when

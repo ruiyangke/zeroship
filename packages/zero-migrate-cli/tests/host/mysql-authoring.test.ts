@@ -5,7 +5,7 @@
 // the SAME `SqlSession` seam Postgres rides:
 //   1. the pure-JS host recorder drains the migration DSL into a `{ ir_version,
 //      name, ops }` op-IR envelope (no embedded V8, no in-Rust recorder);
-//   2. the `zero-migrate-node` napi addon LOWERs the envelope in Rust (stamps
+//   2. the `zeroship-migrate-node` napi addon LOWERs the envelope in Rust (stamps
 //      `owner_app`, folds the authoritative `Checksum::of_ir`, folds the confined
 //      system shape) for the `mysql` dialect, then drives the apply path over
 //      `MysqlBackend` (`GET_LOCK`, MySQL journal DDL, `?` placeholders) against

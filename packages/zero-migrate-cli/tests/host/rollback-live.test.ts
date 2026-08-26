@@ -3,7 +3,7 @@
 // to see whether the table actually went away.
 //
 // The addon verb is already proven against real SQLite
-// (`crates/zero-migrate-node/tests/rollback_sqlite.rs`), but SQLite runs in-process
+// (`crates/zeroship-migrate-node/tests/rollback_sqlite.rs`), but SQLite runs in-process
 // and never crosses the host-driver seam. These arms are the only place the
 // host-driven rollback path executes at all: the `pg` and `mysql2` adapters, the
 // dialect-native journal SQL, and the blocking project-lock bracket a rollback takes
@@ -39,7 +39,7 @@ const CLI_BIN = resolve(HERE, "../../src/cli-bin.ts");
 const ABI = process.platform === "linux" ? "-gnu" : "";
 const ADDON_PATH = resolve(
   HERE,
-  `../../../../crates/zero-migrate-node/zero-migrate-node.${process.platform}-${process.arch}${ABI}.node`,
+  `../../../../crates/zeroship-migrate-node/zeroship-migrate-node.${process.platform}-${process.arch}${ABI}.node`,
 );
 
 const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
@@ -340,7 +340,7 @@ test("PostgreSQL: rolling back a dropSchema rebuilds the schema its create autho
  *  reverse. Sequence and schema are covered above, in this file, against PostgreSQL.
  *
  *  VIEW IS NOT COVERED HERE, and this comment used to say it was. What exists is
- *  `crates/zero-migrate-node/tests/rollback_sqlite.rs`
+ *  `crates/zeroship-migrate-node/tests/rollback_sqlite.rs`
  *  (`a_view_dropped_by_a_later_envelope_comes_back_through_the_verb`), which drives the
  *  same re-lowering path this file does but against SQLite, and
  *  `crates/zero-migrate/tests/drop_view_rollback_pg.rs`, which is PostgreSQL but calls

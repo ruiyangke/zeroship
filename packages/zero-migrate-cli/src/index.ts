@@ -1,6 +1,6 @@
 // `zero-migrate-cli` — the creator-facing HOST runtime.
 //
-// A thin async layer over the prebuilt N-API addon (`crates/zero-migrate-node`).
+// A thin async layer over the prebuilt N-API addon (`crates/zeroship-migrate-node`).
 // The creator never sees N-API, `driver::Row`, or the `hostDriver`
 // callback:
 //

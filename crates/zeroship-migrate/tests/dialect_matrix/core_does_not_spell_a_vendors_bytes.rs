@@ -138,7 +138,7 @@ const CRATES_THAT_MUST_NOT_SPELL: &[&str] = &[
     "zero-migrate",
     "zero-migrate-core",
     "zero-migrate-ir",
-    "zero-migrate-node",
+    "zeroship-migrate-node",
     "zero-migrate-policy",
 ];
 

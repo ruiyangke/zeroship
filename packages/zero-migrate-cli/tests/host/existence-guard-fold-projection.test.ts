@@ -78,7 +78,7 @@
 // guard is satisfied also used to be refused by it, for a registry change that was
 // never about foreign ownership, and no arm here drives one either way. What DOES
 // cover part of it is the projection's own shape: `projection_guard_verdict`
-// (`crates/zero-migrate-node/src/lower.rs`) runs `decide` over every step's probe with
+// (`crates/zeroship-migrate-node/src/lower.rs`) runs `decide` over every step's probe with
 // no per-op branch, so the `createTable` arms below exercise the identical code path
 // for any op. What NOTHING covers is that a guarded `dropTable`/`renameTable` LOWERS a
 // probe the projection can satisfy at all - that residue is a hole.

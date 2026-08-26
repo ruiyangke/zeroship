@@ -411,7 +411,7 @@ the engine**. Before applying an envelope, that lowering folds the pending ops
 onto the catalog snapshot and refuses anything the fold cannot resolve, reporting
 `failed to project pending schema after envelope "<name>": ...`. A host embedding
 `zero-migrate` directly never builds one: `ProjectionGuardVerdict` exists only in
-`crates/zero-migrate-node/src/lower.rs`, and nothing in `zero-migrate`,
+`crates/zeroship-migrate-node/src/lower.rs`, and nothing in `zero-migrate`,
 `zero-migrate-postgres`, `zero-migrate-ir` or `zero-migrate-policy` references it.
 
 That is a difference in strategy rather than a missing check. `MigrationEngine`

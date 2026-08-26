@@ -55,7 +55,7 @@ fn workspace_source_digest() -> String {
     let root = manifest_dir
         .parent()
         .and_then(Path::parent)
-        .expect("the addon crate sits at <workspace>/crates/zero-migrate-node")
+        .expect("the addon crate sits at <workspace>/crates/zeroship-migrate-node")
         .to_path_buf();
 
     let mut inputs = vec![root.join("Cargo.lock"), root.join("Cargo.toml")];

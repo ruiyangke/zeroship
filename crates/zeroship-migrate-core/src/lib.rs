@@ -17,7 +17,7 @@
 //!
 //! The engine is runtime-free and V8-free. Authoring (the JS DSL to op-IR
 //! envelope) and live Postgres/MySQL execution run in the Node host and reach
-//! the engine through the `zero-migrate-node` napi bridge; the Postgres apply
+//! the engine through the `zeroship-migrate-node` napi bridge; the Postgres apply
 //! path is the driver-neutral [`SqlSession`] seam. In-process SQLite is the one
 //! backend the engine drives directly.
 //!
@@ -224,7 +224,7 @@ pub use apply::backend::{
 // `tests/dialect_matrix/core_names_no_vendor_crate.rs` forbids: closing one coupling
 // by opening the other would have been a wash. MySQL went the same way one commit
 // earlier. A host that wants the SQLite backend names the vendor crate, as
-// `zero-migrate-node`'s bridge does.
+// `zeroship-migrate-node`'s bridge does.
 pub use apply::baseline::{BaselineError, BaselineOutcome};
 pub use apply::drift::{
     diff_snapshots, diff_snapshots_with_index_aliases, AlteredObject, ChecksumDrift,

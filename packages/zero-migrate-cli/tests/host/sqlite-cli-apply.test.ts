@@ -11,7 +11,7 @@
 // depending on which document you read.
 //
 // It also fills the gap that let the disagreement persist. The Rust side proves the
-// SQLite backend (`crates/zero-migrate-node/tests/rollback_sqlite.rs` and the
+// SQLite backend (`crates/zeroship-migrate-node/tests/rollback_sqlite.rs` and the
 // in-crate suites), and the host suite proves the CLI against PostgreSQL and MySQL,
 // but no arm ran the CLI against SQLite - the one combination both claims are about.
 //
@@ -34,7 +34,7 @@ const CLI_BIN = resolve(HERE, "../../src/cli-bin.ts");
 const ABI = process.platform === "linux" ? "-gnu" : "";
 const ADDON_PATH = resolve(
   HERE,
-  `../../../../crates/zero-migrate-node/zero-migrate-node.${process.platform}-${process.arch}${ABI}.node`,
+  `../../../../crates/zeroship-migrate-node/zeroship-migrate-node.${process.platform}-${process.arch}${ABI}.node`,
 );
 
 const OWNER_APP = "app_sqlite_cli";

@@ -19,7 +19,7 @@
 // generated.js'` (tsc exit 2) and `ERR_MODULE_NOT_FOUND` under tsx - but loud is
 // not the same as informative: neither message names the step you were supposed
 // to run. AGENTS.md spends twenty lines on exactly that shape of error, because
-// a loud TS2307 from the zero-migrate-node addon still cost a real deploy twenty
+// a loud TS2307 from the zeroship-migrate-node addon still cost a real deploy twenty
 // minutes. Committing the output keeps the build order flat and moves the whole
 // question onto a drift check, which is what `schema/codegen.mjs` (the sibling
 // generator, project-v1.json -> project-config/generated.ts) already does.

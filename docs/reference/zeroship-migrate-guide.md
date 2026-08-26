@@ -234,7 +234,7 @@ process instead:
 2. **The MySQL and Postgres drivers.** The engine ships no network driver of
    its own for either. Both go through the dialect-neutral
    `driver::SqlSession` seam, whose production implementation is the
-   `zero-migrate-node` napi bridge over the host `pg` / `mysql2` npm drivers.
+   `zeroship-migrate-node` napi bridge over the host `pg` / `mysql2` npm drivers.
    SQLite is the exception and runs in-process on a `rusqlite` actor.
 
 Because the engine opens no socket, it names no egress policy type. The
@@ -813,7 +813,7 @@ Declared-only facets survive the fold — the typed-id `prefix`, vector `metric`
 ### 5.4 How the fold is consumed
 
 The vite-plugin now runs gen-types in-process: its pure-JS recorder evaluates
-the committed migration modules into IR envelopes, and `zero-migrate-node`'s
+the committed migration modules into IR envelopes, and `zeroship-migrate-node`'s
 `genArtifacts` verb folds and renders `env.db.ts` plus
 `schema.runtime.json`. There is no CLI subprocess or missing-binary no-op. The
 `.zship` packer does **not** carry migration documents — it reads only the
@@ -1685,7 +1685,7 @@ the removed appbase package cannot be selected with `cargo -p`.
 
 ### 12.6 Sandboxed-child corpus parity + the recorder sandbox
 
-`op_round_trip.rs`'s sandboxed-child corpus parity test (`:184-202`) records every fixture through both the in-process and kernel-sandboxed-child paths and asserts byte-equal output, including fixtures that exercise rooted Postgres vendor exports. `recorder_sandbox_e2e.rs` proved the sandbox at the kernel level: it spawned the real child with `pre_exec` lockdown (netns + rlimits) + in-child seccomp-bpf + Landlock, and asserted on the **child termination cause** — `SIGSYS` (seccomp default-deny on socket/connect/execve/fork), `EACCES` (Landlock on write/out-of-dir read), `RLIMIT_CPU`/wall-watchdog/`RLIMIT_AS` → `BUILD_RECORDER_BUDGET_EXCEEDED`, plus per-invocation isolation. Capability-gated hard-fail, never silent-skip; Linux-only. Both tests went with the V8 recorder host: the standalone engine runs authoring in the Node process over the `zero-migrate-node` napi bridge and ships no sandboxed recorder child, so neither has a successor there.
+`op_round_trip.rs`'s sandboxed-child corpus parity test (`:184-202`) records every fixture through both the in-process and kernel-sandboxed-child paths and asserts byte-equal output, including fixtures that exercise rooted Postgres vendor exports. `recorder_sandbox_e2e.rs` proved the sandbox at the kernel level: it spawned the real child with `pre_exec` lockdown (netns + rlimits) + in-child seccomp-bpf + Landlock, and asserted on the **child termination cause** — `SIGSYS` (seccomp default-deny on socket/connect/execve/fork), `EACCES` (Landlock on write/out-of-dir read), `RLIMIT_CPU`/wall-watchdog/`RLIMIT_AS` → `BUILD_RECORDER_BUDGET_EXCEEDED`, plus per-invocation isolation. Capability-gated hard-fail, never silent-skip; Linux-only. Both tests went with the V8 recorder host: the standalone engine runs authoring in the Node process over the `zeroship-migrate-node` napi bridge and ships no sandboxed recorder child, so neither has a successor there.
 
 ### 12.7 Other golden/preview gates
 

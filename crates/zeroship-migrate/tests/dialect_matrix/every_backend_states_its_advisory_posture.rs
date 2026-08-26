@@ -11,7 +11,7 @@
 //! and "read all of it, found nothing" were the same value.
 //!
 //! The same defect had already been found and fixed ONCE, one layer up, in
-//! `zero-migrate-node`'s `advisoriesFor` — as an `if dialect != POSTGRES` written in
+//! `zeroship-migrate-node`'s `advisoriesFor` — as an `if dialect != POSTGRES` written in
 //! the host addon, deciding on the backends' behalf and spelling out the reason in a
 //! sentence that lived nowhere near the backends it was about. It was not fixed in
 //! the differ, because nothing connected the two sites. This file is that
