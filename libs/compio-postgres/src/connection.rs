@@ -4148,6 +4148,7 @@ mod tests {
             0,
             Some(0.into()),
             None,
+            crate::config::ProtocolVersion::V3_0,
             crate::client::StatementCacheSettings::new(0, std::num::NonZeroUsize::MIN),
         );
         let inner = Arc::clone(client.inner());

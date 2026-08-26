@@ -7,7 +7,7 @@
 
 use crate::cancel_token::CancelKey;
 use crate::codec::{BackendMessages, FrontendMessage};
-use crate::config::{SslMode, SslNegotiation};
+use crate::config::{ProtocolVersion, SslMode, SslNegotiation};
 use crate::connect_tls::Encryption;
 use crate::connection::{Request, RequestDisposition, RequestMessages, TransactionEffect};
 use crate::copy_in::CopyInSink;
@@ -526,7 +526,7 @@ impl TransactionStatus {
 mod transaction_status_tests {
     use super::{Client, TransactionStatus};
     use crate::codec::FrontendMessage;
-    use crate::config::{SslMode, SslNegotiation};
+    use crate::config::{ProtocolVersion, SslMode, SslNegotiation};
     use crate::connection::RequestMessages;
     use bytes::BytesMut;
     use futures_channel::mpsc;
@@ -736,7 +736,7 @@ mod type_cache_tests {
         Client, STATEMENT_CACHE_CANDIDATE_CAPACITY, StatementCacheAdmission,
         StatementCacheSettings, statement_uses_cached_typeinfo,
     };
-    use crate::config::{SslMode, SslNegotiation};
+    use crate::config::{ProtocolVersion, SslMode, SslNegotiation};
     use crate::types::{Kind, Type};
     use crate::{Error, Statement};
     use bytes::{BufMut, BytesMut};
@@ -764,6 +764,7 @@ mod type_cache_tests {
             0,
             Some(0.into()),
             None,
+            ProtocolVersion::V3_0,
             StatementCacheSettings::new(1, NonZeroUsize::MIN),
         )
     }
@@ -895,6 +896,7 @@ mod type_cache_tests {
             0,
             Some(0.into()),
             None,
+            ProtocolVersion::V3_0,
             StatementCacheSettings::new(1, NonZeroUsize::new(usize::MAX).unwrap()),
         );
 
@@ -926,6 +928,7 @@ mod type_cache_tests {
             0,
             Some(0.into()),
             None,
+            ProtocolVersion::V3_0,
             StatementCacheSettings::new(1, NonZeroUsize::new(3).unwrap()),
         );
 
@@ -1617,6 +1620,10 @@ pub struct Client {
     ssl_negotiation: SslNegotiation,
     process_id: i32,
     secret_key: Option<CancelKey>,
+    /// What the startup exchange SETTLED ON, which is not necessarily what was
+    /// requested: an older server answers `NegotiateProtocolVersion` and the
+    /// session continues one version down.
+    protocol_version: ProtocolVersion,
 }
 
 const _: () = {
@@ -1658,6 +1665,7 @@ impl Client {
             process_id,
             secret_key,
             release,
+            ProtocolVersion::V3_0,
             StatementCacheSettings::new(0, NonZeroUsize::MIN),
         )
     }
@@ -1669,6 +1677,7 @@ impl Client {
         process_id: i32,
         secret_key: Option<CancelKey>,
         release: Option<ConnectionRelease>,
+        protocol_version: ProtocolVersion,
         statement_cache: StatementCacheSettings,
     ) -> Self {
         Self {
@@ -1692,6 +1701,7 @@ impl Client {
             ssl_negotiation,
             process_id,
             secret_key,
+            protocol_version,
         }
     }
 
@@ -2457,6 +2467,24 @@ impl Client {
     /// client.
     pub fn process_id(&self) -> i32 {
         self.process_id
+    }
+
+    /// The wire protocol version this session SETTLED ON.
+    ///
+    /// Not the same as [`Config::max_protocol_version`], which is only what was
+    /// requested: a server that cannot speak it answers
+    /// `NegotiateProtocolVersion` and the session continues one version down,
+    /// so a connection asking for 3.2 reports 3.0 against PostgreSQL 15 or 16.
+    ///
+    /// This is the only way to find out. PostgreSQL exposes NO server-side view
+    /// of the negotiated version - `pg_stat_activity` has no such column and
+    /// `pg_settings` carries only the TLS `ssl_min/max_protocol_version` - so
+    /// the client's own record is what `psql`'s `\conninfo` prints too.
+    ///
+    /// Worth checking when a cancel key is in question: 3.0 fixes it at four
+    /// bytes and 3.2 makes it variable-length.
+    pub fn protocol_version(&self) -> ProtocolVersion {
+        self.protocol_version
     }
 
     /// Constructs a cancellation token that can later be used to request

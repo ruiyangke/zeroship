@@ -480,6 +480,7 @@ where
         process_id,
         secret_key,
         release,
+        handshake.protocol,
         StatementCacheSettings::new(
             config.get_statement_cache_capacity(),
             config.get_statement_cache_execution_threshold(),
