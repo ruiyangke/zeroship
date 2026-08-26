@@ -41,9 +41,9 @@ fn null_clause(c: &ColumnSnapshot, inline_pk: bool) -> &'static str {
 /// Render this backend's declared table attributes as SQLite table options.
 ///
 /// SQLite's table options are BARE KEYWORDS, comma separated after the closing paren:
-/// `CREATE TABLE t ( … ) STRICT, WITHOUT ROWID`. There is no `NAME=value` form here at
+/// `CREATE TABLE t ( ... ) STRICT, WITHOUT ROWID`. There is no `NAME=value` form here at
 /// all, so both declared options are booleans and the value decides whether the keyword
-/// appears — `false` emits nothing rather than emitting a negated clause, because SQLite
+/// appears - `false` emits nothing rather than emitting a negated clause, because SQLite
 /// has no way to spell "not strict".
 ///
 /// The keyword is derived from the declared key (`without_rowid` -> `WITHOUT ROWID`)
@@ -120,8 +120,8 @@ fn fk_ddl_referenced_cols(cols: &[String]) -> String {
         .join(", ")
 }
 
-/// Confined-`SQLite` DDL emitter — unqualified (`main` = the app file), inline
-/// `/* … */` sentinels, plain b-tree indexes (no `USING` / `WITH`). Byte-identical
+/// Confined-`SQLite` DDL emitter - unqualified (`main` = the app file), inline
+/// `/* ... */` sentinels, plain b-tree indexes (no `USING` / `WITH`). Byte-identical
 /// to the former `SQLite` arm of each render method.
 struct SqliteEmitter {
     project_schema: String,
@@ -167,7 +167,7 @@ impl DdlEmitter for SqliteEmitter {
         None
     }
 
-    /// SQLite has NO `ALTER COLUMN` in any form — its `ALTER TABLE` does only
+    /// SQLite has NO `ALTER COLUMN` in any form - its `ALTER TABLE` does only
     /// `RENAME TO`, `RENAME COLUMN`, `ADD COLUMN` and `DROP COLUMN`. Every member of
     /// the family is therefore refused here, and every one is reconciled instead by
     /// the differ's table REBUILD, which this backend selects by answering
@@ -290,7 +290,7 @@ impl DdlEmitter for SqliteEmitter {
         let generated = generated_clause(c.generated.as_ref());
         let default = default_clause(c.default.as_deref());
         let checks = inline_checks_clause(c);
-        // inline `/* zero-migrate:enc:… */` for an encrypted column added
+        // inline `/* zero-migrate:enc:... */` for an encrypted column added
         // after the table exists.
         let enc = c
             .encryption_sentinel
@@ -298,21 +298,21 @@ impl DdlEmitter for SqliteEmitter {
             .map(|s| format!(" {s}"))
             .unwrap_or_default();
         // on SQLite the table is `main` (the app file): emit an UNqualified
-        // `ALTER TABLE <t> ADD COLUMN …`. A schema-qualified `"schema"."t"` would
+        // `ALTER TABLE <t> ADD COLUMN ...`. A schema-qualified `"schema"."t"` would
         // resolve to no table ("no such table").
         let table_ref = sqlite_ident(table);
         // on SQLite the mask sentinel rides INLINE in the column clause
-        // (there is NO `COMMENT ON COLUMN` in SQLite — it is a syntax error). SQLite
-        // preserves the inline `/* … */` comment through `ADD COLUMN` in
+        // (there is NO `COMMENT ON COLUMN` in SQLite - it is a syntax error). SQLite
+        // preserves the inline `/* ... */` comment through `ADD COLUMN` in
         // `sqlite_master.sql` (verified), so the drift recovery
         // (`recover_inline_sentinel`) round-trips it from the stored CREATE text
         // exactly like a create-time sentinel.
         //
-        // `comment_sentinel` holds the BARE body (`zero-migrate:mask:…` / `zero-migrate:enc:…`, no
+        // `comment_sentinel` holds the BARE body (`zero-migrate:mask:...` / `zero-migrate:enc:...`, no
         // `/* */`); the SQLite inline form needs the `/* */` wrapper. The ENCRYPTED
         // column case is already covered by `enc` above (`encryption_sentinel` is the
-        // pre-wrapped `/* zero-migrate:enc:… */` form), so only the MASKED-SIBLING case
-        // (`comment_sentinel` set, `encryption_sentinel` unset) rides here — wrapped.
+        // pre-wrapped `/* zero-migrate:enc:... */` form), so only the MASKED-SIBLING case
+        // (`comment_sentinel` set, `encryption_sentinel` unset) rides here - wrapped.
         let sqlite_inline_sentinel = if c.encryption_sentinel.is_none() {
             c.comment_sentinel
                 .as_deref()
@@ -348,7 +348,7 @@ impl DdlEmitter for SqliteEmitter {
         let unique = if idx.unique { "UNIQUE " } else { "" };
         let col_list = render_index_elements_sqlite(idx);
         // SQLite indexes are UNqualified (`main` = the app file), and
-        // SQLite has no `USING <method>` / `WITH (lists=…)` (those PG access-method
+        // SQLite has no `USING <method>` / `WITH (lists=...)` (those PG access-method
         // clauses are emitted only on the PG arm; a SQLite B-tree is the only kind
         // the additive index path emits). The schema qualifier is on neither the
         // index name nor the table.
@@ -372,7 +372,7 @@ impl DdlEmitter for SqliteEmitter {
 
     fn rename_table(&self, table: &str, to: &str) -> (String, String) {
         // SQLite has native `ALTER TABLE <old> RENAME TO <new>` (a `main`-scoped
-        // metadata rewrite). Both names are UNqualified `main` names — a
+        // metadata rewrite). Both names are UNqualified `main` names - a
         // schema-qualified ref would resolve to no table. `down` is the inverse.
         (
             format!(
@@ -389,7 +389,7 @@ impl DdlEmitter for SqliteEmitter {
     }
 
     fn drop_column_up(&self, table: &str, col: &str) -> String {
-        // SQLite ≥ 3.35 has native `ALTER TABLE … DROP COLUMN`; emit it
+        // SQLite >= 3.35 has native `ALTER TABLE ... DROP COLUMN`; emit it
         // UNqualified (`main` = the app file). A schema-qualified `"schema"."t"` would
         // resolve to no table.
         format!(
@@ -401,7 +401,7 @@ impl DdlEmitter for SqliteEmitter {
 
     fn drop_index_up(&self, _table: Option<&str>, idx_name: &str) -> String {
         // on SQLite an index lives UNqualified in `main` (the app file).
-        // A schema-qualified `DROP INDEX "schema"."ix"` does NOT error on SQLite — it
+        // A schema-qualified `DROP INDEX "schema"."ix"` does NOT error on SQLite - it
         // SILENTLY no-ops (the qualified name never resolves), reporting success while
         // the index survives: silent drift, the dangerous failure mode. Emit the
         // unqualified `DROP INDEX <name>` so the index is ACTUALLY dropped.

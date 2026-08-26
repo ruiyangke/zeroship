@@ -853,18 +853,18 @@ fn rewrite_sqlite_stored_foreign_keys(
     ))
 }
 
-/// The virtual-table module of a stored `CREATE VIRTUAL TABLE … USING <module>(…)`
+/// The virtual-table module of a stored `CREATE VIRTUAL TABLE ... USING <module>(...)`
 /// statement, or `None` when `sql` is not a virtual-table create.
 ///
-/// Recognition is keyed on the `CREATE … VIRTUAL TABLE … USING <module>` token
-/// SHAPE, never on a module allowlist or a table-name convention — an `fts5`
+/// Recognition is keyed on the `CREATE ... VIRTUAL TABLE ... USING <module>` token
+/// SHAPE, never on a module allowlist or a table-name convention - an `fts5`
 /// vtable, a `vec0` vtable and a module this engine has never heard of are all
 /// recognised on identical terms. Only the header (everything ahead of the first
 /// `(`) is tokenised, so a column or option named `virtual` inside the argument
 /// list cannot promote an ordinary table into a virtual one.
 ///
 /// Returns `None` on every non-SQLite snapshot, where `stored_create_sql` is
-/// absent — PostgreSQL has no virtual tables and nothing to guard.
+/// absent - PostgreSQL has no virtual tables and nothing to guard.
 fn virtual_table_module(sql: &str) -> Option<String> {
     let head = &sql[..sql.find('(').unwrap_or(sql.len())];
     let lower = head.to_ascii_lowercase();
@@ -906,7 +906,7 @@ mod virtual_table_module_tests {
     /// The `vec0` shape plugin-db's runtime `ensure_vector_index` emits, verbatim.
     /// The guard cannot be exercised end-to-end against a real `vec0` table (the
     /// hardened connection refuses to load `sqlite-vec`), so its DDL is pinned here
-    /// instead — recognition of the shape is proven; the live drop of one is not.
+    /// instead - recognition of the shape is proven; the live drop of one is not.
     #[test]
     fn recognises_a_vec0_vtable() {
         assert_eq!(
@@ -981,16 +981,16 @@ impl SqliteStoredDdl {
     /// drop to the 12-step rebuild, `None` if the column drops cleanly per-op.
     ///
     /// Sources, in fail-closed order:
-    ///   1. INDEX key columns (`IndexSnapshot::columns`) — a column in any index.
-    ///   2. CONSTRAINT definitions (`ConstraintSnapshot::definition`) — the synthesised
+    ///   1. INDEX key columns (`IndexSnapshot::columns`) - a column in any index.
+    ///   2. CONSTRAINT definitions (`ConstraintSnapshot::definition`) - the synthesised
     ///      FK / UNIQUE / PK bodies carry the member column names verbatim.
     ///   3. The verbatim `CREATE TABLE` text (`TableSnapshot::stored_create_sql`),
     ///      the ONLY source for CHECK predicates, generated-column expressions, and
-    ///      partial-index predicates — none of which the `SQLite` drift PRAGMAs surface
+    ///      partial-index predicates - none of which the `SQLite` drift PRAGMAs surface
     ///      into the structured snapshot. We do a CONSERVATIVE whole-word scan: if the
     ///      column name appears as a word ANYWHERE in the stored DDL beyond its own
     ///      definition, we rebuild. This can over-trigger a rebuild (a comment / a
-    ///      coincidental match) but NEVER under-triggers — a rebuild is always
+    ///      coincidental match) but NEVER under-triggers - a rebuild is always
     ///      data-preserving, while a wrong native DROP COLUMN aborts the migration.
     fn sqlite_dropped_column_dependent(
         table: &str,
@@ -1019,7 +1019,7 @@ impl SqliteStoredDdl {
             }
         }
 
-        // (3) The verbatim CREATE text — the only source for CHECK / generated /
+        // (3) The verbatim CREATE text - the only source for CHECK / generated /
         //     partial-index references. We scan the WHOLE statement (conservative:
         //     over-trigger acceptable, under-trigger never), as a whole word so a
         //     substring of another identifier does not false-match.
@@ -1027,8 +1027,8 @@ impl SqliteStoredDdl {
             // Strip this column's OWN definition clause is unnecessary for
             // correctness (a rebuild is always safe); a hit anywhere routes to the
             // rebuild. The column's own clause naturally matches, but the per-op
-            // path is only taken when NO dependent exists — and a column always
-            // appears in its own clause — so we must look for a SECOND occurrence
+            // path is only taken when NO dependent exists - and a column always
+            // appears in its own clause - so we must look for a SECOND occurrence
             // (a reference beyond the bare declaration) to avoid rebuilding EVERY
             // drop. Count whole-word occurrences; >1 means a reference exists.
             if word_count_ci(sql, col) > 1 {

@@ -24,8 +24,8 @@ pub enum SqliteSequencePolicy {
 /// `TableRebuildSpec::sequence_policy` used to be this very type, which pointed the
 /// dependency the wrong way: the backend CONTRACT, which every vendor sits above,
 /// would have had to name this crate. It carries
-/// [`SequenceHighWaterPolicy`] now, and the translation happens here — at the
-/// boundary of the backend that owns the behaviour — rather than in a plan
+/// [`SequenceHighWaterPolicy`] now, and the translation happens here - at the
+/// boundary of the backend that owns the behaviour - rather than in a plan
 /// carrier every dialect shares.
 impl From<SequenceHighWaterPolicy> for SqliteSequencePolicy {
     fn from(policy: SequenceHighWaterPolicy) -> Self {

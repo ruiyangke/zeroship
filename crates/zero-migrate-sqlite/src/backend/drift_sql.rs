@@ -13,8 +13,8 @@
 //! Every read here runs under **`EngineJournal`** mode: the engine's OWN
 //! introspection touches `sqlite_master` and issues `PRAGMA table_info(...)` etc.,
 //! both of which the **CreatorUp** authorizer denies a creator from doing (PRAGMA
-//! is denied outright in CreatorUp;). The introspection is read-only — it
-//! emits no DDL and mutates nothing — but it MUST run in engine mode for the PRAGMA
+//! is denied outright in CreatorUp;). The introspection is read-only - it
+//! emits no DDL and mutates nothing - but it MUST run in engine mode for the PRAGMA
 //! reads to compile. A creator can never reach this code path (it is engine-private,
 //! behind the `SqliteBackend`), so allowing these reads under engine mode does not
 //! widen the creator surface.
@@ -22,13 +22,13 @@
 //! # What is excluded from the app-schema snapshot
 //!
 //! - SQLite internal tables (`sqlite_*`, incl. `sqlite_sequence` / `sqlite_stat*`).
-//! - The `_mig` journal objects — they live in the ATTACHed `_mig` database, not
+//! - The `_mig` journal objects - they live in the ATTACHed `_mig` database, not
 //! `main`, so a `main`-scoped `sqlite_master` read never sees them anyway; we
 //! additionally scope every PRAGMA to `main`.
 //!
 //! # Sentinel recovery
 //!
-//! The SQLite emitter bakes the `/* zero-migrate:mask:… */` (and `/* zero-migrate:enc:… */`) sentinels
+//! The SQLite emitter bakes the `/* zero-migrate:mask:... */` (and `/* zero-migrate:enc:... */`) sentinels
 //! INLINE in the `CREATE` text, which `sqlite_master.sql` preserves verbatim (SQLite
 //! keeps comments in the stored schema text, unlike PG which discards them at
 //! parse). [`recover_inline_sentinel`] pulls the `zero-migrate:mask:` / `zero-migrate:enc:` body for a
@@ -50,7 +50,7 @@ use zero_migrate_backend::stored_ddl::StoredDdl;
 use zero_migrate_ir::ir::{IdentityCol, IndexSortOrder};
 // The catalog-side value-format comparison, called at the NEUTRAL seam with this
 // vendor's own renderers. The engine's `render::value_format` doors are a
-// `pub(crate)` module whose whole body is `seam::…(value_format_renderer(dialect),
+// `pub(crate)` module whose whole body is `seam::...(value_format_renderer(dialect),
 // renderer(dialect))`; a backend that already knows which vendor it is passes them
 // itself and the registry round trip disappears.
 use zero_migrate_backend::value_format::{
@@ -58,7 +58,7 @@ use zero_migrate_backend::value_format::{
 };
 
 /// One member column of a composite foreign key, as `PRAGMA foreign_key_list`
-/// reports it: `(seq, from_column, to_column)` — `seq` orders the columns within
+/// reports it: `(seq, from_column, to_column)` - `seq` orders the columns within
 /// the FK, `from`/`to` are the local and referenced column names.
 type ForeignKeyColumn = (i64, String, String);
 
@@ -102,7 +102,7 @@ fn drift_err(e: SqliteActorError) -> DriftError {
 
 /// True iff `name` is a SQLite-internal object we must exclude from the app-schema
 /// snapshot: anything prefixed `sqlite_` (`sqlite_sequence`, `sqlite_stat1`,
-/// `sqlite_autoindex_*`, …). The `_mig` journal lives in a different database
+/// `sqlite_autoindex_*`, ...). The `_mig` journal lives in a different database
 /// (ATTACHed alias), so it never appears in a `main`-scoped read.
 fn is_internal(name: &str) -> bool {
     name.starts_with("sqlite_")
@@ -119,7 +119,7 @@ fn lit(s: &str) -> String {
 ///
 /// Read-only; runs under engine mode (the PRAGMA reads require it). The
 /// result map is a `BTreeMap` and every child vector is name-sorted, so the
-/// snapshot is byte-stable regardless of catalog scan order — matching the PG
+/// snapshot is byte-stable regardless of catalog scan order - matching the PG
 /// snapshot's determinism contract.
 ///
 /// # Errors
@@ -144,8 +144,8 @@ pub(crate) async fn snapshot_schema_for(
     // Base tables of `main`, with their stored CREATE text (carries inline
     // sentinels). `type='table'` excludes views/indexes/triggers; the
     // `name NOT LIKE 'sqlite_%'` and the `is_internal` guard exclude SQLite
-    // internals. `main.sqlite_master` scopes the read to the app file — never `_mig`.
-    // NOTE: we deliberately do NOT use `NOT LIKE 'sqlite_%'` here — the hardened
+    // internals. `main.sqlite_master` scopes the read to the app file - never `_mig`.
+    // NOTE: we deliberately do NOT use `NOT LIKE 'sqlite_%'` here - the hardened
     // authorizer's function allowlist does not include `LIKE`, so the
     // engine's own introspection must avoid it. The `is_internal` Rust-side guard
     // below filters `sqlite_*` instead (same effect, no LIKE function call).
@@ -258,8 +258,8 @@ pub(crate) async fn snapshot_schema_for(
 }
 
 /// Columns via `PRAGMA table_info(<t>)`. Columns: cid, name, type, notnull,
-/// dflt_value, pk. We map `type` → `data_type` (normalised lowercase, the SQLite
-/// declared-type spelling), `notnull == 0` → nullable, and recover the inline
+/// dflt_value, pk. We map `type` -> `data_type` (normalised lowercase, the SQLite
+/// declared-type spelling), `notnull == 0` -> nullable, and recover the inline
 /// `zero-migrate:mask:` / `zero-migrate:enc:` sentinel for the column from the stored CREATE text.
 async fn introspect_columns(
     actor: &MigrationActor,
@@ -298,7 +298,7 @@ async fn introspect_columns(
         return Ok(());
     };
     // Collect PK member columns (table_info `pk` > 0), ordered by the pk ordinal, so
-    // we can synthesise the PRIMARY KEY constraint here — `index_list` does NOT
+    // we can synthesise the PRIMARY KEY constraint here - `index_list` does NOT
     // report an auto-index for a rowid PK (a single `INTEGER PRIMARY KEY`), so the
     // index-bucket PK detection misses it; table_info is the authoritative source.
     let mut pk_members: Vec<(i64, String)> = Vec::new();
@@ -317,12 +317,12 @@ async fn introspect_columns(
         // an unmanaged INTEGER key distinct from an unmanaged BIGINT key even
         // though both have SQLite INTEGER affinity.
         //
-        // A PRIMARY KEY column is NOT NULL in the engine's model — the desired
+        // A PRIMARY KEY column is NOT NULL in the engine's model - the desired
         // snapshot stamps `id TEXT PRIMARY KEY` as `nullable: false`, and Postgres
         // makes every PK column NOT NULL. But SQLite has a long-standing quirk: a
         // non-`INTEGER` PRIMARY KEY (e.g. our `id TEXT PRIMARY KEY`) is NOT
         // implicitly NOT NULL, so `PRAGMA table_info` reports `notnull=0` for it.
-        // Taking that literally would falsely flag a `nullable true → false` drift on
+        // Taking that literally would falsely flag a `nullable true -> false` drift on
         // the `id` column of every table on the SQLite leg. Treat a PK member as NOT
         // NULL so the introspected nullability agrees with the dialect-agnostic model
         // (and with the PG snapshot).
@@ -440,7 +440,7 @@ async fn introspect_columns(
 }
 
 /// Indexes via `PRAGMA index_list(<t>)` + `PRAGMA index_info(<idx>)`, plus the
-/// UNIQUE / PRIMARY KEY index → [`ConstraintSnapshot`] synthesis.
+/// UNIQUE / PRIMARY KEY index -> [`ConstraintSnapshot`] synthesis.
 ///
 /// `index_list` columns: seq, name, unique, origin, partial. `origin` is `c`
 /// (CREATE INDEX), `u` (a UNIQUE constraint's auto-index), or `pk` (the PRIMARY KEY
@@ -557,8 +557,8 @@ async fn introspect_indexes_and_unique(
                 continue;
             }
         }
-        // A real index (CREATE INDEX, origin 'c') — and an explicitly-named UNIQUE
-        // index that is not a sqlite_autoindex — is an IndexSnapshot.
+        // A real index (CREATE INDEX, origin 'c') - and an explicitly-named UNIQUE
+        // index that is not a sqlite_autoindex - is an IndexSnapshot.
         if is_internal(&index.name) {
             continue;
         }
@@ -782,7 +782,7 @@ fn split_top_level_commas(s: &str) -> Vec<&str> {
     out
 }
 
-/// Foreign keys via `PRAGMA foreign_key_list(<t>)` → one `FOREIGN KEY`
+/// Foreign keys via `PRAGMA foreign_key_list(<t>)` -> one `FOREIGN KEY`
 /// [`ConstraintSnapshot`] per declared FK. PRAGMA is authoritative for the
 /// ordered local/referenced tuples and referential actions. It does not expose a
 /// constraint's declared name or deferrability, so those are correlated from the
@@ -1262,22 +1262,22 @@ fn take_fk_action(tokens: &[SqliteDdlToken], cursor: &mut usize) -> Option<Strin
     }
 }
 
-/// Recover an inline `zero-migrate:mask:…` or `zero-migrate:enc:…` sentinel for `column` from the
+/// Recover an inline `zero-migrate:mask:...` or `zero-migrate:enc:...` sentinel for `column` from the
 /// stored CREATE text. The emitter writes the sentinel as an inline
-/// `/* zero-migrate:mask:… */` comment immediately after the relevant column's type;
+/// `/* zero-migrate:mask:... */` comment immediately after the relevant column's type;
 /// `sqlite_master.sql` preserves it verbatim. We find the column's clause and, if a
-/// `/* … */` comment on that clause carries a `zero-migrate:mask:` / `zero-migrate:enc:` body, return
+/// `/* ... */` comment on that clause carries a `zero-migrate:mask:` / `zero-migrate:enc:` body, return
 /// that body (the sentinel without the comment delimiters). `None` if the column
 /// carries no sentinel.
 ///
 /// Conservative + injection-free: a pure string scan over engine-stored text, never
 /// re-executed as SQL. It looks for the column NAME (quoted or bare) followed by a
-/// `/* … */` block before the next column boundary, and extracts a recognised
+/// `/* ... */` block before the next column boundary, and extracts a recognised
 /// sentinel body from that block.
 fn recover_inline_sentinel(create_sql: &str, column: &str) -> Option<String> {
     let clause = sqlite_column_clause(create_sql, column)?;
 
-    // Extract the first `/* … */` block in this clause and pull a recognised body.
+    // Extract the first `/* ... */` block in this clause and pull a recognised body.
     let open = clause.find("/*")?;
     let close_rel = clause[open + 2..].find("*/")?;
     let body = clause[open + 2..open + 2 + close_rel].trim();

@@ -7,7 +7,7 @@ use crate::DIALECT;
 /// `SQLite`'s capability answers.
 ///
 /// [`Capability::PartitionRelationDdl`] is absent because SQLite has no
-/// partitioning of any kind — no relation-valued partitions and no storage
+/// partitioning of any kind - no relation-valued partitions and no storage
 /// divisions either. All four `DdlEmitter` partition methods return `None`.
 pub const SQLITE_CAPABILITIES: CapabilitySet = CapabilitySet::empty()
     .with(Capability::VirtualGeneratedColumn)

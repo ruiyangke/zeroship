@@ -15,7 +15,7 @@
 //! differ, there is no raw-SQL SQLite author, and the differ's 12-step table
 //! rebuilds are already routed through the engine's destructive/approval gate. So
 //! the shapes an analyzer would warn about are largely shapes the engine has already
-//! made the operator approve. LARGELY, not entirely — this is an argument that the
+//! made the operator approve. LARGELY, not entirely - this is an argument that the
 //! absence costs less on SQLite, not that it costs nothing.
 //!
 //! # Which is why the empty list is not what this returns

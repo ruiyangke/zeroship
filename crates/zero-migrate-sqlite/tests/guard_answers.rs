@@ -15,7 +15,7 @@
 //!   enforcement `data_security.destructive_ops = forbid` has on this backend, because
 //!   this guard is handed no policy and cannot read the knob. Answering `true` would
 //!   assert "I refuse destructive ops myself", the walk would step aside, and the knob
-//!   would become inert — which its doc records as the exact state that once let a
+//!   would become inert - which its doc records as the exact state that once let a
 //!   `DROP TABLE` through under the default `forbid`.
 //! - `flags_for_sql()` returns `requires_approval: true` because no SQLite parser exists
 //!   here, so no facet can be read out of an `up` blob. Returning

@@ -32,7 +32,7 @@ impl CatalogFoldPolicy for SqliteCatalogFoldPolicy {
     }
 
     /// SQLite has no name for a primary key to report. There is no constraint
-    /// catalog at all, and the PK's auto-index — when one exists — is named by the
+    /// catalog at all, and the PK's auto-index - when one exists - is named by the
     /// engine (`sqlite_autoindex_*`), which is an internal that must not leak.
     ///
     /// So this backend does not report a name it was given; it CHOOSES one, and the

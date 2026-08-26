@@ -178,7 +178,7 @@ impl ValidationPolicy for SqliteValidationPolicy {
             )),
             // This backend speaks only for itself and names only itself, from its own
             // DialectId. The old text called the family "Postgres-only" and tagged it
-            // "(PgOnly)" — a variant that does not exist, on a facet no author writes.
+            // "(PgOnly)" - a variant that does not exist, on a facet no author writes.
             // What is true is narrower and checkable: these ops have no analogue here,
             // so an artifact carrying one reaches whichever backend renders them and
             // this is not that backend.
@@ -288,14 +288,14 @@ impl ValidationPolicy for SqliteValidationPolicy {
     /// Until this seam existed, a SQLite raw view body went through the engine's
     /// `pg_query::parse` and the PostgreSQL body scanner, so it had to survive:
     ///
-    /// - the shape gate — exactly one top-level statement, that statement a
+    /// - the shape gate - exactly one top-level statement, that statement a
     ///   `SELECT`, no semicolon-chained second statement, no `SELECT INTO`;
-    /// - the deny-list — `pg_read_file`, `COPY PROGRAM`, network functions,
+    /// - the deny-list - `pg_read_file`, `COPY PROGRAM`, network functions,
     ///   dynamic-SQL string literals, and references outside the confined schema.
     ///
     /// Returning `None` removes ALL of it. `None` was never SAFE; it was CHOSEN,
     /// knowingly, while there are no users, because the alternative was keeping a
-    /// PostgreSQL parser as the judge of SQLite grammar — which was its own defect
+    /// PostgreSQL parser as the judge of SQLite grammar - which was its own defect
     /// (a bracket-quoted identifier, SQLite's own native quoting, was refused on
     /// SQLite).
     ///
@@ -303,7 +303,7 @@ impl ValidationPolicy for SqliteValidationPolicy {
     ///
     /// The declarative differ never emits a `ViewQuery::Raw`, so on the descriptor
     /// path there is nothing here to admit. That is a property of who CALLS the
-    /// author today, not a gate — an operator holding `sql.raw_view_body` and
+    /// author today, not a gate - an operator holding `sql.raw_view_body` and
     /// building IR directly reaches this method, and gets `None`. Do not read the
     /// descriptor path as the reason this is acceptable.
     ///

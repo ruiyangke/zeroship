@@ -31,7 +31,7 @@
 //! # Why `main` IS the app file (not `:memory:`, not a double-ATTACH)
 //!
 //! The app file is the connection's **main** database, so an UNqualified creator
-//! `CREATE TABLE users(...)` lands in — and PERSISTS to — the app file. We do NOT
+//! `CREATE TABLE users(...)` lands in - and PERSISTS to - the app file. We do NOT
 //! ATTACH the app file a second time: opening the same file as both `main` and an
 //! `app` alias would open it TWICE on one connection, and `BEGIN IMMEDIATE` would
 //! deadlock the two handles against each other on the file's RESERVED lock. With
@@ -46,11 +46,11 @@ use rusqlite::Connection;
 use super::authorizer::{make_authorizer, AuthMode, DenialLog, Mode, MIG_ALIAS};
 
 /// The version floor the journal-immutability + feature set requires:
-/// DEFENSIVE/TRUSTED_SCHEMA (≥3.31/3.26), DQS dbconfig (≥3.29), RETURNING (≥3.35),
-/// window functions (≥3.25), and the authorizer passing `zDb` on DROP_TABLE/DML.
+/// DEFENSIVE/TRUSTED_SCHEMA (>=3.31/3.26), DQS dbconfig (>=3.29), RETURNING (>=3.35),
+/// window functions (>=3.25), and the authorizer passing `zDb` on DROP_TABLE/DML.
 /// Bundled SQLite is 3.51.3; the check refuses to run below the floor so the
 /// deny-on-`_mig` proof cannot silently no-op against an exotic build.
-const SQLITE_VERSION_FLOOR: i32 = 3_035_000; // 3.35.0 — the highest single floor (RETURNING)
+const SQLITE_VERSION_FLOOR: i32 = 3_035_000; // 3.35.0 - the highest single floor (RETURNING)
 
 /// An error from the migration SQLite actor. Vendor-neutral `String` payloads so
 /// it can flow through the generic backend errors (which add a `Backend(String)`
@@ -85,7 +85,7 @@ impl SqliteActorError {
     /// `ErrorCode::AuthorizationForStatementDenied` and the message "not
     /// authorized" for STATEMENT-level denials. A denied `Read` (a column read)
     /// renders differently: the message contains `is prohibited`
-    /// (still `SQLITE_AUTH`, the authorizer's column-read deny path) — so we
+    /// (still `SQLITE_AUTH`, the authorizer's column-read deny path) - so we
     /// match that wording too, else a legitimate authorizer deny of a creator
     /// `SELECT FROM "_mig"` would be misclassified as an unrelated error.
     #[must_use]
@@ -105,7 +105,7 @@ impl SqliteActorError {
 /// A single migration-actor command. Each carries a `flume::bounded(1)` reply.
 enum Command {
     /// Run one statement (prepare+step under the current authorizer mode). Used
-    /// for the creator `up` AND the journal writes — NEVER a multi-statement batch
+    /// for the creator `up` AND the journal writes - NEVER a multi-statement batch
     /// that spans a mode boundary (the mode is read at prepare time, so
     /// each prepare must happen under its intended mode).
     Exec {
@@ -131,10 +131,10 @@ enum Command {
         reply: flume::Sender<Result<(), SqliteActorError>>,
     },
     /// Run ONE parameterized statement that returns rows (a windowed
-    /// backfill `UPDATE … RETURNING <cursor>`, or a parameterized SELECT), binding
+    /// backfill `UPDATE ... RETURNING <cursor>`, or a parameterized SELECT), binding
     /// `params` NATIVELY to its `?n` placeholders. The single source the SQLite
-    /// batched-backfill executor uses to run a batch's `UPDATE … RETURNING` and read
-    /// back the touched cursor values — never string-interpolated, so a
+    /// batched-backfill executor uses to run a batch's `UPDATE ... RETURNING` and read
+    /// back the touched cursor values - never string-interpolated, so a
     /// bind value can never alter the statement shape. Prepared + stepped under the
     /// current authorizer mode, exactly like [`Command::Query`].
     QueryParams {
@@ -170,7 +170,7 @@ enum Command {
 
 /// A typed value bound NATIVELY to a `?n` placeholder of a one-shot
 /// DML statement. A transport-safe (`Send`) mirror of [`zero_migrate_backend::step::BindValue`]
-/// the actor binds via rusqlite's parameter API — never interpolated, so a bind
+/// the actor binds via rusqlite's parameter API - never interpolated, so a bind
 /// value can never alter the statement shape. `Decimal`/`Text` are bound
 /// as TEXT (the column affinity coerces; the IR numeric domain is i64 +
 /// decimal-string).
@@ -343,7 +343,7 @@ impl MigrationActor {
     }
 
     /// Run ONE parameterized DML statement, binding `params` natively to
-    /// its `?n` placeholders. The creator one-shot DML SQLite executor — the binds
+    /// its `?n` placeholders. The creator one-shot DML SQLite executor - the binds
     /// can never alter the statement shape.
     ///
     /// # Errors
@@ -365,9 +365,9 @@ impl MigrationActor {
     }
 
     /// Run ONE parameterized statement that returns rows (a windowed
-    /// backfill `UPDATE … RETURNING <cursor>`, or a parameterized SELECT), binding
+    /// backfill `UPDATE ... RETURNING <cursor>`, or a parameterized SELECT), binding
     /// `params` natively to its `?n` placeholders. The batched-backfill executor's
-    /// per-batch primitive — the binds can never alter the statement shape.
+    /// per-batch primitive - the binds can never alter the statement shape.
     ///
     /// # Errors
     /// [`SqliteActorError::Exec`] on a prepare/step failure (an authorizer DENY
@@ -411,7 +411,7 @@ impl MigrationActor {
     }
 
     /// Flip the authorizer mode. Between (never inside) statement
-    /// prepares — enforced by the single-connection actor serialization.
+    /// prepares - enforced by the single-connection actor serialization.
     pub async fn set_mode(&self, mode: Mode) -> Result<(), SqliteActorError> {
         let (reply, rx) = flume::bounded(1);
         self.send(Command::SetMode { mode, reply }).await?;
@@ -505,7 +505,7 @@ async fn recv<T>(rx: flume::Receiver<T>) -> Result<T, SqliteActorError> {
 
 /// A `rusqlite::Connection` plus the [`AuthMode`] handle it shares with its
 /// installed authorizer closure. Owns the mode-flip seam so the actor can switch
-/// CreatorUp ↔ EngineJournal without re-installing the closure.
+/// CreatorUp <-> EngineJournal without re-installing the closure.
 struct HardenedConn {
     conn: Connection,
     mode: AuthMode,
@@ -599,7 +599,7 @@ fn open_hardened(
     journal_path: &Path,
     journal_attachment: JournalAttachment,
 ) -> Result<HardenedConn, SqliteActorError> {
-    // Version floor — refuse to run below the supported SQLite.
+    // Version floor - refuse to run below the supported SQLite.
     let v = rusqlite::version_number();
     if v < SQLITE_VERSION_FLOOR {
         return Err(SqliteActorError::UnsupportedVersion {
@@ -617,7 +617,7 @@ fn open_hardened(
     // single-connection `BEGIN IMMEDIATE` takes their RESERVED locks cleanly.
     //
     // Because `main` is the app file, an UNqualified creator `CREATE TABLE
-    // users(...)` lands in — and PERSISTS to — the app file. NOTE: the
+    // users(...)` lands in - and PERSISTS to - the app file. NOTE: the
     // SQLite migration `up` MUST be emitted UNqualified (no `"<app_id>".table`
     // schema prefix) so it targets `main`. The shared emitter currently qualifies
     // as `"<app_id>".table` (a PG-schema shape); wiring the SQLite emitter to emit
@@ -754,7 +754,7 @@ fn path_str(p: &Path) -> Result<String, SqliteActorError> {
 /// Run one statement (prepare + step). The authorizer fires at prepare under the
 /// current mode; a DENY surfaces as a `SqliteFailure` rendered into
 /// [`SqliteActorError::Exec`]. We use `execute_batch` for a single statement so
-/// PRAGMA/DDL that return no rows are handled uniformly — but callers MUST pass a
+/// PRAGMA/DDL that return no rows are handled uniformly - but callers MUST pass a
 /// single statement (a mode-spanning batch would be prepared under one mode).
 fn run_exec(conn: &HardenedConn, sql: &str) -> Result<(), SqliteActorError> {
     let denials = conn.denial_scope();

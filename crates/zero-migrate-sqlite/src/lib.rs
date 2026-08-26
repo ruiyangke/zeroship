@@ -1,29 +1,29 @@
-//! # `zero-migrate-sqlite` — the SQLite backend
+//! # `zero-migrate-sqlite` - the SQLite backend
 //!
 //! One vendor, no engine. This crate holds BOTH halves of SQLite now:
 //!
-//! * the RENDER half — DML, schema, DDL and value-format renderers plus the line-1
+//! * the RENDER half - DML, schema, DDL and value-format renderers plus the line-1
 //!   guard, all registered through [`VENDOR`]; and
-//! * the EXECUTION half — [`backend`], the `MigrationBackend` implementation: the
+//! * the EXECUTION half - [`backend`], the `MigrationBackend` implementation: the
 //!   dedicated hardened CDC-free `rusqlite` actor, the two-mode prepare-time
 //!   authorizer that is SQLite's second line of confinement, the `_mig` attached
 //!   journal, the `sqlite_master` + `PRAGMA` drift snapshot, the twelve-step table
 //!   rebuild, the batched backfill, and the OS-backed project lock.
 //!
-//! It depends on `zero-migrate-backend` and `zero-migrate-ir` — never on the engine.
+//! It depends on `zero-migrate-backend` and `zero-migrate-ir` - never on the engine.
 //! That is the whole point of the split: the engine names this crate for its
 //! registry, so this crate must not name the engine back.
 //!
 //! # What that cost, and what it bought
 //!
-//! Moving the execution half is what the governing rule — the core is neutral, and
-//! that is the hard limit — asks for. Not one of its couplings needed a change on
+//! Moving the execution half is what the governing rule - the core is neutral, and
+//! that is the hard limit - asks for. Not one of its couplings needed a change on
 //! the core side: every one was the ENGINE'S REGISTRY being asked which backend
 //! handles SQLite, from inside the SQLite backend, and each is answered by this
 //! crate naming ITSELF:
 //!
-//! * `render::backends::stored_ddl(&DIALECT)` — and the local `fn stored_ddl()`
-//!   wrapper that unwrapped its `Option` — became `crate::stored_ddl::PARSER`, the
+//! * `render::backends::stored_ddl(&DIALECT)` - and the local `fn stored_ddl()`
+//!   wrapper that unwrapped its `Option` - became `crate::stored_ddl::PARSER`, the
 //!   spelling `fold.rs` here already used;
 //! * `render::backends::schema_renderer(&DIALECT)` became `&crate::schema::RENDERER`,
 //!   which is the value that lookup returned;
@@ -32,7 +32,7 @@
 //!   `*_for_backend` entry points `zero_migrate_backend::dml`'s header describes;
 //! * the catalog value-format comparison (`catalog_id_default`,
 //!   `catalog_uuid_id_default`, `recover_format_check`, `column_metadata`) calls
-//!   `zero_migrate_backend::value_format` with this vendor's own two renderers —
+//!   `zero_migrate_backend::value_format` with this vendor's own two renderers -
 //!   the engine's doors are a `pub(crate)` module whose bodies are exactly that;
 //! * `schema::query::normalize_fk_action_for_dialect` and the engine's FK-snapshot
 //!   wrapper became `normalize_fk_action_for_vendor` / `fk_constraint_snapshot`
@@ -44,12 +44,12 @@
 //! Nothing in `zero-migrate` was widened to `pub` to make this compile, and core
 //! re-exports nothing from here: `apply::backend::sqlite` is gone rather than
 //! repointed, because a `pub use zero_migrate_sqlite::SqliteBackend` in core would
-//! be core naming a vendor CRATE outside the registry — trading one coupling for
+//! be core naming a vendor CRATE outside the registry - trading one coupling for
 //! another. Consumers name this crate directly.
 //!
 //! # The one-dialect-literal rule
 //!
-//! This CRATE names its dialect exactly ONCE — [`DIALECT`] in this file — and no
+//! This CRATE names its dialect exactly ONCE - [`DIALECT`] in this file - and no
 //! module names another vendor at all. Everything else reads `crate::DIALECT`, the
 //! execution half through its `SQLITE_DIALECT` alias.
 //!
@@ -61,14 +61,14 @@
 //! exactly one place in the workspace.
 //!
 //! `zero-migrate/tests/dialect_matrix/backend_modules_name_one_dialect.rs` ENFORCES
-//! it across the crate boundary — both halves, since the needle is now the
+//! it across the crate boundary - both halves, since the needle is now the
 //! DECLARATION rather than a per-module const, and a crate has exactly one.
 //!
 //! # What the rule does NOT catch
 //!
 //! A backend can still reach another vendor's spelling THROUGH a contract helper
 //! that hard-codes a dialect, and no grep of this crate can see it because the
-//! literal lives in `zero-migrate-backend`. That is measured, not hypothetical —
+//! literal lives in `zero-migrate-backend`. That is measured, not hypothetical -
 //! `zero_migrate_backend::dml`'s header carries the numbers. The identifier seam
 //! (`*_for_dialect(.., DIALECT)`) is how this crate stays clear of it.
 
@@ -102,7 +102,7 @@ pub use plan::SqliteSequencePolicy;
 /// TEST-ONLY charter fixtures, shared by this crate's unit tests.
 ///
 /// The engine's `zero_migrate::test_fixtures::no_inject` is `pub(crate)`, and no
-/// visibility widening can make a `pub(crate)` reachable across a crate boundary —
+/// visibility widening can make a `pub(crate)` reachable across a crate boundary -
 /// so the four project-lock tests that came with the execution half needed a
 /// sibling. This is it, and it is the same shape `zero-migrate-mysql`'s already has.
 #[cfg(test)]
@@ -123,7 +123,7 @@ const NAME: &str = "sqlite";
 /// This backend's identity, declared HERE and nowhere else in the workspace.
 ///
 /// `zero-migrate-ir` is the neutral vocabulary crate and its own module doc says a
-/// backend "declares its own — `DialectId::new(\"duckdb\")` — without editing this
+/// backend "declares its own - `DialectId::new(\"duckdb\")` - without editing this
 /// crate". It used to declare three anyway, and core re-exported them, so every
 /// consumer that wanted to name `SQLite` reached a neutral crate to get it. This is
 /// the declaration that ended that: the `NAME` const above is the workspace's only
@@ -152,7 +152,7 @@ const _: () = assert!(DialectId::is_well_formed_name(NAME));
 /// away at exactly the moment the vendor became separately linkable.
 ///
 /// `value_format`, `validation`, `ddl`, `guard` and `advisor` are REQUIRED. Delete any line and this literal stops
-/// compiling, here, with this crate named — which is the point: a backend cannot
+/// compiling, here, with this crate named - which is the point: a backend cannot
 /// inherit another backend's DDL, acquire a trusting guard, or acquire a silently
 /// empty advisory report by omission. See
 /// `zero_migrate_backend::registry::BackendVendor`.

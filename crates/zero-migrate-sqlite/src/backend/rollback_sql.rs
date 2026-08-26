@@ -3,10 +3,10 @@
 //! Reverses ONE applied migration via its `down` SQL inside a single
 //! `BEGIN IMMEDIATE` transaction, then appends an immutable `rolled_back` event to
 //! the consolidated `schema_migrations` table (event_seq is native AUTOINCREMENT)
-//! — the SAME atomic single-connection model as the apply path:
+//! - the SAME atomic single-connection model as the apply path:
 //!
 //! ```text
-//! BEGIN IMMEDIATE (EngineJournal — the engine owns txn boundaries)
+//! BEGIN IMMEDIATE (EngineJournal - the engine owns txn boundaries)
 //! CreatorUp: run the creator `down` (confined from `_mig`)
 //! EngineJournal: INSERT schema_migrations (event_kind='rolled_back')
 //! COMMIT (down + rolled_back event commit atomically)
@@ -14,14 +14,14 @@
 //!
 //! # Additive-only this phase
 //!
-//! SQLite ≥ 3.35 reverses these NATIVELY, no table rebuild:
+//! SQLite >= 3.35 reverses these NATIVELY, no table rebuild:
 //! - `DROP TABLE` (reverses a `CREATE TABLE`)
-//! - `DROP COLUMN` (reverses an `ADD COLUMN`; SQLite ≥ 3.35)
+//! - `DROP COLUMN` (reverses an `ADD COLUMN`; SQLite >= 3.35)
 //! - `DROP INDEX` (reverses a `CREATE INDEX`)
-//! - `ALTER TABLE … RENAME` (reverses a rename)
+//! - `ALTER TABLE ... RENAME` (reverses a rename)
 //!
-//! Any `down` that would REQUIRE the 12-step rebuild — a column TYPE-change
-//! reversal, a constraint add/drop, a `CHECK`/`DEFAULT`/nullability flip — is
+//! Any `down` that would REQUIRE the 12-step rebuild - a column TYPE-change
+//! reversal, a constraint add/drop, a `CHECK`/`DEFAULT`/nullability flip - is
 //! REFUSED up-front with [`RollbackError::TableRebuildRequired`] (the rebuild path
 //! is not built). We do NOT half-implement a rebuild here. The classifier
 //! ([`down_needs_rebuild`]) is a lightweight SQLite-aware scan: the libpg_query
@@ -31,7 +31,7 @@
 //!
 //! # Confinement (invariants unchanged)
 //!
-//! The creator `down` runs under `CreatorUp` — a malicious `down` attempting a
+//! The creator `down` runs under `CreatorUp` - a malicious `down` attempting a
 //! `_mig` write / ATTACH / PRAGMA is still denied by the authorizer at prepare
 //! time. The `rolled_back` journal write runs under `EngineJournal` (the only
 //! mode that permits a `_mig` write). The mode flip lands between separate
@@ -64,7 +64,7 @@ fn rb_err(e: SqliteActorError) -> RollbackError {
 ///
 /// # Errors
 /// - [`RollbackError::TableRebuildRequired`] if the `down` needs the 12-step
-/// rebuild — refused before any statement runs; nothing changes.
+/// rebuild - refused before any statement runs; nothing changes.
 /// - [`RollbackError::DownFailed`]-shaped `Backend` error if the `down` SQL
 /// fails or is denied by the authorizer (the txn is rolled back).
 /// - [`RollbackError::Backend`] on a journal-write / commit failure.
@@ -155,12 +155,12 @@ async fn run_rollback_txn(
     actor.exec("BEGIN IMMEDIATE").await.map_err(rb_err)?;
 
     let result = async {
-        // 2. CreatorUp — the creator `down` is confined from `_mig`. A malicious
+        // 2. CreatorUp - the creator `down` is confined from `_mig`. A malicious
         // `down` attempting a `_mig` write / ATTACH / PRAGMA is denied at prepare.
         actor.set_mode(Mode::CreatorUp).await?;
         actor.exec(down).await?;
 
-        // 3. EngineJournal — INSERT the immutable rolled_back event into the
+        // 3. EngineJournal - INSERT the immutable rolled_back event into the
         // consolidated table (event_seq is AUTOINCREMENT, not supplied). SEPARATE
         // prepares from the creator `down`, mode flip strictly between. A
         // rolled_back row leaves kind/phase/outcome NULL (the event-shape CHECK).
@@ -208,8 +208,8 @@ async fn finish_rollback_transaction(
         }
         Err(e) => {
             // Roll back so a denied/failed `down` never leaves a partial journal.
-            // Same discipline as apply: the AUTOCOMMIT state — not the ROLLBACK
-            // result — is the wedge signal.
+            // Same discipline as apply: the AUTOCOMMIT state - not the ROLLBACK
+            // result - is the wedge signal.
             actor.set_mode(Mode::EngineJournal).await.map_err(rb_err)?;
             let rb = actor.exec("ROLLBACK").await;
             match actor.is_autocommit().await {
@@ -232,7 +232,7 @@ async fn finish_rollback_transaction(
 
 /// Lightweight SQLite-aware detector: does this `down` contain a statement that
 /// would require the 12-step table REBUILD, rather than an operation SQLite
-/// ≥ 3.35 performs natively?
+/// >= 3.35 performs natively?
 ///
 /// Returns `Some(reason)` for a rebuild-needing `down`, `None` if every statement
 /// is additively-reversible. **Fail-closed:** an unrecognised `ALTER TABLE`
@@ -242,7 +242,7 @@ async fn finish_rollback_transaction(
 /// This is a token scan, NOT the libpg_query parser (which is Postgres and
 /// mis-parses SQLite DDL). It is conservative: it recognises the additive verbs
 /// (`DROP TABLE`/`DROP COLUMN`/`DROP INDEX`/`RENAME`) and the explicitly
-/// rebuild-needing `ALTER … TYPE`; anything else `ALTER`-shaped is refused.
+/// rebuild-needing `ALTER ... TYPE`; anything else `ALTER`-shaped is refused.
 #[must_use]
 pub(crate) fn down_needs_rebuild(down: &str) -> Option<String> {
     for stmt in split_statements(down) {
@@ -261,21 +261,21 @@ pub(crate) fn down_needs_rebuild(down: &str) -> Option<String> {
             continue;
         }
         // ALTER TABLE subcommands. SQLite supports exactly four:
-        // RENAME TO, RENAME [COLUMN] x TO y, ADD [COLUMN] …, DROP [COLUMN] …
-        // All four are additive/native. ANYTHING else expressed as ALTER TABLE — and
+        // RENAME TO, RENAME [COLUMN] x TO y, ADD [COLUMN] ..., DROP [COLUMN] ...
+        // All four are additive/native. ANYTHING else expressed as ALTER TABLE - and
         // in particular a type/constraint change (which SQLite has NO native ALTER
-        // for, so it can only be a 12-step rebuild dressed up) — needs the rebuild.
+        // for, so it can only be a 12-step rebuild dressed up) - needs the rebuild.
         let is_rename = norm.contains(" RENAME ");
         let is_add = norm.contains(" ADD ");
         let is_drop = norm.contains(" DROP ");
         if is_rename || is_add || is_drop {
-            // Native — additively reversible. (An `ADD COLUMN` here would be part of
+            // Native - additively reversible. (An `ADD COLUMN` here would be part of
             // a `down` that re-adds a column; its reversal is native too.)
             continue;
         }
-        // An ALTER TABLE that is neither RENAME/ADD/DROP — e.g. a smuggled
-        // `ALTER TABLE t ALTER COLUMN c TYPE …` (not even valid SQLite, only
-        // expressible via rebuild) — is refused as rebuild-needing.
+        // An ALTER TABLE that is neither RENAME/ADD/DROP - e.g. a smuggled
+        // `ALTER TABLE t ALTER COLUMN c TYPE ...` (not even valid SQLite, only
+        // expressible via rebuild) - is refused as rebuild-needing.
         return Some(format!(
             "ALTER TABLE without RENAME/ADD/DROP (type or constraint change): `{}`",
             stmt.trim()
@@ -285,7 +285,7 @@ pub(crate) fn down_needs_rebuild(down: &str) -> Option<String> {
 }
 
 /// Split a `down` script into statements on top-level `;` (ignoring `;` inside
-/// single/double-quoted strings, identifiers, and `/* … */` block comments). A
+/// single/double-quoted strings, identifiers, and `/* ... */` block comments). A
 /// simple but correct-enough splitter for the rebuild classifier.
 fn split_statements(sql: &str) -> Vec<String> {
     let mut out = Vec::new();

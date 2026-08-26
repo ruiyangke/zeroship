@@ -1,7 +1,7 @@
 //! TEST-ONLY charter fixtures for this crate's unit tests.
 //!
 //! The engine's `zero_migrate::test_fixtures::no_inject` is `pub(crate)`, and no
-//! visibility widening can make a `pub(crate)` reachable across a crate boundary —
+//! visibility widening can make a `pub(crate)` reachable across a crate boundary -
 //! so when the SQLite execution half moved here, its four project-lock tests needed
 //! a sibling. This is it, and it is the same shape `zero-migrate-mysql`'s
 //! `src/test_fixtures.rs` already has.
@@ -14,7 +14,7 @@
 //! The charter TEXT is a copy of the engine's, deliberately: these fixtures exist to
 //! keep the moved tests asserting against the same policy they asserted against
 //! before the move, so a divergence here would be a silent change of premise.
-//! `toml::Value` does the schema-name escaping for the same reason — the same
+//! `toml::Value` does the schema-name escaping for the same reason - the same
 //! escaping, not merely equivalent escaping.
 
 use zero_migrate_ir::policy_registry::effective_policy_from_charter_toml;

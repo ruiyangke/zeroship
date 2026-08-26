@@ -1,4 +1,4 @@
-//! SQLite's line-1 defense — the descriptor-diff path, trusted by construction.
+//! SQLite's line-1 defense - the descriptor-diff path, trusted by construction.
 //!
 //! SQLite migrations are produced ONLY by the declarative differ
 //! (`DeclarativeAuthor::diff`); there is no raw-SQL SQLite author. `libpg_query`
@@ -7,7 +7,7 @@
 //! `SqliteBackend`'s runtime authorizer applied per statement at execution.
 //!
 //! So [`SqliteGuard::check`] returns the EMPTY outcome. That is a deliberate grant of
-//! trust, and this file is where it is granted — written out, in this vendor's own
+//! trust, and this file is where it is granted - written out, in this vendor's own
 //! crate, attributable to this vendor.
 //!
 //! # This is not the whole of SQLite's data security
@@ -16,7 +16,7 @@
 //! It does. `data_security.destructive_ops = forbid` is enforced for SQLite by
 //! `zero_migrate_backend::guard::check_ir_data_security_policy`, over the structured IR
 //! rather than over SQL text, and its gate is written
-//! `if cfg.dialect() != &POSTGRES` — i.e. it exists precisely
+//! `if cfg.dialect() != &POSTGRES` - i.e. it exists precisely
 //! BECAUSE the guard here is empty and is handed no policy. Enforcement over the IR is
 //! the stronger place for a descriptor-only dialect anyway: there is no text to
 //! misparse, only ops.
@@ -24,7 +24,7 @@
 //! # Why this is not shared with MySQL
 //!
 //! It used to be. Both dialects ran one `SqliteDescriptorGuard`, whose own doc
-//! admitted it "serves BOTH descriptor-only engines — SQLite and MySQL — despite the
+//! admitted it "serves BOTH descriptor-only engines - SQLite and MySQL - despite the
 //! name". Sharing a type named after one vendor made a MySQL reviewer read the
 //! dispatch as a bug at a glance. Each vendor now writes its own, which costs a dozen
 //! lines and means a change to SQLite's posture cannot silently become a change to
@@ -56,7 +56,7 @@ impl MigrationGuard for SqliteGuard {
 
     /// REFUSED, not waved through.
     ///
-    /// A raw island is `Op::Raw` — PostgreSQL text. `libpg_query` cannot parse
+    /// A raw island is `Op::Raw` - PostgreSQL text. `libpg_query` cannot parse
     /// SQLite and SQLite has no raw author, so an island arriving here is a
     /// mis-dispatch rather than a trusted operation. Returning `Ok` would grant SQLite
     /// an unchecked raw door that no SQLite author can open, so this refuses with
@@ -80,7 +80,7 @@ impl MigrationGuard for SqliteGuard {
     /// This is the "I have no raw door" answer the neutral net-state walk asks for.
     /// SQLite migrations are produced ONLY by the declarative differ, and
     /// [`SqliteGuard::check_raw_island_sql`] above refuses an island outright, so there
-    /// is no island whose net table state could escape the walk — and establishing
+    /// is no island whose net table state could escape the walk - and establishing
     /// that costs no parse, which is the point of asking the vendor rather than
     /// reaching for `libpg_query` from neutral code.
     ///
@@ -90,13 +90,13 @@ impl MigrationGuard for SqliteGuard {
         false
     }
 
-    /// `false` — this guard is constructed WITHOUT the composed policy, so it cannot
+    /// `false` - this guard is constructed WITHOUT the composed policy, so it cannot
     /// read `data_security.destructive_ops` at all, let alone refuse on it.
     ///
     /// The neutral posture walk in
     /// [`check_ir_data_security_policy`](zero_migrate_backend::guard::check_ir_data_security_policy)
     /// is consequently the ONLY enforcement that knob has on this backend. Answering
-    /// `true` would turn it off and make the knob silently inert — which is exactly
+    /// `true` would turn it off and make the knob silently inert - which is exactly
     /// what it was before that walk existed: a `DROP TABLE` applied under the default
     /// `forbid`.
     fn refuses_destructive_ops_itself(&self) -> bool {
@@ -107,8 +107,8 @@ impl MigrationGuard for SqliteGuard {
     ///
     /// `libpg_query` parses PostgreSQL, and there is no SQLite parser here, so no
     /// `destructive` / `non_transactional` / rename facet can be READ OUT of an `up`
-    /// blob. Rather than return the default flag set — which would silently assert
-    /// "not destructive, no approval needed" about text nobody inspected — this
+    /// blob. Rather than return the default flag set - which would silently assert
+    /// "not destructive, no approval needed" about text nobody inspected - this
     /// returns `requires_approval: true`.
     ///
     /// What is NO LONGER CHECKED, stated plainly: a raw-SQL-authored SQLite migration

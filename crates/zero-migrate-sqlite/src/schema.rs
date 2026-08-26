@@ -18,7 +18,7 @@ pub(super) struct SqliteSchemaRenderer;
 pub(super) static RENDERER: SqliteSchemaRenderer = SqliteSchemaRenderer;
 
 /// Whether this column is `SQLite`'s rowid-alias `INTEGER PRIMARY KEY
-/// AUTOINCREMENT` shape — an auto-increment identity, inline PK, over one of the
+/// AUTOINCREMENT` shape - an auto-increment identity, inline PK, over one of the
 /// integer storage classes.
 #[must_use]
 pub(super) fn sqlite_auto_increment_identity_pk(c: &ColumnSnapshot, inline_pk: bool) -> bool {
@@ -357,7 +357,7 @@ fn sqlite_canonical_type(data_type: &str) -> &'static str {
     }
     match lower.as_str() {
         // TEXT affinity: PG `text`/`jsonb`/`timestamp with time zone`/`date`
-        // (date→TIMESTAMPTZ, calendarDate→DATE on PG; both → SQLite TEXT), and the
+        // (date->TIMESTAMPTZ, calendarDate->DATE on PG; both -> SQLite TEXT), and the
         // live SQLite `text` token itself.
         "text"
         | "text[]"
@@ -377,8 +377,8 @@ fn sqlite_canonical_type(data_type: &str) -> &'static str {
             "integer"
         }
         // TEXT affinity: `numeric`/`decimal` (a numeric `t.literal()`, `t.numeric()`)
-        // are stored as exact decimal TEXT on SQLite — no fixed-precision storage
-        // class — matching the emitter and the `t.numeric()` override. A live
+        // are stored as exact decimal TEXT on SQLite - no fixed-precision storage
+        // class - matching the emitter and the `t.numeric()` override. A live
         // `numeric`/`decimal` declaration canonicalises the same way, so the model
         // and introspection agree instead of drifting (numeric-vs-real).
         "numeric" | "decimal" => "text",
@@ -448,7 +448,7 @@ fn sqlite_ddl_type(data_type: &str) -> &'static str {
         // storage class; REAL (or NUMERIC) affinity coerces a sufficiently wide
         // decimal through a binary float, silently losing precision and diverging
         // from the documented "exact decimal text" guarantee (dialects.md). Store as
-        // TEXT affinity — byte-for-byte decimal text — matching the typed
+        // TEXT affinity - byte-for-byte decimal text - matching the typed
         // `ColType::Decimal` SQLite override.
         "numeric" | "decimal" => "TEXT",
         "bytea" | "blob" | "geography(point, 4326)" => "BLOB",

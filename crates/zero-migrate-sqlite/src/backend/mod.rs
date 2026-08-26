@@ -87,7 +87,7 @@ pub use rebuild_sql::RebuildError;
 // The four apply-time SQL builders under this module (`backfill_sql`,
 // `identity_sql`, `primary_key_sql`, `rebuild_sql`) each spell identifiers into
 // SQL they send to a real SQLite database. They used to do it through the raw
-// crate-wide escape primitive, which reached no renderer at all — and because
+// crate-wide escape primitive, which reached no renderer at all - and because
 // they contained no vendor-identity literal, the one-dialect-literal grep read
 // them as clean: it looks for a FOREIGN literal, and "no literal" passes.
 //
@@ -103,8 +103,8 @@ use crate::DIALECT as SQLITE_DIALECT;
  * received was always `crate::schema::RENDERER.stored_ddl()`, i.e.
  * `Some(&crate::stored_ddl::PARSER)`.
  *
- * The six call sites name `crate::stored_ddl::PARSER` directly now — the spelling
- * `fold.rs` in this crate already used — so the round trip, the `Option`, and the
+ * The six call sites name `crate::stored_ddl::PARSER` directly now - the spelling
+ * `fold.rs` in this crate already used - so the round trip, the `Option`, and the
  * `expect` that could never fire are all gone with it.
  */
 
@@ -166,12 +166,12 @@ impl SqliteBackend {
     }
 
     /// Apply ONE additive migration atomically with confinement. This is
-    /// the end-to-end seam: BEGIN IMMEDIATE → CreatorUp → run `up` →
-    /// EngineJournal → INSERT journal (event_seq AUTOINCREMENT) → COMMIT. Idempotent:
+    /// the end-to-end seam: BEGIN IMMEDIATE -> CreatorUp -> run `up` ->
+    /// EngineJournal -> INSERT journal (event_seq AUTOINCREMENT) -> COMMIT. Idempotent:
     /// a version whose latest event is `completed` is a no-op (returns `false`).
     /// Returns `true` iff the migration was newly applied.
     ///
-    /// This is the EXECUTOR-INTERNAL direct seam — it has NO approval gate. The
+    /// This is the EXECUTOR-INTERNAL direct seam - it has NO approval gate. The
     /// destructive/approval gate lives in the generic executor (`apply_locked`),
     /// which classifies a migration and demands an `Approval` for destructive ops
     /// BEFORE it ever calls down into a backend. Callers reaching this method
@@ -189,13 +189,13 @@ impl SqliteBackend {
     }
 
     /// The net-applied + lone-`started` entries, mirroring the PG `applied`
-    /// logical shape — window-function net-state over the native event_seq PK.
+    /// logical shape - window-function net-state over the native event_seq PK.
     pub async fn applied_sqlite(&self) -> Result<Vec<AppliedEntry>, SqliteActorError> {
         journal_sql::applied(&self.actor).await
     }
 
     /// Run (or resume) a SQLite **batched backfill** directly (the SQLite analog of
-    /// the PG bounded backfill runner) — the checkpointed /
+    /// the PG bounded backfill runner) - the checkpointed /
     /// crash-fuzz seam tests drive. `set_clause` / `filter` are the inline SQL the
     /// shared assembler
     /// ([`assemble_backfill_clauses_for_backend`](zero_migrate_backend::dml::assemble_backfill_clauses_for_backend))
@@ -260,7 +260,7 @@ impl SqliteBackend {
     ///
     /// # This is the EXECUTOR-INTERNAL direct seam (no approval gate here)
     ///
-    /// This inherent method runs the rebuild WITHOUT an approval gate — it is the raw
+    /// This inherent method runs the rebuild WITHOUT an approval gate - it is the raw
     /// dialect-coupled drive. The GATED production path is the engine's
     /// generic `zero_migrate::MigrationEngine::apply_declarative` (named in prose,
     /// not linked: the engine depends on this crate, so this crate cannot name it),
@@ -285,7 +285,7 @@ impl SqliteBackend {
     }
 
     /// Introspect the LIVE `main` (app file) schema into a dialect-agnostic
-    /// [`SchemaSnapshot`] — the drift surface, the same shape the PG path
+    /// [`SchemaSnapshot`] - the drift surface, the same shape the PG path
     /// returns. Recovers inline `zero-migrate:mask:` / `zero-migrate:enc:` sentinels from
     /// `sqlite_master.sql`.
     ///
@@ -307,9 +307,9 @@ impl SqliteBackend {
         dump_sql::dump_schema(&self.actor).await
     }
 
-    /// `load` (a.k.a. `db:setup`) — RESTORE a dumped schema's DDL onto `main`. The
+    /// `load` (a.k.a. `db:setup`) - RESTORE a dumped schema's DDL onto `main`. The
     /// SQLite peer of piping `schema.sql` into `psql`: the operator-/engine-generated
-    /// dump body is replayed verbatim under engine mode (the operator-restore posture —
+    /// dump body is replayed verbatim under engine mode (the operator-restore posture -
     /// this is an operator restore of a dump, not an untrusted creator `up`). Runs as
     /// one `execute_batch` (the dump body is multi-statement). The `_mig` journal is a
     /// SEPARATE attached DB and the dump never references it, so this only recreates
@@ -329,7 +329,7 @@ impl SqliteBackend {
     }
 
     /// Net-applied migrations as `(version, checksum, name)` for the dump trailer
-    /// — read straight from the `_mig` journal so the dumped checksum/name
+    /// - read straight from the `_mig` journal so the dumped checksum/name
     /// are the JOURNAL's, never re-derived from `--dir`. Per version, the LATEST
     /// event must be `applied` (net-applied); its `name`/`checksum` are taken from
     /// that latest completed event. Ordered by version (the trailer order).
@@ -362,7 +362,7 @@ impl SqliteBackend {
         Ok(out)
     }
 
-    /// `load` first-entry guard — run BEFORE any `main` mutation. Refuses
+    /// `load` first-entry guard - run BEFORE any `main` mutation. Refuses
     /// (errors, nothing touched) if `main` already carries user objects (any
     /// `sqlite_master` row that is not an internal `sqlite_*` object) OR if the
     /// journal already records net-applied migrations. `load` bootstraps a FRESH DB;
@@ -413,7 +413,7 @@ impl SqliteBackend {
         Ok(())
     }
 
-    /// `load` — journal the dump trailer's versions as `baseline`-kind `completed`
+    /// `load` - journal the dump trailer's versions as `baseline`-kind `completed`
     /// events WITHOUT running any `up` (the DDL was already restored by
     /// [`restore_schema_sqlite`](Self::restore_schema_sqlite)). First-entry-only: it
     /// refuses if the journal already records net-applied migrations (the
@@ -433,7 +433,7 @@ impl SqliteBackend {
 
 /// Choose the file used for the process-wide migration lock. The lock is keyed on
 /// the database's `(dev, ino)` so symlinks and hard links cannot create separate
-/// lock identities, but it is taken on a SIDECAR file — NEVER on the database file
+/// lock identities, but it is taken on a SIDECAR file - NEVER on the database file
 /// itself.
 ///
 /// # Why the sidecar, and not the database inode
@@ -442,8 +442,8 @@ impl SqliteBackend {
 /// Linux `flock` and the POSIX `fcntl` locks SQLite's unix VFS uses live in
 /// independent lock spaces, so locking the database file appeared to work. On
 /// **Darwin they are the same lock space**: an exclusive `flock` on the database
-/// file blocks SQLite's own writes to it — from the SAME process, on a different
-/// fd — and surfaces as `SQLITE_BUSY`:
+/// file blocks SQLite's own writes to it - from the SAME process, on a different
+/// fd - and surfaces as `SQLITE_BUSY`:
 ///
 /// ```text
 /// sqlite migration statement failed: database is locked
@@ -604,7 +604,7 @@ impl MigrationBackend for SqliteBackend {
     }
 
     async fn snapshot_session(&self) -> Result<Self::SessionSnapshot, ApplyError> {
-        // No GUCs / session settings to restore on SQLite — confinement is by
+        // No GUCs / session settings to restore on SQLite - confinement is by
         // authorizer state, not by per-session SET LOCAL.
         Ok(())
     }
@@ -651,11 +651,11 @@ impl MigrationBackend for SqliteBackend {
         // probe: read the live SQLite catalog and `decide` BEFORE running the `up`.
         // The read + the additive apply both run under the SAME held project lock +
         // atomic boundary `execute_pending` already enforces (apply_one is called
-        // under the held lock), so there is no probe→act TOCTOU window.
+        // under the held lock), so there is no probe->act TOCTOU window.
         //
-        // - RunBare → normal `apply_one_additive`.
-        // - SatisfiedNoop → journal the completed row WITHOUT running the `up` DDL.
-        // - FailDrift → typed `ExistenceGuardDrift` (parity with the PG arm) —
+        // - RunBare -> normal `apply_one_additive`.
+        // - SatisfiedNoop -> journal the completed row WITHOUT running the `up` DDL.
+        // - FailDrift -> typed `ExistenceGuardDrift` (parity with the PG arm) -
         // never a silent skip over a divergence.
         if let Some(probe) = &m.existence_guard {
             authorize_existence_guard_schema(
@@ -817,7 +817,7 @@ impl MigrationBackend for SqliteBackend {
         // The SQLite journal keeps the same append-only events; what it has never
         // had is the READER that projects them into `HistoryEvent`. Refusing by
         // name is the honest posture: an empty Vec would be indistinguishable from
-        // a project with no history at all, and this is an AUDIT surface — a caller
+        // a project with no history at all, and this is an AUDIT surface - a caller
         // that gets a silent empty log cannot tell "nothing happened" from "I
         // cannot see what happened". Adding the reader is a SQLite change, not a
         // core one.
@@ -873,7 +873,7 @@ impl MigrationBackend for SqliteBackend {
         // the comparison is dialect-agnostic (shared `compare_applied_to_set`);
         // only the journal read underneath is dialect-coupled. Read the net-applied
         // journal entries (SQLite window-function net-state) and feed the generic
-        // comparison — identical rules to the PG path.
+        // comparison - identical rules to the PG path.
         let applied = journal_sql::applied(&self.actor)
             .await
             .map_err(|e| DriftError::Backend(e.to_string()))?;
@@ -925,7 +925,7 @@ impl MigrationBackend for SqliteBackend {
         // Squash is an OPERATOR-authored supersession over an existing project's PG
         // migration history. The SQLite dev leg applies only TRUSTED
         // descriptor-generated migrations (empty `supersedes`/`renames`), and the
-        // declarative author never emits a squash — so a squash reaching the SQLite
+        // declarative author never emits a squash - so a squash reaching the SQLite
         // backend is a routing bug. Fail closed with a clear error rather than
         // silently journaling a supersession the dev path never produces (mirrors
         // `rebuild_one` on the PG backend, and `evaluate_preconditions` here).
@@ -949,7 +949,7 @@ impl MigrationBackend for SqliteBackend {
         // populated table is destructive (drop + recreate + copy; `m.flags.destructive`
         // is true for a `TableRebuild` by construction), so under
         // `ApprovalScope::Versions` it runs ONLY if the operator individually reviewed
-        // THIS rebuild's version — mirroring the engine's per-version gate and keyed on
+        // THIS rebuild's version - mirroring the engine's per-version gate and keyed on
         // the same rule as `PlanStep::approval_scope_version`. So a direct seam caller
         // driving `rebuild_one` cannot bypass the per-version scope. Refuse BEFORE
         // touching the table, so a non-scoped rebuild rebuilds NOTHING.
@@ -1097,7 +1097,7 @@ impl MigrationBackend for SqliteBackend {
         // analog of the PG writable-CTE windowed UPDATE. Completes the "one
         // script, both backends, DDL+DML" headline: a batched backfill is now
         // PORTABLE on BOTH backends. Each batch is its own committed
-        // `BEGIN IMMEDIATE … COMMIT` on the single hardened connection, resumable
+        // `BEGIN IMMEDIATE ... COMMIT` on the single hardened connection, resumable
         // from the committed progress cursor in `_mig`.
         //
         if let Some(entry) = journal_sql::applied(&self.actor)
@@ -1220,7 +1220,7 @@ impl MigrationBackend for SqliteBackend {
             });
         }
         // Map the plan binds to the transport-safe SQLite bind mirror (the shared
-        // `?n`-binding seam — `SqliteBind::from_bind`).
+        // `?n`-binding seam - `SqliteBind::from_bind`).
         let sqlite_binds: Vec<crate::backend::actor::SqliteBind> = binds
             .iter()
             .map(crate::backend::actor::SqliteBind::from_bind)
@@ -1265,11 +1265,11 @@ impl MigrationBackend for SqliteBackend {
         applied_by: &str,
     ) -> Result<BaselineOutcome, BaselineError> {
         // Delegate verbatim to the existing SQLite baseline body (first-entry /
-        // idempotency over the net-state → atomic `kind='baseline'` journal write
+        // idempotency over the net-state -> atomic `kind='baseline'` journal write
         // under engine mode, the `up` NEVER run). SQLite has no project schema/lock
         // in the journal write (the single actor serializes structurally), so `cfg`
         // is unused here. Map the SQLite-specific outcome/error onto the neutral
-        // trait types — the dialect split disappears at this boundary.
+        // trait types - the dialect split disappears at this boundary.
         journal_sql::baseline(&self.actor, m, applied_by)
             .await
             .map_err(|e| BaselineError::Backend(e.to_string()))

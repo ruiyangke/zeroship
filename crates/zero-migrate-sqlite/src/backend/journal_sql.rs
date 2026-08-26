@@ -11,7 +11,7 @@
 //! **Native total order.** `event_seq INTEGER PRIMARY KEY AUTOINCREMENT` is the
 //! total order: SQLite assigns a strictly-increasing rowid on every INSERT (the
 //! INSERTs never supply it). AUTOINCREMENT (not bare rowid) is REQUIRED so the
-//! order is strictly monotonic and never reused — a deleted row's seq can never be
+//! order is strictly monotonic and never reused - a deleted row's seq can never be
 //! recycled. There is NO standalone `event_seq` counter table and NO separate
 //! `_rolled_back` table (both removed in the "go native seq" consolidation).
 //!
@@ -23,18 +23,18 @@
 //! non-allowlisted functions.
 //! 3. The authorizer denies `PRAGMA` / writes / DROP / ALTER on `_mig` in
 //! CreatorUp (the primary deny, at prepare time).
-//! 4. Append-only `BEFORE UPDATE`/`BEFORE DELETE` triggers (`RAISE(ABORT,…)`) are
+//! 4. Append-only `BEFORE UPDATE`/`BEFORE DELETE` triggers (`RAISE(ABORT,...)`) are
 //! the in-DB backstop for row mutation (the operator path where the
 //! authorizer relaxes; on the Confined path the authorizer already denied it).
 //!
 //! # Atomic apply
 //!
-//! `BEGIN IMMEDIATE` → mode=CreatorUp → run the creator `up` → mode=EngineJournal
-//! → INSERT the journal row (the DB assigns `event_seq` via AUTOINCREMENT; no
-//! separate allocation step) → COMMIT. The creator `up` and the journal write are
+//! `BEGIN IMMEDIATE` -> mode=CreatorUp -> run the creator `up` -> mode=EngineJournal
+//! -> INSERT the journal row (the DB assigns `event_seq` via AUTOINCREMENT; no
+//! separate allocation step) -> COMMIT. The creator `up` and the journal write are
 //! SEPARATE prepare/execute calls (never one batch) so the mode flip lands between
 //! them and is read at each prepare. All on the single migration connection,
-//! strictly sequential — race-free by construction.
+//! strictly sequential - race-free by construction.
 
 use zero_migrate_backend::journal::{AppliedEntry, EventKind, JournaledKind, Phase};
 use zero_migrate_ir::migration::Migration;
@@ -43,7 +43,7 @@ use super::actor::{MigrationActor, SqliteActorError};
 use super::authorizer::Mode;
 
 /// The fixed, short, table-local immutability trigger names. ASCII-safe
-/// literals — never embed the (hyphenated-UUID) app id, which appears only in the
+/// literals - never embed the (hyphenated-UUID) app id, which appears only in the
 /// file path.
 const IMMUTABLE_TRG: &str = "zs_immutable_trg";
 
@@ -58,12 +58,12 @@ pub(crate) async fn ensure_journal(actor: &MigrationActor) -> Result<(), SqliteA
     actor.set_mode(Mode::EngineJournal).await?;
 
     // 1. The SINGLE consolidated append-only events table. `event_seq INTEGER
-    // PRIMARY KEY AUTOINCREMENT` is the native total order — SQLite assigns it on
+    // PRIMARY KEY AUTOINCREMENT` is the native total order - SQLite assigns it on
     // INSERT (never supplied); AUTOINCREMENT (not bare rowid) guarantees strictly
     // monotonic, never-reused values, so the latest event per version is a true
     // total order. One row per migration EVENT: an `applied` (forward) event or a
     // `rolled_back` event, discriminated by `event_kind`. version is NOT unique
-    // (rollback ↔ re-apply appends multiple rows). TEXT CURRENT_TIMESTAMP replaces
+    // (rollback <-> re-apply appends multiple rows). TEXT CURRENT_TIMESTAMP replaces
     // PG's TIMESTAMPTZ DEFAULT now; `at`/`by` unify the old
     // applied_at/rolled_back_at and applied_by/rolled_back_by. The applied-only
     // columns (kind/phase/outcome) are NULL on a `rolled_back` row; a CHECK
@@ -105,7 +105,7 @@ pub(crate) async fn ensure_journal(actor: &MigrationActor) -> Result<(), SqliteA
             .exec("ALTER TABLE \"_mig\".schema_migrations ADD COLUMN down TEXT")
             .await?;
     }
-    // The supersedes edge table — a relation, not part of the event order, so it
+    // The supersedes edge table - a relation, not part of the event order, so it
     // gets its OWN native AUTOINCREMENT PK (no shared counter).
     actor
         .exec(
@@ -118,7 +118,7 @@ pub(crate) async fn ensure_journal(actor: &MigrationActor) -> Result<(), SqliteA
         .await?;
 
     // 3. The MUTABLE inflight side-table (NOT guarded by the immutability triggers
-    // — markers are deleted on completion). Present for parity; the non-txn path
+    // - markers are deleted on completion). Present for parity; the non-txn path
     // does not exist on SQLite, so this stays empty.
     actor
         .exec(
@@ -134,7 +134,7 @@ pub(crate) async fn ensure_journal(actor: &MigrationActor) -> Result<(), SqliteA
     // 4. Append-only immutability triggers on the two append-only tables (the
     // consolidated events table + the supersedes edge table). SQLite has
     // `CREATE TRIGGER IF NOT EXISTS`, so no pg_trigger-style existence guard is
-    // needed. Short table-local names (`zs_immutable_trg`) — disambiguated per
+    // needed. Short table-local names (`zs_immutable_trg`) - disambiguated per
     // table by SQLite's per-table trigger namespace, but SQLite trigger names are
     // schema-global, so we suffix with the table to keep them unique. NOTE:
     // SQLite has no TRUNCATE and no DROP-fires-DELETE-trigger, so these defend
@@ -194,7 +194,7 @@ pub(crate) async fn apply_one_additive(
 /// Mirrors [`apply_one_additive`]'s idempotency pre-check and [`run_apply_txn`]'s
 /// atomic journal write, but SKIPS the CreatorUp `up` phase entirely (so no creator
 /// DDL runs). The single `completed` row is written under one `BEGIN IMMEDIATE` in
-/// `EngineJournal` mode — same recorded-not-run shape as [`baseline`], but with
+/// `EngineJournal` mode - same recorded-not-run shape as [`baseline`], but with
 /// `kind='apply'` (the guarded op IS an `apply`, just one whose effect is already
 /// satisfied), so the journal `kind` matches a re-deploy's bare-apply expectation
 /// and the checksum is `m`'s real checksum.
@@ -261,7 +261,7 @@ pub(crate) async fn journal_satisfied_noop(
     }
 }
 
-/// Record `m` as the SQLite project's **baseline** — a `kind='baseline'`,
+/// Record `m` as the SQLite project's **baseline** - a `kind='baseline'`,
 /// `completed` journal event WITHOUT running its `up` (the adoption path).
 /// This is the SQLite arm behind the single neutral
 /// [`MigrationBackend::baseline_one`](zero_migrate_backend::backend::MigrationBackend::baseline_one)
@@ -272,17 +272,17 @@ pub(crate) async fn journal_satisfied_noop(
 /// The motivating case: a dev developer who ran the OLD `run_sqlite_pipeline`
 /// has a `zs-default.sqlite` with user tables but an EMPTY `_mig` journal (the old
 /// path was a stateless diff). The first engine boot against that file must NOT
-/// re-create the tables or drift-abort — so we adopt the live schema by journaling
+/// re-create the tables or drift-abort - so we adopt the live schema by journaling
 /// `m` (an `up` that DOCUMENTS the live shape but is recorded-not-run), after which
 /// the declared diff applies only the *additional* ops on top.
 ///
 /// First-entry semantics, mirroring the PG `baseline`:
-/// - idempotent for the SAME version (a retried boot is safe → `already_present`);
+/// - idempotent for the SAME version (a retried boot is safe -> `already_present`);
 /// - refuses if the journal already records a DIFFERENT net-applied migration
-/// (the engine already manages this file) — fail-closed, nothing journaled.
+/// (the engine already manages this file) - fail-closed, nothing journaled.
 ///
 /// The whole thing runs atomically inside one `BEGIN IMMEDIATE` under engine
-/// mode (the `up` is NEVER executed, so there is no CreatorUp phase — this is the
+/// mode (the `up` is NEVER executed, so there is no CreatorUp phase - this is the
 /// key difference from [`apply_one_additive`]).
 pub(crate) async fn baseline(
     actor: &MigrationActor,
@@ -295,7 +295,7 @@ pub(crate) async fn baseline(
 
     // First-entry + idempotency check, read once off the net-state. A baseline is
     // a first-entry operation: refuse if ANY net-applied migration already exists
-    // (unless it is THIS exact version → idempotent).
+    // (unless it is THIS exact version -> idempotent).
     let net_completed: Vec<String> = applied(actor)
         .await?
         .into_iter()
@@ -318,7 +318,7 @@ pub(crate) async fn baseline(
     }
 
     // First entry: journal the baseline `completed` event WITHOUT running the
-    // `up`. One atomic transaction under engine mode (no CreatorUp phase —
+    // `up`. One atomic transaction under engine mode (no CreatorUp phase -
     // nothing of the creator's runs).
     actor.set_mode(Mode::EngineJournal).await?;
     actor.exec("BEGIN IMMEDIATE").await?;
@@ -327,7 +327,7 @@ pub(crate) async fn baseline(
         let checksum = sql_lit(m.checksum.as_str());
         let applied_by_lit = sql_lit(applied_by);
         let version_lit = sql_lit(&version);
-        // event_seq is AUTOINCREMENT — not supplied. event_kind='applied' (a
+        // event_seq is AUTOINCREMENT - not supplied. event_kind='applied' (a
         // baseline is a forward event recorded-not-run).
         actor
             .exec(&format!(
@@ -372,7 +372,7 @@ pub(crate) async fn baseline(
 /// recorded checksum matches what a subsequent `migrate`/drift-check expects).
 #[derive(Debug, Clone)]
 pub struct LoadedVersion {
-    /// The migration version (`<14-digit>` / `mig_…`).
+    /// The migration version (`<14-digit>` / `mig_...`).
     pub version: String,
     /// The migration's display name (best-effort from the file; may be empty).
     pub name: String,
@@ -388,10 +388,10 @@ pub struct LoadedVersion {
 /// genuinely-pending ones.
 ///
 /// **First-entry-only**, mirroring [`baseline`]: refuses (errors, nothing
-/// journaled) if the journal ALREADY records any net-applied migration — `load`
+/// journaled) if the journal ALREADY records any net-applied migration - `load`
 /// targets a FRESH/empty DB and must never clobber a DB the engine already
 /// manages. The whole batch is recorded in ONE `BEGIN IMMEDIATE` transaction
-/// under engine mode (no creator `up` runs — same recorded-not-run shape as
+/// under engine mode (no creator `up` runs - same recorded-not-run shape as
 /// [`baseline`]); on any error the transaction is rolled back, leaving the journal
 /// untouched.
 ///
@@ -405,7 +405,7 @@ pub(crate) async fn record_loaded_versions(
 ) -> Result<usize, SqliteActorError> {
     ensure_journal(actor).await?;
 
-    // First-entry guard — `load` must not clobber an already-managed DB.
+    // First-entry guard - `load` must not clobber an already-managed DB.
     let net_completed: Vec<String> = applied(actor)
         .await?
         .into_iter()
@@ -472,7 +472,7 @@ pub(crate) async fn record_loaded_versions(
 /// alter the statement shape. The DML runs under the confined
 /// **CreatorUp** authorizer mode (denied from `_mig`, from PRAGMA / transaction
 /// boundaries / vtables), then the `completed` journal row is written under
-/// **EngineJournal** — DML + journal atomic in one `BEGIN IMMEDIATE`.
+/// **EngineJournal** - DML + journal atomic in one `BEGIN IMMEDIATE`.
 ///
 /// The supplied checksum is the authoritative checksum of the complete authored
 /// migration. The same value is journaled for every step so edits to SQL, bound
@@ -494,18 +494,18 @@ pub(crate) async fn run_dml(
     ensure_journal(actor).await?;
 
     // 1. BEGIN IMMEDIATE under engine mode (the authorizer allows
-    // SQLITE_TRANSACTION only in EngineJournal — the engine owns txn boundaries).
+    // SQLITE_TRANSACTION only in EngineJournal - the engine owns txn boundaries).
     actor.set_mode(Mode::EngineJournal).await?;
     actor.exec("BEGIN IMMEDIATE").await?;
 
     let result = async {
         // 2. Run the DML under the confined CreatorUp mode (denied from `_mig`,
-        // PRAGMA, transaction boundaries, vtables) — exactly the confinement a
+        // PRAGMA, transaction boundaries, vtables) - exactly the confinement a
         // creator `up` runs under. The binds are positional `?n` params.
         actor.set_mode(Mode::CreatorUp).await?;
         actor.exec_params(template, binds).await?;
 
-        // 3. EngineJournal — INSERT the `completed` row. SEPARATE prepares from the
+        // 3. EngineJournal - INSERT the `completed` row. SEPARATE prepares from the
         // DML, with the mode flip strictly between.
         actor.set_mode(Mode::EngineJournal).await?;
         let name_lit = sql_lit(name);
@@ -538,8 +538,8 @@ async fn run_apply_txn(
     applied_by: &str,
     version: &str,
 ) -> Result<(), SqliteActorError> {
-    // 1. BEGIN IMMEDIATE — one writer, RESERVED lock taken now. Issued under engine
-    // mode (the authorizer allows SQLITE_TRANSACTION only in EngineJournal — the
+    // 1. BEGIN IMMEDIATE - one writer, RESERVED lock taken now. Issued under engine
+    // mode (the authorizer allows SQLITE_TRANSACTION only in EngineJournal - the
     // engine owns transaction boundaries; the creator `up` in CreatorUp can never
     // open/close a transaction).
     actor.set_mode(Mode::EngineJournal).await?;
@@ -563,12 +563,12 @@ async fn run_apply_txn(
         actor.set_mode(up_mode).await?;
         // The `up` may be multiple statements; each is prepared+stepped under the
         // chosen mode via execute_batch (single mode for the whole `up`, which is
-        // correct — the up phase is one mode). A creator `up` must NOT contain a
+        // correct - the up phase is one mode). A creator `up` must NOT contain a
         // journal write (the authorizer denies it); an engine-goodie `up` is
         // engine-authored DDL that touches only `main`.
         actor.exec(&m.up).await?;
 
-        // 3. EngineJournal — INSERT the applied row (event_seq is AUTOINCREMENT, not
+        // 3. EngineJournal - INSERT the applied row (event_seq is AUTOINCREMENT, not
         // supplied). SEPARATE prepares from the creator `up`, with the mode flip
         // strictly between.
         actor.set_mode(Mode::EngineJournal).await?;
@@ -600,7 +600,7 @@ async fn run_apply_txn(
 
     match result {
         Ok(()) => {
-            // 4. COMMIT — DDL + journal row commit together.
+            // 4. COMMIT - DDL + journal row commit together.
             actor.commit_or_cleanup("additive migration apply").await?;
             Ok(())
         }
@@ -611,13 +611,13 @@ async fn run_apply_txn(
             // entirely, which is unsafe on a LONG-LIVED, REUSED connection: if the
             // rollback leaves a transaction open, the NEXT apply fails with "cannot
             // start a transaction within a transaction". The ROLLBACK *error* alone
-            // is NOT the wedge signal — a statement that auto-aborts the txn (e.g. an
+            // is NOT the wedge signal - a statement that auto-aborts the txn (e.g. an
             // `OR ROLLBACK` conflict) already closes it, after which an explicit
             // ROLLBACK spuriously errors with "no transaction is active" while the
             // connection is perfectly clean. The load-bearing invariant is the
             // AUTOCOMMIT STATE: after the rollback attempt the connection MUST be back
             // in autocommit. If it is not, the connection is wedged and the caller
-            // must tear it down + rebuild before reuse — surfaced as `Poisoned` (more
+            // must tear it down + rebuild before reuse - surfaced as `Poisoned` (more
             // severe than the `up` error, which is moot once the connection is dead).
             actor.set_mode(Mode::EngineJournal).await?;
             let rb = actor.exec("ROLLBACK").await; // may spuriously error post auto-abort
@@ -644,8 +644,8 @@ pub(crate) fn sql_lit(s: &str) -> String {
 }
 
 /// The net-applied + lone-`started` entries, mirroring PG `applied`.
-/// `DISTINCT ON` → `ROW_NUMBER OVER (PARTITION BY version ORDER BY event_seq
-/// DESC)` (SQLite window functions, ≥3.25).
+/// `DISTINCT ON` -> `ROW_NUMBER OVER (PARTITION BY version ORDER BY event_seq
+/// DESC)` (SQLite window functions, >=3.25).
 pub(crate) async fn applied(actor: &MigrationActor) -> Result<Vec<AppliedEntry>, SqliteActorError> {
     // Engine read of `_mig`: run under engine mode (the journal is engine
     // territory; a SELECT-only read does not write, but reading `_mig` should not
@@ -758,7 +758,7 @@ pub(crate) async fn superseded_versions(
     rows.iter().map(|r| cell(r, 0)).collect()
 }
 
-/// The latest `completed` checksum per repeatable identity — the
+/// The latest `completed` checksum per repeatable identity - the
 /// repeatable re-run oracle. Reads only `schema_migrations` where
 /// `kind='repeatable'`.
 pub(crate) async fn latest_completed_checksums(

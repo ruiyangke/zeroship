@@ -23,7 +23,7 @@ impl SqliteTableRebuildPolicy {
     }
 
     /// does this existing SQLite table need the 12-step table REBUILD to
-    /// reconcile `live` → `desired`? Returns `Some(reason)` for a change SQLite has
+    /// reconcile `live` -> `desired`? Returns `Some(reason)` for a change SQLite has
     /// NO native `ALTER` for, `None` if every difference is natively expressible
     /// (ADD COLUMN / DROP COLUMN / ADD INDEX / DROP INDEX).
     ///
@@ -42,9 +42,9 @@ impl SqliteTableRebuildPolicy {
         dt: &TableSnapshot,
         table_renames: &[&ResolvedRename],
     ) -> Option<String> {
-        // (1) A hinted column RENAME — SQLite has `RENAME COLUMN`, but the engine's
+        // (1) A hinted column RENAME - SQLite has `RENAME COLUMN`, but the engine's
         //     rename path is the PG-shaped expand-contract sequence; on SQLite we
-        //     reconcile a rename via the rebuild (`to ← from` copy mapping), keeping
+        //     reconcile a rename via the rebuild (`to <- from` copy mapping), keeping
         //     it single-sourced + confinement-clean.
         if let Some(r) = table_renames.first() {
             return Some(format!("rename column {} → {}", r.from, r.to));
@@ -55,8 +55,8 @@ impl SqliteTableRebuildPolicy {
 
         // (2)/(3) A same-name column with a TYPE or NULLABILITY change. The
         //     the registered SQLite canonicalizer avoids false positives on
-        //     PG-vs-SQLite spelling differences (bytea↔blob, double precision↔real,
-        //     timestamptz↔text); a GENUINE change maps to two distinct tokens.
+        //     PG-vs-SQLite spelling differences (bytea<->blob, double precision<->real,
+        //     timestamptz<->text); a GENUINE change maps to two distinct tokens.
         for c in &dt.columns {
             if let Some(lc) = live_cols.get(c.name.as_str()) {
                 if self.schema_renderer().canonical_type(&lc.data_type)
@@ -84,7 +84,7 @@ impl SqliteTableRebuildPolicy {
             }
         }
 
-        // (4) A same-name INDEX whose uniqueness or column set changed — an in-place
+        // (4) A same-name INDEX whose uniqueness or column set changed - an in-place
         //     index redefinition (SQLite has no `ALTER INDEX`; a DROP+CREATE inside a
         //     rebuild is how the new shape's index set lands).
         let live_idx: BTreeMap<&str, &IndexSnapshot> =
@@ -109,7 +109,7 @@ impl SqliteTableRebuildPolicy {
             }
         }
 
-        // (5) A FOREIGN KEY set change — a redefinition (same name, changed body),
+        // (5) A FOREIGN KEY set change - a redefinition (same name, changed body),
         //     an ADD (desired-only FK), or a DROP (live-only FK). SQLite inlines FKs
         //     at CREATE TABLE and has no `ALTER TABLE ADD/DROP CONSTRAINT`, so ANY FK
         //     set difference is a rebuild.
@@ -144,9 +144,9 @@ impl SqliteTableRebuildPolicy {
         }
 
         // (6) A DROP COLUMN of a CONSTRAINED column. SQLite's native
-        //     `ALTER TABLE … DROP COLUMN` ERRORS at apply when the dropped column
+        //     `ALTER TABLE ... DROP COLUMN` ERRORS at apply when the dropped column
         //     participates in ANY index, CHECK, foreign key, generated-column
-        //     expression, or partial-index predicate — so the per-op
+        //     expression, or partial-index predicate - so the per-op
         //     `render_drop_column` would abort the migration. We route such a drop
         //     to the 12-step rebuild (which omits the column from `copy_columns` and
         //     recreates only the surviving dependents). A column that is
@@ -162,7 +162,7 @@ impl SqliteTableRebuildPolicy {
                 continue; // surviving column, or handled by the rename path
             }
             // This `col` is being dropped. Does any index / constraint / raw-DDL
-            // dependent of the LIVE table reference it? If so → rebuild.
+            // dependent of the LIVE table reference it? If so -> rebuild.
             if let Some(dep) = self
                 .schema_renderer()
                 .stored_ddl()

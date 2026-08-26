@@ -4,7 +4,7 @@
 //! `docs/proposals/pluggable-backends.md`, from `render::lower`. It is a DIRECTORY
 //! MOVE and nothing else: same functions, same bytes emitted, one const renamed. It
 //! was the last SQLite render path living in the 17k-line core lowerer, and its own
-//! doc had already said so — `backends/sqlite.rs`'s `render_trigger_op` carried a
+//! doc had already said so - `backends/sqlite.rs`'s `render_trigger_op` carried a
 //! note calling the delegation "a POINTER to work that `lower.rs`'s own step-3 pass
 //! has to finish, not a boundary that is done". This is that pass. MySQL's trigger
 //! spelling was the worked example of where it lands.
@@ -38,13 +38,13 @@ const SPLIT_PART_MAX_N: i64 = 8;
 /// (`crate::backend::backfill_sql`) assembles its own per-batch statements and has to
 /// bind through the same spelling the one-shot assembler reaches via
 /// [`SqliteDmlRenderer::placeholder`]. Two paths, one spelling, in the crate that owns
-/// it — it used to be `zero_migrate_backend::dml::sqlite_placeholder`, a vendor name in
+/// it - it used to be `zero_migrate_backend::dml::sqlite_placeholder`, a vendor name in
 /// the neutral contract whose only two callers were both here.
 pub(crate) fn placeholder(n: usize) -> String {
     format!("?{n}")
 }
 
-// This module's vendor identity, read from `crate::DIALECT` — this module names no
+// This module's vendor identity, read from `crate::DIALECT` - this module names no
 // dialect literal of its own. See `render/backends/mod.rs`.
 //
 // # It absorbed the trigger renderer's const on the way in
@@ -54,7 +54,7 @@ pub(crate) fn placeholder(n: usize) -> String {
 // capability and inline-render arguments that were already right, and six identifier
 // quotes that were NOT. Those six called the PostgreSQL-pinned
 // `dml::quote_bare_ident`, so every identifier in a rendered SQLite trigger was
-// spelled by `PostgresDmlRenderer::quote_ident` — correct only because both vendors
+// spelled by `PostgresDmlRenderer::quote_ident` - correct only because both vendors
 // spell an identifier `"x"`, and a hard blocker on extracting a `zero-migrate-sqlite`
 // crate that does not need `zero-migrate-postgres` at RUNTIME. A crate-extraction
 // spike proved the reach was live rather than theoretical: it rendered a
@@ -69,7 +69,7 @@ pub(crate) fn placeholder(n: usize) -> String {
 // identifier and touched nothing else, and `DIALECT` is what it was renamed to.
 //
 // Pinned by `tests/dialect_matrix/sqlite_trigger_quoting_reaches_postgres.rs`, whose
-// count went 6 → 0 when the fix landed and whose subject-anchor followed the three
+// count went 6 -> 0 when the fix landed and whose subject-anchor followed the three
 // functions here.
 use crate::DIALECT;
 
@@ -105,8 +105,8 @@ fn unsupported_expr_owned(name: String) -> ExprDialectRejection {
 /// (`dialect_scope=PgOnly`)". `PgOnly` names no variant: the pinned arm is
 /// `DialectScope::Only(DialectId)` and has been since the enum stopped growing one
 /// variant per vendor, so a MySQL-only artifact could describe itself. `dialect_scope`
-/// names no authorable field either — it is DERIVED from the op list at lowering,
-/// precisely so a declared reach can never disagree with the ops — so there was
+/// names no authorable field either - it is DERIVED from the op list at lowering,
+/// precisely so a declared reach can never disagree with the ops - so there was
 /// nothing for an author to set. And it spelled another vendor's product name in a
 /// message this backend emits about itself.
 ///
@@ -541,7 +541,7 @@ impl DmlRenderer for SqliteDmlRenderer {
     }
 
     /// rusqlite binds a byte vector natively, so SQLite needs NO decoder around
-    /// the placeholder and NO base64 detour — the bytes stay bytes end to end.
+    /// the placeholder and NO base64 detour - the bytes stay bytes end to end.
     fn bind_bytes(&self, bytes: &[u8], push: &mut dyn FnMut(BindValue) -> String) -> String {
         push(BindValue::Bytes(bytes.to_vec()))
     }
@@ -570,7 +570,7 @@ impl DmlRenderer for SqliteDmlRenderer {
                 if set.is_empty() {
                     return Ok(format!(" {target} DO NOTHING"));
                 }
-                // BTreeMap ⇒ deterministic column order (canonical).
+                // BTreeMap => deterministic column order (canonical).
                 let mut assigns = Vec::with_capacity(set.len());
                 for (col, val) in set {
                     let qc = dml::quote_ident_for_backend("column", col, self)?;
@@ -865,12 +865,12 @@ impl DmlRenderer for SqliteDmlRenderer {
     /// `render::lower::render_sqlite_trigger_op`, inside the 17k-line core lowerer,
     /// and that this delegation was "a POINTER to work that `lower.rs`'s own step-3
     /// pass has to finish, not a boundary that is done". Nothing about the emitted
-    /// SQL changed when it moved — that is what made it a move.
+    /// SQL changed when it moved - that is what made it a move.
     ///
     /// PostgreSQL used to be STILL in the position SQLite just left, via
     /// `render::vendor`, and that one was not the same shape: `render::vendor` was
     /// PostgreSQL by CONSTRUCTION rather than by gate (it carried no dialect literal
-    /// at all), so every dialect-match census scored it zero. RESOLVED as well now —
+    /// at all), so every dialect-match census scored it zero. RESOLVED as well now -
     /// see [`Self::render_vendor_op`] below and `zero_migrate::render::vendor`. The
     /// census that DOES see it is `core_names_no_vendor_crate.rs`, which counts crate
     /// idents rather than dialect literals.
@@ -932,8 +932,8 @@ impl DmlRenderer for SqliteDmlRenderer {
     /// backend, so an artifact carrying any of them measures a `DialectScope::Only`
     /// reach that does not name this one. SQLite has no analogue for any of them, so
     /// there is nothing to render and no partial answer worth giving. The engine refuses
-    /// earlier and more informatively — the lower seam checks
-    /// `Capability::PrivilegedCatalogObjects` and reports the op KIND — so nothing in
+    /// earlier and more informatively - the lower seam checks
+    /// `Capability::PrivilegedCatalogObjects` and reports the op KIND - so nothing in
     /// the shipping paths reaches this. It is here because
     /// [`zero_migrate_backend::renderer::DmlRenderer`] gives no method a default
     /// body: a vendor's posture has to be visible in that vendor's own diff.
@@ -1230,11 +1230,11 @@ fn render_sqlite_trigger_stmt(
     }
 }
 
-/// The `RAISE(<action>, …)` action token for a neutral [`RaiseLevel`].
+/// The `RAISE(<action>, ...)` action token for a neutral [`RaiseLevel`].
 ///
 /// This spelling is THIS backend's, and lives here rather than on the IR enum for
 /// the reason the enum's own comment records: a target without `RAISE` reads the
-/// same level and answers in its own grammar — MySQL discards the level and emits
+/// same level and answers in its own grammar - MySQL discards the level and emits
 /// `SIGNAL SQLSTATE`. A shared `as_sql` would have implied one of the two is the
 /// level's real spelling.
 const fn raise_level_sql(level: RaiseLevel) -> &'static str {

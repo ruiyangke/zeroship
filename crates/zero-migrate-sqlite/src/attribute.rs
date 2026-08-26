@@ -7,8 +7,8 @@
 //! # `sqlite.strict` is NOT `TableStrictness`
 //!
 //! Read this before touching either. The neutral IR already has a field called
-//! `strictness` — [`TableStrictness`](zero_migrate_ir::ir::TableStrictness) on
-//! [`TableRuntimeOptions`](zero_migrate_ir::ir::TableRuntimeOptions) — and it is a
+//! `strictness` - [`TableStrictness`](zero_migrate_ir::ir::TableStrictness) on
+//! [`TableRuntimeOptions`](zero_migrate_ir::ir::TableRuntimeOptions) - and it is a
 //! DIFFERENT THING that happens to share a word:
 //!
 //! * `TableStrictness` is `Strict | Lenient | Off`: zero-migrate's own DEPLOY-TIME data
@@ -17,8 +17,8 @@
 //!   enforce declared column types at write time instead of applying type affinity.
 //!
 //! The key keeps SQLite's own spelling because a vendor attribute should read like the
-//! vendor's documentation. The collision is in English only — one is a `TableStrictness`
-//! enum in the neutral IR, the other an `AttrKey` owned by this crate — but a reader
+//! vendor's documentation. The collision is in English only - one is a `TableStrictness`
+//! enum in the neutral IR, the other an `AttrKey` owned by this crate - but a reader
 //! meeting them a week apart will conflate them, so it is named here rather than left to
 //! be rediscovered.
 
