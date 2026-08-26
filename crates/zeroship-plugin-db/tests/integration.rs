@@ -5192,6 +5192,17 @@ COMMENT ON COLUMN "{app}"."people"."phone_masked" IS '__zsmask:kind=last4,classi
     .await
     .unwrap_or_else(|e| panic!("people fixture (deploy stand-in) failed: {e}"));
 
+    // The engine's apply creates the per-app audit journal on its way through
+    // (`AuditWriter::ensure_audit_table` -> `audit::ensure_audit_table_exists`,
+    // `crates/zeroship-plugin-db/src/backend/postgres.rs:340`). The stand-in
+    // above reproduces the engine's TABLES but not that, so without this the
+    // assertion below asserts a journal nothing ever created - and the whole
+    // point of the test is to compare the journal before and after the runtime
+    // dispatch, which needs it to exist first.
+    zeroship_plugin_db::audit::ensure_audit_table_exists(&pool, app)
+        .await
+        .expect("engine stand-in must create the audit journal, as the engine does");
+
     // Snapshot the audit journal AFTER the engine's apply — the runtime dispatch
     // below must not add to it.
     let audit_before = audit_row_count(&pool, app).await;
