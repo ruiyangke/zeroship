@@ -32,7 +32,7 @@ import { table, t } from "@zeroship/migrate";
 // creates the tables. db-todos has the same pair.
 export default {
   name: "create_db_e2e",
-  up() {
+  schema() {
     table("workspaces").create({
       columns: {
         slug: t.text().notNull().unique(),

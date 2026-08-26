@@ -3,7 +3,7 @@ import { table, t } from "@zeroship/migrate";
 export default {
   name: "initial_schema",
 
-  up() {
+  schema() {
     table("users").create({
       columns: {
         email: t.text().notNull().unique(),
