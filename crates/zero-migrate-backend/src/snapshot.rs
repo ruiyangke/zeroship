@@ -1,0 +1,2122 @@
+//! Schema-shape snapshot value types.
+
+use std::collections::BTreeMap;
+
+use zero_migrate_ir::attribute::Attributes;
+use zero_migrate_ir::expr::Expr;
+use zero_migrate_ir::ir::{
+    ColType, ForEach, FuncArg, FuncArgMode, FuncLanguage, FuncVolatility, IdentityCol,
+    IndexSortOrder, PartitionBounds, PartitionSpec, PolicyCmd, SafeI64, SafeU64, SequenceOwnedBy,
+    SequenceRef, TableRuntimeOptions, TriggerAction, TriggerEvent, TriggerTiming, ValueFormat,
+};
+
+/// Quote one identifier in the canonical constraint-definition normal form.
+///
+/// This codec is deliberately independent of every registered renderer: snapshot
+/// comparison text must not change when any vendor's emission implementation is
+/// replaced or poisoned.
+#[must_use]
+pub fn quote_constraint_definition_ident(ident: &str) -> String {
+    crate::spelling::ansi_double_quote_ident(ident)
+}
+
+/// One column of a table, as introspected from `information_schema.columns`.
+///
+/// `default` is **DDL-emission metadata, not a blanket drift-comparable
+/// attribute**: it
+/// carries the column `DEFAULT` clause the declarative author wants emitted at
+/// CREATE / ADD COLUMN time (#4). It is deliberately EXCLUDED from `PartialEq` /
+/// `Eq` (see the manual impl below) because Postgres normalises a
+/// stored default (`'{}'` -> `'{}'::jsonb`, `NOW()` -> `now()`, ...) so a byte
+/// compare of the authored default against the introspected one would
+/// phantom-drift, AND plugin-db itself never re-diffs column defaults (a default
+/// is set once at create time). Tracking it in equality would make the differ
+/// emit a phantom op and break the lossless round-trip oracle.
+///
+/// ID-bearing defaults are projected into [`Self::id_default`] and compared
+/// semantically. Ordinary defaults remain excluded so harmless catalog
+/// normalization cannot create phantom drift.
+#[derive(Clone, Default)]
+pub struct ColumnSnapshot {
+    /// Column name.
+    pub name: String,
+    /// The SQL data type (`information_schema.columns.data_type`), e.g. `text`,
+    /// `integer`, `timestamp with time zone`.
+    pub data_type: String,
+    /// `true` if the column is nullable.
+    pub nullable: bool,
+    /// The `DEFAULT` clause expression to emit at CREATE / ADD COLUMN (#4), e.g.
+    /// `'active'` or `'{}'::jsonb`. The raw SQL is emission/diagnostic metadata
+    /// and is NOT drift-compared (see the type-level note). `None` means no
+    /// default. Live introspection may retain a catalog-rendered expression;
+    /// only its narrow [`Self::id_default`] projection participates in drift.
+    pub default: Option<String>,
+    /// Dialect-rendered type spelling to use in DDL instead of deriving from
+    /// `data_type`. This is emission-only for named type references: a Postgres
+    /// enum/domain column needs a schema-qualified type name in the emitted DDL,
+    /// while structural drift still compares the introspectable `data_type`.
+    pub ddl_type_override: Option<String>,
+    /// Column-level CHECK clauses to append at the use-site, e.g. the SQLite
+    /// enum/domain inline forms. Each entry includes the `CHECK (...)` wrapper and
+    /// is rendered only by the DDL emitter. Emission-only: live introspection tracks
+    /// table constraints separately; only recognized ID format CHECKs project
+    /// into [`Self::value_format`].
+    ///
+    /// These bodies NAME THEIR OWN COLUMN, so a rename has to follow them, and BOTH
+    /// replays that own a `TableSnapshot` now do: the fold's `Op::RenameColumn` arm
+    /// and `render::declarative`'s SQLite rename rebuild, through the shared
+    /// `rename_column_in_inline_checks`. This used to be a KNOWN GAP recorded here,
+    /// and the gap was real - the rebuild emitted
+    /// `"state" TEXT NOT NULL CHECK ("status" IN (...))` over a table with no `status`.
+    ///
+    /// The rewrite is TEXT SURGERY, which nothing else in this crate does to an
+    /// expression, and the reason is recorded in the paragraph below: there is no AST
+    /// to walk and nothing complete to re-render from. It is admissible only because
+    /// the fragment is walked as QUOTED RUNS, so a string literal spelling the old
+    /// column name is copied through whole, the decoded identifier is matched EXACTLY,
+    /// and a body the walk cannot read is left STALE rather than corrupt.
+    ///
+    /// The severity of a stale body, MEASURED before the fix: that DDL is REJECTED
+    /// rather than accepted, and the rejection is designed. The SQLite actor turns off
+    /// double-quoted string literals for both DDL and DML (`SQLITE_DBCONFIG_DQS_DDL` /
+    /// `_DQS_DML` in the hardened open sequence), so an unknown quoted identifier is an
+    /// error naming the column (`no such column: "status"`) rather than a silent string
+    /// literal. Without that setting the clause would degrade to a constant CHECK the
+    /// database accepts. The rebuild's `CREATE TABLE` leads its statement spec, so the
+    /// failure lands before any value copy, inside the transaction: a FAILED migration,
+    /// never a corrupted schema.
+    ///
+    /// A SQLite CATALOG snapshot carries this field EMPTY and `stored_create_sql` set,
+    /// which routes a pure rename through the arm that replays SQLite's own stored body
+    /// and lets its `RENAME COLUMN` rewrite the predicate. That is an accident of what
+    /// introspection recovers, not a guard, and it is why the rewrite above is scoped to
+    /// what the fold populates rather than relying on the emptiness holding.
+    ///
+    /// Regenerating the clause from the column's facets does NOT work as a general
+    /// repair, and this is the load-bearing detail for anyone attempting it: only the
+    /// value-format writer still has its input on the snapshot. The uuid, SQLite enum
+    /// and domain writers all overwrite `data_type` / `ddl_type_override` and discard
+    /// the name of the type that produced the check, so there is nothing left to
+    /// regenerate from - only something to infer. That is what forces the surgery.
+    ///
+    /// [`Self::generated`] carries the same hazard through the same emitter and was
+    /// repaired first, by the OTHER route: it keeps the closed `Expr` its rendering came
+    /// from, so its rename walks an AST.
+    pub inline_checks: Vec<String>,
+    /// A generated/computed column expression rendered for the target dialect,
+    /// plus whether it is STORED or VIRTUAL. Emission-only, like `default`: live
+    /// introspection does not carry this expression into the structural snapshot,
+    /// so it is excluded from drift equality. The comparable half of the same fact
+    /// is [`Self::generated_kind`].
+    pub generated: Option<GeneratedColumnSnapshot>,
+    /// Whether this column is GENERATED and how the engine stores it, as the
+    /// STRUCTURAL facet rather than the rendered expression.
+    ///
+    /// This stands to [`Self::generated`] exactly as [`Self::id_default`] stands to
+    /// [`Self::default`]: a narrow semantic comparison key beside emission-only SQL
+    /// text. PostgreSQL holds the fact in `pg_attribute.attgenerated`, one char per
+    /// column (`''` / `'s'` / `'v'`), so it survives deparsing and column renames
+    /// untouched - unlike the expression, which `pg_get_expr` re-renders from the
+    /// parse tree under whatever names the columns currently have.
+    ///
+    /// `None` means THIS PRODUCER DID NOT LOOK, which is distinct from
+    /// `Some(NotGenerated)`. Only the PostgreSQL catalog read and the offline fold
+    /// populate it; MySQL and SQLite introspection leave it `None`, so
+    /// `apply::drift::comparable_generated_column` declines rather than accusing
+    /// those engines of having dropped a generated column they never modeled.
+    ///
+    /// Excluded from `PartialEq` / `Eq` for the same reason
+    /// [`Self::generated`] is: adding it would change what every consumer of column
+    /// equality means by "the same column", including the fold and dedup paths, when
+    /// only the drift comparator is asking.
+    pub generated_kind: Option<GeneratedKindSnapshot>,
+    /// SQL identity / portable auto-increment facet. Desired snapshots use it
+    /// for emission and live introspection recovers it from PostgreSQL
+    /// `attidentity`, MySQL `AUTO_INCREMENT`, or SQLite's explicit
+    /// `AUTOINCREMENT` clause. It is drift-comparable.
+    pub identity: Option<IdentityCol>,
+    /// Whether this column IS the table's physical row identifier, aliased onto a
+    /// declared column.
+    ///
+    /// A target with such an alias fixes the column's physical type, so this is a
+    /// stronger statement than "it is the primary key". It is also distinct from
+    /// [`Self::identity`]: a backend's ordinary row-identifier allocator and its
+    /// stronger always-increasing contract are physically different things, and only
+    /// the latter is an identity. A column can therefore be a row-identifier alias
+    /// with no identity at all, and that pair is exactly what makes an out-of-band
+    /// flip between the two visible instead of silent.
+    ///
+    /// The producer decides, never core: whether a stored CREATE permits the alias and
+    /// whether the storage generates the value are
+    /// [`CatalogFoldPolicy::stored_primary_key_allows_rowid`](crate::fold::CatalogFoldPolicy::stored_primary_key_allows_rowid)
+    /// and
+    /// [`rowid_storage_generates`](crate::fold::CatalogFoldPolicy::rowid_storage_generates),
+    /// which have been spelled neutrally since they were written. This field carried a
+    /// vendor prefix until it caught up with them. A backend with no such alias leaves
+    /// it `false` and nothing downstream changes.
+    ///
+    /// Drift-comparable.
+    pub rowid_alias: bool,
+    /// A locally enforced TypeID/ULID format CHECK recovered from the catalog.
+    ///
+    /// This is deliberately separate from [`Self::inline_checks`], which may
+    /// contain unrelated emission-only CHECKs. Typed reference columns that
+    /// inherit format safety through their foreign key leave this field `None`;
+    /// their reference constraint is the drift contract.
+    pub value_format: Option<ValueFormat>,
+    /// Whether the live catalog carries the engine's own exact UUID spelling
+    /// CHECK for this column on MySQL or SQLite. PostgreSQL never sets it: its
+    /// native `uuid` type is the contract and the renderer emits no CHECK.
+    ///
+    /// This exists so a reference whose target has no authored contract can
+    /// still be proved from the catalog. It is INTROSPECTION-ONLY metadata and
+    /// MUST NOT be compared: author-built desired snapshots always leave it
+    /// `false`, so it is excluded from `PartialEq` / `Eq` and the drift
+    /// attribute diff. Comparing it would report permanent phantom drift on
+    /// every UUID column, and on SQLite a column-attribute difference is
+    /// reconciled by a full table rebuild.
+    ///
+    /// A typed reference column that omits its own CHECK and inherits format
+    /// safety through its foreign key leaves this `false`; that inheritance is
+    /// not local catalog evidence.
+    pub catalog_uuid_format_check: bool,
+    /// Semantic drift key for a default on an ID-bearing column.
+    ///
+    /// `None` means this is not an ID-default comparison surface. `Some(Absent)`
+    /// means it is ID-bearing and deliberately has no database default, which is
+    /// distinct from an untracked ordinary column.
+    pub id_default: Option<IdDefaultSnapshot>,
+    /// The catalog's own authoritative answer to "is this default an EXPRESSION
+    /// rather than a scalar literal?", for a backend whose default TEXT cannot be
+    /// read to tell.
+    ///
+    /// `None` means the producing catalog did not answer, which is also the state
+    /// every backend that never asks is in. The name is the one its consumers
+    /// already gave it: [`ValueFormatRenderer::catalog_default_is_unquoted_literal`]
+    /// takes exactly this value and every hop between here and there calls it
+    /// `expression_default`.
+    ///
+    /// Measured need, and the only backend that populates it today: MySQL strips
+    /// SQL quotes from `information_schema.COLUMNS.COLUMN_DEFAULT`, so the raw text
+    /// cannot distinguish the literal `"uuid()"` from the call `uuid()`; its
+    /// `EXTRA` column carrying `DEFAULT_GENERATED` is what settles it.
+    ///
+    /// Introspection metadata retained only for expected-driven ID-default
+    /// classification, not an independently drift-comparable portable facet, and
+    /// so excluded from equality.
+    ///
+    /// [`ValueFormatRenderer::catalog_default_is_unquoted_literal`]:
+    ///     crate::value_format::ValueFormatRenderer::catalog_default_is_unquoted_literal
+    pub expression_default: Option<bool>,
+    /// `Some(false)` means this logical text column is case-insensitive. It is a
+    /// drift-comparable catalog attribute on engines where the intent is
+    /// recoverable (Postgres `citext`, SQLite `COLLATE NOCASE`, and MySQL
+    /// `information_schema.COLUMNS.COLLATION_NAME`). `None` is the
+    /// byte-identical default case-sensitive text behavior.
+    pub case_sensitive: Option<bool>,
+    /// This authored column is semantically unbounded text.
+    ///
+    /// Emission-only: MySQL must distinguish an authored `t.text()` from a live
+    /// bounded `VARCHAR` whose canonical `data_type` is also `text`. Catalog
+    /// introspection cannot recover this authoring provenance, so the field is
+    /// excluded from `PartialEq` / `Eq` just like `ddl_type_override`.
+    pub unbounded_text: bool,
+    /// Original neutral SDK field-definition tokens for the legacy schema-query
+    /// carrier.
+    ///
+    /// Emission-only. Vendors interpret this value with their own moved token
+    /// table; core never converts it to a vendor spelling. Snapshot-native paths
+    /// leave it `None` and use `data_type` plus semantic facets instead.
+    pub type_def: Option<serde_json::Value>,
+    /// Whether this type came from an authored schema rather than a catalog read.
+    ///
+    /// Emission-only provenance. A backend may need to materialize an authored
+    /// default that its catalog-normalized `data_type` cannot carry. It is excluded
+    /// from `PartialEq` / `Eq`: provenance is not schema shape.
+    pub authored_type: bool,
+    /// Exact non-default catalog collation identity for PostgreSQL and SQLite.
+    ///
+    /// This is deliberately separate from [`Self::case_sensitive`]: `C` and
+    /// `POSIX` are both case-sensitive PostgreSQL collations but are distinct
+    /// foreign-key storage contracts. SQLite's default `BINARY` collation is
+    /// canonicalized to `None`, while `NOCASE` continues to round-trip through
+    /// `case_sensitive = Some(false)`; named alternatives such as `RTRIM` stay
+    /// here. MySQL uses [`Self::text_storage`] because character-set
+    /// identity is part of its compatibility contract too.
+    pub collation: Option<ColumnCollationSnapshot>,
+    /// The exact character-set + collation pair the live catalog holds for this
+    /// column, for a backend whose foreign-key compatibility rule is written in
+    /// terms of that pair rather than of a portable case-sensitivity Boolean.
+    ///
+    /// `None` on author-built desired snapshots and on any backend that does not
+    /// read one. Introspection-only, and deliberately excluded from structural
+    /// drift equality: the portable schema surface records collation INTENT, and a
+    /// server-default storage name is not intent.
+    ///
+    /// Measured need, and the only backend that populates it today: MySQL refuses a
+    /// character foreign key whose two sides have incompatible storage, and
+    /// `ascii_bin` and `utf8mb4_bin` are both case-sensitive - so the portable
+    /// [`Self::case_sensitive`] cannot tell them apart.
+    pub text_storage: Option<TextStorageSnapshot>,
+    /// The catalog facts about this column that belong to the backend that read
+    /// them, and that no other backend and no neutral crate can interpret.
+    ///
+    /// A backend records a leg here for a physical identity its own catalog carries
+    /// and [`Self::data_type`] cannot: `canonical_type` NORMALIZES, so a backend
+    /// that folds `varchar(64)` and `varchar(255)` to one portable spelling has no
+    /// way to say they differ. Both sides of a comparison fold the same way, so the
+    /// blindness is symmetric and silent.
+    ///
+    /// The value's type is declared in the vendor crate that owns it and reaching
+    /// it takes a `downcast_ref` to that type, so this field carries a vendor's
+    /// answer without letting core name, spell or resolve one. Absence of a leg is
+    /// the state of every column from another dialect's catalog and of every
+    /// author-built desired snapshot that has not derived one.
+    ///
+    /// It is excluded from this type's `PartialEq` / `Eq`, and the reason is not the
+    /// one [`Self::text_storage`] gives. That is excluded because it is not part of
+    /// the portable schema surface at all. This is excluded because folding a
+    /// vendor's physical answer into the general equality would change what every
+    /// consumer of `ColumnSnapshot` equality means by "the same column" - including
+    /// the fold and the dedup paths - when only the vendor should be asked. The
+    /// comparison happens in one place that structural drift and the existence guard
+    /// both call ([`Dialectal::physical_identity`]), so the two cannot disagree about
+    /// one column.
+    ///
+    /// [`Dialectal::physical_identity`]: crate::dialectal::Dialectal::physical_identity
+    pub vendor: crate::dialectal::Dialectal<dyn crate::dialectal::VendorColumnFacts>,
+    /// The inline encryption sentinel to append after this
+    /// column's type in CREATE / ADD COLUMN DDL, e.g.
+    /// `/* zero-migrate:enc:randomised:default:string */`. Emitted for a `t.encrypted(...)`
+    /// column (its physical type is `BYTEA`); it is the schema-shape contract
+    /// plugin-db reads at runtime to drive the AEAD encrypt/decrypt pass.
+    ///
+    /// Emission-only, exactly like `default`: it is NOT a drift-comparable
+    /// attribute (introspection's `snapshot_schema` leaves it `None`; only
+    /// `desired_snapshot` populates it), so it is EXCLUDED from `PartialEq` /
+    /// `Eq`. The sentinel is built by the shared
+    /// `zero_migrate::schema::query` kernel - never re-spelled here.
+    pub encryption_sentinel: Option<String>,
+    /// The body of a `COMMENT ON COLUMN` sentinel to attach to
+    /// THIS column in CREATE / ADD COLUMN DDL. Two sentinel families ride here:
+    ///   - `zero-migrate:mask:kind=...,classification=...` on a hidden `<col>_masked` sibling
+    ///     (drives the runtime mask read-pass), and
+    ///   - `zero-migrate:enc:<mode>:<keyId>:<wraps>` on an encrypted column itself - the
+    ///     PG-recoverable form of the `encryption_sentinel`, since PG discards
+    ///     the inline `/* zero-migrate:enc */` comment at parse time, so plugin-db recovers
+    ///     the encryption metadata from `pg_description` at runtime.
+    ///
+    /// Built by the shared codecs ([`crate::mask_codec`]) - never
+    /// re-spelled here. EXCLUDED from `PartialEq` / `Eq`: desired
+    /// snapshots use it to emit runtime metadata, and PostgreSQL introspection
+    /// classifies matching catalog comments back into this field instead of the
+    /// user-facing `comment` facet.
+    pub comment_sentinel: Option<String>,
+    /// User-authored catalog comment on this column. Unlike `comment_sentinel`,
+    /// this is drift-comparable metadata folded from `Op::Comment` and recovered
+    /// from PostgreSQL `pg_description`.
+    pub comment: Option<String>,
+}
+
+/// The structural generated-column facet: whether a column is computed by the
+/// engine, and how the value is kept.
+///
+/// Deliberately a closed enum rather than an `Option<bool>`: `NotGenerated` has to be
+/// a value a producer can ASSERT, because the drift comparison's whole subject is a
+/// column that stopped being generated. An `Option<bool>` would spell that as `None`,
+/// which is already taken by "this producer did not look".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GeneratedKindSnapshot {
+    /// An ordinary writable column (`attgenerated = ''`).
+    NotGenerated,
+    /// The engine computes the value and STORES it (`attgenerated = 's'`).
+    Stored,
+    /// The engine computes the value on read (`attgenerated = 'v'`).
+    Virtual,
+}
+
+/// Emission metadata for a generated/computed column.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GeneratedColumnSnapshot {
+    /// The dialect-rendered closed expression body.
+    pub expr: String,
+    /// The closed [`Expr`] [`Self::expr`] was rendered from.
+    ///
+    /// A generated expression NAMES OTHER COLUMNS, so a rename has to follow it or
+    /// the body describes a column the table no longer has. Rendered SQL cannot be
+    /// repaired - substituting inside text turns `note <> 'qty'` into
+    /// `note <> 'quantity'`, which is why every other rendered body in this module
+    /// is left stale on a rename. Keeping the AST beside the rendering is the
+    /// treatment `apply::drift::comparable_generated_column` prescribes and the one
+    /// the descriptor fold already relies on: match `colRef` nodes structurally,
+    /// re-render, and a string literal spelling the old name is untouched.
+    ///
+    /// `None` means THIS PRODUCER HAD NO AST. Only catalog introspection is in that
+    /// position, and it does not populate [`ColumnSnapshot::generated`] at all, so a
+    /// `Some(GeneratedColumnSnapshot)` with `None` here is currently unreachable -
+    /// the arm exists so a future catalog reader that recovers only the deparsed
+    /// text stays honest about what it can and cannot follow, rather than being
+    /// forced to invent an AST.
+    pub source: Option<Expr>,
+    /// `true` => STORED; `false` => VIRTUAL.
+    pub stored: bool,
+}
+
+// This hand-written representation is part of byte-pinned diagnostic goldens.
+// `authored_type` is lowering provenance, not snapshot content for humans, so adding
+// it here would turn an internal carrier into an emitted-byte change.
+#[allow(clippy::missing_fields_in_debug)]
+impl std::fmt::Debug for ColumnSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = f.debug_struct("ColumnSnapshot");
+        s.field("name", &self.name)
+            .field("data_type", &self.data_type)
+            .field("nullable", &self.nullable)
+            .field("default", &self.default);
+        if self.ddl_type_override.is_some() {
+            s.field("ddl_type_override", &self.ddl_type_override);
+        }
+        if !self.inline_checks.is_empty() {
+            s.field("inline_checks", &self.inline_checks);
+        }
+        s.field("generated", &self.generated);
+        if self.generated_kind.is_some() {
+            s.field("generated_kind", &self.generated_kind);
+        }
+        s.field("identity", &self.identity)
+            .field("rowid_alias", &self.rowid_alias)
+            .field("value_format", &self.value_format)
+            .field("id_default", &self.id_default)
+            .field("case_sensitive", &self.case_sensitive)
+            .field("collation", &self.collation);
+        if self.unbounded_text {
+            s.field("unbounded_text", &self.unbounded_text);
+        }
+        if self.type_def.is_some() {
+            s.field("type_def", &self.type_def);
+        }
+        if self.catalog_uuid_format_check {
+            s.field("catalog_uuid_format_check", &self.catalog_uuid_format_check);
+        }
+        if self.text_storage.is_some() {
+            s.field("text_storage", &self.text_storage);
+        }
+        if !self.vendor.is_empty() {
+            s.field("vendor", &self.vendor);
+        }
+        if self.expression_default.is_some() {
+            s.field("expression_default", &self.expression_default);
+        }
+        s.field("encryption_sentinel", &self.encryption_sentinel)
+            .field("comment_sentinel", &self.comment_sentinel)
+            .field("comment", &self.comment)
+            .finish()
+    }
+}
+
+/// Drift-comparable default semantics for an ID-bearing column.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum IdDefaultSnapshot {
+    /// The column is ID-bearing and intentionally has no SQL default.
+    Absent,
+    /// The engine's exact database-side UUIDv4 generator.
+    UuidV4,
+    /// The engine's exact database-side UUIDv7 generator.
+    UuidV7,
+    /// A PostgreSQL `nextval` generator, stored in canonical rendered form so
+    /// schema and sequence identity remain part of the key.
+    Nextval(String),
+    /// A typed scalar literal, stored as a canonical semantic spelling (JSON
+    /// strings, bare booleans/numbers, and exact decimal text). Catalog-specific
+    /// SQL quoting, tagged int64 transport, and type casts are not part of the
+    /// comparison key.
+    Literal(String),
+    /// A scalar literal on PostgreSQL's native UUID surface. PostgreSQL
+    /// canonicalizes accepted UUID text to lowercase hyphenated spelling, so
+    /// this distinct semantic arm normalizes that representation without
+    /// weakening literal comparison on portable UUID/TypeID/ULID text columns.
+    UuidLiteral(String),
+    /// Another catalog expression on an ID-bearing column. The string is a
+    /// dialect-normalized expression fingerprint, not emission SQL.
+    Expression(String),
+}
+
+/// Normalize catalog SQL before narrow ID-literal parsing by ignoring casing,
+/// whitespace, outer grouping, and MySQL character-set introducers. Structured
+/// expression defaults use the semantics-preserving fingerprint in the render
+/// layer instead.
+#[must_use]
+pub fn canonical_id_default_expression(expression: &str) -> String {
+    fn balanced_outer_parens(value: &str) -> bool {
+        let bytes = value.as_bytes();
+        if bytes.first() != Some(&b'(') || bytes.last() != Some(&b')') {
+            return false;
+        }
+        let mut depth = 0_i32;
+        let mut cursor = 0_usize;
+        let mut quote = None;
+        while cursor < bytes.len() {
+            let byte = bytes[cursor];
+            if let Some(delimiter) = quote {
+                if byte == delimiter {
+                    if bytes.get(cursor + 1) == Some(&delimiter) {
+                        cursor += 2;
+                        continue;
+                    }
+                    quote = None;
+                }
+                cursor += 1;
+                continue;
+            }
+            match byte {
+                b'\'' | b'"' | b'`' => quote = Some(byte),
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 && cursor + 1 != bytes.len() {
+                        return false;
+                    }
+                    if depth < 0 {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+            cursor += 1;
+        }
+        depth == 0 && quote.is_none()
+    }
+
+    let mut value = expression.trim();
+    while balanced_outer_parens(value) {
+        value = value[1..value.len() - 1].trim();
+    }
+
+    let bytes = value.as_bytes();
+    let mut out = String::with_capacity(value.len());
+    let mut cursor = 0_usize;
+    while cursor < bytes.len() {
+        let byte = bytes[cursor];
+        if byte.is_ascii_whitespace() {
+            cursor += 1;
+            continue;
+        }
+        if byte == b'_' {
+            let start = cursor;
+            cursor += 1;
+            while bytes
+                .get(cursor)
+                .is_some_and(|candidate| candidate.is_ascii_alphanumeric() || *candidate == b'_')
+            {
+                cursor += 1;
+            }
+            if cursor > start + 1 && bytes.get(cursor) == Some(&b'\'') {
+                // MySQL deparsing may prefix string literals with `_latin1`,
+                // `_ascii`, `_utf8mb4`, or another connection charset. The
+                // literal bytes-not that catalog annotation-define the default.
+                continue;
+            }
+            out.push('_');
+            cursor = start + 1;
+            continue;
+        }
+        if matches!(byte, b'\'' | b'"' | b'`') {
+            let delimiter = byte;
+            out.push(char::from(byte));
+            cursor += 1;
+            while cursor < bytes.len() {
+                let current = bytes[cursor];
+                out.push(char::from(current));
+                cursor += 1;
+                if current == delimiter {
+                    if bytes.get(cursor) == Some(&delimiter) {
+                        out.push(char::from(delimiter));
+                        cursor += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        out.push(char::from(byte.to_ascii_lowercase()));
+        cursor += 1;
+    }
+    out
+}
+
+/// Exact PostgreSQL/SQLite catalog identity for a non-default column collation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ColumnCollationSnapshot {
+    /// PostgreSQL collation schema; SQLite collations are unqualified.
+    pub schema: Option<String>,
+    /// Catalog collation name, preserving PostgreSQL identifier case.
+    pub name: String,
+}
+
+impl ColumnCollationSnapshot {
+    /// Stable diagnostic spelling without losing the structured comparison key.
+    #[must_use]
+    pub fn display_name(&self) -> String {
+        self.schema.as_ref().map_or_else(
+            || self.name.clone(),
+            |schema| format!("{schema}.{}", self.name),
+        )
+    }
+}
+
+/// The exact character-set and collation identity one catalog holds for one
+/// column.
+///
+/// This is a STORAGE identity, not a comparison intent: the portable
+/// `caseSensitive` Boolean cannot distinguish `ascii_bin` from `utf8mb4_bin`,
+/// which are both case-sensitive and are nevertheless not interchangeable on a
+/// backend that requires both sides of a character foreign key to share
+/// compatible storage. MySQL is the backend that requires it today.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TextStorageSnapshot {
+    /// `information_schema.COLUMNS.CHARACTER_SET_NAME`.
+    pub character_set: String,
+    /// `information_schema.COLUMNS.COLLATION_NAME`.
+    pub collation: String,
+}
+
+// No `Hash`: this `PartialEq` deliberately ignores fields (`default`,
+// `vendor`, the sentinels, ...), so a DERIVED `Hash` would hash fields
+// equality does not read and break the `Eq`/`Hash` contract. Nothing in the crate
+// hashes a `ColumnSnapshot` - every keyed collection over one keys by `&str` name -
+// so the trait is simply absent rather than hand-written to stay in step. Anyone
+// adding a hash consumer must hand-write it against exactly the fields below.
+impl PartialEq for ColumnSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.data_type == other.data_type
+            && self.nullable == other.nullable
+            && self.identity == other.identity
+            && self.rowid_alias == other.rowid_alias
+            && self.value_format == other.value_format
+            && self.id_default == other.id_default
+            && self.case_sensitive == other.case_sensitive
+            && self.collation == other.collation
+            && self.comment == other.comment
+    }
+}
+impl Eq for ColumnSnapshot {}
+
+/// One ordered key element of an index snapshot. The expression arm stores the
+/// dialect-rendered expression text produced from a closed [`Expr`]
+/// or recovered from catalog introspection.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum IndexElementSnapshot {
+    /// Plain column key.
+    Column {
+        /// Column name.
+        name: String,
+        /// Optional per-column sort order. `None` is canonical ASC/default.
+        order: Option<IndexSortOrder>,
+        /// **Emission-only** PG-vendor per-column operator class (e.g.
+        /// `text_pattern_ops`). Like the index-level ANN `opclass`, live
+        /// introspection cannot recover it cheaply, so it is EXCLUDED from
+        /// canonical equality (`index_elements_canonically_eq`) and is
+        /// spelled by the PG emitter only. `None` for every non-opclass element.
+        opclass: Option<String>,
+        /// **Emission-only** PG-vendor per-column collation (e.g. `"C"`).
+        /// Excluded from canonical equality for the same reason as
+        /// `opclass`. `None` for every non-collated element.
+        collation: Option<String>,
+    },
+    /// Expression key.
+    Expr(String),
+}
+
+impl IndexElementSnapshot {
+    /// Plain column key.
+    #[must_use]
+    pub fn column(name: impl Into<String>) -> Self {
+        Self::Column {
+            name: name.into(),
+            order: None,
+            opclass: None,
+            collation: None,
+        }
+    }
+
+    /// Plain column key with explicit sort order. ASC canonicalizes to the
+    /// default/absent representation; only DESC is preserved.
+    #[must_use]
+    pub fn column_ordered(name: impl Into<String>, order: IndexSortOrder) -> Self {
+        match order {
+            IndexSortOrder::Asc => Self::column(name),
+            IndexSortOrder::Desc => Self::Column {
+                name: name.into(),
+                order: Some(IndexSortOrder::Desc),
+                opclass: None,
+                collation: None,
+            },
+        }
+    }
+
+    /// Expression key.
+    #[must_use]
+    pub fn expr(expr: impl Into<String>) -> Self {
+        Self::Expr(expr.into())
+    }
+}
+
+fn canonical_index_sql_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '"' {
+            out.push(ch);
+            continue;
+        }
+        let mut ident = String::new();
+        let mut raw_inner = String::new();
+        let mut closed = false;
+        while let Some(c) = chars.next() {
+            if c == '"' {
+                if matches!(chars.peek(), Some('"')) {
+                    chars.next();
+                    ident.push('"');
+                    raw_inner.push_str("\"\"");
+                } else {
+                    closed = true;
+                    break;
+                }
+            } else {
+                ident.push(c);
+                raw_inner.push(c);
+            }
+        }
+        let safe_bare = !ident.is_empty()
+            && ident.starts_with(|c: char| c == '_' || c.is_ascii_lowercase())
+            && ident
+                .chars()
+                .all(|c| c == '_' || c.is_ascii_lowercase() || c.is_ascii_digit());
+        if closed && safe_bare {
+            out.push_str(&ident);
+        } else {
+            out.push('"');
+            out.push_str(&raw_inner);
+            if closed {
+                out.push('"');
+            }
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+pub fn index_elements_canonically_eq(
+    left: &[IndexElementSnapshot],
+    right: &[IndexElementSnapshot],
+) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(a, b)| match (a, b) {
+            (
+                IndexElementSnapshot::Column {
+                    name: a,
+                    order: order_a,
+                    // opclass/collation are emission-only - never a drift attribute.
+                    ..
+                },
+                IndexElementSnapshot::Column {
+                    name: b,
+                    order: order_b,
+                    ..
+                },
+            ) => {
+                a == b
+                    && canonical_index_sort_order(*order_a) == canonical_index_sort_order(*order_b)
+            }
+            (IndexElementSnapshot::Expr(a), IndexElementSnapshot::Expr(b)) => {
+                canonical_index_sql_text(a) == canonical_index_sql_text(b)
+            }
+            _ => false,
+        })
+}
+
+pub fn canonical_index_sort_order(order: Option<IndexSortOrder>) -> Option<IndexSortOrder> {
+    match order {
+        Some(IndexSortOrder::Desc) => Some(IndexSortOrder::Desc),
+        Some(IndexSortOrder::Asc) | None => None,
+    }
+}
+
+pub fn index_predicates_canonically_eq(left: Option<&str>, right: Option<&str>) -> bool {
+    left.map(canonical_index_sql_text) == right.map(canonical_index_sql_text)
+}
+
+/// One index of a table, as introspected from `pg_catalog`.
+///
+/// `opclass` is **emission-only** (like `ColumnSnapshot::default` /
+/// `encryption_sentinel`): it is NOT recovered by `snapshot_schema` and NOT a
+/// drift attribute, so it is EXCLUDED from `PartialEq` / `Eq`. It rides
+/// on a desired snapshot so `render_create_index` can spell the per-column
+/// operator class (`vector_cosine_ops`, ...) an `ivfflat` ANN index needs; live
+/// introspection cannot recover it cheaply, so comparing it would make every
+/// freshly-built vector index phantom-drift against itself.
+#[derive(Debug, Clone)]
+pub struct IndexSnapshot {
+    /// Index name.
+    pub name: String,
+    /// `true` if it enforces uniqueness.
+    pub unique: bool,
+    /// The KEY columns the index covers, in index order (the leading
+    /// plain-column attributes). Expression keys are represented in `elements`.
+    pub columns: Vec<String>,
+    /// Ordered key elements, including both plain columns and expression keys.
+    pub elements: Vec<IndexElementSnapshot>,
+    /// The index ACCESS METHOD (`pg_am.amname`): `btree` (the default), `gin`
+    /// (FTS over a tsvector), `gist` (spatial / geography), `ivfflat` / `hnsw`
+    /// (pgvector ANN), etc.
+    pub access_method: String,
+    /// Partial-index predicate text, when present.
+    pub predicate: Option<String>,
+    /// Non-key covering columns (`INCLUDE (...)`).
+    pub include: Vec<String>,
+    /// Vendor storage parameters, keyed by their full `<dialect>.<name>` wire spelling.
+    ///
+    /// COMPARED by [`Self::definition_differences_except_name`], unlike
+    /// [`TableSnapshot::attributes`], and that difference is the whole point: PostgreSQL's
+    /// drift pass DOES introspect an index's `reloptions`, so both sides of the comparison
+    /// are populated and a real difference is real drift.
+    ///
+    /// Which keys survive introspection is the owning backend's business: it keeps the
+    /// ones it DECLARES on `createIndex` and ignores the rest, which is exactly what the
+    /// two named fields this replaced did for `fillfactor` and `pages_per_range`.
+    pub attributes: Attributes,
+    /// **Emission-only** PostgreSQL `ON ONLY` for partitioned parents. Like
+    /// [`Self::opclass`] and [`Self::nulls_not_distinct`] it is spelled by the PG
+    /// emitter and EXCLUDED from equality, because the catalog cannot
+    /// report it back.
+    ///
+    /// Measured on PostgreSQL 18.4. `pg_get_indexdef` renders `ON ONLY` for EVERY
+    /// index whose table is partitioned, whether or not `ONLY` was written:
+    ///
+    /// ```text
+    /// CREATE INDEX ON ONLY p (payload)  ->  CREATE INDEX p_payload_idx ON ONLY p ...
+    /// CREATE INDEX      ON q (payload)  ->  CREATE INDEX q_payload_idx ON ONLY q ...
+    /// ```
+    ///
+    /// The parent index is a template either way; the only difference `ONLY` makes
+    /// is whether PostgreSQL also builds the partitions' indexes for you, and once
+    /// those are attached the two end states are identical (`indisvalid` flips from
+    /// false to true and nothing else distinguishes them). So there is no reading of
+    /// the catalog that recovers the authored flag, and comparing it reported drift
+    /// on every index that set it. Teaching introspection to answer `true` for a
+    /// partitioned parent instead would only move the false report onto the far more
+    /// common index that did NOT ask for `ONLY`.
+    pub only: bool,
+    /// **Emission-only** per-column operator class for an `ivfflat`/`hnsw` ANN
+    /// index (`vector_cosine_ops`, `vector_l2_ops`, `vector_ip_ops`). `None` for
+    /// every plain / GIN / GiST index. NOT a drift attribute.
+    pub opclass: Option<String>,
+    /// **Emission-only** PG 15+ `NULLS NOT DISTINCT` flag on a UNIQUE index.
+    /// Like `opclass`, it is spelled by the PG emitter but EXCLUDED from drift
+    /// equality (live introspection recovery is out of scope for this
+    /// render-only enrichment). `false` for every ordinary index.
+    pub nulls_not_distinct: bool,
+    /// User-authored catalog comment on this index.
+    pub comment: Option<String>,
+    /// **Provenance-only** local columns read by this index's RENDERED-SQL sites -
+    /// `predicate` and the `Expr` variant of `elements` - recorded structurally by
+    /// the producer rather than read back out of that text.
+    ///
+    /// PostgreSQL drops an index when ANY column it references is dropped, and it
+    /// references columns at four sites: the key columns (`indkey` up to
+    /// `indnkeyatts`), the `INCLUDE` payload (`indkey` past it), an expression key
+    /// (`indexprs`), and a partial predicate (`indpred`). The first two are exact
+    /// names in `columns` / `elements` / `include`, so a cascade compares them
+    /// directly and this field deliberately does NOT repeat them. The last two are
+    /// rendered SQL TEXT, and a name-shaped token inside rendered SQL is not a
+    /// reference - measured on PostgreSQL 18.4,
+    /// `CREATE INDEX i ON t (note) WHERE (note <> 'a')` and
+    /// `CREATE INDEX i ON t ((note || 'a'))` both SURVIVE `DROP COLUMN a`. So the
+    /// producer walks the closed `Expr` instead, descending only the leg the target
+    /// dialect selects, exactly as `ConstraintSnapshot::cascade_columns` does for a
+    /// CHECK.
+    ///
+    /// `None` on an index that HAS no such site (every plain column-list index) and on
+    /// any producer that cannot record one - the MySQL and SQLite introspectors. Both
+    /// mean the same thing to a consumer: cascade on the exact names alone.
+    ///
+    /// The PostgreSQL introspector DOES record it, from `pg_depend`: PostgreSQL keeps
+    /// one dependency row per attribute an index reads, so `refobjsubid > 0` yields the
+    /// set structurally with no parsing, follows a rename by construction, and gives a
+    /// string literal that merely spells a column no weight. What it CANNOT do is
+    /// separate the expression sites from the key and INCLUDE attributes, so the
+    /// catalog set is a SUPERSET of what the offline producer records. That costs the
+    /// cascade nothing - the extra names are the exact ones a cascade already matches -
+    /// and the drift comparison unions both sides before comparing
+    /// (`apply::drift::index_referenced_columns`).
+    ///
+    /// EXCLUDED from equality for the same reason as `opclass` and
+    /// `nulls_not_distinct`: it is provenance rather than identity, and comparing a
+    /// field one side never populates would report drift on every index that has one.
+    pub expr_cascade_columns: Option<Vec<String>>,
+}
+
+impl IndexSnapshot {
+    /// Every comparable attribute of two indexes EXCEPT the name.
+    ///
+    /// This is exactly the body of [`PartialEq`] with the name term removed, and
+    /// `PartialEq` is written in terms of it, so the two can never drift into
+    /// disagreeing about what makes an index the same index. The facets themselves
+    /// are listed once, in
+    /// [`definition_differences_except_name`](Self::definition_differences_except_name),
+    /// which this delegates to.
+    ///
+    /// It is a COMPARABLE shape check, not physical proof that two indexes are
+    /// interchangeable. `opclass`, `nulls_not_distinct` and `expr_cascade_columns`
+    /// are emission-only: live introspection never populates them, so they are
+    /// excluded from equality (see their field docs) and therefore invisible here
+    /// too. Two indexes this returns `true` for agree on everything the live
+    /// snapshot can observe - unique, columns, canonical elements, access method,
+    /// canonical predicate, INCLUDE, storage params, ONLY and comment - and nothing
+    /// more.
+    pub fn same_definition_except_name(&self, other: &Self) -> bool {
+        self.definition_differences_except_name(other).is_empty()
+    }
+
+    /// The comparable attributes of `self` (the LIVE side, printed first) and
+    /// `other` (the DECLARED side) that DISAGREE, one rendered
+    /// `<facet> <live> -> <declared>` entry each. Empty exactly when
+    /// [`same_definition_except_name`](Self::same_definition_except_name) holds,
+    /// which is defined as this being empty, so the answer and the explanation
+    /// read one list of facets and can never name different sets.
+    ///
+    /// Two equal indexes push nothing, so the empty `Vec` never allocates and the
+    /// equality path pays only the comparisons it already paid.
+    ///
+    /// The bound on what this can see is
+    /// `same_definition_except_name`'s: `opclass`, `nulls_not_distinct`, `only` and
+    /// `expr_cascade_columns` are emission-only, excluded from equality, and
+    /// invisible here too.
+    pub fn definition_differences_except_name(&self, other: &Self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.unique != other.unique {
+            out.push(format!("uniqueness {} -> {}", self.unique, other.unique));
+        }
+        if self.columns != other.columns {
+            out.push(format!("columns {:?} -> {:?}", self.columns, other.columns));
+        }
+        if !index_elements_canonically_eq(&self.elements, &other.elements) {
+            out.push(format!(
+                "key elements {:?} -> {:?}",
+                self.elements, other.elements
+            ));
+        }
+        if self.access_method != other.access_method {
+            out.push(format!(
+                "access method {} -> {}",
+                self.access_method, other.access_method
+            ));
+        }
+        if !index_predicates_canonically_eq(self.predicate.as_deref(), other.predicate.as_deref()) {
+            out.push(format!(
+                "predicate {:?} -> {:?}",
+                self.predicate, other.predicate
+            ));
+        }
+        if self.include != other.include {
+            out.push(format!("include {:?} -> {:?}", self.include, other.include));
+        }
+        if self.attributes != other.attributes {
+            out.push(format!(
+                "storage parameters {:?} -> {:?}",
+                self.attributes, other.attributes
+            ));
+        }
+        if self.comment != other.comment {
+            out.push(format!("comment {:?} -> {:?}", self.comment, other.comment));
+        }
+        out
+    }
+}
+
+// No `Hash`, for the same reason as `ColumnSnapshot`: equality here is CANONICAL
+// (sort orders and SQL text are normalised, `opclass` / `nulls_not_distinct` /
+// `only` / `expr_cascade_columns` are skipped entirely), so a derived `Hash` would
+// separate values this `eq` calls equal. Nothing in the crate hashes an
+// `IndexSnapshot`; index maps key by `&str` name.
+impl PartialEq for IndexSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.same_definition_except_name(other)
+    }
+}
+impl Eq for IndexSnapshot {}
+
+impl IndexSnapshot {
+    /// A plain B-tree index over `columns` (the default kind every column-list
+    /// index built by the author is). `access_method = "btree"`, no expression.
+    #[must_use]
+    pub fn btree(name: impl Into<String>, unique: bool, columns: Vec<String>) -> Self {
+        Self {
+            name: name.into(),
+            unique,
+            elements: columns
+                .iter()
+                .cloned()
+                .map(IndexElementSnapshot::column)
+                .collect(),
+            columns,
+            access_method: "btree".to_string(),
+            predicate: None,
+            include: Vec::new(),
+            attributes: Attributes::new(),
+            only: false,
+            opclass: None,
+            nulls_not_distinct: false,
+            comment: None,
+            expr_cascade_columns: None,
+        }
+    }
+}
+
+/// One constraint of a table, as introspected from
+/// `information_schema.table_constraints` (kind) + byte-comparable
+/// `pg_get_constraintdef` bodies.
+#[derive(Debug, Clone)]
+pub struct ConstraintSnapshot {
+    /// Constraint name.
+    pub name: String,
+    /// The constraint type as Postgres reports it: `PRIMARY KEY`, `FOREIGN KEY`,
+    /// `UNIQUE`, `CHECK`, `EXCLUDE`.
+    pub kind: String,
+    /// The full constraint definition as `pg_get_constraintdef(oid)` renders it,
+    /// e.g. `CHECK ((age > 0))`, `FOREIGN KEY (user_id) REFERENCES users(id)`.
+    ///
+    /// Empty for `EXCLUDE`: PG canonicalizes exclusion definitions differently from
+    /// the closed IR renderer, and drift tracks those constraints by name + kind.
+    ///
+    /// Populated for `CHECK`, and exempted from comparison BY THE DIFFER rather than
+    /// by this type. `apply::drift::constraint_definition_is_comparable` skips a CHECK
+    /// body because PostgreSQL deparses one from the parsed tree rather than echoing
+    /// what was written - it re-quotes only the identifiers that need it, injects
+    /// inferred casts, and expands `IN` - so the offline renderer cannot reproduce the
+    /// spelling and a byte compare reports drift on every CHECK that exists. The text
+    /// is still recorded because the existence guard's fail-closed refusal prints it,
+    /// which is the difference between naming the installed predicate and saying
+    /// `<present>`.
+    ///
+    /// That printer reads a LIVE snapshot, never a folded one. All four production
+    /// call sites of `render::existence_probe::decide` pass freshly introspected
+    /// input, so the value a user is shown is always the catalog's. This matters
+    /// because a folded CHECK body GOES STALE: `Op::RenameColumn` rewrites the
+    /// UNIQUE, PRIMARY KEY and FOREIGN KEY definitions, whose leading group is a
+    /// column list a string literal cannot appear in, and deliberately leaves a CHECK
+    /// body alone rather than substituting a name inside an arbitrary expression.
+    /// A folded stale body has no reader: the differ exempts it, the guard prints the
+    /// live one, and the three per-dialect emitters that write a `definition` into
+    /// `CREATE TABLE` DDL cannot receive a folded CHECK - the PostgreSQL and MySQL
+    /// ones are only ever handed a freshly built desired snapshot, and the fold
+    /// refuses to put a CHECK constraint in a SQLite snapshot at all.
+    ///
+    /// Do NOT read that as "stale fold text is harmless" in general. It is a fact
+    /// about THIS field, established by tracing its consumers. `ColumnSnapshot::
+    /// inline_checks` is fold-produced CHECK text on the same rename path, is not
+    /// dialect-gated, and IS emitted into rebuild DDL.
+    ///
+    /// `ConstraintSnapshot`'s own `PartialEq` below DOES compare this field, for every
+    /// kind including `CHECK`, and that divergence is deliberate. The exemption above
+    /// is a PostgreSQL re-deparse artifact, not a statement that a CHECK body is not
+    /// part of a constraint's identity: SQLite stores the `CREATE TABLE` text verbatim
+    /// and reads the same body back byte-identical, so a comparison on that leg needs
+    /// no exemption at all. Generalising the differ's rule into this `PartialEq` would
+    /// export a PG-shaped concession to every consumer. A consumer that wants the
+    /// differ's semantics applies them itself - `tests/fold_roundtrip_sqlite.rs` does,
+    /// and says why at its `canonicalize`.
+    ///
+    /// That same `PartialEq` is why the SQLite rename REBUILD - the OTHER replay that
+    /// owns a `TableSnapshot`, and one that DOES splice a folded `definition` into
+    /// `CREATE TABLE` - cannot follow a rename here the way it does for
+    /// [`ColumnSnapshot::inline_checks`] and [`ColumnSnapshot::generated`]. Those two
+    /// are EXCLUDED from column equality, so the rebuild rewrites them straight into
+    /// its desired snapshot. Rewriting a `definition` there would make the desired
+    /// table unequal to the renamed live one, flip the registered rebuild policy's
+    /// `pure_column_rename` answer to
+    /// `None`, turn `preserve_stored_shape` off and stop the CATALOG path replaying
+    /// SQLite's own stored body. The rewrite therefore runs one layer down, in
+    /// `render_create_table_rebuild`, AFTER that decision and after the
+    /// stored-shape arm has returned - see
+    /// `render::declarative::rename_column_in_constraint_definitions`. Read this as the
+    /// standing rule: a rename-follow on a field this `PartialEq` compares has to run
+    /// after every decision that equality drives, not beside the fields it does not.
+    ///
+    /// The cost of getting it wrong was measured, and it is not the same failure a
+    /// stale `inline_checks` produces. SQLite resolves a foreign key's CHILD column
+    /// list at CREATE TABLE time, so a stale local column is `unknown column "..." in
+    /// foreign key definition` at the rebuild's leading statement - loud, and NOT
+    /// dependent on `SQLITE_DBCONFIG_DQS_DDL`, because a column list is not an
+    /// expression. The REFERENCED list is the opposite: a parent column that does not
+    /// exist is ACCEPTED at CREATE and surfaces only as `foreign key mismatch` on the
+    /// first write that fires the constraint, and not at all while
+    /// `PRAGMA foreign_keys` is off. That asymmetry is why the rewrite touches only the
+    /// LEADING parenthesized group.
+    pub definition: String,
+    /// User-authored catalog comment on this constraint.
+    pub comment: Option<String>,
+    /// **Provenance-only** local columns whose drop cascades this constraint away,
+    /// recorded structurally by the producer rather than parsed back out of
+    /// `definition`.
+    ///
+    /// On the live side this is PostgreSQL's `conkey` expanded to names, which is
+    /// exactly the catalog's own cascade predicate: `ALTER TABLE ... DROP COLUMN`
+    /// removes every constraint whose `conkey` contains the dropped attribute.
+    /// On the offline side it is collected from the closed AST the renderer emitted,
+    /// by a route that differs per kind because PostgreSQL's own cascade does. For a
+    /// `CHECK` it walks the expression, descending only into the leg the target
+    /// dialect selects. For an `EXCLUDE` it takes the PLAIN COLUMN elements and walks
+    /// no expression at all: an exclusion that reaches a column through an expression
+    /// element or its `WHERE` predicate holds a normal dependency rather than an auto
+    /// one, so PostgreSQL REFUSES the drop instead of cascading, and `conkey` records
+    /// attnum `0` for that element accordingly. Collecting those columns would fold
+    /// away a constraint the database kept.
+    ///
+    /// `None` means the producer did not record it and the consumer must fall back
+    /// to parsing the leading parenthesized group of `definition`. `Some(vec![])`
+    /// means the constraint references no column at all (`CHECK (true)`, a
+    /// whole-row predicate) and therefore never cascades.
+    ///
+    /// EXCLUDED from equality: this is provenance, not identity. The fold-derived
+    /// and `conkey`-derived lists legitimately differ (the fold records it only
+    /// where it drives a cascade decision), and comparing them would report drift
+    /// on constraints that are structurally identical.
+    pub cascade_columns: Option<Vec<String>>,
+}
+
+impl PartialEq for ConstraintSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.kind == other.kind
+            && self.definition == other.definition
+            && self.comment == other.comment
+    }
+}
+impl Eq for ConstraintSnapshot {}
+
+/// A live table's structure (deterministic ordering throughout).
+#[derive(Debug, Clone)]
+pub struct TableSnapshot {
+    /// Columns, ordered by name.
+    pub columns: Vec<ColumnSnapshot>,
+    /// Indexes, ordered by name.
+    pub indexes: Vec<IndexSnapshot>,
+    /// Constraints, ordered by name.
+    pub constraints: Vec<ConstraintSnapshot>,
+    /// Runtime-visible collection options. These are intentionally excluded from
+    /// structural drift equality because live catalog introspection cannot recover
+    /// them; the offline fold/gen-types path is their authority.
+    pub runtime_options: TableRuntimeOptions,
+    /// Partitioning strategy for a partitioned table parent.
+    pub partition_by: Option<PartitionSpec>,
+    /// User-authored catalog comment on this table.
+    pub comment: Option<String>,
+    /// **Introspection-only** verbatim `CREATE TABLE` text (`SQLite`
+    /// `sqlite_master.sql`). `None` on the Postgres path and on author-built
+    /// desired snapshots. EXCLUDED from equality.
+    pub stored_create_sql: Option<String>,
+    /// The vendor attributes the author declared on this table, keyed by their full
+    /// `<dialect>.<name>` wire spelling and carrying every dialect at once - a table
+    /// authored for three backends keeps all three namespaces, and each backend renders
+    /// only its own.
+    ///
+    /// EXCLUDED from equality, for the same reason [`Self::runtime_options`] is: no
+    /// introspector populates this field today, so comparing it would report every
+    /// attribute-carrying table as drifted against a live catalog that in fact matches.
+    /// That is a false POSITIVE, which is the loud direction, but it would be wrong every
+    /// time rather than occasionally.
+    ///
+    /// Including it is a real and separate decision, not an oversight: PostgreSQL's drift
+    /// path already reads `reloptions`, so wiring the comparison means first deciding what
+    /// an observed-but-undeclared reloption IS - drift the author must reconcile, a value
+    /// the tool carries forward, or a refusal. Until that is answered, an attribute is an
+    /// AUTHORED fact that reaches the create and nothing more.
+    pub attributes: Attributes,
+}
+
+impl PartialEq for TableSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.columns == other.columns
+            && self.indexes == other.indexes
+            && self.constraints == other.constraints
+            && self.partition_by == other.partition_by
+            && self.comment == other.comment
+    }
+}
+impl Eq for TableSnapshot {}
+
+/// A deterministic snapshot of a view-like top-level object.
+#[derive(Debug, Clone, Default)]
+pub struct ViewSnapshot {
+    /// Whether this is a materialized view (Postgres only).
+    pub materialized: bool,
+    /// Optional declared/output columns. Emission metadata; nothing reads it back.
+    pub columns: Option<Vec<String>>,
+    /// Optional live/declared definition text. Diagnostic metadata.
+    ///
+    /// NOT a rollback source: the two backends fill this from different things.
+    /// PostgreSQL stores a bare SELECT body from `pg_get_viewdef` and SQLite stores
+    /// the whole `CREATE VIEW` statement from `sqlite_master.sql`, so the text is not
+    /// one format and is not executable as-is. Use [`Self::authored_query`], which is
+    /// typed and dialect-neutral.
+    pub definition: Option<String>,
+    /// The typed body an authored `createView` carried, when this snapshot came from
+    /// folding a migration history rather than from introspecting a catalog.
+    ///
+    /// This is what lets a later `dropView` render its own inverse: the body is
+    /// already in the history, so restoring the view needs no catalog read and stays
+    /// identical across dialects. A snapshot built by introspection leaves it `None`,
+    /// because a live catalog cannot yield a typed query - and a drop with no typed
+    /// body correctly stays irreversible rather than guessing one.
+    pub authored_query: Option<zero_migrate_ir::ir::ViewQuery>,
+    /// The schema the authored `createView` resolved to, paired with
+    /// [`Self::authored_query`] so the inverse names the object the drop named.
+    pub authored_schema: Option<String>,
+    /// User-authored catalog comment on this view.
+    pub comment: Option<String>,
+    /// This view's body as the SERVER re-prints it, written ONLY by
+    /// `zero_migrate::apply::drift::resolve_view_bodies` and only onto the two snapshots
+    /// a single drift check is about to compare.
+    ///
+    /// DELIBERATELY NOT [`Self::definition`], and the distinction is the reason this
+    /// field exists rather than reusing that one. `definition` is whatever the
+    /// backend happened to read out of a catalog: `pg_get_viewdef` on PostgreSQL,
+    /// `information_schema.VIEWS` on MySQL, a whole `CREATE VIEW` statement on
+    /// SQLite - three formats, none comparable to another, and on the folded side it
+    /// may be an introspected value CLONED FORWARD by a catalog-seeded fold from a
+    /// schema state that has since moved. PostgreSQL follows a `RENAME TABLE` into a
+    /// dependent view's stored body with no statement naming the view, so such a
+    /// clone goes stale the moment a table is renamed, and comparing it reports
+    /// drift on a view nobody touched.
+    ///
+    /// This field carries only the narrower thing the differ can honestly compare:
+    /// two bodies re-printed by the same server in the same statement, one from the
+    /// live view and one from the authored body rendered into a throwaway temporary
+    /// view. Both went through the identical rewrite, so equality is exact and no
+    /// normaliser stands between them. Absent on both sides means the body is simply
+    /// not compared.
+    pub comparable_body: Option<String>,
+}
+
+impl PartialEq for ViewSnapshot {
+    /// Identity only: `materialized` and `comment`.
+    ///
+    /// [`ViewSnapshot::comparable_body`] is excluded on purpose. It is written after
+    /// a fold, by a step that needs a live connection, onto exactly the two
+    /// snapshots one drift check is comparing - so folding it into structural
+    /// equality would make two otherwise identical snapshots differ on whether
+    /// anyone had run that step. The body comparison lives in
+    /// `zero_migrate::diff_snapshots`, which reports WHICH field differs; this stays the
+    /// cheap identity test its callers already rely on.
+    fn eq(&self, other: &Self) -> bool {
+        self.materialized == other.materialized && self.comment == other.comment
+    }
+}
+impl Eq for ViewSnapshot {}
+
+/// Sequence integer data types Postgres can report for a sequence. The portable
+/// IR can author `integer`/`bigint`; `smallint` is catalog-visible so the snapshot
+/// keeps it distinct and drift-comparable instead of collapsing it into `int`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SequenceDataTypeSnapshot {
+    /// PostgreSQL `smallint`.
+    SmallInt,
+    /// PostgreSQL `integer`.
+    Int,
+    /// PostgreSQL `bigint`.
+    #[default]
+    BigInt,
+    /// A future/unsupported catalog type. Kept closed so it can never be mistaken
+    /// for an authored portable type.
+    Unsupported,
+}
+
+impl std::fmt::Display for SequenceDataTypeSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::SmallInt => "smallint",
+            Self::Int => "integer",
+            Self::BigInt => "bigint",
+            Self::Unsupported => "unsupported",
+        })
+    }
+}
+
+impl SequenceDataTypeSnapshot {
+    /// Convert an authored sequence `AS` type into the snapshot's closed catalog
+    /// enum. `None` is PostgreSQL's default `bigint`.
+    pub fn from_sequence_col_type(as_type: Option<&ColType>) -> Result<Self, &'static str> {
+        match as_type {
+            None | Some(ColType::BigInt) => Ok(Self::BigInt),
+            Some(ColType::SmallInt) => Ok(Self::SmallInt),
+            Some(ColType::Int) => Ok(Self::Int),
+            Some(_) => Err("sequence AS type must be smallInt, int, or bigInt"),
+        }
+    }
+
+    /// Convert a catalog type spelling into the snapshot's closed enum.
+    ///
+    /// A SHARED NORMAL FORM, not a target's private business. Only one backend has
+    /// standalone sequences today, so only one backend's catalog spelling reaches
+    /// this - but the DIALECT-BLIND differ compares a snapshot whose producer it does
+    /// not know, so a second copy of this fold on either side would not report a
+    /// difference, it would MANUFACTURE one. The name says CATALOG for that reason: a
+    /// name carrying one target's would read as that target's private parser rather
+    /// than as the one both sides must share.
+    pub fn from_catalog_type_name(name: &str) -> Self {
+        match name {
+            "smallint" | "int2" => Self::SmallInt,
+            "integer" | "int4" => Self::Int,
+            "bigint" | "int8" => Self::BigInt,
+            _ => Self::Unsupported,
+        }
+    }
+
+    fn bounds(self) -> (i64, i64) {
+        match self {
+            Self::SmallInt => (i16::MIN as i64, i16::MAX as i64),
+            Self::Int => (i32::MIN as i64, i32::MAX as i64),
+            Self::BigInt | Self::Unsupported => (i64::MIN, i64::MAX),
+        }
+    }
+}
+
+fn sequence_default_min_value(as_type: SequenceDataTypeSnapshot, increment: SafeI64) -> i64 {
+    if increment.get() < 0 {
+        as_type.bounds().0
+    } else {
+        1
+    }
+}
+
+fn sequence_default_max_value(as_type: SequenceDataTypeSnapshot, increment: SafeI64) -> i64 {
+    if increment.get() < 0 {
+        -1
+    } else {
+        as_type.bounds().1
+    }
+}
+
+fn normalize_sequence_bound(default: i64, value: i64) -> Result<Option<SafeI64>, String> {
+    if value == default {
+        Ok(None)
+    } else {
+        SafeI64::new(value).map(Some)
+    }
+}
+
+/// Normalize a sequence minimum value against PostgreSQL's default/`NO MINVALUE`
+/// semantics.
+pub fn normalize_sequence_min_value(
+    as_type: SequenceDataTypeSnapshot,
+    increment: SafeI64,
+    value: i64,
+) -> Result<Option<SafeI64>, String> {
+    normalize_sequence_bound(sequence_default_min_value(as_type, increment), value)
+}
+
+/// Normalize a sequence maximum value against PostgreSQL's default/`NO MAXVALUE`
+/// semantics.
+pub fn normalize_sequence_max_value(
+    as_type: SequenceDataTypeSnapshot,
+    increment: SafeI64,
+    value: i64,
+) -> Result<Option<SafeI64>, String> {
+    normalize_sequence_bound(sequence_default_max_value(as_type, increment), value)
+}
+
+/// PostgreSQL's default start value for an omitted `START WITH`: the minimum for
+/// ascending sequences and the maximum for descending sequences, after applying
+/// explicit non-default bounds if present.
+pub fn sequence_default_start_value(
+    as_type: SequenceDataTypeSnapshot,
+    increment: SafeI64,
+    min_value: Option<SafeI64>,
+    max_value: Option<SafeI64>,
+) -> Result<SafeI64, String> {
+    if increment.get() < 0 {
+        match max_value {
+            Some(v) => Ok(v),
+            None => SafeI64::new(sequence_default_max_value(as_type, increment)),
+        }
+    } else {
+        match min_value {
+            Some(v) => Ok(v),
+            None => SafeI64::new(sequence_default_min_value(as_type, increment)),
+        }
+    }
+}
+
+/// A deterministic snapshot of a standalone sequence. Numeric bounds are
+/// normalized to the IR semantics: `min_value`/`max_value = None` means the
+/// PostgreSQL default (`NO MINVALUE` / `NO MAXVALUE`) for the data type and
+/// increment direction, while an explicit value is constrained to [`SafeI64`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SequenceSnapshot {
+    /// Sequence integer type.
+    pub as_type: SequenceDataTypeSnapshot,
+    /// Increment step.
+    pub increment: SafeI64,
+    /// Explicit minimum value, or the normalized default.
+    pub min_value: Option<SafeI64>,
+    /// Explicit maximum value, or the normalized default.
+    pub max_value: Option<SafeI64>,
+    /// Start value.
+    pub start: SafeI64,
+    /// Cache size.
+    pub cache: SafeU64,
+    /// Whether the sequence cycles.
+    pub cycle: bool,
+    /// Optional `OWNED BY table.column` target.
+    pub owned_by: Option<SequenceOwnedBy>,
+    /// User-authored catalog comment on this sequence.
+    pub comment: Option<String>,
+}
+
+impl Default for SequenceSnapshot {
+    fn default() -> Self {
+        Self {
+            as_type: SequenceDataTypeSnapshot::BigInt,
+            increment: SafeI64::new(1).expect("1 is a safe integer"),
+            min_value: None,
+            max_value: None,
+            start: SafeI64::new(1).expect("1 is a safe integer"),
+            cache: SafeU64::new(1).expect("1 is a safe integer"),
+            cycle: false,
+            owned_by: None,
+            comment: None,
+        }
+    }
+}
+
+/// A deterministic snapshot of a privileged Postgres role that a vendor
+/// migration intentionally manages. Passwords and role settings are deliberately
+/// not modeled here; only closed role attributes and membership declared by the IR
+/// participate in structural drift.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoleSnapshot {
+    /// `LOGIN` / `NOLOGIN`.
+    pub login: bool,
+    /// `SUPERUSER` / `NOSUPERUSER`.
+    pub superuser: bool,
+    /// `CREATEDB` / `NOCREATEDB`.
+    pub create_db: bool,
+    /// `CREATEROLE` / `NOCREATEROLE`.
+    pub create_role: bool,
+    /// `BYPASSRLS` / `NOBYPASSRLS`.
+    pub bypass_rls: bool,
+    /// `INHERIT` / `NOINHERIT`.
+    pub inherit: bool,
+    /// `REPLICATION` / `NOREPLICATION`.
+    pub replication: bool,
+    /// Roles this role is a member of (`IN ROLE ...`), sorted canonically.
+    pub member_of: Vec<String>,
+}
+
+impl Default for RoleSnapshot {
+    fn default() -> Self {
+        Self {
+            login: false,
+            superuser: false,
+            create_db: false,
+            create_role: false,
+            bypass_rls: false,
+            inherit: true,
+            replication: false,
+            member_of: Vec::new(),
+        }
+    }
+}
+
+/// A deterministic snapshot of a Postgres schema object managed by a vendor
+/// migration. `owner = None` means the authored op did not assert
+/// `AUTHORIZATION`; diff treats that as presence-only.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SchemaObjectSnapshot {
+    /// Schema owner / `AUTHORIZATION` role when modeled by the authored op.
+    pub owner: Option<String>,
+}
+
+/// A deterministic snapshot of a Postgres extension object managed by a vendor
+/// migration. `schema = None` means the authored op did not assert placement;
+/// diff treats that as presence-only.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExtensionSnapshot {
+    /// Extension placement schema (`WITH SCHEMA ...`) when modeled.
+    pub schema: Option<String>,
+}
+
+/// Offline identity key for one authored PostgreSQL function overload.
+///
+/// PostgreSQL permits functions with the same schema and name when their ordered
+/// input argument types differ. Argument names and `OUT` arguments therefore do
+/// not participate in this key; `INOUT` arguments do. The type vector retains
+/// authored spellings because the pure fold has no catalog OIDs. Non-exact drops
+/// and replacements invalidate possible matches rather than selecting by guess.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FunctionKey {
+    /// Resolved schema containing the function.
+    pub schema: String,
+    /// Function name.
+    pub name: String,
+    /// Ordered input argument type names.
+    pub arg_types: Vec<String>,
+}
+
+impl FunctionKey {
+    pub fn from_create(
+        name: &str,
+        schema: Option<&str>,
+        args: Option<&[FuncArg]>,
+        default_schema: &str,
+    ) -> Self {
+        let arg_types = args
+            .unwrap_or_default()
+            .iter()
+            .filter(|arg| !matches!(arg.mode, Some(FuncArgMode::Out)))
+            .map(|arg| arg.ty.clone())
+            .collect();
+        Self {
+            schema: schema.unwrap_or(default_schema).to_string(),
+            name: name.to_string(),
+            arg_types,
+        }
+    }
+
+    pub fn from_drop(
+        name: &str,
+        schema: Option<&str>,
+        arg_types: Option<&[String]>,
+        default_schema: &str,
+    ) -> Self {
+        Self {
+            schema: schema.unwrap_or(default_schema).to_string(),
+            name: name.to_string(),
+            arg_types: arg_types.unwrap_or_default().to_vec(),
+        }
+    }
+
+    /// This key with its argument types reduced to the ONE spelling an offline fold
+    /// and a `pg_proc` read can both produce.
+    ///
+    /// The rollback map above keys on AUTHORED spellings on purpose - it has no
+    /// catalog OIDs to resolve them with. Drift does have the catalog, and the
+    /// catalog rewrites: an authored `f(x int)` is reported as `f(integer)`. Both
+    /// sides of the comparison go through this so the same overload is not seen as
+    /// one function missing and a different one appearing.
+    #[must_use]
+    pub fn canonicalized(&self) -> Self {
+        Self {
+            schema: self.schema.clone(),
+            name: self.name.clone(),
+            arg_types: self
+                .arg_types
+                .iter()
+                .map(|ty| canonical_signature_type(ty))
+                .collect(),
+        }
+    }
+}
+
+/// One function-argument type in the spelling that decides function IDENTITY.
+///
+/// ONE FOLD, TWO CALLERS, and that is why the name does not name a backend. An
+/// authored signature and a catalog-reported one must reduce to the SAME string, or
+/// the same overload reads as one function missing and a different one appearing. The
+/// alias table it applies IS the way one backend spells types, which the doc below
+/// states, but the JOB is the comparison's.
+///
+/// `tests/dialect_matrix/backend_snapshot_privates_stay_core_only.rs` files this
+/// under its VERDICT half, and that stays true: both callers are engine code, and a
+/// vendor calling it would be answering the engine's question with its own opinion.
+///
+/// Two reductions, in order:
+///
+///  1. **Drop a type modifier.** A modifier is not part of a PostgreSQL signature
+///     and `format_type(oid, NULL)` never prints one. MEASURED on PostgreSQL 18.4:
+///     `CREATE FUNCTION g(x varchar(255))` reads back from `pg_proc` as `character
+///     varying`, so an authored `varchar(255)` that kept its length would be
+///     reported as a missing function and an unexpected one on every snapshot.
+///  2. **Fold the alias**, through [`canonical_arg_type`]
+///     - the authoring gate's own table, called rather than copied.
+///
+/// Step 1 is deliberately NOT pushed into that shared function. It decides which
+/// migrations the gate REFUSES as duplicate signatures; widening it is a change to
+/// authoring, not to drift, and is not what this work measured.
+#[must_use]
+pub fn canonical_signature_type(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let base = match (trimmed.find('('), trimmed.rfind(')')) {
+        (Some(open), Some(close)) if close > open => {
+            format!("{}{}", &trimmed[..open], &trimmed[close + 1..])
+        }
+        _ => trimmed.to_string(),
+    };
+    canonical_arg_type(&base)
+}
+
+/// The authored definition needed to restore a dropped PostgreSQL function.
+///
+/// Catalog introspection does not populate this value. It is retained only when
+/// migration history is folded, then consumed by rollback lowering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionSnapshot {
+    /// Authored schema qualifier, or `None` when the create was unqualified.
+    pub schema: Option<String>,
+    /// Authored argument declarations, including names and modes.
+    pub args: Option<Vec<FuncArg>>,
+    /// Authored return type.
+    pub returns: String,
+    /// Authored function language.
+    pub language: FuncLanguage,
+    /// Authored volatility declaration.
+    pub volatility: Option<FuncVolatility>,
+    /// Authored raw function body.
+    pub body: String,
+}
+
+/// The catalog-comparable facets of ONE PostgreSQL function overload, beyond the
+/// [`FunctionKey`] identity that finds it.
+///
+/// The sibling of [`PolicyIdentity`] and [`TriggerIdentity`], and it carries the
+/// facet those two deliberately cannot: the BODY. A policy's `USING` and a trigger's
+/// `WHEN` are parse trees `pg_get_expr` re-prints, so the authored spelling is
+/// unrecoverable. A `LANGUAGE sql`/`plpgsql` body is not - PostgreSQL keeps it in
+/// `pg_proc.prosrc` as an opaque string and hands it to the language handler at call
+/// time, so it reads back byte for byte. See [`Self::body`] for the one shape that
+/// is not true of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionIdentity {
+    /// The function body reduced to the form both sides can produce, or `None` when
+    /// this side holds no comparable body at all.
+    ///
+    /// `None` means DECLINE, and it has exactly one cause: a SQL-standard-body
+    /// function (`BEGIN ATOMIC ... END`) keeps its body as a PARSE TREE in
+    /// `pg_proc.prosqlbody` and leaves `prosrc` EMPTY. Measured on PostgreSQL 18.4:
+    ///
+    /// ```text
+    ///   CREATE FUNCTION f2(x int) RETURNS int LANGUAGE sql
+    ///   BEGIN ATOMIC SELECT x+1; END;
+    ///       prosrc = []   prosqlbody IS NOT NULL
+    /// ```
+    ///
+    /// Comparing an authored body against `""` would report every such function as
+    /// drifted forever, so the empty-`prosrc`-with-a-`prosqlbody` case declines
+    /// DETECTABLY rather than comparing a value it does not have.
+    pub body: Option<String>,
+}
+
+impl FunctionIdentity {
+    /// The identity an AUTHORED function has, from the rollback history the fold
+    /// keeps.
+    ///
+    /// Always `Some`: the IR cannot express a `BEGIN ATOMIC` body. The renderer
+    /// emits `AS $zsfn$ ... $zsfn$` unconditionally, so every function this project
+    /// creates stores its body in `prosrc`.
+    #[must_use]
+    pub fn of(snapshot: &FunctionSnapshot) -> Self {
+        Self {
+            body: Some(comparable_function_body(&snapshot.body)),
+        }
+    }
+
+    /// The identity a function READ BACK from `pg_proc` has.
+    ///
+    /// `has_sql_body` is `prosqlbody IS NOT NULL`. It is required rather than
+    /// inferred from an empty `prosrc`, because the two states an empty `prosrc` can
+    /// mean - a `BEGIN ATOMIC` body that lives elsewhere, and a genuinely empty
+    /// authored body - are different claims, and only the first may decline.
+    #[must_use]
+    pub fn from_catalog(prosrc: &str, has_sql_body: bool) -> Self {
+        let body = comparable_function_body(prosrc);
+        Self {
+            body: (!(body.is_empty() && has_sql_body)).then_some(body),
+        }
+    }
+}
+
+/// One function body in the ONE form an offline fold and a `pg_proc` read can both
+/// produce: the authored text with its OUTER whitespace removed.
+///
+/// TRIMMED, and the trim is not squeamishness - it is forced, and measured. The
+/// renderer wraps the authored body in a dollar tag with a newline at each end
+/// (`AS $zsfn$\n{body}\n$zsfn$`), so what PostgreSQL stores for a function this
+/// project created is never the authored string. Measured on PostgreSQL 18.4, after
+/// applying an authored body of `SELECT x + 1`:
+///
+/// ```text
+///   pg_proc.prosrc = [\nSELECT x + 1\n]
+/// ```
+///
+/// An untrimmed byte compare would therefore report EVERY function in EVERY project
+/// as drifted, on the first run, against a schema nobody has touched - the exact
+/// false-drift failure this reduction exists to prevent.
+///
+/// TRIMMED RATHER THAN UN-PADDED. Asserting `prosrc == format!("\n{body}\n")` is
+/// tighter but pins drift to one renderer's padding: a function created by
+/// `Op::Raw` or by hand chooses its own delimiter spacing, and a later change to
+/// the tag would turn every function permanently red. Trimming both sides is the
+/// smallest reduction that survives all of them.
+///
+/// SOUND BECAUSE IT IS APPLIED TO BOTH SIDES, and because the whitespace it removes
+/// is outside the body in both languages this DSL admits: a `LANGUAGE sql` body is a
+/// statement list and a `LANGUAGE plpgsql` body is a `BEGIN ... END` block, and
+/// neither can be changed by padding around it. Whitespace INSIDE the body is
+/// untouched - `BEGIN\n   RETURN   42;\nEND` compares with its odd spacing intact.
+///
+/// WHAT THIS GIVES UP: a rewrite that changes ONLY the leading or trailing
+/// whitespace is not reported. It cannot change what the function computes, and it
+/// is unobservable to the differ in the first place, because the two sides never
+/// agreed about it.
+#[must_use]
+pub fn comparable_function_body(raw: &str) -> String {
+    raw.trim().to_string()
+}
+
+/// Offline identity key for one authored PostgreSQL policy.
+///
+/// PostgreSQL scopes a policy name to its table, so schema, table, and name all
+/// participate. Retaining only schema and name would let same-named policies on
+/// different tables overwrite one another and make rollback restore the wrong
+/// definition on the wrong table.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PolicyKey {
+    /// Resolved schema containing the policy's table.
+    pub schema: String,
+    /// Table the policy belongs to.
+    pub table: String,
+    /// Policy name.
+    pub name: String,
+}
+
+impl PolicyKey {
+    pub fn new(name: &str, table: &str, schema: Option<&str>, default_schema: &str) -> Self {
+        Self {
+            schema: schema.unwrap_or(default_schema).to_string(),
+            table: table.to_string(),
+            name: name.to_string(),
+        }
+    }
+}
+
+/// The authored definition needed to restore a dropped PostgreSQL policy.
+///
+/// Catalog introspection does not populate this value. It is retained only when
+/// migration history is folded, then consumed by rollback lowering.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PolicySnapshot {
+    /// Authored command scope.
+    pub for_cmd: PolicyCmd,
+    /// Authored optional role list; absence retains PostgreSQL's PUBLIC default.
+    pub to: Option<Vec<String>>,
+    /// Authored row-visibility predicate.
+    pub using: Expr,
+    /// Authored optional row-check predicate.
+    pub with_check: Option<Expr>,
+}
+
+/// Offline identity key for one authored trigger.
+///
+/// PostgreSQL scopes a trigger name to its table, so schema, table, and name all
+/// participate. SQLite requires trigger names to be unique across the schema,
+/// which is stricter: a valid SQLite history cannot contain two keys that differ
+/// only by table, while retaining the table keeps PostgreSQL histories lossless.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TriggerKey {
+    /// Resolved schema containing the trigger's table.
+    pub schema: String,
+    /// Table the trigger belongs to.
+    pub table: String,
+    /// Trigger name.
+    pub name: String,
+}
+
+impl TriggerKey {
+    pub fn new(name: &str, table: &str, schema: Option<&str>, default_schema: &str) -> Self {
+        Self {
+            schema: schema.unwrap_or(default_schema).to_string(),
+            table: table.to_string(),
+            name: name.to_string(),
+        }
+    }
+}
+
+/// The authored definition needed to restore a dropped trigger.
+///
+/// Catalog introspection does not populate this value. It is retained only when
+/// migration history is folded, then consumed by rollback lowering.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TriggerSnapshot {
+    /// Authored trigger timing.
+    pub timing: TriggerTiming,
+    /// Authored trigger events in their original order.
+    pub events: Vec<TriggerEvent>,
+    /// Authored row- or statement-level placement.
+    pub for_each: ForEach,
+    /// Authored per-dialect trigger action.
+    pub action: TriggerAction,
+    /// Authored optional trigger predicate.
+    pub when: Option<Expr>,
+}
+
+/// The CATALOG-COMPARABLE identity of one PostgreSQL policy.
+///
+/// NOT the authored definition. [`PolicySnapshot`] carries the `USING` /
+/// `WITH CHECK` predicates so rollback can restore a dropped policy; those are
+/// deliberately ABSENT here, because PostgreSQL re-deparses a policy predicate and
+/// an authored `USING (owner = current_user AND v > 0)` reads back from `pg_policy`
+/// as `((owner = CURRENT_USER) AND (v > 0))`. Comparing that text would report
+/// drift on every project, permanently. What remains - the command scope, the role
+/// list and the permissive flag - survives the round trip unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyIdentity {
+    /// `pg_policy.polcmd`.
+    pub for_cmd: PolicyCmd,
+    /// Roles the policy applies to, sorted. EMPTY means `PUBLIC`, which is both
+    /// PostgreSQL's default and what an authored `to: None` renders to.
+    pub to: Vec<String>,
+    /// `pg_policy.polpermissive`. The IR has no `AS RESTRICTIVE`, so an authored
+    /// policy is always permissive and a restrictive one in the catalog is an
+    /// out-of-band change.
+    pub permissive: bool,
+}
+
+impl PolicyIdentity {
+    /// The identity an authored policy has once PostgreSQL has accepted it.
+    #[must_use]
+    pub fn of(snapshot: &PolicySnapshot) -> Self {
+        let mut to = snapshot.to.clone().unwrap_or_default();
+        to.sort();
+        to.dedup();
+        Self {
+            for_cmd: snapshot.for_cmd,
+            to,
+            permissive: true,
+        }
+    }
+}
+
+/// The CATALOG-COMPARABLE identity of one trigger.
+///
+/// NOT the authored definition. [`TriggerSnapshot`] carries the `WHEN` predicate
+/// and the action; both are excluded here because PostgreSQL re-deparses them - an
+/// authored `WHEN (NEW.v > 0)` reads back as `WHEN ((new.v > 0))`. Timing and the
+/// event set are stored as `pg_trigger.tgtype` BITS, so they round-trip exactly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerIdentity {
+    /// `BEFORE` / `AFTER` / `INSTEAD OF`, from the `tgtype` bits.
+    pub timing: TriggerTiming,
+    /// The firing events, in the fixed order [`Self::sorted_events`] imposes so a
+    /// re-ordered authored list cannot read as a change.
+    pub events: Vec<TriggerEvent>,
+}
+
+impl TriggerIdentity {
+    /// The identity an authored trigger has once PostgreSQL has accepted it.
+    #[must_use]
+    pub fn of(snapshot: &TriggerSnapshot) -> Self {
+        Self {
+            timing: snapshot.timing,
+            events: Self::sorted_events(snapshot.events.clone()),
+        }
+    }
+
+    /// Put an event list in one canonical order and drop duplicates.
+    ///
+    /// `pg_trigger.tgtype` is a bit set with no order at all, so the authored order
+    /// is unrecoverable. Normalising BOTH sides is what stops `INSERT OR UPDATE`
+    /// and `UPDATE OR INSERT` reading as different triggers.
+    #[must_use]
+    pub fn sorted_events(mut events: Vec<TriggerEvent>) -> Vec<TriggerEvent> {
+        fn rank(event: TriggerEvent) -> u8 {
+            match event {
+                TriggerEvent::Insert => 0,
+                TriggerEvent::Update => 1,
+                TriggerEvent::Delete => 2,
+                TriggerEvent::Truncate => 3,
+            }
+        }
+        events.sort_by_key(|event| rank(*event));
+        events.dedup_by_key(|event| rank(*event));
+        events
+    }
+}
+
+/// The PostgreSQL functions, policies and triggers a snapshot can be held to,
+/// reduced to what a catalog read and an offline fold can BOTH produce.
+///
+/// `None` on [`SchemaSnapshot::vendor_objects`] means "this snapshot does not speak
+/// about these objects at all" - a SQLite or MySQL catalog read, or a fold for
+/// either dialect. `Some` means the side is AUTHORITATIVE, so an empty map is the
+/// positive claim that the schema has none. That distinction is the whole
+/// false-drift defence: without it, an engine that never introspects a policy would
+/// be accused of having lost every policy the expected side knows about, and a
+/// genuinely dropped policy would be indistinguishable from it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VendorObjectIdentities {
+    /// Function overloads present, keyed by [`FunctionKey`] whose `arg_types` are
+    /// CANONICAL PostgreSQL type names, not authored spellings - see
+    /// [`canonical_arg_type`]. `pg_proc` reports
+    /// `integer` for an authored `int`, so an uncanonicalised key would report the
+    /// same function as both missing and unexpected.
+    ///
+    /// A MAP rather than the set this used to be, for the reason the two siblings
+    /// below are maps: the key answers "does this overload exist", and the value
+    /// answers "is it still the same function". Identity alone left
+    /// `CREATE OR REPLACE FUNCTION` with an unchanged signature - the ORDINARY way a
+    /// function is modified - reporting a clean schema.
+    pub functions: BTreeMap<FunctionKey, FunctionIdentity>,
+    /// Policies present, with their comparable identity.
+    pub policies: BTreeMap<PolicyKey, PolicyIdentity>,
+    /// Triggers present, with their comparable identity.
+    pub triggers: BTreeMap<TriggerKey, TriggerIdentity>,
+}
+
+/// A deterministic snapshot of one child partition relation.
+///
+/// A relation on PostgreSQL only. SQLite and MySQL collapse a partition child into
+/// its parent rather than creating one, so their introspection reports no partition
+/// and this map stays empty there while a folded snapshot still carries the child -
+/// see the fold's own account of the exception in `zero_migrate::render::fold`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionSnapshot {
+    /// Parent partitioned table.
+    pub of: String,
+    /// Partition bounds.
+    pub bounds: PartitionBounds,
+}
+
+/// A deterministic snapshot of a project schema's structure.
+#[derive(Debug, Clone, Default)]
+pub struct SchemaSnapshot {
+    /// Per-table row-level-security state (`pg_class.relrowsecurity`), keyed by
+    /// table name like the sibling maps.
+    ///
+    /// A MAP RATHER THAN A FIELD ON TableSnapshot: that struct is constructed
+    /// exhaustively at every construction site, while this type is built through `Default` in
+    /// almost all of its own. It also makes the dialect question vanish - engines
+    /// with no row-level security leave BOTH sides empty, so they cannot drift.
+    pub table_rls: std::collections::BTreeMap<String, bool>,
+    /// Tables in the schema, keyed + ordered by name.
+    pub tables: BTreeMap<String, TableSnapshot>,
+    /// Child partitions in the schema, keyed + ordered by child relation name.
+    pub partitions: BTreeMap<String, PartitionSnapshot>,
+    /// Views in the schema, keyed + ordered by name.
+    pub views: BTreeMap<String, ViewSnapshot>,
+    /// Named enum/domain types in the schema, keyed + ordered by name.
+    pub named_types: BTreeMap<String, NamedTypeSnapshot>,
+    /// Standalone sequences in the schema, keyed + ordered by name.
+    pub sequences: BTreeMap<String, SequenceSnapshot>,
+    /// Privileged Postgres roles intentionally managed by vendor migrations.
+    pub roles: BTreeMap<String, RoleSnapshot>,
+    /// Postgres schemas intentionally managed by vendor migrations.
+    pub schemas: BTreeMap<String, SchemaObjectSnapshot>,
+    /// Postgres extensions intentionally managed by vendor migrations.
+    pub extensions: BTreeMap<String, ExtensionSnapshot>,
+    /// Authored PostgreSQL functions, keyed by overload identity.
+    ///
+    /// This rollback-only history is absent from catalog snapshots and excluded
+    /// from structural equality. What drift compares instead is
+    /// [`Self::vendor_objects`].
+    pub functions: BTreeMap<FunctionKey, FunctionSnapshot>,
+    /// Authored PostgreSQL policies, keyed by resolved schema, table, and name.
+    ///
+    /// This rollback-only history is absent from catalog snapshots and excluded
+    /// from structural equality. What drift compares instead is
+    /// [`Self::vendor_objects`].
+    pub policies: BTreeMap<PolicyKey, PolicySnapshot>,
+    /// Authored triggers, keyed by resolved schema, table, and name.
+    ///
+    /// This rollback-only history is absent from catalog snapshots and excluded
+    /// from structural equality. What drift compares instead is
+    /// [`Self::vendor_objects`].
+    pub triggers: BTreeMap<TriggerKey, TriggerSnapshot>,
+    /// The catalog-comparable identity of the functions, policies and triggers
+    /// above - the ONLY form of them a live snapshot and an offline fold can both
+    /// produce, and therefore the only form drift may compare.
+    ///
+    /// A SEPARATE FIELD rather than teaching the three maps above to carry catalog
+    /// state. Those maps are rollback history: `LiveSchema::from_catalog_snapshot`
+    /// copies them straight into the lowering seam, where `DropFunction`,
+    /// `DropPolicy` and `DropTrigger` read the recorded body/predicate back to build
+    /// the inverse DDL. Filling them from `pg_proc`/`pg_policy`/`pg_trigger` - which
+    /// cannot return an authored `Expr` or a pre-normalisation body - would make
+    /// rollback emit statements that do not restore what was dropped. A blind spot
+    /// in drift is better than a wrong `down`.
+    ///
+    /// `None` means the snapshot does not speak about these objects. See
+    /// [`VendorObjectIdentities`] for why that is not the same as "has none".
+    pub vendor_objects: Option<VendorObjectIdentities>,
+}
+
+impl PartialEq for SchemaSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.tables == other.tables
+            && self.partitions == other.partitions
+            && self.views == other.views
+            && self.named_types == other.named_types
+            && self.sequences == other.sequences
+            && self.roles == other.roles
+            && self.schemas == other.schemas
+            && self.extensions == other.extensions
+            && self.table_rls == other.table_rls
+        // `vendor_objects` is EXCLUDED, with `functions`, `policies` and
+        // `triggers` it projects from, and for a reason the other exclusions do
+        // not have: it is an `Option`, and its two empty-looking states are
+        // different claims. `None` is "this snapshot carries no information about
+        // vendor objects"; `Some({})` is "we looked, and there are none". Only the
+        // second may be compared against a populated side, which is why
+        // `diff_snapshots` skips the comparison unless BOTH sides are `Some`.
+        //
+        // Equality cannot make that distinction. It has no skip, and collapsing the
+        // two states so that `None == Some({})` would break transitivity - `Some(a)
+        // == None` and `None == Some(b)` while `Some(a) != Some(b)` - which `Eq`
+        // forbids and every `BTreeMap` key would then misbehave on. Comparing them
+        // strictly instead makes a hand-built expectation unequal to a fold purely
+        // for not having thought about the field, which is a false negative in the
+        // oracles rather than a real difference.
+        //
+        // Nothing is lost. Drift does not go through this impl: `diff_snapshots`
+        // compares the field explicitly, `tests/vendor_object_drift.rs` pins that,
+        // and `fold_roundtrip_pg::trigger_and_function_lifecycle` runs it against a
+        // live catalog.
+    }
+}
+
+impl Eq for SchemaSnapshot {}
+
+/// A schema-level named type. The engine only needs the object class for drift and
+/// guard probes; enum labels/domain predicates are modeled by the neutral IR and
+/// by column use-site metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedTypeSnapshot {
+    /// `"enum"` or `"domain"`.
+    pub kind: String,
+    /// User-authored catalog comment on this enum/domain.
+    pub comment: Option<String>,
+}
+
+/// A PostgreSQL argument-type spelling reduced to the form that decides whether
+/// two function signatures collide.
+///
+/// EVERY PAIR FOLDED HERE WAS MEASURED, one `CREATE FUNCTION` per alias against a
+/// live server, and each of the eight raised `function "p" already exists with
+/// same argument types`. Three near-neighbours were measured NOT to collide and
+/// are deliberately left apart, because folding them would refuse a real
+/// overload: `int`/`bigint`, `varchar`/`text`, and `timestamptz`/`timestamp`.
+///
+/// AN UNRECOGNISED SPELLING FALLS THROUGH TO ITSELF, and that direction is
+/// chosen. A missing alias means two colliding signatures are ACCEPTED here and
+/// refused by the server - the same under-refusal that existed before this
+/// function - whereas a wrong alias would refuse a migration the server runs.
+/// `varchar(255)` versus `varchar` is a known instance: length is not part of a
+/// PG signature, but it is not folded here because it was not measured.
+///
+/// SHARED WITH DRIFT. `zero_migrate::apply::drift` compares a folded function signature
+/// against the one `pg_proc` reports, and the catalog reports `integer` where the
+/// author wrote `int`, so it needs exactly this mapping. It calls this function
+/// rather than carrying a second copy - a duplicated type table that drifts from
+/// this one is a defect this codebase has already had. Drift layers ONE further
+/// reduction of its own (dropping a type modifier) on top of the result; that
+/// belongs to drift and not here, because widening this function widens what the
+/// authoring gate REFUSES.
+pub fn canonical_arg_type(raw: &str) -> String {
+    let lowered = raw.trim().to_ascii_lowercase();
+    let collapsed = lowered.split_whitespace().collect::<Vec<_>>().join(" ");
+    match collapsed.as_str() {
+        "int" | "integer" | "int4" => "int4".to_string(),
+        "bigint" | "int8" => "int8".to_string(),
+        "smallint" | "int2" => "int2".to_string(),
+        "bool" | "boolean" => "bool".to_string(),
+        "varchar" | "character varying" => "varchar".to_string(),
+        "decimal" | "numeric" => "numeric".to_string(),
+        "float8" | "double precision" => "float8".to_string(),
+        "timestamptz" | "timestamp with time zone" => "timestamptz".to_string(),
+        _ => collapsed,
+    }
+}
+
+// -- The `nextval` default's ONE spelling, and its ONE parse -------------------
+//
+// Only PostgreSQL writes `nextval('<seq>'::regclass)`, and both of these read
+// PostgreSQL's spelling. They are still SHARED vocabulary rather than that vendor's
+// private business, by the same test `constraint_definition` passes: the
+// DIALECT-BLIND differ compares a snapshot whose producer it does not know, so it
+// has to be able to read every producer's spelling, and the vendor that writes the
+// spelling has to render the identical bytes. Two copies of that pair is the defect
+// - a differ that stopped recognizing what one producer emits silently stops
+// comparing that producer's defaults.
+//
+// They sat in `zero_migrate::apply::drift` and `zero_migrate::render::declarative`,
+// which put them above the vendor that writes them; the PostgreSQL introspector
+// reaches both, so they came down to where both callers can.
+
+/// Canonical rendered form of a `nextval` default over a sequence identity.
+pub fn nextval_default_expr(sequence: &SequenceRef) -> String {
+    let regclass_name = match sequence.schema.as_deref() {
+        Some(schema) => format!("{schema}.{}", sequence.name),
+        None => sequence.name.clone(),
+    };
+    format!(
+        "nextval({}::regclass)",
+        crate::dml::sql_string_literal(&regclass_name)
+    )
+}
+
+/// The sequence a `nextval(...)` default names, or `None` when the expression is not
+/// one.
+///
+/// SHARED rather than PostgreSQL-private, and the two callers are why. The PG
+/// introspector reaches it to recover an ID default from `pg_get_expr`
+/// (`backend::postgres::drift_sql::recover_nextval_default`), and the DIALECT-BLIND
+/// differ reaches it through `zero_migrate::apply::drift::comparable_column_default` -
+/// which runs for every
+/// dialect, because the snapshot it is handed may have been produced by any of them.
+/// A differ that could not read the spelling one producer emits would silently stop
+/// comparing that producer's defaults, so the parse belongs to the shared vocabulary
+/// even though only PostgreSQL writes the spelling.
+pub fn parse_nextval_sequence_ref(expr: &str) -> Option<SequenceRef> {
+    let expression = expr.trim();
+    // pg_get_expr qualifies the built-in when a same-signature function earlier
+    // on search_path would otherwise capture the deparsed spelling. The OID is
+    // still proven through pg_depend below, so pg_catalog qualification is
+    // catalog decoration rather than generator identity.
+    let call = expression
+        .strip_prefix("nextval(")
+        .or_else(|| expression.strip_prefix("pg_catalog.nextval("))?;
+    let inner = call.strip_suffix(')')?.trim();
+    let literal = inner.strip_suffix("::regclass")?.trim();
+    let regclass = parse_single_quoted_sql_string(literal)?;
+    let (schema, name) = match regclass.split_once('.') {
+        Some((schema, name)) if !schema.is_empty() && !name.is_empty() => {
+            (Some(schema.to_string()), name.to_string())
+        }
+        None if !regclass.is_empty() => (None, regclass),
+        _ => return None,
+    };
+    Some(SequenceRef { name, schema })
+}
+
+/// Read one single-quoted SQL string literal, undoubling `''`. Returns `None` when
+/// the input is not exactly one such literal.
+fn parse_single_quoted_sql_string(input: &str) -> Option<String> {
+    let mut chars = input.chars();
+    if chars.next()? != '\'' {
+        return None;
+    }
+    let mut out = String::new();
+    while let Some(c) = chars.next() {
+        if c == '\'' {
+            match chars.next() {
+                Some('\'') => out.push('\''),
+                None => return Some(out),
+                Some(_) => return None,
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    None
+}

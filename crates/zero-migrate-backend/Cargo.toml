@@ -1,0 +1,47 @@
+[package]
+name = "zero-migrate-backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The zero-migrate backend CONTRACT: required DML, schema, DDL, value-format, stored-DDL and guard surfaces, their shared vocabulary, and the vendor-registry shape a backend crate hands back. Sits between zero-migrate-ir and the per-vendor crates; names no dialect and ships no vendor."
+
+[dependencies]
+# The wire contract: the closed `Op` enum, the closed `Expr` AST, `IrScalar`,
+# `DialectId`, `Capability`, `BackendDescriptor` and the
+# `BackendRegistry` this crate's `VendorSet::descriptors` composes into. Every type
+# the renderer traits name that is not declared here comes from this crate.
+zero-migrate-ir = { workspace = true }
+# The Policy Decision Point. `guard::GuardConfig` HOLDS an unforgeable
+# `EffectivePolicy` and every guard decision is a query against it (grants /
+# obligations / the KnobKey-KnobValue vocabulary / the `ObjectName` object model).
+# The config is what a vendor's `MigrationGuard` is configured by, so it sits with
+# the trait, below every vendor. No SQL parser comes with it - the deny-walk that
+# READS these answers stays in the vendor crate that owns a parser.
+zero-migrate-policy = { workspace = true }
+# `serde_json::Value` IS the schema-field shape `SchemaRenderer` reads: the DDL
+# surface takes the SDK's field definitions as JSON, not as a Rust type.
+serde_json = { workspace = true }
+# `advisory::Advisory` and `advisory::Severity` cross the wire to the SDK/CLI as the
+# operational lint output attached to a plan, so they derive Serialize/Deserialize.
+serde = { workspace = true }
+# `backfill::BackfillSpec::checksum` is a SHA-256 over the spec's canonical
+# encoding — the identity a resumed backfill's progress row is compared against.
+sha2 = { workspace = true }
+# The hex spelling of that SHA-256 — `bf_<32 hex chars>` is the backfill id itself,
+# so the encoding is part of the identity, not a display detail.
+hex = { workspace = true }
+# `backfill::generate_per_row_value` materializes a backfill's per-row generator
+# (`uuidv4`/`uuidv7`/`typeid`/`ulid`) host-side, so the generated identity is the
+# same shape on every dialect rather than each vendor's own function.
+uuid = { workspace = true }
+# Canonical (padded) base64 — the wire form PostgreSQL and MySQL both decode for a
+# binary value carried through TEXT. `spelling::base64_standard` is its one home.
+base64 = { workspace = true }
+# MySQL spells a string literal in an expression position as `_utf8mb4 X'<hex>'` so
+# an inherited `NO_BACKSLASH_ESCAPES` mode cannot reinterpret it.
+# The render error enums are `thiserror` derives, with `#[error(transparent)]`
+# carrying the nested render errors' Display through byte-identically.
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

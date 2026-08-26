@@ -1,0 +1,73 @@
+{
+  "name": "zero-migrate",
+  "version": "0.1.0",
+  "description": "The zero-migrate authoring DSL: fluent table() / view() builders, the t.* column-type lexicon, the closed Expr AST, and the pure-JS recorder. Zero native code, zero runtime deps.",
+  "keywords": [
+    "database",
+    "migration",
+    "migrations",
+    "schema",
+    "postgres",
+    "postgresql",
+    "mysql",
+    "sqlite",
+    "dsl",
+    "ddl",
+    "typescript"
+  ],
+  "author": "Ruiyang Ke <me@ry.ke>",
+  "license": "MIT",
+  "homepage": "https://github.com/ruiyangke/zero-migrate#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ruiyangke/zero-migrate.git",
+    "directory": "packages/zero-migrate"
+  },
+  "bugs": {
+    "url": "https://github.com/ruiyangke/zero-migrate/issues"
+  },
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./internal/recorder": {
+      "types": "./dist/internal/recorder.d.ts",
+      "import": "./dist/internal/recorder.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "gen:ir-types": "node scripts/gen-ir-types.mjs",
+    "gen:dialect-table": "node scripts/gen-dialect-table.mjs",
+    "gen": "node scripts/gen-ir-types.mjs && node scripts/gen-dialect-table.mjs",
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "typecheck:types": "tsc --noEmit -p tsconfig.types.json",
+    "check": "tsc --noEmit && tsc --noEmit -p tsconfig.types.json",
+    "test": "NODE_ENV=test node --import tsx --test tests/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "json-schema-to-typescript": "^15.0.4",
+    "tsup": "^8.5.1",
+    "tsx": "catalog:",
+    "typescript": "catalog:"
+  }
+}

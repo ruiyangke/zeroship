@@ -1,0 +1,81 @@
+[package]
+name = "zero-migrate-postgres"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The PostgreSQL backend for zero-migrate: this vendor's DML, schema, DDL, value-format and guard behavior, including the pg_query(libpg_query)-backed parse-time deny-list, cross-schema confinement, statement classification and operational advisories. Implements the zero-migrate-backend contract; does NOT depend on the engine."
+
+[dependencies]
+# Parse SQL with the REAL Postgres parser (libpg_query bindings) so this vendor's
+# guard sees exactly what Postgres would execute. A deny-list must not misparse or
+# miss a dangerous statement; a pure-Rust parser (sqlparser-rs) is incomplete for
+# exotic PG syntax, which is a security gap. pg_query carries a C build dep
+# (libpg_query).
+#
+# This crate is the SOLE production owner of that C dep now, which was the stated
+# goal. `crates/zero-migrate/Cargo.toml` used to declare `pg_query` independently for
+# the shape gates under `apply/backend/postgres/**`; those gates are
+# `src/backend/{session,backfill_sql,precondition}.rs` in THIS crate, and the engine's
+# entry moved to `[dev-dependencies]` for one remaining test parse. No other crate in
+# the workspace declares it.
+pg_query = "6"
+# The guard walks the serialized `pg_query` parse tree and builds structured
+# advisory/classification values as JSON-ish data.
+serde = { workspace = true }
+# The Policy Decision Point: the unforgeable EffectivePolicy the guard queries
+# (grants/obligations) for its capability + data-security gate, plus the KnobKey/
+# KnobValue vocabulary and the object model (ObjectName).
+zero-migrate-policy = { workspace = true }
+
+# The CONTRACT: the required renderer traits, the render errors their signatures name,
+# the identifier/expression spelling seam this vendor calls, and the VendorSet shape
+# `VENDOR` below is registered through. This is the ONLY zero-migrate crate a
+# backend may depend on - depending on the engine is the cycle the split removed.
+zero-migrate-backend = { workspace = true }
+# The closed `Op` / `Expr` / `IrScalar` vocabulary the trait methods are handed, plus
+# open dialect identity and this vendor's `BackendDescriptor`.
+zero-migrate-ir = { workspace = true }
+# The schema-field shape `SchemaRenderer` reads is the SDK's field JSON.
+serde_json = { workspace = true }
+uuid = { workspace = true }
+# The migrator role name's disambiguating suffix is a base62 SHA-256 of the RAW
+# project id (`role.rs`), so two project ids that collapse to one string under the
+# lossy sanitize-to-`[a-z0-9_]` step still get two distinct roles.
+sha2 = { workspace = true }
+# The backfill id and the cursor-contract fingerprint are hex SHA-256 prefixes, so
+# the encoding is part of the identity rather than a display detail.
+hex = { workspace = true }
+# `RoleError` — the one error enum this crate defines rather than reads off the
+# contract crate.
+thiserror = { workspace = true }
+# The execution half warns — and only warns — on the cleanup paths where a failure
+# must not mask the failure that caused it (a ROLLBACK after a failed COMMIT, a
+# best-effort RESET ROLE). A facade, no runtime.
+tracing = { workspace = true }
+
+[features]
+# TEST-ONLY. Publishes `backend::recording`, the canned `SqlSession` this crate's own
+# unit tests drive, so the ENGINE's integration tests can drive the SAME double. Five
+# tests over that recorder also drive `MigrationEngine` / `AppliedPlan` /
+# `history_via_backend`, which a vendor crate cannot reach (the engine depends on this
+# crate, so the edge back is a cycle), and a SECOND copy of the recorder is the hazard
+# this avoids: its canned rows are the shared premise of both suites and two copies
+# drift silently.
+#
+# `zero-migrate` names it under `[dev-dependencies]` only. Resolver 3 keeps
+# dev-dependency features out of the normal build, so a shipping
+# `zero-migrate-postgres` compiles none of it.
+testing = []
+
+[dev-dependencies]
+# TEST-ONLY: the `MigrationBackend` surface is `async`, so the unit tests that drive
+# it spin a throwaway compio run loop per test (zero tokio), exactly as the engine's
+# own async-apply harness does. NO shipped code in this crate links it.
+compio = { workspace = true }
+# TEST-ONLY: `src/test_fixtures.rs` builds its charter TOML with the same
+# `toml::Value` string escaping the engine's `test_fixtures` uses, so a vendor's test
+# charter and the engine's are the same bytes rather than nearly the same.
+toml = { workspace = true }
+
+[lints]
+workspace = true

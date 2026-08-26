@@ -1,0 +1,90 @@
+{
+  "version": 1,
+  "dialect": "mysql",
+  "attributes": [
+    {
+      "key": "mysql.engine",
+      "ops": [
+        "createTable",
+        "createPartition",
+        "setTableOptions"
+      ],
+      "shape": {
+        "kind": "enum",
+        "variants": [
+          "InnoDB",
+          "MyISAM",
+          "MEMORY",
+          "CSV",
+          "ARCHIVE",
+          "EXAMPLE",
+          "FEDERATED",
+          "HEAP",
+          "MERGE",
+          "MRG_MyISAM",
+          "NDB",
+          "NDBCLUSTER"
+        ]
+      },
+      "docs": "The storage engine. Anything other than InnoDB gives up transactional DDL-adjacent guarantees this tool otherwise relies on. HEAP is a synonym for MEMORY, MRG_MyISAM for MERGE, and NDBCLUSTER for NDB. Spell it as the manual does: the comparison is exact, while the server itself accepts any casing."
+    },
+    {
+      "key": "mysql.row_format",
+      "ops": [
+        "createTable",
+        "createPartition",
+        "setTableOptions"
+      ],
+      "shape": {
+        "kind": "enum",
+        "variants": [
+          "DEFAULT",
+          "DYNAMIC",
+          "FIXED",
+          "COMPRESSED",
+          "REDUNDANT",
+          "COMPACT"
+        ]
+      },
+      "docs": "How rows are physically stored. DYNAMIC and COMPRESSED allow longer index keys over variable-length columns than REDUNDANT or COMPACT."
+    },
+    {
+      "key": "mysql.auto_increment",
+      "ops": [
+        "createTable",
+        "createPartition",
+        "setTableOptions"
+      ],
+      "shape": {
+        "kind": "int",
+        "min": "0",
+        "max": "9223372036854775807"
+      },
+      "docs": "The next value the table's AUTO_INCREMENT column will hand out. MySQL's own ceiling is an unsigned 64-bit integer, which is wider than this attribute can carry, so values above 2^63-1 are refused here despite being legal."
+    },
+    {
+      "key": "mysql.charset",
+      "ops": [
+        "createTable",
+        "createPartition",
+        "setTableOptions"
+      ],
+      "shape": {
+        "kind": "text"
+      },
+      "docs": "The table's DEFAULT CHARACTER SET, inherited by character columns that do not name their own."
+    },
+    {
+      "key": "mysql.collate",
+      "ops": [
+        "createTable",
+        "createPartition",
+        "setTableOptions"
+      ],
+      "shape": {
+        "kind": "text"
+      },
+      "docs": "The table's default collation. Decides comparison and sort order, and therefore whether a unique key treats two spellings as one value."
+    }
+  ]
+}

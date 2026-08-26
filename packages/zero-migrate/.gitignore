@@ -1,0 +1,2 @@
+# napi prebuild binary — built by `napi build` / published to npm, never committed
+native/*.node

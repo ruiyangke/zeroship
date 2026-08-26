@@ -1,0 +1,37 @@
+-- ============================================================
+-- plan "representative"  (dialect: mysql)
+-- ============================================================
+
+SET @__zero_migrate_preview_saved_sql_mode = @@SESSION.sql_mode;
+
+SET SESSION sql_mode = CONCAT_WS(',', @@SESSION.sql_mode, 'NO_BACKSLASH_ESCAPES', 'NO_AUTO_VALUE_ON_ZERO');
+
+CREATE TABLE `public`.`codes` (`code` INT NOT NULL, `created_at` DATETIME(6) NOT NULL, `created_by` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs, `deleted_at` DATETIME(6), `id` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs PRIMARY KEY NOT NULL, `label` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs, `updated_at` DATETIME(6) NOT NULL, `updated_by` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs, `version` INT NOT NULL);
+
+CREATE UNIQUE INDEX `codes_code_key` ON `public`.`codes` (`code`);
+
+CREATE INDEX `codes_created_by_idx` ON `public`.`codes` (`created_by`);
+
+CREATE INDEX `codes_deleted_at_idx` ON `public`.`codes` (`deleted_at`);
+
+CREATE INDEX `codes_updated_at_idx` ON `public`.`codes` (`updated_at`);
+
+ALTER TABLE `public`.`codes` ADD COLUMN `note` text CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs;
+
+-- [runtime-resolved] addColumn "codes"."flag" (ifNotExists): catalog-probed at apply (run / satisfied-noop / fail-drift); present createTable/addColumn is refused until MySQL column-type equality is implemented; the statement below is the bare DDL the apply runs when the probe says run
+
+ALTER TABLE `public`.`codes` ADD COLUMN `flag` TINYINT(1);
+
+CREATE INDEX `codes_label_idx` ON `public`.`codes` (`label`);
+
+-- insert DML; binds: 6 typed value(s) (bound natively, never interpolated)
+
+INSERT INTO `public`.`codes` (`id`, `created_at`, `updated_at`, `version`, `code`, `label`) VALUES (?, ?, ?, ?, ?, ?);
+
+-- update DML; binds: 2 typed value(s) (bound natively, never interpolated)
+
+UPDATE `public`.`codes` SET `label` = ? WHERE (`code` > ?);
+
+SET SESSION sql_mode = @__zero_migrate_preview_saved_sql_mode;
+
+-- preview: 10 statement(s) rendered, 1 runtime-resolved

@@ -1,0 +1,10 @@
+{
+  "departments": "app_hr",
+  "job_grades": "app_hr",
+  "employees": "app_hr",
+  "positions": "app_hr",
+  "employee_position_history": "app_hr",
+  "payroll_runs": "app_hr",
+  "payroll_items": "app_hr",
+  "leave_requests": "app_hr"
+}

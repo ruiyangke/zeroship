@@ -1,0 +1,806 @@
+# dialect-support.toml - the single-source dialect-support sidecar.
+#
+# WHAT: one hand-authored row per (op-kind, variant) recording that token's
+# DISPOSITION on each dialect. The generator
+# (`packages/zero-migrate/scripts/gen-dialect-table.mjs`) reads this file and
+# emits BOTH:
+#   - crates/zero-migrate/tests/dialect_matrix/dialect_table.rs (Rust test artifact)
+#   - packages/zero-migrate/src/generated/dialect-table.ts      (the TS mirror)
+# Regenerate with: `pnpm --filter zero-migrate gen:dialect-table`, then
+# commit both generated artifacts.
+#
+# DISPOSITION vocabulary (per (row, dialect)):
+#   portable             core construct that renders/validates on this dialect
+#   transparentDegradable native where supported, absence-tolerable elsewhere.
+#                         This legend used to end "(NOT produced by the current
+#                         engine; reserved, and no row in this file uses it)".
+#                         BOTH halves were false. TWO rows use it, on both
+#                         non-PostgreSQL dialects: createPartition/base and
+#                         createTable/partitionedCollapse. And it is live, not
+#                         reserved - the generated test artifact carries it, each
+#                         backend policy answers it, op_support.rs groups it with
+#                         portable and vendor as SUPPORTED, and lowering acts on
+#                         it: createPartition on MySQL/SQLite collapses the child
+#                         into its parent behind a mirror guard instead of
+#                         creating a relation.
+#   vendor               vendor-tier construct, admitted only on this dialect
+#   unsupported          refused on this dialect
+#
+# FAITHFULNESS, which is the whole point: this file is HAND-AUTHORED to MIRROR each
+# registered backend's required `ValidationPolicy::op_disposition` answer and the
+# live `Support::decision()` + `Support::tier` behaviour, mapped as:
+#   Supported + Core   -> portable
+#   Supported + Vendor -> vendor
+#   Unsupported        -> unsupported
+# WHICH TEST PROVES WHICH HALF. This comment used to say
+# `tests/dialect_table_faithfulness.rs` "proves the generated table agrees with
+# `Op::support()` for every op-kind × variant × dialect". IT DOES NOT, and cannot:
+# `Op::support()` READS this table, so that comparison is TAUTOLOGICAL — the
+# faithfulness test says so in its own header. What it actually proves is
+# (a) the corpus covers the schema's 56 op-kinds, (b) `op_variant()` agrees with
+# each corpus label, (c) the corpus ⟷ table row BIJECTION, and (d) sidecar ⟷
+# generated table, row for row and cell for cell. The BEHAVIOURAL gate — that a
+# decision matches what validate/lower actually do — is `op_support_matrix.rs`, and
+# the LIVE one is `dialect_conformance_live.rs`. Three tests, three claims; naming
+# one of them for all three is how a gap hides.
+#
+# CONSUMERS differ per side, so state them separately. The Rust table IS read by
+# engine code: `crates/zero-migrate-core/src/model/op_support.rs` calls
+# `dialect_table::lookup(kind, variant)`. The TypeScript mirror is read by
+# NOTHING outside its own generated file - it exists so the SDK can be checked
+# against the same sidecar, and a grep for `generated/dialect-table` or for
+# `DIALECT_TABLE` on that side finds no other reference. Do not collapse
+# these into one claim; they have already drifted apart once.
+#
+# ROW KEYS: `kind` and `variant` are the two STRUCTURAL keys. EVERY OTHER KEY IS A
+# DIALECT ID, and the generator treats it as one without being taught the name — a
+# fourth backend adds `duckdb = "..."` to each row and changes NOTHING ELSE. There
+# is no per-vendor column in the generator, no per-vendor field in either emitted
+# artifact, and no list of dialect names in core code.
+#
+# The key must be the CANONICAL `DialectId` (lowercase `[a-z][a-z0-9_]*`, matching
+# `zero_migrate_ir::dialect::DialectId`), because it is emitted verbatim as
+# `DialectId::new("<key>")`. It used to be `pg` here while every artifact this file
+# fed said `postgres`, so `pg → postgres` was an ALIAS baked into the generator —
+# and `DialectId`'s own rule is "no aliases and no display names in the id". The
+# key is now `postgres`; `tests/dialect-table-drift.test.ts` pins that no alias
+# comes back.
+#
+# VARIANT keys: payload-independent ops carry a single `variant = "base"` row.
+# Ops whose `Support::decision()` depends on a node/option carry one row per
+# distinct support() branch, keyed by a descriptive variant token; the
+# faithfulness test builds one representative op per row and checks agreement.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Payload-independent — fully portable on all three dialects.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[row]]
+kind = "alterPrimaryKey"
+variant = "base"
+postgres = "portable"
+sqlite = "portable"
+mysql = "portable"
+
+[[row]]
+kind = "synchronizeIdentity"
+variant = "base"
+postgres = "portable"
+sqlite = "portable"
+mysql = "portable"
+
+[[row]]
+kind = "setTableOptions"
+variant = "base"
+postgres = "portable"
+sqlite = "portable"
+mysql = "portable"
+
+[[row]]
+kind = "dropTable"
+variant = "base"
+postgres = "portable"
+sqlite = "portable"
+mysql = "portable"
+
+[[row]]
+kind = "renameTable"
+variant = "base"
+postgres = "portable"
+sqlite = "portable"
+mysql = "portable"
+
+[[row]]
+kind = "dropColumn"
+variant = "base"
+postgres = "portable"
+sqlite = "portable"
+mysql = "portable"
+
+[[row]]
+kind = "dropIndex"
+variant = "base"
+postgres = "portable"
+sqlite = "portable"
+mysql = "portable"
+
+[[row]]
+kind = "setColumnNotNull"
+variant = "base"
+postgres = "portable"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "dropColumnNotNull"
+variant = "base"
+postgres = "portable"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "dropColumnDefault"
+variant = "base"
+postgres = "portable"
+sqlite = "unsupported"
+mysql = "portable"
+
+# dropConstraint stays `portable` on SQLite, and the reason is MEASURED rather
+# than assumed. SQLite HAS a drop lane (`render/lower.rs`): when the live snapshot
+# carries the table and the named constraint is a FOREIGN KEY, the op lowers to a
+# 12-step rebuild and APPLIES end to end - proven through validate + lower + apply
+# by `tests/sqlite_declaration_flip_over_refusal_control.rs`. It refuses
+# `TableRebuildUnavailable` only for a missing snapshot or a NON-FK constraint.
+#
+# The live conformance suite recorded this row as a wrong declaration, but its
+# representative drops a constraint that is not a foreign key, so it measured the
+# narrow refusal and generalized it. Flipping this cell was TRIED here: the control
+# above went red with `UNSUPPORTED ... SQLite cannot add or drop a table constraint
+# in place`, i.e. the correction would have refused a migration that works today.
+# There is one row for all constraint kinds and no variant split, so `portable` is
+# the only disposition that does not break the working case.
+[[row]]
+kind = "dropConstraint"
+variant = "base"
+postgres = "portable"
+sqlite = "portable"
+mysql = "portable"
+
+[[row]]
+kind = "update"
+variant = "base"
+postgres = "portable"
+sqlite = "portable"
+mysql = "portable"
+
+[[row]]
+kind = "delete"
+variant = "base"
+postgres = "portable"
+sqlite = "portable"
+mysql = "portable"
+
+[[row]]
+kind = "backfill"
+variant = "base"
+postgres = "portable"
+sqlite = "portable"
+mysql = "portable"
+
+[[row]]
+kind = "dialectal"
+variant = "base"
+postgres = "portable"
+sqlite = "portable"
+mysql = "portable"
+
+[[row]]
+kind = "createEnum"
+variant = "base"
+postgres = "portable"
+sqlite = "portable"
+mysql = "portable"
+
+[[row]]
+kind = "dropEnum"
+variant = "base"
+postgres = "portable"
+sqlite = "portable"
+mysql = "portable"
+
+[[row]]
+kind = "dropDomain"
+variant = "base"
+postgres = "portable"
+sqlite = "portable"
+mysql = "portable"
+
+[[row]]
+kind = "dropTrigger"
+variant = "base"
+postgres = "portable"
+sqlite = "portable"
+mysql = "portable"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Payload-independent — PostgreSQL-only CORE (portable on PG, refused elsewhere).
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[row]]
+kind = "comment"
+variant = "base"
+postgres = "portable"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "createPartition"
+variant = "base"
+postgres = "portable"
+sqlite = "transparentDegradable"
+mysql = "transparentDegradable"
+
+[[row]]
+kind = "attachPartition"
+variant = "base"
+postgres = "vendor"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "detachPartition"
+variant = "base"
+postgres = "portable"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "dropPartition"
+variant = "base"
+postgres = "portable"
+sqlite = "portable"
+mysql = "portable"
+
+[[row]]
+kind = "createSequence"
+variant = "base"
+postgres = "portable"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "alterSequence"
+variant = "base"
+postgres = "portable"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "dropSequence"
+variant = "base"
+postgres = "portable"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+# validateConstraint — PostgreSQL-only online constraint adoption (the second
+# half of NOT VALID → VALIDATE CONSTRAINT). SQLite/MySQL have no VALIDATE
+# CONSTRAINT; fail-closed.
+[[row]]
+kind = "validateConstraint"
+variant = "base"
+postgres = "portable"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Payload-independent — VENDOR-tier, PostgreSQL-only.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[row]]
+kind = "createSchema"
+variant = "base"
+postgres = "vendor"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "dropSchema"
+variant = "base"
+postgres = "vendor"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "createExtension"
+variant = "base"
+postgres = "vendor"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "dropExtension"
+variant = "base"
+postgres = "vendor"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "alterRole"
+variant = "base"
+postgres = "vendor"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "dropRole"
+variant = "base"
+postgres = "vendor"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "dropOwnedBy"
+variant = "base"
+postgres = "vendor"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "grant"
+variant = "base"
+postgres = "vendor"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "revoke"
+variant = "base"
+postgres = "vendor"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "setRls"
+variant = "base"
+postgres = "vendor"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "createPolicy"
+variant = "base"
+postgres = "vendor"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "dropPolicy"
+variant = "base"
+postgres = "vendor"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "createFunction"
+variant = "base"
+postgres = "vendor"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "dropFunction"
+variant = "base"
+postgres = "vendor"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "raw"
+variant = "base"
+postgres = "vendor"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Payload-DEPENDENT ops — one row per distinct Support::decision() branch.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# createTable — the base form is portable; several payload features push it
+# PostgreSQL-only (partitioning, PG-only index features, nextval defaults,
+# identity({always:true}), and non-portable by-default identity).
+[[row]]
+kind = "createTable"
+variant = "base"
+postgres = "portable"
+sqlite = "portable"
+mysql = "portable"
+
+[[row]]
+kind = "createTable"
+variant = "partitioned"
+postgres = "portable"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "createTable"
+variant = "partitionedCollapse"
+postgres = "portable"
+sqlite = "transparentDegradable"
+mysql = "transparentDegradable"
+
+[[row]]
+kind = "createTable"
+variant = "pgOnlyIndexFeature"
+postgres = "portable"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "createTable"
+variant = "nextvalDefault"
+postgres = "portable"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "createTable"
+variant = "identityAlways"
+postgres = "portable"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "createTable"
+variant = "nonportableByDefaultIdentity"
+postgres = "portable"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+# addColumn — portable, except identity and nextval defaults are PG-only.
+[[row]]
+kind = "addColumn"
+variant = "base"
+postgres = "portable"
+sqlite = "portable"
+mysql = "portable"
+
+[[row]]
+kind = "addColumn"
+variant = "identity"
+postgres = "portable"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "addColumn"
+variant = "nextvalDefault"
+postgres = "portable"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+# createIndex — portable base; PG-only index methods/features refuse on both
+# SQLite and MySQL; expression elements and partial predicates refuse on MySQL
+# only (SQLite keeps them).
+[[row]]
+kind = "createIndex"
+variant = "base"
+postgres = "portable"
+sqlite = "portable"
+mysql = "portable"
+
+[[row]]
+kind = "createIndex"
+variant = "pgOnlyMethodOrFeature"
+postgres = "portable"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "createIndex"
+variant = "exprElement"
+postgres = "portable"
+sqlite = "portable"
+mysql = "unsupported"
+
+[[row]]
+kind = "createIndex"
+variant = "partialWhere"
+postgres = "portable"
+sqlite = "portable"
+mysql = "unsupported"
+
+# setColumnType — a `using` expression is deferred everywhere. The base retype is
+# PG-native; on SQLite the imperative op lane refuses it unconditionally
+# (`require_capability_for(NativeAlterColumn)`) because a retype is reconciled ONLY
+# by the differ's 12-step rebuild. MEASURED against a live SQLite: refuses.
+#
+# The MySQL cell is `portable` and was for a long time a KNOWN-WRONG declaration:
+# the lowerer refused every alter-column op on MySQL, and the live conformance suite
+# recorded the disagreement as a declaration error recommending a flip to
+# `unsupported`. The cell was right and the engine was wrong. MySQL spells a retype
+# `MODIFY COLUMN`, which restates the whole column definition, and the definition is
+# recoverable from `SHOW CREATE TABLE` — so the op now lowers to a runtime-resolved
+# restate step. MEASURED against a live MySQL end to end, reading every facet back
+# from `information_schema`:
+# `tests/mysql_engine/mysql_setcolumntype_restate.rs`.
+[[row]]
+kind = "setColumnType"
+variant = "base"
+postgres = "portable"
+sqlite = "unsupported"
+mysql = "portable"
+
+[[row]]
+kind = "setColumnType"
+variant = "using"
+postgres = "unsupported"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+# setColumnDefault — plain/expression/container/json defaults are portable on
+# PG/MySQL; nextval defaults are PG-only. On SQLite the imperative op lane refuses
+# every shape unconditionally (same `NativeAlterColumn` gate as setColumnType): a
+# default change is reconciled only by the differ's 12-step rebuild. MEASURED
+# against a live SQLite: both variants refuse.
+[[row]]
+kind = "setColumnDefault"
+variant = "base"
+postgres = "portable"
+sqlite = "unsupported"
+mysql = "portable"
+
+[[row]]
+kind = "setColumnDefault"
+variant = "containerOrJson"
+postgres = "portable"
+sqlite = "unsupported"
+mysql = "portable"
+
+[[row]]
+kind = "setColumnDefault"
+variant = "nextval"
+postgres = "portable"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+# renameColumn — live-rendered on PG/SQLite but not MySQL (render-only phase);
+# an existence-guard cannot be attributed to a unit today, so it is refused
+# everywhere.
+[[row]]
+kind = "renameColumn"
+variant = "base"
+postgres = "portable"
+sqlite = "portable"
+mysql = "unsupported"
+
+[[row]]
+kind = "renameColumn"
+variant = "existenceGuard"
+postgres = "unsupported"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+# addConstraint — simple single-column id FK and unique are portable; check,
+# exclusion, composite FK, and non-id FK are PG-only; user PK and no-local-column
+# FK are refused everywhere.
+[[row]]
+kind = "addConstraint"
+variant = "fkSimple"
+postgres = "portable"
+sqlite = "portable"
+mysql = "portable"
+
+# SQLite's addConstraint rebuild lane covers FOREIGN KEYS only (`IrConstraintKind::Fk`);
+# a UNIQUE constraint falls through to the PG-shaped renderer and is refused. MEASURED
+# against a live SQLite: the three fk* variants APPLY, `unique` refuses. Per-variant.
+[[row]]
+kind = "addConstraint"
+variant = "unique"
+postgres = "portable"
+sqlite = "unsupported"
+mysql = "portable"
+
+[[row]]
+kind = "addConstraint"
+variant = "check"
+postgres = "portable"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "addConstraint"
+variant = "exclusion"
+postgres = "portable"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "addConstraint"
+variant = "fkComposite"
+postgres = "portable"
+sqlite = "portable"
+mysql = "portable"
+
+[[row]]
+kind = "addConstraint"
+variant = "fkNonId"
+postgres = "portable"
+sqlite = "portable"
+mysql = "portable"
+
+# fkNotValid — NOT VALID online constraint adoption on a FK; PG-only (SQLite/MySQL
+# have no NOT VALID). Composite/non-id notValid FKs collapse to this variant (all
+# PG-only), keeping op-level Support::decision() == validate.
+[[row]]
+kind = "addConstraint"
+variant = "fkNotValid"
+postgres = "portable"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "addConstraint"
+variant = "fkNoLocalColumn"
+postgres = "unsupported"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+# insert: exact conflict targets are native on PostgreSQL and SQLite. MySQL can
+# preserve exact row effects for guarded doUpdate, but has no exact targeted
+# doNothing form.
+[[row]]
+kind = "insert"
+variant = "base"
+postgres = "portable"
+sqlite = "portable"
+mysql = "portable"
+
+[[row]]
+kind = "insert"
+variant = "onConflictDoUpdate"
+postgres = "portable"
+sqlite = "portable"
+mysql = "portable"
+
+[[row]]
+kind = "insert"
+variant = "onConflictDoNothing"
+postgres = "portable"
+sqlite = "portable"
+mysql = "unsupported"
+
+# createView — a plain (non-materialized) view is portable core; materialized
+# views are vendor/PG-only; materialized + replace is refused everywhere.
+[[row]]
+kind = "createView"
+variant = "base"
+postgres = "portable"
+sqlite = "portable"
+mysql = "portable"
+
+[[row]]
+kind = "createView"
+variant = "materialized"
+postgres = "vendor"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "createView"
+variant = "materializedReplace"
+postgres = "unsupported"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+# dropView — plain drop is portable core; dropping a materialized view is
+# vendor/PG-only.
+[[row]]
+kind = "dropView"
+variant = "base"
+postgres = "portable"
+sqlite = "portable"
+mysql = "portable"
+
+[[row]]
+kind = "dropView"
+variant = "materialized"
+postgres = "vendor"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+# createDomain — portable base; a nextval default is PG-only.
+[[row]]
+kind = "createDomain"
+variant = "base"
+postgres = "portable"
+sqlite = "portable"
+mysql = "portable"
+
+[[row]]
+kind = "createDomain"
+variant = "nextvalDefault"
+postgres = "portable"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+# createRole — vendor/PG-only; the superuser + ifNotExists combination is refused
+# everywhere (it cannot be rendered).
+[[row]]
+kind = "createRole"
+variant = "base"
+postgres = "vendor"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "createRole"
+variant = "superuserIfNotExists"
+postgres = "unsupported"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+# createTrigger — the per-dialect trigger grammars diverge sharply; each row is
+# one distinct support() branch (PG needs a named function; SQLite/MySQL take a
+# body but reject truncate/statement-level; MySQL additionally rejects multiple
+# events, INSTEAD OF, WHEN, and RAISE IGNORE).
+[[row]]
+kind = "createTrigger"
+variant = "executeFunction"
+postgres = "portable"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "createTrigger"
+variant = "bodySimple"
+postgres = "unsupported"
+sqlite = "portable"
+mysql = "portable"
+
+[[row]]
+kind = "createTrigger"
+variant = "bodyTruncateEvent"
+postgres = "unsupported"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "createTrigger"
+variant = "bodyStatementLevel"
+postgres = "unsupported"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+# SQLite's CREATE TRIGGER grammar takes exactly one event, and
+# `support.rs`'s `Feature::TriggerMultipleEvents` has declared SQLite unsupported
+# for some time. This row said `portable`; the two contradicted each other and the
+# feature gate won, so the op was already refused. MEASURED against a live SQLite:
+# refuses with "SQLite CREATE TRIGGER accepts exactly one trigger event".
+[[row]]
+kind = "createTrigger"
+variant = "bodyMultipleEvents"
+postgres = "unsupported"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
+kind = "createTrigger"
+variant = "bodyInsteadOf"
+postgres = "unsupported"
+sqlite = "portable"
+mysql = "unsupported"
+
+[[row]]
+kind = "createTrigger"
+variant = "bodyWhen"
+postgres = "unsupported"
+sqlite = "portable"
+mysql = "unsupported"
+
+[[row]]
+kind = "createTrigger"
+variant = "bodyRaiseIgnore"
+postgres = "unsupported"
+sqlite = "portable"
+mysql = "unsupported"

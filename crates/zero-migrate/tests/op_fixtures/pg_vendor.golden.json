@@ -1,0 +1,274 @@
+{
+  "ir_version": 1,
+  "name": "pg_vendor",
+  "owner_app": "app_corpus",
+  "ops": [
+    {
+      "op": "createExtension",
+      "name": "citext",
+      "ifNotExists": true
+    },
+    {
+      "op": "dropExtension",
+      "name": "citext",
+      "ifExists": true
+    },
+    {
+      "op": "createSchema",
+      "name": "zero_migrate",
+      "ifNotExists": true
+    },
+    {
+      "op": "dropSchema",
+      "name": "zero_migrate",
+      "ifExists": true,
+      "cascade": true
+    },
+    {
+      "op": "createRole",
+      "name": "zero_migrate_auth",
+      "login": true,
+      "password": "zero_migrate_auth",
+      "bypassRls": true,
+      "setSearchPath": [
+        "zero_migrate",
+        "public"
+      ],
+      "ifNotExists": true
+    },
+    {
+      "op": "alterRole",
+      "name": "zero_migrate_auth",
+      "setSearchPath": [
+        "zero_migrate",
+        "public"
+      ]
+    },
+    {
+      "op": "dropRole",
+      "name": "zero_migrate_auth",
+      "ifExists": true
+    },
+    {
+      "op": "dropOwnedBy",
+      "roles": [
+        "zero_migrate_auth"
+      ]
+    },
+    {
+      "op": "grant",
+      "privileges": [
+        "select",
+        "insert",
+        "update",
+        "delete"
+      ],
+      "on": {
+        "kind": "table",
+        "names": [
+          "users"
+        ],
+        "schema": "zero_migrate"
+      },
+      "to": [
+        "zero_migrate_auth"
+      ]
+    },
+    {
+      "op": "revoke",
+      "privileges": [
+        "update",
+        "delete",
+        "truncate"
+      ],
+      "on": {
+        "kind": "table",
+        "names": [
+          "audit_events"
+        ],
+        "schema": "zero_migrate"
+      },
+      "from": [
+        "public"
+      ]
+    },
+    {
+      "op": "attachPartition",
+      "parent": "events",
+      "name": "events_2026_11",
+      "bound": {
+        "kind": "range",
+        "from": [
+          {
+            "kind": "string",
+            "value": "2026-11-01T00:00:00Z"
+          }
+        ],
+        "to": [
+          {
+            "kind": "string",
+            "value": "2026-12-01T00:00:00Z"
+          }
+        ]
+      },
+      "schema": "zero_migrate"
+    },
+    {
+      "op": "setRls",
+      "table": "app_secrets",
+      "schema": "zero_migrate",
+      "enabled": true,
+      "forced": true
+    },
+    {
+      "op": "createPolicy",
+      "name": "tenant_isolation",
+      "table": "app_secrets",
+      "schema": "zero_migrate",
+      "forCmd": "all",
+      "using": {
+        "node": "binOp",
+        "op": "eq",
+        "lhs": {
+          "node": "colRef",
+          "name": "app_id"
+        },
+        "rhs": {
+          "node": "cast",
+          "operand": {
+            "node": "fnCall",
+            "fn": "currentSetting",
+            "args": [
+              {
+                "node": "literal",
+                "value": "zero_migrate.tenant_app"
+              },
+              {
+                "node": "literal",
+                "value": true
+              }
+            ]
+          },
+          "target": "text"
+        }
+      },
+      "withCheck": {
+        "node": "binOp",
+        "op": "eq",
+        "lhs": {
+          "node": "colRef",
+          "name": "app_id"
+        },
+        "rhs": {
+          "node": "cast",
+          "operand": {
+            "node": "fnCall",
+            "fn": "currentSetting",
+            "args": [
+              {
+                "node": "literal",
+                "value": "zero_migrate.tenant_app"
+              },
+              {
+                "node": "literal",
+                "value": true
+              }
+            ]
+          },
+          "target": "text"
+        }
+      }
+    },
+    {
+      "op": "dropPolicy",
+      "name": "tenant_isolation",
+      "table": "app_secrets",
+      "schema": "zero_migrate",
+      "ifExists": true
+    },
+    {
+      "op": "setRls",
+      "table": "app_secrets",
+      "schema": "zero_migrate",
+      "enabled": false,
+      "forced": false
+    },
+    {
+      "op": "createFunction",
+      "name": "audit_events_block_tamper",
+      "schema": "zero_migrate",
+      "returns": "trigger",
+      "language": "procedural",
+      "replace": true,
+      "body": "BEGIN RAISE EXCEPTION 'audit_events is append-only'; END;"
+    },
+    {
+      "op": "createTrigger",
+      "name": "audit_events_block_update",
+      "table": "audit_events",
+      "schema": "zero_migrate",
+      "timing": "before",
+      "events": [
+        "update",
+        "delete"
+      ],
+      "forEach": "row",
+      "action": {
+        "kind": "executeFunction",
+        "name": "audit_events_block_tamper"
+      },
+      "when": {
+        "node": "unaryOp",
+        "op": "isNotNull",
+        "operand": {
+          "node": "colRef",
+          "name": "app_id"
+        }
+      }
+    },
+    {
+      "op": "createTrigger",
+      "name": "audit_events_append_only",
+      "table": "audit_events",
+      "schema": "zero_migrate",
+      "timing": "before",
+      "events": [
+        "update"
+      ],
+      "forEach": "row",
+      "action": {
+        "kind": "body",
+        "statements": [
+          {
+            "stmt": "raise",
+            "level": "abort",
+            "message": "append-only",
+            "errcode": "P0001"
+          }
+        ]
+      }
+    },
+    {
+      "op": "dropTrigger",
+      "name": "audit_events_block_update",
+      "table": "audit_events",
+      "schema": "zero_migrate",
+      "ifExists": true
+    },
+    {
+      "op": "dropFunction",
+      "name": "audit_events_block_tamper",
+      "schema": "zero_migrate",
+      "ifExists": true
+    },
+    {
+      "op": "raw",
+      "sql": "SELECT set_config('zero_migrate.tenant_app', 'app_demo', false)",
+      "reason": "set tenant app GUC for pg vendor fixture"
+    }
+  ],
+  "flags": {},
+  "depends_on": [],
+  "supersedes": [],
+  "preconditions": []
+}

@@ -1,0 +1,29 @@
+{
+  "ir_version": 1,
+  "name": "fluent_scalars_dml",
+  "owner_app": "app_corpus",
+  "ops": [
+    {
+      "op": "insert",
+      "table": "ledger",
+      "columns": [
+        "seq",
+        "salt"
+      ],
+      "rows": [
+        [
+          {
+            "decimal": "9007199254740993"
+          },
+          {
+            "bytes": "ABAgQID/"
+          }
+        ]
+      ]
+    }
+  ],
+  "flags": {},
+  "depends_on": [],
+  "supersedes": [],
+  "preconditions": []
+}

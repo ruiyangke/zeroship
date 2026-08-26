@@ -1,0 +1,34 @@
+{
+  "name": "zero-migrate-postgres",
+  "version": "0.1.0",
+  "description": "PostgreSQL vendor attributes for zero-migrate: installing this package adds the `postgres: { ... }` table-option namespace to the authoring DSL, typed from the backend's own declarations.",
+  "keywords": ["zero-migrate", "postgres", "postgresql", "migration", "schema", "typescript"],
+  "author": "Ruiyang Ke <me@ry.ke>",
+  "license": "MIT",
+  "homepage": "https://github.com/ruiyangke/zero-migrate#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ruiyangke/zero-migrate.git",
+    "directory": "packages/zero-migrate-postgres"
+  },
+  "bugs": { "url": "https://github.com/ruiyangke/zero-migrate/issues" },
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist", "README.md", "LICENSE"],
+  "scripts": {
+    "gen": "node scripts/gen-attributes.mjs",
+    "gen:attributes": "node scripts/gen-attributes.mjs",
+    "build": "tsup",
+    "test": "NODE_ENV=test node --import tsx --test tests/*.test.ts"
+  },
+  "peerDependencies": {
+    "zero-migrate": "workspace:*"
+  }
+}

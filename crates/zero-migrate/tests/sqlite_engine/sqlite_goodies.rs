@@ -1,0 +1,332 @@
+//! `SQLite` goodie-column coverage on the faithful path. It was written for parity
+//! with a PostgreSQL vector / geoPoint arm, and there is no such arm to be at parity
+//! WITH: this file is the only end-to-end coverage either goodie column has on any
+//! dialect. The faithful path means the real `DeclarativeAuthor` (`SQLite` dialect)
+//! builds the plan, applies it through the
+//! real hardened `SqliteBackend` on a temp file, and the assertions read the
+//! REAL DB end-state (`PRAGMA table_info`, `sqlite_master`) + a real re-diff.
+//!
+//! WHAT THE SQLITE ENGINE PATH ACTUALLY DOES (ground-truthed, not assumed):
+//!   - a `vector(N)` field → a plain `BLOB` column + a plain B-tree index over it
+//!     (the shared `def_to_column_type_for_dialect` maps vector→BLOB on `SQLite`;
+//!     the engine's `SqliteEmitter::create_index` emits a plain B-tree for every
+//!     index kind — there is NO `vec0` virtual table and NO metric validation on
+//!     this path: sqlite-vec / vec0 vtables are the **plugin-db runtime** data
+//!     plane's concern, created via `ensure_vector_index`, NOT the migrate
+//!     engine, and covered by that runtime's own suite in a separate
+//!     repository).
+//!   - a `geoPoint` field → a packed `BLOB` column + a plain B-tree index (no
+//!     PostGIS/GIST equivalent; spatial search is a haversine flat-scan in
+//!     plugin-db).
+
+use crate::support;
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use tempfile::TempDir;
+use zero_migrate::{
+    desired_snapshot_for_dialect, CollectionDescriptor, DeclarativeAuthor, FieldDescriptor,
+    SchemaSnapshot,
+};
+use zero_migrate_sqlite::SqliteBackend;
+
+const PROJECT: &str = "prj_demo";
+const APP: &str = "app_demo";
+
+struct Paths {
+    _dir: TempDir,
+    app: PathBuf,
+    journal: PathBuf,
+}
+
+fn paths(app_id: &str) -> Paths {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let app = dir.path().join(format!("zs-{app_id}.sqlite"));
+    let journal = dir.path().join(format!("zs-{app_id}.migrations.sqlite"));
+    Paths {
+        _dir: dir,
+        app,
+        journal,
+    }
+}
+
+fn backend(p: &Paths) -> SqliteBackend {
+    SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend")
+}
+
+fn sqlite_author() -> DeclarativeAuthor {
+    DeclarativeAuthor::new_for_dialect(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        APP,
+        zero_migrate_sqlite::DIALECT,
+    )
+}
+
+fn effective_policy() -> zero_migrate::EffectivePolicy {
+    support::confined_charter()
+}
+
+fn ownership_of(d: &zero_migrate::DesiredSchema) -> HashMap<String, String> {
+    d.ownership
+        .iter()
+        .map(|(t, a)| (t.clone(), a.clone()))
+        .collect()
+}
+
+/// The declared `SQLite` type of `column` on `table`, via `PRAGMA table_info`
+/// (engine mode lets the test issue the PRAGMA on `main`).
+async fn column_type(be: &SqliteBackend, table: &str, column: &str) -> String {
+    be.actor()
+        .set_mode(zero_migrate_sqlite::backend::Mode::EngineJournal)
+        .await
+        .expect("engine mode");
+    let info = be
+        .actor()
+        .query(&format!("PRAGMA main.table_info({table})"))
+        .await
+        .expect("table_info");
+    info.iter()
+        .find(|r| r[1].as_deref() == Some(column))
+        .and_then(|r| r[2].clone())
+        .unwrap_or_default()
+}
+
+// ===========================================================================
+// VECTOR — a `vector(N)` field applies as a BLOB column (+ a plain B-tree index)
+// on the SQLite engine path; a re-diff is ZERO-drift. (No PostgreSQL arm applies a
+// vector column end-to-end, so this is not the SQLite half of a pair.)
+// ===========================================================================
+#[compio::test]
+async fn vector_field_applies_as_blob_and_redfiff_is_zero_drift() {
+    let mk = || CollectionDescriptor {
+        name: "docs".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "embedding".into(),
+            ty: "vector".into(),
+            vector_dims: Some(768),
+            vector_metric: Some("cosine".into()),
+            mask: None,
+            ..Default::default()
+        }],
+        indexes: vec![],
+        runtime_options: Default::default(),
+    };
+
+    let desired = desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        &[mk()],
+        &zero_migrate_sqlite::DIALECT,
+        &effective_policy(),
+    )
+    .expect("desired");
+    let plan = sqlite_author()
+        .diff(
+            &desired,
+            &SchemaSnapshot::default(),
+            &HashMap::new(),
+            &[],
+            &effective_policy(),
+        )
+        .expect("diff");
+
+    let p = paths("vector_blob");
+    let be = backend(&p);
+    for m in &plan.all_migrations() {
+        be.apply_one_additive(m, "deployer")
+            .await
+            .unwrap_or_else(|e| panic!("apply {} must succeed: {e:?}", m.name));
+    }
+
+    // REAL end-state: the vector column is a BLOB: on the migrate-engine path a
+    // vector is a packed BLOB with no vec0 vtable.
+    assert_eq!(
+        column_type(&be, "docs", "embedding")
+            .await
+            .to_ascii_uppercase(),
+        "BLOB",
+        "a vector(N) field is a BLOB column on SQLite (not a vec0 virtual table)"
+    );
+
+    // The faithful live snapshot, re-diffed against the SAME desired → ZERO drift
+    // (no spurious ADD/DROP/rebuild). This is the parity the PG ivfflat round-trip
+    // proves on its side.
+    let live = be.snapshot_schema_sqlite().await.expect("introspect live");
+    let own = ownership_of(&desired);
+    let desired2 = desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        &[mk()],
+        &zero_migrate_sqlite::DIALECT,
+        &effective_policy(),
+    )
+    .expect("re-desired");
+    let plan2 = sqlite_author()
+        .diff(&desired2, &live, &own, &[], &effective_policy())
+        .expect("re-diff must succeed");
+    assert!(
+        plan2.all_migrations().is_empty() && plan2.rebuilds.is_empty(),
+        "a vector field must round-trip ZERO-drift; got migs={:?} rebuilds={}",
+        plan2
+            .all_migrations()
+            .iter()
+            .map(|m| m.name.clone())
+            .collect::<Vec<_>>(),
+        plan2.rebuilds.len()
+    );
+}
+
+/// DIVERGENCE PIN — on the `SQLite` **migrate-engine** path, an `innerProduct`
+/// metric does NOT raise a `vector_unsupported_metric` error (that validation
+/// lives in the plugin-db runtime vector index builder, where sqlite-vec supports
+/// only cosine + L2). On the engine path the metric is metadata that rides into
+/// the (PG-shaped) ivfflat index snapshot; the `SQLite` leg emits a plain BLOB
+/// column + plain B-tree index, so ANY metric token applies cleanly. This pins
+/// that reality so a future "reject ip on `SQLite` at author time" change is a
+/// visible, deliberate behaviour flip rather than a silent one.
+#[compio::test]
+async fn vector_inner_product_metric_applies_no_metric_error_on_engine_path() {
+    let mk = || CollectionDescriptor {
+        name: "docs".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "embedding".into(),
+            ty: "vector".into(),
+            vector_dims: Some(3),
+            vector_metric: Some("innerProduct".into()),
+            mask: None,
+            ..Default::default()
+        }],
+        indexes: vec![],
+        runtime_options: Default::default(),
+    };
+    let desired = desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        &[mk()],
+        &zero_migrate_sqlite::DIALECT,
+        &effective_policy(),
+    )
+    .expect("an innerProduct vector descriptor compiles (no author-time metric refusal)");
+    let plan = sqlite_author()
+        .diff(
+            &desired,
+            &SchemaSnapshot::default(),
+            &HashMap::new(),
+            &[],
+            &effective_policy(),
+        )
+        .expect("diff with innerProduct metric must succeed on the SQLite engine path");
+
+    let p = paths("vector_ip");
+    let be = backend(&p);
+    for m in &plan.all_migrations() {
+        be.apply_one_additive(m, "deployer")
+            .await
+            .unwrap_or_else(|e| panic!("apply {} must succeed: {e:?}", m.name));
+    }
+    assert_eq!(
+        column_type(&be, "docs", "embedding")
+            .await
+            .to_ascii_uppercase(),
+        "BLOB",
+        "innerProduct vector applies as a plain BLOB on the SQLite engine path"
+    );
+}
+
+// ===========================================================================
+// GEOPOINT — a `geoPoint` field applies as a packed BLOB column on SQLite
+// (no spatial index AM; the runtime does a haversine flat-scan). Drift
+// round-trips. (PG emits a GIST spatial index; SQLite has none.)
+// ===========================================================================
+#[compio::test]
+async fn geopoint_field_applies_as_blob_and_drift_round_trips() {
+    let mk = || CollectionDescriptor {
+        name: "places".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "loc".into(),
+            ty: "geoPoint".into(),
+            ..Default::default()
+        }],
+        indexes: vec![],
+        runtime_options: Default::default(),
+    };
+    let desired = desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        &[mk()],
+        &zero_migrate_sqlite::DIALECT,
+        &effective_policy(),
+    )
+    .expect("desired");
+    let plan = sqlite_author()
+        .diff(
+            &desired,
+            &SchemaSnapshot::default(),
+            &HashMap::new(),
+            &[],
+            &effective_policy(),
+        )
+        .expect("diff");
+
+    let p = paths("geo_blob");
+    let be = backend(&p);
+    for m in &plan.all_migrations() {
+        be.apply_one_additive(m, "deployer")
+            .await
+            .unwrap_or_else(|e| panic!("apply {} must succeed: {e:?}", m.name));
+    }
+
+    // REAL end-state: the geoPoint column is a packed BLOB.
+    assert_eq!(
+        column_type(&be, "places", "loc").await.to_ascii_uppercase(),
+        "BLOB",
+        "a geoPoint field is a packed BLOB column on SQLite"
+    );
+    // No PostGIS/GIST: SQLite has no `USING gist` access method — the column is a
+    // plain BLOB. (The plugin-db data plane does a haversine flat-scan; there is no
+    // spatial index object to assert here. We DO assert there is no *unexpected*
+    // spatial vtable.)
+    be.actor()
+        .set_mode(zero_migrate_sqlite::backend::Mode::EngineJournal)
+        .await
+        .expect("engine mode");
+    let vtables = be
+        .actor()
+        .query("SELECT name FROM main.sqlite_master WHERE type='table' AND sql LIKE '%USING%'")
+        .await
+        .expect("scan for virtual tables");
+    assert!(
+        vtables.is_empty(),
+        "geoPoint must NOT create a virtual/spatial table on the engine path: {vtables:?}"
+    );
+
+    // A re-diff against the REAL introspected live snapshot → ZERO drift.
+    let live = be.snapshot_schema_sqlite().await.expect("introspect live");
+    let own = ownership_of(&desired);
+    let desired2 = desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        &[mk()],
+        &zero_migrate_sqlite::DIALECT,
+        &effective_policy(),
+    )
+    .expect("re-desired");
+    let plan2 = sqlite_author()
+        .diff(&desired2, &live, &own, &[], &effective_policy())
+        .expect("re-diff must succeed");
+    assert!(
+        plan2.all_migrations().is_empty() && plan2.rebuilds.is_empty(),
+        "a geoPoint field must round-trip ZERO-drift; got migs={:?} rebuilds={}",
+        plan2
+            .all_migrations()
+            .iter()
+            .map(|m| m.name.clone())
+            .collect::<Vec<_>>(),
+        plan2.rebuilds.len()
+    );
+}

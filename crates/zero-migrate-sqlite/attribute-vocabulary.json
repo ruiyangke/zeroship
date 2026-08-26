@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "dialect": "sqlite",
+  "attributes": [
+    {
+      "key": "sqlite.strict",
+      "ops": [
+        "createTable",
+        "createPartition",
+        "setTableOptions"
+      ],
+      "shape": {
+        "kind": "bool"
+      },
+      "docs": "SQLite's STRICT table clause: enforce each column's declared type on write rather than applying type affinity. Unrelated to zero-migrate's own deploy-time `strictness` option."
+    },
+    {
+      "key": "sqlite.without_rowid",
+      "ops": [
+        "createTable",
+        "createPartition",
+        "setTableOptions"
+      ],
+      "shape": {
+        "kind": "bool"
+      },
+      "docs": "Store the table as an index over its PRIMARY KEY with no separate rowid. Requires a PRIMARY KEY, and changes what a rowid-dependent query sees."
+    }
+  ]
+}
