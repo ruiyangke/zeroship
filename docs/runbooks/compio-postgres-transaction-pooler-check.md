@@ -96,6 +96,13 @@ nothing outside it. RE-MEASURED later the same day at suite size 1738, after
 50 test names, nothing added and nothing dropped, so all 18 tests added that
 day pass behind a pooler.
 
+RE-MEASURED 2026-08-25 after protocol 3.2 landed, at suite size 1753:
+**1697/56**. The set gained exactly one name and lost none, and that one is
+the assignment-dependent temp-table case described below - so requesting
+protocol 3.2 by default costs nothing behind a pooler, which is what the
+re-measurement was for. PgBouncer does not speak 3.2 and negotiates the client
+down to 3.0 rather than refusing.
+
 Compare the SET, not the count. Two runs can both report 55 while failing
 different tests, and the count alone cannot see that; diffing the sorted
 `failures:` names can:
@@ -121,6 +128,20 @@ not preserve. Treat anything OUTSIDE this set as the finding:
   mass-termination and terminated-backend tests): a pooler hands out whichever
   backend it likes, so "the same connection came back" is not a claim that can
   hold behind one
+- `copy_input_time_is_not_charged_as_server_read_silence` - ASSIGNMENT
+  DEPENDENT, so it is in the residue on some runs and not others. It creates a
+  session-local TEMP table, which a transaction pooler leaves on whichever
+  backend served the previous statement; the next borrower then meets
+  `relation "cpg_read_timeout_copy" already exists` (42P07), or the delayed
+  COPY meets `canceling statement due to statement timeout` (57014). MEASURED
+  2026-08-25: absent from a 55-failure run, present in a 56-failure run, and
+  passing twice in a row through the same pooler once the leftover temp table
+  is dropped. Not a driver defect and not a protocol-version effect - the
+  temp-table hazard is the one this runbook's last section already names.
+  Finding it means dropping the leftover first:
+  `SELECT schemaname, tablename FROM pg_tables WHERE tablename = '<name>'`
+  reports `pg_temp_N`, not the per-test schema, so a `DROP` aimed at `public`
+  silently does nothing and the next run fails the same way.
 
 FIXED on 2026-08-24, so do NOT expect it any more: `differential_tokio.rs` used
 to carry four hardcoded temp-table names, and behind a pooler the two drivers

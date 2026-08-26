@@ -1326,7 +1326,23 @@ impl Config {
 
     /// Sets the PostgreSQL wire-protocol version requested at startup.
     ///
-    /// Defaults to [`ProtocolVersion::V3_2`].
+    /// Defaults to [`ProtocolVersion::V3_2`], which is a DELIBERATE DIVERGENCE
+    /// from libpq: libpq 18 defaults to `3.0` and makes 3.2 opt-in. Measured
+    /// 2026-08-25 with `psql -c '\conninfo'`, which reports the negotiated
+    /// version - no protocol settings gives `3.0` against an 18.4 server that
+    /// would happily speak 3.2, while `max_protocol_version=3.2` gives `3.2`.
+    ///
+    /// Requesting 3.2 by default is worth the divergence because 3.2 is what
+    /// carries the longer cancel key; 3.0's is a fixed 32 bits, which is
+    /// brute-forceable, and that is why upstream lengthened it. Nothing is lost
+    /// against an older server: the server answers `NegotiateProtocolVersion`
+    /// and the session continues on 3.0.
+    ///
+    /// The fallback was measured in every shape this driver is deployed in,
+    /// because a default that breaks a pooler is not a default: direct to
+    /// PostgreSQL 16.14 negotiates down to 3.0, and so does PgBouncer in front
+    /// of either 16.14 or 18.4 - the pooler does not speak 3.2 and negotiates
+    /// the client down rather than refusing.
     pub fn max_protocol_version(&mut self, version: ProtocolVersion) -> &mut Config {
         self.max_protocol_version = version;
         self
