@@ -4,8 +4,8 @@
  * The operational advisories the analyzer finds in an envelope set's lowered
  * DDL, attributed to the statement that raised each one.
  *
- * F650. The engine already computed these and threw them away: `analyze`
- * produces an ACCESS EXCLUSIVE warning for `ALTER TABLE … ADD CONSTRAINT …
+ * The engine already computed these and threw them away: `analyze`
+ * produces an ACCESS EXCLUSIVE warning for `ALTER TABLE ... ADD CONSTRAINT ...
  * UNIQUE`, the declarative differ exposes them, and no CLI verb ever read one.
  * An operator adding a unique column to a populated table took a table-wide
  * lock with nothing anywhere telling them it was coming.
@@ -30,7 +30,7 @@ export interface AdvisoryDto {
   migration: string
   /** The stable analyzer rule id. */
   rule: string
-  /** `"notice" | "warning" | ...` — the analyzer's severity, lowercased. */
+  /** `"notice" | "warning" | ...` - the analyzer's severity, lowercased. */
   severity: string
   /** What the operational risk is. */
   message: string
@@ -41,10 +41,10 @@ export interface AdvisoryDto {
 }
 
 /**
- * `applyIr` — the HOST-AUTHORING apply entry: take a pure-JS IR envelope
+ * `applyIr` - the HOST-AUTHORING apply entry: take a pure-JS IR envelope
  * ENVELOPE (`{ ir_version, name, ops }`) as a typed [`ApplyRequest`], run the
  * fail-closed LOAD GATE + LOWER **in Rust** (stamping `owner_app` + folding the
- * authoritative `Checksum::of_ir` — the checksum is NEVER computed in JS), then
+ * authoritative `Checksum::of_ir` - the checksum is NEVER computed in JS), then
  * drive the complete ordered plan over the host driver. The envelope must NOT carry
  * `owner_app`; it is stamped from `req.owner_app` (provenance).
  *
@@ -55,7 +55,7 @@ export interface AdvisoryDto {
 export declare function applyIr(hostDriver: (args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void, req: ApplyRequest): Promise<ApplyReply>
 
 /**
- * `applyIrSqlite` — deploy an ordered migration-IR sequence through the bundled
+ * `applyIrSqlite` - deploy an ordered migration-IR sequence through the bundled
  * in-process SQLite backend. There is no host-driver callback: the hardened app
  * and journal connections are opened on the engine worker thread, and the same
  * high-level library deploy loop used by Rust callers owns lowering, idempotent
@@ -71,7 +71,7 @@ export declare function applyIrSqlite(appPath: string, journalPath: string, req:
  * pending envelope in one engine call, without a host-driver callback.
  */
 export interface ApplyIrSqliteRequest {
-  /** The deploying app id (`app_…`) stamped onto every lowered migration. */
+  /** The deploying app id (`app_...`) stamped onto every lowered migration. */
   ownerApp: string
   /** The logical project/schema name used by lowering and executor confinement. */
   projectSchema: string
@@ -121,13 +121,13 @@ export interface ApplyReply {
  * The typed request for the host-authoring `applyIr` verb.
  *
  * The `envelope` (`{ ir_version, name, ops }`) crosses as a REAL JS value
- * ([`JsonValue`]) — the recorder builds a JS object, no JSON string round-trip. The
- * envelope MUST NOT carry `owner_app` (it is stamped from `owner_app` here —
+ * ([`JsonValue`]) - the recorder builds a JS object, no JSON string round-trip. The
+ * envelope MUST NOT carry `owner_app` (it is stamped from `owner_app` here -
  * provenance).
  */
 export interface ApplyRequest {
   /**
-   * The deploying app id (`app_…`) — stamped as `owner_app` + folded into the
+   * The deploying app id (`app_...`) - stamped as `owner_app` + folded into the
    * authoritative `Checksum::of_ir` in Rust.
    */
   ownerApp: string
@@ -135,7 +135,7 @@ export interface ApplyRequest {
   projectSchema: string
   /** The migrator role to `SET ROLE` under (least-privilege apply). Optional. */
   migratorRole?: string
-  /** `"postgres" | "mysql"` — selects the dialect backend (`SQLite` is in-process). */
+  /** `"postgres" | "mysql"` - selects the dialect backend (`SQLite` is in-process). */
   dialect: string
   /**
    * The project's `{ table: owner_app }` ownership registry. Empty on a
@@ -217,7 +217,7 @@ export interface BuildInfo {
 }
 
 /**
- * One collection (table) — the `CollectionDescriptor` mirror, in BOTH directions.
+ * One collection (table) - the `CollectionDescriptor` mirror, in BOTH directions.
  *
  * INBOUND it is the manual `genArtifacts` source. OUTBOUND it is what
  * [`GenArtifactsReply::collections`] carries, so a host can read the folded schema as
@@ -227,7 +227,7 @@ export interface BuildInfo {
 export interface CollectionDescriptorDto {
   /** The collection (table) name. */
   name: string
-  /** The declaring app id (`app_…`). The migrate producer stamps ownership from it. */
+  /** The declaring app id (`app_...`). The migrate producer stamps ownership from it. */
   ownerApp: string
   /**
    * The author-declared fields. Columns owned by the active policy are supplied
@@ -241,7 +241,7 @@ export interface CollectionDescriptorDto {
 }
 
 /**
- * One field of a collection — the `FieldDescriptor` mirror, in BOTH directions.
+ * One field of a collection - the `FieldDescriptor` mirror, in BOTH directions.
  *
  * Mirrors the `@zeroship/db` wire `FieldDef` shape the manual evaluator produces.
  * The common facets are typed scalars; the rich sub-object facets (`encrypted`,
@@ -252,7 +252,7 @@ export interface CollectionDescriptorDto {
  * while nothing ever CONSTRUCTED one, a slot the producer defaults or ignores is
  * indistinguishable from a slot nothing needs. Carrying an export outward is what
  * told `reference_column`, `reference_name`, `char_len` and `max_length` apart from
- * the facets genuinely absent by design — see
+ * the facets genuinely absent by design - see
  * `tests/collection_export_round_trip.rs`, which was RED on all four.
  *
  * napi-NEUTRAL (`cfg_attr`), like the reply envelopes and for the same reason: it is
@@ -264,12 +264,12 @@ export interface FieldDescriptorDto {
   name: string
   /**
    * The DSL type token (`string` | `number` | `boolean` | `date` |
-   * `calendarDate` | `json` | `ref` | `bytes` | `id` | `vector` | …).
+   * `calendarDate` | `json` | `ref` | `bytes` | `id` | `vector` | ...).
    */
   type: string
-  /** `true` ⇒ `NOT NULL`. */
+  /** `true` => `NOT NULL`. */
   required?: boolean
-  /** `true` ⇒ a unique index over this column. */
+  /** `true` => a unique index over this column. */
   unique?: boolean
   /** For a `ref` field, the referenced collection (FK target table). */
   references?: string
@@ -278,7 +278,7 @@ export interface FieldDescriptorDto {
    * historical `id` target; a typed migration reference always records it.
    *
    * Added when this type stopped being inbound-only. It was absent while the DTO
-   * only ever fed the producer — which defaults it to `id` — and that absence
+   * only ever fed the producer - which defaults it to `id` - and that absence
    * became an export loss the moment the fold, which recovers the REAL target
    * column from the FK it holds, had to hand its answer outward.
    */
@@ -306,25 +306,25 @@ export interface FieldDescriptorDto {
   enum?: Array<JsonValue>
   /** A legacy internal `<prefix>_<22 base62 UUIDv7>` platform-ID prefix. */
   idPrefix?: string
-  /** A `t.vector(dims, …)` dimensionality. */
+  /** A `t.vector(dims, ...)` dimensionality. */
   vectorDims?: number
-  /** `t.char(len)` — the FIXED width of a `CHAR(N)` column. */
+  /** `t.char(len)` - the FIXED width of a `CHAR(N)` column. */
   charLen?: number
   /**
-   * `t.string({ length })` — the BOUND on a `VARCHAR(N)` column.
+   * `t.string({ length })` - the BOUND on a `VARCHAR(N)` column.
    *
    * Crosses in BOTH directions, and the inbound half is load-bearing rather than
    * decorative: `string` is a TWO-type token (`ColType::String { length }` and
    * `ColType::Text` both spell it), so `token_to_col_type` reads this value to pick
    * between them. It used to ignore it, and a consumer that exported a
-   * `VARCHAR(64)` and fed it back as a manual source got an unbounded `TEXT` — a
+   * `VARCHAR(64)` and fed it back as a manual source got an unbounded `TEXT` - a
    * column PostgreSQL then stored a 200-character value in
    * (`zero-migrate/tests/fold_live/pg_bounded_string_producer_live.rs`).
    * Pinned end to end by `tests/collection_export_round_trip.rs`.
    */
   maxLength?: number
   /**
-   * `t.numeric({ precision, scale })` — total digits of a FIXED-PRECISION decimal,
+   * `t.numeric({ precision, scale })` - total digits of a FIXED-PRECISION decimal,
    * with [`Self::scale`] beside it.
    *
    * Unlike the three widths above, this pair does not merely PARAMETERISE the type
@@ -337,13 +337,13 @@ export interface FieldDescriptorDto {
    */
   precision?: number
   /**
-   * `t.numeric({ precision, scale })` — digits after the point. See
+   * `t.numeric({ precision, scale })` - digits after the point. See
    * [`Self::precision`].
    */
   scale?: number
   /** A `t.vector(_, { metric })` distance metric (`cosine`|`l2`|`innerProduct`). */
   vectorMetric?: string
-  /** `t.string({ caseSensitive: false })` — only `Some(false)` is meaningful. */
+  /** `t.string({ caseSensitive: false })` - only `Some(false)` is meaningful. */
   caseSensitive?: boolean
   /** The `t.encrypted({ mode, keyId, wraps })` sub-object (verbatim). */
   encrypted?: JsonValue
@@ -356,11 +356,11 @@ export interface FieldDescriptorDto {
 }
 
 /**
- * `genArtifacts` — the sync, DB-free schema-artifact emitter. Fold a schema SOURCE
- * (EITHER a set of IR envelopes — the generated source — OR a declared
- * `CollectionDescriptor` set — the manual source) into the two co-emitted
+ * `genArtifacts` - the sync, DB-free schema-artifact emitter. Fold a schema SOURCE
+ * (EITHER a set of IR envelopes - the generated source - OR a declared
+ * `CollectionDescriptor` set - the manual source) into the two co-emitted
  * artifacts `{ envDbTs, runtimeJson }`. Both sources funnel through the SAME Rust
- * renderer, so their output is byte-identical for equivalent schemas — PROVIDED the
+ * renderer, so their output is byte-identical for equivalent schemas - PROVIDED the
  * same ordered `charterLayers` stack drives both (the confined system-shape injection is
  * policy-driven, not a baked-in engine preset; the caller supplies the confined
  * charter).
@@ -430,7 +430,7 @@ export interface GenArtifactsReply {
   hasDialectalOps?: boolean
   /**
    * **The structured export.** The folded schema as TYPED collections, in the same
-   * `CollectionDescriptorDto` vocabulary the manual source accepts — so a host can
+   * `CollectionDescriptorDto` vocabulary the manual source accepts - so a host can
    * render its own artifacts instead of re-parsing `runtime_json` back out of the
    * string this reply also carries.
    *
@@ -439,7 +439,7 @@ export interface GenArtifactsReply {
    *
    * ABSENT (`undefined` / `None`) when `ok == false`, for the reason
    * `has_dialectal_ops` documents: a refused call folded nothing and has no answer.
-   * A consumer must therefore test for presence rather than for an empty array — a
+   * A consumer must therefore test for presence rather than for an empty array - a
    * schema with no collections is a legitimate `[]`, and an older addon that
    * predates this field is `undefined`, and those two must not read alike.
    *
@@ -460,7 +460,7 @@ export interface GenArtifactsReply {
    * normalises dialect spellings (`preview_dialect` accepts more than one name per
    * target), so this is the resolved target, not the string that was passed in.
    *
-   * ABSENT when `ok == false` — a refusal never reached a fold, and an unknown
+   * ABSENT when `ok == false` - a refusal never reached a fold, and an unknown
    * dialect spelling is one of the ways to be refused, so echoing the input there
    * would report a target that was rejected.
    */
@@ -468,7 +468,7 @@ export interface GenArtifactsReply {
 }
 
 /**
- * The tagged SOURCE for `genArtifacts` — EITHER IR envelopes (the generated
+ * The tagged SOURCE for `genArtifacts` - EITHER IR envelopes (the generated
  * source) OR a declared descriptor set (the manual source). A `#[napi(object)]`
  * cannot be a Rust enum with data, so the two arms are optional fields; exactly one
  * must be populated. Both arms funnel through the SAME Rust renderer, so their
@@ -533,7 +533,7 @@ export interface GenArtifactsSource {
 }
 
 /**
- * `history` — the generic `ops::status::history` over the host driver.
+ * `history` - the generic `ops::status::history` over the host driver.
  * Resolves to a typed [`HistoryReply`].
  */
 export declare function history(hostDriver: (args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void]) => void, req: HistoryRequest): Promise<HistoryReply>
@@ -541,15 +541,15 @@ export declare function history(hostDriver: (args: [request: JsRequest, done: (e
 /** One event in the typed `history` audit trail. */
 export interface HistoryEventDto {
   /**
-   * The shared monotonic sequence number — an `int8` audit key, so it crosses as
+   * The shared monotonic sequence number - an `int8` audit key, so it crosses as
    * a JS `bigint` (napi6) to survive a large sequence without float rounding.
    */
   eventSeq: bigint
-  /** The migration version (`mig_…`). */
+  /** The migration version (`mig_...`). */
   version: string
   /** The migration name recorded on the event. */
   name: string
-  /** `"applied" | "rolled_back"` — the projected `HistoryKind`. */
+  /** `"applied" | "rolled_back"` - the projected `HistoryKind`. */
   kind: string
   /** The event timestamp (RFC-3339 / ISO-8601). */
   at: string
@@ -584,7 +584,7 @@ export interface IndexDescriptorDto {
   name: string
   /** The columns the index covers, in order. */
   columns: Array<string>
-  /** `true` ⇒ a unique index. */
+  /** `true` => a unique index. */
   unique?: boolean
 }
 
@@ -592,7 +592,7 @@ export interface IndexDescriptorDto {
 export declare function irVersion(): number
 
 /**
- * The kind tag of a driver-neutral scalar cell — mirrors the engine `Value`'s
+ * The kind tag of a driver-neutral scalar cell - mirrors the engine `Value`'s
  * variants.
  *
  * A `#[napi(object)]` cannot be a Rust enum with data, so a cell crosses as a
@@ -636,7 +636,7 @@ export interface JsReply {
   /** Rows for `query`/`queryOne` (empty for pure DML). */
   rows: Array<JsRow>
   /**
-   * `result.rowCount` — affected/returned rows. An honest [`i64`] (a JS `number`);
+   * `result.rowCount` - affected/returned rows. An honest [`i64`] (a JS `number`);
    * `None` when the driver reports no count (e.g. `batch`). A count is an integer,
    * not a float.
    */
@@ -659,7 +659,7 @@ export interface JsRequest {
   sql: string
   /** Neutral binds for `execute`/`query`/`queryOne` (as [`JsCell`]s). */
   binds: Array<JsCell>
-  /** Text-format params for `executeTextParams` (`None` element → SQL NULL bind). */
+  /** Text-format params for `executeTextParams` (`None` element -> SQL NULL bind). */
   textParams: Array<string | undefined | null>
 }
 
@@ -965,14 +965,14 @@ export interface RuntimeOptionsDto {
   /** `schema(...).withVersioning()`. */
   versioning?: boolean
   /**
-   * `schema(...).strictness(...)` — `"strict"` | `"lenient"` | `"off"`. Default
+   * `schema(...).strictness(...)` - `"strict"` | `"lenient"` | `"off"`. Default
    * (absent) is `"strict"`.
    */
   strictness?: string
 }
 
 /**
- * `status` — the generic `ops::status::status` over the host driver.
+ * `status` - the generic `ops::status::status` over the host driver.
  * Migrations cross as a typed `Vec<JsonValue>` (each a `Migration`). Resolves to a
  * typed [`StatusReply`](crate::wire::StatusReply).
  */
@@ -1029,9 +1029,9 @@ export declare function statusIrSqlite(appPath: string, journalPath: string, req
 /**
  * The typed reply for `status` (the projected `MigrationStatus`).
  *
- * **The `mig_…` ids below are LOGICAL PLAN ids, and they are a different namespace
+ * **The `mig_...` ids below are LOGICAL PLAN ids, and they are a different namespace
  * from the journal versions [`ApplyReply::applied`] returns.** Both are spelled
- * `mig_…`, so a consumer that correlates the two gets no matches and no error.
+ * `mig_...`, so a consumer that correlates the two gets no matches and no error.
  * Measured on live PostgreSQL: one `createTable` applied through the host path put
  * `mig_7n42DGM5RSBfCGYlS39M1y` in the journal and returned it from `apply`, while
  * `status` reported `applied: ["mig_7n42DGM5SrG4j3FrNuIVBe"]` and the same id as
@@ -1048,11 +1048,11 @@ export interface StatusReply {
    *
    * `apply` and `rollback` both refuse over this state. Status reporting a
    * clean project while they refuse is a contradiction the operator has to
-   * resolve with no information, so the versions travel here (F661).
+   * resolve with no information, so the versions travel here.
    */
   interruptedUnwinds: Array<string>
   /**
-   * The highest net-applied LOGICAL PLAN id (`mig_…`), or `None` when nothing is
+   * The highest net-applied LOGICAL PLAN id (`mig_...`), or `None` when nothing is
    * applied. NOT the journal version - see the type doc.
    */
   currentVersion?: string
