@@ -2064,6 +2064,13 @@ impl Config {
                     // tokio-postgres 0.7.18 reads this as seconds. That is a
                     // DELIBERATE divergence from the crate this one is a port
                     // of, in favour of the parameter's documented meaning.
+                    //
+                    // The server settles it, so neither implementation has to be
+                    // taken on trust: `SELECT name, unit FROM pg_settings` gives
+                    // `tcp_user_timeout | ms` and `tcp_keepalives_idle | s`
+                    // (checked on 16.15, 2026-08-26). A peer driver is the wrong
+                    // oracle for a unit question - it can be confidently wrong in
+                    // a way no differential against it will ever surface.
                     self.tcp_user_timeout(Duration::from_millis(timeout as u64));
                 }
             }
