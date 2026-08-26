@@ -1075,7 +1075,8 @@ fn run_vacuum_into(
 /// the session recovers to a consistent state. If step 3 fails after a
 /// successful rename, the live file IS the new content but the session
 /// has no alias attached — the caller's `restore` impl returns the
-/// typed error and the operator must re-ensure_app_schema.
+/// typed error and the app file must be re-attached, via
+/// `SqliteBackend::attach_app_file`, before the session can serve it.
 fn run_reattach_file(
     conn: &Connection,
     app_id: &str,
@@ -1129,7 +1130,8 @@ fn run_reattach_file(
             message: format!(
                 "ReattachFile: ATTACH new file as \"{app_id}\" failed AFTER rename — \
                  the renamed snapshot is now the live file but the session has no alias \
-                 attached. Operator must call ensure_app_schema(app_id) to recover. \
+                 attached. The app file must be re-attached for this app_id before \
+                 the session can serve it again. \
                  Underlying error: {}",
                 from_sqlite(e)
             ),
