@@ -7,7 +7,7 @@
 //! artifact. (That claim was first written of the standalone walker that produced the
 //! map until step 4 consumer 3 deleted it; the claim is unchanged because
 //! `FoldedSchema::project_field_defs` reads a traversal that makes the same call, one
-//! op earlier.) `runtime_metadata_from_ops` walked the raw list with a catch-all
+//! op earlier.) The runtime-metadata walker walked the raw list with a catch-all
 //! `_ => {}` arm, so the wrapper fell through and the runtime OPTIONS and plain
 //! INDEXES authored in that same leg did not.
 //!

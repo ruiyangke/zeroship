@@ -6,8 +6,8 @@
 //! collection metadata - and what each one produces is recorded.
 //!
 //! TWO of the four no longer have a private walker behind them. The runtime metadata
-//! was `super::runtime_metadata_from_ops` and the authoring tables had a private op
-//! walker of their own next to it; both walkers are deleted and their entry points
+//! and the authoring tables each had one of their own in `super`; both walkers are
+//! deleted and their entry points
 //! are now
 //! `FoldedSchema::project_runtime_metadata` and
 //! `FoldedSchema::project_authoring_tables`. So this corpus keeps cross-checking the
@@ -46,7 +46,7 @@
 //! appending that op moved each walker's answer, measured by prefix sweep over
 //! the whole corpus. It is a behavioural measurement, not an arm count. Section
 //! A of the proposal counted `match` arms and reported that each of
-//! `runtime_metadata_from_ops` and the authoring-table walker handled a small
+//! the runtime-metadata and authoring-table walkers handled a small
 //! fraction of the `Op` variants; [`REACH`] is the measured answer to the same
 //! question, and where the two differ the measurement wins. Both of those arm counts
 //! are now HISTORICAL: the two answers come from `AuthoredState::advance`, whose match
@@ -322,7 +322,7 @@ pub(super) const CASES: &[Stream] = &[
         // Section B rows 7 and 8 in one stream: a table that exists ONLY inside
         // an `Op::Dialectal` leg, whose PostgreSQL leg alone declares a runtime
         // option and a plain index. Row 7 (docs/review-log.md:18536-18539) was
-        // runtime_metadata_from_ops not descending into the leg; row 8
+        // the runtime-metadata walker not descending into the leg; row 8
         // (docs/review-log.md:2931-2942) was two artifact walkers hard-coding
         // Postgres regardless of target.
         name: "c_dialectal_leg_selection",
@@ -1318,7 +1318,7 @@ const ROWS: &[Row] = &[
     //
     // Both FIXED. Leg selection now follows the target on every walker (row 8,
     // docs/review-log.md:2931-2942), and the PostgreSQL leg's runtime option and
-    // plain index reach runtime_metadata_from_ops (row 7,
+    // plain index reach the runtime-metadata answer (row 7,
     // docs/review-log.md:18536-18539) -- which is what the `indexes(docs)` row
     // shows on Postgres and does not show on the other two.
     Row { key: "c_dialectal_leg_selection|Postgres|columns(docs)", verdict: "AGREED {id,pg_only}", status: Status::Consistent },

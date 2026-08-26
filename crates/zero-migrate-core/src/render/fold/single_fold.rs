@@ -16,7 +16,7 @@
 //! blast-radius order. ONE `fold` call inside `render_artifacts` now feeds three of
 //! them:
 //!
-//! * `FoldedSchema::project_runtime_metadata` replaced `runtime_metadata_from_ops`;
+//! * `FoldedSchema::project_runtime_metadata` replaced a standalone metadata walker;
 //! * `FoldedSchema::project_authoring_tables` replaced a standalone op walker,
 //!   and is the source model `env.db.ts` is rendered from;
 //! * `FoldedSchema::project_field_defs` replaced a standalone `FieldDef` walker, and is
@@ -1056,11 +1056,11 @@ impl FoldedSchema {
             .collect()
     }
 
-    /// **Projection 4: the runtime collection metadata.** Today's
-    /// `runtime_metadata_from_ops` output: the collection options and the PLAIN
+    /// **Projection 4: the runtime collection metadata.** The same value the
+    /// separate walker produced: the collection options and the PLAIN
     /// indexes the `FieldDef` map cannot carry.
     ///
-    /// Derived, not tracked. `runtime_metadata_from_ops` ran its own index lifecycle
+    /// Derived, not tracked. That walker ran its own index lifecycle
     /// - create, drop, column-drop, column-rename - beside the two that already run
     /// one; here the NAMED index set is a READ of the authored indexes, so there is no
     /// second lifecycle to keep in step.

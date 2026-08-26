@@ -1,8 +1,8 @@
 //! **Step 4, consumer 1: the runtime collection metadata comes from the single fold.**
 //!
 //! `docs/proposals/single-fold-and-effects.md` section G step 4 moves the artifact
-//! consumers off their private walkers one at a time, and
-//! `runtime_metadata_from_ops` is the first because it has the smallest blast radius.
+//! consumers off their private walkers one at a time, and the runtime-metadata
+//! walker is the first because it has the smallest blast radius.
 //! This file is the gate on that move.
 //!
 //! # What the move can actually change, measured rather than assumed
@@ -24,7 +24,7 @@
 //! # Why these streams
 //!
 //! The step 3 gate (`render/gen_types/fold_projection_equality.rs`) proved
-//! `project_runtime_metadata` equal to `runtime_metadata_from_ops` and found no
+//! `project_runtime_metadata` equal to that walker and found no
 //! difference. It was nonetheless BLIND to the three divergences below, because no
 //! stream in the step 1 corpus crosses a `unique` column with a rename or with a
 //! `dropIndex`. Passing that gate was necessary and not sufficient, and these are the
@@ -55,7 +55,7 @@
 //!
 //! [`dropping_an_included_column_drops_the_index_from_the_runtime_descriptor`] is the
 //! single row where the old walker and the new projection disagree AND the old walker
-//! is the one that is wrong. `runtime_metadata_from_ops` retained an index whose
+//! is the one that is wrong. That walker retained an index whose
 //! `INCLUDE` payload named the dropped column, because it matched on its own `fields`
 //! list and `INCLUDE` columns were never in it. `render/fold.rs` records the
 //! measurement that settles it - on PG 18.4,
@@ -402,8 +402,8 @@ fn a_plain_index_and_an_implicit_unique_index_are_both_described() {
 /// **A deliberate behaviour change.** An index whose `INCLUDE` payload names a
 /// dropped column is dropped by the server, so it must leave the artifact.
 ///
-/// `runtime_metadata_from_ops` kept it: its `DropColumn` arm matched on the runtime
-/// descriptor's own `fields` list, which never contained an `INCLUDE` column.
+/// The retired runtime-metadata walker kept it: its `DropColumn` arm matched on the
+/// runtime descriptor's own `fields` list, which never contained an `INCLUDE` column.
 /// `render/fold.rs` cites the measurement that settles which side is right - on PG
 /// 18.4, `CREATE INDEX i ON t (b) INCLUDE (a); ALTER TABLE t DROP COLUMN a` leaves no
 /// `i` in `pg_indexes`. The artifact was naming an index the database does not have.
@@ -777,8 +777,8 @@ fn measure_corpus() -> Vec<String> {
 
 /// **The behaviour-preservation gate for the move.**
 ///
-/// The golden was captured from the OLD path - `render_artifacts` driven by
-/// `runtime_metadata_from_ops` - BEFORE the consumer was switched, and committed
+/// The golden was captured from the OLD path - `render_artifacts` driven by the
+/// runtime-metadata walker - BEFORE the consumer was switched, and committed
 /// unchanged. So this test compares what the new path emits against what the walker
 /// emitted, on 27 real recorded streams under 3 dialects, and it is not circular: the
 /// side that produced the expectation is not the side under test.
@@ -972,7 +972,7 @@ const REFUSAL_PROBES: &[(&str, &str)] = &[
 ///
 /// Before step 4, the ONLY thing that could make `render_artifacts` refuse a stream
 /// (after the policy resolution it still performs first) was the `FieldDef` walker:
-/// `runtime_metadata_from_ops` and the authoring-table walker applied no coherence gate
+/// the runtime-metadata and authoring-table walkers applied no coherence gate
 /// at all, and the one fallible call they shared - `flatten_dialectal_ops` - the
 /// `FieldDef` walker made too. After the move, `single_fold::fold` runs FIRST and
 /// brings `AuthoredState::advance` with it, whose three fallible sites have no

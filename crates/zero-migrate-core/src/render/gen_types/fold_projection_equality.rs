@@ -76,9 +76,9 @@ use zero_migrate_ir::dialect::DialectId;
 ///
 /// `RuntimeMetadata`, `AuthoringTables` and `FieldDefs` are NOT in this list any more,
 /// and their absence is the point rather than a gap. This gate compares a projection to
-/// the WALKER it replaces; `runtime_metadata_from_ops` and the authoring-table and
-/// `FieldDef` walkers beside it are all deleted, so for each of those there is no
-/// second answer left and keeping
+/// the WALKER it replaces; the runtime-metadata, authoring-table and `FieldDef`
+/// walkers are all deleted, so for each of those three there is no second answer left
+/// and keeping
 /// the leg would have compared the projection to itself. What replaces each is a gate at
 /// the ARTIFACT level - `tests/gen_types_runtime_metadata_from_the_fold.rs`,
 /// `tests/gen_types_authoring_tables_from_the_fold.rs` and

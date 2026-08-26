@@ -1,8 +1,8 @@
 # Both schema artifacts, on 27 recorded op fixtures and 10 carrier streams, x 3 dialects.
 # Read by tests/gen_types_runtime_metadata_from_the_fold.rs. `#` lines are ignored.
 #
-# PROVENANCE. Captured from the OLD path - `render_artifacts` driven by
-# `runtime_metadata_from_ops` - BEFORE step 4 moved the consumer to
+# PROVENANCE. Captured from the OLD path - `render_artifacts` driven by the
+# separate runtime-metadata walker - BEFORE step 4 moved the consumer to
 # `FoldedSchema::project_runtime_metadata`, and committed unchanged. The side that
 # produced this expectation is not the side under test, so the comparison is not a
 # round trip through the code it is checking.

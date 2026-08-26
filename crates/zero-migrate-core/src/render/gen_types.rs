@@ -331,9 +331,9 @@ pub fn render_schema_export(
     let ops = resolved.ops.as_slice();
     // Per `docs/proposals/single-fold-and-effects.md` section G: EVERY value both
     // artifacts are rendered from is a PROJECTION of ONE traversal, not a private
-    // replay of the op stream. `runtime_metadata_from_ops` and the two private replays
-    // beside it - the one that built the authoring tables, the one that built the wire
-    // `FieldDef` map - are all gone.
+    // replay of the op stream. The three private replays that used to answer - one for
+    // the runtime metadata, one for the authoring tables, one for the wire `FieldDef`
+    // map - are all gone.
     //
     // Retiring the `FieldDef` walker changed no refusal. That walker ran
     // `fold_ops` itself as its fail-closed gate and `single_fold::fold` runs the same
@@ -2132,9 +2132,8 @@ mod tests {
 
 // The differential corpus over the four op-stream answers -- an in-crate test
 // module because the items it drives are crate-private: `AuthoringTable` and
-// `RuntimeCollectionMetadata` here, `single_fold::fold` next door. It was
-// `runtime_metadata_from_ops` and the authoring-table replay beside it until both
-// were deleted
+// `RuntimeCollectionMetadata` here, `single_fold::fold` next door. Those items were
+// the runtime-metadata and authoring-table replays until both were deleted
 // (`docs/proposals/single-fold-and-effects.md`). The alternative to a
 // child module is widening a production item so a test can reach it.
 #[cfg(test)]
