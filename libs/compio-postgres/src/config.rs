@@ -2018,6 +2018,15 @@ impl Config {
                     .parse::<i64>()
                     .map_err(|_| Error::config_parse(Box::new(InvalidValue("connect_timeout"))))?;
                 if timeout > 0 {
+                    // TAKEN LITERALLY, INCLUDING 1. libpq is widely described as
+                    // clamping this to a 2 second floor, so `from_secs(1)` reads
+                    // like a parity bug and invites a "fix" that would introduce
+                    // one. MEASURED 2026-08-26 against real libpq by dialling
+                    // 192.0.2.1:5432, which blackholes, so the client's own
+                    // timeout is the only thing that ends the wait: values 1/2/3/5
+                    // returned after 1.1/2.1/3.1/5.1s (the constant 0.1 is
+                    // `docker exec` startup). One second is honoured as one
+                    // second, on libpq 16.15 AND 18.4. There is no floor to match.
                     self.connect_timeout(Duration::from_secs(timeout as u64));
                 }
             }
