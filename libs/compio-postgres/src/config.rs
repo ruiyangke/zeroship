@@ -1835,13 +1835,16 @@ impl Config {
                     ))));
                 }
             },
-            // The pre-`sslmode` spelling. `0` means "do not require TLS",
-            // which is this driver's default posture, so it is satisfied. `1`
-            // means `sslmode=require`, and that IS supported - under that
-            // name, which is what the error says rather than leaving the
-            // caller to guess.
+            // The pre-`sslmode` spelling. libpq stores `0` as
+            // `sslmode=prefer`, rather than treating it as a no-op, so it must
+            // override an earlier sslmode in the same string. `1` means
+            // `sslmode=require`, and that IS supported - under that name,
+            // which is what the error says rather than leaving the caller to
+            // guess.
             "requiressl" => match value {
-                "0" => {}
+                "0" => {
+                    self.ssl_mode(SslMode::Prefer);
+                }
                 "1" => {
                     return Err(Error::config_parse(Box::new(UnsupportedOption(
                         "requiressl (use sslmode=require)",
@@ -3453,6 +3456,14 @@ mod tests {
                     "libpq accepts this and it asks for what this driver already does: {dsn}"
                 );
             }
+        }
+
+        #[test]
+        fn requiressl_zero_overrides_an_earlier_sslmode() {
+            let config = "host=h sslmode=require requiressl=0"
+                .parse::<Config>()
+                .expect("requiressl=0 is the legacy spelling of sslmode=prefer");
+            assert_eq!(config.get_ssl_mode(), crate::config::SslMode::Prefer);
         }
 
         /// THE CONTROL: turning these ON must still be refused, or the test
