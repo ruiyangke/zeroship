@@ -177,11 +177,15 @@ impl rustls::KeyLog for KeyLogToFile {
         }
         line.push('\n');
 
-        if let Err(error) = file.write_all(line.as_bytes()) {
-            log::warn!("could not write to SSL key logging file: {error}");
+        let write_error = file.write_all(line.as_bytes()).err();
+        if write_error.is_some() {
             // Stop trying: a file that has started failing will keep failing,
             // and a warning per secret per handshake is its own problem.
             *guard = None;
+        }
+        drop(guard);
+        if let Some(error) = write_error {
+            log::warn!("could not write to SSL key logging file: {error}");
         }
     }
 }
@@ -1404,12 +1408,81 @@ mod tests {
     use futures_channel::oneshot;
     use rustls::server::{ClientHello, ResolvesServerCert};
     use sha2::Digest;
+    use std::cell::{Cell, RefCell};
     use std::sync::Mutex;
 
     /// The CA that signed [`SERVER_LOCALHOST`], and nothing else.
     const CA: &str = include_str!("../tests/data/verifier_ca.pem");
     /// A server certificate whose only subject-alternative name is `localhost`.
     const SERVER_LOCALHOST: &str = include_str!("../tests/data/verifier_server_localhost.pem");
+
+    thread_local! {
+        static KEY_LOG_PROBE: RefCell<Option<Arc<KeyLogToFile>>> = const { RefCell::new(None) };
+        static KEY_LOG_MUTEX_LOCKED: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+
+    struct KeyLogWarningProbe;
+
+    impl log::Log for KeyLogWarningProbe {
+        fn enabled(&self, _metadata: &log::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn log(&self, _record: &log::Record<'_>) {
+            KEY_LOG_PROBE.with(|slot| {
+                if let Some(key_log) = slot.borrow().as_ref() {
+                    KEY_LOG_MUTEX_LOCKED
+                        .with(|locked| locked.set(Some(key_log.file.try_lock().is_err())));
+                }
+            });
+        }
+
+        fn flush(&self) {}
+    }
+
+    static KEY_LOG_WARNING_PROBE: KeyLogWarningProbe = KeyLogWarningProbe;
+    static INSTALL_KEY_LOG_WARNING_PROBE: std::sync::Once = std::sync::Once::new();
+    static KEY_LOG_WARNING_PROBE_INSTALLED: AtomicBool = AtomicBool::new(false);
+
+    fn install_key_log_warning_probe() {
+        INSTALL_KEY_LOG_WARNING_PROBE.call_once(|| {
+            KEY_LOG_WARNING_PROBE_INSTALLED.store(
+                log::set_logger(&KEY_LOG_WARNING_PROBE).is_ok(),
+                Ordering::Relaxed,
+            );
+            log::set_max_level(log::LevelFilter::Trace);
+        });
+        assert!(
+            KEY_LOG_WARNING_PROBE_INSTALLED.load(Ordering::Relaxed),
+            "the unit-test process already installed a different logger"
+        );
+    }
+
+    #[test]
+    fn a_key_log_write_warning_runs_after_the_file_mutex_is_released() {
+        install_key_log_warning_probe();
+        let read_only = std::fs::File::open(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
+            .expect("open a read-only file for the failing-write fixture");
+        let key_log = Arc::new(KeyLogToFile {
+            file: Mutex::new(Some(read_only)),
+        });
+        KEY_LOG_PROBE.with(|slot| *slot.borrow_mut() = Some(Arc::clone(&key_log)));
+        KEY_LOG_MUTEX_LOCKED.with(|locked| locked.set(None));
+
+        rustls::KeyLog::log(&*key_log, "CLIENT_TRAFFIC_SECRET_0", &[0; 32], &[1; 32]);
+
+        let observed = KEY_LOG_MUTEX_LOCKED.with(Cell::get);
+        KEY_LOG_PROBE.with(|slot| *slot.borrow_mut() = None);
+        assert_eq!(
+            observed,
+            Some(false),
+            "the caller logger ran while the SSL key-log file mutex was locked"
+        );
+        assert!(
+            key_log.file.lock().expect("lock key-log file").is_none(),
+            "the fixture write did not fail, so the warning path never ran"
+        );
+    }
 
     /// 2030-01-01T00:00:00Z, comfortably inside both fixtures' validity
     /// (2026-08-19 to 2126-07-26).
