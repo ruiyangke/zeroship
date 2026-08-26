@@ -1201,13 +1201,25 @@ impl InnerClient {
         sender: mpsc::UnboundedSender<QueryEvent>,
         threshold: Option<Duration>,
     ) {
+        // The REPLACED observer is carried out and destroyed after the lock is
+        // released. Assigning through the guard would drop it while the lock is
+        // held, and that drop is not inert: the observer owns the `QueryEvent`
+        // sender, and dropping the last one calls `recv_task.wake()`
+        // (futures-channel 0.3.32, mpsc/mod.rs:969 -> :515). That waker belongs
+        // to whoever polls the PUBLIC `Client::query_events`, so it is user code
+        // reachable from safe Rust via `impl Wake`.
+        //
+        // `query_observer` is a `parking_lot::Mutex`, which is NOT reentrant, so
+        // a waker that calls back into anything taking this lock - installing a
+        // second observer, for instance - deadlocks rather than panicking.
         let mut observer = self.query_observer.lock();
         let registry = observer
             .as_ref()
             .map(|observer| Arc::clone(&observer.0.registry))
             .unwrap_or_default();
-        *observer = Some(QueryObserver::with_registry(sender, threshold, registry));
+        let replaced = observer.replace(QueryObserver::with_registry(sender, threshold, registry));
         drop(observer);
+        drop(replaced);
         self.query_observer_enabled.store(true, Ordering::Release);
     }
 
@@ -2653,5 +2665,104 @@ impl Client {
 impl fmt::Debug for Client {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Client").finish()
+    }
+}
+
+#[cfg(test)]
+mod query_observer_reentrancy_tests {
+    use super::{Client, InnerClient, StatementCacheSettings};
+    use crate::config::{ProtocolVersion, SslMode, SslNegotiation};
+    use futures_channel::mpsc;
+    use futures_util::Stream;
+    use std::cell::{Cell, RefCell};
+    use std::num::NonZeroUsize;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::{Context, Wake, Waker};
+
+    thread_local! {
+        /// The client whose observer lock the probe interrogates.
+        static PROBE_CLIENT: RefCell<Option<Arc<InnerClient>>> = const { RefCell::new(None) };
+        /// `Some(true)` means the observer mutex was STILL held while a replaced
+        /// observer was destroyed. `None` means the waker never ran, which must
+        /// not read as success.
+        static PROBE_LOCKED: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+
+    struct ObserverDropProbe;
+
+    impl ObserverDropProbe {
+        fn record() {
+            PROBE_CLIENT.with(|client| {
+                if let Some(inner) = client.borrow().as_ref() {
+                    PROBE_LOCKED
+                        .with(|flag| flag.set(Some(inner.query_observer.try_lock().is_none())));
+                }
+            });
+        }
+    }
+
+    impl Wake for ObserverDropProbe {
+        fn wake(self: Arc<Self>) {
+            Self::record();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            Self::record();
+        }
+    }
+
+    fn client() -> Client {
+        let (sender, _receiver) = mpsc::unbounded();
+        Client::new_with_statement_cache(
+            sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+            ProtocolVersion::V3_0,
+            StatementCacheSettings::new(1, NonZeroUsize::MIN),
+        )
+    }
+
+    /// Replacing the query observer must not DESTROY the old one under its lock.
+    ///
+    /// The observer owns the `QueryEvent` sender, and dropping the last one
+    /// calls `recv_task.wake()` (futures-channel 0.3.32, mpsc/mod.rs:969 ->
+    /// :515). That waker belongs to whoever polls the PUBLIC
+    /// `Client::query_events`, so it is user code reachable from safe Rust via
+    /// `impl Wake` - which is exactly what this test installs.
+    ///
+    /// `query_observer` is a `parking_lot::Mutex` and NOT reentrant, so a waker
+    /// that reaches anything taking this lock DEADLOCKS rather than panicking.
+    /// The assertion is therefore on the LOCK STATE observed inside the waker,
+    /// not on a hang: a test that waited for the deadlock could not report it.
+    /// `None` fails deliberately - a waker that never ran proves nothing.
+    #[test]
+    fn replacing_a_query_observer_does_not_destroy_it_under_the_lock() {
+        let client = client();
+        let inner = Arc::clone(&client.inner);
+
+        let mut events = client.query_events();
+        PROBE_CLIENT.with(|cell| *cell.borrow_mut() = Some(Arc::clone(&inner)));
+        PROBE_LOCKED.with(|flag| flag.set(None));
+
+        // Park the probe waker on the receiver so the sender's drop wakes it.
+        let waker = Waker::from(Arc::new(ObserverDropProbe));
+        let mut cx = Context::from_waker(&waker);
+        assert!(Pin::new(&mut events).poll_next(&mut cx).is_pending());
+
+        // Installing a second observer destroys the first, dropping its sender.
+        let _second = client.query_events();
+
+        let observed = PROBE_LOCKED.with(Cell::get);
+        PROBE_CLIENT.with(|cell| *cell.borrow_mut() = None);
+        assert_eq!(
+            observed,
+            Some(false),
+            "the replaced observer was destroyed while its mutex was still held \
+             (None means the waker never ran at all)"
+        );
     }
 }
