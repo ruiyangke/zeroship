@@ -2107,6 +2107,16 @@ impl Future for Waiter<'_> {
         // availability. A later waiter must remain parked even if it receives a
         // spurious poll while the head owns the first claim.
         let new_waker = cx.waker();
+        // Cloned BEFORE any borrow. A `RawWakerVTable`'s clone callback is
+        // arbitrary caller code, exactly like its wake and its drop, so running
+        // it inside the `waiters` or slot borrow is the same hazard those two
+        // were fixed for. Leaving one of the three inside is how the previous
+        // two defects here survived a fix each.
+        //
+        // Done unconditionally, so it costs one refcount pair on the common
+        // re-poll where `will_wake` matches and the clone goes unused. Deciding
+        // first would need the borrow this exists to stay out of.
+        let mut fresh = Some(new_waker.clone());
         let current_slot = self.slot.as_ref().map(Rc::clone);
         let mut waiters = self.pool.waiters.borrow_mut();
 
@@ -2125,12 +2135,12 @@ impl Future for Waiter<'_> {
             let mut w = slot.waker.borrow_mut();
             match &*w {
                 Some(existing) if existing.will_wake(new_waker) => {}
-                _ => replaced = w.replace(new_waker.clone()),
+                _ => replaced = w.replace(fresh.take().expect("cloned before the borrow above")),
             }
         } else {
             // First poll, or our slot was popped for a direct hand-off and we
             // need to re-park. Register a fresh live slot at the back.
-            let slot = WaiterSlot::new(new_waker.clone());
+            let slot = WaiterSlot::new(fresh.take().expect("cloned before the borrow above"));
             waiters.push_back(Rc::clone(&slot));
             self.slot = Some(slot);
         }
@@ -2249,6 +2259,9 @@ impl Future for CloseWaiter<'_> {
 
         let new_waker = cx.waker();
         let current_slot = self.slot.as_ref().map(Rc::clone);
+        // Cloned before the borrow, for the same reason as in `Waiter::poll`:
+        // a `RawWakerVTable`'s clone callback is arbitrary caller code too.
+        let mut fresh = Some(new_waker.clone());
         let mut close_waiters = self.pool.close_waiters.borrow_mut();
         // Carried out for the same reason as in `Waiter::poll`: a replaced
         // `Waker` is arbitrary caller code and must not be destroyed while a
@@ -2262,10 +2275,12 @@ impl Future for CloseWaiter<'_> {
             let mut waker = slot.waker.borrow_mut();
             match &*waker {
                 Some(existing) if existing.will_wake(new_waker) => {}
-                _ => replaced = waker.replace(new_waker.clone()),
+                _ => {
+                    replaced = waker.replace(fresh.take().expect("cloned before the borrow above"))
+                }
             }
         } else {
-            let slot = CloseWaiterSlot::new(new_waker.clone());
+            let slot = CloseWaiterSlot::new(fresh.take().expect("cloned before the borrow above"));
             close_waiters.push(Rc::clone(&slot));
             self.slot = Some(slot);
         }
