@@ -2,7 +2,7 @@
 members = ["crates/*", "libs/*"]
 resolver = "3"
 exclude = [
-    "crates/runtime/benches/ntex-bench",
+    "crates/zeroship-runtime/benches/ntex-bench",
     "refs",
 ]
 
@@ -211,8 +211,8 @@ rdkafka = { version = "0.36", default-features = false, features = ["cmake-build
 tempfile = "3"
 
 # Internal crates
-zeroship-core = { path = "crates/core" }
-zeroship-bundle = { path = "crates/bundle" }
+zeroship-core = { path = "crates/zeroship-core" }
+zeroship-bundle = { path = "crates/zeroship-bundle" }
 compio-postgres = { path = "libs/compio-postgres" }
 compio-redis = { path = "libs/compio-redis" }
 compio-s3 = { path = "libs/compio-s3" }
@@ -245,31 +245,31 @@ zero-migrate-core = { path = "crates/zero-migrate-core" }
 zero-migrate-postgres = { path = "crates/zero-migrate-postgres" }
 zero-migrate-sqlite = { path = "crates/zero-migrate-sqlite" }
 zero-migrate-mysql = { path = "crates/zero-migrate-mysql" }
-zeroship-plugin-db = { path = "crates/plugin-db" }
-zeroship-plugin-storage = { path = "crates/plugin-storage" }
-zeroship-plugin-kv = { path = "crates/plugin-kv" }
-zeroship-plugin-workflow = { path = "crates/plugin-workflow" }
-zeroship-metering = { path = "crates/metering" }
-zeroship-stream = { path = "crates/stream" }
-zeroship-runtime = { path = "crates/runtime" }
-zeroship-runtime-macros = { path = "crates/runtime-macros" }
-zeroship-config-macros = { path = "crates/config-macros" }
-zeroship-config-contract = { path = "crates/config-contract" }
-zeroship-workflow-scheduler = { path = "crates/workflow-scheduler" }
+zeroship-plugin-db = { path = "crates/zeroship-plugin-db" }
+zeroship-plugin-storage = { path = "crates/zeroship-plugin-storage" }
+zeroship-plugin-kv = { path = "crates/zeroship-plugin-kv" }
+zeroship-plugin-workflow = { path = "crates/zeroship-plugin-workflow" }
+zeroship-metering = { path = "crates/zeroship-metering" }
+zeroship-stream = { path = "crates/zeroship-stream" }
+zeroship-runtime = { path = "crates/zeroship-runtime" }
+zeroship-runtime-macros = { path = "crates/zeroship-runtime-macros" }
+zeroship-config-macros = { path = "crates/zeroship-config-macros" }
+zeroship-config-contract = { path = "crates/zeroship-config-contract" }
+zeroship-workflow-scheduler = { path = "crates/zeroship-workflow-scheduler" }
 # The five server libraries, listed here so the non-shipped
 # `zeroship-config-contract` checker can LINK their generated registries rather
 # than re-parse their source. Nothing shipped depends on these entries.
-zeroship-control = { path = "crates/control" }
-zeroship-gateway = { path = "crates/gateway" }
-zeroship-worker = { path = "crates/worker" }
-zeroship-migrated = { path = "crates/migrated" }
-zeroship-auth = { path = "crates/auth" }
-zeroship-authn = { path = "crates/authn" }
-zeroship-authz = { path = "crates/authz" }
-zeroship-mailer = { path = "crates/mailer" }
+zeroship-control = { path = "crates/zeroship-control" }
+zeroship-gateway = { path = "crates/zeroship-gateway" }
+zeroship-worker = { path = "crates/zeroship-worker" }
+zeroship-migrated = { path = "crates/zeroship-migrated" }
+zeroship-auth = { path = "crates/zeroship-auth" }
+zeroship-authn = { path = "crates/zeroship-authn" }
+zeroship-authz = { path = "crates/zeroship-authz" }
+zeroship-mailer = { path = "crates/zeroship-mailer" }
 # Dev-dependency only. Owns the one skip announcer every gated test calls, so
 # that `tests/run_auth_suite.sh` has a single token to search for.
-zeroship-test-support = { path = "crates/test-support" }
+zeroship-test-support = { path = "crates/zeroship-test-support" }
 # Dev-dependency only. The test harness's own logic; `live_db` is the preflight
 # a live-database target runs before its first assertion. NOT test-support -
 # that crate deliberately has no dependencies at all, and this one links a

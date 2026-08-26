@@ -37,7 +37,7 @@ data/builder-client-secret
 # SYMLINK to a WPT tree elsewhere on the machine - which is what you want in a
 # second worktree, so you clone it once instead of once per worktree - showed
 # up as untracked and got staged by a `git add crates/runtime/tests`.
-crates/runtime/tests/wpt
+crates/zeroship-runtime/tests/wpt
 
 # Reject foreign package-manager lockfiles — pnpm-lock.yaml is the source of truth.
 package-lock.json
