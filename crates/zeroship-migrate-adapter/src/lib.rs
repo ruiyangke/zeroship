@@ -1,4 +1,4 @@
-//! `zeroship-migrate-adapter` — the monorepo's native-PG producer for the
+//! `zeroship-migrate-adapter` - the monorepo's native-PG producer for the
 //! published `zero-migrate` engine's driver seam.
 //!
 //! The standalone [`zeroship_migrate`] engine is runtime-free and driver-free: its
@@ -6,13 +6,13 @@
 //! the `<D: SqlSession>` journal/drift/precondition/baseline free functions, and
 //! the `<D: SqlSession>` executor) is generic over the driver-neutral
 //! [`zeroship_migrate::driver::SqlSession`] seam. The engine ships NO native Rust
-//! network Postgres driver — the production producer is the napi/Node `pg` host.
+//! network Postgres driver - the production producer is the napi/Node `pg` host.
 //!
 //! This crate supplies the MONOREPO's producer: [`CompioPgSession`], a newtype
 //! wrapping [`compio_postgres::Client`] that implements [`SqlSession`], mapping the
 //! neutral [`Bind`]/[`Value`]/[`Row`]/[`DbError`] seam types onto the platform's
 //! io_uring PG driver. This lets the engine's apply flow run over the platform's
-//! native compio driver directly — zero tokio, no Node in the loop.
+//! native compio driver directly - zero tokio, no Node in the loop.
 //!
 //! The newtype exists to satisfy Rust's orphan rule: both
 //! `compio_postgres::Client` and [`SqlSession`] are foreign to this crate, so a
@@ -102,13 +102,18 @@
 //! The mapping is a near-mechanical port of the engine's own
 //! `third_party/zero-migrate/crates/zeroship-migrate/src/apply/backend/postgres/session.rs`
 //! `PgSession` impl (whose neutral `Seam*` types are the SAME shape as the standalone's
-//! `driver::*` types, renamed): `batch_execute → batch`, `execute → exec`,
-//! `execute_text_params → exec_text`, `query`/`query_one` unchanged; the
-//! `SeamBind → Value`/`SeamRow`/`SeamError` decode paths carry over byte-for-byte
-//! (same OID → cell classification, same text-param `exec_text` PG coercion
-//! reason).
+//! `driver::*` types, renamed): `batch_execute -> batch`, `execute -> exec`,
+//! `query`/`query_one` unchanged; the `SeamBind -> Value`/`SeamRow`/`SeamError`
+//! decode paths carry over byte-for-byte (same OID -> cell classification).
+//!
+//! The seam's `execute_text_params -> exec_text` leg is GONE, and its replacement is
+//! not a rename. Server-inferred typing moved from a whole-statement verb to a
+//! per-value one, [`Bind::Inferred`], so a statement can mix an inferred instant
+//! with a typed key. This adapter carries it by binding through `execute_typed` /
+//! `query_typed` with `Type::UNKNOWN` for those values - see `Untyped`.
 
-use compio_postgres::types::{Kind, ToSql, Type};
+use compio_postgres::types::{to_sql_checked, Format, IsNull, Kind, ToSql, Type};
+use compio_postgres::types::private::BytesMut;
 use compio_postgres::{Client, Error as PgError, Row as PgRow};
 use zeroship_migrate::driver::{Bind, DbError, Row, SqlSession, Value};
 
@@ -120,8 +125,8 @@ use zeroship_migrate::driver::{Bind, DbError, Row, SqlSession, Value};
 /// checker's dependency graph.
 pub mod config;
 
-/// Phase F Stage 4a — the platform-schema migrate path on the published engine
-/// (author `db/migrations-ts/*.ts` via zeroship-runtime V8 → apply via
+/// Phase F Stage 4a - the platform-schema migrate path on the published engine
+/// (author `db/migrations-ts/*.ts` via zeroship-runtime V8 -> apply via
 /// zero-migrate over [`CompioPgSession`]). Feature-gated so the base library
 /// surface (Stage 1's adapter) stays V8-free.
 #[cfg(feature = "platform-cli")]
@@ -204,12 +209,12 @@ impl CompioPgSession {
 }
 
 // ---------------------------------------------------------------------------
-// Neutral-type mapping — the FIRST monorepo producer of every `driver::*` type.
+// Neutral-type mapping - the FIRST monorepo producer of every `driver::*` type.
 // Ported from
 // `third_party/zero-migrate/crates/zeroship-migrate/src/apply/backend/postgres/session.rs`.
 // ---------------------------------------------------------------------------
 
-/// `compio_postgres::Error → driver::DbError`. The engine treats the error
+/// `compio_postgres::Error -> driver::DbError`. The engine treats the error
 /// opaquely (`Display`/`#[source]`), so `Display` + optional SQLSTATE is a
 /// faithful, lossless-enough projection. The human-meaningful text lives on the
 /// underlying `DbError` (the primary server message); project that into
@@ -233,6 +238,53 @@ enum ToSqlHolder {
     Bool(bool),
     Int(i64),
     Text(String),
+    /// [`Bind::Inferred`]: text bytes with NO declared type, so the server reads
+    /// the parameter's type off the column it lands in. See [`Untyped`].
+    Untyped(Untyped),
+}
+
+/// A parameter the SERVER types, carried as text with its declared type left as
+/// `UNKNOWN`.
+///
+/// This exists because PostgreSQL will not assign a parameter DECLARED as `text`
+/// into a `timestamptz` column - there is no automatic cast - yet it accepts the
+/// identical bytes when nothing is declared, because it then infers the type from
+/// the target column and parses with that type's input function. The engine renders
+/// DML from the IR, where an instant is a string and the column's type is unknown to
+/// it, so "declare nothing" is the only correct choice for those values. That is
+/// exactly what [`Bind::Inferred`] means, and its doc names `Type::UNKNOWN` as the
+/// spelling a type-declaring driver must use.
+///
+/// The three overrides are each load-bearing: `accepts` admits any type because the
+/// point is to make no claim about it; `encode_format` pins TEXT because the bytes
+/// are the value's text form, not a binary encoding; `to_sql` writes them verbatim.
+#[derive(Debug)]
+struct Untyped(Option<String>);
+
+impl ToSql for Untyped {
+    fn to_sql(
+        &self,
+        _ty: &Type,
+        out: &mut BytesMut,
+    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        match &self.0 {
+            None => Ok(IsNull::Yes),
+            Some(text) => {
+                out.extend_from_slice(text.as_bytes());
+                Ok(IsNull::No)
+            }
+        }
+    }
+
+    fn accepts(_ty: &Type) -> bool {
+        true
+    }
+
+    fn encode_format(&self, _ty: &Type) -> Format {
+        Format::Text
+    }
+
+    to_sql_checked!();
 }
 
 impl ToSqlHolder {
@@ -243,7 +295,46 @@ impl ToSqlHolder {
             Self::Bool(b) => b,
             Self::Int(n) => n,
             Self::Text(s) => s,
+            Self::Untyped(u) => u,
         }
+    }
+
+    /// The type this holder DECLARES. `UNKNOWN` is not a fallback here - it is the
+    /// positive statement "I am declaring nothing", which is what makes the
+    /// server-side coercion happen.
+    fn declared_type(&self) -> Type {
+        match self {
+            Self::Null | Self::Text(_) => Type::TEXT,
+            Self::Bool(_) => Type::BOOL,
+            Self::Int(_) => Type::INT8,
+            Self::Untyped(_) => Type::UNKNOWN,
+        }
+    }
+}
+
+fn to_holder(bind: &Bind) -> Result<ToSqlHolder, DbError> {
+    // The wildcard arm is NOT optional: `Bind` is `#[non_exhaustive]`, so an
+    // out-of-crate match cannot be exhaustive and the compiler will never warn a
+    // driver that a variant arrived unhandled. That is precisely how
+    // `Bind::Inferred` went missing here - the enum grew, this file did not, the
+    // build stayed green, and every inferred parameter failed at RUNTIME with
+    // "unsupported bind variant". The PostgreSQL backend maps every `BindValue` to
+    // `Inferred`, so that was the main path rather than an edge.
+    //
+    // Since the compiler cannot hold this seam, the driver conformance suite has to:
+    // `zeroship_migrate_backend::driver::conformance` invariant 3 binds a declared
+    // and an inferred parameter, separately and mixed, against a live server. A
+    // driver that adds a variant here without running it is back to a green build
+    // over a broken bind path.
+    match bind {
+        Bind::Null => Ok(ToSqlHolder::Null),
+        Bind::Bool(b) => Ok(ToSqlHolder::Bool(*b)),
+        Bind::Int(n) => Ok(ToSqlHolder::Int(*n)),
+        // Decimal carried as text - PG infers the numeric target from context.
+        Bind::Decimal(s) => Ok(ToSqlHolder::Text(s.clone())),
+        Bind::Text(s) => Ok(ToSqlHolder::Text(s.clone())),
+        Bind::Inferred(v) => Ok(ToSqlHolder::Untyped(Untyped(v.clone()))),
+        _ => unsupported_bind_to_holder(bind),
     }
 }
 
@@ -251,24 +342,19 @@ fn unsupported_bind_to_holder<T>(_: &T) -> Result<ToSqlHolder, DbError> {
     Err(DbError::message("unsupported bind variant"))
 }
 
-fn to_holder(bind: &Bind) -> Result<ToSqlHolder, DbError> {
-    match bind {
-        Bind::Null => Ok(ToSqlHolder::Null),
-        Bind::Bool(b) => Ok(ToSqlHolder::Bool(*b)),
-        Bind::Int(n) => Ok(ToSqlHolder::Int(*n)),
-        // Decimal carried as text — PG infers the numeric target from context.
-        Bind::Decimal(s) => Ok(ToSqlHolder::Text(s.clone())),
-        Bind::Text(s) => Ok(ToSqlHolder::Text(s.clone())),
-        _ => unsupported_bind_to_holder(bind),
-    }
-}
-
 fn bind_holders(params: &[Bind]) -> Result<Vec<ToSqlHolder>, DbError> {
     params.iter().map(to_holder).collect()
 }
 
-fn holder_refs(holders: &[ToSqlHolder]) -> Vec<&(dyn ToSql + Sync)> {
-    holders.iter().map(ToSqlHolder::as_to_sql).collect()
+/// Pair every holder with the type it declares, the shape `execute_typed` /
+/// `query_typed` take. The engine's per-VALUE inference is only expressible here:
+/// the untyped `execute`/`query` pair declares one type per parameter from the
+/// `ToSql` impl, with no way to say "declare nothing for this one".
+fn holder_params(holders: &[ToSqlHolder]) -> Vec<(&(dyn ToSql + Sync), Type)> {
+    holders
+        .iter()
+        .map(|h| (h.as_to_sql(), h.declared_type()))
+        .collect()
 }
 
 /// Resolve a `Kind::Domain(base)` chain down to its concrete base type, so an
@@ -282,7 +368,7 @@ fn resolve_domain(ty: &Type) -> &Type {
     cur
 }
 
-/// A text-family base type — decoded as `String` / `TextArray` element.
+/// A text-family base type - decoded as `String` / `TextArray` element.
 fn is_text_family(ty: &Type) -> bool {
     matches!(
         *ty,
@@ -292,13 +378,13 @@ fn is_text_family(ty: &Type) -> bool {
 
 /// Decode ONE `compio_postgres::Row` cell into a neutral [`Value`], reproducing the
 /// in-tree adapter's classification byte-for-byte: text-family / `"char"` /
-/// `to_char`-timestamps → `Text`; int2/int4/int8/oid → `Int`; bool → `Bool`;
-/// text[] → `TextArray` (element-NULLs preserved); SQL NULL → `Null`.
+/// `to_char`-timestamps -> `Text`; int2/int4/int8/oid -> `Int`; bool -> `Bool`;
+/// text[] -> `TextArray` (element-NULLs preserved); SQL NULL -> `Null`.
 fn cell_to_value(row: &PgRow, idx: usize, ty: &Type) -> Result<Value, DbError> {
     let base = resolve_domain(ty);
 
     // Arrays first: `text[]` (and any `Kind::Array` whose element is text-family)
-    // → `TextArray`. Also catches `information_schema` array domains.
+    // -> `TextArray`. Also catches `information_schema` array domains.
     if let Kind::Array(elem) = base.kind()
         && is_text_family(resolve_domain(elem))
     {
@@ -353,7 +439,7 @@ fn cell_to_value(row: &PgRow, idx: usize, ty: &Type) -> Result<Value, DbError> {
     }
 }
 
-/// `compio_postgres::Row → driver::Row` — iterate columns, decode each cell.
+/// `compio_postgres::Row -> driver::Row` - iterate columns, decode each cell.
 fn row_to_neutral(row: &PgRow) -> Result<Row, DbError> {
     let cols = row.columns();
     let mut names = Vec::with_capacity(cols.len());
@@ -365,7 +451,7 @@ fn row_to_neutral(row: &PgRow) -> Result<Row, DbError> {
     Ok(Row::new(names, values))
 }
 
-/// The native, compio-postgres [`SqlSession`] impl — one forward per verb (mapping
+/// The native, compio-postgres [`SqlSession`] impl - one forward per verb (mapping
 /// binds/rows/errors through the neutral seam), so the SQL, txn boundaries, and
 /// decoded domain values are identical to the platform's in-tree `PgSession` impl.
 impl SqlSession for CompioPgSession {
@@ -376,32 +462,27 @@ impl SqlSession for CompioPgSession {
             .map_err(|e| to_db_error(&e))
     }
 
+    // All three bind paths go through the `*_typed` entry points rather than
+    // `execute`/`query`, because those declare a type per parameter off the `ToSql`
+    // impl and give the caller no way to decline. Declining is exactly what
+    // `Bind::Inferred` needs, and it is a property of the VALUE, so a statement may
+    // mix an inferred instant with a typed key - which the previous whole-statement
+    // `exec_text` could not express and which `holder_params` now carries.
     async fn exec(&self, sql: &str, binds: &[Bind]) -> Result<u64, DbError> {
         let holders = bind_holders(binds)?;
-        let refs = holder_refs(&holders);
+        let params = holder_params(&holders);
         self.client
-            .execute(sql, &refs)
-            .await
-            .map_err(|e| to_db_error(&e))
-    }
-
-    async fn exec_text(&self, sql: &str, params: &[Option<String>]) -> Result<u64, DbError> {
-        // Text-format, server-inferred params (the load-bearing `text → timestamptz`
-        // coercion the executor's lowered op.* DML relies on — a concrete-OID binary
-        // bind would make PG refuse the coercion). `compio_postgres`'
-        // `execute_text_params` already implements exactly this text-param path.
-        self.client
-            .execute_text_params(sql, params)
+            .execute_typed(sql, &params)
             .await
             .map_err(|e| to_db_error(&e))
     }
 
     async fn query(&self, sql: &str, binds: &[Bind]) -> Result<Vec<Row>, DbError> {
         let holders = bind_holders(binds)?;
-        let refs = holder_refs(&holders);
+        let params = holder_params(&holders);
         let rows = self
             .client
-            .query(sql, &refs)
+            .query_typed(sql, &params)
             .await
             .map_err(|e| to_db_error(&e))?;
         rows.iter().map(row_to_neutral).collect()
@@ -409,13 +490,19 @@ impl SqlSession for CompioPgSession {
 
     async fn query_one(&self, sql: &str, binds: &[Bind]) -> Result<Row, DbError> {
         let holders = bind_holders(binds)?;
-        let refs = holder_refs(&holders);
-        let row = self
+        let params = holder_params(&holders);
+        let rows = self
             .client
-            .query_one(sql, &refs)
+            .query_typed(sql, &params)
             .await
             .map_err(|e| to_db_error(&e))?;
-        row_to_neutral(&row)
+        match rows.as_slice() {
+            [row] => row_to_neutral(row),
+            other => Err(DbError::message(format!(
+                "query_one expected exactly one row, got {}",
+                other.len()
+            ))),
+        }
     }
 }
 
