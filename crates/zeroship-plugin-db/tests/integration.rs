@@ -1,3 +1,8 @@
+// The parity Postgres fixture chains four awaits over compio-postgres futures in one
+// block; each layer is a large generated state machine, and the default 128 is not
+// enough to compute its layout. A compile-budget knob, not a behaviour change.
+#![recursion_limit = "256"]
+
 //! Integration tests for plugin-db query builders against real Postgres.
 //!
 //! Requires: the test PostgreSQL named by the overlay
@@ -12,6 +17,9 @@ use uuid::Uuid;
 use zeroship_plugin_db::backend::ChangeStream;
 
 const CDC_TEST_WORKER_ID: &str = "plugin-db-integration-worker";
+
+#[path = "support/mod.rs"]
+mod support;
 
 #[path = "parity/mod.rs"]
 mod parity;

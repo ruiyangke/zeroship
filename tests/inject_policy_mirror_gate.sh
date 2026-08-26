@@ -17,12 +17,12 @@
 #
 #   Rust        concat!(include_str!("<its grants>"), include_str!("<fragment>"))
 #               rustc folds both at compile time, so the fragment's bytes are
-#               literally in the binary. Five consumers:
-#                 crates/migrated/src/policy.rs                (deployed ceiling)
-#                 crates/plugin-db/src/register_model/sqlite_engine.rs (dev)
-#                 crates/plugin-db/tests/parity/mod.rs         (PG/SQLite matrix)
+#               literally in the binary. Three consumers:
+#                 crates/zeroship-migrated/src/policy.rs       (deployed ceiling)
 #                 crates/zeroship-migrate-adapter/tests/smoke_apply_pg.rs
 #                 crates/zeroship-migrate-adapter/tests/author_and_apply_pg.rs
+#               The two plugin-db consumers were deleted with the engine
+#               dependency; see the EXPECTED_RUST_CONSUMERS note below.
 #   TypeScript  policies/codegen.mjs emits the fragment as a const into
 #               sdks/vite-plugin/src/gen-types/confined-system-shape.generated.ts,
 #               which the emit ceiling and the dev-apply charter import. That
@@ -125,8 +125,17 @@ SELF="tests/inject_policy_mirror_gate.sh"
 # snapshot, six consumers. Every number is ASSERTED, not merely reported: a gate
 # that adapts to whatever it finds cannot tell "nothing was added" from
 # "something was added and I adjusted".
+#
+# LOWERED 5 -> 3 when plugin-db stopped depending on the migration engine. Two
+# Rust consumers were DELETED, not silently dropped:
+#   register_model/sqlite_engine.rs  the dev-tier engine driver, deleted whole
+#   tests/parity/mod.rs              its ceiling fed a policy to the engine; both
+#                                    legs of the matrix build tables directly now
+# Neither still injects anything, which is the case this count exists to catch;
+# both are gone, which is the case it is allowed to absorb. The remaining three
+# are the deployed ceiling and the two adapter PG tests.
 EXPECTED_INERT=1
-EXPECTED_RUST_CONSUMERS=5
+EXPECTED_RUST_CONSUMERS=3
 EXPECTED_TS_CONSUMERS=2
 
 # ---------------------------------------------------------------------------

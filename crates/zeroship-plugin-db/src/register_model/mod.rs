@@ -24,28 +24,18 @@
 //!   only `ensure_app_schema` (the ATTACH the data plane needs), and the caller
 //!   stamps `mark_model_registered` / `cache_schema` on its `Ok(())`.
 //!
-//!   THIS PARAGRAPH SAID THE OPPOSITE until 2026-08-10: that the arm "applies,
-//!   but through the MIGRATION ENGINE", calling
-//!   [`sqlite_engine::run_sqlite_via_engine`] at first `registerModel`. That is
-//!   stale - it describes the pre-cutover arm, and it contradicted the comment
-//!   on the arm itself further down this file, which has said "metadata only,
-//!   NO DDL" since the cutover. Two records of one arm, disagreeing, with the
-//!   summary one wrong: the reader who stops at the module doc gets the
-//!   opposite of the behaviour.
+//!   THIS PARAGRAPH SAID THE OPPOSITE until 2026-08-10: that the arm applied
+//!   through the MIGRATION ENGINE at first `registerModel`. That described the
+//!   pre-cutover arm and contradicted the comment on the arm itself further down
+//!   this file, which has said "metadata only, NO DDL" since the cutover.
 //!
-//!   Consequence worth knowing before editing here:
-//!   [`sqlite_engine::run_sqlite_via_engine`] now has **no production call
-//!   site** - every caller in the tree is a `#[cfg(test)]` test in this file
-//!   or reaches it through
-//!   [`apply_declared_schema_to_dev_sqlite_for_tests`], the `test-helpers`
-//!   seam the SQLite integration suite uses to stand in for the dev server's
-//!   apply-ahead step (re-enumerated 2026-08-20). A charter or engine failure
-//!   reachable only through it still cannot break a running dev server, whose
-//!   apply goes through the addon's `applyIrSqlite` instead. The proposal that
-//!   drove the cutover lists this module under "Retirement"
-//!   (`docs/proposals/2026-08-09-dev-sqlite-migration-apply-ahead-of-runtime.md`,
-//!   risk 5); deleting it means giving the suite an envelope-replay apply
-//!   first, and that is not settled here.
+//!   The engine-driven arm it described is GONE from this crate. It had no
+//!   production call site: every caller was a test or the `test-helpers` seam
+//!   standing in for the dev server's apply-ahead. That fixture now lives in
+//!   `tests/support/sqlite_apply_ahead.rs`, where the engine is a dev-dependency,
+//!   so a test can keep it without the LIBRARY carrying a migration engine it
+//!   never calls. `crates/zeroship-plugin-db` now names `zeroship-migrate`
+//!   nowhere in `src/`.
 //!
 //! So the name is wider than either backend's behaviour: on BOTH backends this
 //! registers metadata and creates nothing. Reading it as "this creates my
@@ -60,9 +50,9 @@
 //!
 //! `bootstrap`, `plan`, `validate` and `apply` are each
 //! `#[cfg(any(test, feature = "test-helpers"))]` (see the `mod` declarations
-//! below); `sqlite_engine` is the only ungated one. So the phases compile for
-//! this crate's tests and for downstream test targets, and for nothing else.
-//! The PG arm no-ops and the SQLite arm goes through the engine, so no
+//! below), and since the engine arm was removed there is no ungated one left.
+//! So the phases compile for this crate's tests and for downstream test targets,
+//! and for nothing else. Both arms register metadata and create nothing, so no
 //! production path executes them.
 //!
 //! They are still worth reading - the integration tests drive the stages
@@ -132,15 +122,6 @@ pub(crate) mod apply;
 pub(crate) mod bootstrap;
 #[cfg(any(test, feature = "test-helpers"))]
 pub(crate) mod plan;
-// Gated for the same reason its three siblings are: every path into it is a test.
-// `run_sqlite_via_engine` has no production call site — the SQLite arm creates
-// nothing, and the dev server applies committed migrations ahead of the worker
-// through the addon's `applyIrSqlite`. Leaving this one module ungated was the
-// only thing making `zeroship-migrate` a hard dependency of a crate that never
-// calls it in production, which is why the cfg belongs here rather than in a doc
-// sentence — the doc above already went stale on exactly this point once.
-#[cfg(any(test, feature = "test-helpers"))]
-pub(crate) mod sqlite_engine;
 #[cfg(any(test, feature = "test-helpers"))]
 pub(crate) mod validate;
 
@@ -468,334 +449,4 @@ pub async fn exec_register_model_via_dispatch_for_tests(
     // multi-collection drop-suppression path call
     // `run_sqlite_via_engine` directly with an explicit declared set.
     exec_register_model(app_id, collection, schema, indexes, &[]).await
-}
-
-/// Apply a declared collection's schema to the dev SQLite app file AHEAD of the
-/// runtime, standing in for what the dev server does before it spawns the worker.
-///
-/// # Why a test needs this at all
-///
-/// Since the 2026-08-10 cutover (d84cbbd84) `registerModel` creates nothing on
-/// EITHER dialect. A test that boots the runtime and calls `env.db.<coll>` must
-/// therefore get its table the way a real app does - from a migration process
-/// that ran first - or it is asserting against a database no creator has. In dev
-/// that process is `applyMigrationsToDevSqlite`
-/// (`sdks/vite-plugin/src/gen-types/dev-apply.ts`), which replays the committed
-/// `migrations/*.ts` envelopes into `<db_dir>/zs-<app_id>.sqlite` through the
-/// addon's `applyIrSqlite` verb before the runtime process exists.
-///
-/// # What this reproduces, and what it does NOT
-///
-/// It drives the SAME engine, on the SAME two files, under the same confined
-/// inject ceiling, and finishes before the caller boots the runtime - so the
-/// table shape (seven system columns, `["id"]` PK, the three system indexes) and
-/// the ordering are the dev tier's.
-///
-/// It does NOT reproduce the dev server's FRONT END. `applyIrSqlite` replays
-/// authored migration-IR envelopes through `deploy_envelopes`; this plans a
-/// declarative diff of the declared schema against live state. So a defect in
-/// envelope lowering, journal versioning of authored migrations, or the recorder
-/// is invisible here. It is the closest apply-ahead available in-process while
-/// the Rust side has no envelope-replay entry point for SQLite.
-#[cfg(feature = "test-helpers")]
-pub async fn apply_declared_schema_to_dev_sqlite_for_tests(
-    backend: &crate::backend::SqliteBackend,
-    app_id: &str,
-    collection: &str,
-    schema: &Value,
-    indexes: &Value,
-) -> Result<(), DbError> {
-    sqlite_engine::run_sqlite_via_engine(backend, app_id, collection, schema, indexes, &[]).await
-}
-
-/// Translate ONE declared collection into the engine's `CollectionDescriptor`.
-///
-/// The Postgres apply-ahead a test needs cannot live in this crate the way the
-/// SQLite one above does: `run_sqlite_via_engine` is retired PRODUCTION code
-/// reused by a test, whereas nothing in production plans a declarative PG diff -
-/// the PG schema is applied by `crates/migrated` replaying authored envelopes at
-/// deploy. Adding a declarative PG applier to `src/` would invent a path with no
-/// production caller. So the driving lives in the test
-/// (`crates/plugin-db/tests/parity/mod.rs`) and only the TRANSLATION is exported
-/// here - the `refTarget` -> `ref` and `fields` -> `columns` re-keying - so a
-/// wire-key change cannot leave the two parity legs disagreeing about what the
-/// same declared schema means. It is dialect-neutral despite its module.
-#[cfg(feature = "test-helpers")]
-pub fn collection_descriptor_for_tests(
-    app_id: &str,
-    collection: &str,
-    schema: &Value,
-    indexes: &Value,
-) -> Result<zeroship_migrate::render::declarative::CollectionDescriptor, DbError> {
-    sqlite_engine::schema_to_descriptor(app_id, collection, schema, indexes)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::backend::sqlite::SqliteBackend;
-    use crate::backend::SqlExecutor;
-    use crate::broker::SubscriptionMessage;
-    use serde_json::json;
-    use std::path::PathBuf;
-    use std::rc::Rc;
-    use std::time::Duration;
-
-    fn run<F: std::future::Future>(f: F) -> F::Output {
-        compio::runtime::Runtime::new()
-            .expect("compio runtime build")
-            .block_on(f)
-    }
-
-    async fn next_change(
-        sub: &crate::broker::Subscription,
-    ) -> std::sync::Arc<crate::broker::ChangeEvent> {
-        for _ in 0..50 {
-            if let Some(msg) = sub.pop() {
-                match msg {
-                    SubscriptionMessage::Change(ev) => return ev,
-                    SubscriptionMessage::Resync => continue,
-                    SubscriptionMessage::Closed => panic!("subscription closed unexpectedly"),
-                }
-            }
-            compio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("timed out waiting for broker change event");
-    }
-
-    /// CDC-bridge regression test (rewritten for the engine path). After a
-    /// SQLite ADD COLUMN through `run_sqlite_via_engine`, connection A's CDC
-    /// name cache must reflect the new column (the engine ran the DDL on the
-    /// hardened backend B; the bridge invalidates A's cache). Pre-bridge a stale
-    /// cache would synthesize positional `c<N>` fallback keys for the new column.
-    ///
-    /// This drives the REAL engine path (B applies → drop B → A re-ATTACHes → CDC
-    /// invalidate), not the retired `apply_sqlite` shim, with backend A installed
-    /// in the per-isolate context exactly as production does.
-    #[test]
-    fn sqlite_register_model_via_engine_refreshes_cdc_name_cache_after_add_column() {
-        run(async {
-            let dir = tempfile::tempdir().expect("create tempdir");
-            let backend = Rc::new(
-                SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend"),
-            );
-            // Install A in the per-isolate context so `run_sqlite_via_engine`
-            // resolves the same data-plane backend the CDC publisher reads.
-            crate::set_sqlite_backend_for_tests(backend.clone());
-            let app_id = "app_cdc_name_refresh";
-            let collection = "messages";
-
-            let schema_v1 = json!({
-                "_meta": {"strictness": "lenient"},
-                "title": {"type": "string", "required": true}
-            });
-            sqlite_engine::run_sqlite_via_engine(
-                &backend,
-                app_id,
-                collection,
-                &schema_v1,
-                &json!([]),
-                &[collection.to_string()],
-            )
-            .await
-            .expect("engine registers the initial schema");
-
-            let sub = crate::broker::subscribe(app_id, collection);
-
-            // CRUD on A (the data plane) — the ATTACH from step 5 means A sees the
-            // engine-created table. A write here fires CDC and primes the cache.
-            backend
-                .pool_exec(
-                    r#"INSERT INTO "app_cdc_name_refresh"."messages" (id, title)
-                       VALUES ('msg_1', 'hello')"#,
-                    &[],
-                )
-                .await
-                .expect("seed row for CDC cache prime (A sees the migrated table)");
-            let first = next_change(&sub).await;
-            assert!(
-                first.new_tuple.contains_key("title"),
-                "first CDC decode must resolve the original column names"
-            );
-
-            // v2: ADD COLUMN body, through the engine. The DDL runs on B; the
-            // bridge invalidates A's CDC name cache for `messages`.
-            let schema_v2 = json!({
-                "_meta": {"strictness": "lenient"},
-                "title": {"type": "string", "required": true},
-                "body": {"type": "string"}
-            });
-            sqlite_engine::run_sqlite_via_engine(
-                &backend,
-                app_id,
-                collection,
-                &schema_v2,
-                &json!([]),
-                &[collection.to_string()],
-            )
-            .await
-            .expect("engine applies the widened schema (ADD COLUMN body)");
-
-            backend
-                .pool_exec(
-                    r#"INSERT INTO "app_cdc_name_refresh"."messages" (id, title, body)
-                       VALUES ('msg_2', 'hello-again', 'fresh-body')"#,
-                    &[],
-                )
-                .await
-                .expect("insert row after ADD COLUMN (A sees the migrated column)");
-            let second = next_change(&sub).await;
-
-            assert!(
-                second.new_tuple.contains_key("body"),
-                "CDC decode must refresh the cached column names after the engine ADD COLUMN"
-            );
-            assert!(
-                second.changed_columns.iter().any(|c| c == "body"),
-                "changed_columns must include the newly-added column name after cache refresh"
-            );
-            assert!(
-                !second.new_tuple.keys().any(|k| {
-                    k.strip_prefix('c')
-                        .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit()))
-                }),
-                "stale cache would synthesize positional fallback keys: {:?}",
-                second.new_tuple.keys().collect::<Vec<_>>()
-            );
-        });
-    }
-
-    /// True if `table` exists in the app's ATTACHed SQLite schema (the data-plane
-    /// backend A view). Reads `sqlite_master` in the app's schema namespace.
-    async fn table_exists(backend: &SqliteBackend, app_id: &str, table: &str) -> bool {
-        let sql = format!(
-            r#"SELECT name FROM "{app_id}".sqlite_master WHERE type='table' AND name='{table}'"#
-        );
-        let rows = backend.query_json(&sql, &[]).await.expect("query sqlite_master");
-        !rows.is_empty()
-    }
-
-    /// **Regression guard — warm multi-collection boot must NOT fail closed.**
-    ///
-    /// A warm app file already holds tables `c1` + `c2` (registered by a prior
-    /// isolate). A FRESH isolate then registers them one at a time (the
-    /// install-schema.ts order), `c1` FIRST. When `c1` registers, the sibling
-    /// cache is empty → the per-collection desired union is `{c1}`, but live is
-    /// `{c1,c2}`. Pre-fix, `c2` was a live-only table with no `live_ownership`
-    /// entry → the differ's fail-closed drop pass raised `DropOfUnownedTable` and
-    /// `registerModel` REJECTED — the app broke on every warm boot of any 2+-
-    /// collection schema.
-    ///
-    /// Post-fix: `c2` is in the FULL declared set `[c1, c2]`, so the drop pass
-    /// hides it (not-yet-registered sibling) → NO error, `c2` is NOT dropped, and
-    /// then registering `c2` is a clean no-op. Both tables stay usable.
-    ///
-    /// RED before the fix: the first phase-2 `run_sqlite_via_engine(c1)` returns
-    /// `Err(DropOfUnownedTable)` and the `.expect(...)` panics.
-    #[test]
-    fn sqlite_warm_multi_collection_fresh_isolate_registers_c1_first_no_drop() {
-        run(async {
-            let dir = tempfile::tempdir().expect("create tempdir");
-            let backend = Rc::new(
-                SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend"),
-            );
-            crate::set_sqlite_backend_for_tests(backend.clone());
-            let app_id = "default";
-            let declared = [c("c1"), c("c2")];
-
-            let c1_schema = json!({"title": {"type": "string", "required": true}});
-            let c2_schema = json!({"label": {"type": "string", "required": true}});
-
-            // ---- Prior isolate: register both, warming the file with c1 + c2. ----
-            sqlite_engine::run_sqlite_via_engine(&backend, app_id, "c1", &c1_schema, &json!([]), &declared)
-                .await
-                .expect("warm: register c1");
-            crate::cache_schema_for_tests(app_id, "c1", c1_schema.clone());
-            sqlite_engine::run_sqlite_via_engine(&backend, app_id, "c2", &c2_schema, &json!([]), &declared)
-                .await
-                .expect("warm: register c2");
-            crate::cache_schema_for_tests(app_id, "c2", c2_schema.clone());
-
-            assert!(table_exists(&backend, app_id, "c1").await, "warm c1 created");
-            assert!(table_exists(&backend, app_id, "c2").await, "warm c2 created");
-
-            // ---- Fresh isolate: empty sibling cache; register c1 FIRST. ----
-            crate::simulate_fresh_isolate_for_tests(app_id, &["c1", "c2"]);
-
-            sqlite_engine::run_sqlite_via_engine(&backend, app_id, "c1", &c1_schema, &json!([]), &declared)
-                .await
-                .expect("H1: fresh-isolate register of c1 first must NOT fail closed on the live c2 sibling");
-            crate::cache_schema_for_tests(app_id, "c1", c1_schema.clone());
-
-            // c2 must survive the c1 register (it is declared, just not yet
-            // re-registered on this isolate).
-            assert!(
-                table_exists(&backend, app_id, "c2").await,
-                "H1: c2 must NOT be dropped when c1 registers first on a warm file"
-            );
-
-            // Then c2 re-registers cleanly (no-op against the warm table).
-            sqlite_engine::run_sqlite_via_engine(&backend, app_id, "c2", &c2_schema, &json!([]), &declared)
-                .await
-                .expect("H1: re-register c2 must be a clean no-op");
-
-            assert!(table_exists(&backend, app_id, "c1").await, "c1 still usable");
-            assert!(table_exists(&backend, app_id, "c2").await, "c2 still usable");
-        });
-    }
-
-    /// **Over-suppression guard — a GENUINELY-removed collection still drops.**
-    ///
-    /// Warm file holds `c1` + `c2`. The app's schema is then edited to declare
-    /// ONLY `c1` (c2 removed). A fresh isolate registers `c1` with the FULL
-    /// declared set `[c1]` (c2 is NOT in it). The drop pass must now author the
-    /// owned drop of `c2` — confirming the warm-boot fix above did not
-    /// over-suppress real removals.
-    ///
-    /// RED before the fix: pre-fix `c2` had no `live_ownership` entry, so this
-    /// path raised `DropOfUnownedTable` instead of dropping (`.expect` panics);
-    /// the assertion that c2 is gone could never be reached.
-    #[test]
-    fn sqlite_genuinely_removed_collection_is_dropped() {
-        run(async {
-            let dir = tempfile::tempdir().expect("create tempdir");
-            let backend = Rc::new(
-                SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend"),
-            );
-            crate::set_sqlite_backend_for_tests(backend.clone());
-            let app_id = "default";
-
-            let c1_schema = json!({"title": {"type": "string", "required": true}});
-            let c2_schema = json!({"label": {"type": "string", "required": true}});
-
-            // Warm the file with both.
-            let both = [c("c1"), c("c2")];
-            sqlite_engine::run_sqlite_via_engine(&backend, app_id, "c1", &c1_schema, &json!([]), &both)
-                .await
-                .expect("warm: register c1");
-            crate::cache_schema_for_tests(app_id, "c1", c1_schema.clone());
-            sqlite_engine::run_sqlite_via_engine(&backend, app_id, "c2", &c2_schema, &json!([]), &both)
-                .await
-                .expect("warm: register c2");
-            crate::cache_schema_for_tests(app_id, "c2", c2_schema.clone());
-            assert!(table_exists(&backend, app_id, "c2").await, "warm c2 created");
-
-            // Fresh isolate; the new declared schema has ONLY c1 (c2 removed).
-            crate::simulate_fresh_isolate_for_tests(app_id, &["c1", "c2"]);
-            let only_c1 = [c("c1")];
-            sqlite_engine::run_sqlite_via_engine(&backend, app_id, "c1", &c1_schema, &json!([]), &only_c1)
-                .await
-                .expect("register c1 with c2 removed from the declared set");
-
-            assert!(table_exists(&backend, app_id, "c1").await, "c1 still present");
-            assert!(
-                !table_exists(&backend, app_id, "c2").await,
-                "H1 guard: a collection genuinely removed from the declared schema MUST be dropped"
-            );
-        });
-    }
-
-    fn c(s: &str) -> String {
-        s.to_string()
-    }
 }

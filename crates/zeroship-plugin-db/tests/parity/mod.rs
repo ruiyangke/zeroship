@@ -97,230 +97,179 @@ fn apply_matrix_schema_ahead_of_runtime(url: &str, collection: &str) {
         .parent()
         .expect("the sqlite parity url names a file inside a directory")
         .to_path_buf();
-    let backend = zeroship_plugin_db::backend::SqliteBackend::new(db_dir)
-        .expect("open a SQLite backend on the matrix db_dir");
-    block_on(async {
-        zeroship_plugin_db::register_model::apply_declared_schema_to_dev_sqlite_for_tests(
-            &backend,
-            MATRIX_APP_ID,
-            collection,
-            &matrix_schema(),
-            &json!([]),
-        )
-        .await
-        .expect("apply the matrix schema ahead of the runtime")
-    });
+    crate::support::tables::create_sqlite_table(&db_dir, MATRIX_APP_ID, &matrix_ddl_sqlite(collection));
 }
 
-/// The confined table-shape ceiling plugin-db's own SQLite arm compiles in.
+/// Raw SQLite DDL for [`matrix_schema`].
 ///
-/// Assembled from THE SAME TWO FILES the SQLite arm compiles in rather than
-/// restated here on purpose: the two legs of this matrix must inject the
-/// identical seven system columns, `["id"]` PK and three system indexes, or the
-/// projections they produce differ for a reason that has nothing to do with the
-/// dialect. The grants come from plugin-db's own file; the `[[inject]]` rule is
-/// the platform-wide fragment every consumer takes.
-/// `tests/inject_policy_mirror_gate.sh` counts those consumers and refuses if one
-/// stops taking it - dropping the second `include_str!` here would leave this
-/// matrix comparing two dialects that both inject nothing.
-const CONFINED_CEILING_TOML: &str = concat!(
-    include_str!("../../policies/confined.policy.toml"),
-    include_str!("../../../../policies/confined-system-shape.inject.toml"),
+/// Hand-written, not rendered: plugin-db does not own DDL, and a matrix whose
+/// fixture came out of the layer under test could not detect that layer being
+/// wrong (see `support::tables`). The PostgreSQL twin is
+/// [`matrix_ddl_postgres`]; the two must describe the SAME declared shape in
+/// each dialect's spelling, because that equivalence IS what this matrix
+/// asserts.
+fn matrix_ddl_sqlite(collection: &str) -> String {
+    format!(
+        r#"CREATE TABLE IF NOT EXISTS "{MATRIX_APP_ID}"."{collection}" (
+  id TEXT PRIMARY KEY,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_by TEXT NULL,
+  updated_by TEXT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  deleted_at TEXT NULL,
+  "title" TEXT NOT NULL,
+  "flag" INTEGER NOT NULL,
+  "meta" TEXT NOT NULL DEFAULT '{{}}',
+  "optional" TEXT,
+  "rank" INTEGER NOT NULL,
+  "occurred_at" TEXT,
+  "payload_bytes" TEXT,
+  "payload_json" TEXT DEFAULT '{{}}'
 );
-
-/// Bind that ceiling to the matrix app's schema, the way the Postgres path does.
-///
-/// `plugin-db/policies/confined.policy.toml` carries NO `schema.cross_schema`
-/// grant, and on SQLite it does not need one - the dialect has no schemas, so the
-/// guard's cross-schema gate is inert and the SQLite arm composes the file as
-/// authored. On Postgres it is load-bearing: `GuardConfig` takes schema authority
-/// from the effective policy and NOTHING else ("Schema authority comes only from
-/// the explicit effective policy", `zero-migrate-guard/src/guard/mod.rs`), so the
-/// unbound ceiling denies the engine's own `CREATE TABLE "default"."<coll>"` with
-/// `CrossSchema { schema: "default" }`. Measured: that is exactly how this leg
-/// failed before this grant was appended.
-///
-/// This mirrors `bind_confined_charter_to_schema`
-/// (`crates/migrated/src/policy.rs`), which the managed PG server runs over the
-/// SAME ceiling shape before composing it. IN ONE RESPECT IT IS WEAKER: the
-/// production binder also NARROWS the authored `schema.create_table` and
-/// `schema.rename` grants from `scope = "all"` to this one schema. Skipping that
-/// leaves the test's policy strictly LOOSER than production's, so this matrix
-/// cannot be read as evidence that the confined binding confines anything - it is
-/// a schema applier for a projection test, not a proof about the guard. What it
-/// does have to get right is the table SHAPE, and that comes from the `[[inject]]`
-/// rule, which is the file's verbatim.
-///
-/// It also cannot silently stop applying: `effective_policy_from_charter_toml`
-/// refuses an unknown key, and a ceiling that ever grows its own cross-schema
-/// grant would make this a duplicate rather than a no-op.
-fn matrix_effective_policy() -> zeroship_migrate::EffectivePolicy {
-    let charter = format!(
-        "{CONFINED_CEILING_TOML}\n\
-         [[grant]]\n\
-         key = \"schema.cross_schema\"\n\
-         value = true\n\
-         scope = {{ include = [\"{MATRIX_APP_ID}\"] }}\n"
-    );
-    zeroship_migrate::effective_policy_from_charter_toml(&charter)
-        .expect("plugin-db's confined ceiling composes once bound to the matrix app schema")
+CREATE INDEX IF NOT EXISTS "{MATRIX_APP_ID}"."{collection}_deleted_at_idx" ON "{collection}" ("deleted_at");
+CREATE INDEX IF NOT EXISTS "{MATRIX_APP_ID}"."{collection}_updated_at_idx" ON "{collection}" ("updated_at");
+CREATE INDEX IF NOT EXISTS "{MATRIX_APP_ID}"."{collection}_created_by_idx" ON "{collection}" ("created_by");
+"#
+    )
 }
+
+/// Raw PostgreSQL DDL for [`matrix_schema`]. Twin of [`matrix_ddl_sqlite`].
+///
+/// The dialect differences here are the ones the matrix exists to hold constant
+/// downstream: `TIMESTAMPTZ`/`NOW()` for SQLite's `TEXT`/`CURRENT_TIMESTAMP`,
+/// `BOOLEAN` for `INTEGER`, `JSONB` for `TEXT`. Note the index targets flip -
+/// PostgreSQL qualifies the TABLE, SQLite qualifies the INDEX NAME, because on
+/// SQLite the app file is an ATTACHed database rather than a schema.
+fn matrix_ddl_postgres(collection: &str) -> String {
+    format!(
+        r#"CREATE TABLE IF NOT EXISTS "{MATRIX_APP_ID}"."{collection}" (
+  id TEXT PRIMARY KEY,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_by TEXT NULL,
+  updated_by TEXT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  deleted_at TIMESTAMPTZ NULL,
+  "title" TEXT NOT NULL,
+  "flag" BOOLEAN NOT NULL,
+  "meta" JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+  "optional" TEXT,
+  "rank" INTEGER NOT NULL,
+  "occurred_at" TIMESTAMPTZ,
+  "payload_bytes" TEXT,
+  "payload_json" JSONB DEFAULT '{{}}'::jsonb
+);
+CREATE INDEX IF NOT EXISTS "{collection}_deleted_at_idx" ON "{MATRIX_APP_ID}"."{collection}" ("deleted_at");
+CREATE INDEX IF NOT EXISTS "{collection}_updated_at_idx" ON "{MATRIX_APP_ID}"."{collection}" ("updated_at");
+CREATE INDEX IF NOT EXISTS "{collection}_created_by_idx" ON "{MATRIX_APP_ID}"."{collection}" ("created_by");
+"#
+    )
+}
+
+// THE CONFINED CEILING AND ITS BINDER ARE GONE FROM THIS FILE.
+//
+// They existed to hand an `EffectivePolicy` to the migration engine, which this
+// matrix used to drive on both legs. plugin-db no longer depends on the engine
+// in any profile, so there is nothing here to hand a policy to: both legs build
+// their table from `zeroship-schema` now.
+//
+// That drops one consumer of the platform `[[inject]]` system-shape fragment
+// under `policies/`, and `tests/inject_policy_mirror_gate.sh` counts consumers
+// on purpose, so its EXPECTED_RUST_CONSUMERS is lowered in the same commit with
+// this as the reason. (The fragment's filename is deliberately NOT spelled here:
+// the gate finds consumers by grepping files that hold both `include_str!` and
+// that exact path, so a comment naming it would become a phantom consumer the
+// day this file gains an unrelated `include_str!`.)
+// The gate's own guidance is to do exactly that for a deliberate deletion; what
+// it must never absorb silently is a consumer that stopped taking the fragment
+// while still injecting.
+//
+// WHAT THIS MATRIX STOPPED PROVING. Both legs no longer take the seven system
+// columns from a policy document, so this file can no longer be read as evidence
+// that a creator's deployed table and the dev table agree. The fragment's own
+// header (see that same fragment) already said `zeroship-schema` is a producer
+// it cannot reach and that
+// the two "differ on purpose" (varchar(255) vs text on id / created_by /
+// updated_by), so that reading was already narrower than it looked. What the
+// matrix still proves is what its assertions actually compare: one declared
+// shape, two dialects, identical JSON projection.
 
 /// Create the matrix collection's table on POSTGRES before the runtime boots.
 ///
-/// # Why this is not a smaller `CREATE TABLE`
+/// # Why this builds the table instead of driving the engine
 ///
-/// The PG arm of `registerModel` has been a pure no-op since long before the
-/// SQLite one became one: on Postgres the schema authority is `crates/migrated`,
-/// which applies ahead of the worker at deploy. A hand-written `CREATE TABLE`
-/// here would test the projection of a table shape no creator ever gets. Driving
-/// the engine, under plugin-db's own confined ceiling, is what makes the two
-/// legs comparable - the system columns, their DDL defaults, the PK and the
-/// three system indexes all arrive from the same policy document on both.
+/// It used to drive `zeroship-migrate` under plugin-db's confined ceiling, on
+/// the argument that the system columns then arrived from the same policy
+/// document on both legs. plugin-db no longer depends on the engine in any
+/// profile, so that option is gone, and the argument was weaker than it read:
+/// `policies/confined-system-shape.inject.toml` says outright that
+/// `zeroship-schema` is a producer it CANNOT reach and that the two "already
+/// differ on purpose". Both legs now take the same `zeroship-schema` emitter,
+/// which is what the matrix actually needs - one shape, two dialects.
 ///
 /// # What this reproduces, and what it does NOT
 ///
-/// Same caveat as the SQLite helper, in the same direction. `crates/migrated`
-/// replays AUTHORED migration-IR envelopes; this plans a declarative diff of the
-/// declared schema against live introspection. So a defect in envelope lowering,
-/// in journal versioning of authored migrations, or in the recorder is invisible
-/// on both legs of this matrix. What it does pin is everything downstream of the
-/// applied table: types, defaults, ordering, transaction nesting and the JSON
-/// projection `env.db` hands back.
+/// Same caveat as the SQLite helper, in the same direction, plus one more.
+/// `crates/zeroship-migrated` replays AUTHORED migration-IR envelopes; this
+/// runs a rendered CREATE. So a defect in envelope lowering, in journal
+/// versioning, or in the recorder is invisible on both legs. AND, since the
+/// engine left: this table's `id` / `created_by` / `updated_by` are `text`,
+/// where a deployed creator's are `varchar(255)`. What the matrix still pins is
+/// everything downstream of the applied table - types, defaults, ordering,
+/// transaction nesting and the JSON projection `env.db` hands back - and it
+/// pins them identically on both dialects, which is its purpose.
 ///
-/// # Why it drops its two schemas first
+/// # Why it drops the app schema first
 ///
 /// The SQLite leg gets a fresh `tempfile::tempdir` per run; Postgres does not.
-/// `run_matrix` mints its collection name from a per-PROCESS counter, so a second
-/// run of this test reuses `fixtures_parity_1` and finds the previous run's rows
+/// `run_matrix` mints its collection name from a per-PROCESS counter, so a
+/// second run reuses `fixtures_parity_1` and finds the previous run's rows
 /// already in it - measured, as a `seed` projection with every row DUPLICATED
-/// against a single-copy SQLite side. Dropping the app schema and its journal
-/// schema makes the leg repeatable and, unlike a unique-name-per-run scheme,
-/// leaves nothing behind on a shared server. It is the same pair of statements
-/// `crates/zeroship-migrate-adapter/tests/smoke_apply_pg.rs` opens with, and it
-/// touches only the two schemas this function itself creates.
+/// against a single-copy SQLite side. Dropping the app schema makes the leg
+/// repeatable without leaving a unique-name-per-run trail on a shared server.
+/// It no longer drops a journal schema: nothing here writes one now.
 fn apply_matrix_schema_ahead_of_postgres(url: &str, collection: &str) {
-    use zeroship_migrate::apply::backend::MigrationBackend;
-    use zeroship_migrate::driver::SqlSession;
-    use zeroship_migrate::{
-        desired_snapshot_for_dialect, Approval, DeclarativeAuthor, ExecutorConfig, GuardConfig,
-        MigrationEngine, PostgresBackend, SqlDialect,
-    };
-    use zeroship_migrate_adapter::CompioPgSession;
-
-    let descriptor = zeroship_plugin_db::register_model::collection_descriptor_for_tests(
-        MATRIX_APP_ID,
-        collection,
-        &matrix_schema(),
-        &json!([]),
-    )
-    .expect("the matrix schema translates to an engine descriptor");
+    // project_schema == app_id: plugin-db's PG data plane resolves a collection
+    // to `"<app_id>"."<collection>"` (`backend/postgres.rs::build_ensure_app_schema`),
+    // and this DDL qualifies into that same schema, so the runtime reads the
+    // table this created rather than a different one.
+    let ddl = matrix_ddl_postgres(collection);
 
     block_on(async move {
-            let session = CompioPgSession::connect(url)
-                .await
-                .expect("connect the migration session to the parity database");
+        let pool = compio_postgres::Pool::connect(url, 2)
+            .await
+            .expect("admin pool for the parity schema");
 
-            // ONE policy, not two. `plan_declarative` and `apply_declarative` both
-            // OVERWRITE the config's policy with this argument
-            // (`engine.rs`: `cfg.clone().with_effective_policy(effective.clone())`
-            // and `policy_exec_cfg.effective = effective.clone()`), so a guard
-            // composed separately would be discarded before it decided anything.
-            let effective = matrix_effective_policy();
-            // project_schema == app_id: plugin-db's PG data plane resolves a
-            // collection to `"<app_id>"."<collection>"`
-            // (`backend/postgres.rs::build_ensure_app_schema`), so the engine has
-            // to own that same schema or the runtime would read a different table
-            // from the one this applied.
-            let exec_cfg =
-                ExecutorConfig::new(MATRIX_APP_ID, MATRIX_APP_ID, effective.clone());
-            session
-                .batch(&format!(
-                    "DROP SCHEMA IF EXISTS \"{}\" CASCADE; \
-                     DROP SCHEMA IF EXISTS \"{}\" CASCADE; \
-                     CREATE SCHEMA \"{}\"",
-                    exec_cfg.project_schema, exec_cfg.pg.meta_schema, exec_cfg.project_schema
-                ))
-                .await
-                .expect("reset the parity app schema and its migration journal");
+        pool.batch_execute(&format!(
+            "DROP SCHEMA IF EXISTS \"{MATRIX_APP_ID}\" CASCADE; \
+             CREATE SCHEMA \"{MATRIX_APP_ID}\""
+        ))
+        .await
+        .expect("reset the parity app schema");
 
-            let desired = desired_snapshot_for_dialect(
-                MATRIX_APP_ID,
-                std::slice::from_ref(&descriptor),
-                SqlDialect::Postgres,
-                &effective,
-            )
-            .expect("desired snapshot for the matrix collection");
+        pool.batch_execute(&ddl)
+            .await
+            .unwrap_or_else(|e| panic!("matrix DDL failed: {e}\n{ddl}"));
 
-            let engine = MigrationEngine::new();
-            let backend = PostgresBackend::new_generic(&session);
-            // Introspected rather than assumed empty, even though the drop above
-            // guarantees it is: a real applier diffs against what the server
-            // actually holds, and an assumed-empty `live` would author a CREATE
-            // over an existing table on the day someone removes the drop.
-            let live = backend
-                .snapshot_schema(&exec_cfg)
-                .await
-                .expect("introspect the live parity schema");
-            let live_ownership: std::collections::HashMap<String, String> = live
-                .tables
-                .keys()
-                .map(|t| (t.clone(), MATRIX_APP_ID.to_string()))
-                .collect();
-
-            let author = DeclarativeAuthor::new_for_dialect(
-                MATRIX_APP_ID,
-                MATRIX_APP_ID,
-                SqlDialect::Postgres,
-            );
-            let guard_cfg = GuardConfig::confined_with_effective(MATRIX_APP_ID, effective.clone())
-                .for_dialect(SqlDialect::Postgres);
-            let plan = engine
-                .plan_declarative(
-                    &desired,
-                    &live,
-                    &live_ownership,
-                    &author,
-                    &[],
-                    &guard_cfg,
-                    &effective,
-                )
-                .expect("plan the matrix collection against live Postgres");
-
-            engine
-                .apply_declarative(
-                    &plan,
-                    &effective,
-                    Approval::Approved,
-                    &backend,
-                    &exec_cfg,
-                    "parity-matrix",
-                )
-                .await
-                .expect("apply the matrix schema ahead of the runtime");
-
-            // The engine creates the table as the ADMIN role. plugin-db's PG data
-            // plane then reads it as the per-app role, which at this point has no
-            // USAGE on the schema - measured, as `permission denied for schema
-            // default` in the server log, surfacing to the caller as a bare
-            // `500 internal error`.
-            //
-            // Provisioning that role is part of the deploy-time apply, not an
-            // afterthought: `crates/migrated` grants exactly this
-            // (`GRANT USAGE ON SCHEMA ... TO <role>` + table/sequence privileges,
-            // `apply.rs`) immediately after its own apply, for the same reason.
-            // Here the equivalent step is plugin-db's own `ensure_per_app_role`,
-            // which must run AFTER the table exists because it grants `ON ALL
-            // TABLES IN SCHEMA`.
-            let pool = compio_postgres::Pool::connect(url, 2)
-                .await
-                .expect("admin pool for the parity role provisioning");
-            zeroship_plugin_db::auth::ensure_admin_schema(&pool)
-                .await
-                .expect("ensure the platform admin schema");
-            zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, MATRIX_APP_ID)
-                .await
-                .expect("provision the matrix app's runtime role");
+        // The table is created as the ADMIN role. plugin-db's PG data plane then
+        // reads it as the per-app role, which at this point has no USAGE on the
+        // schema - measured, as `permission denied for schema default` in the
+        // server log, surfacing to the caller as a bare `500 internal error`.
+        //
+        // Provisioning that role is part of the deploy-time apply, not an
+        // afterthought: `crates/zeroship-migrated` grants exactly this
+        // (`GRANT USAGE ON SCHEMA ... TO <role>` + table/sequence privileges,
+        // `apply.rs`) immediately after its own apply, for the same reason. Here
+        // the equivalent step is plugin-db's own `ensure_per_app_role`, which
+        // must run AFTER the table exists because it grants `ON ALL TABLES IN
+        // SCHEMA`.
+        zeroship_plugin_db::auth::ensure_admin_schema(&pool)
+            .await
+            .expect("ensure the platform admin schema");
+        zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, MATRIX_APP_ID)
+            .await
+            .expect("provision the matrix app's runtime role");
     });
 }
 
@@ -723,3 +672,4 @@ pub fn expected_typed_projection() -> Value {
         }
     })
 }
+
