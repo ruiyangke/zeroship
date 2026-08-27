@@ -222,6 +222,7 @@ scope = \"all\"
     .expect("the trigger-and-function charter composes")
 }
 
+#[allow(clippy::result_large_err)]
 fn lower(
     policy: &EffectivePolicy,
     dialect: &DialectId,

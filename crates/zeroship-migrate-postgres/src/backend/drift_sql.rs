@@ -56,8 +56,8 @@ use zeroship_migrate_backend::value_format::{
 /// [`journal_sql::applied`]):
 ///
 /// - the supplied set has a migration with that version whose checksum differs
-/// => [`ChecksumDrift`](zeroship_migrate_backend::drift::ChecksumDrift) (the migration SQL was mutated after apply, or the
-/// journal row was tampered - scenario 36);
+///   => [`ChecksumDrift`](zeroship_migrate_backend::drift::ChecksumDrift) (the migration SQL was mutated after apply, or the
+///   journal row was tampered - scenario 36);
 /// - the supplied set has NO migration with that version => [`OrphanJournal`](zeroship_migrate_backend::drift::OrphanJournal).
 ///
 /// The recorded checksum used is the one [`journal_sql::applied`] returns, which is
@@ -447,12 +447,12 @@ const VIEW_BODY_PROBE_VIEW: &str = "zm_view_body_probe";
 /// ```
 ///
 /// - quoting dropped, whitespace reflowed, a trailing semicolon added, and a
-/// `::numeric` cast inserted that nobody wrote. That cast comes from type analysis
-/// against the catalog, not from parsing, so no offline pass - not even the
-/// PostgreSQL parser this workspace already links - can predict it. A hand-written
-/// normaliser would have to erase casts, quoting and whitespace, and one aggressive
-/// enough to do that is aggressive enough to erase the body change it exists to
-/// find.
+///   `::numeric` cast inserted that nobody wrote. That cast comes from type analysis
+///   against the catalog, not from parsing, so no offline pass - not even the
+///   PostgreSQL parser this workspace already links - can predict it. A hand-written
+///   normaliser would have to erase casts, quoting and whitespace, and one aggressive
+///   enough to do that is aggressive enough to erase the body change it exists to
+///   find.
 ///
 /// So this does not normalise. It renders the authored body, hands it to the SERVER
 /// as a temporary view, and reads BOTH bodies back through `pg_get_viewdef` **in one
@@ -484,8 +484,8 @@ const VIEW_BODY_PROBE_VIEW: &str = "zm_view_body_probe";
 /// the engine's.
 ///
 /// **WHAT IT DOES NOT COVER.** Only views carrying an `authored_query` and present
-/// on both sides are probed. An adopted view - one introspected rather than authored
-/// - has no typed body anywhere in the history, so there is nothing to compare it
+/// on both sides are probed. An adopted view - one introspected rather than authored -
+/// has no typed body anywhere in the history, so there is nothing to compare it
 /// against and it stays uncompared.
 pub async fn resolve_view_bodies<D: SqlSession>(
     conn: &D,
@@ -611,6 +611,7 @@ async fn resolve_view_bodies_in_transaction<D: SqlSession>(
 ///     established is present in the introspected snapshot. A missing row is an
 ///     error rather than an absent body, because silently reading it as "no body"
 ///     is how a comparison stops running without anyone noticing.
+///
 /// Spell the `<schema>.<view>` argument of the `pg_get_viewdef` probe below.
 ///
 /// PostgreSQL, named rather than assumed: `pg_get_viewdef` is a PG catalog

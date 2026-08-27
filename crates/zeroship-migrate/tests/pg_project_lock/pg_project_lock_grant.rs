@@ -218,6 +218,7 @@ struct Tally {
 /// `acquire` reports whether the acquisition succeeded. Every round ends with the
 /// acquirer's locks dropped, so the next round starts from a session that has to
 /// wait for real.
+#[allow(clippy::too_many_arguments)]
 fn race<F>(
     peer: &Peer,
     acquirer: &PgDevSession,

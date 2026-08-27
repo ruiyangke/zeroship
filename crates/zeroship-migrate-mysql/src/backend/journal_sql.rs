@@ -10,24 +10,24 @@
 //! statement is rendered in MySQL dialect:
 //!
 //! - **native total order** - `event_seq BIGINT AUTO_INCREMENT PRIMARY KEY`
-//! (MySQL's monotonic surrogate) replaces Postgres' `BIGINT GENERATED ALWAYS AS
-//! IDENTITY`;
+//!   (MySQL's monotonic surrogate) replaces Postgres' `BIGINT GENERATED ALWAYS AS
+//!   IDENTITY`;
 //! - **timestamps** - `TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6)` replaces
-//! `TIMESTAMPTZ DEFAULT now`;
+//!   `TIMESTAMPTZ DEFAULT now`;
 //! - **keyed text columns** - `VARCHAR(255)` (MySQL cannot index a bare `TEXT`
-//! without a prefix length) replaces `TEXT` for `version`/`checksum`/etc.;
+//!   without a prefix length) replaces `TEXT` for `version`/`checksum`/etc.;
 //! - **immutability** - `BEFORE UPDATE`/`BEFORE DELETE` triggers that
-//! `SIGNAL SQLSTATE '45000'` replace the plpgsql `RAISE EXCEPTION` trigger
-//! function (MySQL has no per-statement `TRUNCATE` trigger, but `TRUNCATE`
-//! requires the `DROP` privilege the least-privilege migrator role lacks, and
-//! the meta database is admin-owned - defense-in-depth still holds through the
-//! UPDATE/DELETE triggers + privilege model);
+//!   `SIGNAL SQLSTATE '45000'` replace the plpgsql `RAISE EXCEPTION` trigger
+//!   function (MySQL has no per-statement `TRUNCATE` trigger, but `TRUNCATE`
+//!   requires the `DROP` privilege the least-privilege migrator role lacks, and
+//!   the meta database is admin-owned - defense-in-depth still holds through the
+//!   UPDATE/DELETE triggers + privilege model);
 //! - **placeholders** - every bind is the anonymous positional `?`
-//! ([`PlaceholderStyle::Question`](zeroship_migrate_backend::backend::PlaceholderStyle::Question)),
-//! never Postgres' `$N`;
+//!   ([`PlaceholderStyle::Question`](zeroship_migrate_backend::backend::PlaceholderStyle::Question)),
+//!   never Postgres' `$N`;
 //! - **net state** - a MySQL-8 window-function (`ROW_NUMBER OVER (PARTITION BY
-//! version ORDER BY event_seq DESC)`) replaces Postgres' `DISTINCT ON`, and
-//! `COLLATE utf8mb4_bin` replaces `COLLATE "C"` for a byte-ordered version sort;
+//!   version ORDER BY event_seq DESC)`) replaces Postgres' `DISTINCT ON`, and
+//!   `COLLATE utf8mb4_bin` replaces `COLLATE "C"` for a byte-ordered version sort;
 //! - **upsert** - `INSERT IGNORE` replaces `ON CONFLICT (version) DO NOTHING`.
 //!
 //! The meta schema (a MySQL *database*) is admin-owned and off the migrator's

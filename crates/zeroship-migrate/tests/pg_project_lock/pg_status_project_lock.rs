@@ -99,6 +99,7 @@ fn read_within_deadline<T: Send + 'static>(
 /// The holder session stays locked across the whole read, so a pass here cannot be
 /// the reader having simply outlived a lock that was released underneath it.
 #[test]
+#[allow(clippy::result_large_err)]
 fn plan_status_reports_a_busy_project_lock_instead_of_waiting_for_a_peer() {
     let url = require_live_pg!();
     let holder = PgDevSession::connect(&url);
@@ -149,6 +150,7 @@ fn plan_status_reports_a_busy_project_lock_instead_of_waiting_for_a_peer() {
 /// Without this arm the busy test above would also pass if the reader had simply
 /// stopped doing any work.
 #[test]
+#[allow(clippy::result_large_err)]
 fn plan_status_still_locks_reads_and_reconciles_when_no_peer_holds_the_lock() {
     let url = require_live_pg!();
     let observer = PgDevSession::connect(&url);

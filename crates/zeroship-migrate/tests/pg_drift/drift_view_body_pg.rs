@@ -28,10 +28,10 @@
 //! ```
 //!
 //! - quoting dropped, `AS` in the alias dropped, whitespace reflowed onto four
-//! lines with a leading space, a numeric cast inserted that nobody wrote, and a
-//! trailing semicolon added. A hand-written normaliser that collapsed all of that
-//! would have to erase casts and whitespace and quoting, and a normaliser aggressive
-//! enough to do it is aggressive enough to erase the body change it exists to find.
+//!   lines with a leading space, a numeric cast inserted that nobody wrote, and a
+//!   trailing semicolon added. A hand-written normaliser that collapsed all of that
+//!   would have to erase casts and whitespace and quoting, and a normaliser aggressive
+//!   enough to do it is aggressive enough to erase the body change it exists to find.
 //!
 //! THE TWO SIDES ALSO DO NOT CARRY THE SAME FIELD. Measured, not assumed, by
 //! `both_sides_of_a_view_body_are_measured` below: the introspected side fills

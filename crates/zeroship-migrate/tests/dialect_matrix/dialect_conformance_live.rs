@@ -1002,8 +1002,8 @@ fn probe_prefix_for(pid: u32) -> String {
 /// ```
 ///
 /// - which is this file being blamed for a neighbour's installation. Two locks with
-/// different keys protect nothing while looking exactly like protection, so the key
-/// belongs to the RESOURCE. `rollback/extension_claim_is_exclusive.rs` pins that.
+///   different keys protect nothing while looking exactly like protection, so the key
+///   belongs to the RESOURCE. `rollback/extension_claim_is_exclusive.rs` pins that.
 const PROBE_EXTENSION: &str = "pgcrypto";
 
 /// The advisory-lock key that makes claiming [`PROBE_EXTENSION`] safe across runs.
@@ -1301,6 +1301,7 @@ async fn sqlite_verdict(kind: &str, variant: &str, op: &Op) -> Verdict {
 // One row, one dialect
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn run_row<B: MigrationBackend>(
     kind: &str,
     variant: &str,

@@ -3,8 +3,8 @@
 //! The schema-artifact emitter (`gen-types`) has two front-doors:
 //!   - `render_artifacts(ops, dialect, schema, effective)` - the GENERATED source
 //!     (op.* migrations).
-//!   - `render_artifacts_from_descriptors(descriptors, dialect, schema, effective)`
-//!     - the MANUAL source (a declared `CollectionDescriptor` set), routed through
+//!   - `render_artifacts_from_descriptors(descriptors, dialect, schema, effective)` -
+//!     the MANUAL source (a declared `CollectionDescriptor` set), routed through
 //!     `descriptors_to_create_ops` (which injects the confined system shape under
 //!     `effective`) and then the SAME renderer tail.
 //!

@@ -42,9 +42,9 @@ use super::journal_sql;
 ///
 /// # Errors
 /// - [`BaselineError::Guard`] - the baseline SQL was denied (held to the same
-/// deny-list as any `up`).
+///   deny-list as any `up`).
 /// - [`BaselineError::AlreadyManaged`] - the journal already records net-applied
-/// migrations (not a first-entry DB).
+///   migrations (not a first-entry DB).
 /// - [`BaselineError::ConflictingBaseline`] - a different baseline already exists.
 /// - [`BaselineError::Db`] / [`BaselineError::Journal`] - infrastructure failures.
 pub(crate) async fn baseline<B: zeroship_migrate_backend::backend::MigrationBackend, D: SqlSession>(

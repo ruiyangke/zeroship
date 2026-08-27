@@ -1060,8 +1060,8 @@ impl FoldedSchema {
     /// separate walker produced: the collection options and the PLAIN
     /// indexes the `FieldDef` map cannot carry.
     ///
-    /// Derived, not tracked. That walker ran its own index lifecycle
-    /// - create, drop, column-drop, column-rename - beside the two that already run
+    /// Derived, not tracked. That walker ran its own index lifecycle -
+    /// create, drop, column-drop, column-rename - beside the two that already run
     /// one; here the NAMED index set is a READ of the authored indexes, so there is no
     /// second lifecycle to keep in step.
     ///

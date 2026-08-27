@@ -227,8 +227,8 @@ pub struct FieldDescriptor {
     #[serde(rename = "enum", default)]
     pub enum_values: Option<Vec<serde_json::Value>>,
     /// For a `{ type: "id", idPrefix }` field, the declared typed-id prefix
-    /// (`idPrefix` on the wire `FieldDef`). A re-declaration of the system `id` PK
-    /// - it FOLDS into the existing `id TEXT PRIMARY KEY` (NOT a second column),
+    /// (`idPrefix` on the wire `FieldDef`). A re-declaration of the system `id` PK -
+    /// it FOLDS into the existing `id TEXT PRIMARY KEY` (NOT a second column),
     /// and the prefix is validated through
     /// [`crate::schema::query::validate_id_prefix`].
     #[serde(rename = "idPrefix", default)]
@@ -1705,8 +1705,8 @@ pub struct DesiredSchema {
     pub ownership: BTreeMap<String, String>,
     /// `table name -> full SDK schema `Value`` (the
     /// [`descriptor_to_sdk_schema`] reconstruction), retained for SQLite rename
-    /// lowering. The keys match `snapshot.tables`. It does not participate in drift
-    /// - drift is the snapshot's job - so it is excluded from `PartialEq` (see the
+    /// lowering. The keys match `snapshot.tables`. It does not participate in drift -
+    /// drift is the snapshot's job - so it is excluded from `PartialEq` (see the
     /// manual impl).
     pub sdk_schemas: BTreeMap<String, serde_json::Value>,
     /// The policy-resolved injection for each table, derived from the same
@@ -1772,8 +1772,8 @@ impl DesiredSchema {
 /// part of the snapshot.
 ///
 /// **Pure.** No I/O, no DDL. It performs the minimal author-boundary check that
-/// guards the *projection itself* - an unrecognised/out-of-scope field type
-/// - so a degraded snapshot (the creator declared X, would have got `text`) is
+/// guards the *projection itself* - an unrecognised/out-of-scope field type -
+/// so a degraded snapshot (the creator declared X, would have got `text`) is
 /// never produced. Full identifier re-validation still happens in
 /// [`DeclarativeAuthor::diff`] (defense in depth) and the guard is the second
 /// line.
@@ -1813,6 +1813,7 @@ impl DesiredSchema {
 ///   table with different shapes.
 /// - [`DeclarativeError::Invalid`] - a `ref` field's target table is not a safe
 ///   bare identifier.
+///
 /// Build the desired snapshot for an explicit registered backend. One piece of desired shape differs by
 /// engine:
 ///
@@ -2755,6 +2756,7 @@ fn fk_constraint_name(
 /// live catalog always arrives named, so the backends call
 /// [`zeroship_migrate_backend::constraint_definition::fk_constraint_snapshot`] with the
 /// name they already hold, and this resolves `dialect` down to the same function.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn ir_fk_constraint_snapshot_for_columns(
     vendors: VendorSet,
     project_schema: &str,
@@ -2914,15 +2916,15 @@ fn vector_index_snapshot(
 }
 
 /// - a geoPoint field (`t.geoPoint()`) emits a PostGIS spatial index
-/// (`USING GIST`) over the `geography(POINT, 4326)` column, mirroring the
-/// runtime plugin's `SpatialIndex::ensure_spatial_index` (a separate
-/// repository). The live snapshot carries it as
-/// `access_method = 'gist'`, so the desired snapshot must model it identically or
-/// the runtime-created GiST index phantom-drops. The index name is the
-/// `<table>_<col>_idx` that `non_unique_index_name` produces, which equals
-/// `crate::schema::query::index_name` below 61 bytes and differs above it. No
-/// opclass and no storage params (`render_create_index` spells the bare
-/// `USING gist ("col")`).
+///   (`USING GIST`) over the `geography(POINT, 4326)` column, mirroring the
+///   runtime plugin's `SpatialIndex::ensure_spatial_index` (a separate
+///   repository). The live snapshot carries it as
+///   `access_method = 'gist'`, so the desired snapshot must model it identically or
+///   the runtime-created GiST index phantom-drops. The index name is the
+///   `<table>_<col>_idx` that `non_unique_index_name` produces, which equals
+///   `crate::schema::query::index_name` below 61 bytes and differs above it. No
+///   opclass and no storage params (`render_create_index` spells the bare
+///   `USING gist ("col")`).
 fn geo_index_snapshot(
     vendors: VendorSet,
     table: &str,
@@ -3003,6 +3005,7 @@ fn validate_id_prefix(prefix: &str) -> Result<(), DeclarativeError> {
 /// the catalog normalisations the DDL spelling does not have. This is the single
 /// line that turns a `DialectId` into the vendor that answers them, which is why a
 /// backend that already knows which vendor it is calls that function directly.
+#[allow(clippy::too_many_arguments)]
 fn fk_definition_for_dialect(
     vendors: VendorSet,
     local_columns: &[String],
@@ -4804,6 +4807,7 @@ impl DeclarativeAuthor {
         Ok(TableRebuild { migration, spec })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_table_rebuild(
         &self,
         table: &str,
@@ -5006,8 +5010,8 @@ impl DeclarativeAuthor {
     ///   field-key rename, and a [`RenameHint`] - and route them through
     ///   [`Self::diff`]. The diff yields exactly ONE [`TableRebuild`] (a rename
     ///   always needs a rebuild on SQLite), wrapped into
-    ///   [`crate::render::step::RenameStep::TableRebuild`]. NO type string is ever passed to this leg
-    ///   - the affinity comes from the SDK Value, which the caller built from the
+    ///   [`crate::render::step::RenameStep::TableRebuild`]. NO type string is ever passed to this leg -
+    ///   the affinity comes from the SDK Value, which the caller built from the
     ///   dialect-neutral `ColType`.
     ///
     /// `live_snapshot` / `live_sdk_schema` are this table's full introspected
@@ -5729,8 +5733,8 @@ impl DeclarativeAuthor {
     ///
     /// A whole-table rename is a FAST catalog-metadata operation (it is NOT the
     /// online column expand-contract). It is NOT data-loss `destructive` (the
-    /// inverse rename in `down` fully reverses it), but it IS backward-incompatible
-    /// - it silently breaks every reader of the OLD table name - so it carries
+    /// inverse rename in `down` fully reverses it), but it IS backward-incompatible -
+    /// it silently breaks every reader of the OLD table name - so it carries
     /// `requires_approval` (never auto-applied), matching the `flags_for` gate
     /// that classifies a literal `RENAME TABLE` in a submitted `up`.
     fn render_rename_table(&self, table: &str, to: &str) -> Migration {

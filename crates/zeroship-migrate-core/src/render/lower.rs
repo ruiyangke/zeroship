@@ -26,6 +26,12 @@
 //! translation. Literal defaults and sentinels still stay in the shared builder;
 //! structured expression defaults (`now`/exact UUID generators) are overlaid after the
 //! descriptor bridge because descriptors cannot carry apply-time functions.
+// `IrLowerError` is the cold deploy-failure error nearly every lowering path in this
+// module returns, and it sits over the 128-byte heuristic. Boxing it would churn the
+// `#[from]` / `?` ergonomics across the whole lower pipeline for no real-world win
+// (see `load_and_lower` below), so the lint is allowed module-wide rather than
+// repeated on ninety-odd signatures.
+#![allow(clippy::result_large_err)]
 
 use std::collections::{BTreeMap, BTreeSet};
 use zeroship_migrate_backend::registry::VendorSet;
@@ -3798,6 +3804,7 @@ impl IrAuthor {
         crate::render::fold::selected_dialectal_leg(&self.dialect, legs)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn lower_op_into_steps(
         &self,
         op: &Op,
@@ -3902,6 +3909,7 @@ impl IrAuthor {
     /// - [`IrLowerError::Snapshot`] - the shared builder rejected the op's fields.
     /// - [`IrLowerError::UnsupportedOp`] - a non-DDL op (DML).
     /// - rename-lowering errors (see [`lower_steps`](Self::lower_steps)).
+    #[allow(clippy::too_many_arguments)]
     fn lower_one_op(
         &self,
         op_index: usize,
@@ -6199,6 +6207,7 @@ impl IrAuthor {
     /// Build an intermediate [`PlanStep::Dml`] from an assembled one-shot
     /// statement. [`stamp_ir_plan_steps`] replaces the provisional identity and
     /// checksum after the complete ordered plan is known.
+    #[allow(clippy::too_many_arguments)]
     fn dml_step(
         &self,
         op_index: usize,
@@ -6230,6 +6239,7 @@ impl IrAuthor {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn partition_collapse_dml_step(
         &self,
         op_index: usize,
@@ -9336,6 +9346,7 @@ pub const fn op_kind_tag(op: &Op) -> &'static str {
 /// the snapshot already carries, and repeating them here would give a plain
 /// column-list index a provenance the declarative snapshot builder has no way to
 /// produce - breaking the debug-byte convergence the two paths are held to.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn create_index_snapshot(
     vendors: VendorSet,
     table: &str,

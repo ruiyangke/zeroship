@@ -193,10 +193,10 @@ fn quote_ident(s: &str) -> String {
 ///
 /// # Errors
 /// - [`RebuildError::ForeignKeyViolation`] if `foreign_key_check` reports orphans
-/// (the txn is rolled back; the original table is intact; FK enforcement ON).
+///   (the txn is rolled back; the original table is intact; FK enforcement ON).
 /// - [`RebuildError::Step`] if a rebuild statement fails / is denied (rolled back).
 /// - [`RebuildError::Poisoned`] if the connection cannot be confirmed clean +
-/// `foreign_keys=ON` afterwards (the caller must tear it down).
+///   `foreign_keys=ON` afterwards (the caller must tear it down).
 pub(crate) async fn rebuild_one(
     actor: &MigrationActor,
     spec: &TableRebuildSpec,
@@ -762,9 +762,9 @@ struct CapturedObject {
 /// `main.sqlite_master`, BEFORE the drop.
 ///
 /// - Indexes: `type='index' AND tbl_name=<table> AND sql IS NOT NULL`. The
-/// `sql IS NOT NULL` filter SKIPS auto-indexes (the implicit index SQLite creates
-/// for a UNIQUE/PRIMARY KEY constraint has a NULL `sql` - it is re-derived from the
-/// new CREATE, never replayed as DDL).
+///   `sql IS NOT NULL` filter SKIPS auto-indexes (the implicit index SQLite creates
+///   for a UNIQUE/PRIMARY KEY constraint has a NULL `sql` - it is re-derived from the
+///   new CREATE, never replayed as DDL).
 /// - Triggers: `type='trigger' AND tbl_name=<table>` (a trigger always has `sql`).
 ///
 /// Views are NOT captured here: a view is DB-global and is NOT dropped WITH the

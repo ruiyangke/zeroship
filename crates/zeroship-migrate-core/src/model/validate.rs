@@ -862,6 +862,7 @@ fn schemas_name_same_declared_table(left: Option<&str>, right: Option<&str>) -> 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn declare_logical_column(
     declared: &mut LogicalColumnContracts,
     schema_mode: LogicalSchemaMode<'_>,
@@ -1068,6 +1069,7 @@ fn eligible_unique_index_tuple(
         .filter(|tuple| !tuple.is_empty())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn reset_create_table_candidate_keys(
     vendors: VendorSet,
     declared: &mut LogicalColumnContracts,
@@ -1092,6 +1094,7 @@ fn reset_create_table_candidate_keys(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn add_index_candidate_key(
     vendors: VendorSet,
     declared: &mut LogicalColumnContracts,
@@ -1395,6 +1398,7 @@ fn validate_backfill_cursor_fields(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_per_row_destination(
     vendors: VendorSet,
     table: &str,
@@ -2214,6 +2218,7 @@ fn reference_validation_error(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_one_column_reference(
     vendors: VendorSet,
     local: &LogicalColumnKey,
@@ -2392,6 +2397,7 @@ fn validate_one_column_reference(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_column_references_op(
     vendors: VendorSet,
     op: &crate::model::ir::Op,
@@ -5019,6 +5025,7 @@ fn validate_unique_constraint_columns(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_table_foreign_key_constraint(
     vendors: VendorSet,
     local_schema: Option<&str>,
@@ -5271,6 +5278,7 @@ fn validate_table_foreign_key_constraint(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_table_foreign_keys_op(
     vendors: VendorSet,
     op: &crate::model::ir::Op,
@@ -9173,12 +9181,12 @@ fn validate_identity_placement(
 
 /// **Apply/render-seam ColRef resolution (rule (c)).** Re-run the
 /// expression-AST walk for the ops whose live-schema column set was NOT known at
-/// IR-load time - the DML ops (`update`/`delete`/`backfill`) and `setColumnType`
-/// - now that the render/apply seam HAS the live columns. For each such op whose
+/// IR-load time - the DML ops (`update`/`delete`/`backfill`) and `setColumnType` -
+/// now that the render/apply seam HAS the live columns. For each such op whose
 /// target table appears in `live_columns`, the embedded predicates / set RHS /
 /// cast are re-validated with a **RESOLVING** [`TargetScope`], so an unresolved
-/// `ColRef` is rejected with the structured [`AuthoringError`] (rule (c)) at apply
-/// - NOT as an opaque raw DB error mid-statement.
+/// `ColRef` is rejected with the structured [`AuthoringError`] (rule (c)) at apply -
+/// NOT as an opaque raw DB error mid-statement.
 ///
 /// `live_columns` maps a target table -> its live column names (system fields
 /// included). An op whose table is absent from the map keeps the structural-only

@@ -1128,6 +1128,7 @@ fn normalize_historical_renames(
     Ok(changed)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn synthetic_rename_source_column(
     existing_table: Option<&zeroship_migrate::model::snapshot::TableSnapshot>,
     table: &str,

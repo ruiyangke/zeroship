@@ -43,8 +43,8 @@ use zeroship_migrate_backend::journal::{
 /// Quote a SQL identifier by doubling embedded quotes and wrapping in
 /// double-quotes, so a schema name is never interpolated as raw SQL. Routes
 /// through the explicit backend seam
-/// ([`zeroship_migrate_backend::dml::quote_ident_checked_for_backend`])
-/// - byte-identical to (and uniformly self-defending with)
+/// ([`zeroship_migrate_backend::dml::quote_ident_checked_for_backend`]) -
+/// byte-identical to (and uniformly self-defending with)
 /// `author`/`backfill`/`role`/`dml`: fail-closed on an empty / NUL identifier.
 fn quote_ident(ident: &str) -> Result<String, JournalError> {
     Ok(zeroship_migrate_backend::dml::quote_ident_checked_for_backend(
@@ -492,13 +492,13 @@ pub async fn ensure_journal<D: SqlSession>(
 /// monotonic `event_seq` (IDENTITY PK) scale:
 ///
 /// - latest event is `applied` => the version is **applied** (returned as a
-/// [`Phase::Completed`] entry carrying that latest applied row's checksum, so
-/// the drift check compares against the current incarnation);
+///   [`Phase::Completed`] entry carrying that latest applied row's checksum, so
+///   the drift check compares against the current incarnation);
 /// - latest event is `rolled_back` => the version is **pending again** (NOT
-/// returned as completed; it re-enters `pending = set - completed` and can be
-/// re-applied);
+///   returned as completed; it re-enters `pending = set - completed` and can be
+///   re-applied);
 /// - no completed row at all but a lone `started` inflight marker => returned as a
-/// [`Phase::Started`] entry (the non-txn crash-recovery key), exactly as before.
+///   [`Phase::Started`] entry (the non-txn crash-recovery key), exactly as before.
 ///
 /// # Errors
 /// [`JournalError::Db`] on query failure; [`JournalError::BadPhase`] if a stored
@@ -1294,8 +1294,8 @@ pub async fn mark_deploy_recovery_committed<D: SqlSession>(
 /// net-`in_progress`). A genuine commit/connection failure rolls the whole batch
 /// back, leaving every marker net-`in_progress` - the *recoverable* (fail-safe)
 /// state: the next deploy AUTO-ABORTS the half-rename (safe because a pending
-/// contract has not cut over to the shadow column, so no data is lost). This is the
-/// - a promotion failure degrades to "safely re-runnable crash
+/// contract has not cut over to the shadow column, so no data is lost). This is the -
+/// a promotion failure degrades to "safely re-runnable crash
 /// recovery", never "silent revert of a live contract a later deploy mistakes for
 /// committed".
 ///

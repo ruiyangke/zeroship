@@ -297,6 +297,7 @@ pub fn plan_status_reply(status: &AppliedPlanStatus) -> StatusReply {
 /// bracket. The catalog facts used by lowering must describe the same serialized
 /// database state that the executor mutates; taking the snapshot before the lock
 /// would leave a check-then-use window for a concurrent deploy.
+#[allow(clippy::too_many_arguments)]
 pub async fn apply_ir_with_locked_backend<B: MigrationBackend>(
     backend: &B,
     cfg: &ExecutorConfig,
@@ -687,6 +688,7 @@ fn rollback_migration_set(
 /// The live catalog is read after the lock for the same reason `apply` reads it
 /// there: lowering the authored envelopes against a snapshot taken before the lock
 /// would reconstruct the `down` SQL from state a concurrent deploy has since moved.
+#[allow(clippy::too_many_arguments)]
 pub async fn rollback_with_locked_backend<B: MigrationBackend>(
     backend: &B,
     cfg: &ExecutorConfig,
@@ -875,6 +877,7 @@ fn describe_rollback_error(error: &zeroship_migrate::RollbackError, set: &Rollba
 /// run, so waiting would put both behind an unbounded stall every time a peer
 /// deploys. A contended acquisition returns the busy reply instead, having read
 /// nothing.
+#[allow(clippy::too_many_arguments)]
 pub async fn status_ir_with_locked_backend<B: MigrationBackend>(
     backend: &B,
     cfg: &ExecutorConfig,

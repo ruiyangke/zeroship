@@ -1,4 +1,8 @@
 //! PostgreSQL SQL spelling.
+// Every render leaf here returns `IrLowerError`, the cold lower-failure error that
+// sits over the 128-byte heuristic. Boxing it would churn the `?` ergonomics across
+// the whole vendor render path for no real-world win.
+#![allow(clippy::result_large_err)]
 
 use std::collections::BTreeMap;
 

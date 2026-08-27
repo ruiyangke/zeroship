@@ -23,8 +23,8 @@
 //!
 //! - SQLite internal tables (`sqlite_*`, incl. `sqlite_sequence` / `sqlite_stat*`).
 //! - The `_mig` journal objects - they live in the ATTACHed `_mig` database, not
-//! `main`, so a `main`-scoped `sqlite_master` read never sees them anyway; we
-//! additionally scope every PRAGMA to `main`.
+//!   `main`, so a `main`-scoped `sqlite_master` read never sees them anyway; we
+//!   additionally scope every PRAGMA to `main`.
 //!
 //! # Sentinel recovery
 //!
@@ -446,11 +446,11 @@ async fn introspect_columns(
 /// (CREATE INDEX), `u` (a UNIQUE constraint's auto-index), or `pk` (the PRIMARY KEY
 /// index). We:
 /// - record every index as an [`IndexSnapshot`] (its key columns from
-/// index_info), EXCLUDING SQLite auto-indexes named `sqlite_autoindex_*` from
-/// the *index* bucket (they are constraint artifacts, surfaced as constraints);
+///   index_info), EXCLUDING SQLite auto-indexes named `sqlite_autoindex_*` from
+///   the *index* bucket (they are constraint artifacts, surfaced as constraints);
 /// - synthesise a `UNIQUE` / `PRIMARY KEY` [`ConstraintSnapshot`] for `origin`
-/// `u` / `pk` so a unique/PK constraint round-trips against a PG snapshot's
-/// constraint bucket.
+///   `u` / `pk` so a unique/PK constraint round-trips against a PG snapshot's
+///   constraint bucket.
 async fn introspect_indexes_and_unique(
     actor: &MigrationActor,
     schema_ident: &str,

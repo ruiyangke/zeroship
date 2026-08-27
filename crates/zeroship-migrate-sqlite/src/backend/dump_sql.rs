@@ -12,13 +12,13 @@
 //! # What is excluded (no journal / internal leakage)
 //!
 //! - The `_mig` journal lives in a SEPARATE attached database, so a `main`-scoped
-//! `sqlite_master` read never sees `schema_migrations` / its triggers.
+//!   `sqlite_master` read never sees `schema_migrations` / its triggers.
 //! - SQLite internal objects (`sqlite_sequence`, `sqlite_autoindex_*`,
-//! `sqlite_stat*`, ...) are filtered Rust-side (the hardened authorizer's function
-//! allowlist has no `LIKE`, so we cannot `WHERE name NOT LIKE 'sqlite_%'`; we
-//! match the prefix in Rust, exactly like the drift introspector).
+//!   `sqlite_stat*`, ...) are filtered Rust-side (the hardened authorizer's function
+//!   allowlist has no `LIKE`, so we cannot `WHERE name NOT LIKE 'sqlite_%'`; we
+//!   match the prefix in Rust, exactly like the drift introspector).
 //! - Rows with a NULL `sql` (the implicit rowid index of an `INTEGER PRIMARY KEY`,
-//! internal auto-indexes) carry no DDL and are skipped.
+//!   internal auto-indexes) carry no DDL and are skipped.
 
 use super::actor::{MigrationActor, SqliteActorError};
 use super::authorizer::Mode;

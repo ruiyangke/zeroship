@@ -5,8 +5,8 @@
 //! the database: `Op::CreateView` carries the view body, so the migration
 //! history already holds every byte the `CREATE VIEW` needs.
 //!
-//! The whole path is real. The IR goes through `load_ir_document` + `lower_plan`
-//! + `MigrationEngine::apply_plan` onto a temp-file backend, and every assertion
+//! The whole path is real. The IR goes through `load_ir_document` + `lower_plan` +
+//! `MigrationEngine::apply_plan` onto a temp-file backend, and every assertion
 //! reads `sqlite_master` rather than the plan the engine intended to run.
 
 use crate::support;

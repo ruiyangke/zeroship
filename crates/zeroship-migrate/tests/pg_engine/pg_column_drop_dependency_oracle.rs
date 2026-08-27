@@ -69,8 +69,8 @@ async fn shipped_blockers(
 /// `pg_describe_object` for the blocker TEXT and takes no part in the refuse decision.
 ///
 /// The owner term is here because leaving it out made this test FAIL, which is the
-/// useful part of writing it. Without it `excl_mixed` and `excl_sep` share a footprint
-/// - one constraint reading the column two ways, versus two constraints reading it one
+/// useful part of writing it. Without it `excl_mixed` and `excl_sep` share a footprint -
+/// one constraint reading the column two ways, versus two constraints reading it one
 /// way each - and PostgreSQL treats them differently. That reads as "no predicate over
 /// this basis can be correct", and it was wrong: the shipped query separates them
 /// perfectly by following the internal edge's `refobjid`. The footprint was modelled
