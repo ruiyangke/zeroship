@@ -67,6 +67,7 @@ mod connection_churn;
 mod copy_in_failure;
 mod copy_out_abandonment;
 mod copy_out_copy_in_resync;
+mod copy_refusal;
 mod differential_tokio;
 mod domain_parameters;
 mod error_fields;

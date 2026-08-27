@@ -191,7 +191,7 @@ pub(crate) async fn finish_batch_execute(mut responses: Responses) -> Result<(),
             // outranks this, which is what makes the chained case report the
             // copy's own error rather than this one.
             Message::CopyOutResponse(_) | Message::CopyData(_) | Message::CopyDone => {
-                refused.get_or_insert_with(Error::unexpected_message);
+                refused.get_or_insert_with(Error::copy_out_unsupported);
             }
             _ => return Err(Error::unexpected_message()),
         }
@@ -228,7 +228,7 @@ pub(crate) async fn finish_batch_execute_reporting_tag(
             // than returning at it, so a chained `COPY FROM STDIN` later in the
             // same batch is still reached and aborted.
             Message::CopyOutResponse(_) | Message::CopyData(_) | Message::CopyDone => {
-                refused.get_or_insert_with(Error::unexpected_message);
+                refused.get_or_insert_with(Error::copy_out_unsupported);
             }
             _ => return Err(Error::unexpected_message()),
         }
@@ -487,7 +487,7 @@ impl Stream for SimpleQueryStream {
                     // drained to a known frame boundary.
                     if *this.copy_out_refused {
                         *this.copy_out_refused = false;
-                        return Poll::Ready(Some(Err(Error::unexpected_message())));
+                        return Poll::Ready(Some(Err(Error::copy_out_unsupported())));
                     }
                     return Poll::Ready(None);
                 }
