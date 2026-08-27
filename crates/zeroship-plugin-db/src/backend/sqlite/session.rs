@@ -1639,14 +1639,12 @@ impl Actor {
     /// the reservation, and only then acknowledge.
     fn run_cancel(&mut self, reservation: &Arc<Reservation>) -> TerminalOutcome {
         if !reservation.claim_cancelled() {
-            // A completion already claimed the terminal. Because the queue is
-            // FIFO and the completing command ran before this one, the stored
-            // outcome is here to be read. No ROLLBACK is sent; the write
-            // stays durable.
-            let stored = reservation
-                .stored_outcome()
-                .unwrap_or(TerminalOutcome::Committed);
-            return TerminalOutcome::AlreadyCompleted(Box::new(stored));
+            // A completion already claimed the terminal, and the winner's
+            // recorded outcome is the answer. No ROLLBACK is sent; the write
+            // stays durable. When the winner recorded nothing this reports an
+            // indeterminate rather than a commit - see
+            // `reservation::outcome_for_a_claimed_terminal`.
+            return reservation::outcome_for_a_claimed_terminal(reservation);
         }
 
         if !reservation.began() {

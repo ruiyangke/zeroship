@@ -394,6 +394,30 @@ impl TerminalOutcome {
     }
 }
 
+/// What a cancellation reports when it finds the terminal already claimed.
+///
+/// The stored outcome is the answer whenever the winner left one. When it did
+/// not, **nothing here knows what happened**, and the default must say so: the
+/// terminal word alone proves only that some other path claimed the right to
+/// decide, never what it decided.
+///
+/// This defaulted to [`TerminalOutcome::Committed`] until 2026-08-27 - a
+/// confirmed commit that nothing proved, which `into_result` then reported as
+/// `Ok(())`. That is the collapse this whole module exists to refuse: an
+/// uncertainty resolved by assumption, in the direction that publishes success.
+pub(crate) fn outcome_for_a_claimed_terminal(reservation: &Reservation) -> TerminalOutcome {
+    let stored = reservation.stored_outcome().unwrap_or_else(|| {
+        TerminalOutcome::CommitIndeterminate {
+            message: format!(
+                "db: reservation {} had its terminal claimed by another path that recorded no \
+                 outcome; nothing proves whether it committed or rolled back",
+                reservation.id()
+            ),
+        }
+    });
+    TerminalOutcome::AlreadyCompleted(Box::new(stored))
+}
+
 /// Wire code for a statement the platform itself cancelled.
 ///
 /// Shared with the `SQLITE_INTERRUPT` arm of the error mapper
@@ -744,6 +768,50 @@ mod tests {
         assert!(
             !r.claim_completed(),
             "a completion must not overwrite a claimed cancellation"
+        );
+    }
+
+    /// A claimed terminal with no stored outcome is an **unknown**, not a
+    /// commit. Defaulting it to `Committed` published a success nothing
+    /// proved and `into_result` turned it into `Ok(())`.
+    #[test]
+    fn a_claimed_terminal_with_no_stored_outcome_is_indeterminate_not_committed() {
+        let r = Reservation::new(6, Lane::Tx, ReservationKind::Transaction, 0);
+        assert!(r.claim_completed());
+        assert_eq!(r.stored_outcome(), None, "precondition: nothing recorded");
+
+        let outcome = outcome_for_a_claimed_terminal(&r);
+        let TerminalOutcome::AlreadyCompleted(inner) = &outcome else {
+            panic!("a claimed terminal must report AlreadyCompleted; got {outcome:?}");
+        };
+        assert!(
+            matches!(**inner, TerminalOutcome::CommitIndeterminate { .. }),
+            "an outcome nobody recorded must not be reported as a commit; got {inner:?}"
+        );
+        assert!(
+            outcome.quarantines(),
+            "an unproved terminal must quarantine its connection"
+        );
+        outcome
+            .into_result()
+            .expect_err("an unproved terminal must never collapse into Ok(())");
+    }
+
+    /// The other half of the same rule: when the winner DID record an outcome,
+    /// that outcome is the answer and is not overwritten by the default.
+    #[test]
+    fn a_claimed_terminal_reports_the_outcome_its_winner_recorded() {
+        let r = Reservation::new(7, Lane::Tx, ReservationKind::Transaction, 0);
+        assert!(r.claim_completed());
+        r.store_outcome(TerminalOutcome::Committed);
+
+        assert_eq!(
+            outcome_for_a_claimed_terminal(&r),
+            TerminalOutcome::AlreadyCompleted(Box::new(TerminalOutcome::Committed))
+        );
+        assert!(
+            outcome_for_a_claimed_terminal(&r).into_result().is_ok(),
+            "a recorded commit is still a success"
         );
     }
 }
