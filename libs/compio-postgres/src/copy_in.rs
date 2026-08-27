@@ -236,6 +236,14 @@ where
                     match self.as_mut().poll_flush(cx) {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Ok(())) => {}
+                        Poll::Ready(Err(error)) if error.is_closed() => {
+                            // The connection can close its COPY producer only
+                            // after it has published any decoded backend
+                            // messages. Prefer that queued ErrorResponse to the
+                            // local sender-disconnected symptom.
+                            *self.as_mut().project().state = SinkState::Reading;
+                            continue;
+                        }
                         Poll::Ready(Err(error)) => {
                             self.as_mut().clear_copy_mode();
                             return Poll::Ready(Err(error));
@@ -251,9 +259,9 @@ where
                     match sender_ready {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Ok(())) => {}
-                        Poll::Ready(Err(error)) => {
-                            self.as_mut().clear_copy_mode();
-                            return Poll::Ready(Err(error));
+                        Poll::Ready(Err(_)) => {
+                            *self.as_mut().project().state = SinkState::Reading;
+                            continue;
                         }
                     }
                     let send_result = {
@@ -263,9 +271,9 @@ where
                             .start_send(CopyInMessage::Done)
                             .map_err(|_| Error::closed())
                     };
-                    if let Err(error) = send_result {
-                        self.as_mut().clear_copy_mode();
-                        return Poll::Ready(Err(error));
+                    if send_result.is_err() {
+                        *self.as_mut().project().state = SinkState::Reading;
+                        continue;
                     }
                     *self.as_mut().project().state = SinkState::Closing;
                 }
@@ -279,9 +287,8 @@ where
                         Poll::Ready(Ok(())) => {
                             *self.as_mut().project().state = SinkState::Reading;
                         }
-                        Poll::Ready(Err(error)) => {
-                            self.as_mut().clear_copy_mode();
-                            return Poll::Ready(Err(error));
+                        Poll::Ready(Err(_)) => {
+                            *self.as_mut().project().state = SinkState::Reading;
                         }
                     }
                 }
