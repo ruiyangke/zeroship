@@ -336,6 +336,15 @@ impl QueryObservation {
         }
     }
 
+    fn complete_consumer(&self) {
+        let mut state = self.0.state.lock();
+        if state.consumer == ConsumerDisposition::Pending {
+            state.consumer = ConsumerDisposition::Completed;
+            drop(state);
+            self.maybe_emit();
+        }
+    }
+
     fn maybe_emit(&self) {
         let event = {
             let mut state = self.0.state.lock();
@@ -774,6 +783,20 @@ impl Responses {
     /// Pull the next backend message from the response stream.
     pub async fn next(&mut self) -> Result<Message, Error> {
         future::poll_fn(|cx| self.poll_next(cx)).await
+    }
+
+    pub(crate) fn take_request_server_error(&mut self) -> Option<Error> {
+        let error = self
+            .request_server_error
+            .lock()
+            .take()
+            .map(Error::from_db_error);
+        if error.is_some()
+            && let Some(observation) = &self.observation
+        {
+            observation.complete_consumer();
+        }
+        error
     }
 }
 
