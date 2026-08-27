@@ -521,14 +521,28 @@ pub fn set_postgres_pool_for_tests(pool: Rc<compio_postgres::Pool>, url: &str) {
 /// goes away. Clearing the context first lets the connections close while
 /// there is still a runtime to close them.
 ///
-/// Also clears the PROCESS-WIDE live-metadata cache and this thread's operator
-/// pools. Replacing the context used to drop the metadata map with it; the map
-/// outlives the context now, so the reset has to say so rather than leaving one
-/// test's cached facts visible to the next.
+/// Also drops this thread's operator pools, which own live connections for the
+/// same reason.
+///
+/// **It does NOT clear the process-wide live-metadata cache, and that is
+/// deliberate.** It did, briefly. `drain_pg()` is the teardown of essentially
+/// every Postgres integration test, and a test binary is multi-threaded unless
+/// the invocation says otherwise - so a process-global wipe here wipes a
+/// concurrently running test's entries mid-assertion, trading a fixture
+/// -isolation problem for a load-dependent flake. `v8_classes::db`'s
+/// `co_resident_deploy_bindings_keep_tokens_and_schema_entries_isolated` refuses
+/// the same call for the same reason and states it in full.
+///
+/// The remedy is the one that test uses: a fixture that needs its entries kept
+/// apart takes its own identity rather than emptying everyone's map. Every
+/// component of a [`live_metadata::LiveMetadataKey`] can supply that - a
+/// fixture-specific URL (and therefore [`service::DbResourceKey`]), app id, or
+/// deploy token - and `crud::introspect_schema::tests::ctx_for` is the worked
+/// example. The cache also holds no connection, so nothing about the
+/// connection-release contract above needs it emptied.
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn reset_context_for_tests() {
-    live_metadata::process_wide().clear();
     service::reset_operator_pools_for_tests();
     ctx_mut(|c| *c = context::ThreadDbContext::new());
 }
