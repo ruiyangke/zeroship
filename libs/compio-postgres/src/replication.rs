@@ -1125,10 +1125,11 @@ where
                             // body[1..9]   = wal_end (i64)
                             // body[9..17]  = timestamp (i64)
                             // body[17]     = reply_requested (u8)
-                            if body.len() < 18 {
-                                return Err(Error::io(std::io::Error::other(
-                                    "PrimaryKeepalive frame too small",
-                                )));
+                            if body.len() != 18 {
+                                return Err(Error::io(std::io::Error::other(format!(
+                                    "PrimaryKeepalive must be exactly 18 bytes, but the server sent {}",
+                                    body.len()
+                                ))));
                             }
                             let wal_end = u64::from_be_bytes([
                                 body[1], body[2], body[3], body[4], body[5], body[6], body[7],
@@ -4164,6 +4165,40 @@ mod tests {
             .await
             .expect_err("a stream with a malformed CopyDone became reusable");
         assert!(retry.is_cancelled(), "the malformed stream was not retired");
+    }
+
+    /// PrimaryKeepalive has one fixed 18-byte CopyData body. Accepting a
+    /// suffix silently claims support for fields no replication protocol
+    /// version defines, so the refusal must name the known message.
+    #[compio::test]
+    async fn primary_keepalive_with_a_suffix_is_rejected_by_name() {
+        let mut body = vec![PRIMARY_KEEPALIVE_TAG];
+        body.extend_from_slice(&0x16B_4000u64.to_be_bytes());
+        body.extend_from_slice(&700_000_000_000i64.to_be_bytes());
+        body.push(0);
+        body.push(0xAA);
+
+        let mut wire = vec![COPY_DATA_TAG];
+        wire.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_be_bytes());
+        wire.extend_from_slice(&body);
+
+        let mut stream = stream_over(wire);
+        let error = stream
+            .next()
+            .await
+            .expect_err("PrimaryKeepalive with a suffix was accepted");
+        let chain = std::iter::successors(std::error::Error::source(&error), |source| {
+            std::error::Error::source(*source)
+        })
+        .fold(error.to_string(), |chain, source| {
+            format!("{chain}: {source}")
+        });
+        assert!(
+            chain.contains("PrimaryKeepalive")
+                && chain.contains("exactly 18 bytes")
+                && chain.contains("19"),
+            "the malformed keepalive was not refused by name and size: {chain}"
+        );
     }
 
     /// An unhandled tag must retire the stream too, because its body was
