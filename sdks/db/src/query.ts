@@ -34,7 +34,17 @@ type NativeFn = (
  */
 type CursorState = {
   orderBy: Record<string, 1 | -1>;
-  lastValue: unknown;
+  /**
+   * The last row's value for EVERY ordering key, not just the first.
+   *
+   * An earlier shape carried a single `lastValue` taken from
+   * `Object.keys(orderBy)[0]`, which made the seek predicate assume the
+   * emitted order was `(firstKey, id)`. It is not: the order is the caller's
+   * sort verbatim with no primary-key tiebreak appended, so on any multi-key
+   * sort the seek and the order disagreed and rows between them were skipped
+   * permanently. Seeking lexicographically requires every key's value.
+   */
+  lastValues: Record<string, unknown>;
   lastId: string;
 };
 
@@ -319,8 +329,17 @@ export class Query<
     // Build the page-window query: apply orderBy + limit(numItems+1) so
     // we can detect isDone by whether the +1 row materialised. The cursor
     // predicate is OR-merged into the existing filter at the column layer.
+    // The emitted order must be the SAME tuple the seek compares, including
+    // the id tiebreak. Without it the sort is only a partial order: ties in
+    // the caller's keys are broken by whatever the store happens to return,
+    // which the seek then assumes was id order. Appending id here is what
+    // makes `_buildSeekFilter`'s final disjunct meaningful rather than
+    // aspirational.
+    const seekOrder: Record<string, 1 | -1> = { ...orderBy };
+    if (!("id" in seekOrder)) seekOrder.id = 1;
+
     const opts2: ZeroshipDbFindOpts = {
-      orderBy: this._mapOrderByToColumns(orderBy),
+      orderBy: this._mapOrderByToColumns(seekOrder),
       limit: numItems + 1,
     };
     if (this._select !== undefined) {
@@ -364,7 +383,6 @@ export class Query<
       let continueCursor = "";
       if (!isDone && kept.length > 0) {
         const last = page[page.length - 1] as PlainObject;
-        const orderKey = Object.keys(orderBy)[0];
         const lastId = last.id;
         if (typeof lastId !== "string" || lastId.length === 0) {
           return err(
@@ -374,8 +392,9 @@ export class Query<
             ),
           );
         }
-        const lastValue = last[orderKey];
-        continueCursor = encodeCursor({ orderBy, lastValue, lastId });
+        const lastValues: Record<string, unknown> = {};
+        for (const k of Object.keys(orderBy)) lastValues[k] = last[k];
+        continueCursor = encodeCursor({ orderBy, lastValues, lastId });
       }
 
       if (this._with !== undefined && this._loadRelations !== null && page.length > 0) {
@@ -406,31 +425,43 @@ export class Query<
     state: CursorState,
   ): ZeroshipDbFilter {
     const keys = Object.keys(orderBy);
-    const first = keys[0];
-    const dir = orderBy[first];
     const lastIdCol = this._toColumn("id");
 
-    if (first === "id") {
-      return {
-        [lastIdCol]: (dir === 1 ? { $gt: state.lastId } : { $lt: state.lastId }) as ZeroshipDbFilterValue,
-      } as ZeroshipDbFilter;
+    // Lexicographic seek over (k1, .., kn, id) - the SAME tuple the emitted
+    // ORDER BY uses, which is what makes it sound. For each key i, one
+    // disjunct: "keys 1..i-1 equal, key i strictly past its last value",
+    // then a final disjunct with every key equal and id past its last value.
+    //
+    // The previous form compared only keys[0] and id, so it was sound only
+    // when the order really was (keys[0], id). With any second sort key the
+    // order was (k1, k2, ..) while the seek asked for (k1, id), and rows
+    // sorting after the boundary but carrying a smaller id were skipped -
+    // permanently, since no later page ever asks for them again.
+    const terms: ZeroshipDbFilter[] = [];
+    const eqPrefix: ZeroshipDbFilter[] = [];
+
+    for (const k of keys) {
+      const col = this._toColumn(k);
+      const v = state.lastValues[k] as ZeroshipScalar;
+      const cmp = (orderBy[k] === 1 ? { $gt: v } : { $lt: v }) as ZeroshipDbFilterValue;
+      const strict = { [col]: cmp } as ZeroshipDbFilter;
+      terms.push(
+        eqPrefix.length === 0
+          ? strict
+          : ({ $and: [...eqPrefix, strict] } as ZeroshipDbFilter),
+      );
+      eqPrefix.push({ [col]: v as ZeroshipDbFilterValue } as ZeroshipDbFilter);
     }
 
-    const firstCol = this._toColumn(first);
-    const lastValue = state.lastValue as ZeroshipScalar;
-    const strictCmp = (dir === 1 ? { $gt: lastValue } : { $lt: lastValue }) as ZeroshipDbFilterValue;
-    const idCmp = (dir === 1 ? { $gt: state.lastId } : { $lt: state.lastId }) as ZeroshipDbFilterValue;
-    return {
-      $or: [
-        { [firstCol]: strictCmp } as ZeroshipDbFilter,
-        {
-          $and: [
-            { [firstCol]: lastValue as ZeroshipDbFilterValue } as ZeroshipDbFilter,
-            { [lastIdCol]: idCmp } as ZeroshipDbFilter,
-          ],
-        } as ZeroshipDbFilter,
-      ],
-    } as ZeroshipDbFilter;
+    // The id tiebreak, unless `id` is already one of the ordering keys - in
+    // which case the loop above has already compared it and appending another
+    // term would add an unsatisfiable disjunct (id = X AND id > X).
+    if (!keys.includes("id")) {
+      const idCmp = { $gt: state.lastId } as ZeroshipDbFilterValue;
+      terms.push({ $and: [...eqPrefix, { [lastIdCol]: idCmp } as ZeroshipDbFilter] } as ZeroshipDbFilter);
+    }
+
+    return (terms.length === 1 ? terms[0] : { $or: terms }) as ZeroshipDbFilter;
   }
 
   /**
