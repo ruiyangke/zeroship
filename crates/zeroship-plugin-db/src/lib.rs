@@ -669,13 +669,18 @@ pub fn clear_mask_policy_cache_for_tests(app_id: &str) {
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub async fn install_tx_marker_for_tests(app_id: &str, url: &str) {
-    let (client, connection) = compio_postgres::connect(url, compio_postgres::NoTls)
+    // A pooled checkout, like the production path: `TxConnection::Postgres`
+    // now carries an `OwnedPooledClient`, and a helper that opened a raw
+    // connection would be testing a shape production no longer has.
+    let pool = Rc::new(
+        Pool::connect(url, 2)
+            .await
+            .expect("install_tx_marker_for_tests: pool connect failed"),
+    );
+    let client = pool
+        .get_owned()
         .await
-        .expect("install_tx_marker_for_tests: connect failed");
-    compio::runtime::spawn(async move {
-        let _ = connection.run().await;
-    })
-    .detach();
+        .expect("install_tx_marker_for_tests: pooled checkout failed");
     // Issue a real BEGIN so the dummy connection behaves like a real
     // tx — not strictly required (the queueing path keys off
     // `ThreadDbContext::has_tx_for`), but matches the production state
@@ -767,7 +772,7 @@ pub async fn drop_pooled_lock_guard_without_release_for_tests(
 
     let backend = PostgresBackend::new(Rc::clone(&pool), url.to_string());
     let client = pool
-        .get()
+        .get_owned()
         .await
         .map_err(|e| error::DbError::from_pg(&e).into_string())?;
     let scope = LockScope::GlobalApp {

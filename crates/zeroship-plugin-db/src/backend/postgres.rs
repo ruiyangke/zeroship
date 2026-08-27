@@ -156,21 +156,60 @@ impl PostgresBackend {
 // ---------------------------------------------------------------------------
 
 impl SqlExecutor for PostgresBackend {
-    type Client = compio_postgres::Client;
+    type Client = compio_postgres::OwnedPooledClient;
 
+    /// Check a connection out of the pool for the caller's own use.
+    ///
+    /// **This is a capacity-model change, not a refactor.** Until 2026-08-27
+    /// this opened a brand new TCP connection per transaction with
+    /// `compio_postgres::connect` and a detached task per connection - it never
+    /// touched the pool. The concurrent-transaction ceiling was therefore
+    /// *unbounded*, and a worker multiplexing ~200 apps that each open a
+    /// transaction opened ~200 backends. That is a way to exhaust a cluster's
+    /// `max_connections` from one worker, which takes every tenant down rather
+    /// than slowing one. Operator decision, 2026-08-27: connections always come
+    /// from a pool.
+    ///
+    /// The inversion is real and is stated rather than discovered: a
+    /// transaction that used to get a connection now **queues**, and the pool
+    /// size is the ceiling for the whole worker.
+    ///
+    /// ## Policy chosen here, and OWED to a later decision
+    ///
+    /// Three questions are deliberately not settled by the design, and this
+    /// code takes the conservative option on each rather than inventing an
+    /// answer. Each is owed a decision before this ships to a real tenant:
+    ///
+    /// 1. **Ceiling** - the shared data pool's `max_size` (`lib.rs`:
+    ///    `Pool::connect(&url, 8)`). Conservative because it adds no new
+    ///    connections to what the process already opens. A dedicated
+    ///    transaction pool would raise the total and needs a sizing decision.
+    /// 2. **Exhaustion** - queue on the pool's existing `acquire_timeout`
+    ///    rather than refuse immediately. Conservative because a bounded wait
+    ///    degrades to the previous behaviour under light load and refuses only
+    ///    when the wait genuinely expires. It is NOT yet tied to SC-1's
+    ///    deadline; when that lands, the acquire wait must be inside it.
+    /// 3. **Starvation** - one app CAN now starve others: the pool is shared,
+    ///    the queue is FIFO across apps, and nothing here is per-app. The
+    ///    unbounded model made this impossible. No per-app fairness is
+    ///    implemented, because inventing one would settle a question the
+    ///    design explicitly left open.
     async fn acquire_dedicated_client(&self) -> Result<Self::Client, DbError> {
-        let (client, connection) = compio_postgres::connect(&self.url, compio_postgres::NoTls)
-            .await
-            .map_err(|e| DbError::Transient {
-                message: format!("db: backend connect failed: {e}"),
-            })?;
-        compio::runtime::spawn(async move {
-            if let Err(e) = connection.run().await {
-                tracing::error!(error = ?e, "db: backend connection task error");
+        self.pool.get_owned().await.map_err(|e| {
+            // Walk the source chain. The pool renders an exhausted acquire as
+            // the generic "error connecting to server" wrapper and puts
+            // "connection timeout after 400ms (pool: 0/1 idle, 1/1 total)" in
+            // its source - so the bare Display tells an operator the server is
+            // unreachable when what actually happened is that this worker hit
+            // its own ceiling. Those need different responses.
+            let mut message = format!("db: pooled checkout for a dedicated client failed: {e}");
+            let mut cur: &dyn std::error::Error = &e;
+            while let Some(source) = std::error::Error::source(cur) {
+                message.push_str(&format!(" - caused by: {source}"));
+                cur = source;
             }
+            DbError::Transient { message }
         })
-        .detach();
-        Ok(client)
     }
 
     async fn pool_exec(&self, sql: &str, params: &[&str]) -> Result<u64, DbError> {
@@ -661,13 +700,13 @@ impl SpatialIndex for PostgresBackend {
 
 #[cfg(any(test, feature = "test-helpers"))]
 impl PgLockManager for PostgresBackend {
-    async fn acquire_pooled_client_for_lock<'p>(
-        &'p self,
-    ) -> Result<compio_postgres::PooledClient<'p>, DbError> {
+    async fn acquire_pooled_client_for_lock(
+        &self,
+    ) -> Result<compio_postgres::OwnedPooledClient, DbError> {
         // Mirror the pre-PR-3 inline call site at
-        // `register_model/bootstrap.rs:103`: pool.get() with the same
+        // `register_model/bootstrap.rs:103`: a pool checkout with the same
         // operator-facing error message so log lines stay grep-able.
-        self.pool.get().await.map_err(|e| DbError::Transient {
+        self.pool.get_owned().await.map_err(|e| DbError::Transient {
             message: format!("db: failed to acquire orchestrator client: {e}"),
         })
     }
@@ -1701,7 +1740,7 @@ mod tests {
     //!    up so any future bound change to `Backend` (adding a method,
     //!    tightening a lifetime, swapping an associated type) fails
     //!    compilation here, not at a distant call site.
-    //! 2. Associated-type identities — pin `Client = compio_postgres::Client`
+    //! 2. Associated-type identities — pin `Client = compio_postgres::OwnedPooledClient`
     //!    and `LiveSchema = crate::diff::LiveSchema` so a refactor that
     //!    accidentally swaps either is caught here.
     //! 3. The `Backend: 'static` bound on the trait — re-asserted at
@@ -1732,10 +1771,10 @@ mod tests {
     /// the omnibus trait or detaches the impl block fails here at
     /// build time.
     fn assert_postgres_backend_impls_sub_traits() {
-        fn impls_sql_executor<T: SqlExecutor<Client = compio_postgres::Client>>() {}
-        fn impls_lock_manager<T: LockManager<Client = compio_postgres::Client>>() {}
+        fn impls_sql_executor<T: SqlExecutor<Client = compio_postgres::OwnedPooledClient>>() {}
+        fn impls_lock_manager<T: LockManager<Client = compio_postgres::OwnedPooledClient>>() {}
         fn impls_schema_introspect<T: SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>>() {}
-        fn impls_index_builder<T: IndexBuilder<Client = compio_postgres::Client>>() {}
+        fn impls_index_builder<T: IndexBuilder<Client = compio_postgres::OwnedPooledClient>>() {}
         fn impls_pg_sql_executor<T: PgSqlExecutor>() {}
         fn impls_pg_lock_manager<T: PgLockManager>() {}
         fn impls_register_backend<T: RegisterBackend>() {}
@@ -1815,7 +1854,7 @@ mod tests {
     /// `SchemaIntrospect<LiveSchema = LiveSchema>` re-anchors it so
     /// `Backend<LiveSchema = …>` still resolves here.
     fn assert_postgres_backend_assoc_types() {
-        fn same_client<T: Backend<Client = compio_postgres::Client>>() {}
+        fn same_client<T: Backend<Client = compio_postgres::OwnedPooledClient>>() {}
         fn same_live_schema<T: Backend<LiveSchema = crate::diff::LiveSchema>>() {}
         same_client::<PostgresBackend>();
         same_live_schema::<PostgresBackend>();

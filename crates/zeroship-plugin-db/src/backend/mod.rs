@@ -867,7 +867,7 @@ pub trait DialectBuilder: 'static {
 /// `SqliteBackend` would not implement this trait — it would have its
 /// own audit-helper signatures (a `SqliteExecutor` accessor returning
 /// `&sqlite::Connection`, etc.).
-pub trait PgSqlExecutor: SqlExecutor<Client = compio_postgres::Client> {
+pub trait PgSqlExecutor: SqlExecutor<Client = compio_postgres::OwnedPooledClient> {
     /// Borrow the underlying `compio_postgres::Pool`. Free-function
     /// audit helpers in [`crate::audit`] take `&Pool` directly; this
     /// accessor lets generic consumers (e.g.
@@ -877,44 +877,45 @@ pub trait PgSqlExecutor: SqlExecutor<Client = compio_postgres::Client> {
 }
 
 /// Postgres-specific extension trait carrying the
-/// `acquire_pooled_client_for_lock` primitive — the one piece of the
-/// register-model bootstrap that has to return a `PooledClient<'p>`
-/// whose `'p` borrow lifetime threads through
-/// [`crate::backend::lock_guard::LockGuard`].
+/// `acquire_pooled_client_for_lock` primitive — the register-model
+/// bootstrap's pool checkout, whose lease
+/// [`crate::backend::lock_guard::LockGuard`] holds for the life of the
+/// advisory lock.
 ///
-/// **Open Q5 resolution**: the alternative was a GAT on
-/// [`LockManager`] of the form
-/// `type PooledLockClient<'p>: 'p where Self: 'p`. async-fn-in-trait
-/// and GAT is workable but fights the trait solver in subtle ways
-/// (HRTB-style bounds at consumer sites). Since the PG impl is the
-/// only one that needs a borrow-lifetimed lock client today — and
-/// future backends (sqlite, planetscale) would have their own
-/// session-management primitive on a different extension trait —
-/// we take the PG extension-trait path and defer cross-backend
-/// lifetime threading. See
-/// `docs/archive/p0-implementation-plan.md` §3 Q5 and
-/// `docs/archive/db-system-design.md` §7.
+/// **Open Q5 is now moot, and this paragraph is kept as history rather than as
+/// a live trade-off.** It read: the primitive had to return a
+/// `PooledClient<'p>` whose `'p` borrow lifetime threaded through `LockGuard`,
+/// and the alternative was a GAT on [`LockManager`] of the form
+/// `type PooledLockClient<'p>: 'p where Self: 'p` — workable with
+/// async-fn-in-trait but fighting the trait solver at consumer sites, so the
+/// PG extension trait was taken and cross-backend lifetime threading deferred.
+/// `OwnedPooledClient` removes the lifetime outright: the lease owns an `Rc` of
+/// the pool and still returns on drop, so neither branch of that choice is
+/// needed. See `docs/archive/p0-implementation-plan.md` §3 Q5 and
+/// `docs/archive/db-system-design.md` §7 for the original framing.
 ///
-/// The `: LockManager<Client = compio_postgres::Client>` super-bound
-/// is load-bearing: the returned `PooledClient` is the
-/// [`SqlExecutor::Client`] that [`LockManager::acquire_advisory_lock`]
-/// takes, so the orchestrator can hand the returned client straight
-/// into `LockGuard::acquire` without an adapter.
+/// The `: LockManager<Client = compio_postgres::OwnedPooledClient>` super-bound
+/// is load-bearing: the returned lease is the [`SqlExecutor::Client`] that
+/// [`LockManager::acquire_advisory_lock`] takes, so the orchestrator can hand
+/// it straight into `LockGuard::acquire` without an adapter.
 #[cfg(any(test, feature = "test-helpers"))]
-pub trait PgLockManager: LockManager<Client = compio_postgres::Client> {
-    /// Acquire a pool-leased client for advisory-lock duty. The
-    /// returned [`compio_postgres::PooledClient`]'s `'p` lifetime is
-    /// the pool borrow lifetime — it threads through
-    /// [`crate::backend::lock_guard::LockGuard`] so
-    /// the lock auto-returns to the pool on Drop.
+pub trait PgLockManager: LockManager<Client = compio_postgres::OwnedPooledClient> {
+    /// Acquire a pool-leased client for advisory-lock duty.
     ///
-    /// Postgres impl wraps `self.pool().get().await` and maps the
+    /// Returns an [`compio_postgres::OwnedPooledClient`]: the lease owns an
+    /// `Rc` of the pool and still returns on drop, so
+    /// [`crate::backend::lock_guard::LockGuard`] no longer has to thread a
+    /// `'p` borrow lifetime through itself. The Q5 note above is therefore
+    /// historical - the GAT alternative it weighs was solving a lifetime
+    /// problem the owned lease removes outright.
+    ///
+    /// Postgres impl wraps `self.pool().get_owned().await` and maps the
     /// pool error to [`DbError::Transient`] with the same operator-
     /// facing message the bootstrap call site used to emit inline.
     #[allow(async_fn_in_trait)]
-    async fn acquire_pooled_client_for_lock<'p>(
-        &'p self,
-    ) -> Result<compio_postgres::PooledClient<'p>, DbError>;
+    async fn acquire_pooled_client_for_lock(
+        &self,
+    ) -> Result<compio_postgres::OwnedPooledClient, DbError>;
 }
 
 /// Change-stream capability — the "produce CDC events for an app" slice
@@ -1519,7 +1520,7 @@ impl Drop for SchemaPendingGuard {
 #[cfg(any(test, feature = "test-helpers"))]
 pub trait RegisterBackend:
     PgSqlExecutor
-    + LockManager<Client = compio_postgres::Client>
+    + LockManager<Client = compio_postgres::OwnedPooledClient>
     + SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>
     + IndexBuilder
     + PgLockManager
@@ -1532,7 +1533,7 @@ pub trait RegisterBackend:
 #[cfg(any(test, feature = "test-helpers"))]
 impl<T> RegisterBackend for T where
     T: PgSqlExecutor
-        + LockManager<Client = compio_postgres::Client>
+        + LockManager<Client = compio_postgres::OwnedPooledClient>
         + SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>
         + IndexBuilder
         + PgLockManager
@@ -1549,13 +1550,13 @@ impl<T> RegisterBackend for T where
 /// lives on a focused sub-trait. The super-trait bound
 /// is the carved capability set:
 ///
-/// - [`SqlExecutor`] — the `Client = compio_postgres::Client`
+/// - [`SqlExecutor`] — the `Client = compio_postgres::OwnedPooledClient`
 ///   pin was dropped from this super-bound so a `SqliteBackend` whose
 ///   `SqlExecutor::Client = SqliteSessionHandle` can also satisfy
 ///   `Backend`. PG-only consumers that *need* the concrete client
 ///   type continue to bound on
 ///   [`PgSqlExecutor`] / [`PgLockManager`] (which still pin
-///   `Client = compio_postgres::Client`).
+///   `Client = compio_postgres::OwnedPooledClient`).
 /// - [`LockManager`]
 /// - [`SchemaIntrospect`] with `LiveSchema = crate::diff::LiveSchema`
 /// - [`IndexBuilder`]
@@ -1645,7 +1646,7 @@ pub trait Backend:
 /// - `Backend` is `async fn`-in-trait. Object-safety for those traits
 ///   would require `Box<dyn Future>` per call — a per-CRUD-op
 ///   allocation on a hot path that runs ~200K times/sec under load.
-/// - The associated types (`Client = compio_postgres::Client`,
+/// - The associated types (`Client = compio_postgres::OwnedPooledClient`,
 ///   `LiveSchema = crate::diff::LiveSchema`) cannot be erased behind a
 ///   `dyn` without losing the concrete client type that
 ///   [`LockManager::acquire_advisory_lock`] and the audit-row helpers
@@ -1907,18 +1908,18 @@ mod tests {
     /// the omnibus `Backend` trait — or detaches the impl block from
     /// the `PostgresBackend` type — this stops compiling.
     fn assert_postgres_backend_impls_sql_executor() {
-        fn assert_impl<T: SqlExecutor<Client = compio_postgres::Client>>() {}
+        fn assert_impl<T: SqlExecutor<Client = compio_postgres::OwnedPooledClient>>() {}
         assert_impl::<PostgresBackend>();
     }
 
     /// Compile-time: [`PostgresBackend`] satisfies the carved
     /// [`LockManager`] capability super-trait. The
     /// `: SqlExecutor` super-bound on `LockManager` plus the
-    /// `Client = compio_postgres::Client` constraint here pin the
+    /// `Client = compio_postgres::OwnedPooledClient` constraint here pin the
     /// shape end-to-end — a regression in either direction fails
     /// compilation in this module.
     fn assert_postgres_backend_impls_lock_manager() {
-        fn assert_impl<T: LockManager<Client = compio_postgres::Client>>() {}
+        fn assert_impl<T: LockManager<Client = compio_postgres::OwnedPooledClient>>() {}
         assert_impl::<PostgresBackend>();
     }
 
@@ -1935,10 +1936,10 @@ mod tests {
     /// Compile-time: [`PostgresBackend`] satisfies the carved
     /// [`IndexBuilder`] capability trait. The
     /// `: SqlExecutor` super-bound on `IndexBuilder` plus the
-    /// PG-side `Client = compio_postgres::Client` constraint pin the
+    /// PG-side `Client = compio_postgres::OwnedPooledClient` constraint pin the
     /// shape so a regression on either side fails compilation here.
     fn assert_postgres_backend_impls_index_builder() {
-        fn assert_impl<T: IndexBuilder<Client = compio_postgres::Client>>() {}
+        fn assert_impl<T: IndexBuilder<Client = compio_postgres::OwnedPooledClient>>() {}
         assert_impl::<PostgresBackend>();
     }
 
@@ -2082,7 +2083,7 @@ mod tests {
     /// `SchemaIntrospect<LiveSchema = LiveSchema>` super-bound so the
     /// `Backend<LiveSchema = …>` shorthand below still resolves.
     fn assert_associated_types_pinned() {
-        fn pinned_client<T: Backend<Client = compio_postgres::Client>>() {}
+        fn pinned_client<T: Backend<Client = compio_postgres::OwnedPooledClient>>() {}
         fn pinned_live_schema<T: Backend<LiveSchema = crate::diff::LiveSchema>>() {}
         pinned_client::<PostgresBackend>();
         pinned_live_schema::<PostgresBackend>();
@@ -2215,7 +2216,7 @@ mod tests {
     #[allow(dead_code)]
     async fn assert_lock_scope_dispatches_through_try_acquire(
         backend: &PostgresBackend,
-        client: &compio_postgres::Client,
+        client: &compio_postgres::OwnedPooledClient,
     ) -> Result<bool, DbError> {
         // GlobalApp arm — exercises acquire / try_acquire / release.
         let global = LockScope::GlobalApp {
