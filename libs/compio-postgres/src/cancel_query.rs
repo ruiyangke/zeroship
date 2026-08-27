@@ -158,7 +158,7 @@ where
         )
         .await?;
 
-        cancel_query_raw::send_cancel_request_with_encryption(
+        cancel_query_raw::send_cancel_request_with_exact_encryption(
             socket,
             encryption,
             ssl_mode,
@@ -648,6 +648,67 @@ mod tests {
             "a require session's cancel opened in plaintext"
         );
         assert_eq!(packet, Some(cancel_packet()));
+    }
+
+    /// A recorded TLS transport is a decision, not a fresh preference. If the
+    /// cancel peer refuses TLS, the bearer PID and secret must not be sent on
+    /// that socket in plaintext even when the session's original mode was
+    /// `prefer`.
+    #[compio::test]
+    async fn tls_cancel_refusal_does_not_downgrade_the_bearer_key() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind scripted cancel server");
+        let addr = listener.local_addr().expect("scripted server address");
+        let server = compio::runtime::spawn(async move {
+            let (mut cancel, _) = listener.accept().await.expect("accept cancel connection");
+            assert_eq!(read_exact(&mut cancel, 8).await, ssl_request());
+            write_all(&mut cancel, vec![b'N']).await;
+
+            let compio::BufResult(result, bytes) = cancel.read(vec![0; 16]).await;
+            match result {
+                Ok(0) => None,
+                Ok(read) => Some(bytes[..read].to_vec()),
+                Err(error) => panic!("read after SSL refusal failed: {error}"),
+            }
+        });
+
+        let config = SocketConfig {
+            addr: Addr::Tcp(addr.ip()),
+            hostname: Some("localhost".to_string()),
+            port: addr.port(),
+            connect_timeout: None,
+            tcp_user_timeout: None,
+            keepalive: None,
+            require_peer: None,
+            encryption: crate::connect_tls::Encryption::Tls,
+            server_verification: crate::tls::ServerVerification::None,
+        };
+        let result = compio::time::timeout(
+            Duration::from_secs(2),
+            cancel_query(
+                Some(config),
+                SslMode::Prefer,
+                SslNegotiation::Postgres,
+                PassthroughTls {
+                    connected: Arc::new(AtomicBool::new(false)),
+                },
+                PROCESS_ID,
+                SECRET_KEY.into(),
+            ),
+        )
+        .await
+        .expect("prefer cancel timed out");
+
+        let observed = compio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("scripted cancel server timed out")
+            .expect("scripted cancel server panicked");
+        assert_eq!(
+            observed, None,
+            "the cancel PID and secret were sent in plaintext after TLS was refused"
+        );
+        result.expect_err("a recorded TLS cancel must fail when TLS is refused");
     }
 
     /// A connector that always fails its handshake, which is what `prefer`

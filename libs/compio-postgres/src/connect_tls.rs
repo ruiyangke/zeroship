@@ -63,12 +63,65 @@ impl Encryption {
 /// startup or authentication failure must NOT be retried in the clear, or a
 /// mistyped password would be re-sent unencrypted on the second attempt.
 pub(crate) async fn negotiate_tls<S, T>(
+    stream: S,
+    encryption: Encryption,
+    mode: SslMode,
+    negotiation: SslNegotiation,
+    tls: T,
+    has_hostname: bool,
+) -> Result<MaybeTlsStream<S, T::Stream>, Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    T: TlsConnect<S>,
+{
+    negotiate_tls_inner(
+        stream,
+        encryption,
+        mode,
+        negotiation,
+        tls,
+        has_hostname,
+        mode == SslMode::Prefer,
+    )
+    .await
+}
+
+/// Negotiate a transport that was already selected by an earlier connection.
+/// Unlike [`negotiate_tls`], an unavailable TLS transport is never converted
+/// to plaintext: callers use this to replay an actually encrypted session.
+pub(crate) async fn negotiate_tls_exact<S, T>(
+    stream: S,
+    encryption: Encryption,
+    mode: SslMode,
+    negotiation: SslNegotiation,
+    tls: T,
+    has_hostname: bool,
+) -> Result<MaybeTlsStream<S, T::Stream>, Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    T: TlsConnect<S>,
+{
+    negotiate_tls_inner(
+        stream,
+        encryption,
+        mode,
+        negotiation,
+        tls,
+        has_hostname,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn negotiate_tls_inner<S, T>(
     mut stream: S,
     encryption: Encryption,
     mode: SslMode,
     negotiation: SslNegotiation,
     tls: T,
     has_hostname: bool,
+    permit_plaintext: bool,
 ) -> Result<MaybeTlsStream<S, T::Stream>, Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -83,10 +136,20 @@ where
     // Answering impossible cases here rather than after `SSLRequest` also
     // keeps the wire quiet.
     if !tls.can_connect(ForcePrivateApi) {
-        return unavailable(stream, mode, "no TLS connector is configured");
+        return unavailable(
+            stream,
+            mode,
+            permit_plaintext,
+            "no TLS connector is configured",
+        );
     }
     if !has_hostname && mode == SslMode::VerifyFull {
-        return unavailable(stream, mode, "no hostname provided for sslmode=verify-full");
+        return unavailable(
+            stream,
+            mode,
+            permit_plaintext,
+            "no hostname provided for sslmode=verify-full",
+        );
     }
 
     if negotiation == SslNegotiation::Postgres {
@@ -117,7 +180,12 @@ where
             // reaches this point only after its plaintext attempt failed, so
             // another plaintext startup would repeat an exhausted method.
             b'N' => {
-                return unavailable(stream, mode, "server does not support SSL");
+                return unavailable(
+                    stream,
+                    mode,
+                    permit_plaintext,
+                    "server does not support SSL",
+                );
             }
             // A server error during the SSL exchange is fatal in every mode,
             // including the ones that permit plaintext. libpq deliberately does
@@ -585,8 +653,13 @@ mod tests {
 /// `prefer` is the only TLS-first mode with a plaintext method remaining.
 /// `allow` also permits plaintext, but it offers that method first and reaches
 /// this function's TLS failure paths only on its second and final leg.
-fn unavailable<S, T>(stream: S, mode: SslMode, why: &str) -> Result<MaybeTlsStream<S, T>, Error> {
-    if mode == SslMode::Prefer {
+fn unavailable<S, T>(
+    stream: S,
+    mode: SslMode,
+    permit_plaintext: bool,
+    why: &str,
+) -> Result<MaybeTlsStream<S, T>, Error> {
+    if permit_plaintext {
         Ok(MaybeTlsStream::Raw(stream))
     } else {
         Err(Error::tls(
