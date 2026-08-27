@@ -71,7 +71,7 @@ use rustls::{
 };
 use sha1::Digest as _;
 use x509_parser::asn1_rs::{Any, Class, Tag, ToDer};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::Error;
 use crate::config::{Config, SslCertMode, SslMode, SslProtocolVersion, SslRootCert};
@@ -477,13 +477,56 @@ impl KeyProvider for ZeroizingAwsLcKeyProvider {
 
 static ZEROIZING_AWS_LC_KEY_PROVIDER: ZeroizingAwsLcKeyProvider = ZeroizingAwsLcKeyProvider;
 
+fn read_private_key_file(key_path: &str) -> Result<Zeroizing<Vec<u8>>, Error> {
+    use std::io::Read as _;
+
+    let mut file = std::fs::File::open(key_path).map_err(|error| {
+        Error::tls(format!("sslkey={key_path}: cannot read PEM: {error}").into())
+    })?;
+    let metadata = file.metadata().map_err(|error| {
+        Error::tls(format!("sslkey={key_path}: cannot inspect private key file: {error}").into())
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(Error::tls(
+            format!("sslkey={key_path}: private key is not a regular file").into(),
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+
+        // libpq permits root-owned system keys to be group-readable, but a
+        // key with any other owner must have no group or world access. The
+        // file handle and its metadata stay together so a path replacement
+        // cannot make us parse a different, unchecked key.
+        let forbidden = if metadata.uid() == 0 { 0o037 } else { 0o077 };
+        if metadata.mode() & forbidden != 0 {
+            return Err(Error::tls(
+                format!(
+                    "sslkey={key_path}: private key has group or world access; use permissions \
+                     0600 or less, or 0640 or less for a root-owned key"
+                )
+                .into(),
+            ));
+        }
+    }
+
+    let mut pem = Zeroizing::new(Vec::new());
+    file.read_to_end(&mut pem).map_err(|error| {
+        Error::tls(format!("sslkey={key_path}: cannot read PEM: {error}").into())
+    })?;
+    Ok(pem)
+}
+
 /// Load a private key without letting the presence of `sslpassword` change the
 /// meaning of an ordinary plaintext key.
 fn private_key_from_config(
     key_path: &str,
     password: Option<&[u8]>,
 ) -> Result<PrivateKeyDer<'static>, Error> {
-    let unencrypted_error = match PrivateKeyDer::from_pem_file(key_path) {
+    let pem = read_private_key_file(key_path)?;
+    let unencrypted_error = match PrivateKeyDer::from_pem_slice(&pem) {
         Ok(key) => return Ok(key),
         Err(error) => error,
     };
@@ -492,7 +535,7 @@ fn private_key_from_config(
     // Parse only that one additional label here; malformed plaintext keys must
     // retain the existing rustls PEM error instead of being misreported as a
     // bad passphrase.
-    let pem = match std::fs::read_to_string(key_path) {
+    let pem_text = match std::str::from_utf8(&pem) {
         Ok(pem) => pem,
         Err(_) => {
             return Err(Error::tls(
@@ -500,7 +543,7 @@ fn private_key_from_config(
             ));
         }
     };
-    let (label, encrypted_document) = match SecretDocument::from_pem(&pem) {
+    let (label, encrypted_document) = match SecretDocument::from_pem(pem_text) {
         Ok(document) => document,
         Err(_) => {
             return Err(Error::tls(
@@ -1488,6 +1531,51 @@ mod tests {
         assert!(
             key_log.file.lock().expect("lock key-log file").is_none(),
             "the fixture write did not fail, so the warning path never ran"
+        );
+    }
+
+    #[cfg(unix)]
+    fn generated_sslkey(mode: u32) -> tempfile::NamedTempFile {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let issued = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("generate a private key fixture");
+        let mut key = tempfile::NamedTempFile::new().expect("create a private key fixture");
+        key.write_all(issued.signing_key.serialize_pem().as_bytes())
+            .expect("write the private key fixture");
+        std::fs::set_permissions(key.path(), std::fs::Permissions::from_mode(mode))
+            .expect("set private key fixture permissions");
+        key
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sslkey_permissions_allow_a_private_file() {
+        let key = generated_sslkey(0o600);
+        private_key_from_config(key.path().to_str().unwrap(), None)
+            .expect("a 0600 private key must load");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sslkey_permissions_reject_group_or_world_access() {
+        let key = generated_sslkey(0o644);
+        let error = private_key_from_config(key.path().to_str().unwrap(), None)
+            .expect_err("a 0644 private key exposes its client identity");
+        let chain = std::iter::successors(std::error::Error::source(&error), |error| {
+            std::error::Error::source(*error)
+        })
+        .fold(format!("{error}"), |chain, error| {
+            format!("{chain}: {error}")
+        });
+        assert!(
+            chain.contains("sslkey="),
+            "the error must name sslkey: {chain}"
+        );
+        assert!(
+            chain.contains("group or world access"),
+            "the error must name the unsafe permissions: {chain}"
         );
     }
 
