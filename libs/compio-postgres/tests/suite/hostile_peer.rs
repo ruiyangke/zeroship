@@ -1032,6 +1032,26 @@ fn expect_frontend_until_sync(stream: &mut TcpStream) {
     }
 }
 
+fn expect_frontend_frame(stream: &mut TcpStream, expected_tag: u8) -> Vec<u8> {
+    let mut tag = [0u8; 1];
+    stream
+        .read_exact(&mut tag)
+        .expect("read expected frontend tag");
+    assert_eq!(tag[0], expected_tag, "unexpected frontend frame tag");
+
+    let mut length = [0u8; 4];
+    stream
+        .read_exact(&mut length)
+        .expect("read expected frontend frame length");
+    let length = u32::from_be_bytes(length) as usize;
+    assert!(length >= 4, "frontend frame length is below its header");
+    let mut body = vec![0u8; length - 4];
+    stream
+        .read_exact(&mut body)
+        .expect("read expected frontend frame body");
+    body
+}
+
 /// Drive `prepare` against a peer that answers with `response`, and require the
 /// same three properties the simple-query helper does.
 async fn hostile_prepare_retires_session(process_id: i32, response: Vec<u8>) -> String {
@@ -1566,6 +1586,89 @@ async fn a_copy_in_response_to_a_copy_out_request_is_refused() {
     })
     .await
     .expect("wrong-direction COPY test exceeded its outer watchdog");
+}
+
+/// A conforming backend does not leave COPY IN merely because the caller
+/// requested the opposite direction. It waits until the frontend sends
+/// CopyFail (and, for extended query, Sync) before returning ErrorResponse and
+/// ReadyForQuery. The driver must therefore actively end the wrong-way mode.
+#[compio::test]
+async fn a_copy_in_response_to_copy_out_is_actively_ended() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = StubServer::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_startup(&mut stream, 507);
+
+            expect_frontend_until_sync(&mut stream);
+            let mut prepared = backend_frame(b'1', b"");
+            prepared.extend_from_slice(&backend_frame(b't', &0u16.to_be_bytes()));
+            prepared.extend_from_slice(&backend_frame(b'n', b""));
+            prepared.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream
+                .write_all(&prepared)
+                .expect("write scripted prepare response");
+            stream.flush().expect("flush scripted prepare response");
+
+            expect_frontend_until_sync(&mut stream);
+            let mut copy_in = backend_frame(b'2', b"");
+            copy_in.extend_from_slice(&backend_frame(b'G', b"\x00\x00\x00"));
+            stream
+                .write_all(&copy_in)
+                .expect("write wrong-way CopyInResponse");
+            stream.flush().expect("flush wrong-way CopyInResponse");
+
+            let copy_fail = expect_frontend_frame(&mut stream, b'f');
+            assert_eq!(
+                copy_fail.last(),
+                Some(&0),
+                "CopyFail reason is not terminated"
+            );
+            assert!(
+                copy_fail.len() > 1,
+                "connection-owned CopyFail did not explain the refusal"
+            );
+            assert!(
+                expect_frontend_frame(&mut stream, b'S').is_empty(),
+                "Sync unexpectedly carried a body"
+            );
+
+            let mut error = Vec::from(&b"SERROR\0C0A000\0Mwrong-way COPY IN refused\0"[..]);
+            error.push(0);
+            let mut completion = backend_frame(b'E', &error);
+            completion.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream
+                .write_all(&completion)
+                .expect("write COPY refusal completion");
+            stream.flush().expect("flush COPY refusal completion");
+        });
+
+        let (client, connection) = stub_config(server.addr)
+            .connect(common::suite_tls())
+            .await
+            .expect("connect to scripted PostgreSQL peer");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let error = match compio::time::timeout(
+            Duration::from_millis(500),
+            client.copy_out("COPY t TO STDOUT"),
+        )
+        .await
+        {
+            Err(_) => panic!("copy_out hung instead of ending a wrong-way COPY IN response"),
+            Ok(Ok(_)) => panic!("the driver accepted a wrong-way COPY IN response"),
+            Ok(Err(error)) => error,
+        };
+        assert!(
+            common::error_chain(&error).contains("wrong-way COPY IN refused"),
+            "COPY refusal lost the server's diagnosis: {error}"
+        );
+
+        drop(client);
+        let _ = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
+        server.finish();
+    })
+    .await
+    .expect("active wrong-direction COPY test exceeded its outer watchdog");
 }
 
 /// CopyInResponse enters COPY IN immediately. A later CopyOutResponse cannot
