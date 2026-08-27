@@ -224,3 +224,60 @@ async fn copy_in_prefers_a_later_server_error_to_non_copy_refusal() {
     .await
     .expect("late non-COPY diagnosis exceeded its watchdog");
 }
+
+/// COPY OUT has the same Sync boundary when its statement is valid SQL but is
+/// not actually COPY. Its CommandComplete is a provisional local mismatch,
+/// not permission to discard a deferred server error.
+#[compio::test]
+async fn copy_out_prefers_a_later_server_error_to_non_copy_refusal() {
+    compio::time::timeout(TEST_TIMEOUT, async {
+        let client = connect_client().await;
+        let table = common::test_object_name("copy_out_non_copy");
+        client
+            .batch_execute(&format!(
+                "CREATE TEMPORARY TABLE {table} (
+                    v int UNIQUE DEFERRABLE INITIALLY DEFERRED
+                )"
+            ))
+            .await
+            .expect("create deferred non-COPY fixture");
+
+        let error = match client
+            .copy_out(&format!("INSERT INTO {table} VALUES (1), (1)"))
+            .await
+        {
+            Ok(_) => panic!("copy_out accepted a non-COPY statement"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("23505"),
+            "copy_out discarded unique_violation behind unexpected-message: {}",
+            common::error_chain(&error),
+        );
+
+        let local = match client
+            .copy_out(&format!("INSERT INTO {table} VALUES (2)"))
+            .await
+        {
+            Ok(_) => panic!("copy_out accepted a successful non-COPY statement"),
+            Err(error) => error,
+        };
+        assert!(
+            local.code().is_none(),
+            "successful non-COPY control invented a server diagnosis: {}",
+            common::error_chain(&local),
+        );
+
+        let stored: i64 = client
+            .query_one_scalar(&format!("SELECT count(*) FROM {table}"), &[])
+            .await
+            .expect("the non-COPY refusals poisoned their connection");
+        assert_eq!(
+            stored, 1,
+            "the successful control did not commit exactly once"
+        );
+    })
+    .await
+    .expect("late COPY OUT non-COPY diagnosis exceeded its watchdog");
+}
