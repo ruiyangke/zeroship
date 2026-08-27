@@ -1042,6 +1042,50 @@ mod type_cache_tests {
     }
 }
 
+const COPY_MODE_IDLE: u8 = 0;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum CopyMode {
+    In = 1,
+    Out = 2,
+}
+
+impl CopyMode {
+    fn from_state(state: u8) -> Option<Self> {
+        match state {
+            value if value == Self::In as u8 => Some(Self::In),
+            value if value == Self::Out as u8 => Some(Self::Out),
+            _ => None,
+        }
+    }
+
+    fn admission_error(self) -> Error {
+        match self {
+            Self::In => Error::copy_in_progress(),
+            Self::Out => Error::copy_out_progress(),
+        }
+    }
+}
+
+pub(crate) struct CopyModeGuard {
+    state: Arc<AtomicU8>,
+    expected: u8,
+}
+
+impl Drop for CopyModeGuard {
+    fn drop(&mut self) {
+        // A compare-exchange, rather than a store, makes a stale guard unable
+        // to clear a later COPY mode if ownership is ever refactored.
+        let _ = self.state.compare_exchange(
+            self.expected,
+            COPY_MODE_IDLE,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+}
+
 /// Shared inner state of a `Client`. Lives behind an `Arc` so helpers
 /// like `bind`, `prepare`, and the Drop impls on `Statement`/`Portal`
 /// can keep a `Weak<InnerClient>` back-reference.
@@ -1086,6 +1130,16 @@ pub struct InnerClient {
     /// driver's internal `Close + Sync` maintenance is not counted because it
     /// cannot change transaction state.
     in_flight_requests: Arc<AtomicUsize>,
+
+    /// Serializes the COPY-mode check with request enqueueing. Without one
+    /// shared critical section an ordinary request can observe idle, lose the
+    /// race to a COPY claim, then enqueue behind that COPY anyway.
+    request_admission: Mutex<()>,
+
+    /// Caller-visible COPY handle currently owning the connection's COPY
+    /// subprotocol. The handle's guard clears this synchronously on terminal
+    /// completion or Drop; the pool also reads it to reject an active lease.
+    copy_mode: Arc<AtomicU8>,
 
     /// Shuts the connection's socket down when this `InnerClient` drops - that
     /// is, when the last handle that could still issue a query on this
@@ -1194,13 +1248,79 @@ impl InnerClient {
         message: FrontendMessage,
         cleanup: FrontendMessage,
     ) -> Result<Responses, Error> {
-        let responses = self.send(RequestMessages::Single(message))?;
-        drop(self.send_with(
+        let admission = self.request_admission.lock();
+        if let Some(mode) = self.active_copy_mode() {
+            drop(admission);
+            return Err(mode.admission_error());
+        }
+
+        let responses = self.enqueue_admitted(
+            RequestMessages::Single(message),
+            RequestDisposition::Awaited,
+            TransactionEffect::MayChange,
+            None,
+            None,
+        );
+        let cleanup = self.enqueue_admitted(
             RequestMessages::Single(cleanup),
             RequestDisposition::Housekeeping,
             TransactionEffect::MayChange,
-        )?);
+            None,
+            None,
+        );
+        drop(admission);
+
+        let responses = Self::finish_enqueue(responses)?;
+        drop(Self::finish_enqueue(cleanup)?);
         Ok(responses)
+    }
+
+    pub(crate) fn send_copy_statement(
+        &self,
+        messages: RequestMessages,
+        statement: &Statement,
+        mode: CopyMode,
+    ) -> Result<(Responses, CopyModeGuard), Error> {
+        let admission = self.request_admission.lock();
+        if let Some(active) = self.active_copy_mode() {
+            drop(admission);
+            return Err(active.admission_error());
+        }
+
+        if self
+            .copy_mode
+            .compare_exchange(
+                COPY_MODE_IDLE,
+                mode as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            let active = self.active_copy_mode().unwrap_or(mode);
+            drop(admission);
+            return Err(active.admission_error());
+        }
+        let mode_guard = CopyModeGuard {
+            state: Arc::clone(&self.copy_mode),
+            expected: mode as u8,
+        };
+        let result = self.enqueue_admitted(
+            messages,
+            RequestDisposition::Awaited,
+            TransactionEffect::MayChange,
+            None,
+            Some(statement.clone()),
+        );
+        drop(admission);
+
+        match Self::finish_enqueue(result) {
+            Ok(responses) => Ok((responses, mode_guard)),
+            Err(error) => {
+                drop(mode_guard);
+                Err(error)
+            }
+        }
     }
 
     fn send_inner(
@@ -1211,6 +1331,30 @@ impl InnerClient {
         prepare_cleanup: Option<prepare::PrepareCleanup>,
         statement: Option<Statement>,
     ) -> Result<Responses, Error> {
+        let admission = self.request_admission.lock();
+        if let Some(mode) = self.active_copy_mode() {
+            drop(admission);
+            return Err(mode.admission_error());
+        }
+        let result = self.enqueue_admitted(
+            messages,
+            disposition,
+            transaction_effect,
+            prepare_cleanup,
+            statement,
+        );
+        drop(admission);
+        Self::finish_enqueue(result)
+    }
+
+    fn enqueue_admitted(
+        &self,
+        messages: RequestMessages,
+        disposition: RequestDisposition,
+        transaction_effect: TransactionEffect,
+        prepare_cleanup: Option<prepare::PrepareCleanup>,
+        statement: Option<Statement>,
+    ) -> Result<Responses, Request> {
         let observation = self.start_observation(&messages);
         let (sender, receiver) = mpsc::channel(1);
         let request = Request {
@@ -1225,11 +1369,11 @@ impl InnerClient {
         if transaction_effect == TransactionEffect::MayChange {
             self.in_flight_requests.fetch_add(1, Ordering::Relaxed);
         }
-        if self.sender.unbounded_send(request).is_err() {
+        if let Err(error) = self.sender.unbounded_send(request) {
             if transaction_effect == TransactionEffect::MayChange {
                 self.in_flight_requests.fetch_sub(1, Ordering::Relaxed);
             }
-            return Err(Error::closed());
+            return Err(error.into_inner());
         }
 
         if let Some(observation) = &observation {
@@ -1241,6 +1385,23 @@ impl InnerClient {
             cur: ResponseMessages::empty(),
             observation,
         })
+    }
+
+    fn finish_enqueue(result: Result<Responses, Request>) -> Result<Responses, Error> {
+        match result {
+            Ok(responses) => Ok(responses),
+            Err(request) => {
+                // Dropping a Statement or PrepareCleanup can enqueue protocol
+                // cleanup. Every caller invokes this only after releasing the
+                // non-reentrant request_admission lock.
+                drop(request);
+                Err(Error::closed())
+            }
+        }
+    }
+
+    fn active_copy_mode(&self) -> Option<CopyMode> {
+        CopyMode::from_state(self.copy_mode.load(Ordering::Acquire))
     }
 
     fn start_observation(&self, messages: &RequestMessages) -> Option<QueryObservation> {
@@ -1815,6 +1976,8 @@ impl Client {
                 dirty: AtomicBool::new(false),
                 tx_status: Arc::new(AtomicU8::new(b'I')),
                 in_flight_requests: Arc::new(AtomicUsize::new(0)),
+                request_admission: Mutex::new(()),
+                copy_mode: Arc::new(AtomicU8::new(COPY_MODE_IDLE)),
                 release,
                 parameters: Arc::default(),
             }),
