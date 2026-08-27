@@ -665,3 +665,36 @@ async fn protocol_above_four_is_refused_locally() {
         "the refusal must name the supported maximum: {chain}"
     );
 }
+
+/// pgoutput has no protocol zero and does not negotiate one upward. Refuse the
+/// invalid request locally, just like a version above the decoder's ceiling.
+#[compio::test]
+async fn protocol_below_one_is_refused_locally() {
+    let replication = compio_postgres::replication::connect_replication(
+        common::suite_tls(),
+        &common::replication_config("cpg_protocol_floor"),
+    )
+    .await
+    .expect("replication connect failed");
+
+    let error = replication
+        .start_logical_replication(StartReplicationOptions {
+            slot_name: "never_used",
+            publication_names: &["never_used"],
+            proto_version: 0,
+            ..Default::default()
+        })
+        .await
+        .err()
+        .expect("proto_version 0 must be refused before START_REPLICATION");
+    let chain = common::error_chain(&error);
+
+    assert!(
+        error.as_db_error().is_none(),
+        "the invalid version reached PostgreSQL instead of being refused locally: {chain}"
+    );
+    assert!(
+        chain.contains("proto_version") && chain.contains("1 or higher"),
+        "the refusal must name the supported minimum: {chain}"
+    );
+}
