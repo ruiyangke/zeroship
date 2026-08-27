@@ -120,6 +120,8 @@ use std::thread::ThreadId;
 
 use parking_lot::{Condvar, Mutex};
 
+use crate::buf_stream::SplitStream;
+
 /// Bytes requested per socket read while handshaking.
 ///
 /// A TLS record is at most 16 KiB of plaintext plus overhead, so this holds a
@@ -850,12 +852,54 @@ impl<S> TlsStreamCore<S> {
         }
     }
 
-    pub(crate) fn into_parts(self) -> (S, SharedSession) {
-        (self.reader.socket, self.reader.session)
-    }
-
     pub(crate) fn session(&self) -> SharedSession {
         self.reader.session.clone()
+    }
+}
+
+impl<S> TlsStreamCore<S>
+where
+    S: SplitStream,
+{
+    /// Split only the socket, carrying every byte already read from it into
+    /// the owned read half. A refused split rebuilds the identical stream.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn try_into_split(
+        self,
+    ) -> Result<(TlsReadHalf<S::ReadHalf>, TlsWriteHalf<S::WriteHalf>), Self> {
+        let TlsReader {
+            socket,
+            session,
+            cipher,
+            cipher_len,
+            cipher_read,
+            plain,
+        } = self.reader;
+        match socket.try_into_split() {
+            Ok((read, write)) => Ok((
+                TlsReadHalf {
+                    reader: TlsReader {
+                        socket: read,
+                        session: session.clone(),
+                        cipher,
+                        cipher_len,
+                        cipher_read,
+                        plain,
+                    },
+                },
+                TlsWriteHalf::new(write, session),
+            )),
+            Err(socket) => Err(Self {
+                reader: TlsReader {
+                    socket,
+                    session,
+                    cipher,
+                    cipher_len,
+                    cipher_read,
+                    plain,
+                },
+            }),
+        }
     }
 }
 
@@ -893,14 +937,6 @@ where
 /// Owned read half: the socket's read side plus a share of the session.
 pub struct TlsReadHalf<R> {
     reader: TlsReader<R>,
-}
-
-impl<R> TlsReadHalf<R> {
-    pub(crate) fn new(socket: R, session: SharedSession) -> Self {
-        Self {
-            reader: TlsReader::new(socket, session),
-        }
-    }
 }
 
 impl<R> AsyncRead for TlsReadHalf<R>
@@ -942,6 +978,9 @@ where
         shutdown_through(&mut self.socket, &self.session).await
     }
 }
+
+#[cfg(test)]
+pub(crate) use tests::handshaken_pair;
 
 #[cfg(test)]
 mod tests {
@@ -1168,7 +1207,7 @@ mod tests {
     /// A real handshake, not a stub: the state this test is about
     /// (`read_tls` answering `Ok(0)` forever once `close_notify` has arrived)
     /// only exists behind live keys.
-    fn handshaken_pair() -> (ClientConnection, rustls::ServerConnection) {
+    pub(crate) fn handshaken_pair() -> (ClientConnection, rustls::ServerConnection) {
         handshaken_pair_with_store(None)
     }
 
