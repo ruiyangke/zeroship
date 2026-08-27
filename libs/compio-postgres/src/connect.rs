@@ -751,6 +751,8 @@ where
         // `negotiated`, not `encryption`: the argument above is what this leg
         // ATTEMPTED. A cancel has to reproduce what the session got.
         encryption: negotiated,
+        ssl_sni: config.get_ssl_sni(),
+        ssl_cert_mode: config.get_ssl_cert_mode(),
     });
 
     Ok((client, connection))
