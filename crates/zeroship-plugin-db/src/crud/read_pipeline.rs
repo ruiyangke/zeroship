@@ -1,6 +1,7 @@
 use base64::Engine as _;
 use serde_json::Value;
 
+use crate::binding::DbBinding;
 use crate::error::DbError;
 
 pub(crate) enum SchemaFieldScope<'a> {
@@ -46,7 +47,7 @@ pub(crate) struct ApplyResult {
 /// - schema-independent normalization still runs for the platform system
 ///   timestamps (`created_at`, `updated_at`, `deleted_at`)
 /// - schema-driven coercions (`boolean`, `json`/`object`/`array`/`union`,
-///   `bytes`, non-system `date`/`calendarDate`) only run when the per-isolate
+///   `bytes`, non-system `date`/`calendarDate`) only run when the per-thread
 ///   schema cache is warm
 /// - decrypt/mask/unmask metadata is schema-driven, so those stages only do
 ///   useful work when the schema cache is present
@@ -54,17 +55,18 @@ pub(crate) struct ApplyResult {
 /// This keeps raw-JS / pre-register reads lossless instead of guessing at
 /// ambiguous user data like `"{"ok":true}"` or `0/1` without a schema.
 pub(crate) async fn apply(
-    app_id: &str,
+    binding: &DbBinding,
     collection: &str,
     mut rows: Vec<Value>,
     opts: ApplyOptions<'_>,
 ) -> Result<ApplyResult, DbError> {
+    let app_id = binding.app_id();
     // The runtime data-access metadata (column types, encrypted
     // mode/keyId/wraps, mask kind/classification) is sourced from LIVE
     // introspection + the engine's sentinels (design §6), NOT the in-memory
     // declared schema. `runtime_schema_for` caches per (app, collection, deploy)
     // so this is an introspection only on a cold/stale cache, not every read.
-    let schema = super::introspect_schema::runtime_schema_for(app_id, collection)
+    let schema = super::introspect_schema::runtime_schema_for(binding, collection)
         .await?
         .map(|schema| scope_schema(schema, &opts.schema_field_scope));
     normalize_rows_on_read(schema.as_ref(), &mut rows)?;
@@ -529,10 +531,11 @@ mod tests {
             "secret": 3
         })];
 
+        let binding = DbBinding::cold_start("app_aggregate_scope");
         let result = compio::runtime::Runtime::new()
             .expect("compio runtime build")
             .block_on(apply(
-                "app_aggregate_scope",
+                &binding,
                 "users",
                 rows,
                 ApplyOptions {
@@ -566,10 +569,11 @@ mod tests {
             "email": "a***@example.com"
         })];
 
+        let binding = DbBinding::cold_start("app_distinct_masked");
         let result = compio::runtime::Runtime::new()
             .expect("compio runtime build")
             .block_on(apply(
-                "app_distinct_masked",
+                &binding,
                 "users",
                 rows,
                 ApplyOptions {

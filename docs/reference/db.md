@@ -109,8 +109,8 @@ const result = await db.transaction(async (tx) => {
 
 The `tx.<table>` wrapper is a JS-side throw-style adapter around the
 outer Collection. Routing the CRUD call to the transaction connection
-happens in Rust via the per-isolate `IsolateDbContext::tx_conn` slot
-(formerly a `TX_CONN` thread-local, folded into `IsolateDbContext` in
+happens in Rust via the per-isolate `ThreadDbContext::tx_conn` slot
+(formerly a `TX_CONN` thread-local, folded into `ThreadDbContext` in
 Stage 8d-R4); the JS adapter only flips the surface from Result to
 throw.
 

@@ -1,4 +1,4 @@
-//! Per-isolate DB context — single typed home for every plug-in
+//! Per-worker-thread DB context — single typed home for every plug-in
 //! thread-local. The plug-in previously carried several separate
 //! `thread_local!` declarations (`DB_POOL`, `DB_URL`, `REGISTERED_MODELS`,
 //! `TX_CONN`, `PENDING_EMITS` in `lib.rs`; `RUNNING_CONSUMERS` in
@@ -6,7 +6,7 @@
 //! lifecycle invariants were enforced by convention only.
 //!
 //! This module folds all of those slots into a single
-//! [`IsolateDbContext`] stashed in one [`thread_local!`]. Typed
+//! [`ThreadDbContext`] stashed in one [`thread_local!`]. Typed
 //! accessors enforce the invariants in one place:
 //!
 //! * [`crate::context::with`] / [`crate::context::with_mut`] are
@@ -14,7 +14,7 @@
 //! * `*_tx_*` methods coordinate the tx-state slots (`tx_conn`,
 //!   `savepoint_depth`, `tx_claims`) so the single-connection model the
 //!   transaction orchestrator relies on holds (one BEGIN per app per
-//!   isolate, nested `SAVEPOINT`s reusing the same connection). The
+//!   worker thread, nested `SAVEPOINT`s reusing the same connection). The
 //!   `tx_claims` set is what makes "one BEGIN" true: it is held from
 //!   before the BEGIN until after the settle, covering the window in
 //!   which `tx_conn` is still empty and two overlapping `transaction()`
@@ -23,11 +23,11 @@
 //!   the transaction settle path (`drain_pending_emits_on_commit`) and
 //!   cleared on ROLLBACK / fresh BEGIN.
 //!
-//! Each isolate (worker thread) carries one context; the compio
-//! runtime is single-threaded per worker so plain `RefCell` /
-//! `Cell` sufficient. The fields stay `pub(crate)` so the lib.rs
-//! shim thread-locals can be removed slot-by-slot in subsequent
-//! commits without churn.
+//! Each worker thread carries one context, and every V8 isolate scheduled on
+//! that thread shares it. The compio runtime is single-threaded per worker, so
+//! plain `RefCell` / `Cell` is sufficient. State that must distinguish
+//! co-resident isolates therefore needs an explicit binding key; thread-local
+//! storage alone does not provide isolate identity.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -38,11 +38,12 @@ use compio_postgres::{Client, Pool};
 
 use crate::backend::sqlite::session::SqliteSessionHandle;
 use crate::backend::{BackendHandle, PostgresBackend};
+use crate::binding::DbBinding;
 use crate::encryption::{LocalKeySource, SuppliedRootKeys};
 use crate::broker::ChangeEvent;
 use crate::error::DbError;
 
-/// Result of trying to claim the per-isolate backend initialisation slot.
+/// Result of trying to claim the per-thread backend initialisation slot.
 pub(crate) enum BackendInitState {
     /// A backend is already installed; no work needed.
     Ready,
@@ -52,7 +53,7 @@ pub(crate) enum BackendInitState {
     InProgress,
 }
 
-/// Pinned transaction client parked in the per-isolate tx slot.
+/// Pinned transaction client parked in the app-keyed, per-thread tx map.
 ///
 /// Postgres keeps a dedicated libpq connection alive for the lifetime of
 /// the transaction; SQLite keeps a handle to the shared session actor and
@@ -64,7 +65,7 @@ pub(crate) enum TxConnection {
 }
 
 /// RAII guard for a transaction client temporarily removed from the
-/// per-isolate slot.
+/// per-thread map.
 ///
 /// SQLite needs this guard to stay cancellation-safe: dropping a future
 /// mid-await must restore the session-actor handle back into
@@ -79,7 +80,7 @@ pub(crate) struct TxClientSlotGuard {
 }
 
 impl TxClientSlotGuard {
-    /// Drain `app_id`'s transaction client out of the per-isolate slot.
+    /// Drain `app_id`'s transaction client out of the per-thread map.
     /// SEC-1: the guard restores it to the *same* app's slot on drop, so
     /// a cancellation mid-await can never re-park one app's client under
     /// another's key.
@@ -109,15 +110,18 @@ impl Drop for TxClientSlotGuard {
     }
 }
 
-/// Per-isolate DB plug-in state. One instance per worker thread, held
-/// by the [`ISOLATE_CTX`] thread-local.
+/// Per-worker-thread DB plug-in state, held by [`THREAD_DB_CTX`].
+///
+/// This is deliberately named for its actual ownership: a worker thread may
+/// host many app isolates, including current and deploy-pinned isolates of the
+/// same app, and all of them share this value.
 ///
 /// All fields are private. Every consumer goes through an accessor
 /// method on this `impl` — [`Self::pool`], [`Self::savepoint_depth_for`],
 /// etc. Direct field access from inside the
 /// crate is rejected at compile time.
 #[allow(missing_debug_implementations)]
-pub struct IsolateDbContext {
+pub struct ThreadDbContext {
     /// Connection pool — created lazily on first DB operation.
     pool: Option<Rc<Pool>>,
 
@@ -131,8 +135,12 @@ pub struct IsolateDbContext {
     /// different values.
     cdc_worker_id: Option<String>,
 
-    /// Registered models — keyed by "app_id:collection". Prevents
-    /// redundant DDL on subsequent cold starts within the same deploy.
+    /// Registered models — keyed by "app_id:collection". Prevents repeated
+    /// registration on this worker thread.
+    ///
+    /// This key does not yet distinguish deploys. It cannot be changed alone:
+    /// the declared [`Self::schemas`] cache and all of its consumers are keyed
+    /// at the same granularity.
     registered_models: HashSet<String>,
 
     /// Active transaction clients, **keyed by owning `app_id`**.
@@ -245,7 +253,7 @@ pub struct IsolateDbContext {
     /// that app.
     pending_emits: HashMap<String, Vec<ChangeEvent>>,
 
-    /// Per-isolate, per-`(app_id, collection)` schema
+    /// Per-thread, per-`(app_id, collection)` declared-schema
     /// cache. Populated by `register_model_dispatch` on successful
     /// register; consulted by the CRUD encryption pass (`crud::dispatch_*`)
     /// to find columns declared `t.encrypted(...)`. Empty for any
@@ -256,7 +264,7 @@ pub struct IsolateDbContext {
     /// is the raw schema JSON the SDK declared.
     schemas: HashMap<String, serde_json::Value>,
 
-    /// Per-isolate, per-`(app_id, collection)` cache of the
+    /// Per-thread cache of the
     /// schema metadata **introspected from the LIVE catalog + sentinels**
     /// (`zeroship_schema::read_live_schema` + the `zsenc`/`__zsmask` codecs),
     /// NOT the declared descriptor. This is the runtime data-access metadata
@@ -266,49 +274,28 @@ pub struct IsolateDbContext {
     /// (kind/classification) by reading what the migration engine actually
     /// applied, decoupled from any in-memory declared schema.
     ///
-    /// Keyed by `"{app_id}:{collection}"`; the value is `(deploy_token, schema)`
-    /// where `deploy_token` is the app's current deploy/schema-version token
-    /// (the worker-injected `ZEROSHIP_DEPLOY_ID` = `deploy_hash`, read via
-    /// [`Self::deploy_token_for`]). A stale token (a redeploy changed the
-    /// app's `deploy_hash`) invalidates the entry on next read,
-    /// mirroring the `is_model_registered` per-thread fast-path but keyed on the
-    /// deploy/schema version rather than mere presence. The inner `Option`
+    /// Keyed by `(DbBinding, collection)`, where the binding contains both the
+    /// app id and deploy/schema-version token. Current and deploy-pinned
+    /// isolates of one app therefore retain independent entries instead of
+    /// evicting or reading one another's metadata. The inner `Option`
     /// distinguishes "introspected, collection absent / has no goodies" (`None`)
     /// from "not yet introspected" (no map entry) so a goodie-free collection is
     /// cached as a negative result rather than re-introspected every call.
-    introspected_schemas: HashMap<String, (String, Option<serde_json::Value>)>,
+    introspected_schemas: HashMap<(DbBinding, String), Option<serde_json::Value>>,
 
-    /// Per-isolate, per-`app_id` deploy/schema-version token used as the
-    /// invalidation key for [`Self::introspected_schemas`] (and any other
-    /// deploy-keyed runtime cache). Stamped from the worker-injected
-    /// `ZEROSHIP_DEPLOY_ID` env var (the per-app `deploy_hash`) when the `Db`
-    /// wrapper is minted (`mint_db`), so a redeploy that changes the app's
-    /// `deploy_hash` produces a fresh token and forces re-introspection of the
-    /// new schema's crypto/mask/column metadata.
-    ///
-    /// This REPLACES the prior `std::env::var("ZEROSHIP_DEPLOY_ID")` read: that
-    /// env var was process-global, never `set_var`'d by worker/runtime/control,
-    /// and would have been WRONG for a multi-app worker thread even if it were —
-    /// so the token was pinned at `"cold_start"` for the life of the isolate and
-    /// the deploy-keyed cache never invalidated, applying stale metadata to a
-    /// redeployed schema. Keyed by `app_id`; absent ⇒ `"cold_start"` (the cold /
-    /// dev / raw-JS contract, matching the historical default).
-    deploy_tokens: HashMap<String, String>,
-
-    /// Per-isolate, per-app mask-policy cache. Seeded
+    /// Per-thread, per-app mask-policy cache. Seeded
     /// on first unmask attempt by reading durable storage (PG admin
     /// schema or SQLite sidecar file); refreshed write-through by the
     /// `setMaskPolicy` op when the SDK's `defineMaskPolicy()` flushes.
     ///
     /// `Some(policy)` — the app declared a policy; the unmask
     /// authorisation path honours it.
-    /// `None` (entry missing) — no policy in scope on this isolate
+    /// `None` (entry missing) — no policy cached on this worker thread
     /// yet. The unmask path then falls through to the default-deny
     /// rule (`auto` actor allowed; everyone else denied).
     ///
-    /// Keyed by `app_id`. The entry is never proactively evicted —
-    /// isolate lifetime is bounded by the LRU worker cache, so the
-    /// policy lives as long as the app is hot.
+    /// Keyed by `app_id`. The entry is never proactively evicted, so it lives
+    /// for the worker thread's lifetime unless explicitly replaced.
     mask_policies: HashMap<String, crate::crud::mask_policy::MaskPolicy>,
 
     /// Backend handle wrapping the pool, as the typed
@@ -345,15 +332,14 @@ pub struct IsolateDbContext {
     /// unforgeable by app code. `None` in meter-less test harnesses.
     meter: Option<Arc<zeroship_metering::Meter>>,
 
-    /// Column root keys handed to this isolate directly, in place of
+    /// Column root keys handed to this worker thread directly, in place of
     /// `ZEROSHIP_COLUMN_KEY_<KEYID>`.
     ///
-    /// Every backend installed on this isolate resolves column keys
-    /// through [`Self::local_key_source`], so this is the per-isolate
-    /// injection vehicle for root key material - the same shape the
-    /// server-injected `app_id` and deploy token already use, and the one
-    /// a host that holds key material (rather than exporting it into the
-    /// process environment) would install into.
+    /// Every backend installed on this worker thread resolves column keys
+    /// through [`Self::local_key_source`], so this is the per-thread injection
+    /// vehicle for root key material. Unlike app/deploy identity, root keys are
+    /// currently configured for the whole worker rather than carried by a V8
+    /// wrapper.
     ///
     /// `None` today on every production vector: nothing in the worker or
     /// the CLI installs roots here yet, so those backends read env vars.
@@ -363,9 +349,9 @@ pub struct IsolateDbContext {
     supplied_root_keys: Option<Rc<SuppliedRootKeys>>,
 }
 
-impl IsolateDbContext {
-    /// Build a fresh per-isolate context. Called once per worker
-    /// thread on first access (via [`ISOLATE_CTX`]'s `const`
+impl ThreadDbContext {
+    /// Build a fresh per-worker-thread context. Called once per worker
+    /// thread on first access (via [`THREAD_DB_CTX`]'s `const`
     /// initialiser path is too restrictive for `HashSet::new`, so the
     /// `RefCell` is initialised lazily through `std::cell::RefCell::new`
     /// in the `thread_local!` body).
@@ -384,7 +370,6 @@ impl IsolateDbContext {
             pending_emits: HashMap::new(),
             schemas: HashMap::new(),
             introspected_schemas: HashMap::new(),
-            deploy_tokens: HashMap::new(),
             mask_policies: HashMap::new(),
             backend: None,
             backend_init_in_progress: false,
@@ -395,7 +380,7 @@ impl IsolateDbContext {
 
     // ----- column root keys -------------------------------------------
 
-    /// Install the root-key material this isolate's backends should resolve
+    /// Install the root-key material this worker thread's backends should resolve
     /// column keys from, in place of `ZEROSHIP_COLUMN_KEY_<KEYID>`.
     ///
     /// `None` restores env sourcing. Installing an EMPTY
@@ -407,13 +392,13 @@ impl IsolateDbContext {
         self.supplied_root_keys = keys;
     }
 
-    /// The local root-key source every backend built on this isolate
+    /// The local root-key source every backend built on this worker thread
     /// should use: whatever was installed above, else the env vars.
     ///
     /// Backends call this THROUGH the context they are being installed
     /// into rather than reaching for the thread-local themselves, because
     /// [`Self::set_pool`] constructs a `PostgresBackend` while it already
-    /// holds `&mut self` and a second borrow of `ISOLATE_CTX` would panic.
+    /// holds `&mut self` and a second borrow of `THREAD_DB_CTX` would panic.
     pub(crate) fn local_key_source(&self) -> LocalKeySource {
         match &self.supplied_root_keys {
             Some(keys) => LocalKeySource::Supplied(Rc::clone(keys)),
@@ -458,7 +443,7 @@ impl IsolateDbContext {
     /// [`BackendHandle::Postgres`] arm.
     pub(crate) fn set_pool(&mut self, pool: Rc<Pool>) {
         let url = self.db_url.clone().unwrap_or_default();
-        // Admin table first, this isolate's local source behind it.
+        // Admin table first, this worker thread's local source behind it.
         let key_source = crate::encryption::KeySource::pg_admin_table_with_fallback(
             Rc::clone(&pool),
             self.local_key_source(),
@@ -555,7 +540,7 @@ impl IsolateDbContext {
 
     // ----- REGISTERED_MODELS -----------------------------------------
 
-    /// Check whether the model has been registered on this isolate.
+    /// Check whether the model has been registered on this worker thread.
     pub(crate) fn is_model_registered(&self, app_id: &str, collection: &str) -> bool {
         let key = format!("{app_id}:{collection}");
         self.registered_models.contains(&key)
@@ -570,7 +555,7 @@ impl IsolateDbContext {
     /// Clear the registered mark for one model — forces the next `registerModel`
     /// to re-run the cold path instead of the warm short-circuit. Used by tests
     /// that re-register the same `(app, collection)` with a CHANGED schema (a real
-    /// dev re-deploy mints a fresh isolate; the test reuses one).
+    /// dev re-deploy presents a fresh binding; the test reuses one context).
     #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) fn clear_model_registered(&mut self, app_id: &str, collection: &str) {
         let key = format!("{app_id}:{collection}");
@@ -594,8 +579,8 @@ impl IsolateDbContext {
     }
 
     /// Drop every cached declared schema for `app_id`. Test-only seam used to
-    /// simulate a FRESH isolate booting against a WARM app file (the per-isolate
-    /// sibling cache starts empty even though the file already holds tables) —
+    /// simulate a FRESH worker-thread context booting against a WARM app file
+    /// (the sibling cache starts empty even though the file already holds tables) —
     /// the exact condition the warm-multi-collection drop-suppression fix
     /// must survive.
     #[cfg(any(test, feature = "test-helpers"))]
@@ -606,7 +591,7 @@ impl IsolateDbContext {
 
     /// Fetch the cached schema for a `(app_id,
     /// collection)`. Returns `None` when the collection hasn't been
-    /// registered on this isolate yet (the CRUD encryption pass
+    /// registered on this worker thread yet (the CRUD encryption pass
     /// short-circuits on `None`, which is the correct behaviour for
     /// collections with no encrypted columns).
     pub(crate) fn schema_for(
@@ -618,77 +603,42 @@ impl IsolateDbContext {
         self.schemas.get(&key).cloned()
     }
 
-    /// Read the cached INTROSPECTED schema for `(app_id,
-    /// collection)`, but only if it was cached under the CURRENT
-    /// `deploy_token`. A token mismatch (a redeploy changed the app's
-    /// `deploy_hash` / `ZEROSHIP_DEPLOY_ID`)
-    /// returns `None`, forcing the caller to re-introspect — this is the
-    /// deploy-bump invalidation. Returns:
-    ///   - `Some(Some(schema))` — cached, current, collection has goodies;
-    ///   - `Some(None)` — cached, current, collection has NO goodies (negative
+    /// Read the cached INTROSPECTED schema for one immutable
+    /// `(app_id, deploy_token, collection)` binding. Returns:
+    ///   - `Some(Some(schema))` — cached, collection has goodies;
+    ///   - `Some(None)` — cached, collection has NO goodies (negative
     ///     cache — the caller skips the encrypt/mask passes without
     ///     re-introspecting);
-    ///   - `None` — not cached or stale → caller must introspect.
+    ///   - `None` — this binding has not cached the collection → caller must
+    ///     introspect.
     pub(crate) fn introspected_schema_for(
         &self,
-        app_id: &str,
+        binding: &DbBinding,
         collection: &str,
-        deploy_token: &str,
     ) -> Option<Option<serde_json::Value>> {
-        let key = format!("{app_id}:{collection}");
-        match self.introspected_schemas.get(&key) {
-            Some((tok, schema)) if tok == deploy_token => Some(schema.clone()),
-            // Missing OR stale (token changed by a deploy) → re-introspect.
-            _ => None,
-        }
+        let key = (binding.clone(), collection.to_string());
+        self.introspected_schemas.get(&key).cloned()
     }
 
-    /// Cache the result of a live introspection for `(app_id,
-    /// collection)` under `deploy_token`. `schema = None` records a negative
-    /// result (the collection has no encrypted/masked columns — the passes are
-    /// skipped). Overwrites any stale entry from a prior deploy.
+    /// Cache the result of a live introspection for one immutable binding and
+    /// collection. `schema = None` records a negative result (the collection
+    /// has no encrypted/masked columns — the passes are skipped). Other deploys
+    /// of the same app retain their own entries.
     pub(crate) fn cache_introspected_schema(
         &mut self,
-        app_id: &str,
+        binding: &DbBinding,
         collection: &str,
-        deploy_token: &str,
         schema: Option<serde_json::Value>,
     ) {
-        let key = format!("{app_id}:{collection}");
-        self.introspected_schemas
-            .insert(key, (deploy_token.to_string(), schema));
-    }
-
-    // ----- DEPLOY_TOKENS -----------------------------------------------
-
-    /// Stamp the per-`app_id` deploy/schema-version token (the
-    /// worker-injected `ZEROSHIP_DEPLOY_ID` = `deploy_hash`). Called from
-    /// `mint_db` when the `Db` wrapper is built, so the token reflects the
-    /// deploy the isolate is currently serving. Idempotent overwrite -- a swap to
-    /// a new deploy re-mints the wrapper and re-stamps, which is exactly what
-    /// invalidates the deploy-keyed introspection cache on the next CRUD op.
-    pub(crate) fn set_deploy_token(&mut self, app_id: &str, token: &str) {
-        self.deploy_tokens
-            .insert(app_id.to_string(), token.to_string());
-    }
-
-    /// Read the per-`app_id` deploy/schema-version token. Defaults to
-    /// `"cold_start"` when nothing was stamped (dev `zeroship serve`, raw-JS
-    /// deploys, or test harnesses with no worker env injection) — the same cold
-    /// default the prior `std::env::var` read fell back to, so the
-    /// never-redeployed path behaves identically.
-    pub(crate) fn deploy_token_for(&self, app_id: &str) -> String {
-        self.deploy_tokens
-            .get(app_id)
-            .cloned()
-            .unwrap_or_else(|| "cold_start".to_string())
+        let key = (binding.clone(), collection.to_string());
+        self.introspected_schemas.insert(key, schema);
     }
 
     /// Enumerate every `(collection, schema)` pair the
-    /// per-isolate cache holds for `app_id`. Drift-check sweep uses
+    /// per-thread cache holds for `app_id`. Drift-check sweep uses
     /// this to iterate every registered collection without having to
     /// re-introspect the catalog. Returns an empty `Vec` when the
-    /// isolate has registered no collections for the app yet.
+    /// worker thread has registered no collections for the app yet.
     ///
     /// Key shape: `<app_id>:<collection>` (the same format
     /// [`Self::cache_schema`] writes); we filter on the `<app_id>:`
@@ -943,67 +893,68 @@ impl IsolateDbContext {
 
 }
 
-impl Default for IsolateDbContext {
+impl Default for ThreadDbContext {
     fn default() -> Self {
         Self::new()
     }
 }
 
 thread_local! {
-    /// The per-isolate DB context. Replaces the slot-per-thread-local
+    /// The DB context shared by all isolates on this worker thread. Replaces
+    /// the slot-per-thread-local
     /// lattice that previously lived in `lib.rs`, `migrations.rs`, and
     /// `replication_ops.rs`.
-    pub(crate) static ISOLATE_CTX: RefCell<IsolateDbContext> =
-        RefCell::new(IsolateDbContext::new());
+    pub(crate) static THREAD_DB_CTX: RefCell<ThreadDbContext> =
+        RefCell::new(ThreadDbContext::new());
 }
 
-/// Run `f` with a shared reference to the per-isolate DB context.
+/// Run `f` with a shared reference to the per-worker-thread DB context.
 ///
 /// The compio runtime is single-threaded per worker; this never
 /// contends. Callers must NOT re-enter [`with`] / [`with_mut`] from
 /// inside `f` (the underlying `RefCell` will panic).
-pub fn with<R>(f: impl FnOnce(&IsolateDbContext) -> R) -> R {
-    ISOLATE_CTX.with(|c| f(&c.borrow()))
+pub fn with<R>(f: impl FnOnce(&ThreadDbContext) -> R) -> R {
+    THREAD_DB_CTX.with(|c| f(&c.borrow()))
 }
 
-/// Run `f` with an exclusive reference to the per-isolate DB context.
+/// Run `f` with an exclusive reference to the per-worker-thread DB context.
 /// Same re-entrancy rule as [`with`].
-pub fn with_mut<R>(f: impl FnOnce(&mut IsolateDbContext) -> R) -> R {
-    ISOLATE_CTX.with(|c| f(&mut c.borrow_mut()))
+pub fn with_mut<R>(f: impl FnOnce(&mut ThreadDbContext) -> R) -> R {
+    THREAD_DB_CTX.with(|c| f(&mut c.borrow_mut()))
 }
 
 /// The column-key source for a backend that constructs itself rather than
-/// being built by [`IsolateDbContext::set_pool`].
+/// being built by [`ThreadDbContext::set_pool`].
 ///
 /// The SQLite backend is in that position: `SqliteBackend::{new, open}`
 /// are called directly (by `init_pool_async`, and by tests) and then
-/// handed to `set_sqlite_backend`, so they read the isolate's installed
+/// handed to `set_sqlite_backend`, so they read the worker thread's installed
 /// root keys here. Same re-entrancy rule as [`with`] - do not call this
 /// from inside a context closure.
 pub(crate) fn sqlite_key_source() -> crate::encryption::KeySource {
-    crate::encryption::KeySource::Local(with(IsolateDbContext::local_key_source))
+    crate::encryption::KeySource::Local(with(ThreadDbContext::local_key_source))
 }
 
 /// The column-key source for a `PostgresBackend` that constructs itself
-/// rather than being built by [`IsolateDbContext::set_pool`]: the admin
-/// table first, this isolate's local source behind it.
+/// rather than being built by [`ThreadDbContext::set_pool`]: the admin
+/// table first, this worker thread's local source behind it.
 ///
 /// `set_pool` does NOT call this - it already holds `&mut` on the context
-/// and reads [`IsolateDbContext::local_key_source`] off `self` instead.
+/// and reads [`ThreadDbContext::local_key_source`] off `self` instead.
 /// Same re-entrancy rule as [`with`].
 pub(crate) fn pg_key_source(pool: Rc<Pool>) -> crate::encryption::KeySource {
     crate::encryption::KeySource::pg_admin_table_with_fallback(
         pool,
-        with(IsolateDbContext::local_key_source),
+        with(ThreadDbContext::local_key_source),
     )
 }
 
 #[cfg(test)]
 mod tests {
-    //! Unit tests for the per-isolate DB context state machine.
+    //! Unit tests for the per-worker-thread DB context state machine.
     //!
-    //! Every test constructs a fresh [`IsolateDbContext`] directly via
-    //! [`IsolateDbContext::new`] — the thread-local [`ISOLATE_CTX`] is
+    //! Every test constructs a fresh [`ThreadDbContext`] directly via
+    //! [`ThreadDbContext::new`] — the thread-local [`THREAD_DB_CTX`] is
     //! avoided so test ordering on the same OS thread cannot cause one
     //! test to observe state another mutated.
     //!
@@ -1019,15 +970,15 @@ mod tests {
     //! Concretely, the following can only be exercised by
     //! `tests/integration.rs` (which spins up a real PG):
     //!
-    //! * [`IsolateDbContext::install_tx_client`] /
-    //!   [`IsolateDbContext::take_tx_client`] /
-    //!   [`IsolateDbContext::put_tx_client`] round-trip with a real
+    //! * [`ThreadDbContext::install_tx_client`] /
+    //!   [`ThreadDbContext::take_tx_client`] /
+    //!   [`ThreadDbContext::put_tx_client`] round-trip with a real
     //!   backend client.
-    //! * The `debug_assert!` inside [`IsolateDbContext::push_savepoint`]
+    //! * The `debug_assert!` inside [`ThreadDbContext::push_savepoint`]
     //!   that a savepoint requires an active `tx_conn` — same constraint;
     //!   the pop/reset arms (no such precondition) are unit-tested.
     //!
-    //! For [`IsolateDbContext::set_pool`] / [`IsolateDbContext::backend`]
+    //! For [`ThreadDbContext::set_pool`] / [`ThreadDbContext::backend`]
     //! we need an `Rc<Pool>`, which only `Pool::connect` produces. Those
     //! lifecycles are covered by `tests/integration.rs`.
 
@@ -1048,11 +999,11 @@ mod tests {
         }
     }
 
-    // ----- IsolateDbContext::new / Default -------------------------------
+    // ----- ThreadDbContext::new / Default -------------------------------
 
     #[test]
     fn new_yields_fully_cleared_slots() {
-        let ctx = IsolateDbContext::new();
+        let ctx = ThreadDbContext::new();
         assert!(ctx.pool().is_none());
         assert!(!ctx.pool_initialised());
         assert!(ctx.backend().is_none());
@@ -1068,8 +1019,8 @@ mod tests {
 
     #[test]
     fn default_matches_new() {
-        let a = IsolateDbContext::default();
-        let b = IsolateDbContext::new();
+        let a = ThreadDbContext::default();
+        let b = ThreadDbContext::new();
         // Compare observable state (no PartialEq on the struct).
         assert_eq!(a.pool_initialised(), b.pool_initialised());
         assert_eq!(a.savepoint_depth_for("a"), b.savepoint_depth_for("a"));
@@ -1081,14 +1032,14 @@ mod tests {
 
     #[test]
     fn set_db_url_returns_true_on_change() {
-        let mut ctx = IsolateDbContext::new();
+        let mut ctx = ThreadDbContext::new();
         assert!(ctx.set_db_url("postgres://a"));
         assert_eq!(ctx.db_url().as_deref(), Some("postgres://a"));
     }
 
     #[test]
     fn set_db_url_returns_false_when_unchanged() {
-        let mut ctx = IsolateDbContext::new();
+        let mut ctx = ThreadDbContext::new();
         assert!(ctx.set_db_url("postgres://a"));
         assert!(!ctx.set_db_url("postgres://a"));
         assert_eq!(ctx.db_url().as_deref(), Some("postgres://a"));
@@ -1096,7 +1047,7 @@ mod tests {
 
     #[test]
     fn set_db_url_returns_true_on_subsequent_change() {
-        let mut ctx = IsolateDbContext::new();
+        let mut ctx = ThreadDbContext::new();
         ctx.set_db_url("postgres://a");
         assert!(ctx.set_db_url("postgres://b"));
         assert_eq!(ctx.db_url().as_deref(), Some("postgres://b"));
@@ -1112,7 +1063,7 @@ mod tests {
         // a hypothetical pool would still be installed. Verified
         // indirectly: the function body has no `self.pool = None` or
         // `self.backend = None`.
-        let mut ctx = IsolateDbContext::new();
+        let mut ctx = ThreadDbContext::new();
         ctx.set_db_url("postgres://a");
         // No pool to clear; we're checking the API surface remains
         // pool-agnostic.
@@ -1127,7 +1078,7 @@ mod tests {
 
     #[test]
     fn clear_pool_when_unset_is_noop() {
-        let mut ctx = IsolateDbContext::new();
+        let mut ctx = ThreadDbContext::new();
         ctx.clear_pool();
         assert!(ctx.pool().is_none());
         assert!(ctx.backend().is_none());
@@ -1137,7 +1088,7 @@ mod tests {
 
     #[test]
     fn backend_init_slot_allows_one_initializer_at_a_time() {
-        let mut ctx = IsolateDbContext::new();
+        let mut ctx = ThreadDbContext::new();
 
         assert!(matches!(
             ctx.begin_backend_init(),
@@ -1158,7 +1109,7 @@ mod tests {
 
     #[test]
     fn clear_pool_releases_backend_init_slot() {
-        let mut ctx = IsolateDbContext::new();
+        let mut ctx = ThreadDbContext::new();
 
         assert!(matches!(
             ctx.begin_backend_init(),
@@ -1181,7 +1132,7 @@ mod tests {
 
     #[test]
     fn registered_models_round_trip() {
-        let mut ctx = IsolateDbContext::new();
+        let mut ctx = ThreadDbContext::new();
         assert!(!ctx.is_model_registered("app_a", "messages"));
         ctx.mark_model_registered("app_a", "messages");
         assert!(ctx.is_model_registered("app_a", "messages"));
@@ -1192,7 +1143,7 @@ mod tests {
 
     #[test]
     fn mark_model_registered_is_idempotent() {
-        let mut ctx = IsolateDbContext::new();
+        let mut ctx = ThreadDbContext::new();
         ctx.mark_model_registered("app_a", "msgs");
         ctx.mark_model_registered("app_a", "msgs");
         assert!(ctx.is_model_registered("app_a", "msgs"));
@@ -1210,7 +1161,7 @@ mod tests {
         // the integration/V8 end-to-end paths. The decrement / reset
         // arms have no such precondition: a double-settle (handler +
         // finalizer race) must NOT underflow the unsigned counter.
-        let mut ctx = IsolateDbContext::new();
+        let mut ctx = ThreadDbContext::new();
         assert_eq!(ctx.savepoint_depth_for("app_t"), 0);
         // pop on an already-zero depth saturates rather than wrapping to
         // u32::MAX, and yields no watermark - there is no frame to restore.
@@ -1256,14 +1207,14 @@ mod tests {
 
     #[test]
     fn pending_emits_start_empty() {
-        let ctx = IsolateDbContext::new();
+        let ctx = ThreadDbContext::new();
         assert!(ctx.pending_emits.is_empty());
     }
 
     #[test]
     fn push_pending_emit_allocates_slot_lazily() {
         // dummy_event tags app_id "app_t"; the queue keys on that.
-        let mut ctx = IsolateDbContext::new();
+        let mut ctx = ThreadDbContext::new();
         assert!(ctx.pending_emits.is_empty());
         ctx.push_pending_emit(dummy_event("c1"));
         assert!(ctx.pending_emits.contains_key("app_t"));
@@ -1272,7 +1223,7 @@ mod tests {
 
     #[test]
     fn push_pending_emit_accumulates() {
-        let mut ctx = IsolateDbContext::new();
+        let mut ctx = ThreadDbContext::new();
         ctx.push_pending_emit(dummy_event("c1"));
         ctx.push_pending_emit(dummy_event("c2"));
         ctx.push_pending_emit(dummy_event("c3"));
@@ -1285,7 +1236,7 @@ mod tests {
 
     #[test]
     fn drain_pending_emits_returns_and_clears() {
-        let mut ctx = IsolateDbContext::new();
+        let mut ctx = ThreadDbContext::new();
         ctx.push_pending_emit(dummy_event("c1"));
         ctx.push_pending_emit(dummy_event("c2"));
         let drained = ctx.drain_pending_emits_for("app_t");
@@ -1297,7 +1248,7 @@ mod tests {
 
     #[test]
     fn drain_pending_emits_on_empty_returns_empty_vec() {
-        let mut ctx = IsolateDbContext::new();
+        let mut ctx = ThreadDbContext::new();
         let drained = ctx.drain_pending_emits_for("app_t");
         assert!(drained.is_empty());
         assert!(ctx.pending_emits.is_empty());
@@ -1305,7 +1256,7 @@ mod tests {
 
     #[test]
     fn drain_then_push_starts_fresh() {
-        let mut ctx = IsolateDbContext::new();
+        let mut ctx = ThreadDbContext::new();
         ctx.push_pending_emit(dummy_event("c1"));
         let _ = ctx.drain_pending_emits_for("app_t");
         ctx.push_pending_emit(dummy_event("c2"));
@@ -1316,7 +1267,7 @@ mod tests {
 
     #[test]
     fn clear_pending_emits_drops_without_returning() {
-        let mut ctx = IsolateDbContext::new();
+        let mut ctx = ThreadDbContext::new();
         ctx.push_pending_emit(dummy_event("c1"));
         ctx.push_pending_emit(dummy_event("c2"));
         ctx.clear_pending_emits_for("app_t");
@@ -1327,7 +1278,7 @@ mod tests {
 
     #[test]
     fn clear_pending_emits_on_empty_is_idempotent() {
-        let mut ctx = IsolateDbContext::new();
+        let mut ctx = ThreadDbContext::new();
         ctx.clear_pending_emits_for("app_t");
         ctx.clear_pending_emits_for("app_t");
         assert!(ctx.pending_emits.is_empty());
@@ -1370,7 +1321,7 @@ mod tests {
     fn sec1_tx_parked_by_app_a_is_invisible_and_untakable_for_app_b() {
         run_async(async {
             let dir = tempfile::tempdir().expect("tempdir");
-            let mut ctx = IsolateDbContext::new();
+            let mut ctx = ThreadDbContext::new();
             let prev = ctx.install_tx_client("app_a", sqlite_tx_conn(&dir).await);
             assert!(prev.is_none(), "tx slot must start empty");
 
@@ -1403,7 +1354,7 @@ mod tests {
     fn sec1_savepoint_depth_is_scoped_per_app() {
         run_async(async {
             let dir = tempfile::tempdir().expect("tempdir");
-            let mut ctx = IsolateDbContext::new();
+            let mut ctx = ThreadDbContext::new();
             ctx.install_tx_client("app_a", sqlite_tx_conn(&dir).await);
 
             ctx.push_savepoint_for("app_a");
@@ -1429,7 +1380,7 @@ mod tests {
 
     #[test]
     fn sec1_pending_emits_drain_is_scoped_per_app() {
-        let mut ctx = IsolateDbContext::new();
+        let mut ctx = ThreadDbContext::new();
         let mut ev_a = dummy_event("orders");
         ev_a.app_id = "app_a".to_string();
         let mut ev_b = dummy_event("messages");

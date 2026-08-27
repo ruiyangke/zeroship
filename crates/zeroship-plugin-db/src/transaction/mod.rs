@@ -51,7 +51,7 @@
 //! ## Single-connection model & backend scope
 //!
 //! There is exactly one transaction connection slot per (app, isolate).
-//! It lives in `IsolateDbContext::tx_conns` and a second top-level
+//! It lives in `ThreadDbContext::tx_conns` and a second top-level
 //! transaction for the same app **waits** for it
 //! ([`AwaitTxClaim`]) rather than racing for it.
 //!
@@ -95,6 +95,7 @@ use std::cell::Cell;
 use zeroship_runtime::state::{OpResult, ResolveValue, SharedState};
 
 use crate::backend::SqlExecutor;
+use crate::binding::DbBinding;
 use crate::context::TxConnection;
 use crate::error::DbError;
 use crate::exec::{clear_pending_emits, drain_pending_emits_on_commit};
@@ -271,8 +272,9 @@ pub fn transaction_dispatch<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     user_fn: v8::Local<v8::Function>,
     isolation_level: Option<String>,
-    app_id: String,
+    binding: DbBinding,
 ) -> v8::Local<'s, v8::Promise> {
+    let app_id = binding.app_id().to_string();
     let state = runtime_state(scope);
 
     // Outer promise — returned to JS now; settled by the commit/rollback
@@ -396,7 +398,7 @@ pub fn transaction_dispatch<'s>(
                     // Continuation arm.
                     resolver: finalizer.outer.clone(),
                     value: ResolveValue::Continuation(Box::new(move |scope, state| {
-                        run_begin_continuation(scope, state, user_fn_global, finalizer, app_id);
+                        run_begin_continuation(scope, state, user_fn_global, finalizer, binding);
                     })),
                     request_id,
                 }
@@ -439,7 +441,7 @@ pub fn transaction_dispatch<'s>(
 }
 
 /// Future that resolves once this app owns the top-level-transaction
-/// claim (see [`crate::context::IsolateDbContext::try_claim_tx`]).
+/// claim (see [`crate::context::ThreadDbContext::try_claim_tx`]).
 ///
 /// Held from before the `BEGIN` until after the `COMMIT`/`ROLLBACK` has
 /// settled, so it covers the window in which the tx connection slot is
@@ -705,10 +707,11 @@ fn run_begin_continuation(
     state: &SharedState,
     user_fn_global: v8::Global<v8::Function>,
     finalizer: TxFinalizer,
-    app_id: String,
+    binding: DbBinding,
 ) {
+    let app_id = binding.app_id();
     // 1. Mint the tx-view (collections-as-props; no commit/rollback).
-    let tx_view = match crate::v8_classes::transaction::mint_tx_view(scope, &app_id) {
+    let tx_view = match crate::v8_classes::transaction::mint_tx_view(scope, &binding) {
         Ok(v) => v,
         Err(e) => {
             // Minting failed before the callback ran — roll the tx back
@@ -732,7 +735,7 @@ fn run_begin_continuation(
     //    isolate think it was inside this transaction.
     let user_fn = v8::Local::new(scope, &user_fn_global);
     let undefined = v8::undefined(scope).into();
-    let prev_scope = crate::tx_scope::enter(scope, &app_id);
+    let prev_scope = crate::tx_scope::enter(scope, app_id);
     let call_result = {
         v8::tc_scope!(let tc, scope);
         let ret = user_fn.call(tc, undefined, &[tx_view.into()]);
@@ -1040,7 +1043,7 @@ async fn exec_settle(app_id: &str, success: bool, savepoint: Option<&str>) -> Se
 /// slot, runs the statement, drops the client, and settles that app's
 /// broker queue.
 /// Every exit path below releases `app_id`'s top-level-transaction claim
-/// (see [`crate::context::IsolateDbContext::try_claim_tx`]). A path that
+/// (see [`crate::context::ThreadDbContext::try_claim_tx`]). A path that
 /// forgot to would park every later transaction for that app forever, so
 /// the release is deliberately duplicated per-arm rather than hidden in a
 /// guard that a future `return` could skip.

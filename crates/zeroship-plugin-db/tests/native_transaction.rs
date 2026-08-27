@@ -60,7 +60,7 @@ thread_local! {
     /// ONE compio runtime per test thread, alive for the whole thread.
     ///
     /// plugin-db parks its `compio_postgres::Pool` (and the backend handle
-    /// wrapping it) in a **thread-local** `IsolateDbContext` that deliberately
+    /// wrapping it) in a **thread-local** `ThreadDbContext` that deliberately
     /// outlives any single dispatch — `DbPlugin::register` only clears the pool
     /// when the DB URL *changes*, and every dispatch here uses the same URL. A
     /// compio runtime built per dispatch and dropped at the end of it therefore

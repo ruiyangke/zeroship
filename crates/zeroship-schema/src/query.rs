@@ -2994,7 +2994,7 @@ pub fn build_conflict_probe_with_dialect(
 /// Schema-aware SELECT builder.
 ///
 /// Same shape as [`build_find`], plus an optional `schema` (the cached
-/// `serde_json::Value` from `IsolateDbContext::schema_for`). When the
+/// `serde_json::Value` from `ThreadDbContext::schema_for`). When the
 /// schema is `Some(_)` and declares masked columns (`def.mask = Some({...})`
 /// with `kind != "none"`), the SELECT clause emits
 /// `"<col>_masked" AS "<col>"` in place of the bare parent column, and

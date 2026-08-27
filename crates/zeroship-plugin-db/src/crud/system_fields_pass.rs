@@ -114,7 +114,7 @@ pub(crate) fn derive_prefix_from_collection_name(collection: &str) -> String {
 
 /// Resolve the typed_id prefix for a given `(app_id, collection)`.
 ///
-/// 1. Consult the [`crate::context::IsolateDbContext`] schema cache for
+/// 1. Consult the [`crate::context::ThreadDbContext`] schema cache for
 ///    a `t.id(prefix)`-declared `idPrefix` on the `id` field.
 /// 2. Fall back to [`derive_prefix_from_collection_name`].
 ///

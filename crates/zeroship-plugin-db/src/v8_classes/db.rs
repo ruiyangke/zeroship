@@ -29,7 +29,7 @@
 //!
 //! ## Why a v8_class
 //!
-//! The instance carries per-isolate state (`app_id` + the collection
+//! The instance carries per-isolate state (its immutable [`DbBinding`] + the collection
 //! cache); the brand check that ships with `#[v8_class]` gives a
 //! free `instanceof`-style guard for any receiver-shape checks the
 //! runtime needs.
@@ -44,6 +44,7 @@ use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method};
 
+use crate::binding::{COLD_START_DEPLOY_TOKEN, DbBinding};
 use crate::transaction::transaction_dispatch;
 use crate::v8_bridge::v8_value_to_serde_json;
 use crate::v8_classes::collection::mint_collection;
@@ -57,16 +58,15 @@ use crate::v8_classes::db_platform::mint_db_platform;
 ///
 /// Field 0 of the wrapper holds a `Box<Db>` (this struct). The Weak
 /// finalizer registered by `mint_db` drops the Box on GC. There are
-/// no native resources to release in `Drop` — `app_id` is a String and
+/// no native resources to release in `Drop` — `binding` is owned and
 /// the `collection_cache` holds `v8::Global<v8::Object>` handles whose
 /// own Weak counterparts (registered by `mint_collection`) reclaim
 /// the wrapped Collection state.
 pub struct Db {
-    /// The app_id this Db belongs to. Captured at instance-build time
-    /// from `SharedState.env_vars["APP_ID"]`. Never mutated after mint,
-    /// so a plain `String` (not `RefCell`) — borrowed by `&self.app_id`
-    /// on the Collection's forwarded dispatch.
-    pub(crate) app_id: String,
+    /// Immutable app-at-deploy identity captured from the active isolate when
+    /// this wrapper is minted. Every Collection and async CRUD continuation
+    /// receives a clone, so another isolate on this thread cannot redirect it.
+    pub(crate) binding: DbBinding,
     /// Cache of `(collection_name -> Collection JS wrapper)`. Populated
     /// on the first `.collection(name)` call for each name; subsequent
     /// calls return the same Global so identity holds:
@@ -83,7 +83,7 @@ pub struct Db {
 impl std::fmt::Debug for Db {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Db")
-            .field("app_id", &self.app_id)
+            .field("binding", &self.binding)
             .field("collection_cache_len", &self.collection_cache.borrow().len())
             .finish()
     }
@@ -132,7 +132,7 @@ impl Db {
         match cache.entry(name) {
             Entry::Occupied(o) => Ok(v8::Local::new(scope, o.get())),
             Entry::Vacant(v) => {
-                let obj = mint_collection(scope, v.key().clone(), self.app_id.clone())?;
+                let obj = mint_collection(scope, v.key().clone(), self.binding.clone())?;
                 v.insert(v8::Global::new(scope, obj));
                 Ok(obj)
             }
@@ -204,7 +204,7 @@ impl Db {
                 None => None,
             }
         };
-        Ok(transaction_dispatch(scope, user_fn, isolation, self.app_id.clone()).into())
+        Ok(transaction_dispatch(scope, user_fn, isolation, self.binding.clone()).into())
     }
 
     // `db.setMaskPolicy` and the
@@ -235,7 +235,7 @@ impl Db {
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
         tracing::error!(
             target: "zeroship_db",
-            app_id = %self.app_id,
+            app_id = %self.binding.app_id(),
             "env.db.__platform string access denied (platform_internal_only) — \
              the platform capability handle is private-symbol-only"
         );
@@ -314,21 +314,20 @@ pub fn mint_db<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
 ) -> Option<v8::Local<'s, v8::Object>> {
-    // Stamp this app's deploy/schema-version token into the per-isolate
-    // DB context. The worker injects the app's `deploy_hash` as the
-    // `ZEROSHIP_DEPLOY_ID` env var at load (see `worker::cache::load_app`); a
-    // redeploy that changes the hash re-mints this wrapper, re-stamping the new
-    // token and invalidating the deploy-keyed introspection cache so the
-    // crypto/mask/column metadata of the *new* schema is re-read on the next op.
-    // Absent (dev `zeroship serve` / raw-JS / tests) ⇒ leave the context default
-    // (`"cold_start"`), preserving the historical cold contract.
-    {
+    // Capture the app-at-deploy identity from THIS isolate. The worker injects
+    // `deploy_hash` as `ZEROSHIP_DEPLOY_ID`; pinned workflow runtimes carry the
+    // hash they were started on. Absent in dev/raw-JS harnesses means the
+    // historical `cold_start` token.
+    let binding = {
         let state = crate::v8_bridge::runtime_state(scope);
-        let deploy_id = state.borrow().env_vars.get("ZEROSHIP_DEPLOY_ID").cloned();
-        if let Some(token) = deploy_id {
-            crate::context::with_mut(|c| c.set_deploy_token(app_id, &token));
-        }
-    }
+        let deploy_token = state
+            .borrow()
+            .env_vars
+            .get("ZEROSHIP_DEPLOY_ID")
+            .cloned()
+            .unwrap_or_else(|| COLD_START_DEPLOY_TOKEN.to_string());
+        DbBinding::new(app_id, deploy_token)
+    };
 
     let class_tmpl = Db::install(scope);
     let inst_tmpl = class_tmpl.instance_template(scope);
@@ -340,7 +339,7 @@ pub fn mint_db<'s>(
     obj.set_prototype(scope, proto_v);
 
     let state = Db {
-        app_id: app_id.to_string(),
+        binding: binding.clone(),
         collection_cache: RefCell::new(HashMap::new()),
     };
     let boxed: Box<Db> = Box::new(state);
@@ -372,7 +371,7 @@ pub fn mint_db<'s>(
     // simply yields `undefined` and `installSchema` falls back to its
     // platform-handle-absent path (skip registerModel, used by RPC-only /
     // fetch-only apps and dev runs without a DB URL).
-    if let Some(plat) = mint_db_platform(scope, app_id) {
+    if let Some(plat) = mint_db_platform(scope, binding) {
         let priv_sym = zeroship_runtime::core::init::zs_platform_private(scope);
         // `set_private` returns `Option<bool>` (None only on context
         // teardown — impossible here, we just minted the object). The
@@ -389,7 +388,112 @@ pub fn mint_db<'s>(
 mod tests {
     #![allow(unsafe_code)]
 
+    use std::collections::HashMap;
+
+    use serde_json::{Value, json};
+    use zeroship_runtime::Runtime;
+
     use super::normalize_isolation_level;
+    use crate::{binding::DbBinding, v8_classes::collection::Collection};
+
+    fn runtime_for_deploy(app_id: &str, deploy_token: &str) -> Runtime {
+        Runtime::builder()
+            .env_vars(HashMap::from([
+                ("APP_ID".to_string(), app_id.to_string()),
+                (
+                    "ZEROSHIP_DEPLOY_ID".to_string(),
+                    deploy_token.to_string(),
+                ),
+            ]))
+            .build()
+    }
+
+    fn mint_collection_binding(
+        runtime: &Runtime,
+        app_id: &str,
+        collection: &str,
+    ) -> v8::Global<v8::Object> {
+        runtime.with_scope(|scope| {
+            let db = super::mint_db(scope, app_id).expect("mint Db binding");
+            let collection_key = v8::String::new(scope, "collection").unwrap();
+            let collection_fn: v8::Local<v8::Function> = db
+                .get(scope, collection_key.into())
+                .expect("Db.collection property")
+                .try_into()
+                .expect("Db.collection function");
+            let name = v8::String::new(scope, collection).unwrap();
+            let value = collection_fn
+                .call(scope, db.into(), &[name.into()])
+                .expect("mint Collection binding");
+            let object: v8::Local<v8::Object> =
+                value.try_into().expect("Collection binding object");
+            v8::Global::new(scope, object)
+        })
+    }
+
+    fn resolve_collection_binding(
+        runtime: &Runtime,
+        collection: &v8::Global<v8::Object>,
+    ) -> (String, Option<Value>) {
+        runtime.with_scope(|scope| {
+            let object = v8::Local::new(scope, collection);
+            let external: v8::Local<v8::External> = object
+                .get_internal_field(scope, 0)
+                .expect("Collection internal field")
+                .try_into()
+                .expect("Collection native state");
+            // SAFETY: `mint_collection` stores a `Box<Collection>` in internal
+            // field 0 and the Global above keeps the wrapper (and therefore the
+            // Box) live for this read in its owning isolate.
+            let binding = unsafe { &*(external.value() as *const Collection) };
+            binding.resolved_runtime_schema_for_tests()
+        })
+    }
+
+    #[test]
+    fn co_resident_deploy_bindings_keep_tokens_and_schema_entries_isolated() {
+        const APP: &str = "app_same";
+        const COLLECTION: &str = "secrets";
+        const PINNED: &str = "deploy_pinned";
+        const CURRENT: &str = "deploy_current";
+
+        crate::context::with_mut(|c| *c = crate::context::ThreadDbContext::new());
+
+        let pinned_runtime = runtime_for_deploy(APP, PINNED);
+        let pinned_collection = mint_collection_binding(&pinned_runtime, APP, COLLECTION);
+        let pinned_binding = DbBinding::new(APP, PINNED);
+        crate::context::with_mut(|c| {
+            c.cache_introspected_schema(
+                &pinned_binding,
+                COLLECTION,
+                Some(json!({ "marker": "pinned" })),
+            );
+        });
+        pinned_runtime.exit_isolate();
+
+        let current_runtime = runtime_for_deploy(APP, CURRENT);
+        let current_collection = mint_collection_binding(&current_runtime, APP, COLLECTION);
+        let current_binding = DbBinding::new(APP, CURRENT);
+        crate::context::with_mut(|c| {
+            c.cache_introspected_schema(
+                &current_binding,
+                COLLECTION,
+                Some(json!({ "marker": "current" })),
+            );
+        });
+        current_runtime.exit_isolate();
+
+        assert_eq!(
+            resolve_collection_binding(&pinned_runtime, &pinned_collection),
+            (PINNED.to_string(), Some(json!({ "marker": "pinned" }))),
+            "minting the current deploy redirected the pinned binding",
+        );
+        assert_eq!(
+            resolve_collection_binding(&current_runtime, &current_collection),
+            (CURRENT.to_string(), Some(json!({ "marker": "current" }))),
+            "the current binding must retain its own deploy token and cache entry",
+        );
+    }
 
     /// The rejection message is the one artefact a creator reads at the moment
     /// they get the spelling wrong, so it must not omit a value the very same

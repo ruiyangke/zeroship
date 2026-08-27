@@ -327,7 +327,7 @@ pub(crate) fn check_unmask_authorization(
 /// before the auth check. A storage miss is a no-op (cache stays
 /// empty, the default-deny fallback applies on the auth path); a storage hit
 /// installs the loaded policy via
-/// [`crate::context::IsolateDbContext::set_mask_policy_for_app`].
+/// [`crate::context::ThreadDbContext::set_mask_policy_for_app`].
 ///
 /// Errors propagate (a corrupt sidecar JSON or PG SQL failure surfaces
 /// as `DbError`); the unmask flow then rejects with the typed error
@@ -1758,7 +1758,7 @@ mod tests {
     // has no policy cached; these tests pin that fallthrough
     // behaviour.
     //
-    // Unit tests reach the per-isolate ISOLATE_CTX (which the
+    // Unit tests reach the per-isolate THREAD_DB_CTX (which the
     // `check_unmask_authorization` body uses to look up the cached
     // policy). Each test uses a unique app_id so the global
     // thread-local cache state doesn't bleed between tests.
