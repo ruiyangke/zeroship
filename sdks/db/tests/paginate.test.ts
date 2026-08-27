@@ -187,7 +187,7 @@ describe("Query.paginate — descending sort", () => {
     assert.deepEqual(calls[1].filter, { id: { $lt: "8" } });
   });
 
-  test("descending field sort uses $lt + tie-break with id $lt", async () => {
+  test("descending field sort uses $lt + ascending id tie-break", async () => {
     const first: PlainObject[] = [
       { id: "3", created_at: 1000 },
       { id: "1", created_at: 900 },
@@ -197,10 +197,11 @@ describe("Query.paginate — descending sort", () => {
     const r1 = await new Query("u", {}, fn)
       .sort({ created_at: -1 })
       .paginate({ numItems: 2 });
-    assert.deepEqual(calls[0].opts.orderBy, { created_at: -1 });
+    assert.deepEqual(calls[0].opts.orderBy, { created_at: -1, id: 1 },
+      "the emitted order must carry the id tiebreak the seek relies on");
     const c = decode(r1.data!.continueCursor);
     assert.equal(c.lastId, "1");
-    assert.equal(c.lastValue, 900);
+    assert.deepEqual(c.lastValues, { created_at: 900 });
 
     await new Query("u", {}, fn)
       .sort({ created_at: -1 })
@@ -208,7 +209,11 @@ describe("Query.paginate — descending sort", () => {
     assert.deepEqual(calls[1].filter, {
       $or: [
         { created_at: { $lt: 900 } },
-        { $and: [{ created_at: 900 }, { id: { $lt: "1" } }] },
+        // id ascends even when the sort key descends: the emitted order is
+        // (created_at DESC, id ASC), and the seek must compare that same
+        // tuple. Pairing a DESC key with an ASC id is sound - what matters is
+        // that order and seek agree, not that their directions match.
+        { $and: [{ created_at: 900 }, { id: { $gt: "1" } }] },
       ],
     });
   });
@@ -227,10 +232,11 @@ describe("Query.paginate — non-id sort (ascending)", () => {
       .sort({ name: 1 })
       .paginate({ numItems: 2 });
 
-    assert.deepEqual(calls[0].opts.orderBy, { name: 1 });
+    assert.deepEqual(calls[0].opts.orderBy, { name: 1, id: 1 },
+      "the emitted order must carry the id tiebreak the seek relies on");
     const c = decode(r1.data!.continueCursor);
     assert.equal(c.lastId, "3");
-    assert.equal(c.lastValue, "bob");
+    assert.deepEqual(c.lastValues, { name: "bob" });
 
     await new Query("u", {}, fn)
       .sort({ name: 1 })
@@ -258,11 +264,19 @@ describe("Query.paginate — multi-field sort (compound)", () => {
       .sort({ status: 1, created_at: 1 })
       .paginate({ numItems: 2 });
 
-    assert.deepEqual(calls[0].opts.orderBy, { status: 1, created_at: 1 });
+    // The emitted order carries the id tiebreak; the seek compares the SAME
+    // tuple. An earlier version of this test asserted the seek used only
+    // "the first orderBy key (status), with id as tie-break" - which is what
+    // the code did, and was the defect: on a multi-key sort the order was
+    // (status, created_at) while the seek asked for (status, id), silently
+    // dropping rows between them. The test encoded the bug as the contract,
+    // which is why it stayed green while rows were being lost.
+    assert.deepEqual(calls[0].opts.orderBy, { status: 1, created_at: 1, id: 1 });
     const c = decode(r1.data!.continueCursor);
     assert.deepEqual(c.orderBy, { status: 1, created_at: 1 });
-    // The seek's first key is the first orderBy key (status), with id as tie-break.
-    assert.equal(c.lastValue, "open");
+    // Every ordering key's value is carried, not just the first - lexicographic
+    // seeking is impossible without them.
+    assert.deepEqual(c.lastValues, { status: "open", created_at: 200 });
     assert.equal(c.lastId, "2");
 
     // Round-trip — same sort accepted.
@@ -313,5 +327,111 @@ describe("Query.paginate — last page (isDone)", () => {
     assert.equal(r2.data!.isDone, true);
     assert.equal(r2.data!.page.length, 1);
     assert.equal(r2.data!.page[0].id, "4");
+  });
+});
+
+/**
+ * A mock that ACTUALLY applies the emitted filter and ordering, unlike
+ * `makeMockNative` above which returns canned pages and ignores both.
+ *
+ * That difference is the point: a canned-page mock can only check the SHAPE of
+ * what paginate emits, and the shape is exactly what the existing multi-key
+ * test blesses. To show that rows are lost you have to let the store behave
+ * like a store.
+ */
+function makeFilteringNative(rows: PlainObject[]) {
+  const calls: { filter: PlainObject; opts: ZeroshipDbFindOpts }[] = [];
+
+  const matches = (row: PlainObject, filter: PlainObject): boolean => {
+    for (const [k, v] of Object.entries(filter)) {
+      if (k === "$or") {
+        if (!(v as PlainObject[]).some((sub) => matches(row, sub))) return false;
+        continue;
+      }
+      if (k === "$and") {
+        if (!(v as PlainObject[]).every((sub) => matches(row, sub))) return false;
+        continue;
+      }
+      const actual = row[k];
+      if (v !== null && typeof v === "object") {
+        const ops = v as Record<string, unknown>;
+        if ("$gt" in ops && !(actual! > ops.$gt!)) return false;
+        if ("$lt" in ops && !(actual! < ops.$lt!)) return false;
+      } else if (actual !== v) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  const fn = async (
+    _collection: string,
+    filter: PlainObject,
+    opts: ZeroshipDbFindOpts,
+  ): Promise<PlainObject[]> => {
+    calls.push({ filter, opts });
+    let out = rows.filter((r) => matches(r, filter));
+    const orderBy = (opts.orderBy ?? {}) as Record<string, 1 | -1>;
+    const keys = Object.keys(orderBy);
+    out = [...out].sort((a, b) => {
+      for (const k of keys) {
+        const av = a[k] as never;
+        const bv = b[k] as never;
+        if (av < bv) return orderBy[k] === 1 ? -1 : 1;
+        if (av > bv) return orderBy[k] === 1 ? 1 : -1;
+      }
+      return 0;
+    });
+    if (typeof opts.limit === "number") out = out.slice(0, opts.limit);
+    return out;
+  };
+
+  return { fn, calls };
+}
+
+describe("Query.paginate — the seek must cover every ordering key", () => {
+  test("multi-key sort does not silently drop rows across a page boundary", async () => {
+    // ORDER BY is emitted as the user's sort verbatim - one term per key, with
+    // NO primary-key tiebreak appended (build_order_by_with_validator in
+    // crates/zeroship-schema/src/query.rs pushes exactly one term per supplied
+    // key and appends nothing). But the seek predicate is built from
+    // `keys[0]` plus `id` (`_buildSeekFilter`), i.e. it assumes the order is
+    // `(firstKey, id)`.
+    //
+    // When those disagree - any multi-key sort - the seek skips rows that sort
+    // AFTER the page boundary by the real ordering but have a smaller id.
+    // Fixture: within status="open", created_at order is 100, 200, 300 while
+    // the ids are "1", "5", "2". A page of 2 ends at id "5"; the seek then
+    // asks for id > "5", so id "2" (created_at 300, which genuinely belongs on
+    // page 2) can never be returned by any subsequent page.
+    const rows: PlainObject[] = [
+      { id: "1", status: "open", created_at: 100 },
+      { id: "5", status: "open", created_at: 200 },
+      { id: "2", status: "open", created_at: 300 },
+    ];
+    const { fn } = makeFilteringNative(rows);
+
+    const r1 = await new Query("u", {}, fn)
+      .sort({ status: 1, created_at: 1 })
+      .paginate({ numItems: 2 });
+    assert.equal(r1.error, null);
+    assert.deepEqual(r1.data!.page.map((r) => r.id), ["1", "5"]);
+    assert.equal(r1.data!.isDone, false, "a third row exists");
+
+    const r2 = await new Query("u", {}, fn)
+      .sort({ status: 1, created_at: 1 })
+      .paginate({ cursor: r1.data!.continueCursor, numItems: 2 });
+    assert.equal(r2.error, null);
+
+    // Every row must appear exactly once across the two pages. This is the
+    // assertion that matters: it is about the DATA, not the emitted SQL shape,
+    // so it cannot be satisfied by emitting a differently-shaped-but-still-
+    // wrong seek.
+    const seen = [...r1.data!.page, ...r2.data!.page].map((r) => r.id);
+    assert.deepEqual(
+      [...seen].sort(),
+      ["1", "2", "5"],
+      `pagination dropped rows: saw ${JSON.stringify(seen)}`,
+    );
   });
 });
