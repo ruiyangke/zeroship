@@ -988,9 +988,10 @@ const _procedures = { setup, probeBegin };
 /// The driver detects exactly this and turns it into an error
 /// (`libs/compio-postgres/src/transaction.rs:186-188`), but plugin-db's raw
 /// executor throws the command tag away - `client_exec` returns
-/// `Ok(rows.len() as u64)` (`crates/zeroship-plugin-db/src/backend/postgres.rs:201-212`)
-/// - and the explicit-transaction settle path sends its `COMMIT` through that
-/// same function (`crates/zeroship-plugin-db/src/transaction/mod.rs:1001`).
+/// `Ok(rows.len() as u64)`
+/// (`crates/zeroship-plugin-db/src/backend/postgres.rs:201-212`) - and the
+/// explicit-transaction settle path sends its `COMMIT` through that same
+/// function (`crates/zeroship-plugin-db/src/transaction/mod.rs:1001`).
 ///
 /// SCOPE: this drives an EXPLICIT creator transaction on purpose. The autocommit
 /// path already goes through the driver's own `tx.commit()` wrapper
