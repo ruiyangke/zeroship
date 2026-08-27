@@ -207,6 +207,26 @@ impl BackendMessages {
         }
         Ok(None)
     }
+
+    /// Clone and decode the first error response in this batch, if any.
+    ///
+    /// The connection dispatcher uses this before waking a response consumer:
+    /// a `FATAL` or `PANIC` response means PostgreSQL is ending the session, so
+    /// a pooled borrower that drops immediately must already see the connection
+    /// as retired rather than briefly returning it to the idle set.
+    pub(crate) fn first_error_response(&self) -> io::Result<Option<backend::ErrorResponseBody>> {
+        if !self.contains_tag(backend::ERROR_RESPONSE_TAG) {
+            return Ok(None);
+        }
+
+        let mut messages = BackendMessages(self.0.clone());
+        while let Some(message) = messages.next()? {
+            if let backend::Message::ErrorResponse(body) = message {
+                return Ok(Some(body));
+            }
+        }
+        Ok(None)
+    }
 }
 
 impl FallibleIterator for BackendMessages {
