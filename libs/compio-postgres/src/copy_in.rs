@@ -468,6 +468,19 @@ where
         let _ = sender.send(CopyInMessage::Abort).await;
     }
 
+    // A local API/protocol mismatch can precede an ErrorResponse generated
+    // while Execute or the following Sync finishes. Keep the mismatch only as
+    // a fallback at ReadyForQuery; a server diagnosis always wins.
+    async fn drain_refusal(responses: &mut Responses, fallback: Error) -> Error {
+        loop {
+            match responses.next().await {
+                Ok(Message::ReadyForQuery(_)) => return fallback,
+                Ok(_) => {}
+                Err(error) => return error,
+            }
+        }
+    }
+
     if unnamed_sql.is_some() {
         match responses.next().await {
             Ok(Message::ParseComplete) => {}
@@ -507,7 +520,7 @@ where
         Ok(Message::CopyOutResponse(_)) => {
             abort(&mut sender).await;
             return Err(ExecutionError::after_bind_complete(
-                Error::copy_out_answered_copy_in(),
+                drain_refusal(&mut responses, Error::copy_out_answered_copy_in()).await,
             ));
         }
         Ok(_) => {

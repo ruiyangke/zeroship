@@ -130,3 +130,40 @@ async fn unsupported_copy_out_is_refused_by_name_at_every_public_entry_point() {
     .await
     .expect("COPY refusal test exceeded its watchdog");
 }
+
+/// The direction mismatch is only provisional: `CopyOutResponse` precedes
+/// execution, so the server can still diagnose the statement while producing
+/// its rows. That SQLSTATE is more useful than the local API mismatch.
+#[compio::test]
+async fn copy_in_prefers_a_later_server_error_to_its_direction_refusal() {
+    compio::time::timeout(TEST_TIMEOUT, async {
+        let client = connect_client().await;
+
+        let error = match client
+            .copy_in::<_, Bytes>(
+                "COPY (
+                    SELECT 1 / (n - 2)
+                    FROM generate_series(1, 3) AS series(n)
+                ) TO STDOUT",
+            )
+            .await
+        {
+            Ok(_) => panic!("copy_in accepted COPY TO STDOUT"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("22012"),
+            "copy_in discarded division_by_zero behind its direction refusal: {}",
+            common::error_chain(&error),
+        );
+
+        let value: i32 = client
+            .query_one_scalar("SELECT 41::int4", &[])
+            .await
+            .expect("the failed wrong-direction COPY poisoned its connection");
+        assert_eq!(value, 41);
+    })
+    .await
+    .expect("late wrong-direction diagnosis exceeded its watchdog");
+}
