@@ -281,10 +281,6 @@ export function fieldDefToDto(
   if (def.vectorDims !== undefined) dto.vectorDims = def.vectorDims;
   if (def.vectorMetric !== undefined) dto.vectorMetric = def.vectorMetric;
 
-  // Full-text-search facets.
-  if (def.fts !== undefined) dto.fts = def.fts;
-  if (def.ftsLanguage !== undefined) dto.ftsLanguage = def.ftsLanguage;
-
   // Encryption + masking (verbatim sub-objects).
   if (def.encrypted !== undefined) dto.encrypted = def.encrypted;
   if (def.mask !== undefined) dto.mask = def.mask;
@@ -294,6 +290,21 @@ export function fieldDefToDto(
   // `pattern`, `shape`, `items`, `literalValue`, `variants`, `discriminator`,
   // `actorNullable`, `timestampAuto` have no descriptor home. Reject rather than
   // silently drop when the author actually used one.
+  //
+  // `fts`/`ftsLanguage` joined this list rather than the assignment block above.
+  // They used to be written onto the DTO, which stopped compiling when
+  // `FieldDescriptorDto` lost the fields: **full-text support was removed from
+  // the migration engine outright** - no `.fts()` facet, no `fts5` sentinel, no
+  // `IndexMethod` variant - on the grounds that FTS is not an atomic type and
+  // should be composed from smaller primitives (see the rationale on
+  // `desired_snapshot_for_dialect` in
+  // `crates/zeroship-migrate-core/src/render/declarative.rs`). Rejecting is the
+  // honest response: `t.string().fts()` is still callable in `@zeroship/db`, so
+  // an author CAN reach this path, and there is no longer anywhere for the facet
+  // to go. Silently dropping it would render a schema whose full-text columns
+  // simply never appear.
+  rejectUnmappableFacet(where, def, "fts");
+  rejectUnmappableFacet(where, def, "ftsLanguage");
   rejectUnmappableFacet(where, def, "pattern");
   rejectUnmappableFacet(where, def, "shape");
   rejectUnmappableFacet(where, def, "items");
