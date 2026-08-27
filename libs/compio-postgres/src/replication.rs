@@ -1152,8 +1152,20 @@ where
                     }
                 }
                 COPY_DONE_TAG => {
-                    // Drain (length-only frame).
-                    let _ = self.stream.buf().split_to(header.body_len()).freeze();
+                    let body_len = header.body_len();
+                    let _ = self.stream.buf().split_to(body_len).freeze();
+                    if body_len != 0 {
+                        self.in_flight.poison();
+                        if let Some(release) = &self.release {
+                            release.shutdown();
+                        }
+                        return Err(Error::io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!(
+                                "CopyDone must have an empty body, but the server sent {body_len} bytes"
+                            ),
+                        )));
+                    }
                     return Ok(None);
                 }
                 ERROR_RESPONSE_TAG => {
@@ -3979,6 +3991,38 @@ mod tests {
                 .is_none(),
             "CopyDone ends the stream"
         );
+    }
+
+    /// CopyDone is exactly a tag plus Int32(4); it has no body. Accepting a
+    /// payload silently changes malformed bytes into a clean CopyBoth state
+    /// transition, so reject it by name and retire the stream.
+    #[compio::test]
+    async fn copy_done_with_a_body_is_rejected_and_retires_the_stream() {
+        let mut wire = vec![COPY_DONE_TAG];
+        wire.extend_from_slice(&5u32.to_be_bytes());
+        wire.push(0xAA);
+
+        let mut stream = stream_over(wire);
+        let error = stream
+            .next()
+            .await
+            .expect_err("CopyDone with a body was accepted as a clean transition");
+        let chain = std::iter::successors(std::error::Error::source(&error), |source| {
+            std::error::Error::source(*source)
+        })
+        .fold(error.to_string(), |chain, source| {
+            format!("{chain}: {source}")
+        });
+        assert!(
+            chain.contains("CopyDone") && chain.contains("empty body"),
+            "the malformed CopyDone was not refused by name: {chain}"
+        );
+
+        let retry = stream
+            .next()
+            .await
+            .expect_err("a stream with a malformed CopyDone became reusable");
+        assert!(retry.is_cancelled(), "the malformed stream was not retired");
     }
 
     /// An unhandled tag must retire the stream too, because its body was
