@@ -967,14 +967,7 @@ impl Pool {
                         // entered `entries`; dropping it closes the session.
                         drop(entry);
                         drop(entries);
-                        return Err(if i == 0 {
-                            e
-                        } else {
-                            pool_error(format!(
-                                "warm-up after_connect failed after {i} successful \
-                                 connection(s): {e}"
-                            ))
-                        });
+                        return Err(e);
                     }
                     if !entry.is_pool_eligible() {
                         drop(entry);
