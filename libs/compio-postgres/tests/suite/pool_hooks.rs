@@ -4,6 +4,8 @@ use compio_postgres::config::TargetSessionAttrs;
 use compio_postgres::error::SqlState;
 use compio_postgres::{Config, Pool, PoolConfig};
 use std::cell::Cell;
+use std::io::{ErrorKind, Read, Write};
+use std::net::TcpListener;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -27,6 +29,226 @@ async fn connect_pool(url: &str, config: PoolConfig) -> Pool {
     Pool::connect_with_pool_config(url, config)
         .await
         .unwrap_or_else(|error| common::postgres_unreachable(url, &error))
+}
+
+fn read_startup(stream: &mut std::net::TcpStream) {
+    let mut length = [0_u8; 4];
+    stream.read_exact(&mut length).unwrap();
+    let remaining = u32::from_be_bytes(length) as usize - length.len();
+    let mut startup = vec![0_u8; remaining];
+    stream.read_exact(&mut startup).unwrap();
+}
+
+fn backend_frame(tag: u8, body: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(body.len() + 5);
+    frame.push(tag);
+    frame.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_be_bytes());
+    frame.extend_from_slice(body);
+    frame
+}
+
+fn write_startup_ok(stream: &mut std::net::TcpStream, process_id: u32) {
+    let pid = process_id.to_be_bytes();
+    stream
+        .write_all(&[
+            b'R', 0, 0, 0, 8, 0, 0, 0, 0, b'K', 0, 0, 0, 12, pid[0], pid[1], pid[2], pid[3], 0, 0,
+            0, 46, b'Z', 0, 0, 0, 5, b'I',
+        ])
+        .unwrap();
+}
+
+/// Accept one healthy connection, then answer every later startup with 57P03
+/// until the test signals completion. The measured accept count makes a retry
+/// policy mutation a wrong value instead of a blocked server thread.
+struct StartupFailureServer {
+    address: std::net::SocketAddr,
+    finish: std::sync::mpsc::Sender<()>,
+    result: std::sync::mpsc::Receiver<(usize, bool)>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+enum IdleServerCommand {
+    Fatal {
+        index: usize,
+        retired: futures_channel::oneshot::Sender<()>,
+    },
+    Finish,
+}
+
+struct IdleFatalServer {
+    address: std::net::SocketAddr,
+    commands: std::sync::mpsc::Sender<IdleServerCommand>,
+    accepted: std::sync::mpsc::Receiver<usize>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+fn idle_fatal_server() -> IdleFatalServer {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let (command_tx, command_rx) = std::sync::mpsc::channel();
+    let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        let mut streams = Vec::new();
+        loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    read_startup(&mut stream);
+                    write_startup_ok(&mut stream, 45 + streams.len() as u32);
+                    streams.push(Some(stream));
+                }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+                Err(error) => panic!("idle FATAL server accept failed: {error}"),
+            }
+
+            match command_rx.try_recv() {
+                Ok(IdleServerCommand::Fatal { index, retired }) => {
+                    let mut stream = streams
+                        .get_mut(index)
+                        .and_then(Option::take)
+                        .expect("FATAL command named a connection not yet accepted");
+                    let frame = backend_frame(
+                        b'E',
+                        b"SFATAL\0VFATAL\0C57P01\0Mscripted idle termination\0\0",
+                    );
+                    stream.write_all(&frame).unwrap();
+                    stream.flush().unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let mut byte = [0_u8; 1];
+                    loop {
+                        match stream.read(&mut byte) {
+                            Ok(0) => break,
+                            Ok(_) => {}
+                            Err(error)
+                                if matches!(
+                                    error.kind(),
+                                    ErrorKind::ConnectionAborted
+                                        | ErrorKind::ConnectionReset
+                                        | ErrorKind::BrokenPipe
+                                ) =>
+                            {
+                                break;
+                            }
+                            Err(error) => {
+                                panic!("driver did not retire the idle FATAL session: {error}")
+                            }
+                        }
+                    }
+                    let _ = retired.send(());
+                }
+                Ok(IdleServerCommand::Finish) => {
+                    let _ = accepted_tx.send(streams.len());
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+            }
+        }
+    });
+    IdleFatalServer {
+        address,
+        commands: command_tx,
+        accepted: accepted_rx,
+        thread,
+    }
+}
+
+async fn retire_idle_backend(commands: &std::sync::mpsc::Sender<IdleServerCommand>, index: usize) {
+    let (retired_tx, retired_rx) = futures_channel::oneshot::channel();
+    commands
+        .send(IdleServerCommand::Fatal {
+            index,
+            retired: retired_tx,
+        })
+        .expect("idle FATAL server stopped before its command");
+    compio::time::timeout(Duration::from_secs(5), retired_rx)
+        .await
+        .expect("driver did not retire the idle FATAL session")
+        .expect("idle FATAL server stopped before reporting retirement");
+}
+
+fn finish_idle_fatal_server(server: IdleFatalServer) -> usize {
+    server
+        .commands
+        .send(IdleServerCommand::Finish)
+        .expect("idle FATAL server stopped before Finish");
+    let accepted = server
+        .accepted
+        .recv_timeout(Duration::from_secs(5))
+        .expect("idle FATAL server did not report its connection count");
+    server.thread.join().expect("idle FATAL server panicked");
+    accepted
+}
+
+fn later_warmup_startup_failure_server() -> StartupFailureServer {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let mut accepted = 0_usize;
+        let mut first = None;
+        loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    read_startup(&mut stream);
+                    if accepted == 0 {
+                        write_startup_ok(&mut stream, 45);
+                        first = Some(stream);
+                    } else {
+                        let frame = backend_frame(
+                            b'E',
+                            b"SFATAL\0VFATAL\0C57P03\0Mscripted startup refusal\0\0",
+                        );
+                        stream.write_all(&frame).unwrap();
+                    }
+                    accepted += 1;
+                }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    if finish_rx.try_recv().is_ok() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(_) => break,
+            }
+        }
+
+        let closed = first.is_some_and(|mut stream| {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut byte = [0_u8; 1];
+            loop {
+                match stream.read(&mut byte) {
+                    Ok(0) => return true,
+                    Ok(_) => {}
+                    Err(error) => {
+                        return matches!(
+                            error.kind(),
+                            ErrorKind::ConnectionAborted
+                                | ErrorKind::ConnectionReset
+                                | ErrorKind::BrokenPipe
+                        );
+                    }
+                }
+            }
+        });
+        let _ = result_tx.send((accepted, closed));
+    });
+    StartupFailureServer {
+        address,
+        finish: finish_tx,
+        result: result_rx,
+        thread: server,
+    }
 }
 
 #[compio::test]
@@ -177,6 +399,197 @@ async fn later_warmup_after_connect_failure_preserves_sqlstate() {
         "later warm-up after_connect discarded SQLSTATE 22012: {error}"
     );
     assert_eq!(calls.get(), 2, "the failing second hook was not reached");
+}
+
+#[compio::test]
+async fn later_warmup_startup_failure_preserves_sqlstate() {
+    let server = later_warmup_startup_failure_server();
+    let connection_config: Config = format!(
+        "postgres://postgres@{}/fake?sslmode=disable",
+        server.address
+    )
+    .parse()
+    .unwrap();
+    let pool_config = config(2, 2);
+
+    let outcome = compio::time::timeout(
+        Duration::from_secs(5),
+        Pool::connect_with_config(connection_config, pool_config),
+    )
+    .await;
+    let _ = server.finish.send(());
+    let (accepted, first_closed) = server
+        .result
+        .recv_timeout(Duration::from_secs(6))
+        .expect("scripted startup server did not finish");
+    server
+        .thread
+        .join()
+        .expect("scripted startup server panicked");
+
+    assert_eq!(
+        accepted, 4,
+        "warm-up did not make one successful connection plus three retries"
+    );
+    assert!(first_closed, "startup failure left the first session open");
+    let outcome = outcome.expect("pool warm-up did not finish");
+    let error = outcome.expect_err("the second warm-up accepted startup refusal");
+    assert_eq!(
+        error.code(),
+        Some(&SqlState::CANNOT_CONNECT_NOW),
+        "later warm-up startup failure discarded SQLSTATE 57P03: {error}"
+    );
+}
+
+#[compio::test]
+async fn current_warmup_eligibility_preserves_idle_fatal() {
+    let server = idle_fatal_server();
+    let commands = server.commands.clone();
+    let calls = Rc::new(Cell::new(0));
+    let hook_calls = Rc::clone(&calls);
+    let mut pool_config = config(1, 1);
+    pool_config.after_connect(move |_| {
+        let commands = commands.clone();
+        hook_calls.set(hook_calls.get() + 1);
+        Box::pin(async move {
+            retire_idle_backend(&commands, 0).await;
+            Ok(())
+        })
+    });
+    let connection_config: Config = format!(
+        "postgres://postgres@{}/fake?sslmode=disable",
+        server.address
+    )
+    .parse()
+    .unwrap();
+
+    let outcome = compio::time::timeout(
+        Duration::from_secs(5),
+        Pool::connect_with_config(connection_config, pool_config),
+    )
+    .await;
+    let error = match outcome {
+        Ok(Err(error)) => Some(error),
+        Ok(Ok(pool)) => {
+            drop(pool);
+            None
+        }
+        Err(_) => None,
+    };
+    let accepted = finish_idle_fatal_server(server);
+
+    assert_eq!(accepted, 1, "current warm-up opened extra connections");
+    assert_eq!(calls.get(), 1, "current warm-up hook count moved");
+    let error = error.expect("current warm-up published its FATAL session or timed out");
+    assert_eq!(
+        error.code(),
+        Some(&SqlState::ADMIN_SHUTDOWN),
+        "current warm-up eligibility discarded SQLSTATE 57P01: {error}"
+    );
+}
+
+#[compio::test]
+async fn final_warmup_eligibility_preserves_idle_fatal() {
+    let server = idle_fatal_server();
+    let commands = server.commands.clone();
+    let calls = Rc::new(Cell::new(0));
+    let hook_calls = Rc::clone(&calls);
+    let mut pool_config = config(2, 2);
+    pool_config.after_connect(move |_| {
+        let invocation = hook_calls.get() + 1;
+        hook_calls.set(invocation);
+        let commands = commands.clone();
+        Box::pin(async move {
+            if invocation == 2 {
+                retire_idle_backend(&commands, 0).await;
+            }
+            Ok(())
+        })
+    });
+    let connection_config: Config = format!(
+        "postgres://postgres@{}/fake?sslmode=disable",
+        server.address
+    )
+    .parse()
+    .unwrap();
+
+    let outcome = compio::time::timeout(
+        Duration::from_secs(5),
+        Pool::connect_with_config(connection_config, pool_config),
+    )
+    .await;
+    let error = match outcome {
+        Ok(Err(error)) => Some(error),
+        Ok(Ok(pool)) => {
+            drop(pool);
+            None
+        }
+        Err(_) => None,
+    };
+    let accepted = finish_idle_fatal_server(server);
+
+    assert_eq!(
+        accepted, 2,
+        "final warm-up opened the wrong connection count"
+    );
+    assert_eq!(calls.get(), 2, "final warm-up hook count moved");
+    let error = error.expect("final warm-up published its FATAL session or timed out");
+    assert_eq!(
+        error.code(),
+        Some(&SqlState::ADMIN_SHUTDOWN),
+        "final warm-up eligibility discarded SQLSTATE 57P01: {error}"
+    );
+}
+
+#[compio::test]
+async fn fresh_after_connect_eligibility_preserves_idle_fatal() {
+    let server = idle_fatal_server();
+    let commands = server.commands.clone();
+    let calls = Rc::new(Cell::new(0));
+    let hook_calls = Rc::clone(&calls);
+    let mut pool_config = config(2, 0);
+    pool_config.after_connect(move |_| {
+        let invocation = hook_calls.get() + 1;
+        hook_calls.set(invocation);
+        let commands = commands.clone();
+        Box::pin(async move {
+            if invocation == 2 {
+                retire_idle_backend(&commands, 1).await;
+            }
+            Ok(())
+        })
+    });
+    let connection_config: Config = format!(
+        "postgres://postgres@{}/fake?sslmode=disable",
+        server.address
+    )
+    .parse()
+    .unwrap();
+    let pool = Pool::connect_with_config(connection_config, pool_config)
+        .await
+        .expect("initial warm-up failed");
+    let held = pool.get().await.expect("check out the warm connection");
+
+    let outcome = compio::time::timeout(Duration::from_secs(5), pool.get()).await;
+    let error = match outcome {
+        Ok(Err(error)) => Some(error),
+        Ok(Ok(client)) => {
+            drop(client);
+            None
+        }
+        Err(_) => None,
+    };
+    drop(held);
+    let accepted = finish_idle_fatal_server(server);
+
+    assert_eq!(accepted, 2, "fresh path opened the wrong connection count");
+    assert_eq!(calls.get(), 2, "fresh path hook count moved");
+    let error = error.expect("fresh path published its FATAL session or timed out");
+    assert_eq!(
+        error.code(),
+        Some(&SqlState::ADMIN_SHUTDOWN),
+        "fresh after_connect eligibility discarded SQLSTATE 57P01: {error}"
+    );
 }
 
 /// A rejected candidate is replaced by the NEXT IDLE one, and the borrower
