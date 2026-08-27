@@ -118,7 +118,7 @@ pub(crate) async fn runtime_schema_for(
     // invisible to any benchmark that warms one app and then measures steady
     // state, which is how this would be measured by default.
     crate::context::with_mut(|c| {
-        cache_every_collection(c, app_id, &token, &live);
+        cache_every_collection_and_request(c, app_id, &token, &live, collection);
     });
     Ok(schema)
 }
@@ -130,6 +130,33 @@ pub(crate) async fn runtime_schema_for(
 /// fixture: the property that matters ("one read populates all collections")
 /// needs no pool to assert, and asserting it by counting queries would need
 /// one.
+/// Populate every collection this read covered, **and** the requested one even
+/// when the catalog does not contain it.
+///
+/// The second half is not a special case, it is the negative-caching contract
+/// this module has always had: `build_runtime_schema` returns `None` for a
+/// collection that is registered but absent, and that `None` must be
+/// remembered. Populating only `live.tables` silently drops it, and the cost is
+/// not one extra read - it is a whole-schema catalog read on **every**
+/// subsequent operation for that collection, because nothing ever caches the
+/// miss.
+fn cache_every_collection_and_request(
+    ctx: &mut crate::context::IsolateDbContext,
+    app_id: &str,
+    token: &str,
+    live: &LiveSchema,
+    requested: &str,
+) {
+    cache_every_collection(ctx, app_id, token, live);
+    // `cache_every_collection` skips internal tables and anything absent from
+    // the catalog. If the caller asked about a collection in neither set, its
+    // result - `None` - still has to be recorded.
+    if ctx.introspected_schema_for(app_id, requested, token).is_none() {
+        let schema = build_runtime_schema(live, requested);
+        ctx.cache_introspected_schema(app_id, requested, token, schema);
+    }
+}
+
 fn cache_every_collection(
     ctx: &mut crate::context::IsolateDbContext,
     app_id: &str,
@@ -412,6 +439,39 @@ mod tests {
                 "'{coll}' must miss under a different deploy token",
             );
         }
+    }
+
+    /// A collection that is REGISTERED but absent from the live catalog must
+    /// still be cached, as a negative result.
+    ///
+    /// This is the arm the populate-all rewrite regressed. The original cached
+    /// `build_runtime_schema`'s `Option` for the requested collection
+    /// unconditionally, so an absent collection was remembered as `None` and
+    /// cost one introspection. Iterating `live.tables` instead caches only
+    /// tables that EXIST, so an absent one is never remembered and re-reads the
+    /// whole app schema on every operation, forever - strictly worse on that
+    /// path than the cold-start defect the rewrite was fixing.
+    ///
+    /// It is not an exotic state: it is the ordinary first-deploy window before
+    /// the migration lands, and any drift or rolling deploy where a registered
+    /// collection is not yet in the catalog.
+    #[test]
+    fn absent_collection_is_cached_as_a_negative_result() {
+        let live = live_with_tables(vec![("notes", vec![("title", col("text"))])]);
+        let mut ctx = crate::context::IsolateDbContext::new();
+
+        cache_every_collection_and_request(&mut ctx, "app_1", "deploy_a", &live, "ghosts");
+
+        assert_eq!(
+            ctx.introspected_schema_for("app_1", "ghosts", "deploy_a"),
+            Some(None),
+            "an absent collection must be cached as a negative result, not left \
+             uncached to re-introspect on every op",
+        );
+        // The present collection is still populated by the same call.
+        assert!(ctx
+            .introspected_schema_for("app_1", "notes", "deploy_a")
+            .is_some());
     }
 
     /// MEASUREMENT, not an assertion - run with `--nocapture`.
