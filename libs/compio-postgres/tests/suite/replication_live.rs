@@ -109,6 +109,15 @@ fn backend_frame(tag: u8, body: &[u8]) -> Vec<u8> {
 }
 
 fn complete_replication_startup(stream: &mut TcpStream, delay: Duration) {
+    complete_replication_startup_with_key(stream, delay, 0, &[0; 4]);
+}
+
+fn complete_replication_startup_with_key(
+    stream: &mut TcpStream,
+    delay: Duration,
+    process_id: i32,
+    cancel_key: &[u8],
+) {
     let mut length = [0u8; 4];
     stream
         .read_exact(&mut length)
@@ -136,8 +145,10 @@ fn complete_replication_startup(stream: &mut TcpStream, delay: Duration) {
     // Startup is deliberately delayed in one test to prove read_timeout is
     // not installed until authentication completes.
     thread::sleep(delay);
+    let mut backend_key = process_id.to_be_bytes().to_vec();
+    backend_key.extend_from_slice(cancel_key);
     let mut response = backend_frame(b'R', &0u32.to_be_bytes());
-    response.extend_from_slice(&backend_frame(b'K', &[0; 8]));
+    response.extend_from_slice(&backend_frame(b'K', &backend_key));
     response.extend_from_slice(&backend_frame(b'Z', b"I"));
     stream
         .write_all(&response)
@@ -950,6 +961,100 @@ async fn a_replication_error_response_retires_copy_both_after_preserving_57014()
     })
     .await
     .expect("replication ErrorResponse retirement test exceeded its outer watchdog");
+}
+
+/// Replication startup receives the same BackendKeyData capability as an
+/// ordinary session. Keep its complete protocol-3.2 key and use a dedicated
+/// second connection; silently discarding it leaves a live CopyBoth operation
+/// with no cancellation path even though PostgreSQL advertised one.
+#[compio::test]
+async fn a_replication_cancel_token_sends_the_full_key_and_surfaces_57014() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        const PROCESS_ID: i32 = 0x1020_3040;
+        const CANCEL_KEY: [u8; 32] = [0x5a; 32];
+
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut replication = accept_bounded(&listener);
+            complete_replication_startup_with_key(
+                &mut replication,
+                Duration::ZERO,
+                PROCESS_ID,
+                &CANCEL_KEY,
+            );
+            assert_eq!(
+                expect_simple_query(&mut replication),
+                b"START_REPLICATION SLOT \"deadline_slot\" LOGICAL 0/0 (\"proto_version\" '1', \"publication_names\" '\"deadline_publication\"')\0"
+            );
+            send_copy_both(&mut replication);
+
+            let mut cancel = accept_bounded(&listener);
+            let mut packet = [0u8; 44];
+            cancel
+                .read_exact(&mut packet)
+                .expect("read replication CancelRequest");
+            assert_eq!(u32::from_be_bytes(packet[..4].try_into().unwrap()), 44);
+            assert_eq!(
+                u32::from_be_bytes(packet[4..8].try_into().unwrap()),
+                80_877_102
+            );
+            assert_eq!(
+                i32::from_be_bytes(packet[8..12].try_into().unwrap()),
+                PROCESS_ID
+            );
+            assert_eq!(&packet[12..], &CANCEL_KEY);
+            drop(cancel);
+
+            let mut cancelled =
+                backend_frame(b'E', b"SERROR\0C57014\0Mcanceling statement due to user request\0\0");
+            cancelled.extend_from_slice(&backend_frame(b'Z', b"I"));
+            replication
+                .write_all(&cancelled)
+                .expect("write cancelled CopyBoth response");
+            replication
+                .flush()
+                .expect("flush cancelled CopyBoth response");
+            expect_disconnect(&mut replication);
+        });
+
+        let replication = compio_postgres::replication::connect_replication(
+            common::suite_tls(),
+            &stub_config(server.addr),
+        )
+        .await
+        .expect("connect to scripted replication peer");
+        let mut stream = replication
+            .start_logical_replication(start_options())
+            .await
+            .expect("scripted peer refused CopyBoth mode");
+        let token = stream.cancel_token();
+
+        let (stream_result, cancel_result) = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            futures_util::future::join(
+                stream.next(),
+                token.cancel_query(common::suite_tls()),
+            ),
+        )
+        .await
+        .expect("replication cancellation exceeded its watchdog");
+        cancel_result.expect("replication CancelRequest was not consumed");
+        let error = stream_result.expect_err("cancelled CopyBoth returned a stream item");
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("57014"),
+            "the original replication connection lost 57014: {}",
+            common::error_chain(&error)
+        );
+
+        let retired = stream
+            .next()
+            .await
+            .expect_err("a cancelled CopyBoth stream was reused");
+        assert!(retired.is_cancelled());
+        server.finish();
+    })
+    .await
+    .expect("replication cancellation test exceeded its outer watchdog");
 }
 
 /// An out-of-range `start_lsn` must be REFUSED, not silently replaced by 0.
