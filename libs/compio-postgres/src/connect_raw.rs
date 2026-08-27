@@ -774,7 +774,9 @@ where
                     .map_err(Error::parse)
                     .map_err(Error::target_session_attrs_fatal)?
                     .to_string();
-                record_parameter_status(parameters, name, value)
+                let result = record_parameter_status(parameters, name, value);
+                handshake
+                    .prefer_available_ascii_server_error(result)
                     .map_err(Error::target_session_attrs_fatal)?;
             }
             Some(Message::ReadyForQuery(_)) if saw_row_description && saw_command_complete => {
@@ -1499,6 +1501,35 @@ mod tests {
         }
     }
 
+    struct HandshakeWriteSuccess {
+        input: Vec<u8>,
+        offset: usize,
+    }
+
+    impl AsyncRead for HandshakeWriteSuccess {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            let mut remaining = &self.input[self.offset..];
+            let before = remaining.len();
+            let BufResult(result, buf) = AsyncRead::read(&mut remaining, buf).await;
+            self.offset += before - remaining.len();
+            BufResult(result, buf)
+        }
+    }
+
+    impl AsyncWrite for HandshakeWriteSuccess {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            BufResult(Ok(buf.buf_len()), buf)
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     fn frame(tag: u8, body: &[u8]) -> Vec<u8> {
         let mut frame = Vec::with_capacity(5 + body.len());
         frame.push(tag);
@@ -1789,6 +1820,32 @@ mod tests {
             error.code().map(|code| code.code()),
             Some("57P01"),
             "target probe write failure discarded buffered SQLSTATE 57P01: {error}"
+        );
+    }
+
+    #[compio::test]
+    async fn target_probe_encoding_refusal_preserves_a_pending_server_error() {
+        let mut script = parameter_status("client_encoding", "LATIN1");
+        script.extend_from_slice(&error_response("57P01", "terminating during target probe"));
+        let config = plaintext_config();
+        let stream = MaybeTlsStream::<_, crate::tls::NoTlsStream>::Raw(HandshakeWriteSuccess {
+            input: script,
+            offset: 0,
+        });
+        let mut handshake = Handshake::new(stream, &config);
+        handshake.phase = HandshakePhase::Complete;
+
+        let error = probe_target_session_attrs(
+            &mut handshake,
+            TargetSessionAttrs::ReadWrite,
+            &mut HashMap::new(),
+        )
+        .await
+        .expect_err("the scripted target probe accepted client_encoding=LATIN1");
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("57P01"),
+            "target probe client_encoding refusal discarded queued SQLSTATE 57P01: {error}"
         );
     }
 
