@@ -37,7 +37,9 @@ use futures_channel::mpsc;
 use postgres_protocol::authentication;
 use postgres_protocol::authentication::sasl;
 use postgres_protocol::authentication::sasl::ScramSha256;
-use postgres_protocol::message::backend::{AuthenticationSaslBody, DataRowBody, Message};
+use postgres_protocol::message::backend::{
+    AuthenticationSaslBody, DataRowBody, ErrorResponseBody, Message,
+};
 use postgres_protocol::message::frontend;
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
@@ -138,7 +140,85 @@ where
 
     async fn send(&mut self, msg: FrontendMessage) -> Result<(), Error> {
         write_frontend(&mut self.stream, msg)?;
-        self.stream.flush().await
+        if let Err(error) = self.stream.flush().await {
+            return Err(self.take_available_server_error().unwrap_or(error));
+        }
+        Ok(())
+    }
+
+    /// Prefer an ErrorResponse which a previous handshake read already put in
+    /// memory over the local write symptom which made us look for it.
+    ///
+    /// This never submits a socket read: a one-way transport failure must not
+    /// turn a failed write into an unbounded wait. `pending` owns an already-
+    /// decoded batch; the stream buffer may contain complete frames over-read
+    /// behind the message which triggered this frontend write.
+    fn take_available_server_error(&mut self) -> Option<Error> {
+        self.take_available_server_error_if(|_| true)
+    }
+
+    fn take_available_ascii_server_error(&mut self) -> Option<Error> {
+        self.take_available_server_error_if(error_response_is_ascii)
+    }
+
+    fn take_available_server_error_if(
+        &mut self,
+        accept: impl Fn(&ErrorResponseBody) -> bool,
+    ) -> Option<Error> {
+        if let Ok(Some(body)) = self.pending.first_error_response() {
+            return accept(&body).then(|| Error::db(body));
+        }
+
+        loop {
+            let length = self.stream.peek_u32_be(1)?;
+            if length < 4 || self.stream.validate_length(length).is_err() {
+                return None;
+            }
+            let total_len = usize::try_from(length).ok()?.checked_add(1)?;
+            if self.stream.buf().len() < total_len {
+                return None;
+            }
+
+            match self.stream.buf()[0] {
+                b'E' => {
+                    let mut frame = self.stream.buf().split_to(total_len);
+                    let message = Message::parse(&mut frame).ok()??;
+                    return match message {
+                        Message::ErrorResponse(body) if accept(&body) => Some(Error::db(body)),
+                        _ => None,
+                    };
+                }
+                // These messages may arrive without a frontend request. Skip
+                // only complete async frames; an ordinary response is a
+                // protocol boundary and an error beyond it cannot safely be
+                // attributed to the write which just failed.
+                b'N' | b'A' | b'S' => {
+                    let _ = self.stream.buf().split_to(total_len);
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    /// Prefer a complete server diagnosis already decoded or over-read over a
+    /// local policy, configuration, or capability refusal.
+    fn prefer_available_server_error<R>(&mut self, result: Result<R, Error>) -> Result<R, Error> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(local) => Err(self.take_available_server_error().unwrap_or(local)),
+        }
+    }
+
+    /// After the server announces an encoding this driver cannot decode, only
+    /// an ASCII ErrorResponse can safely replace the local encoding refusal.
+    fn prefer_available_ascii_server_error<R>(
+        &mut self,
+        result: Result<R, Error>,
+    ) -> Result<R, Error> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(local) => Err(self.take_available_ascii_server_error().unwrap_or(local)),
+        }
     }
 
     /// Read one post-handshake message. Returns `None` on clean EOF.
@@ -164,8 +244,13 @@ where
                         "PostgreSQL sent NegotiateProtocolVersion after authentication began",
                     ));
                 }
-                self.negotiate_protocol(body)?;
-                continue;
+                match self.negotiate_protocol(body) {
+                    Ok(()) => continue,
+                    Err(local) if local.is_config() => {
+                        return Err(self.take_available_server_error().unwrap_or(local));
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             if let Some(body) = self.pending.take_raw_frame(b'K').map_err(Error::parse)? {
                 if self.phase != HandshakePhase::ReadingStartupInfo {
@@ -390,6 +475,21 @@ where
     }
 }
 
+fn error_response_is_ascii(body: &ErrorResponseBody) -> bool {
+    let mut fields = body.fields();
+    loop {
+        match fields.next() {
+            Ok(Some(field)) => {
+                if !field.type_().is_ascii() || !field.value_bytes().is_ascii() {
+                    return false;
+                }
+            }
+            Ok(None) => return true,
+            Err(_) => return false,
+        }
+    }
+}
+
 fn protocol_error(message: impl Into<String>) -> Error {
     Error::connect(io::Error::new(io::ErrorKind::InvalidData, message.into()))
 }
@@ -413,9 +513,9 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     T: TlsConnect<S>,
 {
-    // The negotiated transport is dropped here on purpose: a caller-owned
-    // stream has no `SocketConfig`, so it can never issue a `CancelToken`
-    // cancel that would need to reproduce the transport.
+    // A caller-owned stream has no `SocketConfig` address, but the Client still
+    // records the negotiated transport so `CancelToken::cancel_query_raw` can
+    // reproduce it on another caller-owned stream.
     let (client, connection, _negotiated) = connect_raw_with_target_session_attrs(
         stream,
         tls,
@@ -450,6 +550,7 @@ where
     T: TlsConnect<S>,
 {
     validate_tls_connector_parameters(&tls, encryption, config)?;
+    let cancel_tls_policy_identity = tls.cancel_policy_identity().cloned();
     let stream = negotiate_tls(
         stream,
         encryption,
@@ -476,7 +577,9 @@ where
 
     startup(&mut handshake, config, &user).await?;
     authenticate(&mut handshake, config, &user).await?;
-    check_ssl_cert_mode(config, handshake.stream.get_mut().client_cert_status())?;
+    let client_cert_status = handshake.stream.get_mut().client_cert_status();
+    let ssl_cert_check = check_ssl_cert_mode(config, client_cert_status);
+    handshake.prefer_available_server_error(ssl_cert_check)?;
     let (process_id, secret_key, mut parameters) = read_info(&mut handshake).await?;
     probe_target_session_attrs(&mut handshake, target_session_attrs, &mut parameters).await?;
 
@@ -497,7 +600,7 @@ where
 
     let (sender, receiver) = mpsc::unbounded();
     let drop_release = release.as_ref().map(|release| release.connection_guard());
-    let client = Client::new_with_statement_cache(
+    let mut client = Client::new_with_statement_cache(
         sender,
         config.get_ssl_mode(),
         config.get_ssl_negotiation(),
@@ -510,6 +613,21 @@ where
             config.get_statement_cache_execution_threshold(),
         ),
     );
+    client.set_cancel_tls_policy(
+        negotiated,
+        config.get_ssl_sni(),
+        config.get_ssl_cert_mode(),
+        if negotiated == Encryption::Plaintext {
+            ServerVerification::None
+        } else {
+            ServerVerification::demanded_by(config.get_ssl_mode(), config.get_ssl_root_cert())?
+        },
+        if negotiated == Encryption::Tls {
+            cancel_tls_policy_identity
+        } else {
+            None
+        },
+    );
     let connection = Connection::new(
         handshake.stream,
         handshake.delayed,
@@ -518,6 +636,7 @@ where
         receiver,
         client.tx_status_handle(),
         client.in_flight_requests_handle(),
+        client.terminal_server_error_handle(),
         drop_release,
     );
 
@@ -655,7 +774,9 @@ where
                     .map_err(Error::parse)
                     .map_err(Error::target_session_attrs_fatal)?
                     .to_string();
-                record_parameter_status(parameters, name, value)
+                let result = record_parameter_status(parameters, name, value);
+                handshake
+                    .prefer_available_ascii_server_error(result)
                     .map_err(Error::target_session_attrs_fatal)?;
             }
             Some(Message::ReadyForQuery(_)) if saw_row_description && saw_command_complete => {
@@ -844,6 +965,8 @@ pub(crate) async fn handshake_for_replication<S, T>(
 ) -> Result<
     (
         MaybeTlsStream<S, T>,
+        i32,
+        Option<CancelKey>,
         std::collections::HashMap<String, String>,
     ),
     Error,
@@ -861,10 +984,17 @@ where
 
     startup(&mut handshake, config, &user).await?;
     authenticate(&mut handshake, config, &user).await?;
-    check_ssl_cert_mode(config, handshake.stream.get_mut().client_cert_status())?;
-    let (_pid, _key, parameters) = read_info(&mut handshake).await?;
+    let client_cert_status = handshake.stream.get_mut().client_cert_status();
+    let ssl_cert_check = check_ssl_cert_mode(config, client_cert_status);
+    handshake.prefer_available_server_error(ssl_cert_check)?;
+    let (process_id, secret_key, parameters) = read_info(&mut handshake).await?;
 
-    Ok((handshake.stream.into_inner(), parameters))
+    Ok((
+        handshake.stream.into_inner(),
+        process_id,
+        secret_key,
+        parameters,
+    ))
 }
 
 /// Enforce `sslcertmode=require` only after PostgreSQL authentication succeeds.
@@ -953,27 +1083,33 @@ where
 {
     match handshake.next().await? {
         Some(Message::AuthenticationOk) => {
-            check_require_auth(config, AuthMethod::None)?;
-            can_skip_channel_binding(config)?;
+            handshake
+                .prefer_available_server_error(check_require_auth(config, AuthMethod::None))?;
+            handshake.prefer_available_server_error(can_skip_channel_binding(config))?;
             return Ok(());
         }
         Some(Message::AuthenticationCleartextPassword) => {
-            check_require_auth(config, AuthMethod::Password)?;
-            can_skip_channel_binding(config)?;
+            handshake
+                .prefer_available_server_error(check_require_auth(config, AuthMethod::Password))?;
+            handshake.prefer_available_server_error(can_skip_channel_binding(config))?;
 
-            let pass = config
-                .get_password()
-                .ok_or_else(|| Error::authentication("password missing".into()))?;
+            let pass = handshake.prefer_available_server_error(
+                config
+                    .get_password()
+                    .ok_or_else(|| Error::authentication("password missing".into())),
+            )?;
 
             authenticate_password(handshake, pass).await?;
         }
         Some(Message::AuthenticationMd5Password(body)) => {
-            check_require_auth(config, AuthMethod::Md5)?;
-            can_skip_channel_binding(config)?;
+            handshake.prefer_available_server_error(check_require_auth(config, AuthMethod::Md5))?;
+            handshake.prefer_available_server_error(can_skip_channel_binding(config))?;
 
-            let pass = config
-                .get_password()
-                .ok_or_else(|| Error::authentication("password missing".into()))?;
+            let pass = handshake.prefer_available_server_error(
+                config
+                    .get_password()
+                    .ok_or_else(|| Error::authentication("password missing".into())),
+            )?;
 
             let output = authentication::md5_hash(user.as_bytes(), pass, body.salt());
             authenticate_password(handshake, output.as_bytes()).await?;
@@ -982,7 +1118,10 @@ where
             // PostgreSQL 16's only SASL authentication family is SCRAM; both
             // SCRAM-SHA-256 and SCRAM-SHA-256-PLUS map to this policy name.
             // Check before constructing or writing the client-first message.
-            check_require_auth(config, AuthMethod::ScramSha256)?;
+            handshake.prefer_available_server_error(check_require_auth(
+                config,
+                AuthMethod::ScramSha256,
+            ))?;
             authenticate_sasl(handshake, body, config).await?;
         }
         // The four methods this driver does not implement. Each names ITSELF:
@@ -993,21 +1132,26 @@ where
         // connection parameter to be named through the error's source chain,
         // for exactly this reason.
         Some(Message::AuthenticationGss) => {
-            check_require_auth(config, AuthMethod::Gss)?;
-            return Err(unsupported_authentication("GSSAPI"));
+            handshake.prefer_available_server_error(check_require_auth(config, AuthMethod::Gss))?;
+            return handshake
+                .prefer_available_server_error(Err(unsupported_authentication("GSSAPI")));
         }
         Some(Message::AuthenticationSspi) => {
-            check_require_auth(config, AuthMethod::Sspi)?;
-            return Err(unsupported_authentication("SSPI"));
+            handshake
+                .prefer_available_server_error(check_require_auth(config, AuthMethod::Sspi))?;
+            return handshake
+                .prefer_available_server_error(Err(unsupported_authentication("SSPI")));
         }
         // Neither of these has an `AuthMethod` variant, so neither consults
         // `require_auth`: there is no policy that could permit a method the
         // driver cannot perform.
         Some(Message::AuthenticationKerberosV5) => {
-            return Err(unsupported_authentication("Kerberos V5"));
+            return handshake
+                .prefer_available_server_error(Err(unsupported_authentication("Kerberos V5")));
         }
         Some(Message::AuthenticationScmCredential) => {
-            return Err(unsupported_authentication("SCM credential"));
+            return handshake
+                .prefer_available_server_error(Err(unsupported_authentication("SCM credential")));
         }
         Some(Message::ErrorResponse(body)) => return Err(Error::db(body)),
         Some(_) => return Err(Error::unexpected_message()),
@@ -1066,7 +1210,8 @@ where
     T: AsyncRead + AsyncWrite + Unpin,
 {
     let mut buf = BytesMut::new();
-    frontend::password_message(password, &mut buf).map_err(Error::encode)?;
+    let encoded = frontend::password_message(password, &mut buf).map_err(Error::encode);
+    handshake.prefer_available_server_error(encoded)?;
     handshake.send(FrontendMessage::Raw(buf.freeze())).await
 }
 
@@ -1079,9 +1224,11 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     T: TlsStream + Unpin,
 {
-    let password = config
-        .get_password()
-        .ok_or_else(|| Error::authentication("password missing".into()))?;
+    let password = handshake.prefer_available_server_error(
+        config
+            .get_password()
+            .ok_or_else(|| Error::authentication("password missing".into())),
+    )?;
 
     let mut has_scram = false;
     let mut has_scram_plus = false;
@@ -1120,14 +1267,14 @@ where
     // Both are fatal when the user asked for `require`.
     if channel_binding_cfg == config::ChannelBinding::Require {
         if !has_scram_plus {
-            return Err(Error::authentication(
+            return handshake.prefer_available_server_error(Err(Error::authentication(
                 "server did not offer SCRAM-SHA-256-PLUS but channel binding was required".into(),
-            ));
+            )));
         }
         if tls_server_end_point.is_none() {
-            return Err(Error::tls(
+            return handshake.prefer_available_server_error(Err(Error::tls(
                 "channel binding requested but backend does not support it".into(),
-            ));
+            )));
         }
     }
 
@@ -1159,11 +1306,13 @@ where
             None => (sasl::ChannelBinding::unsupported(), sasl::SCRAM_SHA_256),
         }
     } else {
-        return Err(Error::authentication("unsupported SASL mechanism".into()));
+        return handshake.prefer_available_server_error(Err(Error::authentication(
+            "unsupported SASL mechanism".into(),
+        )));
     };
 
     if mechanism != sasl::SCRAM_SHA_256_PLUS {
-        can_skip_channel_binding(config)?;
+        handshake.prefer_available_server_error(can_skip_channel_binding(config))?;
     }
 
     let mut scram = ScramSha256::new(password, channel_binding);
@@ -1269,11 +1418,12 @@ where
     loop {
         match handshake.next().await? {
             Some(Message::ParameterStatus(body)) => {
-                record_parameter_status(
+                let result = record_parameter_status(
                     &mut parameters,
                     body.name().map_err(Error::parse)?.to_string(),
                     body.value().map_err(Error::parse)?.to_string(),
-                )?;
+                );
+                handshake.prefer_available_ascii_server_error(result)?;
             }
             // NO `NoticeResponse` ARM HERE, and its absence is deliberate.
             // `Handshake::next` only yields what `read_backend` did not classify
@@ -1304,6 +1454,7 @@ mod tests {
     use crate::AsyncMessage;
     use crate::config::{AuthMethod, AuthMethods, RequireAuth, SslMode};
     use crate::tls::NoTls;
+    use compio::buf::{BufResult, IoBuf, IoBufMut};
     use compio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
     use compio::net::{TcpListener, TcpStream};
     use futures_channel::oneshot;
@@ -1311,6 +1462,73 @@ mod tests {
     use std::time::Duration;
 
     const EXPECTED_DELAYED_MESSAGE_LIMIT: usize = 256;
+
+    /// Replays one coalesced backend read, then fails every frontend write.
+    /// This isolates the handshake's already-buffered diagnosis choice from
+    /// kernel timing and from whether a real TCP reset wins a race.
+    struct HandshakeWriteFailure {
+        input: Vec<u8>,
+        offset: usize,
+    }
+
+    impl AsyncRead for HandshakeWriteFailure {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            let mut remaining = &self.input[self.offset..];
+            let before = remaining.len();
+            let BufResult(result, buf) = AsyncRead::read(&mut remaining, buf).await;
+            self.offset += before - remaining.len();
+            BufResult(result, buf)
+        }
+    }
+
+    impl AsyncWrite for HandshakeWriteFailure {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            BufResult(
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "scripted handshake write failure",
+                )),
+                buf,
+            )
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct HandshakeWriteSuccess {
+        input: Vec<u8>,
+        offset: usize,
+    }
+
+    impl AsyncRead for HandshakeWriteSuccess {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            let mut remaining = &self.input[self.offset..];
+            let before = remaining.len();
+            let BufResult(result, buf) = AsyncRead::read(&mut remaining, buf).await;
+            self.offset += before - remaining.len();
+            BufResult(result, buf)
+        }
+    }
+
+    impl AsyncWrite for HandshakeWriteSuccess {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            BufResult(Ok(buf.buf_len()), buf)
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     fn frame(tag: u8, body: &[u8]) -> Vec<u8> {
         let mut frame = Vec::with_capacity(5 + body.len());
@@ -1329,6 +1547,306 @@ mod tests {
         body.extend_from_slice(message.as_bytes());
         body.extend_from_slice(b"\0\0");
         frame(b'N', &body)
+    }
+
+    fn error_response(code: &str, message: &str) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(b"SERROR\0");
+        body.extend_from_slice(b"VERROR\0");
+        body.push(b'C');
+        body.extend_from_slice(code.as_bytes());
+        body.push(0);
+        body.push(b'M');
+        body.extend_from_slice(message.as_bytes());
+        body.extend_from_slice(b"\0\0");
+        frame(b'E', &body)
+    }
+
+    fn write_failing_handshake(
+        input: Vec<u8>,
+        config: &Config,
+    ) -> Handshake<HandshakeWriteFailure, crate::tls::NoTlsStream> {
+        Handshake::new(
+            MaybeTlsStream::Raw(HandshakeWriteFailure { input, offset: 0 }),
+            config,
+        )
+    }
+
+    async fn assert_auth_refusal_prefers_server_error(
+        config: &Config,
+        authentication_body: &[u8],
+        label: &str,
+    ) {
+        let mut script = frame(b'R', authentication_body);
+        script.extend_from_slice(&error_response(
+            "57P01",
+            "terminating during authentication",
+        ));
+        let mut handshake = write_failing_handshake(script, config);
+        let error = authenticate(&mut handshake, config, "scripted-user")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("57P01"),
+            "{label} discarded queued SQLSTATE 57P01: {error}"
+        );
+    }
+
+    #[compio::test]
+    async fn password_write_failure_preserves_a_pending_server_error() {
+        let mut script = frame(b'R', &3i32.to_be_bytes());
+        script.extend_from_slice(&error_response("28P01", "password rejected"));
+        let config = plaintext_config();
+        let mut handshake = write_failing_handshake(script, &config);
+
+        assert!(matches!(
+            handshake.next().await.unwrap(),
+            Some(Message::AuthenticationCleartextPassword)
+        ));
+        let error = authenticate_password(&mut handshake, b"wrong")
+            .await
+            .expect_err("the scripted transport must fail the password write");
+
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("28P01"),
+            "password write failure discarded SQLSTATE 28P01: {error}"
+        );
+    }
+
+    #[compio::test]
+    async fn authentication_policy_preserves_a_pending_server_error() {
+        let mut script = frame(b'R', &0i32.to_be_bytes());
+        script.extend_from_slice(&error_response(
+            "57P01",
+            "terminating during authentication",
+        ));
+        let mut config = plaintext_config();
+        config.require_auth(RequireAuth::Require(AuthMethods::new(
+            AuthMethod::ScramSha256,
+        )));
+        let mut handshake = write_failing_handshake(script, &config);
+
+        let error = authenticate(&mut handshake, &config, "scripted-user")
+            .await
+            .expect_err("require_auth=scram-sha-256 accepted AuthenticationOk");
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("57P01"),
+            "require_auth after AuthenticationOk discarded queued SQLSTATE 57P01: {error}"
+        );
+
+        let mut local_only = write_failing_handshake(frame(b'R', &0i32.to_be_bytes()), &config);
+        let error = authenticate(&mut local_only, &config, "scripted-user")
+            .await
+            .expect_err("require_auth=scram-sha-256 accepted AuthenticationOk");
+        assert!(
+            error.code().is_none(),
+            "require_auth invented a server diagnosis when none was queued"
+        );
+    }
+
+    #[compio::test]
+    async fn authentication_local_refusals_preserve_pending_server_errors() {
+        let cleartext = 3i32.to_be_bytes();
+        assert_auth_refusal_prefers_server_error(
+            &plaintext_config(),
+            &cleartext,
+            "missing cleartext password",
+        )
+        .await;
+
+        let mut binding = plaintext_config();
+        binding
+            .password("secret")
+            .channel_binding(crate::config::ChannelBinding::Require);
+        assert_auth_refusal_prefers_server_error(
+            &binding,
+            &cleartext,
+            "cleartext channel-binding refusal",
+        )
+        .await;
+
+        let mut nul_password = plaintext_config();
+        nul_password.password(b"secret\0suffix");
+        assert_auth_refusal_prefers_server_error(
+            &nul_password,
+            &cleartext,
+            "cleartext password encoding",
+        )
+        .await;
+
+        let mut md5 = 5i32.to_be_bytes().to_vec();
+        md5.extend_from_slice(b"salt");
+        let mut md5_policy = plaintext_config();
+        md5_policy
+            .password("secret")
+            .require_auth(RequireAuth::Require(AuthMethods::new(AuthMethod::Password)));
+        assert_auth_refusal_prefers_server_error(&md5_policy, &md5, "MD5 authentication policy")
+            .await;
+
+        let mut scram = 10i32.to_be_bytes().to_vec();
+        scram.extend_from_slice(b"SCRAM-SHA-256\0\0");
+        let mut scram_policy = scram_config();
+        scram_policy.require_auth(RequireAuth::Require(AuthMethods::new(AuthMethod::Md5)));
+        assert_auth_refusal_prefers_server_error(
+            &scram_policy,
+            &scram,
+            "SASL authentication policy",
+        )
+        .await;
+        assert_auth_refusal_prefers_server_error(
+            &plaintext_config(),
+            &scram,
+            "missing SASL password",
+        )
+        .await;
+
+        let mut require_binding = scram_config();
+        require_binding.channel_binding(crate::config::ChannelBinding::Require);
+        assert_auth_refusal_prefers_server_error(
+            &require_binding,
+            &scram,
+            "missing SCRAM-SHA-256-PLUS",
+        )
+        .await;
+
+        let mut scram_plus = 10i32.to_be_bytes().to_vec();
+        scram_plus.extend_from_slice(b"SCRAM-SHA-256-PLUS\0SCRAM-SHA-256\0\0");
+        assert_auth_refusal_prefers_server_error(
+            &require_binding,
+            &scram_plus,
+            "missing TLS channel-binding endpoint",
+        )
+        .await;
+
+        let mut unsupported_sasl = 10i32.to_be_bytes().to_vec();
+        unsupported_sasl.extend_from_slice(b"SCRAM-SHA-999\0\0");
+        assert_auth_refusal_prefers_server_error(
+            &scram_config(),
+            &unsupported_sasl,
+            "unsupported valid SASL mechanism",
+        )
+        .await;
+
+        for (code, label) in [
+            (7i32, "unsupported GSSAPI authentication"),
+            (9, "unsupported SSPI authentication"),
+            (2, "unsupported Kerberos V5 authentication"),
+            (6, "unsupported SCM credential authentication"),
+        ] {
+            assert_auth_refusal_prefers_server_error(
+                &plaintext_config(),
+                &code.to_be_bytes(),
+                label,
+            )
+            .await;
+        }
+    }
+
+    #[compio::test]
+    async fn sslcertmode_refusal_preserves_a_pending_server_error() {
+        let mut script = frame(b'R', &0u32.to_be_bytes());
+        script.extend_from_slice(&error_response("57P01", "terminating after authentication"));
+        let (stream, _) = scripted_server_after_startup(Some(script)).await;
+        let mut config = plaintext_config();
+        config.ssl_cert_mode(config::SslCertMode::Require);
+
+        let error = match connect_raw_with_target_session_attrs(
+            stream,
+            NoTls,
+            Encryption::Plaintext,
+            false,
+            &config,
+            TargetSessionAttrs::Any,
+            None,
+        )
+        .await
+        {
+            Ok(_) => panic!("sslcertmode=require accepted a plaintext session"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("57P01"),
+            "sslcertmode refusal discarded queued SQLSTATE 57P01: {error}"
+        );
+    }
+
+    #[compio::test]
+    async fn replication_sslcertmode_refusal_preserves_a_pending_server_error() {
+        let mut script = frame(b'R', &0u32.to_be_bytes());
+        script.extend_from_slice(&error_response("57P01", "terminating after authentication"));
+        let (stream, _) = scripted_server_after_startup(Some(script)).await;
+        let mut config = plaintext_config();
+        config.ssl_cert_mode(config::SslCertMode::Require);
+
+        let stream = MaybeTlsStream::<_, crate::tls::NoTlsStream>::Raw(stream);
+        let error = match handshake_for_replication(stream, &config).await {
+            Ok(_) => panic!("replication sslcertmode=require accepted a plaintext session"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("57P01"),
+            "replication sslcertmode refusal discarded queued SQLSTATE 57P01: {error}"
+        );
+    }
+
+    #[compio::test]
+    async fn target_probe_write_failure_preserves_an_error_buffered_after_ready() {
+        let mut script = frame(b'Z', b"I");
+        script.extend_from_slice(&notice("retiring after startup"));
+        script.extend_from_slice(&error_response("57P01", "terminating connection"));
+        let config = plaintext_config();
+        let mut handshake = write_failing_handshake(script, &config);
+        handshake.phase = HandshakePhase::ReadingStartupInfo;
+
+        assert!(matches!(
+            handshake.next().await.unwrap(),
+            Some(Message::ReadyForQuery(_))
+        ));
+        handshake.finish_startup();
+        let error = probe_target_session_attrs(
+            &mut handshake,
+            TargetSessionAttrs::ReadWrite,
+            &mut HashMap::new(),
+        )
+        .await
+        .expect_err("the scripted transport must fail the target probe write");
+
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("57P01"),
+            "target probe write failure discarded buffered SQLSTATE 57P01: {error}"
+        );
+    }
+
+    #[compio::test]
+    async fn target_probe_encoding_refusal_preserves_a_pending_server_error() {
+        let mut script = parameter_status("client_encoding", "LATIN1");
+        script.extend_from_slice(&error_response("57P01", "terminating during target probe"));
+        let config = plaintext_config();
+        let stream = MaybeTlsStream::<_, crate::tls::NoTlsStream>::Raw(HandshakeWriteSuccess {
+            input: script,
+            offset: 0,
+        });
+        let mut handshake = Handshake::new(stream, &config);
+        handshake.phase = HandshakePhase::Complete;
+
+        let error = probe_target_session_attrs(
+            &mut handshake,
+            TargetSessionAttrs::ReadWrite,
+            &mut HashMap::new(),
+        )
+        .await
+        .expect_err("the scripted target probe accepted client_encoding=LATIN1");
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("57P01"),
+            "target probe client_encoding refusal discarded queued SQLSTATE 57P01: {error}"
+        );
     }
 
     fn parameter_status(name: &str, value: &str) -> Vec<u8> {
@@ -1640,6 +2158,33 @@ mod tests {
                 && chain.contains("3.2"),
             "the negotiation refusal did not name the server version and configured floor: \
              {chain}"
+        );
+    }
+
+    #[compio::test]
+    async fn min_protocol_refusal_preserves_a_pending_server_error() {
+        let mut negotiation = Vec::new();
+        negotiation.extend_from_slice(&0x0003_0000u32.to_be_bytes());
+        negotiation.extend_from_slice(&0u32.to_be_bytes());
+
+        let mut script = frame(b'v', &negotiation);
+        script.extend_from_slice(&error_response(
+            "57P01",
+            "terminating after protocol negotiation",
+        ));
+        let (stream, _) = scripted_server_after_startup(Some(script)).await;
+        let config: Config = "user=scripted-user sslmode=disable min_protocol_version=3.2"
+            .parse()
+            .expect("parse scripted protocol minimum");
+
+        let error = match config.connect_raw(stream, NoTls).await {
+            Ok(_) => panic!("protocol 3.0 satisfied min_protocol_version=3.2"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("57P01"),
+            "minimum protocol refusal discarded queued SQLSTATE 57P01: {error}"
         );
     }
 
@@ -2510,6 +3055,50 @@ mod tests {
         assert!(
             chain.contains("client_encoding"),
             "the refusal must name the setting that caused it: {chain}"
+        );
+    }
+
+    #[compio::test]
+    async fn startup_client_encoding_refusal_preserves_a_pending_server_error() {
+        let mut script = frame(b'R', &0u32.to_be_bytes());
+        script.extend_from_slice(&parameter_status("client_encoding", "LATIN1"));
+        script.extend_from_slice(&error_response("57P01", "terminating during startup"));
+        let (stream, _) = scripted_server_after_startup(Some(script)).await;
+
+        let error = match plaintext_config().connect_raw(stream, NoTls).await {
+            Ok(_) => panic!("a server announcing LATIN1 was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("57P01"),
+            "startup client_encoding refusal discarded queued SQLSTATE 57P01: {error}"
+        );
+    }
+
+    #[compio::test]
+    async fn startup_encoding_refusal_outranks_a_non_ascii_error_response() {
+        let mut non_ascii_error = b"SFATAL\0VFATAL\0C57P01\0Mlatin1 bytes ".to_vec();
+        non_ascii_error.extend_from_slice(&[0xc3, 0xa9]);
+        non_ascii_error.extend_from_slice(b"\0\0");
+
+        let mut script = frame(b'R', &0u32.to_be_bytes());
+        script.extend_from_slice(&parameter_status("client_encoding", "LATIN1"));
+        script.extend_from_slice(&frame(b'E', &non_ascii_error));
+        let (stream, _) = scripted_server_after_startup(Some(script)).await;
+
+        let error = match plaintext_config().connect_raw(stream, NoTls).await {
+            Ok(_) => panic!("a server announcing LATIN1 was accepted"),
+            Err(error) => error,
+        };
+        assert!(
+            error.code().is_none(),
+            "a non-ASCII response from a LATIN1 session replaced the safe local refusal: {error}"
+        );
+        let chain = authentication_error_chain(error);
+        assert!(
+            chain.contains("client_encoding"),
+            "the non-ASCII server response hid the encoding refusal: {chain}"
         );
     }
 

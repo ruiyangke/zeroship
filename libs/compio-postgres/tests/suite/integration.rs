@@ -2663,6 +2663,143 @@ async fn copy_out_error_surfaces_and_recovers_the_same_connection() {
     assert_eq!(row.get::<_, i32>(0), 42);
 }
 
+/// COPY OUT data completion is not command completion. PostgreSQL sends
+/// CopyDone before it finishes the executor, and an AFTER trigger for a
+/// data-modifying COPY query can still fail after the copied row was sent.
+#[compio::test]
+async fn copy_out_waits_for_the_final_command_status_after_copy_done() {
+    use futures_util::StreamExt;
+
+    let url = require_pg().await;
+    let client = connect(&url).await.unwrap();
+
+    client
+        .batch_execute(
+            "CREATE TEMPORARY TABLE cpg_copy_out_late_failure (n int);
+             CREATE FUNCTION pg_temp.cpg_copy_out_late_failure() RETURNS trigger
+             LANGUAGE plpgsql AS $$
+             BEGIN
+                 RAISE EXCEPTION USING
+                     ERRCODE = 'P1234',
+                     MESSAGE = 'late COPY OUT failure';
+             END
+             $$;
+             CREATE TRIGGER cpg_copy_out_late_failure
+             AFTER INSERT ON cpg_copy_out_late_failure
+             FOR EACH ROW EXECUTE FUNCTION pg_temp.cpg_copy_out_late_failure();",
+        )
+        .await
+        .unwrap();
+
+    let stream = client
+        .copy_out(
+            "COPY (
+                 INSERT INTO cpg_copy_out_late_failure VALUES (7)
+                 RETURNING n
+             ) TO STDOUT",
+        )
+        .await
+        .expect("start the COPY OUT before its late executor failure");
+    let mut stream = Box::pin(stream);
+
+    let first = stream
+        .as_mut()
+        .next()
+        .await
+        .expect("COPY OUT ended before returning its row")
+        .expect("COPY OUT failed before returning its row");
+    assert_eq!(first, b"7\n"[..]);
+
+    let error = stream
+        .as_mut()
+        .next()
+        .await
+        .expect("COPY OUT reported success before its final command status")
+        .expect_err("COPY OUT discarded its late executor failure");
+    assert_eq!(
+        error.code().map(|code| code.code()),
+        Some("P1234"),
+        "the late COPY OUT failure lost its SQLSTATE: {}",
+        common::error_chain(&error),
+    );
+    drop(stream);
+
+    let row = client
+        .query_one("SELECT count(*)::int8 FROM cpg_copy_out_late_failure", &[])
+        .await
+        .expect("the late COPY OUT failure poisoned its connection");
+    assert_eq!(
+        row.get::<_, i64>(0),
+        0,
+        "the failed data-modifying COPY OUT committed its inserted row"
+    );
+}
+
+/// CommandComplete ends the COPY command, but the extended-protocol Sync that
+/// follows can still fail while committing its implicit transaction. A
+/// deferred constraint is checked at exactly that boundary, so COPY OUT must
+/// not report EOF until ReadyForQuery proves the Sync succeeded.
+#[compio::test]
+async fn copy_out_waits_for_sync_before_reporting_eof() {
+    use futures_util::StreamExt;
+
+    let url = require_pg().await;
+    let client = connect(&url).await.unwrap();
+
+    client
+        .batch_execute(
+            "CREATE TEMPORARY TABLE cpg_copy_out_sync_parent (id int PRIMARY KEY);
+             CREATE TEMPORARY TABLE cpg_copy_out_sync_child (
+                 parent_id int REFERENCES cpg_copy_out_sync_parent (id)
+                     DEFERRABLE INITIALLY DEFERRED
+             );",
+        )
+        .await
+        .unwrap();
+
+    let stream = client
+        .copy_out(
+            "COPY (
+                 INSERT INTO cpg_copy_out_sync_child VALUES (314159)
+                 RETURNING parent_id
+             ) TO STDOUT",
+        )
+        .await
+        .expect("start COPY OUT before its deferred constraint is checked");
+    let mut stream = Box::pin(stream);
+
+    let first = stream
+        .as_mut()
+        .next()
+        .await
+        .expect("COPY OUT ended before returning its row")
+        .expect("COPY OUT failed before returning its row");
+    assert_eq!(first, b"314159\n"[..]);
+
+    let error = stream
+        .as_mut()
+        .next()
+        .await
+        .expect("COPY OUT reported EOF before Sync committed its implicit transaction")
+        .expect_err("COPY OUT accepted a deferred foreign-key violation");
+    assert_eq!(
+        error.code(),
+        Some(&SqlState::FOREIGN_KEY_VIOLATION),
+        "the Sync failure lost its SQLSTATE: {}",
+        common::error_chain(&error),
+    );
+    drop(stream);
+
+    let count: i64 = client
+        .query_one_scalar("SELECT count(*)::int8 FROM cpg_copy_out_sync_child", &[])
+        .await
+        .expect("the deferred COPY OUT failure poisoned its connection");
+    assert_eq!(
+        count, 0,
+        "the failed implicit transaction committed its row"
+    );
+}
+
 /// Buffers larger than the coalescing threshold become independent CopyData
 /// messages. Enough of them must cross the connection task without loss,
 /// reordering, or an early CopyDone.

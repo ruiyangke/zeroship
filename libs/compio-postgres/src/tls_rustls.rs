@@ -77,7 +77,7 @@ use crate::Error;
 use crate::config::{Config, SslCertMode, SslMode, SslProtocolVersion, SslRootCert};
 use crate::tls::{
     ChannelBinding, ClientCertStatus, MakeTlsConnect, POSTGRESQL_ALPN_PROTOCOL, ServerVerification,
-    TlsConnect, TlsStream,
+    TlsConnect, TlsPolicyIdentity, TlsStream,
 };
 use crate::tls_sansio::{self, SharedSession, TlsReadHalf, TlsStreamCore, TlsWriteHalf, share};
 
@@ -965,9 +965,16 @@ impl SigningKey for ObservingSigningKey {
 /// made in code rather than in the connection string. The connection path
 /// refuses a connector whose SNI or certificate mode does not match its
 /// [`Config`].
+///
+/// Clone this maker before passing it to a connection if that session may need
+/// cancellation. The clone retains the opaque TLS policy identity that a
+/// cancel connection must present. Constructing a second maker, even from the
+/// same visible settings, intentionally creates a different policy lineage and
+/// is refused before the cancel connection sends bytes.
 #[derive(Clone, Debug)]
 pub struct MakeRustlsConnect {
     config: Arc<ClientConfig>,
+    policy_identity: TlsPolicyIdentity,
     ssl_cert_mode: SslCertMode,
     /// What the verifier inside `config` really checks. Reported to
     /// `connect_raw`, which refuses the connection when the connection string
@@ -1029,6 +1036,7 @@ impl MakeRustlsConnect {
         };
         MakeRustlsConnect {
             config,
+            policy_identity: TlsPolicyIdentity::new(),
             ssl_cert_mode: SslCertMode::Allow,
             server_verification: verification,
             crl_directory_reload: None,
@@ -1237,6 +1245,7 @@ where
         };
         Ok(RustlsConnect {
             config,
+            policy_identity: self.policy_identity.clone(),
             domain: domain.to_string(),
             ssl_cert_mode: self.ssl_cert_mode,
             server_verification: self.server_verification,
@@ -1247,6 +1256,7 @@ where
 /// A single rustls handshake, produced by [`MakeRustlsConnect`].
 pub struct RustlsConnect {
     config: Arc<ClientConfig>,
+    policy_identity: TlsPolicyIdentity,
     domain: String,
     ssl_cert_mode: SslCertMode,
     server_verification: ServerVerification,
@@ -1314,6 +1324,10 @@ where
 
     fn can_honor_server_verification(&self, verification: ServerVerification) -> bool {
         self.server_verification == verification
+    }
+
+    fn cancel_policy_identity(&self) -> Option<&TlsPolicyIdentity> {
+        Some(&self.policy_identity)
     }
 }
 

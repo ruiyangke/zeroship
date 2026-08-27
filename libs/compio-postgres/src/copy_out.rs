@@ -60,6 +60,8 @@ async fn copy_out_inner(
     Ok(CopyOutStream {
         responses,
         response,
+        copy_done: false,
+        command_complete: false,
         copy_mode: Some(copy_mode),
     })
 }
@@ -106,6 +108,19 @@ async fn start(
         }
     }
 
+    // A non-COPY command can complete Execute and then fail while Sync closes
+    // its implicit transaction. Keep the local mismatch only as a fallback at
+    // ReadyForQuery so the later ErrorResponse can win.
+    async fn drain_refusal(responses: &mut Responses, fallback: Error) -> Error {
+        loop {
+            match responses.next().await {
+                Ok(Message::ReadyForQuery(_)) => return fallback,
+                Ok(_) => {}
+                Err(error) => return error,
+            }
+        }
+    }
+
     let response = loop {
         match responses
             .next()
@@ -120,7 +135,7 @@ async fn start(
             Message::CopyInResponse(_) => {}
             _ => {
                 return Err(ExecutionError::after_bind_complete(
-                    Error::unexpected_message(),
+                    drain_refusal(&mut responses, Error::unexpected_message()).await,
                 ));
             }
         }
@@ -135,6 +150,8 @@ pin_project! {
     pub struct CopyOutStream {
         responses: Responses,
         response: CopyResponse,
+        copy_done: bool,
+        command_complete: bool,
         // Last so Drop disconnects the consumer, arming connection-owned
         // draining, before ordinary requests may queue behind it.
         copy_mode: Option<CopyModeGuard>,
@@ -159,19 +176,36 @@ impl Stream for CopyOutStream {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
 
-        match ready!(this.responses.poll_next(cx)) {
-            Ok(Message::CopyData(body)) => Poll::Ready(Some(Ok(body.into_bytes()))),
-            Ok(Message::CopyDone) => {
-                this.copy_mode.take();
-                Poll::Ready(None)
-            }
-            Ok(_) => {
-                this.copy_mode.take();
-                Poll::Ready(Some(Err(Error::unexpected_message())))
-            }
-            Err(error) => {
-                this.copy_mode.take();
-                Poll::Ready(Some(Err(error)))
+        loop {
+            match ready!(this.responses.poll_next(cx)) {
+                Ok(Message::CopyData(body)) if !*this.copy_done => {
+                    return Poll::Ready(Some(Ok(body.into_bytes())));
+                }
+                Ok(Message::CopyDone) if !*this.copy_done => {
+                    // CopyDone terminates the data stream, but PostgreSQL has
+                    // not completed the command yet. ExecutorFinish runs after
+                    // CopyDone and can still produce an ErrorResponse, so do
+                    // not report EOF until CommandComplete arrives.
+                    *this.copy_done = true;
+                }
+                Ok(Message::CommandComplete(_)) if *this.copy_done => {
+                    // The following Sync closes the implicit transaction. A
+                    // deferred constraint can still fail there, so command
+                    // completion is not yet stream success.
+                    *this.command_complete = true;
+                }
+                Ok(Message::ReadyForQuery(_)) if *this.command_complete => {
+                    this.copy_mode.take();
+                    return Poll::Ready(None);
+                }
+                Ok(_) => {
+                    this.copy_mode.take();
+                    return Poll::Ready(Some(Err(Error::unexpected_message())));
+                }
+                Err(error) => {
+                    this.copy_mode.take();
+                    return Poll::Ready(Some(Err(error)));
+                }
             }
         }
     }

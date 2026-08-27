@@ -117,8 +117,9 @@ Inside the runtime, the harness:
    first allocation is outside the series.
 3. Sustains four concurrent pooled-query workers while also exercising pool
    acquire/release, periodic large responses, clean direct connection churn,
-   server-terminated connections, and query cancellation with verified reuse
-   of the same pooled lease.
+   server-terminated connections, query cancellation with verified reuse
+   of the same pooled lease, and COPY IN / COPY OUT round trips on one
+   long-lived session backed by a temporary table.
 4. Samples RSS, the driver's live-connection count, and the server's tagged
    backend counts throughout the load.
 5. Stops the workers, closes the pool and direct clients, waits for both
@@ -274,6 +275,36 @@ machine and the workload mix.
 | acquire timeouts | 0 | 0 |
 | bad connections / cancellations | 233 / 198 | 3,488 / 2,961 |
 
+### After the cancellation audit, which is the run this section exists for
+
+MEASURED 2026-08-27 at `388d026ca`, 600s window with 10s samples, against a
+DEDICATED 16.15 container on 5461 rather than the shared fixture - two audit
+agents were running suites on 5455 and 5459, and the prerequisites above forbid
+sharing a server with other load: **131,510 operations**, 61 samples with 23
+rises and 21 falls for a net **-76 KiB**, 287 pool connections created against
+281 evicted, 0 acquire timeouts, both baselines back to zero
+(`server_final=0 driver_final=0`).
+
+The number this run was for is the cancellation pair:
+
+    cancellations=1970   cancellation_recoveries=1970
+
+EXACT equality over 1,970 cancellations, each one followed by verified reuse of
+the SAME pooled lease. That day's six merged fixes changed when a cancel
+returns, which transport it replays, and whether a lease-scoped token may fire
+at all - all of it on the path this counter measures. A short suite proves each
+rule once; this says the rules hold together 1,970 times without the pool
+drifting.
+
+`pool_acquires` and `pool_releases` also came out identical at 116,199. That
+pair is the permit-leak check and it is exact, not approximate - one lost permit
+in 116,199 checkouts would show.
+
+The dedicated container is worth the 30 seconds. Sharing 5455 with an agent
+running the suite would not have failed the soak; it would have made every RSS
+and latency figure uninterpretable, which is worse, because the run still
+prints `result=ok`.
+
 ### With the prepared-statement cache on
 
 The cache is off by default, so every run above left the driver's most
@@ -354,6 +385,27 @@ So the shape to look for is: errors surface, `live_connections_at_failure=0`,
 no watchdog message. A hang, a panic, or a non-zero live count would each be a
 defect, and each looks different from the ordinary failure above.
 
+RE-MEASURED 2026-08-27 at `dd3ad1de8`, on a DEDICATED 16.15 container rather
+than the shared fixture - a chaos run RESTARTS the server, so doing it on 5455
+would break every other suite on this machine. Restart issued 40s into
+`phase=measure`. All three signals reproduced exactly:
+
+```text
+soak result=failed: pooled query worker: run pooled scalar query failed: db error
+live_connections_at_failure=0
+```
+
+no watchdog message, no panic, no hang. Then 49 `pool_` tests passed against
+the restarted server on the FIRST attempt.
+
+That re-measurement is the point of this section, not a formality. The nine
+cancellation-audit commits merged that day changed when a session is RETIRED
+and when its socket is RELEASED - terminal-severity retirement, pool lease
+revocation that `force_close`s a session whose token escaped, and replication
+retirement after a server ErrorResponse. A defect in any of them shows up here
+as a non-zero live count or a hang, and in neither case would the ordinary
+suite have noticed: it never restarts a server.
+
 ## Chaos: freezing the server without closing anything
 
 A restart makes the server CLOSE, which surfaces as an error at once. The
@@ -424,6 +476,20 @@ sawtooth, and a check that cries wolf gets its floor lowered. But it means a
 leak with any jitter at all is invisible to the rule, and only the printed
 series shows it. READ THE SERIES; do not just look for `soak result=ok`.
 
+**`delta_kib` MISLEADS IN BOTH DIRECTIONS, because it is last-minus-first and
+the first sample is often the process's low-water mark.** Measured 2026-08-27
+at `c832bfdd0`, 300s: the run printed `rises=16 falls=8 delta_kib=200`, which
+next to the previous run's `rises=11 falls=12 delta_kib=-104` reads like the
+start of a leak. It is not. The series opens at 9432 and steps to about 9600
+over its first four samples, then oscillates in a 9508-9768 band:
+
+    first-half mean 9619, second-half mean 9636  ->  +18 KiB across the run
+
+So the +200 KiB is sample 0 against sample 30, and the early steps are also
+what inflate the rise count. Compare the two HALVES of the series, not its
+endpoints, before reading a delta as a trend. A single number over a jittery
+series is the wrong statistic whichever way it points.
+
 RSS is resident memory for the whole soak process. It includes the driver,
 compio runtime, allocator, Rust standard library, reporting buffers, and the
 harness itself. A rising series cannot distinguish a driver leak from allocator
@@ -435,3 +501,50 @@ run, one triggered by a workload shape the mix does not contain, or virtual
 memory reserved but not resident can remain invisible. Increasing the duration
 raises confidence only for behavior exercised during that longer window; it
 does not turn a finite soak into a proof of absence.
+
+**THE MIX CONTAINED NO COPY UNTIL 2026-08-27, and every figure recorded above
+that date is blind to it.** `benches/soak.rs` had zero occurrences of `copy_in`
+or `copy_out`, so the 131,510-operation run and everything before it say
+nothing whatever about the COPY subsystem - not its descriptors, not its pool
+interaction, not its error paths.
+
+That gap was invisible from the output, which is why it survived. The soak
+prints `clean_connections`, `bad_connections`, `cancellations` and their
+floors, and a reader watching 131,510 operations pass could reasonably conclude
+the driver was exercised end to end. It was not. Three COPY fixes landed that
+same day - `1f0012aaf`, `5be471843`, `4056b1be1` - and all three changed state
+machines the harness never entered.
+
+A `copy_round_trips` worker now closes it. Each round trip sends 256 rows
+through COPY IN, reads them back through COPY OUT, and checks the ROW COUNT AND
+THE SUM before truncating - a stream that dropped or duplicated a frame can
+still return a plausible byte count. It holds one connection for the whole run
+rather than churning, because the temporary table is session state and reusing
+the session is also what exposes a COPY that leaves the connection subtly
+unusable for whatever runs next. The table is `TEMPORARY`, so the harness still
+creates no persistent object.
+
+MEASURED 2026-08-27, 60s window: **copy_round_trips=1034 against a floor of
+15**, with `pool_acquires` and `pool_releases` still exactly equal at 11,748.
+The floor is deliberately loose - its job is to catch a worker that never ran,
+not to bound throughput.
+
+RE-MEASURED the same day at `d8c9d1f37`, 300s: **copy_round_trips=5118** -
+roughly 1.31 million rows through COPY IN and the same back out, each round
+trip checked on row count and sum. RSS moved **-104 KiB** across 31 samples
+(11 rises, 12 falls), `pool_acquires` and `pool_releases` were equal at 58,700,
+`cancellations` and `cancellation_recoveries` equal at 987, and both baselines
+returned to zero.
+
+That run is the reason the workload was added. Eight COPY changes had landed
+between the two measurements, and several of them make a stream WAIT longer
+than it used to - COPY OUT now runs on to `CommandComplete` and then
+`ReadyForQuery`, COPY IN buffers its completion until Sync, and a locally
+detected refusal drains the response FIFO before yielding. Every one of those
+is a place where a missed wake or a stranded response would hang rather than
+fail, which a short suite is poorly shaped to catch and 5,118 consecutive round
+trips is well shaped to catch.
+
+Read the workload list under "What the run does" as the boundary of what a
+green result means, and add a shape to the harness rather than stretching a
+claim to reach it. That is what this entry is a worked example of.

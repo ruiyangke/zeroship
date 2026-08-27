@@ -486,8 +486,13 @@ struct PoolEntry {
 }
 
 impl PoolEntry {
-    fn new(client: Client, max_lifetime: Duration) -> Self {
+    fn new(mut client: Client, max_lifetime: Duration) -> Self {
         let now = Instant::now();
+        // Pool lifecycle hooks receive `&Client`, so lease scoping must be in
+        // place before the first hook can retain a token. Idle and hook tokens
+        // remain inactive; checkout installs a fresh active generation only at
+        // the final, non-awaiting handoff to a PooledClient.
+        client.enter_pool();
         Self {
             client,
             last_used: now,
@@ -528,6 +533,13 @@ impl PoolEntry {
             .tx_status_handle()
             .load(std::sync::atomic::Ordering::Acquire)
             == crate::connection::READ_RETIRED_STATUS
+    }
+
+    fn ineligibility_error(&self, fallback: impl FnOnce() -> Error) -> Error {
+        self.client
+            .inner()
+            .terminal_server_error()
+            .unwrap_or_else(fallback)
     }
 }
 
@@ -707,10 +719,20 @@ impl Transport {
     }
 
     /// Send an out-of-band `CancelRequest` with the same transport policy as
-    /// this pool's sessions, then wait for the postmaster to consume it. The
-    /// connector has to be supplied at cancel time, which is why automatic
-    /// cancellation lives here rather than on `Client`.
+    /// this pool's sessions. This public form gives `connect_timeout` ownership
+    /// of the complete attempt, including the postmaster-close barrier.
     async fn cancel_query(&self, token: &CancelToken) -> Result<(), Error> {
+        #[cfg(feature = "tls")]
+        if let Some(tls) = &self.tls {
+            return token.cancel_query(tls.clone()).await;
+        }
+
+        token.cancel_query(NoTls).await
+    }
+
+    /// Pool command-timeout recovery supplies its own whole-recovery grace, so
+    /// keep the postmaster-close wait outside `connect_timeout` in this form.
+    async fn cancel_query_confirmed(&self, token: &CancelToken) -> Result<(), Error> {
         #[cfg(feature = "tls")]
         if let Some(tls) = &self.tls {
             return token.cancel_query_confirmed(tls.clone()).await;
@@ -796,6 +818,21 @@ pub struct Pool {
 }
 
 impl Pool {
+    /// Attempts to cancel the connection identified by a pool lease's token.
+    ///
+    /// The pool retains the TLS policy maker used for its connections, so this
+    /// is the public cancellation path for a token obtained from one of its
+    /// borrows. Success means PostgreSQL consumed and closed the dedicated
+    /// cancellation connection; an effective cancel is reported as SQLSTATE
+    /// `57014` on the original connection.
+    ///
+    /// The token's lease checks still govern the operation. A token from a
+    /// returned borrow is refused, and a cancel racing pool return retires the
+    /// physical session rather than risking the next borrower.
+    pub async fn cancel_query(&self, token: &CancelToken) -> Result<(), Error> {
+        self.transport.cancel_query(token).await
+    }
+
     /// Gracefully close this pool and wait for all borrowed clients to return.
     ///
     /// On its first poll, this method irreversibly marks the pool closed,
@@ -937,23 +974,19 @@ impl Pool {
                         // entered `entries`; dropping it closes the session.
                         drop(entry);
                         drop(entries);
-                        return Err(if i == 0 {
-                            e
-                        } else {
-                            pool_error(format!(
-                                "warm-up after_connect failed after {i} successful \
-                                 connection(s): {e}"
-                            ))
-                        });
+                        return Err(e);
                     }
                     if !entry.is_pool_eligible() {
+                        let error = entry.ineligibility_error(|| {
+                            pool_error(format!(
+                                "warm-up after_connect left connection {} unusable after {i} \
+                                 successful connection(s)",
+                                i + 1
+                            ))
+                        });
                         drop(entry);
                         drop(entries);
-                        return Err(pool_error(format!(
-                            "warm-up after_connect left connection {} unusable after {i} \
-                             successful connection(s)",
-                            i + 1
-                        )));
+                        return Err(error);
                     }
                     entries.push(entry);
                 }
@@ -961,13 +994,7 @@ impl Pool {
                     // Drop any already-opened clients (Client drop closes the
                     // sender, the connection task observes it and exits).
                     drop(entries);
-                    return Err(if i == 0 {
-                        e
-                    } else {
-                        pool_error(format!(
-                            "warm-up failed after {i} successful connection(s): {e}"
-                        ))
-                    });
+                    return Err(e);
                 }
             }
         }
@@ -977,11 +1004,14 @@ impl Pool {
         // per-entry post-hook check cannot prove that those earlier entries
         // remained open, read-healthy, COPY-free, and inside their lifetime.
         if let Some(index) = entries.iter().position(|entry| !entry.is_pool_eligible()) {
+            let error = entries[index].ineligibility_error(|| {
+                pool_error(format!(
+                    "warm-up connection {} became unusable before pool publication",
+                    index + 1
+                ))
+            });
             drop(entries);
-            return Err(pool_error(format!(
-                "warm-up connection {} became unusable before pool publication",
-                index + 1
-            )));
+            return Err(error);
         }
 
         let total = entries.len();
@@ -1321,10 +1351,7 @@ impl Pool {
                 // handles total/active. Disarm so the guard doesn't also
                 // decrement total.
                 permit.disarm();
-                return Ok(PooledClient {
-                    entry: Some(entry),
-                    pool: self,
-                });
+                return Ok(PooledClient::new(entry, self));
             }
 
             // 2. No idle connections - create a new one if under limit.
@@ -1358,9 +1385,9 @@ impl Pool {
                 }
                 if !entry.is_pool_eligible() {
                     self.metrics.inc_evictions();
-                    return Err(pool_error(
-                        "after_connect left the new pool connection unusable",
-                    ));
+                    return Err(entry.ineligibility_error(|| {
+                        pool_error("after_connect left the new pool connection unusable")
+                    }));
                 }
                 // `before_acquire` is deliberately NOT run here. It is a
                 // recycling check -- "is this idle connection still fit to
@@ -1390,10 +1417,7 @@ impl Pool {
                 // handles total/active. Disarm so the guard doesn't also
                 // decrement total.
                 permit.disarm();
-                return Ok(PooledClient {
-                    entry: Some(entry),
-                    pool: self,
-                });
+                return Ok(PooledClient::new(entry, self));
                 // H7 design note: we don't wake a waiter on successful
                 // connect. The freshly-connected client is immediately
                 // consumed by the current caller - there's no idle entry
@@ -1421,6 +1445,12 @@ impl Pool {
 
     /// Return a connection to the pool (called by `PooledClient::drop`).
     fn return_client(&self, mut entry: PoolEntry) {
+        // The lease boundary is an authority boundary. Revoke before any hook
+        // or pool publication. If a token escaped this lease, retire the
+        // physical session instead of allowing that backend-wide credential to
+        // target a later borrower. A cancellation already in progress also
+        // holds the Arc, so this covers the load-before-revoke race.
+        entry.client.revoke_pool_cancel_lease();
         // The returning client is no longer active. (When the entry is handed
         // directly to a waiter below, checkout re-bumps `active` only after
         // validating it, so a successful hand-off nets zero.)
@@ -1439,6 +1469,12 @@ impl Pool {
             drop(entry);
             drop(permit);
             self.wake_close_waiters_if_drained();
+            return;
+        }
+
+        if entry.client.pool_cancel_lease_prevents_reuse() {
+            entry.client.force_close();
+            self.metrics.inc_evictions();
             return;
         }
 
@@ -1467,6 +1503,14 @@ impl Pool {
             return;
         }
         if !keep {
+            self.metrics.inc_evictions();
+            return;
+        }
+        // A release hook can retain a token too. It saw the revoked generation,
+        // so that token is already unusable; still retire this session rather
+        // than carrying escaped authority into another logical lease.
+        if entry.client.pool_cancel_lease_prevents_reuse() {
+            entry.client.force_close();
             self.metrics.inc_evictions();
             return;
         }
@@ -1822,13 +1866,17 @@ impl Pool {
                     }
 
                     if !entry.is_pool_eligible() {
+                        let error = entry.ineligibility_error(|| {
+                            pool_error("after_connect left connection unusable")
+                        });
                         if let Some(pool) = weak.upgrade()
                             && !pool.closed.get()
                         {
                             pool.metrics.inc_evictions();
                         }
                         eprintln!(
-                            "[compio-postgres] housekeeper: after_connect left connection unusable"
+                            "[compio-postgres] housekeeper: after_connect left connection \
+                             unusable: {error:?}"
                         );
                         // `entry` closes and `permit` releases the reserved
                         // slot before the next housekeeper tick.
@@ -2493,12 +2541,24 @@ impl Drop for CommandRecoveryGuard<'_> {
 /// use [`PooledClient::command`] to apply this pool's configured deadline.
 /// [`Pool::query`], [`Pool::execute`], and the other Pool convenience methods
 /// enter that scope automatically.
+///
+/// A [`CancelToken`] obtained through this borrow is lease-scoped. Returning
+/// the borrow revokes the token; if it is retained, the pool retires the
+/// physical session instead of letting the token target its next borrower.
 pub struct PooledClient<'a> {
     entry: Option<PoolEntry>,
     pool: &'a Pool,
 }
 
 impl PooledClient<'_> {
+    fn new(mut entry: PoolEntry, pool: &Pool) -> PooledClient<'_> {
+        entry.client.activate_pool_cancel_lease();
+        PooledClient {
+            entry: Some(entry),
+            pool,
+        }
+    }
+
     /// Run one exclusive logical command under the pool's command deadline.
     ///
     /// If [`PoolConfig::command_timeout`] is configured, expiry sends a real
@@ -2586,7 +2646,7 @@ impl PooledClient<'_> {
             // cross-connection ordering barrier: write/flush alone would let a
             // delayed CancelRequest arrive after this backend's Sync and hit
             // the next command instead.
-            transport.cancel_query(&cancel_token).await?;
+            transport.cancel_query_confirmed(&cancel_token).await?;
             // A query future can return its ErrorResponse before the
             // connection task receives the trailing ReadyForQuery.
             // Sync is a FIFO proof that every response belonging to

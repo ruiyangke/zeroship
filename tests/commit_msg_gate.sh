@@ -179,6 +179,21 @@ main() {
     --range)
       [ $# -eq 2 ] || usage
       gate_arms_init commit_msg
+      # `--no-merges` IS DELIBERATE, and it is not the gate being lax. git
+      # writes its own merge subjects, and the workflow this repo uses tells
+      # every agent to `git merge main` before working, so history is full of
+      # `Merge branch 'main' into worktree-agent-...`. MEASURED 2026-08-27:
+      # of the last 400 merges, 36 fail the conventional-commit shape and
+      # every one is that auto-generated form. Linting merges here would red
+      # the gate on an operation the workflow mandates.
+      #
+      # Deliberate merge subjects are still covered - by the `commit-msg`
+      # HOOK, which does fire on `git merge` and rejected two over-cap
+      # messages on 2026-08-27. So the hook holds interactive merges to the
+      # rules and this arm holds the authored history; the gap is only a merge
+      # made with `--no-verify`, which is a choice rather than an oversight.
+      # Do not "fix" this to `git rev-list "$2"` without re-measuring the line
+      # above.
       local sha n=0
       for sha in $(git rev-list --no-merges "$2"); do
         n=$((n + 1))

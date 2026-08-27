@@ -21,6 +21,83 @@ async fn connect(url: &str) -> Result<Client, Error> {
     Ok(client)
 }
 
+const FAILING_CUSTOM_TYPE_QUERY: &str = "SELECT NULL::pg_temp.cpg_query_diag_enum \
+     FROM generate_series(0, 0) AS g(n) \
+     WHERE $1::int4 / n::int4 = 0";
+
+async fn create_failing_custom_type_fixture(client: &Client) {
+    client
+        .batch_execute(
+            "CREATE TYPE pg_temp.cpg_query_diag_enum AS ENUM ('value'); \
+             BEGIN",
+        )
+        .await
+        .expect("create the custom type and begin its failing transaction");
+}
+
+#[compio::test]
+async fn query_text_params_preserves_the_outer_error_when_type_resolution_fails() {
+    let url = test_url();
+    let client = connect(&url)
+        .await
+        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+    create_failing_custom_type_fixture(&client).await;
+
+    let failure = client
+        .query_text_params(FAILING_CUSTOM_TYPE_QUERY, &["1"])
+        .await
+        .expect_err("query_text_params execution must fail with division by zero");
+    assert_eq!(
+        failure.code().map(compio_postgres::error::SqlState::code),
+        Some("22012"),
+        "query_text_params discarded SQLSTATE 22012 behind catalog SQLSTATE 25P02: {failure}"
+    );
+
+    client
+        .batch_execute("ROLLBACK")
+        .await
+        .expect("the outer query error left the transaction recoverable");
+    let value: i32 = client
+        .query_one("SELECT 1", &[])
+        .await
+        .expect("the outer query error left the session reusable")
+        .get(0);
+    assert_eq!(value, 1);
+}
+
+#[compio::test]
+async fn query_typed_preserves_the_outer_error_when_type_resolution_fails() {
+    let url = test_url();
+    let client = connect(&url)
+        .await
+        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+    create_failing_custom_type_fixture(&client).await;
+
+    let failure = client
+        .query_typed(
+            FAILING_CUSTOM_TYPE_QUERY,
+            &[(&1_i32, compio_postgres::types::Type::INT4)],
+        )
+        .await
+        .expect_err("query_typed execution must fail with division by zero");
+    assert_eq!(
+        failure.code().map(compio_postgres::error::SqlState::code),
+        Some("22012"),
+        "query_typed discarded SQLSTATE 22012 behind catalog SQLSTATE 25P02: {failure}"
+    );
+
+    client
+        .batch_execute("ROLLBACK")
+        .await
+        .expect("the outer query error left the transaction recoverable");
+    let value: i32 = client
+        .query_one("SELECT 1", &[])
+        .await
+        .expect("the outer query error left the session reusable")
+        .get(0);
+    assert_eq!(value, 1);
+}
+
 async fn assert_stale_helpers_are_retired(
     client: &Client,
     ddl: &str,

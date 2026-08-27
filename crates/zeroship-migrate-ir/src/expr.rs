@@ -282,9 +282,10 @@ const fn is_false(b: &bool) -> bool {
 }
 
 /// The CLOSED expression AST node. Internally tagged on `"node"`,
-/// camel-cased (`{"node":"colRef","name":"first"}`). NO `untagged`, NO `flatten`
-/// - same discipline as [`Op`](crate::ir::Op), so schemars derives a clean
-/// discriminated union and serde rejects any out-of-set node tag at deserialize.
+/// camel-cased (`{"node":"colRef","name":"first"}`). NO `untagged`, NO
+/// `flatten` - same discipline as [`Op`](crate::ir::Op), so schemars derives a
+/// clean discriminated union and serde rejects any out-of-set node tag at
+/// deserialize.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[schemars(
     description = "The CLOSED expression AST node. Internally tagged on `\"node\"`,\ncamel-cased (`{\"node\":\"colRef\",\"name\":\"first\"}`). NO `untagged`, NO `flatten`\n— same discipline as [`Op`](crate::ir::Op), so schemars derives a clean\ndiscriminated union and serde rejects any out-of-set node tag at deserialize."

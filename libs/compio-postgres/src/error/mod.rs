@@ -337,6 +337,7 @@ enum Kind {
     CopyOutAnsweredCopyIn,
     CopyInProgress,
     CopyOutProgress,
+    CopyInFinished,
     /// A TLS problem that is settled before any handshake bytes are exchanged:
     /// an impossible `sslmode` combination, a server that refuses `SSLRequest`
     /// under a mode that requires TLS, an unreadable `sslrootcert`.
@@ -445,6 +446,7 @@ impl fmt::Display for Error {
             ),
             Kind::CopyInProgress => fmt.write_str("cannot queue commands during COPY IN"),
             Kind::CopyOutProgress => fmt.write_str("cannot queue commands during COPY OUT"),
+            Kind::CopyInFinished => fmt.write_str("COPY IN sink is already finished"),
             Kind::Tls => fmt.write_str("TLS could not be negotiated"),
             Kind::TlsHandshake => fmt.write_str("error performing TLS handshake"),
             Kind::TlsUnattested => fmt.write_str(
@@ -573,6 +575,12 @@ impl Error {
         self.0.kind == Kind::Authentication
     }
 
+    /// Whether a locally enforced connection configuration rejected a valid
+    /// server response.
+    pub(crate) fn is_config(&self) -> bool {
+        self.0.kind == Kind::Config
+    }
+
     /// Whether the post-startup session-property check rejected the current
     /// configured host while permitting the next configured host.
     pub(crate) fn is_target_session_attrs(&self) -> bool {
@@ -628,12 +636,20 @@ impl Error {
         Error::new(Kind::CopyOutProgress, None)
     }
 
+    pub(crate) fn copy_in_finished() -> Error {
+        Error::new(Kind::CopyInFinished, None)
+    }
+
     #[allow(clippy::needless_pass_by_value)]
     pub(crate) fn db(error: ErrorResponseBody) -> Error {
         match DbError::parse(&mut error.fields()) {
-            Ok(e) => Error::new(Kind::Db, Some(Box::new(e))),
+            Ok(e) => Error::from_db_error(e),
             Err(e) => Error::new(Kind::Parse, Some(Box::new(e))),
         }
+    }
+
+    pub(crate) fn from_db_error(error: DbError) -> Error {
+        Error::new(Kind::Db, Some(Box::new(error)))
     }
 
     pub(crate) fn parse(e: io::Error) -> Error {

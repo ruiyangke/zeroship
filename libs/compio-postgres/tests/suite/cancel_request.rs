@@ -4,12 +4,14 @@
 //! future. Every cancellation here opens a second connection and sends the
 //! backend PID and secret key captured from the target connection's startup.
 
+use bytes::Bytes;
 use compio::buf::{BufResult, IoBuf, IoBufMut};
 use compio::io::{AsyncRead, AsyncWrite};
 use compio::net::{TcpListener, TcpStream};
-use compio_postgres::config::Host;
+use compio_postgres::config::{Host, ProtocolVersion};
 use compio_postgres::error::SqlState;
-use compio_postgres::{CancelToken, Client, Config, Error, NoTls};
+use compio_postgres::{CancelToken, Client, Config, Error, NoTls, Pool};
+use futures_util::{SinkExt, StreamExt};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
@@ -119,6 +121,30 @@ async fn wait_until_backend_is_gone(observer: &Client, pid: i32) {
     })
     .await
     .expect("target backend remained visible after its connection closed");
+}
+
+async fn wait_until_copy_progress(observer: &Client, pid: i32, expected: bool) {
+    compio::time::timeout(OPERATION_TIMEOUT, async {
+        loop {
+            let present: bool = observer
+                .query_one_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_progress_copy WHERE pid = $1)",
+                    &[&pid],
+                )
+                .await
+                .expect("inspect pg_stat_progress_copy");
+            if present == expected {
+                return;
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "COPY progress for backend {pid} did not become {}",
+            if expected { "visible" } else { "absent" }
+        )
+    });
 }
 
 async fn assert_client_still_works(client: &Client) {
@@ -374,6 +400,46 @@ async fn running_query_cancel_returns_57014_and_preserves_session() {
     assert_client_still_works(&client).await;
 }
 
+#[cfg(feature = "suite-over-tls")]
+#[compio::test]
+async fn a_pool_can_cancel_tls_with_its_private_policy_lineage() {
+    const MARKER: &str = "cpg_cancel_pool_tls_policy";
+    const QUERY: &str = "SELECT pg_sleep(1) /* cpg_cancel_pool_tls_policy */";
+
+    let url = test_url();
+    let pool = Pool::connect(&url, 1)
+        .await
+        .expect("connect one-slot TLS pool");
+    let client = pool.get().await.expect("borrow TLS pool connection");
+    let observer = connect(&url).await.expect("connect cancellation observer");
+    let pid = client.process_id();
+    let token = client.cancel_token();
+
+    let encrypted: bool = observer
+        .query_one_scalar("SELECT ssl FROM pg_stat_ssl WHERE pid = $1", &[&pid])
+        .await
+        .expect("inspect the pooled connection's TLS transport");
+    assert!(
+        encrypted,
+        "the pool cancellation test did not establish TLS"
+    );
+
+    let cancel = async {
+        wait_until_pg_sleep_is_running(&observer, pid, MARKER).await;
+        pool.cancel_query(&token).await
+    };
+    let (query_result, cancel_result) = compio::time::timeout(
+        OPERATION_TIMEOUT,
+        futures_util::future::join(client.batch_execute(QUERY), cancel),
+    )
+    .await
+    .expect("pool-owned TLS cancellation did not finish before the test deadline");
+
+    cancel_result.expect("the pool could not use its private TLS policy lineage");
+    assert_query_canceled(query_result);
+    assert_client_still_works(&client).await;
+}
+
 #[compio::test]
 async fn cancel_twice_with_nothing_running_is_harmless() {
     let url = plaintext_url();
@@ -391,6 +457,40 @@ async fn cancel_twice_with_nothing_running_is_harmless() {
         .unwrap_or_else(|_| panic!("{attempt} idle CancelRequest timed out"));
     }
 
+    assert_client_still_works(&client).await;
+}
+
+#[compio::test]
+async fn two_cancels_for_one_running_query_leave_the_session_usable() {
+    const MARKER: &str = "cpg_cancel_twice_running";
+    const QUERY: &str = "SELECT pg_sleep(30) /* cpg_cancel_twice_running */";
+
+    let url = plaintext_url();
+    let client = connect(&url).await.unwrap();
+    let observer = connect(&url).await.unwrap();
+    let pid = client.process_id();
+    let first = client.cancel_token();
+    let second = first.clone();
+
+    let cancel_task = compio::runtime::spawn(async move {
+        wait_until_pg_sleep_is_running(&observer, pid, MARKER).await;
+        futures_util::future::join(
+            first.cancel_query(common::suite_tls()),
+            second.cancel_query(common::suite_tls()),
+        )
+        .await
+    });
+    let (query_result, cancels) = compio::time::timeout(
+        OPERATION_TIMEOUT,
+        futures_util::future::join(client.batch_execute(QUERY), cancel_task),
+    )
+    .await
+    .expect("two CancelRequests did not resolve before the test deadline");
+
+    let (first_result, second_result) = cancels.expect("double-cancel task panicked");
+    first_result.expect("first CancelRequest was not consumed");
+    second_result.expect("second CancelRequest was not consumed");
+    assert_query_canceled(query_result);
     assert_client_still_works(&client).await;
 }
 
@@ -446,6 +546,179 @@ async fn stale_cancel_token_completes_cleanly_without_hanging() {
 }
 
 #[compio::test]
+async fn a_token_from_a_returned_pool_lease_cannot_cancel_the_next_borrower() {
+    const MARKER: &str = "cpg_cancel_stale_pool_lease";
+    const QUERY: &str = "SELECT pg_sleep(1) /* cpg_cancel_stale_pool_lease */";
+
+    let url = plaintext_url();
+    let pool = Pool::connect(&url, 1).await.expect("connect one-slot pool");
+    let observer = connect(&url).await.unwrap();
+
+    let first = pool.get().await.expect("borrow first pool lease");
+    let token = first.cancel_token();
+    drop(first);
+
+    let second = pool.get().await.expect("borrow second pool lease");
+    let second_pid = second.process_id();
+    let cancel_task = compio::runtime::spawn(async move {
+        wait_until_pg_sleep_is_running(&observer, second_pid, MARKER).await;
+        token.cancel_query(common::suite_tls()).await
+    });
+
+    let (query_result, cancel_result) = compio::time::timeout(
+        OPERATION_TIMEOUT,
+        futures_util::future::join(second.batch_execute(QUERY), cancel_task),
+    )
+    .await
+    .expect("stale pool-token race did not finish before the test deadline");
+    let cancel_error = cancel_result
+        .expect("stale pool-token task panicked or was cancelled")
+        .expect_err("a token from the returned lease retained cancellation authority");
+
+    assert!(
+        error_chain(&cancel_error).contains("pool lease has ended"),
+        "stale token refusal did not name the ended pool lease: {}",
+        error_chain(&cancel_error)
+    );
+    query_result.expect("the stale token cancelled the next pool borrower's query");
+    assert_client_still_works(&second).await;
+}
+
+#[compio::test]
+async fn cancel_during_copy_in_surfaces_57014_and_preserves_session() {
+    let url = plaintext_url();
+    let client = connect(&url).await.unwrap();
+    let observer = connect(&url).await.unwrap();
+    let pid = client.process_id();
+    let token = client.cancel_token();
+
+    client
+        .batch_execute("CREATE TEMPORARY TABLE cpg_cancel_copy_in (v int4)")
+        .await
+        .expect("create COPY IN cancellation fixture");
+    let sink = client
+        .copy_in::<_, Bytes>("COPY cpg_cancel_copy_in FROM STDIN")
+        .await
+        .expect("enter COPY IN");
+    let mut sink = Box::pin(sink);
+    sink.as_mut()
+        .send(Bytes::from_static(b"7\n"))
+        .await
+        .expect("send one COPY row before cancellation");
+    wait_until_copy_progress(&observer, pid, true).await;
+
+    token
+        .cancel_query(common::suite_tls())
+        .await
+        .expect("send CancelRequest during COPY IN");
+
+    let error = compio::time::timeout(OPERATION_TIMEOUT, sink.as_mut().finish())
+        .await
+        .expect("COPY IN cancellation recovery timed out")
+        .expect_err("cancelled COPY IN reported success");
+    assert_eq!(
+        error.code(),
+        Some(&SqlState::QUERY_CANCELED),
+        "COPY IN lost SQLSTATE 57014: {}",
+        error_chain(&error)
+    );
+    wait_until_copy_progress(&observer, pid, false).await;
+    assert_client_still_works(&client).await;
+    let stored: i64 = client
+        .query_one_scalar("SELECT count(*) FROM cpg_cancel_copy_in", &[])
+        .await
+        .expect("count COPY IN rows after cancellation");
+    assert_eq!(stored, 0, "cancelled COPY IN committed a partial load");
+}
+
+#[compio::test]
+async fn cancel_during_copy_out_surfaces_57014_and_preserves_session() {
+    const QUERY: &str =
+        "COPY (SELECT repeat('x', 1048576) FROM generate_series(1, 1000)) TO STDOUT";
+
+    let url = plaintext_url();
+    let client = connect(&url).await.unwrap();
+    let observer = connect(&url).await.unwrap();
+    let pid = client.process_id();
+    let token = client.cancel_token();
+    let stream = client.copy_out(QUERY).await.expect("enter COPY OUT");
+    let mut stream = Box::pin(stream);
+    wait_until_copy_progress(&observer, pid, true).await;
+    let stream_result = async {
+        loop {
+            match stream.as_mut().next().await {
+                Some(Ok(_)) => {}
+                Some(Err(error)) => break Err(error),
+                None => break Ok(()),
+            }
+        }
+    };
+    let (copy_result, cancel_result) = compio::time::timeout(
+        OPERATION_TIMEOUT,
+        futures_util::future::join(stream_result, token.cancel_query(common::suite_tls())),
+    )
+    .await
+    .expect("COPY OUT cancellation did not resolve before the test deadline");
+    cancel_result.expect("COPY OUT CancelRequest was not consumed");
+    let error = copy_result.expect_err("cancelled COPY OUT ended successfully");
+    assert_eq!(
+        error.code(),
+        Some(&SqlState::QUERY_CANCELED),
+        "COPY OUT lost SQLSTATE 57014: {}",
+        error_chain(&error)
+    );
+    wait_until_copy_progress(&observer, pid, false).await;
+    assert_client_still_works(&client).await;
+}
+
+#[compio::test]
+async fn cancel_inside_transaction_requires_rollback_then_preserves_session() {
+    const MARKER: &str = "cpg_cancel_transaction";
+    const QUERY: &str = "SELECT pg_sleep(30) /* cpg_cancel_transaction */";
+
+    let url = plaintext_url();
+    let client = connect(&url).await.unwrap();
+    let observer = connect(&url).await.unwrap();
+    let pid = client.process_id();
+    let token = client.cancel_token();
+    client
+        .batch_execute("BEGIN")
+        .await
+        .expect("begin transaction");
+
+    let cancel_task = compio::runtime::spawn(async move {
+        wait_until_pg_sleep_is_running(&observer, pid, MARKER).await;
+        token.cancel_query(common::suite_tls()).await
+    });
+    let (query_result, cancel_result) = compio::time::timeout(
+        OPERATION_TIMEOUT,
+        futures_util::future::join(client.batch_execute(QUERY), cancel_task),
+    )
+    .await
+    .expect("transaction cancellation did not resolve before the test deadline");
+    cancel_result
+        .expect("transaction cancel task panicked")
+        .expect("transaction CancelRequest was not consumed");
+    assert_query_canceled(query_result);
+
+    let aborted = client
+        .query_one_scalar::<i32, _>("SELECT 1::int4", &[])
+        .await
+        .expect_err("cancelled transaction did not enter failed state");
+    assert_eq!(
+        aborted.code(),
+        Some(&SqlState::IN_FAILED_SQL_TRANSACTION),
+        "cancelled transaction did not report 25P02: {}",
+        error_chain(&aborted)
+    );
+    client
+        .batch_execute("ROLLBACK")
+        .await
+        .expect("roll back cancelled transaction");
+    assert_client_still_works(&client).await;
+}
+
+#[compio::test]
 async fn raw_cancel_interrupts_running_query_and_preserves_session() {
     const MARKER: &str = "cpg_cancel_raw_running_query";
     const QUERY: &str = "SELECT pg_sleep(30) /* cpg_cancel_raw_running_query */";
@@ -456,6 +729,7 @@ async fn raw_cancel_interrupts_running_query_and_preserves_session() {
     let observer = connect(&url).await.unwrap();
     let pid = client.process_id();
     let token = client.cancel_token();
+    let protocol_version = client.protocol_version();
     let server_version: i32 = client
         .query_one_scalar("SELECT current_setting('server_version_num')::int4", &[])
         .await
@@ -475,6 +749,12 @@ async fn raw_cancel_interrupts_running_query_and_preserves_session() {
 
     let packet = cancel_result.expect("raw CancelRequest task panicked or was cancelled");
     let expected_len = if server_version >= 180_000 { 44 } else { 16 };
+    let expected_protocol = if server_version >= 180_000 {
+        ProtocolVersion::V3_2
+    } else {
+        ProtocolVersion::V3_0
+    };
+    assert_eq!(protocol_version, expected_protocol);
     assert_eq!(
         packet.len(),
         expected_len,
@@ -487,4 +767,10 @@ async fn raw_cancel_interrupts_running_query_and_preserves_session() {
     );
     assert_query_canceled(query_result);
     assert_client_still_works(&client).await;
+    eprintln!(
+        "cancel oracle: server_version_num={server_version} protocol={protocol_version:?} \
+         backend_key_len={} cancel_packet_len={} original_sqlstate=57014 session_reused=true",
+        packet.len() - 12,
+        packet.len()
+    );
 }

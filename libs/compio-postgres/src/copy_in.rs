@@ -152,10 +152,12 @@ impl Stream for CopyInReceiver {
     }
 }
 
+#[derive(Clone, Copy)]
 enum SinkState {
     Active,
     Closing,
     Reading,
+    Finished(u64),
 }
 
 struct BufferedCopyAppend<'a> {
@@ -203,6 +205,7 @@ pin_project! {
         response: CopyResponse,
         buf: BytesMut,
         state: SinkState,
+        completion: Option<Result<u64, Error>>,
         _p2: PhantomData<T>,
         // Last so Drop closes the producer and response consumer before it
         // publishes that ordinary requests may queue behind their recovery.
@@ -228,6 +231,32 @@ where
         self.project().copy_mode.take();
     }
 
+    /// Once the connection task drops the producer it has already published
+    /// every backend message decoded before that drop. Poll that response FIFO
+    /// before turning the local channel symptom into `connection closed`.
+    fn poll_disconnected_diagnosis(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), Error>> {
+        *self.as_mut().project().state = SinkState::Reading;
+        loop {
+            match self.as_mut().project().responses.poll_next(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(_)) => {}
+            }
+        }
+    }
+
+    fn disconnected_diagnosis_now(mut self: Pin<&mut Self>) -> Error {
+        let waker = std::task::Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        match self.as_mut().poll_disconnected_diagnosis(&mut cx) {
+            Poll::Ready(Err(error)) => error,
+            Poll::Pending | Poll::Ready(Ok(())) => Error::closed(),
+        }
+    }
+
     /// A poll-based version of `finish`.
     pub fn poll_finish(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<u64, Error>> {
         loop {
@@ -236,6 +265,14 @@ where
                     match self.as_mut().poll_flush(cx) {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Ok(())) => {}
+                        Poll::Ready(Err(error)) if error.is_closed() => {
+                            // The connection can close its COPY producer only
+                            // after it has published any decoded backend
+                            // messages. Prefer that queued ErrorResponse to the
+                            // local sender-disconnected symptom.
+                            *self.as_mut().project().state = SinkState::Reading;
+                            continue;
+                        }
                         Poll::Ready(Err(error)) => {
                             self.as_mut().clear_copy_mode();
                             return Poll::Ready(Err(error));
@@ -251,9 +288,9 @@ where
                     match sender_ready {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Ok(())) => {}
-                        Poll::Ready(Err(error)) => {
-                            self.as_mut().clear_copy_mode();
-                            return Poll::Ready(Err(error));
+                        Poll::Ready(Err(_)) => {
+                            *self.as_mut().project().state = SinkState::Reading;
+                            continue;
                         }
                     }
                     let send_result = {
@@ -263,9 +300,9 @@ where
                             .start_send(CopyInMessage::Done)
                             .map_err(|_| Error::closed())
                     };
-                    if let Err(error) = send_result {
-                        self.as_mut().clear_copy_mode();
-                        return Poll::Ready(Err(error));
+                    if send_result.is_err() {
+                        *self.as_mut().project().state = SinkState::Reading;
+                        continue;
                     }
                     *self.as_mut().project().state = SinkState::Closing;
                 }
@@ -279,9 +316,8 @@ where
                         Poll::Ready(Ok(())) => {
                             *self.as_mut().project().state = SinkState::Reading;
                         }
-                        Poll::Ready(Err(error)) => {
-                            self.as_mut().clear_copy_mode();
-                            return Poll::Ready(Err(error));
+                        Poll::Ready(Err(_)) => {
+                            *self.as_mut().project().state = SinkState::Reading;
                         }
                     }
                 }
@@ -290,17 +326,45 @@ where
                         let this = self.as_mut().project();
                         this.responses.poll_next(cx)
                     };
-                    let result = match response {
+                    match response {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Ok(Message::CommandComplete(body))) => {
-                            extract_row_affected(&body)
+                            let this = self.as_mut().project();
+                            if this.completion.is_some() {
+                                *this.completion = Some(Err(Error::unexpected_message()));
+                            } else {
+                                *this.completion = Some(extract_row_affected(&body));
+                            }
                         }
-                        Poll::Ready(Ok(_)) => Err(Error::unexpected_message()),
-                        Poll::Ready(Err(error)) => Err(error),
-                    };
-                    self.as_mut().clear_copy_mode();
-                    return Poll::Ready(result);
+                        Poll::Ready(Ok(Message::ReadyForQuery(_))) => {
+                            let result = self
+                                .as_mut()
+                                .project()
+                                .completion
+                                .take()
+                                .unwrap_or_else(|| Err(Error::unexpected_message()));
+                            self.as_mut().clear_copy_mode();
+                            match result {
+                                Ok(rows) => {
+                                    *self.as_mut().project().state = SinkState::Finished(rows);
+                                    return Poll::Ready(Ok(rows));
+                                }
+                                Err(error) => return Poll::Ready(Err(error)),
+                            }
+                        }
+                        Poll::Ready(Ok(_)) => {
+                            let this = self.as_mut().project();
+                            if this.completion.is_none() {
+                                *this.completion = Some(Err(Error::unexpected_message()));
+                            }
+                        }
+                        Poll::Ready(Err(error)) => {
+                            self.as_mut().clear_copy_mode();
+                            return Poll::Ready(Err(error));
+                        }
+                    }
                 }
+                SinkState::Finished(rows) => return Poll::Ready(Ok(rows)),
             }
         }
     }
@@ -308,7 +372,8 @@ where
     /// Completes the copy, returning the number of rows inserted.
     ///
     /// The `Sink::close` method is equivalent to `finish`, except that it
-    /// does not return the number of rows.
+    /// does not return the number of rows. After successful completion,
+    /// repeated calls return the same row count without touching the session.
     pub async fn finish(mut self: Pin<&mut Self>) -> Result<u64, Error> {
         future::poll_fn(|cx| self.as_mut().poll_finish(cx)).await
     }
@@ -320,15 +385,23 @@ where
 {
     type Error = Error;
 
-    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        self.project()
-            .sender
-            .poll_ready(cx)
-            .map_err(|_| Error::closed())
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        if matches!(self.state, SinkState::Finished(_)) {
+            return Poll::Ready(Err(Error::copy_in_finished()));
+        }
+        let ready = self.as_mut().project().sender.poll_ready(cx);
+        match ready {
+            Poll::Ready(Err(_)) => self.poll_disconnected_diagnosis(cx),
+            Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+            Poll::Pending => Poll::Pending,
+        }
     }
 
-    fn start_send(self: Pin<&mut Self>, item: T) -> Result<(), Error> {
-        let this = self.project();
+    fn start_send(mut self: Pin<&mut Self>, item: T) -> Result<(), Error> {
+        if matches!(self.state, SinkState::Finished(_)) {
+            return Err(Error::copy_in_finished());
+        }
+        let this = self.as_mut().project();
 
         let large_item = item.remaining() > 4096;
         let staged_buffered_prefix = large_item && !this.buf.is_empty();
@@ -350,29 +423,57 @@ where
         };
 
         let data = CopyData::new(data).map_err(Error::encode)?;
-        this.sender
+        if this
+            .sender
             .start_send(CopyInMessage::Message(FrontendMessage::CopyData(data)))
-            .map_err(|_| Error::closed())?;
+            .is_err()
+        {
+            return Err(self.disconnected_diagnosis_now());
+        }
         if staged_buffered_prefix {
             this.buf.clear();
         }
         Ok(())
     }
 
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        let mut this = self.project();
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        if matches!(self.state, SinkState::Finished(_)) {
+            return Poll::Ready(Ok(()));
+        }
+        let buffered = !self.as_mut().project().buf.is_empty();
+        if buffered {
+            let ready = self.as_mut().project().sender.as_mut().poll_ready(cx);
+            match ready {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(_)) => return self.poll_disconnected_diagnosis(cx),
+                Poll::Ready(Ok(())) => {}
+            }
 
-        if !this.buf.is_empty() {
-            ready!(this.sender.as_mut().poll_ready(cx)).map_err(|_| Error::closed())?;
-            let data: Box<dyn Buf + Send> = Box::new(this.buf.split().freeze());
-            let data = CopyData::new(data).map_err(Error::encode)?;
-            this.sender
-                .as_mut()
-                .start_send(CopyInMessage::Message(FrontendMessage::CopyData(data)))
-                .map_err(|_| Error::closed())?;
+            let send_result = {
+                let mut this = self.as_mut().project();
+                let data: Box<dyn Buf + Send> = Box::new(this.buf.split().freeze());
+                let data = CopyData::new(data).map_err(Error::encode)?;
+                this.sender
+                    .as_mut()
+                    .start_send(CopyInMessage::Message(FrontendMessage::CopyData(data)))
+            };
+            if send_result.is_err() {
+                return self.poll_disconnected_diagnosis(cx);
+            }
         }
 
-        this.sender.poll_flush(cx).map_err(|_| Error::closed())
+        let (flushed, disconnected) = {
+            let mut this = self.as_mut().project();
+            let flushed = this.sender.as_mut().poll_flush(cx);
+            let disconnected = this.sender.is_closed();
+            (flushed, disconnected)
+        };
+        match flushed {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(_)) => self.poll_disconnected_diagnosis(cx),
+            Poll::Ready(Ok(())) if disconnected => self.poll_disconnected_diagnosis(cx),
+            Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+        }
     }
 
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
@@ -427,16 +528,28 @@ where
         .send_copy_statement(RequestMessages::CopyIn(receiver), &statement, CopyMode::In)
         .map_err(ExecutionError::before_bind_complete)?;
 
-    sender
-        .send(CopyInMessage::Message(FrontendMessage::Raw(buf)))
+    send_initial_copy_message(&mut sender, &mut responses, FrontendMessage::Raw(buf))
         .await
-        .map_err(|_| ExecutionError::before_bind_complete(Error::closed()))?;
+        .map_err(ExecutionError::before_bind_complete)?;
 
     // Until `CopyInResponse` arrives the server is NOT in copy mode, so every
     // failure below must leave the request silent rather than let the sender's
     // drop synthesize a `CopyFail`. See [`CopyInMessage::Abort`].
     async fn abort(sender: &mut mpsc::Sender<CopyInMessage>) {
         let _ = sender.send(CopyInMessage::Abort).await;
+    }
+
+    // A local API/protocol mismatch can precede an ErrorResponse generated
+    // while Execute or the following Sync finishes. Keep the mismatch only as
+    // a fallback at ReadyForQuery; a server diagnosis always wins.
+    async fn drain_refusal(responses: &mut Responses, fallback: Error) -> Error {
+        loop {
+            match responses.next().await {
+                Ok(Message::ReadyForQuery(_)) => return fallback,
+                Ok(_) => {}
+                Err(error) => return error,
+            }
+        }
     }
 
     if unnamed_sql.is_some() {
@@ -478,13 +591,13 @@ where
         Ok(Message::CopyOutResponse(_)) => {
             abort(&mut sender).await;
             return Err(ExecutionError::after_bind_complete(
-                Error::copy_out_answered_copy_in(),
+                drain_refusal(&mut responses, Error::copy_out_answered_copy_in()).await,
             ));
         }
         Ok(_) => {
             abort(&mut sender).await;
             return Err(ExecutionError::after_bind_complete(
-                Error::unexpected_message(),
+                drain_refusal(&mut responses, Error::unexpected_message()).await,
             ));
         }
         Err(e) => {
@@ -499,17 +612,103 @@ where
         response,
         buf: BytesMut::new(),
         state: SinkState::Active,
+        completion: None,
         _p2: PhantomData,
         copy_mode: Some(copy_mode),
     })
 }
 
+async fn send_initial_copy_message(
+    sender: &mut mpsc::Sender<CopyInMessage>,
+    responses: &mut Responses,
+    message: FrontendMessage,
+) -> Result<(), Error> {
+    if sender.send(CopyInMessage::Message(message)).await.is_ok() {
+        return Ok(());
+    }
+
+    // The request owns both the COPY receiver and its response producer. If
+    // the former has gone away, the latter must either carry the backend
+    // diagnosis which ended the request or terminate too. Drain that FIFO so
+    // a decoded ErrorResponse wins over the local producer-channel symptom.
+    loop {
+        match responses.next().await {
+            Ok(_) => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::CopyInReceiver;
+    use super::{CopyInReceiver, send_initial_copy_message};
+    use crate::Statement;
+    use crate::client::{Client, CopyMode};
     use crate::codec::FrontendMessage;
+    use crate::config::{SslMode, SslNegotiation};
+    use crate::connection::RequestMessages;
+    use crate::error::{DbError, SqlState};
     use bytes::Bytes;
+    use bytes::{BufMut, BytesMut};
+    use futures_channel::mpsc;
     use futures_util::StreamExt;
+    use postgres_protocol::message::backend::Message;
+
+    fn admin_shutdown() -> DbError {
+        let payload = b"SFATAL\0VFATAL\0C57P01\0Mscripted shutdown\0\0";
+        let mut frame = BytesMut::new();
+        frame.put_u8(b'E');
+        frame.put_u32(u32::try_from(payload.len() + 4).unwrap());
+        frame.extend_from_slice(payload);
+
+        match Message::parse(&mut frame).expect("parse scripted ErrorResponse") {
+            Some(Message::ErrorResponse(body)) => {
+                DbError::parse(&mut body.fields()).expect("parse scripted DbError")
+            }
+            _ => panic!("scripted 57P01 did not decode as ErrorResponse"),
+        }
+    }
+
+    #[compio::test]
+    async fn initial_producer_failure_preserves_terminal_server_diagnosis() {
+        let (request_sender, mut requests) = mpsc::unbounded();
+        let client = Client::new(
+            request_sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+        );
+        let (mut producer, receiver) = mpsc::channel(1);
+        let statement = Statement::unnamed(Vec::new(), Vec::new());
+        let (mut responses, _copy_mode) = client
+            .inner()
+            .send_copy_statement(
+                RequestMessages::CopyIn(CopyInReceiver::new(receiver)),
+                &statement,
+                CopyMode::In,
+            )
+            .expect("enqueue the scripted COPY request");
+        let request = requests.try_recv().expect("receive the COPY request");
+        *client.terminal_server_error_handle().lock() = Some(admin_shutdown());
+        drop(request);
+
+        let error = send_initial_copy_message(
+            &mut producer,
+            &mut responses,
+            FrontendMessage::Raw(Bytes::from_static(b"initial COPY batch")),
+        )
+        .await
+        .expect_err("the disconnected COPY producer accepted its initial batch");
+
+        assert_eq!(
+            error.code(),
+            Some(&SqlState::ADMIN_SHUTDOWN),
+            "initial COPY producer failure discarded SQLSTATE 57P01: {error}"
+        );
+        assert!(!error.is_closed());
+    }
 
     async fn terminal_bytes(mut receiver: CopyInReceiver) -> Bytes {
         receiver

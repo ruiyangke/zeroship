@@ -16,6 +16,7 @@ use std::io;
 
 pub async fn cancel_query_raw<S, T>(
     stream: S,
+    encryption: connect_tls::Encryption,
     mode: SslMode,
     negotiation: SslNegotiation,
     tls: T,
@@ -27,9 +28,10 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     T: TlsConnect<S>,
 {
-    // The stream belongs to the caller, so there is no second socket to dial:
-    // `allow` and `prefer` get the transport they attempt first, and no
-    // fallback. What is lost is the retry.
+    // The stream belongs to the caller, so there is no second socket to dial.
+    // Reproduce the transport the original session actually negotiated; do
+    // not re-run `allow` or `prefer` against a new peer and risk exposing the
+    // key on a different transport.
     //
     // A CancelRequest carries NO query text, but it does carry the backend's
     // process id and secret key, and that pair is a BEARER CREDENTIAL: anyone
@@ -51,12 +53,12 @@ where
     // connection's `sslmode`. An earlier version of this comment cited libpq as
     // precedent for plaintext; it was citing the interface upstream retired.
     //
-    // `cancel_query::cancel_query` owns its socket and so applies the
-    // address-aware rule this function has no address to apply. It does NOT
-    // add a retry either - neither entry point has one.
-    send_cancel_request_with_encryption(
+    // `cancel_query::cancel_query` also pins the original address. This raw
+    // entry point cannot do that because the stream is caller-owned, but both
+    // paths replay the original transport without a retry.
+    let stream = send_cancel_request_with_exact_encryption(
         stream,
-        connect_tls::Encryption::first_for(mode),
+        encryption,
         mode,
         negotiation,
         tls,
@@ -64,8 +66,8 @@ where
         process_id,
         secret_key,
     )
-    .await
-    .map(drop)
+    .await?;
+    wait_for_server_close(stream).await
 }
 
 pub(crate) async fn cancel_query_with_encryption<S, T>(
@@ -82,7 +84,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     T: TlsConnect<S>,
 {
-    send_cancel_request_with_exact_encryption(
+    let stream = send_cancel_request_with_exact_encryption(
         stream,
         encryption,
         mode,
@@ -92,8 +94,8 @@ where
         process_id,
         secret_key,
     )
-    .await
-    .map(drop)
+    .await?;
+    wait_for_server_close(stream).await
 }
 
 /// Send and flush a cancel packet, returning its half-closed connection.

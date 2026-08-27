@@ -14,6 +14,7 @@ use std::error;
 use std::fmt;
 use std::future::Future;
 use std::io;
+use std::sync::Arc;
 
 /// `PostgreSQL`'s registered ALPN protocol identifier.
 pub(crate) const POSTGRESQL_ALPN_PROTOCOL: &[u8] = b"postgresql";
@@ -140,6 +141,45 @@ pub enum ClientCertStatus {
     Unknown,
 }
 
+/// Opaque identity for one cancellation-sensitive TLS policy.
+///
+/// A cancel request opens a second connection and sends the original
+/// connection's bearer cancel key through it. The coarse connector
+/// attestations cover SNI, client-certificate mode, and server-verification
+/// level, but cannot prove that two connectors use the same trust anchors,
+/// CRLs, client identity, protocol bounds, or other backend-specific policy.
+///
+/// Mint this once when constructing a TLS policy and retain it in every clone
+/// of that policy. Do not mint a replacement for each handshake, and do not
+/// reuse it after changing any cancellation-sensitive policy. A cancellation
+/// connector without the original identity is refused before it can connect.
+/// The identity is not a secret and reveals no policy contents.
+#[derive(Clone)]
+pub struct TlsPolicyIdentity(Arc<()>);
+
+impl TlsPolicyIdentity {
+    /// Creates a fresh identity for one TLS policy lineage.
+    pub fn new() -> Self {
+        Self(Arc::new(()))
+    }
+
+    pub(crate) fn same_as(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Default for TlsPolicyIdentity {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Debug for TlsPolicyIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("TlsPolicyIdentity(..)")
+    }
+}
+
 impl ChannelBinding {
     /// Creates a `ChannelBinding` containing no information.
     pub fn none() -> ChannelBinding {
@@ -223,6 +263,16 @@ pub trait TlsConnect<S> {
     /// override this and compare against the level it really built.
     fn can_honor_server_verification(&self, verification: ServerVerification) -> bool {
         verification == ServerVerification::None
+    }
+
+    /// Identifies the complete TLS policy this connector will use.
+    ///
+    /// Cancellation requires the connector for its second connection to
+    /// return the same identity recorded from the original connection. The
+    /// default refuses TLS cancellation because a connector that did not opt
+    /// into this contract cannot prove exact policy continuity.
+    fn cancel_policy_identity(&self) -> Option<&TlsPolicyIdentity> {
+        None
     }
 
     #[doc(hidden)]

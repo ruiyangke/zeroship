@@ -74,8 +74,9 @@
 //!
 //! With a bare client, compose the timer and cancellation token explicitly.
 //! The simplest honest policy is to consume and discard that client when the
-//! timer wins, because the fire-and-forget cancellation API does not expose the
-//! pool's postmaster-EOF delivery barrier:
+//! timer wins. Cancellation waits for the postmaster to close its dedicated
+//! connection, but that proves only that the request was consumed. It does not
+//! prove the target connection has drained through `ReadyForQuery`:
 //!
 //! ```no_run
 //! use compio_postgres::{Client, Error, NoTls, Row};
@@ -114,10 +115,9 @@
 //!
 //! `NoTls` above is correct only for a plaintext session; pass the connector
 //! matching a TLS session instead. Advanced bare-client code can retain the
-//! session by using [`CancelToken::cancel_query_raw`], waiting for EOF on that
-//! caller-owned cancellation connection, and then awaiting
-//! [`Client::check_connection`]. The pool wrapper performs both barriers,
-//! restores an idle transaction state, and otherwise retires the session.
+//! session by awaiting cancellation and then [`Client::check_connection`]. The
+//! pool wrapper performs both barriers, restores an idle transaction state, and
+//! otherwise retires the session.
 //!
 //! # Socket read deadlines
 //!

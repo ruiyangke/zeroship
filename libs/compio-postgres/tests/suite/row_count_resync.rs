@@ -1,36 +1,29 @@
-//! A `query_opt` that refuses a second row must leave the session in step.
+//! A `query_opt` that refuses a second row must drain the complete result.
 //!
-//! `Client::query_opt` returns `Err(row_count)` the moment a SECOND row
-//! arrives, which means it abandons the `RowStream` with rows still queued on
-//! the wire. That is the interesting part: the refusal is correct and
-//! deliberate, but it hands the connection back mid-result. If those queued
-//! rows were not drained, the NEXT query on the same session would read them
-//! and return someone else's data -- a wrong answer with no error anywhere.
+//! Returning `Err(row_count)` at the SECOND row abandons the `RowStream` while
+//! PostgreSQL may still be executing the statement. The connection run loop
+//! keeps the protocol in step, but a later `ErrorResponse` then has no receiver
+//! and the caller sees the local row-count symptom instead of the server's
+//! diagnosis. The accessor must remember multiplicity and keep polling until
+//! the result ends: a server error wins, while clean completion still returns
+//! the row-count error.
 //!
 //! `tests/query_claims.rs` already covers the COLUMN arity of
 //! `query_opt_scalar`. Nothing covered the ROW count path or what the session
 //! looks like afterwards.
 //!
-//! Every assertion below is on a session whose `pg_backend_pid()` is checked to
-//! be unchanged, so "the driver quietly opened a new connection" cannot be
-//! mistaken for "the driver resynchronised this one".
+//! The resynchronisation assertions use a session whose `pg_backend_pid()` is
+//! checked to be unchanged, so "the driver quietly opened a new connection"
+//! cannot be mistaken for "the driver resynchronised this one".
 //!
-//! WHAT THE MUTATIONS HERE DID AND DID NOT ESTABLISH, since a guard nobody has
-//! seen fail is worth exactly as much as its evidence. Pointing the follow-up
-//! query at the SAME range the abandoned result used turns the first test red,
-//! so its assertion is live and the distinctness of the two ranges is load
+//! The two diagnostic tests are direct mutations: restoring the old early
+//! return in either accessor changes its result from SQLSTATE 22012 to the
+//! code-less local row-count error. The session-resynchronisation test remains
+//! useful independently: pointing its follow-up query at the same range as the
+//! abandoned result makes its assertion fail, so its distinct ranges are load
 //! bearing rather than decoration.
-//!
-//! I could NOT construct the failure itself. The drain is a property of the
-//! run loop's structure: it routes a response through to `ReadyForQuery`
-//! whether or not a receiver still exists, so leftover rows are unreachable
-//! without restructuring that loop rather than flipping a condition in it. So
-//! read this file as a regression guard against a future change to that
-//! structure, NOT as evidence that the hazard was ever reachable. If you do
-//! rework the run loop, this is one of the tests that should be able to catch
-//! you, and it is worth re-checking that it still can.
 
-use compio_postgres::Client;
+use compio_postgres::{Client, error::SqlState};
 
 #[allow(unused_imports)]
 use crate::common;
@@ -93,6 +86,44 @@ async fn a_row_count_refusal_leaves_the_session_usable_and_in_step() {
         pid_before,
         "this must be the SAME backend; a replaced connection would explain a \
          clean read without the driver having resynchronised anything"
+    );
+}
+
+/// A row-count refusal is only the final verdict once PostgreSQL has finished
+/// the result. A later server error is the actual diagnosis of the statement.
+#[compio::test]
+async fn query_opt_prefers_a_later_server_error_to_row_count() {
+    let url = test_url();
+    let client = connect_client(&url).await;
+
+    let failure = client
+        .query_opt("SELECT 10 / (3 - g) FROM generate_series(1, 3) AS g", &[])
+        .await
+        .expect_err("the third row must fail with division by zero");
+
+    assert_eq!(
+        failure.code(),
+        Some(&SqlState::DIVISION_BY_ZERO),
+        "query_opt discarded SQLSTATE 22012 after seeing a second row: {failure}"
+    );
+}
+
+/// The explicitly typed path has its own row-draining loop and must make the
+/// same diagnostic choice as `query_opt`.
+#[compio::test]
+async fn query_typed_opt_prefers_a_later_server_error_to_row_count() {
+    let url = test_url();
+    let client = connect_client(&url).await;
+
+    let failure = client
+        .query_typed_opt("SELECT 10 / (3 - g) FROM generate_series(1, 3) AS g", &[])
+        .await
+        .expect_err("the third row must fail with division by zero");
+
+    assert_eq!(
+        failure.code(),
+        Some(&SqlState::DIVISION_BY_ZERO),
+        "query_typed_opt discarded SQLSTATE 22012 after seeing a second row: {failure}"
     );
 }
 

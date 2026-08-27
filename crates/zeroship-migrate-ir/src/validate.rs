@@ -1177,8 +1177,8 @@ impl Ctx<'_> {
     }
 
     /// Rule (b): the `FnSynth` arity/shape backstop. Each synth helper has a
-    /// pinned argument shape; an out-of-shape call is rejected STRUCTURALLY here
-    /// - independent of the (per-dialect) render seam - so a hostile/buggy
+    /// pinned argument shape; an out-of-shape call is rejected STRUCTURALLY
+    /// here - independent of the (per-dialect) render seam - so a hostile/buggy
     /// IR envelope carrying e.g. `FnSynth{fn:now, args:[...]}` or a zero-arg
     /// `concatWs` cannot pass the structural gate and defer the blow-up to
     /// rendering. After the shape check each variant recurses into its args.
