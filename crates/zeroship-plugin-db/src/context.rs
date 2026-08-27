@@ -35,7 +35,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
-use compio_postgres::{Client, Pool};
+use compio_postgres::{OwnedPooledClient, Pool};
 
 use crate::backend::sqlite::session::SqliteSessionHandle;
 use crate::backend::{BackendHandle, PostgresBackend};
@@ -87,7 +87,7 @@ pub(crate) enum SchemaIntrospectionState {
 // with open transactions, box it - the lint's assumption would then be true.
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum TxConnection {
-    Postgres(Client),
+    Postgres(OwnedPooledClient),
     Sqlite(SqliteSessionHandle),
 }
 
@@ -189,7 +189,7 @@ pub struct ThreadDbContext {
     /// [`Self::install_tx_client`] together. Single-threaded means one
     /// executing frame at a time, not one in-flight transaction.
     ///
-    /// Postgres stores a raw [`Client`] rather than
+    /// Postgres stores an owned pooled lease ([`OwnedPooledClient`]) rather than
     /// `compio_postgres::Transaction<'_>` because the latter borrows the
     /// former and cannot live in thread-local state. SQLite stores a
     /// [`SqliteSessionHandle`] pointing at the single writer actor; the

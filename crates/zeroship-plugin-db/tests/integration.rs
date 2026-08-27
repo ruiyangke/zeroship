@@ -7451,3 +7451,113 @@ fn direct_connection_sites_do_not_grow() {
          checking anything. Replace this with a check over the helper."
     );
 }
+
+// ---------------------------------------------------------------------------
+// `OwnedPooledClient`: the transaction connection is a pool checkout
+//
+// Until 2026-08-27 `acquire_dedicated_client` called
+// `compio_postgres::connect` directly and spawned a detached task per
+// connection. It never touched the pool, so the concurrent-transaction ceiling
+// was UNBOUNDED - a worker multiplexing ~200 apps that each open a transaction
+// opened ~200 backends, which is a way to exhaust a cluster's
+// `max_connections` from one process.
+//
+// Both arms below fail on that code: the first because the pool's counters
+// never move, the second because an unbounded acquire never has to wait.
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn a_dedicated_client_is_a_pool_checkout_and_returns_on_drop() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+    let backend =
+        zeroship_plugin_db::backend::PostgresBackend::new(std::rc::Rc::clone(&pool), url.clone());
+
+    let active_before = pool.active_count();
+    let created_before = pool.metrics.connections_created.get();
+
+    let client = {
+        use zeroship_plugin_db::backend::SqlExecutor as _;
+        backend
+            .acquire_dedicated_client()
+            .await
+            .expect("dedicated client")
+    };
+
+    assert_eq!(
+        pool.active_count(),
+        active_before + 1,
+        "a dedicated client must be a checkout from THIS pool; the pool's \
+         active count did not move, so the connection came from somewhere else"
+    );
+    // The warm pool already holds idle connections, so this checkout must not
+    // have opened a new backend at all.
+    assert_eq!(
+        pool.metrics.connections_created.get(),
+        created_before,
+        "the checkout opened a new connection instead of reusing an idle one"
+    );
+
+    drop(client);
+
+    assert_eq!(
+        pool.active_count(),
+        active_before,
+        "the dedicated client did not return to the pool on drop"
+    );
+}
+
+#[compio::test]
+async fn concurrent_dedicated_clients_are_bounded_by_the_pool() {
+    use std::time::Duration;
+
+    let url = require_pg().await;
+    // `max_size: 1` makes the ceiling observable in one checkout; a short
+    // acquire timeout keeps the queued caller's wait bounded so the test is
+    // measuring the ceiling rather than sitting on the 30 s default.
+    let mut config = compio_postgres::PoolConfig::default();
+    config
+        .max_size(1)
+        .min_idle(1)
+        .acquire_timeout(Duration::from_millis(400));
+    let pool = std::rc::Rc::new(
+        Pool::connect_with_pool_config(&url, config)
+            .await
+            .expect("pool"),
+    );
+    let backend =
+        zeroship_plugin_db::backend::PostgresBackend::new(std::rc::Rc::clone(&pool), url.clone());
+
+    use zeroship_plugin_db::backend::SqlExecutor as _;
+    let first = backend
+        .acquire_dedicated_client()
+        .await
+        .expect("first dedicated client");
+
+    // THE INVERSION THIS STEP OWNS: a transaction that used to get a
+    // connection of its own now queues, and refuses when the wait expires.
+    // Conservative policy, and OWED a real decision: queue on the pool's
+    // acquire timeout rather than refuse immediately, no per-app fairness, and
+    // the ceiling is whatever the shared data pool is sized to.
+    let second = backend.acquire_dedicated_client().await;
+    let err = second.expect_err(
+        "a second dedicated client must be bounded by the pool, not opened \
+         directly - an unbounded model is how one worker exhausts max_connections",
+    );
+    let message = format!("{err:?}");
+    assert!(
+        message.contains("timeout"),
+        "the refusal must name the acquire timeout so an operator can see the \
+         ceiling was hit; got {message}"
+    );
+
+    drop(first);
+
+    // And the ceiling is a queue, not a wall: once the lease returns, the next
+    // checkout succeeds.
+    let third = backend
+        .acquire_dedicated_client()
+        .await
+        .expect("checkout after the first lease returned");
+    drop(third);
+}
