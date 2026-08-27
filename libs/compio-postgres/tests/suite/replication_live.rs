@@ -1035,6 +1035,102 @@ async fn a_replication_error_response_retires_copy_both_after_preserving_57014()
     .expect("replication ErrorResponse retirement test exceeded its outer watchdog");
 }
 
+/// Backend `CopyDone` closes only PostgreSQL's sending direction. The client
+/// must acknowledge it with frontend `CopyDone`, then consume the ordinary
+/// command completion through `ReadyForQuery` before reporting success.
+///
+/// A FATAL can arrive after a `CommandComplete` and before `ReadyForQuery`.
+/// PostgreSQL closes the socket behind a FATAL, so the failed read which ends
+/// that response must not replace the SQLSTATE already on the wire.
+#[compio::test]
+async fn copy_done_half_close_preserves_a_fatal_terminal_error() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            assert_eq!(
+                expect_simple_query(&mut stream),
+                b"START_REPLICATION SLOT \"deadline_slot\" LOGICAL 0/0 (\"proto_version\" '1', \"publication_names\" '\"deadline_publication\"')\0"
+            );
+            send_copy_both(&mut stream);
+            stream
+                .write_all(&backend_frame(b'c', b""))
+                .expect("write backend CopyDone");
+            stream.flush().expect("flush backend CopyDone");
+
+            // On the old driver the stream reports `None` and its owner drops
+            // the socket below. Let that EOF end the scripted peer cleanly so
+            // the caller's diagnostic assertion, rather than a harness panic,
+            // is the deterministic RED.
+            let mut frontend_copy_done = [0u8; 5];
+            if stream.read_exact(&mut frontend_copy_done).is_err() {
+                return;
+            }
+            assert_eq!(
+                frontend_copy_done,
+                [b'c', 0, 0, 0, 4],
+                "the frontend did not acknowledge backend CopyDone"
+            );
+
+            let mut terminal = backend_frame(b'C', b"COPY 0\0");
+            terminal.extend_from_slice(&backend_frame(b'C', b"START_REPLICATION\0"));
+            terminal.extend_from_slice(&backend_frame(
+                b'E',
+                b"SFATAL\0C57P01\0Mterminating connection due to administrator command\0\0",
+            ));
+            stream
+                .write_all(&terminal)
+                .expect("write fatal replication completion");
+            stream
+                .flush()
+                .expect("flush fatal replication completion");
+            stream
+                .shutdown(std::net::Shutdown::Both)
+                .expect("close scripted connection behind FATAL");
+        });
+
+        let replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(
+                common::suite_tls(),
+                &stub_config(server.addr),
+            ),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+        let mut stream = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            replication.start_logical_replication(start_options()),
+        )
+        .await
+        .expect("START_REPLICATION exceeded its watchdog")
+        .expect("scripted peer refused CopyBoth mode");
+
+        let outcome = compio::time::timeout(OPERATION_WATCHDOG, stream.next())
+            .await
+            .expect("backend CopyDone completion exceeded its watchdog");
+        drop(stream);
+        server.finish();
+
+        let error = outcome.expect_err("backend CopyDone discarded SQLSTATE 57P01");
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("57P01"),
+            "backend CopyDone replaced SQLSTATE 57P01: {}",
+            common::error_chain(&error)
+        );
+        assert!(
+            common::error_chain(&error)
+                .contains("terminating connection due to administrator command"),
+            "backend CopyDone replaced the server's FATAL message: {}",
+            common::error_chain(&error)
+        );
+    })
+    .await
+    .expect("CopyDone half-close diagnostic test exceeded its outer watchdog");
+}
+
 /// Replication startup receives the same BackendKeyData capability as an
 /// ordinary session. Keep its complete protocol-3.2 key and use a dedicated
 /// second connection; silently discarding it leaves a live CopyBoth operation

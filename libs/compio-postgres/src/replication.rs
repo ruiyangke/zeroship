@@ -1282,7 +1282,20 @@ where
                             ),
                         )));
                     }
-                    return Ok(None);
+
+                    // CopyBoth is bidirectional: backend CopyDone closes only
+                    // PostgreSQL's sending direction. Acknowledge it, then
+                    // consume the simple-query completion before reporting a
+                    // clean end. Executor cleanup can still fail in that
+                    // interval, and returning here used to discard that
+                    // ErrorResponse as well as leave the server waiting for
+                    // our half-close.
+                    let result = self.finish_copy_both().await;
+                    self.in_flight.poison();
+                    if let Some(release) = &self.release {
+                        release.shutdown();
+                    }
+                    return result.map(|()| None);
                 }
                 ERROR_RESPONSE_TAG => {
                     // The walsender's own failures arrive here: the slot
@@ -1319,6 +1332,50 @@ where
                     return Err(Error::io(std::io::Error::other(format!(
                         "unexpected tag in replication stream: 0x{other:02x}"
                     ))));
+                }
+            }
+        }
+    }
+
+    /// Acknowledge backend CopyDone and consume the ordinary response which
+    /// finishes the START_REPLICATION simple-query phase.
+    async fn finish_copy_both(&mut self) -> Result<(), Error> {
+        let mut bytes = BytesMut::new();
+        frontend::copy_done(&mut bytes);
+        crate::codec::write_frontend(&mut self.stream, FrontendMessage::Raw(bytes.freeze()))?;
+        self.stream.flush().await?;
+
+        // PostgreSQL owes a terminal CommandComplete/ErrorResponse plus
+        // ReadyForQuery only after the frontend half-close reaches it.
+        self.stream.begin_read_response();
+        let result = self.drain_copy_both_completion().await;
+        self.stream.finish_read_response();
+        result
+    }
+
+    async fn drain_copy_both_completion(&mut self) -> Result<(), Error> {
+        let mut failure: Option<Error> = None;
+
+        loop {
+            let message = match read_one_message(&mut self.stream).await {
+                Ok(message) => message,
+                // PostgreSQL sends no ReadyForQuery after FATAL. In that case
+                // EOF closes the response, but the ErrorResponse already read
+                // from the wire remains the useful diagnosis.
+                Err(error) => return Err(failure.unwrap_or(error)),
+            };
+
+            match message {
+                Message::CommandComplete(_) => {}
+                Message::ReadyForQuery(_) => {
+                    return failure.map_or(Ok(()), Err);
+                }
+                Message::ErrorResponse(body) => failure = failure.or(Some(Error::db(body))),
+                Message::NoticeResponse(_)
+                | Message::ParameterStatus(_)
+                | Message::NotificationResponse(_) => {}
+                _ => {
+                    return Err(failure.unwrap_or_else(Error::unexpected_message));
                 }
             }
         }
@@ -4582,8 +4639,10 @@ mod tests {
     /// `length <= 4`, or that demands a non-empty body, turns this red.
     #[compio::test]
     async fn a_frame_declaring_an_empty_body_still_decodes() {
-        let mut wire = vec![COPY_DONE_TAG];
-        wire.extend_from_slice(&4u32.to_be_bytes());
+        let mut wire = startup_frame(COPY_DONE_TAG, b"");
+        wire.extend_from_slice(&startup_frame(b'C', b"COPY 0\0"));
+        wire.extend_from_slice(&startup_frame(b'C', b"START_REPLICATION\0"));
+        wire.extend_from_slice(&startup_frame(b'Z', b"I"));
 
         let mut stream = stream_over(wire);
         assert!(
@@ -4593,6 +4652,15 @@ mod tests {
                 .expect("CopyDone is a valid empty-bodied frame")
                 .is_none(),
             "CopyDone ends the stream"
+        );
+
+        let retry = stream
+            .next()
+            .await
+            .expect_err("a completed CopyBoth exchange became reusable");
+        assert!(
+            retry.is_cancelled(),
+            "the completed CopyBoth exchange was not retired: {retry}"
         );
     }
 
