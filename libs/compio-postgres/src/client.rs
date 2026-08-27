@@ -724,15 +724,17 @@ fn statement_uses_cached_typeinfo(statement: &Statement) -> bool {
         .any(|type_| Type::from_oid(type_.oid()).is_none())
 }
 
-/// Whether reparsing can heal this cached-statement failure.
+/// Whether PostgreSQL says this cached statement itself is stale.
 ///
-/// Match `26000` broadly, as pgjdbc does. `0A000` covers many unrelated
-/// unsupported features, so match PostgreSQL's plan-cache routines rather
-/// than hiding every error in that broad SQLSTATE class. These are the same
-/// stable routine names pgjdbc uses for its one-shot reparse decision.
-fn cached_statement_error_can_retry(error: &Error) -> bool {
+/// SQLSTATE identifies an error class, not its source. User code can raise the
+/// same codes during Bind parameter input or Execute, so require PostgreSQL's
+/// statement lookup or plan-cache routine as provenance.
+fn cached_statement_error_is_stale(error: &Error) -> bool {
     match error.code() {
-        Some(code) if code == &crate::error::SqlState::INVALID_SQL_STATEMENT_NAME => true,
+        Some(code) if code == &crate::error::SqlState::INVALID_SQL_STATEMENT_NAME => error
+            .as_db_error()
+            .and_then(crate::error::DbError::routine)
+            .is_some_and(|routine| routine == "FetchPreparedStatement"),
         Some(code) if code == &crate::error::SqlState::FEATURE_NOT_SUPPORTED => error
             .as_db_error()
             .and_then(crate::error::DbError::routine)
@@ -783,7 +785,7 @@ mod type_cache_tests {
     }
 
     fn invalid_statement_name_error() -> Error {
-        let payload = b"SERROR\0C26000\0Mscripted stale statement\0\0";
+        let payload = b"SERROR\0C26000\0Mscripted stale statement\0RFetchPreparedStatement\0\0";
         let mut frame = BytesMut::new();
         frame.put_u8(b'E');
         frame.put_u32(u32::try_from(payload.len() + 4).unwrap());
@@ -1735,11 +1737,7 @@ impl InnerClient {
         statement: &Statement,
         error: &Error,
     ) {
-        let invalidates = error.code().is_some_and(|code| {
-            code == &crate::error::SqlState::FEATURE_NOT_SUPPORTED
-                || code == &crate::error::SqlState::INVALID_SQL_STATEMENT_NAME
-        });
-        if !invalidates {
+        if !cached_statement_error_is_stale(error) {
             return;
         }
 
@@ -2054,7 +2052,7 @@ impl Client {
         error: &Error,
     ) -> Option<Result<Statement, Error>> {
         let sql =
-            cache_sql.filter(|_| replay_permitted && cached_statement_error_can_retry(error))?;
+            cache_sql.filter(|_| replay_permitted && cached_statement_error_is_stale(error))?;
         if !matches!(
             self.sync_transaction_status().await,
             Ok(TransactionStatus::Idle)

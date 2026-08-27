@@ -6179,6 +6179,86 @@ async fn statement_cache_does_not_retry_a_cold_26000() {
     assert_eq!(failed_attempts, 1, "a cold prepare is not retry eligible");
 }
 
+/// A SQLSTATE is not proof that PostgreSQL's outer prepared-statement lookup
+/// produced it. Domain input runs during Bind before plan acquisition, so this
+/// application-raised 26000 crosses the phase check but must still propagate
+/// without evicting or replaying the healthy cached statement.
+#[compio::test]
+async fn statement_cache_requires_server_provenance_before_retrying_26000() {
+    use compio_postgres::types::{IsNull, ToSql, to_sql_checked};
+
+    #[derive(Debug)]
+    struct DomainText(&'static str);
+
+    impl ToSql for DomainText {
+        fn to_sql(
+            &self,
+            _: &Type,
+            out: &mut bytes::BytesMut,
+        ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+            out.extend_from_slice(self.0.as_bytes());
+            Ok(IsNull::No)
+        }
+
+        fn accepts(_: &Type) -> bool {
+            true
+        }
+
+        to_sql_checked!();
+    }
+
+    let url = test_url();
+    let client = connect_with_statement_cache(&url, 2).await.unwrap();
+    client
+        .batch_execute(
+            "CREATE TEMP SEQUENCE cpg_cache_domain_26000_seq; \
+             CREATE FUNCTION pg_temp.cpg_cache_domain_26000_check(value text) \
+             RETURNS boolean LANGUAGE plpgsql VOLATILE AS $function$ \
+             BEGIN \
+               IF value = 'raise' THEN \
+                 PERFORM nextval('pg_temp.cpg_cache_domain_26000_seq'); \
+                 RAISE EXCEPTION USING \
+                   ERRCODE = '26000', MESSAGE = 'domain input raised 26000'; \
+               END IF; \
+               RETURN true; \
+             END \
+             $function$; \
+             CREATE DOMAIN pg_temp.cpg_cache_domain_26000 AS text \
+             CHECK (pg_temp.cpg_cache_domain_26000_check(VALUE))",
+        )
+        .await
+        .unwrap();
+
+    const SQL: &str = "SELECT $1::pg_temp.cpg_cache_domain_26000";
+    drop(client.query(SQL, &[&DomainText("ok")]).await.unwrap());
+    let cached_name = prepared_statement_name(&client, SQL).await;
+
+    let error = client
+        .query(SQL, &[&DomainText("raise")])
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Some(&SqlState::INVALID_SQL_STATEMENT_NAME));
+    assert_eq!(
+        error.as_db_error().and_then(|error| error.routine()),
+        Some("exec_stmt_raise"),
+        "the fixture did not raise 26000 from application code"
+    );
+
+    let side_effects: i64 = client
+        .query_one_scalar(
+            "SELECT last_value FROM pg_temp.cpg_cache_domain_26000_seq",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(side_effects, 1, "Bind parameter input ran more than once");
+    assert_eq!(
+        prepared_statement_name(&client, SQL).await,
+        cached_name,
+        "an application-raised 26000 evicted a healthy cached statement"
+    );
+}
+
 /// SQL `EXECUTE` runs after the outer protocol Bind completed. Its 26000 names
 /// the SQL-level target, not the driver's still-live cached statement, so the
 /// call must propagate the first failure without replaying it.
