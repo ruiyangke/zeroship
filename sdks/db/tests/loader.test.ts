@@ -142,6 +142,61 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     assert.deepEqual([...idClause.$in].sort(), ["1", "2"]);
   });
 
+  test("a batch of more than 100 distinct ids is chunked, never over the cap", async () => {
+    // The IdLoader is the SECOND `$in` emitter in this SDK. The first fix for
+    // this defect chunked only the relation loader
+    // (`src/collection/relations.ts`), and this path kept sending an unbounded
+    // list: `dispatch()` dedupes the whole microtask batch and calls `flush`
+    // once. The native builder REJECTS a membership list over
+    // MAX_MEMBERSHIP_LIST_LEN rather than clamping it, so an over-cap batch
+    // fails EVERY queued get(), not merely the ids past the boundary.
+    //
+    // A microtask batch is as large as the caller's concurrency, so a plain
+    // `Promise.all` over a few hundred ids reaches it with nothing unusual
+    // happening.
+    const N = 250;
+    const rows: Record<string, { id: string; email: string; name: string }> = {};
+    for (let i = 0; i < N; i++) {
+      rows[`${i}`] = { id: `${i}`, email: `u${i}@b.com`, name: `User ${i}` };
+    }
+    const { native, calls } = makeMockNative(rows);
+    const Users = model(
+      "users",
+      {
+        email: t.string().required().unique(),
+        name: t.string().required(),
+      },
+      native,
+    );
+
+    const results = await Promise.all(
+      Array.from({ length: N }, (_, i) => Users.get(`${i}`)),
+    );
+
+    // Every caller still resolves - chunking must not drop the tail.
+    for (let i = 0; i < N; i++) {
+      assert.equal(results[i].error, null, `get(${i}) must not error`);
+      assert.equal(results[i].data?.email, `u${i}@b.com`, `get(${i}) resolved`);
+    }
+
+    assert.ok(calls.findBatched.length > 0, "the batched path must be used");
+    for (const c of calls.findBatched) {
+      const list = (c.filter.id as { $in: string[] }).$in;
+      assert.ok(
+        list.length <= 100,
+        `every IN list must stay within the builder's cap of 100; got ${list.length}`,
+      );
+    }
+
+    // No id requested twice: a chunking bug that re-sends the whole set would
+    // satisfy the cap assertion above by accident once the chunks are small.
+    const requested = calls.findBatched.flatMap(
+      (c) => (c.filter.id as { $in: string[] }).$in,
+    );
+    assert.equal(new Set(requested).size, requested.length, "no id sent twice");
+    assert.equal(new Set(requested).size, N, "every distinct id is requested");
+  });
+
   test("filter object falls through to direct dispatch (find with limit:1)", async () => {
     const { native, calls } = makeMockNative({
       1: { id: "1", email: "a@b.com", name: "Alice" },

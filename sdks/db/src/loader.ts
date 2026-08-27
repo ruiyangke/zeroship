@@ -44,6 +44,8 @@ interface QueuedLoad<R> {
   txDepthAtEnqueue: number;
 }
 
+import { MAX_ID_BATCH } from "./membership-cap.js";
+
 /**
  * Coalesces `.load(id)` calls within a microtask into a single batched
  * fetch. Construct one per Collection and reuse — it's stateless across
@@ -139,7 +141,20 @@ export class IdLoader<R extends { id: string }> {
     }
 
     try {
-      const map = await this.flush(ids);
+      // Chunked: the native builder REJECTS a membership list longer than the
+      // cap rather than clamping it, so an unbounded batch fails EVERY queued
+      // get() at once - not just the ids past the boundary. A microtask batch
+      // is as large as the caller's concurrency, so `Promise.all` over a few
+      // hundred distinct ids reaches it without anything unusual happening.
+      //
+      // Sequential, matching the relation loader: these chunks exist because
+      // one call was already too big, and issuing them concurrently would put
+      // the same total work in flight simultaneously.
+      const map = new Map<string, R>();
+      for (let i = 0; i < ids.length; i += MAX_ID_BATCH) {
+        const part = await this.flush(ids.slice(i, i + MAX_ID_BATCH));
+        for (const [k, v] of part) map.set(k, v);
+      }
       for (const q of liveBatch) resolve(q, map);
     } catch (e) {
       for (const q of liveBatch) q.reject(e);
