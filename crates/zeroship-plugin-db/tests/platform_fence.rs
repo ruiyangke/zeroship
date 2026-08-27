@@ -16,7 +16,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use zeroship_plugin_db::DbPlugin;
+use zeroship_plugin_db::service::{DbService, DbServiceConfig};
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::Runtime;
@@ -65,11 +65,15 @@ fn dispatch(source: &str, name: &str) -> (u16, serde_json::Value) {
         source: source.into(),
     }];
     let plugins: Vec<Arc<dyn NativePlugin>> =
-        vec![Arc::new(DbPlugin::new(
-            "postgres://_platform_fence_unused",
-            None,
-            "platform-fence-test-worker",
-        ))];
+        vec![
+            DbService::new(DbServiceConfig {
+                url: "postgres://_platform_fence_unused".to_string(),
+                worker_id: "platform-fence-test-worker".to_string(),
+                meter: None,
+            })
+            .expect("db service")
+            .plugin(),
+        ];
     let runtime = Runtime::builder().modules(modules).plugins(plugins).build();
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());

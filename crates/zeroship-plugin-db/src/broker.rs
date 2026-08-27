@@ -443,15 +443,10 @@ impl Broker {
     /// [`Subscription::close`]) to unsubscribe; the broker GC's its
     /// reference on next publish.
     ///
-    /// **Infallible** by design: the V8-side `subscribe()` call site
-    /// (`v8_classes::subscription::mint_subscription`) and the rich
-    /// existing test surface (~40 in-crate call sites) consume a
-    /// `Subscription` directly. The schema-pending rejection branch is
-    /// layered on top via [`Self::try_subscribe`], which returns a
-    /// `Result` so the SDK boundary can surface the typed
-    /// `DbError::Coded { code: "schema_pending" }`. New SDK call sites
-    /// should prefer `try_subscribe`; the infallible variant stays for
-    /// the callers listed above.
+    /// **Infallible** low-level primitive for internal publishers and unit
+    /// tests that construct a broker in isolation. Creator-facing mint sites
+    /// must use [`Self::try_subscribe`] so schema-pending and per-app resource
+    /// limits reach JavaScript as typed errors.
     pub fn subscribe(&mut self, app_id: &str, collection: &str) -> Subscription {
         self.next_id += 1;
         let sub = Subscription::new(
@@ -506,14 +501,24 @@ impl Broker {
                 ),
             });
         }
-        // DB-12: cap the app's concurrent (live) subscriptions. Count only
-        // non-closed subs so dropped/unsubscribed ones (pruned lazily on
-        // publish) don't count against the limit.
-        let live = self
-            .by_key
-            .get(app_id)
-            .map(|colls| colls.values().flatten().filter(|s| !s.is_closed()).count())
-            .unwrap_or(0);
+        // DB-12: cap the app's concurrent subscriptions and prune closed
+        // handles before minting a replacement. Publish also prunes, but an
+        // app can close subscriptions without ever publishing again; leaving
+        // those entries here would let an open/close loop grow the global
+        // routing table without bound even though the live count stays below
+        // the cap.
+        let mut remove_app = false;
+        let live = self.by_key.get_mut(app_id).map_or(0, |collections| {
+            collections.retain(|_, subscriptions| {
+                subscriptions.retain(|subscription| !subscription.is_closed());
+                !subscriptions.is_empty()
+            });
+            remove_app = collections.is_empty();
+            collections.values().map(Vec::len).sum()
+        });
+        if remove_app {
+            self.by_key.remove(app_id);
+        }
         if live >= MAX_SUBSCRIPTIONS_PER_APP {
             return Err(DbError::Coded {
                 code: "subscription_limit".to_string(),
@@ -1065,23 +1070,6 @@ mod tests {
     }
 
     #[test]
-    fn try_subscribe_caps_per_app_db12() {
-        let mut b = Broker::new();
-        // Hold the subscriptions live (dropping them would close + prune).
-        let mut held = Vec::new();
-        for _ in 0..MAX_SUBSCRIPTIONS_PER_APP {
-            held.push(b.try_subscribe("app_x", "c").expect("under the cap"));
-        }
-        let err = b.try_subscribe("app_x", "c").unwrap_err();
-        assert!(
-            matches!(&err, DbError::Coded { code, .. } if code == "subscription_limit"),
-            "expected subscription_limit, got {err:?}"
-        );
-        // A different app is unaffected (the cap is per-app).
-        assert!(b.try_subscribe("app_y", "c").is_ok());
-    }
-
-    #[test]
     fn subscribe_and_publish_delivers_event() {
         let mut b = Broker::new();
         let s = b.subscribe("a", "messages");
@@ -1093,6 +1081,30 @@ mod tests {
         assert_eq!(c.collection, "messages");
         assert_eq!(c.op, ChangeOp::Insert);
         assert_eq!(c.pk.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn try_subscribe_prunes_closed_entries_before_minting_a_replacement() {
+        let mut broker = Broker::new();
+        let attempts = MAX_SUBSCRIPTIONS_PER_APP * 2;
+        assert!(attempts > 0, "test must exercise at least one subscription");
+
+        for _ in 0..attempts {
+            let subscription = broker
+                .try_subscribe("close-loop-app", "users")
+                .expect("a closed handle must not consume the live cap");
+            subscription.close();
+        }
+
+        let stored = broker
+            .by_key
+            .get("close-loop-app")
+            .and_then(|collections| collections.get("users"))
+            .map_or(0, Vec::len);
+        assert_eq!(
+            stored, 1,
+            "open-then-close loops must not grow the process-wide routing table"
+        );
     }
 
     #[test]

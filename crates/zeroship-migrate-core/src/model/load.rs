@@ -986,8 +986,22 @@ mod tests {
         // hashes that tag, so this hex moved BY CONSTRUCTION. The JS author reuses
         // this same Rust crate's serialization, so both sides move together - a
         // deliberate, matched break.
+        //
+        // Re-captured AGAIN on 2026-08-27, from
+        // `8adb4d9360aa90f73145071a2ce0c769793beee4cc17d136af7e52098c766bb4`,
+        // when full-text search was deleted. That removal took three fields out
+        // of the IR (`zeroship-migrate-ir/src/{ir,load,migration}.rs`), so the
+        // canonical image of an all-default envelope changed and this hex moved
+        // BY CONSTRUCTION again - same matched-break shape as the two above.
+        //
+        // Worth recording HOW it was found, because the deletion updated three
+        // other checksum goldens and missed this one: it survived the FTS
+        // branch's own verification and the branch merge, and surfaced only when
+        // a later merge ran `-p zeroship-migrate-core` for an unrelated reason.
+        // A frozen golden in a crate nobody's verification covers is a guard
+        // that reports nothing until something else trips over it.
         const FROZEN_HINT: &str =
-            "8adb4d9360aa90f73145071a2ce0c769793beee4cc17d136af7e52098c766bb4";
+            "67506b3a51dd9633b218bba57fccfd1272bf60bd3b88589009652e5f90641bbc";
         let bytes = envelope_json(ops, &format!(r#", "checksum": "{FROZEN_HINT}""#));
         let reg = registry(&[("users", "app_a")]);
         let loaded = load_ir_document(

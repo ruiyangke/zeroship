@@ -568,29 +568,12 @@ pub fn fk_referenced_columns(definition: &str) -> Vec<String> {
 // `zero-migrate/tests/dialect_matrix/backend_snapshot_privates_stay_core_only.rs`
 // forbids a vendor from reaching for.
 
-/// Sentinel prefix on a [`ColumnSnapshot::default`] marking a STORED generated
-/// column (the `__fts` tsvector). When the `default` body starts with this
-/// prefix, the emitter writes `GENERATED ALWAYS AS (<expr>) STORED` instead of a
-/// plain `DEFAULT <expr>` clause. The remainder after the prefix is the
-/// generation expression. Generated-column expressions are emission-only metadata
-/// (excluded from `ColumnSnapshot` equality), so this never participates in drift.
-pub const GENERATED_PREFIX: &str = "GENERATED:";
-
-/// Render a column's trailing `DEFAULT <expr>` or `GENERATED ALWAYS AS (<expr>)
-/// STORED` clause from its (emission-only) `default` body. Empty string when the
-/// column has no default. A `GENERATED:`-prefixed body becomes the stored
-/// generated-column clause (the `__fts` generated column); any other body is a
-/// plain default.
+/// Render a column's trailing `DEFAULT <expr>` clause from its emission-only
+/// `default` body. Empty string when the column has no default.
 #[must_use]
 pub fn default_clause(default: Option<&str>) -> String {
     match default {
-        Some(d) => {
-            if let Some(expr) = d.strip_prefix(GENERATED_PREFIX) {
-                format!(" GENERATED ALWAYS AS ({expr}) STORED")
-            } else {
-                format!(" DEFAULT {d}")
-            }
-        }
+        Some(d) => format!(" DEFAULT {d}"),
         None => String::new(),
     }
 }

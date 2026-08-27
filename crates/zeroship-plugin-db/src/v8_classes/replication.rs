@@ -1,6 +1,6 @@
 //! `Replication` — `#[v8_class]` namespace backing `env.db.replication`.
 //!
-//! Two diagnostic methods scoped to the calling app. Provisioning is owned by
+//! One diagnostic method scoped to the calling app. Provisioning is owned by
 //! Subscription.ready(), so this namespace cannot create an unowned slot.
 //! The app scope is always the `app_id`
 //! stamped on the wrapper at mint time — it cannot be overridden from
@@ -17,9 +17,7 @@ use zeroship_runtime::state::OpError;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_class, v8_constructor, v8_method, v8_name};
 
-use crate::replication_ops::{
-    replication_drop_abandoned_dispatch, replication_watchdog_dispatch,
-};
+use crate::replication_ops::replication_watchdog_dispatch;
 use crate::v8_bridge::read_json_arg;
 
 pub struct Replication {
@@ -68,30 +66,6 @@ impl Replication {
         replication_watchdog_dispatch(scope, app_id).into()
     }
 
-    /// `db.replication.dropAbandoned(opts?)` → `Promise<string[] JSON>`.
-    /// `opts.inactiveSeconds` (default 3600) is the threshold; returns
-    /// the names of dropped slots. Scoped to `self.app_id`; the
-    /// underlying SQL filters candidate slots by the per-app prefix so
-    /// a tenant can never reap co-tenant slots (cross-tenant DoS —
-    /// sibling of the cross-app `setup` hijack closed at 309ed52f).
-    #[v8_method]
-    #[v8_name = "dropAbandoned"]
-    fn drop_abandoned<'s>(
-        &self,
-        scope: &mut v8::PinScope<'s, '_>,
-        opts: v8::Local<v8::Value>,
-    ) -> v8::Local<'s, v8::Value> {
-        let opts_v = match read_json_arg(scope, Some(opts)) {
-            Ok(v) => v,
-            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
-        };
-        let inactive_seconds = opts_v
-            .get("inactiveSeconds")
-            .and_then(Value::as_i64)
-            .unwrap_or(3600);
-        let app_id = resolve_drop_abandoned_app_id(&self.app_id, &opts_v);
-        replication_drop_abandoned_dispatch(scope, app_id, inactive_seconds).into()
-    }
 }
 
 /// Resolve the app_id used by `Replication::watchdog` for dispatch.
@@ -106,21 +80,6 @@ impl Replication {
 /// co-tenant app's slot names (info disclosure).
 #[inline]
 fn resolve_watchdog_app_id(stamped: &str, _opts: &Value) -> String {
-    // INVARIANT: never read app-id-shaped fields from `_opts`.
-    stamped.to_string()
-}
-
-/// Resolve the app_id used by `Replication::dropAbandoned` for dispatch.
-///
-/// Returns `stamped` verbatim, ignoring any `appId` field in the
-/// JS-supplied `opts` object.
-///
-/// Sibling of the cross-app `setup` hijack closed at 309ed52f: prior
-/// to this fix, `dropAbandoned()` issued a cluster-wide DROP sweep,
-/// letting App A reap co-tenant inactive slots (cross-tenant DoS —
-/// the next subscriber for the affected victim app has to resync).
-#[inline]
-fn resolve_drop_abandoned_app_id(stamped: &str, _opts: &Value) -> String {
     // INVARIANT: never read app-id-shaped fields from `_opts`.
     stamped.to_string()
 }
@@ -172,16 +131,14 @@ pub(crate) fn mint_replication<'s>(
 mod tests {
     //! Regression guards for app-scoped replication diagnostics.
 
-    use super::{resolve_drop_abandoned_app_id, resolve_watchdog_app_id};
+    use super::resolve_watchdog_app_id;
     use serde_json::json;
 
     // -----------------------------------------------------------------
     // Sibling regression guards for the CRITICAL cross-tenant scoping
-    // gap on `watchdog` and `dropAbandoned` (security review r5,
-    // 2026-05-22). Before the fix, both methods called the underlying
-    // dispatchers without any app_id parameter and the SQL ran cluster-
-    // wide; App A could enumerate co-tenant slot names (info
-    // disclosure) or drop co-tenant inactive slots (cross-tenant DoS).
+    // gap on `watchdog` (security review r5, 2026-05-22). Before the fix,
+    // it called the underlying dispatcher without any app_id parameter and
+    // the SQL ran cluster-wide, exposing co-tenant slot names.
     //
     // The resolver helpers must always return the mint-time stamp, never reading
     // `opts.appId` regardless of shape.
@@ -216,38 +173,4 @@ mod tests {
         assert_eq!(resolve_watchdog_app_id("app_a", &json!(null)), "app_a");
     }
 
-    #[test]
-    fn drop_abandoned_app_id_ignores_string_override() {
-        let opts = json!({"appId": "victim_app", "inactiveSeconds": 0});
-        assert_eq!(resolve_drop_abandoned_app_id("app_a", &opts), "app_a");
-    }
-
-    #[test]
-    fn drop_abandoned_app_id_ignores_non_string_override() {
-        for shape in [
-            json!({"appId": 123, "inactiveSeconds": 0}),
-            json!({"appId": true}),
-            json!({"appId": null}),
-            json!({"appId": ["app_b"]}),
-            json!({"appId": {"name": "app_b"}}),
-        ] {
-            assert_eq!(
-                resolve_drop_abandoned_app_id("app_a", &shape),
-                "app_a",
-                "override shape leaked through dropAbandoned: {shape}"
-            );
-        }
-    }
-
-    #[test]
-    fn drop_abandoned_app_id_empty_opts_uses_stamped() {
-        assert_eq!(
-            resolve_drop_abandoned_app_id("app_a", &json!({})),
-            "app_a"
-        );
-        assert_eq!(
-            resolve_drop_abandoned_app_id("app_a", &json!(null)),
-            "app_a"
-        );
-    }
 }

@@ -14,7 +14,7 @@
 //! there is no secrecy to lean on.
 //!
 //! This is the same threat plugin-db documents as **SEC-1** on
-//! `IsolateDbContext::tx_conns` (`crates/plugin-db/src/context.rs:127-140`):
+//! `ThreadDbContext::tx_conns` (`crates/plugin-db/src/context.rs:127-140`):
 //! a per-thread slot that parks one app's resource across an `await` is
 //! reachable by every co-resident app unless it is keyed by the owning
 //! `app_id`. We take the same remedy for the same reason.

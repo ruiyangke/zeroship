@@ -104,7 +104,7 @@ export interface ApplyPendingContractDto {
 /**
  * The typed reply for `applyIr` (the projected [`ApplyOutcome`]).
  *
- * [`ApplyOutcome`]: zero_migrate::apply::executor::ApplyOutcome
+ * [`ApplyOutcome`]: zeroship_migrate::apply::executor::ApplyOutcome
  */
 export interface ApplyReply {
   /** Versions applied this run, in apply order. */
@@ -204,7 +204,7 @@ export interface BuildInfo {
   irVersion: number
   /**
    * Lowercase 64-char sha256 over the workspace manifests, `Cargo.lock`, and
-   * every `crates/*\/src` file. This is what tells a pre-fix artifact from a
+   * every `src` tree under `crates`. This is what tells a pre-fix artifact from a
    * post-fix one when the version has not moved. It does NOT cover the JS
    * packages, the rustc version, the cargo profile, or the enabled features -
    * and NOTHING ELSE IN THIS REPLY COVERS THEM EITHER. The only other fields are
@@ -849,7 +849,7 @@ export declare function rollback(hostDriver: (args: [request: JsRequest, done: (
  * and every apply carry one it never fills. A host reading `applied` off a
  * rollback reply would read an empty list as "nothing happened".
  *
- * [`RollbackOutcome`]: zero_migrate::RollbackOutcome
+ * [`RollbackOutcome`]: zeroship_migrate::RollbackOutcome
  */
 export interface RollbackReply {
   /**

@@ -10,7 +10,7 @@ Server-only `@zeroship/db` demo for the full SQLite-backed surface area.
 - System fields: `created_at`, `updated_at`, `created_by`, `updated_by`, `version`, `deleted_at`
 - Security: `t.encrypted`, masking, `MaskedValue.canUnmask`, row unmask, bulk unmask, per-query unmask hints
 - Transactions: `db.transaction(...)`, rollback, nested savepoints, `TxCollection` / `TxQuery`
-- Search: FTS, vector search, geo `near`
+- Search: vector search, geo `near`
 - Realtime: `db.live(...)` streamed over `/__zeroship/v1/liveTasks`
 
 ## Build

@@ -20,7 +20,7 @@
 //! `Collection`; every CRUD method on it routes through the open
 //! transaction connection automatically, since
 //! [`crate::exec::run_sql`] consults
-//! `IsolateDbContext::tx_conns` whenever it is set (the
+//! `ThreadDbContext::tx_conns` whenever it is set (the
 //! orchestrator sets it for the duration of the transaction).
 //!
 //! ## Why collections-as-props (not a `Transaction` instance)
@@ -39,6 +39,7 @@
 
 use zeroship_runtime::state::OpError;
 
+use crate::binding::DbBinding;
 use crate::v8_classes::collection::mint_collection;
 
 /// Mint the collections-only `tx` view for a `Db.transaction(fn)`
@@ -46,7 +47,7 @@ use crate::v8_classes::collection::mint_collection;
 ///
 /// Builds a fresh `v8::Object` and sets one
 /// [`Collection`](super::collection::Collection) property per collection
-/// the per-isolate schema cache knows about for `app_id` (the same set
+/// the per-thread schema cache knows about for `app_id` (the same set
 /// `register_model_dispatch` populates). Each minted `Collection` is an
 /// ordinary v8_class instance — identical to what `db.collection(name)`
 /// returns — so its CRUD methods route through the active transaction
@@ -58,16 +59,17 @@ use crate::v8_classes::collection::mint_collection;
 /// abort = throw inside the callback; commit is implicit on resolve.
 ///
 /// When the schema cache is empty for `app_id` (no `registerModel` has
-/// run on this isolate yet — e.g. a raw-JS deploy that opens a tx before
+/// run on this worker thread yet — e.g. a raw-JS deploy that opens a tx before
 /// declaring a schema), the view is an empty object. That is correct: a
 /// transaction with no declared collections has nothing to address
 /// through `tx.<name>`; the creator can still drive raw work, and the
 /// commit/rollback envelope still applies.
 pub(crate) fn mint_tx_view<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    app_id: &str,
+    binding: &DbBinding,
 ) -> Result<v8::Local<'s, v8::Object>, OpError> {
     let view = v8::Object::new(scope);
+    let app_id = binding.app_id();
 
     // One tx-bound Collection per cached-schema collection. The list
     // mirrors `Db::collection(name)`'s minting; the binding to the open
@@ -81,7 +83,7 @@ pub(crate) fn mint_tx_view<'s>(
     });
 
     for name in collections {
-        let col = mint_collection(scope, name.clone(), app_id.to_string())?;
+        let col = mint_collection(scope, name.clone(), binding.clone())?;
         let key = v8::String::new(scope, &name)
             .ok_or_else(|| OpError::type_error("tx-view: collection name allocation failed"))?;
         view.set(scope, key.into(), col.into());
@@ -97,13 +99,15 @@ mod tests {
     //! The proposal (Q-P9-C, §4.4) fixes the tx-view as **collections
     //! only** — no `commit` / `rollback` / `collection` / `transaction` /
     //! `live` method. These tests mint a view directly (no DB needed —
-    //! the per-isolate schema cache is empty in a fresh isolate, so the
+    //! the per-thread schema cache is empty in this test context, so the
     //! view is a bare object) and assert no tx-lifecycle method leaked
     //! onto it. If a future change re-introduces a `commit`/`rollback`
     //! method on the view, these fail.
     #![allow(unsafe_code)]
 
     use zeroship_runtime::init_v8;
+
+    use crate::binding::DbBinding;
 
     fn assert_absent(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>, name: &str) {
         let key = v8::String::new(scope, name).unwrap();
@@ -123,7 +127,8 @@ mod tests {
         let context = v8::Context::new(handle_scope, Default::default());
         let scope = &mut v8::ContextScope::new(handle_scope, context);
 
-        let view = super::mint_tx_view(scope, "test_app").expect("mint_tx_view");
+        let binding = DbBinding::cold_start("test_app");
+        let view = super::mint_tx_view(scope, &binding).expect("mint_tx_view");
 
         // None of the legacy `Transaction` methods, nor `transaction` /
         // `live`, may appear on the view.
@@ -143,7 +148,7 @@ mod tests {
 
     #[test]
     fn tx_view_is_empty_when_no_schema_registered() {
-        // A fresh isolate has registered no collections, so the view has
+        // This app has registered no collections in the thread context, so the view has
         // no own enumerable properties. (Real requests register a schema
         // first; the empty case is the raw-JS-deploy path.)
         init_v8();
@@ -152,14 +157,15 @@ mod tests {
         let context = v8::Context::new(handle_scope, Default::default());
         let scope = &mut v8::ContextScope::new(handle_scope, context);
 
-        let view = super::mint_tx_view(scope, "test_app").expect("mint_tx_view");
+        let binding = DbBinding::cold_start("test_app");
+        let view = super::mint_tx_view(scope, &binding).expect("mint_tx_view");
         let names = view
             .get_own_property_names(scope, v8::GetPropertyNamesArgs::default())
             .unwrap();
         assert_eq!(
             names.length(),
             0,
-            "tx-view for an isolate with no registered schema must be empty"
+            "tx-view for an app with no registered schema must be empty"
         );
     }
 }

@@ -1749,8 +1749,9 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             crate::cache::KernelConfig {
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: String::new(),
-                db_url: db_url.clone(),
-                cdc_worker_id: "handler-test-worker".to_string(),
+                db_service: db_url
+                    .as_deref()
+                    .map(|url| crate::cache::test_db_service(url, "handler-test-worker")),
                 kv_url: None,
                 storage_backend: None,
                 meter: meter.clone(),
@@ -2433,8 +2434,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                 crate::cache::KernelConfig {
                     control_url: "http://127.0.0.1:1".to_string(),
                     control_key: String::new(),
-                    db_url: None,
-                    cdc_worker_id: "handler-test-worker".to_string(),
+                    db_service: None,
                     kv_url: None,
                     storage_backend: None,
                     meter: meter.clone(),
@@ -2542,8 +2542,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                 crate::cache::KernelConfig {
                     control_url: "http://127.0.0.1:1".to_string(),
                     control_key: String::new(),
-                    db_url: None,
-                    cdc_worker_id: "handler-test-worker".to_string(),
+                    db_service: None,
                     kv_url: None,
                     storage_backend: None,
                     meter: meter.clone(),
@@ -3018,8 +3017,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                 crate::cache::KernelConfig {
                     control_url: "http://127.0.0.1:1".to_string(),
                     control_key: String::new(),
-                    db_url: None,
-                    cdc_worker_id: "handler-test-worker".to_string(),
+                    db_service: None,
                     kv_url: None,
                     storage_backend: None,
                     meter: std::sync::Arc::new(zeroship_metering::Meter::new()),
@@ -3130,8 +3128,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                 crate::cache::KernelConfig {
                     control_url: "http://127.0.0.1:1".to_string(),
                     control_key: String::new(),
-                    db_url: None,
-                    cdc_worker_id: "handler-test-worker".to_string(),
+                    db_service: None,
                     kv_url: None,
                     storage_backend: None,
                     meter: std::sync::Arc::new(zeroship_metering::Meter::new()),
@@ -3235,8 +3232,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                 crate::cache::KernelConfig {
                     control_url: "http://127.0.0.1:1".to_string(),
                     control_key: String::new(),
-                    db_url: None,
-                    cdc_worker_id: "handler-test-worker".to_string(),
+                    db_service: None,
                     kv_url: None,
                     storage_backend: None,
                     meter: std::sync::Arc::new(zeroship_metering::Meter::new()),
@@ -3355,8 +3351,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                 crate::cache::KernelConfig {
                     control_url: "http://127.0.0.1:1".to_string(),
                     control_key: String::new(),
-                    db_url: None,
-                    cdc_worker_id: "handler-test-worker".to_string(),
+                    db_service: None,
                     kv_url: None,
                     storage_backend: None,
                     meter: meter.clone(),
@@ -3545,10 +3540,13 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                 crate::cache::KernelConfig {
                     control_url: "http://127.0.0.1:1".to_string(),
                     control_key: String::new(),
-                    // Dummy DSN: DbPlugin stores the URL and connects lazily,
-                    // so `env.db` is installed without a live Postgres.
-                    db_url: Some("postgres://localhost/zs_phase2_unused".to_string()),
-                    cdc_worker_id: "handler-test-worker".to_string(),
+                    // Dummy DSN: the service validates and stores the URL and
+                    // the backend connects lazily, so `env.db` is installed
+                    // without a live Postgres.
+                    db_service: Some(crate::cache::test_db_service(
+                        "postgres://localhost/zs_phase2_unused",
+                        "handler-test-worker",
+                    )),
                     kv_url: Some(kv_url),
                     storage_backend: Some(StorageBackendConfig::Local(storage_root.clone())),
                     meter: std::sync::Arc::new(zeroship_metering::Meter::new()),
@@ -3675,8 +3673,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             crate::cache::KernelConfig {
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: String::new(),
-                db_url: None,
-                cdc_worker_id: "handler-test-worker".to_string(),
+                db_service: None,
                 kv_url: None,
                 storage_backend: None,
                 meter: Arc::clone(&meter),
@@ -3894,8 +3891,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                 crate::cache::KernelConfig {
                     control_url: "http://127.0.0.1:1".to_string(),
                     control_key: String::new(),
-                    db_url: None,
-                    cdc_worker_id: "handler-test-worker".to_string(),
+                    db_service: None,
                     kv_url: None,
                     storage_backend: None,
                     meter: Arc::new(zeroship_metering::Meter::new()),

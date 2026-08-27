@@ -746,7 +746,7 @@ fn is_fatal(err: &ConsumerError) -> bool {
             // SQLSTATE 58P01 (undefined_object) — slot/pub dropped.
             // Postgres surfaces this from START_REPLICATION when the
             // slot was deleted (manual operator action, or the
-            // replication watchdog's drop_abandoned_slots reaper).
+            // operator's abandoned-slot reaper).
             // We bail so the next supervisor iteration doesn't keep
             // hammering a slot that the watchdog hasn't yet
             // reprovisioned.
@@ -858,9 +858,9 @@ mod tests {
     fn emit_local_reaches_process_broker() {
         // Clean the process-wide broker before observing.
         crate::broker::drop_app(None);
-        let sub = crate::broker::subscribe("xapp", "messages");
+        let sub = crate::broker::subscribe("xapp_emit_local_reaches_process_broker", "messages");
         emit_local(
-            "xapp",
+            "xapp_emit_local_reaches_process_broker",
             "messages",
             ChangeOp::Insert,
             Some("99".to_string()),
@@ -869,7 +869,7 @@ mod tests {
         );
         match sub.pop() {
             Some(SubscriptionMessage::Change(ev)) => {
-                assert_eq!(ev.app_id, "xapp");
+                assert_eq!(ev.app_id, "xapp_emit_local_reaches_process_broker");
                 assert_eq!(ev.collection, "messages");
                 assert_eq!(ev.op, ChangeOp::Insert);
                 assert_eq!(ev.pk.as_deref(), Some("99"));
@@ -896,13 +896,13 @@ mod tests {
     #[test]
     fn emit_local_suppressed_when_consumer_active() {
         crate::broker::drop_app(None);
-        let sub = crate::broker::subscribe("xapp", "messages");
+        let sub = crate::broker::subscribe("xapp_emit_local_suppressed_when_consumer_active", "messages");
 
-        // Per-app suppression: the consumer for "xapp" is active, so
-        // local-emit for "xapp" must be a no-op.
-        suppress_app("xapp");
+        // Per-app suppression: the consumer for "xapp_emit_local_suppressed_when_consumer_active" is active, so
+        // local-emit for "xapp_emit_local_suppressed_when_consumer_active" must be a no-op.
+        suppress_app("xapp_emit_local_suppressed_when_consumer_active");
         emit_local(
-            "xapp",
+            "xapp_emit_local_suppressed_when_consumer_active",
             "messages",
             ChangeOp::Insert,
             Some("1".to_string()),
@@ -912,9 +912,9 @@ mod tests {
         // Suppressed — no event in the queue.
         assert!(sub.pop().is_none());
 
-        unsuppress_app("xapp");
+        unsuppress_app("xapp_emit_local_suppressed_when_consumer_active");
         emit_local(
-            "xapp",
+            "xapp_emit_local_suppressed_when_consumer_active",
             "messages",
             ChangeOp::Insert,
             Some("2".to_string()),
@@ -1078,14 +1078,14 @@ mod tests {
     #[test]
     fn dispatch_caches_relation_and_emits_insert() {
         crate::broker::drop_app(None);
-        let sub = crate::broker::subscribe("myapp", "messages");
-        let c = make_consumer("myapp");
+        let sub = crate::broker::subscribe("myapp_dispatch_caches_relation_and_emits_insert", "messages");
+        let c = make_consumer("myapp_dispatch_caches_relation_and_emits_insert");
         let mut rels = HashMap::new();
 
         // Pretend a Relation arrived first.
         c.dispatch(
             &mut rels,
-            &make_relation_msg(16384, "myapp", "messages", &[(1, "id"), (0, "title")]),
+            &make_relation_msg(16384, "myapp_dispatch_caches_relation_and_emits_insert", "messages", &[(1, "id"), (0, "title")]),
         );
         assert!(rels.contains_key(&16384));
 
@@ -1097,7 +1097,7 @@ mod tests {
 
         match sub.pop() {
             Some(SubscriptionMessage::Change(ev)) => {
-                assert_eq!(ev.app_id, "myapp");
+                assert_eq!(ev.app_id, "myapp_dispatch_caches_relation_and_emits_insert");
                 assert_eq!(ev.collection, "messages");
                 assert_eq!(ev.op, ChangeOp::Insert);
                 assert_eq!(ev.pk.as_deref(), Some("42"));
@@ -1111,13 +1111,13 @@ mod tests {
     #[test]
     fn dispatch_emits_typed_id_pk_for_text_primary_key() {
         crate::broker::drop_app(None);
-        let sub = crate::broker::subscribe("myapp", "messages");
-        let c = make_consumer("myapp");
+        let sub = crate::broker::subscribe("myapp_dispatch_emits_typed_id_pk_for_text_primary_key", "messages");
+        let c = make_consumer("myapp_dispatch_emits_typed_id_pk_for_text_primary_key");
         let mut rels = HashMap::new();
 
         c.dispatch(
             &mut rels,
-            &make_relation_msg(16384, "myapp", "messages", &[(1, "id"), (0, "title")]),
+            &make_relation_msg(16384, "myapp_dispatch_emits_typed_id_pk_for_text_primary_key", "messages", &[(1, "id"), (0, "title")]),
         );
         c.dispatch(
             &mut rels,
@@ -1143,8 +1143,8 @@ mod tests {
     #[test]
     fn dispatch_filters_other_app_schemas() {
         crate::broker::drop_app(None);
-        let sub = crate::broker::subscribe("myapp", "messages");
-        let c = make_consumer("myapp");
+        let sub = crate::broker::subscribe("myapp_dispatch_filters_other_app_schemas", "messages");
+        let c = make_consumer("myapp_dispatch_filters_other_app_schemas");
         let mut rels = HashMap::new();
 
         // Relation in a DIFFERENT schema — should not produce events
@@ -1165,8 +1165,8 @@ mod tests {
     #[test]
     fn dispatch_handles_relation_cache_miss() {
         crate::broker::drop_app(None);
-        let sub = crate::broker::subscribe("myapp", "messages");
-        let c = make_consumer("myapp");
+        let sub = crate::broker::subscribe("myapp_dispatch_handles_relation_cache_miss", "messages");
+        let c = make_consumer("myapp_dispatch_handles_relation_cache_miss");
         let mut rels = HashMap::new();
 
         // Insert with no prior Relation. Drop silently.
@@ -1181,13 +1181,13 @@ mod tests {
     #[test]
     fn dispatch_emits_update_and_delete() {
         crate::broker::drop_app(None);
-        let sub = crate::broker::subscribe("myapp", "messages");
-        let c = make_consumer("myapp");
+        let sub = crate::broker::subscribe("myapp_dispatch_emits_update_and_delete", "messages");
+        let c = make_consumer("myapp_dispatch_emits_update_and_delete");
         let mut rels = HashMap::new();
 
         c.dispatch(
             &mut rels,
-            &make_relation_msg(16384, "myapp", "messages", &[(1, "id"), (0, "title")]),
+            &make_relation_msg(16384, "myapp_dispatch_emits_update_and_delete", "messages", &[(1, "id"), (0, "title")]),
         );
         c.dispatch(
             &mut rels,
@@ -1234,8 +1234,8 @@ mod tests {
     #[test]
     fn dispatch_ignores_begin_commit() {
         crate::broker::drop_app(None);
-        let sub = crate::broker::subscribe("myapp", "messages");
-        let c = make_consumer("myapp");
+        let sub = crate::broker::subscribe("myapp_dispatch_ignores_begin_commit", "messages");
+        let c = make_consumer("myapp_dispatch_ignores_begin_commit");
         let mut rels = HashMap::new();
 
         c.dispatch(
@@ -1266,20 +1266,20 @@ mod tests {
     #[test]
     fn p8a2_per_app_emit_suppression_app_a_only() {
         crate::broker::drop_app(None);
-        unsuppress_app("app_a");
-        unsuppress_app("app_b");
+        unsuppress_app("app_a_p8a2_per_app_emit_suppression_app_a_only");
+        unsuppress_app("app_b_p8a2_per_app_emit_suppression_app_a_only");
 
-        let sub_a = crate::broker::subscribe("app_a", "messages");
-        let sub_b = crate::broker::subscribe("app_b", "messages");
+        let sub_a = crate::broker::subscribe("app_a_p8a2_per_app_emit_suppression_app_a_only", "messages");
+        let sub_b = crate::broker::subscribe("app_b_p8a2_per_app_emit_suppression_app_a_only", "messages");
 
         // Activate suppression for app_a only.
-        let _guard = SuppressGuard::activate("app_a");
-        assert!(is_app_suppressed("app_a"));
-        assert!(!is_app_suppressed("app_b"));
+        let _guard = SuppressGuard::activate("app_a_p8a2_per_app_emit_suppression_app_a_only");
+        assert!(is_app_suppressed("app_a_p8a2_per_app_emit_suppression_app_a_only"));
+        assert!(!is_app_suppressed("app_b_p8a2_per_app_emit_suppression_app_a_only"));
 
         // Emit on app_a — must be a no-op.
         emit_local(
-            "app_a",
+            "app_a_p8a2_per_app_emit_suppression_app_a_only",
             "messages",
             ChangeOp::Insert,
             Some("1".to_string()),
@@ -1290,7 +1290,7 @@ mod tests {
 
         // Emit on app_b — MUST be delivered.
         emit_local(
-            "app_b",
+            "app_b_p8a2_per_app_emit_suppression_app_a_only",
             "messages",
             ChangeOp::Insert,
             Some("2".to_string()),
@@ -1303,7 +1303,7 @@ mod tests {
         );
 
         drop(_guard);
-        assert!(!is_app_suppressed("app_a"));
+        assert!(!is_app_suppressed("app_a_p8a2_per_app_emit_suppression_app_a_only"));
         crate::broker::drop_app(None);
     }
 

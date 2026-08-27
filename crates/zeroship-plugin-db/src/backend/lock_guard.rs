@@ -16,7 +16,7 @@
 //! derivation via [`crate::backend::LockScope::to_keys`]). The
 //! invariant is: *every* exit path from the locked region — Ok, Err,
 //! panic — must either explicitly issue `pg_advisory_unlock` before
-//! parking the `PooledClient` back into the pool, OR transfer
+//! parking the `OwnedPooledClient` back into the pool, OR transfer
 //! ownership of the still-locked client to the next stage that will
 //! release it.
 //!
@@ -50,13 +50,13 @@
 //!
 //! # Internal representation
 //!
-//! The guard stores the client as `Option<PooledClient<'p>>` so
+//! The guard stores the client as `Option<OwnedPooledClient>` so
 //! `release()` and `into_held()` can safely move it out without
 //! `mem::replace` / `ManuallyDrop` gymnastics. After either call, the
 //! `Option` is `None` and `released` is `true`, so subsequent `Drop`
 //! is a no-op (idempotent).
 
-use compio_postgres::PooledClient;
+use compio_postgres::OwnedPooledClient;
 
 use crate::backend::{LockManager, LockScope};
 use crate::error::DbError;
@@ -73,11 +73,11 @@ use crate::error::DbError;
 /// warnings on common patterns (e.g. `let _ = acquire(...).await`).
 #[must_use = "LockGuard must be released via .release().await or .into_held(); \
               dropping it leaks the session-scoped advisory lock"]
-pub(crate) struct LockGuard<'p> {
+pub(crate) struct LockGuard {
     /// The pooled client that holds the advisory lock at session
     /// scope. `None` after `release()` or `into_held()` has moved it
     /// out; `Drop` then becomes a no-op.
-    client: Option<PooledClient<'p>>,
+    client: Option<OwnedPooledClient>,
     /// First key passed to `pg_advisory_lock(hashtext($1), hashtext($2))`,
     /// derived from the [`LockScope`] via [`LockScope::to_keys`]
     /// (`"{app_id}:{name}"`). Stored so `release()` can issue the
@@ -93,7 +93,7 @@ pub(crate) struct LockGuard<'p> {
     released: bool,
 }
 
-impl<'p> LockGuard<'p> {
+impl LockGuard {
     /// Acquire the advisory lock for the given [`LockScope`] against
     /// `client` via the backend and wrap the result in a guard.
     ///
@@ -127,9 +127,9 @@ impl<'p> LockGuard<'p> {
     /// are unaffected: on `Ok` the lock is held by `self.client` and
     /// will be released via [`Self::release`] / [`Self::into_held`];
     /// on `Err` no lock is held and `client` drops back to the pool.
-    pub(crate) async fn acquire<B: LockManager<Client = compio_postgres::Client>>(
+    pub(crate) async fn acquire<B: LockManager<Client = compio_postgres::OwnedPooledClient>>(
         backend: &B,
-        client: PooledClient<'p>,
+        client: OwnedPooledClient,
         scope: &LockScope,
     ) -> Result<Self, DbError> {
         let (key, tag) = scope.to_keys();
@@ -160,7 +160,7 @@ impl<'p> LockGuard<'p> {
     /// `query_text_params` are swallowed (matches the pre-existing
     /// inline sites; the session-scoped lock will auto-release when
     /// the backend session ends if the explicit unlock failed).
-    pub(crate) async fn release(mut self) -> Result<Option<PooledClient<'p>>, DbError> {
+    pub(crate) async fn release(mut self) -> Result<Option<OwnedPooledClient>, DbError> {
         if self.released {
             return Ok(self.client.take());
         }
@@ -206,13 +206,13 @@ impl<'p> LockGuard<'p> {
     ///
     /// In the current pipeline the bootstrap → apply boundary keeps the
     /// guard itself in scope (no need to drop down to the raw
-    /// `PooledClient`). This method exists for future callers that need
+    /// `OwnedPooledClient`). This method exists for future callers that need
     /// to thread the locked client into an API that doesn't accept the
     /// guard type — flag it `dead_code` until that arrives so the
     /// invariant stays codified at the guard boundary rather than
     /// re-discovered as another open-coded unlock sequence.
     #[allow(dead_code)]
-    pub(crate) fn into_held(mut self) -> PooledClient<'p> {
+    pub(crate) fn into_held(mut self) -> OwnedPooledClient {
         self.released = true;
         // SAFETY-ish: by construction, a guard returned from
         // `acquire()` always has `client = Some(_)`; the only way to
@@ -227,7 +227,7 @@ impl<'p> LockGuard<'p> {
     }
 }
 
-impl Drop for LockGuard<'_> {
+impl Drop for LockGuard {
     fn drop(&mut self) {
         if !self.released {
             // We can't run `pg_advisory_unlock` here — the call is
@@ -263,7 +263,7 @@ mod tests {
     /// Test-only constructor that bypasses `acquire()` so we can
     /// inspect the lifecycle invariants (`released` flag, Drop
     /// behaviour, idempotency) without a live pool.
-    impl<'p> LockGuard<'p> {
+    impl LockGuard {
         fn for_test_no_client(key: impl Into<String>, tag: impl Into<String>) -> Self {
             Self {
                 client: None,
@@ -291,7 +291,7 @@ mod tests {
 
     #[test]
     fn into_held_flips_released_flag() {
-        // `into_held()` returns the raw PooledClient — we can't
+        // `into_held()` returns the raw OwnedPooledClient - we can't
         // construct one in a unit test (it has a private field +
         // pool back-reference), so we simulate the post-call state
         // directly: after `into_held()` the guard has

@@ -13,6 +13,7 @@ use zeroship_runtime::state::OpError;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_class, v8_constructor, v8_getter, v8_method, v8_name};
 
+use crate::binding::DbBinding;
 use crate::crud::{
     dispatch_aggregate, dispatch_bulk_unmask_field, dispatch_count, dispatch_delete_many,
     dispatch_delete_one, dispatch_distinct, dispatch_find, dispatch_insert, dispatch_insert_many,
@@ -31,17 +32,33 @@ pub struct Collection {
     /// to every dispatch helper. Never mutated after mint — plain
     /// `String`, no `RefCell`.
     pub(crate) name: String,
-    /// The app_id captured at mint time so CRUD callbacks don't have
-    /// to read the runtime slot for every dispatch. Never mutated.
-    pub(crate) app_id: String,
+    /// Immutable app-at-deploy identity captured by the owning Db wrapper.
+    pub(crate) binding: DbBinding,
 }
 
 impl std::fmt::Debug for Collection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Collection")
             .field("name", &self.name)
-            .field("app_id", &self.app_id)
+            .field("binding", &self.binding)
             .finish()
+    }
+}
+
+#[cfg(test)]
+impl Collection {
+    /// Observe the deploy token and cache entry the current CRUD reader would
+    /// resolve from this native receiver. Kept on the receiver so the
+    /// regression cannot accidentally re-read ambient runtime state.
+    pub(crate) fn resolved_runtime_schema_for_tests(
+        &self,
+    ) -> (String, Option<serde_json::Value>) {
+        let schema = crate::context::with(|c| {
+            c.introspected_schema_for(&self.binding, &self.name)
+                .flatten()
+        })
+        .map(|facts| (*facts).clone());
+        (self.binding.deploy_token().to_string(), schema)
     }
 }
 
@@ -75,7 +92,7 @@ impl Collection {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
-        dispatch_find(scope, &self.app_id, &self.name, filter_v, opts_v).into()
+        dispatch_find(scope, self.binding.clone(), &self.name, filter_v, opts_v).into()
     }
 
     #[v8_method]
@@ -93,7 +110,7 @@ impl Collection {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
-        dispatch_insert(scope, &self.app_id, &self.name, doc_v).into()
+        dispatch_insert(scope, self.binding.clone(), &self.name, doc_v).into()
     }
 
     #[v8_method]
@@ -112,7 +129,7 @@ impl Collection {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
-        dispatch_insert_many(scope, &self.app_id, &self.name, docs_v).into()
+        dispatch_insert_many(scope, self.binding.clone(), &self.name, docs_v).into()
     }
 
     #[v8_method]
@@ -136,7 +153,7 @@ impl Collection {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
-        dispatch_update_one(scope, &self.app_id, &self.name, filter_v, update_v).into()
+        dispatch_update_one(scope, self.binding.clone(), &self.name, filter_v, update_v).into()
     }
 
     #[v8_method]
@@ -160,7 +177,7 @@ impl Collection {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
-        dispatch_update_many(scope, &self.app_id, &self.name, filter_v, update_v).into()
+        dispatch_update_many(scope, self.binding.clone(), &self.name, filter_v, update_v).into()
     }
 
     #[v8_method]
@@ -179,7 +196,7 @@ impl Collection {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
-        dispatch_delete_one(scope, &self.app_id, &self.name, filter_v).into()
+        dispatch_delete_one(scope, self.binding.clone(), &self.name, filter_v).into()
     }
 
     #[v8_method]
@@ -198,7 +215,7 @@ impl Collection {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
-        dispatch_delete_many(scope, &self.app_id, &self.name, filter_v).into()
+        dispatch_delete_many(scope, self.binding.clone(), &self.name, filter_v).into()
     }
 
     /// `collection.purge(filter)` — explicit hard-delete
@@ -218,7 +235,7 @@ impl Collection {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
-        dispatch_purge_one(scope, &self.app_id, &self.name, filter_v).into()
+        dispatch_purge_one(scope, self.binding.clone(), &self.name, filter_v).into()
     }
 
     /// `collection.purgeMany(filter)` — bulk hard-delete.
@@ -236,7 +253,7 @@ impl Collection {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
-        dispatch_purge_many(scope, &self.app_id, &self.name, filter_v).into()
+        dispatch_purge_many(scope, self.binding.clone(), &self.name, filter_v).into()
     }
 
     /// `collection.restore(filter)` — clear `deleted_at`
@@ -254,7 +271,7 @@ impl Collection {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
-        dispatch_restore_one(scope, &self.app_id, &self.name, filter_v).into()
+        dispatch_restore_one(scope, self.binding.clone(), &self.name, filter_v).into()
     }
 
     /// `collection.restoreMany(filter)` — bulk-restore.
@@ -272,7 +289,7 @@ impl Collection {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
-        dispatch_restore_many(scope, &self.app_id, &self.name, filter_v).into()
+        dispatch_restore_many(scope, self.binding.clone(), &self.name, filter_v).into()
     }
 
     /// `collection.upsert(doc, opts)` — insert or update on conflict.
@@ -323,7 +340,7 @@ impl Collection {
                 "upsert: opts.conflictFields must be a non-empty array of strings",
             ));
         }
-        Ok(dispatch_upsert(scope, &self.app_id, &self.name, doc_v, conflict_v).into())
+        Ok(dispatch_upsert(scope, self.binding.clone(), &self.name, doc_v, conflict_v).into())
     }
 
     /// `collection.count(filter, opts?)` — count matching rows.
@@ -345,7 +362,7 @@ impl Collection {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
-        dispatch_count(scope, &self.app_id, &self.name, filter_v, opts_v).into()
+        dispatch_count(scope, self.binding.clone(), &self.name, filter_v, opts_v).into()
     }
 
     /// `collection.distinct(filter, opts)` — return the unique values
@@ -377,7 +394,7 @@ impl Collection {
                 "distinct: opts.field must be a non-empty string",
             ))?
             .to_string();
-        Ok(dispatch_distinct(scope, &self.app_id, &self.name, &field, filter_v, opts_v).into())
+        Ok(dispatch_distinct(scope, self.binding.clone(), &self.name, &field, filter_v, opts_v).into())
     }
 
     /// `collection.aggregate(pipeline, opts?)` — run an aggregation
@@ -400,18 +417,15 @@ impl Collection {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
-        dispatch_aggregate(scope, &self.app_id, &self.name, pipeline_v, opts_v).into()
+        dispatch_aggregate(scope, self.binding.clone(), &self.name, pipeline_v, opts_v).into()
     }
 
-    /// `collection.search(args)` — vector / FTS search.
+    /// `collection.search(args)` - vector search.
     ///
     /// `args` is a discriminated union:
     /// - `{ vector: number[], k?: number, metric?, column?, filter? }`
     ///   — pgvector nearest-neighbour search. Resolves with a row
     ///   array; each row carries a synthetic `_distance` field.
-    /// - `{ text, ... }` — reserved for future FTS support (rejects
-    ///   with `fts_unsupported` until implemented).
-    ///
     /// Routes to [`dispatch_search`] which inspects the discriminator
     /// and dispatches to the appropriate backend impl.
     #[v8_method]
@@ -424,7 +438,7 @@ impl Collection {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
-        dispatch_search(scope, &self.app_id, &self.name, args_v).into()
+        dispatch_search(scope, self.binding.clone(), &self.name, args_v).into()
     }
 
     /// `collection.near(args)` — spatial within-radius search.
@@ -453,7 +467,7 @@ impl Collection {
             Ok(v) => v,
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
-        dispatch_near(scope, &self.app_id, &self.name, args_v).into()
+        dispatch_near(scope, self.binding.clone(), &self.name, args_v).into()
     }
 
     /// `collection.unmaskField(rowPk, column, opts?)` — single-cell
@@ -502,7 +516,7 @@ impl Collection {
         args.insert("collection".to_string(), Value::String(self.name.clone()));
         args.insert("row_pk".to_string(), row_pk_v);
         args.insert("column".to_string(), column_v);
-        dispatch_unmask_field(scope, &self.app_id, Value::Object(args)).into()
+        dispatch_unmask_field(scope, self.binding.app_id(), Value::Object(args)).into()
     }
 
     /// `collection.bulkUnmask(items, opts?)` — bulk,
@@ -543,7 +557,7 @@ impl Collection {
         };
         args.insert("collection".to_string(), Value::String(self.name.clone()));
         args.insert("items".to_string(), items_v);
-        dispatch_bulk_unmask_field(scope, &self.app_id, Value::Object(args)).into()
+        dispatch_bulk_unmask_field(scope, self.binding.app_id(), Value::Object(args)).into()
     }
 
     /// `collection.openSubscription()` — returns a
@@ -567,7 +581,7 @@ impl Collection {
         if let Some(refusal) = super::subscription::refuse_mv_subscription(&self.name) {
             return Err(refusal);
         }
-        let obj = super::subscription::mint_subscription(scope, &self.app_id, &self.name)?;
+        let obj = super::subscription::mint_subscription(scope, self.binding.app_id(), &self.name)?;
         Ok(obj.into())
     }
 }
@@ -586,7 +600,7 @@ impl Collection {
 pub(crate) fn mint_collection<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     name: String,
-    app_id: String,
+    binding: DbBinding,
 ) -> Result<v8::Local<'s, v8::Object>, OpError> {
     let class_tmpl = Collection::install(scope);
     let inst_tmpl = class_tmpl.instance_template(scope);
@@ -605,7 +619,7 @@ pub(crate) fn mint_collection<'s>(
 
     let state = Collection {
         name,
-        app_id,
+        binding,
     };
     let boxed: Box<Collection> = Box::new(state);
     let raw = Box::into_raw(boxed);

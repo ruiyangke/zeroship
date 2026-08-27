@@ -116,9 +116,34 @@ export type GenArtifactsReply = Pick<AddonGenArtifactsReply, "ok" | "runtimeJson
  * drop `"envDbTs"` and the build goes red with TS2344 naming `"envDbTs"`.
  * This is type-only and erases at compile time - it loads no addon binary.
  */
+// `hasDialectalOps` is the key this comment block predicted by name, and it has
+// now landed. Triaged as a deliberate DROP rather than added to the `Pick`: it
+// reports whether the fold emitted any dialect-specific op, which is a fact
+// about the migration set, not about the types gen-types renders. gen-types
+// builds the `env.db` surface from `runtimeJson` alone and has no branch that
+// would consult it. Its own doc is explicit that `false` does not even mean the
+// artifacts are dialect-independent, so it could not serve as such a branch.
+// `collections` + `dialect` are triaged TOGETHER because the engine says they
+// are only meaningful together: `collections` is the structured export (the
+// folded schema as typed `CollectionDescriptorDto`s, offered so a host can
+// render artifacts instead of re-parsing `runtimeJson`), and `Op::Dialectal`
+// leg selection changes WHICH COLUMNS EXIST - so the export is meaningless
+// without the dialect it was folded under, and anything storing or forwarding
+// one must carry the other.
+//
+// Both are dropped only because gen-types renders from `runtimeJson` today.
+// The structured export is arguably the better source for exactly this file and
+// would remove a parse. Recorded as a deliberate deferral, not a rejection: if
+// that switch happens, BOTH names move into the `Pick` above, never just one.
 type UntriagedReplyKeys = Exclude<
   keyof AddonGenArtifactsReply,
-  "ok" | "runtimeJson" | "error" | "envDbTs"
+  | "ok"
+  | "runtimeJson"
+  | "error"
+  | "envDbTs"
+  | "hasDialectalOps"
+  | "collections"
+  | "dialect"
 >;
 type AssertNever<T extends never> = T;
 export type _NoUntriagedAddonReplyKeys = AssertNever<UntriagedReplyKeys>;

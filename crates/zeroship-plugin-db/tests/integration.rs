@@ -9,7 +9,29 @@
 //! (`deploy/ops/zeroship.test.toml`, written by
 //! `tests/provision_test_backends.sh`) or by `PG_TEST_URL`. There is no
 //! compiled default; see `crates/core/src/config/test_overlay.rs`.
-//! Run: `cargo test -p zeroship-plugin-db --test integration -- --test-threads=1`
+//! Run:
+//! ```text
+//! RUST_MIN_STACK=33554432 \
+//! cargo test -p zeroship-plugin-db --test integration --features test-helpers \
+//!   -- --test-threads=1
+//! ```
+//!
+//! **All three are required and each fails differently when omitted.**
+//!
+//! `--features test-helpers` is this target's `required-features`. Without it
+//! cargo does not build the target at all - it FILTERS IT OUT, printing
+//! `error: target `integration` ... requires the features: `test-helpers``
+//! only if you named the target explicitly. A plain `cargo test -p
+//! zeroship-plugin-db` names no target, so it silently runs the lib tests
+//! alone and reports a healthy green while none of the 99 tests in this file
+//! were compiled. This line omitted the flag until 2026-08-27, so the command
+//! documented here did not run.
+//!
+//! `--test-threads=1` is required because every test in this file builds the
+//! same schema, `SCHEMA = "plugin_db_test"` below. Run in parallel they race
+//! `CREATE SCHEMA` against one server and fail with
+//! `duplicate key value violates unique constraint "pg_namespace_nspname_index"`.
+//! Measured 2026-08-27: 32 of 99 failed that way at default parallelism.
 
 use compio_postgres::{NoTls, Pool};
 use serde_json::{json, Value};
@@ -1918,8 +1940,8 @@ SELECT con.conname AS name, con.condeferrable AS def, con.condeferred AS init_de
 // Replication slot + publication setup, watchdog, broker plumbing.
 //
 // These tests exercise the Rust-side primitives that the V8 layer
-// exposes through the CDC lifecycle, replication watchdog maintenance,
-// abandoned-slot cleanup, and the process-wide broker.
+// exposes through the CDC lifecycle, replication watchdog diagnostics,
+// operator-owned abandoned-slot cleanup, and the process-wide broker.
 //
 // Tests that need `wal_level=logical` skip themselves when the
 // running Postgres is `replica`. The runbook
@@ -1989,15 +2011,37 @@ async fn c1_cleanup(pool: &Pool, app: &str) {
         .execute(&format!(r#"DROP SCHEMA IF EXISTS "{app}" CASCADE"#), &[])
         .await;
 
-    // Defensive global sweep: drop every leftover `__zs_*` slot + publication
-    // from prior tests under different app names. Without this, replication
-    // slots accumulate across tests and exhaust `max_replication_slots`
-    // (default 10) on long suite runs — the p8a2 ordering hang.
+    // Defensive sweep: drop every leftover `__zs_*` slot + publication from
+    // prior tests under different app names. Without this, replication slots
+    // accumulate across tests and exhaust `max_replication_slots` (default 10)
+    // on long suite runs.
+    //
+    // `AND database = current_database()` is load-bearing, not decoration.
+    // `pg_replication_slots` is a CLUSTER-WIDE view and PostgreSQL does NOT
+    // confine `pg_drop_replication_slot` to the slot's own database when the
+    // slot is inactive. Measured 2026-08-27 on PG 16.14 and confirmed on
+    // 18.4: a session on database `probe_b` ran this statement without the
+    // predicate and dropped an inactive `__zs_%` slot belonging to `probe_a` -
+    // the count went 1 to 0, no error. Every suite sharing the server lost its
+    // CDC slots to whichever
+    // one called cleanup first, which is what made two of these tests fail
+    // only when another suite ran beside them. Giving each suite its own
+    // DATABASE bought nothing against it; only a separate server did.
+    //
+    // The `active = false` guard is not a substitute: a slot is inactive in
+    // the window between `ensure_worker_slot` creating it and the consumer
+    // attaching, and again across a consumer reconnect.
+    //
+    // The publication half below needs no such predicate - `pg_publication`
+    // is per-database and a session sees only its own (probe_b saw 0 of
+    // probe_a's in the same measurement).
     let _ = pool
         .query_text_params(
             "SELECT pg_drop_replication_slot(slot_name) \
              FROM pg_replication_slots \
-             WHERE slot_name LIKE '__zs_%' AND active = false",
+             WHERE slot_name LIKE '__zs_%' \
+               AND active = false \
+               AND database = current_database()",
             &[],
         )
         .await;
@@ -2015,6 +2059,106 @@ async fn c1_cleanup(pool: &Pool, app: &str) {
                 .await;
         }
     }
+}
+
+/// Rewrite the database component of a Postgres DSN, preserving any query
+/// string. Used only to reach a SECOND database on the same server.
+fn url_with_database(url: &str, database: &str) -> String {
+    let (base, query) = match url.find('?') {
+        Some(i) => (&url[..i], &url[i..]),
+        None => (url, ""),
+    };
+    let cut = base.rfind('/').expect("DSN has a database path segment");
+    format!("{}/{}{}", &base[..cut], database, query)
+}
+
+/// `c1_cleanup`'s sweep must not reach another database's replication slots.
+///
+/// This is a regression guard for a cleanup that dropped slots CLUSTER-WIDE.
+/// `pg_replication_slots` is a cluster-wide view and PostgreSQL lets any
+/// session drop an inactive slot regardless of which database owns it, so the
+/// unscoped sweep destroyed the CDC slots of every suite sharing the server -
+/// including suites deliberately given their own database for isolation.
+///
+/// Remove `AND database = current_database()` from `c1_cleanup` and this test
+/// fails: the foreign slot is gone.
+#[compio::test]
+async fn c1_cleanup_sweep_does_not_cross_database_boundaries() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    if !pg_has_logical_wal(&pool).await {
+        zeroship_test_support::skip("Skipping — server wal_level is not 'logical'");
+        return release_pg(pool).await;
+    }
+
+    // A second database on the SAME server, standing in for a concurrently
+    // running suite that was handed its own database.
+    const NEIGHBOUR_DB: &str = "plugin_db_cleanup_neighbour";
+    const FOREIGN_SLOT: &str = "__zs_neighbour_suite_slot";
+    let _ = pool
+        .execute(&format!(r#"DROP DATABASE IF EXISTS "{NEIGHBOUR_DB}""#), &[])
+        .await;
+    pool.execute(&format!(r#"CREATE DATABASE "{NEIGHBOUR_DB}""#), &[])
+        .await
+        .expect("create neighbour database");
+
+    let neighbour_url = url_with_database(&url, NEIGHBOUR_DB);
+    let neighbour = Pool::connect(&neighbour_url, 1).await.unwrap();
+    neighbour
+        .query_text_params(
+            "SELECT pg_create_logical_replication_slot($1, 'pgoutput')",
+            &[FOREIGN_SLOT],
+        )
+        .await
+        .expect("create the neighbour suite's slot");
+
+    // The neighbour's consumer has not attached yet, so its slot is inactive -
+    // exactly the window the sweep used to destroy.
+    let active = pool
+        .query_text_params(
+            "SELECT active::text FROM pg_replication_slots WHERE slot_name = $1",
+            &[FOREIGN_SLOT],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        active.len(),
+        1,
+        "the neighbour's slot must be visible cluster-wide, or this test proves nothing"
+    );
+    let is_active: String = active[0].get(0);
+    assert_eq!(
+        is_active, "false",
+        "the slot must be INACTIVE, or the sweep's active=false guard hides the defect"
+    );
+
+    // Now run cleanup from OUR database.
+    c1_cleanup(&pool, "c1_cleanup_blast_radius_app").await;
+
+    let survivors = pool
+        .query_text_params(
+            "SELECT slot_name FROM pg_replication_slots WHERE slot_name = $1",
+            &[FOREIGN_SLOT],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        survivors.len(),
+        1,
+        "c1_cleanup dropped a slot owned by database {NEIGHBOUR_DB}; the sweep is not \
+         scoped to current_database() and will corrupt every suite on this server"
+    );
+
+    // Teardown: the slot must go before the database will drop.
+    neighbour
+        .query_text_params("SELECT pg_drop_replication_slot($1)", &[FOREIGN_SLOT])
+        .await
+        .expect("drop the neighbour's slot");
+    drop(neighbour);
+    let _ = pool
+        .execute(&format!(r#"DROP DATABASE IF EXISTS "{NEIGHBOUR_DB}""#), &[])
+        .await;
+    release_pg(pool).await;
 }
 
 async fn c1_create_publication(pool: &Pool, app: &str) {
@@ -2149,7 +2293,7 @@ async fn c1_watchdog_reports_new_slot() {
 }
 
 #[compio::test]
-async fn c1_drop_abandoned_reaps_inactive_slot() {
+async fn c1_abandoned_reaper_measures_elapsed_inactivity_not_wal_bytes() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
@@ -2168,23 +2312,335 @@ async fn c1_drop_abandoned_reaps_inactive_slot() {
         .unwrap();
     assert!(setup.created);
 
-    // The slot is brand-new and inactive (no consumer). Run the GC
-    // with a 0-byte floor — must reap.
-    let dropped = zeroship_plugin_db::replication::drop_abandoned_slots(&pool, app, 0)
+    let slot = zeroship_plugin_db::replication::worker_slot_name(app, CDC_TEST_WORKER_ID).unwrap();
+    let candidates = pool
+        .query_text_params(
+            "SELECT slot_name FROM pg_replication_slots WHERE slot_name = $1 AND active = false",
+            &[&slot],
+        )
         .await
         .unwrap();
+    assert_eq!(candidates.len(), 1, "test must exercise one inactive slot");
+
+    // Advance WAL by more bytes than the one-hour threshold's numeric value.
+    // The old implementation compared those unlike units and reaped this
+    // brand-new slot immediately.
+    pool.query_text_params(
+        "SELECT pg_logical_emit_message(true, 'zeroship-reaper-test', repeat('x', 8192))::text",
+        &[],
+    )
+    .await
+    .unwrap();
+    let threshold = std::time::Duration::from_secs(3600);
+    let start = std::time::Instant::now();
+    let mut reaper = zeroship_plugin_db::slot_reaper::OperatorSlotReaper::connect_for_tests(
+        &url,
+        "elapsed-time-reaper",
+        threshold,
+    )
+    .await
+    .unwrap();
+    let first = reaper.sweep_at_for_tests(start).await.unwrap();
+    assert!(first.is_leader, "single test reaper must lead its sweep");
     assert!(
-        dropped.contains(
-            &zeroship_plugin_db::replication::worker_slot_name(app, CDC_TEST_WORKER_ID).unwrap()
+        first.inspected > 0,
+        "test sweep must inspect at least one managed slot"
+    );
+    assert!(
+        first.dropped.is_empty(),
+        "a first observation cannot prove one hour of inactivity: {first:?}"
+    );
+    let remaining = pool
+        .query_text_params(
+            "SELECT slot_name FROM pg_replication_slots WHERE slot_name = $1",
+            &[&slot],
+        )
+        .await
+        .unwrap();
+    assert_eq!(remaining.len(), 1, "young inactive slot must remain");
+
+    let early = reaper
+        .sweep_at_for_tests(start + threshold - std::time::Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert!(early.inspected > 0, "early sweep must inspect the slot");
+    assert!(early.dropped.is_empty(), "slot reaped before threshold: {early:?}");
+
+    let due = reaper
+        .sweep_at_for_tests(start + threshold)
+        .await
+        .unwrap();
+    assert!(due.inspected > 0, "due sweep must inspect the slot");
+    assert_eq!(due.dropped, vec![slot.clone()]);
+    let remaining = pool
+        .query_text_params(
+            "SELECT slot_name FROM pg_replication_slots WHERE slot_name = $1",
+            &[&slot],
+        )
+        .await
+        .unwrap();
+    assert!(remaining.is_empty(), "due abandoned slot must be gone");
+
+    drop(reaper);
+    c1_cleanup(&pool, app).await;
+    release_pg(pool).await;
+}
+
+#[compio::test]
+async fn c1_abandoned_reaper_preserves_inactive_slot_owned_by_live_worker() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    if !pg_has_logical_wal(&pool).await {
+        zeroship_test_support::skip("Skipping - server wal_level is not 'logical'");
+        return release_pg(pool).await;
+    }
+
+    let app = "c1_live_worker_lease";
+    let worker_id = "live-worker-with-reconnecting-consumer";
+    c1_cleanup(&pool, app).await;
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+        .await
+        .unwrap();
+    c1_create_publication(&pool, app).await;
+    zeroship_plugin_db::replication::ensure_worker_slot(&pool, app, worker_id)
+        .await
+        .unwrap();
+    let slot = zeroship_plugin_db::replication::worker_slot_name(app, worker_id).unwrap();
+
+    let threshold = std::time::Duration::from_secs(3600);
+    let owner = zeroship_plugin_db::slot_reaper::OperatorSlotReaper::connect_for_tests(
+        &url,
+        worker_id,
+        threshold,
+    )
+    .await
+    .unwrap();
+    let conflict = zeroship_plugin_db::slot_reaper::OperatorSlotReaper::connect_for_tests(
+        &url,
+        worker_id,
+        threshold,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            conflict,
+            zeroship_plugin_db::error::DbError::Configuration {
+                code: "cdc_worker_lease_conflict",
+                ..
+            }
         ),
-        "expected to reap our slot, got: {dropped:?}"
+        "duplicate live worker identity must be refused: {conflict:?}"
     );
 
-    // A second sweep with the same threshold must not error.
-    let _ = zeroship_plugin_db::replication::drop_abandoned_slots(&pool, app, 0)
+    let mut observer = zeroship_plugin_db::slot_reaper::OperatorSlotReaper::connect_for_tests(
+        &url,
+        "live-worker-lease-observer",
+        threshold,
+    )
+    .await
+    .unwrap();
+    let start = std::time::Instant::now();
+    let first = observer.sweep_at_for_tests(start).await.unwrap();
+    assert!(first.is_leader, "observer must own the fleet sweep");
+    assert!(first.inspected > 0, "test must inspect the leased inactive slot");
+    assert!(first.dropped.is_empty(), "live worker slot was reaped: {first:?}");
+    let aged = observer
+        .sweep_at_for_tests(start + threshold + std::time::Duration::from_secs(1))
         .await
         .unwrap();
+    assert!(aged.inspected > 0, "aged sweep must inspect the leased slot");
+    assert!(aged.dropped.is_empty(), "live worker lease was ignored: {aged:?}");
 
+    let rows = pool
+        .query_text_params(
+            "SELECT active FROM pg_replication_slots WHERE slot_name = $1",
+            &[&slot],
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "leased inactive slot must remain");
+    assert!(!rows[0].get::<_, bool>("active"));
+
+    drop(observer);
+    drop(owner);
+    c1_cleanup(&pool, app).await;
+    release_pg(pool).await;
+}
+
+#[compio::test]
+async fn c1_abandoned_reaper_preserves_a_connected_idle_consumer() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+    if !pg_has_logical_wal(&pool).await {
+        zeroship_test_support::skip("Skipping - server wal_level is not 'logical'");
+        return release_pg(pool).await;
+    }
+
+    let app = "c1_idle_live_consumer";
+    let worker_id = "idle-live-consumer-worker";
+    c1_cleanup(&pool, app).await;
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+        .await
+        .unwrap();
+    pool.execute(
+        &format!(r#"CREATE TABLE "{app}"."events" (id BIGSERIAL PRIMARY KEY)"#),
+        &[],
+    )
+    .await
+    .unwrap();
+    c1_create_publication_for_tables(&pool, app, &["events"]).await;
+
+    let threshold = std::time::Duration::from_secs(3600);
+    let backend = zeroship_plugin_db::backend::BackendHandle::Postgres(std::rc::Rc::new(
+        zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone()),
+    ));
+    let consumer = backend
+        .as_change_stream_pg()
+        .expect("Postgres backend must expose CDC")
+        .spawn_consumer(app, worker_id)
+        .await
+        .expect("idle consumer must reach START_REPLICATION");
+    let slot = zeroship_plugin_db::replication::worker_slot_name(app, worker_id).unwrap();
+    let active = pool
+        .query_text_params(
+            "SELECT active FROM pg_replication_slots WHERE slot_name = $1",
+            &[&slot],
+        )
+        .await
+        .unwrap();
+    assert_eq!(active.len(), 1, "test must exercise one live consumer slot");
+    assert!(active[0].get::<_, bool>("active"));
+
+    let mut observer = zeroship_plugin_db::slot_reaper::OperatorSlotReaper::connect_for_tests(
+        &url,
+        "idle-consumer-observer",
+        threshold,
+    )
+    .await
+    .unwrap();
+    let start = std::time::Instant::now();
+    let first = observer.sweep_at_for_tests(start).await.unwrap();
+    assert!(first.is_leader, "observer must own the fleet sweep");
+    assert!(first.inspected > 0, "test sweep must inspect the active slot");
+    assert_eq!(
+        observer.tracked_slots_for_tests(),
+        0,
+        "an active idle consumer must not enter the inactivity clock"
+    );
+    let aged = observer
+        .sweep_at_for_tests(start + threshold + std::time::Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert!(aged.inspected > 0, "aged sweep must inspect the active slot");
+    assert!(first.dropped.is_empty() && aged.dropped.is_empty());
+    assert_eq!(
+        observer.tracked_slots_for_tests(),
+        0,
+        "an active idle consumer must stay outside the inactivity clock"
+    );
+    let still_active = pool
+        .query_text_params(
+            "SELECT active FROM pg_replication_slots WHERE slot_name = $1",
+            &[&slot],
+        )
+        .await
+        .unwrap();
+    assert_eq!(still_active.len(), 1, "idle live slot must remain");
+    assert!(still_active[0].get::<_, bool>("active"));
+
+    drop(observer);
+    consumer.shutdown().await.unwrap();
+    c1_cleanup(&pool, app).await;
+    drop(backend);
+    release_pg(pool).await;
+}
+
+#[compio::test]
+async fn c1_abandoned_reaper_elects_one_leader_across_concurrent_workers() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+    if !pg_has_logical_wal(&pool).await {
+        zeroship_test_support::skip("Skipping - server wal_level is not 'logical'");
+        return release_pg(pool).await;
+    }
+
+    let app = "c1_concurrent_reapers";
+    let worker_id = "crashed-worker-for-concurrent-reapers";
+    c1_cleanup(&pool, app).await;
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+        .await
+        .unwrap();
+    c1_create_publication(&pool, app).await;
+    zeroship_plugin_db::replication::ensure_worker_slot(&pool, app, worker_id)
+        .await
+        .unwrap();
+    let slot = zeroship_plugin_db::replication::worker_slot_name(app, worker_id).unwrap();
+
+    let threshold = std::time::Duration::from_secs(3600);
+    let start = std::time::Instant::now();
+    let mut first = zeroship_plugin_db::slot_reaper::OperatorSlotReaper::connect_for_tests(
+        &url,
+        "concurrent-reaper-a",
+        threshold,
+    )
+    .await
+    .unwrap();
+    let mut second = zeroship_plugin_db::slot_reaper::OperatorSlotReaper::connect_for_tests(
+        &url,
+        "concurrent-reaper-b",
+        threshold,
+    )
+    .await
+    .unwrap();
+    let (first_observation, second_observation) = futures::join!(
+        first.sweep_at_for_tests(start),
+        second.sweep_at_for_tests(start),
+    );
+    let first_observation = first_observation.unwrap();
+    let second_observation = second_observation.unwrap();
+    assert_eq!(
+        usize::from(first_observation.is_leader) + usize::from(second_observation.is_leader),
+        1,
+        "concurrent workers must elect exactly one fleet observer"
+    );
+    let inspected = first_observation.inspected + second_observation.inspected;
+    assert!(inspected > 0, "the elected reaper must inspect a non-empty set");
+    assert!(first_observation.dropped.is_empty() && second_observation.dropped.is_empty());
+
+    let due = start + threshold;
+    let (first_result, second_result) = futures::join!(
+        first.sweep_at_for_tests(due),
+        second.sweep_at_for_tests(due),
+    );
+    let first_result = first_result.unwrap();
+    let second_result = second_result.unwrap();
+    assert_eq!(
+        usize::from(first_result.is_leader) + usize::from(second_result.is_leader),
+        1,
+        "fleet observer leadership must remain single-flight"
+    );
+    assert!(
+        first_result.inspected + second_result.inspected > 0,
+        "the due sweep must inspect the fixture"
+    );
+    let dropped = first_result.dropped.len() + second_result.dropped.len();
+    assert_eq!(dropped, 1, "exactly one concurrent reaper must win the drop");
+    assert!(
+        first_result.dropped.contains(&slot) || second_result.dropped.contains(&slot),
+        "the dropped slot must be the test fixture"
+    );
+    let remaining = pool
+        .query_text_params(
+            "SELECT slot_name FROM pg_replication_slots WHERE slot_name = $1",
+            &[&slot],
+        )
+        .await
+        .unwrap();
+    assert!(remaining.is_empty(), "concurrent sweep must leave the slot absent");
+
+    drop(first);
+    drop(second);
     c1_cleanup(&pool, app).await;
     release_pg(pool).await;
 }
@@ -3659,6 +4115,89 @@ fn err_chain(e: &dyn std::error::Error) -> String {
 // no DB dependency -- the check is pure-Rust JSON walk.
 // ---------------------------------------------------------------------------
 
+/// SC-5: operator deprovisioning performs NO second URL parse and opens NO
+/// second pool.
+///
+/// The free function this replaces took the URL, re-ran `backend_for_url` on it
+/// and built a fresh two-connection `Pool` **per deleted app** - two connects,
+/// two authentications and two TLS handshakes each time. Against a worker
+/// reconciling a batch of deletions that is a pool per app.
+///
+/// Both instruments are counters rather than inferences. A connection count
+/// cannot rule on pool cardinality (a pool of two and two pools of one look the
+/// same from the server), and "does not re-parse" is a claim about what runs,
+/// which `grep` cannot answer. Mutating `DbLifecycle::deprovision_app` back to
+/// `Pool::connect(&self.service.url, 2)` per call turns the pool assertion red;
+/// mutating it back to `select_backend(&self.service.url)` turns the parse
+/// assertion red.
+///
+/// Three deletions, not one: with one, "opens one pool per deletion" and "opens
+/// one pool ever" are the same number and the arm rules on nothing.
+#[test]
+fn operator_deprovisioning_reuses_one_pool_and_reparses_nothing() {
+    use zeroship_plugin_db::service::{
+        operator_pool_open_count, reset_operator_pools_for_tests, url_parse_count, DbService,
+        DbServiceConfig,
+    };
+
+    const DELETED_APPS: [&str; 3] = [
+        "sc5_operator_pool_arm_a",
+        "sc5_operator_pool_arm_b",
+        "sc5_operator_pool_arm_c",
+    ];
+    assert!(
+        DELETED_APPS.len() > 1,
+        "one deletion cannot distinguish one pool per call from one pool ever"
+    );
+
+    std::thread::spawn(|| {
+        compio::runtime::Runtime::new()
+            .expect("cannot create runtime")
+            .block_on(async {
+                let url = require_pg().await;
+                // This thread has never deprovisioned anything, so its operator
+                // pool map is empty and the counters start from a known floor.
+                reset_operator_pools_for_tests();
+
+                let service = DbService::new(DbServiceConfig {
+                    url,
+                    worker_id: "sc5-operator-lifecycle-arm".to_string(),
+                    meter: None,
+                })
+                .expect("compose the db service");
+
+                let parses_after_composition = url_parse_count();
+                let pools_before = operator_pool_open_count();
+
+                for app_id in DELETED_APPS {
+                    service
+                        .lifecycle()
+                        .deprovision_app(app_id)
+                        .await
+                        .expect("idempotent teardown for an app with no slots");
+                }
+
+                assert_eq!(
+                    url_parse_count(),
+                    parses_after_composition,
+                    "deprovisioning must read the backend selection made at composition, \
+                     not re-parse the URL"
+                );
+                assert_eq!(
+                    operator_pool_open_count() - pools_before,
+                    1,
+                    "{} deletions must share ONE long-lived operator pool",
+                    DELETED_APPS.len()
+                );
+
+                reset_operator_pools_for_tests();
+                drain_pg().await;
+            });
+    })
+    .join()
+    .expect("operator lifecycle thread");
+}
+
 #[test]
 fn cross_app_fk_rejected_at_parse() {
     use zeroship_plugin_db::cross_app_fk::reject_cross_app_fk;
@@ -3999,12 +4538,9 @@ async fn vector_dimension_mismatch_rejected_at_insert() {
 }
 
 // ---------------------------------------------------------------------------
-// FullTextIndex + SpatialIndex (PG arm) test gates.
+// SpatialIndex (PG arm) test gates.
 //
-// FTS tests run unconditionally: tsvector / GIN / plainto_tsquery /
-// tsvector_update_trigger are all core PG (no extension needed).
-//
-// Spatial tests require PostGIS. The default `pg-test` container
+// These tests require PostGIS. The default `pg-test` container
 // (`postgres:16`) doesn't bundle PostGIS, so the spatial gates are
 // `#[ignore]`-marked and run via `--ignored` against a PostGIS-bundled
 // image — see docs/runbooks/docker-compose.md and the open question
@@ -4024,338 +4560,6 @@ async fn postgis_extension_available(pool: &Pool) -> bool {
         .await
         .unwrap_or_default();
     !rows.is_empty()
-}
-
-/// Test gate for `fts_search_matches_substring`.
-///
-/// Inserts 5 rows whose `bio` column matches different keyword sets;
-/// asserts `fts_search("rust")` returns the membership set we expect
-/// (the rows containing "rust" anywhere — bare "rust", "rust async",
-/// and any phrase variant). Set membership, not ordinal positions.
-#[compio::test]
-async fn fts_search_matches_substring() {
-    use zeroship_plugin_db::backend::{FullTextIndex, PostgresBackend};
-
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-
-    let app = "fts_substring";
-    let coll = "people";
-    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
-        .await
-        .unwrap();
-    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
-        .await
-        .unwrap();
-    // `fts_search` runs under the per-app role (autocommit §17.5 + DB-1
-    // guards `SET LOCAL ROLE app_<app>_role`), so the role + its admin
-    // template must exist before the search — exactly as every other
-    // role-scoped test provisions via `ensure_per_app_role`.
-    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
-        .await
-        .unwrap();
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
-        .await
-        .unwrap();
-    pool.execute(
-        &format!(
-            "CREATE TABLE \"{app}\".\"{coll}\" (\
-               id SERIAL PRIMARY KEY, \
-               bio TEXT NOT NULL\
-             )"
-        ),
-        &[],
-    )
-    .await
-    .unwrap();
-
-    let backend = PostgresBackend::new(pool.clone(), url.clone());
-
-    // Build the FTS index (tsvector column + GIN + trigger). The
-    // trigger fires on subsequent INSERTs, so we wire it BEFORE
-    // inserting the seed rows so the tsvector column gets populated
-    // by the trigger rather than the backfill UPDATE.
-    FullTextIndex::ensure_fts_index(
-        &backend,
-        app,
-        coll,
-        &["bio".to_string()],
-        "english",
-    )
-    .await
-    .unwrap_or_else(|e| panic!("ensure_fts_index failed: {e:?}"));
-
-    let seeds = [
-        "Loves rust and systems programming",
-        "Building async services",
-        "rust async fan",
-        "Python developer",
-        "Ruby on Rails dev",
-    ];
-    for s in &seeds {
-        pool.execute(
-            &format!("INSERT INTO \"{app}\".\"{coll}\" (bio) VALUES ($1)"),
-            &[s as &(dyn compio_postgres::types::ToSql + Sync)],
-        )
-        .await
-        .unwrap();
-    }
-
-    let rows = FullTextIndex::fts_search(
-        &backend,
-        app,
-        coll,
-        "rust",
-        &serde_json::Value::Null,
-        None,
-    )
-    .await
-    .unwrap_or_else(|e| panic!("fts_search failed: {e:?}"));
-
-    // "rust" tokenises to "rust" — matches rows 1 and 3 ("rust",
-    // "rust async"). The english stemmer leaves "rust" untouched
-    // (it's already the root form).
-    let bios: Vec<String> = rows
-        .iter()
-        .filter_map(|r| r.get("bio").and_then(serde_json::Value::as_str).map(str::to_string))
-        .collect();
-    assert_eq!(
-        rows.len(),
-        2,
-        "expected 2 rust-matching rows, got {} ({bios:?})",
-        rows.len()
-    );
-    assert!(
-        bios.iter().any(|b| b.contains("rust and systems")),
-        "expected the 'rust and systems' row in {bios:?}"
-    );
-    assert!(
-        bios.iter().any(|b| b.contains("rust async fan")),
-        "expected the 'rust async fan' row in {bios:?}"
-    );
-    // Every row must carry the synthetic `_rank` column.
-    for r in &rows {
-        assert!(r.get("_rank").is_some(), "row missing _rank: {r}");
-    }
-    drop(backend);
-    release_pg(pool).await;
-}
-
-/// Test gate for `fts_and_filter_compose`.
-///
-/// FTS `MATCH` composed via `AND` with a regular column filter must
-/// intersect — assert the final set is exactly the rows matching both
-/// conditions.
-#[compio::test]
-async fn fts_and_filter_compose() {
-    use zeroship_plugin_db::backend::{FullTextIndex, PostgresBackend};
-
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-
-    let app = "fts_compose";
-    let coll = "people";
-    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
-        .await
-        .unwrap();
-    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
-        .await
-        .unwrap();
-    // `fts_search` runs under the per-app role (autocommit §17.5 + DB-1
-    // guards `SET LOCAL ROLE app_<app>_role`); provision it first.
-    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
-        .await
-        .unwrap();
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
-        .await
-        .unwrap();
-    pool.execute(
-        &format!(
-            "CREATE TABLE \"{app}\".\"{coll}\" (\
-               id SERIAL PRIMARY KEY, \
-               bio TEXT NOT NULL, \
-               lang TEXT NOT NULL\
-             )"
-        ),
-        &[],
-    )
-    .await
-    .unwrap();
-
-    let backend = PostgresBackend::new(pool.clone(), url.clone());
-    FullTextIndex::ensure_fts_index(
-        &backend,
-        app,
-        coll,
-        &["bio".to_string()],
-        "english",
-    )
-    .await
-    .unwrap_or_else(|e| panic!("ensure_fts_index failed: {e:?}"));
-
-    let seeds = [
-        ("Loves rust and systems programming", "en"),
-        ("rust async runtimes", "en"),
-        ("python developer", "en"),
-        ("rust fan", "de"),
-        ("rust crab", "de"),
-    ];
-    for (bio, lang) in &seeds {
-        pool.execute(
-            &format!("INSERT INTO \"{app}\".\"{coll}\" (bio, lang) VALUES ($1, $2)"),
-            &[
-                bio as &(dyn compio_postgres::types::ToSql + Sync),
-                lang as &(dyn compio_postgres::types::ToSql + Sync),
-            ],
-        )
-        .await
-        .unwrap();
-    }
-
-    // FTS for "rust" filtered to lang="en" — must hit exactly rows 1 + 2
-    // (the two "rust" bios with lang="en"), not 4/5 (rust bios in de).
-    let rows = FullTextIndex::fts_search(
-        &backend,
-        app,
-        coll,
-        "rust",
-        &serde_json::json!({ "lang": "en" }),
-        None,
-    )
-    .await
-    .unwrap_or_else(|e| panic!("fts_search failed: {e:?}"));
-    assert_eq!(
-        rows.len(),
-        2,
-        "expected exactly 2 (rust ∩ en) rows, got {}",
-        rows.len()
-    );
-    for r in &rows {
-        assert_eq!(
-            r.get("lang").and_then(serde_json::Value::as_str),
-            Some("en"),
-            "filter must restrict to lang=en: {r}"
-        );
-    }
-    drop(backend);
-    release_pg(pool).await;
-}
-
-/// Test gate for `fts_trigger_keeps_index_in_sync_after_update`.
-///
-/// Insert a row, search for token "alpha" — must hit. Update the row to
-/// replace "alpha" with "beta" and search for "alpha" again — must
-/// MISS, while a search for "beta" must hit. This exercises the
-/// `tsvector_update_trigger` rather than just the initial backfill.
-#[compio::test]
-async fn fts_trigger_keeps_index_in_sync_after_update() {
-    use zeroship_plugin_db::backend::{FullTextIndex, PostgresBackend};
-
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-
-    let app = "fts_trigger";
-    let coll = "docs";
-    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
-        .await
-        .unwrap();
-    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
-        .await
-        .unwrap();
-    // `fts_search` runs under the per-app role (autocommit §17.5 + DB-1
-    // guards `SET LOCAL ROLE app_<app>_role`); provision it first.
-    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
-        .await
-        .unwrap();
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
-        .await
-        .unwrap();
-    pool.execute(
-        &format!(
-            "CREATE TABLE \"{app}\".\"{coll}\" (\
-               id SERIAL PRIMARY KEY, \
-               body TEXT NOT NULL\
-             )"
-        ),
-        &[],
-    )
-    .await
-    .unwrap();
-
-    let backend = PostgresBackend::new(pool.clone(), url.clone());
-    FullTextIndex::ensure_fts_index(
-        &backend,
-        app,
-        coll,
-        &["body".to_string()],
-        "english",
-    )
-    .await
-    .unwrap_or_else(|e| panic!("ensure_fts_index failed: {e:?}"));
-
-    let alpha = "alpha test content";
-    pool.execute(
-        &format!("INSERT INTO \"{app}\".\"{coll}\" (body) VALUES ($1)"),
-        &[&alpha as &(dyn compio_postgres::types::ToSql + Sync)],
-    )
-    .await
-    .unwrap();
-
-    let hits = FullTextIndex::fts_search(
-        &backend,
-        app,
-        coll,
-        "alpha",
-        &serde_json::Value::Null,
-        None,
-    )
-    .await
-    .unwrap();
-    assert_eq!(hits.len(), 1, "expected 1 alpha hit pre-update, got {}", hits.len());
-
-    let beta = "beta different content";
-    pool.execute(
-        &format!("UPDATE \"{app}\".\"{coll}\" SET body = $1 WHERE id = 1"),
-        &[&beta as &(dyn compio_postgres::types::ToSql + Sync)],
-    )
-    .await
-    .unwrap();
-
-    let alpha_hits = FullTextIndex::fts_search(
-        &backend,
-        app,
-        coll,
-        "alpha",
-        &serde_json::Value::Null,
-        None,
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        alpha_hits.len(),
-        0,
-        "trigger must invalidate alpha after UPDATE, got {} hits",
-        alpha_hits.len()
-    );
-
-    let beta_hits = FullTextIndex::fts_search(
-        &backend,
-        app,
-        coll,
-        "beta",
-        &serde_json::Value::Null,
-        None,
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        beta_hits.len(),
-        1,
-        "trigger must surface beta after UPDATE, got {} hits",
-        beta_hits.len()
-    );
-    drop(backend);
-    release_pg(pool).await;
 }
 
 /// Test gate for `near_returns_within_radius`.
@@ -6537,87 +6741,6 @@ async fn vector_search_runs_under_per_app_role_via_rls() {
 }
 
 #[compio::test]
-async fn fts_search_runs_under_per_app_role_via_rls() {
-    use zeroship_plugin_db::backend::{FullTextIndex, PostgresBackend};
-
-    let url = require_pg().await;
-    let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-
-    let app = "p6a_fts_role_fence";
-    let coll = "people";
-    let role = provision_app_with_role(&admin_pool, app).await;
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
-        .await
-        .unwrap();
-    admin_pool.execute(
-        &format!(
-            "CREATE TABLE \"{app}\".\"{coll}\" (\
-               id SERIAL PRIMARY KEY, \
-               bio TEXT NOT NULL\
-             )"
-        ),
-        &[],
-    )
-    .await
-    .unwrap();
-
-    let admin_backend = PostgresBackend::new(admin_pool.clone(), url.clone());
-    FullTextIndex::ensure_fts_index(&admin_backend, app, coll, &["bio".to_string()], "english")
-        .await
-        .unwrap();
-    admin_pool.execute(
-        &format!("INSERT INTO \"{app}\".\"{coll}\" (bio) VALUES ('rust systems')"),
-        &[],
-    )
-    .await
-    .unwrap();
-    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
-        .await
-        .unwrap();
-    install_role_bound_select_policy(&admin_pool, app, coll, &role).await;
-    let login_role = "p6a_fts_login";
-    let (login_url, login_pool) = provision_platform_login_pool(
-        &admin_pool,
-        &url,
-        login_role,
-        "test",
-        &role,
-        app,
-    )
-    .await;
-
-    let blocked = login_pool
-        .query_text_params(&format!("SELECT id FROM \"{app}\".\"{coll}\""), &[])
-        .await
-        .unwrap();
-    assert!(
-        blocked.is_empty(),
-        "login role must be blocked by FORCE RLS before fts_search proves the role fence"
-    );
-
-    let backend = PostgresBackend::new(login_pool.clone(), login_url);
-    let rows = FullTextIndex::fts_search(&backend, app, coll, "rust", &Value::Null, Some(1))
-        .await
-        .unwrap_or_else(|e| panic!("fts_search failed: {e:?}"));
-    assert_eq!(rows.len(), 1, "fts_search must see the role-gated row");
-    assert_eq!(rows[0]["bio"], "rust systems");
-
-    drop(login_pool);
-    let _ = admin_pool
-        .execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
-        .await;
-    let _ = admin_pool
-        .execute(&format!("DROP ROLE IF EXISTS \"{login_role}\""), &[])
-        .await;
-    let _ = admin_pool
-        .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
-        .await;
-    drop(admin_backend);
-    drop(backend);
-    release_pg(admin_pool).await;
-}
-
-#[compio::test]
 async fn spatial_near_runs_under_per_app_role_via_rls() {
     use zeroship_plugin_db::backend::{GeoPoint, PostgresBackend, SpatialIndex};
 
@@ -6813,8 +6936,8 @@ async fn unmask_fetch_runs_under_per_app_role_via_rls() {
 async fn wal_connection_stays_platform_role() {
     // §17.5: the WAL/replication connection stays under the platform
     // role and is NEVER switched to a per-app role. This is a structural
-    // assertion: the replication helpers (`ensure_publication_and_slot`,
-    // `drop_abandoned_slots`, the §17.7 deprovision) run on the pool
+    // assertion: the replication helpers (`ensure_worker_slot` and the
+    // section 17.7 deprovision) run on the pool
     // directly with NO `SET ROLE` — only the transaction BEGIN paths
     // (`exec_begin`) applies the per-app role. We pin
     // that the role-application surface is exactly the two tx-begin
@@ -7327,4 +7450,114 @@ fn direct_connection_sites_do_not_grow() {
          one site however many tests call it, so it would pass forever without \
          checking anything. Replace this with a check over the helper."
     );
+}
+
+// ---------------------------------------------------------------------------
+// `OwnedPooledClient`: the transaction connection is a pool checkout
+//
+// Until 2026-08-27 `acquire_dedicated_client` called
+// `compio_postgres::connect` directly and spawned a detached task per
+// connection. It never touched the pool, so the concurrent-transaction ceiling
+// was UNBOUNDED - a worker multiplexing ~200 apps that each open a transaction
+// opened ~200 backends, which is a way to exhaust a cluster's
+// `max_connections` from one process.
+//
+// Both arms below fail on that code: the first because the pool's counters
+// never move, the second because an unbounded acquire never has to wait.
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn a_dedicated_client_is_a_pool_checkout_and_returns_on_drop() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+    let backend =
+        zeroship_plugin_db::backend::PostgresBackend::new(std::rc::Rc::clone(&pool), url.clone());
+
+    let active_before = pool.active_count();
+    let created_before = pool.metrics.connections_created.get();
+
+    let client = {
+        use zeroship_plugin_db::backend::SqlExecutor as _;
+        backend
+            .acquire_dedicated_client()
+            .await
+            .expect("dedicated client")
+    };
+
+    assert_eq!(
+        pool.active_count(),
+        active_before + 1,
+        "a dedicated client must be a checkout from THIS pool; the pool's \
+         active count did not move, so the connection came from somewhere else"
+    );
+    // The warm pool already holds idle connections, so this checkout must not
+    // have opened a new backend at all.
+    assert_eq!(
+        pool.metrics.connections_created.get(),
+        created_before,
+        "the checkout opened a new connection instead of reusing an idle one"
+    );
+
+    drop(client);
+
+    assert_eq!(
+        pool.active_count(),
+        active_before,
+        "the dedicated client did not return to the pool on drop"
+    );
+}
+
+#[compio::test]
+async fn concurrent_dedicated_clients_are_bounded_by_the_pool() {
+    use std::time::Duration;
+
+    let url = require_pg().await;
+    // `max_size: 1` makes the ceiling observable in one checkout; a short
+    // acquire timeout keeps the queued caller's wait bounded so the test is
+    // measuring the ceiling rather than sitting on the 30 s default.
+    let mut config = compio_postgres::PoolConfig::default();
+    config
+        .max_size(1)
+        .min_idle(1)
+        .acquire_timeout(Duration::from_millis(400));
+    let pool = std::rc::Rc::new(
+        Pool::connect_with_pool_config(&url, config)
+            .await
+            .expect("pool"),
+    );
+    let backend =
+        zeroship_plugin_db::backend::PostgresBackend::new(std::rc::Rc::clone(&pool), url.clone());
+
+    use zeroship_plugin_db::backend::SqlExecutor as _;
+    let first = backend
+        .acquire_dedicated_client()
+        .await
+        .expect("first dedicated client");
+
+    // THE INVERSION THIS STEP OWNS: a transaction that used to get a
+    // connection of its own now queues, and refuses when the wait expires.
+    // Conservative policy, and OWED a real decision: queue on the pool's
+    // acquire timeout rather than refuse immediately, no per-app fairness, and
+    // the ceiling is whatever the shared data pool is sized to.
+    let second = backend.acquire_dedicated_client().await;
+    let err = second.expect_err(
+        "a second dedicated client must be bounded by the pool, not opened \
+         directly - an unbounded model is how one worker exhausts max_connections",
+    );
+    let message = format!("{err:?}");
+    assert!(
+        message.contains("timeout"),
+        "the refusal must name the acquire timeout so an operator can see the \
+         ceiling was hit; got {message}"
+    );
+
+    drop(first);
+
+    // And the ceiling is a queue, not a wall: once the lease returns, the next
+    // checkout succeeds.
+    let third = backend
+        .acquire_dedicated_client()
+        .await
+        .expect("checkout after the first lease returned");
+    drop(third);
 }

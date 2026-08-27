@@ -28,6 +28,7 @@ use std::future::Future;
 use serde_json::Value;
 use zeroship_runtime::state::{OpResult, ResolveValue};
 
+use crate::binding::DbBinding;
 use crate::error::DbError;
 use crate::exec::{exec_count, exec_mutation_with_emit, exec_query};
 use crate::query;
@@ -128,7 +129,7 @@ pub use write_pipeline::{
 /// / `"invalid_identifier"`.
 ///
 /// `exec` runs against either the pool or the active
-/// `IsolateDbContext::tx_conns` (transparently —
+/// `ThreadDbContext::tx_conns` (transparently —
 /// `exec::run_sql` already handles that).
 ///
 /// `resolve` lowers the exec's success value to the V8-bound
@@ -605,19 +606,20 @@ fn validate_unmask_projection(
 /// `unmask_not_permitted`.
 pub(crate) fn dispatch_find<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    app_id: &str,
+    binding: DbBinding,
     collection: &str,
     filter: Value,
     opts: Value,
 ) -> v8::Local<'s, v8::Promise> {
+    let app_id = binding.app_id();
     let state = runtime_state(scope);
     // Record into the active query's read-set so the broker can
     // narrow events to this filter. No-op outside `query()` handlers.
     crate::read_set::record_if_active(collection, &filter);
 
-    // DB-2: an omitted `limit` defaults to MAX_QUERY_LIMIT — never "no LIMIT"
-    // (which would stream the whole collection into the worker). Callers
-    // paginate past the first page via `offset`.
+    // DB-2: public `find` normalises an omitted limit here before calling the
+    // builder. This does not protect internal builder callers; they must pass
+    // their own explicit bound. Callers paginate past this page via `offset`.
     let limit = Some(query::effective_query_limit(
         opts.get("limit").and_then(Value::as_i64),
     ));
@@ -708,7 +710,7 @@ pub(crate) fn dispatch_find<'s>(
         match exec_query(&route, bq).await {
             Ok(rows) => {
                 let result = match read_pipeline::apply(
-                    &app,
+                    &binding,
                     &coll,
                     rows,
                     read_pipeline::ApplyOptions {
@@ -771,10 +773,11 @@ pub(crate) fn dispatch_find<'s>(
 /// `refuse_if_query_capability` before reaching here.
 pub(crate) fn dispatch_insert<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    app_id: &str,
+    binding: DbBinding,
     collection: &str,
     doc: Value,
 ) -> v8::Local<'s, v8::Promise> {
+    let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
@@ -795,7 +798,7 @@ pub(crate) fn dispatch_insert<'s>(
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         let mut doc = doc;
         if let Err(e) = write_pipeline::apply(
-            &app,
+            &binding,
             &coll,
             &mut doc,
             write_pipeline::ApplyMode::Insert {
@@ -821,7 +824,7 @@ pub(crate) fn dispatch_insert<'s>(
         match result {
             Ok(rows) => {
                 let result = match read_pipeline::apply(
-                    &app,
+                    &binding,
                     &coll,
                     rows,
                     read_pipeline::ApplyOptions::default(),
@@ -858,10 +861,11 @@ pub(crate) fn dispatch_insert<'s>(
 /// capability-gate contract.
 pub(crate) fn dispatch_insert_many<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    app_id: &str,
+    binding: DbBinding,
     collection: &str,
     docs: Value,
 ) -> v8::Local<'s, v8::Promise> {
+    let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     let coll = collection.to_string();
@@ -872,9 +876,9 @@ pub(crate) fn dispatch_insert_many<'s>(
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         let mut docs = docs;
-        if let Err(e) = prepare_insert_many_docs_for_write(
+        if let Err(e) = prepare_insert_many_docs_for_binding(
             &mut docs,
-            &app,
+            &binding,
             &coll,
             actor_id.as_deref(),
         )
@@ -899,7 +903,7 @@ pub(crate) fn dispatch_insert_many<'s>(
         match result {
             Ok(rows) => {
                 let result = match read_pipeline::apply(
-                    &app,
+                    &binding,
                     &coll,
                     rows,
                     read_pipeline::ApplyOptions::default(),
@@ -948,11 +952,12 @@ pub(crate) fn dispatch_insert_many<'s>(
 /// — the CAS semantics don't generalise to multi-row UPDATEs.
 pub(crate) fn dispatch_update_one<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    app_id: &str,
+    binding: DbBinding,
     collection: &str,
     filter: Value,
     update: Value,
 ) -> v8::Local<'s, v8::Promise> {
+    let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
@@ -1003,7 +1008,7 @@ pub(crate) fn dispatch_update_one<'s>(
         // from live introspection (cached); an introspection failure rejects the
         // op rather than silently skipping the per-row path.
         let per_row_encrypted_update =
-            match write_pipeline::update_requires_per_row_encryption(&app, &coll, &update).await {
+            match write_pipeline::update_requires_per_row_encryption(&binding, &coll, &update).await {
                 Ok(v) => v,
                 Err(e) => {
                     return OpResult::JsValue {
@@ -1018,7 +1023,7 @@ pub(crate) fn dispatch_update_one<'s>(
                 &route,
                 &coll,
                 &filter,
-                Some(1),
+                1,
             )
             .await
             {
@@ -1060,7 +1065,7 @@ pub(crate) fn dispatch_update_one<'s>(
         let mut update = update;
         let row_pk = target_row.as_ref().map_or("", |row| row.row_pk.as_str());
         if let Err(e) = write_pipeline::apply(
-            &app,
+            &binding,
             &coll,
             &mut update,
             write_pipeline::ApplyMode::Update { row_pk },
@@ -1116,7 +1121,7 @@ pub(crate) fn dispatch_update_one<'s>(
         match exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update).await {
             Ok(rows) => {
                 let result = match read_pipeline::apply(
-                    &app,
+                    &binding,
                     &coll,
                     rows,
                     read_pipeline::ApplyOptions::default(),
@@ -1200,11 +1205,12 @@ pub(crate) fn dispatch_update_one<'s>(
 /// path.
 pub(crate) fn dispatch_update_many<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    app_id: &str,
+    binding: DbBinding,
     collection: &str,
     filter: Value,
     update: Value,
 ) -> v8::Local<'s, v8::Promise> {
+    let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
@@ -1251,7 +1257,7 @@ pub(crate) fn dispatch_update_many<'s>(
         // Per-row-randomised-encryption decision from live
         // introspection (cached); an introspection failure rejects the op.
         let per_row_encrypted_update =
-            match write_pipeline::update_requires_per_row_encryption(&app, &coll, &update).await {
+            match write_pipeline::update_requires_per_row_encryption(&binding, &coll, &update).await {
                 Ok(v) => v,
                 Err(e) => {
                     return OpResult::JsValue {
@@ -1269,124 +1275,133 @@ pub(crate) fn dispatch_update_many<'s>(
             skip_updated_by: hints.creator_supplied_updated_by,
         };
         if per_row_encrypted_update {
-            let target_rows =
-                match write_pipeline::resolve_target_row_ids(&route, &coll, &filter, None).await {
-                    Ok(rows) => rows,
-                    Err(e) => {
-                        return OpResult::JsValue {
-                            resolver,
-                            value: ResolveValue::RejectError(e.to_op_error()),
-                            request_id,
-                        };
-                    }
-                };
-            if target_rows.is_empty() {
-                if let Some(expected_version) = cas_version {
-                    let row_id = filter
-                        .as_object()
-                        .and_then(|o| o.get("id"))
-                        .and_then(|v| v.as_str());
-                    return OpResult::JsValue {
-                        resolver,
-                        value: ResolveValue::RejectError(
-                            DbError::version_mismatch(&coll, row_id, expected_version)
-                                .to_op_error(),
-                        ),
-                        request_id,
-                    };
-                }
-                return OpResult::JsValue {
-                    resolver,
-                    value: usize_count_as_f64(0),
-                    request_id,
-                };
-            }
-
-            let update = update;
-            let mut affected = 0usize;
-            for target_row in &target_rows {
-                let row_pk = target_row.row_pk.clone();
-                let row_id = target_row.id_value.clone();
-                let mut row_update = update.clone();
-                if let Err(e) = write_pipeline::apply(
-                    &app,
-                    &coll,
-                    &mut row_update,
-                    write_pipeline::ApplyMode::Update {
-                        row_pk: &row_pk,
-                    },
-                )
-                .await
-                {
+            let frame = match crate::transaction::AtomicWriteFrame::begin(route).await {
+                Ok(frame) => frame,
+                Err(e) => {
                     return OpResult::JsValue {
                         resolver,
                         value: ResolveValue::RejectError(e.to_op_error()),
                         request_id,
                     };
                 }
-                maybe_lower_sqlite_boolean_update(&app, &coll, &mut row_update);
-                let mut row_filter = serde_json::json!({ "id": row_id });
-                if let Some(expected_version) = cas_version {
-                    row_filter["version"] = Value::from(expected_version);
-                }
-                let built = query::build_update_one_with_system_fields(
-                    &app,
+            };
+            let work_result: Result<usize, DbError> = async {
+                let target_rows = write_pipeline::resolve_target_row_ids(
+                    frame.route(),
                     &coll,
-                    &row_filter,
-                    &row_update,
-                    current_sql_dialect(),
-                    &autobump,
-                );
-                let bq = match built {
-                    Ok(bq) => bq,
-                    Err(e) => {
-                        return OpResult::JsValue {
-                            resolver,
-                            value: ResolveValue::RejectError(DbError::from(e).to_op_error()),
-                            request_id,
-                        };
-                    }
-                };
-                match exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update)
-                    .await
-                {
-                    Ok(rows) => affected += rows.len(),
-                    Err(e) => {
-                        return OpResult::JsValue {
-                            resolver,
-                            value: ResolveValue::RejectError(e.to_op_error()),
-                            request_id,
-                        };
-                    }
-                }
-            }
-
-            if let Some(expected_version) = cas_version {
-                if affected == 0 {
-                    let row_id = filter
-                        .as_object()
-                        .and_then(|o| o.get("id"))
-                        .and_then(|v| v.as_str());
-                    return OpResult::JsValue {
-                        resolver,
-                        value: ResolveValue::RejectError(
-                            DbError::version_mismatch(&coll, row_id, expected_version)
-                                .to_op_error(),
+                    &filter,
+                    query::MAX_QUERY_LIMIT + 1,
+                )
+                .await?;
+                let target_limit = usize::try_from(query::MAX_QUERY_LIMIT)
+                    .expect("MAX_QUERY_LIMIT must be a positive usize");
+                if target_rows.len() > target_limit {
+                    return Err(DbError::validation_hinted(
+                        "update_many_target_limit_exceeded",
+                        format!(
+                            "updateMany matched more than {} rows; the maximum is {}",
+                            query::MAX_QUERY_LIMIT,
+                            query::MAX_QUERY_LIMIT
                         ),
-                        request_id,
-                    };
+                        format!(
+                            "Narrow the updateMany filter so one call targets at most {} rows.",
+                            query::MAX_QUERY_LIMIT
+                        ),
+                    ));
                 }
+                if target_rows.is_empty() {
+                    if let Some(expected_version) = cas_version {
+                        let row_id = filter
+                            .as_object()
+                            .and_then(|o| o.get("id"))
+                            .and_then(|v| v.as_str());
+                        return Err(DbError::version_mismatch(
+                            &coll,
+                            row_id,
+                            expected_version,
+                        ));
+                    }
+                    return Ok(0);
+                }
+
+                let target_count = target_rows.len();
+                let mut row_queries = Vec::with_capacity(target_count);
+                for target_row in &target_rows {
+                    let row_pk = target_row.row_pk.clone();
+                    let row_id = target_row.id_value.clone();
+                    let mut row_update = update.clone();
+                    write_pipeline::apply(
+                        &binding,
+                        &coll,
+                        &mut row_update,
+                        write_pipeline::ApplyMode::Update {
+                            row_pk: &row_pk,
+                        },
+                    )
+                    .await?;
+                    maybe_lower_sqlite_boolean_update(&app, &coll, &mut row_update);
+                    let mut row_filter = serde_json::json!({ "id": row_id });
+                    if let Some(expected_version) = cas_version {
+                        row_filter["version"] = Value::from(expected_version);
+                    }
+                    row_queries.push(
+                        query::build_update_one_with_system_fields(
+                            &app,
+                            &coll,
+                            &row_filter,
+                            &row_update,
+                            current_sql_dialect(),
+                            &autobump,
+                        )
+                        .map_err(DbError::from)?,
+                    );
+                }
+
+                let mut affected = 0usize;
+                for built in row_queries {
+                    affected += exec_mutation_with_emit(
+                        built,
+                        frame.route(),
+                        &coll,
+                        crate::broker::ChangeOp::Update,
+                    )
+                    .await?
+                    .len();
+                }
+
+                if let Some(expected_version) = cas_version {
+                    if affected != target_count {
+                        let row_id = filter
+                            .as_object()
+                            .and_then(|o| o.get("id"))
+                            .and_then(|v| v.as_str());
+                        return Err(DbError::version_mismatch(
+                            &coll,
+                            row_id,
+                            expected_version,
+                        ));
+                    }
+                }
+                Ok(affected)
             }
-            return OpResult::JsValue {
-                resolver,
-                value: usize_count_as_f64(affected),
-                request_id,
+            .await;
+            return match frame.finish(work_result).await {
+                Ok(affected) => OpResult::JsValue {
+                    resolver,
+                    value: usize_count_as_f64(affected),
+                    request_id,
+                },
+                Err(e) => OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(e.to_op_error()),
+                    request_id,
+                },
             };
         }
 
         let mut update = update;
         if let Err(e) = write_pipeline::apply(
-            &app,
+            &binding,
             &coll,
             &mut update,
             write_pipeline::ApplyMode::Update { row_pk: "" },
@@ -1471,10 +1486,11 @@ pub(crate) fn dispatch_update_many<'s>(
 /// capability-gate contract.
 pub(crate) fn dispatch_delete_one<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    app_id: &str,
+    binding: DbBinding,
     collection: &str,
     filter: Value,
 ) -> v8::Local<'s, v8::Promise> {
+    let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
@@ -1507,7 +1523,7 @@ pub(crate) fn dispatch_delete_one<'s>(
             let rows =
                 exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update)
                     .await?;
-            read_pipeline::apply(&app, &coll, rows, read_pipeline::ApplyOptions::default()).await
+            read_pipeline::apply(&binding, &coll, rows, read_pipeline::ApplyOptions::default()).await
         },
         |result: read_pipeline::ApplyResult| {
             first_row_or_null_masked(result.rows, result.has_masked)
@@ -1521,10 +1537,11 @@ pub(crate) fn dispatch_delete_one<'s>(
 /// affected rows as a JS `number`.
 pub(crate) fn dispatch_delete_many<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    app_id: &str,
+    binding: DbBinding,
     collection: &str,
     filter: Value,
 ) -> v8::Local<'s, v8::Promise> {
+    let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
@@ -1567,10 +1584,11 @@ pub(crate) fn dispatch_delete_many<'s>(
 /// it removes both live and soft-deleted rows matching the filter.
 pub(crate) fn dispatch_purge_one<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    app_id: &str,
+    binding: DbBinding,
     collection: &str,
     filter: Value,
 ) -> v8::Local<'s, v8::Promise> {
+    let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
@@ -1592,7 +1610,7 @@ pub(crate) fn dispatch_purge_one<'s>(
                 exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Delete)
                     .await?;
             read_pipeline::apply(
-                &app,
+                &binding,
                 &coll,
                 rows,
                 read_pipeline::ApplyOptions::default(),
@@ -1610,10 +1628,11 @@ pub(crate) fn dispatch_purge_one<'s>(
 /// Bulk-purge entry point.
 pub(crate) fn dispatch_purge_many<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    app_id: &str,
+    binding: DbBinding,
     collection: &str,
     filter: Value,
 ) -> v8::Local<'s, v8::Promise> {
+    let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
@@ -1640,10 +1659,11 @@ pub(crate) fn dispatch_purge_many<'s>(
 /// Restore a soft-deleted row.
 pub(crate) fn dispatch_restore_one<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    app_id: &str,
+    binding: DbBinding,
     collection: &str,
     filter: Value,
 ) -> v8::Local<'s, v8::Promise> {
+    let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
@@ -1674,7 +1694,7 @@ pub(crate) fn dispatch_restore_one<'s>(
             let rows =
                 exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update).await?;
             read_pipeline::apply(
-                &app,
+                &binding,
                 &coll,
                 rows,
                 read_pipeline::ApplyOptions::default(),
@@ -1692,10 +1712,11 @@ pub(crate) fn dispatch_restore_one<'s>(
 /// Bulk-restore entry point.
 pub(crate) fn dispatch_restore_many<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    app_id: &str,
+    binding: DbBinding,
     collection: &str,
     filter: Value,
 ) -> v8::Local<'s, v8::Promise> {
+    let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
@@ -1743,11 +1764,12 @@ pub(crate) fn dispatch_restore_many<'s>(
 /// method auto-filters for consistency).
 pub(crate) fn dispatch_aggregate<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    app_id: &str,
+    binding: DbBinding,
     collection: &str,
     pipeline: Value,
     opts: Value,
 ) -> v8::Local<'s, v8::Promise> {
+    let app_id = binding.app_id();
     let state = runtime_state(scope);
 
     // Record into the active query's read-set so the broker can
@@ -1793,7 +1815,7 @@ pub(crate) fn dispatch_aggregate<'s>(
         move |bq| async move {
             let rows = exec_query(&route, bq).await?;
             read_pipeline::apply(
-                &app,
+                &binding,
                 &coll,
                 rows,
                 read_pipeline::ApplyOptions {
@@ -1823,12 +1845,13 @@ pub(crate) fn dispatch_aggregate<'s>(
 /// filter; see [`dispatch_find`].
 pub(crate) fn dispatch_distinct<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    app_id: &str,
+    binding: DbBinding,
     collection: &str,
     field: &str,
     filter: Value,
     opts: Value,
 ) -> v8::Local<'s, v8::Promise> {
+    let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
@@ -1862,7 +1885,7 @@ pub(crate) fn dispatch_distinct<'s>(
         move |bq| async move {
             let rows = exec_query(&route, bq).await?;
             read_pipeline::apply(
-                &app,
+                &binding,
                 &coll,
                 rows,
                 read_pipeline::ApplyOptions {
@@ -1902,11 +1925,12 @@ pub(crate) fn dispatch_distinct<'s>(
 /// filter.
 pub(crate) fn dispatch_count<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    app_id: &str,
+    binding: DbBinding,
     collection: &str,
     filter: Value,
     opts: Value,
 ) -> v8::Local<'s, v8::Promise> {
+    let app_id = binding.app_id();
     let state = runtime_state(scope);
     // Record into the active query's read-set so the broker can
     // narrow events to this filter. No-op outside `query()` handlers.
@@ -1949,11 +1973,12 @@ pub(crate) fn dispatch_count<'s>(
 /// column names that form the ON CONFLICT target.
 pub(crate) fn dispatch_upsert<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    app_id: &str,
+    binding: DbBinding,
     collection: &str,
     doc: Value,
     conflict_fields: Value,
 ) -> v8::Local<'s, v8::Promise> {
+    let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     let actor_id = system_fields_pass::current_actor_id(&state);
@@ -1966,6 +1991,7 @@ pub(crate) fn dispatch_upsert<'s>(
         let mut doc = doc;
         if let Err(e) = prepare_upsert_doc_for_write(
             &mut doc,
+            &binding,
             &route,
             &coll,
             actor_id.as_deref(),
@@ -2001,7 +2027,7 @@ pub(crate) fn dispatch_upsert<'s>(
         match result {
             Ok(rows) => {
                 let result = match read_pipeline::apply(
-                    &app,
+                    &binding,
                     &coll,
                     rows,
                     read_pipeline::ApplyOptions::default(),
@@ -2035,17 +2061,14 @@ pub(crate) fn dispatch_upsert<'s>(
 }
 
 // ---------------------------------------------------------------------------
-// search — vector / FTS unified entry point
+// search - vector entry point
 // ---------------------------------------------------------------------------
 
-/// Shared dispatch for `collection.search(args)` — the unified
-/// search entry. Inspects `args` for a discriminator key:
+/// Shared dispatch for `collection.search(args)`.
 ///
-/// - `{ vector, k?, metric?, column?, filter? }` → `VectorIndex::vector_search`,
+/// - `{ vector, k?, metric?, column?, filter? }` -> `VectorIndex::vector_search`,
 ///   routed to pgvector on PG or the pure-Rust flat-scan implementation
 ///   on SQLite.
-/// - `{ text, ... }` → `FullTextIndex::fts_search`, routed to PG's
-///   `tsvector`/GIN index or SQLite's FTS5 vtable + bm25 ranking.
 ///
 /// Resolves with a JSON array of rows; each row carries the
 /// `_distance` synthetic column from pgvector. Errors are coded
@@ -2053,27 +2076,26 @@ pub(crate) fn dispatch_upsert<'s>(
 /// SQLSTATE) so the SDK can branch on `e.code`.
 pub(crate) fn dispatch_search<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    app_id: &str,
+    binding: DbBinding,
     collection: &str,
     args: Value,
 ) -> v8::Local<'s, v8::Promise> {
+    let app_id = binding.app_id();
     use zeroship_runtime::state::OpError;
 
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
-    // Discriminator: presence of `vector` selects the pgvector path.
+    // Presence of `vector` selects the pgvector path.
     let has_vector = args.get("vector").is_some();
-    let has_text = args.get("text").is_some();
 
-    if !has_vector && !has_text {
+    if !has_vector {
         // Reject synchronously via the typed error path so the SDK sees
         // a coded error rather than a hang. Use `Configuration` because
         // the failure is shape-level, not data-level.
         let err = DbError::Configuration {
             code: "invalid_search_args",
-            message: "search: args must include `vector` or `text`"
-                .to_string(),
+            message: "search: args must include `vector`".to_string(),
             hint: Some(
                 "pass `{ vector: number[], k?: number, metric?, column?, filter? }` for vector search"
                     .to_string(),
@@ -2090,112 +2112,6 @@ pub(crate) fn dispatch_search<'s>(
         return promise;
     }
 
-    if has_text && !has_vector {
-        // FTS branch. Pull the query string, limit, and filter from
-        // args; route to `FullTextIndex::fts_search` on either the PG
-        // or SQLite arm.
-        let text_query = match args.get("text").and_then(Value::as_str) {
-            Some(s) => s.to_string(),
-            None => {
-                let err = DbError::Configuration {
-                    code: "invalid_text_arg",
-                    message: "search: `text` must be a string".to_string(),
-                    hint: None,
-                };
-                let op_err: OpError = err.to_op_error();
-                state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                    zeroship_runtime::state::OpResult::JsValue {
-                        resolver,
-                        value: zeroship_runtime::state::ResolveValue::RejectError(op_err),
-                        request_id,
-                    }
-                }));
-                return promise;
-            }
-        };
-        let limit = args
-            .get("limit")
-            .and_then(Value::as_u64)
-            .map(|n| n as usize)
-            .or_else(|| {
-                // Accept the SDK's `k` alias too — the vector branch
-                // uses `k` and the SDK passes the same name through for
-                // FTS in some cases. The native trait signature carries
-                // `limit: Option<usize>` either way.
-                args.get("k").and_then(Value::as_u64).map(|n| n as usize)
-            });
-        let mut filter = args
-            .get("filter")
-            .cloned()
-            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-        let app = app_id.to_string();
-        let coll = collection.to_string();
-        maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
-
-        state.borrow_mut().spawned_ops.push(Box::pin(async move {
-            let backend = crate::context::with(|c| c.backend());
-            let result: Result<Vec<Value>, DbError> = async {
-                let backend = backend.ok_or_else(|| {
-                    DbError::config("not_configured", "db: backend not initialized".to_string())
-                })?;
-                // SQLite arm routes through the FTS5 vtable + bm25
-                // ranking. We short-circuit BEFORE the PG path so a
-                // build with both arms compiled in dispatches based
-                // on which arm the runtime is bound to, not on
-                // Cargo-feature ordering.
-                if let Some(sq) = backend.as_sqlite() {
-                    use crate::backend::FullTextIndex as _;
-                    return sq
-                        .fts_search(&app, &coll, &text_query, &filter, limit)
-                        .await;
-                }
-                let pg = backend
-                    .as_postgres()
-                    .ok_or_else(|| DbError::backend_unsupported("fts_search"))?;
-                use crate::backend::FullTextIndex as _;
-                pg.fts_search(&app, &coll, &text_query, &filter, limit).await
-            }
-            .await;
-
-            match result {
-                Ok(rows) => {
-                    let result = match read_pipeline::apply(
-                        &app,
-                        &coll,
-                        rows,
-                        read_pipeline::ApplyOptions::default(),
-                    )
-                    .await
-                    {
-                        Ok(result) => result,
-                        Err(e) => {
-                            return zeroship_runtime::state::OpResult::JsValue {
-                                resolver,
-                                value: zeroship_runtime::state::ResolveValue::RejectError(
-                                    e.to_op_error(),
-                                ),
-                                request_id,
-                            };
-                        }
-                    };
-                    zeroship_runtime::state::OpResult::JsValue {
-                        resolver,
-                        value: rows_as_json_array_masked(result.rows, result.has_masked),
-                        request_id,
-                    }
-                }
-                Err(e) => zeroship_runtime::state::OpResult::JsValue {
-                    resolver,
-                    value: zeroship_runtime::state::ResolveValue::RejectError(e.to_op_error()),
-                    request_id,
-                },
-            }
-        }));
-        return promise;
-    }
-
-    // Vector branch.
-    //
     // Decode `vector` into `Vec<f32>`. Reject anything that's not a
     // homogeneous number array at the boundary so the impl can stay
     // typed.
@@ -2307,7 +2223,7 @@ pub(crate) fn dispatch_search<'s>(
         match result {
             Ok(rows) => {
                 let result = match read_pipeline::apply(
-                    &app,
+                    &binding,
                     &coll,
                     rows,
                     read_pipeline::ApplyOptions::default(),
@@ -2359,10 +2275,11 @@ pub(crate) fn dispatch_search<'s>(
 /// `_distance_m` (`f64`) column.
 pub(crate) fn dispatch_near<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    app_id: &str,
+    binding: DbBinding,
     collection: &str,
     args: Value,
 ) -> v8::Local<'s, v8::Promise> {
+    let app_id = binding.app_id();
     use zeroship_runtime::state::OpError;
 
     let state = runtime_state(scope);
@@ -2470,7 +2387,7 @@ pub(crate) fn dispatch_near<'s>(
         match result {
             Ok(rows) => {
                 let result = match read_pipeline::apply(
-                    &app,
+                    &binding,
                     &coll,
                     rows,
                     read_pipeline::ApplyOptions::default(),
@@ -2513,15 +2430,14 @@ pub(crate) fn dispatch_near<'s>(
 // ===========================================================================
 // Transparent column encryption hooks
 // ===========================================================================
-#[cfg(not(feature = "test-helpers"))]
-async fn prepare_insert_many_docs_for_write(
+async fn prepare_insert_many_docs_for_binding(
     docs: &mut Value,
-    app_id: &str,
+    binding: &DbBinding,
     collection: &str,
     actor_id: Option<&str>,
 ) -> Result<(), DbError> {
     write_pipeline::apply(
-        app_id,
+        binding,
         collection,
         docs,
         write_pipeline::ApplyMode::InsertMany { actor_id },
@@ -2536,13 +2452,8 @@ pub async fn prepare_insert_many_docs_for_write(
     collection: &str,
     actor_id: Option<&str>,
 ) -> Result<(), DbError> {
-    write_pipeline::apply(
-        app_id,
-        collection,
-        docs,
-        write_pipeline::ApplyMode::InsertMany { actor_id },
-    )
-    .await
+    let binding = DbBinding::cold_start(app_id);
+    prepare_insert_many_docs_for_binding(docs, &binding, collection, actor_id).await
 }
 
 /// Test helper that drives the REAL read pipeline
@@ -2557,8 +2468,9 @@ pub async fn finalize_rows_on_read_for_tests(
     collection: &str,
     rows: Vec<Value>,
 ) -> Result<Vec<Value>, DbError> {
+    let binding = DbBinding::cold_start(app_id);
     let result = read_pipeline::apply(
-        app_id,
+        &binding,
         collection,
         rows,
         read_pipeline::ApplyOptions::default(),
@@ -2575,7 +2487,13 @@ pub async fn runtime_schema_for_tests(
     app_id: &str,
     collection: &str,
 ) -> Result<Option<Value>, DbError> {
-    introspect_schema::runtime_schema_for(app_id, collection).await
+    let binding = DbBinding::cold_start(app_id);
+    // Deep-clone out of the shared cache: the helper's callers own and mutate
+    // their copy, and handing them the process-wide `Arc` would let one test
+    // observe another's edit.
+    Ok(introspect_schema::runtime_schema_for(&binding, collection)
+        .await?
+        .map(|facts| (*facts).clone()))
 }
 
 /// Upsert's write-side prep. Unlike its `insert_many` sibling this is
@@ -2585,13 +2503,14 @@ pub async fn runtime_schema_for_tests(
 /// read that must land on the same connection as the write).
 async fn prepare_upsert_doc_for_write(
     doc: &mut Value,
+    binding: &DbBinding,
     route: &TxRoute,
     collection: &str,
     actor_id: Option<&str>,
     conflict_fields: &Value,
 ) -> Result<(), DbError> {
     write_pipeline::apply(
-        route.app_id(),
+        binding,
         collection,
         doc,
         write_pipeline::ApplyMode::Upsert {

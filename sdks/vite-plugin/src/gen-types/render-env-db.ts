@@ -25,8 +25,6 @@ export interface RuntimeFieldDef {
   max?: number;
   enum?: unknown[];
   mask?: { kind?: string; classification?: string };
-  fts?: boolean;
-  ftsLanguage?: string;
   default?: unknown;
   encrypted?: { mode?: string; keyId?: string; wraps?: string };
   idPrefix?: string;
@@ -299,10 +297,6 @@ function renderBuilderChain(def: RuntimeFieldDef): string {
     if (!isEncryptedAutoMask) {
       chain += `.mask({ kind: ${jsStr(kind)}, classification: ${jsStr(classification)} })`;
     }
-  }
-  if (def.fts === true) {
-    chain +=
-      typeof def.ftsLanguage === "string" ? `.fts(${jsStr(def.ftsLanguage)})` : ".fts()";
   }
   if (def.default !== undefined) chain += `.default(${renderDefaultValue(def.default)})`;
 
