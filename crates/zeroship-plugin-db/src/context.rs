@@ -68,6 +68,22 @@ pub(crate) enum SchemaIntrospectionState {
 /// the transaction; SQLite keeps a handle to the shared session actor and
 /// drives `BEGIN` / `SAVEPOINT` / `COMMIT` / `ROLLBACK` over that single
 /// worker-owned connection.
+// `large_enum_variant` fires here as of 2026-08-27: main's compio-postgres work
+// grew `Client` to at least 232 bytes against the SQLite handle's 8, and clippy
+// was clean on this crate immediately before that merge.
+//
+// NOT boxed, deliberately. The lint assumes the enum is stored in bulk, where
+// the padding multiplies. This one lives in the per-app transaction map at one
+// entry per app with an OPEN transaction, and concurrent transactions are
+// bounded by the data pool's 8 connections - so the whole population is under
+// 2 KB per thread. Boxing would buy that back at the cost of a heap allocation
+// on every transaction begin and a pointer chase on every operation inside it,
+// which is the wrong trade on the hot path.
+//
+// What would change the answer: if `TxConnection` ever becomes something held
+// per operation, per row, or in a collection that scales with apps rather than
+// with open transactions, box it - the lint's assumption would then be true.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum TxConnection {
     Postgres(Client),
     Sqlite(SqliteSessionHandle),
