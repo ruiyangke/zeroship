@@ -217,7 +217,7 @@ impl ConnectionRelease {
     /// one of them could go red. Now each arm carries a bound, an accessor and
     /// a `map`, so the next field cannot diverge between them.
     ///
-    /// One `Into` bound covers both because socket2 0.5.10 - the resolved
+    /// One `Into` bound covers both because socket2 0.6.3 - the resolved
     /// version - implements `From<OwnedFd>` and `From<OwnedSocket>` for
     /// `Socket` in `sys/unix.rs` and `sys/windows.rs` respectively.
     fn from_owned(owned: impl Into<socket2::Socket>) -> Self {

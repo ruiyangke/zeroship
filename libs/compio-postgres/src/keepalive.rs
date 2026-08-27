@@ -44,7 +44,7 @@ impl KeepaliveConfig {
     ///
     /// `TCP_KEEPIDLE` and `TCP_KEEPINTVL` are whole seconds, and socket2
     /// converts a `Duration` with `as_secs()`, which TRUNCATES - measured on
-    /// socket2 0.5.10, `src/sys/unix.rs:1324`:
+    /// socket2 0.6.3, `src/sys/unix.rs:1294`:
     /// `min(duration.as_secs(), c_int::MAX as u64) as c_int`.
     ///
     /// The truncation is wrong in two different ways. A non-zero value UNDER a
