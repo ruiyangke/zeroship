@@ -129,6 +129,33 @@ tests, which is exactly why the set and not the count is the check. This run was
 also the first live exercise of the corrected recipe below: it reported 55, and
 the `FAILED` line count reported 55, so the two agree.
 
+RE-MEASURED 2026-08-26 after the prepared-statement cache audit (`701802dfd`):
+**504 passed, 60 failed, 60 distinct names**. SIX NAMES ENTERED, which is the
+shape this page calls the finding - and here it is not one. All six are tests
+that audit ADDED, traced with `git log -S` to `d7794582d` and `7b3301d72`, and
+every one needs a prepared statement to survive between transactions, which a
+transaction pooler does not provide:
+
+```text
+statement_cache_capacity_zero_ignores_the_execution_threshold
+statement_cache_concurrent_stale_callers_share_one_replacement
+statement_cache_does_not_retry_0a000_after_parameter_input
+statement_cache_does_not_retry_after_a_savepoint
+statement_cache_eviction_waits_for_a_bound_portal
+statement_cache_retries_a_statement_missing_after_discard_all
+```
+
+So CHECK PROVENANCE BEFORE CALLING AN ENTRY A REGRESSION: a name that entered
+because the test is new belongs to the residue by construction. `git log -S"async
+fn <name>" --reverse` answers it in one command, and a name introduced by the
+same merge you are testing is not evidence about that merge.
+
+One name LEFT: `statement_cache_propagates_a_second_consecutive_26000`, which no
+longer exists - `46e919e2d` renamed it to
+`statement_cache_does_not_retry_26000_after_bind_complete`. The replacement is
+NOT in the residue, so the rewrite also made that case pooler-agnostic. A
+departure can be a rename; grep the source before recording it as a fix.
+
 THAT LINE READ "50 distinct names" UNTIL 2026-08-26, and the 50 was the recipe
 below under-reporting, not a smaller set. Re-measured the same day at 55 failed
 / 55 distinct: the count was always the number of `FAILED` lines, and every one
