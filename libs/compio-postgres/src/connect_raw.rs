@@ -450,6 +450,7 @@ where
     T: TlsConnect<S>,
 {
     validate_tls_connector_parameters(&tls, encryption, config)?;
+    let cancel_tls_policy_identity = tls.cancel_policy_identity().cloned();
     let stream = negotiate_tls(
         stream,
         encryption,
@@ -518,6 +519,11 @@ where
             ServerVerification::None
         } else {
             ServerVerification::demanded_by(config.get_ssl_mode(), config.get_ssl_root_cert())?
+        },
+        if negotiated == Encryption::Tls {
+            cancel_tls_policy_identity
+        } else {
+            None
         },
     );
     let connection = Connection::new(

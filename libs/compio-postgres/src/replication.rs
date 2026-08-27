@@ -79,7 +79,7 @@ use crate::connect_tls::{Encryption, negotiate_tls};
 use crate::escape::{escape_literal_body, quote_identifier};
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::release::ConnectionRelease;
-use crate::tls::{MakeTlsConnect, ServerVerification};
+use crate::tls::{MakeTlsConnect, ServerVerification, TlsConnect};
 use crate::{CancelToken, Error, Socket};
 use bytes::{BufMut, BytesMut};
 use compio::io::{AsyncRead, AsyncWrite};
@@ -254,6 +254,7 @@ where
     let has_hostname = hostname.is_some();
     let encryption = first_encryption_for_addr(&addr, cfg.get_ssl_mode());
     crate::connect_raw::validate_tls_connector_parameters(&tls_inst, encryption, cfg)?;
+    let cancel_tls_policy_identity = tls_inst.cancel_policy_identity().cloned();
 
     // One transport per address, no reconnect: this path opens its own socket
     // rather than going through `connect::connect`, so it does not inherit the
@@ -318,6 +319,11 @@ where
         ssl_sni: cfg.get_ssl_sni(),
         ssl_cert_mode: cfg.get_ssl_cert_mode(),
         server_verification,
+        tls_policy_identity: if negotiated == Encryption::Tls {
+            cancel_tls_policy_identity
+        } else {
+            None
+        },
         ssl_mode: cfg.get_ssl_mode(),
         ssl_negotiation: cfg.get_ssl_negotiation(),
         process_id,
@@ -2767,6 +2773,7 @@ mod tests {
             ssl_sni: true,
             ssl_cert_mode: SslCertMode::Allow,
             server_verification: ServerVerification::None,
+            tls_policy_identity: None,
             ssl_mode: SslMode::Disable,
             ssl_negotiation: SslNegotiation::Postgres,
             process_id: 0,

@@ -26,7 +26,7 @@ use crate::client::SocketConfig;
 use crate::config::{SslCertMode, SslMode, SslNegotiation};
 use crate::connect::{tls_server_name, with_connect_timeout};
 use crate::connect_tls;
-use crate::tls::{MakeTlsConnect, TlsConnect};
+use crate::tls::{MakeTlsConnect, TlsConnect, TlsPolicyIdentity};
 use crate::{Error, Socket, cancel_query_raw, connect_socket};
 use std::io;
 
@@ -36,6 +36,7 @@ pub(crate) fn validate_cancel_tls_policy<S, T>(
     ssl_sni: bool,
     ssl_cert_mode: SslCertMode,
     server_verification: crate::tls::ServerVerification,
+    expected_policy_identity: Option<&TlsPolicyIdentity>,
 ) -> Result<(), Error>
 where
     T: TlsConnect<S>,
@@ -70,10 +71,32 @@ where
         ));
     }
 
+    let expected_policy_identity = expected_policy_identity.ok_or_else(|| {
+        Error::tls_unattested(
+            "the original TLS connector did not provide a cancellation policy identity".into(),
+        )
+    })?;
+    let actual_policy_identity = tls.cancel_policy_identity().ok_or_else(|| {
+        Error::tls_unattested(
+            "the TLS connector supplied to cancel does not provide a cancellation policy identity"
+                .into(),
+        )
+    })?;
+    if !expected_policy_identity.same_as(actual_policy_identity) {
+        return Err(Error::tls_unattested(
+            "the TLS connector supplied to cancel does not match the original session's TLS policy identity"
+                .into(),
+        ));
+    }
+
     Ok(())
 }
 
-fn validate_cancel_tls_connector<T>(tls: &T, config: &SocketConfig) -> Result<(), Error>
+fn validate_cancel_tls_connector<T>(
+    tls: &T,
+    config: &SocketConfig,
+    expected_policy_identity: Option<&TlsPolicyIdentity>,
+) -> Result<(), Error>
 where
     T: TlsConnect<Socket>,
 {
@@ -83,6 +106,7 @@ where
         config.ssl_sni,
         config.ssl_cert_mode,
         config.server_verification,
+        expected_policy_identity,
     )
 }
 
@@ -93,6 +117,7 @@ pub(crate) async fn cancel_query<T>(
     mut tls: T,
     process_id: i32,
     secret_key: CancelKey,
+    expected_policy_identity: Option<TlsPolicyIdentity>,
 ) -> Result<(), Error>
 where
     T: MakeTlsConnect<Socket>,
@@ -117,7 +142,7 @@ where
         // the caller at cancel time. Hold that new connection to every TLS
         // disclosure and verification policy the session recorded before the
         // connector can emit a ClientHello.
-        validate_cancel_tls_connector(&tls, &config)?;
+        validate_cancel_tls_connector(&tls, &config, expected_policy_identity.as_ref())?;
         let has_hostname = config.hostname.is_some();
 
         let socket = connect_socket::connect_socket(
@@ -158,6 +183,7 @@ pub(crate) async fn cancel_query_confirmed<T>(
     mut tls: T,
     process_id: i32,
     secret_key: CancelKey,
+    expected_policy_identity: Option<TlsPolicyIdentity>,
 ) -> Result<(), Error>
 where
     T: MakeTlsConnect<Socket>,
@@ -178,7 +204,7 @@ where
         let tls = tls
             .make_tls_connect(&server_name)
             .map_err(|e| Error::tls(e.into()))?;
-        validate_cancel_tls_connector(&tls, &config)?;
+        validate_cancel_tls_connector(&tls, &config, expected_policy_identity.as_ref())?;
         let has_hostname = config.hostname.is_some();
 
         let socket = connect_socket::connect_socket(
@@ -215,7 +241,7 @@ mod tests {
     use super::*;
     use crate::NoTls;
     use crate::client::Addr;
-    use crate::tls::{ChannelBinding, TlsConnect, TlsStream};
+    use crate::tls::{ChannelBinding, TlsConnect, TlsPolicyIdentity, TlsStream};
     use compio::buf::{IoBuf, IoBufMut};
     use compio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
     use compio::net::TcpListener;
@@ -277,6 +303,7 @@ mod tests {
             NoTls,
             PROCESS_ID,
             SECRET_KEY.into(),
+            None,
         ));
         let packet_seen = Box::pin(packet_seen_rx);
         let cancel = match select(cancel, packet_seen).await {
@@ -457,9 +484,7 @@ mod tests {
         });
 
         let connected = Arc::new(AtomicBool::new(false));
-        let tls = PassthroughTls {
-            connected: connected.clone(),
-        };
+        let tls = PassthroughTls::new(connected.clone());
         let dsn = format!(
             "host={} port=5432 user=postgres sslmode=require",
             socket_dir.0.display()
@@ -491,6 +516,16 @@ mod tests {
     #[derive(Clone)]
     struct PassthroughTls {
         connected: Arc<AtomicBool>,
+        policy_identity: TlsPolicyIdentity,
+    }
+
+    impl PassthroughTls {
+        fn new(connected: Arc<AtomicBool>) -> Self {
+            Self {
+                connected,
+                policy_identity: TlsPolicyIdentity::new(),
+            }
+        }
     }
 
     struct PassthroughStream<S>(S);
@@ -562,6 +597,10 @@ mod tests {
             self.connected.store(true, Ordering::Relaxed);
             Box::pin(async move { Ok(PassthroughStream(stream)) })
         }
+
+        fn cancel_policy_identity(&self) -> Option<&TlsPolicyIdentity> {
+            Some(&self.policy_identity)
+        }
     }
 
     #[compio::test]
@@ -597,6 +636,8 @@ mod tests {
             server_verification: crate::tls::ServerVerification::None,
         };
         let connected = Arc::new(AtomicBool::new(false));
+        let tls = PassthroughTls::new(connected.clone());
+        let policy_identity = tls.policy_identity.clone();
 
         compio::time::timeout(
             Duration::from_secs(2),
@@ -604,11 +645,10 @@ mod tests {
                 Some(config),
                 SslMode::Require,
                 SslNegotiation::Postgres,
-                PassthroughTls {
-                    connected: connected.clone(),
-                },
+                tls,
                 PROCESS_ID,
                 SECRET_KEY.into(),
+                Some(policy_identity),
             ),
         )
         .await
@@ -650,9 +690,7 @@ mod tests {
             (observed, session)
         });
 
-        let tls = PassthroughTls {
-            connected: Arc::new(AtomicBool::new(false)),
-        };
+        let tls = PassthroughTls::new(Arc::new(AtomicBool::new(false)));
         let dsn = format!(
             "host=localhost hostaddr=127.0.0.1 port={} user=postgres sslmode=require",
             addr.port()
@@ -720,17 +758,18 @@ mod tests {
             ssl_cert_mode: crate::config::SslCertMode::Allow,
             server_verification: crate::tls::ServerVerification::None,
         };
+        let tls = PassthroughTls::new(Arc::new(AtomicBool::new(false)));
+        let policy_identity = tls.policy_identity.clone();
         let result = compio::time::timeout(
             Duration::from_secs(2),
             cancel_query(
                 Some(config),
                 SslMode::Prefer,
                 SslNegotiation::Postgres,
-                PassthroughTls {
-                    connected: Arc::new(AtomicBool::new(false)),
-                },
+                tls,
                 PROCESS_ID,
                 SECRET_KEY.into(),
+                Some(policy_identity),
             ),
         )
         .await
@@ -812,9 +851,7 @@ mod tests {
             (observed, session)
         });
 
-        let tls = PassthroughTls {
-            connected: Arc::new(AtomicBool::new(false)),
-        };
+        let tls = PassthroughTls::new(Arc::new(AtomicBool::new(false)));
         let dsn = format!(
             "host=localhost hostaddr=127.0.0.1 port={} user=postgres sslmode=allow",
             addr.port()
@@ -949,17 +986,18 @@ mod tests {
         // Bounded: without the gate this proceeds to dial a scripted server that
         // never answers, so the failure mode of removing it is a HANG. The
         // watchdog turns that into a clean, fast failure.
+        let tls = PassthroughTls::new(Arc::new(AtomicBool::new(false)));
+        let policy_identity = tls.policy_identity.clone();
         let error = compio::time::timeout(
             Duration::from_secs(5),
             cancel_query(
                 Some(config),
                 SslMode::VerifyFull,
                 SslNegotiation::Postgres,
-                PassthroughTls {
-                    connected: Arc::new(AtomicBool::new(false)),
-                },
+                tls,
                 PROCESS_ID,
                 SECRET_KEY.into(),
+                Some(policy_identity),
             ),
         )
         .await
@@ -998,15 +1036,16 @@ mod tests {
             server_verification: crate::tls::ServerVerification::None,
         };
 
+        let tls = PassthroughTls::new(Arc::new(AtomicBool::new(false)));
+        let policy_identity = tls.policy_identity.clone();
         let cancel = Box::pin(cancel_query(
             Some(config),
             SslMode::Require,
             SslNegotiation::Postgres,
-            PassthroughTls {
-                connected: Arc::new(AtomicBool::new(false)),
-            },
+            tls,
             PROCESS_ID,
             SECRET_KEY.into(),
+            Some(policy_identity),
         ));
         let accept = Box::pin(listener.accept());
         let error = match select(cancel, accept).await {
@@ -1045,6 +1084,56 @@ mod tests {
         .await;
     }
 
+    #[compio::test]
+    async fn a_cancel_refuses_a_different_tls_policy_lineage_before_dialing() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind scripted server");
+        let addr = listener.local_addr().expect("scripted server address");
+        let config = SocketConfig {
+            addr: Addr::Tcp(addr.ip()),
+            hostname: Some("localhost".to_string()),
+            port: addr.port(),
+            connect_timeout: None,
+            tcp_user_timeout: None,
+            keepalive: None,
+            require_peer: None,
+            encryption: crate::connect_tls::Encryption::Tls,
+            ssl_sni: true,
+            ssl_cert_mode: crate::config::SslCertMode::Allow,
+            server_verification: crate::tls::ServerVerification::None,
+        };
+        let original_policy_identity = TlsPolicyIdentity::new();
+        let replacement = PassthroughTls::new(Arc::new(AtomicBool::new(false)));
+
+        let cancel = Box::pin(cancel_query(
+            Some(config),
+            SslMode::Require,
+            SslNegotiation::Postgres,
+            replacement,
+            PROCESS_ID,
+            SECRET_KEY.into(),
+            Some(original_policy_identity),
+        ));
+        let accept = Box::pin(listener.accept());
+        let error = match select(cancel, accept).await {
+            Either::Left((result, _)) => {
+                result.expect_err("a different TLS policy lineage must be refused before dialing")
+            }
+            Either::Right(_) => panic!("the mismatched TLS policy connector dialed the server"),
+        };
+        let chain = std::iter::successors(std::error::Error::source(&error), |error| {
+            std::error::Error::source(*error)
+        })
+        .fold(format!("{error}"), |chain, error| {
+            format!("{chain}: {error}")
+        });
+        assert!(
+            chain.contains("TLS policy identity"),
+            "the refusal must name the TLS policy identity mismatch: {chain}"
+        );
+    }
+
     /// THE CONTROL, one variable: the same connector against a session that
     /// demanded NO verification. It must still be allowed, or the gate would
     /// simply ban `PassthroughTls` and every plain `require` cancel with it.
@@ -1075,17 +1164,18 @@ mod tests {
             server_verification: crate::tls::ServerVerification::None,
         };
 
+        let tls = PassthroughTls::new(Arc::new(AtomicBool::new(false)));
+        let policy_identity = tls.policy_identity.clone();
         compio::time::timeout(
             Duration::from_secs(2),
             cancel_query(
                 Some(config),
                 SslMode::Require,
                 SslNegotiation::Postgres,
-                PassthroughTls {
-                    connected: Arc::new(AtomicBool::new(false)),
-                },
+                tls,
                 PROCESS_ID,
                 SECRET_KEY.into(),
+                Some(policy_identity),
             ),
         )
         .await

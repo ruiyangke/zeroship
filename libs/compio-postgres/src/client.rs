@@ -16,7 +16,7 @@ use crate::keepalive::KeepaliveConfig;
 use crate::query::RowStream;
 use crate::release::ConnectionRelease;
 use crate::simple_query::SimpleQueryStream;
-use crate::tls::{MakeTlsConnect, ServerVerification, TlsConnect};
+use crate::tls::{MakeTlsConnect, ServerVerification, TlsConnect, TlsPolicyIdentity};
 use crate::types::{Oid, ToSql, Type};
 use crate::{
     CancelToken, Error, Row, SimpleQueryMessage, Socket, Statement, ToStatement, Transaction,
@@ -1913,6 +1913,7 @@ pub struct Client {
     cancel_ssl_sni: bool,
     cancel_ssl_cert_mode: SslCertMode,
     cancel_server_verification: ServerVerification,
+    cancel_tls_policy_identity: Option<TlsPolicyIdentity>,
     ssl_mode: SslMode,
     ssl_negotiation: SslNegotiation,
     process_id: i32,
@@ -2004,6 +2005,7 @@ impl Client {
             cancel_ssl_sni: true,
             cancel_ssl_cert_mode: SslCertMode::Allow,
             cancel_server_verification: ServerVerification::None,
+            cancel_tls_policy_identity: None,
             ssl_mode,
             ssl_negotiation,
             process_id,
@@ -2166,11 +2168,13 @@ impl Client {
         ssl_sni: bool,
         ssl_cert_mode: SslCertMode,
         server_verification: ServerVerification,
+        tls_policy_identity: Option<TlsPolicyIdentity>,
     ) {
         self.cancel_encryption = encryption;
         self.cancel_ssl_sni = ssl_sni;
         self.cancel_ssl_cert_mode = ssl_cert_mode;
         self.cancel_server_verification = server_verification;
+        self.cancel_tls_policy_identity = tls_policy_identity;
     }
 
     pub(crate) fn enter_pool(&mut self) {
@@ -2937,6 +2941,7 @@ impl Client {
             ssl_sni: self.cancel_ssl_sni,
             ssl_cert_mode: self.cancel_ssl_cert_mode,
             server_verification: self.cancel_server_verification,
+            tls_policy_identity: self.cancel_tls_policy_identity.clone(),
             ssl_mode: self.ssl_mode,
             ssl_negotiation: self.ssl_negotiation,
             process_id: self.process_id,
