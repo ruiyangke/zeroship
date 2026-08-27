@@ -692,17 +692,21 @@ async fn typeinfo_composite_statement(client: &Arc<InnerClient>) -> Result<State
 
 #[cfg(test)]
 mod tests {
-    use super::{get_multirange_subtype, get_type};
-    use crate::client::{Client, ResponseMessages, StatementCacheSettings};
-    use crate::codec::BackendMessages;
+    use super::{get_multirange_subtype, get_type, prepare};
+    use crate::client::{Client, CopyMode, ResponseMessages, StatementCacheSettings};
+    use crate::codec::{BackendMessages, FrontendMessage};
     use crate::config::{ProtocolVersion, SslMode, SslNegotiation};
+    use crate::connection::{RequestDisposition, RequestMessages, TransactionEffect};
     use crate::types::Type;
     use crate::{Column, Statement};
     use bytes::BytesMut;
     use futures_channel::mpsc;
     use futures_util::StreamExt;
+    use futures_util::task::noop_waker;
+    use std::future::Future;
     use std::num::NonZeroUsize;
     use std::sync::Arc;
+    use std::task::{Context, Poll};
 
     fn backend_frame(tag: u8, body: &[u8]) -> Vec<u8> {
         let mut frame = Vec::with_capacity(body.len() + 5);
@@ -749,6 +753,58 @@ mod tests {
             type_modifier: -1,
             r#type: type_,
         }
+    }
+
+    #[test]
+    fn abandoned_prepare_keeps_its_deferred_close_during_copy() {
+        let (sender, mut receiver) = mpsc::unbounded();
+        let client = Client::new_with_statement_cache(
+            sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+            ProtocolVersion::V3_0,
+            StatementCacheSettings::new(0, NonZeroUsize::MIN),
+        );
+        let inner = Arc::clone(client.inner());
+
+        let mut abandoned = Box::pin(prepare(&inner, "SELECT 1", &[]));
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        assert!(
+            matches!(abandoned.as_mut().poll(&mut context), Poll::Pending),
+            "the prepare fixture completed before it could be abandoned"
+        );
+        drop(abandoned);
+
+        let copy_statement = Statement::unnamed_with_copy_in(Vec::new(), Vec::new(), true);
+        let (_copy_responses, _copy_guard) = inner
+            .send_copy_statement(
+                RequestMessages::Single(FrontendMessage::Raw(BytesMut::new().freeze())),
+                &copy_statement,
+                CopyMode::In,
+            )
+            .expect("claim COPY mode after abandoning prepare");
+
+        let prepare_request = receiver
+            .try_recv()
+            .expect("the abandoned prepare did not enqueue its Parse");
+        let _copy_request = receiver
+            .try_recv()
+            .expect("the COPY claim did not enqueue its request");
+        prepare_request
+            .prepare_cleanup
+            .as_ref()
+            .expect("the Parse request did not retain deferred cleanup")
+            .observe(true);
+
+        let close = receiver
+            .try_recv()
+            .expect("abandoned prepare lost its deferred Close while COPY was active");
+        assert_eq!(close.disposition, RequestDisposition::Housekeeping);
+        assert_eq!(close.transaction_effect, TransactionEffect::Neutral);
     }
 
     #[compio::test]
