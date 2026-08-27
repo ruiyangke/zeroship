@@ -62,11 +62,24 @@ pub(crate) fn quote_identifier(identifier: &str) -> String {
 /// mistake attractive: `SELECT E'...'` works perfectly and exercises a
 /// different parser from the one the value is actually going to.
 ///
-/// NOT ESTABLISHED: whether the walsender grammar consults
-/// `standard_conforming_strings` at all. A replication connection does accept
-/// `SET standard_conforming_strings = off`, and this driver never issues it;
-/// if a caller ever does, the question becomes live and wants measuring
-/// rather than assuming.
+/// ESTABLISHED 2026-08-26, from the walsender's own scanner: it does NOT
+/// consult `standard_conforming_strings`, so `SET standard_conforming_strings
+/// = off` on a replication connection cannot make a backslash escape here.
+/// `src/backend/replication/repl_scanner.l` on `REL_18_STABLE` declares two
+/// exclusive states, `xd` and `xq`, and the whole of `xq` is three rules:
+/// `{xqstart}` opens it, `{xqdouble}` (`''`) adds one literal quote, and
+/// `{xqinside}` (`[^']+`) copies everything else verbatim - backslash
+/// included. There is no `xe` state, no `E'...'`, no backslash rule, and the
+/// string `standard_conforming_strings` does not occur in the file.
+///
+/// The control for that last claim: the MAIN SQL scanner,
+/// `src/backend/parser/scan.l`, mentions `standard_conforming_strings` five
+/// times. So the absence in `repl_scanner.l` is a real difference between the
+/// two grammars and not a grep that finds nothing anywhere.
+///
+/// This closes the question rather than deferring it: doubling `'` is
+/// sufficient here unconditionally, and it stays sufficient no matter what a
+/// caller sets.
 pub(crate) fn escape_literal_body(value: &str) -> String {
     value.replace('\'', "''")
 }
