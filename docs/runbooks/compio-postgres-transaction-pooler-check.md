@@ -150,6 +150,48 @@ because the test is new belongs to the residue by construction. `git log -S"asyn
 fn <name>" --reverse` answers it in one command, and a name introduced by the
 same merge you are testing is not evidence about that merge.
 
+RE-MEASURED 2026-08-27 after the cancellation audit (six merges through
+`6aad95ddc`): **507 passed, 65 failed, 65 distinct names**. FIVE NAMES ENTERED,
+all of them live cancellation tests the audit added:
+
+```text
+a_token_from_a_returned_pool_lease_cannot_cancel_the_next_borrower
+cancel_during_copy_in_surfaces_57014_and_preserves_session
+cancel_during_copy_out_surfaces_57014_and_preserves_session
+cancel_inside_transaction_requires_rollback_then_preserves_session
+two_cancels_for_one_running_query_leave_the_session_usable
+```
+
+A NAME'S PROVENANCE IS NOT THE WHOLE ANSWER - read the failure message too.
+Three cancellation tests were already in the residue, so "new cancel test, same
+bucket" is a hypothesis, and the messages are what confirm it. Two of the five
+name the cause outright:
+
+```text
+COPY progress for backend 1833912399 did not become visible
+```
+
+That number CANNOT be a backend pid, and the check is one command rather than
+an impression: `cat /proc/sys/kernel/pid_max` on this host reads 4194304, and
+the two values observed through pgbouncer 1.25.2 were 1257816711 and
+1833912399, both several hundred times larger. So `client.process_id()` under a
+pooler is the POOLER's BackendKeyData identifier - which is what lets it route
+a later CancelRequest itself - and an observer querying `pg_stat_activity` for
+it matches nothing. The other three time out waiting for a cancel that never
+reaches the backend running the query. None of the five is evidence about the
+driver, and the driver's own cancel oracle - printed by
+`raw_cancel_interrupts_running_query_and_preserves_session` under `--nocapture`
+- shows what a direct server does instead:
+
+```text
+16.14: protocol=V3_0 backend_key_len=4  cancel_packet_len=16 sqlstate=57014
+18.4:  protocol=V3_2 backend_key_len=32 cancel_packet_len=44 sqlstate=57014
+```
+
+Any live cancellation test is expected to fail here. Do not "fix" one by making
+it tolerate a pooler: that would delete the coverage on a direct server, which
+is where cancellation has to work.
+
 One name LEFT: `statement_cache_propagates_a_second_consecutive_26000`, which no
 longer exists - `46e919e2d` renamed it to
 `statement_cache_does_not_retry_26000_after_bind_complete`. The replacement is
