@@ -218,7 +218,18 @@ impl Stream for BinaryCopyOutStream {
             let chunk = match ready!(this.stream.as_mut().poll_next(cx)) {
                 Some(Ok(chunk)) => chunk,
                 Some(Err(e)) => return Poll::Ready(Some(Err(e))),
-                None => return Poll::Ready(Some(Err(Error::closed()))),
+                // The protocol exchange ended cleanly - CopyDone reached
+                // CommandComplete - but the binary stream never produced its
+                // -1 trailer. That is malformed DATA on a healthy connection,
+                // so it must not be reported as `Error::closed()`: a pool
+                // reads `is_closed()` to decide whether to discard a session,
+                // and would throw away one that is still perfectly usable.
+                None => {
+                    return Poll::Ready(Some(Err(Error::parse(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "binary COPY stream ended without its trailer",
+                    )))));
+                }
             };
             let mut chunk = Cursor::new(chunk);
 
