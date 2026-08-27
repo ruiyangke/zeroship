@@ -476,6 +476,20 @@ sawtooth, and a check that cries wolf gets its floor lowered. But it means a
 leak with any jitter at all is invisible to the rule, and only the printed
 series shows it. READ THE SERIES; do not just look for `soak result=ok`.
 
+**`delta_kib` MISLEADS IN BOTH DIRECTIONS, because it is last-minus-first and
+the first sample is often the process's low-water mark.** Measured 2026-08-27
+at `c832bfdd0`, 300s: the run printed `rises=16 falls=8 delta_kib=200`, which
+next to the previous run's `rises=11 falls=12 delta_kib=-104` reads like the
+start of a leak. It is not. The series opens at 9432 and steps to about 9600
+over its first four samples, then oscillates in a 9508-9768 band:
+
+    first-half mean 9619, second-half mean 9636  ->  +18 KiB across the run
+
+So the +200 KiB is sample 0 against sample 30, and the early steps are also
+what inflate the rise count. Compare the two HALVES of the series, not its
+endpoints, before reading a delta as a trend. A single number over a jittery
+series is the wrong statistic whichever way it points.
+
 RSS is resident memory for the whole soak process. It includes the driver,
 compio runtime, allocator, Rust standard library, reporting buffers, and the
 harness itself. A rising series cannot distinguish a driver leak from allocator
