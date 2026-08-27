@@ -217,6 +217,15 @@ impl Stream for BinaryCopyOutStream {
         check_remaining(&chunk, 2)?;
         let raw = chunk.get_i16();
         if raw == -1 {
+            if chunk.has_remaining() {
+                return Poll::Ready(Some(Err(Error::parse(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{} trailing bytes after the binary COPY trailer",
+                        chunk.remaining()
+                    ),
+                )))));
+            }
             return Poll::Ready(None);
         }
 
