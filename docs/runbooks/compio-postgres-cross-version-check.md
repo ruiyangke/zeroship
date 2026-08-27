@@ -7,10 +7,16 @@ message layouts, streaming framing, two-phase frames, abort behaviour - was
 measured on THAT server, so a test can pin behaviour that only one version
 has and nothing will say so.
 
-Measured 2026-08-24, this is not hypothetical: PostgreSQL 16.14 streams a
-rolled-back transaction and then sends `StreamAbort`; 18.4 sends **nothing at
-all** for the same workload and simply ends the stream. Two tests required the
-abort and failed on 18.4 while passing on 16.14.
+Measured again 2026-08-26, this is not hypothetical: PostgreSQL 16.14 streams a
+rolled-back transaction and then sends `StreamAbort`; 18.4 sends **no pgoutput
+messages** for the same workload and leaves the replication stream open. A
+fresh-slot `pg_logical_slot_peek_binary_changes` probe agreed at both 4000 and
+40000 rows. The earlier claim that 18.4 "simply ends the stream" was wrong: the
+driver failed to answer `PrimaryKeepalive.reply_requested`, PostgreSQL killed
+the idle walsender after exactly 60 seconds, and the test folded that transport
+error into an empty result. The regression now runs the walsender with a
+one-second feedback deadline and observes for three seconds, so healthy silence
+and a dead stream cannot print the same result.
 
 ## Prerequisites
 
