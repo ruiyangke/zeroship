@@ -6,6 +6,7 @@
 
 use crate::client::{CopyMode, CopyModeGuard, InnerClient, Responses};
 use crate::copy_format::CopyResponse;
+use crate::query::ExecutionError;
 use crate::{CopyFormat, Error, Statement, query, slice_iter};
 use bytes::Bytes;
 use futures_util::Stream;
@@ -20,17 +21,39 @@ pub async fn copy_out(
     statement: Statement,
     unnamed_sql: Option<&str>,
 ) -> Result<CopyOutStream, Error> {
+    copy_out_inner(client, statement, unnamed_sql)
+        .await
+        .map_err(ExecutionError::into_error)
+}
+
+pub(crate) async fn copy_out_cached(
+    client: &InnerClient,
+    statement: Statement,
+    unnamed_sql: Option<&str>,
+) -> Result<CopyOutStream, ExecutionError> {
+    copy_out_inner(client, statement, unnamed_sql).await
+}
+
+async fn copy_out_inner(
+    client: &InnerClient,
+    statement: Statement,
+    unnamed_sql: Option<&str>,
+) -> Result<CopyOutStream, ExecutionError> {
     debug!("executing copy out statement {}", statement.name());
 
     let buf = match unnamed_sql {
-        Some(sql) => query::encode_unnamed(client, sql, &statement, slice_iter(&[]))?,
-        None => query::encode(client, &statement, slice_iter(&[]))?,
+        Some(sql) => query::encode_unnamed(client, sql, &statement, slice_iter(&[]))
+            .map_err(ExecutionError::before_bind_complete)?,
+        None => query::encode(client, &statement, slice_iter(&[]))
+            .map_err(ExecutionError::before_bind_complete)?,
     };
     let (responses, response, copy_mode) =
         match start(client, buf, &statement, unnamed_sql.is_some()).await {
             Ok(result) => result,
             Err(error) => {
-                statement.invalidate_cache_on_error(&error);
+                if matches!(&error, ExecutionError::BeforeBindComplete(_)) {
+                    statement.invalidate_cache_on_error(error.error());
+                }
                 return Err(error);
             }
         };
@@ -46,33 +69,60 @@ async fn start(
     buf: Bytes,
     statement: &Statement,
     reparsed: bool,
-) -> Result<(Responses, CopyResponse, CopyModeGuard), Error> {
-    let (mut responses, copy_mode) = client.send_copy_statement(
-        query::producerless_request(buf, statement.may_enter_copy_in()),
-        statement,
-        CopyMode::Out,
-    )?;
+) -> Result<(Responses, CopyResponse, CopyModeGuard), ExecutionError> {
+    let (mut responses, copy_mode) = client
+        .send_copy_statement(
+            query::producerless_request(buf, statement.may_enter_copy_in()),
+            statement,
+            CopyMode::Out,
+        )
+        .map_err(ExecutionError::before_bind_complete)?;
 
     if reparsed {
-        match responses.next().await? {
+        match responses
+            .next()
+            .await
+            .map_err(ExecutionError::before_bind_complete)?
+        {
             Message::ParseComplete => {}
-            _ => return Err(Error::unexpected_message()),
+            _ => {
+                return Err(ExecutionError::before_bind_complete(
+                    Error::unexpected_message(),
+                ));
+            }
         }
     }
 
-    match responses.next().await? {
+    match responses
+        .next()
+        .await
+        .map_err(ExecutionError::before_bind_complete)?
+    {
         Message::BindComplete => {}
-        _ => return Err(Error::unexpected_message()),
+        _ => {
+            return Err(ExecutionError::before_bind_complete(
+                Error::unexpected_message(),
+            ));
+        }
     }
 
     let response = loop {
-        match responses.next().await? {
+        match responses
+            .next()
+            .await
+            .map_err(ExecutionError::after_bind_complete)?
+        {
             Message::CopyOutResponse(body) => {
-                break CopyResponse::from_backend(body.format(), body.column_formats())?;
+                break CopyResponse::from_backend(body.format(), body.column_formats())
+                    .map_err(ExecutionError::after_bind_complete)?;
             }
             // The connection-owned producer is already sending CopyFail.
             Message::CopyInResponse(_) => {}
-            _ => return Err(Error::unexpected_message()),
+            _ => {
+                return Err(ExecutionError::after_bind_complete(
+                    Error::unexpected_message(),
+                ));
+            }
         }
     };
 

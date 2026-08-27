@@ -49,13 +49,14 @@ where
     I: IntoIterator<Item = P>,
     I::IntoIter: ExactSizeIterator,
 {
-    query_inner(client, statement, params, false).await
+    query_inner(client, statement, params).await
 }
 
-/// Start a cache-hit query, retaining its first execution message until the
-/// returned RowStream is polled. Waiting for this one message keeps a 26000
-/// raised during Execute inside the retryable call without allowing any row
-/// to escape before the decision.
+/// Start a cache-hit query and return only after PostgreSQL has accepted Bind.
+///
+/// A genuine stale statement fails before `BindComplete`. Once that message
+/// arrives, Execute may have run application code, so every later error belongs
+/// to the returned stream and is never eligible for transparent replay.
 pub(crate) async fn query_cached<P, I>(
     client: &Arc<InnerClient>,
     statement: Statement,
@@ -66,14 +67,13 @@ where
     I: IntoIterator<Item = P>,
     I::IntoIter: ExactSizeIterator,
 {
-    query_inner(client, statement, params, true).await
+    query_inner(client, statement, params).await
 }
 
 async fn query_inner<P, I>(
     client: &Arc<InnerClient>,
     statement: Statement,
     params: I,
-    prefetch_first: bool,
 ) -> Result<RowStream, Error>
 where
     P: BorrowToSql,
@@ -91,31 +91,56 @@ where
     } else {
         encode(client, &statement, params)?
     };
-    let mut responses = match start(client, buf, &statement).await {
+    let responses = match start(client, buf, &statement).await {
         Ok(responses) => responses,
         Err(error) => {
             statement.invalidate_cache_on_error(&error);
             return Err(error);
         }
     };
-    let pending = if prefetch_first {
-        match responses.next().await {
-            Ok(message) => Some(message),
-            Err(error) => {
-                statement.invalidate_cache_on_error(&error);
-                return Err(error);
-            }
-        }
-    } else {
-        None
-    };
     Ok(RowStream {
         statement,
         responses,
-        pending,
         rows_affected: None,
         copy_out_refused: false,
     })
+}
+
+/// The protocol phase in which a cached execution failed.
+///
+/// Only the first variant can describe PostgreSQL rejecting the named
+/// statement itself. Ordinary explicit statements report the same public
+/// [`Error`] in either phase.
+pub(crate) enum ExecutionError {
+    BeforeBindComplete(Error),
+    AfterBindComplete(Error),
+}
+
+impl ExecutionError {
+    pub(crate) fn before_bind_complete(error: Error) -> Self {
+        Self::BeforeBindComplete(error)
+    }
+
+    pub(crate) fn after_bind_complete(error: Error) -> Self {
+        Self::AfterBindComplete(error)
+    }
+
+    pub(crate) fn error(&self) -> &Error {
+        match self {
+            Self::BeforeBindComplete(error) | Self::AfterBindComplete(error) => error,
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (Error, bool) {
+        match self {
+            Self::BeforeBindComplete(error) => (error, true),
+            Self::AfterBindComplete(error) => (error, false),
+        }
+    }
+
+    pub(crate) fn into_error(self) -> Error {
+        self.into_parts().0
+    }
 }
 
 /// Execute a statement with text-format string parameters.
@@ -176,7 +201,6 @@ pub async fn query_text_params(
                 return Ok(RowStream {
                     statement: Statement::unnamed(vec![], vec![]),
                     responses,
-                    pending: None,
                     rows_affected: None,
                     copy_out_refused: false,
                 });
@@ -198,7 +222,6 @@ pub async fn query_text_params(
                 return Ok(RowStream {
                     statement: Statement::unnamed(vec![], columns),
                     responses,
-                    pending: None,
                     rows_affected: None,
                     copy_out_refused: false,
                 });
@@ -323,7 +346,6 @@ where
                 return Ok(RowStream {
                     statement: Statement::unnamed(vec![], vec![]),
                     responses,
-                    pending: None,
                     rows_affected: None,
                     copy_out_refused: false,
                 });
@@ -345,7 +367,6 @@ where
                 return Ok(RowStream {
                     statement: Statement::unnamed(vec![], columns),
                     responses,
-                    pending: None,
                     rows_affected: None,
                     copy_out_refused: false,
                 });
@@ -437,7 +458,6 @@ pub async fn query_portal(
     Ok(RowStream {
         statement: portal.statement().clone(),
         responses,
-        pending: None,
         rows_affected: None,
         copy_out_refused: false,
     })
@@ -466,6 +486,34 @@ where
     I: IntoIterator<Item = P>,
     I::IntoIter: ExactSizeIterator,
 {
+    execute_inner(client, statement, params)
+        .await
+        .map_err(ExecutionError::into_error)
+}
+
+pub(crate) async fn execute_cached<P, I>(
+    client: &Arc<InnerClient>,
+    statement: Statement,
+    params: I,
+) -> Result<u64, ExecutionError>
+where
+    P: BorrowToSql,
+    I: IntoIterator<Item = P>,
+    I::IntoIter: ExactSizeIterator,
+{
+    execute_inner(client, statement, params).await
+}
+
+async fn execute_inner<P, I>(
+    client: &Arc<InnerClient>,
+    statement: Statement,
+    params: I,
+) -> Result<u64, ExecutionError>
+where
+    P: BorrowToSql,
+    I: IntoIterator<Item = P>,
+    I::IntoIter: ExactSizeIterator,
+{
     let buf = if log_enabled!(Level::Debug) {
         let params = params.into_iter().collect::<Vec<_>>();
         debug!(
@@ -473,25 +521,29 @@ where
             statement.name(),
             BorrowToSqlParamsDebug(params.as_slice()),
         );
-        encode(client, &statement, params)?
+        encode(client, &statement, params).map_err(ExecutionError::before_bind_complete)?
     } else {
-        encode(client, &statement, params)?
+        encode(client, &statement, params).map_err(ExecutionError::before_bind_complete)?
     };
     let mut responses = match start(client, buf, &statement).await {
         Ok(responses) => responses,
         Err(error) => {
             statement.invalidate_cache_on_error(&error);
-            return Err(error);
+            return Err(ExecutionError::before_bind_complete(error));
         }
     };
 
     let mut rows = 0;
     let mut copy_out_refused = false;
     loop {
-        match responses.next().await? {
+        match responses
+            .next()
+            .await
+            .map_err(ExecutionError::after_bind_complete)?
+        {
             Message::DataRow(_) => {}
             Message::CommandComplete(body) => {
-                rows = extract_row_affected(&body)?;
+                rows = extract_row_affected(&body).map_err(ExecutionError::after_bind_complete)?;
             }
             Message::EmptyQueryResponse => rows = 0,
             Message::CopyInResponse(_) => {}
@@ -499,12 +551,18 @@ where
             Message::CopyData(_) | Message::CopyDone if copy_out_refused => {}
             Message::ReadyForQuery(_) => {
                 return if copy_out_refused {
-                    Err(Error::copy_out_unsupported())
+                    Err(ExecutionError::after_bind_complete(
+                        Error::copy_out_unsupported(),
+                    ))
                 } else {
                     Ok(rows)
                 };
             }
-            _ => return Err(Error::unexpected_message()),
+            _ => {
+                return Err(ExecutionError::after_bind_complete(
+                    Error::unexpected_message(),
+                ));
+            }
         }
     }
 }
@@ -753,7 +811,6 @@ pin_project! {
     pub struct RowStream {
         statement: Statement,
         responses: Responses,
-        pending: Option<Message>,
         rows_affected: Option<u64>,
         copy_out_refused: bool,
     }
@@ -765,15 +822,9 @@ impl Stream for RowStream {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
         loop {
-            let message = match this.pending.take() {
-                Some(message) => message,
-                None => match ready!(this.responses.poll_next(cx)) {
-                    Ok(message) => message,
-                    Err(error) => {
-                        this.statement.invalidate_cache_on_error(&error);
-                        return Poll::Ready(Some(Err(error)));
-                    }
-                },
+            let message = match ready!(this.responses.poll_next(cx)) {
+                Ok(message) => message,
+                Err(error) => return Poll::Ready(Some(Err(error))),
             };
             match message {
                 Message::DataRow(body) => {

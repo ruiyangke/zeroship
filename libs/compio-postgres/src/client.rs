@@ -2603,7 +2603,7 @@ impl Client {
                 return query::execute(self.inner(), execution.statement, params).await;
             }
 
-            let first = query::execute(
+            let first = query::execute_cached(
                 self.inner(),
                 execution.statement,
                 params.iter().map(BorrowToSql::borrow_to_sql),
@@ -2611,7 +2611,11 @@ impl Client {
             .await;
             return match first {
                 Ok(rows) => Ok(rows),
-                Err(error) => {
+                Err(failure) => {
+                    let (error, before_bind_complete) = failure.into_parts();
+                    if !before_bind_complete {
+                        return Err(error);
+                    }
                     let Some(replacement) = self
                         .reprepare_cached_statement_once(Some(cache_sql), replay_permitted, &error)
                         .await
@@ -2636,7 +2640,7 @@ impl Client {
         }
 
         let params = params.into_iter().collect::<Vec<_>>();
-        let first = query::execute(
+        let first = query::execute_cached(
             self.inner(),
             execution.statement,
             params.iter().map(BorrowToSql::borrow_to_sql),
@@ -2644,7 +2648,11 @@ impl Client {
         .await;
         match first {
             Ok(rows) => Ok(rows),
-            Err(error) => {
+            Err(failure) => {
+                let (error, before_bind_complete) = failure.into_parts();
+                if !before_bind_complete {
+                    return Err(error);
+                }
                 let Some(replacement) = self
                     .reprepare_cached_statement_once(Some(cache_sql), replay_permitted, &error)
                     .await
@@ -2677,9 +2685,19 @@ impl Client {
             .finalize_probationary(&self.inner, 0)
             .await?;
         let replay_permitted = execution.cache_sql.is_some() && self.stale_cache_replay_permitted();
-        match copy_in::copy_in(self.inner(), execution.statement, execution.unnamed_sql).await {
+        if !replay_permitted {
+            return copy_in::copy_in(self.inner(), execution.statement, execution.unnamed_sql)
+                .await;
+        }
+        match copy_in::copy_in_cached(self.inner(), execution.statement, execution.unnamed_sql)
+            .await
+        {
             Ok(sink) => Ok(sink),
-            Err(error) => {
+            Err(failure) => {
+                let (error, before_bind_complete) = failure.into_parts();
+                if !before_bind_complete {
+                    return Err(error);
+                }
                 let Some(replacement) = self
                     .reprepare_cached_statement_once(execution.cache_sql, replay_permitted, &error)
                     .await
@@ -2703,9 +2721,19 @@ impl Client {
             .finalize_probationary(&self.inner, 0)
             .await?;
         let replay_permitted = execution.cache_sql.is_some() && self.stale_cache_replay_permitted();
-        match copy_out::copy_out(self.inner(), execution.statement, execution.unnamed_sql).await {
+        if !replay_permitted {
+            return copy_out::copy_out(self.inner(), execution.statement, execution.unnamed_sql)
+                .await;
+        }
+        match copy_out::copy_out_cached(self.inner(), execution.statement, execution.unnamed_sql)
+            .await
+        {
             Ok(stream) => Ok(stream),
-            Err(error) => {
+            Err(failure) => {
+                let (error, before_bind_complete) = failure.into_parts();
+                if !before_bind_complete {
+                    return Err(error);
+                }
                 let Some(replacement) = self
                     .reprepare_cached_statement_once(execution.cache_sql, replay_permitted, &error)
                     .await
