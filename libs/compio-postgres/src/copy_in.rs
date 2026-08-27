@@ -10,8 +10,9 @@
 use crate::client::{InnerClient, Responses};
 use crate::codec::FrontendMessage;
 use crate::connection::RequestMessages;
+use crate::copy_format::CopyResponse;
 use crate::query::extract_row_affected;
-use crate::{Error, Statement, query, slice_iter};
+use crate::{CopyFormat, Error, Statement, query, slice_iter};
 use bytes::{Buf, BufMut, BytesMut};
 use futures_channel::mpsc;
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
@@ -199,6 +200,7 @@ pin_project! {
         #[pin]
         sender: mpsc::Sender<CopyInMessage>,
         responses: Responses,
+        response: CopyResponse,
         buf: BytesMut,
         state: SinkState,
         _p2: PhantomData<T>,
@@ -209,6 +211,16 @@ impl<T> CopyInSink<T>
 where
     T: Buf + 'static + Send,
 {
+    /// The overall format selected by PostgreSQL for this copy.
+    pub fn format(&self) -> CopyFormat {
+        self.response.format()
+    }
+
+    /// The format PostgreSQL selected for each copied column.
+    pub fn column_formats(&self) -> &[CopyFormat] {
+        self.response.column_formats()
+    }
+
     /// A poll-based version of `finish`.
     pub fn poll_finish(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<u64, Error>> {
         loop {
@@ -374,8 +386,10 @@ where
         }
     }
 
-    match responses.next().await {
-        Ok(Message::CopyInResponse(_)) => {}
+    let response = match responses.next().await {
+        Ok(Message::CopyInResponse(body)) => {
+            CopyResponse::from_backend(body.format(), body.column_formats())?
+        }
         Ok(_) => {
             abort(&mut sender).await;
             return Err(Error::unexpected_message());
@@ -385,11 +399,12 @@ where
             abort(&mut sender).await;
             return Err(e);
         }
-    }
+    };
 
     Ok(CopyInSink {
         sender,
         responses,
+        response,
         buf: BytesMut::new(),
         state: SinkState::Active,
         _p2: PhantomData,

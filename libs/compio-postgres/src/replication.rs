@@ -690,11 +690,8 @@ where
             let header = read_header(&mut self.stream).await?;
             match header.tag {
                 COPY_BOTH_RESPONSE_TAG => {
-                    // Consume payload - we don't need its fields
-                    // (overall format byte + column count + per-column
-                    // format byte). The CopyBoth channel is open after
-                    // this.
-                    let _ = self.stream.buf().split_to(header.body_len()).freeze();
+                    let body = self.stream.buf().split_to(header.body_len()).freeze();
+                    let copy_response = crate::copy_format::CopyResponse::from_wire(&body)?;
                     // A started streaming frame arms its own completion budget
                     // in `next`; an idle stream must not inherit this command's
                     // old deadline.
@@ -702,6 +699,7 @@ where
                     return Ok(ReplicationStream {
                         stream: self.stream,
                         lsn: LsnTracker::new(start_lsn),
+                        copy_response,
                         in_flight: InFlight::default(),
                         release: self.release,
                     });
@@ -891,6 +889,7 @@ pub struct ReplicationStream<S, T> {
     stream: BufStream<MaybeTlsStream<S, T>>,
     /// The two StandbyStatusUpdate positions (received vs flushed).
     lsn: LsnTracker,
+    copy_response: crate::copy_format::CopyResponse,
     /// See [`InFlight`]. Neither [`ReplicationStream::next`] nor
     /// [`ReplicationStream::send_standby_status_update`] is cancel-safe.
     in_flight: InFlight,
@@ -987,6 +986,16 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     T: AsyncRead + AsyncWrite + Unpin,
 {
+    /// The overall format selected by PostgreSQL for the CopyBoth stream.
+    pub fn format(&self) -> crate::CopyFormat {
+        self.copy_response.format()
+    }
+
+    /// The format PostgreSQL selected for each CopyBoth column.
+    pub fn column_formats(&self) -> &[crate::CopyFormat] {
+        self.copy_response.column_formats()
+    }
+
     /// Wait for the next frame off the CopyBoth wire.
     ///
     /// Returns `Ok(None)` on a clean `CopyDone` from the server.
@@ -1143,8 +1152,20 @@ where
                     }
                 }
                 COPY_DONE_TAG => {
-                    // Drain (length-only frame).
-                    let _ = self.stream.buf().split_to(header.body_len()).freeze();
+                    let body_len = header.body_len();
+                    let _ = self.stream.buf().split_to(body_len).freeze();
+                    if body_len != 0 {
+                        self.in_flight.poison();
+                        if let Some(release) = &self.release {
+                            release.shutdown();
+                        }
+                        return Err(Error::io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!(
+                                "CopyDone must have an empty body, but the server sent {body_len} bytes"
+                            ),
+                        )));
+                    }
                     return Ok(None);
                 }
                 ERROR_RESPONSE_TAG => {
@@ -3518,6 +3539,87 @@ mod tests {
         }
     }
 
+    fn replication_connection_over(
+        unread: Vec<u8>,
+    ) -> ReplicationConnection<ScriptedPeer, ScriptedPeer> {
+        ReplicationConnection {
+            stream: BufStream::new(MaybeTlsStream::Raw(ScriptedPeer { unread })),
+            parameters: HashMap::new(),
+            in_flight: InFlight::default(),
+            release: None,
+        }
+    }
+
+    fn copy_both_response(body: &[u8]) -> Vec<u8> {
+        let mut frame = vec![COPY_BOTH_RESPONSE_TAG];
+        frame.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_be_bytes());
+        frame.extend_from_slice(body);
+        frame
+    }
+
+    /// CopyBothResponse has the same metadata fields as CopyInResponse and
+    /// CopyOutResponse. This path owns its framer because postgres-protocol
+    /// does not decode `W`, so it must apply the same validation itself.
+    #[compio::test]
+    async fn malformed_copy_both_response_metadata_is_rejected() {
+        let malformed: &[(&str, &[u8])] = &[
+            ("empty body", b""),
+            ("short fixed fields", b"\x00\x00"),
+            ("missing column code", b"\x00\x00\x01"),
+            ("surplus column code", b"\x00\x00\x00\x00\x00"),
+            ("invalid overall code", b"\x02\x00\x00"),
+            ("invalid column code", b"\x00\x00\x01\x00\x02"),
+            ("binary column in text copy", b"\x00\x00\x01\x00\x01"),
+        ];
+
+        let mut ruled_on = 0usize;
+        for (case, body) in malformed {
+            ruled_on += 1;
+            let connection = replication_connection_over(copy_both_response(body));
+            let outcome = connection
+                .start_logical_replication(StartReplicationOptions {
+                    slot_name: "slot",
+                    ..Default::default()
+                })
+                .await;
+            let error = match outcome {
+                Ok(_) => panic!("{case} was accepted in CopyBothResponse"),
+                Err(error) => error,
+            };
+            let chain = std::iter::successors(std::error::Error::source(&error), |source| {
+                std::error::Error::source(*source)
+            })
+            .fold(error.to_string(), |chain, source| {
+                format!("{chain}: {source}")
+            });
+            assert!(
+                chain.contains("COPY") && chain.contains("response"),
+                "{case} produced an unnamed CopyBoth error: {chain}"
+            );
+        }
+        assert_eq!(ruled_on, 7, "the malformed CopyBoth matrix shrank");
+    }
+
+    /// The returned stream retains the format metadata instead of discarding
+    /// it, matching the information libpq keeps on its COPY result.
+    #[compio::test]
+    async fn copy_both_response_metadata_is_exposed() {
+        let connection =
+            replication_connection_over(copy_both_response(b"\x01\x00\x02\x00\x00\x00\x01"));
+        let stream = connection
+            .start_logical_replication(StartReplicationOptions {
+                slot_name: "slot",
+                ..Default::default()
+            })
+            .await
+            .expect("a well-formed CopyBothResponse was rejected");
+        assert_eq!(stream.format(), crate::CopyFormat::Binary);
+        assert_eq!(
+            stream.column_formats(),
+            &[crate::CopyFormat::Text, crate::CopyFormat::Binary]
+        );
+    }
+
     /// A peer that writes part of the first frame, fails the remainder, and is
     /// healthy for every write after that.
     ///
@@ -3576,6 +3678,7 @@ mod tests {
         ReplicationStream {
             stream: BufStream::new(MaybeTlsStream::Raw(WriteFailingPeer { writes: 0 })),
             lsn: LsnTracker::new(0),
+            copy_response: Default::default(),
             in_flight: InFlight::default(),
             release: None,
         }
@@ -3837,6 +3940,7 @@ mod tests {
         ReplicationStream {
             stream: BufStream::new(MaybeTlsStream::Raw(ScriptedPeer { unread: bytes })),
             lsn: LsnTracker::new(0),
+            copy_response: Default::default(),
             in_flight: InFlight::default(),
             release: None,
         }
@@ -3887,6 +3991,38 @@ mod tests {
                 .is_none(),
             "CopyDone ends the stream"
         );
+    }
+
+    /// CopyDone is exactly a tag plus Int32(4); it has no body. Accepting a
+    /// payload silently changes malformed bytes into a clean CopyBoth state
+    /// transition, so reject it by name and retire the stream.
+    #[compio::test]
+    async fn copy_done_with_a_body_is_rejected_and_retires_the_stream() {
+        let mut wire = vec![COPY_DONE_TAG];
+        wire.extend_from_slice(&5u32.to_be_bytes());
+        wire.push(0xAA);
+
+        let mut stream = stream_over(wire);
+        let error = stream
+            .next()
+            .await
+            .expect_err("CopyDone with a body was accepted as a clean transition");
+        let chain = std::iter::successors(std::error::Error::source(&error), |source| {
+            std::error::Error::source(*source)
+        })
+        .fold(error.to_string(), |chain, source| {
+            format!("{chain}: {source}")
+        });
+        assert!(
+            chain.contains("CopyDone") && chain.contains("empty body"),
+            "the malformed CopyDone was not refused by name: {chain}"
+        );
+
+        let retry = stream
+            .next()
+            .await
+            .expect_err("a stream with a malformed CopyDone became reusable");
+        assert!(retry.is_cancelled(), "the malformed stream was not retired");
     }
 
     /// An unhandled tag must retire the stream too, because its body was
@@ -4088,6 +4224,7 @@ mod tests {
             ReplicationStream {
                 stream: BufStream::new(MaybeTlsStream::Raw(client)),
                 lsn: LsnTracker::new(0),
+                copy_response: Default::default(),
                 in_flight: InFlight::default(),
                 release: Some(release),
             },
@@ -4283,6 +4420,7 @@ mod tests {
                 written: std::rc::Rc::clone(&written),
             })),
             lsn: LsnTracker::new(0x16B_3750),
+            copy_response: Default::default(),
             in_flight: InFlight::default(),
             release: None,
         };
@@ -4351,6 +4489,7 @@ mod tests {
                 written: std::rc::Rc::clone(&written),
             })),
             lsn: LsnTracker::new(0x16B_3750),
+            copy_response: Default::default(),
             in_flight: InFlight::default(),
             release: None,
         };

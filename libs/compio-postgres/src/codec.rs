@@ -308,6 +308,16 @@ where
             // because both constrained tags are startup-only.
             validate_startup_message_length(header.tag(), header.len() as u32)?;
 
+            if matches!(
+                header.tag(),
+                backend::COPY_IN_RESPONSE_TAG | backend::COPY_OUT_RESPONSE_TAG
+            ) {
+                let body_start = idx + 5;
+                let body_end = idx + msg_len;
+                crate::copy_format::validate_wire(&stream.buf()[body_start..body_end])
+                    .map_err(Error::parse)?;
+            }
+
             match header.tag() {
                 backend::NOTICE_RESPONSE_TAG
                 | backend::NOTIFICATION_RESPONSE_TAG
@@ -670,5 +680,88 @@ mod tests {
             chain.contains("BackendKeyData") && chain.contains("264"),
             "the per-tag limit was not applied to the batched frame: {chain}"
         );
+    }
+
+    fn copy_response_frame(tag: u8, body: &[u8]) -> Vec<u8> {
+        let mut frame = vec![tag];
+        frame.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_be_bytes());
+        frame.extend_from_slice(body);
+        frame
+    }
+
+    /// CopyInResponse and CopyOutResponse are not opaque transition tags. The
+    /// body declares a bounded column count followed by exactly that many
+    /// format codes, and every code has protocol meaning. Validate at the
+    /// decoder boundary so a malformed response retires the connection even
+    /// when the eventual response consumer has already been dropped.
+    #[compio::test]
+    async fn malformed_copy_response_metadata_is_rejected_before_dispatch() {
+        let malformed: &[(&str, &[u8])] = &[
+            ("empty body", b""),
+            ("short fixed fields", b"\x00\x00"),
+            ("missing column code", b"\x00\x00\x01"),
+            ("surplus column code", b"\x00\x00\x00\x00\x00"),
+            ("invalid overall code", b"\x02\x00\x00"),
+            ("invalid column code", b"\x00\x00\x01\x00\x02"),
+            ("binary column in text copy", b"\x00\x00\x01\x00\x01"),
+        ];
+
+        let mut ruled_on = 0usize;
+        for tag in [
+            backend::COPY_IN_RESPONSE_TAG,
+            backend::COPY_OUT_RESPONSE_TAG,
+        ] {
+            for (case, body) in malformed {
+                ruled_on += 1;
+                let mut framer = ScriptedFramer::new(vec![copy_response_frame(tag, body)]);
+                let error = match read_backend(&mut framer).await {
+                    Ok(_) => panic!(
+                        "{case} was accepted for COPY response tag {}",
+                        char::from(tag)
+                    ),
+                    Err(error) => error,
+                };
+                let chain = error_chain(&error);
+                assert!(
+                    chain.contains("COPY") && chain.contains("response"),
+                    "{case} for tag {} produced an unnamed error: {chain}",
+                    char::from(tag)
+                );
+            }
+        }
+        assert_eq!(ruled_on, 14, "the malformed COPY metadata matrix shrank");
+    }
+
+    /// Text, binary, and the protocol's future-facing mixed-column shape all
+    /// remain deliverable. Present PostgreSQL emits one format for every
+    /// column, but the message design explicitly does not require that when
+    /// the overall format is binary.
+    #[compio::test]
+    async fn well_formed_copy_response_metadata_reaches_dispatch() {
+        let valid: &[&[u8]] = &[
+            b"\x00\x00\x00",
+            b"\x01\x00\x01\x00\x01",
+            b"\x01\x00\x02\x00\x00\x00\x01",
+        ];
+
+        let mut ruled_on = 0usize;
+        for tag in [
+            backend::COPY_IN_RESPONSE_TAG,
+            backend::COPY_OUT_RESPONSE_TAG,
+        ] {
+            for body in valid {
+                ruled_on += 1;
+                let mut framer = ScriptedFramer::new(vec![copy_response_frame(tag, body)]);
+                let BackendMessage::Normal { mut messages, .. } = read_backend(&mut framer)
+                    .await
+                    .expect("a well-formed COPY response was rejected")
+                else {
+                    panic!("a COPY response was classified as asynchronous");
+                };
+                assert!(messages.next().unwrap().is_some());
+                assert!(messages.next().unwrap().is_none());
+            }
+        }
+        assert_eq!(ruled_on, 6, "the valid COPY metadata matrix shrank");
     }
 }

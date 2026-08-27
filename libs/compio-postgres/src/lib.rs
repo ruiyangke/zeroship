@@ -182,15 +182,14 @@ pub use crate::cancel_token::CancelToken;
 pub use crate::client::{Client, QueryEvent, QueryOutcome, TransactionStatus};
 pub use crate::config::Config;
 pub use crate::connection::Connection;
+pub use crate::copy_format::CopyFormat;
 pub use crate::copy_in::CopyInSink;
 pub use crate::copy_out::CopyOutStream;
-pub use crate::maybe_tls_stream::{MaybeTlsReadHalf, MaybeTlsWriteHalf};
-#[cfg(feature = "tls")]
-pub use crate::tls_sansio::{TlsReadHalf, TlsWriteHalf};
 use crate::error::DbError;
 pub use crate::error::Error;
 pub use crate::generic_client::GenericClient;
 pub use crate::live::{drain_connections, live_connections};
+pub use crate::maybe_tls_stream::{MaybeTlsReadHalf, MaybeTlsWriteHalf};
 pub use crate::pool::{Pool, PoolConfig, PoolHookFuture, PoolMetrics, PooledClient};
 pub use crate::portal::Portal;
 pub use crate::query::RowStream;
@@ -201,6 +200,8 @@ pub use crate::statement::{Column, Statement};
 pub use crate::tls::NoTls;
 #[cfg(feature = "tls")]
 pub use crate::tls_rustls::{MakeRustlsConnect, RustlsConnect, RustlsStream};
+#[cfg(feature = "tls")]
+pub use crate::tls_sansio::{TlsReadHalf, TlsWriteHalf};
 pub use crate::to_statement::{ToStatement, Uncached};
 pub use crate::transaction::Transaction;
 pub use crate::transaction_builder::{IsolationLevel, TransactionBuilder};
@@ -222,6 +223,7 @@ mod connect_raw;
 mod connect_socket;
 mod connect_tls;
 pub(crate) mod connection;
+mod copy_format;
 mod copy_in;
 mod copy_out;
 pub mod error;
@@ -231,12 +233,13 @@ mod generic_client;
 mod keepalive;
 mod live;
 mod maybe_tls_stream;
-mod pool;
 mod passfile;
+mod pool;
 mod portal;
 mod prepare;
 mod query;
 mod release;
+pub mod replication;
 pub mod row;
 mod service;
 mod simple_query;
@@ -244,11 +247,10 @@ mod socket;
 mod statement;
 pub mod tls;
 #[cfg(feature = "tls")]
-mod tls_sansio;
-#[cfg(feature = "tls")]
 pub mod tls_rustls;
+#[cfg(feature = "tls")]
+mod tls_sansio;
 mod to_statement;
-pub mod replication;
 mod transaction;
 mod transaction_builder;
 pub mod types;
