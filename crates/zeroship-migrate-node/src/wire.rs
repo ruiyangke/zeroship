@@ -1007,7 +1007,16 @@ pub struct BuildInfo {
     /// `irVersion()` returns, repeated so one call answers the whole identity.
     pub ir_version: u32,
     /// Lowercase 64-char sha256 over the workspace manifests, `Cargo.lock`, and
-    /// every `crates/*/src` file. This is what tells a pre-fix artifact from a
+    /// every `src` tree under `crates`. This is what tells a pre-fix artifact from a
+    //
+    // Deliberately NOT written as a `crates/<glob>/src` path: napi copies this
+    // doc comment verbatim into the generated `index.d.ts` `/** */` block, so a
+    // literal `*` followed by `/` closes the comment early and everything after
+    // it parses as TypeScript. That is not hypothetical - it is why a clean
+    // checkout could not run `pnpm build`: `tsc` reported "Unexpected keyword or
+    // identifier" ~50 lines later, in a file nobody edited, with the real cause
+    // invisible at the error site. The tracked-nowhere `index.d.ts` in an
+    // existing checkout carried a hand-escaped `*\/` and hid it.
     /// post-fix one when the version has not moved. It does NOT cover the JS
     /// packages, the rustc version, the cargo profile, or the enabled features -
     /// and NOTHING ELSE IN THIS REPLY COVERS THEM EITHER. The only other fields are
