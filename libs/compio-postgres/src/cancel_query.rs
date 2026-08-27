@@ -23,40 +23,46 @@
 
 use crate::cancel_token::CancelKey;
 use crate::client::SocketConfig;
-use crate::config::{SslMode, SslNegotiation};
+use crate::config::{SslCertMode, SslMode, SslNegotiation};
 use crate::connect::{tls_server_name, with_connect_timeout};
 use crate::connect_tls;
 use crate::tls::{MakeTlsConnect, TlsConnect};
 use crate::{Error, Socket, cancel_query_raw, connect_socket};
 use std::io;
 
-fn validate_cancel_tls_connector<T>(tls: &T, config: &SocketConfig) -> Result<(), Error>
+pub(crate) fn validate_cancel_tls_policy<S, T>(
+    tls: &T,
+    encryption: connect_tls::Encryption,
+    ssl_sni: bool,
+    ssl_cert_mode: SslCertMode,
+    server_verification: crate::tls::ServerVerification,
+) -> Result<(), Error>
 where
-    T: TlsConnect<Socket>,
+    T: TlsConnect<S>,
 {
-    if config.encryption == connect_tls::Encryption::Plaintext {
+    if encryption == connect_tls::Encryption::Plaintext {
         return Ok(());
     }
 
-    if !tls.can_honor_sslsni(config.ssl_sni) {
+    if !tls.can_honor_sslsni(ssl_sni) {
         return Err(Error::tls_unattested(
             format!(
                 "the TLS connector supplied to cancel does not attest to sslsni={}",
-                u8::from(config.ssl_sni)
+                u8::from(ssl_sni)
             )
             .into(),
         ));
     }
-    if !tls.can_honor_sslcertmode(config.ssl_cert_mode) {
+    if !tls.can_honor_sslcertmode(ssl_cert_mode) {
         return Err(Error::tls_unattested(
             format!(
                 "the TLS connector supplied to cancel does not attest to sslcertmode={}",
-                config.ssl_cert_mode.as_str()
+                ssl_cert_mode.as_str()
             )
             .into(),
         ));
     }
-    if !tls.can_honor_server_verification(config.server_verification) {
+    if !tls.can_honor_server_verification(server_verification) {
         return Err(Error::tls_unattested(
             "the TLS connector supplied to cancel does not attest to the server verification \
              this session was established with"
@@ -65,6 +71,19 @@ where
     }
 
     Ok(())
+}
+
+fn validate_cancel_tls_connector<T>(tls: &T, config: &SocketConfig) -> Result<(), Error>
+where
+    T: TlsConnect<Socket>,
+{
+    validate_cancel_tls_policy::<Socket, _>(
+        tls,
+        config.encryption,
+        config.ssl_sni,
+        config.ssl_cert_mode,
+        config.server_verification,
+    )
 }
 
 pub(crate) async fn cancel_query<T>(
