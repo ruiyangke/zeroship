@@ -884,6 +884,58 @@ struct Dispatch<'a> {
     terminal_server_error: &'a Mutex<Option<DbError>>,
 }
 
+fn first_server_error(messages: &BackendMessages) -> Result<Option<DbError>, Error> {
+    messages
+        .first_error_response()
+        .map_err(Error::parse)?
+        .map(|body| DbError::parse(&mut body.fields()).map_err(Error::parse))
+        .transpose()
+}
+
+fn server_error_ends_session(error: &DbError) -> bool {
+    matches!(
+        error.parsed_severity(),
+        Some(Severity::Fatal | Severity::Panic)
+    ) || matches!(error.severity(), "FATAL" | "PANIC")
+}
+
+fn remember_server_error(slot: &Mutex<Option<DbError>>, error: &DbError) {
+    let mut stored = slot.lock();
+    if stored.is_none() {
+        *stored = Some(error.clone());
+    }
+}
+
+/// Preserve an ErrorResponse which teardown cannot deliver without violating
+/// the pending-response FIFO. The request-local slot is intentionally the
+/// only visibility for a nonterminal SQL error; publishing it globally would
+/// misattribute it to unrelated callers.
+fn preserve_queued_server_error(
+    messages: &BackendMessages,
+    response: Option<&Response>,
+    terminal_server_error: &Mutex<Option<DbError>>,
+    tx_status: &AtomicU8,
+) -> Result<(), Error> {
+    let Some(error) = first_server_error(messages)? else {
+        return Ok(());
+    };
+
+    let ends_session = server_error_ends_session(&error);
+    if ends_session || response.is_none() {
+        // Match normal dispatch for FATAL/PANIC and for an ErrorResponse with
+        // no owning request. Publish terminal poison before request-local
+        // visibility, just as ordinary dispatch does.
+        remember_server_error(terminal_server_error, &error);
+    }
+    if ends_session {
+        tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
+    }
+    if let Some(response) = response {
+        remember_server_error(&response.request_server_error, &error);
+    }
+    Ok(())
+}
+
 impl Dispatch<'_> {
     /// Dispatch a single decoded backend frame.
     fn handle_message(&mut self, message: BackendMessage) -> Result<(), Error> {
@@ -933,17 +985,9 @@ impl Dispatch<'_> {
         // the EOF path uses before making that terminal response visible. This
         // keeps synchronous pool return from counting a known-dead session as
         // idle during that protocol-defined window.
-        let server_error = messages
-            .first_error_response()
-            .map_err(Error::parse)?
-            .map(|body| DbError::parse(&mut body.fields()).map_err(Error::parse))
-            .transpose()?;
+        let server_error = first_server_error(&messages)?;
         if let Some(error) = server_error.as_ref() {
-            if matches!(
-                error.parsed_severity(),
-                Some(Severity::Fatal | Severity::Panic)
-            ) || matches!(error.severity(), "FATAL" | "PANIC")
-            {
+            if server_error_ends_session(error) {
                 self.remember_terminal_server_error(error);
                 self.tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
             }
@@ -963,10 +1007,7 @@ impl Dispatch<'_> {
             },
         };
         if let Some(error) = server_error.as_ref() {
-            let mut request_error = response.request_server_error.lock();
-            if request_error.is_none() {
-                *request_error = Some(error.clone());
-            }
+            remember_server_error(&response.request_server_error, error);
         }
         let completed_at = (request_complete
             && response
@@ -1103,10 +1144,7 @@ impl Dispatch<'_> {
     }
 
     fn remember_terminal_server_error(&self, error: &DbError) {
-        let mut terminal = self.terminal_server_error.lock();
-        if terminal.is_none() {
-            *terminal = Some(error.clone());
-        }
+        remember_server_error(self.terminal_server_error, error);
     }
 }
 
@@ -1567,9 +1605,71 @@ where
                         continue;
                     }
                     Poll::Pending => {
-                        return flush_failure
-                            .take()
-                            .map_or(Poll::Pending, |error| Poll::Ready(Err(error)));
+                        let Some(error) = flush_failure.take() else {
+                            return Poll::Pending;
+                        };
+
+                        // Delivery must remain behind the stashed batch, but
+                        // teardown must not discard a response the reader has
+                        // already decoded. Inspect immediately queued events
+                        // without dispatching normal batches: only their
+                        // ErrorResponse enters the matching request's private
+                        // diagnosis slot. Track completed responses locally so
+                        // multiple queued batches still map to their owners.
+                        let mut response_offset = 0usize;
+                        loop {
+                            match read_rx.poll_next_unpin(cx) {
+                                Poll::Ready(Some(ReadEvent::Message(ReadEnvelope {
+                                    message,
+                                    acknowledgement,
+                                }))) => {
+                                    let result = match message {
+                                        BackendMessage::Async { message, .. } => {
+                                            route_async(parameters, async_sender, message)
+                                        }
+                                        BackendMessage::Normal {
+                                            messages,
+                                            request_complete,
+                                            deferred_error,
+                                        } => {
+                                            let result = preserve_queued_server_error(
+                                                &messages,
+                                                responses.get(response_offset),
+                                                terminal_server_error,
+                                                tx_status,
+                                            );
+                                            if request_complete {
+                                                response_offset += 1;
+                                            }
+                                            if deferred_error.is_some() {
+                                                tx_status
+                                                    .store(READ_RETIRED_STATUS, Ordering::Release);
+                                            }
+                                            result
+                                        }
+                                    };
+                                    if let Some(acknowledgement) = acknowledgement {
+                                        let _ = acknowledgement.send(());
+                                    }
+                                    if let Err(diagnostic_error) = result {
+                                        read_terminal = Some(Some(diagnostic_error));
+                                    }
+                                    if read_terminal.is_some() {
+                                        break;
+                                    }
+                                }
+                                Poll::Ready(Some(ReadEvent::Terminal(terminal))) => {
+                                    read_terminal = Some(Some(terminal));
+                                    break;
+                                }
+                                Poll::Ready(None) => {
+                                    read_terminal = Some(None);
+                                    break;
+                                }
+                                Poll::Pending => break,
+                            }
+                        }
+                        return Poll::Ready(Err(error));
                     }
                 }
             }
@@ -3795,6 +3895,160 @@ mod tests {
             recorder.seen.load(Ordering::Acquire),
             READ_RETIRED_STATUS,
             "the write-dead session woke its borrower before pool poison"
+        );
+        assert!(read_half_dropped.get());
+    }
+
+    /// A response already parked behind one caller's backpressure must keep
+    /// later responses out of the delivery FIFO. That does not make a decoded
+    /// ErrorResponse disappear: if the simultaneous write failure tears the
+    /// connection down, the later request still needs its SQLSTATE through the
+    /// request-scoped diagnosis side channel.
+    #[compio::test]
+    async fn backpressured_flush_failure_preserves_a_queued_server_error() {
+        let read_half_dropped = Rc::new(Cell::new(false));
+        let stream = BufStream::new(WriteFailingSplitStream {
+            read_half_dropped: Rc::clone(&read_half_dropped),
+        });
+        let (read_half, mut write_half) = match stream.try_into_split() {
+            Ok(halves) => halves,
+            Err(_) => panic!("the flush-failure fixture did not split"),
+        };
+        drop(read_half);
+        write_frontend(
+            &mut write_half,
+            FrontendMessage::Raw(bytes::Bytes::from_static(b"scripted request")),
+        )
+        .expect("buffer the scripted request");
+
+        let (mut read_tx, mut read_rx) = mpsc::channel(1);
+        read_tx
+            .try_send(ReadEvent::Message(ReadEnvelope {
+                message: BackendMessage::Normal {
+                    messages: error_response_batch("23505", "scripted unique violation"),
+                    request_complete: true,
+                    deferred_error: None,
+                },
+                acknowledgement: None,
+            }))
+            .expect("queue the decoded server response");
+        let (_read_terminal_tx, mut read_terminal_rx) = mpsc::unbounded();
+
+        let (request_tx, mut request_rx) = mpsc::unbounded();
+        let client = crate::client::Client::new(
+            request_tx,
+            crate::config::SslMode::Disable,
+            crate::config::SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+        );
+        let mut caller = client
+            .inner()
+            .send(RequestMessages::Single(FrontendMessage::Raw(
+                bytes::Bytes::from_static(b"scripted later request"),
+            )))
+            .expect("enqueue the later scripted request");
+        let Request {
+            messages: _,
+            sender,
+            disposition,
+            transaction_effect,
+            prepare_cleanup,
+            statement,
+            observation,
+            request_server_error,
+        } = request_rx
+            .try_recv()
+            .expect("the client did not enqueue its request");
+        let mut responses = VecDeque::from([Response {
+            sender,
+            disposition,
+            transaction_effect,
+            prepare_cleanup,
+            statement,
+            observation,
+            bind_complete_seen: false,
+            read_obligation: ReadObligation::new(None, false),
+            request_server_error,
+        }]);
+
+        // `futures_channel::mpsc` tracks capacity per sender handle. Fill this
+        // exact handle so the earlier pending response remains the active FIFO
+        // gate for the entire flush-failure poll.
+        let (mut blocked_sender, _blocked_receiver) = mpsc::channel(1);
+        for _ in 0..2 {
+            blocked_sender
+                .try_send(ResponseMessages::Raw(BackendMessages::empty()))
+                .expect("the pending response sender filled too early");
+        }
+        assert!(
+            blocked_sender
+                .try_send(ResponseMessages::Raw(BackendMessages::empty()))
+                .is_err(),
+            "the pending response sender was not backpressured"
+        );
+        let blocked_request_server_error = Arc::default();
+        let mut pending_responses = VecDeque::from([PendingResponse {
+            sender: blocked_sender,
+            messages: ResponseMessages::Raw(BackendMessages::empty()),
+            disposition: RequestDisposition::Awaited,
+            request_server_error: Arc::clone(&blocked_request_server_error),
+        }]);
+        let parameters = Mutex::new(HashMap::new());
+        let tx_status = AtomicU8::new(b'I');
+        let in_flight_requests = AtomicUsize::new(1);
+        let terminal_server_error = Mutex::new(None);
+
+        let (write_result, terminal) = flush_with_read_draining(
+            &mut write_half,
+            &mut read_rx,
+            &mut read_terminal_rx,
+            &parameters,
+            &mut responses,
+            &mut pending_responses,
+            None,
+            &tx_status,
+            &in_flight_requests,
+            &terminal_server_error,
+        )
+        .await;
+        let write_error = write_result.expect_err("the scripted flush unexpectedly succeeded");
+        assert_eq!(
+            write_error.as_io().map(std::io::Error::kind),
+            Some(std::io::ErrorKind::BrokenPipe)
+        );
+        assert!(terminal.is_none(), "the fixture invented a read failure");
+
+        // Model `Connection::run` teardown. Delivery remains blocked, but the
+        // decoded diagnosis must survive closure of the response sender.
+        drop(responses);
+        drop(pending_responses);
+        let error = match caller.next().await {
+            Err(error) => error,
+            Ok(_) => panic!("response channel closure hid its queued ErrorResponse"),
+        };
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("23505"),
+            "backpressured flush failure discarded queued SQLSTATE 23505: {error}"
+        );
+        assert!(
+            !error.is_closed(),
+            "the preserved server diagnosis still classified the session as a local close"
+        );
+        assert!(
+            blocked_request_server_error.lock().is_none(),
+            "the later ErrorResponse was attributed to the earlier blocked request"
+        );
+        assert!(
+            terminal_server_error.lock().is_none(),
+            "a nonterminal request error leaked into the connection-global diagnosis"
+        );
+        assert_eq!(
+            tx_status.load(Ordering::Acquire),
+            READ_RETIRED_STATUS,
+            "the failed flush left the physical session reusable"
         );
         assert!(read_half_dropped.get());
     }
