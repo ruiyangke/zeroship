@@ -1321,6 +1321,14 @@ impl Drop for InnerClient {
 }
 
 impl InnerClient {
+    /// Retire this physical session without waiting for its connection task.
+    pub(crate) fn force_close(&self) {
+        self.sender.close_channel();
+        if let Some(release) = &self.release {
+            release.shutdown();
+        }
+    }
+
     /// Send a batch of frontend messages to the connection task. Returns
     /// a `Responses` stream the caller drains with `next().await`.
     ///
@@ -3160,6 +3168,9 @@ impl Client {
             process_id: self.process_id,
             secret_key: self.secret_key.clone(),
             pool_lease: self.pool_cancel_lease.clone(),
+            drop_target: Some(crate::cancel_token::CancelDropTarget::Client(
+                Arc::downgrade(&self.inner),
+            )),
         }
     }
 
@@ -3308,10 +3319,7 @@ impl Client {
     /// trailing `ReadyForQuery` was drained. The synchronous socket shutdown
     /// prevents the still-running backend from outliving the poisoned lease.
     pub(crate) fn force_close(&self) {
-        self.inner.sender.close_channel();
-        if let Some(release) = &self.inner.release {
-            release.shutdown();
-        }
+        self.inner.force_close();
     }
 }
 
