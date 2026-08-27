@@ -163,11 +163,17 @@ impl LiveMetadataCache {
         self.len() == 0
     }
 
-    /// Drop every entry.
+    /// Drop every entry in THIS cache object.
     ///
-    /// The per-thread map this replaces was cleared whenever a test replaced
-    /// its `ThreadDbContext`. A process-wide map outlives that, so the reset
-    /// has to be explicit; [`crate::reset_context_for_tests`] calls this.
+    /// **Never call this on [`process_wide`].** The per-thread map this replaces
+    /// was dropped whenever a test replaced its `ThreadDbContext`, which made a
+    /// wipe a private act; on the process-wide instance it is not. A test binary
+    /// is multi-threaded unless the invocation says otherwise, so a global clear
+    /// from one test's teardown empties a concurrently running test's entries
+    /// mid-assertion. [`crate::reset_context_for_tests`] used to do exactly that
+    /// and no longer does; a fixture that needs isolation takes its own key
+    /// instead. This remains for tests that construct their OWN cache object,
+    /// where the wipe reaches nobody else.
     #[cfg(any(test, feature = "test-helpers"))]
     #[doc(hidden)]
     pub fn clear(&self) {
@@ -348,6 +354,43 @@ mod tests {
         assert!(
             Arc::ptr_eq(&written, &read_back),
             "both threads' contexts must resolve ONE fact object",
+        );
+    }
+
+    /// One test's teardown must not empty the map every other test is using.
+    ///
+    /// [`crate::reset_context_for_tests`] is reached from `drain_pg()`, the
+    /// teardown of essentially every Postgres integration test, and a test
+    /// binary runs multi-threaded unless the invocation says otherwise. While it
+    /// called `process_wide().clear()` it was a process-global wipe fired from
+    /// an arbitrary thread at an arbitrary moment - so an entry a
+    /// concurrently-running test had just published could vanish before that
+    /// test read it back. `v8_classes::db` refuses the same call, with the same
+    /// reasoning, 200 lines from where it was being made.
+    ///
+    /// This arm stands in for the neighbouring test: it publishes under an
+    /// identity of its own, lets somebody else's teardown run, and requires the
+    /// entry - the same allocation, not an equal one - to still be there.
+    #[test]
+    fn the_test_reset_leaves_a_neighbouring_fixtures_entry_alone() {
+        let resource = DbResourceKey::for_url("postgres://live-metadata-reset-neighbour/db");
+        let binding = DbBinding::new("app_reset_neighbour", "deploy_a");
+        let key = LiveMetadataKey::new(resource, &binding, "notes");
+
+        let published = process_wide()
+            .publish(key.clone(), facts("neighbour"))
+            .expect("the fixture publishes present facts");
+
+        // Another test's teardown, on this thread.
+        crate::reset_context_for_tests();
+
+        let survivor = process_wide()
+            .get(&key)
+            .expect("a neighbouring fixture's entry must survive another test's teardown")
+            .expect("the entry is a present-collection fact, not a cached absence");
+        assert!(
+            Arc::ptr_eq(&published, &survivor),
+            "the teardown replaced the neighbouring fixture's fact object",
         );
     }
 
