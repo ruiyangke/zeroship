@@ -1435,6 +1435,11 @@ where
     // At most one terminal read event (Err / closed) is recorded. Once seen,
     // we stop polling both the read channel and the now-useless flush.
     let mut read_terminal: Option<Option<Error>> = None;
+    // A failed flush retires the session, but a response the reader already
+    // queued still belongs to the front request and carries the server's
+    // diagnosis. Hold the local write error just long enough to dispatch every
+    // immediately available FIFO response ahead of it.
+    let mut flush_failure: Option<Error> = None;
 
     let flush_result = poll_fn(|cx| -> Poll<Result<(), Error>> {
         // (1) ReadTimeout is out-of-band and outranks every FIFO gate. The
@@ -1456,9 +1461,19 @@ where
             return Poll::Ready(Ok(()));
         }
 
-        // (2) Drive the flush to completion while the session is live.
-        if let Poll::Ready(res) = flush.as_mut().poll(cx) {
-            return Poll::Ready(res);
+        // (2) Drive the flush to completion while the session is live. A
+        // success can return immediately; a failure first publishes poison and
+        // gives the already-queued read FIFO one turn below.
+        if flush_failure.is_none()
+            && let Poll::Ready(result) = flush.as_mut().poll(cx)
+        {
+            match result {
+                Ok(()) => return Poll::Ready(Ok(())),
+                Err(error) => {
+                    tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
+                    flush_failure = Some(error);
+                }
+            }
         }
 
         // Keep making inbound progress until the flush is ready. Loop so a
@@ -1492,7 +1507,11 @@ where
                         }
                         continue;
                     }
-                    Poll::Pending => return Poll::Pending,
+                    Poll::Pending => {
+                        return flush_failure
+                            .take()
+                            .map_or(Poll::Pending, |error| Poll::Ready(Err(error)));
+                    }
                 }
             }
 
@@ -1535,12 +1554,18 @@ where
                         read_terminal = Some(None);
                         continue;
                     }
-                    Poll::Pending => return Poll::Pending,
+                    Poll::Pending => {
+                        return flush_failure
+                            .take()
+                            .map_or(Poll::Pending, |error| Poll::Ready(Err(error)));
+                    }
                 }
             }
 
             // Flush still pending, nothing left to drain this wake.
-            return Poll::Pending;
+            return flush_failure
+                .take()
+                .map_or(Poll::Pending, |error| Poll::Ready(Err(error)));
         }
     })
     .await;
@@ -3255,6 +3280,117 @@ mod tests {
         let surfaced = take_captured_non_eof_terminal(&mut terminal)
             .expect("a concurrent write failure hid the captured read timeout");
         assert!(surfaced.is_read_timeout());
+    }
+
+    fn error_response_batch(code: &str, message: &str) -> BackendMessages {
+        let mut payload = BytesMut::new();
+        payload.extend_from_slice(b"SERROR\0");
+        payload.extend_from_slice(b"C");
+        payload.extend_from_slice(code.as_bytes());
+        payload.extend_from_slice(b"\0M");
+        payload.extend_from_slice(message.as_bytes());
+        payload.extend_from_slice(b"\0\0");
+
+        let mut bytes = BytesMut::new();
+        bytes.extend_from_slice(b"E");
+        bytes.extend_from_slice(&(u32::try_from(payload.len()).unwrap() + 4).to_be_bytes());
+        bytes.extend_from_slice(&payload);
+        bytes.extend_from_slice(b"Z\0\0\0\x05I");
+        BackendMessages::from_test_bytes(bytes)
+    }
+
+    #[compio::test]
+    async fn queued_server_error_outranks_a_simultaneous_flush_failure() {
+        let read_half_dropped = Rc::new(Cell::new(false));
+        let stream = BufStream::new(WriteFailingSplitStream {
+            read_half_dropped: Rc::clone(&read_half_dropped),
+        });
+        let (read_half, mut write_half) = match stream.try_into_split() {
+            Ok(halves) => halves,
+            Err(_) => panic!("the flush-failure fixture did not split"),
+        };
+        drop(read_half);
+        write_frontend(
+            &mut write_half,
+            FrontendMessage::Raw(bytes::Bytes::from_static(b"scripted request")),
+        )
+        .expect("buffer the scripted request");
+
+        let (mut read_tx, mut read_rx) = mpsc::channel(1);
+        read_tx
+            .try_send(ReadEvent::Message(ReadEnvelope {
+                message: BackendMessage::Normal {
+                    messages: error_response_batch("23505", "scripted unique violation"),
+                    request_complete: true,
+                },
+                acknowledgement: None,
+            }))
+            .expect("queue the decoded server response");
+        let (_read_terminal_tx, mut read_terminal_rx) = mpsc::unbounded();
+
+        let tx_status = Arc::new(AtomicU8::new(b'I'));
+        let recorder = StatusRecordingWake::new(&tx_status);
+        let waker = Waker::from(Arc::clone(&recorder));
+        let mut context = Context::from_waker(&waker);
+        let (response_tx, mut response_rx) = mpsc::channel(1);
+        assert!(response_rx.poll_next_unpin(&mut context).is_pending());
+        let mut responses = VecDeque::from([Response {
+            sender: response_tx,
+            disposition: RequestDisposition::Awaited,
+            transaction_effect: TransactionEffect::MayChange,
+            prepare_cleanup: None,
+            statement: None,
+            observation: None,
+            bind_complete_seen: false,
+            read_obligation: ReadObligation::new(None, false),
+        }]);
+        let mut pending_responses = VecDeque::new();
+        let parameters = Mutex::new(HashMap::new());
+        let in_flight_requests = AtomicUsize::new(1);
+
+        let (write_result, terminal) = flush_with_read_draining(
+            &mut write_half,
+            &mut read_rx,
+            &mut read_terminal_rx,
+            &parameters,
+            &mut responses,
+            &mut pending_responses,
+            None,
+            &tx_status,
+            &in_flight_requests,
+        )
+        .await;
+        let write_error = write_result.expect_err("the scripted flush unexpectedly succeeded");
+        assert_eq!(
+            write_error.as_io().map(std::io::Error::kind),
+            Some(std::io::ErrorKind::BrokenPipe)
+        );
+        assert!(terminal.is_none(), "the fixture invented a read failure");
+
+        let delivered = response_rx
+            .try_recv()
+            .expect("flush failure returned before dispatching queued SQLSTATE 23505");
+        let error = match delivered {
+            ResponseMessages::Raw(mut messages) | ResponseMessages::Filtered(mut messages) => {
+                match messages.next().expect("decode the queued server response") {
+                    Some(Message::ErrorResponse(body)) => Error::db(body),
+                    Some(_) => panic!("the queued response was not ErrorResponse"),
+                    None => panic!("the queued response batch was empty"),
+                }
+            }
+            ResponseMessages::Observed(mut messages) => match messages.pop_front() {
+                Some(Err(error)) => error,
+                Some(Ok(_)) => panic!("the observed response was not an error"),
+                None => panic!("the observed response batch was empty"),
+            },
+        };
+        assert_eq!(error.code().map(|code| code.code()), Some("23505"));
+        assert_eq!(
+            recorder.seen.load(Ordering::Acquire),
+            READ_RETIRED_STATUS,
+            "the write-dead session woke its borrower before pool poison"
+        );
+        assert!(read_half_dropped.get());
     }
 
     #[compio::test]
