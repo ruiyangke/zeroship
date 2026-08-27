@@ -35,9 +35,9 @@
 //! scripted peer, which is exactly how a defect in what we SEND survived: a
 //! scripted peer asserts the bytes we chose to send, and agrees with us.
 
+use compio_postgres::Client;
 use compio_postgres::replication::pgoutput::{self, PgOutputMessage};
 use compio_postgres::replication::{ReplicationMessage, StartReplicationOptions};
-use compio_postgres::Client;
 use std::time::Duration;
 
 #[allow(unused_imports)]
@@ -123,18 +123,17 @@ async fn stream_one_insert(logical: &str, publication: &str) -> Result<PgOutputM
 }
 
 async fn read_first_insert(slot: &str, publication: &str) -> Result<PgOutputMessage, String> {
-    let mut replication =
-        compio_postgres::replication::connect_replication(
-            common::suite_tls(),
-            &common::replication_config("cpg_publication_names"),
+    let mut replication = compio_postgres::replication::connect_replication(
+        common::suite_tls(),
+        &common::replication_config("cpg_publication_names"),
+    )
+    .await
+    .map_err(|error| {
+        format!(
+            "replication connect failed: {}",
+            common::error_chain(&error)
         )
-        .await
-        .map_err(|error| {
-            format!(
-                "replication connect failed: {}",
-                common::error_chain(&error)
-            )
-        })?;
+    })?;
 
     let mut stream = replication
         .start_logical_replication(StartReplicationOptions {

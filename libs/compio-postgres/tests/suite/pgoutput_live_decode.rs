@@ -14,9 +14,9 @@
 //! inserted. A field this decoder reads at the wrong offset cannot satisfy
 //! them by agreeing with a fixture.
 
+use compio_postgres::Client;
 use compio_postgres::replication::pgoutput::{self, PgOutputMessage, TupleColumn};
 use compio_postgres::replication::{ReplicationMessage, StartReplicationOptions};
-use compio_postgres::Client;
 use std::time::Duration;
 
 #[allow(unused_imports)]
@@ -48,13 +48,12 @@ async fn client() -> Client {
 /// transaction, so four DML statements yield one Begin/Commit pair around
 /// them, not four - and a count that guesses high simply waits forever.
 async fn decoded_stream(slot: &str, publication: &str) -> Vec<PgOutputMessage> {
-    let mut replication =
-        compio_postgres::replication::connect_replication(
-            common::suite_tls(),
-            &common::replication_config("cpg_pgoutput_live"),
-        )
-        .await
-        .expect("replication connect failed");
+    let mut replication = compio_postgres::replication::connect_replication(
+        common::suite_tls(),
+        &common::replication_config("cpg_pgoutput_live"),
+    )
+    .await
+    .expect("replication connect failed");
 
     let mut stream = replication
         .start_logical_replication(StartReplicationOptions {
