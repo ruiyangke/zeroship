@@ -5423,9 +5423,13 @@ fn build_field_condition_with_dialect(
                             })
                             .collect();
                         match (placeholders.is_empty(), nulls.is_empty()) {
-                            // `$in: []` keeps its existing meaning: an
-                            // empty IN list, which matches nothing.
-                            (true, true) => format!("{col} IN ()"),
+                            // `$in: []` matches nothing. It must NOT emit
+                            // `IN ()`, which is a syntax error in PostgreSQL
+                            // and so failed the whole query rather than
+                            // returning an empty result - and an empty list is
+                            // the natural result of narrowing a filter to
+                            // nothing, so it is reachable from ordinary code.
+                            (true, true) => "FALSE".to_string(),
                             (true, false) => format!("{col} IS NULL"),
                             (false, true) => format!("{col} IN ({})", placeholders.join(", ")),
                             (false, false) => format!(
@@ -5457,7 +5461,10 @@ fn build_field_condition_with_dialect(
                             })
                             .collect();
                         match (placeholders.is_empty(), nulls.is_empty()) {
-                            (true, true) => format!("{col} NOT IN ()"),
+                            // `$nin: []` excludes nothing, so it matches
+                            // everything - the mirror of the `$in` case, and
+                            // `NOT IN ()` is the same syntax error.
+                            (true, true) => "TRUE".to_string(),
                             (true, false) => format!("{col} IS NOT NULL"),
                             (false, true) => format!("{col} NOT IN ({})", placeholders.join(", ")),
                             (false, false) => format!(
@@ -6166,6 +6173,51 @@ mod tests {
             q.sql
         );
         assert_eq!(q.params, vec!["active"]);
+    }
+
+    /// An empty `$in` matches nothing, and must say so with a constant
+    /// predicate rather than emitting `IN ()`.
+    ///
+    /// `IN ()` is a SYNTAX ERROR in PostgreSQL (verified against PG 16:
+    /// `select 1 where 'x' in ()` -> `ERROR: syntax error at or near ")"`),
+    /// so the previous output did not return zero rows - it failed the whole
+    /// query. A creator passing an empty list, which is the natural result of
+    /// filtering a collection down to nothing, got a crash instead of an
+    /// empty result set.
+    #[test]
+    fn empty_in_matches_nothing_without_emitting_invalid_sql() {
+        let filter = json!({"status": {"$in": []}});
+        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        assert!(
+            !q.sql.contains("IN ()"),
+            "IN () is a syntax error in PostgreSQL; got {}",
+            q.sql
+        );
+        assert!(
+            q.sql.contains("FALSE"),
+            "an empty $in must become a constant-false predicate; got {}",
+            q.sql
+        );
+        assert!(q.params.is_empty());
+    }
+
+    /// The mirror: an empty `$nin` excludes nothing, so it matches
+    /// everything.
+    #[test]
+    fn empty_nin_matches_everything_without_emitting_invalid_sql() {
+        let filter = json!({"status": {"$nin": []}});
+        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        assert!(
+            !q.sql.contains("NOT IN ()"),
+            "NOT IN () is a syntax error in PostgreSQL; got {}",
+            q.sql
+        );
+        assert!(
+            q.sql.contains("TRUE"),
+            "an empty $nin must become a constant-true predicate; got {}",
+            q.sql
+        );
+        assert!(q.params.is_empty());
     }
 
     #[test]
