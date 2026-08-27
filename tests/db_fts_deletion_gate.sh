@@ -26,7 +26,8 @@ SOURCE_NAMES=(
 scan_code_arm() {
   local arm="$1"
   local floor="$2"
-  shift 2
+  local pattern="$3"
+  shift 3
   local -a files=("$@")
   local findings status finding_count sample
 
@@ -35,7 +36,7 @@ scan_code_arm() {
     return
   fi
 
-  findings="$(LC_ALL=C grep -HinEi -- "$CODE_PATTERN" "${files[@]}")"
+  findings="$(LC_ALL=C grep -HinEi -- "$pattern" "${files[@]}")"
   status=$?
   if [ "$status" -gt 1 ]; then
     fail "$arm scan failed with grep status $status"
@@ -62,7 +63,7 @@ mapfile -d '' -t CRATE_FILES < <(
     ! -path 'crates/zeroship-migrate-*/*' \
     -print0 | LC_ALL=C sort -z
 )
-scan_code_arm live_crate_code "900" "${CRATE_FILES[@]}"
+scan_code_arm live_crate_code "900" "$CODE_PATTERN" "${CRATE_FILES[@]}"
 
 # Migration-engine comments retain the deliberate removal record. Scan the
 # executable/source lines, plus the generated JSON wire schema, so the deleted
@@ -106,7 +107,7 @@ mapfile -d '' -t SDK_FILES < <(
     ! -path '*/dist/*' \
     -print0 | LC_ALL=C sort -z
 )
-scan_code_arm live_sdk_code "500" "${SDK_FILES[@]}"
+scan_code_arm live_sdk_code "500" "$MIGRATION_PATTERN" "${SDK_FILES[@]}"
 
 mapfile -d '' -t PACKAGE_FILES < <(
   find packages/zero-migrate -type f \( \( "${SOURCE_NAMES[@]}" \) -o -name '*.json' \) \
@@ -114,7 +115,7 @@ mapfile -d '' -t PACKAGE_FILES < <(
     ! -path '*/dist/*' \
     -print0 | LC_ALL=C sort -z
 )
-scan_code_arm live_migrate_package_code "30" "${PACKAGE_FILES[@]}"
+scan_code_arm live_migrate_package_code "30" "$MIGRATION_PATTERN" "${PACKAGE_FILES[@]}"
 
 mapfile -d '' -t EXAMPLE_FILES < <(
   find examples -type f \( "${SOURCE_NAMES[@]}" \) \
@@ -122,7 +123,7 @@ mapfile -d '' -t EXAMPLE_FILES < <(
     ! -path '*/dist/*' \
     -print0 | LC_ALL=C sort -z
 )
-scan_code_arm live_example_code "150" "${EXAMPLE_FILES[@]}"
+scan_code_arm live_example_code "150" "$CODE_PATTERN" "${EXAMPLE_FILES[@]}"
 
 mapfile -d '' -t DOC_FILES < <(
   {
