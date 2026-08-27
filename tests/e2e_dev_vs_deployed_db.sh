@@ -182,7 +182,7 @@ RECORDER="$ROOT/sdks/vite-plugin/dist/gen-types/recorder.js"
 # shellcheck source=lib/binary_freshness.sh
 source "$ROOT/tests/lib/binary_freshness.sh"
 zs_check_binary_freshness "$ROOT" "$BIN" \
-  "crates/plugin-db/src crates/zeroship-schema/src crates/runtime/src crates/worker/src crates/gateway/src crates/control/src crates/migrated/src sdks/db/src" \
+  "crates/zeroship-plugin-db/src crates/zeroship-schema/src crates/zeroship-runtime/src crates/zeroship-worker/src crates/zeroship-gateway/src crates/zeroship-control/src crates/zeroship-migrated/src sdks/db/src" \
   "zeroship zeroship-worker zeroship-gate zeroship-control zeroship-migrated dev-provision" \
   || { _zs_fresh_rc=$?; [ "$_zs_fresh_rc" -ne 0 ] && exit "$_zs_fresh_rc"; }
 

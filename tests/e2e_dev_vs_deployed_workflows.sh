@@ -150,7 +150,7 @@ trap cleanup EXIT
 # shellcheck source=lib/binary_freshness.sh
 source "$ROOT/tests/lib/binary_freshness.sh"
 zs_check_binary_freshness "$ROOT" "$BIN" \
-  "crates/plugin-workflow/src crates/runtime/src crates/worker/src crates/control/src sdks/workflows/src sdks/bootstrap/src" \
+  "crates/zeroship-plugin-workflow/src crates/zeroship-runtime/src crates/zeroship-worker/src crates/zeroship-control/src sdks/workflows/src sdks/bootstrap/src" \
   "zeroship zeroship-worker zeroship-gate zeroship-control dev-provision" \
   || { _zs_fresh_rc=$?; [ "$_zs_fresh_rc" -ne 0 ] && exit "$_zs_fresh_rc"; }
 

@@ -119,7 +119,7 @@ echo "=== zeroship secret expose: CLI -> control plane -> deployed process.env =
 # shellcheck source=lib/binary_freshness.sh
 source "$ROOT/tests/lib/binary_freshness.sh"
 zs_check_binary_freshness "$ROOT" "$BIN" \
-  "crates/cli/src crates/control/src crates/worker/src crates/gateway/src crates/runtime/src" \
+  "crates/zeroship-cli/src crates/zeroship-control/src crates/zeroship-worker/src crates/zeroship-gateway/src crates/zeroship-runtime/src" \
   "zeroship zeroship-worker zeroship-gate zeroship-control" \
   || { _zs_fresh_rc=$?; [ "$_zs_fresh_rc" -ne 0 ] && exit "$_zs_fresh_rc"; }
 

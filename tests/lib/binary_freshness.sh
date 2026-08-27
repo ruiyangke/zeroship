@@ -54,13 +54,35 @@ zs_check_binary_freshness() {
   ZS_FRESHNESS_STALE_COUNT=0
   ZS_FRESHNESS_STALE_NAMES=""
 
-  local existing=() d
+  local existing=() missing=() d
   for d in $srcdirs; do
-    [ -d "$root/$d" ] && existing+=("$root/$d")
+    if [ -d "$root/$d" ]; then existing+=("$root/$d"); else missing+=("$d"); fi
   done
   if [ "${#existing[@]}" -eq 0 ]; then
     echo "  FRESHNESS: none of the named source directories exist: $srcdirs" >&2
     echo "             The check cannot run, which is not the same as passing." >&2
+    return 2
+  fi
+  # A PARTIALLY missing list is the dangerous case, and until 2026-08-27 it was
+  # accepted silently: only the all-missing arm above refused, so a list whose
+  # paths had been renamed out from under it kept scanning whatever survived and
+  # printed exactly what a healthy run prints.
+  #
+  # That was live. The 2026-08-26 crate-directory rename (crates/plugin-db ->
+  # crates/zeroship-plugin-db, and seven siblings) left e2e_dev_vs_deployed_db.sh
+  # naming eight directories of which only TWO still existed. The guard whose
+  # whole job is "did you rebuild after touching plugin-db" had stopped looking
+  # at plugin-db, and reported fresh either way.
+  #
+  # Refusing rather than warning, because this function exists to make staleness
+  # loud, and a guard quietly covering a quarter of its subject IS the failure it
+  # was written to prevent.
+  if [ "${#missing[@]}" -gt 0 ]; then
+    local _total=$(( ${#existing[@]} + ${#missing[@]} ))
+    echo "  FRESHNESS: ${#missing[@]} of $_total named source directories do not exist:" >&2
+    printf '               %s\n' "${missing[@]}" >&2
+    echo "             Scanning only the survivors would report FRESH for a change" >&2
+    echo "             under any missing path. Fix the caller's list." >&2
     return 2
   fi
 
@@ -170,13 +192,35 @@ zs_check_artifact_freshness() {
   local root="$1" artifact="$2" srcdirs="$3"
   local strict="${ZS_FRESHNESS_STRICT:-0}"
 
-  local existing=() d
+  local existing=() missing=() d
   for d in $srcdirs; do
-    [ -d "$root/$d" ] && existing+=("$root/$d")
+    if [ -d "$root/$d" ]; then existing+=("$root/$d"); else missing+=("$d"); fi
   done
   if [ "${#existing[@]}" -eq 0 ]; then
     echo "  FRESHNESS: none of the named source directories exist: $srcdirs" >&2
     echo "             The check cannot run, which is not the same as passing." >&2
+    return 2
+  fi
+  # A PARTIALLY missing list is the dangerous case, and until 2026-08-27 it was
+  # accepted silently: only the all-missing arm above refused, so a list whose
+  # paths had been renamed out from under it kept scanning whatever survived and
+  # printed exactly what a healthy run prints.
+  #
+  # That was live. The 2026-08-26 crate-directory rename (crates/plugin-db ->
+  # crates/zeroship-plugin-db, and seven siblings) left e2e_dev_vs_deployed_db.sh
+  # naming eight directories of which only TWO still existed. The guard whose
+  # whole job is "did you rebuild after touching plugin-db" had stopped looking
+  # at plugin-db, and reported fresh either way.
+  #
+  # Refusing rather than warning, because this function exists to make staleness
+  # loud, and a guard quietly covering a quarter of its subject IS the failure it
+  # was written to prevent.
+  if [ "${#missing[@]}" -gt 0 ]; then
+    local _total=$(( ${#existing[@]} + ${#missing[@]} ))
+    echo "  FRESHNESS: ${#missing[@]} of $_total named source directories do not exist:" >&2
+    printf '               %s\n' "${missing[@]}" >&2
+    echo "             Scanning only the survivors would report FRESH for a change" >&2
+    echo "             under any missing path. Fix the caller's list." >&2
     return 2
   fi
 

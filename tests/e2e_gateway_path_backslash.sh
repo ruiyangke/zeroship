@@ -68,7 +68,7 @@ note() { echo "  ---- $1"; }
 # shellcheck source=tests/lib/binary_freshness.sh
 source "$ROOT/tests/lib/binary_freshness.sh"
 zs_check_binary_freshness "$ROOT" "$ROOT/target/release" \
-  "crates/gateway/src crates/worker/src crates/runtime/src crates/bundle/src crates/control/src" \
+  "crates/zeroship-gateway/src crates/zeroship-worker/src crates/zeroship-runtime/src crates/zeroship-bundle/src crates/zeroship-control/src" \
   "zeroship zeroship-worker zeroship-gate zeroship-control"
 FRESH_RC=$?
 if [ "$FRESH_RC" = "2" ]; then
