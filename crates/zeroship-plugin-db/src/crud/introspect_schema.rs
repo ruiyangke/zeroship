@@ -102,13 +102,53 @@ pub(crate) async fn runtime_schema_for(
         .map_err(DbError::from)?;
 
     let schema = build_runtime_schema(&live, collection);
-    // Cache the result under the deploy token so the collection is introspected
-    // at most once per deploy on this isolate (mirrors `is_model_registered`'s
-    // per-thread fast-path, keyed on the deploy version).
+    // Cache EVERY collection this read already covered, not just the requested
+    // one, under the SAME deploy token.
+    //
+    // `read_live_schema` has no table predicate: it selects every column of
+    // every table in the app's schema, joining `pg_attribute`/`pg_class`/
+    // `pg_namespace`, LEFT JOINing `pg_attrdef` and `pg_description`, with a
+    // correlated subquery per column. Caching one slice of that meant an app
+    // with N collections paid N whole-schema catalog reads on cold start to
+    // learn what a single read had already returned - quadratic work for
+    // linear information.
+    //
+    // Cold start is the cost that matters at platform scale: the long tail is
+    // rarely-hit apps, so a large share of requests are cold. It is also
+    // invisible to any benchmark that warms one app and then measures steady
+    // state, which is how this would be measured by default.
     crate::context::with_mut(|c| {
-        c.cache_introspected_schema(app_id, collection, &token, schema.clone());
+        cache_every_collection(c, app_id, &token, &live);
     });
     Ok(schema)
+}
+
+/// Populate the deploy-keyed cache for every collection present in one
+/// `LiveSchema` read.
+///
+/// Split out from the caller so it is unit-testable against a `LiveSchema`
+/// fixture: the property that matters ("one read populates all collections")
+/// needs no pool to assert, and asserting it by counting queries would need
+/// one.
+fn cache_every_collection(
+    ctx: &mut crate::context::IsolateDbContext,
+    app_id: &str,
+    token: &str,
+    live: &LiveSchema,
+) {
+    for table in live.tables.keys() {
+        // Internal platform tables are not creator collections. They would
+        // never be requested, and caching them would spend the per-app cache
+        // budget on entries nobody reads.
+        if table.starts_with("__zeroship") || table.starts_with("__zs_") {
+            continue;
+        }
+        let schema = build_runtime_schema(live, table);
+        // One read, one token: every entry from this `LiveSchema` is stamped
+        // with the same deploy token, so a redeploy landing mid-populate can
+        // never leave entries from two schema versions under one identity.
+        ctx.cache_introspected_schema(app_id, table, token, schema);
+    }
 }
 
 /// SQLite dev-tier fallback (the documented gap, design §9/§10): the shared
@@ -279,6 +319,99 @@ mod tests {
         assert_eq!(schema["flag"]["type"], "boolean");
         assert!(schema["title"].get("encrypted").is_none());
         assert!(schema["title"].get("mask").is_none());
+    }
+
+    fn live_with_tables(specs: Vec<(&str, Vec<(&str, ColumnInfo)>)>) -> LiveSchema {
+        let mut tables = HashMap::new();
+        for (name, cols) in specs {
+            let mut m = HashMap::new();
+            for (c, info) in cols {
+                m.insert(c.to_string(), info);
+            }
+            tables.insert(name.to_string(), m);
+        }
+        LiveSchema {
+            tables,
+            ..Default::default()
+        }
+    }
+
+    /// One live-schema read must populate the cache for EVERY collection it
+    /// covered, not only the one that triggered it.
+    ///
+    /// `read_live_schema` reads the whole app schema regardless of which
+    /// collection was asked for, so caching a single slice made an app with N
+    /// collections perform N whole-schema catalog reads on cold start to
+    /// obtain what one read already returned.
+    #[test]
+    fn one_read_populates_every_collection() {
+        let live = live_with_tables(vec![
+            ("notes", vec![("title", col("text"))]),
+            ("users", vec![("email", col("text"))]),
+            ("todos", vec![("done", col("boolean"))]),
+        ]);
+        let mut ctx = crate::context::IsolateDbContext::new();
+
+        cache_every_collection(&mut ctx, "app_1", "deploy_a", &live);
+
+        for coll in ["notes", "users", "todos"] {
+            assert!(
+                ctx.introspected_schema_for("app_1", coll, "deploy_a").is_some(),
+                "'{coll}' must be cached by the single read that covered it",
+            );
+        }
+    }
+
+    /// Internal platform tables are not creator collections: caching them
+    /// would spend the per-app cache budget on entries nothing ever requests.
+    #[test]
+    fn internal_tables_are_not_cached_as_collections() {
+        let live = live_with_tables(vec![
+            ("notes", vec![("title", col("text"))]),
+            ("__zeroship_audit_unmask", vec![("actor", col("text"))]),
+        ]);
+        let mut ctx = crate::context::IsolateDbContext::new();
+
+        cache_every_collection(&mut ctx, "app_1", "deploy_a", &live);
+
+        assert!(ctx.introspected_schema_for("app_1", "notes", "deploy_a").is_some());
+        assert!(
+            ctx.introspected_schema_for("app_1", "__zeroship_audit_unmask", "deploy_a")
+                .is_none(),
+            "internal tables must not occupy the per-app cache",
+        );
+    }
+
+    /// Every entry from one read carries the SAME deploy token, so a redeploy
+    /// landing mid-populate cannot leave two schema versions under one
+    /// identity. Asserted by reading them back under a DIFFERENT token, which
+    /// must miss uniformly rather than partially.
+    #[test]
+    fn one_read_stamps_one_token() {
+        let live = live_with_tables(vec![
+            ("notes", vec![("title", col("text"))]),
+            ("users", vec![("email", col("text"))]),
+        ]);
+        let mut ctx = crate::context::IsolateDbContext::new();
+
+        cache_every_collection(&mut ctx, "app_1", "deploy_a", &live);
+
+        for coll in ["notes", "users"] {
+            // The HIT half is not padding. An earlier version of this test
+            // asserted only the miss, which passes just as happily when
+            // nothing was cached at all - the deny-only shape. Mutation-testing
+            // it caught that: with the population reduced to one collection the
+            // miss-only assertion stayed green, so it was measuring the token
+            // rule while blind to whether anything had been stored.
+            assert!(
+                ctx.introspected_schema_for("app_1", coll, "deploy_a").is_some(),
+                "'{coll}' must be cached under the token it was stamped with",
+            );
+            assert!(
+                ctx.introspected_schema_for("app_1", coll, "deploy_b").is_none(),
+                "'{coll}' must miss under a different deploy token",
+            );
+        }
     }
 
     #[test]
