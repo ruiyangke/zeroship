@@ -712,10 +712,20 @@ impl Transport {
     }
 
     /// Send an out-of-band `CancelRequest` with the same transport policy as
-    /// this pool's sessions, then wait for the postmaster to consume it. The
-    /// connector has to be supplied at cancel time, which is why automatic
-    /// cancellation lives here rather than on `Client`.
+    /// this pool's sessions. This public form gives `connect_timeout` ownership
+    /// of the complete attempt, including the postmaster-close barrier.
     async fn cancel_query(&self, token: &CancelToken) -> Result<(), Error> {
+        #[cfg(feature = "tls")]
+        if let Some(tls) = &self.tls {
+            return token.cancel_query(tls.clone()).await;
+        }
+
+        token.cancel_query(NoTls).await
+    }
+
+    /// Pool command-timeout recovery supplies its own whole-recovery grace, so
+    /// keep the postmaster-close wait outside `connect_timeout` in this form.
+    async fn cancel_query_confirmed(&self, token: &CancelToken) -> Result<(), Error> {
         #[cfg(feature = "tls")]
         if let Some(tls) = &self.tls {
             return token.cancel_query_confirmed(tls.clone()).await;
@@ -801,6 +811,21 @@ pub struct Pool {
 }
 
 impl Pool {
+    /// Attempts to cancel the connection identified by a pool lease's token.
+    ///
+    /// The pool retains the TLS policy maker used for its connections, so this
+    /// is the public cancellation path for a token obtained from one of its
+    /// borrows. Success means PostgreSQL consumed and closed the dedicated
+    /// cancellation connection; an effective cancel is reported as SQLSTATE
+    /// `57014` on the original connection.
+    ///
+    /// The token's lease checks still govern the operation. A token from a
+    /// returned borrow is refused, and a cancel racing pool return retires the
+    /// physical session rather than risking the next borrower.
+    pub async fn cancel_query(&self, token: &CancelToken) -> Result<(), Error> {
+        self.transport.cancel_query(token).await
+    }
+
     /// Gracefully close this pool and wait for all borrowed clients to return.
     ///
     /// On its first poll, this method irreversibly marks the pool closed,
@@ -2617,7 +2642,7 @@ impl PooledClient<'_> {
             // cross-connection ordering barrier: write/flush alone would let a
             // delayed CancelRequest arrive after this backend's Sync and hit
             // the next command instead.
-            transport.cancel_query(&cancel_token).await?;
+            transport.cancel_query_confirmed(&cancel_token).await?;
             // A query future can return its ErrorResponse before the
             // connection task receives the trailing ReadyForQuery.
             // Sync is a FIFO proof that every response belonging to
