@@ -331,9 +331,10 @@ impl PoolConfig {
     /// idle connection left to fall back on, a rejected fresh connection would
     /// only be replaced by another fresh connection, until `acquire_timeout`.
     ///
-    /// `Ok(true)` accepts the connection. `Ok(false)` discards it and retries
-    /// with the next idle candidate. An error discards it and fails the
-    /// checkout.
+    /// `Ok(true)` votes to accept the connection; the pool then rechecks that
+    /// it is still inside its lifetime, open, read-healthy, and not owned by an
+    /// active COPY operation. `Ok(false)` discards it and retries with the next
+    /// idle candidate. An error discards it and fails the checkout.
     pub fn before_acquire<F>(&mut self, hook: F) -> &mut Self
     where
         F: for<'a> Fn(&'a Client) -> PoolHookFuture<'a, Result<bool, Error>> + 'static,
@@ -345,12 +346,14 @@ impl PoolConfig {
     /// Run a synchronous keep-or-discard predicate when a live connection is
     /// returned.
     ///
-    /// Returning `true` makes the connection available for another checkout;
-    /// returning `false` closes it and releases its capacity slot. The callback
-    /// is not invoked for a connection already known to be expired or closed,
-    /// or for a return during [`Pool::close`]: shutdown has already chosen to
-    /// discard that connection, so a reuse predicate has no decision to make.
-    /// On an open pool it runs before the raw-transaction rollback barrier.
+    /// Returning `true` votes to make the connection available for another
+    /// checkout; the pool rechecks its lifetime, liveness, and COPY ownership
+    /// after the callback. Returning `false` closes it and releases its
+    /// capacity slot. The callback is not invoked for a connection already
+    /// known to be expired or closed, or for a return during [`Pool::close`]:
+    /// shutdown has already chosen to discard that connection, so a reuse
+    /// predicate has no decision to make. On an open pool it runs before the
+    /// raw-transaction rollback barrier.
     pub fn after_release<F>(&mut self, hook: F) -> &mut Self
     where
         F: Fn(&Client) -> bool + 'static,
