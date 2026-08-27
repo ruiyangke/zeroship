@@ -526,7 +526,7 @@ where
         Ok(_) => {
             abort(&mut sender).await;
             return Err(ExecutionError::after_bind_complete(
-                Error::unexpected_message(),
+                drain_refusal(&mut responses, Error::unexpected_message()).await,
             ));
         }
         Err(e) => {
