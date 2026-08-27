@@ -735,21 +735,69 @@ mod tests {
         SQLITE_ROUTE.with(|c| c.get())
     }
 
-    /// Reset every piece of thread-local state the gate inspects:
-    ///   - broker subscriptions (`drop_app(None)`),
-    ///   - WAL suppression set (clear the legacy sentinel and any test
-    ///     keys we know we register below),
-    ///   - the per-test build counter.
-    fn reset_world() {
-        crate::broker::drop_app(None);
+    /// Reset the state one test owns, scoped to `app_id`:
+    ///   - that app's broker subscriptions,
+    ///   - that app's WAL suppression entry,
+    ///   - the per-test build counter and SQLite route (both thread-local).
+    ///
+    /// **Scoped on purpose.** This used to call `drop_app(None)` - dropping
+    /// EVERY app's subscriptions process-wide - and to decrement the
+    /// suppression refcount for a hardcoded list of keys belonging to other
+    /// tests. Its doc comment described all of that as "thread-local state",
+    /// but `broker`'s registry and `wal_consumer::SUPPRESSED_APPS` are
+    /// process-global statics, and cargo runs these tests on parallel threads.
+    /// So one test's cleanup silently tore down a concurrently-running test's
+    /// world: that is what made
+    /// `exec_mutation_with_emit_skips_build_when_app_suppressed` fail in 2 of 9
+    /// consecutive runs on unmodified code.
+    ///
+    /// Scoping also makes these tests able to SEE cross-app leakage rather than
+    /// hiding it - a global reset erases the evidence of exactly the bug the
+    /// suppression refcount exists to prevent.
+    fn reset_world(app_id: &str) {
+        crate::broker::drop_app(Some(app_id));
         context::with_mut(|c| c.clear_pool());
-        // Clear every suppression key any test in this module sets so
-        // ordering between tests on the same thread doesn't leak.
-        for key in ["app_suppressed", "app_no_subs", "app_active"] {
-            crate::wal_consumer::unsuppress_app(key);
-        }
+        crate::wal_consumer::unsuppress_app(app_id);
         reset_counter();
         reset_sqlite_route();
+    }
+
+    /// One test's cleanup must not tear down another's world.
+    ///
+    /// The broker registry and `wal_consumer::SUPPRESSED_APPS` are
+    /// process-global statics and cargo runs these tests on parallel threads,
+    /// so a cleanup with global blast radius corrupts whatever else is running.
+    /// `reset_world` used to call `drop_app(None)`, which is what this arm
+    /// pins: it stands in for a concurrent test that owns `theirs` and checks
+    /// that our cleanup leaves it intact. On the pre-fix helper the
+    /// subscription assertion fails.
+    #[test]
+    fn reset_world_leaves_other_apps_untouched() {
+        let mine = "app_reset_scope_mine";
+        let theirs = "app_reset_scope_theirs";
+
+        reset_world(mine);
+
+        // Stand in for a test running concurrently on another thread.
+        let their_sub = crate::broker::subscribe(theirs, "messages");
+        crate::wal_consumer::suppress_app(theirs);
+
+        // Our cleanup fires while they are mid-test.
+        reset_world(mine);
+
+        assert!(
+            crate::wal_consumer::is_app_suppressed(theirs),
+            "reset_world cleared another app's suppression",
+        );
+        assert!(
+            crate::broker::has_subscribers(theirs, "messages"),
+            "reset_world dropped another app's broker subscription",
+        );
+
+        crate::wal_consumer::unsuppress_app(theirs);
+        drop(their_sub);
+        reset_world(theirs);
+        reset_world(mine);
     }
 
     fn run<F: std::future::Future>(f: F) -> F::Output {
@@ -785,7 +833,7 @@ mod tests {
 
     #[test]
     fn exec_mutation_with_emit_skips_build_when_app_suppressed() {
-        reset_world();
+        reset_world("app_suppressed");
         // Register a subscriber so the only thing keeping us out of
         // the build is the suppression flag.
         let sub = crate::broker::subscribe("app_suppressed", "messages");
@@ -803,12 +851,12 @@ mod tests {
             sub.pop().is_none(),
             "no broker event must be queued when the WAL consumer is active",
         );
-        reset_world();
+        reset_world("app_suppressed");
     }
 
     #[test]
     fn exec_mutation_with_emit_skips_build_when_no_subscribers() {
-        reset_world();
+        reset_world("app_no_subs");
         // No subscribers, no suppression — the build should still
         // short-circuit because the broker would discard the event.
         let rows = vec![synthetic_row()];
@@ -827,7 +875,7 @@ mod tests {
             !crate::broker::has_subscribers("app_no_subs", "ghosts"),
             "sanity: precondition for the gate",
         );
-        reset_world();
+        reset_world("app_no_subs");
     }
 
     // -------------------------------------------------------------------
@@ -855,17 +903,17 @@ mod tests {
     /// event without any explicit drain.
     #[test]
     fn queue_or_emit_no_tx_emits_immediately() {
-        reset_world();
+        reset_world("app_active_queue_or_emit_no_tx_emits_immediately");
         // Defensive: make sure no tx is parked for this app from an
         // earlier test on the same OS thread.
-        context::with(|c| assert!(!c.has_tx_for("app_active"), "precondition: no tx"));
+        context::with(|c| assert!(!c.has_tx_for("app_active_queue_or_emit_no_tx_emits_immediately"), "precondition: no tx"));
 
-        let sub = crate::broker::subscribe("app_active", "messages");
+        let sub = crate::broker::subscribe("app_active_queue_or_emit_no_tx_emits_immediately", "messages");
 
         let mut tuple = HashMap::new();
         tuple.insert("id".to_string(), "9".to_string());
         queue_or_emit(
-            &ambient_route_for_tests("app_active"),
+            &ambient_route_for_tests("app_active_queue_or_emit_no_tx_emits_immediately"),
             "messages",
             ChangeOp::Insert,
             Some("9".to_string()),
@@ -880,7 +928,7 @@ mod tests {
             }
             other => panic!("expected immediate Change event, got {other:?}"),
         }
-        reset_world();
+        reset_world("app_active_queue_or_emit_no_tx_emits_immediately");
     }
 
     /// `drain_pending_emits_on_commit` must publish every event sitting
@@ -890,11 +938,11 @@ mod tests {
     /// here — the gate's role is verified by the integration suite.
     #[test]
     fn drain_pending_emits_on_commit_fires_every_queued_event() {
-        reset_world();
-        let sub = crate::broker::subscribe("app_active", "messages");
+        reset_world("app_active_drain_pending_emits_on_commit_fires_every_queued_event");
+        let sub = crate::broker::subscribe("app_active_drain_pending_emits_on_commit_fires_every_queued_event", "messages");
 
         let mk_event = |pk: i64| crate::broker::ChangeEvent {
-            app_id: "app_active".to_string(),
+            app_id: "app_active_drain_pending_emits_on_commit_fires_every_queued_event".to_string(),
             collection: "messages".to_string(),
             op: ChangeOp::Insert,
             pk: Some(pk.to_string()),
@@ -914,7 +962,7 @@ mod tests {
         // Sanity: nothing has been delivered before drain.
         assert!(sub.pop().is_none(), "drain must not have happened yet");
 
-        drain_pending_emits_on_commit("app_active");
+        drain_pending_emits_on_commit("app_active_drain_pending_emits_on_commit_fires_every_queued_event");
 
         let mut pks = Vec::new();
         while let Some(msg) = sub.pop() {
@@ -927,9 +975,9 @@ mod tests {
 
         // Drain a second time → nothing left (queue is consumed, not
         // copied).
-        drain_pending_emits_on_commit("app_active");
+        drain_pending_emits_on_commit("app_active_drain_pending_emits_on_commit_fires_every_queued_event");
         assert!(sub.pop().is_none(), "second drain must be a no-op");
-        reset_world();
+        reset_world("app_active_drain_pending_emits_on_commit_fires_every_queued_event");
     }
 
     /// `clear_pending_emits` must drop the queue WITHOUT publishing
@@ -937,11 +985,11 @@ mod tests {
     /// never observe aborted mutations.
     #[test]
     fn clear_pending_emits_drops_without_firing() {
-        reset_world();
-        let sub = crate::broker::subscribe("app_active", "messages");
+        reset_world("app_active_clear_pending_emits_drops_without_firing");
+        let sub = crate::broker::subscribe("app_active_clear_pending_emits_drops_without_firing", "messages");
 
         let ev = crate::broker::ChangeEvent {
-            app_id: "app_active".to_string(),
+            app_id: "app_active_clear_pending_emits_drops_without_firing".to_string(),
             collection: "messages".to_string(),
             op: ChangeOp::Insert,
             pk: Some("99".to_string()),
@@ -951,25 +999,25 @@ mod tests {
         };
         context::with_mut(|c| c.push_pending_emit(ev));
 
-        clear_pending_emits("app_active");
+        clear_pending_emits("app_active_clear_pending_emits_drops_without_firing");
 
         assert!(
             sub.pop().is_none(),
             "ROLLBACK path must drop queued events silently",
         );
         // After clear, drain must also be a no-op (queue is empty).
-        drain_pending_emits_on_commit("app_active");
+        drain_pending_emits_on_commit("app_active_clear_pending_emits_drops_without_firing");
         assert!(sub.pop().is_none(), "post-clear drain must publish nothing");
-        reset_world();
+        reset_world("app_active_clear_pending_emits_drops_without_firing");
     }
 
     #[test]
     fn exec_mutation_with_emit_builds_when_active_subscriber() {
-        reset_world();
-        let sub = crate::broker::subscribe("app_active", "messages");
+        reset_world("app_active_exec_mutation_with_emit_builds_when_active_subscriber");
+        let sub = crate::broker::subscribe("app_active_exec_mutation_with_emit_builds_when_active_subscriber", "messages");
 
         let rows = vec![synthetic_row()];
-        emit_for_rows(&rows, &ambient_route_for_tests("app_active"), "messages", ChangeOp::Insert);
+        emit_for_rows(&rows, &ambient_route_for_tests("app_active_exec_mutation_with_emit_builds_when_active_subscriber"), "messages", ChangeOp::Insert);
 
         assert_eq!(
             tuple_built_count(),
@@ -980,7 +1028,7 @@ mod tests {
         // subscriber's queue holds the change.
         match sub.pop() {
             Some(crate::broker::SubscriptionMessage::Change(ev)) => {
-                assert_eq!(ev.app_id, "app_active");
+                assert_eq!(ev.app_id, "app_active_exec_mutation_with_emit_builds_when_active_subscriber");
                 assert_eq!(ev.collection, "messages");
                 assert_eq!(ev.op, ChangeOp::Insert);
                 assert_eq!(ev.pk.as_deref(), Some("7"));
@@ -999,22 +1047,22 @@ mod tests {
             }
             other => panic!("expected Change variant, got {other:?}"),
         }
-        reset_world();
+        reset_world("app_active_exec_mutation_with_emit_builds_when_active_subscriber");
     }
 
     #[test]
     fn exec_mutation_with_emit_skips_local_emit_when_sqlite_cdc_publishes() {
-        reset_world();
+        reset_world("app_active_exec_mutation_with_emit_skips_local_emit_when_sqlite_cdc_publishes");
         run(async {
             let dir = tempfile::tempdir().expect("tempdir");
             let backend = Rc::new(
                 SqliteBackend::new(PathBuf::from(dir.path())).expect("open sqlite backend"),
             );
             context::with_mut(|c| c.set_sqlite_backend(Rc::clone(&backend)));
-            let sub = crate::broker::subscribe("app_active", "messages");
+            let sub = crate::broker::subscribe("app_active_exec_mutation_with_emit_skips_local_emit_when_sqlite_cdc_publishes", "messages");
 
             let rows = vec![synthetic_row()];
-            emit_for_rows(&rows, &ambient_route_for_tests("app_active"), "messages", ChangeOp::Insert);
+            emit_for_rows(&rows, &ambient_route_for_tests("app_active_exec_mutation_with_emit_skips_local_emit_when_sqlite_cdc_publishes"), "messages", ChangeOp::Insert);
 
             assert_eq!(
                 tuple_built_count(),
@@ -1026,16 +1074,16 @@ mod tests {
                 "SQLite SDK-local emit must not publish a duplicate broker event"
             );
         });
-        reset_world();
+        reset_world("app_active_exec_mutation_with_emit_skips_local_emit_when_sqlite_cdc_publishes");
     }
 
     #[test]
     fn exec_mutation_with_emit_uses_logical_typed_id_for_pk() {
-        reset_world();
-        let sub = crate::broker::subscribe("app_active", "messages");
+        reset_world("app_active_exec_mutation_with_emit_uses_logical_typed_id_for_pk");
+        let sub = crate::broker::subscribe("app_active_exec_mutation_with_emit_uses_logical_typed_id_for_pk", "messages");
 
         let rows = vec![synthetic_typed_id_row()];
-        emit_for_rows(&rows, &ambient_route_for_tests("app_active"), "messages", ChangeOp::Insert);
+        emit_for_rows(&rows, &ambient_route_for_tests("app_active_exec_mutation_with_emit_uses_logical_typed_id_for_pk"), "messages", ChangeOp::Insert);
 
         match sub.pop() {
             Some(crate::broker::SubscriptionMessage::Change(ev)) => {
@@ -1047,12 +1095,12 @@ mod tests {
             }
             other => panic!("expected Change variant, got {other:?}"),
         }
-        reset_world();
+        reset_world("app_active_exec_mutation_with_emit_uses_logical_typed_id_for_pk");
     }
 
     #[test]
     fn sqlite_exec_helpers_use_tx_connection_when_present() {
-        reset_world();
+        reset_world("app_exec");
         run(async {
             let dir = tempfile::tempdir().expect("tempdir");
             let backend = Rc::new(
@@ -1147,7 +1195,7 @@ mod tests {
             }
             context::with_mut(|c| c.clear_pool());
         });
-        reset_world();
+        reset_world("app_exec");
     }
 
     // -------------------------------------------------------------------
@@ -1162,7 +1210,7 @@ mod tests {
     #[test]
     fn metering_db_exec_emits_reads_writes_rows_and_skips_failures() {
         use std::sync::Arc;
-        reset_world();
+        reset_world("app_metering_db_exec_emits_reads_writes_rows_and_skips_failures");
         run(async {
             let app_id = "00000000-0000-7000-8000-0000000000e5";
             let dir = tempfile::tempdir().expect("tempdir");
@@ -1252,7 +1300,7 @@ mod tests {
                 c.clear_pool();
             });
         });
-        reset_world();
+        reset_world("app_metering_db_exec_emits_reads_writes_rows_and_skips_failures");
     }
 
     fn usage_value(
@@ -1280,7 +1328,8 @@ mod tests {
 
     #[test]
     fn sec1_app_b_query_must_not_route_through_app_a_parked_tx() {
-        reset_world();
+        reset_world("app_a");
+        reset_world("app_b");
         run(async {
             let dir = tempfile::tempdir().expect("tempdir");
             let backend = Rc::new(
@@ -1341,12 +1390,13 @@ mod tests {
             }
             context::with_mut(|c| c.clear_pool());
         });
-        reset_world();
+        reset_world("app_a");
+        reset_world("app_b");
     }
 
     #[test]
     fn dropping_in_flight_sqlite_query_restores_tx_slot() {
-        reset_world();
+        reset_world("app_exec_cancel");
         run(async {
             use crate::backend::sqlite::session::arm_next_command_gate_for_tests;
             use std::time::Duration;
@@ -1433,7 +1483,7 @@ mod tests {
             }
             context::with_mut(|c| c.clear_pool());
         });
-        reset_world();
+        reset_world("app_exec_cancel");
     }
 
     // -------------------------------------------------------------------
@@ -1473,7 +1523,7 @@ mod tests {
         use compio_postgres::{NoTls, Pool};
         use std::time::Duration;
 
-        reset_world();
+        reset_world("app_autocommit_cancelled_query_does_not_leak_role_or_timeout_to_pool");
         run(async {
             let url = pg_test_url();
             match compio_postgres::connect(&url, NoTls).await {
@@ -1591,6 +1641,6 @@ mod tests {
                 .simple_query(&format!("DROP ROLE IF EXISTS {role_ident}"))
                 .await;
         });
-        reset_world();
+        reset_world("app_autocommit_cancelled_query_does_not_leak_role_or_timeout_to_pool");
     }
 }
