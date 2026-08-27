@@ -130,6 +130,11 @@ pub fn init_cache(max_size: usize, max_pinned_isolates_per_app: usize, kernel: K
     CONTROL_URL.with(|u| *u.borrow_mut() = Some(kernel.control_url));
     CONTROL_KEY.with(|k| *k.borrow_mut() = Some(kernel.control_key));
     METER.with(|m| *m.borrow_mut() = Some(kernel.meter));
+    // Every input `plugin_set` builds from was just replaced, so any cached
+    // prototype set is now stale. Clearing here rather than trusting
+    // "init_cache runs once" keeps the cache correct under repeated
+    // installation instead of correct-by-convention.
+    PLUGIN_SET.with(|p| *p.borrow_mut() = None);
 }
 
 pub fn db_url() -> Option<String> {
@@ -162,6 +167,40 @@ pub fn db_url() -> Option<String> {
 ///   (S3/R2/MinIO) is the prod backend behind the same `Backend` trait and is
 ///   inherently shared across nodes. An object written on node A is readable
 ///   on node B in both cases.
+thread_local! {
+    /// The thread's plugin prototype set, minted once and cloned thereafter.
+    ///
+    /// SC-5 of the runtime-db-binding design requires `build_runtime` to
+    /// perform no backend selection and clone an `Arc` rather than minting a
+    /// plugin set, so that current and deploy-pinned isolates on one OS thread
+    /// share one backend and one cache instead of each resolving their own.
+    /// This is the first, behaviour-neutral half of that: the plugins are the
+    /// same values, constructed once.
+    ///
+    /// Cleared by [`init_cache`], which is the single writer of every
+    /// thread-local this set is built from. Without that invalidation a second
+    /// `init_cache` on the same thread - which tests do - would keep serving
+    /// plugins built from the previous configuration, and the staleness would
+    /// be invisible because the plugins would still work, just against the
+    /// wrong backend.
+    static PLUGIN_SET: RefCell<Option<Vec<Arc<dyn NativePlugin>>>> =
+        const { RefCell::new(None) };
+}
+
+/// The thread's plugin set, minting it on first use.
+///
+/// Returns clones of the same `Arc`s on every call, so two runtimes built on
+/// one thread share plugin instances rather than each holding their own.
+fn plugin_set() -> Vec<Arc<dyn NativePlugin>> {
+    PLUGIN_SET.with(|p| {
+        let mut slot = p.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(create_plugins());
+        }
+        slot.as_ref().expect("just populated").clone()
+    })
+}
+
 fn create_plugins() -> Vec<Arc<dyn NativePlugin>> {
     let mut plugins: Vec<Arc<dyn NativePlugin>> = Vec::new();
     // The process-wide meter, if configured. Metering is infrastructure:
@@ -384,7 +423,7 @@ fn build_runtime(
         source: source.to_string(),
     }];
 
-    let plugins = create_plugins();
+    let plugins = plugin_set();
     let meter = METER.with(|m| m.borrow().clone());
     let app_id_string = app_id.to_string();
     let mut env_vars = HashMap::new();
@@ -891,6 +930,65 @@ mod tests {
             "worker create_plugins() must include the auth namespace; got: {:?}",
             plugins.iter().map(|p| p.namespace()).collect::<Vec<_>>()
         );
+    }
+
+    /// SC-5: two runtimes built on one OS thread must SHARE plugin
+    /// instances, not each mint their own.
+    ///
+    /// `build_runtime` used to call `create_plugins()` on every build, so a
+    /// current isolate and a deploy-pinned isolate on the same thread each
+    /// constructed their own `DbPlugin` - and would each resolve their own
+    /// backend and their own caches once the service lands. The design's arm
+    /// is that `build_runtime` performs no backend selection and clones an
+    /// `Arc` instead; this asserts the sharing half of it by pointer identity,
+    /// which is the only thing that distinguishes one instance from two
+    /// structurally identical ones.
+    ///
+    /// The second half - that `init_cache` INVALIDATES the set - is the part a
+    /// naive "cache forever" implementation fails. Every input the prototype
+    /// is built from is written by `init_cache`, so a set retained across a
+    /// re-install would keep serving plugins bound to the previous
+    /// configuration. That failure is invisible: the plugins still work, just
+    /// against the wrong backend.
+    #[test]
+    fn plugin_set_is_shared_per_thread_and_invalidated_by_init_cache() {
+        std::thread::spawn(|| {
+            let kernel = || KernelConfig {
+                control_url: "http://127.0.0.1:1".to_string(),
+                control_key: "test-control-key".to_string(),
+                db_url: Some("postgres://localhost/zs_unused".to_string()),
+                cdc_worker_id: "share-test-worker".to_string(),
+                kv_url: None,
+                storage_backend: None,
+                meter: Arc::new(zeroship_metering::Meter::new()),
+            };
+
+            init_cache(4, 4, kernel());
+            let a = plugin_set();
+            let b = plugin_set();
+            assert_eq!(a.len(), b.len(), "the set must be stable across calls");
+            assert!(!a.is_empty(), "the kernel must register some namespaces");
+            for (x, y) in a.iter().zip(b.iter()) {
+                assert!(
+                    Arc::ptr_eq(x, y),
+                    "two calls on one thread must return the SAME plugin instances, \
+                     not equal ones: '{}' differs",
+                    x.namespace()
+                );
+            }
+
+            // Re-installing the kernel must drop the cached prototypes.
+            init_cache(4, 4, kernel());
+            let c = plugin_set();
+            assert_eq!(c.len(), a.len());
+            assert!(
+                a.iter().zip(c.iter()).all(|(x, y)| !Arc::ptr_eq(x, y)),
+                "init_cache must invalidate the cached plugin set; a set retained \
+                 across re-install is bound to the previous configuration"
+            );
+        })
+        .join()
+        .expect("plugin-sharing guard thread panicked");
     }
 
     /// Phase-2 structural guard (no external services): when the kernel
