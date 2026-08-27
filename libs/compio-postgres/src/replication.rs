@@ -1144,7 +1144,18 @@ where
                                 body[9], body[10], body[11], body[12], body[13], body[14],
                                 body[15], body[16],
                             ]);
-                            let reply_requested = body[17] != 0;
+                            let reply_requested = match body[17] {
+                                0 => false,
+                                1 => true,
+                                other => {
+                                    return Err(Error::io(std::io::Error::new(
+                                        std::io::ErrorKind::InvalidData,
+                                        format!(
+                                            "PrimaryKeepalive reply_requested is 0x{other:02x}; expected 0 or 1"
+                                        ),
+                                    )));
+                                }
+                            };
                             self.lsn.observe_received(wal_end);
                             if reply_requested {
                                 if let Err(error) =
@@ -4462,6 +4473,40 @@ mod tests {
                 && chain.contains("exactly 18 bytes")
                 && chain.contains("19"),
             "the malformed keepalive was not refused by name and size: {chain}"
+        );
+    }
+
+    /// The keepalive's last byte is specified as 0 or 1. Treating every
+    /// nonzero value as true is conservative about replying, but it also
+    /// accepts a peer value no protocol version defines.
+    #[compio::test]
+    async fn primary_keepalive_rejects_an_invalid_reply_flag_by_name() {
+        let mut body = vec![PRIMARY_KEEPALIVE_TAG];
+        body.extend_from_slice(&0x16B_4000u64.to_be_bytes());
+        body.extend_from_slice(&700_000_000_000i64.to_be_bytes());
+        body.push(2);
+
+        let mut wire = vec![COPY_DATA_TAG];
+        wire.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_be_bytes());
+        wire.extend_from_slice(&body);
+
+        let mut stream = stream_over(wire);
+        let error = stream
+            .next()
+            .await
+            .expect_err("PrimaryKeepalive reply_requested=2 was accepted");
+        let chain = std::iter::successors(std::error::Error::source(&error), |source| {
+            std::error::Error::source(*source)
+        })
+        .fold(error.to_string(), |chain, source| {
+            format!("{chain}: {source}")
+        });
+        assert!(
+            chain.contains("PrimaryKeepalive")
+                && chain.contains("reply_requested")
+                && chain.contains("0x02")
+                && chain.contains("0 or 1"),
+            "the malformed flag was not refused by name and value: {chain}"
         );
     }
 
