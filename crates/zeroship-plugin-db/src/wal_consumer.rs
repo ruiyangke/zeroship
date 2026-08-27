@@ -746,7 +746,7 @@ fn is_fatal(err: &ConsumerError) -> bool {
             // SQLSTATE 58P01 (undefined_object) — slot/pub dropped.
             // Postgres surfaces this from START_REPLICATION when the
             // slot was deleted (manual operator action, or the
-            // replication watchdog's drop_abandoned_slots reaper).
+            // operator's abandoned-slot reaper).
             // We bail so the next supervisor iteration doesn't keep
             // hammering a slot that the watchdog hasn't yet
             // reprovisioned.

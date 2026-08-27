@@ -202,6 +202,9 @@ pub(crate) mod replication;
 #[cfg(feature = "test-helpers")]
 pub mod replication;
 
+/// Operator-owned cleanup for abandoned worker replication slots.
+pub mod slot_reaper;
+
 #[cfg(not(feature = "test-helpers"))]
 pub(crate) mod replication_ops;
 #[cfg(feature = "test-helpers")]

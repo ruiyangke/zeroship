@@ -156,8 +156,8 @@ impl DbPlatform {
     }
 
     /// `__platform.replication` — the [`super::replication::Replication`]
-    /// namespace (`setup` / `watchdog` / `dropAbandoned`) scoped to this
-    /// app. Cached on first access. Moved off `Db`.
+    /// namespace (`watchdog`) scoped to this app. Cached on first access.
+    /// Moved off `Db`.
     #[v8_getter]
     fn replication<'s>(
         &self,
