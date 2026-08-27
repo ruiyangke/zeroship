@@ -443,6 +443,59 @@ mod tests {
         }
     }
 
+    /// MEASUREMENT - run with `--nocapture`.
+    ///
+    /// The serialized figure above is a floor; the cache stores a live
+    /// `serde_json::Value`. This reports the STRUCTURAL heap cost so the
+    /// multiplier is a measured quantity rather than the phrase "several
+    /// times".
+    ///
+    /// Counts what the type system fixes: the `Value` enum's own size, the
+    /// per-entry cost of the map that backs an object, and the `String` header
+    /// for every key. It does NOT include allocator rounding or fragmentation,
+    /// so like the serialized figure it is a floor - but a much tighter one.
+    #[test]
+    fn measure_value_memory_overhead() {
+        use std::mem::size_of;
+        let value_sz = size_of::<serde_json::Value>();
+        let string_sz = size_of::<String>();
+
+        for (label, ncols) in [("narrow", 8usize), ("typical", 16), ("wide", 40)] {
+            let owned: Vec<(String, ColumnInfo)> = (0..ncols)
+                .map(|i| (format!("column_name_{i}"), col("text")))
+                .collect();
+            let refs: Vec<(&str, ColumnInfo)> =
+                owned.iter().map(|(n, c)| (n.as_str(), c.clone())).collect();
+            let live = live_with("collection_name", refs);
+            let schema = build_runtime_schema(&live, "collection_name").expect("table exists");
+
+            let json = serde_json::to_string(&schema).unwrap();
+            // Outer object: one entry per column. Each entry is a String key
+            // plus a Value (itself an object holding `type`, and possibly
+            // `encrypted`/`mask`).
+            let obj = schema.as_object().expect("object");
+            let mut structural = 0usize;
+            for (k, v) in obj {
+                structural += string_sz + k.len() + value_sz;
+                if let Some(inner) = v.as_object() {
+                    for (ik, iv) in inner {
+                        structural += string_sz + ik.len() + value_sz;
+                        if let Some(s) = iv.as_str() {
+                            structural += string_sz + s.len();
+                        }
+                    }
+                }
+            }
+            println!(
+                "MEASURED {label}: {ncols} cols -> serialized {} B, structural {} B, ratio {:.1}x",
+                json.len(),
+                structural,
+                structural as f64 / json.len() as f64,
+            );
+        }
+        println!("MEASURED sizeof(serde_json::Value) = {value_sz} B, sizeof(String) = {string_sz} B");
+    }
+
     #[test]
     fn missing_collection_is_none() {
         let live = live_with("notes", vec![("title", col("text"))]);
