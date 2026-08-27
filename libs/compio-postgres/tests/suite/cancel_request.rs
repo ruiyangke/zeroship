@@ -400,6 +400,46 @@ async fn running_query_cancel_returns_57014_and_preserves_session() {
     assert_client_still_works(&client).await;
 }
 
+#[cfg(feature = "suite-over-tls")]
+#[compio::test]
+async fn a_pool_can_cancel_tls_with_its_private_policy_lineage() {
+    const MARKER: &str = "cpg_cancel_pool_tls_policy";
+    const QUERY: &str = "SELECT pg_sleep(1) /* cpg_cancel_pool_tls_policy */";
+
+    let url = test_url();
+    let pool = Pool::connect(&url, 1)
+        .await
+        .expect("connect one-slot TLS pool");
+    let client = pool.get().await.expect("borrow TLS pool connection");
+    let observer = connect(&url).await.expect("connect cancellation observer");
+    let pid = client.process_id();
+    let token = client.cancel_token();
+
+    let encrypted: bool = observer
+        .query_one_scalar("SELECT ssl FROM pg_stat_ssl WHERE pid = $1", &[&pid])
+        .await
+        .expect("inspect the pooled connection's TLS transport");
+    assert!(
+        encrypted,
+        "the pool cancellation test did not establish TLS"
+    );
+
+    let cancel = async {
+        wait_until_pg_sleep_is_running(&observer, pid, MARKER).await;
+        pool.cancel_query(&token).await
+    };
+    let (query_result, cancel_result) = compio::time::timeout(
+        OPERATION_TIMEOUT,
+        futures_util::future::join(client.batch_execute(QUERY), cancel),
+    )
+    .await
+    .expect("pool-owned TLS cancellation did not finish before the test deadline");
+
+    cancel_result.expect("the pool could not use its private TLS policy lineage");
+    assert_query_canceled(query_result);
+    assert_client_still_works(&client).await;
+}
+
 #[compio::test]
 async fn cancel_twice_with_nothing_running_is_harmless() {
     let url = plaintext_url();

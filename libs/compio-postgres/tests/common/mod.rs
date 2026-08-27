@@ -281,11 +281,16 @@ pub fn suite_tls() -> compio_postgres::NoTls {
 
 #[cfg(feature = "suite-over-tls")]
 pub fn suite_tls() -> compio_postgres::MakeRustlsConnect {
-    let config: compio_postgres::Config = test_url()
-        .parse()
-        .expect("the suite-over-tls DSN did not parse");
-    compio_postgres::MakeRustlsConnect::from_config(&config)
-        .expect("could not build the suite TLS connector")
+    static TLS: std::sync::OnceLock<compio_postgres::MakeRustlsConnect> =
+        std::sync::OnceLock::new();
+    TLS.get_or_init(|| {
+        let config: compio_postgres::Config = test_url()
+            .parse()
+            .expect("the suite-over-tls DSN did not parse");
+        compio_postgres::MakeRustlsConnect::from_config(&config)
+            .expect("could not build the suite TLS connector")
+    })
+    .clone()
 }
 
 #[cfg(feature = "suite-over-tls")]
