@@ -4422,9 +4422,10 @@ impl MigrationIr {
 /// A constrained scalar in the IR's typed-bind / row domain.
 ///
 /// The numeric domain is the security-relevant part: on DESERIALIZE this type
-/// REJECTS a fractional / exponential JSON number and any integer with magnitude
-/// >= 2^53, so a malicious IR envelope cannot smuggle a lossy float through the
-/// loader. Exact integers `|v| < 2^53` become [`IrScalar::Int`]; arbitrary-
+/// REJECTS a fractional / exponential JSON number and any integer whose
+/// magnitude is `>= 2^53`, so a malicious IR envelope cannot smuggle a lossy
+/// float through the loader. Exact integers `|v| < 2^53` become
+/// [`IrScalar::Int`]; arbitrary-
 /// precision decimal numbers must be sent as `{ "decimal": "..." }` strings.
 /// Exact signed 64-bit integers outside the JavaScript safe-integer range use
 /// the distinct `{ "int64": "..." }` carrier.

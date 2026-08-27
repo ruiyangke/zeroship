@@ -257,14 +257,15 @@ fn seg_from_normalized(seg: &NormalizedSegment) -> Option<SegGlob> {
 ///
 /// # It is ONE fold, and it is the CHARTER's, not a target's
 ///
-/// The fold this applies - an unquoted segment lowercases, a quoted one is verbatim
-/// - is spelled the way PostgreSQL spells identifier resolution, and naming it after
-/// that target would do real harm: this function is not a target's, it is the
-/// CHARTER's, and both sides of every scope
-/// comparison go through it precisely so a charter written for one project matches
-/// the same objects on every target it is deployed against. A target-shaped name on a
-/// charter-shaped fold invites a second one "for the other dialects", and a second
-/// fold is how a scope of `app.users` stops covering a table spelled `Users`.
+/// The fold this applies - an unquoted segment lowercases, a quoted one is
+/// verbatim - is spelled the way PostgreSQL spells identifier resolution, and
+/// naming it after that target would do real harm: this function is not a
+/// target's, it is the CHARTER's, and both sides of every scope comparison go
+/// through it precisely so a charter written for one project matches the same
+/// objects on every target it is deployed against. A target-shaped name on a
+/// charter-shaped fold invites a second one "for the other dialects", and a
+/// second fold is how a scope of `app.users` stops covering a table spelled
+/// `Users`.
 ///
 /// The same reclassification `zeroship_migrate_backend::constraint_definition`'s
 /// `quote_ident_if_needed` already carries: a deliberate canonical normal form keeps
