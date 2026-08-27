@@ -510,7 +510,16 @@ where
             config.get_statement_cache_execution_threshold(),
         ),
     );
-    client.set_cancel_encryption(negotiated);
+    client.set_cancel_tls_policy(
+        negotiated,
+        config.get_ssl_sni(),
+        config.get_ssl_cert_mode(),
+        if negotiated == Encryption::Plaintext {
+            ServerVerification::None
+        } else {
+            ServerVerification::demanded_by(config.get_ssl_mode(), config.get_ssl_root_cert())?
+        },
+    );
     let connection = Connection::new(
         handshake.stream,
         handshake.delayed,
