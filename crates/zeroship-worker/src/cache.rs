@@ -55,8 +55,20 @@ impl Hash for PinnedWorkflowKey {
 
 thread_local! {
     static CACHE: RefCell<Option<AppCache>> = const { RefCell::new(None) };
-    static DB_URL: RefCell<Option<String>> = const { RefCell::new(None) };
-    static CDC_WORKER_ID: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// This thread's handle to the PROCESS-WIDE `env.db` service.
+    ///
+    /// Not a URL and not a plugin: the service is constructed ONCE in `main`,
+    /// before ntex spawns any worker thread and therefore before any isolate
+    /// exists, and each thread is handed the same `Arc` through
+    /// [`KernelConfig`]. `create_plugins` clones the service's plugin prototype
+    /// rather than minting one, so every runtime in the process shares one
+    /// plugin object, one validated configuration and one live-metadata cache.
+    ///
+    /// This slot used to be `DB_URL: Option<String>` plus
+    /// `CDC_WORKER_ID: Option<String>`, and `create_plugins` built a fresh
+    /// `DbPlugin` from them - per thread, and before that per `build_runtime`.
+    static DB_SERVICE: RefCell<Option<Arc<zeroship_plugin_db::service::DbService>>> =
+        const { RefCell::new(None) };
     /// Redis connection URL for the multi-node KV backend. Held per-thread
     /// like `DB_URL`. When `Some`, `create_plugins` mints a `KvPlugin`
     /// backed by `Redis` (shared across every worker node — see the
@@ -97,8 +109,10 @@ thread_local! {
 pub struct KernelConfig {
     pub control_url: String,
     pub control_key: String,
-    pub db_url: Option<String>,
-    pub cdc_worker_id: String,
+    /// The ONE process-wide `env.db` service, built in `main` before any
+    /// worker thread exists. `None` when no database is configured, in which
+    /// case the `db` namespace is simply absent.
+    pub db_service: Option<Arc<zeroship_plugin_db::service::DbService>>,
     pub kv_url: Option<String>,
     pub storage_backend: Option<StorageBackendConfig>,
     /// The process-wide usage meter shared with the per-process outbox task
@@ -117,10 +131,7 @@ pub fn init_cache(max_size: usize, max_pinned_isolates_per_app: usize, kernel: K
             max_pinned_isolates_per_app,
         });
     });
-    if let Some(url) = kernel.db_url {
-        DB_URL.with(|u| *u.borrow_mut() = Some(url));
-    }
-    CDC_WORKER_ID.with(|id| *id.borrow_mut() = Some(kernel.cdc_worker_id));
+    DB_SERVICE.with(|s| *s.borrow_mut() = kernel.db_service);
     if let Some(url) = kernel.kv_url {
         KV_URL.with(|u| *u.borrow_mut() = Some(url));
     }
@@ -137,8 +148,34 @@ pub fn init_cache(max_size: usize, max_pinned_isolates_per_app: usize, kernel: K
     PLUGIN_SET.with(|p| *p.borrow_mut() = None);
 }
 
+/// This thread's handle to the process-wide `env.db` service, if one is
+/// configured.
+pub fn db_service() -> Option<Arc<zeroship_plugin_db::service::DbService>> {
+    DB_SERVICE.with(|s| s.borrow().clone())
+}
+
+/// Compose a `DbService` the way `main` does, for tests that need a kernel with
+/// the `db` namespace present.
+///
+/// Tests build one per fixture rather than sharing a process-wide instance,
+/// which is faithful: `main` builds exactly one, and a test that wants to prove
+/// the prototype is shared must build ONE service and hand it to both threads -
+/// not two services and hope.
+#[cfg(test)]
+pub(crate) fn test_db_service(
+    url: &str,
+    worker_id: &str,
+) -> Arc<zeroship_plugin_db::service::DbService> {
+    zeroship_plugin_db::service::DbService::new(zeroship_plugin_db::service::DbServiceConfig {
+        url: url.to_string(),
+        worker_id: worker_id.to_string(),
+        meter: None,
+    })
+    .expect("test db service")
+}
+
 pub fn db_url() -> Option<String> {
-    DB_URL.with(|u| u.borrow().clone())
+    DB_SERVICE.with(|s| s.borrow().as_ref().map(|service| service.url().to_string()))
 }
 
 /// Create plugins for a new Runtime — the kernel every deployed app boots
@@ -210,17 +247,12 @@ fn create_plugins() -> Vec<Arc<dyn NativePlugin>> {
     // time via the runtime's server-injected APP_ID). The five platform
     // counters keep flowing through `record_request` (below, unchanged).
     let meter = METER.with(|m| m.borrow().clone());
-    if let Some(url) = DB_URL.with(|u| u.borrow().clone()) {
-        let worker_id = CDC_WORKER_ID.with(|id| {
-            id.borrow()
-                .clone()
-                .expect("CDC worker id must be installed with the kernel")
-        });
-        plugins.push(Arc::new(zeroship_plugin_db::DbPlugin::new(
-            url,
-            meter.clone(),
-            worker_id,
-        )));
+    // CLONE the prototype the process-wide service owns. No backend selection,
+    // no URL parse, no `DbPlugin` construction: all three happened once, in
+    // `main`, before this thread existed. Two worker threads therefore push the
+    // SAME plugin object rather than two equal ones.
+    if let Some(service) = DB_SERVICE.with(|s| s.borrow().clone()) {
+        plugins.push(service.plugin());
     }
     if let Some(url) = KV_URL.with(|u| u.borrow().clone()) {
         plugins.push(Arc::new(zeroship_plugin_kv::KvPlugin::with_backend_and_meter(
@@ -932,6 +964,150 @@ mod tests {
         );
     }
 
+    /// SC-5's arm: building a runtime's plugin set performs NO backend
+    /// selection and opens NO pool.
+    ///
+    /// **Two thirds of this arm already passed before SC-5's work began, and
+    /// recording that is the point of writing it down rather than citing it.**
+    /// `create_plugins` never parsed a URL and never opened a pool: the pool
+    /// has always been created lazily on the first `env.db` call, in plugin-db's
+    /// thread context, and `DbPlugin` has never carried one. So this arm cannot
+    /// discriminate the service work and must not be offered as evidence for
+    /// it. It is kept because it is a real guard against a plausible future
+    /// mistake - eagerly connecting at plugin construction, which is exactly
+    /// what "the service owns the configuration" invites - and because SC-5
+    /// lists it.
+    ///
+    /// The third of the arm that DOES discriminate is "it clones an `Arc` from
+    /// the service", and that is
+    /// [`db_plugin_prototype_is_one_object_across_worker_threads`] below, which
+    /// fails on the pre-change code with two different addresses.
+    ///
+    /// Both instruments are counters. "Opened no pool" is a claim about a call
+    /// that must not happen; a passing build proves nothing about it, and
+    /// inferring it from an unreachable fixture DSN measures the fixture.
+    #[test]
+    fn building_the_plugin_set_selects_no_backend_and_opens_no_pool() {
+        use zeroship_plugin_db::service::{backend_open_count, url_parse_count};
+
+        std::thread::spawn(|| {
+            // Composition happens first and is allowed exactly one parse; the
+            // arm measures everything AFTER it.
+            let service = test_db_service("postgres://localhost/zs_unused_build", "build-worker");
+            let parses = url_parse_count();
+            let opens = backend_open_count();
+
+            init_cache(
+                4,
+                4,
+                KernelConfig {
+                    control_url: "http://127.0.0.1:1".to_string(),
+                    control_key: "test-control-key".to_string(),
+                    db_service: Some(service),
+                    kv_url: None,
+                    storage_backend: None,
+                    meter: Arc::new(zeroship_metering::Meter::new()),
+                },
+            );
+            let plugins = plugin_set();
+            assert!(
+                plugins.iter().any(|p| p.namespace() == "db"),
+                "the arm must rule on a plugin set that actually contains db; got {:?}",
+                plugins.iter().map(|p| p.namespace()).collect::<Vec<_>>(),
+            );
+
+            assert_eq!(
+                url_parse_count(),
+                parses,
+                "building the plugin set must select no backend",
+            );
+            assert_eq!(
+                backend_open_count(),
+                opens,
+                "building the plugin set must open no pool",
+            );
+        })
+        .join()
+        .expect("plugin-set build guard thread panicked");
+    }
+
+    /// SC-5's discriminating arm: the db plugin prototype is PROCESS-wide.
+    ///
+    /// Two OS worker threads, each installing the kernel the way `main` does,
+    /// must end up holding the SAME `DbPlugin` object - not two structurally
+    /// identical ones. Pointer identity is the only instrument that can tell
+    /// those apart.
+    ///
+    /// **Two threads, not two isolates on one thread, and that is the point.**
+    /// The per-thread memo this replaces already made two runtimes on ONE
+    /// thread share a plugin (the arm below asserts that and passed before this
+    /// work began). It could not make two threads share one, because the memo
+    /// slot was a `thread_local!`. Run this arm against a `create_plugins` that
+    /// mints from the service instead of cloning its prototype and it fails
+    /// with two different addresses.
+    ///
+    /// ONE service is built here and handed to both threads, which is what
+    /// `main` does. Building a service per thread would test nothing: two
+    /// services own two prototypes by construction, so the arm would fail on a
+    /// correct implementation.
+    /// **The arm returns the `Arc`s, not their addresses, and that is not a
+    /// stylistic choice.** Written the obvious way - each thread reports
+    /// `Arc::as_ptr(..) as usize` and the parent compares the two numbers - it
+    /// reports EQUAL under the mutation it is supposed to catch. A thread's
+    /// plugin set is a `thread_local!`, so it is dropped when the thread exits;
+    /// the allocator then hands thread two the address thread one just freed,
+    /// and two freshly minted prototypes compare equal. This was not
+    /// hypothetical: running the mutation is how it was found, with the arm's
+    /// cross-thread assertion green and only its second assertion red. Holding
+    /// both `Arc`s alive in the parent makes address reuse impossible, which is
+    /// what `Arc::ptr_eq` needs to mean what it says.
+    #[test]
+    fn db_plugin_prototype_is_one_object_across_worker_threads() {
+        fn db_plugin() -> Arc<dyn NativePlugin> {
+            let set = plugin_set();
+            assert!(!set.is_empty(), "the kernel must register some namespaces");
+            set.iter()
+                .find(|p| p.namespace() == "db")
+                .expect("the db namespace must be registered when a service is installed")
+                .clone()
+        }
+        let service = test_db_service("postgres://localhost/zs_unused_shared", "shared-worker");
+        let kernel = |service: Arc<zeroship_plugin_db::service::DbService>| KernelConfig {
+            control_url: "http://127.0.0.1:1".to_string(),
+            control_key: "test-control-key".to_string(),
+            db_service: Some(service),
+            kv_url: None,
+            storage_backend: None,
+            meter: Arc::new(zeroship_metering::Meter::new()),
+        };
+
+        let one = Arc::clone(&service);
+        let first = std::thread::spawn(move || {
+            init_cache(4, 4, kernel(one));
+            db_plugin()
+        })
+        .join()
+        .expect("thread one");
+
+        let two = Arc::clone(&service);
+        let second = std::thread::spawn(move || {
+            init_cache(4, 4, kernel(two));
+            db_plugin()
+        })
+        .join()
+        .expect("thread two");
+
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "two OS worker threads must clone ONE db plugin prototype, not mint one each"
+        );
+        let prototype: Arc<dyn NativePlugin> = service.plugin();
+        assert!(
+            Arc::ptr_eq(&first, &prototype),
+            "the object both threads hold must be the SERVICE's prototype",
+        );
+    }
+
     /// SC-5: two runtimes built on one OS thread must SHARE plugin
     /// instances, not each mint their own.
     ///
@@ -956,8 +1132,10 @@ mod tests {
             let kernel = || KernelConfig {
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: "test-control-key".to_string(),
-                db_url: Some("postgres://localhost/zs_unused".to_string()),
-                cdc_worker_id: "share-test-worker".to_string(),
+                db_service: Some(test_db_service(
+                    "postgres://localhost/zs_unused",
+                    "share-test-worker",
+                )),
                 kv_url: None,
                 storage_backend: None,
                 meter: Arc::new(zeroship_metering::Meter::new()),
@@ -1012,8 +1190,10 @@ mod tests {
                 KernelConfig {
                     control_url: "http://127.0.0.1:1".to_string(),
                     control_key: "test-control-key".to_string(),
-                    db_url: Some("postgres://localhost/zs_unused".to_string()),
-                    cdc_worker_id: "kernel-test-worker".to_string(),
+                    db_service: Some(test_db_service(
+                        "postgres://localhost/zs_unused",
+                        "kernel-test-worker",
+                    )),
                     kv_url: Some("redis://127.0.0.1:6379".to_string()),
                     storage_backend: Some(StorageBackendConfig::Local(PathBuf::from(
                         "/tmp/zs-cache-test-storage",
@@ -1055,8 +1235,7 @@ mod tests {
                 KernelConfig {
                     control_url: "http://127.0.0.1:1".to_string(),
                     control_key: String::new(),
-                    db_url: None,
-                    cdc_worker_id: "kernel-test-worker".to_string(),
+                    db_service: None,
                     kv_url: None,
                     storage_backend: None,
                     // The meter is always provided (an `Arc<Meter>` is cheap;
@@ -1317,8 +1496,7 @@ mod tests {
                     KernelConfig {
                         control_url: "http://127.0.0.1:1".to_string(),
                         control_key: String::new(),
-                        db_url: None,
-                        cdc_worker_id: "kernel-test-worker".to_string(),
+                        db_service: None,
                         kv_url: None,
                         storage_backend: None,
                         meter: Arc::new(zeroship_metering::Meter::new()),
@@ -1379,8 +1557,7 @@ mod tests {
                     KernelConfig {
                         control_url: "http://127.0.0.1:1".to_string(),
                         control_key: String::new(),
-                        db_url: None,
-                        cdc_worker_id: "kernel-test-worker".to_string(),
+                        db_service: None,
                         kv_url: None,
                         storage_backend: None,
                         meter: Arc::new(zeroship_metering::Meter::new()),
@@ -1444,8 +1621,7 @@ mod tests {
                     KernelConfig {
                         control_url: "http://127.0.0.1:1".to_string(),
                         control_key: String::new(),
-                        db_url: None,
-                        cdc_worker_id: "kernel-test-worker".to_string(),
+                        db_service: None,
                         kv_url: None,
                         storage_backend: None,
                         meter: Arc::new(zeroship_metering::Meter::new()),
@@ -1490,8 +1666,7 @@ mod tests {
                     KernelConfig {
                         control_url: "http://127.0.0.1:1".to_string(),
                         control_key: String::new(),
-                        db_url: None,
-                        cdc_worker_id: "kernel-test-worker".to_string(),
+                        db_service: None,
                         kv_url: None,
                         storage_backend: None,
                         meter: Arc::new(zeroship_metering::Meter::new()),

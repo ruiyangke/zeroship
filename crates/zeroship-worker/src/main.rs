@@ -543,12 +543,6 @@ fn main() -> std::io::Result<()> {
     // every successful control poll, and every ntex worker thread's `/readyz`
     // reads that same stamp plus the same blob-store gate.
     let readiness = Arc::new(health::WorkerReadiness::new());
-    sync::start_version_poller(
-        config.clone(),
-        shared_versions.clone(),
-        shared_envs.clone(),
-        readiness.clone(),
-    );
 
     // ── Metering infrastructure ──────────────────────────────────────────
     // ONE process-wide meter, shared with every ntex worker thread's
@@ -565,6 +559,47 @@ fn main() -> std::io::Result<()> {
         .unwrap_or_else(|| bind_addr.to_string());
     let meter_source = format!("{worker_base}-{}", uuid::Uuid::new_v4());
     let meter = Arc::new(zeroship_metering::Meter::with_source(meter_source.clone()));
+
+    // ── The `env.db` service ─────────────────────────────────────────────
+    // ONE `DbService` for the whole process, constructed HERE - before ntex
+    // spawns a worker thread and therefore before any V8 isolate exists. It
+    // owns the validated configuration, the plugin prototype every runtime
+    // clones, the stable thread-resource key, the process-wide live-metadata
+    // cache, and the operator-lifecycle handle the version poller deprovisions
+    // through. Every worker thread is handed this same `Arc` via `KernelConfig`.
+    //
+    // The URL is parsed exactly once, right here. A URL naming no supported
+    // backend fails the boot rather than surfacing inside the first `env.db`
+    // call an app happens to make. That is not a new failure for this binary:
+    // the slot reaper below already connects at boot and fails the process when
+    // the database is unusable.
+    let db_service = match config.db_url.as_deref() {
+        Some(url) => Some(
+            zeroship_plugin_db::service::DbService::new(
+                zeroship_plugin_db::service::DbServiceConfig {
+                    url: url.to_string(),
+                    worker_id: meter_source.clone(),
+                    meter: Some(Arc::clone(&meter)),
+                },
+            )
+            .map_err(|error| {
+                std::io::Error::other(format!("worker database URL is unusable: {error}"))
+            })?,
+        ),
+        None => None,
+    };
+
+    // The single process-wide version poller. Started after the service exists
+    // because a deleted app's CDC teardown runs through the service's operator
+    // lifecycle handle, and still before `web::server` below spawns any worker
+    // thread, so the shared version map is already filling when they come up.
+    sync::start_version_poller(
+        config.clone(),
+        shared_versions.clone(),
+        shared_envs.clone(),
+        readiness.clone(),
+        db_service.clone(),
+    );
     // The producer's four `metering.*` declarations, already resolved. The
     // worker deliberately has no TOML overlay source (9b205f6ed, a credential
     // boundary), so its tiers are flag then `ZEROSHIP_METERING_*` then the
@@ -667,8 +702,7 @@ fn main() -> std::io::Result<()> {
             cache::KernelConfig {
                 control_url: config.control_url.clone(),
                 control_key: config.control_key.clone(),
-                db_url: config.db_url.clone(),
-                cdc_worker_id: meter_source.clone(),
+                db_service: db_service.clone(),
                 kv_url: config.kv_url.clone(),
                 storage_backend: config.storage_backend.clone(),
                 // The ONE process-wide meter the usage-event outbox drains.

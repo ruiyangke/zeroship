@@ -2488,7 +2488,12 @@ pub async fn runtime_schema_for_tests(
     collection: &str,
 ) -> Result<Option<Value>, DbError> {
     let binding = DbBinding::cold_start(app_id);
-    introspect_schema::runtime_schema_for(&binding, collection).await
+    // Deep-clone out of the shared cache: the helper's callers own and mutate
+    // their copy, and handing them the process-wide `Arc` would let one test
+    // observe another's edit.
+    Ok(introspect_schema::runtime_schema_for(&binding, collection)
+        .await?
+        .map(|facts| (*facts).clone()))
 }
 
 /// Upsert's write-side prep. Unlike its `insert_many` sibling this is

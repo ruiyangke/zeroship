@@ -46,7 +46,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use compio_postgres::NoTls;
-use zeroship_plugin_db::DbPlugin;
+use zeroship_plugin_db::service::{DbService, DbServiceConfig};
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::Runtime;
@@ -360,11 +360,15 @@ fn dispatch_zs_for_app(
         specifier: "index.js".into(),
         source: source.into(),
     }];
-    let plugins: Vec<Arc<dyn NativePlugin>> = vec![Arc::new(DbPlugin::new(
-        url.to_string(),
-        None,
-        "native-transaction-test-worker",
-    ))];
+    let plugins: Vec<Arc<dyn NativePlugin>> = vec![
+        DbService::new(DbServiceConfig {
+            url: url.to_string(),
+            worker_id: "native-transaction-test-worker".to_string(),
+            meter: None,
+        })
+        .expect("db service")
+        .plugin(),
+    ];
     let mut env_vars = std::collections::HashMap::new();
     if let Some(app_id) = app_id {
         env_vars.insert("APP_ID".to_string(), app_id.to_string());

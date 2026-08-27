@@ -106,9 +106,10 @@ pub fn start_version_poller(
     shared: SharedVersions,
     envs: SharedEnvs,
     readiness: Arc<WorkerReadiness>,
+    db_service: Option<Arc<zeroship_plugin_db::service::DbService>>,
 ) {
     compio::runtime::spawn(async move {
-        version_poll_loop(config, shared, envs, readiness).await;
+        version_poll_loop(config, shared, envs, readiness, db_service).await;
     })
     .detach();
 }
@@ -130,6 +131,7 @@ async fn version_poll_loop(
     shared: SharedVersions,
     envs: SharedEnvs,
     readiness: Arc<WorkerReadiness>,
+    db_service: Option<Arc<zeroship_plugin_db::service::DbService>>,
 ) {
     let interval = std::time::Duration::from_secs(config.poll_interval_secs);
     let mut pending_cdc_deprovision = std::collections::HashSet::new();
@@ -140,7 +142,7 @@ async fn version_poll_loop(
                 // central database cleanup. Detect the removal in this single
                 // process-wide poller, retry failures on later polls, and let
                 // every worker container run the idempotent cluster teardown.
-                if config.db_url.is_some() {
+                if db_service.is_some() {
                     if let Ok(guard) = shared.read() {
                         if let Some(previous) = guard.as_ref() {
                             pending_cdc_deprovision.extend(
@@ -152,15 +154,15 @@ async fn version_poll_loop(
                         }
                     }
                 }
-                if let Some(db_url) = config.db_url.as_deref() {
+                // Deprovision through the service's operator-lifecycle handle.
+                // It reads the backend selection made once at composition and
+                // checks out this thread's long-lived operator pool, instead of
+                // re-parsing the URL and building a fresh two-connection pool
+                // for every deleted app the way the old free function did.
+                if let Some(service) = db_service.as_deref() {
                     let pending: Vec<Uuid> = pending_cdc_deprovision.iter().copied().collect();
                     for app_id in pending {
-                        match zeroship_plugin_db::deprovision_app_cdc(
-                            db_url,
-                            &app_id.to_string(),
-                        )
-                        .await
-                        {
+                        match service.lifecycle().deprovision_app(&app_id.to_string()).await {
                             Ok(()) => {
                                 pending_cdc_deprovision.remove(&app_id);
                                 tracing::info!(
@@ -893,8 +895,7 @@ mod tests {
                 crate::cache::KernelConfig {
                     control_url: "http://127.0.0.1:1".to_string(),
                     control_key: String::new(),
-                    db_url: None,
-                    cdc_worker_id: "sync-test-worker".to_string(),
+                    db_service: None,
                     kv_url: None,
                     storage_backend: None,
                     meter: std::sync::Arc::new(zeroship_metering::Meter::new()),
