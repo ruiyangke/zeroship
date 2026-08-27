@@ -1127,8 +1127,23 @@ impl Pool {
     }
 
     async fn get_inner(&self) -> Result<PooledClient<'_>, Error> {
+        // A caller that arrives behind an existing waiter must join the FIFO
+        // before looking at idle entries or unreserved capacity. A capacity
+        // wake is advisory: the head keeps its queue slot until it is polled,
+        // so without this turn bit a fresh caller can reserve the freed slot
+        // first. Once a waiter removes itself from the head it retains that
+        // turn across validation rejection and connection retries.
+        let mut has_fifo_turn = self.waiters.borrow().is_empty();
         loop {
             self.ensure_open()?;
+
+            if !has_fifo_turn {
+                if let Some(entry) = Waiter::new(self).await {
+                    self.idle.borrow_mut().push(entry);
+                }
+                has_fifo_turn = true;
+                continue;
+            }
 
             // 1. Try to pop an idle connection
             let entry = self.idle.borrow_mut().pop();
@@ -1324,6 +1339,7 @@ impl Pool {
                 // caller cannot barge ahead of this waiter.
                 self.idle.borrow_mut().push(entry);
             }
+            has_fifo_turn = true;
             // else: woken for capacity/idle - loop and retry the acquire.
         }
     }
