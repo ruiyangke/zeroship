@@ -1506,14 +1506,6 @@ impl Pool {
             self.metrics.inc_evictions();
             return;
         }
-        // A release hook can retain a token too. It saw the revoked generation,
-        // so that token is already unusable; still retire this session rather
-        // than carrying escaped authority into another logical lease.
-        if entry.client.pool_cancel_lease_prevents_reuse() {
-            entry.client.force_close();
-            self.metrics.inc_evictions();
-            return;
-        }
         if !entry.is_pool_eligible() {
             self.metrics.inc_evictions();
             return;
@@ -3109,6 +3101,38 @@ mod tests {
         assert_eq!(pool.idle_count(), 0, "hook-closed entry became available");
         assert_eq!(pool.total_count(), 0, "hook-closed entry kept its slot");
         assert_eq!(pool.metrics.evictions.get(), 1);
+    }
+
+    #[test]
+    fn a_token_created_by_after_release_does_not_retire_the_reusable_session() {
+        let retained_token = Rc::new(RefCell::new(None));
+        let hook_token = Rc::clone(&retained_token);
+        let mut config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            ..PoolConfig::default()
+        };
+        config.after_release(move |client| {
+            *hook_token.borrow_mut() = Some(client.cancel_token());
+            true
+        });
+        let pool = test_pool(config, Vec::new(), 1, 1);
+        let (client, _receiver) = fake_client(21);
+        let held = PooledClient::new(PoolEntry::new(client, pool.config.max_lifetime), &pool);
+
+        drop(held);
+
+        assert!(
+            retained_token.borrow().is_some(),
+            "after_release did not retain the inactive token"
+        );
+        assert_eq!(
+            pool.idle_count(),
+            1,
+            "an inactive release-hook token retired a reusable session"
+        );
+        assert_eq!(pool.total_count(), 1);
+        assert_eq!(pool.metrics.evictions.get(), 0);
     }
 
     #[compio::test]
