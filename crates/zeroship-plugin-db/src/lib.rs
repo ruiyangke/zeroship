@@ -920,13 +920,48 @@ impl Drop for BackendInitGuard {
     }
 }
 
+/// Decide what this thread's installed DB resources mean for backend init.
+///
+/// `Ok(None)` - nothing is installed; the DB plugin is disabled on this thread
+/// and `env.db` is legitimately absent.
+/// `Ok(Some(..))` - a URL and the backend selection made for it at composition.
+/// `Err(..)` - exactly one of the two is installed.
+///
+/// **The mixed state is an error, not a disabled plugin.** It is unreachable
+/// today - `install_db_resources` writes both fields together and is the only
+/// writer - but the two are separate `Option`s, so the arm has to say something,
+/// and "either is missing means the DB plugin is disabled" says the wrong thing.
+/// Under it, a thread that had a URL and somehow no selection would run every
+/// `env.db` call as a silent no-op that reports success, which is
+/// indistinguishable from an app that never configured a database. Naming the
+/// state costs one arm and turns a whole class of silent misconfiguration into a
+/// message with both halves in it.
+fn backend_init_inputs(
+    url: Option<String>,
+    selection: Option<BackendUrl>,
+) -> Result<Option<(String, BackendUrl)>, String> {
+    match (url, selection) {
+        (None, None) => Ok(None),
+        (Some(url), Some(selection)) => Ok(Some((url, selection))),
+        (Some(_), None) => Err(
+            "db: a database URL is installed on this thread with no backend selection; \
+             the two are installed together by DbPlugin::register, so this thread's \
+             resources were installed by something else"
+                .to_string(),
+        ),
+        (None, Some(selection)) => Err(format!(
+            "db: a backend selection ({selection:?}) is installed on this thread with no \
+             database URL; the two are installed together by DbPlugin::register, so this \
+             thread's resources were installed by something else"
+        )),
+    }
+}
+
 pub async fn init_pool_async() -> Result<(), String> {
-    // The URL and the backend selection are installed together, so either both
-    // are present or the DB plugin is disabled on this thread.
     let Some((url, selection)) =
-        context::with(|c| Some((c.db_url()?, c.backend_selection()?)))
+        context::with(|c| backend_init_inputs(c.db_url(), c.backend_selection()))?
     else {
-        return Ok(()); // No URL configured — DB plugin is disabled
+        return Ok(()); // Nothing configured — DB plugin is disabled
     };
 
     // SQLite installs only a backend handle (no pool), and lazy init
@@ -985,6 +1020,56 @@ pub async fn init_pool_async() -> Result<(), String> {
 // handle: `DbService::lifecycle().deprovision_app(app_id)`. The free function
 // that used to live here took a `&str` URL, re-ran `backend_for_url` on it and
 // built a fresh two-connection `Pool` per deleted app.
+
+#[cfg(test)]
+mod backend_init_input_tests {
+    use super::{backend_init_inputs, BackendUrl};
+
+    /// Nothing installed is the DISABLED state and stays a success.
+    ///
+    /// The control for the two arms below. Without it, "every absent field is
+    /// an error" would satisfy them and would break every meter-less,
+    /// database-less harness in the tree.
+    #[test]
+    fn nothing_installed_is_a_disabled_plugin_not_an_error() {
+        assert_eq!(backend_init_inputs(None, None), Ok(None));
+    }
+
+    #[test]
+    fn both_installed_resolve_to_the_composed_selection() {
+        assert_eq!(
+            backend_init_inputs(Some("postgres://host/db".to_string()), Some(BackendUrl::Postgres)),
+            Ok(Some(("postgres://host/db".to_string(), BackendUrl::Postgres))),
+        );
+    }
+
+    /// A URL with no selection must be REPORTED, not silently disabled.
+    ///
+    /// The pre-fix guard was `Some((c.db_url()?, c.backend_selection()?))`, so
+    /// either field being absent returned `Ok(())` under the comment "No URL
+    /// configured - DB plugin is disabled". That is true of one of the three
+    /// non-trivial states and wrong about the other two: a thread carrying a
+    /// database and no selection ran every `env.db` op as a successful no-op.
+    #[test]
+    fn a_url_without_a_selection_is_a_reported_configuration_error() {
+        let error = backend_init_inputs(Some("postgres://host/db".to_string()), None)
+            .expect_err("a half-installed thread must not read as 'no database configured'");
+        assert!(
+            error.contains("no backend selection"),
+            "the error must name which half is missing: {error}",
+        );
+    }
+
+    #[test]
+    fn a_selection_without_a_url_is_a_reported_configuration_error() {
+        let error = backend_init_inputs(None, Some(BackendUrl::Postgres))
+            .expect_err("a half-installed thread must not read as 'no database configured'");
+        assert!(
+            error.contains("no database URL"),
+            "the error must name which half is missing: {error}",
+        );
+    }
+}
 
 #[cfg(test)]
 mod backend_url_tests {
