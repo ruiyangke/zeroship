@@ -21,7 +21,8 @@ use crate::buf_stream::BufStream;
 use crate::cancel_token::CancelKey;
 use crate::client::{Client, StatementCacheSettings};
 use crate::codec::{
-    BackendMessage, BackendMessages, FrontendMessage, read_backend, write_frontend,
+    BackendMessage, BackendMessages, FrontendMessage, read_backend_detached_async_frames,
+    write_frontend,
 };
 use crate::config::{
     self, AuthMethod, Config, ProtocolVersion, ReplicationMode, TargetSessionAttrs,
@@ -277,7 +278,14 @@ where
                 return Ok(Some(m));
             }
 
-            let batch = read_backend(&mut self.stream).await?;
+            // DETACHED, not shared. A delayed async frame outlives this batch:
+            // it is queued in `self.delayed` and replayed to the connection
+            // task after the handshake. Parsing it straight out of the read
+            // buffer leaves it sharing that allocation, so a 13-byte notice
+            // keeps a grown read buffer alive in full - measured at 13 bytes
+            // pinning 1 MiB. `MAX_DELAYED_HANDSHAKE_BYTES` charges the frame,
+            // so what is charged and what is held must be the same bytes.
+            let batch = read_backend_detached_async_frames(&mut self.stream).await?;
             match batch {
                 BackendMessage::Async {
                     message: msg,
@@ -3384,6 +3392,50 @@ mod tests {
         assert!(
             io.to_string().contains("bytes"),
             "the error must name the byte budget, not the message count: {io}"
+        );
+    }
+
+    /// A delayed async frame must not keep the handshake read buffer's whole
+    /// allocation alive after that buffer grows. `bytes 1.11.1` implements
+    /// `BytesMut::split_to` by sharing the allocation, so parsing a tiny frame
+    /// directly from an over-allocated read buffer can pin all of it.
+    #[compio::test]
+    async fn delayed_message_does_not_pin_handshake_read_allocation() {
+        const NOTIFICATION_FRAME_LEN: usize = 13;
+
+        let mut script = frame(b'A', &[0, 0, 0, 1, b'c', 0, b'p', 0]);
+        assert_eq!(script.len(), NOTIFICATION_FRAME_LEN);
+        script.extend_from_slice(&frame(b'R', &0u32.to_be_bytes()));
+
+        let config = plaintext_config();
+        let stream = MaybeTlsStream::<_, crate::tls::NoTlsStream>::Raw(HandshakeWriteSuccess {
+            input: script,
+            offset: 0,
+        });
+        let mut handshake = Handshake::new(stream, &config);
+        handshake.stream.buf().reserve(1024 * 1024);
+        let allocation_capacity = handshake.stream.buf().capacity();
+        let allocation_base = handshake.stream.buf().as_ptr();
+
+        assert!(matches!(
+            handshake.next().await.expect("read scripted handshake"),
+            Some(Message::AuthenticationOk)
+        ));
+        assert_eq!(handshake.delayed.len(), 1);
+        assert_eq!(handshake.delayed_bytes, NOTIFICATION_FRAME_LEN);
+
+        // The exhausted normal batch is another shared view of the read
+        // allocation. Remove it so only the delayed message can prevent the
+        // stream from reclaiming its consumed prefix.
+        handshake.pending = BackendMessages::empty();
+        assert_eq!(handshake.stream.buf().len(), 0);
+        handshake.stream.buf().reserve(allocation_capacity);
+
+        assert_eq!(
+            handshake.stream.buf().as_ptr(),
+            allocation_base,
+            "a {NOTIFICATION_FRAME_LEN}-byte delayed message pinned the handshake's \
+             {allocation_capacity}-byte read allocation"
         );
     }
 

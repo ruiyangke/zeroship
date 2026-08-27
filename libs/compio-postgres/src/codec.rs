@@ -315,6 +315,35 @@ pub async fn read_backend<S>(stream: &mut S) -> Result<BackendMessage, Error>
 where
     S: ReadFramer + ?Sized,
 {
+    read_backend_with_async_storage(stream, AsyncFrameStorage::Shared).await
+}
+
+/// Decode like [`read_backend`], but copy an async frame out of the stream's
+/// read allocation before parsing it. Handshake notices can outlive later
+/// buffer growth; detaching keeps their retained allocation proportional to
+/// their charged wire size instead of pinning an obsolete read high-watermark.
+pub(crate) async fn read_backend_detached_async_frames<S>(
+    stream: &mut S,
+) -> Result<BackendMessage, Error>
+where
+    S: ReadFramer + ?Sized,
+{
+    read_backend_with_async_storage(stream, AsyncFrameStorage::Detached).await
+}
+
+#[derive(Clone, Copy)]
+enum AsyncFrameStorage {
+    Shared,
+    Detached,
+}
+
+async fn read_backend_with_async_storage<S>(
+    stream: &mut S,
+    async_storage: AsyncFrameStorage,
+) -> Result<BackendMessage, Error>
+where
+    S: ReadFramer + ?Sized,
+{
     loop {
         // Ensure we have at least one full message header (1-byte tag + 4-byte length).
         stream.fill(5).await?;
@@ -438,9 +467,16 @@ where
                         // Measured BEFORE the parse consumes it: `header.len()` counts
                         // itself but not the tag, so the frame is one more.
                         let frame_len = header.len() as usize + 1;
-                        let message = backend::Message::parse(stream.buf())
-                            .map_err(Error::io)?
-                            .expect("async header implies full message is buffered");
+                        let message = match async_storage {
+                            AsyncFrameStorage::Shared => backend::Message::parse(stream.buf()),
+                            AsyncFrameStorage::Detached => {
+                                let mut frame = BytesMut::from(&stream.buf()[..frame_len]);
+                                stream.buf().advance(frame_len);
+                                backend::Message::parse(&mut frame)
+                            }
+                        }
+                        .map_err(Error::io)?
+                        .expect("async header implies full message is buffered");
                         return Ok(BackendMessage::Async { message, frame_len });
                     } else {
                         // Normal batch terminates at this async boundary;
