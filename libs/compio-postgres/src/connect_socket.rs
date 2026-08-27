@@ -366,16 +366,20 @@ mod tests {
         );
     }
 
-    /// A sub-second keepalive is not expressible: `TCP_KEEPIDLE` and
-    /// `TCP_KEEPINTVL` take whole seconds, and socket2 converts a `Duration`
-    /// with `as_secs()`, which TRUNCATES (socket2 0.5.10,
-    /// `src/sys/unix.rs:1324`). So 500ms reaches the kernel as 0, which Linux
-    /// refuses with EINVAL - surfacing as an opaque failed connection rather
-    /// than a statement about the value the caller chose. `Duration::ZERO` is
-    /// the "leave it unset" sentinel and is handled separately; the gap was
-    /// every non-zero value below one second.
+    /// A keepalive that is not a whole number of seconds is not expressible:
+    /// `TCP_KEEPIDLE` and `TCP_KEEPINTVL` take whole seconds, and socket2
+    /// converts a `Duration` with `as_secs()`, which TRUNCATES (socket2 0.5.10,
+    /// `src/sys/unix.rs:1324`).
+    ///
+    /// That truncation fails in two ways, and both are covered below. Under one
+    /// second it reaches the kernel as 0, which Linux refuses with EINVAL,
+    /// surfacing as an opaque failed connection rather than a statement about
+    /// the value the caller chose. At or above one second it is ACCEPTED at the
+    /// truncated value, which is worse: 1500ms becomes 1s and 59_999ms becomes
+    /// 59s with nothing reported, so the caller cannot find out. `Duration::ZERO`
+    /// is the "leave it unset" sentinel and is handled separately.
     #[compio::test]
-    async fn a_sub_second_keepalive_is_refused_by_name() {
+    async fn a_keepalive_that_is_not_whole_seconds_is_refused_by_name() {
         for (label, config) in [
             (
                 "keepalives_idle",
@@ -393,6 +397,28 @@ mod tests {
                     retries: None,
                 },
             ),
+            // A FRACTIONAL value above one second is the same defect: 1500ms
+            // truncates to 1s and 59_999ms to 59s, so the caller silently gets
+            // a different keepalive from the one they asked for. Keying the
+            // guard to `as_secs() == 0` catches only the values that reach the
+            // kernel as 0; the quantity the rule is about is the sub-second
+            // remainder.
+            (
+                "keepalives_idle",
+                KeepaliveConfig {
+                    idle: Duration::from_millis(1500),
+                    interval: None,
+                    retries: None,
+                },
+            ),
+            (
+                "keepalives_interval",
+                KeepaliveConfig {
+                    idle: Duration::from_secs(10),
+                    interval: Some(Duration::from_millis(59_999)),
+                    retries: None,
+                },
+            ),
         ] {
             let listener = TcpListener::bind("127.0.0.1:0")
                 .await
@@ -406,7 +432,7 @@ mod tests {
                 None,
             )
             .await
-            .expect_err("a sub-second keepalive was accepted");
+            .expect_err("a keepalive that is not whole seconds was accepted");
             let chain = {
                 let mut text = error.to_string();
                 let mut source = std::error::Error::source(&error);
