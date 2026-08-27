@@ -176,6 +176,10 @@ impl Stream for CopyOutStream {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
 
+        if this.copy_mode.is_none() {
+            return Poll::Ready(None);
+        }
+
         loop {
             match ready!(this.responses.poll_next(cx)) {
                 Ok(Message::CopyData(body)) if !*this.copy_done => {

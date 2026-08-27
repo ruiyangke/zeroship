@@ -109,3 +109,43 @@ async fn a_drained_copy_out_yields_its_rows() {
 
     assert_answers_its_own_question(&client, 515_151, "draining a COPY OUT").await;
 }
+
+/// `ErrorResponse` is the terminal backend message for a failed COPY OUT.
+/// The following `ReadyForQuery` belongs to the extended-protocol Sync and
+/// must be drained internally, not exposed as a second stream error.
+#[compio::test]
+async fn copy_out_error_response_terminates_the_stream() {
+    let client = connected().await;
+
+    let stream = client
+        .copy_out("COPY (SELECT 10 / (3 - g) FROM generate_series(1, 3) g) TO STDOUT")
+        .await
+        .expect("start the failing copy out");
+    futures_util::pin_mut!(stream);
+
+    let server_error = loop {
+        match stream.next().await {
+            Some(Ok(_)) => {}
+            Some(Err(error)) => break error,
+            None => panic!("COPY OUT ended without reporting its server error"),
+        }
+    };
+    assert_eq!(
+        server_error.code(),
+        Some(&compio_postgres::error::SqlState::DIVISION_BY_ZERO),
+        "COPY OUT reported the wrong server error: {server_error}"
+    );
+
+    match stream.next().await {
+        None => {}
+        Some(Ok(bytes)) => panic!(
+            "COPY OUT yielded {} bytes after its terminal ErrorResponse",
+            bytes.len()
+        ),
+        Some(Err(error)) => {
+            panic!("COPY OUT yielded another item after its terminal ErrorResponse: {error}")
+        }
+    }
+
+    assert_answers_its_own_question(&client, 616_161, "a failed COPY OUT").await;
+}
