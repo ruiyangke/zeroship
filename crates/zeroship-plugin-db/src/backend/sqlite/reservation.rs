@@ -105,6 +105,10 @@ pub struct Reservation {
     /// `BEGIN` and no data SQL was ever issued - from a cancellation that has
     /// something to roll back.
     began: AtomicBool,
+    /// Set by the actor once this reservation has run one command. Only the
+    /// autocommit lane reads it, where "one reservation, one command" is the
+    /// whole of ownership - see [`Reservation::used`].
+    used: AtomicBool,
     outcome: Mutex<Option<TerminalOutcome>>,
 }
 
@@ -127,6 +131,7 @@ impl Reservation {
             running_seq: AtomicU64::new(0),
             cancel_seq: AtomicU64::new(0),
             began: AtomicBool::new(false),
+            used: AtomicBool::new(false),
             outcome: Mutex::new(None),
         }
     }
@@ -254,6 +259,20 @@ impl Reservation {
                 }
             }
         }
+    }
+
+    /// Has this reservation already executed a command?
+    ///
+    /// The autocommit lane's ownership rule is built on this: SC-2 mints an
+    /// autocommit reservation per command and settles it at that command's
+    /// completion, so a *second* command naming one is a stale reservation and
+    /// not a re-use. See [`super::session`]'s `check_owner`.
+    pub(crate) fn used(&self) -> bool {
+        self.used.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn mark_used(&self) {
+        self.used.store(true, Ordering::SeqCst);
     }
 
     pub(crate) fn store_outcome(&self, outcome: TerminalOutcome) {
@@ -840,5 +859,15 @@ mod tests {
             outcome_for_a_claimed_terminal(&r).into_result().is_ok(),
             "a recorded commit is still a success"
         );
+    }
+
+    /// `used` is the autocommit lane's ownership word: one reservation, one
+    /// command.
+    #[test]
+    fn a_reservation_records_that_it_has_run_a_command() {
+        let r = Reservation::new(8, Lane::Op, ReservationKind::Autocommit, 0);
+        assert!(!r.used(), "a freshly minted reservation has run nothing");
+        r.mark_used();
+        assert!(r.used(), "the mark must survive for the ownership check");
     }
 }

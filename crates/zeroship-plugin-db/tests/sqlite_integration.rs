@@ -10128,4 +10128,53 @@ fn a_second_cancellation_is_answered_not_re_executed() {
     });
 }
 
+/// The autocommit lane has an ownership rule too, and it is a *lifetime* rule:
+/// one reservation, one command.
+///
+/// `check_owner` only examined `tx_conn` until 2026-08-27, so this refusal came
+/// from `enter_running` noticing a non-`PENDING` terminal instead - reported as
+/// `statement_cancelled`, which names neither what went wrong nor why. Nothing
+/// was cancelled; a spent reservation was reused.
+#[test]
+fn a_spent_autocommit_reservation_is_refused_as_a_non_owner() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .pool_exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", &[])
+            .await
+            .expect("create table");
+
+        let spent = backend.spent_autocommit_reservation_for_tests();
+        backend
+            .exec_on_reservation_for_tests(&spent, "INSERT INTO t (v) VALUES ('first')", &[])
+            .await
+            .expect("the reservation's one command must run");
+
+        let err = backend
+            .exec_on_reservation_for_tests(&spent, "INSERT INTO t (v) VALUES ('second')", &[])
+            .await
+            .expect_err("a spent autocommit reservation must be refused");
+        match &err {
+            DbError::ValidationFailed { code, .. } => assert_eq!(
+                *code, "reservation_not_owner",
+                "a stale reservation is an ownership failure, not a cancellation. \
+                 `statement_cancelled` here names the wrong thing: nothing was \
+                 cancelled. got {err:?}"
+            ),
+            other => panic!("expected a typed reservation refusal, got {other:?}"),
+        }
+
+        let rows = backend
+            .autocommit_client()
+            .query("SELECT COUNT(*) FROM t", &[])
+            .await
+            .expect("count after the refusal");
+        assert_eq!(
+            rows[0][0].as_deref(),
+            Some("1"),
+            "the refusal must be a refusal: only the first command ran"
+        );
+    });
+}
+
 
