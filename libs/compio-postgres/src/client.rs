@@ -1473,7 +1473,15 @@ impl InnerClient {
         statement: Option<Statement>,
     ) -> Result<Responses, Error> {
         let admission = self.request_admission.lock();
-        if let Some(mode) = self.active_copy_mode() {
+        // Caller work must not enter PostgreSQL's COPY subprotocol, but
+        // housekeeping is only queued here. Both connection loops stop
+        // polling this request channel until the current COPY has recovered,
+        // so a deferred Close or rollback cannot reach the wire early. Drop
+        // paths cannot retry a rejected send, and discarding one here would
+        // leave its server-side resource without an owner.
+        if disposition == RequestDisposition::Awaited
+            && let Some(mode) = self.active_copy_mode()
+        {
             drop(admission);
             return Err(mode.admission_error());
         }
