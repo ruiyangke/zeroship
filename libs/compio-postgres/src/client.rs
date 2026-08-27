@@ -1404,6 +1404,10 @@ impl InnerClient {
         CopyMode::from_state(self.copy_mode.load(Ordering::Acquire))
     }
 
+    pub(crate) fn has_active_copy(&self) -> bool {
+        self.active_copy_mode().is_some()
+    }
+
     fn start_observation(&self, messages: &RequestMessages) -> Option<QueryObservation> {
         if !self.query_observer_enabled.load(Ordering::Acquire) {
             return None;
@@ -2114,6 +2118,10 @@ impl Client {
     #[cfg(test)]
     pub(crate) fn has_in_flight_requests(&self) -> bool {
         self.inner.has_in_flight_requests()
+    }
+
+    pub(crate) fn has_active_copy(&self) -> bool {
+        self.inner.has_active_copy()
     }
 
     pub(crate) fn set_socket_config(&mut self, socket_config: SocketConfig) {

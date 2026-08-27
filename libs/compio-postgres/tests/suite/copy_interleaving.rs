@@ -3,7 +3,7 @@
 //! an active COPY session to another borrower.
 
 use bytes::Bytes;
-use compio_postgres::{Client, Error};
+use compio_postgres::{Client, Error, Pool, PoolConfig};
 use futures_util::{SinkExt, StreamExt};
 use std::time::Duration;
 
@@ -122,4 +122,49 @@ async fn copy_out_refuses_queries_until_the_stream_finishes() {
     })
     .await
     .expect("COPY OUT interleaving test exceeded its watchdog");
+}
+
+#[compio::test]
+async fn returning_a_lease_with_a_live_copy_handle_evicts_the_connection() {
+    compio::time::timeout(TEST_TIMEOUT, async {
+        let mut config = PoolConfig::new();
+        config.max_size(1).min_idle(0);
+        let pool = Pool::connect_with_pool_config(&common::test_url(), config)
+            .await
+            .expect("create one-connection pool");
+
+        let client = pool.get().await.expect("borrow the first connection");
+        let first_pid = client.process_id();
+        client
+            .batch_execute("CREATE TEMPORARY TABLE copy_mode_pool_probe (v int4)")
+            .await
+            .expect("create pooled COPY fixture");
+        let sink = client
+            .copy_in::<_, Bytes>("COPY copy_mode_pool_probe FROM STDIN")
+            .await
+            .expect("start pooled COPY IN");
+
+        drop(client);
+        assert_eq!(
+            pool.idle_count(),
+            0,
+            "an active COPY connection was deposited into the idle pool"
+        );
+
+        let replacement = pool.get().await.expect("borrow a replacement connection");
+        assert_ne!(
+            replacement.process_id(),
+            first_pid,
+            "the pool returned a connection whose COPY handle was still live"
+        );
+        let value: i32 = replacement
+            .query_one_scalar("SELECT 43::int4", &[])
+            .await
+            .expect("the replacement connection was unusable");
+        assert_eq!(value, 43);
+
+        drop(sink);
+    })
+    .await
+    .expect("pooled COPY-mode eviction test exceeded its watchdog");
 }
