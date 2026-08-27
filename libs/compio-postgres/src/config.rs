@@ -1268,7 +1268,8 @@ impl Config {
     /// Sets the path to the client private key (PEM) matching [`Config::ssl_cert`].
     ///
     /// Must be paired with [`Config::ssl_cert`] unless
-    /// [`SslCertMode::Disable`] is selected.
+    /// [`SslCertMode::Disable`] is selected. OpenSSL `engine:key` specifiers
+    /// accepted by libpq are not supported and are refused before connecting.
     pub fn ssl_key(&mut self, ssl_key: impl Into<String>) -> &mut Config {
         self.ssl_key = Some(ssl_key.into());
         self
@@ -1968,6 +1969,9 @@ impl Config {
                 if value.is_empty() {
                     return Err(Error::config_parse(Box::new(InvalidValue("sslkey"))));
                 }
+                if ssl_key_is_engine_specifier(value) {
+                    return Err(Error::config_parse(Box::new(UnsupportedOption("sslkey"))));
+                }
                 self.ssl_key(value);
             }
             "passfile" => {
@@ -2322,6 +2326,17 @@ impl Config {
         self.validate_protocol_version_range()?;
         self.validate_ssl_protocol_version_range()?;
 
+        if self
+            .ssl_key
+            .as_deref()
+            .is_some_and(ssl_key_is_engine_specifier)
+        {
+            return Err(Error::config(
+                "sslkey requests an OpenSSL engine key, which this rustls driver does not support"
+                    .into(),
+            ));
+        }
+
         if self.ssl_cert_mode == SslCertMode::Require && !self.ssl_mode.permits_tls() {
             return Err(Error::config(
                 "sslcertmode=require cannot be satisfied with sslmode=disable because no TLS \
@@ -2615,6 +2630,18 @@ fn canonical_parameter_key(key: &str) -> &str {
     match key {
         "requiressl" => "sslmode",
         _ => key,
+    }
+}
+
+/// libpq treats any colon as the `engine:key` separator, except for a Windows
+/// drive-letter colon. This rustls backend has no OpenSSL ENGINE API, so the
+/// recognisable form must not fall through to filesystem loading.
+fn ssl_key_is_engine_specifier(value: &str) -> bool {
+    match value.find(':') {
+        None => false,
+        #[cfg(windows)]
+        Some(1) => false,
+        Some(_) => true,
     }
 }
 
@@ -4666,6 +4693,45 @@ mod tests {
                 .err()
                 .unwrap_or_else(|| panic!("{s} parsed, so an empty path reads as absent"));
         }
+    }
+
+    #[test]
+    fn sslkey_engine_file_path_control() {
+        "host=h sslkey=/tmp/client.key"
+            .parse::<Config>()
+            .expect("a regular sslkey path must still parse")
+            .validate_connection_settings()
+            .expect("a regular sslkey path must remain valid connection configuration");
+    }
+
+    #[test]
+    fn sslkey_engine_specifier_is_refused_during_parse() {
+        let error = "host=h sslkey=pkcs11:client-key"
+            .parse::<Config>()
+            .expect_err("an OpenSSL engine key cannot be implemented by rustls");
+        let cause = std::error::Error::source(&error)
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        assert!(
+            cause.contains("sslkey") && cause.contains("does not implement"),
+            "the refusal must name the unsupported sslkey feature: {cause}"
+        );
+    }
+
+    #[test]
+    fn sslkey_engine_specifier_is_refused_for_programmatic_config() {
+        let mut config = Config::new();
+        config.ssl_key("pkcs11:client-key");
+        let error = config
+            .validate_connection_settings()
+            .expect_err("the programmatic setter must not bypass engine-key refusal");
+        let cause = std::error::Error::source(&error)
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        assert!(
+            cause.contains("sslkey") && cause.contains("engine"),
+            "the refusal must name the unsupported sslkey engine: {cause}"
+        );
     }
 
     /// libpq treats blank sslpassword, sslcrl, and sslcrldir values as absent
