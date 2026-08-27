@@ -2512,15 +2512,20 @@ impl Client {
         let mut stream = pin!(self.query_raw(statement, slice_iter(params)).await?);
 
         let mut first = None;
+        let mut multiple = false;
         while let Some(row) = stream.try_next().await? {
             if first.is_some() {
-                return Err(Error::row_count());
+                multiple = true;
+            } else {
+                first = Some(row);
             }
-
-            first = Some(row);
         }
 
-        Ok(first)
+        if multiple {
+            Err(Error::row_count())
+        } else {
+            Ok(first)
+        }
     }
 
     /// Like [`Client::query_opt`] but returns an optional scalar.
@@ -2729,15 +2734,20 @@ impl Client {
         );
 
         let mut first = None;
+        let mut multiple = false;
         while let Some(row) = stream.try_next().await? {
             if first.is_some() {
-                return Err(Error::row_count());
+                multiple = true;
+            } else {
+                first = Some(row);
             }
-
-            first = Some(row);
         }
 
-        Ok(first)
+        if multiple {
+            Err(Error::row_count())
+        } else {
+            Ok(first)
+        }
     }
 
     /// The maximally flexible version of [`query_typed`].
