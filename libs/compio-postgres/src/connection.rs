@@ -799,7 +799,10 @@ where
     /// ownership rules as ordinary protocol dispatch.
     fn record_buffered_server_error(&mut self) -> Option<Error> {
         let server = take_buffered_server_error(&mut self.stream)?;
-
+        // The response sender may synchronously wake a pooled borrower whose
+        // Drop path decides reuse from this byte. Publish retirement before any
+        // diagnosis becomes visible, just as the ordinary read-error path does.
+        self.tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
         if let Some(error) = server.as_db_error() {
             // A DbError cannot be duplicated through Error's generic terminal
             // wrapper without losing its SQLSTATE. Rebuild it from the parsed
@@ -817,7 +820,6 @@ where
                 remember_server_error(&self.terminal_server_error, error);
             }
         }
-        self.tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
         Some(server)
     }
 
@@ -972,6 +974,15 @@ fn first_server_error(messages: &BackendMessages) -> Result<Option<DbError>, Err
         .map_err(Error::parse)?
         .map(|body| DbError::parse(&mut body.fields()).map_err(Error::parse))
         .transpose()
+}
+
+fn first_terminal_server_error(messages: &BackendMessages) -> Result<Option<DbError>, Error> {
+    messages
+        .find_error_response(|body| {
+            let error = DbError::parse(&mut body.fields())?;
+            Ok(server_error_ends_session(&error).then_some(error))
+        })
+        .map_err(Error::parse)
 }
 
 /// Decode a diagnosis received after the session stopped being UTF-8 only
@@ -1162,7 +1173,7 @@ fn scan_retirement_message(
 impl Dispatch<'_> {
     /// Dispatch a single decoded backend frame.
     fn handle_message(&mut self, message: BackendMessage) -> Result<DispatchOutcome, Error> {
-        match message {
+        let result = (|| match message {
             BackendMessage::Async { message, .. } => {
                 route_async(self.parameters, self.async_sender, message)
             }
@@ -1187,7 +1198,14 @@ impl Dispatch<'_> {
                 self.deliver_batch(messages, ready_status)?;
                 Ok(DispatchOutcome::Continue)
             }
+        })();
+        if result.is_err() {
+            // Every raw dispatch error ends the connection loop. Publish that
+            // decision before split-reader acknowledgement and teardown, while
+            // the Client request channel can still look open to the pool.
+            self.tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
         }
+        result
     }
 
     /// Deliver a normal batch to the front response channel. Mirrors
@@ -1210,11 +1228,9 @@ impl Dispatch<'_> {
         // keeps synchronous pool return from counting a known-dead session as
         // idle during that protocol-defined window.
         let server_error = first_server_error(&messages)?;
-        if let Some(error) = server_error.as_ref() {
-            if server_error_ends_session(error) {
-                self.remember_terminal_server_error(error);
-                self.tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
-            }
+        if let Some(error) = first_terminal_server_error(&messages)? {
+            self.remember_terminal_server_error(&error);
+            self.tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
         }
 
         // If there's no in-flight request but the server sent us backend
@@ -4060,6 +4076,111 @@ mod tests {
     }
 
     #[test]
+    fn a_dispatch_error_marks_the_session_retired() {
+        let mut bytes = completed_response_batch(b'I');
+        bytes.truncate(bytes.len() - 6);
+        let parameters = Mutex::new(HashMap::new());
+        let mut responses = VecDeque::new();
+        let mut pending_responses = VecDeque::new();
+        let tx_status = AtomicU8::new(b'I');
+        let in_flight_requests = AtomicUsize::new(0);
+        let terminal_server_error = Mutex::new(None);
+
+        let result = Dispatch {
+            parameters: &parameters,
+            responses: &mut responses,
+            pending_responses: &mut pending_responses,
+            async_sender: None,
+            tx_status: &tx_status,
+            in_flight_requests: &in_flight_requests,
+            terminal_server_error: &terminal_server_error,
+        }
+        .handle_message(BackendMessage::Normal {
+            messages: BackendMessages::from_test_bytes(BytesMut::from(bytes.as_slice())),
+            request_complete: false,
+            deferred_error: None,
+        });
+
+        assert!(result.is_err(), "the unsolicited response was accepted");
+        assert_eq!(
+            tx_status.load(Ordering::Acquire),
+            READ_RETIRED_STATUS,
+            "a dispatch error left the pool status reusable"
+        );
+    }
+
+    #[test]
+    fn a_later_fatal_error_response_poisons_before_waking_the_borrower() {
+        let tx_status = Arc::new(AtomicU8::new(b'I'));
+        let recorder = StatusRecordingWake::new(&tx_status);
+        let waker = Waker::from(Arc::clone(&recorder));
+        let mut context = Context::from_waker(&waker);
+        let (response_tx, mut response_rx) = mpsc::channel(1);
+        assert!(response_rx.poll_next_unpin(&mut context).is_pending());
+
+        let request_server_error = Arc::default();
+        let mut responses = VecDeque::from([Response {
+            sender: response_tx,
+            disposition: RequestDisposition::Awaited,
+            transaction_effect: TransactionEffect::MayChange,
+            prepare_cleanup: None,
+            statement: None,
+            observation: None,
+            bind_complete_seen: false,
+            read_obligation: ReadObligation::new(None, false),
+            request_server_error: Arc::clone(&request_server_error),
+        }]);
+        let mut pending_responses = VecDeque::new();
+        let parameters = Mutex::new(HashMap::new());
+        let in_flight_requests = AtomicUsize::new(1);
+        let terminal_server_error = Mutex::new(None);
+        let mut bytes = server_error_frame("ERROR", "23505", "scripted unique violation");
+        bytes.extend_from_slice(&server_error_frame(
+            "FATAL",
+            "57P01",
+            "scripted backend shutdown",
+        ));
+        bytes.extend_from_slice(b"Z\0\0\0\x05I");
+
+        Dispatch {
+            parameters: &parameters,
+            responses: &mut responses,
+            pending_responses: &mut pending_responses,
+            async_sender: None,
+            tx_status: &tx_status,
+            in_flight_requests: &in_flight_requests,
+            terminal_server_error: &terminal_server_error,
+        }
+        .deliver_batch(
+            BackendMessages::from_test_bytes(BytesMut::from(bytes.as_slice())),
+            Some(b'I'),
+        )
+        .expect("dispatch the coalesced ErrorResponses");
+
+        assert_eq!(
+            recorder.seen.load(Ordering::Acquire),
+            READ_RETIRED_STATUS,
+            "a later FATAL ErrorResponse woke its borrower before pool poison"
+        );
+        assert_eq!(
+            request_server_error
+                .lock()
+                .as_ref()
+                .map(|error: &DbError| error.code().code()),
+            Some("23505"),
+            "the later FATAL replaced the request's first diagnosis"
+        );
+        assert_eq!(
+            terminal_server_error
+                .lock()
+                .as_ref()
+                .map(|error: &DbError| error.code().code()),
+            Some("57P01"),
+            "the later FATAL was not retained as the terminal diagnosis"
+        );
+    }
+
+    #[test]
     fn a_captured_read_timeout_outranks_a_concurrent_write_failure() {
         let read_error = Error::read_timeout(Duration::from_millis(75));
 
@@ -4069,19 +4190,28 @@ mod tests {
         assert!(surfaced.is_read_timeout());
     }
 
-    fn error_response_bytes(code: &str, message: &str) -> BytesMut {
+    fn server_error_frame(severity: &str, code: &str, message: &str) -> Vec<u8> {
         let mut payload = BytesMut::new();
-        payload.extend_from_slice(b"SERROR\0");
+        payload.extend_from_slice(b"S");
+        payload.extend_from_slice(severity.as_bytes());
+        payload.extend_from_slice(b"\0V");
+        payload.extend_from_slice(severity.as_bytes());
+        payload.extend_from_slice(b"\0");
         payload.extend_from_slice(b"C");
         payload.extend_from_slice(code.as_bytes());
         payload.extend_from_slice(b"\0M");
         payload.extend_from_slice(message.as_bytes());
         payload.extend_from_slice(b"\0\0");
 
-        let mut bytes = BytesMut::new();
-        bytes.extend_from_slice(b"E");
+        let mut bytes = Vec::new();
+        bytes.push(b'E');
         bytes.extend_from_slice(&(u32::try_from(payload.len()).unwrap() + 4).to_be_bytes());
         bytes.extend_from_slice(&payload);
+        bytes
+    }
+
+    fn error_response_bytes(code: &str, message: &str) -> BytesMut {
+        let mut bytes = BytesMut::from(server_error_frame("ERROR", code, message).as_slice());
         bytes.extend_from_slice(b"Z\0\0\0\x05I");
         bytes
     }
@@ -5752,21 +5882,11 @@ mod tests {
     }
 
     fn fatal_error_frame(code: &str, message: &str) -> Vec<u8> {
-        let mut payload = Vec::new();
-        payload.extend_from_slice(b"SFATAL\0VFATAL\0C");
-        payload.extend_from_slice(code.as_bytes());
-        payload.extend_from_slice(b"\0M");
-        payload.extend_from_slice(message.as_bytes());
-        payload.extend_from_slice(b"\0\0");
-
-        let mut frame = vec![b'E'];
-        frame.extend_from_slice(&(u32::try_from(payload.len()).unwrap() + 4).to_be_bytes());
-        frame.extend_from_slice(&payload);
-        frame
+        server_error_frame("FATAL", code, message)
     }
 
     #[compio::test]
-    async fn serialized_request_flush_preserves_a_buffered_server_error() {
+    async fn serialized_request_flush_poisons_before_delivering_a_buffered_server_error() {
         let (request_sender, request_receiver) = mpsc::unbounded();
         let client = crate::client::Client::new(
             request_sender,
@@ -5788,6 +5908,14 @@ mod tests {
                 bytes::Bytes::from_static(b"scripted second request"),
             )))
             .expect("enqueue the second serialized request");
+        let tx_status = client.tx_status_handle();
+        let recorder = StatusRecordingWake::new(&tx_status);
+        let waker = Waker::from(Arc::clone(&recorder));
+        let mut context = Context::from_waker(&waker);
+        assert!(
+            second.poll_next(&mut context).is_pending(),
+            "the empty second response was unexpectedly ready"
+        );
 
         let mut response = completed_response_batch(b'I');
         response.extend_from_slice(&fatal_error_frame("57P01", "scripted backend shutdown"));
@@ -5811,6 +5939,11 @@ mod tests {
             .run_serialized()
             .await
             .expect_err("the scripted second flush unexpectedly succeeded");
+        assert_eq!(
+            recorder.seen.load(Ordering::Acquire),
+            READ_RETIRED_STATUS,
+            "buffered server error woke its borrower before pool poison"
+        );
         let error = match second.next().await {
             Err(error) => error,
             Ok(_) => panic!("the failed second request produced a response"),
