@@ -2885,8 +2885,9 @@ impl Client {
 
     /// Attempts to cancel an in-progress query.
     ///
-    /// The server provides no information about whether a cancellation attempt was successful or not. An error will
-    /// only be returned if the client was unable to connect to the database.
+    /// Success means PostgreSQL consumed and closed the dedicated cancellation
+    /// connection, not that the target query was necessarily cancelled. An
+    /// effective cancel is reported as SQLSTATE `57014` on this connection.
     #[deprecated(since = "0.6.0", note = "use Client::cancel_token() instead")]
     pub async fn cancel_query<T>(&self, tls: T) -> Result<(), Error>
     where
