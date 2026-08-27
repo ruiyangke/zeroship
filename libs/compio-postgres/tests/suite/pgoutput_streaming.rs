@@ -527,11 +527,11 @@ async fn the_same_transaction_without_streaming_is_one_begin_and_commit() {
     .expect("the non-streaming control exceeded its watchdog");
 }
 
-/// A streamed transaction that rolls back ends with StreamAbort, and the
-/// consumer must be able to name the transaction whose delivered rows are now
-/// void.
+/// A streamed transaction that rolls back is never reported as committed.
+/// When the server emits StreamAbort, the consumer can also name the
+/// transaction whose delivered rows are now void.
 #[compio::test]
-async fn a_rolled_back_streamed_transaction_ends_with_stream_abort() {
+async fn a_rolled_back_streamed_transaction_is_never_reported_as_committed() {
     compio::time::timeout(WATCHDOG, async {
         let fixture = Fixture::create("cpg stream abort").await;
         fixture.write_big_transaction("ROLLBACK").await;
