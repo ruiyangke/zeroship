@@ -366,7 +366,7 @@ where
                         }
                         Poll::Ready(Ok(_)) => {
                             let this = self.as_mut().project();
-                            if this.completion.is_none() {
+                            if !matches!(this.completion.as_ref(), Some(Err(_))) {
                                 *this.completion = Some(Err(Error::unexpected_message()));
                             }
                         }
@@ -898,5 +898,78 @@ mod tests {
                 Bytes::from_static(b"next request"),
             )))
             .unwrap_or_else(|error| panic!("the recovered COPY kept rejecting commands: {error}"));
+    }
+
+    #[compio::test]
+    async fn a_message_after_copy_confirmation_refuses_success() {
+        let (request_sender, mut requests) = mpsc::unbounded();
+        let client = Client::new(
+            request_sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+        );
+        let (sender, receiver) = mpsc::channel(1);
+        let statement = Statement::unnamed(Vec::new(), Vec::new());
+        let (responses, copy_mode) = client
+            .inner()
+            .send_copy_statement(
+                RequestMessages::CopyIn(CopyInReceiver::new(receiver)),
+                &statement,
+                CopyMode::In,
+            )
+            .expect("enqueue the scripted COPY request");
+        let mut response_sender = requests
+            .try_recv()
+            .expect("receive the scripted COPY request")
+            .sender;
+
+        let mut command_frame = BytesMut::new();
+        command_frame.put_u8(b'C');
+        command_frame.put_u32(11);
+        command_frame.extend_from_slice(b"COPY 1\0");
+        let command = Message::parse(&mut command_frame)
+            .expect("parse COPY CommandComplete")
+            .expect("COPY CommandComplete is complete");
+
+        let mut done_frame = BytesMut::from(&b"c\0\0\0\x04"[..]);
+        let done = Message::parse(&mut done_frame)
+            .expect("parse backend CopyDone")
+            .expect("backend CopyDone is complete");
+        let mut ready_frame = BytesMut::from(&b"Z\0\0\0\x05I"[..]);
+        let ready = Message::parse(&mut ready_frame)
+            .expect("parse ReadyForQuery")
+            .expect("ReadyForQuery is complete");
+        response_sender
+            .try_send(ResponseMessages::Observed(VecDeque::from([
+                Ok(command),
+                Ok(done),
+                Ok(ready),
+            ])))
+            .expect("deliver scripted COPY completion");
+
+        let sink = CopyInSink::<Bytes> {
+            sender,
+            responses,
+            response: CopyResponse::default(),
+            buf: BytesMut::new(),
+            state: SinkState::Reading,
+            completion: None,
+            _p2: PhantomData,
+            copy_mode: Some(copy_mode),
+        };
+        let mut sink = Box::pin(sink);
+        match sink.as_mut().finish().await {
+            Ok(rows) => {
+                panic!("COPY IN reported {rows} rows after an illegal post-confirmation message")
+            }
+            Err(error) => assert_eq!(
+                error.to_string(),
+                "unexpected message from server",
+                "post-confirmation message reported the wrong protocol failure"
+            ),
+        }
     }
 }
