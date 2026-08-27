@@ -176,6 +176,11 @@ enum RequestOutcome {
     HousekeepingUndeliverable(Error),
 }
 
+enum DispatchOutcome {
+    Continue,
+    RetireAfterDiagnostics(Error),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ReadObligationState {
     /// Frontend bytes have not finished flushing, so writes cannot consume the
@@ -680,7 +685,7 @@ where
     /// Thin wrapper that borrows the dispatch-relevant fields and defers
     /// to the shared [`Dispatch`] logic, so the serialized and
     /// multiplexed loops route messages identically.
-    fn handle_message(&mut self, message: BackendMessage) -> Result<(), Error> {
+    fn handle_message(&mut self, message: BackendMessage) -> Result<DispatchOutcome, Error> {
         Dispatch {
             parameters: &self.parameters,
             responses: &mut self.responses,
@@ -703,7 +708,14 @@ where
             self.tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
         }
 
-        self.handle_message(message)?;
+        match self.handle_message(message)? {
+            DispatchOutcome::Continue => {}
+            DispatchOutcome::RetireAfterDiagnostics(error) => {
+                self.tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
+                self.drain_retirement_responses().await;
+                return Err(error);
+            }
+        }
 
         if let Some(error) = deferred_error {
             self.drain_pending_responses().await;
@@ -711,6 +723,34 @@ where
             return Err(error);
         }
         Ok(())
+    }
+
+    /// Drain exactly the response boundaries which were already flushed when
+    /// an unsupported client_encoding was reported. The stream stays framed,
+    /// but response text after the switch does not: scan only structural tags
+    /// and wholly ASCII ErrorResponses, then retire.
+    async fn drain_retirement_responses(&mut self) {
+        let response_count = self.responses.len();
+        let mut response_offset = 0usize;
+        while response_offset < response_count {
+            let message = match read_backend(&mut self.stream).await {
+                Ok(message) => message,
+                Err(_) => break,
+            };
+            match scan_retirement_message(
+                message,
+                &mut response_offset,
+                response_count,
+                &self.responses,
+                &self.terminal_server_error,
+                &self.tx_status,
+            ) {
+                RetirementProgress::PrefixComplete | RetirementProgress::Stop => {
+                    break;
+                }
+                RetirementProgress::Continue => {}
+            }
+        }
     }
 
     /// Deliver every stashed batch, waiting for downstream capacity, using the
@@ -934,6 +974,32 @@ fn first_server_error(messages: &BackendMessages) -> Result<Option<DbError>, Err
         .transpose()
 }
 
+/// Decode a diagnosis received after the session stopped being UTF-8 only
+/// when every field is ASCII. PostgreSQL encodes ErrorResponse text in the
+/// current client encoding. ASCII has the same byte representation in every
+/// encoding this driver can be switched to; any other byte would make a
+/// lossy UTF-8 conversion look authoritative when it is not.
+fn first_ascii_server_error(messages: &BackendMessages) -> Option<DbError> {
+    let Ok(Some(body)) = messages.first_error_response() else {
+        return None;
+    };
+    let mut fields = body.fields();
+    loop {
+        let field = match fields.next() {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(_) => return None,
+        };
+        if !field.type_().is_ascii() || !field.value_bytes().is_ascii() {
+            return None;
+        }
+    }
+    let Ok(Some(body)) = messages.first_error_response() else {
+        return None;
+    };
+    DbError::parse(&mut body.fields()).ok()
+}
+
 /// Consume a complete ErrorResponse already over-read behind the response
 /// which made the serialized loop attempt another frontend write.
 ///
@@ -1015,9 +1081,87 @@ fn preserve_queued_server_error(
     Ok(())
 }
 
+/// Preserve only a diagnosis whose bytes remain unambiguous after a
+/// client_encoding change. Normal response delivery has stopped at this
+/// point: callers receive the saved SQLSTATE when teardown closes their
+/// response channels.
+fn preserve_retirement_server_error(
+    messages: &BackendMessages,
+    response: Option<&Response>,
+    terminal_server_error: &Mutex<Option<DbError>>,
+    tx_status: &AtomicU8,
+) {
+    let Some(error) = first_ascii_server_error(messages) else {
+        return;
+    };
+
+    let ends_session = server_error_ends_session(&error);
+    if ends_session || response.is_none() {
+        remember_server_error(terminal_server_error, &error);
+    }
+    if ends_session {
+        tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
+    }
+    if let Some(response) = response {
+        remember_server_error(&response.request_server_error, &error);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RetirementProgress {
+    Continue,
+    PrefixComplete,
+    Stop,
+}
+
+/// Inspect one backend batch after client_encoding became undecodable.
+///
+/// No row, command tag, notice, or parameter text is exposed after the
+/// switch. We use only validated frame boundaries, ReadyForQuery boundaries,
+/// and wholly ASCII ErrorResponse fields to attribute diagnostics to the
+/// requests that were already on the wire. The result distinguishes a drained
+/// prefix from a protocol state, such as COPY input or a deferred framing
+/// failure, where waiting for another response would be wrong.
+fn scan_retirement_message(
+    message: BackendMessage,
+    response_offset: &mut usize,
+    response_count: usize,
+    responses: &VecDeque<Response>,
+    terminal_server_error: &Mutex<Option<DbError>>,
+    tx_status: &AtomicU8,
+) -> RetirementProgress {
+    match message {
+        BackendMessage::Async { .. } => RetirementProgress::Continue,
+        BackendMessage::Normal {
+            messages,
+            request_complete,
+            deferred_error,
+        } => {
+            let entered_copy_input =
+                messages.contains_tag(postgres_protocol::message::backend::COPY_IN_RESPONSE_TAG);
+            preserve_retirement_server_error(
+                &messages,
+                responses.get(*response_offset),
+                terminal_server_error,
+                tx_status,
+            );
+            if request_complete {
+                *response_offset += 1;
+            }
+            if entered_copy_input || deferred_error.is_some() {
+                RetirementProgress::Stop
+            } else if *response_offset >= response_count {
+                RetirementProgress::PrefixComplete
+            } else {
+                RetirementProgress::Continue
+            }
+        }
+    }
+}
+
 impl Dispatch<'_> {
     /// Dispatch a single decoded backend frame.
-    fn handle_message(&mut self, message: BackendMessage) -> Result<(), Error> {
+    fn handle_message(&mut self, message: BackendMessage) -> Result<DispatchOutcome, Error> {
         match message {
             BackendMessage::Async { message, .. } => {
                 route_async(self.parameters, self.async_sender, message)
@@ -1040,7 +1184,8 @@ impl Dispatch<'_> {
                 } else {
                     None
                 };
-                self.deliver_batch(messages, ready_status)
+                self.deliver_batch(messages, ready_status)?;
+                Ok(DispatchOutcome::Continue)
             }
         }
     }
@@ -1281,7 +1426,7 @@ fn route_async(
     parameters: &Mutex<HashMap<String, String>>,
     async_sender: Option<&mpsc::UnboundedSender<AsyncMessage>>,
     msg: Message,
-) -> Result<(), Error> {
+) -> Result<DispatchOutcome, Error> {
     match msg {
         Message::NoticeResponse(body) => {
             let error = DbError::parse(&mut body.fields()).map_err(Error::parse)?;
@@ -1332,13 +1477,13 @@ fn route_async(
             // the cause is not a mystery.
             if name.eq_ignore_ascii_case("client_encoding") {
                 if !crate::config::is_decodable_encoding(&value) {
-                    return Err(Error::config(
+                    return Ok(DispatchOutcome::RetireAfterDiagnostics(Error::config(
                         format!(
                             "session changed client_encoding to {value}; this driver \
                              decodes text as UTF-8 and cannot read that encoding"
                         )
                         .into(),
-                    ));
+                    )));
                 }
             }
 
@@ -1374,7 +1519,7 @@ fn route_async(
         }
         _ => return Err(Error::unexpected_message()),
     }
-    Ok(())
+    Ok(DispatchOutcome::Continue)
 }
 
 fn inner_encode_terminate() -> bytes::Bytes {
@@ -1549,6 +1694,133 @@ enum MuxEvent {
     CopyFrame(Option<FrontendMessage>),
 }
 
+/// Split-transport counterpart of `Connection::drain_retirement_responses`.
+/// The dedicated reader remains cancel-safe while this consumes the finite
+/// set of ReadyForQuery boundaries owed to requests already flushed.
+async fn drain_retirement_read_channel(
+    read_rx: &mut mpsc::Receiver<ReadEvent>,
+    read_terminal_rx: &mut mpsc::UnboundedReceiver<Error>,
+    response_count: usize,
+    responses: &VecDeque<Response>,
+    terminal_server_error: &Mutex<Option<DbError>>,
+    tx_status: &AtomicU8,
+) -> usize {
+    let mut response_offset = 0usize;
+    while response_offset < response_count {
+        let event = poll_fn(|cx| {
+            if let Poll::Ready(terminal) = read_terminal_rx.poll_next_unpin(cx) {
+                return Poll::Ready(MuxEvent::ReadTerminal(terminal));
+            }
+            match read_rx.poll_next_unpin(cx) {
+                Poll::Ready(event) => Poll::Ready(MuxEvent::Read(event)),
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await;
+
+        match event {
+            MuxEvent::Read(Some(ReadEvent::Message(ReadEnvelope {
+                message,
+                acknowledgement,
+            }))) => {
+                let complete = scan_retirement_message(
+                    message,
+                    &mut response_offset,
+                    response_count,
+                    responses,
+                    terminal_server_error,
+                    tx_status,
+                );
+                if let Some(acknowledgement) = acknowledgement {
+                    let _ = acknowledgement.send(());
+                }
+                match complete {
+                    RetirementProgress::PrefixComplete | RetirementProgress::Stop => {
+                        break;
+                    }
+                    RetirementProgress::Continue => {}
+                }
+            }
+            MuxEvent::Read(Some(ReadEvent::Terminal(_)))
+            | MuxEvent::Read(None)
+            | MuxEvent::ReadTerminal(_) => break,
+            MuxEvent::SenderReady | MuxEvent::Request(_) | MuxEvent::CopyFrame(_) => {
+                unreachable!("retirement drain selects only reader events")
+            }
+        }
+    }
+    response_offset
+}
+
+/// Give the split reader one scheduling turn after acknowledging the
+/// encoding-changing frame, then inspect only events it can produce without
+/// waiting. This is the bounded arm for a COPY response which PostgreSQL does
+/// not currently owe: a queued ErrorResponse is still authoritative, but an
+/// empty queue must not make retirement wait for producer input.
+async fn drain_available_retirement_read_channel(
+    read_rx: &mut mpsc::Receiver<ReadEvent>,
+    response_offset: &mut usize,
+    response_count: usize,
+    responses: &VecDeque<Response>,
+    terminal_server_error: &Mutex<Option<DbError>>,
+    tx_status: &AtomicU8,
+) {
+    // A peer can stream asynchronous notices forever. Retirement is allowed a
+    // short lookahead for the diagnosis already following the encoding change,
+    // not an unbounded new read loop on a response PostgreSQL does not owe.
+    for _ in 0..32 {
+        if *response_offset >= response_count {
+            break;
+        }
+        let mut yielded = false;
+        poll_fn(|cx| {
+            if yielded {
+                Poll::Ready(())
+            } else {
+                yielded = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+        .await;
+
+        let Ok(event) = read_rx.try_recv() else {
+            break;
+        };
+        match event {
+            ReadEvent::Message(ReadEnvelope {
+                message,
+                acknowledgement,
+            }) => {
+                let progress = scan_retirement_message(
+                    message,
+                    response_offset,
+                    response_count,
+                    responses,
+                    terminal_server_error,
+                    tx_status,
+                );
+                if let Some(acknowledgement) = acknowledgement {
+                    let _ = acknowledgement.send(());
+                }
+                if progress != RetirementProgress::Continue {
+                    break;
+                }
+            }
+            ReadEvent::Terminal(_) => break,
+        }
+    }
+}
+
+struct FlushRetirement {
+    error: Error,
+    response_offset: usize,
+    response_count: usize,
+    include_tail_after_flush: bool,
+    flush_complete: bool,
+    stopped: bool,
+}
+
 /// Drive `write_half`'s flush while concurrently draining the read channel -
 /// the cancel-safe interleave that keeps the multiplexed loop's
 /// "reads and writes proceed in the same poll" property even across a large
@@ -1597,6 +1869,7 @@ async fn flush_with_read_draining<W>(
     tx_status: &AtomicU8,
     in_flight_requests: &AtomicUsize,
     terminal_server_error: &Mutex<Option<DbError>>,
+    include_tail_after_flush: bool,
 ) -> (Result<(), Error>, Option<Option<Error>>)
 where
     W: AsyncWrite + Unpin,
@@ -1616,6 +1889,11 @@ where
     // diagnosis. Hold the local write error just long enough to dispatch every
     // immediately available FIFO response ahead of it.
     let mut flush_failure: Option<Error> = None;
+    // An unsupported client_encoding retires immediately, but the server may
+    // already owe responses for an earlier flushed prefix. While the current
+    // frontend flush is pending its tail is excluded; a successful flush
+    // proves that tail is also on the wire and may add it to the bounded scan.
+    let mut retirement: Option<FlushRetirement> = None;
 
     let flush_result = poll_fn(|cx| -> Poll<Result<(), Error>> {
         // (1) ReadTimeout is out-of-band and outranks every FIFO gate. The
@@ -1637,14 +1915,27 @@ where
             return Poll::Ready(Ok(()));
         }
 
-        // (2) Drive the flush to completion while the session is live. A
-        // success can return immediately; a failure first publishes poison and
-        // gives the already-queued read FIFO one turn below.
+        // (2) Drive the flush to completion while the session is live. After
+        // an encoding retirement, completion proves the just-buffered tail was
+        // sent and therefore adds it to the finite diagnostic drain. A failure
+        // still gives the already-queued read FIFO one turn below.
         if flush_failure.is_none()
+            && !retirement
+                .as_ref()
+                .is_some_and(|retirement| retirement.flush_complete)
             && let Poll::Ready(result) = flush.as_mut().poll(cx)
         {
             match result {
-                Ok(()) => return Poll::Ready(Ok(())),
+                Ok(()) => {
+                    if let Some(retirement) = retirement.as_mut() {
+                        retirement.flush_complete = true;
+                        if retirement.include_tail_after_flush {
+                            retirement.response_count = responses.len();
+                        }
+                    } else {
+                        return Poll::Ready(Ok(()));
+                    }
+                }
                 Err(error) => {
                     tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
                     flush_failure = Some(error);
@@ -1656,6 +1947,60 @@ where
         // delivered batch immediately frees the FIFO gate for the next read
         // within this single wake.
         loop {
+            if retirement.is_some() {
+                if read_terminal.is_some() {
+                    let retirement = retirement.take().expect("checked above");
+                    return Poll::Ready(Err(retirement.error));
+                }
+
+                let finished = retirement.as_ref().is_some_and(|retirement| {
+                    retirement.stopped
+                        || (retirement.flush_complete
+                            && retirement.response_offset >= retirement.response_count)
+                });
+                if finished {
+                    let retirement = retirement.take().expect("checked above");
+                    return Poll::Ready(Err(retirement.error));
+                }
+
+                match read_rx.poll_next_unpin(cx) {
+                    Poll::Ready(Some(ReadEvent::Message(ReadEnvelope {
+                        message,
+                        acknowledgement,
+                    }))) => {
+                        let retirement = retirement.as_mut().expect("checked above");
+                        match scan_retirement_message(
+                            message,
+                            &mut retirement.response_offset,
+                            retirement.response_count,
+                            responses,
+                            terminal_server_error,
+                            tx_status,
+                        ) {
+                            RetirementProgress::Stop => retirement.stopped = true,
+                            RetirementProgress::Continue | RetirementProgress::PrefixComplete => {}
+                        }
+                        if let Some(acknowledgement) = acknowledgement {
+                            let _ = acknowledgement.send(());
+                        }
+                        continue;
+                    }
+                    Poll::Ready(Some(ReadEvent::Terminal(error))) => {
+                        read_terminal = Some(Some(error));
+                        continue;
+                    }
+                    Poll::Ready(None) => {
+                        read_terminal = Some(None);
+                        continue;
+                    }
+                    Poll::Pending => {
+                        return flush_failure
+                            .take()
+                            .map_or(Poll::Pending, |error| Poll::Ready(Err(error)));
+                    }
+                }
+            }
+
             // A normal terminal event travels through `read_rx`, so it is first
             // recorded inside step (4) below rather than by the out-of-band
             // check above. Observe it on the next trip around this inner loop;
@@ -1696,6 +2041,7 @@ where
                         // diagnosis slot. Track completed responses locally so
                         // multiple queued batches still map to their owners.
                         let mut response_offset = 0usize;
+                        let mut encoding_retired = false;
                         loop {
                             match read_rx.poll_next_unpin(cx) {
                                 Poll::Ready(Some(ReadEvent::Message(ReadEnvelope {
@@ -1703,20 +2049,44 @@ where
                                     acknowledgement,
                                 }))) => {
                                     let result = match message {
-                                        BackendMessage::Async { message, .. } => {
-                                            route_async(parameters, async_sender, message)
+                                        BackendMessage::Async { message, .. }
+                                            if !encoding_retired =>
+                                        {
+                                            match route_async(parameters, async_sender, message) {
+                                                Ok(DispatchOutcome::Continue) => Ok(()),
+                                                Ok(DispatchOutcome::RetireAfterDiagnostics(_)) => {
+                                                    tx_status.store(
+                                                        READ_RETIRED_STATUS,
+                                                        Ordering::Release,
+                                                    );
+                                                    encoding_retired = true;
+                                                    Ok(())
+                                                }
+                                                Err(error) => Err(error),
+                                            }
                                         }
+                                        BackendMessage::Async { .. } => Ok(()),
                                         BackendMessage::Normal {
                                             messages,
                                             request_complete,
                                             deferred_error,
                                         } => {
-                                            let result = preserve_queued_server_error(
-                                                &messages,
-                                                responses.get(response_offset),
-                                                terminal_server_error,
-                                                tx_status,
-                                            );
+                                            let result = if encoding_retired {
+                                                preserve_retirement_server_error(
+                                                    &messages,
+                                                    responses.get(response_offset),
+                                                    terminal_server_error,
+                                                    tx_status,
+                                                );
+                                                Ok(())
+                                            } else {
+                                                preserve_queued_server_error(
+                                                    &messages,
+                                                    responses.get(response_offset),
+                                                    terminal_server_error,
+                                                    tx_status,
+                                                )
+                                            };
                                             if request_complete {
                                                 response_offset += 1;
                                             }
@@ -1774,13 +2144,30 @@ where
                         // Dispatch has now completed or paused the matching
                         // obligation. Only now may the reader submit another
                         // socket read.
+                        if matches!(&result, Ok(DispatchOutcome::RetireAfterDiagnostics(_))) {
+                            tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
+                        }
                         if let Some(acknowledgement) = acknowledgement {
                             let _ = acknowledgement.send(());
                         }
-                        if let Err(e) = result {
-                            // A dispatch error retires the session, so the next
-                            // trip around the loop abandons this useless flush.
-                            read_terminal = Some(Some(e));
+                        match result {
+                            Ok(DispatchOutcome::Continue) => {}
+                            Ok(DispatchOutcome::RetireAfterDiagnostics(error)) => {
+                                tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
+                                retirement = Some(FlushRetirement {
+                                    error,
+                                    response_offset: 0,
+                                    response_count: responses.len().saturating_sub(1),
+                                    include_tail_after_flush,
+                                    flush_complete: false,
+                                    stopped: false,
+                                });
+                            }
+                            Err(error) => {
+                                // A dispatch error retires the session, so the next
+                                // trip around the loop abandons this useless flush.
+                                read_terminal = Some(Some(error));
+                            }
                         }
                         continue;
                     }
@@ -1866,7 +2253,13 @@ where
         // Drain async messages captured during the handshake (e.g.
         // notices from `read_info`) before any socket I/O.
         while let Some(msg) = self.delayed_notices.pop_front() {
-            route_async(&self.parameters, self.async_sender.as_ref(), msg)?;
+            match route_async(&self.parameters, self.async_sender.as_ref(), msg)? {
+                DispatchOutcome::Continue => {}
+                DispatchOutcome::RetireAfterDiagnostics(error) => {
+                    self.tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
+                    return Err(error);
+                }
+            }
         }
 
         // Decompose so the stream can be consumed by the split; if it refuses
@@ -2280,10 +2673,65 @@ where
                         .handle_message(message);
                         // The reader cannot submit its next socket read until all
                         // clock effects from this decoded frame are visible.
+                        if matches!(
+                            &result,
+                            Ok(DispatchOutcome::RetireAfterDiagnostics(_))
+                        ) {
+                            tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
+                        }
                         if let Some(acknowledgement) = acknowledgement {
                             let _ = acknowledgement.send(());
                         }
-                        result?;
+                        match result? {
+                            DispatchOutcome::Continue => {}
+                            DispatchOutcome::RetireAfterDiagnostics(error) => {
+                                if copy_read_obligation
+                                    .as_ref()
+                                    .is_some_and(ReadObligation::accepts_copy_input)
+                                {
+                                    // PostgreSQL is waiting for producer data,
+                                    // not owing a response. No later request can
+                                    // be in flight behind COPY mode, so waiting
+                                    // for ReadyForQuery would hang and cannot
+                                    // uncover another request's diagnosis.
+                                    let mut response_offset = 0;
+                                    drain_available_retirement_read_channel(
+                                        &mut read_rx,
+                                        &mut response_offset,
+                                        responses.len(),
+                                        &responses,
+                                        &terminal_server_error,
+                                        &tx_status,
+                                    )
+                                    .await;
+                                    return Err(error);
+                                }
+                                let response_count = responses.len().saturating_sub(usize::from(
+                                    copy_in.is_some() && !copy_initial_flushed,
+                                ));
+                                let mut response_offset = drain_retirement_read_channel(
+                                    &mut read_rx,
+                                    &mut read_terminal_rx,
+                                    response_count,
+                                    &responses,
+                                    &terminal_server_error,
+                                    &tx_status,
+                                )
+                                .await;
+                                if response_count < responses.len() {
+                                    drain_available_retirement_read_channel(
+                                        &mut read_rx,
+                                        &mut response_offset,
+                                        responses.len(),
+                                        &responses,
+                                        &terminal_server_error,
+                                        &tx_status,
+                                    )
+                                    .await;
+                                }
+                                return Err(error);
+                            }
+                        }
                     }
                     MuxEvent::Read(Some(ReadEvent::Terminal(error))) => {
                         return classify_read_terminal(
@@ -2366,6 +2814,7 @@ where
                                         &tx_status,
                                         &in_flight_requests,
                                         &terminal_server_error,
+                                        true,
                                     )
                                     .await
                                 } else {
@@ -2454,6 +2903,7 @@ where
                             &tx_status,
                             &in_flight_requests,
                             &terminal_server_error,
+                            !copy_initial_flushed || resume_terminal,
                         )
                         .await;
                         if let Some(error) = take_captured_non_eof_terminal(&mut terminal) {
@@ -2549,6 +2999,12 @@ mod tests {
 
     struct WriteFailingSplitStream {
         read_half_dropped: Rc<Cell<bool>>,
+    }
+
+    struct YieldingWriteSplitStream;
+
+    struct YieldingWriteHalf {
+        yielded: bool,
     }
 
     struct TimeoutSplitStream {
@@ -2840,6 +3296,28 @@ mod tests {
         }
     }
 
+    impl AsyncRead for YieldingWriteSplitStream {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            std::future::pending::<()>().await;
+            BufResult(Ok(0), buf)
+        }
+    }
+
+    impl AsyncWrite for YieldingWriteSplitStream {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            let len = buf.buf_len();
+            BufResult(Ok(len), buf)
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     impl AsyncRead for TimeoutSplitStream {
         async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
             self.read_half_started.set(true);
@@ -2960,6 +3438,31 @@ mod tests {
         }
     }
 
+    impl AsyncWrite for YieldingWriteHalf {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            let len = buf.buf_len();
+            poll_fn(|cx| {
+                if self.yielded {
+                    Poll::Ready(())
+                } else {
+                    self.yielded = true;
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            })
+            .await;
+            BufResult(Ok(len), buf)
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     impl AsyncRead for ObservedReadHalf {
         async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
             let result = self.inner.read(buf).await;
@@ -3012,6 +3515,21 @@ mod tests {
                     dropped: self.read_half_dropped,
                 },
                 FailingWriteHalf,
+            ))
+        }
+    }
+
+    impl SplitStream for YieldingWriteSplitStream {
+        type ReadHalf = ParkedReadHalf;
+        type WriteHalf = YieldingWriteHalf;
+
+        fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+            Ok((
+                ParkedReadHalf {
+                    started: None,
+                    dropped: Rc::new(Cell::new(false)),
+                },
+                YieldingWriteHalf { yielded: false },
             ))
         }
     }
@@ -3551,7 +4069,7 @@ mod tests {
         assert!(surfaced.is_read_timeout());
     }
 
-    fn error_response_batch(code: &str, message: &str) -> BackendMessages {
+    fn error_response_bytes(code: &str, message: &str) -> BytesMut {
         let mut payload = BytesMut::new();
         payload.extend_from_slice(b"SERROR\0");
         payload.extend_from_slice(b"C");
@@ -3565,7 +4083,200 @@ mod tests {
         bytes.extend_from_slice(&(u32::try_from(payload.len()).unwrap() + 4).to_be_bytes());
         bytes.extend_from_slice(&payload);
         bytes.extend_from_slice(b"Z\0\0\0\x05I");
-        BackendMessages::from_test_bytes(bytes)
+        bytes
+    }
+
+    fn error_response_batch(code: &str, message: &str) -> BackendMessages {
+        BackendMessages::from_test_bytes(error_response_bytes(code, message))
+    }
+
+    fn parameter_status_frame(name: &str, value: &str) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(name.as_bytes());
+        payload.push(0);
+        payload.extend_from_slice(value.as_bytes());
+        payload.push(0);
+
+        let mut frame = vec![b'S'];
+        frame.extend_from_slice(&(u32::try_from(payload.len()).unwrap() + 4).to_be_bytes());
+        frame.extend_from_slice(&payload);
+        frame
+    }
+
+    #[test]
+    fn retirement_decodes_only_ascii_server_diagnostics() {
+        let ascii = error_response_batch("22012", "division by zero");
+        let error =
+            first_ascii_server_error(&ascii).expect("the ASCII ErrorResponse was not preserved");
+        assert_eq!(error.code().code(), "22012");
+
+        let non_ascii = error_response_batch("22012", "division by z\u{e9}ro");
+        assert!(
+            first_ascii_server_error(&non_ascii).is_none(),
+            "post-switch non-ASCII text was decoded as though it were UTF-8"
+        );
+    }
+
+    #[compio::test]
+    async fn flush_time_encoding_retirement_preserves_a_queued_server_error() {
+        let stream = BufStream::new(YieldingWriteSplitStream);
+        let (read_half, mut write_half) = match stream.try_into_split() {
+            Ok(halves) => halves,
+            Err(_) => panic!("the yielding-write fixture did not split"),
+        };
+        drop(read_half);
+        write_frontend(
+            &mut write_half,
+            FrontendMessage::Raw(bytes::Bytes::from_static(b"scripted request")),
+        )
+        .expect("buffer the scripted request");
+
+        let mut parameter_frame =
+            BytesMut::from(parameter_status_frame("client_encoding", "LATIN1").as_slice());
+        let frame_len = parameter_frame.len();
+        let parameter_status = Message::parse(&mut parameter_frame)
+            .expect("decode the scripted ParameterStatus")
+            .expect("the scripted ParameterStatus was incomplete");
+        let (mut read_tx, mut read_rx) = mpsc::channel(4);
+        read_tx
+            .try_send(ReadEvent::Message(ReadEnvelope {
+                message: BackendMessage::Async {
+                    message: parameter_status,
+                    frame_len,
+                },
+                acknowledgement: None,
+            }))
+            .expect("queue the encoding change");
+        read_tx
+            .try_send(ReadEvent::Message(ReadEnvelope {
+                message: BackendMessage::Normal {
+                    messages: error_response_batch("22012", "scripted division by zero"),
+                    request_complete: true,
+                    deferred_error: None,
+                },
+                acknowledgement: None,
+            }))
+            .expect("queue the server diagnosis behind the encoding change");
+        let (_read_terminal_tx, mut read_terminal_rx) = mpsc::unbounded();
+
+        let (response_tx, _response_rx) = mpsc::channel(1);
+        let request_server_error = Arc::default();
+        let mut responses = VecDeque::from([Response {
+            sender: response_tx,
+            disposition: RequestDisposition::Awaited,
+            transaction_effect: TransactionEffect::MayChange,
+            prepare_cleanup: None,
+            statement: None,
+            observation: None,
+            bind_complete_seen: false,
+            read_obligation: ReadObligation::new(None, false),
+            request_server_error: Arc::clone(&request_server_error),
+        }]);
+        let mut pending_responses = VecDeque::new();
+        let parameters = Mutex::new(HashMap::new());
+        let tx_status = AtomicU8::new(b'I');
+        let in_flight_requests = AtomicUsize::new(1);
+        let terminal_server_error = Mutex::new(None);
+
+        let (write_result, terminal) = flush_with_read_draining(
+            &mut write_half,
+            &mut read_rx,
+            &mut read_terminal_rx,
+            &parameters,
+            &mut responses,
+            &mut pending_responses,
+            None,
+            &tx_status,
+            &in_flight_requests,
+            &terminal_server_error,
+            true,
+        )
+        .await;
+
+        assert_eq!(
+            request_server_error
+                .lock()
+                .as_ref()
+                .map(|error: &DbError| error.code().code()),
+            Some("22012"),
+            "flush-time client_encoding retirement discarded queued SQLSTATE 22012"
+        );
+        let local = write_result.expect_err("the unsupported encoding left the flush reusable");
+        assert!(local.is_config());
+        assert!(terminal.is_none(), "the fixture invented a read failure");
+        assert_eq!(
+            tx_status.load(Ordering::Acquire),
+            READ_RETIRED_STATUS,
+            "the encoding change did not poison pool reuse before retirement"
+        );
+    }
+
+    /// The serialized fallback used to stop on the unsupported ParameterStatus
+    /// and drop the SQLSTATE for the second request which it had already
+    /// flushed. A CommandComplete prefix gives the loop a dispatch point at
+    /// which to dequeue that second request before the encoding switch arrives.
+    #[compio::test]
+    async fn serialized_encoding_retirement_preserves_a_pipelined_server_error() {
+        let (request_sender, request_receiver) = mpsc::unbounded();
+        let client = crate::client::Client::new(
+            request_sender,
+            crate::config::SslMode::Disable,
+            crate::config::SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+        );
+        let _first = client
+            .inner()
+            .send(RequestMessages::Single(FrontendMessage::Raw(
+                bytes::Bytes::from_static(b"scripted first request"),
+            )))
+            .expect("enqueue the first serialized request");
+        let mut second = client
+            .inner()
+            .send(RequestMessages::Single(FrontendMessage::Raw(
+                bytes::Bytes::from_static(b"scripted second request"),
+            )))
+            .expect("enqueue the second serialized request");
+
+        let mut script = vec![b'C'];
+        script.extend_from_slice(&13u32.to_be_bytes());
+        script.extend_from_slice(b"SELECT 1\0");
+        script.extend_from_slice(&parameter_status_frame("client_encoding", "LATIN1"));
+        script.extend_from_slice(&[b'Z', 0, 0, 0, 5, b'I']);
+        script.extend_from_slice(&error_response_bytes("22012", "scripted division by zero"));
+
+        let connection: Connection<ScriptedDuplex, ScriptedDuplex> = Connection::new(
+            BufStream::new(MaybeTlsStream::Raw(ScriptedDuplex {
+                chunks: VecDeque::from([script]),
+            })),
+            VecDeque::new(),
+            HashMap::new(),
+            client.parameters_handle(),
+            request_receiver,
+            client.tx_status_handle(),
+            client.in_flight_requests_handle(),
+            client.terminal_server_error_handle(),
+            None,
+        );
+
+        let driver_error = connection
+            .run_serialized()
+            .await
+            .expect_err("the unsupported encoding left the serialized session alive");
+        assert!(
+            driver_error.is_config(),
+            "the serialized driver lost its configuration classification: {driver_error}"
+        );
+        let error = match second.next().await {
+            Err(error) => error,
+            Ok(_) => panic!("the scripted division by zero unexpectedly succeeded"),
+        };
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("22012"),
+            "serialized client_encoding retirement discarded SQLSTATE 22012: {error}"
+        );
     }
 
     fn error_response_before_malformed_header(code: &str, message: &str) -> Vec<u8> {
@@ -3943,6 +4654,7 @@ mod tests {
             &tx_status,
             &in_flight_requests,
             &terminal_server_error,
+            true,
         )
         .await;
         let write_error = write_result.expect_err("the scripted flush unexpectedly succeeded");
@@ -4090,6 +4802,7 @@ mod tests {
             &tx_status,
             &in_flight_requests,
             &terminal_server_error,
+            true,
         )
         .await;
         let write_error = write_result.expect_err("the scripted flush unexpectedly succeeded");
