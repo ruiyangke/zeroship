@@ -1494,6 +1494,72 @@ async fn an_unaccountable_message_retires_the_replication_session() {
     .expect("unaccountable message test exceeded its outer watchdog");
 }
 
+/// Once `IDENTIFY_SYSTEM` has decoded an `ErrorResponse`, a later local
+/// protocol symptom cannot replace it.
+///
+/// An unaccountable message still retires the session: there is no safe frame
+/// to drain to. The diagnostic returned for that retired session is the first
+/// server failure, not the unexpected-message error observed afterwards.
+#[compio::test]
+async fn an_identify_system_error_outranks_a_later_unaccountable_message() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            assert_eq!(expect_simple_query(&mut stream), b"IDENTIFY_SYSTEM\0");
+
+            let mut response = backend_frame(b'E', b"SERROR\0C22012\0Mdivision by zero\0\0");
+            // EmptyQueryResponse is well framed, but cannot belong to an
+            // IDENTIFY_SYSTEM response.
+            response.extend_from_slice(&backend_frame(b'I', b""));
+            stream
+                .write_all(&response)
+                .expect("write errored and unaccountable IDENTIFY_SYSTEM response");
+            stream
+                .flush()
+                .expect("flush errored and unaccountable IDENTIFY_SYSTEM response");
+            expect_disconnect(&mut stream);
+        });
+
+        let mut replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(
+                common::suite_tls(),
+                &stub_config(server.addr),
+            ),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+
+        let error = compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system())
+            .await
+            .expect("errored identify_system exceeded its watchdog")
+            .expect_err("the scripted ErrorResponse cannot become success");
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("22012"),
+            "IDENTIFY_SYSTEM discarded SQLSTATE 22012 behind an unexpected message: {}",
+            common::error_chain(&error)
+        );
+
+        let retry = compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system())
+            .await
+            .expect("retired identify_system retry exceeded its watchdog")
+            .expect_err("an unaccountable message left the session reusable");
+        assert!(
+            retry.is_cancelled(),
+            "the unaccountable message did not retire the session: {}",
+            common::error_chain(&retry)
+        );
+
+        drop(replication);
+        server.finish();
+    })
+    .await
+    .expect("IDENTIFY_SYSTEM diagnostic precedence test exceeded its outer watchdog");
+}
+
 /// A server-sent `ErrorResponse` must not leave the session one frame behind.
 ///
 /// The response loop returned the moment it saw the `ErrorResponse`, leaving
