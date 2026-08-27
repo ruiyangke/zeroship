@@ -1933,6 +1933,11 @@ pub mod pgoutput {
         InvalidUtf8,
         UnknownTag(u8),
         UnknownTupleFormat(u8),
+        /// Bytes remained after a known message's documented field list.
+        TrailingData {
+            message: &'static str,
+            remaining: usize,
+        },
         /// A streaming frame reached the stateless [`decode`], which cannot
         /// track the chunk state the rest of the transaction needs. Use
         /// [`Decoder`].
@@ -1947,6 +1952,9 @@ pub mod pgoutput {
                 DecodeError::UnknownTag(t) => write!(f, "pgoutput: unknown tag 0x{t:02x}"),
                 DecodeError::UnknownTupleFormat(t) => {
                     write!(f, "pgoutput: unknown tuple column format 0x{t:02x}")
+                }
+                DecodeError::TrailingData { message, remaining } => {
+                    write!(f, "pgoutput: {message} has {remaining} trailing byte(s)")
                 }
                 DecodeError::StreamingNeedsDecoder => write!(
                     f,
@@ -2015,6 +2023,31 @@ pub mod pgoutput {
 
     fn read_i64(buf: &mut &[u8]) -> Result<i64, DecodeError> {
         Ok(read_u64(buf)? as i64)
+    }
+
+    const fn message_name(tag: u8) -> &'static str {
+        match tag {
+            b'B' => "Begin",
+            b'C' => "Commit",
+            b'O' => "Origin",
+            b'R' => "Relation",
+            b'Y' => "Type",
+            b'I' => "Insert",
+            b'U' => "Update",
+            b'D' => "Delete",
+            b'T' => "Truncate",
+            b'M' => "Message",
+            b'b' => "BeginPrepare",
+            b'P' => "Prepare",
+            b'K' => "CommitPrepared",
+            b'r' => "RollbackPrepared",
+            b'S' => "StreamStart",
+            b'E' => "StreamStop",
+            b'c' => "StreamCommit",
+            b'A' => "StreamAbort",
+            b'p' => "StreamPrepare",
+            _ => "unknown pgoutput message",
+        }
     }
 
     /// Decode a tuple - a u16 column count followed by per-column
@@ -2355,6 +2388,7 @@ pub mod pgoutput {
                     return Err(DecodeError::UnexpectedEof);
                 }
                 let content = Bytes::copy_from_slice(&cur[..len]);
+                cur = &cur[len..];
                 PgOutputMessage::Message {
                     xid: carried_xid,
                     flags,
@@ -2386,10 +2420,15 @@ pub mod pgoutput {
             b'A' => {
                 let xid = read_u32(&mut cur)?;
                 let subxid = read_u32(&mut cur)?;
-                let (abort_lsn, abort_timestamp) = if cur.is_empty() {
-                    (None, None)
-                } else {
-                    (Some(read_u64(&mut cur)?), Some(read_i64(&mut cur)?))
+                let (abort_lsn, abort_timestamp) = match cur.len() {
+                    0 => (None, None),
+                    16 => (Some(read_u64(&mut cur)?), Some(read_i64(&mut cur)?)),
+                    remaining => {
+                        return Err(DecodeError::TrailingData {
+                            message: message_name(tag),
+                            remaining,
+                        });
+                    }
                 };
                 PgOutputMessage::StreamAbort {
                     xid,
@@ -2400,11 +2439,12 @@ pub mod pgoutput {
             }
             other => return Err(DecodeError::UnknownTag(other)),
         };
-        // We do NOT enforce `cur.is_empty()` - a future pgoutput proto
-        // version may append optional fields, and the docs explicitly
-        // reserve forward-compatibility space. The caller has the data
-        // it needs.
-        let _ = cur; // suppress "value assigned but not read"
+        if !cur.is_empty() {
+            return Err(DecodeError::TrailingData {
+                message: message_name(tag),
+                remaining: cur.len(),
+            });
+        }
         Ok(msg)
     }
 
@@ -3438,6 +3478,90 @@ mod tests {
             pgoutput::DecodeError::UnknownTag(b'?') => {}
             other => panic!("expected UnknownTag, got {other:?}"),
         }
+    }
+
+    /// pgoutput versions are selected explicitly, and each selected version
+    /// defines a complete field list for every message. Bytes after that list
+    /// are unsupported structure, not an extension the decoder may discard.
+    /// Exercise all 19 legal tags so adding an exhaustion check to only the
+    /// common fixed-layout cases cannot print a clean result.
+    #[test]
+    fn every_pgoutput_message_refuses_trailing_bytes_by_name() {
+        fn fixed(tag: u8, body_len: usize) -> Vec<u8> {
+            let mut frame = vec![tag];
+            frame.resize(body_len + 1, 0);
+            frame
+        }
+
+        let mut relation = fixed(b'R', 4);
+        relation.extend_from_slice(b"public\0t\0d\0\0");
+        let mut type_message = fixed(b'Y', 4);
+        type_message.extend_from_slice(b"public\0t\0");
+        let empty_tuple = [0u8, 0];
+        let mut insert = fixed(b'I', 4);
+        insert.push(b'N');
+        insert.extend_from_slice(&empty_tuple);
+        let mut update = fixed(b'U', 4);
+        update.push(b'N');
+        update.extend_from_slice(&empty_tuple);
+        let mut delete = fixed(b'D', 4);
+        delete.push(b'K');
+        delete.extend_from_slice(&empty_tuple);
+        let mut origin = fixed(b'O', 8);
+        origin.extend_from_slice(b"origin\0");
+        let mut message = fixed(b'M', 1 + 8);
+        message.extend_from_slice(b"prefix\0");
+        message.extend_from_slice(&0u32.to_be_bytes());
+        let mut begin_prepare = fixed(b'b', 8 + 8 + 8 + 4);
+        begin_prepare.extend_from_slice(b"g\0");
+        let mut prepare = fixed(b'P', 1 + 8 + 8 + 8 + 4);
+        prepare.extend_from_slice(b"g\0");
+        let mut commit_prepared = fixed(b'K', 1 + 8 + 8 + 8 + 4);
+        commit_prepared.extend_from_slice(b"g\0");
+        let mut rollback_prepared = fixed(b'r', 1 + 8 + 8 + 8 + 8 + 4);
+        rollback_prepared.extend_from_slice(b"g\0");
+        let mut stream_prepare = fixed(b'p', 1 + 8 + 8 + 8 + 4);
+        stream_prepare.extend_from_slice(b"g\0");
+
+        let frames = [
+            ("Begin", fixed(b'B', 8 + 8 + 4)),
+            ("Commit", fixed(b'C', 1 + 8 + 8 + 8)),
+            ("Origin", origin),
+            ("Relation", relation),
+            ("Type", type_message),
+            ("Insert", insert),
+            ("Update", update),
+            ("Delete", delete),
+            ("Truncate", fixed(b'T', 4 + 1)),
+            ("Message", message),
+            ("BeginPrepare", begin_prepare),
+            ("Prepare", prepare),
+            ("CommitPrepared", commit_prepared),
+            ("RollbackPrepared", rollback_prepared),
+            ("StreamStart", fixed(b'S', 4 + 1)),
+            ("StreamStop", fixed(b'E', 0)),
+            ("StreamCommit", fixed(b'c', 4 + 1 + 8 + 8 + 8)),
+            ("StreamAbort", fixed(b'A', 4 + 4)),
+            ("StreamPrepare", stream_prepare),
+        ];
+
+        let mut ruled_on = 0;
+        for (expected_name, mut frame) in frames {
+            pgoutput::Decoder::new()
+                .decode(&frame)
+                .unwrap_or_else(|error| panic!("valid {expected_name} fixture failed: {error}"));
+            frame.push(0xAA);
+            let error = pgoutput::Decoder::new().decode(&frame).unwrap_err();
+            match error {
+                pgoutput::DecodeError::TrailingData { message, remaining } => {
+                    assert_eq!(message, expected_name);
+                    assert_eq!(remaining, 1);
+                }
+                other => panic!("{expected_name} was not refused by name: {other}"),
+            }
+            ruled_on += 1;
+        }
+        assert_eq!(ruled_on, 19, "the complete legal tag set must be ruled on");
     }
 
     /// A TRUNCATE naming more relations than any fixed cap would allow must
