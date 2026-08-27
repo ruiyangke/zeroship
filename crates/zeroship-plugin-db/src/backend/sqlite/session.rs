@@ -1855,29 +1855,38 @@ fn cancelled_before_start(reservation: &Reservation) -> DbError {
 /// is one SQLite rejects inside a transaction (`PRAGMA` that writes, `VACUUM`,
 /// `ATTACH`, `DETACH`) or one that manages transactions itself.
 ///
-/// It is written so that its only failure mode is a **false negative**. A `;`
-/// inside a string literal splits a fragment that is not a statement, whose
-/// leading token may accidentally match the list - and the result is that the
-/// operation runs unwrapped, exactly as it did before SC-2. It can never
-/// wrongly decide that a `VACUUM` is safe to wrap, because the real leading
-/// keyword of a real statement is always examined.
+/// It is written so that its only failure mode is a **false negative**: it may
+/// refuse to wrap something SQLite would have allowed, and the operation then
+/// runs unwrapped exactly as it did before SC-2. It can never wrongly decide
+/// that a `VACUUM` is safe to wrap.
+///
+/// That property rests on one rule, and the rule is the reason for the
+/// `is_empty` arm below rather than a filter: **a non-empty fragment whose
+/// leading token is not a bare alphabetic keyword is refused, not skipped.**
+/// Skipping it is how the guarantee above was false until 2026-08-27. Trimming
+/// the non-alphabetic edges off a leading `--` or `/*` leaves the empty string,
+/// the old code dropped empty words, and `all` over an empty iterator is
+/// `true`, so `"-- note\nVACUUM"` and `"/* c */ VACUUM"` both reported that a
+/// `VACUUM` was safe to wrap. Refusing an unrecognised leading token costs a
+/// wrap and keeps the direction of every mistake the same.
 fn permits_explicit_transaction(sql: &str) -> bool {
     const REFUSED: &[&str] = &[
         "PRAGMA", "VACUUM", "ATTACH", "DETACH", "BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT",
         "RELEASE",
     ];
     sql.split(';')
-        .filter_map(|fragment| {
+        // A fragment that is only whitespace is the gap around a `;`, not a
+        // statement. Every other fragment must produce a keyword we recognise.
+        .filter(|fragment| !fragment.trim().is_empty())
+        .map(|fragment| {
             fragment
                 .split_whitespace()
                 .next()
-                .map(|word| word.trim_matches(|c: char| !c.is_ascii_alphabetic()))
+                .unwrap_or_default()
+                .trim_matches(|c: char| !c.is_ascii_alphabetic())
+                .to_ascii_uppercase()
         })
-        .filter(|word| !word.is_empty())
-        .all(|word| {
-            let upper = word.to_ascii_uppercase();
-            !REFUSED.contains(&upper.as_str())
-        })
+        .all(|word| !word.is_empty() && !REFUSED.contains(&word.as_str()))
 }
 
 // ---------------------------------------------------------------------------
@@ -2377,6 +2386,14 @@ mod tests {
             "SAVEPOINT zs_sp_1",
             "RELEASE SAVEPOINT zs_sp_1",
             "CREATE TABLE t (x); PRAGMA foreign_keys = OFF;",
+            // Comment-prefixed. The leading token is `--` / `/*`, which trims
+            // to the empty string - and an empty leading token used to be
+            // dropped, leaving `all` vacuously true and reporting that a
+            // VACUUM was safe to wrap. These are the arms that failed.
+            "-- note\nVACUUM",
+            "/* c */ VACUUM",
+            "-- leading comment\nPRAGMA journal_mode = WAL",
+            "CREATE TABLE t (x);\n-- then\nVACUUM",
         ];
         assert!(!refused.is_empty(), "the refusal set must not be empty");
         for sql in refused {
