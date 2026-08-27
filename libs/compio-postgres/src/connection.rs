@@ -433,6 +433,7 @@ pub struct Connection<S, T> {
     /// every server response exactly once and in wire order.
     tx_status: Arc<AtomicU8>,
     in_flight_requests: Arc<AtomicUsize>,
+    terminal_server_error: Arc<Mutex<Option<DbError>>>,
     /// Weak so a task stranded by compio cannot retain the client's dup after
     /// client-first teardown has synchronously released the server session.
     drop_release: Option<crate::release::ConnectionDropRelease>,
@@ -458,6 +459,7 @@ where
         receiver: mpsc::UnboundedReceiver<Request>,
         tx_status: Arc<AtomicU8>,
         in_flight_requests: Arc<AtomicUsize>,
+        terminal_server_error: Arc<Mutex<Option<DbError>>>,
         drop_release: Option<crate::release::ConnectionDropRelease>,
     ) -> Connection<S, T> {
         *parameters.lock() = startup_parameters;
@@ -471,6 +473,7 @@ where
             async_sender: None,
             tx_status,
             in_flight_requests,
+            terminal_server_error,
             drop_release,
             _live: crate::live::LiveConnectionGuard::new(),
         }
@@ -679,6 +682,7 @@ where
             async_sender: self.async_sender.as_ref(),
             tx_status: &self.tx_status,
             in_flight_requests: &self.in_flight_requests,
+            terminal_server_error: &self.terminal_server_error,
         }
         .handle_message(message)
     }
@@ -852,6 +856,7 @@ struct Dispatch<'a> {
     async_sender: Option<&'a mpsc::UnboundedSender<AsyncMessage>>,
     tx_status: &'a AtomicU8,
     in_flight_requests: &'a AtomicUsize,
+    terminal_server_error: &'a Mutex<Option<DbError>>,
 }
 
 impl Dispatch<'_> {
@@ -898,13 +903,18 @@ impl Dispatch<'_> {
         // the EOF path uses before making that terminal response visible. This
         // keeps synchronous pool return from counting a known-dead session as
         // idle during that protocol-defined window.
-        if let Some(body) = messages.first_error_response().map_err(Error::parse)? {
-            let error = DbError::parse(&mut body.fields()).map_err(Error::parse)?;
+        let server_error = messages
+            .first_error_response()
+            .map_err(Error::parse)?
+            .map(|body| DbError::parse(&mut body.fields()).map_err(Error::parse))
+            .transpose()?;
+        if let Some(error) = server_error.as_ref() {
             if matches!(
                 error.parsed_severity(),
                 Some(Severity::Fatal | Severity::Panic)
             ) || matches!(error.severity(), "FATAL" | "PANIC")
             {
+                self.remember_terminal_server_error(error);
                 self.tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
             }
         }
@@ -914,7 +924,11 @@ impl Dispatch<'_> {
         let mut response = match self.responses.pop_front() {
             Some(r) => r,
             None => match messages.next().map_err(Error::parse)? {
-                Some(Message::ErrorResponse(err)) => return Err(Error::db(err)),
+                Some(Message::ErrorResponse(_)) => {
+                    let error = server_error.expect("the first ErrorResponse was parsed above");
+                    self.remember_terminal_server_error(&error);
+                    return Err(Error::from_db_error(error));
+                }
                 _ => return Err(Error::unexpected_message()),
             },
         };
@@ -1049,6 +1063,13 @@ impl Dispatch<'_> {
             observation.server_complete(completed_at);
         }
         Ok(())
+    }
+
+    fn remember_terminal_server_error(&self, error: &DbError) {
+        let mut terminal = self.terminal_server_error.lock();
+        if terminal.is_none() {
+            *terminal = Some(error.clone());
+        }
     }
 }
 
@@ -1421,6 +1442,7 @@ async fn flush_with_read_draining<W>(
     async_sender: Option<&mpsc::UnboundedSender<AsyncMessage>>,
     tx_status: &AtomicU8,
     in_flight_requests: &AtomicUsize,
+    terminal_server_error: &Mutex<Option<DbError>>,
 ) -> (Result<(), Error>, Option<Option<Error>>)
 where
     W: AsyncWrite + Unpin,
@@ -1530,6 +1552,7 @@ where
                             async_sender,
                             tx_status,
                             in_flight_requests,
+                            terminal_server_error,
                         })
                         .handle_message(message);
                         // Dispatch has now completed or paused the matching
@@ -1643,6 +1666,7 @@ where
             async_sender,
             tx_status,
             in_flight_requests,
+            terminal_server_error,
             drop_release: _,
             _live,
         } = self;
@@ -1662,6 +1686,7 @@ where
                     async_sender,
                     tx_status,
                     in_flight_requests,
+                    terminal_server_error,
                     read_deadline,
                     read_error_release,
                     _live.clone(),
@@ -1679,6 +1704,7 @@ where
                     async_sender,
                     tx_status,
                     in_flight_requests,
+                    terminal_server_error,
                     drop_release: None,
                     _live,
                 };
@@ -1766,6 +1792,7 @@ where
         async_sender: Option<mpsc::UnboundedSender<AsyncMessage>>,
         tx_status: Arc<AtomicU8>,
         in_flight_requests: Arc<AtomicUsize>,
+        terminal_server_error: Arc<Mutex<Option<DbError>>>,
         read_deadline: Option<ReadDeadline>,
         read_error_release: Option<crate::release::ConnectionDropRelease>,
         _read_live: crate::live::LiveConnectionGuard,
@@ -2015,6 +2042,7 @@ where
                             async_sender: async_sender.as_ref(),
                             tx_status: &tx_status,
                             in_flight_requests: &in_flight_requests,
+                            terminal_server_error: &terminal_server_error,
                         }
                         .handle_message(message);
                         // The reader cannot submit its next socket read until all
@@ -2102,6 +2130,7 @@ where
                                         async_sender.as_ref(),
                                         &tx_status,
                                         &in_flight_requests,
+                                        &terminal_server_error,
                                     )
                                     .await
                                 } else {
@@ -2189,6 +2218,7 @@ where
                             async_sender.as_ref(),
                             &tx_status,
                             &in_flight_requests,
+                            &terminal_server_error,
                         )
                         .await;
                         if let Some(error) = take_captured_non_eof_terminal(&mut terminal) {
@@ -3256,6 +3286,7 @@ mod tests {
         let mut pending_responses = VecDeque::new();
         let tx_status = AtomicU8::new(b'T');
         let in_flight_requests = AtomicUsize::new(1);
+        let terminal_server_error = Mutex::new(None);
 
         Dispatch {
             parameters: &parameters,
@@ -3264,6 +3295,7 @@ mod tests {
             async_sender: None,
             tx_status: &tx_status,
             in_flight_requests: &in_flight_requests,
+            terminal_server_error: &terminal_server_error,
         }
         .deliver_batch(BackendMessages::empty(), Some(b'I'))
         .expect("deliver transaction-neutral ReadyForQuery");
@@ -3347,6 +3379,7 @@ mod tests {
         let mut pending_responses = VecDeque::new();
         let parameters = Mutex::new(HashMap::new());
         let in_flight_requests = AtomicUsize::new(1);
+        let terminal_server_error = Mutex::new(None);
 
         let (write_result, terminal) = flush_with_read_draining(
             &mut write_half,
@@ -3358,6 +3391,7 @@ mod tests {
             None,
             &tx_status,
             &in_flight_requests,
+            &terminal_server_error,
         )
         .await;
         let write_error = write_result.expect_err("the scripted flush unexpectedly succeeded");
@@ -3417,6 +3451,7 @@ mod tests {
                 request_rx,
                 Arc::new(AtomicU8::new(b'I')),
                 Arc::new(AtomicUsize::new(0)),
+                Arc::default(),
                 None,
             );
             assert_eq!(crate::live::live_connections(), 1);
@@ -3499,6 +3534,7 @@ mod tests {
                     None,
                     Arc::new(AtomicU8::new(b'I')),
                     Arc::new(AtomicUsize::new(1)),
+                    Arc::default(),
                     None,
                     None,
                     crate::live::LiveConnectionGuard::new(),
@@ -3564,6 +3600,7 @@ mod tests {
                 None,
                 Arc::new(AtomicU8::new(b'I')),
                 Arc::new(AtomicUsize::new(1)),
+                Arc::default(),
                 None,
                 None,
                 crate::live::LiveConnectionGuard::new(),
@@ -3669,6 +3706,7 @@ mod tests {
                 None,
                 Arc::clone(&tx_status),
                 Arc::new(AtomicUsize::new(1)),
+                Arc::default(),
                 read_deadline,
                 None,
                 crate::live::LiveConnectionGuard::new(),
@@ -3782,6 +3820,7 @@ mod tests {
                 None,
                 Arc::clone(&tx_status),
                 Arc::new(AtomicUsize::new(1)),
+                Arc::default(),
                 None,
                 None,
                 crate::live::LiveConnectionGuard::new(),
@@ -4417,6 +4456,7 @@ mod tests {
             // `P` plus the COPY: both are transaction-capable, so the
             // ReadyForQuery below decrements rather than underflows.
             Arc::new(AtomicUsize::new(2)),
+            Arc::default(),
             None,
         );
         connection.responses = responses;
