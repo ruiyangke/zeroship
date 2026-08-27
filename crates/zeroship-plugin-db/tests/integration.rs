@@ -2011,15 +2011,37 @@ async fn c1_cleanup(pool: &Pool, app: &str) {
         .execute(&format!(r#"DROP SCHEMA IF EXISTS "{app}" CASCADE"#), &[])
         .await;
 
-    // Defensive global sweep: drop every leftover `__zs_*` slot + publication
-    // from prior tests under different app names. Without this, replication
-    // slots accumulate across tests and exhaust `max_replication_slots`
-    // (default 10) on long suite runs — the p8a2 ordering hang.
+    // Defensive sweep: drop every leftover `__zs_*` slot + publication from
+    // prior tests under different app names. Without this, replication slots
+    // accumulate across tests and exhaust `max_replication_slots` (default 10)
+    // on long suite runs.
+    //
+    // `AND database = current_database()` is load-bearing, not decoration.
+    // `pg_replication_slots` is a CLUSTER-WIDE view and PostgreSQL does NOT
+    // confine `pg_drop_replication_slot` to the slot's own database when the
+    // slot is inactive. Measured 2026-08-27 on PG 16.14 and confirmed on
+    // 18.4: a session on database `probe_b` ran this statement without the
+    // predicate and dropped an inactive `__zs_%` slot belonging to `probe_a` -
+    // the count went 1 to 0, no error. Every suite sharing the server lost its
+    // CDC slots to whichever
+    // one called cleanup first, which is what made two of these tests fail
+    // only when another suite ran beside them. Giving each suite its own
+    // DATABASE bought nothing against it; only a separate server did.
+    //
+    // The `active = false` guard is not a substitute: a slot is inactive in
+    // the window between `ensure_worker_slot` creating it and the consumer
+    // attaching, and again across a consumer reconnect.
+    //
+    // The publication half below needs no such predicate - `pg_publication`
+    // is per-database and a session sees only its own (probe_b saw 0 of
+    // probe_a's in the same measurement).
     let _ = pool
         .query_text_params(
             "SELECT pg_drop_replication_slot(slot_name) \
              FROM pg_replication_slots \
-             WHERE slot_name LIKE '__zs_%' AND active = false",
+             WHERE slot_name LIKE '__zs_%' \
+               AND active = false \
+               AND database = current_database()",
             &[],
         )
         .await;
@@ -2037,6 +2059,106 @@ async fn c1_cleanup(pool: &Pool, app: &str) {
                 .await;
         }
     }
+}
+
+/// Rewrite the database component of a Postgres DSN, preserving any query
+/// string. Used only to reach a SECOND database on the same server.
+fn url_with_database(url: &str, database: &str) -> String {
+    let (base, query) = match url.find('?') {
+        Some(i) => (&url[..i], &url[i..]),
+        None => (url, ""),
+    };
+    let cut = base.rfind('/').expect("DSN has a database path segment");
+    format!("{}/{}{}", &base[..cut], database, query)
+}
+
+/// `c1_cleanup`'s sweep must not reach another database's replication slots.
+///
+/// This is a regression guard for a cleanup that dropped slots CLUSTER-WIDE.
+/// `pg_replication_slots` is a cluster-wide view and PostgreSQL lets any
+/// session drop an inactive slot regardless of which database owns it, so the
+/// unscoped sweep destroyed the CDC slots of every suite sharing the server -
+/// including suites deliberately given their own database for isolation.
+///
+/// Remove `AND database = current_database()` from `c1_cleanup` and this test
+/// fails: the foreign slot is gone.
+#[compio::test]
+async fn c1_cleanup_sweep_does_not_cross_database_boundaries() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    if !pg_has_logical_wal(&pool).await {
+        zeroship_test_support::skip("Skipping — server wal_level is not 'logical'");
+        return release_pg(pool).await;
+    }
+
+    // A second database on the SAME server, standing in for a concurrently
+    // running suite that was handed its own database.
+    const NEIGHBOUR_DB: &str = "plugin_db_cleanup_neighbour";
+    const FOREIGN_SLOT: &str = "__zs_neighbour_suite_slot";
+    let _ = pool
+        .execute(&format!(r#"DROP DATABASE IF EXISTS "{NEIGHBOUR_DB}""#), &[])
+        .await;
+    pool.execute(&format!(r#"CREATE DATABASE "{NEIGHBOUR_DB}""#), &[])
+        .await
+        .expect("create neighbour database");
+
+    let neighbour_url = url_with_database(&url, NEIGHBOUR_DB);
+    let neighbour = Pool::connect(&neighbour_url, 1).await.unwrap();
+    neighbour
+        .query_text_params(
+            "SELECT pg_create_logical_replication_slot($1, 'pgoutput')",
+            &[FOREIGN_SLOT],
+        )
+        .await
+        .expect("create the neighbour suite's slot");
+
+    // The neighbour's consumer has not attached yet, so its slot is inactive -
+    // exactly the window the sweep used to destroy.
+    let active = pool
+        .query_text_params(
+            "SELECT active::text FROM pg_replication_slots WHERE slot_name = $1",
+            &[FOREIGN_SLOT],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        active.len(),
+        1,
+        "the neighbour's slot must be visible cluster-wide, or this test proves nothing"
+    );
+    let is_active: String = active[0].get(0);
+    assert_eq!(
+        is_active, "false",
+        "the slot must be INACTIVE, or the sweep's active=false guard hides the defect"
+    );
+
+    // Now run cleanup from OUR database.
+    c1_cleanup(&pool, "c1_cleanup_blast_radius_app").await;
+
+    let survivors = pool
+        .query_text_params(
+            "SELECT slot_name FROM pg_replication_slots WHERE slot_name = $1",
+            &[FOREIGN_SLOT],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        survivors.len(),
+        1,
+        "c1_cleanup dropped a slot owned by database {NEIGHBOUR_DB}; the sweep is not \
+         scoped to current_database() and will corrupt every suite on this server"
+    );
+
+    // Teardown: the slot must go before the database will drop.
+    neighbour
+        .query_text_params("SELECT pg_drop_replication_slot($1)", &[FOREIGN_SLOT])
+        .await
+        .expect("drop the neighbour's slot");
+    drop(neighbour);
+    let _ = pool
+        .execute(&format!(r#"DROP DATABASE IF EXISTS "{NEIGHBOUR_DB}""#), &[])
+        .await;
+    release_pg(pool).await;
 }
 
 async fn c1_create_publication(pool: &Pool, app: &str) {
