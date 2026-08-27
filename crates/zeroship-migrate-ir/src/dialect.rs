@@ -48,9 +48,10 @@ use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 /// A well-formed id is lowercase ASCII matching `[a-z][a-z0-9_]*`. There are no
 /// aliases and no display names in the id; a human-facing name is a separate
 /// field on [`crate::backend::BackendDescriptor`]. [`DialectId::new`] is `const`
-/// and does NOT check - a `const` constructor cannot return a `Result` usefully
-/// - so the check is enforced at REGISTRATION rather than trusted. See
-/// [`DialectId::is_well_formed`].
+/// and does NOT check - a `const` constructor cannot return a `Result`
+/// usefully - so the check is enforced at REGISTRATION rather than trusted.
+/// See [`DialectId::is_well_formed`].
+///
 /// Backend declarations use the borrowed form through [`DialectId::new`]. Wire
 /// data uses the owned form: a deserialized migration must be able to name a
 /// backend that did not exist when this crate was compiled, without leaking the
