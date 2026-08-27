@@ -917,6 +917,11 @@ const { data, error } = await db.transaction(async (tx) => {
   `Promise.all([tx.a.insert(...), tx.b.insert(...)])` runs them concurrently
   on that one connection and the losing branch is refused with
   `TRANSACTION_CONNECTION_BUSY`.
+  On `pnpm dev` the same code has a second cause, because SQLite has one
+  transaction connection per process: starting a `db.transaction()` while
+  *any* transaction is open — including one belonging to another app in the
+  same dev process — is refused with it too. The error message distinguishes
+  the two; the deployed tier only ever raises the overlapping-operations one.
 - Everything a callback starts must also **finish** inside it. A promise the
   callback never awaits keeps running after the transaction settles, and the
   database calls it then makes belong to a transaction that no longer exists;
@@ -927,11 +932,14 @@ const { data, error } = await db.transaction(async (tx) => {
   call is its own unit of work even while another request holds a transaction
   open for the same app, and a call made inside a callback still belongs to
   that transaction on any branch of the callback's own async work.
-  The previous bullet holds on the deployed tier. On `pnpm dev` it does not
-  yet: SQLite runs the whole app on one connection, so an ordinary write
-  issued while a transaction is open executes inside that transaction and is
-  undone by its rollback. Do not rely on `pnpm dev` to tell you whether
-  concurrent transactional work is correct — see
+  The previous bullet now holds on **both** tiers: SQLite keeps a separate
+  connection for the one open transaction, so an ordinary write issued while a
+  transaction is open is its own unit of work there too. What still differs is
+  how many transactions can be open at once — on `pnpm dev` the answer is one
+  per process, shared across every app, and a second `db.transaction()` is
+  refused immediately with `TRANSACTION_CONNECTION_BUSY` rather than waiting
+  for a connection. Do not rely on `pnpm dev` to tell you whether concurrent
+  transactional work is correct — see
   [sqlite-divergences.md](./sqlite-divergences.md#current-differences).
 - `isolationLevel` accepts `"read uncommitted"`, `"read committed"` (default),
   `"repeatable read"` or `"serializable"` — the SQL spellings, with a space.

@@ -519,6 +519,34 @@ impl SqliteSession {
     /// decided by whether the previous `Weak` still upgrades, so a lease
     /// dropped without settling frees the lane immediately rather than after a
     /// queue round trip.
+    ///
+    /// ## Policy chosen here, and OWED to a later decision
+    ///
+    /// Two questions the design did not settle. Both are answered by the code
+    /// below, so they are stated here rather than discovered - the Postgres
+    /// half writes its equivalents into
+    /// [`crate::backend::postgres::PostgresBackend`]'s
+    /// `acquire_dedicated_client`, and these are this half's.
+    ///
+    /// 1. **Exhaustion: refuse immediately, do not queue.** A second
+    ///    `db.transaction()` gets `transaction_connection_busy` at once rather
+    ///    than waiting for the lane. Conservative because a refusal is decided
+    ///    from state the caller can see and needs no deadline to be safe; the
+    ///    Postgres half queues on the pool's `acquire_timeout` instead, so the
+    ///    two arms differ in what a creator observes under contention. When
+    ///    SC-1's deadline lands, whether this becomes a bounded wait is that
+    ///    decision's to make.
+    /// 2. **Scope of the admission key.** SC-1 keys a transaction slot on
+    ///    `(runtime_instance_id, app_id)`. One `SqliteSession` serves **every**
+    ///    ATTACHed app, so the key here is effectively
+    ///    `(runtime_instance_id, session)`: app B's `db.transaction()` is
+    ///    refused while app A holds one. That is narrower than SC-1 asks for
+    ///    and it is a property of the one-file-per-app-with-one-actor layout,
+    ///    not of this function - widening it means a `tx_conn` per app, which
+    ///    is a connection-count decision nobody has taken.
+    ///
+    /// Both are visible to creators, so they are also written down in
+    /// `docs/reference/sqlite-divergences.md`; keep the two in step.
     pub(crate) async fn reserve_transaction(
         self: &Rc<Self>,
     ) -> Result<Rc<TxLease>, DbError> {
