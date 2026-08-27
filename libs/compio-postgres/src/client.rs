@@ -1909,6 +1909,7 @@ pub(crate) enum Addr {
 pub struct Client {
     inner: Arc<InnerClient>,
     socket_config: Option<SocketConfig>,
+    cancel_encryption: Encryption,
     ssl_mode: SslMode,
     ssl_negotiation: SslNegotiation,
     process_id: i32,
@@ -1992,6 +1993,10 @@ impl Client {
                 parameters: Arc::default(),
             }),
             socket_config: None,
+            // Real connections replace this with the negotiated result before
+            // the Client is returned. Test-only clients have no handshake, so
+            // their configured first leg is the only transport fact available.
+            cancel_encryption: Encryption::first_for(ssl_mode),
             ssl_mode,
             ssl_negotiation,
             process_id,
@@ -2140,7 +2145,12 @@ impl Client {
     }
 
     pub(crate) fn set_socket_config(&mut self, socket_config: SocketConfig) {
+        self.cancel_encryption = socket_config.encryption;
         self.socket_config = Some(socket_config);
+    }
+
+    pub(crate) fn set_cancel_encryption(&mut self, encryption: Encryption) {
+        self.cancel_encryption = encryption;
     }
 
     /// Installs query execution observation for this physical connection.
@@ -2876,6 +2886,7 @@ impl Client {
     pub fn cancel_token(&self) -> CancelToken {
         CancelToken {
             socket_config: self.socket_config.clone(),
+            encryption: self.cancel_encryption,
             ssl_mode: self.ssl_mode,
             ssl_negotiation: self.ssl_negotiation,
             process_id: self.process_id,
