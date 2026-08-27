@@ -413,11 +413,23 @@ cargo test -p compio-postgres -- --test-threads=1   # needs DB
 # matched 0 tests and still printed "test result: ok". Add --all-features when a
 # change touches anything feature-gated:
 cargo test -p compio-postgres --all-features -- --test-threads=1
-# That also pulls in the suite-over-tls binaries, which need
-# libs/compio-postgres/tests/tls_live_setup.sh to have run. In a FRESH worktree
-# they fail with "suite-over-tls needs the TLS servers" - do not fix that by
-# re-running the setup script, which regenerates the shared CA and invalidates
-# every other worktree's certs. Run those from a tree that already has them.
+# --all-features TURNS ON TWO OPT-IN LIVE SUITES, and each needs its own
+# fixture script to have run. They are written NOT to skip: a missing fixture
+# is a loud failure naming the script, never a quiet pass.
+#   tls_live (48 tests)         libs/compio-postgres/tests/tls_live_setup.sh
+#   unix_socket_live (17 tests) libs/compio-postgres/tests/unix_socket_setup.sh
+# With both present, measured 2026-08-26: **1062 passed, 0 failed, exit 0**.
+# With neither, the same command fails on fixtures alone and tells you nothing
+# about the code.
+#
+# `tls_live_setup.sh` REGENERATES A SHARED CA, so it invalidates every other
+# checkout's certs. Do not run it to clear a missing-fixture failure while
+# another compio-postgres worktree exists - run those tests from a tree that
+# already has them, or run the setup only once no other worktree is live.
+#
+# A `--lib --all-features` run does NOT build integration targets, so it cannot
+# see either gap: that is how both suites stayed silently unrun for a whole
+# session of otherwise-green --all-features checks.
 
 # Lint the workspace. NONE of the per-crate runs above invoke clippy, which is
 # why main went red twice in a week without anyone noticing. Run this before you
