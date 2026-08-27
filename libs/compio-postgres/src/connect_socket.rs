@@ -31,10 +31,14 @@ pub(crate) async fn connect_socket(
     #[cfg_attr(not(unix), allow(unused_variables))] require_peer: Option<&str>,
 ) -> Result<Socket, Error> {
     match addr {
-        Addr::Tcp(ip) => {
+        Addr::Tcp { ip, scope_id } => {
+            // Rebuilt through `Addr::socket_addr` rather than `SocketAddr::new`
+            // so the IPv6 zone survives into the sockaddr the kernel sees; a
+            // link-local target with scope 0 is refused with EINVAL.
+            let target = Addr::socket_addr(*ip, port, *scope_id);
             // TCP_USER_TIMEOUT is applied inside the dial, because it only does
             // its job if it is already on the socket when the SYN goes out.
-            let stream = dial_tcp(*ip, port, tcp_user_timeout).await?;
+            let stream = dial_tcp(target, tcp_user_timeout).await?;
 
             stream.set_nodelay(true).map_err(Error::connect)?;
 
@@ -97,8 +101,7 @@ pub(crate) async fn connect_socket(
 /// private).
 #[cfg(target_os = "linux")]
 async fn dial_tcp(
-    ip: std::net::IpAddr,
-    port: u16,
+    target: std::net::SocketAddr,
     tcp_user_timeout: Option<Duration>,
 ) -> Result<TcpStream, Error> {
     use compio::buf::{BufResult, IntoInner};
@@ -107,10 +110,9 @@ async fn dial_tcp(
 
     // Without the option there is nothing to order, so take compio's own path.
     let Some(tcp_user_timeout) = tcp_user_timeout else {
-        return TcpStream::connect((ip, port)).await.map_err(Error::connect);
+        return TcpStream::connect(target).await.map_err(Error::connect);
     };
 
-    let target = std::net::SocketAddr::new(ip, port);
     let socket = socket2::Socket::new(
         Domain::for_address(target),
         Type::STREAM,
@@ -151,11 +153,10 @@ async fn dial_tcp(
 /// that is the point: the parameter is refused or honoured, never emulated.
 #[cfg(not(target_os = "linux"))]
 async fn dial_tcp(
-    ip: std::net::IpAddr,
-    port: u16,
+    target: std::net::SocketAddr,
     _tcp_user_timeout: Option<Duration>,
 ) -> Result<TcpStream, Error> {
-    TcpStream::connect((ip, port)).await.map_err(Error::connect)
+    TcpStream::connect(target).await.map_err(Error::connect)
 }
 
 /// Authenticate a Unix socket before any PostgreSQL bytes cross it.
@@ -237,7 +238,10 @@ mod tests {
             .expect("bind a loopback listener");
         let addr = listener.local_addr().expect("listener address");
         let socket = connect_socket(
-            &Addr::Tcp(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            &Addr::Tcp {
+                ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                scope_id: 0,
+            },
             addr.port(),
             tcp_user_timeout,
             keepalive,
@@ -358,7 +362,10 @@ mod tests {
                 .expect("bind a loopback listener");
             let addr = listener.local_addr().expect("listener address");
             let socket = connect_socket(
-                &Addr::Tcp(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                &Addr::Tcp {
+                    ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    scope_id: 0,
+                },
                 addr.port(),
                 None,
                 Some(&config),
@@ -421,7 +428,16 @@ mod tests {
 
         let control = compio::time::timeout(
             STILL_HANGING,
-            connect_socket(&Addr::Tcp(BLACKHOLE), PORT, None, None, None),
+            connect_socket(
+                &Addr::Tcp {
+                    ip: BLACKHOLE,
+                    scope_id: 0,
+                },
+                PORT,
+                None,
+                None,
+                None,
+            ),
         )
         .await;
         assert!(
@@ -434,7 +450,16 @@ mod tests {
         let started = std::time::Instant::now();
         let bounded = compio::time::timeout(
             STILL_HANGING * 2,
-            connect_socket(&Addr::Tcp(BLACKHOLE), PORT, Some(BOUND), None, None),
+            connect_socket(
+                &Addr::Tcp {
+                    ip: BLACKHOLE,
+                    scope_id: 0,
+                },
+                PORT,
+                Some(BOUND),
+                None,
+                None,
+            ),
         )
         .await;
         let elapsed = started.elapsed();
@@ -448,6 +473,81 @@ mod tests {
              {STILL_HANGING:?} that the SAME dial survives with no timeout set, \
              so the option is not reaching the socket before the SYN"
         );
+    }
+
+    /// The IPv6 zone must reach the KERNEL, not just the `Addr`.
+    ///
+    /// `resolution_keeps_the_ipv6_zone` (connect.rs) proves the zone survives
+    /// resolution; this proves the dial still carries it. They are separate
+    /// failures: `SocketAddr::new(ip, port)` builds a `SocketAddrV6` with
+    /// scope 0, so the zone can be preserved perfectly right up to the dial
+    /// and still be discarded there.
+    ///
+    /// The oracle is EINVAL specifically, not success. Measured here against a
+    /// listener bound to a real link-local address, one variable apart: scope 0
+    /// fails instantly with `Invalid argument` before any packet leaves, while
+    /// the correct scope is accepted by the kernel and the connection is
+    /// attempted (it then goes unanswered, which is why "did not connect" is
+    /// not the assertion).
+    #[compio::test]
+    async fn a_link_local_dial_carries_its_zone_to_the_kernel() {
+        let Some((ip, scope_id)) = first_link_local_address() else {
+            panic!(
+                "fixture unusable: /proc/net/if_inet6 lists no scope-link (scope 20) \
+                 address on this host, so there is nothing to dial and this test \
+                 would prove nothing"
+            );
+        };
+
+        // Nothing needs to listen: the defect fires in the kernel's address
+        // check, before a SYN is built.
+        let outcome = compio::time::timeout(
+            Duration::from_secs(2),
+            connect_socket(&Addr::Tcp { ip, scope_id }, 5432, None, None, None),
+        )
+        .await;
+
+        if let Ok(Err(error)) = &outcome {
+            let text = {
+                let mut text = error.to_string();
+                let mut source = std::error::Error::source(error);
+                while let Some(cause) = source {
+                    text.push_str(&format!(": {cause}"));
+                    source = std::error::Error::source(cause);
+                }
+                text
+            };
+            assert!(
+                !text.contains("Invalid argument"),
+                "dialling {ip} (zone {scope_id}) was refused with EINVAL ({text}), \
+                 which is what the kernel answers when a link-local destination \
+                 carries scope 0 - the zone did not reach the sockaddr"
+            );
+        }
+    }
+
+    /// The first scope-link address in `/proc/net/if_inet6`, with its ifindex.
+    ///
+    /// Read from procfs rather than hardcoded because the address is
+    /// machine-specific. Format is `<32 hex nibbles> <ifindex hex> <prefixlen
+    /// hex> <scope hex> <flags hex> <device>`, and scope `20` is
+    /// `IPV6_ADDR_LINKLOCAL`.
+    fn first_link_local_address() -> Option<(IpAddr, u32)> {
+        let table = std::fs::read_to_string("/proc/net/if_inet6").ok()?;
+        table.lines().find_map(|line| {
+            let mut fields = line.split_whitespace();
+            let packed = fields.next()?;
+            let ifindex = u32::from_str_radix(fields.next()?, 16).ok()?;
+            let _prefixlen = fields.next()?;
+            if fields.next()? != "20" {
+                return None;
+            }
+            let mut segments = [0u16; 8];
+            for (segment, chunk) in segments.iter_mut().zip(packed.as_bytes().chunks(4)) {
+                *segment = u16::from_str_radix(std::str::from_utf8(chunk).ok()?, 16).ok()?;
+            }
+            Some((IpAddr::V6(segments.into()), ifindex))
+        })
     }
 
     /// A DSN's values must reach the kernel IN LIBPQ'S UNITS.
@@ -564,7 +664,10 @@ mod tests {
                 .expect("bind a loopback listener");
             let addr = listener.local_addr().expect("listener address");
             let error = connect_socket(
-                &Addr::Tcp(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                &Addr::Tcp {
+                    ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    scope_id: 0,
+                },
                 addr.port(),
                 None,
                 Some(&config),

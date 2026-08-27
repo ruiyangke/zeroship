@@ -35,7 +35,7 @@ use postgres_types::{BorrowToSql, FromSqlOwned};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::future;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::pin::pin;
@@ -2053,9 +2053,49 @@ pub(crate) struct SocketConfig {
 /// directory. Used by `connect_socket.rs` to pick the right stream type.
 #[derive(Clone)]
 pub(crate) enum Addr {
-    Tcp(IpAddr),
+    /// `scope_id` is the IPv6 zone (`sin6_scope_id`), 0 when there is none.
+    ///
+    /// It is carried rather than dropped because a link-local destination is
+    /// UNDIALABLE without it: Linux `tcp_v6_connect` refuses an
+    /// `IPV6_ADDR_LINKLOCAL` address when `sk_bound_dev_if` is 0, and this
+    /// crate never binds and never sets `SO_BINDTODEVICE`. Measured here, one
+    /// variable apart, against a listener on `fe80::7eed:8dff:fec3:8315%eth0`:
+    /// scope 0 fails instantly with EINVAL before a packet leaves, while the
+    /// correct scope is accepted and the connection is attempted.
+    ///
+    /// libpq never narrows either - `store_conn_addrinfo` memcpy's the whole
+    /// `ai_addr` and keeps `salen` (fe-connect.c:5167), and that full sockaddr
+    /// reaches `connect(2)` at fe-connect.c:3481 with the zone intact.
+    Tcp { ip: IpAddr, scope_id: u32 },
     #[cfg(unix)]
     Unix(PathBuf),
+}
+
+impl Addr {
+    /// Keep the whole resolved address, zone included.
+    ///
+    /// Every site that used to write `Addr::Tcp(addr.ip())` threw the zone
+    /// away; this is the one conversion, so there is no second place to forget.
+    pub(crate) fn tcp(addr: SocketAddr) -> Self {
+        Self::Tcp {
+            ip: addr.ip(),
+            scope_id: match addr {
+                SocketAddr::V6(v6) => v6.scope_id(),
+                SocketAddr::V4(_) => 0,
+            },
+        }
+    }
+
+    /// Rebuild the dialable `SocketAddr`, putting the zone back.
+    ///
+    /// `SocketAddr::new` cannot do this: it produces `SocketAddrV6` with
+    /// scope 0, which is exactly the value that fails.
+    pub(crate) fn socket_addr(ip: IpAddr, port: u16, scope_id: u32) -> SocketAddr {
+        match ip {
+            IpAddr::V4(v4) => SocketAddr::from((v4, port)),
+            IpAddr::V6(v6) => SocketAddr::V6(std::net::SocketAddrV6::new(v6, port, 0, scope_id)),
+        }
+    }
 }
 
 /// An asynchronous PostgreSQL client handle.
