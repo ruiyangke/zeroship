@@ -157,10 +157,16 @@ impl BackendMessages {
         false
     }
 
-    /// Clone and decode an error only when this batch actually contains one.
+    /// Clone and decode an error only when it precedes `stop_tag`.
+    ///
     /// Successful row batches can be large, so scanning their frame headers
-    /// avoids copying them merely to support a rare cache-recovery path.
-    pub(crate) fn error_response(&self) -> io::Result<Option<backend::ErrorResponseBody>> {
+    /// avoids copying them merely to support a rare cache-recovery path. Frame
+    /// order is significant: an error after `BindComplete` is an execution
+    /// error and cannot prove that the prepared statement itself was stale.
+    pub(crate) fn error_response_before(
+        &self,
+        stop_tag: u8,
+    ) -> io::Result<Option<backend::ErrorResponseBody>> {
         let mut offset = 0usize;
         let mut has_error = false;
         while let Some(header_end) = offset.checked_add(5) {
@@ -178,6 +184,9 @@ impl BackendMessages {
                 break;
             };
             if next > self.0.len() {
+                break;
+            }
+            if header[0] == stop_tag {
                 break;
             }
             if header[0] == backend::ERROR_RESPONSE_TAG {
