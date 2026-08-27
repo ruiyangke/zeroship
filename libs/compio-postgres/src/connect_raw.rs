@@ -187,6 +187,15 @@ where
         }
     }
 
+    /// Prefer a complete server diagnosis already decoded or over-read over a
+    /// local policy, configuration, or capability refusal.
+    fn prefer_available_server_error<R>(&mut self, result: Result<R, Error>) -> Result<R, Error> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(local) => Err(self.take_available_server_error().unwrap_or(local)),
+        }
+    }
+
     /// Read one post-handshake message. Returns `None` on clean EOF.
     ///
     /// Classification of async messages (those `read_backend` returns as
@@ -1023,27 +1032,33 @@ where
 {
     match handshake.next().await? {
         Some(Message::AuthenticationOk) => {
-            check_require_auth(config, AuthMethod::None)?;
-            can_skip_channel_binding(config)?;
+            handshake
+                .prefer_available_server_error(check_require_auth(config, AuthMethod::None))?;
+            handshake.prefer_available_server_error(can_skip_channel_binding(config))?;
             return Ok(());
         }
         Some(Message::AuthenticationCleartextPassword) => {
-            check_require_auth(config, AuthMethod::Password)?;
-            can_skip_channel_binding(config)?;
+            handshake
+                .prefer_available_server_error(check_require_auth(config, AuthMethod::Password))?;
+            handshake.prefer_available_server_error(can_skip_channel_binding(config))?;
 
-            let pass = config
-                .get_password()
-                .ok_or_else(|| Error::authentication("password missing".into()))?;
+            let pass = handshake.prefer_available_server_error(
+                config
+                    .get_password()
+                    .ok_or_else(|| Error::authentication("password missing".into())),
+            )?;
 
             authenticate_password(handshake, pass).await?;
         }
         Some(Message::AuthenticationMd5Password(body)) => {
-            check_require_auth(config, AuthMethod::Md5)?;
-            can_skip_channel_binding(config)?;
+            handshake.prefer_available_server_error(check_require_auth(config, AuthMethod::Md5))?;
+            handshake.prefer_available_server_error(can_skip_channel_binding(config))?;
 
-            let pass = config
-                .get_password()
-                .ok_or_else(|| Error::authentication("password missing".into()))?;
+            let pass = handshake.prefer_available_server_error(
+                config
+                    .get_password()
+                    .ok_or_else(|| Error::authentication("password missing".into())),
+            )?;
 
             let output = authentication::md5_hash(user.as_bytes(), pass, body.salt());
             authenticate_password(handshake, output.as_bytes()).await?;
@@ -1052,7 +1067,10 @@ where
             // PostgreSQL 16's only SASL authentication family is SCRAM; both
             // SCRAM-SHA-256 and SCRAM-SHA-256-PLUS map to this policy name.
             // Check before constructing or writing the client-first message.
-            check_require_auth(config, AuthMethod::ScramSha256)?;
+            handshake.prefer_available_server_error(check_require_auth(
+                config,
+                AuthMethod::ScramSha256,
+            ))?;
             authenticate_sasl(handshake, body, config).await?;
         }
         // The four methods this driver does not implement. Each names ITSELF:
@@ -1063,21 +1081,26 @@ where
         // connection parameter to be named through the error's source chain,
         // for exactly this reason.
         Some(Message::AuthenticationGss) => {
-            check_require_auth(config, AuthMethod::Gss)?;
-            return Err(unsupported_authentication("GSSAPI"));
+            handshake.prefer_available_server_error(check_require_auth(config, AuthMethod::Gss))?;
+            return handshake
+                .prefer_available_server_error(Err(unsupported_authentication("GSSAPI")));
         }
         Some(Message::AuthenticationSspi) => {
-            check_require_auth(config, AuthMethod::Sspi)?;
-            return Err(unsupported_authentication("SSPI"));
+            handshake
+                .prefer_available_server_error(check_require_auth(config, AuthMethod::Sspi))?;
+            return handshake
+                .prefer_available_server_error(Err(unsupported_authentication("SSPI")));
         }
         // Neither of these has an `AuthMethod` variant, so neither consults
         // `require_auth`: there is no policy that could permit a method the
         // driver cannot perform.
         Some(Message::AuthenticationKerberosV5) => {
-            return Err(unsupported_authentication("Kerberos V5"));
+            return handshake
+                .prefer_available_server_error(Err(unsupported_authentication("Kerberos V5")));
         }
         Some(Message::AuthenticationScmCredential) => {
-            return Err(unsupported_authentication("SCM credential"));
+            return handshake
+                .prefer_available_server_error(Err(unsupported_authentication("SCM credential")));
         }
         Some(Message::ErrorResponse(body)) => return Err(Error::db(body)),
         Some(_) => return Err(Error::unexpected_message()),
@@ -1136,7 +1159,8 @@ where
     T: AsyncRead + AsyncWrite + Unpin,
 {
     let mut buf = BytesMut::new();
-    frontend::password_message(password, &mut buf).map_err(Error::encode)?;
+    let encoded = frontend::password_message(password, &mut buf).map_err(Error::encode);
+    handshake.prefer_available_server_error(encoded)?;
     handshake.send(FrontendMessage::Raw(buf.freeze())).await
 }
 
@@ -1149,9 +1173,11 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     T: TlsStream + Unpin,
 {
-    let password = config
-        .get_password()
-        .ok_or_else(|| Error::authentication("password missing".into()))?;
+    let password = handshake.prefer_available_server_error(
+        config
+            .get_password()
+            .ok_or_else(|| Error::authentication("password missing".into())),
+    )?;
 
     let mut has_scram = false;
     let mut has_scram_plus = false;
@@ -1190,14 +1216,14 @@ where
     // Both are fatal when the user asked for `require`.
     if channel_binding_cfg == config::ChannelBinding::Require {
         if !has_scram_plus {
-            return Err(Error::authentication(
+            return handshake.prefer_available_server_error(Err(Error::authentication(
                 "server did not offer SCRAM-SHA-256-PLUS but channel binding was required".into(),
-            ));
+            )));
         }
         if tls_server_end_point.is_none() {
-            return Err(Error::tls(
+            return handshake.prefer_available_server_error(Err(Error::tls(
                 "channel binding requested but backend does not support it".into(),
-            ));
+            )));
         }
     }
 
@@ -1229,11 +1255,13 @@ where
             None => (sasl::ChannelBinding::unsupported(), sasl::SCRAM_SHA_256),
         }
     } else {
-        return Err(Error::authentication("unsupported SASL mechanism".into()));
+        return handshake.prefer_available_server_error(Err(Error::authentication(
+            "unsupported SASL mechanism".into(),
+        )));
     };
 
     if mechanism != sasl::SCRAM_SHA_256_PLUS {
-        can_skip_channel_binding(config)?;
+        handshake.prefer_available_server_error(can_skip_channel_binding(config))?;
     }
 
     let mut scram = ScramSha256::new(password, channel_binding);
@@ -1463,6 +1491,27 @@ mod tests {
         )
     }
 
+    async fn assert_auth_refusal_prefers_server_error(
+        config: &Config,
+        authentication_body: &[u8],
+        label: &str,
+    ) {
+        let mut script = frame(b'R', authentication_body);
+        script.extend_from_slice(&error_response(
+            "57P01",
+            "terminating during authentication",
+        ));
+        let mut handshake = write_failing_handshake(script, config);
+        let error = authenticate(&mut handshake, config, "scripted-user")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("57P01"),
+            "{label} discarded queued SQLSTATE 57P01: {error}"
+        );
+    }
+
     #[compio::test]
     async fn password_write_failure_preserves_a_pending_server_error() {
         let mut script = frame(b'R', &3i32.to_be_bytes());
@@ -1483,6 +1532,136 @@ mod tests {
             Some("28P01"),
             "password write failure discarded SQLSTATE 28P01: {error}"
         );
+    }
+
+    #[compio::test]
+    async fn authentication_policy_preserves_a_pending_server_error() {
+        let mut script = frame(b'R', &0i32.to_be_bytes());
+        script.extend_from_slice(&error_response(
+            "57P01",
+            "terminating during authentication",
+        ));
+        let mut config = plaintext_config();
+        config.require_auth(RequireAuth::Require(AuthMethods::new(
+            AuthMethod::ScramSha256,
+        )));
+        let mut handshake = write_failing_handshake(script, &config);
+
+        let error = authenticate(&mut handshake, &config, "scripted-user")
+            .await
+            .expect_err("require_auth=scram-sha-256 accepted AuthenticationOk");
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("57P01"),
+            "require_auth after AuthenticationOk discarded queued SQLSTATE 57P01: {error}"
+        );
+
+        let mut local_only = write_failing_handshake(frame(b'R', &0i32.to_be_bytes()), &config);
+        let error = authenticate(&mut local_only, &config, "scripted-user")
+            .await
+            .expect_err("require_auth=scram-sha-256 accepted AuthenticationOk");
+        assert!(
+            error.code().is_none(),
+            "require_auth invented a server diagnosis when none was queued"
+        );
+    }
+
+    #[compio::test]
+    async fn authentication_local_refusals_preserve_pending_server_errors() {
+        let cleartext = 3i32.to_be_bytes();
+        assert_auth_refusal_prefers_server_error(
+            &plaintext_config(),
+            &cleartext,
+            "missing cleartext password",
+        )
+        .await;
+
+        let mut binding = plaintext_config();
+        binding
+            .password("secret")
+            .channel_binding(crate::config::ChannelBinding::Require);
+        assert_auth_refusal_prefers_server_error(
+            &binding,
+            &cleartext,
+            "cleartext channel-binding refusal",
+        )
+        .await;
+
+        let mut nul_password = plaintext_config();
+        nul_password.password(b"secret\0suffix");
+        assert_auth_refusal_prefers_server_error(
+            &nul_password,
+            &cleartext,
+            "cleartext password encoding",
+        )
+        .await;
+
+        let mut md5 = 5i32.to_be_bytes().to_vec();
+        md5.extend_from_slice(b"salt");
+        let mut md5_policy = plaintext_config();
+        md5_policy
+            .password("secret")
+            .require_auth(RequireAuth::Require(AuthMethods::new(AuthMethod::Password)));
+        assert_auth_refusal_prefers_server_error(&md5_policy, &md5, "MD5 authentication policy")
+            .await;
+
+        let mut scram = 10i32.to_be_bytes().to_vec();
+        scram.extend_from_slice(b"SCRAM-SHA-256\0\0");
+        let mut scram_policy = scram_config();
+        scram_policy.require_auth(RequireAuth::Require(AuthMethods::new(AuthMethod::Md5)));
+        assert_auth_refusal_prefers_server_error(
+            &scram_policy,
+            &scram,
+            "SASL authentication policy",
+        )
+        .await;
+        assert_auth_refusal_prefers_server_error(
+            &plaintext_config(),
+            &scram,
+            "missing SASL password",
+        )
+        .await;
+
+        let mut require_binding = scram_config();
+        require_binding.channel_binding(crate::config::ChannelBinding::Require);
+        assert_auth_refusal_prefers_server_error(
+            &require_binding,
+            &scram,
+            "missing SCRAM-SHA-256-PLUS",
+        )
+        .await;
+
+        let mut scram_plus = 10i32.to_be_bytes().to_vec();
+        scram_plus.extend_from_slice(b"SCRAM-SHA-256-PLUS\0SCRAM-SHA-256\0\0");
+        assert_auth_refusal_prefers_server_error(
+            &require_binding,
+            &scram_plus,
+            "missing TLS channel-binding endpoint",
+        )
+        .await;
+
+        let mut unsupported_sasl = 10i32.to_be_bytes().to_vec();
+        unsupported_sasl.extend_from_slice(b"SCRAM-SHA-999\0\0");
+        assert_auth_refusal_prefers_server_error(
+            &scram_config(),
+            &unsupported_sasl,
+            "unsupported valid SASL mechanism",
+        )
+        .await;
+
+        for (code, label) in [
+            (7i32, "unsupported GSSAPI authentication"),
+            (9, "unsupported SSPI authentication"),
+            (2, "unsupported Kerberos V5 authentication"),
+            (6, "unsupported SCM credential authentication"),
+        ] {
+            assert_auth_refusal_prefers_server_error(
+                &plaintext_config(),
+                &code.to_be_bytes(),
+                label,
+            )
+            .await;
+        }
     }
 
     #[compio::test]
