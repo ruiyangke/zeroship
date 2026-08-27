@@ -158,6 +158,7 @@ where
         // has not been allowed to send, and the server will not answer one it
         // has not received, so reading before writing deadlocks the handshake
         // rather than merely delaying it.
+        let mut wrote = false;
         while connection.wants_write() {
             let mut out = Vec::new();
             connection.write_tls(&mut out)?;
@@ -166,6 +167,10 @@ where
             }
             let BufResult(written, _) = socket.write_all(out).await;
             written?;
+            wrote = true;
+        }
+        if wrote {
+            socket.flush().await?;
         }
 
         if !connection.is_handshaking() {
@@ -1002,6 +1007,7 @@ mod tests {
     /// ClientHello is flushed, the connection is still handshaking, and the
     /// read that follows finds the peer gone.
     struct SilentPeer {
+        pending: usize,
         written: usize,
     }
 
@@ -1013,11 +1019,13 @@ mod tests {
 
     impl AsyncWrite for SilentPeer {
         async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
-            self.written += buf.buf_len();
+            self.pending += buf.buf_len();
             BufResult(Ok(buf.buf_len()), buf)
         }
 
         async fn flush(&mut self) -> std::io::Result<()> {
+            self.written += self.pending;
+            self.pending = 0;
             Ok(())
         }
 
@@ -1574,7 +1582,10 @@ mod tests {
     /// up" from "someone cut the connection during key exchange".
     #[compio::test]
     async fn a_peer_that_closes_mid_handshake_is_refused() {
-        let mut peer = SilentPeer { written: 0 };
+        let mut peer = SilentPeer {
+            pending: 0,
+            written: 0,
+        };
         let error = handshake(&mut peer, client_connection())
             .await
             .err()
@@ -1600,11 +1611,14 @@ mod tests {
     /// flight it has not received with nothing.
     #[compio::test]
     async fn the_client_hello_is_flushed_before_the_first_read() {
-        let mut peer = SilentPeer { written: 0 };
+        let mut peer = SilentPeer {
+            pending: 0,
+            written: 0,
+        };
         let _ = handshake(&mut peer, client_connection()).await;
         assert!(
             peer.written > 0,
-            "no bytes reached the peer, so the handshake read before it wrote"
+            "no ClientHello bytes reached the peer before the handshake read"
         );
     }
 }
