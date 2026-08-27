@@ -265,6 +265,57 @@ async fn valid_rows_copy_and_report_their_count() {
         .await;
 }
 
+/// `finish` takes a pinned mutable reference rather than consuming the sink,
+/// and `Sink::poll_close` promises a closed sink once it returns success. A
+/// second terminal poll therefore observes local API state, not transport
+/// death. It must remain idempotent, while attempts to add more data must not
+/// claim that the still-usable PostgreSQL session closed.
+#[compio::test]
+async fn a_finished_copy_sink_does_not_report_connection_closed() {
+    let client = connected().await;
+    let table = fixture(&client).await;
+    let sink = client
+        .copy_in(&format!("COPY {table} FROM STDIN"))
+        .await
+        .expect("start the COPY");
+    futures_util::pin_mut!(sink);
+    sink.as_mut()
+        .send(Bytes::from_static(b"1\ta\n"))
+        .await
+        .expect("send the COPY row");
+
+    assert_eq!(sink.as_mut().finish().await.expect("finish the COPY"), 1);
+    assert_eq!(
+        sink.as_mut()
+            .finish()
+            .await
+            .expect("repeat finish on the finished COPY"),
+        1,
+        "repeat finish forgot the completed COPY row count"
+    );
+    poll_fn(|cx| Sink::poll_close(sink.as_mut(), cx))
+        .await
+        .expect("close the already-finished COPY");
+    poll_fn(|cx| Sink::poll_flush(sink.as_mut(), cx))
+        .await
+        .expect("flush the already-finished COPY");
+
+    let error = poll_fn(|cx| Sink::poll_ready(sink.as_mut(), cx))
+        .await
+        .expect_err("a finished COPY accepted another row");
+    assert!(
+        !error.is_closed(),
+        "finished COPY sink state was misreported as connection closed: {}",
+        common::error_chain(&error),
+    );
+    assert_eq!(error.to_string(), "COPY IN sink is already finished");
+
+    assert_still_usable(&client, "reusing a finished COPY sink").await;
+    let _ = client
+        .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
+        .await;
+}
+
 /// A rejected COPY must leave NOTHING behind: it is one statement, so its
 /// earlier rows go with the failure. Asserting this separately matters because
 /// a driver that recovered the session by committing what it had would pass

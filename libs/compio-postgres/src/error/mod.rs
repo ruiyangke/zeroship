@@ -337,6 +337,7 @@ enum Kind {
     CopyOutAnsweredCopyIn,
     CopyInProgress,
     CopyOutProgress,
+    CopyInFinished,
     /// A TLS problem that is settled before any handshake bytes are exchanged:
     /// an impossible `sslmode` combination, a server that refuses `SSLRequest`
     /// under a mode that requires TLS, an unreadable `sslrootcert`.
@@ -445,6 +446,7 @@ impl fmt::Display for Error {
             ),
             Kind::CopyInProgress => fmt.write_str("cannot queue commands during COPY IN"),
             Kind::CopyOutProgress => fmt.write_str("cannot queue commands during COPY OUT"),
+            Kind::CopyInFinished => fmt.write_str("COPY IN sink is already finished"),
             Kind::Tls => fmt.write_str("TLS could not be negotiated"),
             Kind::TlsHandshake => fmt.write_str("error performing TLS handshake"),
             Kind::TlsUnattested => fmt.write_str(
@@ -626,6 +628,10 @@ impl Error {
 
     pub(crate) fn copy_out_progress() -> Error {
         Error::new(Kind::CopyOutProgress, None)
+    }
+
+    pub(crate) fn copy_in_finished() -> Error {
+        Error::new(Kind::CopyInFinished, None)
     }
 
     #[allow(clippy::needless_pass_by_value)]
