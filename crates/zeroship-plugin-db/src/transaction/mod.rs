@@ -516,7 +516,9 @@ async fn exec_begin_or_savepoint(
             // ran inside it, so its watermark is simply popped. Passing
             // `true` would truncate to the same length and is equivalent
             // here, but says something untrue about what happened.
-            crate::context::with_mut(|c| c.pop_savepoint_for(app_id, false));
+            // No frame ever opened, so there is nothing to discard: the
+            // watermark is simply dropped.
+            let _ = crate::context::with_mut(|c| c.pop_savepoint_for(app_id));
             return Err(e);
         }
         return Ok(Some(name));
@@ -1001,14 +1003,32 @@ async fn exec_settle(app_id: &str, success: bool, savepoint: Option<&str>) -> Se
             // RELEASE hands them to the enclosing frame. Before this, the
             // buffer was never touched here and the top-level COMMIT
             // drained everything - publishing events for rolled-back rows.
-            crate::context::with_mut(|c| c.pop_savepoint_for(app_id, !success));
+            let mark = crate::context::with_mut(|c| c.pop_savepoint_for(app_id));
             let sql = if success {
                 format!("RELEASE SAVEPOINT {name}")
             } else {
                 format!("ROLLBACK TO SAVEPOINT {name}")
             };
             match run_on_tx_conn(app_id, &sql).await {
-                Ok(()) => SettleOutcome::Ok,
+                Ok(()) => {
+                    // The frame's effect fate, applied only now that the
+                    // statement has actually succeeded:
+                    //   RELEASE      -> events are inherited by the enclosing
+                    //                   frame, exactly as its rows are;
+                    //   ROLLBACK TO  -> events are discarded, because the rows
+                    //                   they describe are NOW known to be gone.
+                    if !success {
+                        crate::context::with_mut(|c| c.discard_effects_to_mark(app_id, mark));
+                    }
+                    SettleOutcome::Ok
+                }
+                // A FAILED settle keeps the frame's events. The transaction is
+                // poisoned and will not commit (a COMMIT on a failed tx is
+                // answered `ROLLBACK`, which `exec_terminal_on_tx` now
+                // detects), so nothing publishes either way - but the events
+                // are the diagnostic evidence for why the rollback failed, and
+                // discarding them before the statement ran destroyed exactly
+                // that.
                 Err(e) => SettleOutcome::SettleErr(e),
             }
         }
