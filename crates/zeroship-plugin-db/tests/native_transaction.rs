@@ -718,6 +718,82 @@ const _procedures = { setup, nestedPartialFailure };
     );
 }
 
+/// A write rolled back to a SAVEPOINT must not publish its change event
+/// when the OUTER transaction commits.
+///
+/// `pending_emits` is a flat, app-keyed `Vec<ChangeEvent>`
+/// (`context.rs:231`) with no savepoint scoping, and the nested settle arm
+/// pops the savepoint depth and runs `ROLLBACK TO SAVEPOINT` without
+/// touching that buffer (`transaction/mod.rs:989-999`). The top-level
+/// commit then drains *everything* queued for the app
+/// (`drain_pending_emits_on_commit`, `exec.rs:600-612`, called at
+/// `transaction/mod.rs:1056`). So a subscriber is told about a row that
+/// was rolled back and does not exist.
+///
+/// The live subscription is load-bearing, not scaffolding: `emit_for_rows`
+/// returns early unless `broker::has_subscribers(app, collection)`
+/// (`exec.rs:501-504`), so without it nothing is ever queued and this test
+/// would pass vacuously against the very defect it exists to catch.
+#[test]
+fn savepoint_rollback_must_not_publish_its_change_event_at_outer_commit() {
+    let url = require_pg();
+    reset_schema(&url);
+
+    // Same thread as `block_on`'s runtime (`RT.with`), so this shares the
+    // thread-local broker the dispatch path publishes into.
+    let sub = zeroship_plugin_db::broker::subscribe(APP_SCHEMA, "notes");
+
+    let src = build_src(
+        r#"
+async function savepointEmitLeak(_input, _ctx) {
+    const r = await env.db.transaction(async (tx) => {
+        try {
+            await env.db.transaction(async (tx2) => {
+                await tx2.notes.insert({ title: "inner-doomed" });
+                throw new Error("inner abort");
+            });
+        } catch (e) {
+            // swallow - the outer continues and commits
+        }
+        await tx.notes.insert({ title: "outer-survives" });
+        return "outer-committed";
+    });
+    return { txResult: r };
+}
+savepointEmitLeak.config = { kind: "action" };
+const _procedures = { setup, savepointEmitLeak };
+"#,
+    );
+
+    let (status, _b) = dispatch_zs(&url, &src, "setup");
+    assert_eq!(status, 200);
+
+    let (status, body) = dispatch_zs(&url, &src, "savepointEmitLeak");
+    assert_eq!(status, 200, "handler should succeed: {body}");
+
+    // Ground truth: exactly one row survived.
+    assert_eq!(
+        count_notes(&url),
+        1,
+        "precondition: only the outer row persists; body={body}"
+    );
+
+    let mut published: Vec<String> = Vec::new();
+    while let Some(msg) = sub.pop() {
+        if let zeroship_plugin_db::broker::SubscriptionMessage::Change(ev) = msg {
+            if let Some(title) = ev.new_tuple.get("title") {
+                published.push(title.clone());
+            }
+        }
+    }
+
+    assert!(
+        !published.iter().any(|t| t == "inner-doomed"),
+        "a row rolled back to its SAVEPOINT must never be published at the \
+         outer COMMIT, but the subscriber received it; published={published:?}"
+    );
+}
+
 /// Nested transaction inner resolve releases the savepoint: both the
 /// inner and outer writes commit (RELEASE SAVEPOINT then top-level
 /// COMMIT).
