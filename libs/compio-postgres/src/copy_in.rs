@@ -203,6 +203,7 @@ pin_project! {
         response: CopyResponse,
         buf: BytesMut,
         state: SinkState,
+        completion: Option<Result<u64, Error>>,
         _p2: PhantomData<T>,
         // Last so Drop closes the producer and response consumer before it
         // publishes that ordinary requests may queue behind their recovery.
@@ -297,16 +298,37 @@ where
                         let this = self.as_mut().project();
                         this.responses.poll_next(cx)
                     };
-                    let result = match response {
+                    match response {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Ok(Message::CommandComplete(body))) => {
-                            extract_row_affected(&body)
+                            let this = self.as_mut().project();
+                            if this.completion.is_some() {
+                                *this.completion = Some(Err(Error::unexpected_message()));
+                            } else {
+                                *this.completion = Some(extract_row_affected(&body));
+                            }
                         }
-                        Poll::Ready(Ok(_)) => Err(Error::unexpected_message()),
-                        Poll::Ready(Err(error)) => Err(error),
-                    };
-                    self.as_mut().clear_copy_mode();
-                    return Poll::Ready(result);
+                        Poll::Ready(Ok(Message::ReadyForQuery(_))) => {
+                            let result = self
+                                .as_mut()
+                                .project()
+                                .completion
+                                .take()
+                                .unwrap_or_else(|| Err(Error::unexpected_message()));
+                            self.as_mut().clear_copy_mode();
+                            return Poll::Ready(result);
+                        }
+                        Poll::Ready(Ok(_)) => {
+                            let this = self.as_mut().project();
+                            if this.completion.is_none() {
+                                *this.completion = Some(Err(Error::unexpected_message()));
+                            }
+                        }
+                        Poll::Ready(Err(error)) => {
+                            self.as_mut().clear_copy_mode();
+                            return Poll::Ready(Err(error));
+                        }
+                    }
                 }
             }
         }
@@ -506,6 +528,7 @@ where
         response,
         buf: BytesMut::new(),
         state: SinkState::Active,
+        completion: None,
         _p2: PhantomData,
         copy_mode: Some(copy_mode),
     })
