@@ -599,6 +599,11 @@ where
         // command goes out, and these floors are properties of the message
         // formats THIS decoder implements, so they are ours to state.
         //
+        if opts.proto_version == 0 {
+            return Err(Error::config(
+                "proto_version 0 is not supported; use proto_version 1 or higher".into(),
+            ));
+        }
         if opts.proto_version > 4 {
             return Err(Error::config(
                 format!(
