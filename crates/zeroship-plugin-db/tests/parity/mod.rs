@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use zeroship_plugin_db::DbPlugin;
+use zeroship_plugin_db::service::{DbService, DbServiceConfig};
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::Runtime;
@@ -27,7 +27,7 @@ thread_local! {
     /// This harness used to build a fresh `compio::runtime::Runtime` inside each
     /// `dispatch_zs` and drop it on the way out, which is invisible on SQLite and
     /// fatal on Postgres. plugin-db parks its `compio_postgres::Pool` in a
-    /// THREAD-LOCAL `IsolateDbContext` that outlives any one dispatch, and
+    /// THREAD-LOCAL `ThreadDbContext` that outlives any one dispatch, and
     /// `DbPlugin::register` only clears it when the DB URL changes. So the second
     /// PG dispatch submits a pooled query on sockets registered with an io_uring
     /// that no longer exists, and it never completes.
@@ -510,11 +510,15 @@ pub fn dispatch_zs(url: &str, source: &str, name: &str) -> (u16, Value) {
         specifier: "index.js".into(),
         source: source.into(),
     }];
-    let plugins: Vec<Arc<dyn NativePlugin>> = vec![Arc::new(DbPlugin::new(
-        url.to_string(),
-        None,
-        "parity-test-worker",
-    ))];
+    let plugins: Vec<Arc<dyn NativePlugin>> = vec![
+        DbService::new(DbServiceConfig {
+            url: url.to_string(),
+            worker_id: "parity-test-worker".to_string(),
+            meter: None,
+        })
+        .expect("db service")
+        .plugin(),
+    ];
     let runtime = Runtime::builder().modules(modules).plugins(plugins).build();
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());

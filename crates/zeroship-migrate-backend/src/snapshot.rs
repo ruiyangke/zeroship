@@ -767,9 +767,8 @@ pub struct IndexSnapshot {
     pub columns: Vec<String>,
     /// Ordered key elements, including both plain columns and expression keys.
     pub elements: Vec<IndexElementSnapshot>,
-    /// The index ACCESS METHOD (`pg_am.amname`): `btree` (the default), `gin`
-    /// (FTS over a tsvector), `gist` (spatial / geography), `ivfflat` / `hnsw`
-    /// (pgvector ANN), etc.
+    /// The index ACCESS METHOD (`pg_am.amname`): `btree` (the default), `gist`
+    /// (spatial / geography), `ivfflat` / `hnsw` (pgvector ANN), etc.
     pub access_method: String,
     /// Partial-index predicate text, when present.
     pub predicate: Option<String>,

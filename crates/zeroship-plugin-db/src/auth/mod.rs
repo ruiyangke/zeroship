@@ -18,7 +18,6 @@
 //!
 //! 2. **SECURITY DEFINER wrappers** (`bootstrap.rs`)
 //!    `__zeroship_admin.ensure_publication_and_slot(app)`,
-//!    `__zeroship_admin.drop_abandoned_slots(threshold_bytes)`,
 //!    `__zeroship_admin.watchdog()`.
 //!
 //! 3. **HMAC session init** (this file + `session.rs`)

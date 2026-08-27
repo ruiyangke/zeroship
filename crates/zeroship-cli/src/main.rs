@@ -178,11 +178,29 @@ fn cmd_serve(args: &[String]) {
         zeroship_core::declared_env!(external, "DATABASE_URL", crate::ZeroshipCliConsumer)
     {
         if !url.is_empty() {
-            plugins.push(Arc::new(zeroship_plugin_db::DbPlugin::new(
-                url,
-                Some(Arc::clone(&dev_meter)),
-                format!("serve-{}", uuid::Uuid::new_v4()),
-            )));
+            // The dev vector's composition point. One `DbService`, built before
+            // the runtime exists, owning the validated configuration and the
+            // plugin prototype the runtime clones — the same shape the worker
+            // uses, so `zeroship serve` and a deployed app resolve `env.db`
+            // through identical machinery.
+            //
+            // A URL naming no supported backend fails HERE, with the same
+            // exit(2) the invalid-`ZEROSHIP_STORAGE_URL` arm below already
+            // uses, rather than surfacing inside the creator's first query.
+            let service = match zeroship_plugin_db::service::DbService::new(
+                zeroship_plugin_db::service::DbServiceConfig {
+                    url,
+                    worker_id: format!("serve-{}", uuid::Uuid::new_v4()),
+                    meter: Some(Arc::clone(&dev_meter)),
+                },
+            ) {
+                Ok(service) => service,
+                Err(e) => {
+                    eprintln!("[zeroship] invalid DATABASE_URL: {e}");
+                    std::process::exit(2);
+                }
+            };
+            plugins.push(service.plugin());
             eprintln!("[zeroship] db plugin registered (DATABASE_URL set)");
         }
     }

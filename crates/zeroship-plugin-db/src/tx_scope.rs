@@ -5,7 +5,7 @@
 //! `env.db.transaction(fn)` has to decide, at call time, whether it is
 //! opening a **new** transaction (`BEGIN`) or **nesting** inside one that
 //! is already open (`SAVEPOINT`). Until 2026-08-10 that decision read
-//! [`crate::context::IsolateDbContext::has_tx_for`] — "does this app
+//! [`crate::context::ThreadDbContext::has_tx_for`] — "does this app
 //! currently have a transaction open on this isolate?".
 //!
 //! That is a *temporal* test standing in for a *structural* one, and the

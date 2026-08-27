@@ -1007,7 +1007,16 @@ pub struct BuildInfo {
     /// `irVersion()` returns, repeated so one call answers the whole identity.
     pub ir_version: u32,
     /// Lowercase 64-char sha256 over the workspace manifests, `Cargo.lock`, and
-    /// every `crates/*/src` file. This is what tells a pre-fix artifact from a
+    /// every `src` tree under `crates`. This is what tells a pre-fix artifact from a
+    //
+    // Deliberately NOT written as a `crates/<glob>/src` path: napi copies this
+    // doc comment verbatim into the generated `index.d.ts` `/** */` block, so a
+    // literal `*` followed by `/` closes the comment early and everything after
+    // it parses as TypeScript. That is not hypothetical - it is why a clean
+    // checkout could not run `pnpm build`: `tsc` reported "Unexpected keyword or
+    // identifier" ~50 lines later, in a file nobody edited, with the real cause
+    // invisible at the error site. The tracked-nowhere `index.d.ts` in an
+    // existing checkout carried a hand-escaped `*\/` and hid it.
     /// post-fix one when the version has not moved. It does NOT cover the JS
     /// packages, the rustc version, the cargo profile, or the enabled features -
     /// and NOTHING ELSE IN THIS REPLY COVERS THEM EITHER. The only other fields are
@@ -1040,4 +1049,72 @@ pub struct AdvisoryDto {
     pub suggestion: Option<String>,
     /// The exact statement the advisory describes.
     pub statement: String,
+}
+
+#[cfg(test)]
+mod doc_comment_guard {
+    /// napi copies Rust doc comments VERBATIM into the generated `index.d.ts`,
+    /// wrapping each one in a `/* ... *` `/` block. A doc comment whose own
+    /// text contains that closing sequence therefore ends the block early, and
+    /// everything after it is parsed as TypeScript.
+    ///
+    /// That happened here: a comment referred to "every `crates/*` `/src` file"
+    /// (written without the space). `tsc` reported a syntax error ~50 lines
+    /// later in a GENERATED file, with nothing pointing back at the Rust source
+    /// that produced it, and checkouts whose `index.d.ts` had already been
+    /// hand-corrected did not reproduce it at all.
+    ///
+    /// This scans the crate's own sources so the next occurrence fails HERE,
+    /// naming the file and line, rather than in a generated artifact.
+    #[test]
+    fn no_doc_comment_contains_a_block_comment_terminator() {
+        let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let terminator = ["*", "/"].concat();
+        let mut offenders = Vec::new();
+        let mut scanned_files = 0usize;
+        let mut scanned_doc_lines = 0usize;
+
+        for entry in std::fs::read_dir(&src_dir).expect("read src dir") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("read source");
+            scanned_files += 1;
+            for (i, line) in text.lines().enumerate() {
+                let trimmed = line.trim_start();
+                // Both forms are copied into the generated declarations.
+                let Some(body) = trimmed
+                    .strip_prefix("///")
+                    .or_else(|| trimmed.strip_prefix("//!"))
+                else {
+                    continue;
+                };
+                scanned_doc_lines += 1;
+                if body.contains(&terminator) {
+                    offenders.push(format!(
+                        "{}:{}: {trimmed}",
+                        path.file_name().unwrap().to_string_lossy(),
+                        i + 1,
+                    ));
+                }
+            }
+        }
+
+        // A guard that scanned nothing would pass silently -- the exact failure
+        // mode that makes this whole class of bug survive review.
+        assert!(
+            scanned_files >= 5,
+            "expected to scan the crate's sources, saw {scanned_files} .rs files",
+        );
+        assert!(
+            scanned_doc_lines >= 500,
+            "expected a substantial doc-comment corpus, saw {scanned_doc_lines} lines",
+        );
+        assert!(
+            offenders.is_empty(),
+            "doc comment(s) end the generated index.d.ts block early:\n  {}",
+            offenders.join("\n  "),
+        );
+    }
 }

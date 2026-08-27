@@ -534,9 +534,6 @@ pub fn authoritative_ir_checksum(ir: &MigrationIr) -> Checksum {
     if let Some(value) = ir.flags.repeatable {
         flags.repeatable = value;
     }
-    if let Some(value) = ir.flags.engine_goodie_ddl {
-        flags.engine_goodie_ddl = value;
-    }
     flags.timeout_ms = ir.flags.timeout_ms.map(crate::ir::SafeU64::get);
     flags.lock_timeout_ms = ir.flags.lock_timeout_ms.map(crate::ir::SafeU64::get);
     flags.phase = ir.flags.phase;

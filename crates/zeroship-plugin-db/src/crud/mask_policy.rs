@@ -3,7 +3,7 @@
 //!
 //! The unmask authorization path (`crate::crud::unmask::check_unmask_authorization`)
 //! reads a per-app [`MaskPolicy`] cached on the per-isolate context
-//! (`IsolateDbContext::mask_policies`). The cache is
+//! (`ThreadDbContext::mask_policies`). The cache is
 //! seeded from durable storage:
 //!
 //! - **PG** (selected at runtime by a `postgres://` url):
@@ -59,7 +59,7 @@ pub const VALID_CLASSIFICATIONS: &[&str] = &[
 /// Per-app mask policy. Maps actor-role string → set
 /// of classifications the role is permitted to unmask.
 ///
-/// Stored on `IsolateDbContext::mask_policies` for the
+/// Stored on `ThreadDbContext::mask_policies` for the
 /// life of the isolate; refreshed write-through when `setMaskPolicy`
 /// fires. A `None` cache slot means "no policy declared for this app
 /// on this isolate" — [`crate::crud::unmask::check_unmask_authorization`]
@@ -215,7 +215,7 @@ impl MaskPolicy {
 ///    - **SQLite**: read sidecar JSON, update the app's entry, atomic
 ///      write back via `<file>.tmp + rename`.
 /// 3. Refresh the in-process cache on
-///    `IsolateDbContext::mask_policies` so the next
+///    `ThreadDbContext::mask_policies` so the next
 ///    unmask sees the new policy without a re-read.
 ///
 /// Idempotent: re-running with the same policy is a no-op for the cache
@@ -743,7 +743,7 @@ mod tests {
     // The proposal asserts that a `defineMaskPolicy()` write under
     // app A's isolate-context entry must NOT be visible from app B's
     // entry. The cache is keyed by app_id on
-    // `IsolateDbContext.mask_policies`; this test pins that
+    // `ThreadDbContext.mask_policies`; this test pins that
     // invariant directly through the public surface so a future
     // refactor that accidentally widens the key (e.g. to a shared
     // singleton) trips the gate.
@@ -751,7 +751,7 @@ mod tests {
 
     #[test]
     fn mask_policy_per_app_isolated() {
-        use crate::context::IsolateDbContext;
+        use crate::context::ThreadDbContext;
 
         // Build two distinct policies — one permissive for `admin`,
         // one restrictive for `support` — and seed them under
@@ -772,8 +772,8 @@ mod tests {
 
         // Construct a fresh context (mirrors the pattern in the
         // `context` module's tests — avoids touching the thread-local
-        // ISOLATE_CTX so test ordering is irrelevant).
-        let mut ctx = IsolateDbContext::new();
+        // THREAD_DB_CTX so test ordering is irrelevant).
+        let mut ctx = ThreadDbContext::new();
         ctx.set_mask_policy_for_app("app_a", Some(policy_a.clone()));
         ctx.set_mask_policy_for_app("app_b", Some(policy_b.clone()));
 

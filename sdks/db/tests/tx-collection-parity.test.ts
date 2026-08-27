@@ -38,7 +38,6 @@ async function assertTxSurfaceTypes(tx: TxCollection<ExampleSchema>): Promise<vo
     [{ id: "doc_1", columns: ["secret"] }],
     { actor: { role: "admin" } },
   );
-  await tx.search({ text: "hello", limit: 1 });
   await tx.search({ vector: [0.1, 0.2], k: 1 });
   await tx.near({
     field: "location",

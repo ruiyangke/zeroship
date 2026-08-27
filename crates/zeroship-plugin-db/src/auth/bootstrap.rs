@@ -1239,61 +1239,6 @@ async fn install_slot_wrapper_functions(pool: &Pool) -> Result<(), DbError> {
     .await
     .map_err(|e| coded_sql("GRANT ensure_publication_and_slot proc", e))?;
 
-    // drop_abandoned_slots(threshold_bytes) → text[] of dropped names.
-    let sql_drop = format!(
-        r#"CREATE OR REPLACE FUNCTION "{ADMIN_SCHEMA}".drop_abandoned_slots(p_threshold BIGINT)
-           RETURNS TEXT[]
-           LANGUAGE plpgsql SECURITY DEFINER
-           SET search_path = pg_catalog, pg_temp
-           AS $$
-           DECLARE v_names TEXT[]; v_rec RECORD;
-           BEGIN
-             v_names := ARRAY[]::TEXT[];
-             FOR v_rec IN
-               SELECT slot_name FROM pg_replication_slots
-                WHERE slot_name LIKE '__zs_%'
-                  AND active = false
-                  AND (
-                    restart_lsn IS NULL
-                    OR pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)
-                       >= GREATEST(p_threshold, 0)
-                  )
-             LOOP
-               BEGIN
-                 PERFORM pg_drop_replication_slot(v_rec.slot_name);
-                 v_names := array_append(v_names, v_rec.slot_name);
-               EXCEPTION WHEN object_in_use THEN
-                 -- benign race; next sweep will pick it up
-                 NULL;
-               END;
-             END LOOP;
-             RETURN v_names;
-           END $$"#
-    );
-    pool.execute(&sql_drop, &[])
-        .await
-        .map_err(|e| coded_sql("CREATE drop_abandoned_slots", e))?;
-    pool.execute(
-        &format!(
-            r#"REVOKE ALL ON FUNCTION
-               "{ADMIN_SCHEMA}".drop_abandoned_slots(BIGINT)
-               FROM PUBLIC"#
-        ),
-        &[],
-    )
-    .await
-    .map_err(|e| coded_sql("REVOKE drop_abandoned_slots", e))?;
-    pool.execute(
-        &format!(
-            r#"GRANT EXECUTE ON FUNCTION
-               "{ADMIN_SCHEMA}".drop_abandoned_slots(BIGINT)
-               TO "{PLATFORM_ROLE}""#
-        ),
-        &[],
-    )
-    .await
-    .map_err(|e| coded_sql("GRANT drop_abandoned_slots", e))?;
-
     // watchdog() → JSONB array of slot health rows.
     let sql_watchdog = format!(
         r#"CREATE OR REPLACE FUNCTION "{ADMIN_SCHEMA}".watchdog()

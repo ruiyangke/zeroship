@@ -12,22 +12,19 @@
 //! metadata came from `registerModel`'s declared schema (the old source) or from
 //! introspection (the new one).
 //!
-//! Caching: per-isolate, per-`(app, collection)`, keyed on the app's current
-//! deploy/schema-version token. A deploy bump invalidates the entry on next read
-//! — mirroring `register_model`'s per-thread `is_model_registered` fast-path but
-//! keyed on the deploy version rather than mere presence (design §6). A
-//! goodie-free collection is cached as a NEGATIVE result (`None`) so it is not
-//! re-introspected each call.
+//! Caching: the per-worker-thread context keys each entry by
+//! `(DbBinding { app_id, deploy_token }, collection)`. An absent collection is
+//! cached as a NEGATIVE result (`None`) so it is not re-introspected each
+//! call. Cold misses are singleflight per exact key. One successful catalog
+//! read admits the requested collection plus at most 31 uncached siblings.
 //!
-//! The token is the per-`app_id` value the worker injects as
-//! `ZEROSHIP_DEPLOY_ID` (= the app's `deploy_hash`), stamped into the per-isolate
-//! [`crate::context::IsolateDbContext`] when the `Db` wrapper is minted
-//! (`mint_db`). It is read here via [`crate::context::IsolateDbContext::
-//! deploy_token_for`], NOT from the process-global `std::env::var` — that env var
-//! was never set by any worker/runtime/control vector (so the token was pinned at
-//! `"cold_start"` for the isolate's whole life and the deploy-keyed cache never
-//! invalidated), and a process-global would in any case be wrong for a multi-app
-//! worker thread.
+//! `mint_db` captures `ZEROSHIP_DEPLOY_ID` (= the app's `deploy_hash`) from the
+//! active runtime's own environment and stores that immutable [`DbBinding`] on
+//! the `Db` and every `Collection` wrapper it mints. The binding is then passed
+//! through each asynchronous CRUD continuation into this resolver. It is not
+//! recovered from process-global environment or app-keyed thread-local state:
+//! either would be wrong when one worker thread keeps current and deploy-pinned
+//! isolates of the same app alive together.
 //!
 //! ## Recoverability gap (flagged, not papered over)
 //!
@@ -45,28 +42,73 @@
 //! observable post-coercion. (PG is the engine's target backend — design §10;
 //! the SQLite dev-tier introspector is a documented follow-up.)
 
+use std::future::Future;
+use std::sync::Arc;
+
 use serde_json::{json, Map, Value};
 
+use crate::binding::DbBinding;
+use crate::live_metadata::CachedFacts;
 use crate::diff::{ColumnInfo, EncryptionMeta, LiveSchema, MaskMeta, WrappedType};
 use crate::error::DbError;
 
+/// Maximum number of cache entries one whole-catalog read may admit.
+///
+/// The measured 16-column fixture costs at least 3,830 structural bytes per
+/// entry, so 32 such entries are about 120 KiB before allocator and map
+/// overhead. The cap still covers the repository's largest documented
+/// first-party domain (31 billing tables) in one read.
+const MAX_COLLECTIONS_PER_POPULATE: usize = 32;
+
+/// Cancellation-safe ownership of one per-thread introspection flight.
+///
+/// The `Rc` marker makes the guard explicitly thread-bound: releasing it on a
+/// different OS thread would address the wrong thread-local context.
+struct SchemaIntrospectionGuard {
+    binding: DbBinding,
+    collection: String,
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl SchemaIntrospectionGuard {
+    fn new(binding: &DbBinding, collection: &str) -> Self {
+        Self {
+            binding: binding.clone(),
+            collection: collection.to_string(),
+            _thread_bound: std::marker::PhantomData,
+        }
+    }
+}
+
+impl Drop for SchemaIntrospectionGuard {
+    fn drop(&mut self) {
+        let waiters = crate::context::with_mut(|ctx| {
+            ctx.finish_schema_introspection(&self.binding, &self.collection)
+        });
+        for waiter in waiters {
+            waiter.wake();
+        }
+    }
+}
+
 /// Resolve the runtime data-access schema for `(app_id, collection)` from the
-/// LIVE catalog + sentinels, with per-isolate deploy-keyed caching.
+/// LIVE catalog + sentinels, with binding-keyed caching.
 ///
-/// Returns `Ok(None)` when the collection has no encrypted/masked columns (the
-/// caller then skips the encrypt/mask passes — the schema-driven read coercions
-/// also run only when a schema is present, matching the original cold-schema
-/// contract). Returns `Ok(Some(schema))` with the declared-shape JSON otherwise.
+/// A live Postgres collection returns `Ok(Some(schema))` with every column,
+/// including when it has no encrypted or masked columns, so schema-driven read
+/// coercions still run. An absent or never-registered collection returns
+/// `Ok(None)`.
 ///
-/// On a backend without a PG pool (SQLite), returns `Ok(None)` — the SQLite
-/// introspector is the documented dev-tier follow-up (design §9/§10); plugin-db
-/// then behaves as it does for a cold schema cache.
+/// On a backend without a PG pool, the SQLite dev tier returns the declared
+/// schema cache result. Its live introspector remains a documented follow-up.
 pub(crate) async fn runtime_schema_for(
-    app_id: &str,
+    binding: &DbBinding,
     collection: &str,
-) -> Result<Option<Value>, DbError> {
+) -> Result<CachedFacts, DbError> {
+    let app_id = binding.app_id();
     // Behaviour-identity gate: the OLD `schema_for` returned `Some(schema)` ONLY
-    // when `register_model` had cached it on this isolate, and `None` otherwise
+    // when `register_model` had cached it on this worker thread, and `None`
+    // otherwise
     // (the deliberate cold-schema contract — raw-JS / pre-register reads stay
     // lossless instead of guessing). We preserve that EXACTLY: introspection
     // only sources a schema once the model is registered this deploy. A
@@ -77,16 +119,9 @@ pub(crate) async fn runtime_schema_for(
         return Ok(None);
     }
 
-    // The per-app deploy/schema-version token (the worker-injected
-    // `ZEROSHIP_DEPLOY_ID` = `deploy_hash`, stamped at `mint_db`). A redeploy
-    // re-mints the wrapper with the new hash, so this token changes and the
-    // deploy-keyed cache below invalidates on the next op. See the module note.
-    let token = crate::context::with(|c| c.deploy_token_for(app_id));
-
-    // Fast path: per-isolate cache hit under the current deploy token.
-    if let Some(cached) =
-        crate::context::with(|c| c.introspected_schema_for(app_id, collection, &token))
-    {
+    // Fast path: cache hit under the immutable binding captured from the
+    // Collection's owning isolate. No thread-ambient lookup participates.
+    if let Some(cached) = crate::context::with(|c| c.introspected_schema_for(binding, collection)) {
         return Ok(cached);
     }
 
@@ -97,18 +132,114 @@ pub(crate) async fn runtime_schema_for(
         return Ok(sqlite_fallback_schema(app_id, collection));
     };
 
-    let live = crate::diff::read_live_schema(pool.as_ref(), app_id)
-        .await
-        .map_err(DbError::from)?;
+    let app_id = app_id.to_string();
+    resolve_cache_miss_with_reader(binding, collection, move || async move {
+        crate::diff::read_live_schema(pool.as_ref(), &app_id)
+            .await
+            .map_err(DbError::from)
+    })
+    .await
+}
 
-    let schema = build_runtime_schema(&live, collection);
-    // Cache the result under the deploy token so the collection is introspected
-    // at most once per deploy on this isolate (mirrors `is_model_registered`'s
-    // per-thread fast-path, keyed on the deploy version).
-    crate::context::with_mut(|c| {
-        c.cache_introspected_schema(app_id, collection, &token, schema.clone());
-    });
+/// Resolve a catalog-backed miss using an injected reader.
+///
+/// Keeping the reader behind this seam lets the concurrency tests count and
+/// control catalog reads without weakening the assertion to cache side effects.
+async fn resolve_cache_miss_with_reader<Read, ReadFuture>(
+    binding: &DbBinding,
+    collection: &str,
+    read: Read,
+) -> Result<CachedFacts, DbError>
+where
+    Read: FnOnce() -> ReadFuture,
+    ReadFuture: Future<Output = Result<LiveSchema, DbError>>,
+{
+    let state = std::future::poll_fn(|cx| {
+        crate::context::with_mut(|ctx| ctx.poll_schema_introspection(binding, collection, cx))
+    })
+    .await;
+    match state {
+        crate::context::SchemaIntrospectionState::Cached(schema) => return Ok(schema),
+        crate::context::SchemaIntrospectionState::Acquired => {}
+    }
+    let _flight = SchemaIntrospectionGuard::new(binding, collection);
+
+    let live = read().await?;
+
+    // Cache the requested collection and a bounded set of siblings this read
+    // already covered under the same deploy token.
+    //
+    // `read_live_schema` has no table predicate: it selects every column of
+    // every table in the app's schema, joining `pg_attribute`/`pg_class`/
+    // `pg_namespace`, LEFT JOINing `pg_attrdef` and `pg_description`, with a
+    // correlated subquery per column. Caching one slice of that meant an app
+    // with N collections paid N whole-schema catalog reads on cold start to
+    // learn what a single read had already returned - quadratic work for
+    // linear information.
+    //
+    // Cold start is the cost that matters at platform scale: the long tail is
+    // rarely-hit apps, so a large share of requests are cold. It is also
+    // invisible to any benchmark that warms one app and then measures steady
+    // state, which is how this would be measured by default.
+    // `with`, not `with_mut`: the cache is process-wide and carries its own
+    // synchronisation, so publishing a read is no longer a mutation of this
+    // thread's state. The singleflight marker still is, and is released by
+    // `_flight` above.
+    let schema =
+        crate::context::with(|c| cache_every_collection_and_request(c, binding, &live, collection));
     Ok(schema)
+}
+
+/// Populate the deploy-keyed cache for the requested collection and a bounded
+/// set of creator-collection siblings present in one `LiveSchema` read.
+///
+/// Split out from the caller so it is unit-testable against a `LiveSchema`
+/// fixture. The requested entry always consumes the first admission, including
+/// when the catalog does not contain it. Remaining admissions prefer siblings
+/// not already cached under this binding.
+///
+/// The second half is not a special case, it is the negative-caching contract
+/// this module has always had: `build_runtime_schema` returns `None` for a
+/// collection that is registered but absent, and that `None` must be
+/// remembered. Populating only `live.tables` silently drops it, and the cost is
+/// not one extra read - it is a whole-schema catalog read on **every**
+/// subsequent operation for that collection, because nothing ever caches the
+/// miss.
+fn cache_every_collection_and_request(
+    ctx: &crate::context::ThreadDbContext,
+    binding: &DbBinding,
+    live: &LiveSchema,
+    requested: &str,
+) -> CachedFacts {
+    // Reserve the first admission for the requested collection. It must be
+    // cached even when absent, or every later operation would repeat the whole
+    // catalog read forever.
+    let mut admissions = usize::from(!ctx.has_introspected_schema(binding, requested));
+    let requested_schema = build_runtime_schema(live, requested).map(Arc::new);
+    ctx.cache_introspected_schema(binding, requested, requested_schema.clone());
+
+    for table in live.tables.keys() {
+        if table == requested
+            || table.starts_with("__zeroship")
+            || table.starts_with("__zs_")
+            || ctx.has_introspected_schema(binding, table)
+        {
+            continue;
+        }
+        if admissions >= MAX_COLLECTIONS_PER_POPULATE {
+            break;
+        }
+        // Internal platform tables are not creator collections. They would
+        // never be requested, and caching them would spend the per-populate
+        // admission budget on entries nobody reads.
+        let schema = build_runtime_schema(live, table).map(Arc::new);
+        // One read, one token: every entry from this `LiveSchema` is stamped
+        // with the same deploy token, so a redeploy landing mid-populate can
+        // never leave entries from two schema versions under one identity.
+        ctx.cache_introspected_schema(binding, table, schema);
+        admissions += 1;
+    }
+    requested_schema
 }
 
 /// SQLite dev-tier fallback (the documented gap, design §9/§10): the shared
@@ -116,8 +247,8 @@ pub(crate) async fn runtime_schema_for(
 /// fall back to the declared schema cache `register_model` populated. This keeps
 /// the dev tier working until the SQLite-arm introspector (regex over
 /// `sqlite_master.sql`, which already recovers mask sentinels) is wired in.
-fn sqlite_fallback_schema(app_id: &str, collection: &str) -> Option<Value> {
-    crate::context::with(|c| c.schema_for(app_id, collection))
+fn sqlite_fallback_schema(app_id: &str, collection: &str) -> CachedFacts {
+    crate::context::with(|c| c.schema_for(app_id, collection)).map(Arc::new)
 }
 
 /// Build the declared-shape `{ <col>: { type, encrypted?, mask? } }` JSON for
@@ -242,7 +373,14 @@ mod tests {
     use super::*;
     use crate::backend::EncryptionMode;
     use crate::diff::{Classification, MaskKind};
+    use std::cell::Cell;
     use std::collections::HashMap;
+    use std::rc::Rc;
+    use std::task::Poll;
+
+    fn binding(deploy_token: &str) -> DbBinding {
+        DbBinding::new("app_1", deploy_token)
+    }
 
     fn col(pg_type: &str) -> ColumnInfo {
         ColumnInfo {
@@ -279,6 +417,474 @@ mod tests {
         assert_eq!(schema["flag"]["type"], "boolean");
         assert!(schema["title"].get("encrypted").is_none());
         assert!(schema["title"].get("mask").is_none());
+    }
+
+    fn live_with_tables(specs: Vec<(&str, Vec<(&str, ColumnInfo)>)>) -> LiveSchema {
+        let mut tables = HashMap::new();
+        for (name, cols) in specs {
+            let mut m = HashMap::new();
+            for (c, info) in cols {
+                m.insert(c.to_string(), info);
+            }
+            tables.insert(name.to_string(), m);
+        }
+        LiveSchema {
+            tables,
+            ..Default::default()
+        }
+    }
+
+    fn live_with_numbered_tables(count: usize) -> (LiveSchema, Vec<String>) {
+        let names: Vec<String> = (0..count).map(|i| format!("table_{i:04}")).collect();
+        let tables = names
+            .iter()
+            .map(|name| {
+                let cols = HashMap::from([("value".to_string(), col("text"))]);
+                (name.clone(), cols)
+            })
+            .collect();
+        (
+            LiveSchema {
+                tables,
+                ..Default::default()
+            },
+            names,
+        )
+    }
+
+    /// A fresh context bound to a database of this test's own.
+    ///
+    /// Constructing a `ThreadDbContext` no longer implies a fresh metadata
+    /// cache: the cache is process-wide and `DbService` owns it. Two tests
+    /// using the same app id and deploy token would otherwise read each
+    /// other's entries. Binding each to its own URL gives it its own
+    /// `DbResourceKey`, which is the identity the cache partitions on - the
+    /// same mechanism that keeps two databases apart in production, exercised
+    /// here rather than worked around.
+    fn ctx_for(test: &str) -> crate::context::ThreadDbContext {
+        let mut ctx = crate::context::ThreadDbContext::new();
+        let url = format!("postgres://introspect-fixture/{test}");
+        ctx.install_db_resources(
+            &url,
+            crate::service::DbResourceKey::for_url(&url),
+            crate::service::select_backend(&url).expect("fixture URL must be valid"),
+            crate::live_metadata::process_wide(),
+        );
+        ctx
+    }
+
+    fn cached_fixture_count(
+        ctx: &crate::context::ThreadDbContext,
+        binding: &DbBinding,
+        names: &[String],
+    ) -> usize {
+        assert!(
+            !names.is_empty(),
+            "cache-admission fixture must contain creator tables"
+        );
+        names
+            .iter()
+            .filter(|name| ctx.introspected_schema_for(binding, name).is_some())
+            .count()
+    }
+
+    async fn yield_once() {
+        let mut yielded = false;
+        std::future::poll_fn(move |cx| {
+            if yielded {
+                Poll::Ready(())
+            } else {
+                yielded = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+        .await;
+    }
+
+    /// One live-schema read must populate the cache for every creator
+    /// collection it covered when the fixture fits within the admission cap,
+    /// not only the one that triggered it.
+    ///
+    /// `read_live_schema` reads the whole app schema regardless of which
+    /// collection was asked for, so caching a single slice made an app with N
+    /// collections perform N whole-schema catalog reads on cold start to
+    /// obtain what one read already returned.
+    #[test]
+    fn one_read_populates_every_collection() {
+        let live = live_with_tables(vec![
+            ("notes", vec![("title", col("text"))]),
+            ("users", vec![("email", col("text"))]),
+            ("todos", vec![("done", col("boolean"))]),
+        ]);
+        let ctx = ctx_for("one_read_populates_every_collection");
+
+        let deploy_a = binding("deploy_a");
+        let _ = cache_every_collection_and_request(&ctx, &deploy_a, &live, "notes");
+
+        // Assert the INNER value, not just that a cache entry exists.
+        // `introspected_schema_for` returns `Option<Option<_>>` -- the outer
+        // is "was it cached", the inner is "does the collection exist" -- so a
+        // bare `.is_some()` on the outer stays green if populate-all cached
+        // every table as a NEGATIVE. Each fixture carries a distinct column,
+        // so checking for it also rules out entries cross-wired between
+        // sibling collections, which a presence-only check cannot see.
+        for (coll, expected_col) in [("notes", "title"), ("users", "email"), ("todos", "done")] {
+            let cached = ctx
+                .introspected_schema_for(&deploy_a, coll)
+                .unwrap_or_else(|| panic!("'{coll}' must be cached by the single read that covered it"))
+                .unwrap_or_else(|| panic!("'{coll}' was cached as ABSENT, but the read covered it"));
+            assert!(
+                cached.to_string().contains(expected_col),
+                "'{coll}' cached a schema without its own column '{expected_col}': {cached}",
+            );
+        }
+    }
+
+    /// Internal platform tables are not creator collections: caching them
+    /// would spend the per-populate admission budget on entries nothing ever
+    /// requests.
+    ///
+    /// Production skips TWO prefixes (`__zeroship` and `__zs_`), so this arm
+    /// supplies a fixture for each. Covering only one left the other's
+    /// `starts_with` deletable with the test still green - which is how it was
+    /// written first, and what a mutation check caught.
+    #[test]
+    fn internal_tables_are_not_cached_as_collections() {
+        let live = live_with_tables(vec![
+            ("notes", vec![("title", col("text"))]),
+            ("__zeroship_audit_unmask", vec![("actor", col("text"))]),
+            ("__zs_mask_policy", vec![("kind", col("text"))]),
+        ]);
+        let ctx = ctx_for("internal_tables_are_not_cached_as_collections");
+
+        let deploy_a = binding("deploy_a");
+        let _ = cache_every_collection_and_request(&ctx, &deploy_a, &live, "notes");
+
+        assert!(ctx.introspected_schema_for(&deploy_a, "notes").is_some());
+        for internal in ["__zeroship_audit_unmask", "__zs_mask_policy"] {
+            assert!(
+                ctx.introspected_schema_for(&deploy_a, internal).is_none(),
+                "internal table {internal} must not occupy the per-app cache",
+            );
+        }
+    }
+
+    /// Every entry from one read carries the SAME deploy token. Asserted by
+    /// reading them back under a DIFFERENT token, which must miss uniformly
+    /// rather than partially.
+    ///
+    /// WHAT THIS DOES NOT CATCH. It passes a constant token into a fresh local
+    /// context: there is no `mint_db`, no shared thread-local context, no
+    /// await, and no second runtime. So it cannot see any race, and in
+    /// particular it stayed green under the pre-fix deploy-token identity bug,
+    /// where `deploy_tokens` was keyed by `app_id` alone and a second runtime
+    /// of the SAME app at a different deploy overwrote the first's token
+    /// last-writer-wins. This comment used to claim the test showed "a
+    /// redeploy landing mid-populate cannot leave two schema versions under one
+    /// identity", which is precisely the property it is blind to. Uniform
+    /// stamping within one populate call is a real but much narrower guarantee,
+    /// and it is all that is asserted here.
+    #[test]
+    fn one_read_stamps_one_token() {
+        let live = live_with_tables(vec![
+            ("notes", vec![("title", col("text"))]),
+            ("users", vec![("email", col("text"))]),
+        ]);
+        let ctx = ctx_for("one_read_stamps_one_token");
+
+        let deploy_a = binding("deploy_a");
+        let deploy_b = binding("deploy_b");
+        let _ = cache_every_collection_and_request(&ctx, &deploy_a, &live, "notes");
+
+        for coll in ["notes", "users"] {
+            // The HIT half is not padding. An earlier version of this test
+            // asserted only the miss, which passes just as happily when
+            // nothing was cached at all - the deny-only shape. Mutation-testing
+            // it caught that: with the population reduced to one collection the
+            // miss-only assertion stayed green, so it was measuring the token
+            // rule while blind to whether anything had been stored.
+            assert!(
+                ctx.introspected_schema_for(&deploy_a, coll).is_some(),
+                "'{coll}' must be cached under the token it was stamped with",
+            );
+            assert!(
+                ctx.introspected_schema_for(&deploy_b, coll).is_none(),
+                "'{coll}' must miss under a different deploy token",
+            );
+        }
+    }
+
+    /// A collection that is REGISTERED but absent from the live catalog must
+    /// still be cached, as a negative result.
+    ///
+    /// This is the arm the populate-all rewrite regressed. The original cached
+    /// `build_runtime_schema`'s `Option` for the requested collection
+    /// unconditionally, so an absent collection was remembered as `None` and
+    /// cost one introspection. Iterating `live.tables` instead caches only
+    /// tables that EXIST, so an absent one is never remembered and re-reads the
+    /// whole app schema on every operation, forever - strictly worse on that
+    /// path than the cold-start defect the rewrite was fixing.
+    ///
+    /// It is not an exotic state: it is the ordinary first-deploy window before
+    /// the migration lands, and any drift or rolling deploy where a registered
+    /// collection is not yet in the catalog.
+    #[test]
+    fn absent_collection_is_cached_as_a_negative_result() {
+        let live = live_with_tables(vec![("notes", vec![("title", col("text"))])]);
+        let ctx = ctx_for("absent_collection_is_cached_as_a_negative_result");
+
+        let deploy_a = binding("deploy_a");
+        let _ = cache_every_collection_and_request(&ctx, &deploy_a, &live, "ghosts");
+
+        assert_eq!(
+            ctx.introspected_schema_for(&deploy_a, "ghosts"),
+            Some(None),
+            "an absent collection must be cached as a negative result, not left \
+             uncached to re-introspect on every op",
+        );
+        // The present collection is still populated by the same call.
+        assert!(ctx
+            .introspected_schema_for(&deploy_a, "notes")
+            .is_some());
+    }
+
+    #[test]
+    fn one_populate_admits_at_most_the_per_populate_cap() {
+        let (live, names) = live_with_numbered_tables(500);
+        assert_eq!(
+            MAX_COLLECTIONS_PER_POPULATE, 32,
+            "the reviewed per-populate security ceiling must stay explicit"
+        );
+        assert!(names.len() > MAX_COLLECTIONS_PER_POPULATE);
+
+        let ctx = ctx_for("one_populate_admits_at_most_the_per_populate_cap");
+        let neighbour = DbBinding::new("app_neighbour", "deploy_neighbour");
+        let neighbour_schema = Some(Arc::new(json!({ "marker": { "type": "string" } })));
+        ctx.cache_introspected_schema(&neighbour, "keep_me", neighbour_schema.clone());
+
+        let attacker = DbBinding::new("app_attacker", "deploy_attacker");
+        let _ = cache_every_collection_and_request(&ctx, &attacker, &live, &names[0]);
+
+        assert_eq!(
+            cached_fixture_count(&ctx, &attacker, &names),
+            MAX_COLLECTIONS_PER_POPULATE,
+            "one app's single populate must have a fixed admission ceiling"
+        );
+        assert_eq!(
+            ctx.introspected_schema_for(&neighbour, "keep_me"),
+            Some(neighbour_schema),
+            "bounding one tenant's populate must not disturb a co-resident tenant"
+        );
+    }
+
+    #[test]
+    fn requested_present_collection_is_cached_when_cap_is_hit() {
+        let (live, names) = live_with_numbered_tables(500);
+        assert!(names.len() > MAX_COLLECTIONS_PER_POPULATE);
+        let requested = live
+            .tables
+            .keys()
+            .nth(MAX_COLLECTIONS_PER_POPULATE)
+            .cloned()
+            .expect("fixture must have a table beyond the capped iteration prefix");
+        let ctx = ctx_for("requested_present_collection_is_cached_when_cap_is_hit");
+        let deploy = DbBinding::new("app_requested_present", "deploy_a");
+
+        let _ = cache_every_collection_and_request(&ctx, &deploy, &live, &requested);
+
+        let cached = ctx
+            .introspected_schema_for(&deploy, &requested)
+            .expect("requested collection must be admitted even at the cap")
+            .expect("requested present collection must not be cached as absent");
+        assert_eq!(cached["value"]["type"], "string");
+        assert_eq!(
+            cached_fixture_count(&ctx, &deploy, &names),
+            MAX_COLLECTIONS_PER_POPULATE
+        );
+    }
+
+    #[test]
+    fn requested_absent_collection_is_cached_when_cap_is_hit() {
+        let (live, names) = live_with_numbered_tables(500);
+        assert!(names.len() > MAX_COLLECTIONS_PER_POPULATE);
+        let ctx = ctx_for("requested_absent_collection_is_cached_when_cap_is_hit");
+        let deploy = DbBinding::new("app_requested_absent", "deploy_a");
+
+        let _ = cache_every_collection_and_request(&ctx, &deploy, &live, "ghosts");
+
+        assert_eq!(
+            ctx.introspected_schema_for(&deploy, "ghosts"),
+            Some(None),
+            "an absent requested collection must retain its negative entry at the cap"
+        );
+        assert_eq!(
+            cached_fixture_count(&ctx, &deploy, &names) + 1,
+            MAX_COLLECTIONS_PER_POPULATE,
+            "the requested negative entry must consume one of the bounded admissions"
+        );
+    }
+
+    #[test]
+    fn concurrent_cold_resolutions_share_one_catalog_read() {
+        let concurrency = 8usize;
+        assert!(concurrency > 1, "singleflight fixture must be concurrent");
+        let reads = Rc::new(Cell::new(0usize));
+        let deploy = DbBinding::new("app_singleflight_success", "deploy_a");
+
+        let operations: Vec<_> = (0..concurrency)
+            .map(|_| {
+                let reads = Rc::clone(&reads);
+                resolve_cache_miss_with_reader(&deploy, "notes", move || async move {
+                    reads.set(reads.get() + 1);
+                    yield_once().await;
+                    Ok(live_with("notes", vec![("title", col("text"))]))
+                })
+            })
+            .collect();
+        assert!(
+            !operations.is_empty(),
+            "singleflight test must drive at least one cold resolution"
+        );
+
+        let results = futures::executor::block_on(futures::future::join_all(operations));
+        for result in &results {
+            let schema = result
+                .as_ref()
+                .expect("catalog read must succeed")
+                .as_ref()
+                .expect("requested present collection must resolve");
+            assert_eq!(schema["title"]["type"], "string");
+        }
+        assert_eq!(
+            reads.get(),
+            1,
+            "K concurrent cold resolutions for one cache key must read the catalog once"
+        );
+    }
+
+    #[test]
+    fn failed_catalog_read_is_not_cached_or_shared() {
+        let concurrency = 4usize;
+        assert!(concurrency > 1, "singleflight fixture must be concurrent");
+        let reads = Rc::new(Cell::new(0usize));
+        let deploy = DbBinding::new("app_singleflight_retry", "deploy_a");
+
+        let operations: Vec<_> = (0..concurrency)
+            .map(|_| {
+                let reads = Rc::clone(&reads);
+                resolve_cache_miss_with_reader(&deploy, "notes", move || async move {
+                    let attempt = reads.get() + 1;
+                    reads.set(attempt);
+                    yield_once().await;
+                    if attempt == 1 {
+                        Err(DbError::internal("injected catalog failure"))
+                    } else {
+                        Ok(live_with("notes", vec![("title", col("text"))]))
+                    }
+                })
+            })
+            .collect();
+        assert!(!operations.is_empty());
+
+        let results = futures::executor::block_on(futures::future::join_all(operations));
+        assert_eq!(
+            results.iter().filter(|result| result.is_err()).count(),
+            1,
+            "only the failed owner must receive the catalog error"
+        );
+        assert_eq!(
+            results.iter().filter(|result| result.is_ok()).count(),
+            concurrency - 1,
+            "waiters must retry after a failure instead of sharing it"
+        );
+        assert_eq!(
+            reads.get(),
+            2,
+            "one failed read must be followed by exactly one successful retry"
+        );
+    }
+
+    /// MEASUREMENT, not an assertion - run with `--nocapture`.
+    ///
+    /// The per-populate admission cap has to be a number, and a number nobody
+    /// measured is a guess with a decimal point. This reports the serialized
+    /// size of one cached entry so the cap can be derived from the actual shape
+    /// being stored.
+    ///
+    /// It measures the DATA STRUCTURE, not a production app: the column count
+    /// is varied and the names are realistic-length, but a real creator schema
+    /// with encrypted/masked facets stores more per column. Read the result as
+    /// a floor.
+    #[test]
+    fn measure_cached_entry_size() {
+        for (label, ncols) in [("narrow", 8usize), ("typical", 16), ("wide", 40)] {
+            let owned: Vec<(String, ColumnInfo)> = (0..ncols)
+                .map(|i| (format!("column_name_{i}"), col("text")))
+                .collect();
+            let refs: Vec<(&str, ColumnInfo)> =
+                owned.iter().map(|(n, c)| (n.as_str(), c.clone())).collect();
+            let live = live_with("collection_name", refs);
+            let schema = build_runtime_schema(&live, "collection_name");
+            let bytes = serde_json::to_string(&schema).unwrap().len();
+            println!(
+                "MEASURED {label}: {ncols} cols -> {bytes} bytes ({} b/col)",
+                bytes / ncols
+            );
+        }
+    }
+
+    /// MEASUREMENT - run with `--nocapture`.
+    ///
+    /// The serialized figure above is a floor; the cache stores a live
+    /// `serde_json::Value`. This reports the STRUCTURAL heap cost so the
+    /// multiplier is a measured quantity rather than the phrase "several
+    /// times".
+    ///
+    /// Counts what the type system fixes: the `Value` enum's own size, the
+    /// per-entry cost of the map that backs an object, and the `String` header
+    /// for every key. It does NOT include allocator rounding or fragmentation,
+    /// so like the serialized figure it is a floor - but a much tighter one.
+    #[test]
+    fn measure_value_memory_overhead() {
+        use std::mem::size_of;
+        let value_sz = size_of::<serde_json::Value>();
+        let string_sz = size_of::<String>();
+
+        for (label, ncols) in [("narrow", 8usize), ("typical", 16), ("wide", 40)] {
+            let owned: Vec<(String, ColumnInfo)> = (0..ncols)
+                .map(|i| (format!("column_name_{i}"), col("text")))
+                .collect();
+            let refs: Vec<(&str, ColumnInfo)> =
+                owned.iter().map(|(n, c)| (n.as_str(), c.clone())).collect();
+            let live = live_with("collection_name", refs);
+            let schema = build_runtime_schema(&live, "collection_name").expect("table exists");
+
+            let json = serde_json::to_string(&schema).unwrap();
+            // Outer object: one entry per column. Each entry is a String key
+            // plus a Value (itself an object holding `type`, and possibly
+            // `encrypted`/`mask`).
+            let obj = schema.as_object().expect("object");
+            let mut structural = 0usize;
+            for (k, v) in obj {
+                structural += string_sz + k.len() + value_sz;
+                if let Some(inner) = v.as_object() {
+                    for (ik, iv) in inner {
+                        structural += string_sz + ik.len() + value_sz;
+                        if let Some(s) = iv.as_str() {
+                            structural += string_sz + s.len();
+                        }
+                    }
+                }
+            }
+            println!(
+                "MEASURED {label}: {ncols} cols -> serialized {} B, structural {} B, ratio {:.1}x",
+                json.len(),
+                structural,
+                structural as f64 / json.len() as f64,
+            );
+        }
+        println!("MEASURED sizeof(serde_json::Value) = {value_sz} B, sizeof(String) = {string_sz} B");
     }
 
     #[test]

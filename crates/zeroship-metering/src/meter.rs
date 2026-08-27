@@ -130,9 +130,14 @@ fn push_metric(out: &mut Vec<DrainedMetric>, meter: &str, value: u64) {
     }
 }
 
-/// Process-wide usage meter. Cheap to clone behind an `Arc`. Lock-free on the
-/// increment fast path once an app's `AppCounters` exists; a brief write lock
-/// is taken only on first-touch per app.
+/// Process-wide usage meter. Cheap to clone behind an `Arc`.
+///
+/// The increment fast path bumps an atomic under a SHARED read guard, so
+/// increments never exclude one another. A brief write lock is taken when an
+/// app's `AppCounters` must be created - on first touch, and again after
+/// [`Self::drain`] has evicted an idle app (see the trade documented there).
+/// The one thing that does exclude increments is `drain` itself, which takes
+/// the exclusive lock.
 #[derive(Debug)]
 pub struct Meter {
     source: String,
@@ -165,6 +170,23 @@ impl Meter {
             source,
             apps: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// How many apps this meter currently holds counters for.
+    ///
+    /// Bounded by the count of apps with traffic since the last drain, NOT by
+    /// the count this process has ever seen - [`Self::drain`] evicts entries
+    /// that drained empty. Exposed so an operator (or a gate) can assert that
+    /// boundedness rather than trust it.
+    ///
+    /// # Panics
+    ///
+    /// If the `apps` lock is poisoned, as every other accessor on this type
+    /// does: a poisoned meter lock means a counter update panicked mid-write,
+    /// and continuing on unknown counter state would corrupt billing input.
+    #[must_use]
+    pub fn tracked_app_count(&self) -> usize {
+        self.apps.read().unwrap().len()
     }
 
     /// Increment `metric` for `app_id` by `n`. Auto-vivifies the app's counter
@@ -203,22 +225,49 @@ impl Meter {
     }
 
     /// Drain every app's counters to `UsageEvent`s, resetting each counter to
-    /// zero. Apps with zero activity since the last drain are omitted. The
-    /// returned vector is empty when no app saw any traffic.
+    /// zero. Apps with zero activity since the last drain are omitted from the
+    /// result AND **evicted from the map**. The returned vector is empty when
+    /// no app saw any traffic.
     ///
     /// Held under the write lock so no increment interleaves a partial drain
     /// (fixed-counter `swap`s plus a `custom` take must be atomic per app
     /// relative to that app's own increments).
+    ///
+    /// **Why evict.** Every increment auto-vivifies an entry and nothing used to
+    /// remove one, so the map's size tracked "every app this process has ever
+    /// touched". That is unbounded memory on a long-lived worker, and - because
+    /// this scan runs under the EXCLUSIVE lock on the outbox's ten-second
+    /// cadence - it is also a periodic process-wide stall on every `env.db` /
+    /// `env.kv` / `env.storage` increment, whose length grows with uptime rather
+    /// than with load. Evicting on an empty drain bounds both by the ACTIVE app
+    /// count.
+    ///
+    /// **The trade this makes, stated plainly.** The type comment above promises
+    /// a write lock "only on first-touch per app". With eviction, an app that
+    /// stays idle across a drain pays that first-touch write lock again when it
+    /// next increments. That is the right side of the trade: an app busy enough
+    /// for the write lock to matter never idles through a whole drain window, and
+    /// one that does idle is by definition not on a hot path. What it buys is
+    /// that neither the map nor the stall can grow without bound.
+    ///
+    /// It does NOT remove the stall itself, only its unbounded growth. The
+    /// exclusive lock is still taken process-wide to get an atomicity property
+    /// that is only needed per app; making that per-app is a separate change.
     #[must_use]
-    #[allow(clippy::readonly_write_lock)]
     pub fn drain(&self) -> Vec<UsageEvent> {
         let event_time = drain_wall_clock_unix();
-        let apps = self.apps.write().unwrap();
+        let mut apps = self.apps.write().unwrap();
         let mut events = Vec::new();
-        for (app_id, counters) in apps.iter() {
+        apps.retain(|app_id, counters| {
             let drained = counters.drain_metrics();
             if drained.is_empty() {
-                continue;
+                // Idle since the last drain: drop the entry instead of carrying
+                // it for the life of the process. Every increment auto-vivifies,
+                // so this is not a tombstone - the app reappears, from zero, the
+                // next time it is touched. Without this the map size tracks every
+                // app the process has EVER seen, which is unbounded memory and a
+                // growing exclusive-lock hold on every drain.
+                return false;
             }
             let app_uuid = match Uuid::parse_str(app_id) {
                 Ok(id) => id,
@@ -228,7 +277,11 @@ impl Meter {
                         error = %e,
                         "meter: drain skipped non-UUID app_id"
                     );
-                    continue;
+                    // Evict too: this entry can never produce a valid event, so
+                    // retaining it only grows the map and re-warns every drain.
+                    // Its counters were already zeroed by `drain_metrics` above,
+                    // so keeping it would not preserve anything either.
+                    return false;
                 }
             };
             // The worker producer has only the server-injected app id; emitted
@@ -249,7 +302,8 @@ impl Meter {
                     dims: BTreeMap::new(),
                 });
             }
-        }
+            true
+        });
         events
     }
 }
@@ -281,6 +335,44 @@ mod tests {
             .iter()
             .find(|event| event.subject.app == Some(app_id) && event.meter == meter)
             .expect("usage event exists")
+    }
+
+    /// An app that goes idle must not be retained forever.
+    ///
+    /// `apps` is process-wide and every increment auto-vivifies an entry, so
+    /// without eviction its size tracks "every app this process ever touched"
+    /// rather than "apps with traffic". That is unbounded memory on a
+    /// long-lived worker, and it is also a latency bug: `drain` walks the whole
+    /// map under the EXCLUSIVE lock on a ten-second cadence, so every increment
+    /// in the process stalls behind a scan whose length grows with uptime.
+    /// Evicting on an empty drain bounds both by the ACTIVE app count.
+    #[test]
+    fn drain_evicts_apps_that_went_idle() {
+        let m = Meter::new();
+        let a = app();
+        m.increment(&a, "requests", 1);
+
+        // First drain: the app has traffic, so it reports and is kept.
+        assert_eq!(m.drain().len(), 1);
+        assert_eq!(m.tracked_app_count(), 1, "an active app must be retained");
+
+        // Second drain: nothing happened since, so the entry must go.
+        assert!(m.drain().is_empty());
+        assert_eq!(
+            m.tracked_app_count(),
+            0,
+            "an app idle since the last drain must be evicted, not retained forever",
+        );
+
+        // Re-vivification still works: the app is not tombstoned, just absent.
+        m.increment(&a, "requests", 7);
+        assert_eq!(m.tracked_app_count(), 1);
+        let events = m.drain();
+        assert_eq!(
+            event_value(&events, Uuid::parse_str(&a).unwrap(), "requests"),
+            Some(7),
+            "a re-touched app must count from zero, not resume a stale total",
+        );
     }
 
     #[test]

@@ -789,7 +789,7 @@ pub struct MintedToken {
 ///
 /// See `docs/archive/p1-sqlite-implementation-plan.md` §5. The six
 /// methods listed below are the minimum-viable hook set; additional
-/// hooks (RETURNING/upsert/JSON/vector/FTS) fill in alongside
+/// hooks (RETURNING/upsert/JSON/vector) fill in alongside
 /// the consumers that need them.
 ///
 /// **No production caller yet** — the trait + ZST impls
@@ -867,7 +867,7 @@ pub trait DialectBuilder: 'static {
 /// `SqliteBackend` would not implement this trait — it would have its
 /// own audit-helper signatures (a `SqliteExecutor` accessor returning
 /// `&sqlite::Connection`, etc.).
-pub trait PgSqlExecutor: SqlExecutor<Client = compio_postgres::Client> {
+pub trait PgSqlExecutor: SqlExecutor<Client = compio_postgres::OwnedPooledClient> {
     /// Borrow the underlying `compio_postgres::Pool`. Free-function
     /// audit helpers in [`crate::audit`] take `&Pool` directly; this
     /// accessor lets generic consumers (e.g.
@@ -877,44 +877,45 @@ pub trait PgSqlExecutor: SqlExecutor<Client = compio_postgres::Client> {
 }
 
 /// Postgres-specific extension trait carrying the
-/// `acquire_pooled_client_for_lock` primitive — the one piece of the
-/// register-model bootstrap that has to return a `PooledClient<'p>`
-/// whose `'p` borrow lifetime threads through
-/// [`crate::backend::lock_guard::LockGuard`].
+/// `acquire_pooled_client_for_lock` primitive — the register-model
+/// bootstrap's pool checkout, whose lease
+/// [`crate::backend::lock_guard::LockGuard`] holds for the life of the
+/// advisory lock.
 ///
-/// **Open Q5 resolution**: the alternative was a GAT on
-/// [`LockManager`] of the form
-/// `type PooledLockClient<'p>: 'p where Self: 'p`. async-fn-in-trait
-/// and GAT is workable but fights the trait solver in subtle ways
-/// (HRTB-style bounds at consumer sites). Since the PG impl is the
-/// only one that needs a borrow-lifetimed lock client today — and
-/// future backends (sqlite, planetscale) would have their own
-/// session-management primitive on a different extension trait —
-/// we take the PG extension-trait path and defer cross-backend
-/// lifetime threading. See
-/// `docs/archive/p0-implementation-plan.md` §3 Q5 and
-/// `docs/archive/db-system-design.md` §7.
+/// **Open Q5 is now moot, and this paragraph is kept as history rather than as
+/// a live trade-off.** It read: the primitive had to return a
+/// `PooledClient<'p>` whose `'p` borrow lifetime threaded through `LockGuard`,
+/// and the alternative was a GAT on [`LockManager`] of the form
+/// `type PooledLockClient<'p>: 'p where Self: 'p` — workable with
+/// async-fn-in-trait but fighting the trait solver at consumer sites, so the
+/// PG extension trait was taken and cross-backend lifetime threading deferred.
+/// `OwnedPooledClient` removes the lifetime outright: the lease owns an `Rc` of
+/// the pool and still returns on drop, so neither branch of that choice is
+/// needed. See `docs/archive/p0-implementation-plan.md` §3 Q5 and
+/// `docs/archive/db-system-design.md` §7 for the original framing.
 ///
-/// The `: LockManager<Client = compio_postgres::Client>` super-bound
-/// is load-bearing: the returned `PooledClient` is the
-/// [`SqlExecutor::Client`] that [`LockManager::acquire_advisory_lock`]
-/// takes, so the orchestrator can hand the returned client straight
-/// into `LockGuard::acquire` without an adapter.
+/// The `: LockManager<Client = compio_postgres::OwnedPooledClient>` super-bound
+/// is load-bearing: the returned lease is the [`SqlExecutor::Client`] that
+/// [`LockManager::acquire_advisory_lock`] takes, so the orchestrator can hand
+/// it straight into `LockGuard::acquire` without an adapter.
 #[cfg(any(test, feature = "test-helpers"))]
-pub trait PgLockManager: LockManager<Client = compio_postgres::Client> {
-    /// Acquire a pool-leased client for advisory-lock duty. The
-    /// returned [`compio_postgres::PooledClient`]'s `'p` lifetime is
-    /// the pool borrow lifetime — it threads through
-    /// [`crate::backend::lock_guard::LockGuard`] so
-    /// the lock auto-returns to the pool on Drop.
+pub trait PgLockManager: LockManager<Client = compio_postgres::OwnedPooledClient> {
+    /// Acquire a pool-leased client for advisory-lock duty.
     ///
-    /// Postgres impl wraps `self.pool().get().await` and maps the
+    /// Returns an [`compio_postgres::OwnedPooledClient`]: the lease owns an
+    /// `Rc` of the pool and still returns on drop, so
+    /// [`crate::backend::lock_guard::LockGuard`] no longer has to thread a
+    /// `'p` borrow lifetime through itself. The Q5 note above is therefore
+    /// historical - the GAT alternative it weighs was solving a lifetime
+    /// problem the owned lease removes outright.
+    ///
+    /// Postgres impl wraps `self.pool().get_owned().await` and maps the
     /// pool error to [`DbError::Transient`] with the same operator-
     /// facing message the bootstrap call site used to emit inline.
     #[allow(async_fn_in_trait)]
-    async fn acquire_pooled_client_for_lock<'p>(
-        &'p self,
-    ) -> Result<compio_postgres::PooledClient<'p>, DbError>;
+    async fn acquire_pooled_client_for_lock(
+        &self,
+    ) -> Result<compio_postgres::OwnedPooledClient, DbError>;
 }
 
 /// Change-stream capability — the "produce CDC events for an app" slice
@@ -1153,58 +1154,6 @@ pub trait VectorIndex: 'static {
 // `zeroship-schema` and is re-exported here so existing
 // `crate::backend::VectorMetric` references resolve unchanged.
 pub use zeroship_schema::descriptors::VectorMetric;
-
-/// Full-text search index capability — the "build a tokeniser-backed
-/// inverted index over one or more text columns and run a phrase /
-/// proximity query" slice of the data-store boundary.
-///
-/// See plan §2. The PG impl maintains
-/// a generated `__fts tsvector` column + GIN index + an `AFTER
-/// INSERT/UPDATE` trigger calling `tsvector_update_trigger(...)`.
-/// The SQLite impl uses FTS5 external-content virtual tables
-/// keyed by `rowid` with `AFTER` triggers mirroring writes.
-///
-/// `language` is honoured on PG (selects the tsvector configuration —
-/// `english`, `simple`, …); SQLite FTS5's default tokenizer is
-/// language-agnostic Unicode and ignores the parameter today (plan §9).
-///
-/// `filter` composes with `MATCH` via `AND`. Results are returned
-/// ordered by relevance DESC — PG: `ts_rank`; SQLite: `bm25`. Each
-/// returned `Value` includes a synthetic `"_rank"` field (`f64`).
-///
-/// **One composite index per collection** (Q-P4-B): the SDK's
-/// `.fts()` per-field modifier collects every flagged column into a
-/// single `__fts` index — `columns: &[String]` carries the ordered
-/// list.
-pub trait FullTextIndex: 'static {
-    /// Idempotently create the FTS index. PG: emits the `__fts`
-    /// column + GIN index + trigger. SQLite: creates the
-    /// `<coll>__fts` external-content virtual table + the
-    /// INSERT/UPDATE/DELETE mirror triggers.
-    #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(async_fn_in_trait)]
-    async fn ensure_fts_index(
-        &self,
-        app_id: &str,
-        collection: &str,
-        columns: &[String],
-        language: &str,
-    ) -> Result<(), DbError>;
-
-    /// Run the FTS query and return matching rows ordered by relevance
-    /// DESC. `limit` of `None` defers to the impl's default (today: no
-    /// explicit limit — caller must guard against `O(table)` results).
-    /// Each returned `Value` includes a synthetic `"_rank"` field.
-    #[allow(async_fn_in_trait)]
-    async fn fts_search(
-        &self,
-        app_id: &str,
-        collection: &str,
-        query: &str,
-        filter: &serde_json::Value,
-        limit: Option<usize>,
-    ) -> Result<Vec<serde_json::Value>, DbError>;
-}
 
 /// Spatial-index capability — the "build an R-tree-like index over a
 /// `geography(POINT)` column and run a within-radius point query"
@@ -1571,12 +1520,11 @@ impl Drop for SchemaPendingGuard {
 #[cfg(any(test, feature = "test-helpers"))]
 pub trait RegisterBackend:
     PgSqlExecutor
-    + LockManager<Client = compio_postgres::Client>
+    + LockManager<Client = compio_postgres::OwnedPooledClient>
     + SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>
     + IndexBuilder
     + PgLockManager
     + VectorIndex
-    + FullTextIndex
     + SpatialIndex
     + EncryptedColumn
 {
@@ -1585,12 +1533,11 @@ pub trait RegisterBackend:
 #[cfg(any(test, feature = "test-helpers"))]
 impl<T> RegisterBackend for T where
     T: PgSqlExecutor
-        + LockManager<Client = compio_postgres::Client>
+        + LockManager<Client = compio_postgres::OwnedPooledClient>
         + SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>
         + IndexBuilder
         + PgLockManager
         + VectorIndex
-        + FullTextIndex
         + SpatialIndex
         + EncryptedColumn
 {
@@ -1603,13 +1550,13 @@ impl<T> RegisterBackend for T where
 /// lives on a focused sub-trait. The super-trait bound
 /// is the carved capability set:
 ///
-/// - [`SqlExecutor`] — the `Client = compio_postgres::Client`
+/// - [`SqlExecutor`] — the `Client = compio_postgres::OwnedPooledClient`
 ///   pin was dropped from this super-bound so a `SqliteBackend` whose
 ///   `SqlExecutor::Client = SqliteSessionHandle` can also satisfy
 ///   `Backend`. PG-only consumers that *need* the concrete client
 ///   type continue to bound on
 ///   [`PgSqlExecutor`] / [`PgLockManager`] (which still pin
-///   `Client = compio_postgres::Client`).
+///   `Client = compio_postgres::OwnedPooledClient`).
 /// - [`LockManager`]
 /// - [`SchemaIntrospect`] with `LiveSchema = crate::diff::LiveSchema`
 /// - [`IndexBuilder`]
@@ -1628,7 +1575,7 @@ impl<T> RegisterBackend for T where
 /// - [`SqlExecutor::acquire_dedicated_client`] returns an owned `Client`
 ///   detached from any pool lifetime — the caller is free to park it
 ///   on the per-isolate context (e.g.
-///   `IsolateDbContext::tx_conns`) for the duration
+///   `ThreadDbContext::tx_conns`) for the duration
 ///   of a transaction.
 ///
 /// NOTE FOR DOC LINKS, AND AN OPEN DECISION.
@@ -1690,7 +1637,7 @@ pub trait Backend:
 }
 
 /// Per-isolate backend handle — the typed enum stashed on
-/// [`crate::context::IsolateDbContext`].
+/// [`crate::context::ThreadDbContext`].
 ///
 /// **Why an enum, not `Box<dyn Backend>`** (closes
 /// `docs/archive/db-system-design.md` §5.5 and
@@ -1699,7 +1646,7 @@ pub trait Backend:
 /// - `Backend` is `async fn`-in-trait. Object-safety for those traits
 ///   would require `Box<dyn Future>` per call — a per-CRUD-op
 ///   allocation on a hot path that runs ~200K times/sec under load.
-/// - The associated types (`Client = compio_postgres::Client`,
+/// - The associated types (`Client = compio_postgres::OwnedPooledClient`,
 ///   `LiveSchema = crate::diff::LiveSchema`) cannot be erased behind a
 ///   `dyn` without losing the concrete client type that
 ///   [`LockManager::acquire_advisory_lock`] and the audit-row helpers
@@ -1961,18 +1908,18 @@ mod tests {
     /// the omnibus `Backend` trait — or detaches the impl block from
     /// the `PostgresBackend` type — this stops compiling.
     fn assert_postgres_backend_impls_sql_executor() {
-        fn assert_impl<T: SqlExecutor<Client = compio_postgres::Client>>() {}
+        fn assert_impl<T: SqlExecutor<Client = compio_postgres::OwnedPooledClient>>() {}
         assert_impl::<PostgresBackend>();
     }
 
     /// Compile-time: [`PostgresBackend`] satisfies the carved
     /// [`LockManager`] capability super-trait. The
     /// `: SqlExecutor` super-bound on `LockManager` plus the
-    /// `Client = compio_postgres::Client` constraint here pin the
+    /// `Client = compio_postgres::OwnedPooledClient` constraint here pin the
     /// shape end-to-end — a regression in either direction fails
     /// compilation in this module.
     fn assert_postgres_backend_impls_lock_manager() {
-        fn assert_impl<T: LockManager<Client = compio_postgres::Client>>() {}
+        fn assert_impl<T: LockManager<Client = compio_postgres::OwnedPooledClient>>() {}
         assert_impl::<PostgresBackend>();
     }
 
@@ -1989,10 +1936,10 @@ mod tests {
     /// Compile-time: [`PostgresBackend`] satisfies the carved
     /// [`IndexBuilder`] capability trait. The
     /// `: SqlExecutor` super-bound on `IndexBuilder` plus the
-    /// PG-side `Client = compio_postgres::Client` constraint pin the
+    /// PG-side `Client = compio_postgres::OwnedPooledClient` constraint pin the
     /// shape so a regression on either side fails compilation here.
     fn assert_postgres_backend_impls_index_builder() {
-        fn assert_impl<T: IndexBuilder<Client = compio_postgres::Client>>() {}
+        fn assert_impl<T: IndexBuilder<Client = compio_postgres::OwnedPooledClient>>() {}
         assert_impl::<PostgresBackend>();
     }
 
@@ -2055,13 +2002,6 @@ mod tests {
     /// instantiate this against the concrete backends.
     #[allow(dead_code)]
     fn _assert_vector_index<T: VectorIndex>() {}
-
-    /// Compile-time: the [`FullTextIndex`] trait's shape is
-    /// pinned. Ships no impl — neither backend yet satisfies the
-    /// trait. A later change will instantiate this against the concrete
-    /// backends.
-    #[allow(dead_code)]
-    fn _assert_fts_index<T: FullTextIndex>() {}
 
     /// Compile-time: the [`SpatialIndex`] trait's shape is
     /// pinned. Ships no impl — neither backend yet satisfies the
@@ -2143,7 +2083,7 @@ mod tests {
     /// `SchemaIntrospect<LiveSchema = LiveSchema>` super-bound so the
     /// `Backend<LiveSchema = …>` shorthand below still resolves.
     fn assert_associated_types_pinned() {
-        fn pinned_client<T: Backend<Client = compio_postgres::Client>>() {}
+        fn pinned_client<T: Backend<Client = compio_postgres::OwnedPooledClient>>() {}
         fn pinned_live_schema<T: Backend<LiveSchema = crate::diff::LiveSchema>>() {}
         pinned_client::<PostgresBackend>();
         pinned_live_schema::<PostgresBackend>();
@@ -2159,7 +2099,7 @@ mod tests {
     }
 
     /// Compile-time: [`BackendHandle`] is `Clone + 'static`. The
-    /// per-isolate context's accessor (`IsolateDbContext::backend`)
+    /// per-isolate context's accessor (`ThreadDbContext::backend`)
     /// returns a cloned handle by value so consumers can hold it
     /// across awaits without keeping the `RefCell` borrow open; the
     /// `Clone` bound is therefore load-bearing. The `'static` bound
@@ -2276,7 +2216,7 @@ mod tests {
     #[allow(dead_code)]
     async fn assert_lock_scope_dispatches_through_try_acquire(
         backend: &PostgresBackend,
-        client: &compio_postgres::Client,
+        client: &compio_postgres::OwnedPooledClient,
     ) -> Result<bool, DbError> {
         // GlobalApp arm — exercises acquire / try_acquire / release.
         let global = LockScope::GlobalApp {

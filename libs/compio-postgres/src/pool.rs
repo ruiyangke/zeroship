@@ -1197,6 +1197,32 @@ impl Pool {
     /// hooks are inside that timeout; cancellation discards their candidate and
     /// releases its capacity slot.
     pub async fn get(&self) -> Result<PooledClient<'_>, Error> {
+        let entry = self.checkout().await?;
+        Ok(PooledClient::new(entry, self))
+    }
+
+    /// Acquire a connection whose lease owns an `Rc` of this pool.
+    ///
+    /// Same acquisition path as [`Pool::get`] - same FIFO fairness, same
+    /// `acquire_timeout`, same return-on-drop - but the borrow carries no
+    /// lifetime, so a caller can hold it inside an owned, `'static` future.
+    /// That is what [`OwnedPooledClient`] exists for: a session that drives raw
+    /// `BEGIN`/`COMMIT` and outlives the stack frame that opened it cannot hold
+    /// `PooledClient<'a>`, and `Transaction<'a>` (which borrows `&'a mut
+    /// Client`) is unavailable for the same reason.
+    ///
+    /// # Errors
+    ///
+    /// Identical to [`Pool::get`]: pool closed, acquisition timeout, or a
+    /// connection/lifecycle-hook failure.
+    pub async fn get_owned(self: &Rc<Self>) -> Result<OwnedPooledClient, Error> {
+        let entry = self.checkout().await?;
+        Ok(OwnedPooledClient::new(entry, Rc::clone(self)))
+    }
+
+    /// The shared acquisition body behind [`Pool::get`] and
+    /// [`Pool::get_owned`]: one deadline, one FIFO turn, one entry.
+    async fn checkout(&self) -> Result<PoolEntry, Error> {
         self.ensure_open()?;
         match compio::time::timeout(self.config.acquire_timeout, self.get_inner()).await {
             Ok(result) => result,
@@ -1223,7 +1249,16 @@ impl Pool {
         }
     }
 
-    async fn get_inner(&self) -> Result<PooledClient<'_>, Error> {
+    /// `get_inner` wrapped in a borrowed lease, for the tests that drive the
+    /// acquisition loop directly (no `acquire_timeout`) and still need the
+    /// entry to be returned to the pool on drop. A bare `PoolEntry` has no
+    /// `Drop` accounting, so a test holding one would leak `active`.
+    #[cfg(test)]
+    async fn get_inner_leased(&self) -> Result<PooledClient<'_>, Error> {
+        Ok(PooledClient::new(self.get_inner().await?, self))
+    }
+
+    async fn get_inner(&self) -> Result<PoolEntry, Error> {
         // A caller that arrives behind an existing waiter must join the FIFO
         // before looking at idle entries or unreserved capacity. A capacity
         // wake is advisory: the head keeps its queue slot until it is polled,
@@ -1353,7 +1388,7 @@ impl Pool {
                 // handles total/active. Disarm so the guard doesn't also
                 // decrement total.
                 permit.disarm();
-                return Ok(PooledClient::new(entry, self));
+                return Ok(entry);
             }
 
             // 2. No idle connections - create a new one if under limit.
@@ -1419,7 +1454,7 @@ impl Pool {
                 // handles total/active. Disarm so the guard doesn't also
                 // decrement total.
                 permit.disarm();
-                return Ok(PooledClient::new(entry, self));
+                return Ok(entry);
                 // H7 design note: we don't wake a waiter on successful
                 // connect. The freshly-connected client is immediately
                 // consumed by the current caller - there's no idle entry
@@ -2622,101 +2657,194 @@ impl PooledClient<'_> {
     where
         F: for<'client> AsyncFnOnce(&'client mut Client) -> Result<T, Error>,
     {
-        let command_timeout = self.pool.config.command_timeout;
-        let transport = &self.pool.transport;
         let Some(entry) = self.entry.as_mut() else {
             // `entry` is taken only by Drop, which cannot race a method call.
             // Keep the impossible state an ordinary closed-client error rather
             // than putting a panic edge on a public database operation.
             return Err(Error::closed());
         };
-        let client = &mut entry.client;
+        run_pool_command(self.pool, &mut entry.client, operation).await
+    }
+}
 
-        let Some(command_timeout) = command_timeout else {
-            return operation(client).await;
-        };
+/// The deadline + cancellation-recovery body shared by
+/// [`PooledClient::command`] and [`OwnedPooledClient::command`].
+///
+/// It lives outside both types because the two leases differ only in how they
+/// hold the pool (`&'a Pool` versus `Rc<Pool>`); duplicating the recovery
+/// state machine is how the two would drift, and the arm that decides whether a
+/// mid-`CancelRequest` session is retired or reused is the last place in this
+/// file that should exist twice.
+async fn run_pool_command<T, F>(pool: &Pool, client: &mut Client, operation: F) -> Result<T, Error>
+where
+    F: for<'client> AsyncFnOnce(&'client mut Client) -> Result<T, Error>,
+{
+    let command_timeout = pool.config.command_timeout;
+    let transport = &pool.transport;
 
-        if let Ok(result) = compio::time::timeout(command_timeout, operation(client)).await {
-            return result;
-        }
+    let Some(command_timeout) = command_timeout else {
+        return operation(client).await;
+    };
 
-        // A settled Idle status proves every transaction-capable request reached
-        // ReadyForQuery. With no active COPY or escaped/uncertain cancel lease,
-        // dropping the operation left nothing that can act on a later borrower.
-        // Sending CancelRequest in that state adds no proof and can turn a local
-        // timeout into needless session loss.
-        if !client.is_closed()
-            && client.transaction_status() == Some(TransactionStatus::Idle)
-            && !client.has_active_copy()
-            && !client.pool_cancel_lease_prevents_reuse()
-        {
-            return Err(Error::command_timeout(None));
-        }
+    if let Ok(result) = compio::time::timeout(command_timeout, operation(client)).await {
+        return result;
+    }
 
-        let cancel_token = client.cancel_token();
+    // A settled Idle status proves every transaction-capable request reached
+    // ReadyForQuery. With no active COPY or escaped/uncertain cancel lease,
+    // dropping the operation left nothing that can act on a later borrower.
+    // Sending CancelRequest in that state adds no proof and can turn a local
+    // timeout into needless session loss.
+    if !client.is_closed()
+        && client.transaction_status() == Some(TransactionStatus::Idle)
+        && !client.has_active_copy()
+        && !client.pool_cancel_lease_prevents_reuse()
+    {
+        return Err(Error::command_timeout(None));
+    }
 
-        // Recovery either restores this physical session or destroys it, and
-        // the deciding arms below only run if this future is polled to
-        // completion. A caller that drops it - a timeout of its own, a select
-        // that lost, a cancelled task - would otherwise return a session that
-        // is mid-CancelRequest to the pool, and the next borrower inherits it.
-        // The guard makes retirement the default and success the exception.
-        let recovery_guard = CommandRecoveryGuard::new(client);
-        let recovery = compio::time::timeout(COMMAND_TIMEOUT_RECOVERY_GRACE, async {
-            // Waiting for EOF on the dedicated cancel connection is the
-            // cross-connection ordering barrier: write/flush alone would let a
-            // delayed CancelRequest arrive after this backend's Sync and hit
-            // the next command instead.
-            transport.cancel_query_confirmed(&cancel_token).await?;
-            // A query future can return its ErrorResponse before the
-            // connection task receives the trailing ReadyForQuery.
-            // Sync is a FIFO proof that every response belonging to
-            // the dropped operation has been drained.
+    let cancel_token = client.cancel_token();
+
+    // Recovery either restores this physical session or destroys it, and
+    // the deciding arms below only run if this future is polled to
+    // completion. A caller that drops it - a timeout of its own, a select
+    // that lost, a cancelled task - would otherwise return a session that
+    // is mid-CancelRequest to the pool, and the next borrower inherits it.
+    // The guard makes retirement the default and success the exception.
+    let recovery_guard = CommandRecoveryGuard::new(client);
+    let recovery = compio::time::timeout(COMMAND_TIMEOUT_RECOVERY_GRACE, async {
+        // Waiting for EOF on the dedicated cancel connection is the
+        // cross-connection ordering barrier: write/flush alone would let a
+        // delayed CancelRequest arrive after this backend's Sync and hit
+        // the next command instead.
+        transport.cancel_query_confirmed(&cancel_token).await?;
+        // A query future can return its ErrorResponse before the
+        // connection task receives the trailing ReadyForQuery.
+        // Sync is a FIFO proof that every response belonging to
+        // the dropped operation has been drained.
+        client.check_connection().await?;
+
+        if client.transaction_status() != Some(TransactionStatus::Idle) {
+            // Cancellation inside a raw BEGIN leaves the backend in `E`,
+            // where every follow-up statement fails with 25P02. Roll back
+            // inside the same bounded recovery window so success means the
+            // held client is immediately usable, not merely frame-aligned.
+            client.__private_api_rollback(None);
             client.check_connection().await?;
-
             if client.transaction_status() != Some(TransactionStatus::Idle) {
-                // Cancellation inside a raw BEGIN leaves the backend in `E`,
-                // where every follow-up statement fails with 25P02. Roll back
-                // inside the same bounded recovery window so success means the
-                // held client is immediately usable, not merely frame-aligned.
-                client.__private_api_rollback(None);
-                client.check_connection().await?;
-                if client.transaction_status() != Some(TransactionStatus::Idle) {
-                    return Err(Error::io(io::Error::other(
-                        "command-timeout recovery did not restore an idle transaction state",
-                    )));
-                }
-                client.clear_dirty();
+                return Err(Error::io(io::Error::other(
+                    "command-timeout recovery did not restore an idle transaction state",
+                )));
             }
-
-            Ok(())
-        })
-        .await;
-
-        match recovery {
-            Ok(Ok(())) => {
-                // The only arm that keeps the session: recovery ran to
-                // completion and left the backend idle and frame-aligned.
-                recovery_guard.disarm();
-                Err(Error::command_timeout(None))
-            }
-            Ok(Err(error)) => Err(Error::command_timeout(Some(Box::new(error)))),
-            Err(_) => {
-                Err(Error::command_timeout(Some(Box::new(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!(
-                        // `{:?}`, not `{}s` with `as_secs()`. It renders `5s`
-                        // identically for the current value, and keeps doing
-                        // so if the grace ever becomes sub-second - where
-                        // `as_secs()` would silently print `0s`, as the
-                        // acquire timeout did.
-                        "CancelRequest recovery did not reach ReadyForQuery within {:?}; \
-                         the pooled session was discarded",
-                        COMMAND_TIMEOUT_RECOVERY_GRACE
-                    ),
-                )))))
-            }
+            client.clear_dirty();
         }
+
+        Ok(())
+    })
+    .await;
+
+    match recovery {
+        Ok(Ok(())) => {
+            // The only arm that keeps the session: recovery ran to
+            // completion and left the backend idle and frame-aligned.
+            recovery_guard.disarm();
+            Err(Error::command_timeout(None))
+        }
+        Ok(Err(error)) => Err(Error::command_timeout(Some(Box::new(error)))),
+        Err(_) => {
+            Err(Error::command_timeout(Some(Box::new(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    // `{:?}`, not `{}s` with `as_secs()`. It renders `5s`
+                    // identically for the current value, and keeps doing
+                    // so if the grace ever becomes sub-second - where
+                    // `as_secs()` would silently print `0s`, as the
+                    // acquire timeout did.
+                    "CancelRequest recovery did not reach ReadyForQuery within {:?}; \
+                         the pooled session was discarded",
+                    COMMAND_TIMEOUT_RECOVERY_GRACE
+                ),
+            )))))
+        }
+    }
+}
+
+/// A checked-out connection that owns its pool handle and returns on drop.
+///
+/// The lifetime-free peer of [`PooledClient`]. Everything else is the same:
+/// same acquisition path, same FIFO fairness, same `acquire_timeout`, same
+/// `return_client` on drop, same lease-scoped [`CancelToken`] revocation. Get
+/// one from [`Pool::get_owned`].
+///
+/// Reach for this when the lease must outlive the frame that took it - a
+/// session object that drives raw `BEGIN`/`COMMIT` across `await` points and is
+/// stored somewhere `'static`. `PooledClient<'a>` and `Transaction<'a>` both
+/// borrow, so neither can be held by such a value.
+pub struct OwnedPooledClient {
+    entry: Option<PoolEntry>,
+    pool: Rc<Pool>,
+}
+
+impl OwnedPooledClient {
+    fn new(mut entry: PoolEntry, pool: Rc<Pool>) -> Self {
+        entry.client.activate_pool_cancel_lease();
+        Self {
+            entry: Some(entry),
+            pool,
+        }
+    }
+
+    /// Run one exclusive logical command under the pool's command deadline.
+    ///
+    /// Identical in every respect to [`PooledClient::command`] - both call the
+    /// same body - including that a successful recovery returns an [`Error`]
+    /// for which [`Error::is_command_timeout`] is true.
+    ///
+    /// # Errors
+    ///
+    /// See [`PooledClient::command`].
+    pub async fn command<T, F>(&mut self, operation: F) -> Result<T, Error>
+    where
+        F: for<'client> AsyncFnOnce(&'client mut Client) -> Result<T, Error>,
+    {
+        let pool = Rc::clone(&self.pool);
+        let Some(entry) = self.entry.as_mut() else {
+            return Err(Error::closed());
+        };
+        run_pool_command(&pool, &mut entry.client, operation).await
+    }
+
+    /// The pool this lease came from.
+    #[must_use]
+    pub fn pool(&self) -> &Rc<Pool> {
+        &self.pool
+    }
+}
+
+impl Deref for OwnedPooledClient {
+    type Target = Client;
+    fn deref(&self) -> &Self::Target {
+        &self.entry.as_ref().unwrap().client
+    }
+}
+
+impl DerefMut for OwnedPooledClient {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.entry.as_mut().unwrap().client
+    }
+}
+
+impl Drop for OwnedPooledClient {
+    fn drop(&mut self) {
+        if let Some(entry) = self.entry.take() {
+            self.pool.return_client(entry);
+        }
+    }
+}
+
+impl std::fmt::Debug for OwnedPooledClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnedPooledClient").finish()
     }
 }
 
@@ -3070,7 +3198,7 @@ mod tests {
             2,
         );
 
-        let mut acquire = Box::pin(pool.get_inner());
+        let mut acquire = Box::pin(pool.get_inner_leased());
         let client = match poll_once(acquire.as_mut()) {
             Poll::Ready(Ok(client)) => client,
             Poll::Ready(Err(error)) => panic!("healthy fallback failed: {error}"),
@@ -3258,7 +3386,7 @@ mod tests {
         let url = format!("postgres://postgres@{address}/fake?sslmode=disable");
         pool.transport = Transport::resolve(url.parse().unwrap()).unwrap();
 
-        let outcome = pool.get_inner().await;
+        let outcome = pool.get_inner_leased().await;
         assert!(
             outcome.is_err(),
             "hook-closed newly connected entry was published"
@@ -3383,7 +3511,7 @@ mod tests {
             pool: &pool,
         };
 
-        let mut acquire = Box::pin(pool.get_inner());
+        let mut acquire = Box::pin(pool.get_inner_leased());
         assert!(poll_once(acquire.as_mut()).is_pending());
         assert_eq!(pool.pending_count(), 1);
 
@@ -3428,7 +3556,7 @@ mod tests {
             pool: &pool,
         };
 
-        let mut acquire = Box::pin(pool.get_inner());
+        let mut acquire = Box::pin(pool.get_inner_leased());
         assert!(poll_once(acquire.as_mut()).is_pending());
         drop(held);
         assert_eq!(pool.pending_count(), 0, "the stale entry was handed off");
@@ -3505,7 +3633,7 @@ mod tests {
             pool: &pool,
         };
 
-        let mut acquire = Box::pin(pool.get_inner());
+        let mut acquire = Box::pin(pool.get_inner_leased());
         assert!(poll_once(acquire.as_mut()).is_pending());
         drop(held);
 
@@ -4640,7 +4768,7 @@ mod tests {
         );
 
         let borrowed = pool
-            .get_inner()
+            .get_inner_leased()
             .await
             .expect("concurrent checkout did not consume the first refill");
         assert_eq!(pool.idle_count(), 0);
@@ -4903,8 +5031,8 @@ mod tests {
         let second_count = Arc::new(AtomicUsize::new(0));
         let first_waker = counting_waker(&first_count);
         let second_waker = counting_waker(&second_count);
-        let mut first = Box::pin(pool.get_inner());
-        let mut second = Box::pin(pool.get_inner());
+        let mut first = Box::pin(pool.get_inner_leased());
+        let mut second = Box::pin(pool.get_inner_leased());
 
         assert!(poll_with_waker(first.as_mut(), &first_waker).is_pending());
         assert!(poll_with_waker(second.as_mut(), &second_waker).is_pending());
@@ -5087,5 +5215,92 @@ mod tests {
             "the replaced waker was destroyed while the pool held its slot \
              borrowed (None means the destructor never ran at all)"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // `Pool::get_owned` / `OwnedPooledClient`
+    //
+    // What these rule on: the owned lease is accounted exactly like the
+    // borrowed one (active while held, back to idle on drop, pool handle
+    // released) and it is bounded by `max_size` - a second checkout parks
+    // in the same FIFO rather than opening a connection of its own. That
+    // second property is the whole point of the type on the plugin-db
+    // side, where a transaction used to call `connect()` directly and had
+    // no ceiling at all.
+    //
+    // What they do NOT rule on: anything about `command()`'s deadline or
+    // its CancelRequest recovery. Both leases call the same
+    // `run_pool_command` body and the borrowed lease's own tests cover it;
+    // nothing here would notice if that body were wrong.
+    // -----------------------------------------------------------------
+
+    #[compio::test]
+    async fn an_owned_lease_is_active_while_held_and_idle_again_on_drop() {
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            validation_bypass: Duration::from_secs(60),
+            ..PoolConfig::default()
+        };
+        let (client, _receiver) = fake_client(77);
+        let entry = PoolEntry::new(client, config.max_lifetime);
+        let pool = Rc::new(test_pool(config, vec![entry], 0, 1));
+
+        let lease = pool.get_owned().await.expect("owned checkout");
+        assert_eq!(lease.process_id(), 77);
+        assert_eq!(pool.active_count(), 1);
+        assert_eq!(pool.idle_count(), 0);
+        assert_eq!(
+            Rc::strong_count(&pool),
+            2,
+            "the owned lease must hold a pool handle of its own"
+        );
+
+        drop(lease);
+
+        assert_eq!(pool.active_count(), 0, "owned lease did not return");
+        assert_eq!(pool.idle_count(), 1, "owned lease did not re-enter idle");
+        assert_eq!(
+            Rc::strong_count(&pool),
+            1,
+            "the owned lease leaked its pool handle"
+        );
+    }
+
+    #[compio::test]
+    async fn a_second_owned_checkout_is_bounded_by_max_size() {
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            validation_bypass: Duration::from_secs(60),
+            ..PoolConfig::default()
+        };
+        let (client, _receiver) = fake_client(91);
+        let entry = PoolEntry::new(client, config.max_lifetime);
+        let pool = Rc::new(test_pool(config, vec![entry], 0, 1));
+
+        let first = pool.get_owned().await.expect("first owned checkout");
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let waker = counting_waker(&wake_count);
+        let mut second = Box::pin(pool.get_owned());
+        assert!(
+            poll_with_waker(second.as_mut(), &waker).is_pending(),
+            "a second owned checkout must queue behind max_size, not connect"
+        );
+        assert_eq!(
+            pool.metrics.connections_created.get(),
+            0,
+            "the queued checkout opened a connection instead of waiting"
+        );
+
+        drop(first);
+
+        let handed = second.await.expect("hand-off to the queued checkout");
+        assert_eq!(
+            handed.process_id(),
+            91,
+            "the queued checkout did not receive the returned session"
+        );
+        assert_eq!(pool.active_count(), 1);
     }
 }

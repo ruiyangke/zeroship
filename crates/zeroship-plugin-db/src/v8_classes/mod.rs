@@ -21,7 +21,7 @@
 //!   GC-auto-rollback) is gone; transaction orchestration lives entirely
 //!   in [`crate::transaction`]. CRUD on the view's
 //!   collections routes through the open transaction connection
-//!   (`IsolateDbContext::tx_conn`) automatically, since the orchestrator
+//!   (`ThreadDbContext::tx_conn`) automatically, since the orchestrator
 //!   sets that slot for the transaction's duration.
 //! - [`subscription`] — `env.db.<collection>.openSubscription()` (the
 //!   duplicate `env.db.openSubscription(name)` entry was removed)

@@ -158,7 +158,7 @@ const TS = {
   ].sort(),
   AggFunc: ["count", "sum", "avg", "min", "max", "stringAgg", "arrayAgg", "boolAnd", "boolOr"].sort(),
   IndexSortOrder: ["asc", "desc"].sort(),
-  IndexMethod: ["btree", "brin", "gin", "gist", "ivfflat", "hnsw", "fts5"].sort(),
+  IndexMethod: ["btree", "brin", "gin", "gist", "ivfflat", "hnsw"].sort(),
   PartitionSpec: ["hash", "list", "range"].sort(),
   PartitionBounds: ["default", "hash", "list", "range"].sort(),
   PartitionBoundValue: ["int", "maxValue", "minValue", "string"].sort(),
@@ -435,7 +435,7 @@ test("partition type tags match the schema", () => {
 // so a future added/renamed flag FAILS here, forcing `ir.ts` into lockstep.
 const TS_FLAGS_OVERRIDE = [
   "transactional", "destructive", "online", "requires_approval", "repeatable",
-  "engine_goodie_ddl", "timeout_ms", "lock_timeout_ms", "phase",
+  "timeout_ms", "lock_timeout_ms", "phase",
 ].sort();
 
 test("IrFlagsOverride field set matches the schema (#180)", () => {

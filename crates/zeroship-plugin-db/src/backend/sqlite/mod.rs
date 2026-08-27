@@ -48,14 +48,12 @@ use crate::query::IndexSpec;
 pub(crate) mod cdc;
 pub(crate) mod dialect;
 pub(crate) mod error;
-// FTS5 vtable lifecycle + MATCH query composition. The
-// `impl FullTextIndex for SqliteBackend` block at the bottom of this
-// file orchestrates the five idempotent DDL statements + the search
-// path; the SQL primitives (`build_create_fts_table_sql`,
-// `build_insert_trigger_sql`, `build_fts_search_sql`, etc.) live in
-// `fts.rs` so the documented shapes stay unit-testable in isolation.
-pub(crate) mod fts;
 pub(crate) mod lock;
+// SC-2's reservation / cancellation / terminal-classification protocol.
+// Public because the cancellation surface (`SqliteCancelHandle`,
+// `TerminalOutcome`) is the contract a deadline or a dropped caller-side
+// future acts through; the actor in `session` is its only driver.
+pub mod reservation;
 // `pub` under `test-helpers` so the e2e encrypted-column round-trip
 // test in `tests/sqlite_integration.rs` can name `session::TypedCell`
 // for typed BLOB extraction.
@@ -313,7 +311,21 @@ impl SqliteBackend {
                     "SqliteBackend::open: failed to create SQLite temp dir: {e}"
                 ))
             })?;
-            (memory_db_dir.path().to_path_buf(), PathBuf::from(":memory:"), Some(memory_db_dir))
+            // A `:memory:` control session becomes a FILE inside the temp dir
+            // that already exists for this case, not a true in-memory database.
+            //
+            // SC-2's two connections force this: `Connection::open(":memory:")`
+            // twice yields two PRIVATE, unrelated databases, so `op_conn` and
+            // `tx_conn` would not share a single byte. The alternatives are
+            // worse - a shared-cache `file:...?mode=memory&cache=shared` URI
+            // cannot run WAL and changes locking to table granularity - and the
+            // file is just as ephemeral: the `TempDir` deletes it on drop.
+            let session_path = memory_db_dir.path().join("zs-control.sqlite");
+            (
+                memory_db_dir.path().to_path_buf(),
+                session_path,
+                Some(memory_db_dir),
+            )
         } else if path.is_dir() {
             let session_path = path.join("zs-control.sqlite");
             (path, session_path, None)
@@ -510,18 +522,64 @@ struct OpenedBackend {
 // side-by-side as the SQLite side grows.
 // ---------------------------------------------------------------------------
 
+impl SqliteBackend {
+    /// A session handle bound to no reservation: every command it issues mints
+    /// its own autocommit reservation and runs on `op_conn`.
+    ///
+    /// This is what a caller that just wants to *read* should hold.
+    /// [`SqlExecutor::acquire_dedicated_client`] is the transaction lane and is
+    /// exclusive - taking it for a read would serialise that read behind any
+    /// open creator transaction, which is exactly the coupling SC-2 Decision 1
+    /// removes.
+    #[cfg(not(feature = "test-helpers"))]
+    pub(crate) fn autocommit_client(&self) -> SqliteSessionHandle {
+        SqliteSessionHandle::new(self.session.clone())
+    }
+
+    /// `pub` under `test-helpers` so the integration target can hold a probe
+    /// on `op_conn` while a transaction owns `tx_conn` - which is the state
+    /// Decision 1 exists to make representable.
+    #[cfg(feature = "test-helpers")]
+    pub fn autocommit_client(&self) -> SqliteSessionHandle {
+        SqliteSessionHandle::new(self.session.clone())
+    }
+
+    /// **Test-only**: a transaction-lane handle the actor never bound. See
+    /// [`session::SqliteSession::unregistered_transaction_handle_for_tests`].
+    #[cfg(feature = "test-helpers")]
+    pub fn unregistered_transaction_client_for_tests(&self) -> SqliteSessionHandle {
+        self.session.unregistered_transaction_handle_for_tests()
+    }
+
+    /// **Test-only**: run a transaction handle's terminal statement and return
+    /// the classified outcome. Production reaches this through
+    /// `transaction::exec_terminal_on_tx`.
+    #[cfg(feature = "test-helpers")]
+    pub async fn settle_transaction_for_tests(
+        &self,
+        client: &SqliteSessionHandle,
+        intent: session::TerminalIntent,
+    ) -> Result<crate::backend::sqlite::reservation::TerminalOutcome, DbError> {
+        client.settle(intent).await
+    }
+}
+
 impl SqlExecutor for SqliteBackend {
     type Client = SqliteSessionHandle;
 
     async fn acquire_dedicated_client(&self) -> Result<Self::Client, DbError> {
-        // SQLite has no per-client session — the actor IS the only
-        // writer — so every "dedicated client" handle multiplexes
-        // through the same mpsc queue. Long-lived transactions
-        // serialise by construction because every command (BEGIN /
-        // INSERT / COMMIT) flows through the same single-threaded
-        // worker. This is the documented divergence from PG, where a
-        // dedicated client gets its own libpq connection.
-        Ok(SqliteSessionHandle::from(self.session.clone()))
+        // SC-2 Decision 1: a dedicated client is a reservation on `tx_conn`,
+        // the connection kept for at most one explicit creator transaction.
+        // Everything else - `pool_exec`, an unbound handle's `exec` - runs on
+        // `op_conn` instead, which is what retires the divergence formerly
+        // recorded at `tx_route.rs:119-124`: an app's autocommit work no
+        // longer executes inside that app's open transaction.
+        //
+        // The lease is RAII. Dropping every clone of the returned handle frees
+        // the lane and rolls back anything the transaction left open, so a
+        // caller that never settles cannot strand the next one.
+        let lease = self.session.reserve_transaction().await?;
+        Ok(SqliteSessionHandle::with_lease(self.session.clone(), lease))
     }
 
     async fn pool_exec(&self, sql: &str, params: &[&str]) -> Result<u64, DbError> {
@@ -868,7 +926,7 @@ impl SchemaIntrospect for SqliteBackend {
                         // (`CURRENT_TIMESTAMP`, `(unixepoch())`, etc.).
                         default_volatility: None,
                         // New fields default; `vector_dims` /
-                        // `is_fts_source` / `is_geopoint` are populated
+                        // `is_geopoint` are populated
                         // from `sqlite_master.sql` introspection regexes.
                         encryption,
                         mask,
@@ -1611,11 +1669,10 @@ impl crate::backend::SessionMinter for SqliteBackend {
 //     `build_find` machinery, and decodes the result rows through the
 //     session actor's `query_typed` path.
 //
-// **Trigger-vs-preupdate-hook coexistence** (Q-P4-F): same ordering
-// guarantees as FTS5 — preupdate fires BEFORE the row mutation, AFTER
-// triggers fire after, both run inside the same transaction. The
-// broker sees the base-row event with the vec0 index already updated
-// at COMMIT time. See `fts.rs` rustdoc for the canonical walkthrough.
+// **Trigger-vs-preupdate-hook coexistence** (Q-P4-F): preupdate fires
+// BEFORE the row mutation, AFTER triggers fire after, both run inside
+// the same transaction. The broker sees the base-row event with the
+// vec0 index already updated at COMMIT time.
 
 impl crate::backend::VectorIndex for SqliteBackend {
     #[cfg(any(test, feature = "test-helpers"))]
@@ -1769,157 +1826,6 @@ impl crate::backend::VectorIndex for SqliteBackend {
             &query_hex,
             k,
             &where_expr,
-            schema_hint.as_ref(),
-        );
-        let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
-        let typed = self.session.query_typed(&sql, &param_refs).await?;
-        Ok(crate::v8_bridge::typed_rows_to_json_value(&typed))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// `FullTextIndex` impl (FTS5 external-content vtables)
-// ---------------------------------------------------------------------------
-//
-// FTS5 ships in rusqlite's `bundled` feature by default (the SQLite
-// amalgamation we link in already carries `SQLITE_ENABLE_FTS5`). No
-// Cargo flag toggle, no runtime extension load.
-//
-// Two methods:
-//   * `ensure_fts_index` — runs five idempotent statements:
-//       1. CREATE VIRTUAL TABLE IF NOT EXISTS `<coll>__fts` USING fts5(...)
-//       2. Initial population INSERT INTO __fts SELECT FROM `<coll>`
-//          (guarded by a vtable-presence probe so we only seed once)
-//       3. AFTER INSERT trigger `<coll>__fts_ai`
-//       4. AFTER DELETE trigger `<coll>__fts_ad`
-//       5. AFTER UPDATE OF cols trigger `<coll>__fts_au`
-//     `language` is logged via `tracing::debug!` but otherwise ignored —
-//     FTS5's default tokeniser is language-agnostic Unicode.
-//   * `fts_search` — composes the JOIN + MATCH + filter + ORDER BY bm25
-//     SQL via `fts::build_fts_search_sql`, binds (query, limit, filter
-//     params) positionally, and re-emits each row as `serde_json::Value`
-//     with a synthetic `_rank: f64` field.
-//
-// **Trigger-vs-preupdate-hook coexistence** (Q-P4-F): preupdate fires
-// BEFORE the row mutation; AFTER triggers fire after. Both run within
-// the same transaction — the broker sees the base-row event with the
-// FTS index already updated at COMMIT time. See `fts.rs` module
-// rustdoc for the canonical ordering walkthrough.
-
-impl crate::backend::FullTextIndex for SqliteBackend {
-    #[cfg(any(test, feature = "test-helpers"))]
-    async fn ensure_fts_index(
-        &self,
-        app_id: &str,
-        collection: &str,
-        columns: &[String],
-        language: &str,
-    ) -> Result<(), DbError> {
-        if columns.is_empty() {
-            return Err(DbError::Configuration {
-                code: "fts_no_columns",
-                message: "db: ensure_fts_index requires at least one source column"
-                    .to_string(),
-                hint: Some(
-                    "mark at least one t.string() field with `.fts()` in the schema"
-                        .to_string(),
-                ),
-            });
-        }
-        // SQLite FTS5's default tokeniser is language-agnostic Unicode;
-        // `language` is honoured on the PG arm but ignored here. The
-        // SDK already validates the language token; log it so an
-        // operator wondering why an `es` tokeniser produces the same
-        // hits as `en` sees the cause in the structured log.
-        tracing::debug!(
-            app_id = %app_id,
-            collection = %collection,
-            language = %language,
-            "SqliteBackend::ensure_fts_index: `language` is ignored \
-             — FTS5 default tokeniser is language-agnostic Unicode"
-        );
-
-        // Probe whether the FTS vtable already exists. If it does, we
-        // skip the initial-population INSERT (which is NOT idempotent
-        // — running it twice doubles the index payload). The CREATE
-        // VIRTUAL TABLE / CREATE TRIGGER statements ARE idempotent via
-        // `IF NOT EXISTS`, so we re-run them unconditionally — cheap,
-        // and it picks up any column-list drift across `registerModel`
-        // calls (though changing the column list isn't supported on
-        // FTS5 in-place; that's a DROP + RECREATE path the diff engine
-        // handles in a future PR).
-        let probe_sql = format!(
-            "SELECT 1 FROM {qschema}.sqlite_master \
-             WHERE type = 'table' AND name = '{coll}__fts'",
-            qschema = SqliteDialect.quote_ident(app_id),
-            // The probe's `name = '<lit>'` is a single-quoted SQL
-            // literal — escape any embedded `'` by doubling. The
-            // collection name was validated at the SDK boundary.
-            coll = collection.replace('\'', "''"),
-        );
-        let existing = self.session.query(&probe_sql, &[]).await?;
-        let vtable_exists = !existing.is_empty();
-
-        // 1. CREATE VIRTUAL TABLE IF NOT EXISTS — emits the external-
-        //    content FTS5 vtable.
-        let create_sql =
-            fts::build_create_fts_table_sql(app_id, collection, columns);
-        self.session.exec(&create_sql, &[]).await?;
-
-        // 2. Initial population — only if the vtable did NOT exist
-        //    before this call. Skipping the re-population is the only
-        //    reason we needed the sqlite_master probe; the rest of
-        //    the DDL is idempotent.
-        if !vtable_exists {
-            let populate_sql =
-                fts::build_initial_population_sql(app_id, collection, columns);
-            self.session.exec(&populate_sql, &[]).await?;
-        }
-
-        // 3-5. AFTER triggers (idempotent via `IF NOT EXISTS`).
-        let insert_trg =
-            fts::build_insert_trigger_sql(app_id, collection, columns);
-        self.session.exec(&insert_trg, &[]).await?;
-        let delete_trg =
-            fts::build_delete_trigger_sql(app_id, collection, columns);
-        self.session.exec(&delete_trg, &[]).await?;
-        let update_trg =
-            fts::build_update_trigger_sql(app_id, collection, columns);
-        self.session.exec(&update_trg, &[]).await?;
-
-        Ok(())
-    }
-
-    async fn fts_search(
-        &self,
-        app_id: &str,
-        collection: &str,
-        query: &str,
-        filter: &serde_json::Value,
-        limit: Option<usize>,
-    ) -> Result<Vec<serde_json::Value>, DbError> {
-        // Param layout: `[$1=query, $2+...=filter_params, ?=limit?]`.
-        // SQLite/rusqlite binds parameters in placeholder appearance
-        // order, so the trailing LIMIT value must be appended AFTER the
-        // filter params rather than pre-seeded ahead of them.
-        let mut params: Vec<String> = Vec::with_capacity(4);
-        // DB-16: bind the query as LITERAL terms — FTS5 would otherwise parse it
-        // as MATCH query syntax (diverging from PG's plainto_tsquery and
-        // raising a per-request syntax error on malformed input).
-        params.push(fts::normalize_fts_query_literal(query));
-
-        let filter_clause = fts::build_fts_filter_clause(filter, &mut params)
-            .map_err(DbError::from)?;
-        let has_limit = limit.is_some();
-        if let Some(l) = limit {
-            params.push(l.to_string());
-        }
-        let schema_hint = crate::context::with(|c| c.schema_for(app_id, collection));
-        let sql = fts::build_fts_search_sql(
-            app_id,
-            collection,
-            &filter_clause,
-            has_limit,
             schema_hint.as_ref(),
         );
         let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
@@ -2983,14 +2889,6 @@ mod tests {
         assert_impl::<SqliteBackend>();
     }
 
-    /// `FullTextIndex` capability - pin the SQLite-arm impl
-    /// wire so the FTS5 vtable + AFTER-trigger path's trait composition
-    /// regresses at compile time if the impl block is detached.
-    fn assert_sqlite_backend_impls_full_text_index() {
-        fn assert_impl<T: crate::backend::FullTextIndex>() {}
-        assert_impl::<SqliteBackend>();
-    }
-
     /// `SpatialIndex` capability - pin the SQLite-arm impl
     /// wire so the haversine flat-scan path's trait composition
     /// regresses at compile time if the impl block is detached.
@@ -3249,7 +3147,6 @@ mod tests {
         #[cfg(feature = "test-helpers")]
         let _ = assert_sqlite_backend_impls_session_minter as fn();
         let _ = assert_sqlite_backend_impls_vector_index as fn();
-        let _ = assert_sqlite_backend_impls_full_text_index as fn();
         let _ = assert_sqlite_backend_impls_spatial_index as fn();
         let _ = assert_sqlite_change_stream_impls_change_stream as fn();
         let _ = assert_sqlite_backend_is_static as fn();
