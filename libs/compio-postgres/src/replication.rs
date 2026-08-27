@@ -604,7 +604,7 @@ where
                     // instead, so a caller cannot reuse a connection whose
                     // response was abandoned part-way.
                     self.in_flight.poison();
-                    return Err(Error::unexpected_message());
+                    return Err(failure.unwrap_or_else(Error::unexpected_message));
                 }
             }
         }
