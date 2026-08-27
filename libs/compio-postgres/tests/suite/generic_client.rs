@@ -1,9 +1,7 @@
 //! Rollback-sensitive coverage for every method on the public `GenericClient` trait.
 
 use compio_postgres::types::{ToSql, Type};
-use compio_postgres::{
-    Client, Error, GenericClient, Row, SimpleQueryMessage, Transaction,
-};
+use compio_postgres::{Client, Error, GenericClient, Row, SimpleQueryMessage, Transaction};
 use futures_util::TryStreamExt;
 use std::time::Duration;
 
@@ -38,7 +36,11 @@ fn expect_ok<T>(result: Result<T, Error>, context: &str) -> T {
 }
 
 fn assert_one_row(rows: &[Row], marker: i32, method: &str) {
-    assert_eq!(rows.len(), 1, "GenericClient::{method} returned the wrong row count");
+    assert_eq!(
+        rows.len(),
+        1,
+        "GenericClient::{method} returned the wrong row count"
+    );
     assert_eq!(
         rows[0].get::<_, i32>(0),
         marker,
@@ -69,9 +71,8 @@ where
     C: GenericClient + Sync,
 {
     let insert = |marker| format!("INSERT INTO {table} (marker) VALUES (${marker})");
-    let returning = |marker| {
-        format!("INSERT INTO {table} (marker) VALUES (${marker}) RETURNING marker")
-    };
+    let returning =
+        |marker| format!("INSERT INTO {table} (marker) VALUES (${marker}) RETURNING marker");
     let mut inserted = Vec::with_capacity(16);
 
     let marker = offset + 1;
@@ -179,12 +180,8 @@ where
     let marker = offset + 11;
     let sql = returning(1);
     let stream = expect_ok(
-        <C as GenericClient>::query_typed_raw(
-            client,
-            &sql,
-            std::iter::once((&marker, Type::INT4)),
-        )
-        .await,
+        <C as GenericClient>::query_typed_raw(client, &sql, std::iter::once((&marker, Type::INT4)))
+            .await,
         "GenericClient::query_typed_raw",
     );
     collect_raw(stream, marker, "query_typed_raw").await;
@@ -304,7 +301,10 @@ async fn shared_methods_for_client_and_transaction_remain_inside_the_transaction
         expected.sort_unstable();
         assert_eq!(stored_markers(transaction.client(), &table).await, expected);
 
-        expect_ok(transaction.rollback().await, "roll back GenericClient operations");
+        expect_ok(
+            transaction.rollback().await,
+            "roll back GenericClient operations",
+        );
         assert!(
             stored_markers(&client, &table).await.is_empty(),
             "a GenericClient method escaped the transaction rollback"
@@ -347,7 +347,10 @@ async fn transaction_method_preserves_top_level_and_nested_rollback_scopes() {
             ),
             1
         );
-        expect_ok(transaction.rollback().await, "roll back top-level generic transaction");
+        expect_ok(
+            transaction.rollback().await,
+            "roll back top-level generic transaction",
+        );
         assert!(stored_markers(&client, &table).await.is_empty());
 
         let mut outer = expect_ok(client.transaction().await, "start outer transaction");

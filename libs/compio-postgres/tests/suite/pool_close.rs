@@ -65,8 +65,16 @@ fn poll_with_waker<F: Future>(future: Pin<&mut F>, waker: &Waker) -> Poll<F::Out
 fn assert_drained(pool: &Pool) {
     assert_eq!(pool.active_count(), 0, "closed pool retained a borrower");
     assert_eq!(pool.idle_count(), 0, "closed pool retained an idle entry");
-    assert_eq!(pool.total_count(), 0, "closed pool retained a capacity slot");
-    assert_eq!(pool.pending_count(), 0, "closed pool retained a FIFO waiter");
+    assert_eq!(
+        pool.total_count(),
+        0,
+        "closed pool retained a capacity slot"
+    );
+    assert_eq!(
+        pool.pending_count(),
+        0,
+        "closed pool retained a FIFO waiter"
+    );
 }
 
 #[compio::test]
@@ -86,7 +94,11 @@ async fn acquire_after_close_fails_immediately_with_pool_closed_error() {
         Poll::Ready(Ok(_)) => panic!("closed pool handed out a connection"),
         Poll::Pending => panic!("acquire after close parked instead of failing immediately"),
     }
-    assert_eq!(pool.metrics.timeouts.get(), 0, "close was reported as a timeout");
+    assert_eq!(
+        pool.metrics.timeouts.get(),
+        0,
+        "close was reported as a timeout"
+    );
 }
 
 #[compio::test]
@@ -115,8 +127,14 @@ async fn close_wakes_every_parked_fifo_waiter_with_pool_closed_error() {
 
     assert!(pool.is_closed());
     assert_eq!(pool.pending_count(), 0, "close left FIFO waiters queued");
-    assert!(first_wakes.load(Ordering::Relaxed) > 0, "first waiter was not woken");
-    assert!(second_wakes.load(Ordering::Relaxed) > 0, "second waiter was not woken");
+    assert!(
+        first_wakes.load(Ordering::Relaxed) > 0,
+        "first waiter was not woken"
+    );
+    assert!(
+        second_wakes.load(Ordering::Relaxed) > 0,
+        "second waiter was not woken"
+    );
 
     for (name, mut acquire, waker) in [
         ("first", first, first_waker),
@@ -128,13 +146,20 @@ async fn close_wakes_every_parked_fifo_waiter_with_pool_closed_error() {
             Poll::Pending => panic!("{name} waiter stayed parked after close"),
         }
     }
-    assert_eq!(pool.metrics.timeouts.get(), 0, "waiters were reported as timeouts");
+    assert_eq!(
+        pool.metrics.timeouts.get(),
+        0,
+        "waiters were reported as timeouts"
+    );
     assert_eq!(pool.active_count(), 1);
     assert_eq!(pool.idle_count(), 0);
     assert_eq!(pool.total_count(), 1);
 
     drop(held);
-    assert!(close_wakes.load(Ordering::Relaxed) > 0, "last return did not wake close");
+    assert!(
+        close_wakes.load(Ordering::Relaxed) > 0,
+        "last return did not wake close"
+    );
     assert!(poll_with_waker(close.as_mut(), &close_waker).is_ready());
     assert_drained(&pool);
 }
@@ -157,7 +182,10 @@ async fn close_waits_for_a_borrower_and_finishes_when_it_is_dropped() {
     assert_eq!(pool.total_count(), 1);
 
     drop(held);
-    assert!(wakes.load(Ordering::Relaxed) > 0, "borrower return did not wake close");
+    assert!(
+        wakes.load(Ordering::Relaxed) > 0,
+        "borrower return did not wake close"
+    );
     assert!(poll_with_waker(close.as_mut(), &waker).is_ready());
     assert_drained(&pool);
 }
@@ -224,10 +252,18 @@ async fn close_discards_an_entry_already_assigned_to_a_waiter() {
     assert_eq!(waiter_wakes.load(Ordering::Relaxed), 0);
 
     drop(held);
-    assert_eq!(pool.pending_count(), 0, "returned entry was not assigned directly");
+    assert_eq!(
+        pool.pending_count(),
+        0,
+        "returned entry was not assigned directly"
+    );
     assert_eq!(pool.idle_count(), 0, "assigned entry leaked into idle");
     assert_eq!(pool.active_count(), 0);
-    assert_eq!(pool.total_count(), 1, "assigned entry lost its accounting slot");
+    assert_eq!(
+        pool.total_count(),
+        1,
+        "assigned entry lost its accounting slot"
+    );
     assert!(waiter_wakes.load(Ordering::Relaxed) > 0);
 
     pool.close().await;
@@ -298,7 +334,11 @@ async fn acquisition_in_a_hook_cannot_commit_after_close() {
     assert_eq!(wakes.load(Ordering::Relaxed), 0);
     assert_eq!(pool.idle_count(), 0);
     assert_eq!(pool.active_count(), 0);
-    assert_eq!(pool.total_count(), 1, "hook candidate lost its capacity slot");
+    assert_eq!(
+        pool.total_count(),
+        1,
+        "hook candidate lost its capacity slot"
+    );
 
     pool.close().await;
     assert!(pool.is_closed());
@@ -308,8 +348,13 @@ async fn acquisition_in_a_hook_cannot_commit_after_close() {
         "close waited for or stole a non-borrowed hook candidate"
     );
 
-    release_tx.send(()).expect("before_acquire gate was dropped");
-    assert!(wakes.load(Ordering::Relaxed) > 0, "hook release did not wake checkout");
+    release_tx
+        .send(())
+        .expect("before_acquire gate was dropped");
+    assert!(
+        wakes.load(Ordering::Relaxed) > 0,
+        "hook release did not wake checkout"
+    );
     match poll_with_waker(acquire.as_mut(), &waker) {
         Poll::Ready(Err(error)) => assert_pool_closed(&error),
         Poll::Ready(Ok(_)) => panic!("hook candidate became active after close"),
@@ -389,7 +434,10 @@ async fn cancelling_close_leaves_the_pool_closed_and_a_later_close_resumes() {
     drop(cancelled);
     assert!(pool.is_closed());
 
-    let error = pool.get().await.expect_err("cancelled close reopened the pool");
+    let error = pool
+        .get()
+        .await
+        .expect_err("cancelled close reopened the pool");
     assert_pool_closed(&error);
 
     let resumed_wakes = Arc::new(AtomicUsize::new(0));

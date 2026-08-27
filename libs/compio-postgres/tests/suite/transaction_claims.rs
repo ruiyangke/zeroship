@@ -153,7 +153,9 @@ async fn bind_reports_parameter_count_mismatch_as_an_error() {
 
         let complaint = match outcome {
             Err(_) => Some("panicked".to_string()),
-            Ok(Ok(_)) => Some("returned Ok(Portal) for a statement expecting 1 parameter".to_string()),
+            Ok(Ok(_)) => {
+                Some("returned Ok(Portal) for a statement expecting 1 parameter".to_string())
+            }
             Ok(Err(error)) => {
                 // The counts both appear, and in the right roles: one
                 // parameter expected, none supplied.
@@ -161,7 +163,9 @@ async fn bind_reports_parameter_count_mismatch_as_an_error() {
                 if chain.contains("expected 1 parameters but got 0") {
                     None
                 } else {
-                    Some(format!("returned Err({chain}), which does not name both counts"))
+                    Some(format!(
+                        "returned Err({chain}), which does not name both counts"
+                    ))
                 }
             }
         };
@@ -257,7 +261,10 @@ async fn panicking_transaction_start_setup_preserves_a_preexisting_transaction()
             .await;
         // `assert_injected_panic` consumes the outcome, which is what releases
         // the borrow on `client` that the old `drop(panic)` here existed for.
-        assert_injected_panic(panic, "panic requested before START TRANSACTION was encoded");
+        assert_injected_panic(
+            panic,
+            "panic requested before START TRANSACTION was encoded",
+        );
 
         client.simple_query("").await.unwrap();
         assert_eq!(
@@ -397,7 +404,6 @@ async fn abandoned_savepoint_creation_cleans_its_server_name() {
     .await
     .expect("abandoned savepoint cleanup test exceeded its watchdog");
 }
-
 
 #[compio::test]
 async fn nonpositive_portal_limits_return_every_row() {
@@ -577,7 +583,11 @@ async fn a_suspended_portal_resumes_and_then_empties() {
                 .query_portal(&portal, 2)
                 .await
                 .expect("a portal fetch must not fail, drained or not");
-            chunks.push(rows.iter().map(|row| row.get::<_, i32>(0)).collect::<Vec<_>>());
+            chunks.push(
+                rows.iter()
+                    .map(|row| row.get::<_, i32>(0))
+                    .collect::<Vec<_>>(),
+            );
         }
 
         assert_eq!(

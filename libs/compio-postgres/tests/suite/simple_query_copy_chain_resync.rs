@@ -67,9 +67,7 @@ async fn batch_execute_finds_copy_in_after_copy_out_and_recovers() {
         let table = copy_table(&client, "batch").await;
 
         let failure = client
-            .batch_execute(&format!(
-                "COPY {table} TO STDOUT; COPY {table} FROM STDIN"
-            ))
+            .batch_execute(&format!("COPY {table} TO STDOUT; COPY {table} FROM STDIN"))
             .await
             .expect_err("batch_execute cannot return COPY output or feed COPY input");
 
@@ -101,9 +99,7 @@ async fn simple_query_finds_copy_in_after_copy_out_and_recovers() {
         let table = copy_table(&client, "stream").await;
 
         let failure = client
-            .simple_query(&format!(
-                "COPY {table} TO STDOUT; COPY {table} FROM STDIN"
-            ))
+            .simple_query(&format!("COPY {table} TO STDOUT; COPY {table} FROM STDIN"))
             .await
             .expect_err("simple_query cannot return COPY output or feed COPY input");
 
@@ -134,9 +130,7 @@ async fn two_copy_out_statements_were_already_synchronised() {
         let table = copy_table(&client, "control").await;
 
         client
-            .batch_execute(&format!(
-                "COPY {table} TO STDOUT; COPY {table} TO STDOUT"
-            ))
+            .batch_execute(&format!("COPY {table} TO STDOUT; COPY {table} TO STDOUT"))
             .await
             .expect_err("batch_execute unexpectedly decoded COPY output");
 

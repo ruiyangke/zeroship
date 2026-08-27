@@ -58,10 +58,7 @@ async fn drop_test_table(table: &str) -> Result<(), String> {
     .map_err(|_| format!("dropping {table} exceeded its cleanup timeout"))?
 }
 
-async fn run_with_table_cleanup(
-    table: &str,
-    test: futures_util::future::LocalBoxFuture<'_, ()>,
-) {
+async fn run_with_table_cleanup(table: &str, test: futures_util::future::LocalBoxFuture<'_, ()>) {
     let outcome = match compio::time::timeout(
         OBJECT_TEST_TIMEOUT,
         std::panic::AssertUnwindSafe(test).catch_unwind(),
@@ -92,10 +89,7 @@ async fn run_with_table_cleanup(
     }
 }
 
-async fn next_event(
-    events: &mut mpsc::UnboundedReceiver<QueryEvent>,
-    sql: &str,
-) -> QueryEvent {
+async fn next_event(events: &mut mpsc::UnboundedReceiver<QueryEvent>, sql: &str) -> QueryEvent {
     compio::time::timeout(EVENT_TIMEOUT, async {
         loop {
             let event = events
@@ -198,8 +192,7 @@ async fn zero_threshold_reports_every_query() {
 
 #[compio::test]
 async fn observer_reports_sql_elapsed_success_rows_without_bound_values() {
-    const SQL: &str =
-        "SELECT $1::text AS value FROM generate_series(1, 3) /* cpg_obs_success */";
+    const SQL: &str = "SELECT $1::text AS value FROM generate_series(1, 3) /* cpg_obs_success */";
     const SECRET: &str = "cpg_obs_bound_secret_7f36";
 
     let client = connect().await;
@@ -226,8 +219,7 @@ async fn observer_reports_sql_elapsed_success_rows_without_bound_values() {
 
 #[compio::test]
 async fn observer_reports_cancelled_once_when_row_stream_drops_early() {
-    const SQL: &str =
-        "SELECT i::int4 FROM generate_series(1, 10000) AS i /* cpg_obs_early_drop */";
+    const SQL: &str = "SELECT i::int4 FROM generate_series(1, 10000) AS i /* cpg_obs_early_drop */";
     const BARRIER: &str = "SELECT 1::int4 /* cpg_obs_early_drop_barrier */";
 
     let client = connect().await;
@@ -252,11 +244,12 @@ async fn observer_reports_cancelled_once_when_row_stream_drops_early() {
 
     client.query(&barrier, &[]).await.unwrap();
     let observed = events_through(&mut events, BARRIER).await;
-    let target: Vec<_> = observed
-        .iter()
-        .filter(|event| event.sql() == SQL)
-        .collect();
-    assert_eq!(target.len(), 1, "early drop emitted zero or multiple events");
+    let target: Vec<_> = observed.iter().filter(|event| event.sql() == SQL).collect();
+    assert_eq!(
+        target.len(),
+        1,
+        "early drop emitted zero or multiple events"
+    );
     assert_eq!(target[0].outcome(), &QueryOutcome::Cancelled);
     assert_eq!(target[0].rows(), None);
 }
@@ -282,11 +275,12 @@ async fn observer_reports_database_error_once() {
 
     client.query(&barrier, &[]).await.unwrap();
     let observed = events_through(&mut events, BARRIER).await;
-    let target: Vec<_> = observed
-        .iter()
-        .filter(|event| event.sql() == SQL)
-        .collect();
-    assert_eq!(target.len(), 1, "database error emitted zero or multiple events");
+    let target: Vec<_> = observed.iter().filter(|event| event.sql() == SQL).collect();
+    assert_eq!(
+        target.len(),
+        1,
+        "database error emitted zero or multiple events"
+    );
     assert_eq!(target[0].rows(), None);
     match target[0].outcome() {
         QueryOutcome::DatabaseError { code } => assert_eq!(
@@ -322,10 +316,7 @@ async fn observer_reports_server_query_canceled_as_cancelled() {
 
         client.simple_query(BARRIER).await.unwrap();
         let observed = events_through(&mut events, BARRIER).await;
-        let target: Vec<_> = observed
-            .iter()
-            .filter(|event| event.sql() == SQL)
-            .collect();
+        let target: Vec<_> = observed.iter().filter(|event| event.sql() == SQL).collect();
         assert_eq!(
             target.len(),
             1,
@@ -340,8 +331,7 @@ async fn observer_reports_server_query_canceled_as_cancelled() {
 
 #[compio::test]
 async fn observer_reports_each_portal_chunk_once() {
-    const SQL: &str =
-        "SELECT i::int4 FROM generate_series(1, 5) AS i /* cpg_obs_portal_chunks */";
+    const SQL: &str = "SELECT i::int4 FROM generate_series(1, 5) AS i /* cpg_obs_portal_chunks */";
     const BARRIER: &str = "SELECT 3::int4 /* cpg_obs_portal_barrier */";
 
     let mut client = connect().await;
@@ -358,11 +348,12 @@ async fn observer_reports_each_portal_chunk_once() {
 
     transaction.query(&barrier, &[]).await.unwrap();
     let observed = events_through(&mut events, BARRIER).await;
-    let target: Vec<_> = observed
-        .iter()
-        .filter(|event| event.sql() == SQL)
-        .collect();
-    assert_eq!(target.len(), 3, "portal execution did not emit once per chunk");
+    let target: Vec<_> = observed.iter().filter(|event| event.sql() == SQL).collect();
+    assert_eq!(
+        target.len(),
+        3,
+        "portal execution did not emit once per chunk"
+    );
     assert_eq!(
         target.iter().map(|event| event.rows()).collect::<Vec<_>>(),
         [Some(2), Some(2), Some(1)]
@@ -536,11 +527,12 @@ async fn observer_reports_dropped_in_flight_future_cancelled_once() {
 
         client.query(&barrier, &[]).await.unwrap();
         let observed = events_through(&mut events, BARRIER).await;
-        let target: Vec<_> = observed
-            .iter()
-            .filter(|event| event.sql() == SQL)
-            .collect();
-        assert_eq!(target.len(), 1, "dropped future emitted zero or multiple events");
+        let target: Vec<_> = observed.iter().filter(|event| event.sql() == SQL).collect();
+        assert_eq!(
+            target.len(),
+            1,
+            "dropped future emitted zero or multiple events"
+        );
         assert_eq!(target[0].outcome(), &QueryOutcome::Cancelled);
         assert_eq!(target[0].rows(), None);
     })
@@ -550,8 +542,7 @@ async fn observer_reports_dropped_in_flight_future_cancelled_once() {
 
 #[compio::test]
 async fn replacing_observer_preserves_the_in_flight_requests_receiver() {
-    const SQL: &str =
-        "SELECT pg_advisory_lock(hashtextextended($1, 0)) \
+    const SQL: &str = "SELECT pg_advisory_lock(hashtextextended($1, 0)) \
          /* cpg_obs_replacement_in_flight */";
     const BARRIER: &str = "SELECT 8::int4 /* cpg_obs_replacement_barrier */";
 

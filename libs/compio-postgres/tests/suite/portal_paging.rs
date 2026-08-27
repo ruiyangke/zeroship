@@ -6,8 +6,7 @@ use futures_util::TryStreamExt;
 #[allow(unused_imports)]
 use crate::common;
 
-const ORDERED_ROWS: &str =
-    "SELECT value::int4 FROM generate_series(1, 10) AS value ORDER BY value";
+const ORDERED_ROWS: &str = "SELECT value::int4 FROM generate_series(1, 10) AS value ORDER BY value";
 
 #[derive(Debug, PartialEq, Eq)]
 struct Page {

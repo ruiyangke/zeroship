@@ -67,8 +67,8 @@ async fn drop_test_schema(pool: &Pool, schema: &str) -> Result<(), String> {
     }
     .boxed_local();
     compio::time::timeout(CLEANUP_TIMEOUT, cleanup)
-    .await
-    .map_err(|_| format!("dropping {schema} exceeded its cleanup timeout"))?
+        .await
+        .map_err(|_| format!("dropping {schema} exceeded its cleanup timeout"))?
 }
 
 #[compio::test]
@@ -140,10 +140,7 @@ async fn a_raw_begin_does_not_leak_to_the_next_borrower() {
             );
 
             let rows = client
-                .query(
-                    &format!("SELECT count(*)::int8 AS n FROM {relation}"),
-                    &[],
-                )
+                .query(&format!("SELECT count(*)::int8 AS n FROM {relation}"), &[])
                 .await
                 .expect("count rows");
             let visible: i64 = rows[0].get("n");
@@ -190,8 +187,7 @@ async fn a_raw_begin_does_not_leak_to_the_next_borrower() {
         Err(_) => Err(format!("cleanup for {schema} panicked")),
     };
     match outcome {
-        Ok(()) => cleanup
-            .unwrap_or_else(|error| panic!("failed to clean up {schema}: {error}")),
+        Ok(()) => cleanup.unwrap_or_else(|error| panic!("failed to clean up {schema}: {error}")),
         Err(panic) => {
             if let Err(error) = cleanup {
                 eprintln!("failed to clean up {schema} after test failure: {error}");
@@ -458,7 +454,10 @@ async fn a_terminated_backend_is_not_handed_to_the_next_borrower() {
 
     // The pooled entry is now dead. A checkout must evict and replace it, not
     // hand back the corpse.
-    let client = pool.get().await.expect("checkout after the backend was killed");
+    let client = pool
+        .get()
+        .await
+        .expect("checkout after the backend was killed");
     let rows = client
         .query("SELECT pg_backend_pid()::int4 AS pid", &[])
         .await

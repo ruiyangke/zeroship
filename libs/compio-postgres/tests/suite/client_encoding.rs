@@ -49,8 +49,8 @@ async fn connect_keeping_driver() -> (Client, JoinHandle<Result<(), Error>>) {
     // No type annotation: the transport is chosen by `suite_tls`, and naming
     // one here would pin the file to plaintext.
     let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
-            .await
-            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        .await
+        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
     let driver = compio::runtime::spawn(async move { connection.run().await });
     (client, driver)
 }

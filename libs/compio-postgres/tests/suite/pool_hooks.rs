@@ -1,7 +1,7 @@
 //! Live coverage for pool connection lifecycle hooks.
 
-use compio_postgres::error::SqlState;
 use compio_postgres::config::TargetSessionAttrs;
+use compio_postgres::error::SqlState;
 use compio_postgres::{Config, Pool, PoolConfig};
 use std::cell::Cell;
 use std::rc::Rc;
@@ -101,9 +101,7 @@ async fn after_connect_failure_discards_the_connection() {
         Box::pin(async move {
             if invocation == 2 {
                 client
-                    .batch_execute(
-                        "SET cpg_hooks_after_connect_failure.marker = 'poisoned'",
-                    )
+                    .batch_execute("SET cpg_hooks_after_connect_failure.marker = 'poisoned'")
                     .await?;
                 client.batch_execute("SELECT 1 / 0").await
             } else {
@@ -140,7 +138,10 @@ async fn after_connect_failure_discards_the_connection() {
         )
         .await
         .unwrap();
-    assert!(row.get::<_, bool>(0), "replacement inherited failed hook state");
+    assert!(
+        row.get::<_, bool>(0),
+        "replacement inherited failed hook state"
+    );
     assert_eq!(calls.get(), 3);
     assert_eq!(pool.metrics.evictions.get(), 1);
 
@@ -204,7 +205,10 @@ async fn before_acquire_false_discards_and_retries() {
         .await
         .unwrap();
     assert_eq!(row.get::<_, i32>(0), 42);
-    assert!(row.get::<_, bool>(1), "borrower received the rejected session");
+    assert!(
+        row.get::<_, bool>(1),
+        "borrower received the rejected session"
+    );
 }
 
 #[compio::test]
@@ -277,7 +281,11 @@ async fn after_release_false_discards_the_dirty_session() {
     assert_eq!(pool.metrics.evictions.get(), 1);
 
     let client = pool.get().await.unwrap();
-    assert_ne!(client.process_id(), first_pid, "rejected session was reused");
+    assert_ne!(
+        client.process_id(),
+        first_pid,
+        "rejected session was reused"
+    );
     let row = client
         .query_one(
             "SELECT current_setting('cpg_hooks_after_release.marker', true) IS NULL",
