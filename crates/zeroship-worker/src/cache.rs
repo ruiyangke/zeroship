@@ -122,6 +122,17 @@ pub struct KernelConfig {
     pub meter: Arc<zeroship_metering::Meter>,
 }
 
+/// Install this thread's isolate cache and runtime kernel.
+///
+/// **`db_service` is assigned unconditionally, and the other handles are not.
+/// That is a behaviour change from the pre-service code, disclosed here because
+/// the step that made it was declared behaviour-neutral.** `DB_URL` used to be
+/// written only inside `if let Some(url) = kernel.db_url`, so a second
+/// `init_cache` carrying no database left the previous one's URL installed - a
+/// kernel that says "no db" could not turn the namespace off. `DB_SERVICE` is
+/// now written on both arms, so `db_service: None` clears the binding and the
+/// `db` namespace really is absent. `kv_url` and `storage_backend` keep the
+/// sticky shape; they are not this contract's to change.
 pub fn init_cache(max_size: usize, max_pinned_isolates_per_app: usize, kernel: KernelConfig) {
     CACHE.with(|c| {
         *c.borrow_mut() = Some(AppCache {
@@ -980,6 +991,14 @@ mod tests {
     /// Both instruments are counters. "Opened no pool" is a claim about a call
     /// that must not happen; a passing build proves nothing about it, and
     /// inferring it from an unreachable fixture DSN measures the fixture.
+    ///
+    /// **It drives `build_runtime`, not only `plugin_set`.** The contract names
+    /// `build_runtime`, and the step that touches this thread's DB state is
+    /// `DbPlugin::register`, which `Runtime::initialize` calls and
+    /// `plugin_set()` does not reach at all. Stopping at the plugin set left
+    /// the one place an eager connect would plausibly be added - "the plugin
+    /// knows the URL, so open the pool when it registers" - outside everything
+    /// the arm could see.
     #[test]
     fn building_the_plugin_set_selects_no_backend_and_opens_no_pool() {
         use zeroship_plugin_db::service::{backend_open_count, url_parse_count};
@@ -1020,6 +1039,37 @@ mod tests {
                 opens,
                 "building the plugin set must open no pool",
             );
+
+            // Now the call the contract actually names, which runs
+            // `DbPlugin::register` on this thread through `Runtime::initialize`.
+            compio::runtime::Runtime::new()
+                .expect("compio runtime")
+                .block_on(async {
+                    let (runtime, _app) = build_runtime(
+                        Uuid::new_v4(),
+                        br#"export default { fetch() { return new Response("ok"); } }"#,
+                        AppRuntimeLimits::default(),
+                        AppNetPolicy::default(),
+                        Some("deploy_build_runtime_guard"),
+                        None,
+                        &EnvSnapshot::empty(),
+                    )
+                    .expect("the guard needs a runtime that actually built");
+                    // The DSN is unreachable, so a build that DID connect would
+                    // have failed above - but that is an argument about the
+                    // fixture. The counters are the measurement.
+                    assert_eq!(
+                        url_parse_count(),
+                        parses,
+                        "build_runtime must select no backend",
+                    );
+                    assert_eq!(
+                        backend_open_count(),
+                        opens,
+                        "build_runtime must open no pool",
+                    );
+                    drop(runtime);
+                });
         })
         .join()
         .expect("plugin-set build guard thread panicked");
@@ -1161,6 +1211,66 @@ mod tests {
         })
         .join()
         .expect("plugin-sharing guard thread panicked");
+    }
+
+    /// Re-installing a kernel with no database must turn the `db` namespace
+    /// OFF, not keep the previous one.
+    ///
+    /// This is the one behaviour the service step changed rather than preserved,
+    /// and it went in undisclosed. The slot it replaced was written only inside
+    /// `if let Some(url) = kernel.db_url`, so `db_url: None` was indistinguishable
+    /// from "leave it alone": a worker re-installed without a database kept
+    /// serving `env.db` against the previous DSN. `DB_SERVICE` is assigned on
+    /// both arms, so the absence is now expressible.
+    ///
+    /// The first half is the control. Without it a `create_plugins` that never
+    /// registers `db` at all would satisfy the second half exactly as well.
+    #[test]
+    fn re_installing_the_kernel_without_a_database_clears_the_db_namespace() {
+        std::thread::spawn(|| {
+            let with_db = || KernelConfig {
+                control_url: "http://127.0.0.1:1".to_string(),
+                control_key: "test-control-key".to_string(),
+                db_service: Some(test_db_service(
+                    "postgres://localhost/zs_unused_sticky",
+                    "sticky-test-worker",
+                )),
+                kv_url: None,
+                storage_backend: None,
+                meter: Arc::new(zeroship_metering::Meter::new()),
+            };
+
+            init_cache(4, 4, with_db());
+            assert!(
+                plugin_set().iter().any(|p| p.namespace() == "db"),
+                "the fixture must start from a kernel that HAS the db namespace",
+            );
+            assert!(db_url().is_some(), "the fixture must start from a bound db");
+
+            init_cache(
+                4,
+                4,
+                KernelConfig {
+                    db_service: None,
+                    ..with_db()
+                },
+            );
+            assert!(
+                !plugin_set().iter().any(|p| p.namespace() == "db"),
+                "a kernel installed with no database must not keep serving env.db \
+                 against the previous one; got {:?}",
+                plugin_set()
+                    .iter()
+                    .map(|p| p.namespace())
+                    .collect::<Vec<_>>(),
+            );
+            assert!(
+                db_url().is_none(),
+                "the previous DSN must not survive a kernel that carries none",
+            );
+        })
+        .join()
+        .expect("db-service stickiness guard thread panicked");
     }
 
     /// Phase-2 structural guard (no external services): when the kernel

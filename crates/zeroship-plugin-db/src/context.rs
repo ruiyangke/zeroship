@@ -341,7 +341,16 @@ pub struct ThreadDbContext {
     /// `n_threads` catalog walks per epoch bump. Two threads racing a cold miss
     /// both walk the catalog; what they must not end up with is two cache
     /// entries or two distinct fact objects, and that is the cache's job.
-    introspection_in_progress: HashMap<(DbBinding, String), Vec<Waker>>,
+    ///
+    /// Keyed by the SAME [`LiveMetadataKey`] the cache uses, resource key
+    /// included. It was keyed by `(DbBinding, collection)` while the doc above
+    /// said it matched the cache's identity - which was true only while a
+    /// thread had one database. It no longer does: `install_db_resources` can
+    /// repoint a thread, and the resource key is precisely the component that
+    /// records it. A flight for one database would otherwise hold the marker for
+    /// the same app/deploy/collection on a DIFFERENT one, parking a cold miss
+    /// that has nothing to wait for.
+    introspection_in_progress: HashMap<LiveMetadataKey, Vec<Waker>>,
 
     /// Per-thread, per-app mask-policy cache. Seeded
     /// on first unmask attempt by reading durable storage (PG admin
@@ -728,8 +737,16 @@ impl ThreadDbContext {
     }
 
     /// Cache the result of a live introspection for one immutable binding and
-    /// collection. `facts = None` records that the collection is absent. Other
-    /// deploys of the same app, and other databases, retain their own entries.
+    /// collection, and return what the process-wide cache holds for that
+    /// identity afterwards. `facts = None` records that the collection is
+    /// absent. Other deploys of the same app, and other databases, retain their
+    /// own entries.
+    ///
+    /// **Callers must use the return value rather than the `Arc` they passed
+    /// in.** Another thread racing the same cold miss may have published first;
+    /// its object is the one in the map and therefore the one every later
+    /// reader on every thread will see. See
+    /// [`crate::live_metadata::LiveMetadataCache::publish`].
     ///
     /// Takes `&self`: the cache is process-wide and carries its own
     /// synchronisation, so writing to it is not a mutation of thread state.
@@ -738,9 +755,9 @@ impl ThreadDbContext {
         binding: &DbBinding,
         collection: &str,
         facts: CachedFacts,
-    ) {
+    ) -> CachedFacts {
         self.live_metadata
-            .insert(self.live_metadata_key(binding, collection), facts);
+            .publish(self.live_metadata_key(binding, collection), facts)
     }
 
     /// Poll the success-only singleflight for one exact introspection key.
@@ -754,14 +771,11 @@ impl ThreadDbContext {
         collection: &str,
         cx: &mut Context<'_>,
     ) -> Poll<SchemaIntrospectionState> {
-        if let Some(cached) = self
-            .live_metadata
-            .get(&LiveMetadataKey::new(self.resource_key, binding, collection))
-        {
+        let key = self.live_metadata_key(binding, collection);
+        if let Some(cached) = self.live_metadata.get(&key) {
             return Poll::Ready(SchemaIntrospectionState::Cached(cached));
         }
 
-        let key = (binding.clone(), collection.to_string());
         match self.introspection_in_progress.entry(key) {
             std::collections::hash_map::Entry::Vacant(entry) => {
                 entry.insert(Vec::new());
@@ -786,9 +800,8 @@ impl ThreadDbContext {
         binding: &DbBinding,
         collection: &str,
     ) -> Vec<Waker> {
-        let key = (binding.clone(), collection.to_string());
         self.introspection_in_progress
-            .remove(&key)
+            .remove(&self.live_metadata_key(binding, collection))
             .unwrap_or_default()
     }
 
@@ -1240,6 +1253,55 @@ mod tests {
             ctx.backend_selection(),
             Some(BackendUrl::Sqlite { .. })
         ));
+    }
+
+    /// The singleflight marker is keyed by the SAME identity as the cache, so
+    /// repointing this thread at a different database starts a NEW flight
+    /// instead of parking behind the old one's.
+    ///
+    /// The marker was keyed by `(DbBinding, collection)` while its own doc said
+    /// it marked "one catalog read in progress for the exact same identity
+    /// [the cache] caches under". Those differ by the resource key, and the
+    /// resource key is exactly the component that changes here. Under the old
+    /// shape the second poll below returns `Pending` and parks a waiter on a
+    /// flight against a database whose result can never satisfy it - the cache
+    /// entry it is woken to read is keyed under the other resource.
+    ///
+    /// The first two assertions are the control: a same-database re-poll MUST
+    /// still park, or the fix would read as "the singleflight was removed".
+    #[test]
+    fn a_flight_on_one_database_does_not_block_a_cold_miss_on_another() {
+        let mut ctx = ThreadDbContext::new();
+        let binding = DbBinding::new("app_flight_key", "deploy_a");
+        let waker = std::task::Waker::noop();
+        let mut cx = Context::from_waker(waker);
+
+        install(&mut ctx, "postgres://flight-key-a");
+        assert!(
+            matches!(
+                ctx.poll_schema_introspection(&binding, "notes", &mut cx),
+                Poll::Ready(SchemaIntrospectionState::Acquired)
+            ),
+            "the first cold miss must acquire the flight",
+        );
+        assert!(
+            matches!(
+                ctx.poll_schema_introspection(&binding, "notes", &mut cx),
+                Poll::Pending
+            ),
+            "a SECOND cold miss on the SAME database must park - that is the \
+             singleflight, and removing it would also satisfy the arm below",
+        );
+
+        install(&mut ctx, "postgres://flight-key-b");
+        assert!(
+            matches!(
+                ctx.poll_schema_introspection(&binding, "notes", &mut cx),
+                Poll::Ready(SchemaIntrospectionState::Acquired)
+            ),
+            "a cold miss on a DIFFERENT database must start its own flight, not \
+             wait on one whose result is keyed under another resource",
+        );
     }
 
     #[test]

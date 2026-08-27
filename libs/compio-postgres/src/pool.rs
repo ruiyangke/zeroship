@@ -263,10 +263,12 @@ impl PoolConfig {
     /// Set the client command deadline applied by [`PooledClient::command`].
     ///
     /// This builds clock (1), a client-side command deadline. When it expires,
-    /// the pool sends a `PostgreSQL` `CancelRequest` using the connector it owns,
-    /// waits for the postmaster to close that cancellation connection, then
-    /// drains through `ReadyForQuery` before returning a distinguishable
-    /// [`Error::is_command_timeout`] error. It is disabled by default.
+    /// the pool first keeps a session that is already proven idle and free of
+    /// COPY or cancellation authority. Otherwise it sends a `PostgreSQL`
+    /// `CancelRequest` using the connector it owns, waits for the postmaster to
+    /// close that cancellation connection, then drains through `ReadyForQuery`
+    /// before returning a distinguishable [`Error::is_command_timeout`] error.
+    /// It is disabled by default.
     ///
     /// It is deliberately separate from the other four clocks:
     ///
@@ -1541,14 +1543,6 @@ impl Pool {
             self.metrics.inc_evictions();
             return;
         }
-        // A release hook can retain a token too. It saw the revoked generation,
-        // so that token is already unusable; still retire this session rather
-        // than carrying escaped authority into another logical lease.
-        if entry.client.pool_cancel_lease_prevents_reuse() {
-            entry.client.force_close();
-            self.metrics.inc_evictions();
-            return;
-        }
         if !entry.is_pool_eligible() {
             self.metrics.inc_evictions();
             return;
@@ -1657,6 +1651,17 @@ impl Pool {
     fn redeposit_freed_entry(&self, entry: PoolEntry) {
         if self.closed.get() {
             self.discard_unowned_entry(entry);
+            return;
+        }
+        if !entry.is_pool_eligible() {
+            // An assigned handoff can dwell across arbitrary connection-task
+            // progress before its waiter is cancelled. Recheck at this second
+            // publication boundary instead of advertising a corpse until a
+            // later checkout or housekeeping pass happens to reap it.
+            self.release_total_slots(1);
+            self.metrics.inc_evictions();
+            self.wake_one_waiter();
+            drop(entry);
             return;
         }
         if let Some(waker) = self.deposit_freed_entry(entry) {
@@ -2596,15 +2601,17 @@ impl PooledClient<'_> {
 
     /// Run one exclusive logical command under the pool's command deadline.
     ///
-    /// If [`PoolConfig::command_timeout`] is configured, expiry sends a real
-    /// `PostgreSQL` `CancelRequest` over a new connection using the pool-owned
-    /// TLS connector. It waits for the postmaster to close that dedicated
-    /// connection so a late cancel cannot hit the next query. The timed
-    /// operation future is dropped, but the connection task continues draining
-    /// its server responses. This method then sends a FIFO `Sync` barrier and,
-    /// if needed, rolls back a cancelled transaction. It does not return until
-    /// the same session is idle at `ReadyForQuery`. A successful recovery
-    /// returns an
+    /// If [`PoolConfig::command_timeout`] is configured, expiry first checks
+    /// whether the timed operation left any unsettled protocol work or cancel
+    /// authority. A session already proven idle is kept without sending a
+    /// cancellation. Otherwise expiry sends a real `PostgreSQL` `CancelRequest`
+    /// over a new connection using the pool-owned TLS connector. It waits for
+    /// the postmaster to close that dedicated connection so a late cancel cannot
+    /// hit the next query. The timed operation future is dropped, but the
+    /// connection task continues draining its server responses. This method then
+    /// sends a FIFO `Sync` barrier and, if needed, rolls back a cancelled
+    /// transaction. It does not return until the same session is idle at
+    /// `ReadyForQuery`. A successful recovery returns an
     /// [`Error`] for which [`Error::is_command_timeout`] is true; `PostgreSQL`'s
     /// own errors, including SQLSTATE `57014`, remain ordinary database
     /// errors.
@@ -2679,10 +2686,24 @@ where
         return operation(client).await;
     };
 
-    let cancel_token = client.cancel_token();
     if let Ok(result) = compio::time::timeout(command_timeout, operation(client)).await {
         return result;
     }
+
+    // A settled Idle status proves every transaction-capable request reached
+    // ReadyForQuery. With no active COPY or escaped/uncertain cancel lease,
+    // dropping the operation left nothing that can act on a later borrower.
+    // Sending CancelRequest in that state adds no proof and can turn a local
+    // timeout into needless session loss.
+    if !client.is_closed()
+        && client.transaction_status() == Some(TransactionStatus::Idle)
+        && !client.has_active_copy()
+        && !client.pool_cancel_lease_prevents_reuse()
+    {
+        return Err(Error::command_timeout(None));
+    }
+
+    let cancel_token = client.cancel_token();
 
     // Recovery either restores this physical session or destroys it, and
     // the deciding arms below only run if this future is polled to
@@ -3228,6 +3249,127 @@ mod tests {
         assert_eq!(pool.metrics.evictions.get(), 1);
     }
 
+    #[test]
+    fn a_token_created_by_after_release_does_not_retire_the_reusable_session() {
+        let retained_token = Rc::new(RefCell::new(None));
+        let hook_token = Rc::clone(&retained_token);
+        let mut config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            ..PoolConfig::default()
+        };
+        config.after_release(move |client| {
+            *hook_token.borrow_mut() = Some(client.cancel_token());
+            true
+        });
+        let pool = test_pool(config, Vec::new(), 1, 1);
+        let (client, _receiver) = fake_client(21);
+        let held = PooledClient::new(PoolEntry::new(client, pool.config.max_lifetime), &pool);
+
+        drop(held);
+
+        assert!(
+            retained_token.borrow().is_some(),
+            "after_release did not retain the inactive token"
+        );
+        assert_eq!(
+            pool.idle_count(),
+            1,
+            "an inactive release-hook token retired a reusable session"
+        );
+        assert_eq!(pool.total_count(), 1);
+        assert_eq!(pool.metrics.evictions.get(), 0);
+    }
+
+    #[compio::test]
+    async fn a_timeout_before_protocol_work_does_not_retire_an_idle_session() {
+        let mut config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            ..PoolConfig::default()
+        };
+        config.command_timeout(Duration::from_millis(1));
+        let pool = test_pool(config, Vec::new(), 1, 1);
+        let (client, _receiver) = fake_client(22);
+        let mut held = PooledClient::new(PoolEntry::new(client, pool.config.max_lifetime), &pool);
+
+        let error = held
+            .command(async |_| std::future::pending::<Result<(), Error>>().await)
+            .await
+            .expect_err("the local pending operation beat its command deadline");
+        assert!(error.is_command_timeout());
+        drop(held);
+
+        assert_eq!(
+            pool.idle_count(),
+            1,
+            "a timeout before any request retired a reusable session"
+        );
+        assert_eq!(pool.total_count(), 1);
+        assert_eq!(pool.metrics.evictions.get(), 0);
+    }
+
+    #[compio::test]
+    async fn a_timeout_with_an_unsettled_request_still_retires_the_session() {
+        let mut config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            ..PoolConfig::default()
+        };
+        config.command_timeout(Duration::from_millis(1));
+        let pool = test_pool(config, Vec::new(), 1, 1);
+        let (client, _receiver) = fake_client(23);
+        let mut held = PooledClient::new(PoolEntry::new(client, pool.config.max_lifetime), &pool);
+
+        let error = held
+            .command(async |client| {
+                client.__private_api_rollback(None);
+                std::future::pending::<Result<(), Error>>().await
+            })
+            .await
+            .expect_err("the unsettled operation beat its command deadline");
+        assert!(error.is_command_timeout());
+        drop(held);
+
+        assert_eq!(
+            pool.total_count(),
+            0,
+            "a timeout with unsettled backend work reused the session"
+        );
+    }
+
+    #[compio::test]
+    async fn a_timeout_with_escaped_cancellation_authority_still_retires_the_session() {
+        let retained_token = Rc::new(RefCell::new(None));
+        let operation_token = Rc::clone(&retained_token);
+        let mut config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            ..PoolConfig::default()
+        };
+        config.command_timeout(Duration::from_millis(1));
+        let pool = test_pool(config, Vec::new(), 1, 1);
+        let (client, _receiver) = fake_client(24);
+        let mut held = PooledClient::new(PoolEntry::new(client, pool.config.max_lifetime), &pool);
+
+        let error = held
+            .command(async move |client| {
+                *operation_token.borrow_mut() = Some(client.cancel_token());
+                std::future::pending::<Result<(), Error>>().await
+            })
+            .await
+            .expect_err("the token-retaining operation beat its command deadline");
+        assert!(error.is_command_timeout());
+        assert!(retained_token.borrow().is_some());
+        drop(held);
+
+        assert_eq!(
+            pool.total_count(),
+            0,
+            "a timeout with escaped cancellation authority reused the session"
+        );
+    }
+
     #[compio::test]
     async fn accepted_after_connect_cannot_publish_a_hook_closed_new_entry() {
         let (address, finish_tx, count_rx, server) = accepting_postgres_server();
@@ -3434,6 +3576,46 @@ mod tests {
             Poll::Ready(Err(error)) => panic!("fresh replacement was rejected: {error}"),
             Poll::Pending => panic!("fresh replacement should be ready without I/O"),
         }
+    }
+
+    #[test]
+    fn cancelling_a_waiter_does_not_redeposit_a_handoff_that_closed_in_its_slot() {
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            validation_bypass: Duration::from_secs(60),
+            ..PoolConfig::default()
+        };
+        let pool = test_pool(config, Vec::new(), 1, 1);
+        let (client, receiver) = fake_client(13);
+        let held = PooledClient {
+            entry: Some(PoolEntry::new(client, pool.config.max_lifetime)),
+            pool: &pool,
+        };
+        let mut waiter = Box::pin(Waiter::new(&pool));
+
+        assert!(poll_once(waiter.as_mut()).is_pending());
+        drop(held);
+        assert_eq!(pool.pending_count(), 0, "the live entry was not handed off");
+
+        // The entry is pool-owned but can dwell in the assigned slot until the
+        // waiter is polled. Model the connection task ending in that interval,
+        // then cancel the waiter so its Drop path must decide whether to
+        // republish or retire the entry.
+        drop(receiver);
+        drop(waiter);
+
+        assert_eq!(
+            pool.idle_count(),
+            0,
+            "cancelled waiter redeposited an ineligible handoff"
+        );
+        assert_eq!(
+            pool.total_count(),
+            0,
+            "closed handoff kept its capacity slot"
+        );
+        assert_eq!(pool.metrics.evictions.get(), 1);
     }
 
     #[test]

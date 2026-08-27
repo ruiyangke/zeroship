@@ -156,9 +156,9 @@ async fn version_poll_loop(
                 }
                 // Deprovision through the service's operator-lifecycle handle.
                 // It reads the backend selection made once at composition and
-                // checks out this thread's long-lived operator pool, instead of
-                // re-parsing the URL and building a fresh two-connection pool
-                // for every deleted app the way the old free function did.
+                // checks out this thread's operator pool, instead of re-parsing
+                // the URL and building a fresh two-connection pool for every
+                // deleted app the way the old free function did.
                 if let Some(service) = db_service.as_deref() {
                     let pending: Vec<Uuid> = pending_cdc_deprovision.iter().copied().collect();
                     for app_id in pending {
@@ -178,6 +178,31 @@ async fn version_poll_loop(
                                 );
                             }
                         }
+                    }
+                    // Release the operator pool once nothing is left to
+                    // reconcile. It is the ONLY thing that removes the entry -
+                    // the map is a `thread_local!` with no eviction and its
+                    // connections sit at the pool's `min_idle`, so idle
+                    // reclamation never touches them. Without this the two
+                    // maintenance backends opened for the first deleted app
+                    // this process ever saw would stay open for the life of the
+                    // container, in every container, against whatever
+                    // `max_connections` the cluster is sized for.
+                    //
+                    // The trade, stated at its worst: deletions arriving one
+                    // per poll drain the set every time, so each one pays its
+                    // own pool - which IS the per-deletion cost the shared pool
+                    // was introduced to avoid. Two connects on a background
+                    // poller nobody waits on is the cheaper side of that trade
+                    // than two idle backends per container held forever, and
+                    // the sharing still applies where it was argued for: a
+                    // batch of deletions reconciled together.
+                    //
+                    // Inside the poll loop, on the poller's own compio runtime:
+                    // dropping a pool only asks its driver tasks to shut down,
+                    // so this has to run somewhere they can still be driven.
+                    if pending_cdc_deprovision.is_empty() {
+                        zeroship_plugin_db::service::close_operator_pools();
                     }
                 }
                 // GC SharedEnvs against the latest known-app set BEFORE
