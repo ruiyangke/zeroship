@@ -60,6 +60,7 @@ async fn copy_out_inner(
     Ok(CopyOutStream {
         responses,
         response,
+        copy_done: false,
         copy_mode: Some(copy_mode),
     })
 }
@@ -135,6 +136,7 @@ pin_project! {
     pub struct CopyOutStream {
         responses: Responses,
         response: CopyResponse,
+        copy_done: bool,
         // Last so Drop disconnects the consumer, arming connection-owned
         // draining, before ordinary requests may queue behind it.
         copy_mode: Option<CopyModeGuard>,
@@ -159,19 +161,30 @@ impl Stream for CopyOutStream {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
 
-        match ready!(this.responses.poll_next(cx)) {
-            Ok(Message::CopyData(body)) => Poll::Ready(Some(Ok(body.into_bytes()))),
-            Ok(Message::CopyDone) => {
-                this.copy_mode.take();
-                Poll::Ready(None)
-            }
-            Ok(_) => {
-                this.copy_mode.take();
-                Poll::Ready(Some(Err(Error::unexpected_message())))
-            }
-            Err(error) => {
-                this.copy_mode.take();
-                Poll::Ready(Some(Err(error)))
+        loop {
+            match ready!(this.responses.poll_next(cx)) {
+                Ok(Message::CopyData(body)) if !*this.copy_done => {
+                    return Poll::Ready(Some(Ok(body.into_bytes())));
+                }
+                Ok(Message::CopyDone) if !*this.copy_done => {
+                    // CopyDone terminates the data stream, but PostgreSQL has
+                    // not completed the command yet. ExecutorFinish runs after
+                    // CopyDone and can still produce an ErrorResponse, so do
+                    // not report EOF until CommandComplete arrives.
+                    *this.copy_done = true;
+                }
+                Ok(Message::CommandComplete(_)) if *this.copy_done => {
+                    this.copy_mode.take();
+                    return Poll::Ready(None);
+                }
+                Ok(_) => {
+                    this.copy_mode.take();
+                    return Poll::Ready(Some(Err(Error::unexpected_message())));
+                }
+                Err(error) => {
+                    this.copy_mode.take();
+                    return Poll::Ready(Some(Err(error)));
+                }
             }
         }
     }
