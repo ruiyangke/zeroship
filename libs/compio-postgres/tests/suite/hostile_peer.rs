@@ -1900,6 +1900,34 @@ async fn copy_data_after_the_binary_copy_trailer_is_refused() {
     .expect("cross-frame binary trailer test exceeded its outer watchdog");
 }
 
+/// An empty CopyData is still a CopyData message. After the binary trailer no
+/// further row frame is legal, regardless of whether its body has bytes.
+#[compio::test]
+async fn empty_copy_data_after_the_binary_copy_trailer_is_refused() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let suffix = backend_frame(b'd', b"");
+        let response = binary_copy_out_frames_with_suffix(
+            vec![binary_copy_chunk(&[&binary_int4_tuple(7)])],
+            &(-1i16).to_be_bytes(),
+            &suffix,
+        );
+        let outcome = binary_copy_out_against(535, response).await;
+        let error = match outcome {
+            Ok(values) => panic!(
+                "the driver returned {values:?} after empty CopyData followed the binary trailer"
+            ),
+            Err(error) => error,
+        };
+        let chain = common::error_chain(&error);
+        assert!(
+            chain.contains("0 bytes of CopyData after the binary COPY trailer"),
+            "empty CopyData after the binary trailer was not refused by name: {chain}"
+        );
+    })
+    .await
+    .expect("empty post-trailer CopyData test exceeded its outer watchdog");
+}
+
 /// Protocol `CopyDone` ends COPY OUT, but it is not the binary file trailer.
 /// PostgreSQL emits the -1 tuple-count trailer first (`CopyToBinaryEnd`) and
 /// only then emits `CopyDone` (`SendCopyEnd`). If the peer skips the former,
