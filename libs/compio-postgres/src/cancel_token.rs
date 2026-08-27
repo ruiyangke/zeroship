@@ -206,6 +206,8 @@ mod tests {
                 keepalive: None,
                 require_peer: None,
                 encryption: crate::connect_tls::Encryption::Plaintext,
+                ssl_sni: true,
+                ssl_cert_mode: crate::config::SslCertMode::Allow,
                 server_verification: crate::tls::ServerVerification::None,
             }),
             ssl_mode: SslMode::Disable,

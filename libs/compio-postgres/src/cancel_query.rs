@@ -30,6 +30,43 @@ use crate::tls::{MakeTlsConnect, TlsConnect};
 use crate::{Error, Socket, cancel_query_raw, connect_socket};
 use std::io;
 
+fn validate_cancel_tls_connector<T>(tls: &T, config: &SocketConfig) -> Result<(), Error>
+where
+    T: TlsConnect<Socket>,
+{
+    if config.encryption == connect_tls::Encryption::Plaintext {
+        return Ok(());
+    }
+
+    if !tls.can_honor_sslsni(config.ssl_sni) {
+        return Err(Error::tls_unattested(
+            format!(
+                "the TLS connector supplied to cancel does not attest to sslsni={}",
+                u8::from(config.ssl_sni)
+            )
+            .into(),
+        ));
+    }
+    if !tls.can_honor_sslcertmode(config.ssl_cert_mode) {
+        return Err(Error::tls_unattested(
+            format!(
+                "the TLS connector supplied to cancel does not attest to sslcertmode={}",
+                config.ssl_cert_mode.as_str()
+            )
+            .into(),
+        ));
+    }
+    if !tls.can_honor_server_verification(config.server_verification) {
+        return Err(Error::tls_unattested(
+            "the TLS connector supplied to cancel does not attest to the server verification \
+             this session was established with"
+                .into(),
+        ));
+    }
+
+    Ok(())
+}
+
 pub(crate) async fn cancel_query<T>(
     config: Option<SocketConfig>,
     ssl_mode: SslMode,
@@ -57,22 +94,11 @@ where
         let tls = tls
             .make_tls_connect(&server_name)
             .map_err(|e| Error::tls(e.into()))?;
-        // The cancel key is a BEARER CREDENTIAL, and the connector carrying it
-        // arrives from the CALLER at cancel time - `CancelToken::cancel_query`
-        // takes it as an argument, so it need not be the one this session was
-        // vetted with. Check it against the verification the SESSION recorded
-        // rather than trusting whatever turns up. Plaintext needs no check:
-        // there is no certificate to verify, and `sslmode` already decided
-        // that at connect time.
-        if encryption != connect_tls::Encryption::Plaintext
-            && !tls.can_honor_server_verification(config.server_verification)
-        {
-            return Err(Error::tls_unattested(
-                "the TLS connector supplied to cancel does not attest to the server \
-                 verification this session was established with"
-                    .into(),
-            ));
-        }
+        // The cancel key is a bearer credential, and its connector comes from
+        // the caller at cancel time. Hold that new connection to every TLS
+        // disclosure and verification policy the session recorded before the
+        // connector can emit a ClientHello.
+        validate_cancel_tls_connector(&tls, &config)?;
         let has_hostname = config.hostname.is_some();
 
         let socket = connect_socket::connect_socket(
@@ -131,22 +157,7 @@ where
         let tls = tls
             .make_tls_connect(&server_name)
             .map_err(|e| Error::tls(e.into()))?;
-        // The cancel key is a BEARER CREDENTIAL, and the connector carrying it
-        // arrives from the CALLER at cancel time - `CancelToken::cancel_query`
-        // takes it as an argument, so it need not be the one this session was
-        // vetted with. Check it against the verification the SESSION recorded
-        // rather than trusting whatever turns up. Plaintext needs no check:
-        // there is no certificate to verify, and `sslmode` already decided
-        // that at connect time.
-        if encryption != connect_tls::Encryption::Plaintext
-            && !tls.can_honor_server_verification(config.server_verification)
-        {
-            return Err(Error::tls_unattested(
-                "the TLS connector supplied to cancel does not attest to the server \
-                 verification this session was established with"
-                    .into(),
-            ));
-        }
+        validate_cancel_tls_connector(&tls, &config)?;
         let has_hostname = config.hostname.is_some();
 
         let socket = connect_socket::connect_socket(
@@ -234,6 +245,8 @@ mod tests {
             keepalive: None,
             require_peer: None,
             encryption: crate::connect_tls::Encryption::Plaintext,
+            ssl_sni: true,
+            ssl_cert_mode: crate::config::SslCertMode::Allow,
             server_verification: crate::tls::ServerVerification::None,
         };
         let cancel = Box::pin(cancel_query_confirmed(
@@ -558,6 +571,8 @@ mod tests {
             // The only value `require` can record: `connect.rs` never offers
             // it a plaintext leg, and a server refusal is fatal there.
             encryption: crate::connect_tls::Encryption::Tls,
+            ssl_sni: true,
+            ssl_cert_mode: crate::config::SslCertMode::Allow,
             server_verification: crate::tls::ServerVerification::None,
         };
         let connected = Arc::new(AtomicBool::new(false));
@@ -682,6 +697,8 @@ mod tests {
             keepalive: None,
             require_peer: None,
             encryption: crate::connect_tls::Encryption::Tls,
+            ssl_sni: true,
+            ssl_cert_mode: crate::config::SslCertMode::Allow,
             server_verification: crate::tls::ServerVerification::None,
         };
         let result = compio::time::timeout(
@@ -908,6 +925,8 @@ mod tests {
             keepalive: None,
             require_peer: None,
             encryption: crate::connect_tls::Encryption::Tls,
+            ssl_sni: true,
+            ssl_cert_mode: crate::config::SslCertMode::Allow,
             // What `sslmode=verify-full` plus a root cert demands.
             server_verification: crate::tls::ServerVerification::ChainAndHostname,
         };
@@ -941,11 +960,81 @@ mod tests {
         );
     }
 
+    async fn assert_cancel_tls_policy_refused(
+        ssl_sni: bool,
+        ssl_cert_mode: crate::config::SslCertMode,
+        expected: &str,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind scripted server");
+        let addr = listener.local_addr().expect("scripted server address");
+        let config = SocketConfig {
+            addr: Addr::Tcp(addr.ip()),
+            hostname: Some("localhost".to_string()),
+            port: addr.port(),
+            connect_timeout: None,
+            tcp_user_timeout: None,
+            keepalive: None,
+            require_peer: None,
+            encryption: crate::connect_tls::Encryption::Tls,
+            ssl_sni,
+            ssl_cert_mode,
+            server_verification: crate::tls::ServerVerification::None,
+        };
+
+        let cancel = Box::pin(cancel_query(
+            Some(config),
+            SslMode::Require,
+            SslNegotiation::Postgres,
+            PassthroughTls {
+                connected: Arc::new(AtomicBool::new(false)),
+            },
+            PROCESS_ID,
+            SECRET_KEY.into(),
+        ));
+        let accept = Box::pin(listener.accept());
+        let error = match select(cancel, accept).await {
+            Either::Left((result, _)) => {
+                result.expect_err("the connector must be refused before a socket is dialed")
+            }
+            Either::Right(_) => {
+                panic!("the cancel dialed before enforcing the session's {expected} policy")
+            }
+        };
+        let chain = std::iter::successors(std::error::Error::source(&error), |error| {
+            std::error::Error::source(*error)
+        })
+        .fold(format!("{error}"), |chain, error| {
+            format!("{chain}: {error}")
+        });
+        assert!(
+            chain.contains(expected),
+            "the refusal must name {expected}: {chain}"
+        );
+    }
+
+    #[compio::test]
+    async fn a_cancel_tls_policy_refuses_sni_disclosure() {
+        assert_cancel_tls_policy_refused(false, crate::config::SslCertMode::Allow, "sslsni=0")
+            .await;
+    }
+
+    #[compio::test]
+    async fn a_cancel_tls_policy_refuses_client_certificate_disclosure() {
+        assert_cancel_tls_policy_refused(
+            true,
+            crate::config::SslCertMode::Disable,
+            "sslcertmode=disable",
+        )
+        .await;
+    }
+
     /// THE CONTROL, one variable: the same connector against a session that
     /// demanded NO verification. It must still be allowed, or the gate would
     /// simply ban `PassthroughTls` and every plain `require` cancel with it.
     #[compio::test]
-    async fn a_cancel_allows_a_connector_when_the_session_demanded_no_verification() {
+    async fn a_cancel_tls_policy_allows_matching_defaults() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind scripted server");
@@ -966,6 +1055,8 @@ mod tests {
             keepalive: None,
             require_peer: None,
             encryption: crate::connect_tls::Encryption::Tls,
+            ssl_sni: true,
+            ssl_cert_mode: crate::config::SslCertMode::Allow,
             server_verification: crate::tls::ServerVerification::None,
         };
 

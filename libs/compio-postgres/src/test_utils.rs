@@ -293,6 +293,8 @@ pub async fn connect_serialized(
         keepalive: None,
         require_peer: config.get_require_peer().map(str::to_owned),
         encryption: crate::connect_tls::Encryption::Plaintext,
+        ssl_sni: config.get_ssl_sni(),
+        ssl_cert_mode: config.get_ssl_cert_mode(),
         // Plaintext, so nothing is verified - the same value the connect path
         // records for an unencrypted session.
         server_verification: crate::tls::ServerVerification::None,
