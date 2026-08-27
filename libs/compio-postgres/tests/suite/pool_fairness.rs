@@ -148,6 +148,57 @@ async fn fresh_caller_cannot_barge_a_parked_waiter_after_release() {
 }
 
 #[compio::test]
+async fn fresh_caller_cannot_barge_a_capacity_woken_waiter() {
+    let url = test_url();
+    let mut pool_config = config(1, 1);
+    pool_config.after_release(|_| false);
+    let pool = connect_pool(&url, pool_config).await;
+    let held = pool.get().await.expect("hold the pool's only connection");
+    let mut earlier = Box::pin(pool.get());
+    assert!(poll_once(earlier.as_mut()).is_pending());
+    assert_eq!(pool.pending_count(), 1, "earlier caller did not park");
+
+    // Rejecting the returned connection releases only capacity, not an entry
+    // that can be handed directly to the queue head. Leave that woken head
+    // unpolled, then introduce a fresh caller. FIFO requires the newcomer to
+    // park behind it instead of reserving the free slot.
+    drop(held);
+    assert_eq!(pool.total_count(), 0, "rejected return kept its slot");
+
+    let mut later = Box::pin(pool.get());
+    assert!(
+        poll_once(later.as_mut()).is_pending(),
+        "fresh caller completed before the capacity-woken FIFO head"
+    );
+    assert_eq!(
+        pool.total_count(),
+        0,
+        "fresh caller reserved capacity ahead of the FIFO head"
+    );
+    assert_eq!(
+        pool.pending_count(),
+        2,
+        "fresh caller did not park behind the capacity-woken FIFO head"
+    );
+
+    let earlier_client = earlier
+        .await
+        .expect("capacity-woken FIFO head failed to connect");
+    assert_eq!(pool.active_count(), 1);
+    drop(earlier_client);
+
+    let later_client = later.await.expect("successor failed to acquire");
+    assert_eq!(pool.active_count(), 1);
+    drop(later_client);
+
+    assert_eq!(pool.pending_count(), 0);
+    assert_eq!(pool.active_count(), 0);
+    assert_eq!(pool.idle_count(), 0);
+    assert_eq!(pool.total_count(), 0);
+    pool.close().await;
+}
+
+#[compio::test]
 async fn cancelling_parked_waiter_preserves_handoff_and_capacity() {
     let url = test_url();
     let pool = connect_pool(&url, config(1, 1)).await;
