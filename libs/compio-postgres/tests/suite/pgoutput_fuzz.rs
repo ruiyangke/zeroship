@@ -383,28 +383,30 @@ fn a_hostile_pgoutput_body_is_refused_rather_than_fatal() {
 /// be misparsed - a single bad frame poisoning the rest of the stream.
 ///
 /// WHAT THIS DOES NOT CATCH: it does not assert the decoder's state is
-/// UNCHANGED by a rejected frame, only that a well-formed frame still decodes
-/// afterwards. Pinning the state itself would need an accessor the type does
-/// not expose.
+/// UNCHANGED by a rejected frame; the counted unit regression for invalid
+/// stream boundaries pins that directly. This corpus proves only that a valid
+/// start/stop pair still works after arbitrary input.
 #[test]
 fn a_rejected_frame_leaves_the_stateful_decoder_usable() {
     let mut rng = Rng::new(0xfeed_beef_dead_c0de);
     let mut decoder = pgoutput::Decoder::new();
     let mut survived = 0u32;
 
-    // `StreamStop` is the shortest well-formed message there is: a bare tag.
-    // After every hostile frame it must still decode, or the decoder has been
-    // wedged by the frame before it.
     for _ in 0..512 {
         let hostile = tagged_case(&mut rng);
         let _ = decoder.decode(&hostile);
 
+        if decoder.stream_xid().is_some() {
+            decoder
+                .decode(b"E")
+                .expect("an open block remains stoppable after hostile input");
+        }
+        decoder
+            .decode(&stream_start(0x000a_b400))
+            .expect("a block still starts after hostile input");
         match decoder.decode(b"E") {
             Ok(PgOutputMessage::StreamStop) => survived += 1,
-            other => panic!(
-                "a hostile frame wedged the decoder: a bare StreamStop then \
-                 decoded as {other:?}"
-            ),
+            other => panic!("a hostile frame wedged a valid start/stop probe: {other:?}"),
         }
     }
 
@@ -472,11 +474,17 @@ fn sequence(rng: &mut Rng) -> Vec<Vec<u8>> {
                     frames.push(body);
                 }
             }
-            frames.push(match rng.below(3) {
-                0 => vec![b'E'],
-                1 => stream_commit(xid),
-                _ => stream_abort(xid, xid + 1),
-            });
+            match rng.below(3) {
+                0 => frames.push(vec![b'E']),
+                1 => {
+                    frames.push(vec![b'E']);
+                    frames.push(stream_commit(xid));
+                }
+                _ => {
+                    frames.push(vec![b'E']);
+                    frames.push(stream_abort(xid, xid + 1));
+                }
+            }
             frames
         }
         // Framing deliberately wrong.
@@ -519,10 +527,9 @@ struct SequenceReach {
 /// subtransaction's xid and was rejected. `tests/pgoutput_subtransactions.rs`
 /// pins that against a live server. This pins it against a corpus.
 ///
-/// WHAT THIS DOES NOT CATCH: it does not assert that a malformed ORDER is
-/// refused. Some orders concern transaction application rather than the
-/// layout of one frame, so demanding an error here would be a claim about the
-/// decoder's policy rather than about memory-safe parsing.
+/// WHAT THIS DOES NOT CATCH: transaction lifecycle policy beyond the currently
+/// open block. Xid history, first-segment history, and prepare/commit pairing
+/// belong to an apply engine, not to the codec state that selects wire layout.
 #[test]
 fn a_hostile_pgoutput_sequence_is_refused_rather_than_fatal() {
     let mut rng = Rng::new(0x51ea_d0a1_b2c3_d4e5);
@@ -560,12 +567,22 @@ fn a_hostile_pgoutput_sequence_is_refused_rather_than_fatal() {
             }
         }
 
-        // A bad sequence must not wedge the decoder. `StreamStop` is the
-        // shortest well-formed frame there is.
-        assert!(
-            matches!(decoder.decode(b"E"), Ok(PgOutputMessage::StreamStop)),
-            "a sequence wedged the decoder"
-        );
+        // Normalize any legitimately open block, then prove a complete new
+        // block can still cross both state transitions.
+        if decoder.stream_xid().is_some() {
+            assert!(matches!(
+                decoder.decode(b"E"),
+                Ok(PgOutputMessage::StreamStop)
+            ));
+        }
+        assert!(matches!(
+            decoder.decode(&stream_start(0x000a_b500)),
+            Ok(PgOutputMessage::StreamStart { .. })
+        ));
+        assert!(matches!(
+            decoder.decode(b"E"),
+            Ok(PgOutputMessage::StreamStop)
+        ));
     }
 
     println!(
