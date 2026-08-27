@@ -534,6 +534,13 @@ impl PoolEntry {
             .load(std::sync::atomic::Ordering::Acquire)
             == crate::connection::READ_RETIRED_STATUS
     }
+
+    fn ineligibility_error(&self, fallback: impl FnOnce() -> Error) -> Error {
+        self.client
+            .inner()
+            .terminal_server_error()
+            .unwrap_or_else(fallback)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -970,13 +977,16 @@ impl Pool {
                         return Err(e);
                     }
                     if !entry.is_pool_eligible() {
+                        let error = entry.ineligibility_error(|| {
+                            pool_error(format!(
+                                "warm-up after_connect left connection {} unusable after {i} \
+                                 successful connection(s)",
+                                i + 1
+                            ))
+                        });
                         drop(entry);
                         drop(entries);
-                        return Err(pool_error(format!(
-                            "warm-up after_connect left connection {} unusable after {i} \
-                             successful connection(s)",
-                            i + 1
-                        )));
+                        return Err(error);
                     }
                     entries.push(entry);
                 }
@@ -994,11 +1004,14 @@ impl Pool {
         // per-entry post-hook check cannot prove that those earlier entries
         // remained open, read-healthy, COPY-free, and inside their lifetime.
         if let Some(index) = entries.iter().position(|entry| !entry.is_pool_eligible()) {
+            let error = entries[index].ineligibility_error(|| {
+                pool_error(format!(
+                    "warm-up connection {} became unusable before pool publication",
+                    index + 1
+                ))
+            });
             drop(entries);
-            return Err(pool_error(format!(
-                "warm-up connection {} became unusable before pool publication",
-                index + 1
-            )));
+            return Err(error);
         }
 
         let total = entries.len();
@@ -1372,9 +1385,9 @@ impl Pool {
                 }
                 if !entry.is_pool_eligible() {
                     self.metrics.inc_evictions();
-                    return Err(pool_error(
-                        "after_connect left the new pool connection unusable",
-                    ));
+                    return Err(entry.ineligibility_error(|| {
+                        pool_error("after_connect left the new pool connection unusable")
+                    }));
                 }
                 // `before_acquire` is deliberately NOT run here. It is a
                 // recycling check -- "is this idle connection still fit to
@@ -1853,13 +1866,17 @@ impl Pool {
                     }
 
                     if !entry.is_pool_eligible() {
+                        let error = entry.ineligibility_error(|| {
+                            pool_error("after_connect left connection unusable")
+                        });
                         if let Some(pool) = weak.upgrade()
                             && !pool.closed.get()
                         {
                             pool.metrics.inc_evictions();
                         }
                         eprintln!(
-                            "[compio-postgres] housekeeper: after_connect left connection unusable"
+                            "[compio-postgres] housekeeper: after_connect left connection \
+                             unusable: {error:?}"
                         );
                         // `entry` closes and `permit` releases the reserved
                         // slot before the next housekeeper tick.
