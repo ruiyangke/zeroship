@@ -19,7 +19,7 @@ use crate::diff::LiveSchema;
 use crate::error::DbError;
 
 use super::{
-    DialectBuilder, FullTextIndex, GeoPoint, LockManager, PgSqlExecutor,
+    DialectBuilder, GeoPoint, LockManager, PgSqlExecutor,
     SpatialIndex, SqlExecutor, VectorIndex, VectorMetric,
 };
 #[cfg(any(test, feature = "test-helpers"))]
@@ -89,7 +89,7 @@ impl PostgresBackend {
     ///
     /// Do not call this from inside a `context::with` / `with_mut`
     /// closure - it takes a context borrow of its own.
-    /// `IsolateDbContext::set_pool` uses `new_with_key_source` for
+    /// `ThreadDbContext::set_pool` uses `new_with_key_source` for
     /// exactly that reason.
     pub fn new(pool: Rc<compio_postgres::Pool>, url: String) -> Self {
         // Wire the column-key store. We clone the `Rc<Pool>`
@@ -105,7 +105,7 @@ impl PostgresBackend {
     /// Build a backend handle with an explicit column-key source.
     ///
     /// The isolate context uses this to hand a backend the root keys the
-    /// host installed (`IsolateDbContext::local_key_source`) instead of
+    /// host installed (`ThreadDbContext::local_key_source`) instead of
     /// the process environment.
     pub fn new_with_key_source(
         pool: Rc<compio_postgres::Pool>,
@@ -156,21 +156,60 @@ impl PostgresBackend {
 // ---------------------------------------------------------------------------
 
 impl SqlExecutor for PostgresBackend {
-    type Client = compio_postgres::Client;
+    type Client = compio_postgres::OwnedPooledClient;
 
+    /// Check a connection out of the pool for the caller's own use.
+    ///
+    /// **This is a capacity-model change, not a refactor.** Until 2026-08-27
+    /// this opened a brand new TCP connection per transaction with
+    /// `compio_postgres::connect` and a detached task per connection - it never
+    /// touched the pool. The concurrent-transaction ceiling was therefore
+    /// *unbounded*, and a worker multiplexing ~200 apps that each open a
+    /// transaction opened ~200 backends. That is a way to exhaust a cluster's
+    /// `max_connections` from one worker, which takes every tenant down rather
+    /// than slowing one. Operator decision, 2026-08-27: connections always come
+    /// from a pool.
+    ///
+    /// The inversion is real and is stated rather than discovered: a
+    /// transaction that used to get a connection now **queues**, and the pool
+    /// size is the ceiling for the whole worker.
+    ///
+    /// ## Policy chosen here, and OWED to a later decision
+    ///
+    /// Three questions are deliberately not settled by the design, and this
+    /// code takes the conservative option on each rather than inventing an
+    /// answer. Each is owed a decision before this ships to a real tenant:
+    ///
+    /// 1. **Ceiling** - the shared data pool's `max_size` (`lib.rs`:
+    ///    `Pool::connect(&url, 8)`). Conservative because it adds no new
+    ///    connections to what the process already opens. A dedicated
+    ///    transaction pool would raise the total and needs a sizing decision.
+    /// 2. **Exhaustion** - queue on the pool's existing `acquire_timeout`
+    ///    rather than refuse immediately. Conservative because a bounded wait
+    ///    degrades to the previous behaviour under light load and refuses only
+    ///    when the wait genuinely expires. It is NOT yet tied to SC-1's
+    ///    deadline; when that lands, the acquire wait must be inside it.
+    /// 3. **Starvation** - one app CAN now starve others: the pool is shared,
+    ///    the queue is FIFO across apps, and nothing here is per-app. The
+    ///    unbounded model made this impossible. No per-app fairness is
+    ///    implemented, because inventing one would settle a question the
+    ///    design explicitly left open.
     async fn acquire_dedicated_client(&self) -> Result<Self::Client, DbError> {
-        let (client, connection) = compio_postgres::connect(&self.url, compio_postgres::NoTls)
-            .await
-            .map_err(|e| DbError::Transient {
-                message: format!("db: backend connect failed: {e}"),
-            })?;
-        compio::runtime::spawn(async move {
-            if let Err(e) = connection.run().await {
-                tracing::error!(error = ?e, "db: backend connection task error");
+        self.pool.get_owned().await.map_err(|e| {
+            // Walk the source chain. The pool renders an exhausted acquire as
+            // the generic "error connecting to server" wrapper and puts
+            // "connection timeout after 400ms (pool: 0/1 idle, 1/1 total)" in
+            // its source - so the bare Display tells an operator the server is
+            // unreachable when what actually happened is that this worker hit
+            // its own ceiling. Those need different responses.
+            let mut message = format!("db: pooled checkout for a dedicated client failed: {e}");
+            let mut cur: &dyn std::error::Error = &e;
+            while let Some(source) = std::error::Error::source(cur) {
+                message.push_str(&format!(" - caused by: {source}"));
+                cur = source;
             }
+            DbError::Transient { message }
         })
-        .detach();
-        Ok(client)
     }
 
     async fn pool_exec(&self, sql: &str, params: &[&str]) -> Result<u64, DbError> {
@@ -529,202 +568,6 @@ impl VectorIndex for PostgresBackend {
 }
 
 // ---------------------------------------------------------------------------
-// FullTextIndex — tsvector + GIN + tsvector_update_trigger
-// ---------------------------------------------------------------------------
-//
-// Two methods:
-//   * `ensure_fts_index` — four idempotent statements:
-//       1. ADD COLUMN IF NOT EXISTS "__fts" tsvector
-//       2. backfill the column for rows where it's NULL
-//       3. CREATE INDEX CONCURRENTLY IF NOT EXISTS "..."__fts_idx
-//          USING GIN ("__fts")
-//       4. CREATE TRIGGER "..."__fts_trg BEFORE INSERT OR UPDATE OF
-//          <cols> EXECUTE FUNCTION tsvector_update_trigger(...)
-//   * `fts_search` — `WHERE __fts @@ plainto_tsquery($1) ORDER BY
-//     ts_rank(__fts, plainto_tsquery($1)) DESC LIMIT $2`.
-//
-// No extension probe: tsvector + GIN + plainto_tsquery +
-// tsvector_update_trigger are all part of core Postgres — they ship in
-// every supported PG image, including the `postgres:16` default. No
-// `CREATE EXTENSION` needed.
-// ---------------------------------------------------------------------------
-
-impl FullTextIndex for PostgresBackend {
-    #[cfg(any(test, feature = "test-helpers"))]
-    async fn ensure_fts_index(
-        &self,
-        app_id: &str,
-        collection: &str,
-        columns: &[String],
-        language: &str,
-    ) -> Result<(), DbError> {
-        if columns.is_empty() {
-            // Nothing to index. Refuse loudly so a SDK bug emitting an
-            // empty FTS index spec gets surfaced rather than silently
-            // becoming a no-op (which would later present as "search
-            // returns nothing" without any logged cause).
-            return Err(DbError::Configuration {
-                code: "fts_no_columns",
-                message: "db: ensure_fts_index requires at least one source column"
-                    .to_string(),
-                hint: Some(
-                    "mark at least one t.string() field with `.fts()` in the schema"
-                        .to_string(),
-                ),
-            });
-        }
-
-        // Whitelist the language token against the same character set we
-        // allow in identifiers — splicing it into a SQL literal is safe
-        // because plainto_tsquery accepts it verbatim, but we still
-        // reject anything that smells of injection. The SDK already
-        // restricts the language token at validate time; this is
-        // defense-in-depth.
-        if language.is_empty()
-            || !language
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_')
-        {
-            return Err(DbError::Configuration {
-                code: "fts_invalid_language",
-                message: format!(
-                    "db: ensure_fts_index language {language:?} must be [A-Za-z0-9_]+"
-                ),
-                hint: Some("use a tsvector configuration name such as 'english' or 'simple'".to_string()),
-            });
-        }
-
-        // DB-9: validate every FTS source column with the identifier fence
-        // BEFORE it is spliced UNQUOTED into the `tsvector_update_trigger` arg
-        // list below. That arg list requires bare column names, so quoting is
-        // not an option — validation is the only guard. Today CreateTable
-        // validates these columns first, but that is a non-local cross-statement
-        // ordering invariant; enforce it locally so a direct or FTS-only
-        // re-apply against an unvalidated spec can't inject DDL via a column name.
-        validate_fts_columns(columns)?;
-
-        let qschema = self.quote_ident(app_id);
-        let qcoll = self.quote_ident(collection);
-        let qtable = format!("{qschema}.{qcoll}");
-        // Derived, so NAMEDATALEN-capped — and derived by the SAME functions
-        // `zeroship_schema::query::build_create_indexes` uses, so the name this
-        // executor creates is the name the planner emitted. A local `format!`
-        // here is exactly how the two would drift apart.
-        let idx_name = zeroship_schema::query::fts_index_name(collection);
-        let trg_name = zeroship_schema::query::fts_trigger_name(collection);
-        let qidx = self.quote_ident(&idx_name);
-        let qtrg = self.quote_ident(&trg_name);
-        let qfts_col = self.quote_ident("__fts");
-
-        // For the tsvector backfill + trigger we need both the unquoted
-        // form (passed as a positional arg to `tsvector_update_trigger`)
-        // and the safely-quoted form (spliced into the UPDATE / column
-        // list). The trigger function only accepts column NAMES (not
-        // dotted identifiers), so the unquoted form is what PG expects
-        // there.
-        let qcols_csv: String = columns
-            .iter()
-            .map(|c| self.quote_ident(c))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let unquoted_cols_csv: String = columns.join(", ");
-        let coalesce_concat: String = columns
-            .iter()
-            .map(|c| format!("coalesce({}, '')", self.quote_ident(c)))
-            .collect::<Vec<_>>()
-            .join(" || ' ' || ");
-
-        let empty: Vec<&str> = Vec::new();
-
-        // 1. Add the tsvector column. Idempotent via IF NOT EXISTS.
-        let add_col_sql =
-            format!("ALTER TABLE {qtable} ADD COLUMN IF NOT EXISTS {qfts_col} tsvector");
-        self.pool
-            .query_text_params(&add_col_sql, &empty)
-            .await
-            .map_err(|e| DbError::from_pg(&e))?;
-
-        // 2. Backfill rows where the tsvector column is still NULL.
-        //    A second registerModel call after schema change re-runs the
-        //    backfill on any rows where new source columns nulled the
-        //    derived value, but typical case is the post-ADD-COLUMN seed.
-        let backfill_sql = format!(
-            "UPDATE {qtable} SET {qfts_col} = to_tsvector('pg_catalog.{language}', {coalesce_concat}) WHERE {qfts_col} IS NULL"
-        );
-        self.pool
-            .query_text_params(&backfill_sql, &empty)
-            .await
-            .map_err(|e| DbError::from_pg(&e))?;
-
-        // 3. CREATE INDEX CONCURRENTLY. We do NOT route through the
-        //    audited retry loop here because the GIN over tsvector index
-        //    cannot land INVALID the same way ivfflat can (no NULL-key
-        //    edge cases). Idempotent via IF NOT EXISTS.
-        let cic_sql = format!(
-            "CREATE INDEX CONCURRENTLY IF NOT EXISTS {qidx} ON {qtable} USING GIN ({qfts_col})"
-        );
-        self.pool
-            .query_text_params(&cic_sql, &empty)
-            .await
-            .map_err(|e| DbError::from_pg(&e))?;
-
-        // 4. CREATE TRIGGER. Idempotent via DROP TRIGGER IF EXISTS +
-        //    CREATE TRIGGER (PG 14+ supports `CREATE OR REPLACE TRIGGER`
-        //    but we stay compatible with PG 13/14 minimum since the
-        //    rest of the codebase doesn't pin a higher minimum).
-        let drop_trg_sql = format!("DROP TRIGGER IF EXISTS {qtrg} ON {qtable}");
-        self.pool
-            .query_text_params(&drop_trg_sql, &empty)
-            .await
-            .map_err(|e| DbError::from_pg(&e))?;
-        // tsvector_update_trigger args:
-        //   1. target column NAME (unquoted, but the trigger function
-        //      tokenises by identifier rules — quoting with the standard
-        //      identifier syntax is safe).
-        //   2. text-cast config name (we pin pg_catalog.<lang> so the
-        //      config resolution is deterministic regardless of search_path).
-        //   3..n. source column names (unquoted; the trigger reads the
-        //      NEW row by name).
-        let create_trg_sql = format!(
-            "CREATE TRIGGER {qtrg} BEFORE INSERT OR UPDATE OF {qcols_csv} \
-             ON {qtable} FOR EACH ROW EXECUTE FUNCTION \
-             tsvector_update_trigger(__fts, 'pg_catalog.{language}', {unquoted_cols_csv})"
-        );
-        self.pool
-            .query_text_params(&create_trg_sql, &empty)
-            .await
-            .map_err(|e| DbError::from_pg(&e))?;
-
-        Ok(())
-    }
-
-    async fn fts_search(
-        &self,
-        app_id: &str,
-        collection: &str,
-        query: &str,
-        filter: &serde_json::Value,
-        limit: Option<usize>,
-    ) -> Result<Vec<serde_json::Value>, DbError> {
-        let schema_hint = crate::context::with(|c| c.schema_for(app_id, collection));
-        let bq = crate::query::build_fts_search(
-            app_id,
-            collection,
-            query,
-            filter,
-            limit,
-            schema_hint.as_ref(),
-        )
-        .map_err(DbError::from)?;
-        let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-        let rows =
-            crate::exec::query_postgres_pool_with_autocommit_role(&self.pool, app_id, &bq.sql, &param_refs)
-                .await?;
-        Ok(crate::v8_bridge::rows_to_json_value(&rows))
-    }
-}
-
-// ---------------------------------------------------------------------------
 // SpatialIndex — PostGIS adapter
 // ---------------------------------------------------------------------------
 //
@@ -857,13 +700,13 @@ impl SpatialIndex for PostgresBackend {
 
 #[cfg(any(test, feature = "test-helpers"))]
 impl PgLockManager for PostgresBackend {
-    async fn acquire_pooled_client_for_lock<'p>(
-        &'p self,
-    ) -> Result<compio_postgres::PooledClient<'p>, DbError> {
+    async fn acquire_pooled_client_for_lock(
+        &self,
+    ) -> Result<compio_postgres::OwnedPooledClient, DbError> {
         // Mirror the pre-PR-3 inline call site at
-        // `register_model/bootstrap.rs:103`: pool.get() with the same
+        // `register_model/bootstrap.rs:103`: a pool checkout with the same
         // operator-facing error message so log lines stay grep-able.
-        self.pool.get().await.map_err(|e| DbError::Transient {
+        self.pool.get_owned().await.map_err(|e| DbError::Transient {
             message: format!("db: failed to acquire orchestrator client: {e}"),
         })
     }
@@ -1865,16 +1708,6 @@ mod backup_pg {
     }
 }
 
-/// DB-9: validate FTS source column names with the shared identifier fence
-/// before they are spliced unquoted into the `tsvector_update_trigger` DDL.
-#[cfg(any(test, feature = "test-helpers"))]
-fn validate_fts_columns(columns: &[String]) -> Result<(), DbError> {
-    for col in columns {
-        crate::query::validate_field_name(col).map_err(DbError::from)?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     //! Unit tests for [`PostgresBackend`].
@@ -1907,7 +1740,7 @@ mod tests {
     //!    up so any future bound change to `Backend` (adding a method,
     //!    tightening a lifetime, swapping an associated type) fails
     //!    compilation here, not at a distant call site.
-    //! 2. Associated-type identities — pin `Client = compio_postgres::Client`
+    //! 2. Associated-type identities — pin `Client = compio_postgres::OwnedPooledClient`
     //!    and `LiveSchema = crate::diff::LiveSchema` so a refactor that
     //!    accidentally swaps either is caught here.
     //! 3. The `Backend: 'static` bound on the trait — re-asserted at
@@ -1938,10 +1771,10 @@ mod tests {
     /// the omnibus trait or detaches the impl block fails here at
     /// build time.
     fn assert_postgres_backend_impls_sub_traits() {
-        fn impls_sql_executor<T: SqlExecutor<Client = compio_postgres::Client>>() {}
-        fn impls_lock_manager<T: LockManager<Client = compio_postgres::Client>>() {}
+        fn impls_sql_executor<T: SqlExecutor<Client = compio_postgres::OwnedPooledClient>>() {}
+        fn impls_lock_manager<T: LockManager<Client = compio_postgres::OwnedPooledClient>>() {}
         fn impls_schema_introspect<T: SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>>() {}
-        fn impls_index_builder<T: IndexBuilder<Client = compio_postgres::Client>>() {}
+        fn impls_index_builder<T: IndexBuilder<Client = compio_postgres::OwnedPooledClient>>() {}
         fn impls_pg_sql_executor<T: PgSqlExecutor>() {}
         fn impls_pg_lock_manager<T: PgLockManager>() {}
         fn impls_register_backend<T: RegisterBackend>() {}
@@ -1972,16 +1805,6 @@ mod tests {
     // PgDialect hook unit tests. ZST has no I/O -- each test
     // is a string-compare against the expected SQL fragment.
     // ---------------------------------------------------------------------
-
-    #[test]
-    fn validate_fts_columns_rejects_unsafe_names_db9() {
-        // Normal FTS source columns pass.
-        assert!(super::validate_fts_columns(&["title".into(), "body".into()]).is_ok());
-        // A column name that would break out of the unquoted trigger arg list
-        // (or carry a null byte) is rejected before any DDL is built.
-        assert!(super::validate_fts_columns(&["body); DROP TABLE x; --".into()]).is_err());
-        assert!(super::validate_fts_columns(&["a\u{0}b".into()]).is_err());
-    }
 
     #[test]
     fn pg_dialect_quote_ident_doubles_embedded_quote() {
@@ -2031,7 +1854,7 @@ mod tests {
     /// `SchemaIntrospect<LiveSchema = LiveSchema>` re-anchors it so
     /// `Backend<LiveSchema = …>` still resolves here.
     fn assert_postgres_backend_assoc_types() {
-        fn same_client<T: Backend<Client = compio_postgres::Client>>() {}
+        fn same_client<T: Backend<Client = compio_postgres::OwnedPooledClient>>() {}
         fn same_live_schema<T: Backend<LiveSchema = crate::diff::LiveSchema>>() {}
         same_client::<PostgresBackend>();
         same_live_schema::<PostgresBackend>();

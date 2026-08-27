@@ -596,9 +596,11 @@ pub const MAX_QUERY_LIMIT: i64 = 500;
 pub const MAX_QUERY_OFFSET: i64 = 10_000;
 pub const MAX_SEARCH_LIMIT: usize = 500;
 /// DB-11: max documents in a single `insertMany`. Bounds the multi-row SQL
-/// string + bound-param vector materialized in the worker (and stays well
-/// under Postgres' 65535-bind-param wall). Callers needing more must chunk.
+/// string and row bookkeeping materialized in the worker. Bind parameters are
+/// capped separately because this document count says nothing about row width.
 pub const MAX_INSERT_MANY_BATCH: usize = 1_000;
+const POSTGRES_MAX_BIND_PARAMETERS: usize = u16::MAX as usize;
+const SQLITE_MAX_BIND_PARAMETERS: usize = 32_766;
 const MAX_FILTER_NESTING_DEPTH: usize = 16;
 const MAX_FILTER_CLAUSE_COUNT: usize = 128;
 const MAX_MEMBERSHIP_LIST_LEN: usize = 100;
@@ -734,8 +736,8 @@ pub const SYSTEM_FIELD_NAMES: &[&str] = &[
 /// validator (the latter fences `db.users.find({ ssn_masked: ... })`
 /// with the same error code path).
 pub(crate) const RESERVED_NAMES: &[ReservedName] = &[
-    // Synthetic-result columns the runtime emits (e.g. `_rank`,
-    // `_score` on FTS / vector search). Reserved so creator-declared
+    // Synthetic-result columns the runtime emits (e.g. `_distance`
+    // on vector search). Reserved so creator-declared
     // columns can't shadow them.
     ReservedName::Prefix("_"),
     // Platform bookkeeping table prefixes. Mirrors the
@@ -1730,9 +1732,9 @@ pub fn build_add_column(
 /// must not be retried — see the INVALID-index recovery path).
 ///
 /// `kind` carries the index *shape* — B-tree (the default for
-/// every call site), vector (pgvector / Rust flat-scan), full-text
-/// (tsvector+GIN on PG, FTS5 on SQLite), or spatial (PostGIS GIST on PG,
-/// haversine post-filter on SQLite). The default is [`IndexKind::BTree`]
+/// every call site), vector (pgvector / Rust flat-scan), or spatial
+/// (PostGIS GIST on PG, haversine post-filter on SQLite). The default is
+/// [`IndexKind::BTree`]
 /// so existing call sites that build B-tree indexes (`build_create_indexes`,
 /// `build_named_indexes`) need no churn — they construct with explicit
 /// fields including `kind: IndexKind::BTree` to stay readable, but
@@ -1748,21 +1750,21 @@ pub struct IndexSpec {
     /// `CREATE …` DDL ready for execution.
     pub sql: String,
     /// Index shape — selects the backend builder branch, wiring
-    /// `Vector` / `Fts` / `Spatial` dispatch through the
+    /// `Vector` / `Spatial` dispatch through the
     /// `zeroship_plugin_db::register_model::apply` Pass 2.
     pub kind: IndexKind,
 }
 
-/// Index shape — the closed sum over the four kinds of indexes
+/// Index shape - the closed sum over the three kinds of indexes
 /// `registerModel` can materialise.
 ///
 /// The default is [`IndexKind::BTree`] so every call site keeps
-/// the same observable behaviour; `Vector` / `Fts` /
-/// `Spatial` dispatch is wired through the `zeroship_plugin_db::register_model::apply` Pass 2.
+/// the same observable behaviour; `Vector` / `Spatial` dispatch is wired
+/// through the `zeroship_plugin_db::register_model::apply` Pass 2.
 ///
 /// **Why an enum, not a string**: same rationale as
-/// [`crate::descriptors::VectorMetric`] — the rustc exhaustiveness check
-/// trips every match arm if a future PR adds a fifth kind, rather
+/// [`crate::descriptors::VectorMetric`] - the rustc exhaustiveness check
+/// trips every match arm if a future PR adds a fourth kind, rather
 /// than a default branch silently routing the new kind to the B-tree
 /// builder.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1783,13 +1785,6 @@ pub enum IndexKind {
         dims: i32,
         /// Distance metric — see [`crate::descriptors::VectorMetric`].
         metric: crate::descriptors::VectorMetric,
-    },
-    /// Full-text index. `language` is the tsvector configuration
-    /// (`english`, `simple`, …) on PG; SQLite FTS5 ignores it (its
-    /// default tokenizer is language-agnostic Unicode).
-    Fts {
-        /// Tokeniser language. Honoured on PG; ignored on SQLite.
-        language: String,
     },
     /// Spatial index over a `geography(POINT, 4326)` (PG) or BLOB-
     /// packed `(lat, lng)` (SQLite) column. PG: `USING GIST`;
@@ -1827,21 +1822,6 @@ pub fn build_create_indexes(
 
     let table_qualified = format!("{}.{}", quote_ident(app_id), quote_ident(collection));
 
-    // Accumulate FTS-marked columns into a single composite
-    // index per collection. The SDK's
-    // `.fts()` per-field modifier sets `def.fts = true; def.ftsLanguage =
-    // <lang>` on each text column; we collect those into one
-    // `IndexSpec { kind: Fts { language } }` after the per-field loop.
-    //
-    // **Language**: every `.fts()`-marked column must agree on the
-    // language token (a single `__fts` tsvector column can only carry
-    // one config). We pick the first non-empty language we see and
-    // ignore mismatches at this layer; the SDK is expected to validate
-    // language consistency at schema-definition time. If no language is
-    // declared the fallback is `english`.
-    let mut fts_cols: Vec<String> = Vec::new();
-    let mut fts_language: Option<String> = None;
-
     for (field, def) in obj {
         // Skip top-level metadata keys (`_meta`,
         // `_indexes`) so the `_` reserved-prefix check in
@@ -1864,24 +1844,6 @@ pub fn build_create_indexes(
                 kind: IndexKind::Spatial,
             });
             continue;
-        }
-
-        // Collect FTS-marked text columns. A column is
-        // FTS-marked when `def.fts === true`; the language defaults to
-        // `english` (matches the SDK default in `t.string().fts()`).
-        if def.get("fts").and_then(|v| v.as_bool()) == Some(true) {
-            fts_cols.push(field.clone());
-            if fts_language.is_none() {
-                if let Some(lang) = def.get("ftsLanguage").and_then(|v| v.as_str()) {
-                    if !lang.is_empty() {
-                        fts_language = Some(lang.to_string());
-                    }
-                }
-            }
-            // Fall through — an FTS-marked column can also carry an
-            // `index: true` or `unique: true` modifier and the user
-            // still wants the B-tree alongside the FTS index. The
-            // composite FTS index is emitted once after the loop.
         }
 
         // Vector fields always emit an `IndexKind::Vector`
@@ -2043,22 +2005,6 @@ pub fn build_create_indexes(
         }
     }
 
-    // Emit a single composite FTS spec covering every
-    // `.fts()`-marked column on this collection (Q-P4-B). The PG impl
-    // builds the `__fts tsvector` column + GIN index + trigger; the
-    // `sql` field stays empty because the impl builds its own DDL.
-    if !fts_cols.is_empty() {
-        let language = fts_language.unwrap_or_else(|| "english".to_string());
-        let name = fts_index_name(collection);
-        out.push(IndexSpec {
-            name,
-            columns: fts_cols,
-            unique: false,
-            sql: String::new(),
-            kind: IndexKind::Fts { language },
-        });
-    }
-
     Ok(out)
 }
 
@@ -2167,35 +2113,6 @@ pub fn build_named_indexes(
 /// crate's single identifier cap.
 pub fn named_index_name(collection: &str, name: &str) -> String {
     cap_ident_name(&format!("{collection}__{name}"))
-}
-
-/// The Postgres GIN index over a collection's `__fts` tsvector column.
-///
-/// Shared with plugin-db's Postgres backend, which executes the
-/// `CREATE INDEX CONCURRENTLY IF NOT EXISTS` this name goes into: the planner
-/// side (`build_create_indexes`) and the executor side must derive the SAME
-/// name or the executor builds an index the planner never asked for.
-///
-/// Capping matters more here than anywhere else: for a collection at the
-/// 63-byte ceiling the natural `<coll>__fts_idx` truncates to exactly the
-/// collection name, and Postgres indexes share the `pg_class` namespace with
-/// tables — so `IF NOT EXISTS` would find the TABLE and skip, leaving the app
-/// with no full-text index and no error.
-#[must_use]
-pub fn fts_index_name(collection: &str) -> String {
-    cap_ident_name(&format!("{collection}__fts_idx"))
-}
-
-/// The Postgres `BEFORE INSERT OR UPDATE` trigger that maintains a collection's
-/// `__fts` tsvector column.
-///
-/// Trigger names are scoped per-table in Postgres, so an over-long name cannot
-/// collide across collections the way an index name can. It is capped anyway:
-/// `DROP TRIGGER IF EXISTS` and any catalog lookup have to spell the name the
-/// same way the server stored it, and a server-truncated name does not.
-#[must_use]
-pub fn fts_trigger_name(collection: &str) -> String {
-    cap_ident_name(&format!("{collection}__fts_trg"))
 }
 
 /// Build a deterministic Postgres index name from a table name and columns.
@@ -2928,6 +2845,40 @@ pub fn build_find(
     build_find_with_schema(app_id, collection, filter, limit, offset, order_by, select, None)
 }
 
+/// Build the bounded id probe used before a write fans out per matching row.
+///
+/// The caller supplies an explicit bound. `updateMany` asks for one row above
+/// [`MAX_QUERY_LIMIT`] so it can distinguish an exactly-full target set from
+/// an overflowing one; `updateOne` asks for one. This is deliberately separate
+/// from creator-facing `find`, whose public limit remains `MAX_QUERY_LIMIT`.
+pub fn build_write_target_probe(
+    app_id: &str,
+    collection: &str,
+    filter: &Value,
+    limit: i64,
+    dialect: SqlDialect,
+) -> Result<BuiltQuery, QueryError> {
+    let select = serde_json::json!(["id"]);
+    let mut built = build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceiling(
+        app_id,
+        collection,
+        filter,
+        Some(limit),
+        None,
+        None,
+        Some(&select),
+        None,
+        &[],
+        false,
+        dialect,
+        MAX_QUERY_LIMIT + 1,
+    )?;
+    if dialect == SqlDialect::Postgres {
+        built.sql.push_str(" FOR UPDATE");
+    }
+    Ok(built)
+}
+
 pub fn build_conflict_probe_with_dialect(
     app_id: &str,
     collection: &str,
@@ -2994,7 +2945,7 @@ pub fn build_conflict_probe_with_dialect(
 /// Schema-aware SELECT builder.
 ///
 /// Same shape as [`build_find`], plus an optional `schema` (the cached
-/// `serde_json::Value` from `IsolateDbContext::schema_for`). When the
+/// `serde_json::Value` from `ThreadDbContext::schema_for`). When the
 /// schema is `Some(_)` and declares masked columns (`def.mask = Some({...})`
 /// with `kind != "none"`), the SELECT clause emits
 /// `"<col>_masked" AS "<col>"` in place of the bare parent column, and
@@ -3125,6 +3076,37 @@ pub fn build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
     filter_soft_deleted: bool,
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
+    build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceiling(
+        app_id,
+        collection,
+        filter,
+        limit,
+        offset,
+        order_by,
+        select,
+        schema_hint,
+        unmask_columns,
+        filter_soft_deleted,
+        dialect,
+        MAX_QUERY_LIMIT,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceiling(
+    app_id: &str,
+    collection: &str,
+    filter: &Value,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    order_by: Option<&Value>,
+    select: Option<&Value>,
+    schema_hint: Option<&Value>,
+    unmask_columns: &[String],
+    filter_soft_deleted: bool,
+    dialect: SqlDialect,
+    limit_ceiling: i64,
+) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
 
@@ -3134,7 +3116,7 @@ pub fn build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
     let mut params: Vec<String> = Vec::new();
     let where_clause = build_where_with_dialect(filter, &mut params, dialect)?;
     if let Some(lim) = limit {
-        validate_limit_bound("find.limit", lim, MAX_QUERY_LIMIT)?;
+        validate_limit_bound("find.limit", lim, limit_ceiling)?;
     }
     if let Some(off) = offset {
         validate_limit_bound("find.offset", off, MAX_QUERY_OFFSET)?;
@@ -3257,9 +3239,9 @@ pub fn build_masked_aware_select_expr(
 /// cached schema.
 ///
 /// This is the specialized-search sibling of
-/// [`build_masked_aware_select_expr`]. The search paths (`search`,
-/// `fts`, `near`) all read from a table alias (`t`) and append one
-/// synthetic engine column (`_distance`, `_rank`, `_distance_m`). When
+/// [`build_masked_aware_select_expr`]. The search paths (`search`, `near`)
+/// read from a table alias (`t`) and append one synthetic engine column
+/// (`_distance`, `_distance_m`). When
 /// the cached schema declares any masked column, emitting `t.*` drifts
 /// back to the un-masked shape: the parent ciphertext/plaintext column
 /// rides out of SQL and only gets corrected later in the read pipeline.
@@ -3997,7 +3979,8 @@ pub fn build_update_one_with_system_fields(
 /// Build an INSERT query for multiple documents:
 /// `INSERT INTO "app_id"."collection" ("col1", "col2") VALUES ($1, $2), ($3, $4) RETURNING *`
 ///
-/// All docs must have the same column set (defined by the first document).
+/// Column names are unioned across documents; a missing or explicit null value
+/// is emitted as a SQL `NULL` literal and consumes no bind parameter.
 ///
 /// PG-flavour wrapper around [`build_insert_many_with_dialect`].
 pub fn build_insert_many(
@@ -4028,10 +4011,10 @@ pub fn build_insert_many_with_dialect(
         ));
     }
 
-    // DB-11: cap the batch BEFORE materializing the multi-row SQL + param vec,
-    // so one call can't slam a multi-MB statement at the shared DB or blow the
-    // worker heap. Enforced in the builder (the single choke point) so a raw
-    // `default={fetch}` deploy bypassing the SDK is bounded too.
+    // DB-11: cap the batch BEFORE materializing per-row SQL groups and params.
+    // This bounds only the document-count contribution; the non-null-cell
+    // budget below separately bounds placeholders. It makes no claim about
+    // total statement bytes. Enforced here so raw deploys cannot bypass it.
     if arr.len() > MAX_INSERT_MANY_BATCH {
         return Err(QueryError::InvalidFilter(format!(
             "insertMany batch of {} exceeds the maximum of {MAX_INSERT_MANY_BATCH}",
@@ -4060,15 +4043,23 @@ pub fn build_insert_many_with_dialect(
     // Skip every `__zsbin__*` marker key: they are a side-channel from
     // the write passes, not user-declared columns.
     let mut column_set = std::collections::BTreeSet::<&String>::new();
+    let mut bind_count = 0usize;
     for doc in arr {
         let obj = doc.as_object().ok_or_else(|| {
             QueryError::InvalidFilter("insertMany: each document must be an object".to_string())
         })?;
-        for key in obj.keys() {
+        for (key, value) in obj {
             if key.starts_with("__zsbin__") {
                 continue;
             }
             column_set.insert(key);
+            if !value.is_null() {
+                bind_count = bind_count.checked_add(1).ok_or_else(|| {
+                    QueryError::InvalidFilter(
+                        "insertMany: non-null field-value count overflowed".to_string(),
+                    )
+                })?;
+            }
         }
     }
 
@@ -4078,11 +4069,25 @@ pub fn build_insert_many_with_dialect(
         ));
     }
 
+    let (dialect_name, bind_limit) = match dialect {
+        SqlDialect::Postgres => ("PostgreSQL", POSTGRES_MAX_BIND_PARAMETERS),
+        SqlDialect::Sqlite => ("SQLite", SQLITE_MAX_BIND_PARAMETERS),
+        // MySQL's prepared-statement parameter count is also a 16-bit field.
+        // This dialect is render-only today, but keeping its builder bounded
+        // prevents a future executor from inheriting the same defect.
+        SqlDialect::Mysql => ("MySQL", POSTGRES_MAX_BIND_PARAMETERS),
+    };
+    if bind_count > bind_limit {
+        return Err(QueryError::InvalidFilter(format!(
+            "insertMany batch has {bind_count} non-null field values; one {dialect_name} insertMany call supports at most {bind_limit}; split the documents into smaller batches"
+        )));
+    }
+
     let column_names: Vec<&String> = column_set.into_iter().collect();
     let columns: Vec<String> = column_names.iter().map(|k| quote_ident(k)).collect();
 
-    let mut params: Vec<String> = Vec::new();
-    let mut value_groups: Vec<String> = Vec::new();
+    let mut params: Vec<String> = Vec::with_capacity(bind_count);
+    let mut value_groups: Vec<String> = Vec::with_capacity(arr.len());
 
     for doc in arr {
         let obj = doc.as_object().ok_or_else(|| {
@@ -4973,76 +4978,6 @@ pub fn build_vector_search(
     Ok(BuiltQuery { sql, params })
 }
 
-/// Build the SQL + bind parameters for a full-text search (PG arm).
-///
-/// Shape:
-/// ```sql
-/// SELECT *, ts_rank("__fts", plainto_tsquery('pg_catalog.english', $1)) AS _rank
-/// FROM "<app>"."<coll>"
-/// WHERE "__fts" @@ plainto_tsquery('pg_catalog.english', $1) AND <filter>
-/// ORDER BY _rank DESC
-/// LIMIT $2
-/// ```
-///
-/// **Language**: we always render `'pg_catalog.english'` here at the
-/// builder level — the per-collection `FullTextIndex::ensure_fts_index`
-/// call wires the trigger with the schema-declared language, so query-
-/// time text decomposition matches the index-time decomposition. A
-/// future change may thread the per-collection language through the builder
-/// for non-English schemas; this builder deliberately ships only English to keep
-/// the wire path narrow (PG itself ships configs for many languages, so
-/// the upgrade is one `language: &str` parameter away).
-///
-/// **Parameter binding**: `$1` is the query text (bound as TEXT, not
-/// cast — `plainto_tsquery(regconfig, text)` takes the text verbatim);
-/// `$2` is the LIMIT. Filter parameters start at `$3` for the same
-/// reason as [`build_vector_search`].
-///
-/// Pulls in the standard `build_where` helper for filter composition —
-/// any operator the rest of the read path supports works inside an FTS
-/// query too (`{lang: "en"}`, `{$and: [...]}`, etc.).
-pub fn build_fts_search(
-    app_id: &str,
-    collection: &str,
-    query: &str,
-    filter: &Value,
-    limit: Option<usize>,
-    schema_hint: Option<&Value>,
-) -> Result<BuiltQuery, QueryError> {
-    validate_collection(collection)?;
-    validate_schema(app_id)?;
-
-    let schema = quote_ident(app_id);
-    let table = quote_ident(collection);
-    let fts_col = quote_ident("__fts");
-
-    // Default LIMIT — 100 is large enough for typical "top results" UIs
-    // without dragging the whole table into memory if the caller forgets
-    // a `.limit()`.
-    let limit = limit.unwrap_or(100);
-    validate_search_limit_bound("search.limit", limit)?;
-
-    let mut params: Vec<String> = Vec::with_capacity(2 + 4);
-    params.push(query.to_string());
-    params.push(limit.to_string());
-
-    let where_clause = build_where(filter, &mut params)?;
-
-    let select_expr = build_masked_aware_select_expr(None, schema_hint)?;
-    let mut sql = format!(
-        "SELECT {select_expr}, ts_rank({fts_col}, plainto_tsquery('pg_catalog.english', $1)) AS _rank \
-         FROM {schema}.{table} \
-         WHERE {fts_col} @@ plainto_tsquery('pg_catalog.english', $1)"
-    );
-    if !where_clause.is_empty() {
-        sql.push_str(" AND ");
-        sql.push_str(&where_clause);
-    }
-    sql.push_str(" ORDER BY _rank DESC LIMIT $2");
-
-    Ok(BuiltQuery { sql, params })
-}
-
 /// Build the SQL + bind parameters for a spatial within-radius search
 /// (PostGIS arm).
 ///
@@ -5261,12 +5196,10 @@ fn build_having_condition(
 /// Build a WHERE clause from a filter JSON value.
 /// Returns empty string if the filter is null/empty.
 ///
-/// Visibility lifted from `fn` to `pub` so the
-/// SQLite-side `fts.rs` / `spatial.rs` helpers can compose a parametrised
-/// predicate fragment against pre-seeded params (`$1` = MATCH query, `$2`
-/// = LIMIT, etc.) without rebuilding the filter machinery. The body
-/// itself is unchanged — every existing call site keeps its
-/// behaviour byte-for-byte.
+/// Visibility lifted from `fn` to `pub` so SQLite backend helpers can
+/// compose a parametrised predicate fragment without rebuilding the filter
+/// machinery. The body itself is unchanged - every existing call site keeps
+/// its behaviour byte-for-byte.
 pub fn build_where(filter: &Value, params: &mut Vec<String>) -> Result<String, QueryError> {
     build_where_with_dialect(filter, params, SqlDialect::Postgres)
 }
@@ -5504,16 +5437,6 @@ fn build_field_condition_with_dialect(
                                 format!("{col} LIKE ${} COLLATE utf8mb4_0900_ai_ci", params.len())
                             }
                         }
-                    }
-                    "$search" => {
-                        let query_text = val.as_str().ok_or_else(|| {
-                            QueryError::InvalidFilter("$search must be a string".to_string())
-                        })?;
-                        params.push(query_text.to_string());
-                        format!(
-                            "to_tsvector('english', {col}) @@ plainto_tsquery('english', ${})",
-                            params.len()
-                        )
                     }
                     other => {
                         return Err(QueryError::InvalidFilter(format!(
@@ -6316,17 +6239,6 @@ mod tests {
     }
 
     #[test]
-    fn test_search_operator() {
-        let filter = json!({"bio": {"$search": "rust developer"}});
-        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
-        assert_eq!(
-            q.sql,
-            r#"SELECT * FROM "app1"."users" WHERE to_tsvector('english', "bio") @@ plainto_tsquery('english', $1)"#
-        );
-        assert_eq!(q.params, vec!["rust developer"]);
-    }
-
-    #[test]
     fn test_not_operator() {
         let filter = json!({"$not": {"role": "admin"}});
         let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
@@ -6452,6 +6364,144 @@ mod tests {
         }
         let at_cap: Vec<Value> = (0..MAX_INSERT_MANY_BATCH).map(|i| json!({ "n": i })).collect();
         assert!(build_insert_many("app1", "users", &Value::Array(at_cap)).is_ok());
+    }
+
+    fn full_non_null_insert_many_batch(column_count: usize) -> Value {
+        let template: serde_json::Map<String, Value> = (0..column_count)
+            .map(|column| (format!("field_{column}"), Value::from(column)))
+            .collect();
+        Value::Array(
+            (0..MAX_INSERT_MANY_BATCH)
+                .map(|_| Value::Object(template.clone()))
+                .collect(),
+        )
+    }
+
+    fn insert_many_batch_with_exact_non_null_cells(cell_count: usize) -> Value {
+        let base_width = cell_count / MAX_INSERT_MANY_BATCH;
+        let wider_rows = cell_count % MAX_INSERT_MANY_BATCH;
+        assert!(base_width > 0, "the exact-boundary fixture must have non-empty rows");
+        Value::Array(
+            (0..MAX_INSERT_MANY_BATCH)
+                .map(|row| {
+                    let width = base_width + usize::from(row < wider_rows);
+                    let mut doc: serde_json::Map<String, Value> = (0..width)
+                        .map(|column| (format!("field_{column}"), Value::from(column)))
+                        .collect();
+                    doc.insert("explicit_null".to_string(), Value::Null);
+                    doc.insert("__zsbin__field_0".to_string(), Value::Bool(true));
+                    Value::Object(doc)
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn insert_many_full_batch_enforces_postgres_bind_limit_db11() {
+        let protocol_limit = usize::from(u16::MAX);
+        let largest_full_width = protocol_limit / MAX_INSERT_MANY_BATCH;
+        let first_rejected_width = largest_full_width + 1;
+        assert!(largest_full_width > 0, "the exercised column set must be non-empty");
+
+        let accepted = build_insert_many(
+            "app1",
+            "users",
+            &full_non_null_insert_many_batch(largest_full_width),
+        )
+        .expect("a full document batch below the PostgreSQL bind limit must build");
+        assert_eq!(
+            accepted.params.len(),
+            MAX_INSERT_MANY_BATCH * largest_full_width
+        );
+        assert!(accepted.params.len() <= protocol_limit);
+
+        let rejected = build_insert_many(
+            "app1",
+            "users",
+            &full_non_null_insert_many_batch(first_rejected_width),
+        );
+        match rejected {
+            Err(QueryError::InvalidFilter(message)) => {
+                assert!(message.contains("65535"), "{message}");
+                assert!(message.contains("non-null"), "{message}");
+                assert!(message.contains("smaller batches"), "{message}");
+                assert!(!message.contains("parameter"), "{message}");
+            }
+            Ok(query) => panic!(
+                "builder accepted {} bind parameters, above the PostgreSQL limit of {protocol_limit}",
+                query.params.len()
+            ),
+            Err(other) => panic!("expected creator-facing InvalidFilter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn insert_many_accepts_exact_postgres_bind_limit_and_rejects_next_db11() {
+        let protocol_limit = usize::from(u16::MAX);
+        let accepted_docs = insert_many_batch_with_exact_non_null_cells(protocol_limit);
+        assert_eq!(
+            accepted_docs.as_array().map(Vec::len),
+            Some(MAX_INSERT_MANY_BATCH),
+            "the exact-boundary batch must exercise the documented document cap"
+        );
+        let accepted = build_insert_many("app1", "users", &accepted_docs)
+            .expect("exactly the PostgreSQL non-null field-value limit must build");
+        assert_eq!(accepted.params.len(), protocol_limit);
+
+        let rejected_docs = insert_many_batch_with_exact_non_null_cells(protocol_limit + 1);
+        let rejected = build_insert_many("app1", "users", &rejected_docs);
+        match rejected {
+            Err(QueryError::InvalidFilter(message)) => {
+                assert!(message.contains("65536"), "{message}");
+                assert!(message.contains("at most 65535"), "{message}");
+                assert!(!message.contains("parameter"), "{message}");
+            }
+            Ok(query) => panic!(
+                "builder accepted {} non-null field values above the PostgreSQL limit",
+                query.params.len()
+            ),
+            Err(other) => panic!("expected creator-facing InvalidFilter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn insert_many_full_batch_enforces_sqlite_bind_limit_db11() {
+        let largest_full_width = SQLITE_MAX_BIND_PARAMETERS / MAX_INSERT_MANY_BATCH;
+        let first_rejected_width = largest_full_width + 1;
+        assert!(largest_full_width > 0, "the exercised column set must be non-empty");
+
+        let accepted = build_insert_many_with_dialect(
+            "app1",
+            "users",
+            &full_non_null_insert_many_batch(largest_full_width),
+            SqlDialect::Sqlite,
+        )
+        .expect("a full document batch below the SQLite bind limit must build");
+        assert_eq!(
+            accepted.params.len(),
+            MAX_INSERT_MANY_BATCH * largest_full_width
+        );
+        assert!(accepted.params.len() <= SQLITE_MAX_BIND_PARAMETERS);
+
+        let rejected = build_insert_many_with_dialect(
+            "app1",
+            "users",
+            &full_non_null_insert_many_batch(first_rejected_width),
+            SqlDialect::Sqlite,
+        );
+        match rejected {
+            Err(QueryError::InvalidFilter(message)) => {
+                assert!(message.contains("32766"), "{message}");
+                assert!(message.contains("SQLite"), "{message}");
+                assert!(message.contains("smaller batches"), "{message}");
+                assert!(!message.contains("parameter"), "{message}");
+            }
+            Ok(query) => panic!(
+                "builder accepted {} bind parameters, above the SQLite limit of {SQLITE_MAX_BIND_PARAMETERS}",
+                query.params.len()
+            ),
+            Err(other) => panic!("expected creator-facing InvalidFilter, got {other:?}"),
+        }
     }
 
     #[test]
@@ -8511,36 +8561,6 @@ mod tests {
         );
     }
 
-    /// The FTS GIN index name `<coll>__fts_idx` truncates, for a 63-byte
-    /// collection, to exactly the collection name — and in Postgres indexes
-    /// share the `pg_class` namespace with tables, so the emitted
-    /// `CREATE INDEX ... IF NOT EXISTS` finds the TABLE under that name and
-    /// skips. The GIN index is then never created, silently.
-    ///
-    /// What this does NOT catch: it asserts the derived name is bounded and
-    /// distinct from the table name; it does not exercise the plugin-db
-    /// backend that executes the DDL.
-    #[test]
-    fn derived_fts_index_name_does_not_collapse_onto_the_table_name() {
-        let coll = "f".repeat(63);
-        let schema = serde_json::json!({
-            "body": { "type": "string", "fts": true },
-        });
-        let specs = build_create_indexes("app1", &coll, &schema).expect("indexes build");
-        let fts = specs
-            .iter()
-            .find(|s| matches!(s.kind, IndexKind::Fts { .. }))
-            .expect("an fts spec");
-        assert!(fts.name.len() <= 63, "derived name {} is {} bytes", fts.name, fts.name.len());
-        let truncate = |n: &str| n.as_bytes()[..n.len().min(63)].to_vec();
-        assert_ne!(
-            truncate(&fts.name),
-            truncate(&coll),
-            "fts index name truncated onto the table name: {}",
-            fts.name
-        );
-    }
-
     // -----------------------------------------------------------------------
     // Silent-bug repro (the original reason A1 exists).
     //
@@ -9544,7 +9564,7 @@ mod tests {
     /// ASCII allowlist must accept the same shape `validate_collection`
     /// accepts: alphanumeric + underscore. `_private` was historically
     /// accepted, but the `_` prefix is now reserved for synthetic-
-    /// result columns (`_rank`, `_distance`); see
+    /// result columns (`_distance`, `_distance_m`); see
     /// `validate_field_name_rejects_reserved_underscore_prefix` for the
     /// updated rule.
     #[test]
@@ -9609,11 +9629,11 @@ mod tests {
     }
 
     /// The `_` prefix is reserved for synthetic-result columns
-    /// (`_rank`, `_distance`, `_score`) emitted by FTS / vector /
+    /// (`_distance`, `_distance_m`, `_score`) emitted by vector /
     /// spatial native paths.
     #[test]
     fn validate_field_name_rejects_reserved_underscore_prefix() {
-        for name in &["_rank", "_distance", "_score", "_anything"] {
+        for name in &["_distance", "_distance_m", "_score", "_anything"] {
             let err = validate_field_name(name).unwrap_err();
             assert!(
                 matches!(err, QueryError::InvalidIdent(_)),
@@ -9649,7 +9669,7 @@ mod tests {
     fn is_schema_metadata_key_matches_meta_and_indexes() {
         assert!(is_schema_metadata_key("_meta"));
         assert!(is_schema_metadata_key("_indexes"));
-        assert!(!is_schema_metadata_key("_rank"));
+        assert!(!is_schema_metadata_key("_distance"));
         assert!(!is_schema_metadata_key("ssn"));
     }
 
@@ -10377,7 +10397,7 @@ mod tests {
         ));
         // `_` prefix inherited from `RESERVED_NAMES`.
         assert!(matches!(
-            validate_field_name_for_declaration("_rank").unwrap_err(),
+            validate_field_name_for_declaration("_distance").unwrap_err(),
             QueryError::InvalidIdent(_)
         ));
     }
@@ -11088,34 +11108,6 @@ mod tests {
     }
 
     #[test]
-    fn fts_search_expands_masked_projection_when_schema_cached() {
-        let schema = serde_json::json!({
-            "ssn": { "type": "string",
-                     "mask": { "kind": "last4", "classification": "spi" } },
-            "bio": { "type": "string" },
-        });
-        let q = build_fts_search(
-            "app1",
-            "users",
-            "alice",
-            &serde_json::json!({}),
-            Some(10),
-            Some(&schema),
-        )
-        .expect("fts search sql");
-        assert!(
-            !q.sql.starts_with("SELECT *"),
-            "fts search must not fall back to SELECT * when masked columns exist: {}",
-            q.sql,
-        );
-        assert!(
-            q.sql.contains("\"ssn_masked\" AS \"ssn\""),
-            "fts search must read masked sibling: {}",
-            q.sql,
-        );
-    }
-
-    #[test]
     fn spatial_near_expands_masked_projection_when_schema_cached() {
         let schema = serde_json::json!({
             "ssn": { "type": "string",
@@ -11146,7 +11138,7 @@ mod tests {
     }
 
     #[test]
-    fn implicit_find_projection_with_schema_avoids_star_and_internal_columns() {
+    fn implicit_find_projection_with_schema_uses_allowlist() {
         let schema = serde_json::json!({
             "name": { "type": "string" },
         });
@@ -11171,37 +11163,6 @@ mod tests {
             "schema-backed find must project public system fields + declared fields: {}",
             bq.sql,
         );
-        assert!(
-            !bq.sql.contains("\"__fts\""),
-            "implicit projection must not expose internal physical columns: {}",
-            bq.sql,
-        );
-    }
-
-    #[test]
-    fn fts_search_with_schema_avoids_star_when_no_fields_are_masked() {
-        let schema = serde_json::json!({
-            "bio": { "type": "string" },
-        });
-        let q = build_fts_search(
-            "app1",
-            "users",
-            "rust",
-            &serde_json::json!({}),
-            Some(10),
-            Some(&schema),
-        )
-        .expect("fts projection");
-        assert!(
-            !q.sql.starts_with("SELECT *"),
-            "schema-backed search must use an allowlisted projection: {}",
-            q.sql,
-        );
-        assert!(
-            !q.sql.contains("SELECT *") && !q.sql.contains("\"__fts\" AS"),
-            "search projection must not expose internal physical columns: {}",
-            q.sql,
-        );
     }
 
     #[test]
@@ -11221,10 +11182,10 @@ mod tests {
             None,
             None,
             None,
-            Some(&serde_json::json!(["__fts"])),
+            Some(&serde_json::json!(["ssn_masked"])),
             Some(&schema),
         )
-        .expect_err("select on __fts must be refused");
+        .expect_err("select on masked sibling must be refused");
         assert!(matches!(select_err, QueryError::InvalidIdent(_)));
 
         let sort_err = build_find_with_schema(
@@ -11243,13 +11204,13 @@ mod tests {
         let distinct_err = build_distinct_with_soft_delete_with_dialect(
             "app1",
             "users",
-            "__fts",
+            "ssn_masked",
             &serde_json::json!({}),
             false,
             Some(&schema),
             SqlDialect::Postgres,
         )
-        .expect_err("distinct on __fts must be refused");
+        .expect_err("distinct on masked sibling must be refused");
         assert!(matches!(distinct_err, QueryError::InvalidIdent(_)));
 
         let aggregate_err = build_aggregate_with_soft_delete_with_dialect(

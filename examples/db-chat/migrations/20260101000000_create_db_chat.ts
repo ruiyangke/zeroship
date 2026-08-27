@@ -28,7 +28,7 @@ import { table, t } from "@zeroship/migrate";
 // creates the tables. db-todos has the same pair.
 //
 // UNLIKE examples/db-e2e, this example's schema uses no encrypted columns, no
-// vector, no geoPoint and no full-text index, so all of it IS representable in
+// vector and no geoPoint, so all of it IS representable in
 // a migration. db-e2e stops short at `t.encrypted`, which cannot carry a mode
 // or a keyId -- see the comment in its migration.
 export default {

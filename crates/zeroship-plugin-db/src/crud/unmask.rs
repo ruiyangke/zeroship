@@ -327,7 +327,7 @@ pub(crate) fn check_unmask_authorization(
 /// before the auth check. A storage miss is a no-op (cache stays
 /// empty, the default-deny fallback applies on the auth path); a storage hit
 /// installs the loaded policy via
-/// [`crate::context::IsolateDbContext::set_mask_policy_for_app`].
+/// [`crate::context::ThreadDbContext::set_mask_policy_for_app`].
 ///
 /// Errors propagate (a corrupt sidecar JSON or PG SQL failure surfaces
 /// as `DbError`); the unmask flow then rejects with the typed error
@@ -507,12 +507,12 @@ async fn fetch_and_decrypt(
     // ---- SQLite arm ----
     if let Some(sq) = backend.as_encrypted_column_sqlite() {
         use crate::backend::sqlite::session::TypedCell;
-        use crate::backend::{DialectBuilder as _, EncryptedColumn as _, SqlExecutor as _};
+        use crate::backend::{DialectBuilder as _, EncryptedColumn as _};
         let q_app = sq.quote_ident(app_id);
         let q_coll = sq.quote_ident(&args.collection);
         let q_col = sq.quote_ident(&args.column);
         let sql = format!("SELECT {q_col} FROM {q_app}.{q_coll} WHERE id = ?1");
-        let handle = sq.acquire_dedicated_client().await?;
+        let handle = sq.autocommit_client();
         let typed = handle
             .query_typed_internal(&sql, &[args.row_pk.as_str()])
             .await?;
@@ -602,12 +602,12 @@ async fn fetch_plaintext_parent(app_id: &str, args: &UnmaskFieldArgs) -> Result<
 
     // ---- SQLite arm ----
     if let Some(sq) = backend.as_sqlite() {
-        use crate::backend::{DialectBuilder as _, SqlExecutor as _};
+        use crate::backend::DialectBuilder as _;
         let q_app = sq.quote_ident(app_id);
         let q_coll = sq.quote_ident(&args.collection);
         let q_col = sq.quote_ident(&args.column);
         let sql = format!("SELECT {q_col} FROM {q_app}.{q_coll} WHERE id = ?1");
-        let handle = sq.acquire_dedicated_client().await?;
+        let handle = sq.autocommit_client();
         let rows = handle
             .query_internal(&sql, &[args.row_pk.as_str()])
             .await?;
@@ -1758,7 +1758,7 @@ mod tests {
     // has no policy cached; these tests pin that fallthrough
     // behaviour.
     //
-    // Unit tests reach the per-isolate ISOLATE_CTX (which the
+    // Unit tests reach the per-isolate THREAD_DB_CTX (which the
     // `check_unmask_authorization` body uses to look up the cached
     // policy). Each test uses a unique app_id so the global
     // thread-local cache state doesn't bleed between tests.

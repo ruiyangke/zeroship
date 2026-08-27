@@ -12,7 +12,9 @@ mod cache;
 mod db_posture;
 mod metrics;
 mod logs;
+mod slot_reaper;
 
+use std::future::Future;
 use std::sync::{Arc, RwLock};
 use clap::Parser;
 use ntex::web;
@@ -40,6 +42,38 @@ const CONTROL_KEY_LABEL: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file";
 /// `crates/config-macros/src/shared.rs` (`canonical: "worker_key"`) projects to
 /// this environment name; the flag comes from the same declaration.
 const WORKER_KEY_LABEL: &str = "ZEROSHIP_WORKER_KEY / --worker-key-file";
+
+type SlotReaperTask = compio::runtime::JoinHandle<Result<(), zeroship_plugin_db::error::DbError>>;
+
+async fn run_server_with_slot_reaper<S>(
+    server: S,
+    slot_reaper_task: Option<SlotReaperTask>,
+) -> std::io::Result<()>
+where
+    S: Future<Output = std::io::Result<()>>,
+{
+    use futures::FutureExt as _;
+
+    let Some(slot_reaper_task) = slot_reaper_task else {
+        return server.await;
+    };
+
+    let server = server.fuse();
+    let slot_reaper_task = slot_reaper_task.fuse();
+    futures::pin_mut!(server, slot_reaper_task);
+    futures::select! {
+        result = server => result,
+        outcome = slot_reaper_task => {
+            let message = match outcome {
+                Ok(Ok(())) => "abandoned-slot reaper stopped unexpectedly".to_string(),
+                Ok(Err(error)) => format!("abandoned-slot reaper failed: {error}"),
+                Err(_) => "abandoned-slot reaper panicked".to_string(),
+            };
+            tracing::error!(%message, "worker infrastructure task ended; stopping worker");
+            Err(std::io::Error::other(message))
+        }
+    }
+}
 
 /// Every credential the worker needs, tagged by the subsystem that needs it.
 ///
@@ -509,12 +543,6 @@ fn main() -> std::io::Result<()> {
     // every successful control poll, and every ntex worker thread's `/readyz`
     // reads that same stamp plus the same blob-store gate.
     let readiness = Arc::new(health::WorkerReadiness::new());
-    sync::start_version_poller(
-        config.clone(),
-        shared_versions.clone(),
-        shared_envs.clone(),
-        readiness.clone(),
-    );
 
     // ── Metering infrastructure ──────────────────────────────────────────
     // ONE process-wide meter, shared with every ntex worker thread's
@@ -531,6 +559,47 @@ fn main() -> std::io::Result<()> {
         .unwrap_or_else(|| bind_addr.to_string());
     let meter_source = format!("{worker_base}-{}", uuid::Uuid::new_v4());
     let meter = Arc::new(zeroship_metering::Meter::with_source(meter_source.clone()));
+
+    // ── The `env.db` service ─────────────────────────────────────────────
+    // ONE `DbService` for the whole process, constructed HERE - before ntex
+    // spawns a worker thread and therefore before any V8 isolate exists. It
+    // owns the validated configuration, the plugin prototype every runtime
+    // clones, the stable thread-resource key, the process-wide live-metadata
+    // cache, and the operator-lifecycle handle the version poller deprovisions
+    // through. Every worker thread is handed this same `Arc` via `KernelConfig`.
+    //
+    // The URL is parsed exactly once, right here. A URL naming no supported
+    // backend fails the boot rather than surfacing inside the first `env.db`
+    // call an app happens to make. That is not a new failure for this binary:
+    // the slot reaper below already connects at boot and fails the process when
+    // the database is unusable.
+    let db_service = match config.db_url.as_deref() {
+        Some(url) => Some(
+            zeroship_plugin_db::service::DbService::new(
+                zeroship_plugin_db::service::DbServiceConfig {
+                    url: url.to_string(),
+                    worker_id: meter_source.clone(),
+                    meter: Some(Arc::clone(&meter)),
+                },
+            )
+            .map_err(|error| {
+                std::io::Error::other(format!("worker database URL is unusable: {error}"))
+            })?,
+        ),
+        None => None,
+    };
+
+    // The single process-wide version poller. Started after the service exists
+    // because a deleted app's CDC teardown runs through the service's operator
+    // lifecycle handle, and still before `web::server` below spawns any worker
+    // thread, so the shared version map is already filling when they come up.
+    sync::start_version_poller(
+        config.clone(),
+        shared_versions.clone(),
+        shared_envs.clone(),
+        readiness.clone(),
+        db_service.clone(),
+    );
     // The producer's four `metering.*` declarations, already resolved. The
     // worker deliberately has no TOML overlay source (9b205f6ed, a credential
     // boundary), so its tiers are flag then `ZEROSHIP_METERING_*` then the
@@ -598,6 +667,24 @@ fn main() -> std::io::Result<()> {
         }
     }
 
+    // Acquire the process liveness lease before accepting traffic. The task is
+    // supervised with the HTTP server below: if its maintenance session or
+    // sweep fails, this process stops rather than continuing CDC after losing
+    // the lease that tells peer reapers it is live.
+    let slot_reaper_task = if let Some(db_url) = config.db_url.as_deref() {
+        Some(
+            slot_reaper::start(db_url, &meter_source)
+                .await
+                .map_err(|error| {
+                    std::io::Error::other(format!(
+                        "abandoned-slot reaper could not acquire its worker lease: {error}"
+                    ))
+                })?,
+        )
+    } else {
+        None
+    };
+
     // ntex installs SIGINT/SIGTERM handlers by default; `shutdown_timeout`
     // bounds how long worker threads have to drain in-flight requests
     // before they're force-dropped. Wire our flag through.
@@ -615,8 +702,7 @@ fn main() -> std::io::Result<()> {
             cache::KernelConfig {
                 control_url: config.control_url.clone(),
                 control_key: config.control_key.clone(),
-                db_url: config.db_url.clone(),
-                cdc_worker_id: meter_source.clone(),
+                db_service: db_service.clone(),
                 kv_url: config.kv_url.clone(),
                 storage_backend: config.storage_backend.clone(),
                 // The ONE process-wide meter the usage-event outbox drains.
@@ -659,7 +745,7 @@ fn main() -> std::io::Result<()> {
     // serving their current requests, and returns. Detached tasks
     // (fetch body readers, stream drainers) whose futures the pump is
     // polling get one last chance to run during the drain window.
-    let run_result = server.run().await;
+    let run_result = run_server_with_slot_reaper(server.run(), slot_reaper_task).await;
     tracing::info!("worker shutdown complete");
     run_result
         })
@@ -669,6 +755,52 @@ fn main() -> std::io::Result<()> {
 mod tests {
     use super::*;
     use zeroship_core::config::{GeneratedConfig, SourceKind, SERVICE_CREDENTIAL_SENTINEL};
+
+    #[test]
+    fn production_main_starts_and_supervises_one_process_wide_slot_reaper() {
+        let source = include_str!("main.rs");
+        let start_call = ["slot_reaper", "::start", "("].concat();
+        assert_eq!(
+            source.matches(&start_call).count(),
+            1,
+            "worker main must start exactly one operator-owned reaper"
+        );
+        assert_eq!(
+            source
+                .matches(
+                    &["run_server_with_slot_reaper", "(server.run(), slot_reaper_task)"].concat(),
+                )
+                .count(),
+            1,
+            "worker main must supervise the reaper beside the HTTP server"
+        );
+
+        let server_factory = source
+            .split_once("web::server(async move ||")
+            .expect("worker server factory")
+            .1;
+        assert!(
+            !server_factory.contains(&start_call),
+            "the reaper must not be multiplied by ntex worker threads"
+        );
+    }
+
+    #[compio::test]
+    async fn reaper_failure_stops_the_worker_server() {
+        let task = compio::runtime::spawn(async {
+            Err(zeroship_plugin_db::error::DbError::Internal {
+                message: "lost maintenance lease".to_string(),
+            })
+        });
+        let server = futures::future::pending::<std::io::Result<()>>();
+        let error = run_server_with_slot_reaper(server, Some(task))
+            .await
+            .expect_err("reaper failure must stop the worker");
+        assert!(
+            error.to_string().contains("lost maintenance lease"),
+            "creator-serving worker hid reaper failure: {error}"
+        );
+    }
 
     /// A temp file that removes itself even when an assertion panics.
     struct SecretFile(std::path::PathBuf);

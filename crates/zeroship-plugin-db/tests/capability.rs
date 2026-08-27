@@ -16,7 +16,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use zeroship_plugin_db::DbPlugin;
+use zeroship_plugin_db::service::{DbService, DbServiceConfig};
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::Runtime;
@@ -40,11 +40,15 @@ fn dispatch_zs(source: &str, name: &str) -> (u16, serde_json::Value) {
     // Use a dummy URL — the capability gate fires BEFORE the pool is
     // touched, so the URL is never dialed.
     let plugins: Vec<Arc<dyn NativePlugin>> =
-        vec![Arc::new(DbPlugin::new(
-            "postgres://_capability_test_unused",
-            None,
-            "capability-test-worker",
-        ))];
+        vec![
+            DbService::new(DbServiceConfig {
+                url: "postgres://_capability_test_unused".to_string(),
+                worker_id: "capability-test-worker".to_string(),
+                meter: None,
+            })
+            .expect("db service")
+            .plugin(),
+        ];
     let runtime = Runtime::builder()
         .modules(modules)
         .plugins(plugins)

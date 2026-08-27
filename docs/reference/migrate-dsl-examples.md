@@ -315,7 +315,7 @@ table("users").index("users_email_uq").add({ on: ["email"],
   unique: true });
 
 // Access method
-table("docs").index("docs_body_fts").add({ on: ["body"],
+table("docs").index("docs_body_gin").add({ on: ["body"],
   using: "gin" });
 table("events").index("events_ts_brin").add({ on: ["occurred_at"],
   using: "brin" });

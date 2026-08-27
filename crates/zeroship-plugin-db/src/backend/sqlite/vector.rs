@@ -165,8 +165,7 @@ pub(crate) fn build_create_vec0_sql(
 
 /// Build the initial-population `INSERT INTO __vec_<col> SELECT FROM
 /// <coll>` statement. Run exactly once, gated by a `sqlite_master`
-/// presence probe (same pattern as FTS5; see
-/// `fts::build_initial_population_sql` rustdoc).
+/// presence probe.
 #[cfg(any(test, feature = "test-helpers"))]
 pub(crate) fn build_initial_population_sql(
     app_id: &str,
@@ -186,8 +185,7 @@ pub(crate) fn build_initial_population_sql(
 /// `AFTER INSERT` trigger mirroring `(rowid, <col>)` into the vec0
 /// vtable. The body references the vec0 table without a schema
 /// qualifier — the SQLite engine rule "table referenced inside a
-/// trigger body cannot be qualified by the database name" applies
-/// (see `fts::build_insert_trigger_sql` rustdoc).
+/// trigger body cannot be qualified by the database name" applies.
 #[cfg(any(test, feature = "test-helpers"))]
 pub(crate) fn build_insert_trigger_sql(
     app_id: &str,
@@ -209,8 +207,7 @@ pub(crate) fn build_insert_trigger_sql(
 
 /// `AFTER DELETE` trigger removing the mirrored row from the vec0
 /// vtable. vec0 supports plain `DELETE FROM v WHERE rowid = ?` (it
-/// internally owns the row, no external-content sentinel required —
-/// contrast FTS5's `'delete'` command sentinel).
+/// internally owns the row and needs no external-content sentinel).
 #[cfg(any(test, feature = "test-helpers"))]
 pub(crate) fn build_delete_trigger_sql(
     app_id: &str,

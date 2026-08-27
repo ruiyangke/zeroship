@@ -45,6 +45,7 @@ use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method};
 
+use crate::binding::DbBinding;
 use crate::crud::dispatch_set_mask_policy_field;
 use crate::register_model::register_model_dispatch;
 use crate::v8_bridge::read_json_arg;
@@ -57,16 +58,16 @@ use crate::v8_bridge::read_json_arg;
 ///
 /// Field 0 of the wrapper holds a `Box<DbPlatform>`. The Weak finalizer
 /// registered by [`mint_db_platform`] drops the Box on GC. There are no
-/// native resources to release — `app_id` is a `String` and the cached
+/// native resources to release — `binding` is owned and the cached
 /// `replication_obj` holds a `v8::Global<v8::Object>` handle whose own
 /// Weak counterpart reclaims the wrapped state.
 pub struct DbPlatform {
-    /// The app_id this handle is scoped to. Stamped at mint time from
-    /// the live `Db`'s `app_id`; never mutated. Security-critical — the
+    /// The app-at-deploy identity this handle is scoped to. Stamped at mint
+    /// time from the live `Db`; never mutated. Security-critical — the
     /// platform methods route to `"<app_id>".*` schemas, so a
     /// caller-supplied override is never honoured (see
     /// platform operations).
-    pub(crate) app_id: String,
+    pub(crate) binding: DbBinding,
     /// Cache of the `Replication` namespace wrapper minted on first
     /// access of `__platform.replication`. Stable identity.
     pub(crate) replication_obj: RefCell<Option<v8::Global<v8::Object>>>,
@@ -75,7 +76,7 @@ pub struct DbPlatform {
 impl std::fmt::Debug for DbPlatform {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DbPlatform")
-            .field("app_id", &self.app_id)
+            .field("binding", &self.binding)
             .finish()
     }
 }
@@ -134,7 +135,7 @@ impl DbPlatform {
         // consumer can disagree with cannot fail usefully - a malformed value
         // would be silently coerced to an empty default and then discarded.
         let _ = (&indexes, &declared);
-        Ok(register_model_dispatch(scope, &self.app_id, &collection, schema_v).into())
+        Ok(register_model_dispatch(scope, self.binding.app_id(), &collection, schema_v).into())
     }
 
     /// `__platform.setMaskPolicy(policy)` — persist the
@@ -151,12 +152,12 @@ impl DbPlatform {
             Ok(v) => v,
             Err(e) => return Ok(crate::v8_bridge::throw_decode_error(scope, &e)),
         };
-        Ok(dispatch_set_mask_policy_field(scope, &self.app_id, policy_v).into())
+        Ok(dispatch_set_mask_policy_field(scope, self.binding.app_id(), policy_v).into())
     }
 
     /// `__platform.replication` — the [`super::replication::Replication`]
-    /// namespace (`setup` / `watchdog` / `dropAbandoned`) scoped to this
-    /// app. Cached on first access. Moved off `Db`.
+    /// namespace (`watchdog`) scoped to this app. Cached on first access.
+    /// Moved off `Db`.
     #[v8_getter]
     fn replication<'s>(
         &self,
@@ -165,7 +166,7 @@ impl DbPlatform {
         if let Some(existing) = self.replication_obj.borrow().as_ref() {
             return Ok(v8::Local::new(scope, existing));
         }
-        let obj = super::replication::mint_replication(scope, &self.app_id)?;
+        let obj = super::replication::mint_replication(scope, self.binding.app_id())?;
         let global = v8::Global::new(scope, obj);
         *self.replication_obj.borrow_mut() = Some(global);
         Ok(obj)
@@ -185,7 +186,7 @@ impl DbPlatform {
 /// slot); only Rust and the bootstrap runtime-entry resolver read it.
 pub(crate) fn mint_db_platform<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    app_id: &str,
+    binding: DbBinding,
 ) -> Option<v8::Local<'s, v8::Object>> {
     let class_tmpl = DbPlatform::install(scope);
     let inst_tmpl = class_tmpl.instance_template(scope);
@@ -197,7 +198,7 @@ pub(crate) fn mint_db_platform<'s>(
     obj.set_prototype(scope, proto_v);
 
     let state = DbPlatform {
-        app_id: app_id.to_string(),
+        binding,
         replication_obj: RefCell::new(None),
     };
     let boxed: Box<DbPlatform> = Box::new(state);

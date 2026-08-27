@@ -547,25 +547,12 @@ async fn run_apply_txn(
 
     // Run the rest; on ANY error, roll back and propagate.
     let result = async {
-        // 2. Run the `up`. Ordinary creator/AI DDL runs under the confined
-        // **CreatorUp** mode (denied from `_mig`, from transaction boundaries,
-        // from PRAGMA, from making a vtable). The ONE exception is **engine-emitted
-        // goodie DDL**, which runs under EngineJournal instead. No engine path sets
-        // that flag today -- its only producer was the FTS5 vtable create, removed
-        // with full-text support -- so in the current tree every `up` takes the
-        // confined branch. The routing is kept because the flag is part of the
-        // checksum image; see `MigrationFlags::engine_goodie_ddl`.
-        let up_mode = if m.flags.engine_goodie_ddl {
-            Mode::EngineJournal
-        } else {
-            Mode::CreatorUp
-        };
-        actor.set_mode(up_mode).await?;
-        // The `up` may be multiple statements; each is prepared+stepped under the
-        // chosen mode via execute_batch (single mode for the whole `up`, which is
-        // correct - the up phase is one mode). A creator `up` must NOT contain a
-        // journal write (the authorizer denies it); an engine-goodie `up` is
-        // engine-authored DDL that touches only `main`.
+        // 2. Run the creator/AI `up` under the confined CreatorUp mode (denied
+        // from `_mig`, transaction boundaries, PRAGMA and virtual-table creation).
+        actor.set_mode(Mode::CreatorUp).await?;
+        // The `up` may be multiple statements; each is prepared and stepped under
+        // CreatorUp via execute_batch. A creator `up` must NOT contain a journal
+        // write; the authorizer denies it.
         actor.exec(&m.up).await?;
 
         // 3. EngineJournal - INSERT the applied row (event_seq is AUTOINCREMENT, not

@@ -46,7 +46,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use compio_postgres::NoTls;
-use zeroship_plugin_db::DbPlugin;
+use zeroship_plugin_db::service::{DbService, DbServiceConfig};
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::Runtime;
@@ -60,7 +60,7 @@ thread_local! {
     /// ONE compio runtime per test thread, alive for the whole thread.
     ///
     /// plugin-db parks its `compio_postgres::Pool` (and the backend handle
-    /// wrapping it) in a **thread-local** `IsolateDbContext` that deliberately
+    /// wrapping it) in a **thread-local** `ThreadDbContext` that deliberately
     /// outlives any single dispatch — `DbPlugin::register` only clears the pool
     /// when the DB URL *changes*, and every dispatch here uses the same URL. A
     /// compio runtime built per dispatch and dropped at the end of it therefore
@@ -244,6 +244,70 @@ fn count_notes(url: &str) -> i64 {
     })
 }
 
+fn create_encrypted_users_table(url: &str, key_id: &str) {
+    let url = url.to_string();
+    let key_id = key_id.to_string();
+    block_on(async move {
+        zeroship_plugin_db::set_db_url_for_tests(&url);
+        let pool = std::rc::Rc::new(compio_postgres::Pool::connect(&url, 2).await.unwrap());
+        pool.batch_execute(&format!(
+            r#"CREATE TABLE "{APP_SCHEMA}"."users" (
+  id TEXT PRIMARY KEY,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_by TEXT NULL,
+  updated_by TEXT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  deleted_at TIMESTAMPTZ NULL,
+  email TEXT NOT NULL,
+  name TEXT NOT NULL,
+  ssn BYTEA NULL
+);
+CREATE UNIQUE INDEX "users_email_key" ON "{APP_SCHEMA}"."users" (email);
+CREATE INDEX "users_deleted_at_idx" ON "{APP_SCHEMA}"."users" (deleted_at);
+CREATE INDEX "users_updated_at_idx" ON "{APP_SCHEMA}"."users" (updated_at);
+CREATE INDEX "users_created_by_idx" ON "{APP_SCHEMA}"."users" (created_by);
+COMMENT ON COLUMN "{APP_SCHEMA}"."users"."ssn" IS 'zsenc:randomised:{key_id}:string';"#
+        ))
+        .await
+        .expect("deploy stand-in must create encrypted users");
+        zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, APP_SCHEMA)
+            .await
+            .expect("per-app role must receive grants on encrypted users");
+        pool.close().await;
+        drop(pool);
+        drain_open_connections().await;
+    });
+}
+
+fn user_email_versions(url: &str) -> Vec<(String, i32)> {
+    let url = url.to_string();
+    block_on(async move {
+        let (client, connection) = compio_postgres::connect(&url, NoTls).await.unwrap();
+        compio::runtime::spawn(async move {
+            let _ = connection.run().await;
+        })
+        .detach();
+        let rows = client
+            .query(
+                &format!(
+                    "SELECT email, version FROM \"{APP_SCHEMA}\".users \
+                     WHERE name = 'Red Team' ORDER BY id"
+                ),
+                &[],
+            )
+            .await
+            .expect("inspect encrypted updateMany rows");
+        let values = rows
+            .iter()
+            .map(|row| (row.get::<_, String>("email"), row.get::<_, i32>("version")))
+            .collect();
+        drop(client);
+        drain_open_connections().await;
+        values
+    })
+}
+
 /// Self-contained dispatcher shim: a function-shape `default.rpc` that
 /// looks up `_procedures[name]` and runs it. These tests open
 /// transactions explicitly via `env.db.transaction`.
@@ -296,11 +360,15 @@ fn dispatch_zs_for_app(
         specifier: "index.js".into(),
         source: source.into(),
     }];
-    let plugins: Vec<Arc<dyn NativePlugin>> = vec![Arc::new(DbPlugin::new(
-        url.to_string(),
-        None,
-        "native-transaction-test-worker",
-    ))];
+    let plugins: Vec<Arc<dyn NativePlugin>> = vec![
+        DbService::new(DbServiceConfig {
+            url: url.to_string(),
+            worker_id: "native-transaction-test-worker".to_string(),
+            meter: None,
+        })
+        .expect("db service")
+        .plugin(),
+    ];
     let mut env_vars = std::collections::HashMap::new();
     if let Some(app_id) = app_id {
         env_vars.insert("APP_ID".to_string(), app_id.to_string());
@@ -424,6 +492,32 @@ setup.config = {{ kind: "action" }};
 
 {body}
 "#
+    ) + SHIM
+}
+
+fn build_encrypted_users_src(key_id: &str, body: &str) -> String {
+    format!(
+        r#"
+import {{ env }} from "zeroship";
+
+const __plat = (typeof globalThis.__zsDbPlatform === "function")
+    ? globalThis.__zsDbPlatform(env.db)
+    : undefined;
+
+function setup(_input, _ctx) {{
+    return __plat.registerModel("users", {{
+        email: {{ type: "string", required: true, unique: true }},
+        name: {{ type: "string", required: true }},
+        ssn: {{
+            type: "string",
+            encrypted: {{ mode: "randomised", keyId: "{key_id}", wraps: "string" }}
+        }}
+    }});
+}}
+setup.config = {{ kind: "action" }};
+
+{body}
+"#,
     ) + SHIM
 }
 
@@ -974,6 +1068,125 @@ const _procedures = { setup, probeBegin };
     );
 }
 
+#[test]
+fn update_many_randomised_failure_is_atomic_postgres() {
+    let url = require_pg();
+    reset_schema(&url);
+    let key_id = "update_many_atomic_pg";
+    create_encrypted_users_table(&url, key_id);
+    let _keys = zeroship_plugin_db::supply_root_keys_for_tests(&[(key_id, &"b".repeat(64))]);
+
+    let src = build_encrypted_users_src(
+        key_id,
+        r#"
+async function seed(_input, _ctx) {
+    const coll = env.db.collection("users");
+    try {
+        await coll.insert({
+            id: "user_a",
+            email: "alice@example.com",
+            name: "Red Team",
+            ssn: "123-45-6789"
+        });
+        await coll.insert({
+            id: "user_b",
+            email: "bob@example.com",
+            name: "Red Team",
+            ssn: "222-33-4444"
+        });
+        return { failure: null };
+    } catch (err) {
+        return {
+            failure: {
+                code: err?.code ?? null,
+                message: err?.message ?? String(err),
+                hint: err?.hint ?? null,
+            }
+        };
+    }
+}
+seed.config = { kind: "action" };
+
+async function failBulk(_input, _ctx) {
+    const coll = env.db.collection("users");
+    let failure = null;
+    try {
+        await coll.updateMany(
+            { name: "Red Team" },
+            { email: "bulk-collision@example.com", ssn: "999-88-7777" },
+        );
+    } catch (err) {
+        failure = { code: err?.code ?? null, message: err?.message ?? String(err) };
+    }
+    const after = await coll.find({ name: "Red Team" });
+    return { failure, after };
+}
+failBulk.config = { kind: "action" };
+
+const _procedures = { setup, seed, failBulk };
+"#,
+    );
+
+    let (status, body) = dispatch_zs(&url, &src, "setup");
+    assert_eq!(status, 200, "setup failed: {body}");
+    let (status, body) = dispatch_zs(&url, &src, "seed");
+    assert_eq!(status, 200, "seed failed: {body}");
+    assert!(body["json"]["failure"].is_null(), "seed failed: {body}");
+
+    zeroship_plugin_db::crud::reset_write_path_counters_for_tests();
+    let (status, body) = dispatch_zs(&url, &src, "failBulk");
+    assert_eq!(status, 200, "caught updateMany failure must remain inspectable: {body}");
+    let result = &body["json"];
+    assert_eq!(result["failure"]["code"], "unique_violation", "body={body}");
+    let after = result["after"]
+        .as_array()
+        .expect("caller-visible post-failure rows must be an array");
+    assert_eq!(after.len(), 2, "the exercised target set must be non-empty: {body}");
+    let counters = zeroship_plugin_db::crud::write_path_counters_for_tests();
+    assert_eq!(
+        counters.target_row_resolution_calls, 1,
+        "the PG failure must occur on the per-row fan-out path: {counters:?}"
+    );
+    assert_eq!(
+        counters.target_row_resolution_sql.len(),
+        1,
+        "the PG fan-out must execute one non-empty target probe: {counters:?}"
+    );
+    let expected_probe_suffix = format!(
+        " LIMIT {} FOR UPDATE",
+        zeroship_plugin_db::query::MAX_QUERY_LIMIT + 1
+    );
+    assert!(
+        counters.target_row_resolution_sql[0].ends_with(&expected_probe_suffix),
+        "the PG target probe must cap and lock the rows it will update: {counters:?}"
+    );
+    let mut caller_visible: Vec<(String, i64)> = after
+        .iter()
+        .map(|row| {
+            (
+                row["email"].as_str().expect("email string").to_string(),
+                row["version"].as_i64().expect("version integer"),
+            )
+        })
+        .collect();
+    caller_visible.sort();
+    assert_eq!(
+        caller_visible,
+        vec![
+            ("alice@example.com".to_string(), 1),
+            ("bob@example.com".to_string(), 1),
+        ]
+    );
+    assert_eq!(
+        user_email_versions(&url),
+        vec![
+            ("alice@example.com".to_string(), 1),
+            ("bob@example.com".to_string(), 1),
+        ],
+        "PostgreSQL must roll back the successful prefix before reporting failure"
+    );
+}
+
 /// L8 REVEAL: a transaction PostgreSQL rolled back must not be reported as a
 /// successful commit.
 ///
@@ -988,9 +1201,10 @@ const _procedures = { setup, probeBegin };
 /// The driver detects exactly this and turns it into an error
 /// (`libs/compio-postgres/src/transaction.rs:186-188`), but plugin-db's raw
 /// executor throws the command tag away - `client_exec` returns
-/// `Ok(rows.len() as u64)` (`crates/zeroship-plugin-db/src/backend/postgres.rs:201-212`)
-/// - and the explicit-transaction settle path sends its `COMMIT` through that
-/// same function (`crates/zeroship-plugin-db/src/transaction/mod.rs:1001`).
+/// `Ok(rows.len() as u64)`
+/// (`crates/zeroship-plugin-db/src/backend/postgres.rs:201-212`) - and the
+/// explicit-transaction settle path sends its `COMMIT` through that same
+/// function (`crates/zeroship-plugin-db/src/transaction/mod.rs:1001`).
 ///
 /// SCOPE: this drives an EXPLICIT creator transaction on purpose. The autocommit
 /// path already goes through the driver's own `tx.commit()` wrapper

@@ -417,6 +417,8 @@ jobs:
         run: tests/ws_subscription_stub_gate.sh --self-test
       - name: websocket subscription stub agrees with what describes it
         run: tests/ws_subscription_stub_gate.sh
+      - name: Deleted database full-text search stays deleted
+        run: tests/db_fts_deletion_gate.sh
       # THE META-GATE. The step above is one of four gates found vacuous on
       # 2026-08-20 - an arm watching a single identifier the fix had deleted,
       # examining 0 names and printing green. The other three were skip_marker
