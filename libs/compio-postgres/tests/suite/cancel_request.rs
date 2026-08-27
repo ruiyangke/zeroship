@@ -9,7 +9,7 @@ use compio::io::{AsyncRead, AsyncWrite};
 use compio::net::{TcpListener, TcpStream};
 use compio_postgres::config::Host;
 use compio_postgres::error::SqlState;
-use compio_postgres::{CancelToken, Client, Config, Error, NoTls};
+use compio_postgres::{CancelToken, Client, Config, Error, NoTls, Pool};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
@@ -443,6 +443,45 @@ async fn stale_cancel_token_completes_cleanly_without_hanging() {
         .await
         .expect("stale CancelToken hung")
         .expect("stale CancelToken could not send its fire-and-forget packet");
+}
+
+#[compio::test]
+async fn a_token_from_a_returned_pool_lease_cannot_cancel_the_next_borrower() {
+    const MARKER: &str = "cpg_cancel_stale_pool_lease";
+    const QUERY: &str = "SELECT pg_sleep(1) /* cpg_cancel_stale_pool_lease */";
+
+    let url = plaintext_url();
+    let pool = Pool::connect(&url, 1).await.expect("connect one-slot pool");
+    let observer = connect(&url).await.unwrap();
+
+    let first = pool.get().await.expect("borrow first pool lease");
+    let token = first.cancel_token();
+    drop(first);
+
+    let second = pool.get().await.expect("borrow second pool lease");
+    let second_pid = second.process_id();
+    let cancel_task = compio::runtime::spawn(async move {
+        wait_until_pg_sleep_is_running(&observer, second_pid, MARKER).await;
+        token.cancel_query(common::suite_tls()).await
+    });
+
+    let (query_result, cancel_result) = compio::time::timeout(
+        OPERATION_TIMEOUT,
+        futures_util::future::join(second.batch_execute(QUERY), cancel_task),
+    )
+    .await
+    .expect("stale pool-token race did not finish before the test deadline");
+    let cancel_error = cancel_result
+        .expect("stale pool-token task panicked or was cancelled")
+        .expect_err("a token from the returned lease retained cancellation authority");
+
+    assert!(
+        error_chain(&cancel_error).contains("pool lease has ended"),
+        "stale token refusal did not name the ended pool lease: {}",
+        error_chain(&cancel_error)
+    );
+    query_result.expect("the stale token cancelled the next pool borrower's query");
+    assert_client_still_works(&second).await;
 }
 
 #[compio::test]

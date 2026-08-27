@@ -9,6 +9,8 @@ use crate::{
 use bytes::Bytes;
 use compio::io::{AsyncRead, AsyncWrite};
 use std::io;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub(crate) const MIN_CANCEL_KEY_LEN: usize = 4;
 pub(crate) const MAX_CANCEL_KEY_LEN: usize = 256;
@@ -36,6 +38,78 @@ impl CancelKey {
     }
 }
 
+pub(crate) struct PoolCancelLease {
+    active: AtomicBool,
+    uncertain_cancel: AtomicBool,
+}
+
+impl PoolCancelLease {
+    pub(crate) fn inactive() -> Arc<Self> {
+        Arc::new(Self {
+            active: AtomicBool::new(false),
+            uncertain_cancel: AtomicBool::new(false),
+        })
+    }
+
+    pub(crate) fn active() -> Arc<Self> {
+        Arc::new(Self {
+            active: AtomicBool::new(true),
+            uncertain_cancel: AtomicBool::new(false),
+        })
+    }
+
+    pub(crate) fn revoke(&self) {
+        self.active.store(false, Ordering::Release);
+    }
+
+    fn ensure_active(&self) -> Result<(), Error> {
+        if self.active.load(Ordering::Acquire) {
+            Ok(())
+        } else {
+            Err(pool_lease_ended())
+        }
+    }
+
+    fn begin_cancel(self: &Arc<Self>) -> Result<PoolCancelAttempt, Error> {
+        self.ensure_active()?;
+        let lease = Arc::clone(self);
+        // Recheck after taking the reference which makes the attempt visible
+        // to pool return. If return won the race, do not send. If it happens
+        // after this load, the retained Arc makes return retire the session.
+        lease.ensure_active()?;
+        Ok(PoolCancelAttempt {
+            lease,
+            confirmed: false,
+        })
+    }
+
+    pub(crate) fn is_uncertain(&self) -> bool {
+        self.uncertain_cancel.load(Ordering::Acquire)
+    }
+}
+
+struct PoolCancelAttempt {
+    lease: Arc<PoolCancelLease>,
+    confirmed: bool,
+}
+
+impl PoolCancelAttempt {
+    fn confirm(mut self) {
+        self.confirmed = true;
+    }
+}
+
+impl Drop for PoolCancelAttempt {
+    fn drop(&mut self) {
+        if !self.confirmed {
+            // A dropped future or transport error may have sent a complete
+            // packet without observing postmaster EOF. Make later reuse
+            // impossible even if the CancelToken itself is then dropped.
+            self.lease.uncertain_cancel.store(true, Ordering::Release);
+        }
+    }
+}
+
 #[cfg(test)]
 impl From<i32> for CancelKey {
     fn from(key: i32) -> Self {
@@ -45,6 +119,11 @@ impl From<i32> for CancelKey {
 
 /// The capability to request cancellation of in-progress queries on a
 /// connection.
+///
+/// A token from a bare [`Client`](crate::Client) remains usable after that
+/// client is dropped. A token obtained through a [`Pool`](crate::Pool) borrow
+/// is scoped to that logical lease and is refused after the borrow is returned;
+/// it can never target a later borrower of the physical session.
 #[derive(Clone)]
 pub struct CancelToken {
     pub(crate) socket_config: Option<SocketConfig>,
@@ -59,6 +138,7 @@ pub struct CancelToken {
     pub(crate) ssl_negotiation: SslNegotiation,
     pub(crate) process_id: i32,
     pub(crate) secret_key: Option<CancelKey>,
+    pub(crate) pool_lease: Option<Arc<PoolCancelLease>>,
 }
 
 impl CancelToken {
@@ -78,8 +158,10 @@ impl CancelToken {
     where
         T: MakeTlsConnect<Socket>,
     {
+        self.ensure_pool_lease_active()?;
         let secret_key = self.secret_key.clone().ok_or_else(missing_cancel_key)?;
-        cancel_query::cancel_query(
+        let attempt = self.begin_pool_cancel_attempt()?;
+        let result = cancel_query::cancel_query(
             self.socket_config.clone(),
             self.ssl_mode,
             self.ssl_negotiation,
@@ -87,7 +169,13 @@ impl CancelToken {
             self.process_id,
             secret_key,
         )
-        .await
+        .await;
+        if result.is_ok()
+            && let Some(attempt) = attempt
+        {
+            attempt.confirm();
+        }
+        result
     }
 
     /// Send cancellation and wait until the postmaster closes its dedicated
@@ -99,8 +187,10 @@ impl CancelToken {
     where
         T: MakeTlsConnect<Socket>,
     {
+        self.ensure_pool_lease_active()?;
         let secret_key = self.secret_key.clone().ok_or_else(missing_cancel_key)?;
-        cancel_query::cancel_query_confirmed(
+        let attempt = self.begin_pool_cancel_attempt()?;
+        let result = cancel_query::cancel_query_confirmed(
             self.socket_config.clone(),
             self.ssl_mode,
             self.ssl_negotiation,
@@ -108,7 +198,13 @@ impl CancelToken {
             self.process_id,
             secret_key,
         )
-        .await
+        .await;
+        if result.is_ok()
+            && let Some(attempt) = attempt
+        {
+            attempt.confirm();
+        }
+        result
     }
 
     /// Like `cancel_query`, but uses a stream which is already connected to the
@@ -119,6 +215,7 @@ impl CancelToken {
         S: AsyncRead + AsyncWrite + Unpin,
         T: TlsConnect<S>,
     {
+        self.ensure_pool_lease_active()?;
         let secret_key = self.secret_key.clone().ok_or_else(missing_cancel_key)?;
         let encryption = self
             .socket_config
@@ -146,7 +243,8 @@ impl CancelToken {
             ssl_cert_mode,
             server_verification,
         )?;
-        cancel_query_raw::cancel_query_raw(
+        let attempt = self.begin_pool_cancel_attempt()?;
+        let result = cancel_query_raw::cancel_query_raw(
             stream,
             encryption,
             self.ssl_mode,
@@ -170,13 +268,40 @@ impl CancelToken {
             self.process_id,
             secret_key,
         )
-        .await
+        .await;
+        if result.is_ok()
+            && let Some(attempt) = attempt
+        {
+            attempt.confirm();
+        }
+        result
+    }
+
+    fn ensure_pool_lease_active(&self) -> Result<(), Error> {
+        self.pool_lease
+            .as_ref()
+            .map_or(Ok(()), |lease| lease.ensure_active())
+    }
+
+    fn begin_pool_cancel_attempt(&self) -> Result<Option<PoolCancelAttempt>, Error> {
+        self.pool_lease
+            .as_ref()
+            .map(|lease| lease.begin_cancel().map(Some))
+            .unwrap_or(Ok(None))
     }
 }
 
 fn missing_cancel_key() -> Error {
     Error::config(
         "PostgreSQL did not provide BackendKeyData, so this connection cannot be cancelled".into(),
+    )
+}
+
+fn pool_lease_ended() -> Error {
+    Error::config(
+        "CancelToken cannot be used because its pool lease has ended; acquire a new token from \
+         the current borrower"
+            .into(),
     )
 }
 
@@ -248,6 +373,7 @@ mod tests {
             ssl_negotiation: SslNegotiation::Postgres,
             process_id: PROCESS_ID,
             secret_key: Some(SECRET_KEY.into()),
+            pool_lease: None,
         }
     }
 
@@ -496,6 +622,7 @@ mod tests {
                 ssl_negotiation: SslNegotiation::Postgres,
                 process_id: PROCESS_ID,
                 secret_key: Some(SECRET_KEY.into()),
+                pool_lease: None,
             };
             let stream = TcpStream::connect(addr)
                 .await
