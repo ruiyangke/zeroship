@@ -24,22 +24,22 @@
 //! # Safety
 //!
 //! - **Guard-checked.** The baseline SQL is still run through the
-//! registered line-1 guard ([`MigrationGuard`](crate::guard::MigrationGuard))
-//! (defense-in-depth): it represents the
-//! real schema and must not carry a denied/cross-schema construct, even though
-//! it does not execute here.
+//!   registered line-1 guard ([`MigrationGuard`](crate::guard::MigrationGuard))
+//!   (defense-in-depth): it represents the
+//!   real schema and must not carry a denied/cross-schema construct, even though
+//!   it does not execute here.
 //! - **First-entry only.** Baseline refuses if the journal already records ANY
-//! net-applied migration - you cannot baseline a DB the engine already manages
-//! ([`BaselineError::AlreadyManaged`]). Re-baselining the *same* baseline
-//! version is an idempotent no-op (so a retried deploy is safe); a *different*
-//! baseline once one exists is refused.
+//!   net-applied migration - you cannot baseline a DB the engine already manages
+//!   ([`BaselineError::AlreadyManaged`]). Re-baselining the *same* baseline
+//!   version is an idempotent no-op (so a retried deploy is safe); a *different*
+//!   baseline once one exists is refused.
 //! - **Privileged.** Baseline is an operator/admin operation (not creator
-//! self-service): it runs as the ADMIN (it journals, which the migrator role has
-//! no grant for) under the project advisory lock, serialized against every other
-//! migration activity exactly like `MigrationEngine::apply`.
+//!   self-service): it runs as the ADMIN (it journals, which the migrator role has
+//!   no grant for) under the project advisory lock, serialized against every other
+//!   migration activity exactly like `MigrationEngine::apply`.
 //! - **Append-only journal preserved.** The baseline event is an ordinary
-//! immutable `completed` row stamped `kind = 'baseline'`; nothing is updated or
-//! deleted.
+//!   immutable `completed` row stamped `kind = 'baseline'`; nothing is updated or
+//!   deleted.
 
 use crate::guard::GuardError;
 use crate::journal::JournalError;

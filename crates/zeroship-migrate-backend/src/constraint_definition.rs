@@ -335,6 +335,7 @@ pub fn normalize_fk_action_for_vendor(s: Option<&str>, vendor: &BackendVendor) -
 /// `SchemaRenderer::canonical_fk_target`, and the two capability gates read
 /// `vendor`'s own descriptor row. The caller RESOLVES a vendor; this asks it.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn fk_definition(
     local_columns: &[String],
     project_schema: &str,
@@ -429,6 +430,7 @@ pub fn fk_definition(
 /// A backend never needs the derived half: a constraint it read out of a live
 /// catalog always arrives already named.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn fk_constraint_snapshot(
     name: String,
     project_schema: &str,

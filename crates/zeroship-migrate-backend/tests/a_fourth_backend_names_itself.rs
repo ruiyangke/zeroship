@@ -823,9 +823,9 @@ impl DmlRenderer for DuckDbDmlRenderer {
     /// `render_vendor_op` covers sixteen op kinds that are PostgreSQL-only. A
     /// default body would have let this backend inherit somebody else's answer
     /// silently; a required method makes the omission `E0046` in the newcomer's
-    /// own crate, so the only way to compile is to state a position. DuckDb has no
+    /// own crate, so the only way to compile is to state a position. `DuckDb` has no
     /// vendor-op surface, so it refuses, naming ITSELF - exactly as the shipping
-    /// SQLite and MySQL renderers do.
+    /// `SQLite` and `MySQL` renderers do.
     fn render_vendor_op(
         &self,
         _op: &zeroship_migrate_ir::ir::Op,
@@ -851,7 +851,7 @@ impl SchemaRenderer for DuckDbSchemaRenderer {
         '"'
     }
 
-    /// DuckDB deliberately offers no catalog-stored DDL parser in this stub.
+    /// `DuckDB` deliberately offers no catalog-stored DDL parser in this stub.
     fn stored_ddl(&self) -> Option<&'static dyn zeroship_migrate_backend::stored_ddl::StoredDdl> {
         None
     }
@@ -1033,7 +1033,7 @@ impl SchemaRenderer for DuckDbSchemaRenderer {
         rendered.to_string()
     }
 
-    /// With no pin of its own, DuckDB has no suffix of its own to strip.
+    /// With no pin of its own, `DuckDB` has no suffix of its own to strip.
     fn strip_collation<'a>(&self, rendered: &'a str) -> &'a str {
         rendered
     }
@@ -1094,7 +1094,7 @@ impl SchemaRenderer for DuckDbSchemaRenderer {
     /// REFUSED: this fourth backend has no exclusion constraint.
     ///
     /// The compiler asked for this, which is the point of the method being required
-    /// with no default. A default body would have handed this backend PostgreSQL's
+    /// with no default. A default body would have handed this backend `PostgreSQL`'s
     /// `EXCLUDE USING gist (...)` for free, and the fixture would have compiled while
     /// claiming a constraint kind it cannot enforce.
     fn exclusion_constraint_body(
@@ -1421,9 +1421,9 @@ fn the_stub_never_names_the_closed_enum() {
 /// vendor fact, and the outsider states it the same way it states every other one.
 ///
 /// The three shipping backends disagree on this in the strongest possible way.
-/// PostgreSQL derives a name from the table (`<table>_pkey`) and stores it. MySQL
+/// `PostgreSQL` derives a name from the table (`<table>_pkey`) and stores it. `MySQL`
 /// stores no name at all and reports the fixed catalog name `PRIMARY`, which is the
-/// only name a MySQL primary key can have. SQLite has neither, and its reader
+/// only name a `MySQL` primary key can have. `SQLite` has neither, and its reader
 /// synthesizes one. There is no shared convention here to inherit, which is exactly
 /// why an outsider must be asked rather than assumed.
 ///

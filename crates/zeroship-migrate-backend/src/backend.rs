@@ -824,6 +824,7 @@ pub trait MigrationBackend {
     /// EXPAND backfill rides
     /// [`OnlineSchemaChange::run_online_backfill`](crate::capability::OnlineSchemaChange::run_online_backfill),
     /// NOT this method.
+    #[allow(clippy::too_many_arguments)]
     async fn run_backfill_step(
         &self,
         cfg: &ExecutorConfig,

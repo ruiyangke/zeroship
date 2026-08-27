@@ -66,19 +66,19 @@
 //!   BOTH the declared and the live data_type through the selected backend's
 //!   [`SchemaRenderer::canonical_type`](crate::schema::SchemaRenderer::canonical_type)
 //!   - the SAME affinity fold the declarative DIFFER uses - so a clean guarded
-//!   `createTable`/`addColumn` re-run is
-//!   idempotent for every type, while a genuine affinity change (string->number, i.e.
-//!   `text` vs `real`) still maps to two distinct canonical tokens and IS a
-//!   divergence. Several distinct SDK facets collapse to the `text` affinity on SQLite
-//!   (`string`/`ref`/`actor`/`id` + `date`/`json` + a string `literal`) and the live
-//!   catalog stores only the affinity, so a within-text-affinity facet change (live
-//!   `string` vs declared `ref`/`date`) is INVISIBLE - but we do NOT fail closed on
-//!   it: an affinity-match is a `SatisfiedNoop`, exactly as the DIFFER treats it (a
-//!   documented SQLite divergence; on
-//!   SQLite a `ref` column adds no FK via `ALTER` - it is physically a plain `text`
-//!   column either way, so the blind spot carries no provable physical divergence).
-//!   On PG both sides are the `information_schema` spelling and the raw compare is
-//!   exact.
+//!     `createTable`/`addColumn` re-run is
+//!     idempotent for every type, while a genuine affinity change (string->number, i.e.
+//!     `text` vs `real`) still maps to two distinct canonical tokens and IS a
+//!     divergence. Several distinct SDK facets collapse to the `text` affinity on SQLite
+//!     (`string`/`ref`/`actor`/`id` + `date`/`json` + a string `literal`) and the live
+//!     catalog stores only the affinity, so a within-text-affinity facet change (live
+//!     `string` vs declared `ref`/`date`) is INVISIBLE - but we do NOT fail closed on
+//!     it: an affinity-match is a `SatisfiedNoop`, exactly as the DIFFER treats it (a
+//!     documented SQLite divergence; on
+//!     SQLite a `ref` column adds no FK via `ALTER` - it is physically a plain `text`
+//!     column either way, so the blind spot carries no provable physical divergence).
+//!     On PG both sides are the `information_schema` spelling and the raw compare is
+//!     exact.
 //! - **MySQL column equality is not implemented here** - the MySQL executor calls
 //!   this function only when name lookup or non-column structure settles the
 //!   decision. A present `createTable` or `addColumn` is refused before [`decide`]
@@ -156,8 +156,8 @@ pub enum GuardVerdict {
 /// sides through the selected backend's
 /// [`SchemaRenderer::canonical_type`](crate::schema::SchemaRenderer::canonical_type)
 /// - the SAME affinity fold the differ uses (`declarative.rs`) - so a guarded
-/// `createTable`/`addColumn` re-run is idempotent for every type, while a real
-/// affinity change still diverges.
+///   `createTable`/`addColumn` re-run is idempotent for every type, while a real
+///   affinity change still diverges.
 #[must_use]
 pub fn decide(probe: &GuardProbe, live: &SchemaSnapshot, vendor: &BackendVendor) -> GuardVerdict {
     match probe {
@@ -569,9 +569,9 @@ struct ExpectColumnShape<'a> {
 /// SQLite leg we therefore fold BOTH sides through the selected backend's
 /// [`SchemaRenderer::canonical_type`](crate::schema::SchemaRenderer::canonical_type)
 /// - the SAME affinity fold the declarative differ uses - so a clean guarded re-run is idempotent for every
-/// type, while a real affinity change (`text` vs `real`, i.e. string->number) still
-/// maps to two DIFFERENT canonical tokens and IS a divergence. On PG both sides are
-/// already the `information_schema` spelling and the raw compare is exact.
+///   type, while a real affinity change (`text` vs `real`, i.e. string->number) still
+///   maps to two DIFFERENT canonical tokens and IS a divergence. On PG both sides are
+///   already the `information_schema` spelling and the raw compare is exact.
 ///
 /// **F1 - SQLite verifies the canonical AFFINITY, consistent with the differ.**
 /// After the fold, several distinct SDK facets collapse to the `text` affinity on
@@ -925,8 +925,8 @@ fn decide_constraint(
 ///
 /// A migration carrying a probe can reach the executor without lowering ever having run
 /// - `Migration::existence_guard` is a public field on a struct that is not
-/// `#[non_exhaustive]`, in a crate a consumer can depend on directly - so the bound the
-/// load gate and the lower seam enforce needs a last line here.
+///   `#[non_exhaustive]`, in a crate a consumer can depend on directly - so the bound the
+///   load gate and the lower seam enforce needs a last line here.
 ///
 /// The rule is deliberately narrow, because a blanket refusal would break migrations
 /// that are correct today:
