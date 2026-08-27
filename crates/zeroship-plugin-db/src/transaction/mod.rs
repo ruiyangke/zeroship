@@ -511,7 +511,12 @@ async fn exec_begin_or_savepoint(
             // SAVEPOINT failed — undo the depth bump so the slot stays
             // consistent (the enclosing tx is untouched; nothing was
             // opened).
-            crate::context::with_mut(|c| c.pop_savepoint_for(app_id));
+            //
+            // `rolled_back: false` because no frame ever opened: nothing
+            // ran inside it, so its watermark is simply popped. Passing
+            // `true` would truncate to the same length and is equivalent
+            // here, but says something untrue about what happened.
+            crate::context::with_mut(|c| c.pop_savepoint_for(app_id, false));
             return Err(e);
         }
         return Ok(Some(name));
@@ -990,7 +995,13 @@ async fn exec_settle(app_id: &str, success: bool, savepoint: Option<&str>) -> Se
         Some(name) => {
             // Nested — pop the depth first so a sibling/enclosing level
             // sees the correct count, then run RELEASE / ROLLBACK TO.
-            crate::context::with_mut(|c| c.pop_savepoint_for(app_id));
+            //
+            // `!success` is the frame's effect fate: a ROLLBACK TO drops
+            // the frame's queued change events along with its rows, a
+            // RELEASE hands them to the enclosing frame. Before this, the
+            // buffer was never touched here and the top-level COMMIT
+            // drained everything - publishing events for rolled-back rows.
+            crate::context::with_mut(|c| c.pop_savepoint_for(app_id, !success));
             let sql = if success {
                 format!("RELEASE SAVEPOINT {name}")
             } else {
