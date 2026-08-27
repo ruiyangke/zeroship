@@ -1381,15 +1381,11 @@ where
             client_cert_status,
             negotiated_alpn_protocol,
         } = self;
-        let (socket, session) = inner.into_parts();
-        match socket.try_into_split() {
-            Ok((read, write)) => Ok((
-                TlsReadHalf::new(read, session.clone()),
-                TlsWriteHalf::new(write, session),
-            )),
+        match inner.try_into_split() {
+            Ok((read, write)) => Ok((read, write)),
             // The socket refused, so rebuild the stream exactly as it was.
-            Err(socket) => Err(RustlsStream {
-                inner: TlsStreamCore::new(socket, session),
+            Err(inner) => Err(RustlsStream {
+                inner,
                 tls_server_end_point,
                 client_cert_status,
                 negotiated_alpn_protocol,
@@ -1530,17 +1526,150 @@ fn tls_server_end_point(cert: &CertificateDer<'_>) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buf_stream::SplitStream;
+    use crate::maybe_tls_stream::MaybeTlsStream;
+    use crate::tls_sansio::handshaken_pair;
+    use compio::buf::{BufResult, IoBuf, IoBufMut};
     use compio::net::{TcpListener, TcpStream};
     use futures_channel::oneshot;
     use rustls::server::{ClientHello, ResolvesServerCert};
     use sha2::Digest;
     use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
+    use std::io::Write as _;
     use std::sync::Mutex;
 
     /// The CA that signed [`SERVER_LOCALHOST`], and nothing else.
     const CA: &str = include_str!("../tests/data/verifier_ca.pem");
     /// A server certificate whose only subject-alternative name is `localhost`.
     const SERVER_LOCALHOST: &str = include_str!("../tests/data/verifier_server_localhost.pem");
+
+    struct ScriptedTlsSocket {
+        reads: VecDeque<Vec<u8>>,
+    }
+
+    struct DiscardTlsWriteHalf;
+
+    async fn read_scripted<B: IoBufMut>(
+        reads: &mut VecDeque<Vec<u8>>,
+        buf: B,
+    ) -> BufResult<usize, B> {
+        let Some(chunk) = reads.pop_front() else {
+            let mut empty: &[u8] = &[];
+            return AsyncRead::read(&mut empty, buf).await;
+        };
+        let mut source: &[u8] = &chunk;
+        let result = AsyncRead::read(&mut source, buf).await;
+        let consumed = chunk.len() - source.len();
+        if consumed < chunk.len() {
+            reads.push_front(chunk[consumed..].to_vec());
+        }
+        result
+    }
+
+    impl AsyncRead for ScriptedTlsSocket {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            read_scripted(&mut self.reads, buf).await
+        }
+    }
+
+    impl AsyncWrite for ScriptedTlsSocket {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            let len = buf.buf_len();
+            BufResult(Ok(len), buf)
+        }
+
+        async fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl AsyncWrite for DiscardTlsWriteHalf {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            let len = buf.buf_len();
+            BufResult(Ok(len), buf)
+        }
+
+        async fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl SplitStream for ScriptedTlsSocket {
+        type ReadHalf = Self;
+        type WriteHalf = DiscardTlsWriteHalf;
+
+        fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+            Ok((self, DiscardTlsWriteHalf))
+        }
+    }
+
+    #[compio::test]
+    async fn tls_split_preserves_ciphertext_already_read_from_socket() {
+        const BEFORE: &[u8] = b"before split";
+        let trailing = vec![b'x'; 4096];
+        let (client, mut server) = handshaken_pair();
+
+        server
+            .writer()
+            .write_all(BEFORE)
+            .expect("queue the first TLS record");
+        let mut wire = Vec::new();
+        while server.wants_write() {
+            server
+                .write_tls(&mut wire)
+                .expect("serialize the first TLS record");
+        }
+        server
+            .writer()
+            .write_all(&trailing)
+            .expect("queue the trailing TLS record");
+        while server.wants_write() {
+            server
+                .write_tls(&mut wire)
+                .expect("serialize the trailing TLS record");
+        }
+        assert!(
+            wire.len() > 4096 && wire.len() < 16 * 1024,
+            "the fixture must cross rustls' 4096-byte input window in one socket read"
+        );
+
+        let socket = ScriptedTlsSocket {
+            reads: VecDeque::from([wire]),
+        };
+        let rustls = RustlsStream {
+            inner: TlsStreamCore::new(socket, share(client)),
+            tls_server_end_point: None,
+            client_cert_status: ClientCertStatus::NotApplicable,
+            negotiated_alpn_protocol: None,
+        };
+        let mut stream: MaybeTlsStream<ScriptedTlsSocket, _> = MaybeTlsStream::Tls(rustls);
+
+        let BufResult(first, first_buf) = stream.read(vec![0u8; BEFORE.len()]).await;
+        let first = first.expect("decrypt the first TLS record");
+        assert_eq!(&first_buf[..first], BEFORE, "the split fixture is invalid");
+
+        let (mut read, _write) = match stream.try_into_split() {
+            Ok(halves) => halves,
+            Err(_) => panic!("the scripted TLS stream refused to split"),
+        };
+        let BufResult(second, second_buf) = read.read(vec![0u8; trailing.len()]).await;
+        let second = second.expect("decrypt the trailing TLS record after the split");
+        assert_eq!(
+            second,
+            trailing.len(),
+            "the TLS split discarded ciphertext already read from the socket"
+        );
+        assert_eq!(&second_buf[..second], trailing);
+    }
 
     thread_local! {
         static KEY_LOG_PROBE: RefCell<Option<Arc<KeyLogToFile>>> = const { RefCell::new(None) };
