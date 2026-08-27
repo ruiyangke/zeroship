@@ -219,8 +219,13 @@ where
                         "PostgreSQL sent NegotiateProtocolVersion after authentication began",
                     ));
                 }
-                self.negotiate_protocol(body)?;
-                continue;
+                match self.negotiate_protocol(body) {
+                    Ok(()) => continue,
+                    Err(local) if local.is_config() => {
+                        return Err(self.take_available_server_error().unwrap_or(local));
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             if let Some(body) = self.pending.take_raw_frame(b'K').map_err(Error::parse)? {
                 if self.phase != HandshakePhase::ReadingStartupInfo {
@@ -532,7 +537,9 @@ where
 
     startup(&mut handshake, config, &user).await?;
     authenticate(&mut handshake, config, &user).await?;
-    check_ssl_cert_mode(config, handshake.stream.get_mut().client_cert_status())?;
+    let client_cert_status = handshake.stream.get_mut().client_cert_status();
+    let ssl_cert_check = check_ssl_cert_mode(config, client_cert_status);
+    handshake.prefer_available_server_error(ssl_cert_check)?;
     let (process_id, secret_key, mut parameters) = read_info(&mut handshake).await?;
     probe_target_session_attrs(&mut handshake, target_session_attrs, &mut parameters).await?;
 
@@ -1665,6 +1672,35 @@ mod tests {
     }
 
     #[compio::test]
+    async fn sslcertmode_refusal_preserves_a_pending_server_error() {
+        let mut script = frame(b'R', &0u32.to_be_bytes());
+        script.extend_from_slice(&error_response("57P01", "terminating after authentication"));
+        let (stream, _) = scripted_server_after_startup(Some(script)).await;
+        let mut config = plaintext_config();
+        config.ssl_cert_mode(config::SslCertMode::Require);
+
+        let error = match connect_raw_with_target_session_attrs(
+            stream,
+            NoTls,
+            Encryption::Plaintext,
+            false,
+            &config,
+            TargetSessionAttrs::Any,
+            None,
+        )
+        .await
+        {
+            Ok(_) => panic!("sslcertmode=require accepted a plaintext session"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("57P01"),
+            "sslcertmode refusal discarded queued SQLSTATE 57P01: {error}"
+        );
+    }
+
+    #[compio::test]
     async fn target_probe_write_failure_preserves_an_error_buffered_after_ready() {
         let mut script = frame(b'Z', b"I");
         script.extend_from_slice(&notice("retiring after startup"));
@@ -2002,6 +2038,33 @@ mod tests {
                 && chain.contains("3.2"),
             "the negotiation refusal did not name the server version and configured floor: \
              {chain}"
+        );
+    }
+
+    #[compio::test]
+    async fn min_protocol_refusal_preserves_a_pending_server_error() {
+        let mut negotiation = Vec::new();
+        negotiation.extend_from_slice(&0x0003_0000u32.to_be_bytes());
+        negotiation.extend_from_slice(&0u32.to_be_bytes());
+
+        let mut script = frame(b'v', &negotiation);
+        script.extend_from_slice(&error_response(
+            "57P01",
+            "terminating after protocol negotiation",
+        ));
+        let (stream, _) = scripted_server_after_startup(Some(script)).await;
+        let config: Config = "user=scripted-user sslmode=disable min_protocol_version=3.2"
+            .parse()
+            .expect("parse scripted protocol minimum");
+
+        let error = match config.connect_raw(stream, NoTls).await {
+            Ok(_) => panic!("protocol 3.0 satisfied min_protocol_version=3.2"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("57P01"),
+            "minimum protocol refusal discarded queued SQLSTATE 57P01: {error}"
         );
     }
 
