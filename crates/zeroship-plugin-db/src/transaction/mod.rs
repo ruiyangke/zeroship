@@ -1276,10 +1276,10 @@ async fn exec_settle_top_level(app_id: &str, success: bool) -> SettleOutcome {
         }
         (true, Err(e)) => {
             // COMMIT failed after the body resolved → indeterminate.
-            // PG aborts on connection drop; SQLite needs the explicit
-            // best-effort `ROLLBACK` above because the actor outlives the
-            // handle. Drop the queued events so subscribers never see
-            // writes that may not have landed.
+            // PG aborts on connection drop; SQLite's actor terminalizes inside
+            // `run_settle`, which is exactly why the block above no longer
+            // sends a fallback `ROLLBACK` from here. Drop the queued events so
+            // subscribers never see writes that may not have landed.
             clear_pending_emits(app_id);
             SettleOutcome::CommitIndeterminate(e)
         }
@@ -1290,9 +1290,10 @@ async fn exec_settle_top_level(app_id: &str, success: bool) -> SettleOutcome {
         }
         (false, Err(e)) => {
             // Do not claim that the body was cleanly rolled back when the
-            // terminal statement failed. PG aborts on connection drop and
-            // SQLite retried above, but the creator must still see that the
-            // outcome could not be confirmed.
+            // terminal statement failed. PG aborts on connection drop and the
+            // SQLite actor classified the terminal from `is_autocommit`, but
+            // the creator must still see that the outcome could not be
+            // confirmed.
             clear_pending_emits(app_id);
             SettleOutcome::SettleErr(rollback_failed_indeterminate(e))
         }

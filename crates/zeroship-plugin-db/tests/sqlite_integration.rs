@@ -30,7 +30,7 @@ mod support;
 mod parity;
 
 use zeroship_plugin_db::backend::sqlite::SqliteBackend;
-use zeroship_plugin_db::backend::sqlite::reservation::TerminalOutcome;
+use zeroship_plugin_db::backend::sqlite::reservation::{CancelCleanup, TerminalOutcome};
 use zeroship_plugin_db::backend::sqlite::session::TerminalIntent;
 use zeroship_plugin_db::backend::{
     BackendHandle, ChangeStream, IndexBuilder, LockManager, LockScope,
@@ -9969,14 +9969,21 @@ fn a_command_bearing_a_foreign_reservation_is_refused() {
 /// committed (or rolled back) by then" - because nothing could reach a running
 /// statement.
 ///
-/// **What proves "during" is the error, not the clock.** `statement_cancelled`
-/// on this path can only come from `SQLITE_INTERRUPT`, and
-/// `sqlite3_interrupt` only produces it against a statement that was
-/// mid-execution. Had the query finished first, the actor would have left
-/// `Running`, `request_cancel` would have returned `Set` with no interrupt
-/// issued, and the query would have returned rows. The elapsed-time assertion
-/// is a backstop for the case where nothing interrupts and the test would
-/// otherwise sit for minutes.
+/// **What proves "during" is the cleanup, not the error and not the clock.**
+/// This doc comment used to say the error proved it - that `statement_cancelled`
+/// "can only come from `SQLITE_INTERRUPT`". It cannot: the *pre-start* path
+/// (`enter_running` refusing, `cancelled_before_start`) produces
+/// `Cancelled { NoSqlStarted }`, whose `into_result` carries the identical
+/// `statement_cancelled` code, and `matches!(outcome, Cancelled { .. })` is
+/// satisfied by both. The only thing that separates them is the `cleanup`
+/// field, so this arm asserts on it: `RolledBack` / `AlreadyRolledBack` means
+/// SQL was in flight and something had to be undone, `NoSqlStarted` means the
+/// statement never began - a different code path reaching the same error code,
+/// ruled on by `a_cancel_before_execution_starts_stops_the_actor_from_running`
+/// in `backend::sqlite::reservation`'s unit tests. The elapsed-time assertion
+/// stays a backstop for the case where nothing interrupts and the test would
+/// otherwise sit for minutes; it is not the discriminator, and it cannot be -
+/// a pre-start cancellation returns *faster*, not slower.
 #[test]
 fn a_cancellation_interrupts_a_statement_that_is_already_running() {
     run(async {
@@ -10020,10 +10027,21 @@ fn a_cancellation_interrupts_a_statement_that_is_already_running() {
             ),
             other => panic!("expected the cancellation code, got {other:?}"),
         }
+        let TerminalOutcome::Cancelled { cleanup, .. } = &outcome else {
+            panic!(
+                "the actor must acknowledge a cancellation after rolling back; \
+                 got {outcome:?}"
+            );
+        };
         assert!(
-            matches!(outcome, TerminalOutcome::Cancelled { .. }),
-            "the actor must acknowledge a cancellation after rolling back; \
-             got {outcome:?}"
+            matches!(
+                cleanup,
+                CancelCleanup::RolledBack | CancelCleanup::AlreadyRolledBack
+            ),
+            "this arm claims the statement was interrupted mid-execution, so the \
+             cancellation had something to undo. `NoSqlStarted` here would mean the \
+             pre-start path ran instead - the same error code, a different code \
+             path, and nothing about the interrupt proved. got {cleanup:?}"
         );
     });
 }
@@ -10078,6 +10096,284 @@ fn a_cancellation_after_commit_does_not_roll_the_commit_back() {
              after the commit; got {rows:?}"
         );
         assert_eq!(rows[0][0].as_deref(), Some("durable"));
+    });
+}
+
+/// **The data-destroying shape, with no duplicate cancel anywhere.**
+///
+/// A lease dropped without settling retires through `Release`/`unbind_tx`, and
+/// that path does not claim the reservation's terminal - it stays `PENDING`. A
+/// cancel handle taken from that lease therefore still wins its claim later,
+/// arbitrarily far in the future. By then `tx_conn` can belong to an entirely
+/// different transaction, and `run_cancel` used to issue its `ROLLBACK`
+/// unconditionally: it destroyed the *current* owner's writes.
+///
+/// The second half of the damage is the part a creator sees. The stale cancel
+/// leaves the current owner's `tx_bound` untouched, so its `COMMIT` still runs
+/// - onto a connection SQLite has already returned to autocommit. That commit
+/// errors, `classify_commit` correctly refuses to guess, and the creator is
+/// told `commit_indeterminate`: "nobody knows whether your write landed", for a
+/// write that was silently rolled back.
+///
+/// Nothing here cancels twice, so `claim_cancelled`'s idempotency does not
+/// close it. Ownership is what closes it.
+#[test]
+fn a_cancel_for_a_retired_reservation_does_not_roll_back_the_next_transaction() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .pool_exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", &[])
+            .await
+            .expect("create table");
+
+        // R1 takes the lane, writes, and is dropped WITHOUT settling. Its
+        // cancel handle outlives it - which is the whole point: a guard held
+        // by a dropped future is exactly how SC-1 step 9 will arm this.
+        let stale_cancel = {
+            let first = backend
+                .acquire_dedicated_client()
+                .await
+                .expect("acquire the first transaction");
+            let cancel = first.cancel_handle().expect("cancel handle for R1");
+            backend
+                .client_exec(&first, "BEGIN", &[])
+                .await
+                .expect("BEGIN on R1");
+            backend
+                .client_exec(&first, "INSERT INTO t (v) VALUES ('r1')", &[])
+                .await
+                .expect("write inside R1");
+            cancel
+        };
+
+        // R2 takes the lane R1 gave up, and opens its own transaction.
+        let second = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire the second transaction");
+        backend
+            .client_exec(&second, "BEGIN", &[])
+            .await
+            .expect("BEGIN on R2");
+        backend
+            .client_exec(&second, "INSERT INTO t (v) VALUES ('r2')", &[])
+            .await
+            .expect("write inside R2");
+
+        // The stale cancellation lands while R2's transaction is open.
+        let stale_outcome = stale_cancel
+            .cancel()
+            .await
+            .expect("the actor must answer a stale cancellation, not hang");
+        assert_eq!(
+            stale_outcome,
+            TerminalOutcome::Cancelled {
+                cleanup: CancelCleanup::AlreadyRetired,
+                cause: None
+            },
+            "a cancellation for a reservation that no longer owns tx_conn must report \
+             that it cleaned up nothing. `RolledBack` here is the failure: the only \
+             transaction there to roll back belongs to somebody else. got \
+             {stale_outcome:?}"
+        );
+
+        // R2 must be untouched: its COMMIT is a real commit, not an
+        // indeterminate one, and its row is on disk.
+        let committed = backend
+            .settle_transaction_for_tests(&second, TerminalIntent::Commit)
+            .await
+            .expect("settle R2");
+        assert_eq!(
+            committed,
+            TerminalOutcome::Committed,
+            "R2's commit must be a confirmed commit. A stale cancellation that rolled \
+             its transaction back leaves SQLite in autocommit, so COMMIT errors and \
+             this reports CommitIndeterminate - the creator is told the fate is \
+             unknown for a write that was destroyed."
+        );
+
+        let rows = backend
+            .autocommit_client()
+            .query("SELECT v FROM t ORDER BY id", &[])
+            .await
+            .expect("read after the stale cancellation");
+        assert_eq!(
+            rows.len(),
+            1,
+            "exactly R2's row should survive: R1's died with its unsettled lease, \
+             R2's must survive the stale cancel; got {rows:?}"
+        );
+        assert_eq!(rows[0][0].as_deref(), Some("r2"));
+    });
+}
+
+/// A cancellation is a claim on one terminal, and a claim can be won once.
+///
+/// `claim_cancelled` used to return `true` for a terminal already reading
+/// `CLAIMED_CANCELLED`, so a second `Cancel` re-entered the cleanup path and
+/// issued a second `ROLLBACK` on the lane. Here the second cancel must instead
+/// be answered with what the first one decided.
+#[test]
+fn a_second_cancellation_is_answered_not_re_executed() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .pool_exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", &[])
+            .await
+            .expect("create table");
+
+        let tx = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire tx client");
+        let cancel = tx.cancel_handle().expect("cancel handle");
+        backend.client_exec(&tx, "BEGIN", &[]).await.expect("BEGIN");
+        backend
+            .client_exec(&tx, "INSERT INTO t (v) VALUES ('doomed')", &[])
+            .await
+            .expect("write inside the transaction");
+
+        let first = cancel.cancel().await.expect("first cancel acknowledged");
+        assert!(
+            matches!(first, TerminalOutcome::Cancelled { .. }),
+            "the first cancellation wins the terminal and rolls back; got {first:?}"
+        );
+
+        let second = cancel.cancel().await.expect("second cancel acknowledged");
+        let TerminalOutcome::AlreadyCompleted(inner) = &second else {
+            panic!(
+                "a second cancellation must be told what the first one decided, not \
+                 granted the terminal again; got {second:?}"
+            );
+        };
+        assert!(
+            matches!(**inner, TerminalOutcome::Cancelled { .. }),
+            "and the answer it is told must be the first cancellation's own \
+             outcome; got {inner:?}"
+        );
+    });
+}
+
+/// The autocommit lane has an ownership rule too, and it is a *lifetime* rule:
+/// one reservation, one command.
+///
+/// `check_owner` only examined `tx_conn` until 2026-08-27, so this refusal came
+/// from `enter_running` noticing a non-`PENDING` terminal instead - reported as
+/// `statement_cancelled`, which names neither what went wrong nor why. Nothing
+/// was cancelled; a spent reservation was reused.
+#[test]
+fn a_spent_autocommit_reservation_is_refused_as_a_non_owner() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .pool_exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", &[])
+            .await
+            .expect("create table");
+
+        let spent = backend.spent_autocommit_reservation_for_tests();
+        backend
+            .exec_on_reservation_for_tests(&spent, "INSERT INTO t (v) VALUES ('first')", &[])
+            .await
+            .expect("the reservation's one command must run");
+
+        let err = backend
+            .exec_on_reservation_for_tests(&spent, "INSERT INTO t (v) VALUES ('second')", &[])
+            .await
+            .expect_err("a spent autocommit reservation must be refused");
+        match &err {
+            DbError::ValidationFailed { code, .. } => assert_eq!(
+                *code, "reservation_not_owner",
+                "a stale reservation is an ownership failure, not a cancellation. \
+                 `statement_cancelled` here names the wrong thing: nothing was \
+                 cancelled. got {err:?}"
+            ),
+            other => panic!("expected a typed reservation refusal, got {other:?}"),
+        }
+
+        let rows = backend
+            .autocommit_client()
+            .query("SELECT COUNT(*) FROM t", &[])
+            .await
+            .expect("count after the refusal");
+        assert_eq!(
+            rows[0][0].as_deref(),
+            Some("1"),
+            "the refusal must be a refusal: only the first command ran"
+        );
+    });
+}
+
+/// Both connections publish CDC. Installing the hooks on one would silently
+/// drop half the change stream now that `op_conn` is a write path too.
+#[test]
+fn writes_on_both_connections_reach_the_broker() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .attach_app_file("app_cdc")
+            .await
+            .expect("ensure_app_schema");
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_cdc\".\"items\" (\
+                     id INTEGER PRIMARY KEY, \
+                     name TEXT NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE items");
+
+        let sub = subscribe_local("app_cdc", "items");
+
+        // op_conn: an ordinary autocommit write.
+        backend
+            .pool_exec(
+                "INSERT INTO \"app_cdc\".\"items\" (name) VALUES ('from_op_conn')",
+                &[],
+            )
+            .await
+            .expect("autocommit INSERT");
+
+        // tx_conn: a write inside an explicit creator transaction, committed.
+        let tx = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire tx client");
+        backend.client_exec(&tx, "BEGIN", &[]).await.expect("BEGIN");
+        backend
+            .client_exec(
+                &tx,
+                "INSERT INTO \"app_cdc\".\"items\" (name) VALUES ('from_tx_conn')",
+                &[],
+            )
+            .await
+            .expect("transactional INSERT");
+        assert_eq!(
+            backend
+                .settle_transaction_for_tests(&tx, TerminalIntent::Commit)
+                .await
+                .expect("commit"),
+            TerminalOutcome::Committed
+        );
+
+        drain_publisher().await;
+
+        let msgs = drain(&sub);
+        let mut names: Vec<String> = msgs
+            .iter()
+            .filter_map(|m| match m {
+                SubscriptionMessage::Change(ev) => ev.new_tuple.get("name").cloned(),
+                _ => None,
+            })
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["from_op_conn".to_string(), "from_tx_conn".to_string()],
+            "a write on EACH connection must reach the broker; a dispatcher \
+             installed on only one drops the other silently. got {msgs:?}"
+        );
     });
 }
 

@@ -105,6 +105,10 @@ pub struct Reservation {
     /// `BEGIN` and no data SQL was ever issued - from a cancellation that has
     /// something to roll back.
     began: AtomicBool,
+    /// Set by the actor once this reservation has run one command. Only the
+    /// autocommit lane reads it, where "one reservation, one command" is the
+    /// whole of ownership - see [`Reservation::used`].
+    used: AtomicBool,
     outcome: Mutex<Option<TerminalOutcome>>,
 }
 
@@ -127,6 +131,7 @@ impl Reservation {
             running_seq: AtomicU64::new(0),
             cancel_seq: AtomicU64::new(0),
             began: AtomicBool::new(false),
+            used: AtomicBool::new(false),
             outcome: Mutex::new(None),
         }
     }
@@ -222,14 +227,22 @@ impl Reservation {
             .is_ok()
     }
 
-    /// Claim the terminal as a cancellation. `false` means a completion has
-    /// already been claimed and the cancellation lost the race.
+    /// Claim the terminal as a cancellation. `false` means the terminal is
+    /// already claimed - by a completion, or by an earlier cancellation - and
+    /// this caller must not act on its own.
+    ///
+    /// **The second-claim arm is load-bearing, not tidiness.** It returned
+    /// `true` until 2026-08-27, so a reservation whose terminal already read
+    /// `CLAIMED_CANCELLED` handed a *second* caller the right to run cleanup.
+    /// The actor's cleanup is a `ROLLBACK` on the reservation's lane, and by
+    /// the time a duplicate arrives that lane can belong to somebody else, so
+    /// "claim an already-claimed terminal" is a licence to destroy a stranger's
+    /// open transaction. Exactly one claim wins; every later one is told so.
     pub(crate) fn claim_cancelled(&self) -> bool {
         loop {
             let current = self.terminal.load(Ordering::SeqCst);
             match current {
-                TERMINAL_CLAIMED_COMPLETED => return false,
-                TERMINAL_CLAIMED_CANCELLED => return true,
+                TERMINAL_CLAIMED_COMPLETED | TERMINAL_CLAIMED_CANCELLED => return false,
                 _ => {
                     if self
                         .terminal
@@ -246,6 +259,20 @@ impl Reservation {
                 }
             }
         }
+    }
+
+    /// Has this reservation already executed a command?
+    ///
+    /// The autocommit lane's ownership rule is built on this: SC-2 mints an
+    /// autocommit reservation per command and settles it at that command's
+    /// completion, so a *second* command naming one is a stale reservation and
+    /// not a re-use. See [`super::session`]'s `check_owner`.
+    pub(crate) fn used(&self) -> bool {
+        self.used.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn mark_used(&self) {
+        self.used.store(true, Ordering::SeqCst);
     }
 
     pub(crate) fn store_outcome(&self, outcome: TerminalOutcome) {
@@ -289,6 +316,14 @@ pub enum CancelCleanup {
     /// `ROLLBACK` errored because SQLite had already ended the transaction
     /// itself - the ordinary result of interrupting a write. Not a failure.
     AlreadyRolledBack,
+    /// The reservation no longer owned the connection it names, so this
+    /// cancellation cleaned up **nothing**: whoever retired the reservation
+    /// (`Release`/`Reserve`'s `unbind_tx`, or its own `Settle`) already did.
+    ///
+    /// It exists so the actor never has to choose between issuing a `ROLLBACK`
+    /// on a lane a stranger now owns and *reporting* a rollback it did not
+    /// perform. Both are lies; this names the state instead.
+    AlreadyRetired,
 }
 
 /// The terminal fate of a reservation, as classified by `is_autocommit`.
@@ -392,6 +427,30 @@ impl TerminalOutcome {
             }),
         }
     }
+}
+
+/// What a cancellation reports when it finds the terminal already claimed.
+///
+/// The stored outcome is the answer whenever the winner left one. When it did
+/// not, **nothing here knows what happened**, and the default must say so: the
+/// terminal word alone proves only that some other path claimed the right to
+/// decide, never what it decided.
+///
+/// This defaulted to [`TerminalOutcome::Committed`] until 2026-08-27 - a
+/// confirmed commit that nothing proved, which `into_result` then reported as
+/// `Ok(())`. That is the collapse this whole module exists to refuse: an
+/// uncertainty resolved by assumption, in the direction that publishes success.
+pub(crate) fn outcome_for_a_claimed_terminal(reservation: &Reservation) -> TerminalOutcome {
+    let stored = reservation.stored_outcome().unwrap_or_else(|| {
+        TerminalOutcome::CommitIndeterminate {
+            message: format!(
+                "db: reservation {} had its terminal claimed by another path that recorded no \
+                 outcome; nothing proves whether it committed or rolled back",
+                reservation.id()
+            ),
+        }
+    });
+    TerminalOutcome::AlreadyCompleted(Box::new(stored))
 }
 
 /// Wire code for a statement the platform itself cancelled.
@@ -745,5 +804,78 @@ mod tests {
             !r.claim_completed(),
             "a completion must not overwrite a claimed cancellation"
         );
+    }
+
+    /// A cancellation cannot claim a terminal it already holds.
+    ///
+    /// The claim is a licence to run cleanup, and the actor's cleanup is a
+    /// `ROLLBACK` on the reservation's *lane* - which a later reservation may
+    /// own by then. Handing that licence out twice is how one duplicate
+    /// `Cancel` destroys a stranger's open transaction.
+    #[test]
+    fn a_second_cancellation_claim_on_the_same_terminal_is_refused() {
+        let r = Reservation::new(5, Lane::Tx, ReservationKind::Transaction, 0);
+        assert_eq!(r.request_cancel(), CancelIntent::Set);
+        assert!(r.claim_cancelled(), "the first claim must win the terminal");
+        assert!(
+            !r.claim_cancelled(),
+            "a second claim must not re-win a terminal this reservation already holds"
+        );
+        // And a third, so the arm rules on repetition rather than on parity.
+        assert!(!r.claim_cancelled(), "every later claim must lose too");
+    }
+
+    /// A claimed terminal with no stored outcome is an **unknown**, not a
+    /// commit. Defaulting it to `Committed` published a success nothing
+    /// proved and `into_result` turned it into `Ok(())`.
+    #[test]
+    fn a_claimed_terminal_with_no_stored_outcome_is_indeterminate_not_committed() {
+        let r = Reservation::new(6, Lane::Tx, ReservationKind::Transaction, 0);
+        assert!(r.claim_completed());
+        assert_eq!(r.stored_outcome(), None, "precondition: nothing recorded");
+
+        let outcome = outcome_for_a_claimed_terminal(&r);
+        let TerminalOutcome::AlreadyCompleted(inner) = &outcome else {
+            panic!("a claimed terminal must report AlreadyCompleted; got {outcome:?}");
+        };
+        assert!(
+            matches!(**inner, TerminalOutcome::CommitIndeterminate { .. }),
+            "an outcome nobody recorded must not be reported as a commit; got {inner:?}"
+        );
+        assert!(
+            outcome.quarantines(),
+            "an unproved terminal must quarantine its connection"
+        );
+        outcome
+            .into_result()
+            .expect_err("an unproved terminal must never collapse into Ok(())");
+    }
+
+    /// The other half of the same rule: when the winner DID record an outcome,
+    /// that outcome is the answer and is not overwritten by the default.
+    #[test]
+    fn a_claimed_terminal_reports_the_outcome_its_winner_recorded() {
+        let r = Reservation::new(7, Lane::Tx, ReservationKind::Transaction, 0);
+        assert!(r.claim_completed());
+        r.store_outcome(TerminalOutcome::Committed);
+
+        assert_eq!(
+            outcome_for_a_claimed_terminal(&r),
+            TerminalOutcome::AlreadyCompleted(Box::new(TerminalOutcome::Committed))
+        );
+        assert!(
+            outcome_for_a_claimed_terminal(&r).into_result().is_ok(),
+            "a recorded commit is still a success"
+        );
+    }
+
+    /// `used` is the autocommit lane's ownership word: one reservation, one
+    /// command.
+    #[test]
+    fn a_reservation_records_that_it_has_run_a_command() {
+        let r = Reservation::new(8, Lane::Op, ReservationKind::Autocommit, 0);
+        assert!(!r.used(), "a freshly minted reservation has run nothing");
+        r.mark_used();
+        assert!(r.used(), "the mark must survive for the ownership check");
     }
 }
