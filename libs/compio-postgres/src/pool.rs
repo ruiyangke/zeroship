@@ -911,7 +911,8 @@ impl Pool {
     /// # Errors
     ///
     /// Returns an error for invalid pool or transport configuration, failed
-    /// connection warm-up, or a rejected `after_connect` callback.
+    /// connection warm-up, a rejected `after_connect` callback, or a warm-up
+    /// connection that becomes unusable before the pool can be published.
     pub async fn connect_with_config(
         connection_config: Config,
         pool_config: PoolConfig,
@@ -969,6 +970,18 @@ impl Pool {
                     });
                 }
             }
+        }
+
+        // An earlier entry has sat across every later connect/retry/hook
+        // await. Recheck the whole set at the actual publication point; a
+        // per-entry post-hook check cannot prove that those earlier entries
+        // remained open, read-healthy, COPY-free, and inside their lifetime.
+        if let Some(index) = entries.iter().position(|entry| !entry.is_pool_eligible()) {
+            drop(entries);
+            return Err(pool_error(format!(
+                "warm-up connection {} became unusable before pool publication",
+                index + 1
+            )));
         }
 
         let total = entries.len();
@@ -1089,6 +1102,36 @@ impl Pool {
     fn discard_unowned_entry(&self, entry: PoolEntry) {
         self.release_total_slots(1);
         drop(entry);
+    }
+
+    /// Remove idle entries whose pool-owned lifecycle state already forbids
+    /// reuse. Ownership and accounting are committed before destroying a
+    /// Client or waking caller code.
+    fn reap_ineligible_idle(&self) -> usize {
+        let discarded = {
+            let mut idle = self.idle.borrow_mut();
+            let mut discarded = Vec::new();
+            let mut kept = Vec::with_capacity(idle.len());
+            for entry in idle.drain(..) {
+                if entry.is_pool_eligible() {
+                    kept.push(entry);
+                } else {
+                    discarded.push(entry);
+                }
+            }
+            *idle = kept;
+            discarded
+        };
+        let count = discarded.len();
+        if count > 0 {
+            self.release_total_slots(count);
+            for _ in 0..count {
+                self.metrics.inc_evictions();
+            }
+            self.wake_one_waiter();
+        }
+        drop(discarded);
+        count
     }
 
     fn remove_handoff_slot(&self, slot: &Rc<WaiterSlot>) {
@@ -1632,7 +1675,7 @@ impl Pool {
         // Take counts and do all mutations inside tight borrows. Release
         // every borrow before awaiting.
 
-        let (before, evicted_expired, evicted_idle, discarded) = {
+        let (before, evicted_unusable, evicted_idle, discarded) = {
             let mut idle = pool.idle.borrow_mut();
             let before = idle.len();
 
@@ -1652,12 +1695,13 @@ impl Pool {
             // believe it holds capacity it does not.
             let mut discarded: Vec<PoolEntry> = Vec::new();
 
-            // 1. Evict expired (max_lifetime reached).
-            let mut evicted_expired = 0usize;
+            // 1. Evict entries that are expired or otherwise already known to
+            // be unusable.
+            let mut evicted_unusable = 0usize;
             let mut kept = Vec::with_capacity(idle.len());
             for entry in idle.drain(..) {
-                if entry.is_expired() {
-                    evicted_expired += 1;
+                if !entry.is_pool_eligible() {
+                    evicted_unusable += 1;
                     discarded.push(entry);
                 } else {
                     kept.push(entry);
@@ -1683,10 +1727,10 @@ impl Pool {
                 }
             }
 
-            (before, evicted_expired, evicted_idle, discarded)
+            (before, evicted_unusable, evicted_idle, discarded)
         };
 
-        let evicted = evicted_expired + evicted_idle;
+        let mut evicted = evicted_unusable + evicted_idle;
         if evicted > 0 {
             let cur = pool.total.get();
             pool.total.set(cur.saturating_sub(evicted));
@@ -1721,6 +1765,14 @@ impl Pool {
                 let Some(pool) = weak.upgrade() else {
                     return false;
                 };
+                if pool.closed.get() {
+                    return false;
+                }
+                // Entries deposited by an earlier iteration have crossed the
+                // later iteration's connection and hook awaits. Reap any that
+                // became ineligible before using the live idle count as the
+                // refill stop condition.
+                evicted += pool.reap_ineligible_idle();
                 if pool.closed.get() {
                     return false;
                 }
@@ -4374,6 +4426,54 @@ mod tests {
         server.join().expect("fake PostgreSQL server panicked");
     }
 
+    #[compio::test]
+    async fn housekeeping_rechecks_idle_eligibility_after_refill_await() {
+        let (address, finish_tx, count_rx, server) = accepting_postgres_server();
+        let (seeded, _seeded_receiver) = fake_client(98);
+        let seeded_status = seeded.tx_status_handle();
+        let calls = Rc::new(Cell::new(0_usize));
+        let hook_calls = Rc::clone(&calls);
+        let mut config = PoolConfig {
+            max_size: 3,
+            min_idle: 2,
+            validation_bypass: Duration::from_secs(60),
+            ..PoolConfig::default()
+        };
+        config.after_connect(move |_| {
+            let invocation = hook_calls.get() + 1;
+            hook_calls.set(invocation);
+            if invocation == 1 {
+                seeded_status.store(crate::connection::READ_RETIRED_STATUS, Ordering::Release);
+            }
+            Box::pin(async { Ok(()) })
+        });
+
+        let seeded = PoolEntry::new(seeded, Duration::from_secs(600));
+        let mut pool = test_pool(config, vec![seeded], 0, 1);
+        pool.transport = Transport::resolve(
+            format!("postgres://postgres@{address}/fake?sslmode=disable")
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
+        let pool = Rc::new(pool);
+        let weak = Rc::downgrade(&pool);
+
+        assert!(Pool::housekeep(&weak).await);
+
+        assert_eq!(calls.get(), 2, "refill counted a retired idle entry");
+        assert_eq!(pool.idle_count(), 2, "refill did not restore min_idle");
+        assert_eq!(pool.active_count(), 0);
+        assert_eq!(pool.total_count(), 2);
+        assert_eq!(pool.metrics.connections_created.get(), 2);
+        assert_eq!(pool.metrics.evictions.get(), 1);
+
+        drop(pool);
+        let _ = finish_tx.send(());
+        assert_eq!(count_rx.recv().unwrap(), 2);
+        server.join().expect("fake PostgreSQL server panicked");
+    }
+
     /// Check out one connection from a pool holding a single idle entry aged
     /// `remaining_lifetime`, and report which backend the borrower got plus how
     /// many evictions the checkout recorded.
@@ -4496,6 +4596,51 @@ mod tests {
             closed,
             [true, true],
             "warm-up failure left an earlier session open"
+        );
+    }
+
+    #[compio::test]
+    async fn warmup_rechecks_idle_eligibility_at_pool_publication() {
+        let (address, finish_tx, count_rx, server) = accepting_postgres_server();
+        let connection_config: Config =
+            format!("postgres://postgres@{address}/fake?sslmode=disable")
+                .parse()
+                .unwrap();
+        let calls = Rc::new(Cell::new(0_usize));
+        let hook_calls = Rc::clone(&calls);
+        let first_status = Rc::new(RefCell::new(None));
+        let hook_first_status = Rc::clone(&first_status);
+        let mut pool_config = PoolConfig {
+            max_size: 2,
+            min_idle: 2,
+            ..PoolConfig::default()
+        };
+        pool_config.after_connect(move |client| {
+            let invocation = hook_calls.get() + 1;
+            hook_calls.set(invocation);
+            if invocation == 1 {
+                *hook_first_status.borrow_mut() = Some(client.tx_status_handle());
+            } else if invocation == 2 {
+                hook_first_status
+                    .borrow()
+                    .as_ref()
+                    .expect("first hook did not retain its status handle")
+                    .store(crate::connection::READ_RETIRED_STATUS, Ordering::Release);
+            }
+            Box::pin(async { Ok(()) })
+        });
+
+        let outcome = Pool::connect_with_config(connection_config, pool_config).await;
+        let published = outcome.is_ok();
+        drop(outcome);
+
+        let _ = finish_tx.send(());
+        assert_eq!(count_rx.recv().unwrap(), 2);
+        server.join().expect("fake PostgreSQL server panicked");
+        assert_eq!(calls.get(), 2);
+        assert!(
+            !published,
+            "warm-up published an earlier entry invalidated by a later hook"
         );
     }
 
