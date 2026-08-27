@@ -543,7 +543,7 @@ pub fn set_postgres_pool_for_tests(pool: Rc<compio_postgres::Pool>, url: &str) {
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn reset_context_for_tests() {
-    service::reset_operator_pools_for_tests();
+    service::close_operator_pools();
     ctx_mut(|c| *c = context::ThreadDbContext::new());
 }
 

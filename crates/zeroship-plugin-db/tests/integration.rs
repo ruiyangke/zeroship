@@ -4115,8 +4115,16 @@ fn err_chain(e: &dyn std::error::Error) -> String {
 // no DB dependency -- the check is pure-Rust JSON walk.
 // ---------------------------------------------------------------------------
 
-/// SC-5: operator deprovisioning performs NO second URL parse and opens NO
-/// second pool.
+/// Operator deprovisioning performs NO second URL parse, and opens ONE operator
+/// pool for a whole run of deletions - not none, and not one per app.
+///
+/// **SC-5 words the second half as "opens NO second pool", and the code does not
+/// do that.** `DbLifecycle::operator_pool` opens a dedicated
+/// two-connection pool and shares it. The doc comment here claimed zero while
+/// the assertion below required one; they are different claims and the
+/// assertion is the true one. What the pool costs, and what releases it, is on
+/// `crate::service::OPERATOR_POOLS` and in `docs/runbooks/docker-compose.md`
+/// under "Postgres connections a worker holds".
 ///
 /// The free function this replaces took the URL, re-ran `backend_for_url` on it
 /// and built a fresh two-connection `Pool` **per deleted app** - two connects,
@@ -4133,10 +4141,14 @@ fn err_chain(e: &dyn std::error::Error) -> String {
 ///
 /// Three deletions, not one: with one, "opens one pool per deletion" and "opens
 /// one pool ever" are the same number and the arm rules on nothing.
+///
+/// The last section rules on the RELEASE, which is the other half of a pool
+/// that is not per-deletion: `close_operator_pools` must actually uninstall it,
+/// or "shared across deletions" would mean "held until the process exits".
 #[test]
 fn operator_deprovisioning_reuses_one_pool_and_reparses_nothing() {
     use zeroship_plugin_db::service::{
-        operator_pool_open_count, reset_operator_pools_for_tests, url_parse_count, DbService,
+        close_operator_pools, operator_pool_open_count, url_parse_count, DbService,
         DbServiceConfig,
     };
 
@@ -4157,7 +4169,7 @@ fn operator_deprovisioning_reuses_one_pool_and_reparses_nothing() {
                 let url = require_pg().await;
                 // This thread has never deprovisioned anything, so its operator
                 // pool map is empty and the counters start from a known floor.
-                reset_operator_pools_for_tests();
+                close_operator_pools();
 
                 let service = DbService::new(DbServiceConfig {
                     url,
@@ -4183,14 +4195,35 @@ fn operator_deprovisioning_reuses_one_pool_and_reparses_nothing() {
                     "deprovisioning must read the backend selection made at composition, \
                      not re-parse the URL"
                 );
+                let opened_for_the_batch = operator_pool_open_count() - pools_before;
                 assert_eq!(
-                    operator_pool_open_count() - pools_before,
+                    opened_for_the_batch,
                     1,
-                    "{} deletions must share ONE long-lived operator pool",
+                    "{} deletions must share ONE operator pool, not one each",
                     DELETED_APPS.len()
                 );
 
-                reset_operator_pools_for_tests();
+                // The release half. `close_operator_pools` must uninstall the
+                // pool, not merely be callable: a shared pool that nothing
+                // removes is a pool held until the process exits, which is the
+                // cost this arm's doc comment now discloses. A deletion AFTER
+                // the release therefore has to open a second pool - if the
+                // count stays at 1 the release did nothing and the entry is
+                // still installed.
+                close_operator_pools();
+                service
+                    .lifecycle()
+                    .deprovision_app("sc5_operator_pool_arm_after_release")
+                    .await
+                    .expect("idempotent teardown for an app with no slots");
+                assert_eq!(
+                    operator_pool_open_count() - pools_before,
+                    opened_for_the_batch + 1,
+                    "closing the operator pools must uninstall them, so the next \
+                     deletion opens a fresh pool",
+                );
+
+                close_operator_pools();
                 drain_pg().await;
             });
     })
