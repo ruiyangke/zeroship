@@ -123,9 +123,13 @@ impl Endpoint {
                     )));
                 }
 
-                Ok(addrs.into_iter().map(|addr| Addr::Tcp(addr.ip())).collect())
+                Ok(addrs.into_iter().map(Addr::tcp).collect())
             }
-            EndpointTarget::Ip(ip) => Ok(vec![Addr::Tcp(*ip)]),
+            EndpointTarget::Ip(ip) => Ok(vec![Addr::Tcp {
+                ip: *ip,
+                // `hostaddr` parses as an `IpAddr`, which cannot carry a zone.
+                scope_id: 0,
+            }]),
             #[cfg(unix)]
             EndpointTarget::Unix(path) => Ok(vec![Addr::Unix(path.clone())]),
         }
@@ -514,7 +518,7 @@ where
 /// sockets use the mode's normal ordering and may be retried by their caller.
 pub(crate) fn first_encryption_for_addr(addr: &Addr, mode: SslMode) -> Encryption {
     match addr {
-        Addr::Tcp(_) => Encryption::first_for(mode),
+        Addr::Tcp { .. } => Encryption::first_for(mode),
         #[cfg(unix)]
         Addr::Unix(_) => Encryption::Plaintext,
     }
@@ -525,7 +529,9 @@ pub(crate) fn first_encryption_for_addr(addr: &Addr, mode: SslMode) -> Encryptio
 /// separate policy bit so `verify-full` can still require an actual `host`.
 pub(crate) fn tls_server_name(addr: &Addr, hostname: Option<&str>) -> String {
     hostname.map(str::to_owned).unwrap_or_else(|| match addr {
-        Addr::Tcp(ip) => ip.to_string(),
+        // Deliberately WITHOUT the zone: this string is the TLS server
+        // name, and a `%scope` suffix would break certificate matching.
+        Addr::Tcp { ip, .. } => ip.to_string(),
         #[cfg(unix)]
         Addr::Unix(_) => String::new(),
     })
@@ -1188,7 +1194,7 @@ mod tests {
     ///
     /// The per-address deadline test needs TWO stalled endpoints sharing ONE
     /// port, because `Endpoint::addresses` discards the resolved port
-    /// (`Addr::Tcp(addr.ip())`) and `connect_once` dials `endpoint.port()`.
+    /// (`Addr::tcp(addr)`) and `connect_once` dials `endpoint.port()`.
     /// Two loopback IPs on the same port is the only shape that expresses it.
     async fn scripted_server_bound(
         bind: SocketAddr,
@@ -2058,6 +2064,54 @@ mod tests {
         }
     }
 
+    /// A resolved IPv6 zone must survive resolution.
+    ///
+    /// `getaddrinfo` returns `sin6_scope_id` for a link-local host, and it is
+    /// not decoration: Linux `tcp_v6_connect` refuses an `IPV6_ADDR_LINKLOCAL`
+    /// destination when the socket is not bound to an interface, which this
+    /// crate never does. Measured here against a listener on
+    /// `fe80::7eed:8dff:fec3:8315%eth0`, one variable apart: scope 0 fails
+    /// instantly with EINVAL before a packet leaves, the real scope is
+    /// accepted. Narrowing to `IpAddr` at this line is therefore the point at
+    /// which a link-local endpoint becomes permanently undialable.
+    ///
+    /// The port is deliberately different from the endpoint's, because
+    /// `addresses` keeps only the address and `connect_once` supplies the port
+    /// separately; this test is about the ZONE, not the port.
+    #[compio::test]
+    async fn resolution_keeps_the_ipv6_zone() {
+        const ZONE: u32 = 7;
+        let mut config = Config::new();
+        config.host("link-local.example").ssl_mode(SslMode::Disable);
+        let endpoint = endpoints(&config)
+            .expect("one hostname is a valid endpoint list")
+            .pop()
+            .expect("the endpoint list contains the hostname");
+
+        let mut resolver = ListResolver(vec![SocketAddr::V6(std::net::SocketAddrV6::new(
+            "fe80::1".parse().expect("a literal link-local address"),
+            5432,
+            0,
+            ZONE,
+        ))]);
+        let resolved = endpoint
+            .addresses(&mut resolver, LoadBalanceHosts::Disable)
+            .await
+            .expect("the resolver returned one address");
+
+        match resolved.as_slice() {
+            [Addr::Tcp { ip, scope_id }] => {
+                assert_eq!(ip.to_string(), "fe80::1", "the address itself changed");
+                assert_eq!(
+                    *scope_id, ZONE,
+                    "the resolved IPv6 zone was dropped, so this link-local \
+                     address would be dialled with scope 0 and refused with EINVAL"
+                );
+            }
+            other => panic!("expected one resolved TCP address, got {}", other.len()),
+        }
+    }
+
     /// Four entries have 24 possible permutations. If the shuffle is correct
     /// and uniform, the chance that all 64 trials produce the same ordering is
     /// 24^-63, approximately 1.11e-87.
@@ -2087,7 +2141,7 @@ mod tests {
                 .expect("the resolver returned four addresses")
                 .into_iter()
                 .map(|addr| match addr {
-                    Addr::Tcp(ip) => ip,
+                    Addr::Tcp { ip, .. } => ip,
                     #[cfg(unix)]
                     Addr::Unix(path) => {
                         panic!(
@@ -2222,7 +2276,7 @@ mod tests {
             .socket_config
             .expect("a connected client records its socket address");
         assert!(
-            matches!(socket_config.addr, Addr::Tcp(ip) if ip == second.ip()),
+            matches!(socket_config.addr, Addr::Tcp { ip, .. } if ip == second.ip()),
             "the returned client must record the healthy second address"
         );
         drop((client, connection));

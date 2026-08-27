@@ -364,7 +364,7 @@ mod tests {
     fn network_token(addr: std::net::SocketAddr) -> CancelToken {
         CancelToken {
             socket_config: Some(SocketConfig {
-                addr: Addr::Tcp(addr.ip()),
+                addr: Addr::tcp(addr),
                 hostname: Some("localhost".to_string()),
                 port: addr.port(),
                 connect_timeout: None,

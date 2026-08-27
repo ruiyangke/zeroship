@@ -284,7 +284,7 @@ mod tests {
         });
 
         let config = SocketConfig {
-            addr: Addr::Tcp(addr.ip()),
+            addr: Addr::tcp(addr),
             hostname: Some("localhost".to_string()),
             port: addr.port(),
             connect_timeout: None,
@@ -621,7 +621,7 @@ mod tests {
         });
 
         let config = SocketConfig {
-            addr: Addr::Tcp(addr.ip()),
+            addr: Addr::tcp(addr),
             hostname: Some("localhost".to_string()),
             port: addr.port(),
             connect_timeout: None,
@@ -746,7 +746,7 @@ mod tests {
         });
 
         let config = SocketConfig {
-            addr: Addr::Tcp(addr.ip()),
+            addr: Addr::tcp(addr),
             hostname: Some("localhost".to_string()),
             port: addr.port(),
             connect_timeout: None,
@@ -969,7 +969,7 @@ mod tests {
         let addr = listener.local_addr().expect("scripted server address");
 
         let config = SocketConfig {
-            addr: Addr::Tcp(addr.ip()),
+            addr: Addr::tcp(addr),
             hostname: Some("localhost".to_string()),
             port: addr.port(),
             connect_timeout: None,
@@ -1023,7 +1023,7 @@ mod tests {
             .expect("bind scripted server");
         let addr = listener.local_addr().expect("scripted server address");
         let config = SocketConfig {
-            addr: Addr::Tcp(addr.ip()),
+            addr: Addr::tcp(addr),
             hostname: Some("localhost".to_string()),
             port: addr.port(),
             connect_timeout: None,
@@ -1091,7 +1091,7 @@ mod tests {
             .expect("bind scripted server");
         let addr = listener.local_addr().expect("scripted server address");
         let config = SocketConfig {
-            addr: Addr::Tcp(addr.ip()),
+            addr: Addr::tcp(addr),
             hostname: Some("localhost".to_string()),
             port: addr.port(),
             connect_timeout: None,
@@ -1151,7 +1151,7 @@ mod tests {
         });
 
         let config = SocketConfig {
-            addr: Addr::Tcp(addr.ip()),
+            addr: Addr::tcp(addr),
             hostname: Some("localhost".to_string()),
             port: addr.port(),
             connect_timeout: None,

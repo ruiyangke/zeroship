@@ -282,10 +282,13 @@ pub async fn connect_serialized(
     // omitted this would make every cancellation fail with "unknown host" and
     // look like a driver defect. Recorded here exactly as `connect` does.
     client.set_socket_config(crate::client::SocketConfig {
-        addr: crate::client::Addr::Tcp(
-            host.parse()
+        addr: crate::client::Addr::Tcp {
+            ip: host
+                .parse()
                 .map_err(|_| Error::config("connect_serialized needs a numeric TCP host".into()))?,
-        ),
+            // `host` parses as an `IpAddr`, which cannot carry a zone.
+            scope_id: 0,
+        },
         hostname: Some(host.clone()),
         port,
         connect_timeout: config.get_connect_timeout().copied(),
