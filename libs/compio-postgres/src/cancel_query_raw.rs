@@ -54,7 +54,7 @@ where
     // `cancel_query::cancel_query` owns its socket and so applies the
     // address-aware rule this function has no address to apply. It does NOT
     // add a retry either - neither entry point has one.
-    cancel_query_with_encryption(
+    send_cancel_request_with_encryption(
         stream,
         connect_tls::Encryption::first_for(mode),
         mode,
@@ -65,6 +65,7 @@ where
         secret_key,
     )
     .await
+    .map(drop)
 }
 
 pub(crate) async fn cancel_query_with_encryption<S, T>(
@@ -81,7 +82,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     T: TlsConnect<S>,
 {
-    send_cancel_request_with_encryption(
+    send_cancel_request_with_exact_encryption(
         stream,
         encryption,
         mode,
@@ -115,9 +116,72 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     T: TlsConnect<S>,
 {
-    let mut stream =
-        connect_tls::negotiate_tls(stream, encryption, mode, negotiation, tls, has_hostname)
-            .await?;
+    send_cancel_request(
+        stream,
+        encryption,
+        mode,
+        negotiation,
+        tls,
+        has_hostname,
+        process_id,
+        secret_key,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+/// Send a cancel packet over the exact transport recorded for a live session.
+pub(crate) async fn send_cancel_request_with_exact_encryption<S, T>(
+    stream: S,
+    encryption: connect_tls::Encryption,
+    mode: SslMode,
+    negotiation: SslNegotiation,
+    tls: T,
+    has_hostname: bool,
+    process_id: i32,
+    secret_key: CancelKey,
+) -> Result<MaybeTlsStream<S, T::Stream>, Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    T: TlsConnect<S>,
+{
+    send_cancel_request(
+        stream,
+        encryption,
+        mode,
+        negotiation,
+        tls,
+        has_hostname,
+        process_id,
+        secret_key,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_cancel_request<S, T>(
+    stream: S,
+    encryption: connect_tls::Encryption,
+    mode: SslMode,
+    negotiation: SslNegotiation,
+    tls: T,
+    has_hostname: bool,
+    process_id: i32,
+    secret_key: CancelKey,
+    exact_encryption: bool,
+) -> Result<MaybeTlsStream<S, T::Stream>, Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    T: TlsConnect<S>,
+{
+    let mut stream = if exact_encryption {
+        connect_tls::negotiate_tls_exact(stream, encryption, mode, negotiation, tls, has_hostname)
+            .await?
+    } else {
+        connect_tls::negotiate_tls(stream, encryption, mode, negotiation, tls, has_hostname).await?
+    };
 
     let packet_len = 12 + secret_key.as_bytes().len();
     let mut packet = Vec::with_capacity(packet_len);
