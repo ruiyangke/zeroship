@@ -976,6 +976,15 @@ fn first_server_error(messages: &BackendMessages) -> Result<Option<DbError>, Err
         .transpose()
 }
 
+fn first_terminal_server_error(messages: &BackendMessages) -> Result<Option<DbError>, Error> {
+    messages
+        .find_error_response(|body| {
+            let error = DbError::parse(&mut body.fields())?;
+            Ok(server_error_ends_session(&error).then_some(error))
+        })
+        .map_err(Error::parse)
+}
+
 /// Decode a diagnosis received after the session stopped being UTF-8 only
 /// when every field is ASCII. PostgreSQL encodes ErrorResponse text in the
 /// current client encoding. ASCII has the same byte representation in every
@@ -1212,11 +1221,9 @@ impl Dispatch<'_> {
         // keeps synchronous pool return from counting a known-dead session as
         // idle during that protocol-defined window.
         let server_error = first_server_error(&messages)?;
-        if let Some(error) = server_error.as_ref() {
-            if server_error_ends_session(error) {
-                self.remember_terminal_server_error(error);
-                self.tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
-            }
+        if let Some(error) = first_terminal_server_error(&messages)? {
+            self.remember_terminal_server_error(&error);
+            self.tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
         }
 
         // If there's no in-flight request but the server sent us backend
@@ -4062,6 +4069,77 @@ mod tests {
     }
 
     #[test]
+    fn a_later_fatal_error_response_poisons_before_waking_the_borrower() {
+        let tx_status = Arc::new(AtomicU8::new(b'I'));
+        let recorder = StatusRecordingWake::new(&tx_status);
+        let waker = Waker::from(Arc::clone(&recorder));
+        let mut context = Context::from_waker(&waker);
+        let (response_tx, mut response_rx) = mpsc::channel(1);
+        assert!(response_rx.poll_next_unpin(&mut context).is_pending());
+
+        let request_server_error = Arc::default();
+        let mut responses = VecDeque::from([Response {
+            sender: response_tx,
+            disposition: RequestDisposition::Awaited,
+            transaction_effect: TransactionEffect::MayChange,
+            prepare_cleanup: None,
+            statement: None,
+            observation: None,
+            bind_complete_seen: false,
+            read_obligation: ReadObligation::new(None, false),
+            request_server_error: Arc::clone(&request_server_error),
+        }]);
+        let mut pending_responses = VecDeque::new();
+        let parameters = Mutex::new(HashMap::new());
+        let in_flight_requests = AtomicUsize::new(1);
+        let terminal_server_error = Mutex::new(None);
+        let mut bytes = server_error_frame("ERROR", "23505", "scripted unique violation");
+        bytes.extend_from_slice(&server_error_frame(
+            "FATAL",
+            "57P01",
+            "scripted backend shutdown",
+        ));
+        bytes.extend_from_slice(b"Z\0\0\0\x05I");
+
+        Dispatch {
+            parameters: &parameters,
+            responses: &mut responses,
+            pending_responses: &mut pending_responses,
+            async_sender: None,
+            tx_status: &tx_status,
+            in_flight_requests: &in_flight_requests,
+            terminal_server_error: &terminal_server_error,
+        }
+        .deliver_batch(
+            BackendMessages::from_test_bytes(BytesMut::from(bytes.as_slice())),
+            Some(b'I'),
+        )
+        .expect("dispatch the coalesced ErrorResponses");
+
+        assert_eq!(
+            recorder.seen.load(Ordering::Acquire),
+            READ_RETIRED_STATUS,
+            "a later FATAL ErrorResponse woke its borrower before pool poison"
+        );
+        assert_eq!(
+            request_server_error
+                .lock()
+                .as_ref()
+                .map(|error: &DbError| error.code().code()),
+            Some("23505"),
+            "the later FATAL replaced the request's first diagnosis"
+        );
+        assert_eq!(
+            terminal_server_error
+                .lock()
+                .as_ref()
+                .map(|error: &DbError| error.code().code()),
+            Some("57P01"),
+            "the later FATAL was not retained as the terminal diagnosis"
+        );
+    }
+
+    #[test]
     fn a_captured_read_timeout_outranks_a_concurrent_write_failure() {
         let read_error = Error::read_timeout(Duration::from_millis(75));
 
@@ -4071,19 +4149,28 @@ mod tests {
         assert!(surfaced.is_read_timeout());
     }
 
-    fn error_response_bytes(code: &str, message: &str) -> BytesMut {
+    fn server_error_frame(severity: &str, code: &str, message: &str) -> Vec<u8> {
         let mut payload = BytesMut::new();
-        payload.extend_from_slice(b"SERROR\0");
+        payload.extend_from_slice(b"S");
+        payload.extend_from_slice(severity.as_bytes());
+        payload.extend_from_slice(b"\0V");
+        payload.extend_from_slice(severity.as_bytes());
+        payload.extend_from_slice(b"\0");
         payload.extend_from_slice(b"C");
         payload.extend_from_slice(code.as_bytes());
         payload.extend_from_slice(b"\0M");
         payload.extend_from_slice(message.as_bytes());
         payload.extend_from_slice(b"\0\0");
 
-        let mut bytes = BytesMut::new();
-        bytes.extend_from_slice(b"E");
+        let mut bytes = Vec::new();
+        bytes.push(b'E');
         bytes.extend_from_slice(&(u32::try_from(payload.len()).unwrap() + 4).to_be_bytes());
         bytes.extend_from_slice(&payload);
+        bytes
+    }
+
+    fn error_response_bytes(code: &str, message: &str) -> BytesMut {
+        let mut bytes = BytesMut::from(server_error_frame("ERROR", code, message).as_slice());
         bytes.extend_from_slice(b"Z\0\0\0\x05I");
         bytes
     }
@@ -5754,17 +5841,7 @@ mod tests {
     }
 
     fn fatal_error_frame(code: &str, message: &str) -> Vec<u8> {
-        let mut payload = Vec::new();
-        payload.extend_from_slice(b"SFATAL\0VFATAL\0C");
-        payload.extend_from_slice(code.as_bytes());
-        payload.extend_from_slice(b"\0M");
-        payload.extend_from_slice(message.as_bytes());
-        payload.extend_from_slice(b"\0\0");
-
-        let mut frame = vec![b'E'];
-        frame.extend_from_slice(&(u32::try_from(payload.len()).unwrap() + 4).to_be_bytes());
-        frame.extend_from_slice(&payload);
-        frame
+        server_error_frame("FATAL", code, message)
     }
 
     #[compio::test]

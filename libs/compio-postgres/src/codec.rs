@@ -238,14 +238,29 @@ impl BackendMessages {
     /// a pooled borrower that drops immediately must already see the connection
     /// as retired rather than briefly returning it to the idle set.
     pub(crate) fn first_error_response(&self) -> io::Result<Option<backend::ErrorResponseBody>> {
+        self.find_error_response(|body| Ok(Some(body)))
+    }
+
+    /// Clone and inspect error responses in order without consuming this batch.
+    ///
+    /// Inspection stops when `f` returns a value, so a usable diagnosis does not
+    /// depend on parsing unrelated bytes behind it. Connection-survival
+    /// classification uses this to find a later FATAL/PANIC before making the
+    /// batch visible to a pooled borrower.
+    pub(crate) fn find_error_response<T>(
+        &self,
+        mut f: impl FnMut(backend::ErrorResponseBody) -> io::Result<Option<T>>,
+    ) -> io::Result<Option<T>> {
         if !self.contains_tag(backend::ERROR_RESPONSE_TAG) {
             return Ok(None);
         }
 
         let mut messages = BackendMessages(self.0.clone());
         while let Some(message) = messages.next()? {
-            if let backend::Message::ErrorResponse(body) = message {
-                return Ok(Some(body));
+            if let backend::Message::ErrorResponse(body) = message
+                && let Some(found) = f(body)?
+            {
+                return Ok(Some(found));
             }
         }
         Ok(None)
