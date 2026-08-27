@@ -203,6 +203,7 @@ pin_project! {
         response: CopyResponse,
         buf: BytesMut,
         state: SinkState,
+        completion: Option<Result<u64, Error>>,
         _p2: PhantomData<T>,
         // Last so Drop closes the producer and response consumer before it
         // publishes that ordinary requests may queue behind their recovery.
@@ -297,16 +298,37 @@ where
                         let this = self.as_mut().project();
                         this.responses.poll_next(cx)
                     };
-                    let result = match response {
+                    match response {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Ok(Message::CommandComplete(body))) => {
-                            extract_row_affected(&body)
+                            let this = self.as_mut().project();
+                            if this.completion.is_some() {
+                                *this.completion = Some(Err(Error::unexpected_message()));
+                            } else {
+                                *this.completion = Some(extract_row_affected(&body));
+                            }
                         }
-                        Poll::Ready(Ok(_)) => Err(Error::unexpected_message()),
-                        Poll::Ready(Err(error)) => Err(error),
-                    };
-                    self.as_mut().clear_copy_mode();
-                    return Poll::Ready(result);
+                        Poll::Ready(Ok(Message::ReadyForQuery(_))) => {
+                            let result = self
+                                .as_mut()
+                                .project()
+                                .completion
+                                .take()
+                                .unwrap_or_else(|| Err(Error::unexpected_message()));
+                            self.as_mut().clear_copy_mode();
+                            return Poll::Ready(result);
+                        }
+                        Poll::Ready(Ok(_)) => {
+                            let this = self.as_mut().project();
+                            if this.completion.is_none() {
+                                *this.completion = Some(Err(Error::unexpected_message()));
+                            }
+                        }
+                        Poll::Ready(Err(error)) => {
+                            self.as_mut().clear_copy_mode();
+                            return Poll::Ready(Err(error));
+                        }
+                    }
                 }
             }
         }
@@ -446,6 +468,19 @@ where
         let _ = sender.send(CopyInMessage::Abort).await;
     }
 
+    // A local API/protocol mismatch can precede an ErrorResponse generated
+    // while Execute or the following Sync finishes. Keep the mismatch only as
+    // a fallback at ReadyForQuery; a server diagnosis always wins.
+    async fn drain_refusal(responses: &mut Responses, fallback: Error) -> Error {
+        loop {
+            match responses.next().await {
+                Ok(Message::ReadyForQuery(_)) => return fallback,
+                Ok(_) => {}
+                Err(error) => return error,
+            }
+        }
+    }
+
     if unnamed_sql.is_some() {
         match responses.next().await {
             Ok(Message::ParseComplete) => {}
@@ -485,13 +520,13 @@ where
         Ok(Message::CopyOutResponse(_)) => {
             abort(&mut sender).await;
             return Err(ExecutionError::after_bind_complete(
-                Error::copy_out_answered_copy_in(),
+                drain_refusal(&mut responses, Error::copy_out_answered_copy_in()).await,
             ));
         }
         Ok(_) => {
             abort(&mut sender).await;
             return Err(ExecutionError::after_bind_complete(
-                Error::unexpected_message(),
+                drain_refusal(&mut responses, Error::unexpected_message()).await,
             ));
         }
         Err(e) => {
@@ -506,6 +541,7 @@ where
         response,
         buf: BytesMut::new(),
         state: SinkState::Active,
+        completion: None,
         _p2: PhantomData,
         copy_mode: Some(copy_mode),
     })
