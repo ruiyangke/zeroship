@@ -414,6 +414,35 @@ mod tests {
         }
     }
 
+    /// MEASUREMENT, not an assertion - run with `--nocapture`.
+    ///
+    /// The per-app cache bound has to be a number, and a number nobody
+    /// measured is a guess with a decimal point. This reports the serialized
+    /// size of one cached entry so the bound can be derived from the actual
+    /// shape being stored.
+    ///
+    /// It measures the DATA STRUCTURE, not a production app: the column count
+    /// is varied and the names are realistic-length, but a real creator schema
+    /// with encrypted/masked facets stores more per column. Read the result as
+    /// a floor.
+    #[test]
+    fn measure_cached_entry_size() {
+        for (label, ncols) in [("narrow", 8usize), ("typical", 16), ("wide", 40)] {
+            let owned: Vec<(String, ColumnInfo)> = (0..ncols)
+                .map(|i| (format!("column_name_{i}"), col("text")))
+                .collect();
+            let refs: Vec<(&str, ColumnInfo)> =
+                owned.iter().map(|(n, c)| (n.as_str(), c.clone())).collect();
+            let live = live_with("collection_name", refs);
+            let schema = build_runtime_schema(&live, "collection_name");
+            let bytes = serde_json::to_string(&schema).unwrap().len();
+            println!(
+                "MEASURED {label}: {ncols} cols -> {bytes} bytes ({} b/col)",
+                bytes / ncols
+            );
+        }
+    }
+
     #[test]
     fn missing_collection_is_none() {
         let live = live_with("notes", vec![("title", col("text"))]);
