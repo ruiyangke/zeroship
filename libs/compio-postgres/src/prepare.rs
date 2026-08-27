@@ -591,12 +591,8 @@ async fn drain_single_row(rows: query::RowStream) -> Result<crate::Row, Error> {
 
 async fn get_multirange_subtype(client: &Arc<InnerClient>, oid: Oid) -> Result<Oid, Error> {
     let stmt = prepare_rec(client, TYPEINFO_MULTIRANGE_QUERY, &[]).await?;
-    let mut rows = pin!(query::query(client, stmt, slice_iter(&[&oid])).await?);
-
-    match rows.try_next().await? {
-        Some(row) => row.try_get(0),
-        None => Err(Error::unexpected_message()),
-    }
+    let row = drain_single_row(query::query(client, stmt, slice_iter(&[&oid])).await?).await?;
+    row.try_get(0)
 }
 
 async fn typeinfo_statement(client: &Arc<InnerClient>) -> Result<Statement, Error> {
@@ -696,7 +692,7 @@ async fn typeinfo_composite_statement(client: &Arc<InnerClient>) -> Result<State
 
 #[cfg(test)]
 mod tests {
-    use super::get_type;
+    use super::{get_multirange_subtype, get_type};
     use crate::client::{Client, ResponseMessages, StatementCacheSettings};
     use crate::codec::BackendMessages;
     use crate::config::{ProtocolVersion, SslMode, SslNegotiation};
@@ -728,6 +724,20 @@ mod tests {
                 None => body.extend_from_slice(&(-1i32).to_be_bytes()),
             }
         }
+        body
+    }
+
+    fn oid_row_description(name: &str) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u16.to_be_bytes());
+        body.extend_from_slice(name.as_bytes());
+        body.push(0);
+        body.extend_from_slice(&0u32.to_be_bytes());
+        body.extend_from_slice(&0u16.to_be_bytes());
+        body.extend_from_slice(&Type::OID.oid().to_be_bytes());
+        body.extend_from_slice(&4i16.to_be_bytes());
+        body.extend_from_slice(&(-1i32).to_be_bytes());
+        body.extend_from_slice(&0u16.to_be_bytes());
         body
     }
 
@@ -818,6 +828,84 @@ mod tests {
         assert!(
             inner.cached_type(OID).0.is_none(),
             "a type from a terminally failed lookup entered the cache"
+        );
+    }
+
+    #[compio::test]
+    async fn multirange_lookup_preserves_a_server_error_after_its_first_row() {
+        const OID: u32 = 900_002;
+        let (sender, mut receiver) = mpsc::unbounded();
+        let client = Client::new_with_statement_cache(
+            sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+            ProtocolVersion::V3_0,
+            StatementCacheSettings::new(0, NonZeroUsize::MIN),
+        );
+        let inner = Arc::clone(client.inner());
+
+        let lookup = get_multirange_subtype(&inner, OID);
+        let respond = async {
+            let mut prepare = receiver
+                .next()
+                .await
+                .expect("multirange lookup did not prepare its catalog query");
+            prepare
+                .prepare_cleanup
+                .as_ref()
+                .expect("the internal prepare lacked its cleanup observer")
+                .observe(true);
+
+            let mut parameter_description = Vec::new();
+            parameter_description.extend_from_slice(&1u16.to_be_bytes());
+            parameter_description.extend_from_slice(&Type::OID.oid().to_be_bytes());
+            let mut bytes = BytesMut::new();
+            bytes.extend_from_slice(&backend_frame(b'1', b""));
+            bytes.extend_from_slice(&backend_frame(b't', &parameter_description));
+            bytes.extend_from_slice(&backend_frame(b'T', &oid_row_description("rngsubtype")));
+            bytes.extend_from_slice(&backend_frame(b'Z', b"I"));
+            prepare
+                .sender
+                .try_send(ResponseMessages::Raw(BackendMessages::from_test_bytes(
+                    bytes,
+                )))
+                .expect("deliver the multirange catalog prepare response");
+
+            let mut query = receiver
+                .next()
+                .await
+                .expect("multirange lookup did not enqueue its catalog query");
+            let subtype = Type::INT4.oid().to_be_bytes();
+            let mut bytes = BytesMut::new();
+            bytes.extend_from_slice(&backend_frame(b'2', b""));
+            bytes.extend_from_slice(&backend_frame(b'D', &data_row(&[Some(&subtype)])));
+            bytes.extend_from_slice(&backend_frame(
+                b'E',
+                b"SERROR\0VERROR\0C57014\0Mscripted cancellation after multirange row\0\0",
+            ));
+            bytes.extend_from_slice(&backend_frame(b'Z', b"I"));
+            query
+                .sender
+                .try_send(ResponseMessages::Raw(BackendMessages::from_test_bytes(
+                    bytes,
+                )))
+                .expect("deliver the terminal multirange lookup response");
+        };
+
+        let (result, ()) = futures_util::join!(lookup, respond);
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!(
+                "multirange subtype lookup returned success before its cancellation SQLSTATE 57014"
+            ),
+        };
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("57014"),
+            "multirange subtype lookup discarded cancellation SQLSTATE 57014: {error}"
         );
     }
 }
