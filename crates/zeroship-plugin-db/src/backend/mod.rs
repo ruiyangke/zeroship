@@ -1628,7 +1628,7 @@ impl<T> RegisterBackend for T where
 /// - [`SqlExecutor::acquire_dedicated_client`] returns an owned `Client`
 ///   detached from any pool lifetime — the caller is free to park it
 ///   on the per-isolate context (e.g.
-///   `IsolateDbContext::tx_conns`) for the duration
+///   `ThreadDbContext::tx_conns`) for the duration
 ///   of a transaction.
 ///
 /// NOTE FOR DOC LINKS, AND AN OPEN DECISION.
@@ -1690,7 +1690,7 @@ pub trait Backend:
 }
 
 /// Per-isolate backend handle — the typed enum stashed on
-/// [`crate::context::IsolateDbContext`].
+/// [`crate::context::ThreadDbContext`].
 ///
 /// **Why an enum, not `Box<dyn Backend>`** (closes
 /// `docs/archive/db-system-design.md` §5.5 and
@@ -2159,7 +2159,7 @@ mod tests {
     }
 
     /// Compile-time: [`BackendHandle`] is `Clone + 'static`. The
-    /// per-isolate context's accessor (`IsolateDbContext::backend`)
+    /// per-isolate context's accessor (`ThreadDbContext::backend`)
     /// returns a cloned handle by value so consumers can hold it
     /// across awaits without keeping the `RefCell` borrow open; the
     /// `Clone` bound is therefore load-bearing. The `'static` bound

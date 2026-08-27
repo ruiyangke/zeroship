@@ -89,7 +89,7 @@ impl PostgresBackend {
     ///
     /// Do not call this from inside a `context::with` / `with_mut`
     /// closure - it takes a context borrow of its own.
-    /// `IsolateDbContext::set_pool` uses `new_with_key_source` for
+    /// `ThreadDbContext::set_pool` uses `new_with_key_source` for
     /// exactly that reason.
     pub fn new(pool: Rc<compio_postgres::Pool>, url: String) -> Self {
         // Wire the column-key store. We clone the `Rc<Pool>`
@@ -105,7 +105,7 @@ impl PostgresBackend {
     /// Build a backend handle with an explicit column-key source.
     ///
     /// The isolate context uses this to hand a backend the root keys the
-    /// host installed (`IsolateDbContext::local_key_source`) instead of
+    /// host installed (`ThreadDbContext::local_key_source`) instead of
     /// the process environment.
     pub fn new_with_key_source(
         pool: Rc<compio_postgres::Pool>,

@@ -14,7 +14,7 @@
 //!   that still need SDK-local publication.
 //!
 //! All four route through `run_sql`, which uses the per-isolate TX
-//! client (`IsolateDbContext::tx_conns`) when the DISPATCH THAT STARTED
+//! client (`ThreadDbContext::tx_conns`) when the DISPATCH THAT STARTED
 //! THIS OP was issued inside the app's own `db.transaction(fn)` callback,
 //! and the pool otherwise.
 //!
@@ -634,7 +634,7 @@ pub(crate) async fn ensure_pool() -> Result<Rc<compio_postgres::Pool>, DbError> 
 /// real Postgres connection without spinning up a V8 isolate.
 ///
 /// The caller is responsible for setting
-/// `IsolateDbContext::tx_conns` (via
+/// `ThreadDbContext::tx_conns` (via
 /// [`crate::install_tx_marker_for_tests`]) when the test wants the
 /// queueing path to fire.
 ///

@@ -12,22 +12,18 @@
 //! metadata came from `registerModel`'s declared schema (the old source) or from
 //! introspection (the new one).
 //!
-//! Caching: per-isolate, per-`(app, collection)`, keyed on the app's current
-//! deploy/schema-version token. A deploy bump invalidates the entry on next read
-//! — mirroring `register_model`'s per-thread `is_model_registered` fast-path but
-//! keyed on the deploy version rather than mere presence (design §6). A
-//! goodie-free collection is cached as a NEGATIVE result (`None`) so it is not
-//! re-introspected each call.
+//! Caching: the per-worker-thread context keys each entry by
+//! `(DbBinding { app_id, deploy_token }, collection)`. A goodie-free collection
+//! is cached as a NEGATIVE result (`None`) so it is not re-introspected each
+//! call.
 //!
-//! The token is the per-`app_id` value the worker injects as
-//! `ZEROSHIP_DEPLOY_ID` (= the app's `deploy_hash`), stamped into the per-isolate
-//! [`crate::context::IsolateDbContext`] when the `Db` wrapper is minted
-//! (`mint_db`). It is read here via [`crate::context::IsolateDbContext::
-//! deploy_token_for`], NOT from the process-global `std::env::var` — that env var
-//! was never set by any worker/runtime/control vector (so the token was pinned at
-//! `"cold_start"` for the isolate's whole life and the deploy-keyed cache never
-//! invalidated), and a process-global would in any case be wrong for a multi-app
-//! worker thread.
+//! `mint_db` captures `ZEROSHIP_DEPLOY_ID` (= the app's `deploy_hash`) from the
+//! active runtime's own environment and stores that immutable [`DbBinding`] on
+//! the `Db` and every `Collection` wrapper it mints. The binding is then passed
+//! through each asynchronous CRUD continuation into this resolver. It is not
+//! recovered from process-global environment or app-keyed thread-local state:
+//! either would be wrong when one worker thread keeps current and deploy-pinned
+//! isolates of the same app alive together.
 //!
 //! ## Recoverability gap (flagged, not papered over)
 //!
@@ -47,11 +43,12 @@
 
 use serde_json::{json, Map, Value};
 
+use crate::binding::DbBinding;
 use crate::diff::{ColumnInfo, EncryptionMeta, LiveSchema, MaskMeta, WrappedType};
 use crate::error::DbError;
 
 /// Resolve the runtime data-access schema for `(app_id, collection)` from the
-/// LIVE catalog + sentinels, with per-isolate deploy-keyed caching.
+/// LIVE catalog + sentinels, with binding-keyed caching.
 ///
 /// Returns `Ok(None)` when the collection has no encrypted/masked columns (the
 /// caller then skips the encrypt/mask passes — the schema-driven read coercions
@@ -62,11 +59,13 @@ use crate::error::DbError;
 /// introspector is the documented dev-tier follow-up (design §9/§10); plugin-db
 /// then behaves as it does for a cold schema cache.
 pub(crate) async fn runtime_schema_for(
-    app_id: &str,
+    binding: &DbBinding,
     collection: &str,
 ) -> Result<Option<Value>, DbError> {
+    let app_id = binding.app_id();
     // Behaviour-identity gate: the OLD `schema_for` returned `Some(schema)` ONLY
-    // when `register_model` had cached it on this isolate, and `None` otherwise
+    // when `register_model` had cached it on this worker thread, and `None`
+    // otherwise
     // (the deliberate cold-schema contract — raw-JS / pre-register reads stay
     // lossless instead of guessing). We preserve that EXACTLY: introspection
     // only sources a schema once the model is registered this deploy. A
@@ -77,16 +76,9 @@ pub(crate) async fn runtime_schema_for(
         return Ok(None);
     }
 
-    // The per-app deploy/schema-version token (the worker-injected
-    // `ZEROSHIP_DEPLOY_ID` = `deploy_hash`, stamped at `mint_db`). A redeploy
-    // re-mints the wrapper with the new hash, so this token changes and the
-    // deploy-keyed cache below invalidates on the next op. See the module note.
-    let token = crate::context::with(|c| c.deploy_token_for(app_id));
-
-    // Fast path: per-isolate cache hit under the current deploy token.
-    if let Some(cached) =
-        crate::context::with(|c| c.introspected_schema_for(app_id, collection, &token))
-    {
+    // Fast path: cache hit under the immutable binding captured from the
+    // Collection's owning isolate. No thread-ambient lookup participates.
+    if let Some(cached) = crate::context::with(|c| c.introspected_schema_for(binding, collection)) {
         return Ok(cached);
     }
 
@@ -118,7 +110,7 @@ pub(crate) async fn runtime_schema_for(
     // invisible to any benchmark that warms one app and then measures steady
     // state, which is how this would be measured by default.
     crate::context::with_mut(|c| {
-        cache_every_collection_and_request(c, app_id, &token, &live, collection);
+        cache_every_collection_and_request(c, binding, &live, collection);
     });
     Ok(schema)
 }
@@ -141,26 +133,24 @@ pub(crate) async fn runtime_schema_for(
 /// subsequent operation for that collection, because nothing ever caches the
 /// miss.
 fn cache_every_collection_and_request(
-    ctx: &mut crate::context::IsolateDbContext,
-    app_id: &str,
-    token: &str,
+    ctx: &mut crate::context::ThreadDbContext,
+    binding: &DbBinding,
     live: &LiveSchema,
     requested: &str,
 ) {
-    cache_every_collection(ctx, app_id, token, live);
+    cache_every_collection(ctx, binding, live);
     // `cache_every_collection` skips internal tables and anything absent from
     // the catalog. If the caller asked about a collection in neither set, its
     // result - `None` - still has to be recorded.
-    if ctx.introspected_schema_for(app_id, requested, token).is_none() {
+    if ctx.introspected_schema_for(binding, requested).is_none() {
         let schema = build_runtime_schema(live, requested);
-        ctx.cache_introspected_schema(app_id, requested, token, schema);
+        ctx.cache_introspected_schema(binding, requested, schema);
     }
 }
 
 fn cache_every_collection(
-    ctx: &mut crate::context::IsolateDbContext,
-    app_id: &str,
-    token: &str,
+    ctx: &mut crate::context::ThreadDbContext,
+    binding: &DbBinding,
     live: &LiveSchema,
 ) {
     for table in live.tables.keys() {
@@ -174,7 +164,7 @@ fn cache_every_collection(
         // One read, one token: every entry from this `LiveSchema` is stamped
         // with the same deploy token, so a redeploy landing mid-populate can
         // never leave entries from two schema versions under one identity.
-        ctx.cache_introspected_schema(app_id, table, token, schema);
+        ctx.cache_introspected_schema(binding, table, schema);
     }
 }
 
@@ -311,6 +301,10 @@ mod tests {
     use crate::diff::{Classification, MaskKind};
     use std::collections::HashMap;
 
+    fn binding(deploy_token: &str) -> DbBinding {
+        DbBinding::new("app_1", deploy_token)
+    }
+
     fn col(pg_type: &str) -> ColumnInfo {
         ColumnInfo {
             pg_type: pg_type.into(),
@@ -377,9 +371,10 @@ mod tests {
             ("users", vec![("email", col("text"))]),
             ("todos", vec![("done", col("boolean"))]),
         ]);
-        let mut ctx = crate::context::IsolateDbContext::new();
+        let mut ctx = crate::context::ThreadDbContext::new();
 
-        cache_every_collection(&mut ctx, "app_1", "deploy_a", &live);
+        let deploy_a = binding("deploy_a");
+        cache_every_collection(&mut ctx, &deploy_a, &live);
 
         // Assert the INNER value, not just that a cache entry exists.
         // `introspected_schema_for` returns `Option<Option<_>>` -- the outer
@@ -390,7 +385,7 @@ mod tests {
         // sibling collections, which a presence-only check cannot see.
         for (coll, expected_col) in [("notes", "title"), ("users", "email"), ("todos", "done")] {
             let cached = ctx
-                .introspected_schema_for("app_1", coll, "deploy_a")
+                .introspected_schema_for(&deploy_a, coll)
                 .unwrap_or_else(|| panic!("'{coll}' must be cached by the single read that covered it"))
                 .unwrap_or_else(|| panic!("'{coll}' was cached as ABSENT, but the read covered it"));
             assert!(
@@ -414,15 +409,15 @@ mod tests {
             ("__zeroship_audit_unmask", vec![("actor", col("text"))]),
             ("__zs_mask_policy", vec![("kind", col("text"))]),
         ]);
-        let mut ctx = crate::context::IsolateDbContext::new();
+        let mut ctx = crate::context::ThreadDbContext::new();
 
-        cache_every_collection(&mut ctx, "app_1", "deploy_a", &live);
+        let deploy_a = binding("deploy_a");
+        cache_every_collection(&mut ctx, &deploy_a, &live);
 
-        assert!(ctx.introspected_schema_for("app_1", "notes", "deploy_a").is_some());
+        assert!(ctx.introspected_schema_for(&deploy_a, "notes").is_some());
         for internal in ["__zeroship_audit_unmask", "__zs_mask_policy"] {
             assert!(
-                ctx.introspected_schema_for("app_1", internal, "deploy_a")
-                    .is_none(),
+                ctx.introspected_schema_for(&deploy_a, internal).is_none(),
                 "internal table {internal} must not occupy the per-app cache",
             );
         }
@@ -435,10 +430,10 @@ mod tests {
     /// WHAT THIS DOES NOT CATCH. It passes a constant token into a fresh local
     /// context: there is no `mint_db`, no shared thread-local context, no
     /// await, and no second runtime. So it cannot see any race, and in
-    /// particular it stays green while the deploy-token identity bug is live -
-    /// the one where `deploy_tokens` is keyed by `app_id` alone, so a second
-    /// runtime of the SAME app at a different deploy overwrites the first's
-    /// token last-writer-wins. This comment used to claim the test showed "a
+    /// particular it stayed green under the pre-fix deploy-token identity bug,
+    /// where `deploy_tokens` was keyed by `app_id` alone and a second runtime
+    /// of the SAME app at a different deploy overwrote the first's token
+    /// last-writer-wins. This comment used to claim the test showed "a
     /// redeploy landing mid-populate cannot leave two schema versions under one
     /// identity", which is precisely the property it is blind to. Uniform
     /// stamping within one populate call is a real but much narrower guarantee,
@@ -449,9 +444,11 @@ mod tests {
             ("notes", vec![("title", col("text"))]),
             ("users", vec![("email", col("text"))]),
         ]);
-        let mut ctx = crate::context::IsolateDbContext::new();
+        let mut ctx = crate::context::ThreadDbContext::new();
 
-        cache_every_collection(&mut ctx, "app_1", "deploy_a", &live);
+        let deploy_a = binding("deploy_a");
+        let deploy_b = binding("deploy_b");
+        cache_every_collection(&mut ctx, &deploy_a, &live);
 
         for coll in ["notes", "users"] {
             // The HIT half is not padding. An earlier version of this test
@@ -461,11 +458,11 @@ mod tests {
             // miss-only assertion stayed green, so it was measuring the token
             // rule while blind to whether anything had been stored.
             assert!(
-                ctx.introspected_schema_for("app_1", coll, "deploy_a").is_some(),
+                ctx.introspected_schema_for(&deploy_a, coll).is_some(),
                 "'{coll}' must be cached under the token it was stamped with",
             );
             assert!(
-                ctx.introspected_schema_for("app_1", coll, "deploy_b").is_none(),
+                ctx.introspected_schema_for(&deploy_b, coll).is_none(),
                 "'{coll}' must miss under a different deploy token",
             );
         }
@@ -488,19 +485,20 @@ mod tests {
     #[test]
     fn absent_collection_is_cached_as_a_negative_result() {
         let live = live_with_tables(vec![("notes", vec![("title", col("text"))])]);
-        let mut ctx = crate::context::IsolateDbContext::new();
+        let mut ctx = crate::context::ThreadDbContext::new();
 
-        cache_every_collection_and_request(&mut ctx, "app_1", "deploy_a", &live, "ghosts");
+        let deploy_a = binding("deploy_a");
+        cache_every_collection_and_request(&mut ctx, &deploy_a, &live, "ghosts");
 
         assert_eq!(
-            ctx.introspected_schema_for("app_1", "ghosts", "deploy_a"),
+            ctx.introspected_schema_for(&deploy_a, "ghosts"),
             Some(None),
             "an absent collection must be cached as a negative result, not left \
              uncached to re-introspect on every op",
         );
         // The present collection is still populated by the same call.
         assert!(ctx
-            .introspected_schema_for("app_1", "notes", "deploy_a")
+            .introspected_schema_for(&deploy_a, "notes")
             .is_some());
     }
 

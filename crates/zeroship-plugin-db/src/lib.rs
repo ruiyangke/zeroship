@@ -78,6 +78,7 @@ zeroship_core::declare_env_consumer!(
 
 // Always pub:
 pub mod broker;
+pub(crate) mod binding;
 pub mod error;
 // The DDL builders + `QueryError` + `SqlDialect` +
 // the system-field / validation helpers were extracted into the leaf crate
@@ -251,10 +252,10 @@ pub mod wal_consumer;
 pub(crate) mod test_support;
 
 // ---------------------------------------------------------------------------
-// Per-isolate state
+// Per-worker-thread state
 // ---------------------------------------------------------------------------
 //
-// All per-isolate slots live on [`context::IsolateDbContext`]; this
+// All per-thread slots live on [`context::ThreadDbContext`]; this
 // module just re-exports the helpers the rest of the crate calls.
 
 /// Check if a model is already registered for this app on this thread.
@@ -267,7 +268,7 @@ pub(crate) fn mark_model_registered(app_id: &str, collection: &str) {
     ctx_mut(|c| c.mark_model_registered(app_id, collection));
 }
 
-/// Test helper — mark a model registered on the current isolate,
+/// Test helper — mark a model registered in the current worker-thread context,
 /// mirroring what `register_model` does at the SDK boundary. The runtime schema
 /// resolver gates on `is_model_registered` (the cold-schema contract), so a
 /// faithful e2e that drives the CRUD pipelines directly must mark the model.
@@ -279,23 +280,12 @@ pub fn mark_model_registered_for_tests(app_id: &str, collection: &str) {
 
 /// Test helper — clear the registered mark so a re-register of the same
 /// `(app, collection)` with a CHANGED schema re-runs the cold path (a real dev
-/// re-deploy mints a fresh isolate; tests reuse one). Used by the destructive-
+/// re-deploy presents a fresh binding; tests reuse one context). Used by the destructive-
 /// apply test to drive a v1→v2 schema change through the engine.
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn clear_model_registered_for_tests(app_id: &str, collection: &str) {
     ctx_mut(|c| c.clear_model_registered(app_id, collection));
-}
-
-/// Test helper — stamp the per-`app_id` deploy/schema-version token into the
-/// per-isolate context, the way `mint_db` does from the worker-injected
-/// `ZEROSHIP_DEPLOY_ID`. A faithful e2e that drives the CRUD pipelines directly
-/// uses this to simulate a redeploy (bump the token) and prove the deploy-keyed
-/// introspection cache re-introspects the new schema's metadata.
-#[cfg(any(test, feature = "test-helpers"))]
-#[doc(hidden)]
-pub fn set_deploy_token_for_tests(app_id: &str, token: &str) {
-    context::with_mut(|c| c.set_deploy_token(app_id, token));
 }
 
 // The synchronous `ensure_pool(scope)` helper that used to live here
@@ -481,7 +471,7 @@ pub fn set_postgres_pool_for_tests(pool: Rc<compio_postgres::Pool>, url: &str) {
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn reset_context_for_tests() {
-    ctx_mut(|c| *c = context::IsolateDbContext::new());
+    ctx_mut(|c| *c = context::ThreadDbContext::new());
 }
 
 /// Test helper: hand this isolate the column root keys its backends
@@ -490,7 +480,7 @@ pub fn reset_context_for_tests() {
 ///
 /// Each entry is `(key_id, root_hex)` where `root_hex` is 64 hex
 /// characters. The keys land in the per-isolate context
-/// (`IsolateDbContext::set_supplied_root_keys`), so every backend
+/// (`ThreadDbContext::set_supplied_root_keys`), so every backend
 /// constructed on this thread AFTERWARDS picks them up - including the
 /// ones a test never sees, such as the `SqliteBackend` that
 /// `init_pool_async` builds behind a V8 dispatch and the
@@ -608,8 +598,8 @@ pub fn clear_mask_policy_cache_for_tests(app_id: &str) {
 }
 
 /// **Test-only**: install a real Postgres client into the active
-/// isolate's `IsolateDbContext::tx_conn` slot (formerly the `TX_CONN`
-/// thread-local, folded into `IsolateDbContext`) so the Gap B
+/// isolate's `ThreadDbContext::tx_conn` slot (formerly the `TX_CONN`
+/// thread-local, folded into `ThreadDbContext`) so the Gap B
 /// integration tests can drive the deferred-broker-emit queue/drain
 /// machinery without standing up a V8 isolate. Returns the
 /// connection-task handle so the caller can detach it.
@@ -629,7 +619,7 @@ pub async fn install_tx_marker_for_tests(app_id: &str, url: &str) {
     .detach();
     // Issue a real BEGIN so the dummy connection behaves like a real
     // tx — not strictly required (the queueing path keys off
-    // `IsolateDbContext::has_tx_for`), but matches the production state
+    // `ThreadDbContext::has_tx_for`), but matches the production state
     // machine more honestly.
     let _ = client.execute("BEGIN", &[]).await;
     ctx_mut(|c| {
@@ -645,7 +635,7 @@ pub async fn install_tx_marker_for_tests(app_id: &str, url: &str) {
 /// [`install_tx_marker_for_tests`].
 ///
 /// Async + sends `ROLLBACK` before dropping the Client because the
-/// per-isolate `IsolateDbContext` is thread-local and the test's
+/// per-isolate `ThreadDbContext` is thread-local and the test's
 /// compio runtime drops between tests. With `--test-threads=1` every
 /// test shares one thread; if a prior test's Client is dropped without
 /// explicit `ROLLBACK` the PG backend on the other end can linger as

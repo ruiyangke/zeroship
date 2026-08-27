@@ -27,7 +27,7 @@ thread_local! {
     /// This harness used to build a fresh `compio::runtime::Runtime` inside each
     /// `dispatch_zs` and drop it on the way out, which is invisible on SQLite and
     /// fatal on Postgres. plugin-db parks its `compio_postgres::Pool` in a
-    /// THREAD-LOCAL `IsolateDbContext` that outlives any one dispatch, and
+    /// THREAD-LOCAL `ThreadDbContext` that outlives any one dispatch, and
     /// `DbPlugin::register` only clears it when the DB URL changes. So the second
     /// PG dispatch submits a pooled query on sockets registered with an io_uring
     /// that no longer exists, and it never completes.

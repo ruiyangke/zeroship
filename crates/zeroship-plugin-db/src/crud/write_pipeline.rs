@@ -1,5 +1,6 @@
 use serde_json::Value;
 
+use crate::binding::DbBinding;
 use crate::error::DbError;
 use crate::exec::exec_query;
 use crate::query;
@@ -84,11 +85,12 @@ fn validate_update_patch_keys(patch: &Value) -> Result<(), DbError> {
 /// emission. This module centralises the transform stages that were
 /// previously hand-wired per dispatch site.
 pub(crate) async fn apply(
-    app_id: &str,
+    binding: &DbBinding,
     collection: &str,
     payload: &mut Value,
     mode: ApplyMode<'_>,
 ) -> Result<(), DbError> {
+    let app_id = binding.app_id();
     // DB-8: validate every USER-supplied document field key BEFORE the system /
     // encryption / mask passes below add their own (reserved-suffix / `__zsbin__`)
     // sibling columns. The write SQL builders only `quote_ident`'d these keys —
@@ -111,7 +113,7 @@ pub(crate) async fn apply(
     // The encrypt/mask write transforms are driven by metadata
     // from LIVE introspection + the engine's sentinels (design §6), not the
     // in-memory declared schema. Cached per (app, collection, deploy).
-    let schema = super::introspect_schema::runtime_schema_for(app_id, collection).await?;
+    let schema = super::introspect_schema::runtime_schema_for(binding, collection).await?;
     let stages = WriteStages::new(schema.as_ref());
 
     match mode {
@@ -166,6 +168,7 @@ pub(crate) async fn apply(
             );
             rewrite_upsert_doc_id_to_existing_row_id(
                 payload,
+                binding,
                 route,
                 collection,
                 conflict_fields,
@@ -357,14 +360,14 @@ pub(crate) async fn resolve_target_row_ids(
 }
 
 pub(crate) async fn update_requires_per_row_encryption(
-    app_id: &str,
+    binding: &DbBinding,
     collection: &str,
     patch: &Value,
 ) -> Result<bool, DbError> {
     // Sourced from introspection (cached), not the declared
     // schema. A failed introspection propagates rather than silently returning
     // `false` (which would skip the per-row randomised-encryption path).
-    let Some(schema) = super::introspect_schema::runtime_schema_for(app_id, collection).await?
+    let Some(schema) = super::introspect_schema::runtime_schema_for(binding, collection).await?
     else {
         return Ok(false);
     };
@@ -372,11 +375,11 @@ pub(crate) async fn update_requires_per_row_encryption(
 }
 
 pub(crate) async fn upsert_requires_conflict_probe(
-    app_id: &str,
+    binding: &DbBinding,
     collection: &str,
     doc: &Value,
 ) -> Result<bool, DbError> {
-    let Some(schema) = super::introspect_schema::runtime_schema_for(app_id, collection).await?
+    let Some(schema) = super::introspect_schema::runtime_schema_for(binding, collection).await?
     else {
         return Ok(false);
     };
@@ -455,13 +458,14 @@ fn update_target(patch: &mut Value) -> &mut Value {
 
 async fn rewrite_upsert_doc_id_to_existing_row_id(
     doc: &mut Value,
+    binding: &DbBinding,
     route: &TxRoute,
     collection: &str,
     conflict_fields: &Value,
     schema: Option<&Value>,
 ) -> Result<(), DbError> {
     let app_id = route.app_id();
-    if !upsert_requires_conflict_probe(app_id, collection, doc).await? {
+    if !upsert_requires_conflict_probe(binding, collection, doc).await? {
         return Ok(());
     }
     let Some(schema) = schema else {
@@ -617,6 +621,7 @@ mod tests {
     use base64::Engine as _;
     use serde_json::Value;
 
+    use crate::binding::DbBinding;
     use crate::tx_route::TxRoute;
 
     use super::{apply, inspect_update, validate_update_patch_keys, validate_user_doc_keys, ApplyMode};
@@ -744,6 +749,7 @@ mod tests {
             // `KeyStore::resolve` + HKDF derivation.
             let _keys = crate::supply_root_keys_for_tests(&[(key_id, &"1".repeat(64))]);
             let app_id = "app_write_pipeline";
+            let binding = DbBinding::cold_start(app_id);
             let collection = "users";
             let schema = serde_json::json!({
                 "email": { "type": "string", "required": true, "unique": true },
@@ -797,7 +803,7 @@ mod tests {
                 "ssn": "123-45-6789"
             });
             apply(
-                app_id,
+                &binding,
                 collection,
                 &mut insert_doc,
                 ApplyMode::Insert {
@@ -848,7 +854,7 @@ mod tests {
                 }
             ]);
             apply(
-                app_id,
+                &binding,
                 collection,
                 &mut bulk_docs,
                 ApplyMode::InsertMany {
@@ -893,7 +899,7 @@ mod tests {
                 "update system-field pre-pass should surface creator overrides",
             );
             apply(
-                app_id,
+                &binding,
                 collection,
                 &mut update_patch,
                 ApplyMode::Update {
@@ -947,7 +953,7 @@ mod tests {
                 "ssn": "222-33-4444"
             });
             apply(
-                app_id,
+                &binding,
                 collection,
                 &mut upsert_doc,
                 ApplyMode::Upsert {
