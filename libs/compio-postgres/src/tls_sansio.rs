@@ -836,6 +836,19 @@ where
     Ok(n)
 }
 
+/// Flush the transport without allowing an indeterminate buffered ciphertext
+/// tail to outlive a cancelled or failed flush.
+async fn flush_through<W>(socket: &mut W, session: &SharedSession) -> io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    flush_outgoing(socket, session).await?;
+    let write_flight = WriteFlight::new(session);
+    socket.flush().await?;
+    write_flight.disarm();
+    Ok(())
+}
+
 async fn shutdown_through<W>(socket: &mut W, session: &SharedSession) -> io::Result<()>
 where
     W: AsyncWrite + Unpin,
@@ -929,8 +942,7 @@ where
 
     async fn flush(&mut self) -> io::Result<()> {
         let session = self.reader.session.clone();
-        flush_outgoing(self.reader.socket_mut(), &session).await?;
-        self.reader.socket_mut().flush().await
+        flush_through(self.reader.socket_mut(), &session).await
     }
 
     async fn shutdown(&mut self) -> io::Result<()> {
@@ -975,8 +987,7 @@ where
     }
 
     async fn flush(&mut self) -> io::Result<()> {
-        flush_outgoing(&mut self.socket, &self.session).await?;
-        self.socket.flush().await
+        flush_through(&mut self.socket, &self.session).await
     }
 
     async fn shutdown(&mut self) -> io::Result<()> {
@@ -1068,6 +1079,20 @@ mod tests {
         wire_prefix: Vec<u8>,
     }
 
+    /// A buffered transport whose flush exposes one byte and then never
+    /// returns. Dropping that flush loses an unknowable ciphertext tail.
+    struct ParkedFlushWriter {
+        buffered: usize,
+        wire_prefix: Vec<u8>,
+    }
+
+    /// A buffered transport whose first flush exposes one byte and errors.
+    struct PartialErrorFlushWriter {
+        buffered: usize,
+        flushes: usize,
+        wire_prefix: Vec<u8>,
+    }
+
     impl AsyncWrite for ParkedWriter {
         async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
             let bytes = buf.as_init();
@@ -1107,6 +1132,52 @@ mod tests {
         }
 
         async fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl AsyncWrite for ParkedFlushWriter {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            self.buffered += buf.buf_len();
+            BufResult(Ok(buf.buf_len()), buf)
+        }
+
+        async fn flush(&mut self) -> io::Result<()> {
+            assert!(
+                self.buffered > 0,
+                "the TLS fixture tried to park an empty transport flush"
+            );
+            self.wire_prefix.push(0);
+            std::future::pending::<()>().await;
+            unreachable!("the parked transport flush completed")
+        }
+
+        async fn shutdown(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl AsyncWrite for PartialErrorFlushWriter {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            self.buffered += buf.buf_len();
+            BufResult(Ok(buf.buf_len()), buf)
+        }
+
+        async fn flush(&mut self) -> io::Result<()> {
+            self.flushes += 1;
+            if self.flushes == 1 {
+                assert!(
+                    self.buffered > 0,
+                    "the TLS fixture tried to fail an empty transport flush"
+                );
+                self.wire_prefix.push(0);
+                return Err(io::Error::other("scripted partial transport flush"));
+            }
+            self.buffered = 0;
             Ok(())
         }
 
@@ -1171,6 +1242,68 @@ mod tests {
             .flush()
             .await
             .expect_err("a TLS session that lost ciphertext to a returned write error was reused");
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[compio::test]
+    async fn cancelling_a_transport_flush_poisons_the_reused_tls_stream() {
+        let (client, _server) = handshaken_pair();
+        let session = share(client);
+        let mut writer = TlsWriteHalf::new(
+            ParkedFlushWriter {
+                buffered: 0,
+                wire_prefix: Vec::new(),
+            },
+            session,
+        );
+
+        let BufResult(written, _) = writer.write(b"buffered plaintext".to_vec()).await;
+        written.expect("the fixture transport should buffer the TLS frame");
+
+        let mut flush = Box::pin(writer.flush());
+        assert!(
+            futures_util::poll!(flush.as_mut()).is_pending(),
+            "the TLS fixture did not park after making flush progress"
+        );
+        drop(flush);
+        assert_eq!(
+            writer.socket.wire_prefix.len(),
+            1,
+            "the cancelled transport flush made no progress"
+        );
+
+        let BufResult(retry, _) = writer.write(b"next plaintext".to_vec()).await;
+        let error = retry.expect_err("a cancelled transport flush left a TLS stream reusable");
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[compio::test]
+    async fn a_partial_transport_flush_error_poisons_the_reused_tls_stream() {
+        let (client, _server) = handshaken_pair();
+        let session = share(client);
+        let mut writer = TlsWriteHalf::new(
+            PartialErrorFlushWriter {
+                buffered: 0,
+                flushes: 0,
+                wire_prefix: Vec::new(),
+            },
+            session,
+        );
+
+        let BufResult(written, _) = writer.write(b"buffered plaintext".to_vec()).await;
+        written.expect("the fixture transport should buffer the TLS frame");
+        writer
+            .flush()
+            .await
+            .expect_err("the fixture transport flush should fail");
+        assert_eq!(
+            writer.socket.wire_prefix.len(),
+            1,
+            "the failed transport flush made no progress"
+        );
+
+        let BufResult(retry, _) = writer.write(b"next plaintext".to_vec()).await;
+        let error = retry.expect_err("a partial transport flush error left a TLS stream reusable");
         assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
     }
 
