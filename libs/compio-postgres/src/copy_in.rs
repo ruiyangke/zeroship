@@ -528,10 +528,9 @@ where
         .send_copy_statement(RequestMessages::CopyIn(receiver), &statement, CopyMode::In)
         .map_err(ExecutionError::before_bind_complete)?;
 
-    sender
-        .send(CopyInMessage::Message(FrontendMessage::Raw(buf)))
+    send_initial_copy_message(&mut sender, &mut responses, FrontendMessage::Raw(buf))
         .await
-        .map_err(|_| ExecutionError::before_bind_complete(Error::closed()))?;
+        .map_err(ExecutionError::before_bind_complete)?;
 
     // Until `CopyInResponse` arrives the server is NOT in copy mode, so every
     // failure below must leave the request silent rather than let the sender's
@@ -619,12 +618,97 @@ where
     })
 }
 
+async fn send_initial_copy_message(
+    sender: &mut mpsc::Sender<CopyInMessage>,
+    responses: &mut Responses,
+    message: FrontendMessage,
+) -> Result<(), Error> {
+    if sender.send(CopyInMessage::Message(message)).await.is_ok() {
+        return Ok(());
+    }
+
+    // The request owns both the COPY receiver and its response producer. If
+    // the former has gone away, the latter must either carry the backend
+    // diagnosis which ended the request or terminate too. Drain that FIFO so
+    // a decoded ErrorResponse wins over the local producer-channel symptom.
+    loop {
+        match responses.next().await {
+            Ok(_) => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::CopyInReceiver;
+    use super::{CopyInReceiver, send_initial_copy_message};
+    use crate::Statement;
+    use crate::client::{Client, CopyMode};
     use crate::codec::FrontendMessage;
+    use crate::config::{SslMode, SslNegotiation};
+    use crate::connection::RequestMessages;
+    use crate::error::{DbError, SqlState};
     use bytes::Bytes;
+    use bytes::{BufMut, BytesMut};
+    use futures_channel::mpsc;
     use futures_util::StreamExt;
+    use postgres_protocol::message::backend::Message;
+
+    fn admin_shutdown() -> DbError {
+        let payload = b"SFATAL\0VFATAL\0C57P01\0Mscripted shutdown\0\0";
+        let mut frame = BytesMut::new();
+        frame.put_u8(b'E');
+        frame.put_u32(u32::try_from(payload.len() + 4).unwrap());
+        frame.extend_from_slice(payload);
+
+        match Message::parse(&mut frame).expect("parse scripted ErrorResponse") {
+            Some(Message::ErrorResponse(body)) => {
+                DbError::parse(&mut body.fields()).expect("parse scripted DbError")
+            }
+            _ => panic!("scripted 57P01 did not decode as ErrorResponse"),
+        }
+    }
+
+    #[compio::test]
+    async fn initial_producer_failure_preserves_terminal_server_diagnosis() {
+        let (request_sender, mut requests) = mpsc::unbounded();
+        let client = Client::new(
+            request_sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+        );
+        let (mut producer, receiver) = mpsc::channel(1);
+        let statement = Statement::unnamed(Vec::new(), Vec::new());
+        let (mut responses, _copy_mode) = client
+            .inner()
+            .send_copy_statement(
+                RequestMessages::CopyIn(CopyInReceiver::new(receiver)),
+                &statement,
+                CopyMode::In,
+            )
+            .expect("enqueue the scripted COPY request");
+        let request = requests.try_recv().expect("receive the COPY request");
+        *client.terminal_server_error_handle().lock() = Some(admin_shutdown());
+        drop(request);
+
+        let error = send_initial_copy_message(
+            &mut producer,
+            &mut responses,
+            FrontendMessage::Raw(Bytes::from_static(b"initial COPY batch")),
+        )
+        .await
+        .expect_err("the disconnected COPY producer accepted its initial batch");
+
+        assert_eq!(
+            error.code(),
+            Some(&SqlState::ADMIN_SHUTDOWN),
+            "initial COPY producer failure discarded SQLSTATE 57P01: {error}"
+        );
+        assert!(!error.is_closed());
+    }
 
     async fn terminal_bytes(mut receiver: CopyInReceiver) -> Bytes {
         receiver
