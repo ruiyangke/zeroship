@@ -1173,7 +1173,7 @@ fn scan_retirement_message(
 impl Dispatch<'_> {
     /// Dispatch a single decoded backend frame.
     fn handle_message(&mut self, message: BackendMessage) -> Result<DispatchOutcome, Error> {
-        match message {
+        let result = (|| match message {
             BackendMessage::Async { message, .. } => {
                 route_async(self.parameters, self.async_sender, message)
             }
@@ -1198,7 +1198,14 @@ impl Dispatch<'_> {
                 self.deliver_batch(messages, ready_status)?;
                 Ok(DispatchOutcome::Continue)
             }
+        })();
+        if result.is_err() {
+            // Every raw dispatch error ends the connection loop. Publish that
+            // decision before split-reader acknowledgement and teardown, while
+            // the Client request channel can still look open to the pool.
+            self.tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
         }
+        result
     }
 
     /// Deliver a normal batch to the front response channel. Mirrors
@@ -4066,6 +4073,40 @@ mod tests {
 
         assert_eq!(tx_status.load(Ordering::Relaxed), b'T');
         assert_eq!(in_flight_requests.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn a_dispatch_error_marks_the_session_retired() {
+        let mut bytes = completed_response_batch(b'I');
+        bytes.truncate(bytes.len() - 6);
+        let parameters = Mutex::new(HashMap::new());
+        let mut responses = VecDeque::new();
+        let mut pending_responses = VecDeque::new();
+        let tx_status = AtomicU8::new(b'I');
+        let in_flight_requests = AtomicUsize::new(0);
+        let terminal_server_error = Mutex::new(None);
+
+        let result = Dispatch {
+            parameters: &parameters,
+            responses: &mut responses,
+            pending_responses: &mut pending_responses,
+            async_sender: None,
+            tx_status: &tx_status,
+            in_flight_requests: &in_flight_requests,
+            terminal_server_error: &terminal_server_error,
+        }
+        .handle_message(BackendMessage::Normal {
+            messages: BackendMessages::from_test_bytes(BytesMut::from(bytes.as_slice())),
+            request_complete: false,
+            deferred_error: None,
+        });
+
+        assert!(result.is_err(), "the unsolicited response was accepted");
+        assert_eq!(
+            tx_status.load(Ordering::Acquire),
+            READ_RETIRED_STATUS,
+            "a dispatch error left the pool status reusable"
+        );
     }
 
     #[test]
