@@ -157,27 +157,35 @@ impl BackendMessages {
     /// possibly backpressured consumer: PostgreSQL owes no further bytes after
     /// `CopyInResponse` until the caller supplies input.
     pub(crate) fn contains_tag(&self, tag: u8) -> bool {
+        self.first_matching_tag(&[tag]).is_some()
+    }
+
+    /// Return the first frame tag in wire order which appears in `tags`.
+    ///
+    /// COPY direction responses can share a decoded batch. Their order still
+    /// decides which protocol state the backend entered first.
+    pub(crate) fn first_matching_tag(&self, tags: &[u8]) -> Option<u8> {
         let mut offset = 0usize;
         while let Some(header_end) = offset.checked_add(5) {
             let Some(header) = self.0.get(offset..header_end) else {
-                return false;
+                return None;
             };
             let length = u32::from_be_bytes(header[1..5].try_into().unwrap()) as usize;
             let Some(next) = offset
                 .checked_add(1)
                 .and_then(|value| value.checked_add(length))
             else {
-                return false;
+                return None;
             };
             if length < 4 || next > self.0.len() {
-                return false;
+                return None;
             }
-            if header[0] == tag {
-                return true;
+            if tags.contains(&header[0]) {
+                return Some(header[0]);
             }
             offset = next;
         }
-        false
+        None
     }
 
     /// Clone and decode an error only when it precedes `stop_tag`.

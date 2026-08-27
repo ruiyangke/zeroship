@@ -1336,10 +1336,11 @@ impl Dispatch<'_> {
             return Ok(());
         }
 
-        let entered_copy_input = !request_complete
-            && messages.contains_tag(postgres_protocol::message::backend::COPY_IN_RESPONSE_TAG);
-        let entered_copy_output = !request_complete
-            && messages.contains_tag(postgres_protocol::message::backend::COPY_OUT_RESPONSE_TAG);
+        let copy_in_tag = postgres_protocol::message::backend::COPY_IN_RESPONSE_TAG;
+        let copy_out_tag = postgres_protocol::message::backend::COPY_OUT_RESPONSE_TAG;
+        let first_copy_response = (!request_complete)
+            .then(|| messages.first_matching_tag(&[copy_in_tag, copy_out_tag]))
+            .flatten();
 
         // PostgreSQL sends FATAL/PANIC before closing the socket, and the
         // response consumer can wake and drop its pooled lease before the
@@ -1445,13 +1446,16 @@ impl Dispatch<'_> {
         let copy_input_without_producer = if request_complete {
             response.read_obligation.complete();
             false
-        } else if entered_copy_input {
-            response.read_obligation.pause_for_copy_input()
-        } else if entered_copy_output {
-            response.read_obligation.enter_copy_output();
-            false
         } else {
-            false
+            match first_copy_response {
+                Some(tag) if tag == copy_in_tag => response.read_obligation.pause_for_copy_input(),
+                Some(tag) if tag == copy_out_tag => {
+                    response.read_obligation.enter_copy_output();
+                    messages.contains_tag(copy_in_tag)
+                        && response.read_obligation.pause_for_copy_input()
+                }
+                _ => false,
+            }
         };
 
         let (messages, completion_observation) =
