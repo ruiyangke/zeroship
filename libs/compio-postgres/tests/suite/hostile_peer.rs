@@ -1695,6 +1695,108 @@ async fn a_copy_in_response_cannot_transition_to_copy_out() {
     .expect("COPY direction-transition test exceeded its outer watchdog");
 }
 
+/// Once CopyOutResponse has suppressed the connection-owned COPY IN fallback,
+/// a later CopyInResponse cannot be answered. The only legal bounded exit is
+/// to close the connection; sending the next ordinary request would itself be
+/// an illegal non-COPY message while the peer waits for frontend COPY input.
+#[compio::test]
+async fn a_copy_out_response_cannot_transition_to_copy_in() {
+    use futures_util::TryStreamExt;
+
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+        let server = StubServer::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_startup(&mut stream, 508);
+
+            expect_frontend_until_sync(&mut stream);
+            let mut prepared = backend_frame(b'1', b"");
+            prepared.extend_from_slice(&backend_frame(b't', &0u16.to_be_bytes()));
+            prepared.extend_from_slice(&backend_frame(b'n', b""));
+            prepared.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream
+                .write_all(&prepared)
+                .expect("write scripted prepare response");
+            stream.flush().expect("flush scripted prepare response");
+
+            expect_frontend_until_sync(&mut stream);
+            let mut copy_out = backend_frame(b'2', b"");
+            copy_out.extend_from_slice(&backend_frame(b'H', b"\x00\x00\x00"));
+            stream
+                .write_all(&copy_out)
+                .expect("write initial CopyOutResponse");
+            stream.flush().expect("flush initial CopyOutResponse");
+
+            continue_rx
+                .recv_timeout(THREAD_WATCHDOG)
+                .expect("the client did not accept CopyOutResponse");
+            let mut changed_direction = backend_frame(b'd', b"row-one\n");
+            changed_direction.extend_from_slice(&backend_frame(b'G', b"\x00\x00\x00"));
+            stream
+                .write_all(&changed_direction)
+                .expect("write CopyOutResponse to CopyInResponse transition");
+            stream
+                .flush()
+                .expect("flush CopyOutResponse to CopyInResponse transition");
+
+            let mut tag = [0u8; 1];
+            let read = stream
+                .read(&mut tag)
+                .expect("read the driver's COPY transition exit");
+            assert_eq!(
+                read, 0,
+                "the driver sent frontend tag {} instead of closing after COPY OUT changed to \
+                 COPY IN",
+                tag[0]
+            );
+        });
+
+        let (client, connection) = stub_config(server.addr)
+            .connect(common::suite_tls())
+            .await
+            .expect("connect to scripted PostgreSQL peer");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let stream = client
+            .copy_out("COPY t TO STDOUT")
+            .await
+            .expect("accept the initial CopyOutResponse");
+        continue_tx
+            .send(())
+            .expect("scripted peer stopped before the direction transition");
+        let mut stream = Box::pin(stream);
+        assert_eq!(
+            stream
+                .try_next()
+                .await
+                .expect("read the row before the transition"),
+            Some(bytes::Bytes::from_static(b"row-one\n"))
+        );
+        let error = stream
+            .try_next()
+            .await
+            .expect_err("the driver accepted COPY OUT changing to COPY IN");
+        assert!(
+            common::error_chain(&error).contains("unexpected message from server"),
+            "the COPY direction transition reported the wrong error: {error}"
+        );
+
+        let follow_up =
+            compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 2")).await;
+        match follow_up {
+            Err(_) => panic!("the poisoned COPY transition stranded the next request"),
+            Ok(Ok(_)) => panic!("the driver reused a connection after its COPY direction changed"),
+            Ok(Err(_)) => {}
+        }
+
+        drop(client);
+        let _ = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
+        server.finish();
+    })
+    .await
+    .expect("COPY OUT to COPY IN transition test exceeded its outer watchdog");
+}
+
 /// Ordinary extended COPY OUT completes Execute once. Replication has a
 /// separate two-CommandComplete contract, but that cannot leak into this
 /// state machine.
