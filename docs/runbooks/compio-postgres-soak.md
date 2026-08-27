@@ -515,6 +515,22 @@ MEASURED 2026-08-27, 60s window: **copy_round_trips=1034 against a floor of
 The floor is deliberately loose - its job is to catch a worker that never ran,
 not to bound throughput.
 
+RE-MEASURED the same day at `d8c9d1f37`, 300s: **copy_round_trips=5118** -
+roughly 1.31 million rows through COPY IN and the same back out, each round
+trip checked on row count and sum. RSS moved **-104 KiB** across 31 samples
+(11 rises, 12 falls), `pool_acquires` and `pool_releases` were equal at 58,700,
+`cancellations` and `cancellation_recoveries` equal at 987, and both baselines
+returned to zero.
+
+That run is the reason the workload was added. Eight COPY changes had landed
+between the two measurements, and several of them make a stream WAIT longer
+than it used to - COPY OUT now runs on to `CommandComplete` and then
+`ReadyForQuery`, COPY IN buffers its completion until Sync, and a locally
+detected refusal drains the response FIFO before yielding. Every one of those
+is a place where a missed wake or a stranded response would hang rather than
+fail, which a short suite is poorly shaped to catch and 5,118 consecutive round
+trips is well shaped to catch.
+
 Read the workload list under "What the run does" as the boundary of what a
 green result means, and add a shape to the harness rather than stretching a
 claim to reach it. That is what this entry is a worked example of.

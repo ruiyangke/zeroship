@@ -192,6 +192,53 @@ Any live cancellation test is expected to fail here. Do not "fix" one by making
 it tolerate a pooler: that would delete the coverage on a direct server, which
 is where cancellation has to work.
 
+### A NEW NAME THAT WAS NEITHER A NEW TEST NOR A REGRESSION
+
+RE-MEASURED 2026-08-27 at `b88362a56`: **523 passed, 66 failed**. One name
+entered, and it is the most instructive entry on this page because both of the
+usual explanations were wrong:
+
+```text
+read_timeout::copy_input_time_is_not_charged_as_server_read_silence
+```
+
+It is NOT residue-by-construction - `git show 6aad95ddc:...` finds it in the
+tree at the previous baseline, where it passed. And it is NOT a regression - it
+passes on the direct server, where the same day's gates read 1128/0.
+
+The failure names its own cause:
+
+```text
+57014 canceling statement due to statement timeout
+where: COPY cpg_read_timeout_copy, line 1: "7"   routine: ProcessInterrupts
+```
+
+That is a SERVER-side statement timeout, and the test sets none; it only sleeps
+ten seconds mid-COPY on purpose. The chain, each link measured:
+
+1. `SHOW statement_timeout` on the backing server is `0`, so it is no default.
+2. pgbouncer proxies to `172.17.0.9`, which is the SAME container as 5455 - so
+   the two paths differ only in the pooler, not in the server.
+3. That config is `pool_mode = transaction` and defines NO
+   `server_reset_query` (grep count 0).
+4. Several tests run `SET statement_timeout = '50ms'` or `'4s'`
+   (`query_observer.rs`, `command_timeout.rs`, `integration.rs`).
+
+So a session GUC set by one logical client persists on the shared server
+connection and lands on a later one. The pooler leaks session state because it
+has no reset query - a configuration property, not a driver defect.
+
+WHY IT SURFACED ONLY NOW is the part worth keeping. The COPY IN fixes merged
+that day (`5be471843`, `a3422d6b1`, `1db02668d`) make `finish` report the
+server's error instead of discarding it. Before them the leaked timeout's 57014
+was SWALLOWED and this test passed by accident. The new failure is the fix
+working.
+
+So a name entering the residue has THREE possible causes, not two: the test is
+new, the driver regressed, or the driver stopped hiding something. Check
+provenance first, then the direct server, and only then read the message - the
+third case looks exactly like the second until you do.
+
 One name LEFT: `statement_cache_propagates_a_second_consecutive_26000`, which no
 longer exists - `46e919e2d` renamed it to
 `statement_cache_does_not_retry_26000_after_bind_complete`. The replacement is
