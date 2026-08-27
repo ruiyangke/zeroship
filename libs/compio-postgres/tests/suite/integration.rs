@@ -6179,11 +6179,11 @@ async fn statement_cache_does_not_retry_a_cold_26000() {
     assert_eq!(failed_attempts, 1, "a cold prepare is not retry eligible");
 }
 
-/// The replacement gets one attempt, not a retry loop. The driver's cached
-/// outer `EXECUTE` loses its SQL-level target, so both the stale execution and
-/// its freshly prepared replacement receive a genuine 26000 from PostgreSQL.
+/// SQL `EXECUTE` runs after the outer protocol Bind completed. Its 26000 names
+/// the SQL-level target, not the driver's still-live cached statement, so the
+/// call must propagate the first failure without replaying it.
 #[compio::test]
-async fn statement_cache_propagates_a_second_consecutive_26000() {
+async fn statement_cache_does_not_retry_26000_after_bind_complete() {
     use futures_util::StreamExt;
     use std::time::Duration;
 
@@ -6200,22 +6200,17 @@ async fn statement_cache_propagates_a_second_consecutive_26000() {
         .unwrap();
     let warm_rows = client.query(&sql, &[]).await.unwrap();
     assert_eq!(warm_rows[0].get::<_, i32>(0), 66);
+    let cached_name = prepared_statement_name(&client, &sql).await;
 
     client
         .batch_execute(&format!("DEALLOCATE {target}"))
         .await
         .unwrap();
 
-    let second = compio::time::timeout(
-        Duration::from_secs(5),
-        client.query_raw(sql.as_str(), std::iter::empty::<&i32>()),
-    )
-    .await
-    .expect("a cached-statement retry loop did not stop after one replacement");
-    let second_error = match second {
-        Err(error) => error,
-        Ok(_) => panic!("the second 26000 escaped through the returned RowStream"),
-    };
+    let second = compio::time::timeout(Duration::from_secs(5), client.query(sql.as_str(), &[]))
+        .await
+        .expect("the cached execution did not return its server error");
+    let second_error = second.expect_err("the execution-time 26000 was hidden");
     assert_eq!(
         second_error.code(),
         Some(&SqlState::INVALID_SQL_STATEMENT_NAME)
@@ -6242,8 +6237,62 @@ async fn statement_cache_propagates_a_second_consecutive_26000() {
         }
     }
     assert_eq!(
-        failed_attempts, 2,
-        "the call must make exactly two attempts"
+        failed_attempts, 1,
+        "an execution-time 26000 must not replay the outer statement"
+    );
+    assert_eq!(
+        prepared_statement_name(&client, &sql).await,
+        cached_name,
+        "an execution-time 26000 evicted the still-live outer statement"
+    );
+}
+
+/// The retry cut is exactly `BindComplete`, not the first row or command tag.
+/// This cached CALL binds successfully, commits one INSERT, then dynamic SQL
+/// raises PostgreSQL's genuine `FetchPreparedStatement` 26000. Replaying after
+/// that point would commit a second row even though the caller only made one
+/// call.
+#[compio::test]
+async fn statement_cache_never_replays_a_committed_effect_after_bind_complete() {
+    let url = test_url();
+    let client = connect_with_statement_cache(&url, 2).await.unwrap();
+    let procedure = common::test_object_name("cpg_cache_retry_procedure");
+    let missing = common::test_object_name("cpg_cache_retry_missing");
+    let sql = format!("CALL pg_temp.{procedure}($1)");
+
+    client
+        .batch_execute(&format!(
+            "CREATE TEMP TABLE cpg_cache_retry_rows (attempt int4 NOT NULL); \
+             CREATE PROCEDURE pg_temp.{procedure}(run bool) \
+             LANGUAGE plpgsql AS $procedure$ \
+             BEGIN \
+               IF run THEN \
+                 INSERT INTO cpg_cache_retry_rows VALUES (1); \
+                 COMMIT; \
+                 EXECUTE 'EXECUTE {missing}'; \
+               END IF; \
+             END \
+             $procedure$"
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(client.execute(&sql, &[&false]).await.unwrap(), 0);
+    let error = client.execute(&sql, &[&true]).await.unwrap_err();
+    assert_eq!(error.code(), Some(&SqlState::INVALID_SQL_STATEMENT_NAME));
+    assert_eq!(
+        error.as_db_error().and_then(|error| error.routine()),
+        Some("FetchPreparedStatement"),
+        "the fixture did not reach PostgreSQL's prepared-statement lookup"
+    );
+
+    let committed: i64 = client
+        .query_one_scalar("SELECT count(*) FROM cpg_cache_retry_rows", &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        committed, 1,
+        "one cached call committed its side effect more than once"
     );
 }
 

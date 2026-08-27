@@ -146,6 +146,8 @@ struct Response {
     prepare_cleanup: Option<crate::prepare::PrepareCleanup>,
     statement: Option<Statement>,
     observation: Option<QueryObservation>,
+    /// Whether this response has crossed the last replay-safe protocol point.
+    bind_complete_seen: bool,
     /// Socket-read phase for this one wire response. It is shared with the
     /// write path so an answer that arrives during `flush` can complete the
     /// phase before the successful flush would otherwise activate it.
@@ -740,6 +742,7 @@ where
             prepare_cleanup,
             statement,
             observation,
+            bind_complete_seen: false,
             read_obligation: read_obligation.clone(),
         });
 
@@ -921,11 +924,16 @@ impl Dispatch<'_> {
         // The response consumer may already be gone, but this dispatch point
         // still sees every server error. Retiring poison here keeps a cancelled
         // borrower from returning it to the pool for somebody else to hit.
-        if let Some(statement) = response.statement.as_ref()
-            && let Some(body) = messages.error_response().map_err(Error::parse)?
+        let bind_complete_tag = postgres_protocol::message::backend::BIND_COMPLETE_TAG;
+        if !response.bind_complete_seen
+            && let Some(statement) = response.statement.as_ref()
+            && let Some(body) = messages
+                .error_response_before(bind_complete_tag)
+                .map_err(Error::parse)?
         {
             statement.invalidate_cache_on_error(&Error::db(body));
         }
+        response.bind_complete_seen |= messages.contains_tag(bind_complete_tag);
 
         if let Some(status) = ready_status
             && response.transaction_effect == TransactionEffect::MayChange
@@ -2031,6 +2039,7 @@ where
                             prepare_cleanup,
                             statement,
                             observation,
+                            bind_complete_seen: false,
                             read_obligation: read_obligation.clone(),
                         });
                         match messages {
@@ -3198,6 +3207,7 @@ mod tests {
             prepare_cleanup: None,
             statement: None,
             observation: None,
+            bind_complete_seen: false,
             read_obligation: ReadObligation::new(None, false),
         }]);
         let mut pending_responses = VecDeque::new();
@@ -3717,6 +3727,7 @@ mod tests {
             prepare_cleanup: None,
             statement: None,
             observation: None,
+            bind_complete_seen: false,
             read_obligation: ReadObligation::new(None, false),
         }]);
         let pending_responses = VecDeque::new();
@@ -4234,6 +4245,7 @@ mod tests {
             prepare_cleanup: None,
             statement: None,
             observation: None,
+            bind_complete_seen: false,
             read_obligation: ReadObligation::new(None, false),
         }]);
 
@@ -4497,6 +4509,7 @@ mod tests {
             prepare_cleanup: None,
             statement: None,
             observation: None,
+            bind_complete_seen: false,
             read_obligation: ReadObligation::new(None, false),
         }]);
         let pending_responses = VecDeque::new();

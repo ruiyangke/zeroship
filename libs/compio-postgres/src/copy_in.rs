@@ -11,7 +11,7 @@ use crate::client::{CopyMode, CopyModeGuard, InnerClient, Responses};
 use crate::codec::FrontendMessage;
 use crate::connection::RequestMessages;
 use crate::copy_format::CopyResponse;
-use crate::query::extract_row_affected;
+use crate::query::{ExecutionError, extract_row_affected};
 use crate::{CopyFormat, Error, Statement, query, slice_iter};
 use bytes::{Buf, BufMut, BytesMut};
 use futures_channel::mpsc;
@@ -388,22 +388,49 @@ pub async fn copy_in<T>(
 where
     T: Buf + 'static + Send,
 {
+    copy_in_inner(client, statement, unnamed_sql)
+        .await
+        .map_err(ExecutionError::into_error)
+}
+
+pub(crate) async fn copy_in_cached<T>(
+    client: &InnerClient,
+    statement: Statement,
+    unnamed_sql: Option<&str>,
+) -> Result<CopyInSink<T>, ExecutionError>
+where
+    T: Buf + 'static + Send,
+{
+    copy_in_inner(client, statement, unnamed_sql).await
+}
+
+async fn copy_in_inner<T>(
+    client: &InnerClient,
+    statement: Statement,
+    unnamed_sql: Option<&str>,
+) -> Result<CopyInSink<T>, ExecutionError>
+where
+    T: Buf + 'static + Send,
+{
     debug!("executing copy in statement {}", statement.name());
 
     let buf = match unnamed_sql {
-        Some(sql) => query::encode_unnamed(client, sql, &statement, slice_iter(&[]))?,
-        None => query::encode(client, &statement, slice_iter(&[]))?,
+        Some(sql) => query::encode_unnamed(client, sql, &statement, slice_iter(&[]))
+            .map_err(ExecutionError::before_bind_complete)?,
+        None => query::encode(client, &statement, slice_iter(&[]))
+            .map_err(ExecutionError::before_bind_complete)?,
     };
 
     let (mut sender, receiver) = mpsc::channel(1);
     let receiver = CopyInReceiver::new(receiver);
-    let (mut responses, copy_mode) =
-        client.send_copy_statement(RequestMessages::CopyIn(receiver), &statement, CopyMode::In)?;
+    let (mut responses, copy_mode) = client
+        .send_copy_statement(RequestMessages::CopyIn(receiver), &statement, CopyMode::In)
+        .map_err(ExecutionError::before_bind_complete)?;
 
     sender
         .send(CopyInMessage::Message(FrontendMessage::Raw(buf)))
         .await
-        .map_err(|_| Error::closed())?;
+        .map_err(|_| ExecutionError::before_bind_complete(Error::closed()))?;
 
     // Until `CopyInResponse` arrives the server is NOT in copy mode, so every
     // failure below must leave the request silent rather than let the sender's
@@ -417,11 +444,13 @@ where
             Ok(Message::ParseComplete) => {}
             Ok(_) => {
                 abort(&mut sender).await;
-                return Err(Error::unexpected_message());
+                return Err(ExecutionError::before_bind_complete(
+                    Error::unexpected_message(),
+                ));
             }
             Err(e) => {
                 abort(&mut sender).await;
-                return Err(e);
+                return Err(ExecutionError::before_bind_complete(e));
             }
         }
     }
@@ -430,31 +459,37 @@ where
         Ok(Message::BindComplete) => {}
         Ok(_) => {
             abort(&mut sender).await;
-            return Err(Error::unexpected_message());
+            return Err(ExecutionError::before_bind_complete(
+                Error::unexpected_message(),
+            ));
         }
         Err(e) => {
             statement.invalidate_cache_on_error(&e);
             abort(&mut sender).await;
-            return Err(e);
+            return Err(ExecutionError::before_bind_complete(e));
         }
     }
 
     let response = match responses.next().await {
         Ok(Message::CopyInResponse(body)) => {
-            CopyResponse::from_backend(body.format(), body.column_formats())?
+            CopyResponse::from_backend(body.format(), body.column_formats())
+                .map_err(ExecutionError::after_bind_complete)?
         }
         Ok(Message::CopyOutResponse(_)) => {
             abort(&mut sender).await;
-            return Err(Error::copy_out_answered_copy_in());
+            return Err(ExecutionError::after_bind_complete(
+                Error::copy_out_answered_copy_in(),
+            ));
         }
         Ok(_) => {
             abort(&mut sender).await;
-            return Err(Error::unexpected_message());
+            return Err(ExecutionError::after_bind_complete(
+                Error::unexpected_message(),
+            ));
         }
         Err(e) => {
-            statement.invalidate_cache_on_error(&e);
             abort(&mut sender).await;
-            return Err(e);
+            return Err(ExecutionError::after_bind_complete(e));
         }
     };
 
