@@ -1797,6 +1797,79 @@ async fn a_copy_out_response_cannot_transition_to_copy_in() {
     .expect("COPY OUT to COPY IN transition test exceeded its outer watchdog");
 }
 
+/// Backend batches are an I/O optimisation, not a protocol reorder point. If
+/// CopyOutResponse precedes CopyInResponse in one read, COPY OUT owns the
+/// state before the illegal direction change arrives. The frontend therefore
+/// cannot send CopyFail; PostgreSQL allows only close or cancel to abort COPY
+/// OUT.
+#[compio::test]
+async fn copy_response_direction_changes_preserve_batch_wire_order() {
+    use futures_util::TryStreamExt;
+
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = StubServer::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_startup(&mut stream, 509);
+
+            expect_frontend_until_sync(&mut stream);
+            let mut prepared = backend_frame(b'1', b"");
+            prepared.extend_from_slice(&backend_frame(b't', &0u16.to_be_bytes()));
+            prepared.extend_from_slice(&backend_frame(b'n', b""));
+            prepared.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream
+                .write_all(&prepared)
+                .expect("write scripted prepare response");
+            stream.flush().expect("flush scripted prepare response");
+
+            expect_frontend_until_sync(&mut stream);
+            let mut changed_direction = backend_frame(b'2', b"");
+            changed_direction.extend_from_slice(&backend_frame(b'H', b"\x00\x00\x00"));
+            changed_direction.extend_from_slice(&backend_frame(b'G', b"\x00\x00\x00"));
+            stream
+                .write_all(&changed_direction)
+                .expect("write batched COPY direction transition");
+            stream
+                .flush()
+                .expect("flush batched COPY direction transition");
+
+            let mut tag = [0u8; 1];
+            let read = stream
+                .read(&mut tag)
+                .expect("read the driver's batched COPY transition exit");
+            assert_eq!(
+                read, 0,
+                "the driver sent frontend tag {} after reordering batched COPY responses",
+                tag[0]
+            );
+        });
+
+        let (client, connection) = stub_config(server.addr)
+            .connect(common::suite_tls())
+            .await
+            .expect("connect to scripted PostgreSQL peer");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let error = compio::time::timeout(OPERATION_WATCHDOG, async {
+            let stream = client.copy_out("COPY t TO STDOUT").await?;
+            let mut stream = Box::pin(stream);
+            stream.try_next().await.map(|_| ())
+        })
+        .await
+        .expect("batched COPY direction transition hung")
+        .expect_err("the driver accepted a batched COPY direction transition");
+        assert!(
+            common::error_chain(&error).contains("unexpected message from server"),
+            "the batched COPY direction transition reported the wrong error: {error}"
+        );
+
+        drop(client);
+        let _ = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
+        server.finish();
+    })
+    .await
+    .expect("batched COPY direction-transition test exceeded its outer watchdog");
+}
+
 /// Ordinary extended COPY OUT completes Execute once. Replication has a
 /// separate two-CommandComplete contract, but that cannot leak into this
 /// state machine.
