@@ -508,6 +508,16 @@ impl PoolEntry {
         self.client.has_active_copy()
     }
 
+    /// Whether this entry can be committed to a borrower, idle storage, or a
+    /// FIFO hand-off right now. Async hooks and validation are caller code and
+    /// may change any of these facts while the entry is held out of the pool.
+    fn is_pool_eligible(&self) -> bool {
+        !self.is_expired()
+            && !self.client.is_closed()
+            && !self.is_read_retired()
+            && !self.has_active_copy()
+    }
+
     /// Whether the connection's read task published terminal poison before
     /// its main task had a chance to drop the Client request receiver.
     fn is_read_retired(&self) -> bool {
@@ -932,6 +942,15 @@ impl Pool {
                             ))
                         });
                     }
+                    if !entry.is_pool_eligible() {
+                        drop(entry);
+                        drop(entries);
+                        return Err(pool_error(format!(
+                            "warm-up after_connect left connection {} unusable after {i} \
+                             successful connection(s)",
+                            i + 1
+                        )));
+                    }
                     entries.push(entry);
                 }
                 Err(e) => {
@@ -1157,14 +1176,10 @@ impl Pool {
                 // guard's Drop does it when the loop body unwinds on `continue`.
                 let permit = PermitGuard::adopt(self);
 
-                if entry.is_expired() {
-                    self.metrics.inc_evictions();
-                    continue;
-                }
-
-                // If the Client's sender is closed (connection task exited
-                // due to I/O error, EOF, etc), we cannot use this entry.
-                if entry.client.is_closed() || entry.is_read_retired() || entry.has_active_copy() {
+                // If the lifetime elapsed, the Client's sender closed, the
+                // reader published terminal poison, or COPY still owns the
+                // protocol, this entry cannot be handed out.
+                if !entry.is_pool_eligible() {
                     self.metrics.inc_evictions();
                     continue;
                 }
@@ -1241,6 +1256,14 @@ impl Pool {
                     }
                 }
 
+                // The hook is arbitrary async caller code. Its `Ok(true)` is
+                // a vote to reuse, not authority to override lifecycle facts
+                // that changed while it awaited.
+                if !entry.is_pool_eligible() {
+                    self.metrics.inc_evictions();
+                    continue;
+                }
+
                 // This check is deliberately adjacent to the active commit.
                 // Every awaited path checks above as well, and the
                 // single-threaded executor cannot interleave close between
@@ -1286,6 +1309,12 @@ impl Pool {
                     // `entry` is dropped and `permit` releases the reserved
                     // slot; this connection is never made active or idle.
                     return Err(e);
+                }
+                if !entry.is_pool_eligible() {
+                    self.metrics.inc_evictions();
+                    return Err(pool_error(
+                        "after_connect left the new pool connection unusable",
+                    ));
                 }
                 // `before_acquire` is deliberately NOT run here. It is a
                 // recycling check -- "is this idle connection still fit to
@@ -1372,11 +1401,7 @@ impl Pool {
         //   - closed: Client::is_closed() indicates the connection task exited
         //   - read-retired: the dedicated reader synchronously marked poison
         //     before its main task could close the Client channel
-        if entry.is_expired()
-            || entry.client.is_closed()
-            || entry.is_read_retired()
-            || entry.has_active_copy()
-        {
+        if !entry.is_pool_eligible() {
             self.metrics.inc_evictions();
             return;
         }
@@ -1396,6 +1421,10 @@ impl Pool {
             return;
         }
         if !keep {
+            self.metrics.inc_evictions();
+            return;
+        }
+        if !entry.is_pool_eligible() {
             self.metrics.inc_evictions();
             return;
         }
@@ -1739,6 +1768,20 @@ impl Pool {
                         }
                         eprintln!(
                             "[compio-postgres] housekeeper: after_connect rejected connection: {e}"
+                        );
+                        // `entry` closes and `permit` releases the reserved
+                        // slot before the next housekeeper tick.
+                        break;
+                    }
+
+                    if !entry.is_pool_eligible() {
+                        if let Some(pool) = weak.upgrade()
+                            && !pool.closed.get()
+                        {
+                            pool.metrics.inc_evictions();
+                        }
+                        eprintln!(
+                            "[compio-postgres] housekeeper: after_connect left connection unusable"
                         );
                         // `entry` closes and `permit` releases the reserved
                         // slot before the next housekeeper tick.
@@ -2863,6 +2906,123 @@ mod tests {
         assert_eq!(pool.total_count(), 0, "read-retired entry kept its slot");
         assert_eq!(pool.active_count(), 0);
         assert_eq!(pool.metrics.evictions.get(), 1);
+    }
+
+    #[test]
+    fn accepted_before_acquire_cannot_publish_a_hook_closed_entry() {
+        let calls = Rc::new(Cell::new(0));
+        let hook_calls = Rc::clone(&calls);
+        let (doomed, doomed_receiver) = fake_client(18);
+        let receiver = Rc::new(RefCell::new(Some(doomed_receiver)));
+        let hook_receiver = Rc::clone(&receiver);
+        let (healthy, _healthy_receiver) = fake_client(19);
+        let mut config = PoolConfig {
+            max_size: 2,
+            min_idle: 0,
+            validation_bypass: Duration::from_secs(60),
+            ..PoolConfig::default()
+        };
+        config.before_acquire(move |_| {
+            let invocation = hook_calls.get() + 1;
+            hook_calls.set(invocation);
+            if invocation == 1 {
+                drop(hook_receiver.borrow_mut().take());
+            }
+            Box::pin(async { Ok(true) })
+        });
+        // Idle is LIFO: the hook closes process 18 first, then the checkout
+        // must discard it and continue to the healthy process 19 entry.
+        let pool = test_pool(
+            config,
+            vec![
+                PoolEntry::new(healthy, Duration::from_secs(600)),
+                PoolEntry::new(doomed, Duration::from_secs(600)),
+            ],
+            0,
+            2,
+        );
+
+        let mut acquire = Box::pin(pool.get_inner());
+        let client = match poll_once(acquire.as_mut()) {
+            Poll::Ready(Ok(client)) => client,
+            Poll::Ready(Err(error)) => panic!("healthy fallback failed: {error}"),
+            Poll::Pending => panic!("fake-client checkout unexpectedly awaited I/O"),
+        };
+
+        assert_eq!(client.process_id(), 19, "hook-closed entry was published");
+        assert_eq!(
+            calls.get(),
+            2,
+            "checkout did not inspect the fallback entry"
+        );
+        assert_eq!(pool.metrics.evictions.get(), 1);
+        assert_eq!(pool.total_count(), 1);
+        assert_eq!(pool.active_count(), 1);
+        assert_eq!(pool.idle_count(), 0);
+        drop(client);
+        assert_eq!(pool.total_count(), 1);
+        assert_eq!(pool.active_count(), 0);
+        assert_eq!(pool.idle_count(), 1);
+    }
+
+    #[test]
+    fn accepted_after_release_cannot_redeposit_a_hook_closed_entry() {
+        let (client, receiver) = fake_client(20);
+        let receiver = Rc::new(RefCell::new(Some(receiver)));
+        let hook_receiver = Rc::clone(&receiver);
+        let mut config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            ..PoolConfig::default()
+        };
+        config.after_release(move |_| {
+            drop(hook_receiver.borrow_mut().take());
+            true
+        });
+        let pool = test_pool(config, Vec::new(), 1, 1);
+        let held = PooledClient {
+            entry: Some(PoolEntry::new(client, Duration::from_secs(600))),
+            pool: &pool,
+        };
+
+        drop(held);
+
+        assert_eq!(pool.active_count(), 0);
+        assert_eq!(pool.idle_count(), 0, "hook-closed entry became available");
+        assert_eq!(pool.total_count(), 0, "hook-closed entry kept its slot");
+        assert_eq!(pool.metrics.evictions.get(), 1);
+    }
+
+    #[compio::test]
+    async fn accepted_after_connect_cannot_publish_a_hook_closed_new_entry() {
+        let (address, finish_tx, count_rx, server) = accepting_postgres_server();
+        let mut config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            ..PoolConfig::default()
+        };
+        config.after_connect(|client| {
+            client.force_close();
+            Box::pin(async { Ok(()) })
+        });
+        let mut pool = test_pool(config, Vec::new(), 0, 0);
+        let url = format!("postgres://postgres@{address}/fake?sslmode=disable");
+        pool.transport = Transport::resolve(url.parse().unwrap()).unwrap();
+
+        let outcome = pool.get_inner().await;
+        assert!(
+            outcome.is_err(),
+            "hook-closed newly connected entry was published"
+        );
+        assert_eq!(pool.active_count(), 0);
+        assert_eq!(pool.idle_count(), 0);
+        assert_eq!(pool.total_count(), 0, "failed checkout leaked its permit");
+        assert_eq!(pool.metrics.connections_created.get(), 1);
+        assert_eq!(pool.metrics.evictions.get(), 1);
+
+        let _ = finish_tx.send(());
+        assert_eq!(count_rx.recv().unwrap(), 1);
+        server.join().expect("fake PostgreSQL server panicked");
     }
 
     /// Drain a fake client's request channel and count the `ROLLBACK`
