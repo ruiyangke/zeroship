@@ -215,8 +215,18 @@ fn cache_every_collection_and_request(
     // cached even when absent, or every later operation would repeat the whole
     // catalog read forever.
     let mut admissions = usize::from(!ctx.has_introspected_schema(binding, requested));
-    let requested_schema = build_runtime_schema(live, requested).map(Arc::new);
-    ctx.cache_introspected_schema(binding, requested, requested_schema.clone());
+    // Return the PUBLISHED entry, not the local `Arc` just built. A second
+    // thread racing this same cold miss walks the catalog too - the singleflight
+    // is per thread by design - and builds its own structurally equal `Arc`.
+    // Handing each caller its own allocation left the two of them holding
+    // different objects for one immutable fact, and the map holding whichever
+    // published last. `cache_introspected_schema` resolves that under one write
+    // lock and hands both the winner.
+    let requested_schema = ctx.cache_introspected_schema(
+        binding,
+        requested,
+        build_runtime_schema(live, requested).map(Arc::new),
+    );
 
     for table in live.tables.keys() {
         if table == requested
@@ -236,7 +246,9 @@ fn cache_every_collection_and_request(
         // One read, one token: every entry from this `LiveSchema` is stamped
         // with the same deploy token, so a redeploy landing mid-populate can
         // never leave entries from two schema versions under one identity.
-        ctx.cache_introspected_schema(binding, table, schema);
+        // Nothing returns a sibling entry to a caller, so the published object
+        // is dropped here on purpose.
+        let _published = ctx.cache_introspected_schema(binding, table, schema);
         admissions += 1;
     }
     requested_schema
@@ -722,6 +734,86 @@ mod tests {
             cached_fixture_count(&ctx, &deploy, &names) + 1,
             MAX_COLLECTIONS_PER_POPULATE,
             "the requested negative entry must consume one of the bounded admissions"
+        );
+    }
+
+    /// TWO OS THREADS racing ONE cold miss must end up holding ONE fact object.
+    ///
+    /// The singleflight is per thread by design, so both threads legitimately
+    /// walk the catalog and both build an `Arc` of their own. What they must not
+    /// do is return those two `Arc`s: the entry's identity is immutable, so one
+    /// immutable fact would exist as two allocations, the map would keep
+    /// whichever published last, and the object a caller holds would be
+    /// unrelated to the object every subsequent reader gets.
+    ///
+    /// **This is a real race, not a sequential fixture, and that distinction is
+    /// the reason the arm exists.** `a_second_worker_thread_reads_the_first_ones
+    /// _facts_through_its_context` in `live_metadata` is strictly ordered - the
+    /// writer thread is `join`ed before the reader thread starts - so the second
+    /// thread always takes the cache-hit path and never publishes at all. It
+    /// passes on the defective code. Here the barrier holds both threads inside
+    /// their readers until both have passed their singleflight check, so both
+    /// reach the publish with a live `Arc` in hand.
+    ///
+    /// It is deterministic in both directions: on the pre-fix code each thread
+    /// returns the allocation it built itself, so the pointers differ on every
+    /// interleaving; on the fixed code `publish` resolves both under one write
+    /// lock, so they agree on every interleaving.
+    #[test]
+    fn two_threads_racing_one_cold_miss_resolve_one_fact_object() {
+        const FIXTURE_URL: &str = "postgres://introspect-fixture/cold-miss-race";
+        let deploy = DbBinding::new("app_cold_miss_race", "deploy_a");
+        // 2, because a barrier of 1 releases immediately and would turn this
+        // back into the sequential arm it exists to be distinguishable from.
+        let gate = Arc::new(std::sync::Barrier::new(2));
+
+        let racers: Vec<_> = (0..2)
+            .map(|_| {
+                let gate = Arc::clone(&gate);
+                let deploy = deploy.clone();
+                std::thread::spawn(move || {
+                    // Each thread installs the SAME database, so both resolve
+                    // one `DbResourceKey` and therefore one cache identity.
+                    crate::context::with_mut(|c| {
+                        c.install_db_resources(
+                            FIXTURE_URL,
+                            crate::service::DbResourceKey::for_url(FIXTURE_URL),
+                            crate::service::select_backend(FIXTURE_URL).expect("fixture URL"),
+                            crate::live_metadata::process_wide(),
+                        );
+                    });
+                    futures::executor::block_on(resolve_cache_miss_with_reader(
+                        &deploy,
+                        "notes",
+                        move || async move {
+                            // Both readers are inside the catalog read before
+                            // either publishes.
+                            gate.wait();
+                            Ok(live_with("notes", vec![("title", col("text"))]))
+                        },
+                    ))
+                })
+            })
+            .collect();
+
+        let facts: Vec<Arc<Value>> = racers
+            .into_iter()
+            .map(|racer| {
+                racer
+                    .join()
+                    .expect("racing resolver thread")
+                    .expect("catalog read must succeed")
+                    .expect("requested present collection must resolve")
+            })
+            .collect();
+
+        assert_eq!(facts.len(), 2, "the race needs both racers' results");
+        assert!(
+            Arc::ptr_eq(&facts[0], &facts[1]),
+            "two threads racing one cold miss returned two allocations for one \
+             immutable fact: {:p} and {:p}",
+            Arc::as_ptr(&facts[0]),
+            Arc::as_ptr(&facts[1]),
         );
     }
 

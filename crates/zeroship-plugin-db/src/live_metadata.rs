@@ -124,9 +124,26 @@ impl LiveMetadataCache {
         self.read_entries().contains_key(key)
     }
 
-    /// Record one identity's facts. `facts = None` records absence.
-    pub(crate) fn insert(&self, key: LiveMetadataKey, facts: CachedFacts) {
-        self.write_entries().insert(key, facts);
+    /// Publish one identity's facts, and return what the cache holds for that
+    /// identity afterwards. `facts = None` records absence.
+    ///
+    /// **The return value is the resident entry, never necessarily the caller's
+    /// own allocation, and that is the whole point.** Two threads racing a cold
+    /// miss both walk the catalog (the singleflight is per thread, by design)
+    /// and both arrive here with structurally equal facts in two different
+    /// `Arc`s. Publishing each and returning your own hands the two callers two
+    /// allocations for one immutable fact and leaves the map holding whichever
+    /// wrote last - so the `Arc` a caller holds and the `Arc` the next reader
+    /// gets are unrelated objects. Insert-if-vacant and return the resident
+    /// value, both under ONE write lock, makes the first publisher's object the
+    /// only one anybody ends up with.
+    ///
+    /// First-publisher-wins is not a policy invented here; it follows from the
+    /// identity. Every component of [`LiveMetadataKey`] is immutable for the
+    /// life of the entry, so two publishers of one key are publishing the same
+    /// facts and only the allocation differs.
+    pub(crate) fn publish(&self, key: LiveMetadataKey, facts: CachedFacts) -> CachedFacts {
+        self.write_entries().entry(key).or_insert(facts).clone()
     }
 
     /// Number of cached identities. Test observability only.
@@ -193,9 +210,11 @@ mod tests {
         // handed the same object by the test rather than finding it themselves.
         {
             let key = key.clone();
-            std::thread::spawn(move || process_wide().insert(key, written))
-                .join()
-                .expect("writer thread");
+            std::thread::spawn(move || {
+                process_wide().publish(key, written);
+            })
+            .join()
+            .expect("writer thread");
         }
 
         let read_back = std::thread::spawn(move || process_wide().get(&key))
@@ -246,7 +265,7 @@ mod tests {
         let second = DbResourceKey::for_url("postgres://second-host/db");
         assert_ne!(first, second, "the fixture needs two distinct resources");
 
-        cache.insert(
+        cache.publish(
             LiveMetadataKey::new(first, &binding, "notes"),
             facts("first"),
         );
@@ -373,7 +392,7 @@ mod tests {
         let binding = DbBinding::new("app_poison", "deploy_a");
         let key = LiveMetadataKey::new(resource, &binding, "notes");
 
-        cache.insert(key.clone(), facts("after the panic"));
+        cache.publish(key.clone(), facts("after the panic"));
         assert!(cache.contains(&key), "contains must survive the poison");
         assert!(
             matches!(cache.get(&key), Some(Some(_))),
@@ -394,7 +413,7 @@ mod tests {
         let key = LiveMetadataKey::new(resource, &binding, "ghosts");
 
         assert!(cache.get(&key).is_none(), "nothing cached yet");
-        cache.insert(key.clone(), None);
+        cache.publish(key.clone(), None);
         assert!(cache.contains(&key), "absence must be recorded");
         assert!(
             matches!(cache.get(&key), Some(None)),
