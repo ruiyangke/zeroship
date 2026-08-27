@@ -73,6 +73,55 @@ async fn assert_still_usable(client: &Client, after: &str) {
     assert_eq!(one, 1);
 }
 
+/// An error after CopyInResponse can make PostgreSQL answer both the opening
+/// extended-query Sync and the terminal CopyDone + Sync. Both replies belong
+/// to this COPY exchange; the second ReadyForQuery must not consume the next
+/// request's response slot on the ordinary multiplexed connection path.
+#[compio::test]
+async fn a_post_copy_in_response_error_does_not_leave_a_second_ready_for_query() {
+    let client = connected().await;
+    let table = test_object_name("copy post response error");
+    let function = test_object_name("copy post response error function");
+    let trigger = test_object_name("copy post response error trigger");
+
+    client
+        .batch_execute(&format!(
+            "CREATE TEMPORARY TABLE {table} (n int);
+             CREATE FUNCTION pg_temp.{function}() RETURNS trigger
+             LANGUAGE plpgsql AS $$
+             BEGIN
+                 PERFORM pg_sleep(1);
+                 RAISE EXCEPTION USING
+                     ERRCODE = 'P0001',
+                     MESSAGE = 'post-G failure';
+             END
+             $$;
+             CREATE TRIGGER {trigger}
+             BEFORE INSERT ON {table}
+             FOR EACH STATEMENT EXECUTE FUNCTION pg_temp.{function}();"
+        ))
+        .await
+        .expect("create delayed COPY IN failure fixture");
+
+    let sink = client
+        .copy_in::<_, Bytes>(&format!("COPY {table} FROM STDIN"))
+        .await
+        .expect("PostgreSQL must enter COPY IN before the trigger fails");
+    futures_util::pin_mut!(sink);
+    let error = compio::time::timeout(Duration::from_secs(5), sink.finish())
+        .await
+        .expect("COPY IN failure did not finish")
+        .expect_err("the delayed trigger unexpectedly accepted COPY IN");
+    assert_eq!(
+        error.code().map(|code| code.code()),
+        Some("P0001"),
+        "COPY IN lost the post-G server error: {}",
+        common::error_chain(&error)
+    );
+
+    assert_still_usable(&client, "a post-G COPY error").await;
+}
+
 async fn terminated_copy() -> (Client, Client, i32, Pin<Box<CopyInSink<Bytes>>>) {
     let victim = connected().await;
     let killer = connected().await;

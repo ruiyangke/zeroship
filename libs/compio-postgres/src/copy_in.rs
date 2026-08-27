@@ -116,6 +116,13 @@ impl CopyInReceiver {
     pub(crate) fn is_done(&self) -> bool {
         self.done
     }
+
+    /// Whether this producer's terminal COPY frame includes an extended-query
+    /// Sync. PostgreSQL can answer both the opening Sync and this terminal Sync
+    /// after an error that occurs immediately after CopyInResponse.
+    pub(crate) fn terminal_includes_sync(&self) -> bool {
+        self.sync_after_terminal
+    }
 }
 
 impl Stream for CopyInReceiver {
