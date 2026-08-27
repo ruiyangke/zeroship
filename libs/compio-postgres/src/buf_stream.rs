@@ -334,6 +334,18 @@ where
     }
 }
 
+async fn flush_retry_interrupted<W>(writer: &mut W) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    loop {
+        match writer.flush().await {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            result => return result,
+        }
+    }
+}
+
 /// Buffered read/write stream over any compio `AsyncRead + AsyncWrite`.
 ///
 /// The stream is generic so the same wrapper works for plain sockets
@@ -491,7 +503,9 @@ where
         }
         let data = self.write_buf.split();
         self.write_all_raw(data).await?;
-        self.inner.flush().await.map_err(Error::io)?;
+        flush_retry_interrupted(&mut self.inner)
+            .await
+            .map_err(Error::io)?;
         Ok(())
     }
 
@@ -686,7 +700,9 @@ where
         let data = self.write_buf.split();
         let BufResult(result, _) = self.inner.write_all(data).await;
         result.map_err(Error::io)?;
-        self.inner.flush().await.map_err(Error::io)?;
+        flush_retry_interrupted(&mut self.inner)
+            .await
+            .map_err(Error::io)?;
         Ok(())
     }
 
@@ -821,6 +837,10 @@ mod tests {
         observed: Rc<Cell<Option<Instant>>>,
     }
 
+    struct InterruptOnceWriter {
+        flushes: usize,
+    }
+
     impl AsyncRead for InterruptOnceReader {
         async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
             self.reads += 1;
@@ -854,6 +874,35 @@ mod tests {
                 self.observed.set(self.deadline.current());
                 BufResult(Ok(1), buf)
             }
+        }
+    }
+
+    impl AsyncRead for InterruptOnceWriter {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            BufResult(Ok(0), buf)
+        }
+    }
+
+    impl AsyncWrite for InterruptOnceWriter {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            let len = buf.buf_len();
+            BufResult(Ok(len), buf)
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            self.flushes += 1;
+            if self.flushes == 1 {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "scripted interrupted flush",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
         }
     }
 
@@ -947,6 +996,27 @@ mod tests {
             Some(sentinel),
             "retrying an interrupted read restarted its deadline"
         );
+    }
+
+    #[compio::test]
+    async fn one_interrupted_flush_is_retried_on_serialized_and_split_paths() {
+        let mut stream = BufStream::new(InterruptOnceWriter { flushes: 0 });
+        stream.write(b"serialized request");
+        assert!(
+            stream.flush().await.is_ok(),
+            "one interrupted flush was treated as terminal"
+        );
+        assert_eq!(stream.inner.flushes, 2, "serialized flush was not retried");
+
+        let mut write_half = BufWriteHalf {
+            inner: InterruptOnceWriter { flushes: 0 },
+            write_buf: BytesMut::from(&b"split request"[..]),
+        };
+        assert!(
+            write_half.flush().await.is_ok(),
+            "one interrupted flush was treated as terminal"
+        );
+        assert_eq!(write_half.inner.flushes, 2, "split flush was not retried");
     }
 
     #[test]
