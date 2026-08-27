@@ -539,7 +539,7 @@ impl TransactionStatus {
 mod transaction_status_tests {
     use super::{Client, TransactionStatus};
     use crate::codec::FrontendMessage;
-    use crate::config::{ProtocolVersion, SslMode, SslNegotiation};
+    use crate::config::{SslMode, SslNegotiation};
     use crate::connection::RequestMessages;
     use bytes::BytesMut;
     use futures_channel::mpsc;
