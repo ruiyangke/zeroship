@@ -132,6 +132,22 @@ The SUMMED in-test time barely moved, 270.6s before and 268.8s after - folding
 the files saves linking and disk, NOT execution, because the same tests do the
 same I/O either way. Do not expect this run to get faster.
 
+EVERY FIGURE ABOVE IS A DEFAULT-FEATURES RUN, and this crate declares
+`default = []`. Such a run compiles no `tls`-gated test at all, so it says
+nothing about the TLS surface on either version. Measured 2026-08-26 with both
+live fixture sets generated (`tls_live_setup.sh` and `unix_socket_setup.sh`):
+
+```bash
+PG_TEST_URL=postgres://postgres:zeroship@127.0.0.1:5459/zeroship \
+  cargo test -p compio-postgres --all-features -- --test-threads=1
+```
+
+**1062 passed, 0 failed, exit 0 on 18.4** - identical to 16.14 the same day,
+including the 48 `tls_live` and 17 `unix_socket_live` tests. Note the TLS suite
+talks to its OWN servers on 5447-5452 regardless of `PG_TEST_URL`, so this run
+crosses versions for everything else while still exercising TLS; the fixture
+set includes a PostgreSQL 18 `directtls` server for the direct-SSL case.
+
 Count BINARIES as well as tests. Both numbers come from the same log and only
 the pair is evidence: every test passing across HALF the binaries would print a
 clean `0 failed` for the half it reached.
