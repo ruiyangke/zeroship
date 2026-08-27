@@ -329,23 +329,21 @@ pub(crate) async fn resolve_target_row_ids(
     route: &TxRoute,
     collection: &str,
     filter: &Value,
-    limit: Option<i64>,
+    limit: i64,
 ) -> Result<Vec<TargetRowId>, DbError> {
     let app_id = route.app_id();
     note_target_row_resolution_for_tests();
     let mut sql_filter = filter.clone();
     super::maybe_lower_sqlite_boolean_filter(app_id, collection, &mut sql_filter);
-    let select = serde_json::json!(["id"]);
-    let built = query::build_find(
+    let built = query::build_write_target_probe(
         app_id,
         collection,
         &sql_filter,
         limit,
-        None,
-        None,
-        Some(&select),
+        super::current_sql_dialect(),
     )
     .map_err(DbError::from)?;
+    note_target_row_resolution_sql_for_tests(&built.sql);
     let rows = exec_query(route, built).await?;
     Ok(rows
         .into_iter()
@@ -527,10 +525,11 @@ async fn rewrite_upsert_doc_id_to_existing_row_id(
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WritePathCounters {
     pub target_row_resolution_calls: usize,
     pub upsert_conflict_probe_calls: usize,
+    pub target_row_resolution_sql: Vec<String>,
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -550,7 +549,7 @@ pub fn reset_write_path_counters_for_tests() {
 #[cfg(any(test, feature = "test-helpers"))]
 #[cfg_attr(test, allow(dead_code))]
 pub fn write_path_counters_for_tests() -> WritePathCounters {
-    WRITE_PATH_COUNTERS.with(|counters| *counters.borrow())
+    WRITE_PATH_COUNTERS.with(|counters| counters.borrow().clone())
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -562,6 +561,19 @@ fn note_target_row_resolution_for_tests() {
 
 #[cfg(not(any(test, feature = "test-helpers")))]
 fn note_target_row_resolution_for_tests() {}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn note_target_row_resolution_sql_for_tests(sql: &str) {
+    WRITE_PATH_COUNTERS.with(|counters| {
+        counters
+            .borrow_mut()
+            .target_row_resolution_sql
+            .push(sql.to_string());
+    });
+}
+
+#[cfg(not(any(test, feature = "test-helpers")))]
+fn note_target_row_resolution_sql_for_tests(_sql: &str) {}
 
 #[cfg(any(test, feature = "test-helpers"))]
 fn note_upsert_conflict_probe_for_tests() {
