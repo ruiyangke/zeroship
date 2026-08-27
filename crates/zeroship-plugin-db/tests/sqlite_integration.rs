@@ -30,7 +30,7 @@ mod support;
 mod parity;
 
 use zeroship_plugin_db::backend::sqlite::SqliteBackend;
-use zeroship_plugin_db::backend::sqlite::reservation::TerminalOutcome;
+use zeroship_plugin_db::backend::sqlite::reservation::{CancelCleanup, TerminalOutcome};
 use zeroship_plugin_db::backend::sqlite::session::TerminalIntent;
 use zeroship_plugin_db::backend::{
     BackendHandle, ChangeStream, IndexBuilder, LockManager, LockScope,
@@ -10078,6 +10078,114 @@ fn a_cancellation_after_commit_does_not_roll_the_commit_back() {
              after the commit; got {rows:?}"
         );
         assert_eq!(rows[0][0].as_deref(), Some("durable"));
+    });
+}
+
+/// **The data-destroying shape, with no duplicate cancel anywhere.**
+///
+/// A lease dropped without settling retires through `Release`/`unbind_tx`, and
+/// that path does not claim the reservation's terminal - it stays `PENDING`. A
+/// cancel handle taken from that lease therefore still wins its claim later,
+/// arbitrarily far in the future. By then `tx_conn` can belong to an entirely
+/// different transaction, and `run_cancel` used to issue its `ROLLBACK`
+/// unconditionally: it destroyed the *current* owner's writes.
+///
+/// The second half of the damage is the part a creator sees. The stale cancel
+/// leaves the current owner's `tx_bound` untouched, so its `COMMIT` still runs
+/// - onto a connection SQLite has already returned to autocommit. That commit
+/// errors, `classify_commit` correctly refuses to guess, and the creator is
+/// told `commit_indeterminate`: "nobody knows whether your write landed", for a
+/// write that was silently rolled back.
+///
+/// Nothing here cancels twice, so `claim_cancelled`'s idempotency does not
+/// close it. Ownership is what closes it.
+#[test]
+fn a_cancel_for_a_retired_reservation_does_not_roll_back_the_next_transaction() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .pool_exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", &[])
+            .await
+            .expect("create table");
+
+        // R1 takes the lane, writes, and is dropped WITHOUT settling. Its
+        // cancel handle outlives it - which is the whole point: a guard held
+        // by a dropped future is exactly how SC-1 step 9 will arm this.
+        let stale_cancel = {
+            let first = backend
+                .acquire_dedicated_client()
+                .await
+                .expect("acquire the first transaction");
+            let cancel = first.cancel_handle().expect("cancel handle for R1");
+            backend
+                .client_exec(&first, "BEGIN", &[])
+                .await
+                .expect("BEGIN on R1");
+            backend
+                .client_exec(&first, "INSERT INTO t (v) VALUES ('r1')", &[])
+                .await
+                .expect("write inside R1");
+            cancel
+        };
+
+        // R2 takes the lane R1 gave up, and opens its own transaction.
+        let second = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire the second transaction");
+        backend
+            .client_exec(&second, "BEGIN", &[])
+            .await
+            .expect("BEGIN on R2");
+        backend
+            .client_exec(&second, "INSERT INTO t (v) VALUES ('r2')", &[])
+            .await
+            .expect("write inside R2");
+
+        // The stale cancellation lands while R2's transaction is open.
+        let stale_outcome = stale_cancel
+            .cancel()
+            .await
+            .expect("the actor must answer a stale cancellation, not hang");
+        assert_eq!(
+            stale_outcome,
+            TerminalOutcome::Cancelled {
+                cleanup: CancelCleanup::AlreadyRetired,
+                cause: None
+            },
+            "a cancellation for a reservation that no longer owns tx_conn must report \
+             that it cleaned up nothing. `RolledBack` here is the failure: the only \
+             transaction there to roll back belongs to somebody else. got \
+             {stale_outcome:?}"
+        );
+
+        // R2 must be untouched: its COMMIT is a real commit, not an
+        // indeterminate one, and its row is on disk.
+        let committed = backend
+            .settle_transaction_for_tests(&second, TerminalIntent::Commit)
+            .await
+            .expect("settle R2");
+        assert_eq!(
+            committed,
+            TerminalOutcome::Committed,
+            "R2's commit must be a confirmed commit. A stale cancellation that rolled \
+             its transaction back leaves SQLite in autocommit, so COMMIT errors and \
+             this reports CommitIndeterminate - the creator is told the fate is \
+             unknown for a write that was destroyed."
+        );
+
+        let rows = backend
+            .autocommit_client()
+            .query("SELECT v FROM t ORDER BY id", &[])
+            .await
+            .expect("read after the stale cancellation");
+        assert_eq!(
+            rows.len(),
+            1,
+            "exactly R2's row should survive: R1's died with its unsettled lease, \
+             R2's must survive the stale cancel; got {rows:?}"
+        );
+        assert_eq!(rows[0][0].as_deref(), Some("r2"));
     });
 }
 
