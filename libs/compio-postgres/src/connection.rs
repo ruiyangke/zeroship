@@ -222,6 +222,17 @@ struct ReadObligationInner {
     /// Whether this request owns a `CopyInReceiver`, i.e. whether the driver
     /// has a producer that will eventually answer a `CopyInResponse`.
     copy_producer: bool,
+    /// The connection selected and is writing the terminal COPY frame. This
+    /// survives `Complete` so response dispatch can account for a second
+    /// ReadyForQuery earned by its extended-protocol Sync.
+    copy_terminal_queued: Cell<bool>,
+    /// Simple-query CopyFail has no Sync and therefore cannot earn another
+    /// ReadyForQuery after an error.
+    copy_terminal_has_sync: Cell<bool>,
+    /// The response consumer takes its saved DbError as soon as it yields the
+    /// ErrorResponse, so recovery accounting keeps an independent bit through
+    /// ReadyForQuery.
+    server_error_seen: Cell<bool>,
     state: Cell<ReadObligationState>,
 }
 
@@ -234,6 +245,9 @@ impl ReadObligation {
             Rc::new(ReadObligationInner {
                 deadline: deadline.cloned(),
                 copy_producer: track_copy_state,
+                copy_terminal_queued: Cell::new(false),
+                copy_terminal_has_sync: Cell::new(false),
+                server_error_seen: Cell::new(false),
                 state: Cell::new(ReadObligationState::PendingInitialFlush),
             })
         });
@@ -324,6 +338,7 @@ impl ReadObligation {
             return false;
         };
         if inner.state.get() == ReadObligationState::PausedForCopyInput {
+            inner.copy_terminal_queued.set(true);
             inner
                 .state
                 .set(ReadObligationState::PendingCopyTerminalFlush);
@@ -331,6 +346,26 @@ impl ReadObligation {
         } else {
             false
         }
+    }
+
+    fn set_copy_terminal_has_sync(&self, has_sync: bool) {
+        if let Some(inner) = &self.inner {
+            inner.copy_terminal_has_sync.set(has_sync);
+        }
+    }
+
+    fn observe_server_error(&self) {
+        if let Some(inner) = &self.inner {
+            inner.server_error_seen.set(true);
+        }
+    }
+
+    fn copy_error_may_owe_extra_ready(&self) -> bool {
+        self.inner.as_ref().is_some_and(|inner| {
+            inner.copy_terminal_queued.get()
+                && inner.copy_terminal_has_sync.get()
+                && inner.server_error_seen.get()
+        })
     }
 
     fn activate_copy_terminal(&self) {
@@ -492,6 +527,11 @@ pub struct Connection<S, T> {
     tx_status: Arc<AtomicU8>,
     in_flight_requests: Arc<AtomicUsize>,
     terminal_server_error: Arc<Mutex<Option<DbError>>>,
+    /// An errored extended COPY IN can earn one ReadyForQuery from its opening
+    /// Sync and a second from the terminal CopyDone/CopyFail + Sync. The first
+    /// completes the response; this flag reserves the second for that same
+    /// exchange instead of letting it consume a later response slot.
+    copy_error_may_owe_extra_ready: Cell<bool>,
     /// Weak so a task stranded by compio cannot retain the client's dup after
     /// client-first teardown has synchronously released the server session.
     drop_release: Option<crate::release::ConnectionDropRelease>,
@@ -532,6 +572,7 @@ where
             tx_status,
             in_flight_requests,
             terminal_server_error,
+            copy_error_may_owe_extra_ready: Cell::new(false),
             drop_release,
             _live: crate::live::LiveConnectionGuard::new(),
         }
@@ -744,6 +785,7 @@ where
             tx_status: &self.tx_status,
             in_flight_requests: &self.in_flight_requests,
             terminal_server_error: &self.terminal_server_error,
+            copy_error_may_owe_extra_ready: &self.copy_error_may_owe_extra_ready,
         }
         .handle_message(message)
     }
@@ -889,7 +931,12 @@ where
         } = request;
         let copy_observation = observation.clone();
         let is_copy = matches!(&messages, RequestMessages::CopyIn(_));
+        let copy_terminal_has_sync = match &messages {
+            RequestMessages::CopyIn(receiver) => receiver.terminal_includes_sync(),
+            RequestMessages::Single(_) => false,
+        };
         let read_obligation = ReadObligation::new(self.stream.read_deadline().as_ref(), is_copy);
+        read_obligation.set_copy_terminal_has_sync(copy_terminal_has_sync);
         self.responses.push_back(Response {
             sender,
             disposition,
@@ -1016,6 +1063,7 @@ struct Dispatch<'a> {
     tx_status: &'a AtomicU8,
     in_flight_requests: &'a AtomicUsize,
     terminal_server_error: &'a Mutex<Option<DbError>>,
+    copy_error_may_owe_extra_ready: &'a Cell<bool>,
 }
 
 fn first_server_error(messages: &BackendMessages) -> Result<Option<DbError>, Error> {
@@ -1268,6 +1316,21 @@ impl Dispatch<'_> {
         ready_status: Option<u8>,
     ) -> Result<(), Error> {
         let request_complete = ready_status.is_some();
+
+        // An error after CopyInResponse can make the opening extended-query
+        // Sync produce ErrorResponse + ReadyForQuery, after which the already
+        // queued terminal CopyDone/CopyFail + Sync produces one more bare
+        // ReadyForQuery. The first completed the COPY response. Consume the
+        // second without touching the next response slot. Any other normal
+        // frame proves that no duplicate arrived before later work began.
+        if self.copy_error_may_owe_extra_ready.replace(false)
+            && request_complete
+            && messages.first_tag()
+                == Some(postgres_protocol::message::backend::READY_FOR_QUERY_TAG)
+        {
+            return Ok(());
+        }
+
         let entered_copy_input = !request_complete
             && messages.contains_tag(postgres_protocol::message::backend::COPY_IN_RESPONSE_TAG);
         let entered_copy_output = !request_complete
@@ -1300,6 +1363,12 @@ impl Dispatch<'_> {
         };
         if let Some(error) = server_error.as_ref() {
             remember_server_error(&response.request_server_error, error);
+            response.read_obligation.observe_server_error();
+        }
+        if request_complete && response.read_obligation.copy_error_may_owe_extra_ready() {
+            // Arm before the response sender is woken below: its caller can
+            // enqueue another request before the reader sees the extra reply.
+            self.copy_error_may_owe_extra_ready.set(true);
         }
         let completed_at = (request_complete
             && response
@@ -1939,6 +2008,7 @@ async fn flush_with_read_draining<W>(
     tx_status: &AtomicU8,
     in_flight_requests: &AtomicUsize,
     terminal_server_error: &Mutex<Option<DbError>>,
+    copy_error_may_owe_extra_ready: &Cell<bool>,
     include_tail_after_flush: bool,
 ) -> (Result<(), Error>, Option<Option<Error>>)
 where
@@ -2209,6 +2279,7 @@ where
                             tx_status,
                             in_flight_requests,
                             terminal_server_error,
+                            copy_error_may_owe_extra_ready,
                         })
                         .handle_message(message);
                         // Dispatch has now completed or paused the matching
@@ -2346,6 +2417,7 @@ where
             tx_status,
             in_flight_requests,
             terminal_server_error,
+            copy_error_may_owe_extra_ready,
             drop_release: _,
             _live,
         } = self;
@@ -2366,6 +2438,7 @@ where
                     tx_status,
                     in_flight_requests,
                     terminal_server_error,
+                    copy_error_may_owe_extra_ready,
                     read_deadline,
                     read_error_release,
                     _live.clone(),
@@ -2384,6 +2457,7 @@ where
                     tx_status,
                     in_flight_requests,
                     terminal_server_error,
+                    copy_error_may_owe_extra_ready,
                     drop_release: None,
                     _live,
                 };
@@ -2472,6 +2546,7 @@ where
         tx_status: Arc<AtomicU8>,
         in_flight_requests: Arc<AtomicUsize>,
         terminal_server_error: Arc<Mutex<Option<DbError>>>,
+        copy_error_may_owe_extra_ready: Cell<bool>,
         read_deadline: Option<ReadDeadline>,
         read_error_release: Option<crate::release::ConnectionDropRelease>,
         _read_live: crate::live::LiveConnectionGuard,
@@ -2739,6 +2814,7 @@ where
                             tx_status: &tx_status,
                             in_flight_requests: &in_flight_requests,
                             terminal_server_error: &terminal_server_error,
+                            copy_error_may_owe_extra_ready: &copy_error_may_owe_extra_ready,
                         }
                         .handle_message(message);
                         // The reader cannot submit its next socket read until all
@@ -2853,8 +2929,13 @@ where
                         } = request;
                         let request_observation = observation.clone();
                         let is_copy = matches!(&messages, RequestMessages::CopyIn(_));
+                        let copy_terminal_has_sync = match &messages {
+                            RequestMessages::CopyIn(receiver) => receiver.terminal_includes_sync(),
+                            RequestMessages::Single(_) => false,
+                        };
                         let read_obligation =
                             ReadObligation::new(read_deadline.as_ref(), is_copy);
+                        read_obligation.set_copy_terminal_has_sync(copy_terminal_has_sync);
                         responses.push_back(Response {
                             sender,
                             disposition,
@@ -2884,6 +2965,7 @@ where
                                         &tx_status,
                                         &in_flight_requests,
                                         &terminal_server_error,
+                                        &copy_error_may_owe_extra_ready,
                                         true,
                                     )
                                     .await
@@ -2973,6 +3055,7 @@ where
                             &tx_status,
                             &in_flight_requests,
                             &terminal_server_error,
+                            &copy_error_may_owe_extra_ready,
                             !copy_initial_flushed || resume_terminal,
                         )
                         .await;
@@ -4121,12 +4204,121 @@ mod tests {
             tx_status: &tx_status,
             in_flight_requests: &in_flight_requests,
             terminal_server_error: &terminal_server_error,
+            copy_error_may_owe_extra_ready: &Cell::new(false),
         }
         .deliver_batch(BackendMessages::empty(), Some(b'I'))
         .expect("deliver transaction-neutral ReadyForQuery");
 
         assert_eq!(tx_status.load(Ordering::Relaxed), b'T');
         assert_eq!(in_flight_requests.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn copy_recovery_ready_does_not_complete_the_next_response() {
+        let copy_obligation = ReadObligation::new(None, true);
+        copy_obligation.set_copy_terminal_has_sync(true);
+        copy_obligation.activate_initial();
+        copy_obligation.pause_for_copy_input();
+        assert!(
+            copy_obligation.prepare_copy_terminal(),
+            "the fixture did not queue its terminal COPY frame"
+        );
+        copy_obligation.activate_copy_terminal();
+
+        let (copy_sender, _copy_receiver) = mpsc::channel(1);
+        let (next_sender, _next_receiver) = mpsc::channel(1);
+        let mut responses = VecDeque::from([
+            Response {
+                sender: copy_sender,
+                disposition: RequestDisposition::Awaited,
+                transaction_effect: TransactionEffect::MayChange,
+                prepare_cleanup: None,
+                statement: None,
+                observation: None,
+                bind_complete_seen: false,
+                read_obligation: copy_obligation,
+                request_server_error: Arc::default(),
+            },
+            Response {
+                sender: next_sender,
+                disposition: RequestDisposition::Awaited,
+                transaction_effect: TransactionEffect::MayChange,
+                prepare_cleanup: None,
+                statement: None,
+                observation: None,
+                bind_complete_seen: false,
+                read_obligation: ReadObligation::new(None, false),
+                request_server_error: Arc::default(),
+            },
+        ]);
+        let mut pending_responses = VecDeque::new();
+        let parameters = Mutex::new(HashMap::new());
+        let tx_status = AtomicU8::new(b'I');
+        let in_flight_requests = AtomicUsize::new(2);
+        let terminal_server_error = Mutex::new(None);
+        let extra_ready = Cell::new(false);
+
+        Dispatch {
+            parameters: &parameters,
+            responses: &mut responses,
+            pending_responses: &mut pending_responses,
+            async_sender: None,
+            tx_status: &tx_status,
+            in_flight_requests: &in_flight_requests,
+            terminal_server_error: &terminal_server_error,
+            copy_error_may_owe_extra_ready: &extra_ready,
+        }
+        .deliver_batch(error_response_batch("P0001", "post-G failure"), Some(b'I'))
+        .expect("complete the errored COPY response");
+        assert!(
+            extra_ready.get(),
+            "the errored COPY did not reserve its second reply"
+        );
+        assert_eq!(responses.len(), 1);
+        assert_eq!(in_flight_requests.load(Ordering::Relaxed), 1);
+
+        Dispatch {
+            parameters: &parameters,
+            responses: &mut responses,
+            pending_responses: &mut pending_responses,
+            async_sender: None,
+            tx_status: &tx_status,
+            in_flight_requests: &in_flight_requests,
+            terminal_server_error: &terminal_server_error,
+            copy_error_may_owe_extra_ready: &extra_ready,
+        }
+        .deliver_batch(
+            BackendMessages::from_test_bytes(BytesMut::from(&b"Z\0\0\0\x05I"[..])),
+            Some(b'I'),
+        )
+        .expect("consume the COPY recovery ReadyForQuery");
+        assert!(!extra_ready.get());
+        assert_eq!(
+            responses.len(),
+            1,
+            "the extra reply consumed the next response"
+        );
+        assert_eq!(in_flight_requests.load(Ordering::Relaxed), 1);
+
+        Dispatch {
+            parameters: &parameters,
+            responses: &mut responses,
+            pending_responses: &mut pending_responses,
+            async_sender: None,
+            tx_status: &tx_status,
+            in_flight_requests: &in_flight_requests,
+            terminal_server_error: &terminal_server_error,
+            copy_error_may_owe_extra_ready: &extra_ready,
+        }
+        .deliver_batch(
+            BackendMessages::from_test_bytes(BytesMut::from(
+                completed_response_batch(b'I').as_slice(),
+            )),
+            Some(b'I'),
+        )
+        .expect("complete the next response");
+        assert!(responses.is_empty());
+        assert_eq!(in_flight_requests.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -4148,6 +4340,7 @@ mod tests {
             tx_status: &tx_status,
             in_flight_requests: &in_flight_requests,
             terminal_server_error: &terminal_server_error,
+            copy_error_may_owe_extra_ready: &Cell::new(false),
         }
         .handle_message(BackendMessage::Normal {
             messages: BackendMessages::from_test_bytes(BytesMut::from(bytes.as_slice())),
@@ -4204,6 +4397,7 @@ mod tests {
             tx_status: &tx_status,
             in_flight_requests: &in_flight_requests,
             terminal_server_error: &terminal_server_error,
+            copy_error_may_owe_extra_ready: &Cell::new(false),
         }
         .deliver_batch(
             BackendMessages::from_test_bytes(BytesMut::from(bytes.as_slice())),
@@ -4373,6 +4567,7 @@ mod tests {
             &tx_status,
             &in_flight_requests,
             &terminal_server_error,
+            &Cell::new(false),
             true,
         )
         .await;
@@ -4569,6 +4764,7 @@ mod tests {
             tx_status: &tx_status,
             in_flight_requests: &in_flight_requests,
             terminal_server_error: &terminal_server_error,
+            copy_error_may_owe_extra_ready: &Cell::new(false),
         }
         .deliver_batch(
             error_response_batch("23505", "scripted unique violation"),
@@ -4655,6 +4851,7 @@ mod tests {
                 Arc::clone(&tx_status),
                 Arc::new(AtomicUsize::new(1)),
                 Arc::default(),
+                Cell::new(false),
                 None,
                 None,
                 crate::live::LiveConnectionGuard::new(),
@@ -4838,6 +5035,7 @@ mod tests {
             &tx_status,
             &in_flight_requests,
             &terminal_server_error,
+            &Cell::new(false),
             true,
         )
         .await;
@@ -4986,6 +5184,7 @@ mod tests {
             &tx_status,
             &in_flight_requests,
             &terminal_server_error,
+            &Cell::new(false),
             true,
         )
         .await;
@@ -5138,6 +5337,7 @@ mod tests {
                     Arc::new(AtomicU8::new(b'I')),
                     Arc::new(AtomicUsize::new(1)),
                     Arc::default(),
+                    Cell::new(false),
                     None,
                     None,
                     crate::live::LiveConnectionGuard::new(),
@@ -5205,6 +5405,7 @@ mod tests {
                 Arc::new(AtomicU8::new(b'I')),
                 Arc::new(AtomicUsize::new(1)),
                 Arc::default(),
+                Cell::new(false),
                 None,
                 None,
                 crate::live::LiveConnectionGuard::new(),
@@ -5312,6 +5513,7 @@ mod tests {
                 Arc::clone(&tx_status),
                 Arc::new(AtomicUsize::new(1)),
                 Arc::default(),
+                Cell::new(false),
                 read_deadline,
                 None,
                 crate::live::LiveConnectionGuard::new(),
@@ -5428,6 +5630,7 @@ mod tests {
                 Arc::clone(&tx_status),
                 Arc::new(AtomicUsize::new(1)),
                 Arc::default(),
+                Cell::new(false),
                 None,
                 None,
                 crate::live::LiveConnectionGuard::new(),
