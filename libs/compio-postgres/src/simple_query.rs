@@ -274,7 +274,7 @@ fn may_enter_copy_in_with_string_mode(query: &str, ordinary_backslash_escapes: b
 
     while index < bytes.len() {
         match bytes[index] {
-            byte if byte.is_ascii_whitespace() => index += 1,
+            byte if byte.is_ascii_whitespace() || byte == b'\x0b' => index += 1,
             b'-' if bytes.get(index + 1) == Some(&b'-') => {
                 index += 2;
                 while index < bytes.len() && !matches!(bytes[index], b'\n' | b'\r') {
@@ -522,6 +522,10 @@ mod tests {
         ] {
             assert!(may_enter_copy_in(query), "missed COPY-IN query: {query}");
         }
+        assert!(
+            may_enter_copy_in("COPY t FROM\x0bSTDIN"),
+            "missed COPY-IN query with PostgreSQL vertical-tab whitespace"
+        );
     }
 
     #[test]
