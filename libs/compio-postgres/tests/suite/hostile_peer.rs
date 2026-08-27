@@ -1611,6 +1611,14 @@ fn binary_copy_out_frames(data: Vec<Vec<u8>>) -> Vec<u8> {
 }
 
 fn binary_copy_out_frames_with_trailer(data: Vec<Vec<u8>>, trailer: &[u8]) -> Vec<u8> {
+    binary_copy_out_frames_with_suffix(data, trailer, &[])
+}
+
+fn binary_copy_out_frames_with_suffix(
+    data: Vec<Vec<u8>>,
+    trailer: &[u8],
+    suffix: &[u8],
+) -> Vec<u8> {
     let mut response = backend_frame(b'2', b"");
     // CopyOutResponse: overall format 1 (binary), one column, that column
     // binary too.
@@ -1619,6 +1627,7 @@ fn binary_copy_out_frames_with_trailer(data: Vec<Vec<u8>>, trailer: &[u8]) -> Ve
         response.extend_from_slice(&chunk);
     }
     response.extend_from_slice(&backend_frame(b'd', trailer));
+    response.extend_from_slice(suffix);
     response.extend_from_slice(&backend_frame(b'c', b""));
     response.extend_from_slice(&backend_frame(b'C', b"COPY 2\0"));
     response.extend_from_slice(&backend_frame(b'Z', b"I"));
@@ -1757,4 +1766,34 @@ async fn bytes_after_the_binary_copy_trailer_are_refused() {
     })
     .await
     .expect("binary trailer suffix test exceeded its outer watchdog");
+}
+
+/// The EOF rule spans `CopyData` boundaries. Returning `None` as soon as the
+/// trailer's own frame ends lets a later data frame disappear into the raw
+/// stream's drop-time drain, so exercise the transition separately from the
+/// same-frame suffix above.
+#[compio::test]
+async fn copy_data_after_the_binary_copy_trailer_is_refused() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let suffix = backend_frame(b'd', &[0]);
+        let response = binary_copy_out_frames_with_suffix(
+            vec![binary_copy_chunk(&[&binary_int4_tuple(7)])],
+            &(-1i16).to_be_bytes(),
+            &suffix,
+        );
+        let outcome = binary_copy_out_against(533, response).await;
+        let error = match outcome {
+            Ok(values) => {
+                panic!("the driver returned {values:?} after CopyData followed the binary trailer")
+            }
+            Err(error) => error,
+        };
+        let chain = common::error_chain(&error);
+        assert!(
+            chain.contains("CopyData after the binary COPY trailer"),
+            "cross-frame binary trailer garbage was not refused by name: {chain}"
+        );
+    })
+    .await
+    .expect("cross-frame binary trailer test exceeded its outer watchdog");
 }
