@@ -1944,6 +1944,13 @@ pub mod pgoutput {
             message: &'static str,
             remaining: usize,
         },
+        /// A known field carried a byte outside its documented value set.
+        InvalidField {
+            message: &'static str,
+            field: &'static str,
+            value: u8,
+            expected: &'static str,
+        },
         /// A streaming frame reached the stateless [`decode`], which cannot
         /// track the chunk state the rest of the transaction needs. Use
         /// [`Decoder`].
@@ -1962,6 +1969,15 @@ pub mod pgoutput {
                 DecodeError::TrailingData { message, remaining } => {
                     write!(f, "pgoutput: {message} has {remaining} trailing byte(s)")
                 }
+                DecodeError::InvalidField {
+                    message,
+                    field,
+                    value,
+                    expected,
+                } => write!(
+                    f,
+                    "pgoutput: {message} {field} is 0x{value:02x}; expected {expected}"
+                ),
                 DecodeError::StreamingNeedsDecoder => write!(
                     f,
                     "pgoutput: this frame belongs to a streamed transaction, whose framing is \
@@ -2029,6 +2045,25 @@ pub mod pgoutput {
 
     fn read_i64(buf: &mut &[u8]) -> Result<i64, DecodeError> {
         Ok(read_u64(buf)? as i64)
+    }
+
+    fn read_constrained_u8(
+        buf: &mut &[u8],
+        message: &'static str,
+        field: &'static str,
+        allowed: &[u8],
+        expected: &'static str,
+    ) -> Result<u8, DecodeError> {
+        let value = read_u8(buf)?;
+        if !allowed.contains(&value) {
+            return Err(DecodeError::InvalidField {
+                message,
+                field,
+                value,
+                expected,
+            });
+        }
+        Ok(value)
     }
 
     const fn message_name(tag: u8) -> &'static str {
@@ -2202,7 +2237,7 @@ pub mod pgoutput {
                 }
             }
             b'C' => {
-                let flags = read_u8(&mut cur)?;
+                let flags = read_constrained_u8(&mut cur, "Commit", "flags", &[0], "0")?;
                 let commit_lsn = read_u64(&mut cur)?;
                 let end_lsn = read_u64(&mut cur)?;
                 let commit_timestamp = read_i64(&mut cur)?;
@@ -2221,7 +2256,7 @@ pub mod pgoutput {
                 gid: read_cstr(&mut cur)?,
             },
             b'P' => PgOutputMessage::Prepare {
-                flags: read_u8(&mut cur)?,
+                flags: read_constrained_u8(&mut cur, "Prepare", "flags", &[0], "0")?,
                 prepare_lsn: read_u64(&mut cur)?,
                 end_lsn: read_u64(&mut cur)?,
                 prepare_timestamp: read_i64(&mut cur)?,
@@ -2229,7 +2264,7 @@ pub mod pgoutput {
                 gid: read_cstr(&mut cur)?,
             },
             b'K' => PgOutputMessage::CommitPrepared {
-                flags: read_u8(&mut cur)?,
+                flags: read_constrained_u8(&mut cur, "CommitPrepared", "flags", &[0], "0")?,
                 commit_lsn: read_u64(&mut cur)?,
                 end_lsn: read_u64(&mut cur)?,
                 commit_timestamp: read_i64(&mut cur)?,
@@ -2237,7 +2272,7 @@ pub mod pgoutput {
                 gid: read_cstr(&mut cur)?,
             },
             b'r' => PgOutputMessage::RollbackPrepared {
-                flags: read_u8(&mut cur)?,
+                flags: read_constrained_u8(&mut cur, "RollbackPrepared", "flags", &[0], "0")?,
                 prepare_end_lsn: read_u64(&mut cur)?,
                 rollback_end_lsn: read_u64(&mut cur)?,
                 prepare_timestamp: read_i64(&mut cur)?,
@@ -2403,20 +2438,27 @@ pub mod pgoutput {
                     content,
                 }
             }
-            b'S' => PgOutputMessage::StreamStart {
-                xid: read_u32(&mut cur)?,
-                first_segment: read_u8(&mut cur)? != 0,
-            },
+            b'S' => {
+                let xid = read_u32(&mut cur)?;
+                let first_segment = read_constrained_u8(
+                    &mut cur,
+                    "StreamStart",
+                    "first_segment",
+                    &[0, 1],
+                    "0 or 1",
+                )? == 1;
+                PgOutputMessage::StreamStart { xid, first_segment }
+            }
             b'E' => PgOutputMessage::StreamStop,
             b'c' => PgOutputMessage::StreamCommit {
                 xid: read_u32(&mut cur)?,
-                flags: read_u8(&mut cur)?,
+                flags: read_constrained_u8(&mut cur, "StreamCommit", "flags", &[0], "0")?,
                 commit_lsn: read_u64(&mut cur)?,
                 end_lsn: read_u64(&mut cur)?,
                 commit_timestamp: read_i64(&mut cur)?,
             },
             b'p' => PgOutputMessage::StreamPrepare {
-                flags: read_u8(&mut cur)?,
+                flags: read_constrained_u8(&mut cur, "StreamPrepare", "flags", &[0], "0")?,
                 prepare_lsn: read_u64(&mut cur)?,
                 end_lsn: read_u64(&mut cur)?,
                 prepare_timestamp: read_i64(&mut cur)?,
@@ -3568,6 +3610,77 @@ mod tests {
             ruled_on += 1;
         }
         assert_eq!(ruled_on, 19, "the complete legal tag set must be ruled on");
+    }
+
+    /// PostgreSQL rejects the six currently-zero flags in its own pgoutput
+    /// reader. StreamStart is also constrained to 0 or 1; coercing byte 2 to
+    /// true here disagrees with PostgreSQL's `byte == 1` interpretation. Keep
+    /// the seven sites in one counted matrix so a newly strict subset cannot
+    /// leave an untested raw-byte arm behind.
+    #[test]
+    fn pgoutput_refuses_invalid_fixed_fields_by_message_name() {
+        fn fixed(tag: u8, body_len: usize) -> Vec<u8> {
+            let mut frame = vec![tag];
+            frame.resize(body_len + 1, 0);
+            frame
+        }
+
+        let mut commit = fixed(b'C', 1 + 8 + 8 + 8);
+        commit[1] = 1;
+        let mut prepare = fixed(b'P', 1 + 8 + 8 + 8 + 4);
+        prepare[1] = 1;
+        prepare.extend_from_slice(b"g\0");
+        let mut commit_prepared = fixed(b'K', 1 + 8 + 8 + 8 + 4);
+        commit_prepared[1] = 1;
+        commit_prepared.extend_from_slice(b"g\0");
+        let mut rollback_prepared = fixed(b'r', 1 + 8 + 8 + 8 + 8 + 4);
+        rollback_prepared[1] = 1;
+        rollback_prepared.extend_from_slice(b"g\0");
+        let mut stream_start = fixed(b'S', 4 + 1);
+        stream_start[5] = 2;
+        let mut stream_commit = fixed(b'c', 4 + 1 + 8 + 8 + 8);
+        stream_commit[5] = 1;
+        let mut stream_prepare = fixed(b'p', 1 + 8 + 8 + 8 + 4);
+        stream_prepare[1] = 1;
+        stream_prepare.extend_from_slice(b"g\0");
+
+        let cases = [
+            ("Commit", "flags", 1, commit),
+            ("Prepare", "flags", 1, prepare),
+            ("CommitPrepared", "flags", 1, commit_prepared),
+            ("RollbackPrepared", "flags", 1, rollback_prepared),
+            ("StreamStart", "first_segment", 2, stream_start),
+            ("StreamCommit", "flags", 1, stream_commit),
+            ("StreamPrepare", "flags", 1, stream_prepare),
+        ];
+
+        let mut refused = 0;
+        let mut accepted = Vec::new();
+        for (expected_message, expected_field, expected_value, frame) in cases {
+            match pgoutput::Decoder::new().decode(&frame) {
+                Err(pgoutput::DecodeError::InvalidField {
+                    message,
+                    field,
+                    value,
+                    ..
+                }) => {
+                    assert_eq!(message, expected_message);
+                    assert_eq!(field, expected_field);
+                    assert_eq!(value, expected_value);
+                    refused += 1;
+                }
+                Ok(_) => accepted.push(expected_message),
+                Err(other) => panic!(
+                    "{expected_message} reached the wrong refusal instead of its field: {other}"
+                ),
+            }
+        }
+        assert!(
+            accepted.is_empty(),
+            "{} of 7 invalid fields were accepted: {accepted:?}",
+            accepted.len()
+        );
+        assert_eq!(refused, 7, "every constrained-byte site must be ruled on");
     }
 
     /// A TRUNCATE naming more relations than any fixed cap would allow must
