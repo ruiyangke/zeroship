@@ -9969,14 +9969,21 @@ fn a_command_bearing_a_foreign_reservation_is_refused() {
 /// committed (or rolled back) by then" - because nothing could reach a running
 /// statement.
 ///
-/// **What proves "during" is the error, not the clock.** `statement_cancelled`
-/// on this path can only come from `SQLITE_INTERRUPT`, and
-/// `sqlite3_interrupt` only produces it against a statement that was
-/// mid-execution. Had the query finished first, the actor would have left
-/// `Running`, `request_cancel` would have returned `Set` with no interrupt
-/// issued, and the query would have returned rows. The elapsed-time assertion
-/// is a backstop for the case where nothing interrupts and the test would
-/// otherwise sit for minutes.
+/// **What proves "during" is the cleanup, not the error and not the clock.**
+/// This doc comment used to say the error proved it - that `statement_cancelled`
+/// "can only come from `SQLITE_INTERRUPT`". It cannot: the *pre-start* path
+/// (`enter_running` refusing, `cancelled_before_start`) produces
+/// `Cancelled { NoSqlStarted }`, whose `into_result` carries the identical
+/// `statement_cancelled` code, and `matches!(outcome, Cancelled { .. })` is
+/// satisfied by both. The only thing that separates them is the `cleanup`
+/// field, so this arm asserts on it: `RolledBack` / `AlreadyRolledBack` means
+/// SQL was in flight and something had to be undone, `NoSqlStarted` means the
+/// statement never began - a different code path reaching the same error code,
+/// ruled on by `a_cancel_before_execution_starts_stops_the_actor_from_running`
+/// in `backend::sqlite::reservation`'s unit tests. The elapsed-time assertion
+/// stays a backstop for the case where nothing interrupts and the test would
+/// otherwise sit for minutes; it is not the discriminator, and it cannot be -
+/// a pre-start cancellation returns *faster*, not slower.
 #[test]
 fn a_cancellation_interrupts_a_statement_that_is_already_running() {
     run(async {
@@ -10020,10 +10027,21 @@ fn a_cancellation_interrupts_a_statement_that_is_already_running() {
             ),
             other => panic!("expected the cancellation code, got {other:?}"),
         }
+        let TerminalOutcome::Cancelled { cleanup, .. } = &outcome else {
+            panic!(
+                "the actor must acknowledge a cancellation after rolling back; \
+                 got {outcome:?}"
+            );
+        };
         assert!(
-            matches!(outcome, TerminalOutcome::Cancelled { .. }),
-            "the actor must acknowledge a cancellation after rolling back; \
-             got {outcome:?}"
+            matches!(
+                cleanup,
+                CancelCleanup::RolledBack | CancelCleanup::AlreadyRolledBack
+            ),
+            "this arm claims the statement was interrupted mid-execution, so the \
+             cancellation had something to undo. `NoSqlStarted` here would mean the \
+             pre-start path ran instead - the same error code, a different code \
+             path, and nothing about the interrupt proved. got {cleanup:?}"
         );
     });
 }
