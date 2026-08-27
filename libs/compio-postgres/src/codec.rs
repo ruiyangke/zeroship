@@ -75,6 +75,11 @@ impl BackendMessages {
         BackendMessages(BytesMut::new())
     }
 
+    #[cfg(test)]
+    pub(crate) fn from_test_bytes(bytes: BytesMut) -> BackendMessages {
+        BackendMessages(bytes)
+    }
+
     /// Consume one complete raw frame with `tag` from the head of this batch.
     ///
     /// Startup uses this only for protocol messages postgres-protocol 0.6.12
