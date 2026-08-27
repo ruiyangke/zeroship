@@ -248,8 +248,9 @@ fn mutated_case(rng: &mut Rng) -> Vec<u8> {
             let keep = 1 + rng.below(frame.len() - 1);
             frame.truncate(keep);
         }
-        // Append junk, which the decoder explicitly tolerates - so this must
-        // NOT change the verdict, and a failure here is a real finding.
+        // Append junk. A non-empty suffix is outside the selected protocol
+        // version's field list and must be refused; an empty suffix leaves the
+        // original valid frame intact.
         _ => {
             for _ in 0..rng.below(8) {
                 frame.push(rng.byte());
@@ -519,9 +520,9 @@ struct SequenceReach {
 /// pins that against a live server. This pins it against a corpus.
 ///
 /// WHAT THIS DOES NOT CATCH: it does not assert that a malformed ORDER is
-/// refused. Some orders are indistinguishable from forward-compatible ones,
-/// and the decoder tolerates trailing bytes on purpose, so demanding an error
-/// would be a claim about the protocol rather than about the driver.
+/// refused. Some orders concern transaction application rather than the
+/// layout of one frame, so demanding an error here would be a claim about the
+/// decoder's policy rather than about memory-safe parsing.
 #[test]
 fn a_hostile_pgoutput_sequence_is_refused_rather_than_fatal() {
     let mut rng = Rng::new(0x51ea_d0a1_b2c3_d4e5);
