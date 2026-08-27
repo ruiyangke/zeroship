@@ -48,6 +48,8 @@ mod connect_socket;
 mod connect_tls;
 #[path = "../src/connection.rs"]
 pub(crate) mod connection;
+#[path = "../src/copy_format.rs"]
+mod copy_format;
 #[path = "../src/copy_in.rs"]
 mod copy_in;
 #[path = "../src/copy_out.rs"]
@@ -112,6 +114,7 @@ pub use cancel_token::CancelToken;
 pub use client::{Client, QueryEvent, QueryOutcome, TransactionStatus};
 pub use config::Config;
 pub use connection::Connection;
+pub use copy_format::CopyFormat;
 pub use copy_in::CopyInSink;
 pub use copy_out::CopyOutStream;
 use error::DbError;

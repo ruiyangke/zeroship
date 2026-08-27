@@ -1462,6 +1462,8 @@ async fn a_well_formed_copy_out_is_accepted() {
 
         let collected = compio::time::timeout(OPERATION_WATCHDOG, async {
             let stream = client.copy_out("COPY t TO STDOUT").await?;
+            assert_eq!(stream.format(), compio_postgres::CopyFormat::Text);
+            assert!(stream.column_formats().is_empty());
             let mut stream = Box::pin(stream);
             let mut collected: Vec<u8> = Vec::new();
             while let Some(chunk) = stream.try_next().await? {
@@ -1641,6 +1643,11 @@ async fn binary_copy_out_against(
 
     let collected = compio::time::timeout(OPERATION_WATCHDOG, async {
         let stream = client.copy_out("COPY t TO STDOUT BINARY").await?;
+        assert_eq!(stream.format(), compio_postgres::CopyFormat::Binary);
+        assert_eq!(
+            stream.column_formats(),
+            &[compio_postgres::CopyFormat::Binary]
+        );
         let mut rows = Box::pin(BinaryCopyOutStream::new(stream, &[Type::INT4]));
         let mut values = Vec::new();
         while let Some(row) = rows.try_next().await? {
