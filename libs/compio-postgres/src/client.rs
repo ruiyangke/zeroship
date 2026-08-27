@@ -20,7 +20,8 @@ use crate::tls::{MakeTlsConnect, ServerVerification, TlsConnect, TlsPolicyIdenti
 use crate::types::{Oid, ToSql, Type};
 use crate::{
     CancelToken, Error, Row, SimpleQueryMessage, Socket, Statement, ToStatement, Transaction,
-    TransactionBuilder, copy_in, copy_out, prepare, query, simple_query, slice_iter,
+    TransactionBuilder, copy_in, copy_out, error::DbError, prepare, query, simple_query,
+    slice_iter,
 };
 use bytes::{Buf, Bytes, BytesMut};
 use compio::io::{AsyncRead, AsyncWrite};
@@ -589,6 +590,100 @@ mod transaction_status_tests {
     }
 }
 
+#[cfg(test)]
+mod terminal_server_error_tests {
+    use super::Client;
+    use crate::codec::FrontendMessage;
+    use crate::config::{SslMode, SslNegotiation};
+    use crate::connection::RequestMessages;
+    use crate::error::{DbError, SqlState};
+    use bytes::{BufMut, BytesMut};
+    use futures_channel::mpsc;
+    use postgres_protocol::message::backend::Message;
+    use std::task::{Context, Poll};
+
+    fn admin_shutdown() -> DbError {
+        let payload = b"SFATAL\0VFATAL\0C57P01\0Mscripted shutdown\0\0";
+        let mut frame = BytesMut::new();
+        frame.put_u8(b'E');
+        frame.put_u32(u32::try_from(payload.len() + 4).unwrap());
+        frame.extend_from_slice(payload);
+
+        match Message::parse(&mut frame).expect("parse scripted ErrorResponse") {
+            Some(Message::ErrorResponse(body)) => {
+                DbError::parse(&mut body.fields()).expect("parse scripted DbError")
+            }
+            _ => panic!("scripted 57P01 did not decode as ErrorResponse"),
+        }
+    }
+
+    fn client(sender: mpsc::UnboundedSender<crate::connection::Request>) -> Client {
+        Client::new(
+            sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+        )
+    }
+
+    #[test]
+    fn enqueue_failure_preserves_terminal_server_diagnosis() {
+        let (sender, receiver) = mpsc::unbounded();
+        let client = client(sender);
+        *client.inner.terminal_server_error.lock() = Some(admin_shutdown());
+        drop(receiver);
+
+        let result = client
+            .inner()
+            .send(RequestMessages::Single(FrontendMessage::Raw(
+                BytesMut::new().freeze(),
+            )));
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("the disconnected request channel accepted a send"),
+        };
+
+        assert_eq!(
+            error.code(),
+            Some(&SqlState::ADMIN_SHUTDOWN),
+            "enqueue failure discarded SQLSTATE 57P01: {error}"
+        );
+        assert!(!error.is_closed());
+    }
+
+    #[test]
+    fn response_channel_close_preserves_terminal_server_diagnosis() {
+        let (sender, mut receiver) = mpsc::unbounded();
+        let client = client(sender);
+        let mut responses = client
+            .inner()
+            .send(RequestMessages::Single(FrontendMessage::Raw(
+                BytesMut::new().freeze(),
+            )))
+            .expect("enqueue scripted request");
+        let request = receiver.try_recv().expect("receive scripted request");
+        *client.inner.terminal_server_error.lock() = Some(admin_shutdown());
+        drop(request);
+
+        let waker = futures_util::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let error = match responses.poll_next(&mut cx) {
+            Poll::Ready(Err(error)) => error,
+            Poll::Ready(Ok(_)) => panic!("closed response stream yielded a backend message"),
+            Poll::Pending => panic!("closed response stream remained pending"),
+        };
+
+        assert_eq!(
+            error.code(),
+            Some(&SqlState::ADMIN_SHUTDOWN),
+            "response channel closure discarded SQLSTATE 57P01: {error}"
+        );
+        assert!(!error.is_closed());
+    }
+}
+
 /// A stream of backend messages for a single in-flight request.
 ///
 /// Yields messages one at a time via `next().await`. The connection task
@@ -606,6 +701,7 @@ pub struct Responses {
     receiver: mpsc::Receiver<ResponseMessages>,
     cur: ResponseMessages,
     observation: Option<QueryObservation>,
+    terminal_server_error: Arc<Mutex<Option<DbError>>>,
 }
 
 pub(crate) enum ResponseMessages {
@@ -656,7 +752,13 @@ impl Responses {
                     }
                     self.cur = messages;
                 }
-                None => return Poll::Ready(Err(Error::closed())),
+                None => {
+                    return Poll::Ready(Err(self
+                        .terminal_server_error
+                        .lock()
+                        .clone()
+                        .map_or_else(Error::closed, Error::from_db_error)));
+                }
             }
         }
     }
@@ -1170,6 +1272,12 @@ pub struct InnerClient {
     /// hot path touches it, and `route_async` locks it only for the
     /// `ParameterStatus` arm.
     parameters: Arc<Mutex<HashMap<String, String>>>,
+
+    /// The first server diagnosis which also ended the protocol session.
+    /// Connection records it before closing request/response channels so a
+    /// racing caller never has to replace a decoded SQLSTATE with the local
+    /// fact that a channel is gone.
+    terminal_server_error: Arc<Mutex<Option<DbError>>>,
 }
 
 impl Drop for InnerClient {
@@ -1272,8 +1380,8 @@ impl InnerClient {
         );
         drop(admission);
 
-        let responses = Self::finish_enqueue(responses)?;
-        drop(Self::finish_enqueue(cleanup)?);
+        let responses = self.finish_enqueue(responses)?;
+        drop(self.finish_enqueue(cleanup)?);
         Ok(responses)
     }
 
@@ -1316,7 +1424,7 @@ impl InnerClient {
         );
         drop(admission);
 
-        match Self::finish_enqueue(result) {
+        match self.finish_enqueue(result) {
             Ok(responses) => Ok((responses, mode_guard)),
             Err(error) => {
                 drop(mode_guard);
@@ -1346,7 +1454,7 @@ impl InnerClient {
             statement,
         );
         drop(admission);
-        Self::finish_enqueue(result)
+        self.finish_enqueue(result)
     }
 
     fn enqueue_admitted(
@@ -1386,10 +1494,11 @@ impl InnerClient {
             receiver,
             cur: ResponseMessages::empty(),
             observation,
+            terminal_server_error: Arc::clone(&self.terminal_server_error),
         })
     }
 
-    fn finish_enqueue(result: Result<Responses, Request>) -> Result<Responses, Error> {
+    fn finish_enqueue(&self, result: Result<Responses, Request>) -> Result<Responses, Error> {
         match result {
             Ok(responses) => Ok(responses),
             Err(request) => {
@@ -1397,9 +1506,16 @@ impl InnerClient {
                 // cleanup. Every caller invokes this only after releasing the
                 // non-reentrant request_admission lock.
                 drop(request);
-                Err(Error::closed())
+                Err(self.terminal_server_error().unwrap_or_else(Error::closed))
             }
         }
+    }
+
+    pub(crate) fn terminal_server_error(&self) -> Option<Error> {
+        self.terminal_server_error
+            .lock()
+            .clone()
+            .map(Error::from_db_error)
     }
 
     fn active_copy_mode(&self) -> Option<CopyMode> {
@@ -1996,6 +2112,7 @@ impl Client {
                 copy_mode: Arc::new(AtomicU8::new(COPY_MODE_IDLE)),
                 release,
                 parameters: Arc::default(),
+                terminal_server_error: Arc::default(),
             }),
             socket_config: None,
             // Real connections replace this with the negotiated result before
@@ -2106,6 +2223,10 @@ impl Client {
 
     pub(crate) fn in_flight_requests_handle(&self) -> Arc<AtomicUsize> {
         Arc::clone(&self.inner.in_flight_requests)
+    }
+
+    pub(crate) fn terminal_server_error_handle(&self) -> Arc<Mutex<Option<DbError>>> {
+        Arc::clone(&self.inner.terminal_server_error)
     }
 
     pub(crate) fn parameters_handle(&self) -> Arc<Mutex<HashMap<String, String>>> {
