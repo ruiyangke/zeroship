@@ -10109,11 +10109,11 @@ fn a_cancellation_after_commit_does_not_roll_the_commit_back() {
 /// unconditionally: it destroyed the *current* owner's writes.
 ///
 /// The second half of the damage is the part a creator sees. The stale cancel
-/// leaves the current owner's `tx_bound` untouched, so its `COMMIT` still runs
-/// - onto a connection SQLite has already returned to autocommit. That commit
-/// errors, `classify_commit` correctly refuses to guess, and the creator is
-/// told `commit_indeterminate`: "nobody knows whether your write landed", for a
-/// write that was silently rolled back.
+/// leaves the current owner's `tx_bound` untouched, so its `COMMIT` still
+/// runs - onto a connection SQLite has already returned to autocommit. That
+/// commit errors, `classify_commit` correctly refuses to guess, and the
+/// creator is told `commit_indeterminate`: "nobody knows whether your write
+/// landed", for a write that was silently rolled back.
 ///
 /// Nothing here cancels twice, so `claim_cancelled`'s idempotency does not
 /// close it. Ownership is what closes it.
