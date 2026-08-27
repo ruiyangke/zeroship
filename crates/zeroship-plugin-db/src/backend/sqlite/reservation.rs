@@ -222,14 +222,22 @@ impl Reservation {
             .is_ok()
     }
 
-    /// Claim the terminal as a cancellation. `false` means a completion has
-    /// already been claimed and the cancellation lost the race.
+    /// Claim the terminal as a cancellation. `false` means the terminal is
+    /// already claimed - by a completion, or by an earlier cancellation - and
+    /// this caller must not act on its own.
+    ///
+    /// **The second-claim arm is load-bearing, not tidiness.** It returned
+    /// `true` until 2026-08-27, so a reservation whose terminal already read
+    /// `CLAIMED_CANCELLED` handed a *second* caller the right to run cleanup.
+    /// The actor's cleanup is a `ROLLBACK` on the reservation's lane, and by
+    /// the time a duplicate arrives that lane can belong to somebody else, so
+    /// "claim an already-claimed terminal" is a licence to destroy a stranger's
+    /// open transaction. Exactly one claim wins; every later one is told so.
     pub(crate) fn claim_cancelled(&self) -> bool {
         loop {
             let current = self.terminal.load(Ordering::SeqCst);
             match current {
-                TERMINAL_CLAIMED_COMPLETED => return false,
-                TERMINAL_CLAIMED_CANCELLED => return true,
+                TERMINAL_CLAIMED_COMPLETED | TERMINAL_CLAIMED_CANCELLED => return false,
                 _ => {
                     if self
                         .terminal
@@ -769,6 +777,25 @@ mod tests {
             !r.claim_completed(),
             "a completion must not overwrite a claimed cancellation"
         );
+    }
+
+    /// A cancellation cannot claim a terminal it already holds.
+    ///
+    /// The claim is a licence to run cleanup, and the actor's cleanup is a
+    /// `ROLLBACK` on the reservation's *lane* - which a later reservation may
+    /// own by then. Handing that licence out twice is how one duplicate
+    /// `Cancel` destroys a stranger's open transaction.
+    #[test]
+    fn a_second_cancellation_claim_on_the_same_terminal_is_refused() {
+        let r = Reservation::new(5, Lane::Tx, ReservationKind::Transaction, 0);
+        assert_eq!(r.request_cancel(), CancelIntent::Set);
+        assert!(r.claim_cancelled(), "the first claim must win the terminal");
+        assert!(
+            !r.claim_cancelled(),
+            "a second claim must not re-win a terminal this reservation already holds"
+        );
+        // And a third, so the arm rules on repetition rather than on parity.
+        assert!(!r.claim_cancelled(), "every later claim must lose too");
     }
 
     /// A claimed terminal with no stored outcome is an **unknown**, not a
