@@ -7,7 +7,7 @@
 
 use crate::cancel_token::CancelKey;
 use crate::codec::{BackendMessages, FrontendMessage};
-use crate::config::{ProtocolVersion, SslMode, SslNegotiation};
+use crate::config::{ProtocolVersion, SslCertMode, SslMode, SslNegotiation};
 use crate::connect_tls::Encryption;
 use crate::connection::{Request, RequestDisposition, RequestMessages, TransactionEffect};
 use crate::copy_in::CopyInSink;
@@ -1871,6 +1871,14 @@ pub(crate) struct SocketConfig {
     /// second leg, so guessing wrong either puts the cancel key on the wire in
     /// the clear or fails the cancel outright.
     pub encryption: Encryption,
+    /// Whether this session's TLS connector was required to suppress or emit
+    /// SNI. A cancel opens a new TLS connection with a caller-supplied
+    /// connector, so this disclosure policy must travel with the session.
+    pub ssl_sni: bool,
+    /// The client-certificate disclosure policy established for this session.
+    /// In particular, `disable` must not become `allow` on a cancel connection
+    /// and expose an identity the original connection withheld.
+    pub ssl_cert_mode: SslCertMode,
     /// The server verification this session's `sslmode` and `sslrootcert`
     /// demanded - recorded here for the same reason as `encryption` above.
     ///
