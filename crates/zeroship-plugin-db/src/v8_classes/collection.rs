@@ -56,7 +56,8 @@ impl Collection {
         let schema = crate::context::with(|c| {
             c.introspected_schema_for(&self.binding, &self.name)
                 .flatten()
-        });
+        })
+        .map(|facts| (*facts).clone());
         (self.binding.deploy_token().to_string(), schema)
     }
 }

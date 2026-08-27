@@ -457,16 +457,35 @@ mod tests {
         const PINNED: &str = "deploy_pinned";
         const CURRENT: &str = "deploy_current";
 
-        crate::context::with_mut(|c| *c = crate::context::ThreadDbContext::new());
+        // Replacing the context no longer drops the introspected entries: the
+        // live-metadata cache is process-wide now, owned by `DbService` rather
+        // than by whichever thread got there first. Give this fixture its own
+        // resource key instead, so its entries share the map with every other
+        // test's without colliding.
+        //
+        // NOT `process_wide().clear()`. This binary runs its tests in parallel,
+        // so a global clear here would wipe a concurrently-running test's
+        // entries mid-assertion - trading a fixture-isolation problem for a
+        // flake that only shows up under load.
+        const FIXTURE_URL: &str = "postgres://db-v8-co-resident-fixture/db";
+        crate::context::with_mut(|c| {
+            *c = crate::context::ThreadDbContext::new();
+            c.install_db_resources(
+                FIXTURE_URL,
+                crate::service::DbResourceKey::for_url(FIXTURE_URL),
+                crate::service::select_backend(FIXTURE_URL).expect("fixture URL"),
+                crate::live_metadata::process_wide(),
+            );
+        });
 
         let pinned_runtime = runtime_for_deploy(APP, PINNED);
         let pinned_collection = mint_collection_binding(&pinned_runtime, APP, COLLECTION);
         let pinned_binding = DbBinding::new(APP, PINNED);
-        crate::context::with_mut(|c| {
+        crate::context::with(|c| {
             c.cache_introspected_schema(
                 &pinned_binding,
                 COLLECTION,
-                Some(json!({ "marker": "pinned" })),
+                Some(std::sync::Arc::new(json!({ "marker": "pinned" }))),
             );
         });
         pinned_runtime.exit_isolate();
@@ -474,11 +493,11 @@ mod tests {
         let current_runtime = runtime_for_deploy(APP, CURRENT);
         let current_collection = mint_collection_binding(&current_runtime, APP, COLLECTION);
         let current_binding = DbBinding::new(APP, CURRENT);
-        crate::context::with_mut(|c| {
+        crate::context::with(|c| {
             c.cache_introspected_schema(
                 &current_binding,
                 COLLECTION,
-                Some(json!({ "marker": "current" })),
+                Some(std::sync::Arc::new(json!({ "marker": "current" }))),
             );
         });
         current_runtime.exit_isolate();

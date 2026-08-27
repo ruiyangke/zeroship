@@ -114,7 +114,7 @@ pub(crate) async fn apply(
     // from LIVE introspection + the engine's sentinels (design §6), not the
     // in-memory declared schema. Cached per (app, collection, deploy).
     let schema = super::introspect_schema::runtime_schema_for(binding, collection).await?;
-    let stages = WriteStages::new(schema.as_ref());
+    let stages = WriteStages::new(schema.as_deref());
 
     match mode {
         ApplyMode::Insert { actor_id } => {
@@ -172,7 +172,7 @@ pub(crate) async fn apply(
                 route,
                 collection,
                 conflict_fields,
-                schema.as_ref(),
+                schema.as_deref(),
             )
             .await?;
             let row_pk = row_pk_from_doc(payload);

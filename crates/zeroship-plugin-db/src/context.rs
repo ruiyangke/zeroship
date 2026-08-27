@@ -43,6 +43,8 @@ use crate::binding::DbBinding;
 use crate::encryption::{LocalKeySource, SuppliedRootKeys};
 use crate::broker::ChangeEvent;
 use crate::error::DbError;
+use crate::live_metadata::{CachedFacts, LiveMetadataCache, LiveMetadataKey};
+use crate::service::DbResourceKey;
 
 /// Result of trying to claim the per-thread backend initialisation slot.
 pub(crate) enum BackendInitState {
@@ -57,7 +59,7 @@ pub(crate) enum BackendInitState {
 /// Result of polling the per-thread live-schema singleflight.
 pub(crate) enum SchemaIntrospectionState {
     /// Another resolution already populated this exact cache key.
-    Cached(Option<serde_json::Value>),
+    Cached(CachedFacts),
     /// This caller owns the catalog read and must release the marker.
     Acquired,
 }
@@ -289,8 +291,8 @@ pub struct ThreadDbContext {
     /// is the raw schema JSON the SDK declared.
     schemas: HashMap<String, serde_json::Value>,
 
-    /// Per-thread cache of the
-    /// schema metadata **introspected from the LIVE catalog + sentinels**
+    /// This thread's handle to the PROCESS-WIDE cache of schema metadata
+    /// **introspected from the LIVE catalog + sentinels**
     /// (`zeroship_schema::read_live_schema` + the `zsenc`/`__zsmask` codecs),
     /// NOT the declared descriptor. This is the runtime data-access metadata
     /// source the CRUD encryption + mask passes consume per the schema-authority
@@ -299,22 +301,46 @@ pub struct ThreadDbContext {
     /// (kind/classification) by reading what the migration engine actually
     /// applied, decoupled from any in-memory declared schema.
     ///
-    /// Keyed by `(DbBinding, collection)`, where the binding contains both the
-    /// app id and deploy/schema-version token. Current and deploy-pinned
-    /// isolates of one app therefore retain independent entries instead of
-    /// evicting or reading one another's metadata. The inner `Option`
-    /// distinguishes "introspected, collection absent" (`None`) from "not yet
-    /// introspected" (no map entry), so absence is cached rather than causing a
-    /// catalog read on every call.
-    introspected_schemas: HashMap<(DbBinding, String), Option<serde_json::Value>>,
+    /// **It is a handle, not the cache.** The map used to live here, which made
+    /// an n-thread worker hold n copies of one app's immutable facts and pay n
+    /// whole-catalog reads to build them. `DbService` owns the map now;
+    /// `DbPlugin::register` hands this thread the service's `Arc`. See
+    /// [`crate::live_metadata`] for the identity the entries are keyed by and
+    /// for why the singleflight below deliberately stayed per thread.
+    live_metadata: Arc<LiveMetadataCache>,
+
+    /// The identity of the database this thread's resources belong to.
+    ///
+    /// Minted once from validated configuration by `DbService` and stamped here
+    /// by `DbPlugin::register`. It qualifies every live-metadata key, so two
+    /// services over different databases can share one process-wide cache
+    /// without aliasing each other's facts.
+    ///
+    /// [`DbResourceKey::UNBOUND`] until a URL is installed.
+    resource_key: DbResourceKey,
+
+    /// Which backend this thread's URL resolves to, decided ONCE by
+    /// `DbService::new` at composition and stamped here by
+    /// `DbPlugin::register`.
+    ///
+    /// `init_pool_async` reads it instead of re-parsing the URL. `None` until a
+    /// URL is installed, which is also the "DB plugin disabled" state.
+    backend_selection: Option<crate::BackendUrl>,
 
     /// Success-only singleflight state for live-schema cache misses.
     ///
     /// Entry existence marks one catalog read in progress for the exact same
-    /// `(DbBinding, collection)` identity as [`Self::introspected_schemas`].
-    /// Waiters are woken after either success or failure. Success is shared via
-    /// the cache; failures are never stored, so one woken waiter acquires and
-    /// retries while the failed owner alone receives its error.
+    /// identity [`Self::live_metadata`] caches under. Waiters are woken after
+    /// either success or failure. Success is shared via the cache; failures are
+    /// never stored, so one woken waiter acquires and retries while the failed
+    /// owner alone receives its error.
+    ///
+    /// **Deliberately still per thread while the cache went process-wide.** The
+    /// parent design lists a process-wide singleflight under rejected
+    /// alternatives: it needs a cross-thread wake path to save at most
+    /// `n_threads` catalog walks per epoch bump. Two threads racing a cold miss
+    /// both walk the catalog; what they must not end up with is two cache
+    /// entries or two distinct fact objects, and that is the cache's job.
     introspection_in_progress: HashMap<(DbBinding, String), Vec<Waker>>,
 
     /// Per-thread, per-app mask-policy cache. Seeded
@@ -403,7 +429,9 @@ impl ThreadDbContext {
             savepoint_emit_marks: HashMap::new(),
             pending_emits: HashMap::new(),
             schemas: HashMap::new(),
-            introspected_schemas: HashMap::new(),
+            live_metadata: crate::live_metadata::process_wide(),
+            resource_key: DbResourceKey::UNBOUND,
+            backend_selection: None,
             introspection_in_progress: HashMap::new(),
             mask_policies: HashMap::new(),
             backend: None,
@@ -552,14 +580,43 @@ impl ThreadDbContext {
         self.db_url.clone()
     }
 
-    /// Poison the URL slot. Returns `true` iff the URL changed (the
-    /// caller wants to drop the pool in that case so the next CRUD
-    /// call rebuilds it).
-    pub(crate) fn set_db_url(&mut self, url: &str) -> bool {
-        let different = self.db_url.as_deref() != Some(url);
-        if different {
-            self.db_url = Some(url.to_string());
-        }
+    /// The identity of the database this thread's resources belong to.
+    pub(crate) fn resource_key(&self) -> DbResourceKey {
+        self.resource_key
+    }
+
+    /// The backend the service selected for this thread's URL. `None` when no
+    /// database is configured - the "DB plugin disabled" state.
+    pub(crate) fn backend_selection(&self) -> Option<crate::BackendUrl> {
+        self.backend_selection.clone()
+    }
+
+    /// Hand this thread the service's database resources: the URL its lazy
+    /// backend init will open, the backend selection already made for it, the
+    /// stable resource key everything is indexed by, and the process-wide
+    /// live-metadata cache.
+    ///
+    /// Returns `true` iff the resource CHANGED - i.e. this thread was pointed
+    /// at a different database. The caller drops the pool in that case so the
+    /// next CRUD call rebuilds it, rather than silently aliasing the old pool
+    /// to the new URL.
+    ///
+    /// The comparison is on the resource key, not the URL string: the key is
+    /// minted once from validated configuration, so "same database" is decided
+    /// by the same value the caches and pools are indexed by rather than
+    /// re-decided from a string here.
+    pub(crate) fn install_db_resources(
+        &mut self,
+        url: &str,
+        resource_key: DbResourceKey,
+        backend_selection: crate::BackendUrl,
+        live_metadata: Arc<LiveMetadataCache>,
+    ) -> bool {
+        let different = self.resource_key != resource_key;
+        self.db_url = Some(url.to_string());
+        self.resource_key = resource_key;
+        self.backend_selection = Some(backend_selection);
+        self.live_metadata = live_metadata;
         different
     }
 
@@ -638,40 +695,52 @@ impl ThreadDbContext {
         self.schemas.get(&key).cloned()
     }
 
+    /// The live-metadata identity for one binding and collection on this
+    /// thread's database.
+    fn live_metadata_key(&self, binding: &DbBinding, collection: &str) -> LiveMetadataKey {
+        LiveMetadataKey::new(self.resource_key, binding, collection)
+    }
+
     /// Read the cached INTROSPECTED schema for one immutable
-    /// `(app_id, deploy_token, collection)` binding. Returns:
-    ///   - `Some(Some(schema))` - cached, collection exists;
+    /// `(app_id, deploy_token, collection)` binding on this thread's database.
+    /// Returns:
+    ///   - `Some(Some(facts))` - cached, collection exists;
     ///   - `Some(None)` - cached, collection is absent (negative cache);
-    ///   - `None` — this binding has not cached the collection → caller must
-    ///     introspect.
+    ///   - `None` — nothing cached for this identity → caller must introspect.
+    ///
+    /// The `Arc` is handed out rather than the schema deep-cloned, so every
+    /// reader of one identity - on any worker thread - observes one allocation.
     pub(crate) fn introspected_schema_for(
         &self,
         binding: &DbBinding,
         collection: &str,
-    ) -> Option<Option<serde_json::Value>> {
-        let key = (binding.clone(), collection.to_string());
-        self.introspected_schemas.get(&key).cloned()
+    ) -> Option<CachedFacts> {
+        self.live_metadata
+            .get(&self.live_metadata_key(binding, collection))
     }
 
     /// True when an introspected cache entry exists, including a cached
-    /// negative result. Unlike [`Self::introspected_schema_for`], this avoids
-    /// cloning a potentially large schema when admission only needs presence.
+    /// negative result. Unlike [`Self::introspected_schema_for`], this clones
+    /// no `Arc` when admission accounting only needs presence.
     pub(crate) fn has_introspected_schema(&self, binding: &DbBinding, collection: &str) -> bool {
-        let key = (binding.clone(), collection.to_string());
-        self.introspected_schemas.contains_key(&key)
+        self.live_metadata
+            .contains(&self.live_metadata_key(binding, collection))
     }
 
     /// Cache the result of a live introspection for one immutable binding and
-    /// collection. `schema = None` records that the collection is absent. Other
-    /// deploys of the same app retain their own entries.
+    /// collection. `facts = None` records that the collection is absent. Other
+    /// deploys of the same app, and other databases, retain their own entries.
+    ///
+    /// Takes `&self`: the cache is process-wide and carries its own
+    /// synchronisation, so writing to it is not a mutation of thread state.
     pub(crate) fn cache_introspected_schema(
-        &mut self,
+        &self,
         binding: &DbBinding,
         collection: &str,
-        schema: Option<serde_json::Value>,
+        facts: CachedFacts,
     ) {
-        let key = (binding.clone(), collection.to_string());
-        self.introspected_schemas.insert(key, schema);
+        self.live_metadata
+            .insert(self.live_metadata_key(binding, collection), facts);
     }
 
     /// Poll the success-only singleflight for one exact introspection key.
@@ -685,11 +754,14 @@ impl ThreadDbContext {
         collection: &str,
         cx: &mut Context<'_>,
     ) -> Poll<SchemaIntrospectionState> {
-        let key = (binding.clone(), collection.to_string());
-        if let Some(cached) = self.introspected_schemas.get(&key).cloned() {
+        if let Some(cached) = self
+            .live_metadata
+            .get(&LiveMetadataKey::new(self.resource_key, binding, collection))
+        {
             return Poll::Ready(SchemaIntrospectionState::Cached(cached));
         }
 
+        let key = (binding.clone(), collection.to_string());
         match self.introspection_in_progress.entry(key) {
             std::collections::hash_map::Entry::Vacant(entry) => {
                 entry.insert(Vec::new());
@@ -1071,6 +1143,7 @@ mod tests {
     use super::*;
 
     use crate::broker::{ChangeEvent, ChangeOp};
+    use crate::BackendUrl;
     use std::collections::HashMap;
 
     fn dummy_event(collection: &str) -> ChangeEvent {
@@ -1114,48 +1187,72 @@ mod tests {
         assert_eq!(a.db_url(), b.db_url());
     }
 
-    // ----- DB_URL coherence ----------------------------------------------
+    // ----- installed DB resources ----------------------------------------
+
+    /// Install the resources a service over `url` would hand this thread.
+    fn install(ctx: &mut ThreadDbContext, url: &str) -> bool {
+        ctx.install_db_resources(
+            url,
+            DbResourceKey::for_url(url),
+            crate::service::select_backend(url).expect("test URLs must be valid"),
+            crate::live_metadata::process_wide(),
+        )
+    }
 
     #[test]
-    fn set_db_url_returns_true_on_change() {
+    fn installing_a_new_database_reports_the_change() {
         let mut ctx = ThreadDbContext::new();
-        assert!(ctx.set_db_url("postgres://a"));
+        assert!(install(&mut ctx, "postgres://a"));
+        assert_eq!(ctx.db_url().as_deref(), Some("postgres://a"));
+        assert_eq!(ctx.resource_key(), DbResourceKey::for_url("postgres://a"));
+    }
+
+    #[test]
+    fn reinstalling_the_same_database_reports_no_change() {
+        let mut ctx = ThreadDbContext::new();
+        assert!(install(&mut ctx, "postgres://a"));
+        assert!(!install(&mut ctx, "postgres://a"));
         assert_eq!(ctx.db_url().as_deref(), Some("postgres://a"));
     }
 
     #[test]
-    fn set_db_url_returns_false_when_unchanged() {
+    fn installing_a_second_database_reports_the_change() {
         let mut ctx = ThreadDbContext::new();
-        assert!(ctx.set_db_url("postgres://a"));
-        assert!(!ctx.set_db_url("postgres://a"));
-        assert_eq!(ctx.db_url().as_deref(), Some("postgres://a"));
-    }
-
-    #[test]
-    fn set_db_url_returns_true_on_subsequent_change() {
-        let mut ctx = ThreadDbContext::new();
-        ctx.set_db_url("postgres://a");
-        assert!(ctx.set_db_url("postgres://b"));
+        install(&mut ctx, "postgres://a");
+        assert!(install(&mut ctx, "postgres://b"));
         assert_eq!(ctx.db_url().as_deref(), Some("postgres://b"));
+        assert_ne!(ctx.resource_key(), DbResourceKey::for_url("postgres://a"));
+    }
+
+    /// The URL and its backend selection are installed together, so no reader
+    /// can observe one without the other. `init_pool_async` depends on that:
+    /// it opens the pool from this selection rather than re-parsing the URL.
+    #[test]
+    fn the_url_and_its_backend_selection_are_installed_together() {
+        let mut ctx = ThreadDbContext::new();
+        assert!(ctx.db_url().is_none() && ctx.backend_selection().is_none());
+
+        install(&mut ctx, "postgres://a");
+        assert!(matches!(ctx.backend_selection(), Some(BackendUrl::Postgres)));
+
+        install(&mut ctx, "sqlite:/tmp/ctx-install.sqlite");
+        assert!(matches!(
+            ctx.backend_selection(),
+            Some(BackendUrl::Sqlite { .. })
+        ));
     }
 
     #[test]
-    fn set_db_url_does_not_clear_pool_on_no_op() {
-        // `set_db_url` is *just* the URL slot; the caller (lib.rs) is
-        // responsible for invoking `clear_pool` when the URL changes.
-        // We can't install a real pool here (Pool::connect needs PG),
-        // but we can at least confirm `set_db_url` itself does NOT
-        // poke the `backend` slot — once the no-op path returns false,
-        // a hypothetical pool would still be installed. Verified
-        // indirectly: the function body has no `self.pool = None` or
-        // `self.backend = None`.
+    fn installing_resources_does_not_touch_the_pool_slot() {
+        // `install_db_resources` is *just* the configuration slots; the caller
+        // (lib.rs) invokes `clear_pool` when the resource changed. We can't
+        // install a real pool here (Pool::connect needs PG), but we can pin
+        // that the installer itself leaves the pool/backend slots alone.
         let mut ctx = ThreadDbContext::new();
-        ctx.set_db_url("postgres://a");
-        // No pool to clear; we're checking the API surface remains
-        // pool-agnostic.
+        install(&mut ctx, "postgres://a");
         assert!(ctx.pool().is_none());
         assert!(ctx.backend().is_none());
-        let _ = ctx.set_db_url("postgres://a"); // no-op
+        let _ = install(&mut ctx, "postgres://a"); // no-op
         assert!(ctx.pool().is_none());
         assert!(ctx.backend().is_none());
     }

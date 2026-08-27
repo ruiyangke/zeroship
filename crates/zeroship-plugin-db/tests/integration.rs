@@ -4115,6 +4115,89 @@ fn err_chain(e: &dyn std::error::Error) -> String {
 // no DB dependency -- the check is pure-Rust JSON walk.
 // ---------------------------------------------------------------------------
 
+/// SC-5: operator deprovisioning performs NO second URL parse and opens NO
+/// second pool.
+///
+/// The free function this replaces took the URL, re-ran `backend_for_url` on it
+/// and built a fresh two-connection `Pool` **per deleted app** - two connects,
+/// two authentications and two TLS handshakes each time. Against a worker
+/// reconciling a batch of deletions that is a pool per app.
+///
+/// Both instruments are counters rather than inferences. A connection count
+/// cannot rule on pool cardinality (a pool of two and two pools of one look the
+/// same from the server), and "does not re-parse" is a claim about what runs,
+/// which `grep` cannot answer. Mutating `DbLifecycle::deprovision_app` back to
+/// `Pool::connect(&self.service.url, 2)` per call turns the pool assertion red;
+/// mutating it back to `select_backend(&self.service.url)` turns the parse
+/// assertion red.
+///
+/// Three deletions, not one: with one, "opens one pool per deletion" and "opens
+/// one pool ever" are the same number and the arm rules on nothing.
+#[test]
+fn operator_deprovisioning_reuses_one_pool_and_reparses_nothing() {
+    use zeroship_plugin_db::service::{
+        operator_pool_open_count, reset_operator_pools_for_tests, url_parse_count, DbService,
+        DbServiceConfig,
+    };
+
+    const DELETED_APPS: [&str; 3] = [
+        "sc5_operator_pool_arm_a",
+        "sc5_operator_pool_arm_b",
+        "sc5_operator_pool_arm_c",
+    ];
+    assert!(
+        DELETED_APPS.len() > 1,
+        "one deletion cannot distinguish one pool per call from one pool ever"
+    );
+
+    std::thread::spawn(|| {
+        compio::runtime::Runtime::new()
+            .expect("cannot create runtime")
+            .block_on(async {
+                let url = require_pg().await;
+                // This thread has never deprovisioned anything, so its operator
+                // pool map is empty and the counters start from a known floor.
+                reset_operator_pools_for_tests();
+
+                let service = DbService::new(DbServiceConfig {
+                    url,
+                    worker_id: "sc5-operator-lifecycle-arm".to_string(),
+                    meter: None,
+                })
+                .expect("compose the db service");
+
+                let parses_after_composition = url_parse_count();
+                let pools_before = operator_pool_open_count();
+
+                for app_id in DELETED_APPS {
+                    service
+                        .lifecycle()
+                        .deprovision_app(app_id)
+                        .await
+                        .expect("idempotent teardown for an app with no slots");
+                }
+
+                assert_eq!(
+                    url_parse_count(),
+                    parses_after_composition,
+                    "deprovisioning must read the backend selection made at composition, \
+                     not re-parse the URL"
+                );
+                assert_eq!(
+                    operator_pool_open_count() - pools_before,
+                    1,
+                    "{} deletions must share ONE long-lived operator pool",
+                    DELETED_APPS.len()
+                );
+
+                reset_operator_pools_for_tests();
+                drain_pg().await;
+            });
+    })
+    .join()
+    .expect("operator lifecycle thread");
+}
+
 #[test]
 fn cross_app_fk_rejected_at_parse() {
     use zeroship_plugin_db::cross_app_fk::reject_cross_app_fk;
