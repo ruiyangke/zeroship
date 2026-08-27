@@ -487,6 +487,26 @@ rather than a generic failure, and the server served again as soon as the
 slots freed. Read the chain, not the top line: `Error`'s own `Display` is the
 terse `db error` by design, and the actionable text is in the source.
 
+RE-MEASURED 2026-08-27 at `526ba9e5f`, after ~52 merged fixes to error and
+retirement paths:
+
+```text
+EX held=15 then refused: db error
+EX pool build refused after 504.742721ms: db error | FATAL: sorry, too many clients already
+EX recovered: SELECT 42 = 42, live=2
+```
+
+504.74ms against 505.33ms the previous day, the same FATAL still in the chain,
+and recovery once the slots freed. `live=2` rather than `1` is the probe asking
+for a two-connection pool, not a behaviour change - state what the probe asked
+for when quoting a live count.
+
+That the FATAL is still reachable through the chain is the useful part. Two
+sweeps spent that week making the driver prefer a server diagnosis over a local
+symptom, and this is the shape where a regression would be invisible: the pool
+refuses either way, and only the CAUSE distinguishes "the server is full" from
+"something went wrong".
+
 ## Limits of the measurement
 
 **The RSS rule fails only on a MONOTONIC climb** - the check is
