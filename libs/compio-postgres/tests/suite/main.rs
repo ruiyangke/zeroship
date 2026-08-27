@@ -65,6 +65,7 @@ mod config_fuzz;
 mod connect_failure_diagnosis;
 mod connection_churn;
 mod copy_in_failure;
+mod copy_interleaving;
 mod copy_out_abandonment;
 mod copy_out_copy_in_resync;
 mod copy_refusal;

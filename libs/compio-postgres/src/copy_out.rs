@@ -4,7 +4,7 @@
 // `Connection` changes needed. The resulting `CopyOutStream` just drains
 // the `Responses` channel until `CopyDone`.
 
-use crate::client::{InnerClient, Responses};
+use crate::client::{CopyMode, CopyModeGuard, InnerClient, Responses};
 use crate::copy_format::CopyResponse;
 use crate::{CopyFormat, Error, Statement, query, slice_iter};
 use bytes::Bytes;
@@ -26,16 +26,18 @@ pub async fn copy_out(
         Some(sql) => query::encode_unnamed(client, sql, &statement, slice_iter(&[]))?,
         None => query::encode(client, &statement, slice_iter(&[]))?,
     };
-    let (responses, response) = match start(client, buf, &statement, unnamed_sql.is_some()).await {
-        Ok(result) => result,
-        Err(error) => {
-            statement.invalidate_cache_on_error(&error);
-            return Err(error);
-        }
-    };
+    let (responses, response, copy_mode) =
+        match start(client, buf, &statement, unnamed_sql.is_some()).await {
+            Ok(result) => result,
+            Err(error) => {
+                statement.invalidate_cache_on_error(&error);
+                return Err(error);
+            }
+        };
     Ok(CopyOutStream {
         responses,
         response,
+        copy_mode: Some(copy_mode),
     })
 }
 
@@ -44,10 +46,11 @@ async fn start(
     buf: Bytes,
     statement: &Statement,
     reparsed: bool,
-) -> Result<(Responses, CopyResponse), Error> {
-    let mut responses = client.send_statement(
+) -> Result<(Responses, CopyResponse, CopyModeGuard), Error> {
+    let (mut responses, copy_mode) = client.send_copy_statement(
         query::producerless_request(buf, statement.may_enter_copy_in()),
         statement,
+        CopyMode::Out,
     )?;
 
     if reparsed {
@@ -73,7 +76,7 @@ async fn start(
         }
     };
 
-    Ok((responses, response))
+    Ok((responses, response, copy_mode))
 }
 
 pin_project! {
@@ -82,6 +85,9 @@ pin_project! {
     pub struct CopyOutStream {
         responses: Responses,
         response: CopyResponse,
+        // Last so Drop disconnects the consumer, arming connection-owned
+        // draining, before ordinary requests may queue behind it.
+        copy_mode: Option<CopyModeGuard>,
     }
 }
 
@@ -103,10 +109,20 @@ impl Stream for CopyOutStream {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
 
-        match ready!(this.responses.poll_next(cx)?) {
-            Message::CopyData(body) => Poll::Ready(Some(Ok(body.into_bytes()))),
-            Message::CopyDone => Poll::Ready(None),
-            _ => Poll::Ready(Some(Err(Error::unexpected_message()))),
+        match ready!(this.responses.poll_next(cx)) {
+            Ok(Message::CopyData(body)) => Poll::Ready(Some(Ok(body.into_bytes()))),
+            Ok(Message::CopyDone) => {
+                this.copy_mode.take();
+                Poll::Ready(None)
+            }
+            Ok(_) => {
+                this.copy_mode.take();
+                Poll::Ready(Some(Err(Error::unexpected_message())))
+            }
+            Err(error) => {
+                this.copy_mode.take();
+                Poll::Ready(Some(Err(error)))
+            }
         }
     }
 }
