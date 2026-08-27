@@ -138,7 +138,53 @@ where
 
     async fn send(&mut self, msg: FrontendMessage) -> Result<(), Error> {
         write_frontend(&mut self.stream, msg)?;
-        self.stream.flush().await
+        if let Err(error) = self.stream.flush().await {
+            return Err(self.take_available_server_error().unwrap_or(error));
+        }
+        Ok(())
+    }
+
+    /// Prefer an ErrorResponse which a previous handshake read already put in
+    /// memory over the local write symptom which made us look for it.
+    ///
+    /// This never submits a socket read: a one-way transport failure must not
+    /// turn a failed write into an unbounded wait. `pending` owns an already-
+    /// decoded batch; the stream buffer may contain complete frames over-read
+    /// behind the message which triggered this frontend write.
+    fn take_available_server_error(&mut self) -> Option<Error> {
+        if let Ok(Some(body)) = self.pending.first_error_response() {
+            return Some(Error::db(body));
+        }
+
+        loop {
+            let length = self.stream.peek_u32_be(1)?;
+            if length < 4 || self.stream.validate_length(length).is_err() {
+                return None;
+            }
+            let total_len = usize::try_from(length).ok()?.checked_add(1)?;
+            if self.stream.buf().len() < total_len {
+                return None;
+            }
+
+            match self.stream.buf()[0] {
+                b'E' => {
+                    let mut frame = self.stream.buf().split_to(total_len);
+                    let message = Message::parse(&mut frame).ok()??;
+                    return match message {
+                        Message::ErrorResponse(body) => Some(Error::db(body)),
+                        _ => None,
+                    };
+                }
+                // These messages may arrive without a frontend request. Skip
+                // only complete async frames; an ordinary response is a
+                // protocol boundary and an error beyond it cannot safely be
+                // attributed to the write which just failed.
+                b'N' | b'A' | b'S' => {
+                    let _ = self.stream.buf().split_to(total_len);
+                }
+                _ => return None,
+            }
+        }
     }
 
     /// Read one post-handshake message. Returns `None` on clean EOF.
@@ -1328,6 +1374,7 @@ mod tests {
     use crate::AsyncMessage;
     use crate::config::{AuthMethod, AuthMethods, RequireAuth, SslMode};
     use crate::tls::NoTls;
+    use compio::buf::{BufResult, IoBuf, IoBufMut};
     use compio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
     use compio::net::{TcpListener, TcpStream};
     use futures_channel::oneshot;
@@ -1335,6 +1382,44 @@ mod tests {
     use std::time::Duration;
 
     const EXPECTED_DELAYED_MESSAGE_LIMIT: usize = 256;
+
+    /// Replays one coalesced backend read, then fails every frontend write.
+    /// This isolates the handshake's already-buffered diagnosis choice from
+    /// kernel timing and from whether a real TCP reset wins a race.
+    struct HandshakeWriteFailure {
+        input: Vec<u8>,
+        offset: usize,
+    }
+
+    impl AsyncRead for HandshakeWriteFailure {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            let mut remaining = &self.input[self.offset..];
+            let before = remaining.len();
+            let BufResult(result, buf) = AsyncRead::read(&mut remaining, buf).await;
+            self.offset += before - remaining.len();
+            BufResult(result, buf)
+        }
+    }
+
+    impl AsyncWrite for HandshakeWriteFailure {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            BufResult(
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "scripted handshake write failure",
+                )),
+                buf,
+            )
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     fn frame(tag: u8, body: &[u8]) -> Vec<u8> {
         let mut frame = Vec::with_capacity(5 + body.len());
@@ -1353,6 +1438,80 @@ mod tests {
         body.extend_from_slice(message.as_bytes());
         body.extend_from_slice(b"\0\0");
         frame(b'N', &body)
+    }
+
+    fn error_response(code: &str, message: &str) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(b"SERROR\0");
+        body.extend_from_slice(b"VERROR\0");
+        body.push(b'C');
+        body.extend_from_slice(code.as_bytes());
+        body.push(0);
+        body.push(b'M');
+        body.extend_from_slice(message.as_bytes());
+        body.extend_from_slice(b"\0\0");
+        frame(b'E', &body)
+    }
+
+    fn write_failing_handshake(
+        input: Vec<u8>,
+        config: &Config,
+    ) -> Handshake<HandshakeWriteFailure, crate::tls::NoTlsStream> {
+        Handshake::new(
+            MaybeTlsStream::Raw(HandshakeWriteFailure { input, offset: 0 }),
+            config,
+        )
+    }
+
+    #[compio::test]
+    async fn password_write_failure_preserves_a_pending_server_error() {
+        let mut script = frame(b'R', &3i32.to_be_bytes());
+        script.extend_from_slice(&error_response("28P01", "password rejected"));
+        let config = plaintext_config();
+        let mut handshake = write_failing_handshake(script, &config);
+
+        assert!(matches!(
+            handshake.next().await.unwrap(),
+            Some(Message::AuthenticationCleartextPassword)
+        ));
+        let error = authenticate_password(&mut handshake, b"wrong")
+            .await
+            .expect_err("the scripted transport must fail the password write");
+
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("28P01"),
+            "password write failure discarded SQLSTATE 28P01: {error}"
+        );
+    }
+
+    #[compio::test]
+    async fn target_probe_write_failure_preserves_an_error_buffered_after_ready() {
+        let mut script = frame(b'Z', b"I");
+        script.extend_from_slice(&notice("retiring after startup"));
+        script.extend_from_slice(&error_response("57P01", "terminating connection"));
+        let config = plaintext_config();
+        let mut handshake = write_failing_handshake(script, &config);
+        handshake.phase = HandshakePhase::ReadingStartupInfo;
+
+        assert!(matches!(
+            handshake.next().await.unwrap(),
+            Some(Message::ReadyForQuery(_))
+        ));
+        handshake.finish_startup();
+        let error = probe_target_session_attrs(
+            &mut handshake,
+            TargetSessionAttrs::ReadWrite,
+            &mut HashMap::new(),
+        )
+        .await
+        .expect_err("the scripted transport must fail the target probe write");
+
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("57P01"),
+            "target probe write failure discarded buffered SQLSTATE 57P01: {error}"
+        );
     }
 
     fn parameter_status(name: &str, value: &str) -> Vec<u8> {
