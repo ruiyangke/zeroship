@@ -845,8 +845,12 @@ where
                             if let Some(observation) = &copy_observation {
                                 observation.inspect_frontend(&msg);
                             }
-                            write_frontend(&mut self.stream, msg)?;
-                            self.stream.flush().await?;
+                            if let Err(error) = write_frontend(&mut self.stream, msg) {
+                                return Err(self.prefer_buffered_server_error(error));
+                            }
+                            if let Err(error) = self.stream.flush().await {
+                                return Err(self.prefer_buffered_server_error(error));
+                            }
                             if !initial_flushed {
                                 read_obligation.activate_initial();
                                 initial_flushed = true;
@@ -5095,6 +5099,61 @@ mod tests {
             error.code().map(|code| code.code()),
             Some("57P01"),
             "serialized request flush discarded buffered SQLSTATE 57P01: {error}"
+        );
+    }
+
+    #[compio::test]
+    async fn serialized_copy_flush_preserves_a_buffered_server_error() {
+        let (request_sender, request_receiver) = mpsc::unbounded();
+        let client = crate::client::Client::new(
+            request_sender,
+            crate::config::SslMode::Disable,
+            crate::config::SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+        );
+        let _first = client
+            .inner()
+            .send(RequestMessages::Single(FrontendMessage::Raw(
+                bytes::Bytes::from_static(b"scripted first request"),
+            )))
+            .expect("enqueue the first serialized request");
+
+        let mut response = completed_response_batch(b'I');
+        response.extend_from_slice(&fatal_error_frame("57P01", "scripted backend shutdown"));
+        let connection: Connection<SerializedSecondFlushFailure, SerializedSecondFlushFailure> =
+            Connection::new(
+                BufStream::new(MaybeTlsStream::Raw(SerializedSecondFlushFailure {
+                    chunks: VecDeque::from([response]),
+                    flushes: 0,
+                })),
+                VecDeque::new(),
+                HashMap::new(),
+                client.parameters_handle(),
+                request_receiver,
+                client.tx_status_handle(),
+                client.in_flight_requests_handle(),
+                client.terminal_server_error_handle(),
+                None,
+            );
+
+        let copy = crate::copy_in::copy_in::<bytes::Bytes>(
+            client.inner(),
+            Statement::unnamed(Vec::new(), Vec::new()),
+            None,
+        );
+        let driver = connection.run_serialized();
+        let (copy_result, driver_result) = futures_util::join!(copy, driver);
+        driver_result.expect_err("the scripted COPY flush unexpectedly succeeded");
+        let error = match copy_result {
+            Err(error) => error,
+            Ok(_) => panic!("the failed COPY startup returned a sink"),
+        };
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("57P01"),
+            "serialized COPY flush discarded buffered SQLSTATE 57P01: {error}"
         );
     }
 
