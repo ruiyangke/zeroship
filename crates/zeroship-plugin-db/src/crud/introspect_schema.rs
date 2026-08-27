@@ -381,32 +381,51 @@ mod tests {
 
         cache_every_collection(&mut ctx, "app_1", "deploy_a", &live);
 
-        for coll in ["notes", "users", "todos"] {
+        // Assert the INNER value, not just that a cache entry exists.
+        // `introspected_schema_for` returns `Option<Option<_>>` -- the outer
+        // is "was it cached", the inner is "does the collection exist" -- so a
+        // bare `.is_some()` on the outer stays green if populate-all cached
+        // every table as a NEGATIVE. Each fixture carries a distinct column,
+        // so checking for it also rules out entries cross-wired between
+        // sibling collections, which a presence-only check cannot see.
+        for (coll, expected_col) in [("notes", "title"), ("users", "email"), ("todos", "done")] {
+            let cached = ctx
+                .introspected_schema_for("app_1", coll, "deploy_a")
+                .unwrap_or_else(|| panic!("'{coll}' must be cached by the single read that covered it"))
+                .unwrap_or_else(|| panic!("'{coll}' was cached as ABSENT, but the read covered it"));
             assert!(
-                ctx.introspected_schema_for("app_1", coll, "deploy_a").is_some(),
-                "'{coll}' must be cached by the single read that covered it",
+                cached.to_string().contains(expected_col),
+                "'{coll}' cached a schema without its own column '{expected_col}': {cached}",
             );
         }
     }
 
     /// Internal platform tables are not creator collections: caching them
     /// would spend the per-app cache budget on entries nothing ever requests.
+    ///
+    /// Production skips TWO prefixes (`__zeroship` and `__zs_`), so this arm
+    /// supplies a fixture for each. Covering only one left the other's
+    /// `starts_with` deletable with the test still green - which is how it was
+    /// written first, and what a mutation check caught.
     #[test]
     fn internal_tables_are_not_cached_as_collections() {
         let live = live_with_tables(vec![
             ("notes", vec![("title", col("text"))]),
             ("__zeroship_audit_unmask", vec![("actor", col("text"))]),
+            ("__zs_mask_policy", vec![("kind", col("text"))]),
         ]);
         let mut ctx = crate::context::IsolateDbContext::new();
 
         cache_every_collection(&mut ctx, "app_1", "deploy_a", &live);
 
         assert!(ctx.introspected_schema_for("app_1", "notes", "deploy_a").is_some());
-        assert!(
-            ctx.introspected_schema_for("app_1", "__zeroship_audit_unmask", "deploy_a")
-                .is_none(),
-            "internal tables must not occupy the per-app cache",
-        );
+        for internal in ["__zeroship_audit_unmask", "__zs_mask_policy"] {
+            assert!(
+                ctx.introspected_schema_for("app_1", internal, "deploy_a")
+                    .is_none(),
+                "internal table {internal} must not occupy the per-app cache",
+            );
+        }
     }
 
     /// Every entry from one read carries the SAME deploy token, so a redeploy
