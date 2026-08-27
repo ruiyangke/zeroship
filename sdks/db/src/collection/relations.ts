@@ -1,5 +1,6 @@
 import type { NormalizedSchema } from "../schema";
 import type { Filter, PlainObject, Result, WithSpec } from "../types";
+import { MAX_ID_BATCH } from "../membership-cap.js";
 
 interface RelationTargetCollection {
   find(filter: Filter<unknown>): PromiseLike<Result<unknown[]>>;
@@ -12,17 +13,6 @@ export interface RelationsCollectionInternals {
     | ((name: string) => RelationTargetCollection | undefined)
     | null;
 }
-
-/**
- * Largest `$in` list the relation loader will send in one call.
- *
- * MUST NOT exceed `MAX_MEMBERSHIP_LIST_LEN` in
- * `crates/zeroship-schema/src/query.rs`, which rejects longer lists outright.
- * The two are separate constants in separate languages with no compile-time
- * link, so the ceiling is restated here rather than assumed; the regression
- * test asserts the emitted batches stay within it.
- */
-const MAX_ID_BATCH = 100;
 
 /**
  * @internal — eager-load referenced rows for each `with` key onto every
