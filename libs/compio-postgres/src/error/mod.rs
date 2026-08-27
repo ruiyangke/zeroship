@@ -334,6 +334,7 @@ enum Kind {
     Io,
     UnexpectedMessage,
     CopyOutUnsupported,
+    CopyOutAnsweredCopyIn,
     CopyInProgress,
     CopyOutProgress,
     /// A TLS problem that is settled before any handshake bytes are exchanged:
@@ -437,6 +438,11 @@ impl fmt::Display for Error {
             Kind::CopyOutUnsupported => {
                 fmt.write_str("COPY TO STDOUT is not supported by this API; use Client::copy_out")
             }
+            Kind::CopyOutAnsweredCopyIn => fmt.write_str(
+                "the server answered a COPY IN request with COPY OUT; if the statement is \
+                 COPY ... TO STDOUT use Client::copy_out, otherwise the server violated the \
+                 protocol",
+            ),
             Kind::CopyInProgress => fmt.write_str("cannot queue commands during COPY IN"),
             Kind::CopyOutProgress => fmt.write_str("cannot queue commands during COPY OUT"),
             Kind::Tls => fmt.write_str("TLS could not be negotiated"),
@@ -608,6 +614,10 @@ impl Error {
 
     pub(crate) fn copy_out_unsupported() -> Error {
         Error::new(Kind::CopyOutUnsupported, None)
+    }
+
+    pub(crate) fn copy_out_answered_copy_in() -> Error {
+        Error::new(Kind::CopyOutAnsweredCopyIn, None)
     }
 
     pub(crate) fn copy_in_progress() -> Error {
