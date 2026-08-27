@@ -596,9 +596,11 @@ pub const MAX_QUERY_LIMIT: i64 = 500;
 pub const MAX_QUERY_OFFSET: i64 = 10_000;
 pub const MAX_SEARCH_LIMIT: usize = 500;
 /// DB-11: max documents in a single `insertMany`. Bounds the multi-row SQL
-/// string + bound-param vector materialized in the worker (and stays well
-/// under Postgres' 65535-bind-param wall). Callers needing more must chunk.
+/// string and row bookkeeping materialized in the worker. Bind parameters are
+/// capped separately because this document count says nothing about row width.
 pub const MAX_INSERT_MANY_BATCH: usize = 1_000;
+const POSTGRES_MAX_BIND_PARAMETERS: usize = u16::MAX as usize;
+const SQLITE_MAX_BIND_PARAMETERS: usize = 32_766;
 const MAX_FILTER_NESTING_DEPTH: usize = 16;
 const MAX_FILTER_CLAUSE_COUNT: usize = 128;
 const MAX_MEMBERSHIP_LIST_LEN: usize = 100;
@@ -2928,6 +2930,40 @@ pub fn build_find(
     build_find_with_schema(app_id, collection, filter, limit, offset, order_by, select, None)
 }
 
+/// Build the bounded id probe used before a write fans out per matching row.
+///
+/// The caller supplies an explicit bound. `updateMany` asks for one row above
+/// [`MAX_QUERY_LIMIT`] so it can distinguish an exactly-full target set from
+/// an overflowing one; `updateOne` asks for one. This is deliberately separate
+/// from creator-facing `find`, whose public limit remains `MAX_QUERY_LIMIT`.
+pub fn build_write_target_probe(
+    app_id: &str,
+    collection: &str,
+    filter: &Value,
+    limit: i64,
+    dialect: SqlDialect,
+) -> Result<BuiltQuery, QueryError> {
+    let select = serde_json::json!(["id"]);
+    let mut built = build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceiling(
+        app_id,
+        collection,
+        filter,
+        Some(limit),
+        None,
+        None,
+        Some(&select),
+        None,
+        &[],
+        false,
+        dialect,
+        MAX_QUERY_LIMIT + 1,
+    )?;
+    if dialect == SqlDialect::Postgres {
+        built.sql.push_str(" FOR UPDATE");
+    }
+    Ok(built)
+}
+
 pub fn build_conflict_probe_with_dialect(
     app_id: &str,
     collection: &str,
@@ -3125,6 +3161,37 @@ pub fn build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
     filter_soft_deleted: bool,
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
+    build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceiling(
+        app_id,
+        collection,
+        filter,
+        limit,
+        offset,
+        order_by,
+        select,
+        schema_hint,
+        unmask_columns,
+        filter_soft_deleted,
+        dialect,
+        MAX_QUERY_LIMIT,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceiling(
+    app_id: &str,
+    collection: &str,
+    filter: &Value,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    order_by: Option<&Value>,
+    select: Option<&Value>,
+    schema_hint: Option<&Value>,
+    unmask_columns: &[String],
+    filter_soft_deleted: bool,
+    dialect: SqlDialect,
+    limit_ceiling: i64,
+) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
 
@@ -3134,7 +3201,7 @@ pub fn build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
     let mut params: Vec<String> = Vec::new();
     let where_clause = build_where_with_dialect(filter, &mut params, dialect)?;
     if let Some(lim) = limit {
-        validate_limit_bound("find.limit", lim, MAX_QUERY_LIMIT)?;
+        validate_limit_bound("find.limit", lim, limit_ceiling)?;
     }
     if let Some(off) = offset {
         validate_limit_bound("find.offset", off, MAX_QUERY_OFFSET)?;
@@ -3997,7 +4064,8 @@ pub fn build_update_one_with_system_fields(
 /// Build an INSERT query for multiple documents:
 /// `INSERT INTO "app_id"."collection" ("col1", "col2") VALUES ($1, $2), ($3, $4) RETURNING *`
 ///
-/// All docs must have the same column set (defined by the first document).
+/// Column names are unioned across documents; a missing or explicit null value
+/// is emitted as a SQL `NULL` literal and consumes no bind parameter.
 ///
 /// PG-flavour wrapper around [`build_insert_many_with_dialect`].
 pub fn build_insert_many(
@@ -4028,10 +4096,10 @@ pub fn build_insert_many_with_dialect(
         ));
     }
 
-    // DB-11: cap the batch BEFORE materializing the multi-row SQL + param vec,
-    // so one call can't slam a multi-MB statement at the shared DB or blow the
-    // worker heap. Enforced in the builder (the single choke point) so a raw
-    // `default={fetch}` deploy bypassing the SDK is bounded too.
+    // DB-11: cap the batch BEFORE materializing per-row SQL groups and params.
+    // This bounds only the document-count contribution; the non-null-cell
+    // budget below separately bounds placeholders. It makes no claim about
+    // total statement bytes. Enforced here so raw deploys cannot bypass it.
     if arr.len() > MAX_INSERT_MANY_BATCH {
         return Err(QueryError::InvalidFilter(format!(
             "insertMany batch of {} exceeds the maximum of {MAX_INSERT_MANY_BATCH}",
@@ -4060,15 +4128,23 @@ pub fn build_insert_many_with_dialect(
     // Skip every `__zsbin__*` marker key: they are a side-channel from
     // the write passes, not user-declared columns.
     let mut column_set = std::collections::BTreeSet::<&String>::new();
+    let mut bind_count = 0usize;
     for doc in arr {
         let obj = doc.as_object().ok_or_else(|| {
             QueryError::InvalidFilter("insertMany: each document must be an object".to_string())
         })?;
-        for key in obj.keys() {
+        for (key, value) in obj {
             if key.starts_with("__zsbin__") {
                 continue;
             }
             column_set.insert(key);
+            if !value.is_null() {
+                bind_count = bind_count.checked_add(1).ok_or_else(|| {
+                    QueryError::InvalidFilter(
+                        "insertMany: non-null field-value count overflowed".to_string(),
+                    )
+                })?;
+            }
         }
     }
 
@@ -4078,11 +4154,25 @@ pub fn build_insert_many_with_dialect(
         ));
     }
 
+    let (dialect_name, bind_limit) = match dialect {
+        SqlDialect::Postgres => ("PostgreSQL", POSTGRES_MAX_BIND_PARAMETERS),
+        SqlDialect::Sqlite => ("SQLite", SQLITE_MAX_BIND_PARAMETERS),
+        // MySQL's prepared-statement parameter count is also a 16-bit field.
+        // This dialect is render-only today, but keeping its builder bounded
+        // prevents a future executor from inheriting the same defect.
+        SqlDialect::Mysql => ("MySQL", POSTGRES_MAX_BIND_PARAMETERS),
+    };
+    if bind_count > bind_limit {
+        return Err(QueryError::InvalidFilter(format!(
+            "insertMany batch has {bind_count} non-null field values; one {dialect_name} insertMany call supports at most {bind_limit}; split the documents into smaller batches"
+        )));
+    }
+
     let column_names: Vec<&String> = column_set.into_iter().collect();
     let columns: Vec<String> = column_names.iter().map(|k| quote_ident(k)).collect();
 
-    let mut params: Vec<String> = Vec::new();
-    let mut value_groups: Vec<String> = Vec::new();
+    let mut params: Vec<String> = Vec::with_capacity(bind_count);
+    let mut value_groups: Vec<String> = Vec::with_capacity(arr.len());
 
     for doc in arr {
         let obj = doc.as_object().ok_or_else(|| {
@@ -6452,6 +6542,144 @@ mod tests {
         }
         let at_cap: Vec<Value> = (0..MAX_INSERT_MANY_BATCH).map(|i| json!({ "n": i })).collect();
         assert!(build_insert_many("app1", "users", &Value::Array(at_cap)).is_ok());
+    }
+
+    fn full_non_null_insert_many_batch(column_count: usize) -> Value {
+        let template: serde_json::Map<String, Value> = (0..column_count)
+            .map(|column| (format!("field_{column}"), Value::from(column)))
+            .collect();
+        Value::Array(
+            (0..MAX_INSERT_MANY_BATCH)
+                .map(|_| Value::Object(template.clone()))
+                .collect(),
+        )
+    }
+
+    fn insert_many_batch_with_exact_non_null_cells(cell_count: usize) -> Value {
+        let base_width = cell_count / MAX_INSERT_MANY_BATCH;
+        let wider_rows = cell_count % MAX_INSERT_MANY_BATCH;
+        assert!(base_width > 0, "the exact-boundary fixture must have non-empty rows");
+        Value::Array(
+            (0..MAX_INSERT_MANY_BATCH)
+                .map(|row| {
+                    let width = base_width + usize::from(row < wider_rows);
+                    let mut doc: serde_json::Map<String, Value> = (0..width)
+                        .map(|column| (format!("field_{column}"), Value::from(column)))
+                        .collect();
+                    doc.insert("explicit_null".to_string(), Value::Null);
+                    doc.insert("__zsbin__field_0".to_string(), Value::Bool(true));
+                    Value::Object(doc)
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn insert_many_full_batch_enforces_postgres_bind_limit_db11() {
+        let protocol_limit = usize::from(u16::MAX);
+        let largest_full_width = protocol_limit / MAX_INSERT_MANY_BATCH;
+        let first_rejected_width = largest_full_width + 1;
+        assert!(largest_full_width > 0, "the exercised column set must be non-empty");
+
+        let accepted = build_insert_many(
+            "app1",
+            "users",
+            &full_non_null_insert_many_batch(largest_full_width),
+        )
+        .expect("a full document batch below the PostgreSQL bind limit must build");
+        assert_eq!(
+            accepted.params.len(),
+            MAX_INSERT_MANY_BATCH * largest_full_width
+        );
+        assert!(accepted.params.len() <= protocol_limit);
+
+        let rejected = build_insert_many(
+            "app1",
+            "users",
+            &full_non_null_insert_many_batch(first_rejected_width),
+        );
+        match rejected {
+            Err(QueryError::InvalidFilter(message)) => {
+                assert!(message.contains("65535"), "{message}");
+                assert!(message.contains("non-null"), "{message}");
+                assert!(message.contains("smaller batches"), "{message}");
+                assert!(!message.contains("parameter"), "{message}");
+            }
+            Ok(query) => panic!(
+                "builder accepted {} bind parameters, above the PostgreSQL limit of {protocol_limit}",
+                query.params.len()
+            ),
+            Err(other) => panic!("expected creator-facing InvalidFilter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn insert_many_accepts_exact_postgres_bind_limit_and_rejects_next_db11() {
+        let protocol_limit = usize::from(u16::MAX);
+        let accepted_docs = insert_many_batch_with_exact_non_null_cells(protocol_limit);
+        assert_eq!(
+            accepted_docs.as_array().map(Vec::len),
+            Some(MAX_INSERT_MANY_BATCH),
+            "the exact-boundary batch must exercise the documented document cap"
+        );
+        let accepted = build_insert_many("app1", "users", &accepted_docs)
+            .expect("exactly the PostgreSQL non-null field-value limit must build");
+        assert_eq!(accepted.params.len(), protocol_limit);
+
+        let rejected_docs = insert_many_batch_with_exact_non_null_cells(protocol_limit + 1);
+        let rejected = build_insert_many("app1", "users", &rejected_docs);
+        match rejected {
+            Err(QueryError::InvalidFilter(message)) => {
+                assert!(message.contains("65536"), "{message}");
+                assert!(message.contains("at most 65535"), "{message}");
+                assert!(!message.contains("parameter"), "{message}");
+            }
+            Ok(query) => panic!(
+                "builder accepted {} non-null field values above the PostgreSQL limit",
+                query.params.len()
+            ),
+            Err(other) => panic!("expected creator-facing InvalidFilter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn insert_many_full_batch_enforces_sqlite_bind_limit_db11() {
+        let largest_full_width = SQLITE_MAX_BIND_PARAMETERS / MAX_INSERT_MANY_BATCH;
+        let first_rejected_width = largest_full_width + 1;
+        assert!(largest_full_width > 0, "the exercised column set must be non-empty");
+
+        let accepted = build_insert_many_with_dialect(
+            "app1",
+            "users",
+            &full_non_null_insert_many_batch(largest_full_width),
+            SqlDialect::Sqlite,
+        )
+        .expect("a full document batch below the SQLite bind limit must build");
+        assert_eq!(
+            accepted.params.len(),
+            MAX_INSERT_MANY_BATCH * largest_full_width
+        );
+        assert!(accepted.params.len() <= SQLITE_MAX_BIND_PARAMETERS);
+
+        let rejected = build_insert_many_with_dialect(
+            "app1",
+            "users",
+            &full_non_null_insert_many_batch(first_rejected_width),
+            SqlDialect::Sqlite,
+        );
+        match rejected {
+            Err(QueryError::InvalidFilter(message)) => {
+                assert!(message.contains("32766"), "{message}");
+                assert!(message.contains("SQLite"), "{message}");
+                assert!(message.contains("smaller batches"), "{message}");
+                assert!(!message.contains("parameter"), "{message}");
+            }
+            Ok(query) => panic!(
+                "builder accepted {} bind parameters, above the SQLite limit of {SQLITE_MAX_BIND_PARAMETERS}",
+                query.params.len()
+            ),
+            Err(other) => panic!("expected creator-facing InvalidFilter, got {other:?}"),
+        }
     }
 
     #[test]

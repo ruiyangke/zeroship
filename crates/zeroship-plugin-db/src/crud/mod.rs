@@ -617,9 +617,9 @@ pub(crate) fn dispatch_find<'s>(
     // narrow events to this filter. No-op outside `query()` handlers.
     crate::read_set::record_if_active(collection, &filter);
 
-    // DB-2: an omitted `limit` defaults to MAX_QUERY_LIMIT — never "no LIMIT"
-    // (which would stream the whole collection into the worker). Callers
-    // paginate past the first page via `offset`.
+    // DB-2: public `find` normalises an omitted limit here before calling the
+    // builder. This does not protect internal builder callers; they must pass
+    // their own explicit bound. Callers paginate past this page via `offset`.
     let limit = Some(query::effective_query_limit(
         opts.get("limit").and_then(Value::as_i64),
     ));
@@ -1023,7 +1023,7 @@ pub(crate) fn dispatch_update_one<'s>(
                 &route,
                 &coll,
                 &filter,
-                Some(1),
+                1,
             )
             .await
             {
@@ -1275,118 +1275,127 @@ pub(crate) fn dispatch_update_many<'s>(
             skip_updated_by: hints.creator_supplied_updated_by,
         };
         if per_row_encrypted_update {
-            let target_rows =
-                match write_pipeline::resolve_target_row_ids(&route, &coll, &filter, None).await {
-                    Ok(rows) => rows,
-                    Err(e) => {
-                        return OpResult::JsValue {
-                            resolver,
-                            value: ResolveValue::RejectError(e.to_op_error()),
-                            request_id,
-                        };
-                    }
-                };
-            if target_rows.is_empty() {
-                if let Some(expected_version) = cas_version {
-                    let row_id = filter
-                        .as_object()
-                        .and_then(|o| o.get("id"))
-                        .and_then(|v| v.as_str());
-                    return OpResult::JsValue {
-                        resolver,
-                        value: ResolveValue::RejectError(
-                            DbError::version_mismatch(&coll, row_id, expected_version)
-                                .to_op_error(),
-                        ),
-                        request_id,
-                    };
-                }
-                return OpResult::JsValue {
-                    resolver,
-                    value: usize_count_as_f64(0),
-                    request_id,
-                };
-            }
-
-            let update = update;
-            let mut affected = 0usize;
-            for target_row in &target_rows {
-                let row_pk = target_row.row_pk.clone();
-                let row_id = target_row.id_value.clone();
-                let mut row_update = update.clone();
-                if let Err(e) = write_pipeline::apply(
-                    &binding,
-                    &coll,
-                    &mut row_update,
-                    write_pipeline::ApplyMode::Update {
-                        row_pk: &row_pk,
-                    },
-                )
-                .await
-                {
+            let frame = match crate::transaction::AtomicWriteFrame::begin(route).await {
+                Ok(frame) => frame,
+                Err(e) => {
                     return OpResult::JsValue {
                         resolver,
                         value: ResolveValue::RejectError(e.to_op_error()),
                         request_id,
                     };
                 }
-                maybe_lower_sqlite_boolean_update(&app, &coll, &mut row_update);
-                let mut row_filter = serde_json::json!({ "id": row_id });
-                if let Some(expected_version) = cas_version {
-                    row_filter["version"] = Value::from(expected_version);
-                }
-                let built = query::build_update_one_with_system_fields(
-                    &app,
+            };
+            let work_result: Result<usize, DbError> = async {
+                let target_rows = write_pipeline::resolve_target_row_ids(
+                    frame.route(),
                     &coll,
-                    &row_filter,
-                    &row_update,
-                    current_sql_dialect(),
-                    &autobump,
-                );
-                let bq = match built {
-                    Ok(bq) => bq,
-                    Err(e) => {
-                        return OpResult::JsValue {
-                            resolver,
-                            value: ResolveValue::RejectError(DbError::from(e).to_op_error()),
-                            request_id,
-                        };
-                    }
-                };
-                match exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update)
-                    .await
-                {
-                    Ok(rows) => affected += rows.len(),
-                    Err(e) => {
-                        return OpResult::JsValue {
-                            resolver,
-                            value: ResolveValue::RejectError(e.to_op_error()),
-                            request_id,
-                        };
-                    }
-                }
-            }
-
-            if let Some(expected_version) = cas_version {
-                if affected == 0 {
-                    let row_id = filter
-                        .as_object()
-                        .and_then(|o| o.get("id"))
-                        .and_then(|v| v.as_str());
-                    return OpResult::JsValue {
-                        resolver,
-                        value: ResolveValue::RejectError(
-                            DbError::version_mismatch(&coll, row_id, expected_version)
-                                .to_op_error(),
+                    &filter,
+                    query::MAX_QUERY_LIMIT + 1,
+                )
+                .await?;
+                let target_limit = usize::try_from(query::MAX_QUERY_LIMIT)
+                    .expect("MAX_QUERY_LIMIT must be a positive usize");
+                if target_rows.len() > target_limit {
+                    return Err(DbError::validation_hinted(
+                        "update_many_target_limit_exceeded",
+                        format!(
+                            "updateMany matched more than {} rows; the maximum is {}",
+                            query::MAX_QUERY_LIMIT,
+                            query::MAX_QUERY_LIMIT
                         ),
-                        request_id,
-                    };
+                        format!(
+                            "Narrow the updateMany filter so one call targets at most {} rows.",
+                            query::MAX_QUERY_LIMIT
+                        ),
+                    ));
                 }
+                if target_rows.is_empty() {
+                    if let Some(expected_version) = cas_version {
+                        let row_id = filter
+                            .as_object()
+                            .and_then(|o| o.get("id"))
+                            .and_then(|v| v.as_str());
+                        return Err(DbError::version_mismatch(
+                            &coll,
+                            row_id,
+                            expected_version,
+                        ));
+                    }
+                    return Ok(0);
+                }
+
+                let target_count = target_rows.len();
+                let mut row_queries = Vec::with_capacity(target_count);
+                for target_row in &target_rows {
+                    let row_pk = target_row.row_pk.clone();
+                    let row_id = target_row.id_value.clone();
+                    let mut row_update = update.clone();
+                    write_pipeline::apply(
+                        &binding,
+                        &coll,
+                        &mut row_update,
+                        write_pipeline::ApplyMode::Update {
+                            row_pk: &row_pk,
+                        },
+                    )
+                    .await?;
+                    maybe_lower_sqlite_boolean_update(&app, &coll, &mut row_update);
+                    let mut row_filter = serde_json::json!({ "id": row_id });
+                    if let Some(expected_version) = cas_version {
+                        row_filter["version"] = Value::from(expected_version);
+                    }
+                    row_queries.push(
+                        query::build_update_one_with_system_fields(
+                            &app,
+                            &coll,
+                            &row_filter,
+                            &row_update,
+                            current_sql_dialect(),
+                            &autobump,
+                        )
+                        .map_err(DbError::from)?,
+                    );
+                }
+
+                let mut affected = 0usize;
+                for built in row_queries {
+                    affected += exec_mutation_with_emit(
+                        built,
+                        frame.route(),
+                        &coll,
+                        crate::broker::ChangeOp::Update,
+                    )
+                    .await?
+                    .len();
+                }
+
+                if let Some(expected_version) = cas_version {
+                    if affected != target_count {
+                        let row_id = filter
+                            .as_object()
+                            .and_then(|o| o.get("id"))
+                            .and_then(|v| v.as_str());
+                        return Err(DbError::version_mismatch(
+                            &coll,
+                            row_id,
+                            expected_version,
+                        ));
+                    }
+                }
+                Ok(affected)
             }
-            return OpResult::JsValue {
-                resolver,
-                value: usize_count_as_f64(affected),
-                request_id,
+            .await;
+            return match frame.finish(work_result).await {
+                Ok(affected) => OpResult::JsValue {
+                    resolver,
+                    value: usize_count_as_f64(affected),
+                    request_id,
+                },
+                Err(e) => OpResult::JsValue {
+                    resolver,
+                    value: ResolveValue::RejectError(e.to_op_error()),
+                    request_id,
+                },
             };
         }
 
