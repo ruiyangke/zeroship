@@ -63,12 +63,65 @@ impl Encryption {
 /// startup or authentication failure must NOT be retried in the clear, or a
 /// mistyped password would be re-sent unencrypted on the second attempt.
 pub(crate) async fn negotiate_tls<S, T>(
+    stream: S,
+    encryption: Encryption,
+    mode: SslMode,
+    negotiation: SslNegotiation,
+    tls: T,
+    has_hostname: bool,
+) -> Result<MaybeTlsStream<S, T::Stream>, Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    T: TlsConnect<S>,
+{
+    negotiate_tls_inner(
+        stream,
+        encryption,
+        mode,
+        negotiation,
+        tls,
+        has_hostname,
+        mode == SslMode::Prefer,
+    )
+    .await
+}
+
+/// Negotiate a transport that was already selected by an earlier connection.
+/// Unlike [`negotiate_tls`], an unavailable TLS transport is never converted
+/// to plaintext: callers use this to replay an actually encrypted session.
+pub(crate) async fn negotiate_tls_exact<S, T>(
+    stream: S,
+    encryption: Encryption,
+    mode: SslMode,
+    negotiation: SslNegotiation,
+    tls: T,
+    has_hostname: bool,
+) -> Result<MaybeTlsStream<S, T::Stream>, Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    T: TlsConnect<S>,
+{
+    negotiate_tls_inner(
+        stream,
+        encryption,
+        mode,
+        negotiation,
+        tls,
+        has_hostname,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn negotiate_tls_inner<S, T>(
     mut stream: S,
     encryption: Encryption,
     mode: SslMode,
     negotiation: SslNegotiation,
     tls: T,
     has_hostname: bool,
+    permit_plaintext: bool,
 ) -> Result<MaybeTlsStream<S, T::Stream>, Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -83,10 +136,20 @@ where
     // Answering impossible cases here rather than after `SSLRequest` also
     // keeps the wire quiet.
     if !tls.can_connect(ForcePrivateApi) {
-        return unavailable(stream, mode, "no TLS connector is configured");
+        return unavailable(
+            stream,
+            mode,
+            permit_plaintext,
+            "no TLS connector is configured",
+        );
     }
     if !has_hostname && mode == SslMode::VerifyFull {
-        return unavailable(stream, mode, "no hostname provided for sslmode=verify-full");
+        return unavailable(
+            stream,
+            mode,
+            permit_plaintext,
+            "no hostname provided for sslmode=verify-full",
+        );
     }
 
     if negotiation == SslNegotiation::Postgres {
@@ -112,12 +175,17 @@ where
             // Accepted.
             b'S' => {}
             // Refused. The socket is still in a known state - one byte
-            // consumed, nothing else sent - so a mode that permits plaintext
-            // continues the startup on THIS connection. libpq does the same
-            // (`ENCRYPTION_NEGOTIATION_FAILED` returning `CONNECTION_MADE`);
-            // no reconnect is needed and none is done.
+            // consumed, nothing else sent. `prefer` can continue the startup
+            // on THIS connection because TLS was its first attempt. `allow`
+            // reaches this point only after its plaintext attempt failed, so
+            // another plaintext startup would repeat an exhausted method.
             b'N' => {
-                return unavailable(stream, mode, "server does not support SSL");
+                return unavailable(
+                    stream,
+                    mode,
+                    permit_plaintext,
+                    "server does not support SSL",
+                );
             }
             // A server error during the SSL exchange is fatal in every mode,
             // including the ones that permit plaintext. libpq deliberately does
@@ -366,6 +434,76 @@ mod tests {
         assert_eq!(rest, b"BackendMessages", "the socket must still be usable");
     }
 
+    /// `allow` has already tried plaintext by the time its TLS leg sends an
+    /// `SSLRequest`. A refusal therefore exhausts the mode; returning the raw
+    /// second socket would send a second plaintext StartupMessage, which
+    /// libpq's encryption-method state machine never does.
+    #[compio::test]
+    async fn allow_tls_refusal_does_not_send_a_second_plaintext_startup() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = compio::runtime::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let compio::BufResult(result, request) = socket.read_exact(vec![0u8; 8]).await;
+            result.unwrap();
+            assert_eq!(u32::from_be_bytes(request[..4].try_into().unwrap()), 8);
+            assert_eq!(
+                u32::from_be_bytes(request[4..].try_into().unwrap()),
+                80_877_103
+            );
+
+            let compio::BufResult(result, _) = socket.write_all(vec![b'N']).await;
+            result.unwrap();
+            socket.flush().await.unwrap();
+
+            let compio::BufResult(result, bytes) = socket.read(vec![0u8; 1]).await;
+            match result {
+                Ok(0) => None,
+                Ok(read) => Some(bytes[..read].to_vec()),
+                Err(error) => panic!("read after SSL refusal failed: {error}"),
+            }
+        });
+
+        let result = negotiate_tls(
+            TcpStream::connect(addr).await.unwrap(),
+            Encryption::Tls,
+            SslMode::Allow,
+            SslNegotiation::Postgres,
+            PassthroughTls {
+                negotiated_alpn_protocol: None,
+            },
+            true,
+        )
+        .await;
+
+        // If the pre-fix implementation hands this socket back as plaintext,
+        // drive the returned stream exactly as the startup path would. This
+        // makes the regression assert the bytes on the peer, not just an enum.
+        let result = match result {
+            Ok(MaybeTlsStream::Raw(mut stream)) => {
+                let mut startup = BytesMut::new();
+                frontend::startup_message([("user", "postgres")], &mut startup).unwrap();
+                let compio::BufResult(write, _) = stream.write_all(startup.to_vec()).await;
+                write.unwrap();
+                stream.flush().await.unwrap();
+                drop(stream);
+                Ok(())
+            }
+            Ok(MaybeTlsStream::Tls(_)) => panic!("the server refused TLS"),
+            Err(error) => Err(error),
+        };
+
+        let observed = server.await.expect("scripted server task");
+        assert_eq!(
+            observed, None,
+            "a second plaintext StartupMessage reached the server after its SSL refusal"
+        );
+        assert!(
+            result.is_err(),
+            "sslmode=allow repeated plaintext after its first plaintext leg failed"
+        );
+    }
+
     /// The same refusal under a mode that requires TLS is an error, and there
     /// is no arm in which it is not.
     #[compio::test]
@@ -509,15 +647,19 @@ mod tests {
     }
 }
 
-/// TLS could not be used on this attempt. Continue in plaintext if the mode
-/// allows it; otherwise report why, in libpq's words.
+/// TLS could not be used on this attempt. Continue in plaintext only when TLS
+/// was the mode's first offer; otherwise report why.
 ///
-/// This is the single place the "may I downgrade?" question is asked, and it
-/// asks it of [`SslMode::permits_plaintext`] - the set membership, not a list
-/// of mode names. `require`, `verify-ca` and `verify-full` cannot reach the
-/// `Ok` arm.
-fn unavailable<S, T>(stream: S, mode: SslMode, why: &str) -> Result<MaybeTlsStream<S, T>, Error> {
-    if mode.permits_plaintext() {
+/// `prefer` is the only TLS-first mode with a plaintext method remaining.
+/// `allow` also permits plaintext, but it offers that method first and reaches
+/// this function's TLS failure paths only on its second and final leg.
+fn unavailable<S, T>(
+    stream: S,
+    mode: SslMode,
+    permit_plaintext: bool,
+    why: &str,
+) -> Result<MaybeTlsStream<S, T>, Error> {
+    if permit_plaintext {
         Ok(MaybeTlsStream::Raw(stream))
     } else {
         Err(Error::tls(

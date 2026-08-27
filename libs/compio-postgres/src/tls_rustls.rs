@@ -71,7 +71,7 @@ use rustls::{
 };
 use sha1::Digest as _;
 use x509_parser::asn1_rs::{Any, Class, Tag, ToDer};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::Error;
 use crate::config::{Config, SslCertMode, SslMode, SslProtocolVersion, SslRootCert};
@@ -477,13 +477,56 @@ impl KeyProvider for ZeroizingAwsLcKeyProvider {
 
 static ZEROIZING_AWS_LC_KEY_PROVIDER: ZeroizingAwsLcKeyProvider = ZeroizingAwsLcKeyProvider;
 
+fn read_private_key_file(key_path: &str) -> Result<Zeroizing<Vec<u8>>, Error> {
+    use std::io::Read as _;
+
+    let mut file = std::fs::File::open(key_path).map_err(|error| {
+        Error::tls(format!("sslkey={key_path}: cannot read PEM: {error}").into())
+    })?;
+    let metadata = file.metadata().map_err(|error| {
+        Error::tls(format!("sslkey={key_path}: cannot inspect private key file: {error}").into())
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(Error::tls(
+            format!("sslkey={key_path}: private key is not a regular file").into(),
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+
+        // libpq permits root-owned system keys to be group-readable, but a
+        // key with any other owner must have no group or world access. The
+        // file handle and its metadata stay together so a path replacement
+        // cannot make us parse a different, unchecked key.
+        let forbidden = if metadata.uid() == 0 { 0o037 } else { 0o077 };
+        if metadata.mode() & forbidden != 0 {
+            return Err(Error::tls(
+                format!(
+                    "sslkey={key_path}: private key has group or world access; use permissions \
+                     0600 or less, or 0640 or less for a root-owned key"
+                )
+                .into(),
+            ));
+        }
+    }
+
+    let mut pem = Zeroizing::new(Vec::new());
+    file.read_to_end(&mut pem).map_err(|error| {
+        Error::tls(format!("sslkey={key_path}: cannot read PEM: {error}").into())
+    })?;
+    Ok(pem)
+}
+
 /// Load a private key without letting the presence of `sslpassword` change the
 /// meaning of an ordinary plaintext key.
 fn private_key_from_config(
     key_path: &str,
     password: Option<&[u8]>,
 ) -> Result<PrivateKeyDer<'static>, Error> {
-    let unencrypted_error = match PrivateKeyDer::from_pem_file(key_path) {
+    let pem = read_private_key_file(key_path)?;
+    let unencrypted_error = match PrivateKeyDer::from_pem_slice(&pem) {
         Ok(key) => return Ok(key),
         Err(error) => error,
     };
@@ -492,7 +535,7 @@ fn private_key_from_config(
     // Parse only that one additional label here; malformed plaintext keys must
     // retain the existing rustls PEM error instead of being misreported as a
     // bad passphrase.
-    let pem = match std::fs::read_to_string(key_path) {
+    let pem_text = match std::str::from_utf8(&pem) {
         Ok(pem) => pem,
         Err(_) => {
             return Err(Error::tls(
@@ -500,7 +543,7 @@ fn private_key_from_config(
             ));
         }
     };
-    let (label, encrypted_document) = match SecretDocument::from_pem(&pem) {
+    let (label, encrypted_document) = match SecretDocument::from_pem(pem_text) {
         Ok(document) => document,
         Err(_) => {
             return Err(Error::tls(
@@ -1374,38 +1417,100 @@ impl<S: AsyncRead + AsyncWrite + Unpin + 'static> TlsStream for RustlsStream<S> 
 /// `be_tls_get_certificate_hash`, which reads the same OID and applies the same
 /// MD5/SHA-1 upgrade.
 ///
-/// Returns `None` when the signature algorithm names no hash we can reproduce -
-/// RSASSA-PSS (whose hash lives in the algorithm parameters, not the OID) and
-/// Ed25519 are the realistic cases. `None` propagates to
-/// `ChannelBinding::none()`, so `channel_binding=require` fails loudly instead
-/// of authenticating against a hash the server did not compute. PostgreSQL
-/// refuses those certificates for channel binding too, so the two sides agree
-/// that the connection has no binding.
+/// Returns `None` when the signature algorithm names no hash we can reproduce.
+/// `None` propagates to `ChannelBinding::none()`, so
+/// `channel_binding=require` fails loudly instead of authenticating against a
+/// hash the server did not compute. Ed25519 is the common case: its signature
+/// algorithm does not identify a standalone digest.
 fn tls_server_end_point(cert: &CertificateDer<'_>) -> Option<Vec<u8>> {
-    use sha2::Digest;
+    use sha2::Digest as _;
+
+    #[derive(Clone, Copy)]
+    enum Digest {
+        Sha224,
+        Sha256,
+        Sha384,
+        Sha512,
+        Sha512_224,
+        Sha512_256,
+    }
+
+    impl Digest {
+        fn for_hash_oid(oid: &str) -> Option<Digest> {
+            match oid {
+                // SHA-1 is upgraded by RFC 5929 section 4.1.
+                "1.3.14.3.2.26" => Some(Digest::Sha256),
+                "2.16.840.1.101.3.4.2.4" => Some(Digest::Sha224),
+                "2.16.840.1.101.3.4.2.1" => Some(Digest::Sha256),
+                "2.16.840.1.101.3.4.2.2" => Some(Digest::Sha384),
+                "2.16.840.1.101.3.4.2.3" => Some(Digest::Sha512),
+                "2.16.840.1.101.3.4.2.5" => Some(Digest::Sha512_224),
+                "2.16.840.1.101.3.4.2.6" => Some(Digest::Sha512_256),
+                _ => None,
+            }
+        }
+
+        fn hash(self, der: &[u8]) -> Vec<u8> {
+            match self {
+                Digest::Sha224 => sha2::Sha224::digest(der).to_vec(),
+                Digest::Sha256 => sha2::Sha256::digest(der).to_vec(),
+                Digest::Sha384 => sha2::Sha384::digest(der).to_vec(),
+                Digest::Sha512 => sha2::Sha512::digest(der).to_vec(),
+                Digest::Sha512_224 => sha2::Sha512_224::digest(der).to_vec(),
+                Digest::Sha512_256 => sha2::Sha512_256::digest(der).to_vec(),
+            }
+        }
+    }
 
     let (_, parsed) = x509_parser::parse_x509_certificate(cert.as_ref()).ok()?;
-    // Dotted OIDs, checked against RFC 8017 A.2.4 (RSA PKCS#1 v1.5), RFC 5758
-    // (ECDSA, DSA) and RFC 5754 (SHA-2). MD5/SHA-1 signatures map to SHA-256
-    // per RFC 5929 4.1.
-    let der = cert.as_ref();
-    match parsed.signature_algorithm.algorithm.to_id_string().as_str() {
-        // md5WithRSAEncryption, sha1WithRSAEncryption, sha256WithRSAEncryption
-        "1.2.840.113549.1.1.4" | "1.2.840.113549.1.1.5" | "1.2.840.113549.1.1.11"
-        // id-dsa-with-sha1, ecdsa-with-SHA1, ecdsa-with-SHA256
-        | "1.2.840.10040.4.3" | "1.2.840.10045.4.1" | "1.2.840.10045.4.3.2"
-        // dsa-with-sha256
-        | "2.16.840.1.101.3.4.3.2" => Some(sha2::Sha256::digest(der).to_vec()),
-        // sha384WithRSAEncryption, ecdsa-with-SHA384
-        "1.2.840.113549.1.1.12" | "1.2.840.10045.4.3.3" => {
-            Some(sha2::Sha384::digest(der).to_vec())
+    let signature_oid = parsed.signature_algorithm.algorithm.to_id_string();
+    let digest = if signature_oid == "1.2.840.113549.1.1.10" {
+        // RSASSA-PSS carries its digest in AlgorithmIdentifier parameters. This
+        // is the equivalent of libpq's X509_get_signature_info path; treating
+        // the outer OID as the whole algorithm loses the binding.
+        match x509_parser::signature_algorithm::SignatureAlgorithm::try_from(
+            &parsed.signature_algorithm,
+        )
+        .ok()?
+        {
+            x509_parser::signature_algorithm::SignatureAlgorithm::RSASSA_PSS(parameters) => {
+                Digest::for_hash_oid(&parameters.hash_algorithm_oid().to_id_string())?
+            }
+            _ => return None,
         }
-        // sha512WithRSAEncryption, ecdsa-with-SHA512
-        "1.2.840.113549.1.1.13" | "1.2.840.10045.4.3.4" => {
-            Some(sha2::Sha512::digest(der).to_vec())
+    } else {
+        // Dotted OIDs from RFC 8017 (RSA), RFC 5758 (ECDSA/DSA), and RFC 5754
+        // (SHA-2). MD5 and SHA-1 signatures map to SHA-256 per RFC 5929.
+        match signature_oid.as_str() {
+            // md5WithRSAEncryption, sha1WithRSAEncryption, id-dsa-with-sha1,
+            // ecdsa-with-SHA1, sha256WithRSAEncryption, ecdsa-with-SHA256,
+            // dsa-with-sha256.
+            "1.2.840.113549.1.1.4"
+            | "1.2.840.113549.1.1.5"
+            | "1.2.840.10040.4.3"
+            | "1.2.840.10045.4.1"
+            | "1.2.840.113549.1.1.11"
+            | "1.2.840.10045.4.3.2"
+            | "2.16.840.1.101.3.4.3.2" => Digest::Sha256,
+            // sha224WithRSAEncryption, ecdsa-with-SHA224, dsa-with-sha224.
+            "1.2.840.113549.1.1.14" | "1.2.840.10045.4.3.1" | "2.16.840.1.101.3.4.3.1" => {
+                Digest::Sha224
+            }
+            // sha384WithRSAEncryption, ecdsa-with-SHA384, dsa-with-sha384.
+            "1.2.840.113549.1.1.12" | "1.2.840.10045.4.3.3" | "2.16.840.1.101.3.4.3.3" => {
+                Digest::Sha384
+            }
+            // sha512WithRSAEncryption, ecdsa-with-SHA512, dsa-with-sha512.
+            "1.2.840.113549.1.1.13" | "1.2.840.10045.4.3.4" | "2.16.840.1.101.3.4.3.4" => {
+                Digest::Sha512
+            }
+            "1.2.840.113549.1.1.15" => Digest::Sha512_224,
+            "1.2.840.113549.1.1.16" => Digest::Sha512_256,
+            _ => return None,
         }
-        _ => None,
-    }
+    };
+
+    Some(digest.hash(cert.as_ref()))
 }
 
 #[cfg(test)]
@@ -1488,6 +1593,51 @@ mod tests {
         assert!(
             key_log.file.lock().expect("lock key-log file").is_none(),
             "the fixture write did not fail, so the warning path never ran"
+        );
+    }
+
+    #[cfg(unix)]
+    fn generated_sslkey(mode: u32) -> tempfile::NamedTempFile {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let issued = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("generate a private key fixture");
+        let mut key = tempfile::NamedTempFile::new().expect("create a private key fixture");
+        key.write_all(issued.signing_key.serialize_pem().as_bytes())
+            .expect("write the private key fixture");
+        std::fs::set_permissions(key.path(), std::fs::Permissions::from_mode(mode))
+            .expect("set private key fixture permissions");
+        key
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sslkey_permissions_allow_a_private_file() {
+        let key = generated_sslkey(0o600);
+        private_key_from_config(key.path().to_str().unwrap(), None)
+            .expect("a 0600 private key must load");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sslkey_permissions_reject_group_or_world_access() {
+        let key = generated_sslkey(0o644);
+        let error = private_key_from_config(key.path().to_str().unwrap(), None)
+            .expect_err("a 0644 private key exposes its client identity");
+        let chain = std::iter::successors(std::error::Error::source(&error), |error| {
+            std::error::Error::source(*error)
+        })
+        .fold(format!("{error}"), |chain, error| {
+            format!("{chain}: {error}")
+        });
+        assert!(
+            chain.contains("sslkey="),
+            "the error must name sslkey: {chain}"
+        );
+        assert!(
+            chain.contains("group or world access"),
+            "the error must name the unsafe permissions: {chain}"
         );
     }
 
@@ -1723,6 +1873,38 @@ mod tests {
             };
             assert_eq!(hash, std::mem::take(&mut expected));
         }
+    }
+
+    fn endpoint_hash_fixture(pem: &str) -> (CertificateDer<'static>, Vec<u8>) {
+        let cert = CertificateDer::from_pem_slice(pem.as_bytes()).expect("parse certificate PEM");
+        let hash = tls_server_end_point(&cert).expect("certificate signature names a digest");
+        (cert, hash)
+    }
+
+    /// The control for the two libpq digest cases below. It must remain green
+    /// when their new selection arms are removed, proving the shared filter
+    /// still runs a known working certificate.
+    #[test]
+    fn end_point_hash_libpq_digest_sha256_control() {
+        let (cert, hash) = endpoint_hash_fixture(include_str!("../tests/data/sha256_cert.pem"));
+        assert_eq!(hash, sha2::Sha256::digest(cert.as_ref()).to_vec());
+    }
+
+    #[test]
+    fn end_point_hash_libpq_digest_rsa_pss_sha256() {
+        let (cert, hash) =
+            endpoint_hash_fixture(include_str!("../tests/data/rsa_pss_sha256_cert.pem"));
+        assert_eq!(
+            hash,
+            sha2::Sha256::digest(cert.as_ref()).to_vec(),
+            "RSASSA-PSS must take SHA-256 from its AlgorithmIdentifier parameters"
+        );
+    }
+
+    #[test]
+    fn end_point_hash_libpq_digest_rsa_sha224() {
+        let (cert, hash) = endpoint_hash_fixture(include_str!("../tests/data/rsa_sha224_cert.pem"));
+        assert_eq!(hash, sha2::Sha224::digest(cert.as_ref()).to_vec());
     }
 
     /// An Ed25519 certificate names no hash in its signature OID. We must
