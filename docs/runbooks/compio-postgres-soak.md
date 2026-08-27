@@ -440,6 +440,26 @@ this path and the query waits for as long as the freeze lasts - which is the
 correct behaviour for a driver told to wait indefinitely, and is why the
 parameter exists.
 
+RE-MEASURED 2026-08-27 at `8b4022269`, same 5s bound:
+
+```text
+PROBE query ended after 5.000447224s is_closed=true err=socket read timeout expired
+PROBE live_connections=0
+```
+
+0.45ms over the bound against 0.47ms the previous day - unchanged. That
+re-measurement exists because `e87aa8d04` put an EINTR RETRY LOOP inside
+`read_with_deadline`, and the obvious way to write one resets the clock on each
+retry, so a timeout would fire late or never. A scripted peer cannot show that;
+only a real frozen server puts the loop under a deadline it must not restart.
+
+USE A PORT NO CONTAINER ALREADY PUBLISHES, and check with
+`docker ps -a --format '{{.Ports}}'`, not only `ss -ltn`. On 2026-08-27 port
+5462 looked free by socket state but belonged to another project's
+`zs-dbbind-pg`; docker refused the bind, which is the only reason this section's
+`docker pause` did not freeze a stranger's database mid-session. A published
+port is held by the container whether or not anything is listening right now.
+
 ## Chaos: a healthy server with no connection slots left
 
 The third shape, and the one a platform running many apps against one
@@ -466,6 +486,26 @@ Refused in half a second rather than hanging, the CAUSE names the real reason
 rather than a generic failure, and the server served again as soon as the
 slots freed. Read the chain, not the top line: `Error`'s own `Display` is the
 terse `db error` by design, and the actionable text is in the source.
+
+RE-MEASURED 2026-08-27 at `526ba9e5f`, after ~52 merged fixes to error and
+retirement paths:
+
+```text
+EX held=15 then refused: db error
+EX pool build refused after 504.742721ms: db error | FATAL: sorry, too many clients already
+EX recovered: SELECT 42 = 42, live=2
+```
+
+504.74ms against 505.33ms the previous day, the same FATAL still in the chain,
+and recovery once the slots freed. `live=2` rather than `1` is the probe asking
+for a two-connection pool, not a behaviour change - state what the probe asked
+for when quoting a live count.
+
+That the FATAL is still reachable through the chain is the useful part. Two
+sweeps spent that week making the driver prefer a server diagnosis over a local
+symptom, and this is the shape where a regression would be invisible: the pool
+refuses either way, and only the CAUSE distinguishes "the server is full" from
+"something went wrong".
 
 ## Limits of the measurement
 

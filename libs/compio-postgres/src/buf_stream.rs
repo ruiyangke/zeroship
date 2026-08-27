@@ -268,50 +268,82 @@ where
     R: AsyncRead + Unpin,
     B: IoBufMut,
 {
-    let Some(deadline) = deadline else {
-        return Ok(reader.read(buffer).await);
-    };
+    if let Some(deadline) = deadline {
+        deadline.begin_read();
+    }
+    let _registration = deadline.map(ReaderRegistration);
+    let mut buffer = buffer;
 
-    deadline.begin_read();
-    let _registration = ReaderRegistration(deadline);
-    let mut read = std::pin::pin!(reader.read(buffer));
-    let mut timer: Option<Pin<Box<dyn Future<Output = ()>>>> = None;
-    let mut timer_for = None;
+    loop {
+        let BufResult(result, returned) = if let Some(deadline) = deadline {
+            let mut read = std::pin::pin!(reader.read(buffer));
+            let mut timer: Option<Pin<Box<dyn Future<Output = ()>>>> = None;
+            let mut timer_for = None;
 
-    poll_fn(|cx| {
-        // Bytes win a same-poll race with the clock, matching
-        // compio::time::timeout and treating real socket progress as progress.
-        if let Poll::Ready(result) = read.as_mut().poll(cx) {
-            deadline.finish_read();
-            return Poll::Ready(Ok(result));
-        }
+            poll_fn(|cx| {
+                // Bytes win a same-poll race with the clock, matching
+                // compio::time::timeout and treating real socket progress as progress.
+                if let Poll::Ready(result) = read.as_mut().poll(cx) {
+                    return Poll::Ready(Ok(result));
+                }
 
-        // The protocol loop may add an obligation to a read that began while
-        // idle, or finish the last one at ReadyForQuery / CopyInResponse.
-        // Retain the submitted read in both cases: cancelling it merely to
-        // change clocks could discard bytes and desynchronise a connection
-        // that was otherwise healthy.
-        deadline.register_reader(cx.waker());
-        let current = deadline.current();
-        if current != timer_for {
-            timer = current.map(|at| {
-                Box::pin(compio::time::sleep_until(at)) as Pin<Box<dyn Future<Output = ()>>>
-            });
-            timer_for = current;
-        }
+                // The protocol loop may add an obligation to a read that began while
+                // idle, or finish the last one at ReadyForQuery / CopyInResponse.
+                // Retain the submitted read in both cases: cancelling it merely to
+                // change clocks could discard bytes and desynchronise a connection
+                // that was otherwise healthy.
+                deadline.register_reader(cx.waker());
+                let current = deadline.current();
+                if current != timer_for {
+                    timer = current.map(|at| {
+                        Box::pin(compio::time::sleep_until(at)) as Pin<Box<dyn Future<Output = ()>>>
+                    });
+                    timer_for = current;
+                }
 
-        if let Some(timer) = timer.as_mut()
-            && timer.as_mut().poll(cx).is_ready()
+                if let Some(timer) = timer.as_mut()
+                    && timer.as_mut().poll(cx).is_ready()
+                {
+                    // This is the sole intentional cancellation of an in-flight read.
+                    // A partial completion cannot be resumed, so the caller receives a
+                    // terminal error and Connection::run retires the protocol session.
+                    return Poll::Ready(Err(Error::read_timeout(deadline.timeout())));
+                }
+
+                Poll::Pending
+            })
+            .await?
+        } else {
+            reader.read(buffer).await
+        };
+
+        if result
+            .as_ref()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::Interrupted)
         {
-            // This is the sole intentional cancellation of an in-flight read.
-            // A partial completion cannot be resumed, so the caller receives a
-            // terminal error and Connection::run retires the protocol session.
-            return Poll::Ready(Err(Error::read_timeout(deadline.timeout())));
+            // Interrupted promises that this operation made no progress. Keep
+            // the same owned buffer and, when armed, the same absolute read
+            // deadline; reporting it would retire a still-aligned session.
+            buffer = returned;
+            continue;
         }
+        if let Some(deadline) = deadline {
+            deadline.finish_read();
+        }
+        return Ok(BufResult(result, returned));
+    }
+}
 
-        Poll::Pending
-    })
-    .await
+async fn flush_retry_interrupted<W>(writer: &mut W) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    loop {
+        match writer.flush().await {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            result => return result,
+        }
+    }
 }
 
 /// Buffered read/write stream over any compio `AsyncRead + AsyncWrite`.
@@ -471,7 +503,9 @@ where
         }
         let data = self.write_buf.split();
         self.write_all_raw(data).await?;
-        self.inner.flush().await.map_err(Error::io)?;
+        flush_retry_interrupted(&mut self.inner)
+            .await
+            .map_err(Error::io)?;
         Ok(())
     }
 
@@ -666,7 +700,9 @@ where
         let data = self.write_buf.split();
         let BufResult(result, _) = self.inner.write_all(data).await;
         result.map_err(Error::io)?;
-        self.inner.flush().await.map_err(Error::io)?;
+        flush_retry_interrupted(&mut self.inner)
+            .await
+            .map_err(Error::io)?;
         Ok(())
     }
 
@@ -790,6 +826,86 @@ mod tests {
 
     struct UnsplitIo;
 
+    struct InterruptOnceReader {
+        reads: usize,
+    }
+
+    struct InterruptThenObserveDeadline {
+        reads: usize,
+        deadline: ReadDeadline,
+        sentinel: Instant,
+        observed: Rc<Cell<Option<Instant>>>,
+    }
+
+    struct InterruptOnceWriter {
+        flushes: usize,
+    }
+
+    impl AsyncRead for InterruptOnceReader {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            self.reads += 1;
+            if self.reads == 1 {
+                BufResult(
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "scripted interrupted read",
+                    )),
+                    buf,
+                )
+            } else {
+                BufResult(Ok(1), buf)
+            }
+        }
+    }
+
+    impl AsyncRead for InterruptThenObserveDeadline {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            self.reads += 1;
+            if self.reads == 1 {
+                self.deadline.inner.deadline.set(Some(self.sentinel));
+                BufResult(
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "scripted interrupted read",
+                    )),
+                    buf,
+                )
+            } else {
+                self.observed.set(self.deadline.current());
+                BufResult(Ok(1), buf)
+            }
+        }
+    }
+
+    impl AsyncRead for InterruptOnceWriter {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            BufResult(Ok(0), buf)
+        }
+    }
+
+    impl AsyncWrite for InterruptOnceWriter {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            let len = buf.buf_len();
+            BufResult(Ok(len), buf)
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            self.flushes += 1;
+            if self.flushes == 1 {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "scripted interrupted flush",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     impl AsyncRead for UnsplitIo {
         async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
             BufResult(Ok(0), buf)
@@ -834,6 +950,73 @@ mod tests {
         })
         .await
         .expect("same-poll read/deadline test exceeded its watchdog");
+    }
+
+    #[compio::test]
+    async fn one_interrupted_read_is_retried_on_idle_and_timed_paths() {
+        for timed in [false, true] {
+            let deadline = ReadDeadline::new(Duration::from_secs(1));
+            if timed {
+                deadline.begin_response();
+            }
+            let mut reader = InterruptOnceReader { reads: 0 };
+
+            let BufResult(result, _) =
+                read_with_deadline(&mut reader, vec![0u8; 1], timed.then_some(&deadline))
+                    .await
+                    .expect("the read-deadline layer failed");
+            assert_eq!(
+                result.map_err(|error| error.kind()),
+                Ok(1),
+                "one interrupted read was treated as terminal"
+            );
+            assert_eq!(reader.reads, 2, "the interrupted read was not retried");
+        }
+    }
+
+    #[compio::test]
+    async fn retrying_an_interrupted_read_keeps_the_original_deadline() {
+        let deadline = ReadDeadline::new(Duration::from_secs(60));
+        deadline.begin_response();
+        let sentinel = Instant::now();
+        let observed = Rc::new(Cell::new(None));
+        let mut reader = InterruptThenObserveDeadline {
+            reads: 0,
+            deadline: deadline.clone(),
+            sentinel,
+            observed: Rc::clone(&observed),
+        };
+
+        let BufResult(result, _) = read_with_deadline(&mut reader, vec![0u8; 1], Some(&deadline))
+            .await
+            .expect("the read-deadline layer failed");
+        assert_eq!(result.expect("the retried read failed"), 1);
+        assert_eq!(
+            observed.get(),
+            Some(sentinel),
+            "retrying an interrupted read restarted its deadline"
+        );
+    }
+
+    #[compio::test]
+    async fn one_interrupted_flush_is_retried_on_serialized_and_split_paths() {
+        let mut stream = BufStream::new(InterruptOnceWriter { flushes: 0 });
+        stream.write(b"serialized request");
+        assert!(
+            stream.flush().await.is_ok(),
+            "one interrupted flush was treated as terminal"
+        );
+        assert_eq!(stream.inner.flushes, 2, "serialized flush was not retried");
+
+        let mut write_half = BufWriteHalf {
+            inner: InterruptOnceWriter { flushes: 0 },
+            write_buf: BytesMut::from(&b"split request"[..]),
+        };
+        assert!(
+            write_half.flush().await.is_ok(),
+            "one interrupted flush was treated as terminal"
+        );
+        assert_eq!(write_half.inner.flushes, 2, "split flush was not retried");
     }
 
     #[test]

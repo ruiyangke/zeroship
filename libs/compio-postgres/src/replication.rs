@@ -517,7 +517,16 @@ where
     }
 
     async fn identify_system_inner(&mut self) -> Result<IdentifySystem, Error> {
-        send_simple_query(&mut self.stream, "IDENTIFY_SYSTEM").await?;
+        if let Err(error) = send_simple_query(&mut self.stream, "IDENTIFY_SYSTEM").await {
+            // `BufStream::flush` removes the frame from its write buffer before
+            // awaiting the transport. A failure can therefore leave PostgreSQL
+            // holding a frontend fragment whose missing tail cannot be replayed.
+            self.in_flight.poison();
+            if let Some(release) = &self.release {
+                release.shutdown();
+            }
+            return Err(error);
+        }
 
         // IDENTIFY_SYSTEM returns: RowDescription, DataRow,
         // CommandComplete, ReadyForQuery. We use postgres-protocol's
@@ -4607,6 +4616,15 @@ mod tests {
             error.code().map(crate::error::SqlState::code),
             Some("57P01"),
             "replication command write discarded SQLSTATE 57P01: {chain}"
+        );
+
+        let retry = connection
+            .identify_system()
+            .await
+            .expect_err("a failed replication command write left the connection reusable");
+        assert!(
+            retry.is_cancelled(),
+            "the failed replication command write did not retire the connection: {retry}"
         );
     }
 
