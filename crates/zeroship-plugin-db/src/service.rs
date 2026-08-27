@@ -189,7 +189,7 @@ impl std::fmt::Debug for DbResourceKey {
 }
 
 /// Everything the platform must decide about `env.db` before an isolate exists.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct DbServiceConfig {
     /// The database URL. Parsed exactly once, by [`DbService::new`].
     pub url: String,
@@ -198,6 +198,21 @@ pub struct DbServiceConfig {
     pub worker_id: String,
     /// The process-wide usage meter. `None` in meter-less test harnesses.
     pub meter: Option<Arc<zeroship_metering::Meter>>,
+}
+
+impl std::fmt::Debug for DbServiceConfig {
+    /// Hand-written for the same reason [`DbResourceKey`] is a digest: the DSN
+    /// carries a password and this struct is `pub`, so any caller may render it.
+    /// A derived `Debug` here would have made the module doc above - "it is a
+    /// digest, not the URL, because it reaches `Debug` output" - false about the
+    /// value the URL actually lives in.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DbServiceConfig")
+            .field("url", &"<redacted>")
+            .field("worker_id", &self.worker_id)
+            .field("meter", &self.meter.as_ref().map(|_| "<meter>"))
+            .finish()
+    }
 }
 
 /// The process-wide owner of the `env.db` primitive's configuration.
@@ -437,6 +452,15 @@ mod tests {
 
     /// Every caller gets the same prototype object, so a runtime clones rather
     /// than mints.
+    ///
+    /// **What this arm can and cannot fail, recorded because the assertion
+    /// reads stronger than it is.** `Arc::ptr_eq` over two `Arc::clone`s of one
+    /// field is true by construction; the only edit that turns it red is
+    /// [`DbService::plugin`] minting a fresh `DbPlugin` per call. It does NOT
+    /// rule on two runtimes, two isolates or two threads sharing one prototype -
+    /// nothing here builds a second runtime. That is
+    /// `zeroship_worker::cache::tests::db_plugin_prototype_is_one_object_across_worker_threads`,
+    /// which is the arm that fails on the pre-service code.
     #[test]
     fn the_plugin_prototype_is_one_object() {
         let service = DbService::new(config("sqlite::memory:")).expect("service");
@@ -475,7 +499,34 @@ mod tests {
         );
     }
 
+    /// The config struct's `Debug` must not carry the DSN - it holds a
+    /// password, and the struct is `pub` so any caller may render it.
+    ///
+    /// The derived `Debug` this replaces printed `url: "postgres://postgres:
+    /// hunter2@host/db"` verbatim. No call site formatted it, which is why the
+    /// leak was latent rather than observed; a `pub` field is reachable by
+    /// definition, so latency is not a defence.
+    #[test]
+    fn the_service_config_debug_hides_the_dsn() {
+        let rendered = format!("{:?}", config("postgres://postgres:hunter2@host/db"));
+        assert!(
+            !rendered.contains("hunter2"),
+            "DbServiceConfig Debug leaked the DSN password: {rendered}",
+        );
+        assert!(
+            rendered.contains("service-test-worker"),
+            "the redaction must not blind the fields that are safe to print: {rendered}",
+        );
+    }
+
     /// Every service in a process shares one live-metadata cache object.
+    ///
+    /// **Near-tautological, and recorded as such.** Both services call
+    /// [`crate::live_metadata::process_wide`], which is a `OnceLock`, so this
+    /// can only fail if `DbService::new` stops adopting that handle - a real but
+    /// narrow mistake. It rules on NOTHING about cross-thread sharing: the arm
+    /// that does is
+    /// `live_metadata::tests::facts_written_on_one_thread_are_the_same_allocation_on_another`.
     #[test]
     fn services_share_the_process_wide_metadata_cache() {
         let one = DbService::new(config("postgres://host-a/db")).expect("service");
