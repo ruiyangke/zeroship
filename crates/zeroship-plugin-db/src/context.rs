@@ -864,25 +864,37 @@ impl IsolateDbContext {
     /// `RELEASE` they are inherited by the enclosing frame. Passing the
     /// wrong one either publishes events for rows that do not exist or
     /// silently drops events for rows that do.
-    pub(crate) fn pop_savepoint_for(&mut self, app_id: &str, rolled_back: bool) {
+    /// Returns the frame's effect watermark so the caller can discard the
+    /// frame's queued events **after** confirming the rollback actually
+    /// happened - see [`Self::discard_effects_to_mark`].
+    pub(crate) fn pop_savepoint_for(&mut self, app_id: &str) -> Option<usize> {
         if let Some(depth) = self.savepoint_depths.get_mut(app_id) {
             *depth = depth.saturating_sub(1);
         }
-        let mark = self
-            .savepoint_emit_marks
+        self.savepoint_emit_marks
             .get_mut(app_id)
-            .and_then(std::vec::Vec::pop);
-        if rolled_back {
-            // A missing mark means the frame was opened before this
-            // bookkeeping existed for the app, or the stacks desynced.
-            // Truncating to 0 would discard the ENCLOSING frame's events
-            // too, so leave the buffer alone and let the enclosing settle
-            // decide - over-publishing is a bug, but silently dropping a
-            // committed row's event is a worse one.
-            if let (Some(mark), Some(buf)) = (mark, self.pending_emits.get_mut(app_id)) {
-                if mark <= buf.len() {
-                    buf.truncate(mark);
-                }
+            .and_then(std::vec::Vec::pop)
+    }
+
+    /// Discard the events a rolled-back frame queued, truncating back to the
+    /// watermark [`Self::pop_savepoint_for`] returned.
+    ///
+    /// Called **only after `ROLLBACK TO SAVEPOINT` has succeeded**, because
+    /// only then are the matching database changes known to be undone. An
+    /// earlier version discarded before issuing the statement, which is the
+    /// "mutate state on the assumption the operation will succeed" shape: a
+    /// failed `ROLLBACK TO` left the contract's documented fate (retain the
+    /// effects for diagnosis, poison the transaction) unachievable, since the
+    /// evidence was already gone.
+    pub(crate) fn discard_effects_to_mark(&mut self, app_id: &str, mark: Option<usize>) {
+        // A missing mark means the frame was opened before this bookkeeping
+        // existed for the app, or the stacks desynced. Truncating to 0 would
+        // discard the ENCLOSING frame's events too, so leave the buffer alone:
+        // over-publishing is a bug, but silently dropping a committed row's
+        // event is a worse one.
+        if let (Some(mark), Some(buf)) = (mark, self.pending_emits.get_mut(app_id)) {
+            if mark <= buf.len() {
+                buf.truncate(mark);
             }
         }
     }
@@ -1201,17 +1213,40 @@ mod tests {
         let mut ctx = IsolateDbContext::new();
         assert_eq!(ctx.savepoint_depth_for("app_t"), 0);
         // pop on an already-zero depth saturates rather than wrapping to
-        // u32::MAX. Both frame fates must saturate: a rollback pop with no
-        // frame open has no watermark to restore either, and must not
-        // truncate the buffer on the strength of a missing mark.
-        ctx.pop_savepoint_for("app_t", false);
-        assert_eq!(ctx.savepoint_depth_for("app_t"), 0, "pop must saturate at zero");
-        ctx.pop_savepoint_for("app_t", true);
+        // u32::MAX, and yields no watermark - there is no frame to restore.
         assert_eq!(
-            ctx.savepoint_depth_for("app_t"),
-            0,
-            "a rollback pop must saturate at zero too"
+            ctx.pop_savepoint_for("app_t"),
+            None,
+            "no open frame yields no watermark"
         );
+        assert_eq!(ctx.savepoint_depth_for("app_t"), 0, "pop must saturate at zero");
+
+        // Discarding against a missing watermark must leave the buffer ALONE
+        // rather than truncating to zero, which would drop the enclosing
+        // frame's events. Over-publishing is a bug; silently dropping a
+        // committed row's event is a worse one.
+        ctx.push_pending_emit(dummy_event("c1"));
+        ctx.discard_effects_to_mark("app_t", None);
+        assert_eq!(
+            ctx.pending_emits.get("app_t").map(std::vec::Vec::len),
+            Some(1),
+            "a missing watermark must not discard the enclosing frame's events"
+        );
+
+        // And a watermark past the buffer end is equally refused.
+        ctx.discard_effects_to_mark("app_t", Some(99));
+        assert_eq!(
+            ctx.pending_emits.get("app_t").map(std::vec::Vec::len),
+            Some(1),
+            "an out-of-range watermark must not be applied"
+        );
+
+        // A real watermark discards exactly the frame's own events.
+        ctx.push_pending_emit(dummy_event("c2"));
+        ctx.discard_effects_to_mark("app_t", Some(1));
+        let kept = ctx.pending_emits.get("app_t").expect("queue");
+        assert_eq!(kept.len(), 1, "truncate to the frame's watermark");
+        assert_eq!(kept[0].collection, "c1", "the enclosing frame's event survives");
         // reset on zero is a no-op.
         ctx.reset_savepoint_depth_for("app_t");
         assert_eq!(ctx.savepoint_depth_for("app_t"), 0);
