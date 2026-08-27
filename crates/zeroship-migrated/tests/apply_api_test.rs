@@ -208,7 +208,12 @@ async fn ensure_migrated_service_tables(conn: &Client) {
 
 async fn cleanup_app(conn: &Client, app_id: &Uuid) {
     let schema = app_id.to_string();
-    let role = zeroship_migrate::migrator_role_name(&schema).unwrap();
+    // The vendor crate, not the composition root: `migrator_role_name` lives at
+    // `zeroship_migrate_postgres::role`, which is how `src/apply.rs:19` in this
+    // same crate already spells it. The old path did not resolve, so this test
+    // target had stopped compiling - invisible while the clippy gate aborted
+    // before reaching it.
+    let role = zeroship_migrate_postgres::role::migrator_role_name(&schema).unwrap();
     let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
     let _ = conn
         .batch_execute(&format!(
