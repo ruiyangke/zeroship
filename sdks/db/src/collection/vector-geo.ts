@@ -14,10 +14,10 @@ export interface VectorGeoCollectionInternals<S> {
 }
 
 /**
- * Validates `k` / `limit` arguments to `.search()` are positive integers
+ * Validates `k` arguments to `.search()` are positive integers
  * in `1..=1000`. Throws ValidationError with `code: "INVALID_K"` on
  * violation. The 1000-row ceiling matches the engine-side practical
- * limit for kNN flat scan + GIN/ivfflat result sets.
+ * limit for kNN flat-scan and ivfflat result sets.
  */
 export function _validateK(value: number, paramName: string): void {
   if (
@@ -45,29 +45,22 @@ function _mergeFilter(
   return hasKeys ? ({ $and: [filter, softFilter] } as ZeroshipDbFilter) : softFilter;
 }
 
-/**
- * **P4** — vector-nearest-neighbour OR full-text search,
- * discriminated by the presence of `vector` vs. `text` in `args`.
- */
+/** **P4** - vector-nearest-neighbour search. */
 export function searchCollection<S>(
   self: VectorGeoCollectionInternals<S>,
-  args:
-    | {
-        vector: number[];
-        k?: number;
-        metric?: VectorMetric;
-        column?: string;
-        filter?: Filter<S>;
-      }
-    | { text: string; limit?: number; k?: number; filter?: Filter<S> },
-): Promise<Result<(Row<S> & { _distance?: number; _rank?: number })[]>> {
+  args: {
+    vector: number[];
+    k?: number;
+    metric?: VectorMetric;
+    column?: string;
+    filter?: Filter<S>;
+  },
+): Promise<Result<(Row<S> & { _distance?: number })[]>> {
   trackCollectionAccess(self._name);
   return self._run(async () => {
     const nativeArgs: {
       vector?: number[];
-      text?: string;
       k?: number;
-      limit?: number;
       metric?: VectorMetric;
       column?: string;
       filter?: ZeroshipDbFilter;
@@ -86,23 +79,11 @@ export function searchCollection<S>(
       if (args.column !== undefined) {
         nativeArgs.column = self._toColumn(args.column);
       }
-    } else if ("text" in args && args.text !== undefined) {
-      if (typeof args.text !== "string") {
-        throw new ValidationError({
-          text: { path: "text", message: "search: `text` must be a string" },
-        });
-      }
-      nativeArgs.text = args.text;
-      if ((args as { limit?: number }).limit !== undefined) {
-        const lim = (args as { limit?: number }).limit as number;
-        _validateK(lim, "limit");
-        nativeArgs.limit = lim;
-      }
     } else {
       throw new ValidationError({
         args: {
           path: "args",
-          message: "search: args must include `vector` or `text`",
+          message: "search: args must include `vector`",
         },
       });
     }
@@ -123,7 +104,6 @@ export function searchCollection<S>(
       (d) =>
         mapResultDoc(d as PlainObject, self._toField) as Row<S> & {
           _distance?: number;
-          _rank?: number;
         },
     );
   });

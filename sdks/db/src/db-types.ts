@@ -142,16 +142,14 @@ export type TxCollection<S = PlainObject, AllSchemas extends Record<string, unkn
     opts: { actor: import("./types").Actor; reason?: string },
   ): Promise<Map<string, Record<string, unknown>>>;
   search(
-    args:
-      | {
-          vector: number[];
-          k?: number;
-          metric?: import("./types").VectorMetric;
-          column?: string;
-          filter?: Filter<S>;
-        }
-      | { text: string; limit?: number; k?: number; filter?: Filter<S> },
-  ): Promise<(Row<S> & { _distance?: number; _rank?: number })[]>;
+    args: {
+      vector: number[];
+      k?: number;
+      metric?: import("./types").VectorMetric;
+      column?: string;
+      filter?: Filter<S>;
+    },
+  ): Promise<(Row<S> & { _distance?: number })[]>;
   near(args: {
     field: keyof S & string;
     point: { lat: number; lng: number };

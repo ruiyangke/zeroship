@@ -2061,17 +2061,14 @@ pub(crate) fn dispatch_upsert<'s>(
 }
 
 // ---------------------------------------------------------------------------
-// search — vector / FTS unified entry point
+// search - vector entry point
 // ---------------------------------------------------------------------------
 
-/// Shared dispatch for `collection.search(args)` — the unified
-/// search entry. Inspects `args` for a discriminator key:
+/// Shared dispatch for `collection.search(args)`.
 ///
-/// - `{ vector, k?, metric?, column?, filter? }` → `VectorIndex::vector_search`,
+/// - `{ vector, k?, metric?, column?, filter? }` -> `VectorIndex::vector_search`,
 ///   routed to pgvector on PG or the pure-Rust flat-scan implementation
 ///   on SQLite.
-/// - `{ text, ... }` → `FullTextIndex::fts_search`, routed to PG's
-///   `tsvector`/GIN index or SQLite's FTS5 vtable + bm25 ranking.
 ///
 /// Resolves with a JSON array of rows; each row carries the
 /// `_distance` synthetic column from pgvector. Errors are coded
@@ -2089,18 +2086,16 @@ pub(crate) fn dispatch_search<'s>(
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
-    // Discriminator: presence of `vector` selects the pgvector path.
+    // Presence of `vector` selects the pgvector path.
     let has_vector = args.get("vector").is_some();
-    let has_text = args.get("text").is_some();
 
-    if !has_vector && !has_text {
+    if !has_vector {
         // Reject synchronously via the typed error path so the SDK sees
         // a coded error rather than a hang. Use `Configuration` because
         // the failure is shape-level, not data-level.
         let err = DbError::Configuration {
             code: "invalid_search_args",
-            message: "search: args must include `vector` or `text`"
-                .to_string(),
+            message: "search: args must include `vector`".to_string(),
             hint: Some(
                 "pass `{ vector: number[], k?: number, metric?, column?, filter? }` for vector search"
                     .to_string(),
@@ -2117,112 +2112,6 @@ pub(crate) fn dispatch_search<'s>(
         return promise;
     }
 
-    if has_text && !has_vector {
-        // FTS branch. Pull the query string, limit, and filter from
-        // args; route to `FullTextIndex::fts_search` on either the PG
-        // or SQLite arm.
-        let text_query = match args.get("text").and_then(Value::as_str) {
-            Some(s) => s.to_string(),
-            None => {
-                let err = DbError::Configuration {
-                    code: "invalid_text_arg",
-                    message: "search: `text` must be a string".to_string(),
-                    hint: None,
-                };
-                let op_err: OpError = err.to_op_error();
-                state.borrow_mut().spawned_ops.push(Box::pin(async move {
-                    zeroship_runtime::state::OpResult::JsValue {
-                        resolver,
-                        value: zeroship_runtime::state::ResolveValue::RejectError(op_err),
-                        request_id,
-                    }
-                }));
-                return promise;
-            }
-        };
-        let limit = args
-            .get("limit")
-            .and_then(Value::as_u64)
-            .map(|n| n as usize)
-            .or_else(|| {
-                // Accept the SDK's `k` alias too — the vector branch
-                // uses `k` and the SDK passes the same name through for
-                // FTS in some cases. The native trait signature carries
-                // `limit: Option<usize>` either way.
-                args.get("k").and_then(Value::as_u64).map(|n| n as usize)
-            });
-        let mut filter = args
-            .get("filter")
-            .cloned()
-            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-        let app = app_id.to_string();
-        let coll = collection.to_string();
-        maybe_lower_sqlite_boolean_filter(&app, &coll, &mut filter);
-
-        state.borrow_mut().spawned_ops.push(Box::pin(async move {
-            let backend = crate::context::with(|c| c.backend());
-            let result: Result<Vec<Value>, DbError> = async {
-                let backend = backend.ok_or_else(|| {
-                    DbError::config("not_configured", "db: backend not initialized".to_string())
-                })?;
-                // SQLite arm routes through the FTS5 vtable + bm25
-                // ranking. We short-circuit BEFORE the PG path so a
-                // build with both arms compiled in dispatches based
-                // on which arm the runtime is bound to, not on
-                // Cargo-feature ordering.
-                if let Some(sq) = backend.as_sqlite() {
-                    use crate::backend::FullTextIndex as _;
-                    return sq
-                        .fts_search(&app, &coll, &text_query, &filter, limit)
-                        .await;
-                }
-                let pg = backend
-                    .as_postgres()
-                    .ok_or_else(|| DbError::backend_unsupported("fts_search"))?;
-                use crate::backend::FullTextIndex as _;
-                pg.fts_search(&app, &coll, &text_query, &filter, limit).await
-            }
-            .await;
-
-            match result {
-                Ok(rows) => {
-                    let result = match read_pipeline::apply(
-                        &binding,
-                        &coll,
-                        rows,
-                        read_pipeline::ApplyOptions::default(),
-                    )
-                    .await
-                    {
-                        Ok(result) => result,
-                        Err(e) => {
-                            return zeroship_runtime::state::OpResult::JsValue {
-                                resolver,
-                                value: zeroship_runtime::state::ResolveValue::RejectError(
-                                    e.to_op_error(),
-                                ),
-                                request_id,
-                            };
-                        }
-                    };
-                    zeroship_runtime::state::OpResult::JsValue {
-                        resolver,
-                        value: rows_as_json_array_masked(result.rows, result.has_masked),
-                        request_id,
-                    }
-                }
-                Err(e) => zeroship_runtime::state::OpResult::JsValue {
-                    resolver,
-                    value: zeroship_runtime::state::ResolveValue::RejectError(e.to_op_error()),
-                    request_id,
-                },
-            }
-        }));
-        return promise;
-    }
-
-    // Vector branch.
-    //
     // Decode `vector` into `Vec<f32>`. Reject anything that's not a
     // homogeneous number array at the boundary so the impl can stay
     // typed.

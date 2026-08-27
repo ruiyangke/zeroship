@@ -461,7 +461,7 @@ table("accounts").rename({ to: "members" }); // ALTER TABLE … RENAME TO … (P
 constraints and indexes are **fields**, and each carries a **required `name`**
 (name-first, so a later migration can deterministically drop it). Foreign-key
 actions are `cascade | restrict | setNull | setDefault | noAction` (the index
-method set is `btree | gin | gist | ivfflat | hnsw | fts5`).
+method set is `btree | gin | gist | ivfflat | hnsw`).
 
 #### `.rename({ to })` — whole-table rename
 

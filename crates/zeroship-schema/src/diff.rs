@@ -241,14 +241,6 @@ pub struct ColumnInfo {
     /// `__zs_schema_meta` table is the upgrade path).
     #[allow(dead_code, reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path.")]
     pub vector_dims: Option<i32>,
-    /// Whether this column is enrolled in the
-    /// collection's composite FTS index (one composite index per
-    /// collection, per Q-P4-B). PG: presence of the column in the
-    /// `tsvector_update_trigger(__fts, ...)` arg list. SQLite:
-    /// presence in the `<coll>__fts` external-content vtable's
-    /// column list. `false` for every existing column at HEAD.
-    #[allow(dead_code, reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path.")]
-    pub is_fts_source: bool,
     /// Whether this column is a `geography(POINT,
     /// 4326)` (PG) or a BLOB column with a `length("col") = 16`
     /// CHECK constraint (SQLite). `false` for every existing column
@@ -290,11 +282,11 @@ pub struct ColumnInfo {
 
 impl Default for ColumnInfo {
     /// `Default` impl so call sites can use
-    /// `..Default::default()` for the vector/FTS/geopoint fields
+    /// `..Default::default()` for the vector/geopoint fields
     /// without restating the base field defaults. The B-tree column
     /// shape is: empty type string, nullable, no default, no
-    /// volatility, no vector dimension, not an FTS source, not a
-    /// geopoint, **no encryption**. Every existing
+    /// volatility, no vector dimension, not a geopoint, **no
+    /// encryption**. Every existing
     /// introspection / test site overrides `pg_type` + `not_null`
     /// explicitly.
     fn default() -> Self {
@@ -304,7 +296,6 @@ impl Default for ColumnInfo {
             default_expr: None,
             default_volatility: None,
             vector_dims: None,
-            is_fts_source: false,
             is_geopoint: false,
             encryption: None,
             // Mask defaults to None. Every existing
@@ -709,7 +700,7 @@ SELECT c.relname AS table_name,
                 default_expr,
                 default_volatility,
                 encryption,
-                // Remaining fields default; vector/fts/geo are populated
+                // Remaining fields default; vector/geo are populated
                 // from `information_schema` + `pg_indexes` introspection.
                 ..Default::default()
             },
