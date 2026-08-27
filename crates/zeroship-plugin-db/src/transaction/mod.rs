@@ -99,6 +99,7 @@ use crate::binding::DbBinding;
 use crate::context::TxConnection;
 use crate::error::DbError;
 use crate::exec::{clear_pending_emits, drain_pending_emits_on_commit};
+use crate::tx_route::TxRoute;
 use crate::v8_bridge::runtime_state;
 
 /// Maximum nesting depth for `env.db.transaction(...)` calls — the
@@ -471,6 +472,155 @@ impl std::future::Future for AwaitTxClaim {
         // wakes every waiter, so a spurious wake just re-runs this poll.
         crate::context::with_mut(|c| c.push_tx_waiter(&self.app_id, cx.waker().clone()));
         std::task::Poll::Pending
+    }
+}
+
+/// Transaction frame used by a native write that expands one creator call
+/// into multiple SQL mutations.
+///
+/// A normally settled call outside `db.transaction()` owns a top-level
+/// `BEGIN`/`COMMIT`; a call inside one owns a savepoint. A row failure is
+/// returned only after that frame reports a successful rollback. Settlement
+/// goes through [`exec_settle`], including its PostgreSQL
+/// `COMMIT`-answered-with-`ROLLBACK` check. Dropping an unsettled top-level
+/// frame tears down its pinned client; SQLite additionally queues an explicit
+/// rollback because dropping its actor handle does not end the transaction.
+#[must_use = "an atomic write frame must be settled with finish"]
+pub(crate) struct AtomicWriteFrame {
+    route: TxRoute,
+    savepoint: Option<String>,
+    state: AtomicWriteFrameState,
+}
+
+#[derive(Clone, Copy)]
+enum AtomicWriteFrameState {
+    Open,
+    Settling,
+    Settled,
+}
+
+impl AtomicWriteFrame {
+    /// Open the frame and promote the captured dispatch route onto it.
+    pub(crate) async fn begin(route: TxRoute) -> Result<Self, DbError> {
+        let nested = route.in_tx();
+        let app_id = route.app_id().to_string();
+        if nested && !crate::context::with(|context| context.has_tx_for(&app_id)) {
+            return Err(DbError::validation_hinted(
+                "transaction_scope_expired",
+                "updateMany: the enclosing transaction has already settled".to_string(),
+                "Run updateMany while its enclosing db.transaction callback is still open.",
+            ));
+        }
+        if nested {
+            let would_be = crate::context::with(|context| {
+                context.savepoint_depth_for(&app_id)
+            }) + 1;
+            if would_be > MAX_SAVEPOINT_DEPTH {
+                return Err(DbError::validation_hinted(
+                    "savepoint_depth_exceeded",
+                    format!(
+                        "updateMany: nested transaction depth limit ({MAX_SAVEPOINT_DEPTH}) \
+                         exceeded"
+                    ),
+                    "Flatten the nesting or split the work into separate transactions.",
+                ));
+            }
+        }
+        if !nested {
+            AwaitTxClaim::new(app_id.clone()).await;
+        }
+
+        match exec_begin_or_savepoint(nested, None, &app_id).await {
+            Ok(savepoint) => Ok(Self {
+                route: route.into_internal_transaction(),
+                savepoint,
+                state: AtomicWriteFrameState::Open,
+            }),
+            Err(error) => {
+                if !nested {
+                    crate::context::with_mut(|context| context.release_tx_claim(&app_id));
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Route all statements and broker effects through this frame.
+    pub(crate) fn route(&self) -> &TxRoute {
+        &self.route
+    }
+
+    /// Commit/release a successful body or roll back a failed one.
+    ///
+    /// The body value is returned only after a confirmed successful settle.
+    /// On rollback, the original row error remains the creator-visible error;
+    /// a savepoint settle failure wins because the enclosing transaction state
+    /// is then no longer trustworthy.
+    pub(crate) async fn finish<T>(mut self, body: Result<T, DbError>) -> Result<T, DbError> {
+        let success = body.is_ok();
+        // Transfer cancellation cleanup to `exec_settle`: its top-level arm
+        // installs a `TxTeardownGuard`, and its nested arm installs a
+        // `TxClientSlotGuard`, before either one can yield.
+        self.state = AtomicWriteFrameState::Settling;
+        let outcome = exec_settle(
+            self.route.app_id(),
+            success,
+            self.savepoint.as_deref(),
+        )
+        .await;
+        self.state = AtomicWriteFrameState::Settled;
+        match (body, outcome) {
+            (Ok(value), SettleOutcome::Ok) => Ok(value),
+            (Err(error), SettleOutcome::Ok) => Err(error),
+            (_, SettleOutcome::CommitIndeterminate(error)) => {
+                Err(commit_failed_indeterminate(error))
+            }
+            (_, SettleOutcome::SettleErr(error)) => Err(error),
+        }
+    }
+}
+
+impl Drop for AtomicWriteFrame {
+    fn drop(&mut self) {
+        if !matches!(self.state, AtomicWriteFrameState::Open) {
+            return;
+        }
+
+        let app_id = self.route.app_id();
+        if self.savepoint.is_some() {
+            // A nested frame cannot synchronously issue ROLLBACK TO from Drop.
+            // The enclosing transaction still owns the connection and must
+            // settle it; do not release its claim or destroy its client here.
+            tracing::warn!(
+                app_id,
+                "nested atomic write frame dropped before savepoint settlement"
+            );
+            return;
+        }
+
+        let (client, backend) = crate::context::with_mut(|context| {
+            let client = context.take_tx_client_for(app_id);
+            context.reset_savepoint_depth_for(app_id);
+            (client, context.backend())
+        });
+        if let Some(client) = client {
+            drop(TxTeardownGuard::new(app_id.to_string(), client));
+        } else if matches!(backend, Some(crate::backend::BackendHandle::Postgres(_))) {
+            // PostgreSQL's exec path owns its taken client directly. If that
+            // future was cancelled, dropping it already closed the session
+            // and aborted the transaction; only the logical claim remains.
+            crate::context::with_mut(|context| context.release_tx_claim(app_id));
+            clear_pending_emits(app_id);
+        } else {
+            // SQLite routes through TxClientSlotGuard, which must restore the
+            // actor handle before this frame drops. Releasing the claim with
+            // no handle would let another transaction enter a possibly live
+            // SQLite transaction, so fail closed.
+            tracing::warn!(
+                app_id,
+                "atomic write frame dropped with no SQLite transaction client; retaining claim"
+            );
+        }
     }
 }
 
@@ -956,11 +1106,10 @@ fn settle_failed_before_body(
         v8::Global::new(scope, exc)
     };
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        // Roll back (best-effort); the body already failed.
-        let _ = exec_settle(&app_id, false, savepoint.as_deref()).await;
+        let settle_result = exec_settle(&app_id, false, savepoint.as_deref()).await;
         OpResult::JsValue {
             resolver: outer,
-            value: ResolveValue::Reject(err_global),
+            value: build_settle_resolve_value(settle_result, false, Some(err_global)),
             request_id,
         }
     }));
@@ -979,9 +1128,8 @@ enum SettleOutcome {
     /// COMMIT failed after the body resolved — the tx state is
     /// indeterminate; reject with `commit_failed_indeterminate`.
     CommitIndeterminate(DbError),
-    /// A rollback / release / rollback-to failed. The body's own
-    /// success/failure still governs how the outer settles, but a failed
-    /// commit-path rollback escalates to an error.
+    /// A rollback / release / rollback-to failed. The frame state is no
+    /// longer trustworthy, so this error governs how the outer settles.
     SettleErr(DbError),
 }
 
@@ -1032,7 +1180,14 @@ async fn exec_settle(app_id: &str, success: bool, savepoint: Option<&str>) -> Se
                 // are the diagnostic evidence for why the rollback failed, and
                 // discarding them before the statement ran destroyed exactly
                 // that.
-                Err(e) => SettleOutcome::SettleErr(e),
+                Err(error) => {
+                    let error = if success {
+                        savepoint_release_failed_indeterminate(error)
+                    } else {
+                        rollback_failed_indeterminate(error)
+                    };
+                    SettleOutcome::SettleErr(error)
+                }
             }
         }
         None => exec_settle_top_level(app_id, success).await,
@@ -1074,9 +1229,12 @@ async fn exec_settle_top_level(app_id: &str, success: bool) -> SettleOutcome {
 
     let teardown = TxTeardownGuard::new(app_id.to_string(), client);
     let cmd = if success { "COMMIT" } else { "ROLLBACK" };
-    let result = exec_terminal_on_tx(&backend, teardown.client(), cmd).await;
-    if success && result.is_err() && matches!(teardown.client(), TxConnection::Sqlite(_)) {
-        let _ = client_exec_on_tx(&backend, teardown.client(), "ROLLBACK", &[]).await;
+    let mut result = exec_terminal_on_tx(&backend, teardown.client(), cmd).await;
+    if result.is_err() && matches!(teardown.client(), TxConnection::Sqlite(_)) {
+        let fallback = client_exec_on_tx(&backend, teardown.client(), "ROLLBACK", &[]).await;
+        if !success && fallback.is_ok() {
+            result = Ok(0);
+        }
     }
     let client = teardown.into_inner();
     drop(client);
@@ -1104,13 +1262,13 @@ async fn exec_settle_top_level(app_id: &str, success: bool) -> SettleOutcome {
             clear_pending_emits(app_id);
             SettleOutcome::Ok
         }
-        (false, Err(_)) => {
-            // Rollback failed; PG still aborts on connection drop and the
-            // SQLite arm already attempted an explicit `ROLLBACK`.
-            // Treat as rolled back (the body error still governs the
-            // outer rejection).
+        (false, Err(e)) => {
+            // Do not claim that the body was cleanly rolled back when the
+            // terminal statement failed. PG aborts on connection drop and
+            // SQLite retried above, but the creator must still see that the
+            // outcome could not be confirmed.
             clear_pending_emits(app_id);
-            SettleOutcome::Ok
+            SettleOutcome::SettleErr(rollback_failed_indeterminate(e))
         }
     }
 }
@@ -1142,17 +1300,7 @@ fn build_settle_resolve_value(
             }
         }
         SettleOutcome::CommitIndeterminate(e) => {
-            ResolveValue::RejectError(
-                DbError::Coded {
-                    code: "commit_failed_indeterminate".to_string(),
-                    message: format!(
-                        "commit failed — transaction state indeterminate: {}",
-                        e.message_str()
-                    ),
-                    hint: None,
-                }
-                .to_op_error(),
-            )
+            ResolveValue::RejectError(commit_failed_indeterminate(e).to_op_error())
         }
         SettleOutcome::SettleErr(e) => {
             // A nested RELEASE / ROLLBACK TO failed. Surface it as a coded
@@ -1160,6 +1308,39 @@ fn build_settle_resolve_value(
             // is no longer trustworthy.
             ResolveValue::RejectError(e.to_op_error())
         }
+    }
+}
+
+fn commit_failed_indeterminate(error: DbError) -> DbError {
+    DbError::Coded {
+        code: "commit_failed_indeterminate".to_string(),
+        message: format!(
+            "commit failed - transaction state indeterminate: {}",
+            error.message_str()
+        ),
+        hint: None,
+    }
+}
+
+fn rollback_failed_indeterminate(error: DbError) -> DbError {
+    DbError::Coded {
+        code: "rollback_failed_indeterminate".to_string(),
+        message: format!(
+            "rollback failed - transaction state indeterminate: {}",
+            error.message_str()
+        ),
+        hint: None,
+    }
+}
+
+fn savepoint_release_failed_indeterminate(error: DbError) -> DbError {
+    DbError::Coded {
+        code: "savepoint_release_failed_indeterminate".to_string(),
+        message: format!(
+            "savepoint release failed - transaction state indeterminate: {}",
+            error.message_str()
+        ),
+        hint: None,
     }
 }
 
@@ -1345,6 +1526,52 @@ mod tests {
                 .expect("count notes after rollback");
             assert_eq!(rows[0][0].as_deref(), Some("0"));
             assert!(!crate::context::with(|c| c.has_tx_for("app_sqlite")));
+        });
+    }
+
+    #[test]
+    fn dropped_atomic_write_frame_rolls_back_top_level_sqlite() {
+        run(async {
+            let (backend, _dir, _reset) = install_sqlite_backend_for_test();
+            let probe = backend
+                .acquire_dedicated_client()
+                .await
+                .expect("acquire sqlite probe");
+            backend
+                .client_exec(
+                    &probe,
+                    "CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT)",
+                    &[],
+                )
+                .await
+                .expect("create table");
+
+            let frame = AtomicWriteFrame::begin(TxRoute::pool_for_tests("app_sqlite"))
+                .await
+                .expect("begin atomic write frame");
+            backend
+                .client_exec(
+                    &probe,
+                    "INSERT INTO notes (title) VALUES ('must-rollback')",
+                    &[],
+                )
+                .await
+                .expect("insert inside atomic write frame");
+            drop(frame);
+
+            let rows = probe
+                .query_internal("SELECT COUNT(*) FROM notes", &[])
+                .await
+                .expect("count notes after frame cancellation");
+            assert_eq!(
+                rows[0][0].as_deref(),
+                Some("0"),
+                "dropping an unsettled frame must roll back its writes"
+            );
+            assert!(!crate::context::with(|context| {
+                context.has_tx_for("app_sqlite")
+                    || context.tx_claimed_by("app_sqlite")
+            }));
         });
     }
 }

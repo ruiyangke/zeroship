@@ -126,6 +126,18 @@ impl TxRoute {
         self.in_tx
     }
 
+    /// Promote this already-captured dispatch onto an internal transaction.
+    ///
+    /// This is deliberately a consuming conversion rather than another
+    /// constructor: the app identity and the original async-scope decision
+    /// still have to come from [`Self::capture`]. Bulk write fan-out uses it
+    /// only after opening either a top-level transaction or a savepoint, so
+    /// every statement and its deferred broker event share that frame.
+    pub(crate) fn into_internal_transaction(mut self) -> Self {
+        self.in_tx = true;
+        self
+    }
+
     /// **Test-only**: a route that is known to be outside any transaction.
     ///
     /// For test harnesses that drive the exec helpers directly, with no

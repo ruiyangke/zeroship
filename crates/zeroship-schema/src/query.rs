@@ -2928,6 +2928,40 @@ pub fn build_find(
     build_find_with_schema(app_id, collection, filter, limit, offset, order_by, select, None)
 }
 
+/// Build the bounded id probe used before a write fans out per matching row.
+///
+/// The caller supplies an explicit bound. `updateMany` asks for one row above
+/// [`MAX_QUERY_LIMIT`] so it can distinguish an exactly-full target set from
+/// an overflowing one; `updateOne` asks for one. This is deliberately separate
+/// from creator-facing `find`, whose public limit remains `MAX_QUERY_LIMIT`.
+pub fn build_write_target_probe(
+    app_id: &str,
+    collection: &str,
+    filter: &Value,
+    limit: i64,
+    dialect: SqlDialect,
+) -> Result<BuiltQuery, QueryError> {
+    let select = serde_json::json!(["id"]);
+    let mut built = build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceiling(
+        app_id,
+        collection,
+        filter,
+        Some(limit),
+        None,
+        None,
+        Some(&select),
+        None,
+        &[],
+        false,
+        dialect,
+        MAX_QUERY_LIMIT + 1,
+    )?;
+    if dialect == SqlDialect::Postgres {
+        built.sql.push_str(" FOR UPDATE");
+    }
+    Ok(built)
+}
+
 pub fn build_conflict_probe_with_dialect(
     app_id: &str,
     collection: &str,
@@ -3125,6 +3159,37 @@ pub fn build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
     filter_soft_deleted: bool,
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
+    build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceiling(
+        app_id,
+        collection,
+        filter,
+        limit,
+        offset,
+        order_by,
+        select,
+        schema_hint,
+        unmask_columns,
+        filter_soft_deleted,
+        dialect,
+        MAX_QUERY_LIMIT,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceiling(
+    app_id: &str,
+    collection: &str,
+    filter: &Value,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    order_by: Option<&Value>,
+    select: Option<&Value>,
+    schema_hint: Option<&Value>,
+    unmask_columns: &[String],
+    filter_soft_deleted: bool,
+    dialect: SqlDialect,
+    limit_ceiling: i64,
+) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
 
@@ -3134,7 +3199,7 @@ pub fn build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
     let mut params: Vec<String> = Vec::new();
     let where_clause = build_where_with_dialect(filter, &mut params, dialect)?;
     if let Some(lim) = limit {
-        validate_limit_bound("find.limit", lim, MAX_QUERY_LIMIT)?;
+        validate_limit_bound("find.limit", lim, limit_ceiling)?;
     }
     if let Some(off) = offset {
         validate_limit_bound("find.offset", off, MAX_QUERY_OFFSET)?;

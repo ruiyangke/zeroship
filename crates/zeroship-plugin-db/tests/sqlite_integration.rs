@@ -4341,12 +4341,32 @@ const _procedures = { setup, seed, updateManyByName };
 
         dispatch_sqlite_runtime(&dir, &source, "setup");
         dispatch_sqlite_runtime(&dir, &source, "seed");
+        zeroship_plugin_db::crud::reset_write_path_counters_for_tests();
         let updated = parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "updateManyByName"));
         assert_eq!(
             updated.as_f64(),
             Some(2.0),
             "two rows should match the non-id updateMany filter: {updated}"
         );
+        let counters = zeroship_plugin_db::crud::write_path_counters_for_tests();
+        assert_eq!(
+            counters.target_row_resolution_calls, 1,
+            "encrypted updateMany must resolve one non-empty target set: {counters:?}"
+        );
+        assert!(
+            !counters.target_row_resolution_sql.is_empty(),
+            "the target-resolution SQL set must be non-empty: {counters:?}"
+        );
+        let expected_limit = format!(
+            " LIMIT {}",
+            zeroship_plugin_db::query::MAX_QUERY_LIMIT + 1
+        );
+        for sql in &counters.target_row_resolution_sql {
+            assert!(
+                sql.ends_with(&expected_limit),
+                "updateMany target resolution must carry the row ceiling; sql={sql}"
+            );
+        }
 
         let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend");
         backend
@@ -4403,6 +4423,335 @@ const _procedures = { setup, seed, updateManyByName };
                 b"999-88-7777".to_vec(),
                 "each bulk-updated row must carry ciphertext bound to its own row id"
             );
+        }
+    });
+}
+
+#[test]
+fn update_many_randomised_target_cap_rejects_without_writes_sqlite_runtime() {
+    let key_id = "c1_update_many_target_cap_runtime";
+    let _keys = with_root_key("c1_update_many_target_cap_runtime", &"c".repeat(64));
+
+    run(async {
+        use zeroship_plugin_db::backend::sqlite::session::TypedCell;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target_cap = usize::try_from(zeroship_plugin_db::query::MAX_QUERY_LIMIT)
+            .expect("MAX_QUERY_LIMIT must fit usize");
+        let seeded = target_cap + 1;
+        let values = (0..seeded)
+            .map(|index| {
+                format!(
+                    "('user_{index:04}', 'user_{index:04}@example.com', 'Red Team')"
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(!values.is_empty(), "overflow fixture must seed target rows");
+        let mut ddl = users_encrypted_ssn_ddl(key_id);
+        ddl.push_str(&format!(
+            "INSERT INTO \"default\".\"users\" (id, email, name) VALUES {};",
+            values.join(",")
+        ));
+        apply_schema_ahead_of_runtime(&dir, &ddl);
+
+        let schema = users_encrypted_ssn_schema(key_id);
+        let source = sqlite_runtime_source(
+            "users",
+            &schema,
+            r#"
+async function overflow(_input, _ctx) {
+    let failure = null;
+    try {
+        await env.db.collection(COLLECTION).updateMany(
+            { name: "Red Team" },
+            { ssn: "999-88-7777" },
+        );
+    } catch (err) {
+        failure = {
+            code: typeof err?.code === "string" ? err.code : null,
+            message: err?.message ?? String(err),
+        };
+    }
+    return { failure };
+}
+overflow.config = { kind: "action" };
+
+const _procedures = { setup, overflow };
+"#,
+        );
+
+        dispatch_sqlite_runtime(&dir, &source, "setup");
+        zeroship_plugin_db::crud::reset_write_path_counters_for_tests();
+        let result = parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "overflow"));
+        assert_eq!(
+            result["failure"]["code"], "update_many_target_limit_exceeded",
+            "the bounded probe must reject an overflowing target set: {result}"
+        );
+        let counters = zeroship_plugin_db::crud::write_path_counters_for_tests();
+        assert_eq!(
+            counters.target_row_resolution_calls, 1,
+            "overflow detection must use one bounded target probe: {counters:?}"
+        );
+        assert_eq!(
+            counters.target_row_resolution_sql.len(),
+            1,
+            "the overflow SQL witness set must contain exactly the exercised probe"
+        );
+        let expected_limit = format!(" LIMIT {}", target_cap + 1);
+        assert!(
+            counters.target_row_resolution_sql[0].ends_with(&expected_limit),
+            "the overflow probe must fetch at most one row beyond the write cap: {counters:?}"
+        );
+
+        let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend");
+        backend
+            .attach_app_file("default")
+            .await
+            .expect("ensure default schema");
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        let state = client
+            .query_typed(
+                r#"SELECT COUNT(*), SUM(version), COUNT(ssn)
+                   FROM "default"."users"
+                   WHERE name = 'Red Team'"#,
+                &[],
+            )
+            .await
+            .expect("inspect rows after overflowing updateMany");
+        assert_eq!(state.rows.len(), 1, "aggregate must return one non-empty row");
+        let expected_seeded = i64::try_from(seeded).expect("fixture count must fit i64");
+        for (cell, expected, label) in [
+            (&state.rows[0][0], expected_seeded, "row count"),
+            (&state.rows[0][1], expected_seeded, "version sum"),
+            (&state.rows[0][2], 0, "encrypted value count"),
+        ] {
+            match cell {
+                TypedCell::Integer(actual) => assert_eq!(
+                    *actual, expected,
+                    "overflow rejection must preserve {label}"
+                ),
+                other => panic!("{label} must be INTEGER, got {other:?}"),
+            }
+        }
+    });
+}
+
+#[test]
+fn update_many_randomised_failure_rolls_back_committed_prefix_sqlite_runtime() {
+    let key_id = "c1_update_many_atomic_failure_runtime";
+    let _keys = with_root_key("c1_update_many_atomic_failure_runtime", &"a".repeat(64));
+
+    run(async {
+        use zeroship_plugin_db::backend::sqlite::session::TypedCell;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let schema = users_encrypted_ssn_schema(key_id);
+        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl(key_id));
+        let source = sqlite_runtime_source(
+            "users",
+            &schema,
+            r#"
+async function seed(_input, _ctx) {
+    const coll = env.db.collection(COLLECTION);
+    await coll.insert({
+        id: "user_a",
+        email: "alice@example.com",
+        name: "Red Team",
+        ssn: "123-45-6789"
+    });
+    await coll.insert({
+        id: "user_b",
+        email: "bob@example.com",
+        name: "Red Team",
+        ssn: "222-33-4444"
+    });
+    return true;
+}
+seed.config = { kind: "action" };
+
+async function failBulk(_input, _ctx) {
+    const coll = env.db.collection(COLLECTION);
+    let failure = null;
+    try {
+        await coll.updateMany(
+            { name: "Red Team" },
+            { email: "bulk-collision@example.com", ssn: "999-88-7777" },
+        );
+    } catch (err) {
+        failure = {
+            code: typeof err?.code === "string" ? err.code : null,
+            message: err?.message ?? String(err),
+        };
+    }
+    const after = await coll.find({ name: "Red Team" });
+    return { failure, after };
+}
+failBulk.config = { kind: "action" };
+
+async function failBulkInsideTransaction(_input, _ctx) {
+    return await env.db.transaction(async (tx) => {
+        let failure = null;
+        try {
+            await tx[COLLECTION].updateMany(
+                { name: "Red Team" },
+                { email: "nested-collision@example.com", ssn: "777-66-5555" },
+            );
+        } catch (err) {
+            failure = {
+                code: typeof err?.code === "string" ? err.code : null,
+                message: err?.message ?? String(err),
+            };
+        }
+        await tx[COLLECTION].insert({
+            id: "control_row",
+            email: "control@example.com",
+            name: "Blue Team",
+            ssn: "111-22-3333"
+        });
+        return { failure };
+    });
+}
+failBulkInsideTransaction.config = { kind: "action" };
+
+const _procedures = { setup, seed, failBulk, failBulkInsideTransaction };
+"#,
+        );
+
+        dispatch_sqlite_runtime(&dir, &source, "setup");
+        dispatch_sqlite_runtime(&dir, &source, "seed");
+        zeroship_plugin_db::crud::reset_write_path_counters_for_tests();
+        let result = parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "failBulk"));
+        let after = result["after"]
+            .as_array()
+            .expect("caught failure must leave an inspectable result set");
+        assert_eq!(after.len(), 2, "the exercised target set must be non-empty: {result}");
+        let counters = zeroship_plugin_db::crud::write_path_counters_for_tests();
+        assert_eq!(
+            counters.target_row_resolution_calls, 1,
+            "the failing call must exercise one per-row fan-out target query: {counters:?}"
+        );
+        assert!(
+            !counters.target_row_resolution_sql.is_empty(),
+            "the failing fan-out SQL witness must be non-empty: {counters:?}"
+        );
+        assert_eq!(
+            result["failure"]["code"],
+            "unique_violation",
+            "the second conflicting row must reject in creator vocabulary: {result}"
+        );
+        let mut caller_visible: Vec<(String, i64)> = after
+            .iter()
+            .map(|row| {
+                (
+                    row["email"]
+                        .as_str()
+                        .expect("caller-visible email must be a string")
+                        .to_string(),
+                    row["version"]
+                        .as_i64()
+                        .expect("caller-visible version must be an integer"),
+                )
+            })
+            .collect();
+        caller_visible.sort();
+        assert_eq!(
+            caller_visible,
+            vec![
+                ("alice@example.com".to_string(), 1),
+                ("bob@example.com".to_string(), 1),
+            ],
+            "after rejection, the caller must observe that no prefix committed"
+        );
+
+        let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend");
+        backend
+            .attach_app_file("default")
+            .await
+            .expect("ensure default schema");
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        let typed = client
+            .query_typed(
+                r#"SELECT email, version
+                   FROM "default"."users"
+                   WHERE name = 'Red Team'
+                   ORDER BY id"#,
+                &[],
+            )
+            .await
+            .expect("inspect rows after failed updateMany");
+        assert_eq!(
+            typed.rows.len(),
+            2,
+            "the directly inspected target set must be non-empty"
+        );
+        let expected = ["alice@example.com", "bob@example.com"];
+        for (index, row) in typed.rows.iter().enumerate() {
+            match &row[0] {
+                TypedCell::Text(email) => assert_eq!(email, expected[index]),
+                other => panic!("email must be TEXT, got {other:?}"),
+            }
+            match &row[1] {
+                TypedCell::Integer(version) => assert_eq!(
+                    *version, 1,
+                    "a rejected updateMany must not commit or version-bump a prefix"
+                ),
+                other => panic!("version must be INTEGER, got {other:?}"),
+            }
+        }
+
+        let nested = parity::extract_json(&dispatch_sqlite_runtime(
+            &dir,
+            &source,
+            "failBulkInsideTransaction",
+        ));
+        assert_eq!(
+            nested["failure"]["code"], "unique_violation",
+            "the savepoint-wrapped fan-out must preserve the row error: {nested}"
+        );
+        let after_nested = client
+            .query_typed(
+                r#"SELECT email, version
+                   FROM "default"."users"
+                   WHERE name = 'Red Team'
+                   ORDER BY id"#,
+                &[],
+            )
+            .await
+            .expect("inspect rows after nested failed updateMany");
+        assert_eq!(after_nested.rows.len(), 2, "nested target set must be non-empty");
+        for (index, row) in after_nested.rows.iter().enumerate() {
+            match &row[0] {
+                TypedCell::Text(email) => assert_eq!(email, expected[index]),
+                other => panic!("email must be TEXT, got {other:?}"),
+            }
+            match &row[1] {
+                TypedCell::Integer(version) => assert_eq!(*version, 1),
+                other => panic!("version must be INTEGER, got {other:?}"),
+            }
+        }
+        let control = client
+            .query_typed(
+                r#"SELECT COUNT(*) FROM "default"."users" WHERE id = 'control_row'"#,
+                &[],
+            )
+            .await
+            .expect("inspect outer transaction control write");
+        assert!(
+            !control.rows.is_empty(),
+            "the outer transaction control result must be non-empty"
+        );
+        match &control.rows[0][0] {
+            TypedCell::Integer(count) => assert_eq!(
+                *count, 1,
+                "rolling back the updateMany savepoint must not roll back the outer transaction"
+            ),
+            other => panic!("control count must be INTEGER, got {other:?}"),
         }
     });
 }
@@ -9790,6 +10139,5 @@ fn p6c_data_plane_reaches_the_app_file_without_a_register() {
 // zeroship-side adoption of a pre-existing dev file, which is fine while
 // nothing can create one, and would need re-testing the day something can.
 // ---------------------------------------------------------------------------
-
 
 
