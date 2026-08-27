@@ -390,6 +390,10 @@ where
         Ok(Message::CopyInResponse(body)) => {
             CopyResponse::from_backend(body.format(), body.column_formats())?
         }
+        Ok(Message::CopyOutResponse(_)) => {
+            abort(&mut sender).await;
+            return Err(Error::copy_out_unsupported());
+        }
         Ok(_) => {
             abort(&mut sender).await;
             return Err(Error::unexpected_message());

@@ -333,6 +333,7 @@ pub enum ErrorPosition {
 enum Kind {
     Io,
     UnexpectedMessage,
+    CopyOutUnsupported,
     /// A TLS problem that is settled before any handshake bytes are exchanged:
     /// an impossible `sslmode` combination, a server that refuses `SSLRequest`
     /// under a mode that requires TLS, an unreadable `sslrootcert`.
@@ -431,6 +432,9 @@ impl fmt::Display for Error {
         match &self.0.kind {
             Kind::Io => fmt.write_str("error communicating with the server"),
             Kind::UnexpectedMessage => fmt.write_str("unexpected message from server"),
+            Kind::CopyOutUnsupported => {
+                fmt.write_str("COPY TO STDOUT is not supported by this API; use Client::copy_out")
+            }
             Kind::Tls => fmt.write_str("TLS could not be negotiated"),
             Kind::TlsHandshake => fmt.write_str("error performing TLS handshake"),
             Kind::TlsUnattested => fmt.write_str(
@@ -596,6 +600,10 @@ impl Error {
 
     pub(crate) fn unexpected_message() -> Error {
         Error::new(Kind::UnexpectedMessage, None)
+    }
+
+    pub(crate) fn copy_out_unsupported() -> Error {
+        Error::new(Kind::CopyOutUnsupported, None)
     }
 
     #[allow(clippy::needless_pass_by_value)]
