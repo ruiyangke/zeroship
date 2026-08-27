@@ -818,12 +818,12 @@ where
         }
         let write_flight = WriteFlight::new(session);
         let BufResult(result, _) = socket.write_all(pending).await;
+        result?;
         session.with(|session| {
             session.write_in_flight = false;
             Ok(())
         })?;
         write_flight.disarm();
-        result?;
     }
 }
 
@@ -1061,6 +1061,13 @@ mod tests {
         wire_prefix: Vec<u8>,
     }
 
+    /// A peer that accepts a prefix, errors once, then recovers. The recovery
+    /// makes a second TLS operation test the session's own retirement state.
+    struct PartialErrorWriter {
+        writes: usize,
+        wire_prefix: Vec<u8>,
+    }
+
     impl AsyncWrite for ParkedWriter {
         async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
             let bytes = buf.as_init();
@@ -1071,6 +1078,32 @@ mod tests {
             self.wire_prefix.push(bytes[0]);
             std::future::pending::<()>().await;
             unreachable!("the parked TLS writer completed")
+        }
+
+        async fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl AsyncWrite for PartialErrorWriter {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            self.writes += 1;
+            let bytes = buf.as_init();
+            match self.writes {
+                1 => {
+                    self.wire_prefix.push(bytes[0]);
+                    BufResult(Ok(1), buf)
+                }
+                2 => BufResult(
+                    Err(io::Error::other("scripted partial ciphertext write")),
+                    buf,
+                ),
+                _ => BufResult(Ok(bytes.len()), buf),
+            }
         }
 
         async fn flush(&mut self) -> io::Result<()> {
@@ -1109,6 +1142,35 @@ mod tests {
             .flush()
             .await
             .expect_err("a cancelled TLS write was reported as a successful reusable stream");
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[compio::test]
+    async fn a_partial_tls_write_error_poisons_the_reused_stream() {
+        let (client, _server) = handshaken_pair();
+        let session = share(client);
+        let mut writer = TlsWriteHalf::new(
+            PartialErrorWriter {
+                writes: 0,
+                wire_prefix: Vec::new(),
+            },
+            session,
+        );
+
+        let BufResult(first, _) = writer
+            .write(b"partially delivered plaintext".to_vec())
+            .await;
+        first.expect_err("the scripted ciphertext write did not fail");
+        assert_eq!(
+            writer.socket.wire_prefix.len(),
+            1,
+            "the failed TLS write made no progress, so no frame tail was lost"
+        );
+
+        let error = writer
+            .flush()
+            .await
+            .expect_err("a TLS session that lost ciphertext to a returned write error was reused");
         assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
     }
 
