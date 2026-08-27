@@ -274,6 +274,36 @@ machine and the workload mix.
 | acquire timeouts | 0 | 0 |
 | bad connections / cancellations | 233 / 198 | 3,488 / 2,961 |
 
+### After the cancellation audit, which is the run this section exists for
+
+MEASURED 2026-08-27 at `388d026ca`, 600s window with 10s samples, against a
+DEDICATED 16.15 container on 5461 rather than the shared fixture - two audit
+agents were running suites on 5455 and 5459, and the prerequisites above forbid
+sharing a server with other load: **131,510 operations**, 61 samples with 23
+rises and 21 falls for a net **-76 KiB**, 287 pool connections created against
+281 evicted, 0 acquire timeouts, both baselines back to zero
+(`server_final=0 driver_final=0`).
+
+The number this run was for is the cancellation pair:
+
+    cancellations=1970   cancellation_recoveries=1970
+
+EXACT equality over 1,970 cancellations, each one followed by verified reuse of
+the SAME pooled lease. That day's six merged fixes changed when a cancel
+returns, which transport it replays, and whether a lease-scoped token may fire
+at all - all of it on the path this counter measures. A short suite proves each
+rule once; this says the rules hold together 1,970 times without the pool
+drifting.
+
+`pool_acquires` and `pool_releases` also came out identical at 116,199. That
+pair is the permit-leak check and it is exact, not approximate - one lost permit
+in 116,199 checkouts would show.
+
+The dedicated container is worth the 30 seconds. Sharing 5455 with an agent
+running the suite would not have failed the soak; it would have made every RSS
+and latency figure uninterpretable, which is worse, because the run still
+prints `result=ok`.
+
 ### With the prepared-statement cache on
 
 The cache is off by default, so every run above left the driver's most
