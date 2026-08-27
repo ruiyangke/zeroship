@@ -1400,9 +1400,9 @@ async fn a_copy_out_response_to_a_copy_in_request_is_refused() {
         response.extend_from_slice(&backend_frame(b'H', b"\x00\x00\x00"));
         let chain = hostile_copy_in_retires_session(511, response).await;
         assert!(
-            chain.contains("unexpected message from server"),
-            "a wrong-direction COPY IN response reported {chain:?} rather than an out-of-order \
-             message"
+            chain.contains("COPY TO STDOUT is not supported by this API; use Client::copy_out"),
+            "a wrong-direction COPY IN response did not name COPY TO STDOUT and copy_out: \
+             {chain:?}"
         );
     })
     .await

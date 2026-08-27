@@ -7,7 +7,7 @@
 // branch reads the `CopyInReceiver` with `next().await` instead of
 // `poll_next_unpin(cx)`.
 
-use crate::client::{InnerClient, Responses};
+use crate::client::{CopyMode, CopyModeGuard, InnerClient, Responses};
 use crate::codec::FrontendMessage;
 use crate::connection::RequestMessages;
 use crate::copy_format::CopyResponse;
@@ -204,6 +204,9 @@ pin_project! {
         buf: BytesMut,
         state: SinkState,
         _p2: PhantomData<T>,
+        // Last so Drop closes the producer and response consumer before it
+        // publishes that ordinary requests may queue behind their recovery.
+        copy_mode: Option<CopyModeGuard>,
     }
 }
 
@@ -221,33 +224,82 @@ where
         self.response.column_formats()
     }
 
+    fn clear_copy_mode(self: Pin<&mut Self>) {
+        self.project().copy_mode.take();
+    }
+
     /// A poll-based version of `finish`.
     pub fn poll_finish(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<u64, Error>> {
         loop {
             match self.state {
                 SinkState::Active => {
-                    ready!(self.as_mut().poll_flush(cx))?;
-                    let mut this = self.as_mut().project();
-                    ready!(this.sender.as_mut().poll_ready(cx)).map_err(|_| Error::closed())?;
-                    this.sender
-                        .start_send(CopyInMessage::Done)
-                        .map_err(|_| Error::closed())?;
-                    *this.state = SinkState::Closing;
+                    match self.as_mut().poll_flush(cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Ok(())) => {}
+                        Poll::Ready(Err(error)) => {
+                            self.as_mut().clear_copy_mode();
+                            return Poll::Ready(Err(error));
+                        }
+                    }
+                    let sender_ready = {
+                        let mut this = self.as_mut().project();
+                        this.sender
+                            .as_mut()
+                            .poll_ready(cx)
+                            .map_err(|_| Error::closed())
+                    };
+                    match sender_ready {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Ok(())) => {}
+                        Poll::Ready(Err(error)) => {
+                            self.as_mut().clear_copy_mode();
+                            return Poll::Ready(Err(error));
+                        }
+                    }
+                    let send_result = {
+                        let mut this = self.as_mut().project();
+                        this.sender
+                            .as_mut()
+                            .start_send(CopyInMessage::Done)
+                            .map_err(|_| Error::closed())
+                    };
+                    if let Err(error) = send_result {
+                        self.as_mut().clear_copy_mode();
+                        return Poll::Ready(Err(error));
+                    }
+                    *self.as_mut().project().state = SinkState::Closing;
                 }
                 SinkState::Closing => {
-                    let this = self.as_mut().project();
-                    ready!(this.sender.poll_close(cx)).map_err(|_| Error::closed())?;
-                    *this.state = SinkState::Reading;
+                    let sender_closed = {
+                        let this = self.as_mut().project();
+                        this.sender.poll_close(cx).map_err(|_| Error::closed())
+                    };
+                    match sender_closed {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Ok(())) => {
+                            *self.as_mut().project().state = SinkState::Reading;
+                        }
+                        Poll::Ready(Err(error)) => {
+                            self.as_mut().clear_copy_mode();
+                            return Poll::Ready(Err(error));
+                        }
+                    }
                 }
                 SinkState::Reading => {
-                    let this = self.as_mut().project();
-                    match ready!(this.responses.poll_next(cx))? {
-                        Message::CommandComplete(body) => {
-                            let rows = extract_row_affected(&body)?;
-                            return Poll::Ready(Ok(rows));
+                    let response = {
+                        let this = self.as_mut().project();
+                        this.responses.poll_next(cx)
+                    };
+                    let result = match response {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Ok(Message::CommandComplete(body))) => {
+                            extract_row_affected(&body)
                         }
-                        _ => return Poll::Ready(Err(Error::unexpected_message())),
-                    }
+                        Poll::Ready(Ok(_)) => Err(Error::unexpected_message()),
+                        Poll::Ready(Err(error)) => Err(error),
+                    };
+                    self.as_mut().clear_copy_mode();
+                    return Poll::Ready(result);
                 }
             }
         }
@@ -345,7 +397,8 @@ where
 
     let (mut sender, receiver) = mpsc::channel(1);
     let receiver = CopyInReceiver::new(receiver);
-    let mut responses = client.send_statement(RequestMessages::CopyIn(receiver), &statement)?;
+    let (mut responses, copy_mode) =
+        client.send_copy_statement(RequestMessages::CopyIn(receiver), &statement, CopyMode::In)?;
 
     sender
         .send(CopyInMessage::Message(FrontendMessage::Raw(buf)))
@@ -390,6 +443,10 @@ where
         Ok(Message::CopyInResponse(body)) => {
             CopyResponse::from_backend(body.format(), body.column_formats())?
         }
+        Ok(Message::CopyOutResponse(_)) => {
+            abort(&mut sender).await;
+            return Err(Error::copy_out_unsupported());
+        }
         Ok(_) => {
             abort(&mut sender).await;
             return Err(Error::unexpected_message());
@@ -408,6 +465,7 @@ where
         buf: BytesMut::new(),
         state: SinkState::Active,
         _p2: PhantomData,
+        copy_mode: Some(copy_mode),
     })
 }
 

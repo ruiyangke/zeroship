@@ -114,6 +114,7 @@ where
         responses,
         pending,
         rows_affected: None,
+        copy_out_refused: false,
     })
 }
 
@@ -177,6 +178,7 @@ pub async fn query_text_params(
                     responses,
                     pending: None,
                     rows_affected: None,
+                    copy_out_refused: false,
                 });
             }
             Message::RowDescription(row_description) => {
@@ -198,6 +200,7 @@ pub async fn query_text_params(
                     responses,
                     pending: None,
                     rows_affected: None,
+                    copy_out_refused: false,
                 });
             }
             _ => return Err(Error::unexpected_message()),
@@ -257,6 +260,7 @@ pub async fn execute_text_params(
 
     let mut responses = client.send(producerless_request(buf, may_enter_copy_in(query)))?;
     let mut rows = 0;
+    let mut copy_out_refused = false;
     loop {
         match responses.next().await? {
             Message::ParseComplete
@@ -272,7 +276,15 @@ pub async fn execute_text_params(
             // The connection-owned producer is already committed to
             // `CopyFail + Sync`; keep draining to its server error.
             Message::CopyInResponse(_) => {}
-            Message::ReadyForQuery(_) => return Ok(rows),
+            Message::CopyOutResponse(_) => copy_out_refused = true,
+            Message::CopyData(_) | Message::CopyDone if copy_out_refused => {}
+            Message::ReadyForQuery(_) => {
+                return if copy_out_refused {
+                    Err(Error::copy_out_unsupported())
+                } else {
+                    Ok(rows)
+                };
+            }
             _ => return Err(Error::unexpected_message()),
         }
     }
@@ -313,6 +325,7 @@ where
                     responses,
                     pending: None,
                     rows_affected: None,
+                    copy_out_refused: false,
                 });
             }
             Message::RowDescription(row_description) => {
@@ -334,6 +347,7 @@ where
                     responses,
                     pending: None,
                     rows_affected: None,
+                    copy_out_refused: false,
                 });
             }
             _ => return Err(Error::unexpected_message()),
@@ -368,6 +382,7 @@ where
     let mut responses = client.send(producerless_request(buf, may_enter_copy_in(query)))?;
 
     let mut rows = 0;
+    let mut copy_out_refused = false;
 
     loop {
         match responses.next().await? {
@@ -386,7 +401,15 @@ where
 
             Message::EmptyQueryResponse => rows = 0,
             Message::CopyInResponse(_) => {}
-            Message::ReadyForQuery(_) => return Ok(rows),
+            Message::CopyOutResponse(_) => copy_out_refused = true,
+            Message::CopyData(_) | Message::CopyDone if copy_out_refused => {}
+            Message::ReadyForQuery(_) => {
+                return if copy_out_refused {
+                    Err(Error::copy_out_unsupported())
+                } else {
+                    Ok(rows)
+                };
+            }
             _ => {
                 return Err(Error::unexpected_message());
             }
@@ -416,6 +439,7 @@ pub async fn query_portal(
         responses,
         pending: None,
         rows_affected: None,
+        copy_out_refused: false,
     })
 }
 
@@ -462,6 +486,7 @@ where
     };
 
     let mut rows = 0;
+    let mut copy_out_refused = false;
     loop {
         match responses.next().await? {
             Message::DataRow(_) => {}
@@ -470,7 +495,15 @@ where
             }
             Message::EmptyQueryResponse => rows = 0,
             Message::CopyInResponse(_) => {}
-            Message::ReadyForQuery(_) => return Ok(rows),
+            Message::CopyOutResponse(_) => copy_out_refused = true,
+            Message::CopyData(_) | Message::CopyDone if copy_out_refused => {}
+            Message::ReadyForQuery(_) => {
+                return if copy_out_refused {
+                    Err(Error::copy_out_unsupported())
+                } else {
+                    Ok(rows)
+                };
+            }
             _ => return Err(Error::unexpected_message()),
         }
     }
@@ -722,6 +755,7 @@ pin_project! {
         responses: Responses,
         pending: Option<Message>,
         rows_affected: Option<u64>,
+        copy_out_refused: bool,
     }
 }
 
@@ -760,10 +794,18 @@ impl Stream for RowStream {
                 // so the stream genuinely is not exhausted and `None` is the
                 // honest answer.
                 Message::PortalSuspended => {}
-                Message::ReadyForQuery(_) => return Poll::Ready(None),
+                Message::ReadyForQuery(_) => {
+                    if *this.copy_out_refused {
+                        *this.copy_out_refused = false;
+                        return Poll::Ready(Some(Err(Error::copy_out_unsupported())));
+                    }
+                    return Poll::Ready(None);
+                }
                 // The connection owns the producerless COPY abort. Returning
                 // no item here keeps polling until PostgreSQL reports it.
                 Message::CopyInResponse(_) => {}
+                Message::CopyOutResponse(_) => *this.copy_out_refused = true,
+                Message::CopyData(_) | Message::CopyDone if *this.copy_out_refused => {}
                 _ => return Poll::Ready(Some(Err(Error::unexpected_message()))),
             }
         }
