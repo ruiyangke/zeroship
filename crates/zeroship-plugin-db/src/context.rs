@@ -728,8 +728,16 @@ impl ThreadDbContext {
     }
 
     /// Cache the result of a live introspection for one immutable binding and
-    /// collection. `facts = None` records that the collection is absent. Other
-    /// deploys of the same app, and other databases, retain their own entries.
+    /// collection, and return what the process-wide cache holds for that
+    /// identity afterwards. `facts = None` records that the collection is
+    /// absent. Other deploys of the same app, and other databases, retain their
+    /// own entries.
+    ///
+    /// **Callers must use the return value rather than the `Arc` they passed
+    /// in.** Another thread racing the same cold miss may have published first;
+    /// its object is the one in the map and therefore the one every later
+    /// reader on every thread will see. See
+    /// [`crate::live_metadata::LiveMetadataCache::publish`].
     ///
     /// Takes `&self`: the cache is process-wide and carries its own
     /// synchronisation, so writing to it is not a mutation of thread state.
@@ -738,9 +746,9 @@ impl ThreadDbContext {
         binding: &DbBinding,
         collection: &str,
         facts: CachedFacts,
-    ) {
+    ) -> CachedFacts {
         self.live_metadata
-            .insert(self.live_metadata_key(binding, collection), facts);
+            .publish(self.live_metadata_key(binding, collection), facts)
     }
 
     /// Poll the success-only singleflight for one exact introspection key.
