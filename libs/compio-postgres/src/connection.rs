@@ -652,6 +652,9 @@ where
                     }
                 }
                 None => {
+                    if let Some(error) = self.record_buffered_server_error() {
+                        return Err(error);
+                    }
                     // Client side dropped. Send Terminate and begin
                     // graceful shutdown.
                     trace!("receiver closed, sending Terminate");
@@ -749,9 +752,13 @@ where
     /// Prefer a complete server diagnosis already in the serialized read
     /// buffer over the local write failure which exposed it.
     fn prefer_buffered_server_error(&mut self, local: Error) -> Error {
-        let Some(server) = take_buffered_server_error(&mut self.stream) else {
-            return local;
-        };
+        self.record_buffered_server_error().unwrap_or(local)
+    }
+
+    /// Record and publish a complete buffered diagnosis using the same
+    /// ownership rules as ordinary protocol dispatch.
+    fn record_buffered_server_error(&mut self) -> Option<Error> {
+        let server = take_buffered_server_error(&mut self.stream)?;
 
         if let Some(error) = server.as_db_error() {
             // A DbError cannot be duplicated through Error's generic terminal
@@ -766,12 +773,12 @@ where
                         Error::from_db_error(error.clone()),
                     )])));
             }
-            if server_error_ends_session(error) {
+            if server_error_ends_session(error) || self.responses.is_empty() {
                 remember_server_error(&self.terminal_server_error, error);
             }
         }
         self.tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
-        server
+        Some(server)
     }
 
     /// Handle a request received from the client (serialized path).
@@ -5154,6 +5161,67 @@ mod tests {
             error.code().map(|code| code.code()),
             Some("57P01"),
             "serialized COPY flush discarded buffered SQLSTATE 57P01: {error}"
+        );
+    }
+
+    #[compio::test]
+    async fn serialized_client_shutdown_preserves_a_buffered_server_error() {
+        let (request_sender, request_receiver) = mpsc::unbounded();
+        let client = crate::client::Client::new(
+            request_sender,
+            crate::config::SslMode::Disable,
+            crate::config::SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+        );
+        let mut response_stream = client
+            .inner()
+            .send(RequestMessages::Single(FrontendMessage::Raw(
+                bytes::Bytes::from_static(b"scripted final request"),
+            )))
+            .expect("enqueue the final serialized request");
+
+        let mut response = completed_response_batch(b'I');
+        response.extend_from_slice(&fatal_error_frame("57P01", "scripted backend shutdown"));
+        let connection: Connection<ScriptedDuplex, ScriptedDuplex> = Connection::new(
+            BufStream::new(MaybeTlsStream::Raw(ScriptedDuplex {
+                chunks: VecDeque::from([response]),
+            })),
+            VecDeque::new(),
+            HashMap::new(),
+            client.parameters_handle(),
+            request_receiver,
+            client.tx_status_handle(),
+            client.in_flight_requests_handle(),
+            client.terminal_server_error_handle(),
+            None,
+        );
+
+        let consume_then_close = async move {
+            match response_stream.next().await.expect("read CommandComplete") {
+                Message::CommandComplete(_) => {}
+                _ => panic!("the final response did not start with CommandComplete"),
+            }
+            match response_stream.next().await.expect("read ReadyForQuery") {
+                Message::ReadyForQuery(_) => {}
+                _ => panic!("the final response did not end with ReadyForQuery"),
+            }
+            drop(response_stream);
+            drop(client);
+        };
+        let (driver_result, ()) =
+            futures_util::join!(connection.run_serialized(), consume_then_close);
+        let error = match driver_result {
+            Err(error) => error,
+            Ok(()) => {
+                panic!("serialized client shutdown discarded buffered SQLSTATE 57P01: ()")
+            }
+        };
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("57P01"),
+            "serialized client shutdown replaced buffered SQLSTATE 57P01: {error}"
         );
     }
 
