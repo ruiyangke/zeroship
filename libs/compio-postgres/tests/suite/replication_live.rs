@@ -876,6 +876,82 @@ async fn a_mid_frame_replication_stall_times_out_and_poisons_the_stream() {
     .expect("mid-frame replication timeout test exceeded its outer watchdog");
 }
 
+/// A CopyBoth `ErrorResponse` is frame-aligned but not protocol-state aligned.
+/// PostgreSQL has ended replication and follows an ordinary ERROR with
+/// `ReadyForQuery`; this stream cannot send a recovery `Sync` or turn back into
+/// a `ReplicationConnection`. Preserve 57014 for the first call, then retire
+/// the stream and socket instead of treating `ReadyForQuery` as replication.
+#[compio::test]
+async fn a_replication_error_response_retires_copy_both_after_preserving_57014() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            assert_eq!(
+                expect_simple_query(&mut stream),
+                b"START_REPLICATION SLOT \"deadline_slot\" LOGICAL 0/0 (\"proto_version\" '1', \"publication_names\" '\"deadline_publication\"')\0"
+            );
+            send_copy_both(&mut stream);
+
+            let mut cancelled =
+                backend_frame(b'E', b"SERROR\0C57014\0Mcanceling statement due to user request\0\0");
+            cancelled.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream
+                .write_all(&cancelled)
+                .expect("write replication cancellation response");
+            stream
+                .flush()
+                .expect("flush replication cancellation response");
+            expect_disconnect(&mut stream);
+        });
+
+        let replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(
+                common::suite_tls(),
+                &stub_config(server.addr),
+            ),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+        let mut stream = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            replication.start_logical_replication(start_options()),
+        )
+        .await
+        .expect("START_REPLICATION exceeded its watchdog")
+        .expect("scripted peer refused CopyBoth mode");
+
+        let first = compio::time::timeout(OPERATION_WATCHDOG, stream.next())
+            .await
+            .expect("replication cancellation exceeded its watchdog")
+            .expect_err("57014 ended CopyBoth and cannot be a stream item");
+        assert_eq!(
+            first.code().map(|code| code.code()),
+            Some("57014"),
+            "the replication stream lost the server's cancellation SQLSTATE: {}",
+            common::error_chain(&first)
+        );
+
+        // Finish before retrying: logical poison alone is insufficient because
+        // a CopyBoth session left open can still retain WAL and accept feedback.
+        server.finish();
+
+        let second = compio::time::timeout(OPERATION_WATCHDOG, stream.next())
+            .await
+            .expect("retired replication retry exceeded its watchdog")
+            .expect_err("a stream whose CopyBoth exchange ended was reused");
+        assert!(
+            second.is_cancelled(),
+            "the ended CopyBoth exchange was not retired: {}",
+            common::error_chain(&second)
+        );
+    })
+    .await
+    .expect("replication ErrorResponse retirement test exceeded its outer watchdog");
+}
+
 /// An out-of-range `start_lsn` must be REFUSED, not silently replaced by 0.
 ///
 /// MEASURED against the test server on 2026-08-23, because the two parsers

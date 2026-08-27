@@ -1066,9 +1066,11 @@ where
             // everything below this point was well-framed, and that arm is the
             // counterexample sitting in the same `match`.
             //
-            // A server-sent `ErrorResponse` is the case that does NOT poison: it
-            // is a complete message, its arm consumes the body, and the wire is
-            // exactly where it should be, so a caller may reasonably carry on.
+            // A server-sent `ErrorResponse` is frame-aligned but not reusable:
+            // it ends CopyBoth protocol state. PostgreSQL may follow it with
+            // ReadyForQuery, but this API cannot send Sync, return to a
+            // ReplicationConnection, or interpret ordinary-query frames. Its
+            // arm therefore preserves the server error and retires the stream.
             let header = match frame {
                 Ok(header) => header,
                 Err(e) => {
@@ -1211,7 +1213,12 @@ where
                     // travel with the error rather than being dropped for a
                     // fixed string.
                     let bytes = self.stream.buf().split_to(header.body_len()).freeze();
-                    return Err(error_from_error_response_frame(&header, &bytes));
+                    let error = error_from_error_response_frame(&header, &bytes);
+                    self.in_flight.poison();
+                    if let Some(release) = &self.release {
+                        release.shutdown();
+                    }
+                    return Err(error);
                 }
                 NOTICE_RESPONSE_TAG => {
                     let _ = self.stream.buf().split_to(header.body_len()).freeze();
