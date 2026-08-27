@@ -440,6 +440,26 @@ this path and the query waits for as long as the freeze lasts - which is the
 correct behaviour for a driver told to wait indefinitely, and is why the
 parameter exists.
 
+RE-MEASURED 2026-08-27 at `8b4022269`, same 5s bound:
+
+```text
+PROBE query ended after 5.000447224s is_closed=true err=socket read timeout expired
+PROBE live_connections=0
+```
+
+0.45ms over the bound against 0.47ms the previous day - unchanged. That
+re-measurement exists because `e87aa8d04` put an EINTR RETRY LOOP inside
+`read_with_deadline`, and the obvious way to write one resets the clock on each
+retry, so a timeout would fire late or never. A scripted peer cannot show that;
+only a real frozen server puts the loop under a deadline it must not restart.
+
+USE A PORT NO CONTAINER ALREADY PUBLISHES, and check with
+`docker ps -a --format '{{.Ports}}'`, not only `ss -ltn`. On 2026-08-27 port
+5462 looked free by socket state but belonged to another project's
+`zs-dbbind-pg`; docker refused the bind, which is the only reason this section's
+`docker pause` did not freeze a stranger's database mid-session. A published
+port is held by the container whether or not anything is listening right now.
+
 ## Chaos: a healthy server with no connection slots left
 
 The third shape, and the one a platform running many apps against one
