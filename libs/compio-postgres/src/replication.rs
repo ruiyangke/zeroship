@@ -1343,7 +1343,9 @@ where
         let mut bytes = BytesMut::new();
         frontend::copy_done(&mut bytes);
         crate::codec::write_frontend(&mut self.stream, FrontendMessage::Raw(bytes.freeze()))?;
-        self.stream.flush().await?;
+        if let Err(error) = self.stream.flush().await {
+            return Err(take_buffered_server_error(&mut self.stream).unwrap_or(error));
+        }
 
         // PostgreSQL owes a terminal CommandComplete/ErrorResponse plus
         // ReadyForQuery only after the frontend half-close reaches it.
@@ -1460,7 +1462,10 @@ where
         let now = postgres_microseconds_since_epoch();
         let (write, flush, apply) = self.lsn.standby_lsns();
         encode_standby_status_update(&mut self.stream, write, flush, apply, now, reply_requested)?;
-        self.stream.flush().await
+        if let Err(error) = self.stream.flush().await {
+            return Err(take_buffered_server_error(&mut self.stream).unwrap_or(error));
+        }
+        Ok(())
     }
 }
 
@@ -1567,6 +1572,41 @@ where
     }
 }
 
+/// Consume a complete ErrorResponse already over-read behind the response
+/// which made the caller attempt a frontend write, skipping only complete
+/// asynchronous messages before it.
+///
+/// This deliberately performs no socket read. A failed write retires the
+/// session, and waiting for bytes which are not already buffered could hang on
+/// a one-way transport failure. The common coalesced-read case still gets the
+/// server diagnosis which is already locally available.
+fn take_buffered_server_error<S>(stream: &mut BufStream<S>) -> Option<Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    loop {
+        let length = stream.peek_u32_be(1)?;
+        if length < 4 || stream.validate_length(length).is_err() {
+            return None;
+        }
+        let total_len = usize::try_from(length).ok()?.checked_add(1)?;
+        if stream.buf().len() < total_len {
+            return None;
+        }
+
+        match stream.buf()[0] {
+            ERROR_RESPONSE_TAG => {
+                let frame = stream.buf().split_to(total_len);
+                return Some(error_from_error_response_body(frame));
+            }
+            NOTICE_RESPONSE_TAG | NOTIFICATION_RESPONSE_TAG | PARAMETER_STATUS_TAG => {
+                let _ = stream.buf().split_to(total_len);
+            }
+            _ => return None,
+        }
+    }
+}
+
 /// Send a simple-query (`Q`) frontend message - used to issue both
 /// `IDENTIFY_SYSTEM` and `START_REPLICATION`. The walsender accepts
 /// the simple-query path for the replication command grammar.
@@ -1577,7 +1617,10 @@ where
     let mut buf = BytesMut::new();
     frontend::query(query, &mut buf).map_err(Error::encode)?;
     crate::codec::write_frontend(stream, FrontendMessage::Raw(buf.freeze()))?;
-    stream.flush().await
+    if let Err(error) = stream.flush().await {
+        return Err(take_buffered_server_error(stream).unwrap_or(error));
+    }
+    Ok(())
 }
 
 /// Encode a `StandbyStatusUpdate` frame into the stream's write
@@ -4230,8 +4273,9 @@ mod tests {
         );
     }
 
-    /// A peer that writes part of the first frame, fails the remainder, and is
-    /// healthy for every write after that.
+    /// A peer that accepts a configured number of writes, writes part of the
+    /// next frame, fails the remainder, and is healthy for every write after
+    /// that.
     ///
     /// The recovery is the whole point. A peer that simply stayed broken would
     /// make the test below pass on the unfixed driver too, because the second
@@ -4245,6 +4289,8 @@ mod tests {
     /// with a write error, which no real peer is needed to produce.
     struct WriteFailingPeer {
         writes: usize,
+        writes_before_failure: usize,
+        unread: Vec<u8>,
     }
 
     impl compio::io::AsyncRead for WriteFailingPeer {
@@ -4252,8 +4298,12 @@ mod tests {
             &mut self,
             buf: B,
         ) -> compio::buf::BufResult<usize, B> {
-            // Nothing to read: the subject is the write path.
-            compio::buf::BufResult(Ok(0), buf)
+            let mut src: &[u8] = &self.unread;
+            let before = src.len();
+            let result = src.read(buf).await;
+            let consumed = before - src.len();
+            self.unread.drain(..consumed);
+            result
         }
     }
 
@@ -4264,12 +4314,13 @@ mod tests {
         ) -> compio::buf::BufResult<usize, B> {
             self.writes += 1;
             let len = compio::buf::IoBuf::buf_len(&buf);
+            let partial_write = self.writes_before_failure + 1;
             match self.writes {
                 // Accept half the frame, so `write_all` comes back for the rest.
-                1 => compio::buf::BufResult(Ok(len / 2), buf),
+                write if write == partial_write => compio::buf::BufResult(Ok(len / 2), buf),
                 // ... and fail it. `BufStream::flush` took the frame out of the
                 // write buffer before awaiting, so the tail is now gone.
-                2 => compio::buf::BufResult(
+                write if write == partial_write + 1 => compio::buf::BufResult(
                     Err(std::io::Error::other("scripted mid-frame write failure")),
                     buf,
                 ),
@@ -4286,9 +4337,47 @@ mod tests {
 
     fn stream_over_failing_writer() -> ReplicationStream<WriteFailingPeer, WriteFailingPeer> {
         ReplicationStream {
-            stream: BufStream::new(MaybeTlsStream::Raw(WriteFailingPeer { writes: 0 })),
+            stream: BufStream::new(MaybeTlsStream::Raw(WriteFailingPeer {
+                writes: 0,
+                writes_before_failure: 0,
+                unread: Vec::new(),
+            })),
             lsn: LsnTracker::new(0),
             copy_response: Default::default(),
+            in_flight: InFlight::default(),
+            release: None,
+            cancel_token: test_cancel_token(),
+        }
+    }
+
+    fn stream_over_failing_writer_with_unread(
+        unread: Vec<u8>,
+    ) -> ReplicationStream<WriteFailingPeer, WriteFailingPeer> {
+        ReplicationStream {
+            stream: BufStream::new(MaybeTlsStream::Raw(WriteFailingPeer {
+                writes: 0,
+                writes_before_failure: 0,
+                unread,
+            })),
+            lsn: LsnTracker::new(0),
+            copy_response: Default::default(),
+            in_flight: InFlight::default(),
+            release: None,
+            cancel_token: test_cancel_token(),
+        }
+    }
+
+    fn replication_connection_over_failing_writer(
+        unread: Vec<u8>,
+        writes_before_failure: usize,
+    ) -> ReplicationConnection<WriteFailingPeer, WriteFailingPeer> {
+        ReplicationConnection {
+            stream: BufStream::new(MaybeTlsStream::Raw(WriteFailingPeer {
+                writes: 0,
+                writes_before_failure,
+                unread,
+            })),
+            parameters: HashMap::new(),
             in_flight: InFlight::default(),
             release: None,
             cancel_token: test_cancel_token(),
@@ -4333,6 +4422,196 @@ mod tests {
         assert!(
             second.is_cancelled(),
             "the driver wrote a second frame after a fragment instead of refusing: {second}"
+        );
+    }
+
+    /// The read which delivered a reply-requesting keepalive can over-read a
+    /// following ErrorResponse into the userspace buffer. If the automatic
+    /// StandbyStatusUpdate then fails to flush, that already-available server
+    /// diagnosis outranks the local write symptom.
+    #[compio::test]
+    async fn an_automatic_keepalive_write_failure_preserves_a_buffered_server_error() {
+        let mut keepalive = vec![PRIMARY_KEEPALIVE_TAG];
+        keepalive.extend_from_slice(&0x16B_4000u64.to_be_bytes());
+        keepalive.extend_from_slice(&700_000_000_000i64.to_be_bytes());
+        keepalive.push(1);
+
+        let mut wire = startup_frame(COPY_DATA_TAG, &keepalive);
+        wire.extend_from_slice(&error_response_message(&[
+            (b'S', "FATAL"),
+            (b'C', "57P01"),
+            (b'M', "terminating connection due to administrator command"),
+        ]));
+        let mut stream = stream_over_failing_writer_with_unread(wire);
+
+        let error = stream
+            .next()
+            .await
+            .expect_err("the automatic keepalive reply write was scripted to fail");
+        let chain = std::iter::successors(std::error::Error::source(&error), |source| {
+            std::error::Error::source(*source)
+        })
+        .fold(error.to_string(), |chain, source| {
+            format!("{chain}: {source}")
+        });
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("57P01"),
+            "automatic keepalive reply discarded SQLSTATE 57P01: {chain}"
+        );
+
+        let retry = stream
+            .next()
+            .await
+            .expect_err("a failed automatic keepalive reply left the stream reusable");
+        assert!(
+            retry.is_cancelled(),
+            "the failed automatic keepalive reply did not retire the stream: {retry}"
+        );
+    }
+
+    /// A preceding `next` can over-read an ErrorResponse behind the CopyData
+    /// it returns. If a caller then sends a manual StandbyStatusUpdate and the
+    /// write fails, that buffered server diagnosis outranks the local write
+    /// symptom just as it does for an automatic keepalive reply.
+    #[compio::test]
+    async fn a_manual_status_write_failure_preserves_a_buffered_server_error() {
+        let mut xlog_data = vec![XLOG_DATA_TAG];
+        xlog_data.extend_from_slice(&0x16B_3000u64.to_be_bytes());
+        xlog_data.extend_from_slice(&0x16B_4000u64.to_be_bytes());
+        xlog_data.extend_from_slice(&700_000_000_000i64.to_be_bytes());
+        xlog_data.extend_from_slice(b"payload");
+
+        let mut wire = startup_frame(COPY_DATA_TAG, &xlog_data);
+        wire.extend_from_slice(&error_response_message(&[
+            (b'S', "FATAL"),
+            (b'C', "57P01"),
+            (b'M', "terminating connection due to administrator command"),
+        ]));
+        let mut stream = stream_over_failing_writer_with_unread(wire);
+
+        let message = stream
+            .next()
+            .await
+            .expect("the XLogData preceding the buffered error was rejected")
+            .expect("the XLogData preceding the buffered error ended the stream");
+        assert!(matches!(message, ReplicationMessage::XLogData { .. }));
+
+        let error = stream
+            .send_standby_status_update(false)
+            .await
+            .expect_err("the manual status write was scripted to fail");
+        let chain = std::iter::successors(std::error::Error::source(&error), |source| {
+            std::error::Error::source(*source)
+        })
+        .fold(error.to_string(), |chain, source| {
+            format!("{chain}: {source}")
+        });
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("57P01"),
+            "manual standby status discarded SQLSTATE 57P01: {chain}"
+        );
+
+        let retry = stream
+            .next()
+            .await
+            .expect_err("a failed manual status write left the stream reusable");
+        assert!(
+            retry.is_cancelled(),
+            "the failed manual status write did not retire the stream: {retry}"
+        );
+    }
+
+    /// A command response can end at ReadyForQuery while the same read has
+    /// already buffered a later ErrorResponse. If the next simple-query write
+    /// fails, report that server diagnosis instead of the local write symptom.
+    #[compio::test]
+    async fn a_simple_query_write_failure_preserves_a_buffered_server_error() {
+        let fields = [
+            Some("7012345678901234567"),
+            Some("3"),
+            Some("0/16B3750"),
+            Some("zeroship"),
+        ];
+        let mut row = Vec::new();
+        row.extend_from_slice(&u16::try_from(fields.len()).unwrap().to_be_bytes());
+        for field in fields {
+            let field = field.expect("the fixture has no NULL fields");
+            row.extend_from_slice(&i32::try_from(field.len()).unwrap().to_be_bytes());
+            row.extend_from_slice(field.as_bytes());
+        }
+
+        let mut wire = startup_frame(b'D', &row);
+        wire.extend_from_slice(&startup_frame(b'C', b"IDENTIFY_SYSTEM\0"));
+        wire.extend_from_slice(&startup_frame(b'Z', b"I"));
+        wire.extend_from_slice(&error_response_message(&[
+            (b'S', "FATAL"),
+            (b'C', "57P01"),
+            (b'M', "terminating connection due to administrator command"),
+        ]));
+        let mut connection = replication_connection_over_failing_writer(wire, 1);
+
+        let identity = connection
+            .identify_system()
+            .await
+            .expect("the first IDENTIFY_SYSTEM response was rejected");
+        assert_eq!(identity.systemid, "7012345678901234567");
+
+        let error = connection
+            .identify_system()
+            .await
+            .expect_err("the second simple-query write was scripted to fail");
+        let chain = std::iter::successors(std::error::Error::source(&error), |source| {
+            std::error::Error::source(*source)
+        })
+        .fold(error.to_string(), |chain, source| {
+            format!("{chain}: {source}")
+        });
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("57P01"),
+            "replication command write discarded SQLSTATE 57P01: {chain}"
+        );
+    }
+
+    /// Backend CopyDone and the ErrorResponse raised while ending CopyBoth can
+    /// arrive in one read. If the frontend CopyDone acknowledgment then fails
+    /// to flush, the already-buffered server diagnosis still outranks that
+    /// local write symptom.
+    #[compio::test]
+    async fn a_copy_done_write_failure_preserves_a_buffered_server_error() {
+        let mut wire = startup_frame(COPY_DONE_TAG, b"");
+        wire.extend_from_slice(&error_response_message(&[
+            (b'S', "FATAL"),
+            (b'C', "57P01"),
+            (b'M', "terminating connection due to administrator command"),
+        ]));
+        let mut stream = stream_over_failing_writer_with_unread(wire);
+
+        let error = stream
+            .next()
+            .await
+            .expect_err("the CopyDone acknowledgment write was scripted to fail");
+        let chain = std::iter::successors(std::error::Error::source(&error), |source| {
+            std::error::Error::source(*source)
+        })
+        .fold(error.to_string(), |chain, source| {
+            format!("{chain}: {source}")
+        });
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("57P01"),
+            "CopyDone acknowledgment discarded SQLSTATE 57P01: {chain}"
+        );
+
+        let retry = stream
+            .next()
+            .await
+            .expect_err("a failed CopyDone acknowledgment left the stream reusable");
+        assert!(
+            retry.is_cancelled(),
+            "the failed CopyDone acknowledgment did not retire the stream: {retry}"
         );
     }
 
