@@ -5,7 +5,7 @@
 // and COPY helpers are still stubbed until `transaction.rs`,
 // `copy_in.rs`, and `copy_out.rs` land.
 
-use crate::cancel_token::CancelKey;
+use crate::cancel_token::{CancelKey, PoolCancelLease};
 use crate::codec::{BackendMessages, FrontendMessage};
 use crate::config::{ProtocolVersion, SslCertMode, SslMode, SslNegotiation};
 use crate::connect_tls::Encryption;
@@ -1917,6 +1917,7 @@ pub struct Client {
     ssl_negotiation: SslNegotiation,
     process_id: i32,
     secret_key: Option<CancelKey>,
+    pool_cancel_lease: Option<Arc<PoolCancelLease>>,
     /// What the startup exchange SETTLED ON, which is not necessarily what was
     /// requested: an older server answers `NegotiateProtocolVersion` and the
     /// session continues one version down.
@@ -2007,6 +2008,7 @@ impl Client {
             ssl_negotiation,
             process_id,
             secret_key,
+            pool_cancel_lease: None,
             protocol_version,
         }
     }
@@ -2169,6 +2171,29 @@ impl Client {
         self.cancel_ssl_sni = ssl_sni;
         self.cancel_ssl_cert_mode = ssl_cert_mode;
         self.cancel_server_verification = server_verification;
+    }
+
+    pub(crate) fn enter_pool(&mut self) {
+        self.pool_cancel_lease = Some(PoolCancelLease::inactive());
+    }
+
+    pub(crate) fn activate_pool_cancel_lease(&mut self) {
+        if let Some(lease) = &self.pool_cancel_lease {
+            lease.revoke();
+        }
+        self.pool_cancel_lease = Some(PoolCancelLease::active());
+    }
+
+    pub(crate) fn revoke_pool_cancel_lease(&self) {
+        if let Some(lease) = &self.pool_cancel_lease {
+            lease.revoke();
+        }
+    }
+
+    pub(crate) fn pool_cancel_lease_prevents_reuse(&self) -> bool {
+        self.pool_cancel_lease
+            .as_ref()
+            .is_some_and(|lease| Arc::strong_count(lease) > 1 || lease.is_uncertain())
     }
 
     /// Installs query execution observation for this physical connection.
@@ -2901,6 +2926,10 @@ impl Client {
 
     /// Constructs a cancellation token that can later be used to request
     /// cancellation of a query running on this connection.
+    ///
+    /// When this client belongs to a [`Pool`](crate::Pool) borrow, the token is
+    /// valid only for that borrow. Returning the [`PooledClient`](crate::PooledClient)
+    /// revokes it and retires the physical session if the token escaped.
     pub fn cancel_token(&self) -> CancelToken {
         CancelToken {
             socket_config: self.socket_config.clone(),
@@ -2912,6 +2941,7 @@ impl Client {
             ssl_negotiation: self.ssl_negotiation,
             process_id: self.process_id,
             secret_key: self.secret_key.clone(),
+            pool_lease: self.pool_cancel_lease.clone(),
         }
     }
 

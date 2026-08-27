@@ -486,8 +486,13 @@ struct PoolEntry {
 }
 
 impl PoolEntry {
-    fn new(client: Client, max_lifetime: Duration) -> Self {
+    fn new(mut client: Client, max_lifetime: Duration) -> Self {
         let now = Instant::now();
+        // Pool lifecycle hooks receive `&Client`, so lease scoping must be in
+        // place before the first hook can retain a token. Idle and hook tokens
+        // remain inactive; checkout installs a fresh active generation only at
+        // the final, non-awaiting handoff to a PooledClient.
+        client.enter_pool();
         Self {
             client,
             last_used: now,
@@ -1321,10 +1326,7 @@ impl Pool {
                 // handles total/active. Disarm so the guard doesn't also
                 // decrement total.
                 permit.disarm();
-                return Ok(PooledClient {
-                    entry: Some(entry),
-                    pool: self,
-                });
+                return Ok(PooledClient::new(entry, self));
             }
 
             // 2. No idle connections - create a new one if under limit.
@@ -1390,10 +1392,7 @@ impl Pool {
                 // handles total/active. Disarm so the guard doesn't also
                 // decrement total.
                 permit.disarm();
-                return Ok(PooledClient {
-                    entry: Some(entry),
-                    pool: self,
-                });
+                return Ok(PooledClient::new(entry, self));
                 // H7 design note: we don't wake a waiter on successful
                 // connect. The freshly-connected client is immediately
                 // consumed by the current caller - there's no idle entry
@@ -1421,6 +1420,12 @@ impl Pool {
 
     /// Return a connection to the pool (called by `PooledClient::drop`).
     fn return_client(&self, mut entry: PoolEntry) {
+        // The lease boundary is an authority boundary. Revoke before any hook
+        // or pool publication. If a token escaped this lease, retire the
+        // physical session instead of allowing that backend-wide credential to
+        // target a later borrower. A cancellation already in progress also
+        // holds the Arc, so this covers the load-before-revoke race.
+        entry.client.revoke_pool_cancel_lease();
         // The returning client is no longer active. (When the entry is handed
         // directly to a waiter below, checkout re-bumps `active` only after
         // validating it, so a successful hand-off nets zero.)
@@ -1439,6 +1444,12 @@ impl Pool {
             drop(entry);
             drop(permit);
             self.wake_close_waiters_if_drained();
+            return;
+        }
+
+        if entry.client.pool_cancel_lease_prevents_reuse() {
+            entry.client.force_close();
+            self.metrics.inc_evictions();
             return;
         }
 
@@ -1467,6 +1478,14 @@ impl Pool {
             return;
         }
         if !keep {
+            self.metrics.inc_evictions();
+            return;
+        }
+        // A release hook can retain a token too. It saw the revoked generation,
+        // so that token is already unusable; still retire this session rather
+        // than carrying escaped authority into another logical lease.
+        if entry.client.pool_cancel_lease_prevents_reuse() {
+            entry.client.force_close();
             self.metrics.inc_evictions();
             return;
         }
@@ -2493,12 +2512,24 @@ impl Drop for CommandRecoveryGuard<'_> {
 /// use [`PooledClient::command`] to apply this pool's configured deadline.
 /// [`Pool::query`], [`Pool::execute`], and the other Pool convenience methods
 /// enter that scope automatically.
+///
+/// A [`CancelToken`] obtained through this borrow is lease-scoped. Returning
+/// the borrow revokes the token; if it is retained, the pool retires the
+/// physical session instead of letting the token target its next borrower.
 pub struct PooledClient<'a> {
     entry: Option<PoolEntry>,
     pool: &'a Pool,
 }
 
 impl PooledClient<'_> {
+    fn new(mut entry: PoolEntry, pool: &Pool) -> PooledClient<'_> {
+        entry.client.activate_pool_cancel_lease();
+        PooledClient {
+            entry: Some(entry),
+            pool,
+        }
+    }
+
     /// Run one exclusive logical command under the pool's command deadline.
     ///
     /// If [`PoolConfig::command_timeout`] is configured, expiry sends a real
