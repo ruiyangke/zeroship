@@ -1568,6 +1568,30 @@ async fn a_copy_in_response_to_a_copy_out_request_is_refused() {
     .expect("wrong-direction COPY test exceeded its outer watchdog");
 }
 
+/// CopyInResponse enters COPY IN immediately. A later CopyOutResponse cannot
+/// replace that state: the frontend has already begun ending the wrong-way
+/// exchange with CopyFail.
+#[compio::test]
+async fn a_copy_in_response_cannot_transition_to_copy_out() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut response = backend_frame(b'2', b"");
+        response.extend_from_slice(&backend_frame(b'G', b"\x00\x00\x00"));
+        response.extend_from_slice(&backend_frame(b'H', b"\x00\x00\x00"));
+        response.extend_from_slice(&backend_frame(b'd', b"row-one\n"));
+        response.extend_from_slice(&backend_frame(b'c', b""));
+        response.extend_from_slice(&backend_frame(b'C', b"COPY 1\0"));
+        response.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let chain = hostile_copy_out_retires_session(505, response).await;
+        assert!(
+            chain.contains("unexpected message from server"),
+            "a COPY IN to COPY OUT transition reported the wrong failure: {chain:?}"
+        );
+    })
+    .await
+    .expect("COPY direction-transition test exceeded its outer watchdog");
+}
+
 /// A COPY that is established correctly and then delivers a `DataRow` mid
 /// stream. This is the site at `copy_out.rs:88`, the one where resynchronising
 /// would hand the caller unparsed bytes as if they were copy data.

@@ -131,8 +131,14 @@ async fn start(
                 break CopyResponse::from_backend(body.format(), body.column_formats())
                     .map_err(ExecutionError::after_bind_complete)?;
             }
-            // The connection-owned producer is already sending CopyFail.
-            Message::CopyInResponse(_) => {}
+            // The connection-owned producer is already sending CopyFail. The
+            // server entered COPY IN when it sent this response, so no later
+            // response can turn the exchange into COPY OUT.
+            Message::CopyInResponse(_) => {
+                return Err(ExecutionError::after_bind_complete(
+                    drain_refusal(&mut responses, Error::unexpected_message()).await,
+                ));
+            }
             _ => {
                 return Err(ExecutionError::after_bind_complete(
                     drain_refusal(&mut responses, Error::unexpected_message()).await,
