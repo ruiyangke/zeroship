@@ -69,7 +69,7 @@ use crate::codec::{
     BackendMessage, BackendMessages, FrontendMessage, read_backend, write_frontend,
 };
 use crate::copy_in::CopyInReceiver;
-use crate::error::DbError;
+use crate::error::{DbError, Severity};
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::{AsyncMessage, Error, Notification, Statement};
 use compio::io::{AsyncRead, AsyncWrite};
@@ -891,6 +891,24 @@ impl Dispatch<'_> {
         let request_complete = ready_status.is_some();
         let entered_copy_input = !request_complete
             && messages.contains_tag(postgres_protocol::message::backend::COPY_IN_RESPONSE_TAG);
+
+        // PostgreSQL sends FATAL/PANIC before closing the socket, and the
+        // response consumer can wake and drop its pooled lease before the
+        // dedicated reader observes the trailing EOF. Publish the same poison
+        // the EOF path uses before making that terminal response visible. This
+        // keeps synchronous pool return from counting a known-dead session as
+        // idle during that protocol-defined window.
+        if let Some(body) = messages.first_error_response().map_err(Error::parse)? {
+            let error = DbError::parse(&mut body.fields()).map_err(Error::parse)?;
+            if matches!(
+                error.parsed_severity(),
+                Some(Severity::Fatal | Severity::Panic)
+            ) || matches!(error.severity(), "FATAL" | "PANIC")
+            {
+                self.tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
+            }
+        }
+
         // If there's no in-flight request but the server sent us backend
         // data, surface it as an error (matches tokio version).
         let mut response = match self.responses.pop_front() {

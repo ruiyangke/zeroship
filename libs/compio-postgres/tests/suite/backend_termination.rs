@@ -162,12 +162,6 @@ async fn wait_for_tagged_pg_sleep(
     .expect("the tagged pooled query never reached pg_sleep");
 }
 
-/// The MID-QUERY path leaves the dead entry in the idle set; the
-/// idle-in-hand path does not. Measured, see the two tests below.
-fn observe_dead_lease(pool: &Pool) -> (usize, usize) {
-    (pool.idle_count(), pool.total_count())
-}
-
 fn assert_dead_lease_was_discarded(pool: &Pool) -> (usize, usize) {
     let idle_after_drop = pool.idle_count();
     let total_after_drop = pool.total_count();
@@ -745,26 +739,13 @@ async fn a_checked_out_idle_pool_backend_is_discarded_after_termination() {
 /// the server's FATAL response to that borrower, and the NEXT checkout must
 /// land on a live backend.
 ///
-/// IT DOES NOT TAKE THE SAME DISCARD PATH as the idle-in-hand case, and the
-/// difference is measured rather than assumed. MEASURED 2026-08-24, both paths
-/// immediately after the borrower drops its lease:
-///
-/// ```text
-///   idle-in-hand   idle=0 total=0 evictions=1   discarded at release
-///   mid-query      idle=1 total=1 evictions=0   still in the idle set
-/// ```
-///
-/// The mid-query corpse stays in `idle_count()` (still there 200 ms later),
-/// because the failure was observed by the QUERY and the release path did not
-/// notice. That is NOT a defect and this test deliberately does not assert it
-/// away: the next `get()` returns a working connection on a DIFFERENT backend,
-/// so the corpse is never handed out - proved here by comparing PIDs. What it
-/// costs is one pool slot until the next checkout, and an `idle_count()` that
-/// briefly over-reports.
-///
-/// The tempting stricter assertion - `idle_count() == 0` right after the drop -
-/// was tried first and fails. Asserting it would pin an implementation detail
-/// the pool does not promise, in place of the guarantee that actually matters.
+/// A FATAL response is itself PostgreSQL's protocol-level declaration that the
+/// session is ending. The reader may not have observed the following EOF when
+/// the query future wakes, so response dispatch must publish retirement before
+/// the borrower can synchronously return its lease. Otherwise `idle_count()`
+/// reports a known-dead connection as available, `total_count()` retains a
+/// phantom slot, and `min_idle` can be satisfied by a corpse until a later
+/// checkout happens to clean it up.
 #[compio::test]
 async fn a_checked_out_pool_backend_killed_mid_query_is_discarded() {
     compio::time::timeout(WATCHDOG, async {
@@ -833,7 +814,7 @@ async fn a_checked_out_pool_backend_killed_mid_query_is_discarded() {
             pool.idle_count(),
             pool.total_count()
         );
-        let (idle_after_drop, total_after_drop) = observe_dead_lease(&pool);
+        let (idle_after_drop, total_after_drop) = assert_dead_lease_was_discarded(&pool);
         let replacement_pid = assert_replacement_uses_a_new_backend(&pool, killed_pid).await;
         assert_eq!(
             failure.code(),
