@@ -37,7 +37,9 @@ use futures_channel::mpsc;
 use postgres_protocol::authentication;
 use postgres_protocol::authentication::sasl;
 use postgres_protocol::authentication::sasl::ScramSha256;
-use postgres_protocol::message::backend::{AuthenticationSaslBody, DataRowBody, Message};
+use postgres_protocol::message::backend::{
+    AuthenticationSaslBody, DataRowBody, ErrorResponseBody, Message,
+};
 use postgres_protocol::message::frontend;
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
@@ -152,8 +154,19 @@ where
     /// decoded batch; the stream buffer may contain complete frames over-read
     /// behind the message which triggered this frontend write.
     fn take_available_server_error(&mut self) -> Option<Error> {
+        self.take_available_server_error_if(|_| true)
+    }
+
+    fn take_available_ascii_server_error(&mut self) -> Option<Error> {
+        self.take_available_server_error_if(error_response_is_ascii)
+    }
+
+    fn take_available_server_error_if(
+        &mut self,
+        accept: impl Fn(&ErrorResponseBody) -> bool,
+    ) -> Option<Error> {
         if let Ok(Some(body)) = self.pending.first_error_response() {
-            return Some(Error::db(body));
+            return accept(&body).then(|| Error::db(body));
         }
 
         loop {
@@ -171,7 +184,7 @@ where
                     let mut frame = self.stream.buf().split_to(total_len);
                     let message = Message::parse(&mut frame).ok()??;
                     return match message {
-                        Message::ErrorResponse(body) => Some(Error::db(body)),
+                        Message::ErrorResponse(body) if accept(&body) => Some(Error::db(body)),
                         _ => None,
                     };
                 }
@@ -193,6 +206,18 @@ where
         match result {
             Ok(value) => Ok(value),
             Err(local) => Err(self.take_available_server_error().unwrap_or(local)),
+        }
+    }
+
+    /// After the server announces an encoding this driver cannot decode, only
+    /// an ASCII ErrorResponse can safely replace the local encoding refusal.
+    fn prefer_available_ascii_server_error<R>(
+        &mut self,
+        result: Result<R, Error>,
+    ) -> Result<R, Error> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(local) => Err(self.take_available_ascii_server_error().unwrap_or(local)),
         }
     }
 
@@ -447,6 +472,21 @@ where
         self.delayed_bytes = retained;
         self.delayed.push_back(msg);
         Ok(())
+    }
+}
+
+fn error_response_is_ascii(body: &ErrorResponseBody) -> bool {
+    let mut fields = body.fields();
+    loop {
+        match fields.next() {
+            Ok(Some(field)) => {
+                if !field.type_().is_ascii() || !field.value_bytes().is_ascii() {
+                    return false;
+                }
+            }
+            Ok(None) => return true,
+            Err(_) => return false,
+        }
     }
 }
 
@@ -1376,11 +1416,12 @@ where
     loop {
         match handshake.next().await? {
             Some(Message::ParameterStatus(body)) => {
-                record_parameter_status(
+                let result = record_parameter_status(
                     &mut parameters,
                     body.name().map_err(Error::parse)?.to_string(),
                     body.value().map_err(Error::parse)?.to_string(),
-                )?;
+                );
+                handshake.prefer_available_ascii_server_error(result)?;
             }
             // NO `NoticeResponse` ARM HERE, and its absence is deliberate.
             // `Handshake::next` only yields what `read_backend` did not classify
@@ -2957,6 +2998,50 @@ mod tests {
         assert!(
             chain.contains("client_encoding"),
             "the refusal must name the setting that caused it: {chain}"
+        );
+    }
+
+    #[compio::test]
+    async fn startup_client_encoding_refusal_preserves_a_pending_server_error() {
+        let mut script = frame(b'R', &0u32.to_be_bytes());
+        script.extend_from_slice(&parameter_status("client_encoding", "LATIN1"));
+        script.extend_from_slice(&error_response("57P01", "terminating during startup"));
+        let (stream, _) = scripted_server_after_startup(Some(script)).await;
+
+        let error = match plaintext_config().connect_raw(stream, NoTls).await {
+            Ok(_) => panic!("a server announcing LATIN1 was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("57P01"),
+            "startup client_encoding refusal discarded queued SQLSTATE 57P01: {error}"
+        );
+    }
+
+    #[compio::test]
+    async fn startup_encoding_refusal_outranks_a_non_ascii_error_response() {
+        let mut non_ascii_error = b"SFATAL\0VFATAL\0C57P01\0Mlatin1 bytes ".to_vec();
+        non_ascii_error.extend_from_slice(&[0xc3, 0xa9]);
+        non_ascii_error.extend_from_slice(b"\0\0");
+
+        let mut script = frame(b'R', &0u32.to_be_bytes());
+        script.extend_from_slice(&parameter_status("client_encoding", "LATIN1"));
+        script.extend_from_slice(&frame(b'E', &non_ascii_error));
+        let (stream, _) = scripted_server_after_startup(Some(script)).await;
+
+        let error = match plaintext_config().connect_raw(stream, NoTls).await {
+            Ok(_) => panic!("a server announcing LATIN1 was accepted"),
+            Err(error) => error,
+        };
+        assert!(
+            error.code().is_none(),
+            "a non-ASCII response from a LATIN1 session replaced the safe local refusal: {error}"
+        );
+        let chain = authentication_error_chain(error);
+        assert!(
+            chain.contains("client_encoding"),
+            "the non-ASCII server response hid the encoding refusal: {chain}"
         );
     }
 
