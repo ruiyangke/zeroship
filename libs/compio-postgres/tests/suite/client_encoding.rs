@@ -94,6 +94,37 @@ async fn a_non_utf8_session_encoding_retires_the_connection() {
     .expect("encoding-retirement test exceeded its watchdog");
 }
 
+#[compio::test]
+async fn encoding_retirement_preserves_a_pipelined_server_error() {
+    compio::time::timeout(WATCHDOG, async {
+        let (client, driver) = connect_keeping_driver().await;
+
+        let changing_encoding =
+            client.batch_execute("SELECT pg_sleep(0.2); SET client_encoding TO 'LATIN1'");
+        let division_by_zero = client.batch_execute("SELECT 1 / 0");
+        let (_, division_by_zero) =
+            futures_util::future::join(changing_encoding, division_by_zero).await;
+
+        let error =
+            division_by_zero.expect_err("the pipelined division by zero unexpectedly succeeded");
+        assert_eq!(
+            error.code().map(compio_postgres::error::SqlState::code),
+            Some("22012"),
+            "client_encoding retirement discarded pipelined SQLSTATE 22012: {error}"
+        );
+
+        drop(client);
+        let outcome = driver.await.expect("the driver task panicked");
+        let driver_error = outcome.expect_err("the encoding change did not retire the session");
+        assert!(
+            common::error_chain(&driver_error).contains("client_encoding"),
+            "the driver did not retain the encoding-retirement cause: {driver_error}"
+        );
+    })
+    .await
+    .expect("pipelined encoding-retirement test exceeded its watchdog");
+}
+
 /// THE ONE-VARIABLE CONTROL. Naming the encoding the driver already announced
 /// is a no-op and must NOT retire anything -- otherwise "retire when
 /// client_encoding is reported" would be satisfied by retiring on every report,
