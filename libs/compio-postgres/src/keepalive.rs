@@ -39,6 +39,46 @@ pub(crate) struct KeepaliveConfig {
 /// negative to zero and then sets it unconditionally, contradicting the
 /// documentation it ships. The documented contract is what a caller can read,
 /// so it is the one followed here.
+impl KeepaliveConfig {
+    /// Refuse a keepalive duration the kernel cannot express, by name.
+    ///
+    /// `TCP_KEEPIDLE` and `TCP_KEEPINTVL` are whole seconds, and socket2
+    /// converts a `Duration` with `as_secs()`, which TRUNCATES - measured on
+    /// socket2 0.5.10, `src/sys/unix.rs:1324`:
+    /// `min(duration.as_secs(), c_int::MAX as u64) as c_int`. So any non-zero
+    /// value under a second reaches `setsockopt` as `0`, which Linux answers
+    /// with EINVAL, and `connect_socket` turns that into a failed connection
+    /// reading `error connecting to server: Invalid argument (os error 22)` -
+    /// a message that names neither the parameter nor the value.
+    ///
+    /// The zero case is separate and already handled: `Duration::ZERO` is the
+    /// "leave this option unset" sentinel, so it is skipped rather than sent.
+    /// What was missing is every OTHER value that truncates to zero.
+    ///
+    /// Refusing rather than rounding up follows this crate's rule that a
+    /// setting is honoured or rejected by name, never accepted and quietly
+    /// changed: a caller who asked for 500ms and silently got one second would
+    /// have no way to find out.
+    pub(crate) fn check_expressible(&self) -> Result<(), String> {
+        for (name, value) in [
+            ("keepalives_idle", Some(self.idle)),
+            ("keepalives_interval", self.interval),
+        ] {
+            if let Some(value) = value
+                && !value.is_zero()
+                && value.as_secs() == 0
+            {
+                return Err(format!(
+                    "{name}={}ms is below the one-second granularity of the TCP keepalive \
+                     socket options, which would reach the kernel as 0 and be refused",
+                    value.as_millis()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 impl From<&KeepaliveConfig> for TcpKeepalive {
     fn from(keepalive_config: &KeepaliveConfig) -> Self {
         let mut tcp_keepalive = Self::new();

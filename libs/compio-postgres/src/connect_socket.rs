@@ -54,6 +54,9 @@ pub(crate) async fn connect_socket(
             }
 
             if let Some(keepalive_config) = keepalive_config {
+                keepalive_config
+                    .check_expressible()
+                    .map_err(|message| Error::config(message.into()))?;
                 sock_ref
                     .set_tcp_keepalive(&TcpKeepalive::from(keepalive_config))
                     .map_err(Error::connect)?;
@@ -361,5 +364,66 @@ mod tests {
              seven seconds; reading it as seconds sets a timeout 1000x too \
              long and silently stops it ever firing"
         );
+    }
+
+    /// A sub-second keepalive is not expressible: `TCP_KEEPIDLE` and
+    /// `TCP_KEEPINTVL` take whole seconds, and socket2 converts a `Duration`
+    /// with `as_secs()`, which TRUNCATES (socket2 0.5.10,
+    /// `src/sys/unix.rs:1324`). So 500ms reaches the kernel as 0, which Linux
+    /// refuses with EINVAL - surfacing as an opaque failed connection rather
+    /// than a statement about the value the caller chose. `Duration::ZERO` is
+    /// the "leave it unset" sentinel and is handled separately; the gap was
+    /// every non-zero value below one second.
+    #[compio::test]
+    async fn a_sub_second_keepalive_is_refused_by_name() {
+        for (label, config) in [
+            (
+                "keepalives_idle",
+                KeepaliveConfig {
+                    idle: Duration::from_millis(500),
+                    interval: None,
+                    retries: None,
+                },
+            ),
+            (
+                "keepalives_interval",
+                KeepaliveConfig {
+                    idle: Duration::from_secs(10),
+                    interval: Some(Duration::from_millis(500)),
+                    retries: None,
+                },
+            ),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind a loopback listener");
+            let addr = listener.local_addr().expect("listener address");
+            let error = connect_socket(
+                &Addr::Tcp(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                addr.port(),
+                None,
+                Some(&config),
+                None,
+            )
+            .await
+            .expect_err("a sub-second keepalive was accepted");
+            let chain = {
+                let mut text = error.to_string();
+                let mut source = std::error::Error::source(&error);
+                while let Some(inner) = source {
+                    text.push_str(&format!(": {inner}"));
+                    source = std::error::Error::source(inner);
+                }
+                text
+            };
+            assert!(
+                chain.contains(label),
+                "the refusal did not name {label}: {chain}"
+            );
+            assert!(
+                !chain.contains("Invalid argument"),
+                "{label} still surfaced as a raw EINVAL: {chain}"
+            );
+        }
     }
 }
