@@ -139,7 +139,7 @@ pub struct BackendVendor {
     /// Required, never defaulted. A vendor that trusts its input must say so by
     /// writing a [`MigrationGuard`] whose `check` returns `Ok(GuardOutcome::default())`
     /// - visible in the diff, attributable to the vendor, and impossible to acquire by
-    /// forgetting something.
+    ///   forgetting something.
     ///
     /// [`GuardOutcome`]: crate::guard::GuardOutcome
     pub guard: GuardFactory,

@@ -601,8 +601,8 @@ impl From<crate::driver::DbError> for ApplyError {
 /// `pub` because it is the return type of
 /// `MigrationBackend::evaluate_preconditions`
 /// - the preconditions seam rides through the (public) trait so the generic
-/// apply body never holds a concrete connection. The variants carry no data; a
-/// consumer can only match on the apply/skip decision.
+///   apply body never holds a concrete connection. The variants carry no data; a
+///   consumer can only match on the apply/skip decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreconditionVerdict {
     /// Every precondition held - apply the migration normally.
@@ -615,18 +615,18 @@ pub enum PreconditionVerdict {
 ///
 /// Every variant here is resolved in **apply order** - the journal's `event_seq`
 /// - and never by how version strings sort. The distinction is not cosmetic:
-/// [`AppliedEntry::event_seq`](crate::journal::AppliedEntry::event_seq)
-/// records that `MigrationId::derive` stamps the high bits with an `0xFF` marker
-/// and fills the rest from a SHA-256, so derived ids sort in hash order among
-/// themselves and above every generated id. Version order carries no authoring
-/// or apply order at all, and a target resolved against it would name an
-/// arbitrary set.
+///   [`AppliedEntry::event_seq`](crate::journal::AppliedEntry::event_seq)
+///   records that `MigrationId::derive` stamps the high bits with an `0xFF` marker
+///   and fills the rest from a SHA-256, so derived ids sort in hash order among
+///   themselves and above every generated id. Version order carries no authoring
+///   or apply order at all, and a target resolved against it would name an
+///   arbitrary set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RollbackTarget {
     /// Roll back every net-applied migration applied **strictly after** this one
     /// - i.e. unwind *down to* (and keeping) this version. The target itself is
-    /// NOT rolled back. "After" is by apply order; the target's own version
-    /// string may sort above or below the migrations that come back.
+    ///   NOT rolled back. "After" is by apply order; the target's own version
+    ///   string may sort above or below the migrations that come back.
     ToVersion(MigrationId),
     /// Roll back the `n` most-recently-applied migrations - most recent by apply
     /// order, which is not the same as the `n` highest version strings.

@@ -791,9 +791,9 @@ mod backfill_error_message_tests {
 
     /// "A paged batch failed after the last committed cursor" is engine-independent
     /// - PostgreSQL reports the same condition as an unprefixed "batch failed after
-    /// cursor ...". The variant name is compiler-checked, but this operator-facing
-    /// string is not, and nothing else in the tree pins it, so a drift back to a
-    /// vendor spelling would otherwise be silent.
+    ///   cursor ...". The variant name is compiler-checked, but this operator-facing
+    ///   string is not, and nothing else in the tree pins it, so a drift back to a
+    ///   vendor spelling would otherwise be silent.
     #[test]
     fn batch_failure_message_names_no_engine() {
         let rendered = BackfillError::BatchFailedAtCursor {

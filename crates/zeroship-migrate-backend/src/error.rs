@@ -463,7 +463,7 @@ pub enum DeclarativeError {
     /// A foreign key had to be inlined at CREATE TABLE - because the target answers
     /// no to [`Capability::AlterTableAddConstraint`](zeroship_migrate_ir::backend::Capability)
     /// - but the FK's referenced table is neither already live nor created earlier in
-    /// THIS batch, so there is nothing to inline it against.
+    ///   THIS batch, so there is nothing to inline it against.
     ///
     /// Such a target can only add the constraint later by rebuilding the whole table,
     /// which this path does not author. Surfaced as a typed error rather than emitting

@@ -743,9 +743,14 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
         // No `safety.require_approval` obligation on the default confined ceiling.
         assert_eq!(effective.approval_level(&app_id.to_string()), ApprovalLevel::Never);
         let app_schema = app_id.to_string();
-        let guard = zeroship_migrate::guard::GuardConfig::confined_with_effective(
-            app_schema.clone(),
+        // `from_policy`, not the removed `confined_with_effective(schema, policy)`:
+        // the schema is no longer passed alongside the policy because
+        // `schema_scope()` derives it from the policy itself
+        // (`owned_schemas_from_effective`). The assertion below is what proves the
+        // derivation still yields this app's schema.
+        let guard = zeroship_migrate::guard::GuardConfig::from_policy(
             effective.policy.clone(),
+            zeroship_migrate_postgres::DIALECT,
         );
         assert_eq!(
             guard.schema_scope(),
