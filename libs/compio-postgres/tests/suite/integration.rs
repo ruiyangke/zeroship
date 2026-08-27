@@ -5375,6 +5375,28 @@ async fn statement_cache_capacity_zero_prepares_every_call() {
     assert!(prepared_statement_names(&client, SQL).await.is_empty());
 }
 
+/// Capacity zero disables the entire admission mechanism, not merely prepared
+/// entry retention. A configured threshold therefore cannot send early calls
+/// through the unnamed statement slot.
+#[compio::test]
+async fn statement_cache_capacity_zero_ignores_the_execution_threshold() {
+    let url = test_url();
+    let client = connect_with_statement_cache_threshold(&url, 0, 3)
+        .await
+        .unwrap();
+
+    const SQL: &str = "SELECT 87::int4 AS cpg_cache_zero_threshold";
+    let first = client.query(SQL, &[]).await.unwrap();
+    let second = client.query(SQL, &[]).await.unwrap();
+    assert_eq!(first[0].get::<_, i32>(0), 87);
+    assert_eq!(second[0].get::<_, i32>(0), 87);
+    assert_eq!(
+        prepared_statement_names(&client, SQL).await.len(),
+        2,
+        "a zero-capacity cache still applied its execution threshold"
+    );
+}
+
 /// An enabled cache prepares one server statement and reuses it for every
 /// identical raw SQL string on this connection.
 #[compio::test]
@@ -5796,6 +5818,46 @@ async fn statement_cache_eviction_closes_after_outstanding_clones() {
     assert_eq!(prepared_statement_names(&client, SQL_B).await.len(), 1);
 }
 
+/// Protocol Close of a statement also closes every portal made from it. The
+/// cache may evict its clone, but a caller-owned Portal must keep the server
+/// statement alive until that portal is dropped.
+#[compio::test]
+async fn statement_cache_eviction_waits_for_a_bound_portal() {
+    let url = test_url();
+    let mut client = connect_with_statement_cache(&url, 1).await.unwrap();
+    let transaction = client.transaction().await.unwrap();
+
+    const SQL_A: &str = "SELECT $1::int4 AS cpg_cache_portal_owner";
+    const SQL_B: &str = "SELECT $1::int4 AS cpg_cache_portal_evictor";
+    let portal_a = transaction.bind(SQL_A, &[&81_i32]).await.unwrap();
+    let name_a = prepared_statement_name(transaction.client(), SQL_A).await;
+
+    let portal_b = transaction.bind(SQL_B, &[&82_i32]).await.unwrap();
+    assert_eq!(
+        prepared_statement_names(transaction.client(), SQL_A).await,
+        vec![name_a.clone()],
+        "eviction closed a statement while its portal still named it"
+    );
+
+    let rows = transaction.query_portal(&portal_a, 0).await.unwrap();
+    assert_eq!(rows[0].get::<_, i32>(0), 81);
+    drop((rows, portal_b));
+    assert_eq!(
+        prepared_statement_names(transaction.client(), SQL_A).await,
+        vec![name_a],
+        "executing the portal released its statement ownership early"
+    );
+
+    drop(portal_a);
+    transaction.client().simple_query("").await.unwrap();
+    assert!(
+        prepared_statement_names(transaction.client(), SQL_A)
+            .await
+            .is_empty()
+    );
+    transaction.rollback().await.unwrap();
+}
+
 /// Concurrent cold misses may race through Parse/Describe, but cache
 /// insertion elects one winner and drops every losing Statement. Both callers
 /// execute the winner, so no losing server name remains live.
@@ -5817,6 +5879,31 @@ async fn statement_cache_concurrent_misses_keep_one_statement() {
     drop((first, second));
     client.simple_query("").await.unwrap();
     assert_eq!(prepared_statement_names(&client, SQL).await.len(), 1);
+}
+
+/// Both callers can clone the same cached Statement before either missing-name
+/// response is delivered. They must each recover without evicting the other's
+/// replacement, and the race must converge on one live server name.
+#[compio::test]
+async fn statement_cache_concurrent_stale_callers_share_one_replacement() {
+    let url = test_url();
+    let client = connect_with_statement_cache(&url, 2).await.unwrap();
+
+    const SQL: &str = "SELECT 83::int4 AS cpg_cache_concurrent_stale";
+    drop(client.query(SQL, &[]).await.unwrap());
+    client.batch_execute("DEALLOCATE ALL").await.unwrap();
+
+    let (first, second) =
+        futures_util::future::join(client.query(SQL, &[]), client.query(SQL, &[])).await;
+    let first = first.unwrap();
+    let second = second.unwrap();
+    assert_eq!(first[0].get::<_, i32>(0), 83);
+    assert_eq!(second[0].get::<_, i32>(0), 83);
+    assert_eq!(
+        prepared_statement_names(&client, SQL).await.len(),
+        1,
+        "concurrent recovery left more than one cached server statement"
+    );
 }
 
 /// `Uncached` skips both cache lookup and insertion for exactly this use. The
@@ -6036,6 +6123,73 @@ async fn statement_cache_does_not_retry_0a000_inside_a_transaction() {
     assert_eq!(refreshed_rows[0].len(), 2);
     assert_eq!(refreshed_rows[0].get::<_, i32>("id"), 68);
     assert_eq!(refreshed_rows[0].get::<_, &str>("label"), "transaction");
+}
+
+/// ReadyForQuery reports `T` after SAVEPOINT, not only after a bare BEGIN. A
+/// genuine missing-name failure there aborts the block and must remain the
+/// caller's one server attempt rather than becoming a futile 25P02 retry.
+#[compio::test]
+async fn statement_cache_does_not_retry_after_a_savepoint() {
+    let url = test_url();
+    let client = connect_with_statement_cache(&url, 2).await.unwrap();
+
+    const SQL: &str = "SELECT 85::int4 AS cpg_cache_savepoint";
+    drop(client.query(SQL, &[]).await.unwrap());
+    client
+        .batch_execute("BEGIN; SAVEPOINT cpg_cache_retry_savepoint; DEALLOCATE ALL")
+        .await
+        .unwrap();
+    assert_eq!(
+        client.transaction_status(),
+        Some(TransactionStatus::InTransaction),
+        "SAVEPOINT did not leave the server status at T"
+    );
+
+    let error = client.query(SQL, &[]).await.unwrap_err();
+    assert_eq!(error.code(), Some(&SqlState::INVALID_SQL_STATEMENT_NAME));
+    client.simple_query("").await.unwrap();
+    assert_eq!(
+        client.transaction_status(),
+        Some(TransactionStatus::Failed),
+        "the missing-name Bind did not publish failed status E"
+    );
+
+    client.batch_execute("ROLLBACK").await.unwrap();
+    let refreshed = client.query(SQL, &[]).await.unwrap();
+    assert_eq!(refreshed[0].get::<_, i32>(0), 85);
+}
+
+/// Once ReadyForQuery has reported `E`, PostgreSQL rejects every ordinary
+/// command until recovery. The cache must preserve that 25P02 and must not
+/// mistake the block for an idle session eligible for stale replay.
+#[compio::test]
+async fn statement_cache_knows_an_existing_transaction_is_aborted() {
+    let url = test_url();
+    let client = connect_with_statement_cache(&url, 2).await.unwrap();
+
+    const SQL: &str = "SELECT 86::int4 AS cpg_cache_already_failed";
+    drop(client.query(SQL, &[]).await.unwrap());
+    let cached_name = prepared_statement_name(&client, SQL).await;
+
+    client.batch_execute("BEGIN").await.unwrap();
+    let division_error = client.query("SELECT 1 / 0", &[]).await.unwrap_err();
+    assert_eq!(division_error.code(), Some(&SqlState::DIVISION_BY_ZERO));
+    client.simple_query("").await.unwrap();
+    assert_eq!(client.transaction_status(), Some(TransactionStatus::Failed));
+
+    let failed_error = client.query(SQL, &[]).await.unwrap_err();
+    assert_eq!(
+        failed_error.code(),
+        Some(&SqlState::IN_FAILED_SQL_TRANSACTION)
+    );
+    client.batch_execute("ROLLBACK").await.unwrap();
+    assert_eq!(
+        prepared_statement_name(&client, SQL).await,
+        cached_name,
+        "a failed transaction displaced a healthy cached statement"
+    );
+    let rows = client.query(SQL, &[]).await.unwrap();
+    assert_eq!(rows[0].get::<_, i32>(0), 86);
 }
 
 /// The same recovery as `statement_cache_retries_stale_result_shape_once_
@@ -6553,6 +6707,27 @@ async fn statement_cache_retries_a_statement_missing_after_deallocate_all() {
             .unwrap(),
         65
     );
+}
+
+/// `DISCARD ALL` includes `DEALLOCATE ALL`, so it invalidates protocol-level
+/// prepared names just as directly as the narrower command. The next cached
+/// use must recover on the same session.
+#[compio::test]
+async fn statement_cache_retries_a_statement_missing_after_discard_all() {
+    let url = test_url();
+    let client = connect_with_statement_cache(&url, 2).await.unwrap();
+
+    const SQL: &str = "SELECT 84::int4 AS cpg_cache_discarded";
+    let first = client.query(SQL, &[]).await.unwrap();
+    assert_eq!(first[0].get::<_, i32>(0), 84);
+    drop(first);
+
+    client.batch_execute("DISCARD ALL").await.unwrap();
+    assert!(prepared_statement_names(&client, SQL).await.is_empty());
+
+    let refreshed = client.query(SQL, &[]).await.unwrap();
+    assert_eq!(refreshed[0].get::<_, i32>(0), 84);
+    assert_eq!(prepared_statement_names(&client, SQL).await.len(), 1);
 }
 
 /// A missing cached DML statement failed before execution. Its replacement
