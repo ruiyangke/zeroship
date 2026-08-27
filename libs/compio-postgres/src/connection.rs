@@ -581,7 +581,7 @@ where
             // finish the awaited responses. No new requests.
             if terminating {
                 match read_backend(&mut self.stream).await {
-                    Ok(msg) => self.handle_message(msg)?,
+                    Ok(msg) => self.dispatch_decoded_message(msg).await?,
                     Err(e) => {
                         self.record_terminal_read(&e);
                         if is_eof(&e)
@@ -617,7 +617,7 @@ where
                         return Err(e);
                     }
                 };
-                self.handle_message(msg)?;
+                self.dispatch_decoded_message(msg).await?;
                 // Drain any requests that arrived while we were reading.
                 while let Ok(request) = self.receiver.try_recv() {
                     if let RequestOutcome::HousekeepingUndeliverable(error) =
@@ -688,6 +688,26 @@ where
             terminal_server_error: &self.terminal_server_error,
         }
         .handle_message(message)
+    }
+
+    /// Dispatch a valid wire prefix before surfacing a local failure found
+    /// behind it in the same read. Pool poison is published before the prefix
+    /// can wake its consumer, while the local error waits until a stashed
+    /// ErrorResponse has reached that consumer's FIFO.
+    async fn dispatch_decoded_message(&mut self, mut message: BackendMessage) -> Result<(), Error> {
+        let deferred_error = message.take_deferred_error();
+        if deferred_error.is_some() {
+            self.tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
+        }
+
+        self.handle_message(message)?;
+
+        if let Some(error) = deferred_error {
+            self.drain_pending_responses().await;
+            publish_terminal_error(&error, &mut self.responses);
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Deliver every stashed batch, waiting for downstream capacity, using the
@@ -816,7 +836,7 @@ where
                                             return Err(error);
                                         }
                                     };
-                                    self.handle_message(message)?;
+                                    self.dispatch_decoded_message(message).await?;
                                 }
 
                                 // CopyInResponse may have arrived in a second
@@ -874,7 +894,12 @@ impl Dispatch<'_> {
             BackendMessage::Normal {
                 messages,
                 request_complete,
+                deferred_error,
             } => {
+                debug_assert!(
+                    deferred_error.is_none(),
+                    "the connection loop must order a deferred read error after its prefix"
+                );
                 let ready_status = if request_complete {
                     Some(
                         messages
@@ -1850,7 +1875,20 @@ where
             let mut read_half = read_half;
             loop {
                 match read_backend(&mut read_half).await {
-                    Ok(message) => {
+                    Ok(mut message) => {
+                        let deferred_error = message.take_deferred_error();
+                        if deferred_error.is_some() {
+                            // The valid prefix still owns the operation's
+                            // diagnosis, but the malformed tail has already
+                            // made the physical session unreusable. Publish
+                            // pool poison before the prefix can wake its
+                            // borrower; the terminal error itself remains
+                            // behind that prefix in the read FIFO.
+                            read_error_status.store(READ_RETIRED_STATUS, Ordering::Release);
+                            if let Some(release) = &read_error_release {
+                                release.shutdown();
+                            }
+                        }
                         let (acknowledgement, acknowledged) = if acknowledge_reads {
                             let (sender, receiver) = oneshot::channel();
                             (Some(sender), Some(receiver))
@@ -1878,6 +1916,10 @@ where
                         {
                             // Main loop dropped the acknowledgement side;
                             // connection is already ending.
+                            break;
+                        }
+                        if let Some(error) = deferred_error {
+                            publish_reader_failure(error, &mut read_tx, &read_terminal_tx).await;
                             break;
                         }
                     }
@@ -3347,6 +3389,39 @@ mod tests {
         BackendMessages::from_test_bytes(bytes)
     }
 
+    fn error_response_before_malformed_header(code: &str, message: &str) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"SERROR\0C");
+        payload.extend_from_slice(code.as_bytes());
+        payload.extend_from_slice(b"\0M");
+        payload.extend_from_slice(message.as_bytes());
+        payload.extend_from_slice(b"\0\0");
+
+        let mut bytes = vec![postgres_protocol::message::backend::ERROR_RESPONSE_TAG];
+        bytes.extend_from_slice(&(u32::try_from(payload.len()).unwrap() + 4).to_be_bytes());
+        bytes.extend_from_slice(&payload);
+        bytes.push(b'D');
+        bytes.extend_from_slice(&3u32.to_be_bytes());
+        bytes
+    }
+
+    fn response_error(messages: ResponseMessages) -> Error {
+        match messages {
+            ResponseMessages::Raw(mut messages) | ResponseMessages::Filtered(mut messages) => {
+                match messages.next().expect("decode the scripted response") {
+                    Some(Message::ErrorResponse(body)) => Error::db(body),
+                    Some(_) => panic!("the scripted response was not ErrorResponse"),
+                    None => panic!("the scripted response batch was empty"),
+                }
+            }
+            ResponseMessages::Observed(mut messages) => match messages.pop_front() {
+                Some(Err(error)) => error,
+                Some(Ok(_)) => panic!("the observed response was not an error"),
+                None => panic!("the observed response batch was empty"),
+            },
+        }
+    }
+
     /// A decoded ErrorResponse can be parked behind a full per-request
     /// channel when an independent terminal read tears down the connection.
     /// Closing that channel must not replace the request's already-decoded
@@ -3454,6 +3529,178 @@ mod tests {
         );
     }
 
+    /// The split reader can discover the malformed tail before dispatch has
+    /// delivered the ErrorResponse at the front of the same read. It must mark
+    /// the session dead immediately, then preserve FIFO so SQLSTATE still owns
+    /// the operation's result.
+    #[compio::test]
+    async fn split_reader_delivers_server_error_before_coalesced_local_failure() {
+        let tx_status = Arc::new(AtomicU8::new(b'I'));
+        let recorder = StatusRecordingWake::new(&tx_status);
+        let waker = Waker::from(Arc::clone(&recorder));
+        let mut context = Context::from_waker(&waker);
+        let (response_tx, mut response_rx) = mpsc::channel(1);
+        assert!(response_rx.poll_next_unpin(&mut context).is_pending());
+
+        let (request_tx, request_rx) = mpsc::unbounded();
+        request_tx
+            .unbounded_send(Request {
+                messages: RequestMessages::Single(FrontendMessage::Raw(bytes::Bytes::from_static(
+                    b"scripted request",
+                ))),
+                sender: response_tx,
+                disposition: RequestDisposition::Awaited,
+                transaction_effect: TransactionEffect::MayChange,
+                prepare_cleanup: None,
+                statement: None,
+                observation: None,
+                request_server_error: Arc::default(),
+            })
+            .expect("queue the scripted request");
+
+        let stream = BufStream::new(ScriptedReadSplitStream {
+            chunks: VecDeque::from([error_response_before_malformed_header(
+                "23505",
+                "scripted unique violation",
+            )]),
+            eof_after: None,
+        });
+        let (read_half, write_half) = match stream.try_into_split() {
+            Ok(halves) => halves,
+            Err(_) => panic!("the coalesced-failure fixture did not split"),
+        };
+
+        let result = compio::time::timeout(
+            Duration::from_secs(1),
+            Connection::<ScriptedReadSplitStream, ScriptedReadSplitStream>::run_multiplexed(
+                read_half,
+                write_half,
+                Arc::default(),
+                request_rx,
+                None,
+                Arc::clone(&tx_status),
+                Arc::new(AtomicUsize::new(1)),
+                Arc::default(),
+                None,
+                None,
+                crate::live::LiveConnectionGuard::new(),
+            ),
+        )
+        .await
+        .expect("the coalesced-failure split reader exceeded its watchdog");
+        let local = result.expect_err("the malformed tail left the split session reusable");
+        assert!(
+            local
+                .as_io()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::InvalidData),
+            "the split reader retired for the wrong local reason: {local}"
+        );
+
+        let operation = response_error(
+            response_rx
+                .try_recv()
+                .expect("the local framing failure retired before SQLSTATE 23505 was delivered"),
+        );
+        assert_eq!(
+            operation.code().map(|code| code.code()),
+            Some("23505"),
+            "coalesced framing failure discarded SQLSTATE 23505: {operation}"
+        );
+        assert_eq!(
+            recorder.seen.load(Ordering::Acquire),
+            READ_RETIRED_STATUS,
+            "the malformed tail woke its borrower before pool poison"
+        );
+        drop(request_tx);
+    }
+
+    /// The serialized fallback has no reader task to carry a second FIFO
+    /// event. It must explicitly dispatch and unstash the valid ErrorResponse
+    /// before returning the malformed tail's terminal error.
+    #[compio::test]
+    async fn serialized_reader_delivers_server_error_before_coalesced_local_failure() {
+        let tx_status = Arc::new(AtomicU8::new(b'I'));
+        let (mut response_tx, mut response_rx) = mpsc::channel(1);
+        // Park this exact sender handle. `deliver_batch` must stash the server
+        // error, and the serialized deferred-error path must flush that stash
+        // before teardown drops it.
+        for _ in 0..2 {
+            response_tx
+                .try_send(ResponseMessages::Raw(BackendMessages::empty()))
+                .expect("the response channel parked before both primers were queued");
+        }
+        assert!(
+            response_tx
+                .try_send(ResponseMessages::Raw(BackendMessages::empty()))
+                .is_err(),
+            "the response sender was not backpressured by two primers"
+        );
+        let (request_tx, request_rx) = mpsc::unbounded();
+        request_tx
+            .unbounded_send(Request {
+                messages: RequestMessages::Single(FrontendMessage::Raw(bytes::Bytes::from_static(
+                    b"scripted request",
+                ))),
+                sender: response_tx,
+                disposition: RequestDisposition::Awaited,
+                transaction_effect: TransactionEffect::MayChange,
+                prepare_cleanup: None,
+                statement: None,
+                observation: None,
+                request_server_error: Arc::default(),
+            })
+            .expect("queue the scripted request");
+
+        let connection: Connection<ScriptedDuplex, ScriptedDuplex> = Connection::new(
+            BufStream::new(MaybeTlsStream::Raw(ScriptedDuplex {
+                chunks: VecDeque::from([error_response_before_malformed_header(
+                    "23505",
+                    "scripted unique violation",
+                )]),
+            })),
+            VecDeque::new(),
+            HashMap::new(),
+            Arc::default(),
+            request_rx,
+            Arc::clone(&tx_status),
+            Arc::new(AtomicUsize::new(1)),
+            Arc::default(),
+            None,
+        );
+
+        let result = compio::time::timeout(Duration::from_secs(1), connection.run_serialized())
+            .await
+            .expect("the coalesced-failure serialized reader exceeded its watchdog");
+        let local = result.expect_err("the malformed tail left the serialized session reusable");
+        assert!(
+            local
+                .as_io()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::InvalidData),
+            "the serialized reader retired for the wrong local reason: {local}"
+        );
+
+        for _ in 0..2 {
+            response_rx
+                .try_recv()
+                .expect("a response-channel primer disappeared");
+        }
+        let operation =
+            response_error(response_rx.try_recv().expect(
+                "the serialized local framing failure dropped backpressured SQLSTATE 23505",
+            ));
+        assert_eq!(
+            operation.code().map(|code| code.code()),
+            Some("23505"),
+            "serialized framing failure discarded SQLSTATE 23505: {operation}"
+        );
+        assert_eq!(
+            tx_status.load(Ordering::Acquire),
+            READ_RETIRED_STATUS,
+            "the serialized malformed tail left the pool status reusable"
+        );
+        drop(request_tx);
+    }
+
     #[compio::test]
     async fn queued_server_error_outranks_a_simultaneous_flush_failure() {
         let read_half_dropped = Rc::new(Cell::new(false));
@@ -3477,6 +3724,7 @@ mod tests {
                 message: BackendMessage::Normal {
                     messages: error_response_batch("23505", "scripted unique violation"),
                     request_complete: true,
+                    deferred_error: None,
                 },
                 acknowledgement: None,
             }))
@@ -3862,6 +4110,7 @@ mod tests {
                 message: BackendMessage::Normal {
                     messages: BackendMessages::empty(),
                     request_complete: false,
+                    deferred_error: None,
                 },
                 acknowledgement: None,
             }))
@@ -4012,6 +4261,7 @@ mod tests {
                     message: BackendMessage::Normal {
                         messages: BackendMessages::empty(),
                         request_complete: false,
+                        deferred_error: None,
                     },
                     acknowledgement: None,
                 }))
