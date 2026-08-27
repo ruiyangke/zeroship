@@ -445,10 +445,11 @@ impl PolicyDoc {
 
     /// Parse + validate a TRUSTED document that may `extends` a base, resolving the
     /// base chain against the injected trusted `catalog` (II.7, H-1) with cycle
-    /// detection. `ctx` MUST be a trusted context (`RootCharter`/`TrustedCatalogEntry`)
-    /// - an untrusted-draft context with `extends` is `ExtendsForbiddenInDraft`. The
-    /// base document's rules ACCUMULATE into this document's, and its `default_scope` is
-    /// inherited when this document omits its own.
+    /// detection. `ctx` MUST be a trusted context
+    /// (`RootCharter`/`TrustedCatalogEntry`) - an untrusted-draft context with
+    /// `extends` is `ExtendsForbiddenInDraft`. The base document's rules
+    /// ACCUMULATE into this document's, and its `default_scope` is inherited
+    /// when this document omits its own.
     ///
     /// Accumulate, not override. The merge produces one document, which is one layer,
     /// and a layer joins every covering grant rule, so this document can raise a base

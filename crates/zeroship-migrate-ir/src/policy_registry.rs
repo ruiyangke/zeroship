@@ -177,9 +177,9 @@ pub const KEY_SCHEMA_CREATE_SCHEMA: &str = "schema.create_schema";
 /// target scope. (The namespace-authority CHECK - rename-into-inject-scope - stays a
 /// guard rule.)
 pub const KEY_SCHEMA_RENAME: &str = "schema.rename";
-/// Which schemas this migration may reference (PerSchema Bool grant, default-deny)
-/// - the capability-model replacement for the schema-scope confinement. A reference
-/// to schema `s` is admitted iff `grants(schema.cross_schema, s)` is `Bool(true)`; the
+/// Which schemas this migration may reference (PerSchema Bool grant,
+/// default-deny) - the capability-model replacement for the schema-scope
+/// confinement. A reference to schema `s` is admitted iff `grants(schema.cross_schema, s)` is `Bool(true)`; the
 /// project schema(s) a confined/platform posture owns are granted here, everything
 /// else is a `CrossSchema` violation. Object-scoped so the grant can name exactly
 /// the permitted schemas (an `include: ["app1"]` grant permits only `app1`).
@@ -268,9 +268,9 @@ pub const KEY_SAFETY_NO_HARD_DELETE: &str = "safety.no_hard_delete";
 /// each obliging at least as much as the one before it
 /// (OrderedEnum, `Require` polarity - composes UP, un-lowerable). This is a SEALED
 /// obligation the engine does not enforce but a HOST does: it is
-/// `Enforcement::HostEnforced`, so the engine's own guard/apply never gate on it, YET
-/// - unlike a `DeclaredOnly` knob - it MAY be sealed at a non-default value (M-2,
-/// II.6). The HOST (`migrated`) reads it via
+/// `Enforcement::HostEnforced`, so the engine's own guard/apply never gate on
+/// it, YET - unlike a `DeclaredOnly` knob - it MAY be sealed at a non-default
+/// value (M-2, II.6). The HOST (`migrated`) reads it via
 /// [`crate::policy_approval::migration_requires_approval`] and enforces approval as a
 /// state machine - the engine `apply` stays dumb. Object-scoped like every other
 /// knob (the level resolves per target object; the host ORs across a migration's ops).
