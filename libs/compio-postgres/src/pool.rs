@@ -1624,6 +1624,17 @@ impl Pool {
             self.discard_unowned_entry(entry);
             return;
         }
+        if !entry.is_pool_eligible() {
+            // An assigned handoff can dwell across arbitrary connection-task
+            // progress before its waiter is cancelled. Recheck at this second
+            // publication boundary instead of advertising a corpse until a
+            // later checkout or housekeeping pass happens to reap it.
+            self.release_total_slots(1);
+            self.metrics.inc_evictions();
+            self.wake_one_waiter();
+            drop(entry);
+            return;
+        }
         if let Some(waker) = self.deposit_freed_entry(entry) {
             waker.wake();
         }
@@ -3306,6 +3317,46 @@ mod tests {
             Poll::Ready(Err(error)) => panic!("fresh replacement was rejected: {error}"),
             Poll::Pending => panic!("fresh replacement should be ready without I/O"),
         }
+    }
+
+    #[test]
+    fn cancelling_a_waiter_does_not_redeposit_a_handoff_that_closed_in_its_slot() {
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            validation_bypass: Duration::from_secs(60),
+            ..PoolConfig::default()
+        };
+        let pool = test_pool(config, Vec::new(), 1, 1);
+        let (client, receiver) = fake_client(13);
+        let held = PooledClient {
+            entry: Some(PoolEntry::new(client, pool.config.max_lifetime)),
+            pool: &pool,
+        };
+        let mut waiter = Box::pin(Waiter::new(&pool));
+
+        assert!(poll_once(waiter.as_mut()).is_pending());
+        drop(held);
+        assert_eq!(pool.pending_count(), 0, "the live entry was not handed off");
+
+        // The entry is pool-owned but can dwell in the assigned slot until the
+        // waiter is polled. Model the connection task ending in that interval,
+        // then cancel the waiter so its Drop path must decide whether to
+        // republish or retire the entry.
+        drop(receiver);
+        drop(waiter);
+
+        assert_eq!(
+            pool.idle_count(),
+            0,
+            "cancelled waiter redeposited an ineligible handoff"
+        );
+        assert_eq!(
+            pool.total_count(),
+            0,
+            "closed handoff kept its capacity slot"
+        );
+        assert_eq!(pool.metrics.evictions.get(), 1);
     }
 
     #[test]
