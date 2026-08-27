@@ -46,8 +46,8 @@ const dbSchema = {
   tasks: schema({
     workspaceId: t.ref("workspaces").required(),
     ownerId: t.ref("users").required(),
-    title: t.string().required().fts("english"),
-    description: t.string().required().fts("english"),
+    title: t.string().required(),
+    description: t.string().required(),
     status: t.string().enum("open", "in_progress", "done", "archived").default("open"),
     priority: t.number().required(),
     score: t.number().required(),
@@ -59,8 +59,8 @@ const dbSchema = {
 
   places: schema({
     workspaceId: t.ref("workspaces").required(),
-    name: t.string().required().fts("english"),
-    description: t.string().required().fts("english"),
+    name: t.string().required(),
+    description: t.string().required(),
     category: t.string().required(),
     loc: t.geoPoint().required(),
     embedding: t.vector(4, { metric: "cosine" }),
@@ -745,14 +745,6 @@ export const searchShowcase = action(async ({
 }: {
   workspaceId: WorkspaceId;
 }) => {
-  const text = expectData(
-    await db.places.search({
-      text: "coffee",
-      limit: 3,
-      filter: { workspaceId },
-    }),
-    "searchShowcase.text",
-  ) as Array<Record<string, unknown>>;
   const vector = expectData(
     await db.places.search({
       vector: [1, 0, 0, 0],
@@ -773,7 +765,6 @@ export const searchShowcase = action(async ({
   ) as Array<Record<string, unknown>>;
 
   return {
-    text: text.map((row) => ({ ...summarizePlace(row), _rank: row._rank })),
     vector: vector.map((row) => ({ ...summarizePlace(row), _distance: row._distance })),
     near: near.map((row) => ({ ...summarizePlace(row), _distance_m: row._distance_m })),
   };

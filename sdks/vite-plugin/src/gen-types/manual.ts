@@ -281,10 +281,6 @@ export function fieldDefToDto(
   if (def.vectorDims !== undefined) dto.vectorDims = def.vectorDims;
   if (def.vectorMetric !== undefined) dto.vectorMetric = def.vectorMetric;
 
-  // Full-text-search facets.
-  if (def.fts !== undefined) dto.fts = def.fts;
-  if (def.ftsLanguage !== undefined) dto.ftsLanguage = def.ftsLanguage;
-
   // Encryption + masking (verbatim sub-objects).
   if (def.encrypted !== undefined) dto.encrypted = def.encrypted;
   if (def.mask !== undefined) dto.mask = def.mask;

@@ -2514,11 +2514,6 @@ pub fn flags_for(report: &GuardReport) -> MigrationFlags {
         // Repeatable is an authoring-time facet (a stable-identity, replace-style
         // R__ migration), not derivable from a single SQL blob - defaults off.
         repeatable: false,
-        // Engine-goodie DDL is an authoring-time facet; a guard-derived flag set for
-        // an arbitrary SQL blob never carries it. Nothing sets it true any more (its
-        // only producer was the removed FTS5 vtable create), so this is the value it
-        // would take regardless -- stated rather than inherited.
-        engine_goodie_ddl: false,
     }
 }
 

@@ -237,16 +237,42 @@ wait_for_backend redis "$REDIS_HOST" "$REDIS_PORT" "Redis" \
 #
 # Reported, not fatal: `--check` also describes service containers owned by
 # auth and billing jobs, which do not run these logical-replication tests.
+#
+# THE PROBE FOLLOWS THE PORT, NOT THE COMPOSE PROJECT, and that distinction is
+# the whole point. This block used to ask `dc ps -q postgres` for the container
+# to interrogate - the compose-managed one - and then report ITS wal_level. But
+# the paragraph above says the danger is a hand-started container holding the
+# port, and in exactly that case `dc ps -q postgres` is EMPTY: the script fell
+# to a generic ownership warning and printed no settings at all. So the one
+# situation the check was written for was the one situation it did not measure.
+#
+# Observed 2026-08-27: 127.0.0.1:5440 was held by `zs-auth-pg-5440` (up 12
+# days) running wal_level=replica, max_prepared_transactions=0. Both
+# LOAD-BEARING values were wrong, the ten `pg_has_logical_wal`-guarded tests in
+# crates/zeroship-plugin-db/tests/integration.rs skip-and-count-as-passed
+# (integration.rs:2045 and nine siblings call `skip(...)` then `return`), and
+# nothing in any printed number said so.
+#
+# Resolution order: the container PUBLISHING the port wins; the compose service
+# is only the fallback for when nothing publishes it (host-network, remote).
 if command -v docker >/dev/null 2>&1; then
-  pg_cid="$(dc ps -q postgres 2>/dev/null || true)"
+  pg_cid="$(docker ps -q --filter "publish=${PG_PORT}" 2>/dev/null | head -1 || true)"
+  pg_probe_source="the container publishing ${PG_HOST}:${PG_PORT}"
+  if [ -z "$pg_cid" ]; then
+    pg_cid="$(dc ps -q postgres 2>/dev/null || true)"
+    pg_probe_source="the compose-managed postgres service"
+  fi
   if [ -n "$pg_cid" ]; then
+    echo "  ..   probing $pg_probe_source ($(docker inspect -f '{{.Name}}' "$pg_cid" 2>/dev/null | sed 's|^/||'))"
     wal="$(docker exec "$pg_cid" psql -U postgres -tAc 'show wal_level' 2>/dev/null || true)"
     if [ "$wal" = "logical" ]; then
       echo "  ok   PostgreSQL wal_level=logical (logical-decoding tests will run)"
     else
       echo "  WARN PostgreSQL wal_level=${wal:-unknown}, not 'logical'." >&2
       echo "       The 10 pg_has_logical_wal-guarded tests in" >&2
-      echo "       crates/plugin-db/tests/integration.rs will announce skips." >&2
+      echo "       crates/zeroship-plugin-db/tests/integration.rs skip -- and a" >&2
+      echo "       skip COUNTS AS A PASS. The run's totals will look identical" >&2
+      echo "       to one where all ten actually ran and passed." >&2
     fi
     prepared="$(docker exec "$pg_cid" psql -U postgres -tAc \
       'show max_prepared_transactions' 2>/dev/null || true)"

@@ -78,6 +78,7 @@ zeroship_core::declare_env_consumer!(
 
 // Always pub:
 pub mod broker;
+pub(crate) mod binding;
 pub mod error;
 // The DDL builders + `QueryError` + `SqlDialect` +
 // the system-field / validation helpers were extracted into the leaf crate
@@ -138,6 +139,15 @@ pub(crate) use zeroship_schema::diff;
 pub use zeroship_schema::diff;
 pub(crate) mod read_set;
 pub(crate) mod v8_bridge;
+
+// The process-wide live-schema metadata cache `DbService` owns. `pub` for the
+// cache TYPE (it is reachable through `DbService::live_metadata`); its key and
+// accessors stay crate-private.
+pub mod live_metadata;
+// Process-wide ownership of the `env.db` primitive: validated configuration,
+// the plugin prototype, the stable thread-resource key, the live-metadata
+// cache, and the neutral operator-lifecycle handle.
+pub mod service;
 
 // Cross-backend column-encryption surface. Always
 // compiled (not gated to `pg` / `sqlite`) because both backends
@@ -201,6 +211,9 @@ pub(crate) mod replication;
 #[cfg(feature = "test-helpers")]
 pub mod replication;
 
+/// Operator-owned cleanup for abandoned worker replication slots.
+pub mod slot_reaper;
+
 #[cfg(not(feature = "test-helpers"))]
 pub(crate) mod replication_ops;
 #[cfg(feature = "test-helpers")]
@@ -251,10 +264,10 @@ pub mod wal_consumer;
 pub(crate) mod test_support;
 
 // ---------------------------------------------------------------------------
-// Per-isolate state
+// Per-worker-thread state
 // ---------------------------------------------------------------------------
 //
-// All per-isolate slots live on [`context::IsolateDbContext`]; this
+// All per-thread slots live on [`context::ThreadDbContext`]; this
 // module just re-exports the helpers the rest of the crate calls.
 
 /// Check if a model is already registered for this app on this thread.
@@ -267,7 +280,7 @@ pub(crate) fn mark_model_registered(app_id: &str, collection: &str) {
     ctx_mut(|c| c.mark_model_registered(app_id, collection));
 }
 
-/// Test helper — mark a model registered on the current isolate,
+/// Test helper — mark a model registered in the current worker-thread context,
 /// mirroring what `register_model` does at the SDK boundary. The runtime schema
 /// resolver gates on `is_model_registered` (the cold-schema contract), so a
 /// faithful e2e that drives the CRUD pipelines directly must mark the model.
@@ -279,23 +292,12 @@ pub fn mark_model_registered_for_tests(app_id: &str, collection: &str) {
 
 /// Test helper — clear the registered mark so a re-register of the same
 /// `(app, collection)` with a CHANGED schema re-runs the cold path (a real dev
-/// re-deploy mints a fresh isolate; tests reuse one). Used by the destructive-
+/// re-deploy presents a fresh binding; tests reuse one context). Used by the destructive-
 /// apply test to drive a v1→v2 schema change through the engine.
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn clear_model_registered_for_tests(app_id: &str, collection: &str) {
     ctx_mut(|c| c.clear_model_registered(app_id, collection));
-}
-
-/// Test helper — stamp the per-`app_id` deploy/schema-version token into the
-/// per-isolate context, the way `mint_db` does from the worker-injected
-/// `ZEROSHIP_DEPLOY_ID`. A faithful e2e that drives the CRUD pipelines directly
-/// uses this to simulate a redeploy (bump the token) and prove the deploy-keyed
-/// introspection cache re-introspects the new schema's metadata.
-#[cfg(any(test, feature = "test-helpers"))]
-#[doc(hidden)]
-pub fn set_deploy_token_for_tests(app_id: &str, token: &str) {
-    context::with_mut(|c| c.set_deploy_token(app_id, token));
 }
 
 // The synchronous `ensure_pool(scope)` helper that used to live here
@@ -308,6 +310,12 @@ pub fn set_deploy_token_for_tests(app_id: &str, token: &str) {
 // ---------------------------------------------------------------------------
 
 /// The database plugin — registers `zeroship.db.*` methods.
+///
+/// **The prototype, not a per-runtime object.** One instance is minted by
+/// [`service::DbService::new`] at composition and every runtime on every worker
+/// thread clones the same `Arc`. There is deliberately no public constructor:
+/// a `DbPlugin` is a view of validated service configuration, and minting one
+/// beside the service would be a second, unvalidated configuration.
 pub struct DbPlugin {
     url: String,
     /// Stable across every isolate in one worker process and distinct across
@@ -318,29 +326,47 @@ pub struct DbPlugin {
     /// `db_reads` / `db_writes` / `db_rows_written` through it on success.
     /// `None` in meter-less test harnesses.
     meter: Option<std::sync::Arc<zeroship_metering::Meter>>,
+    /// The service's stable thread-resource key. Stamped into the thread
+    /// context on `register`, so every isolate this plugin serves — current and
+    /// deploy-pinned alike — resolves resources and live metadata under one
+    /// identity.
+    resource_key: service::DbResourceKey,
+    /// The backend the service selected at composition. Carried so lazy pool
+    /// init reads a decision rather than re-parsing the URL.
+    backend: BackendUrl,
+    /// The service's process-wide live-metadata cache. Handed to the thread
+    /// context on `register` so the cache's owner is the service rather than
+    /// whichever thread got there first.
+    live_metadata: std::sync::Arc<live_metadata::LiveMetadataCache>,
 }
 
 impl std::fmt::Debug for DbPlugin {
+    /// No URL — it carries a password.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DbPlugin").finish()
+        f.debug_struct("DbPlugin")
+            .field("resource", &self.resource_key)
+            .finish_non_exhaustive()
     }
 }
 
 impl DbPlugin {
-    /// Create a new `DbPlugin` instance over a DB URL and (optionally) the
-    /// process-wide usage meter. Pass `None` for the meter in test harnesses
-    /// where metering is not under test; the worker / dev-serve vectors pass
-    /// `Some(meter)` so each db op emits a per-app usage metric.
-    #[must_use]
-    pub fn new(
-        url: impl Into<String>,
+    /// Mint the prototype. Crate-private: [`service::DbService::new`] is the
+    /// only caller, and it has already validated the configuration.
+    pub(crate) fn new(
+        url: String,
+        worker_id: String,
         meter: Option<std::sync::Arc<zeroship_metering::Meter>>,
-        worker_id: impl Into<String>,
+        resource_key: service::DbResourceKey,
+        backend: BackendUrl,
+        live_metadata: std::sync::Arc<live_metadata::LiveMetadataCache>,
     ) -> Self {
         Self {
-            url: url.into(),
-            worker_id: worker_id.into(),
+            url,
+            worker_id,
             meter,
+            resource_key,
+            backend,
+            live_metadata,
         }
     }
 }
@@ -381,7 +407,12 @@ impl NativePlugin for DbPlugin {
         // build a fresh one for the new URL instead of silently aliasing
         // the first pool to the second URL.
         ctx_mut(|c| {
-            if c.set_db_url(&self.url) {
+            if c.install_db_resources(
+                &self.url,
+                self.resource_key,
+                self.backend.clone(),
+                std::sync::Arc::clone(&self.live_metadata),
+            ) {
                 c.clear_pool();
             }
             c.set_cdc_worker_id(&self.worker_id);
@@ -446,14 +477,22 @@ pub fn first_row_or_null_for_bench(rows: &[compio_postgres::Row]) -> String {
         .to_string()
 }
 
-/// **Test-only**: set the per-thread `DB_URL` directly, bypassing the
-/// usual `DbPlugin::register()` path. Used by integration tests that
-/// drive DB ops directly without spinning up a full runtime.
+/// **Test-only**: install this thread's DB resources directly, bypassing the
+/// usual `DbService` → `DbPlugin::register()` path. Used by integration tests
+/// that drive DB ops directly without spinning up a full runtime.
+///
+/// It derives the same resource key `DbService` would from the same URL, so a
+/// harness and a composed service address one identity - a harness that made up
+/// its own key would silently get a private slice of the process-wide cache and
+/// every cross-thread assertion would pass vacuously.
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn set_db_url_for_tests(url: &str) {
+    let key = service::DbResourceKey::for_url(url);
+    let backend = service::select_backend(url).expect("test URL must be a supported backend");
+    let cache = live_metadata::process_wide();
     ctx_mut(|c| {
-        c.set_db_url(url);
+        c.install_db_resources(url, key, backend, cache);
     });
 }
 
@@ -464,8 +503,11 @@ pub fn set_db_url_for_tests(url: &str) {
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn set_postgres_pool_for_tests(pool: Rc<compio_postgres::Pool>, url: &str) {
+    let key = service::DbResourceKey::for_url(url);
+    let backend = service::select_backend(url).expect("test URL must be a supported backend");
+    let cache = live_metadata::process_wide();
     ctx_mut(|c| {
-        c.set_db_url(url);
+        c.install_db_resources(url, key, backend, cache);
         c.set_pool(pool);
     });
 }
@@ -478,10 +520,17 @@ pub fn set_postgres_pool_for_tests(pool: Rc<compio_postgres::Pool>, url: &str) {
 /// connection is asynchronous they are then orphaned when the test's runtime
 /// goes away. Clearing the context first lets the connections close while
 /// there is still a runtime to close them.
+///
+/// Also clears the PROCESS-WIDE live-metadata cache and this thread's operator
+/// pools. Replacing the context used to drop the metadata map with it; the map
+/// outlives the context now, so the reset has to say so rather than leaving one
+/// test's cached facts visible to the next.
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn reset_context_for_tests() {
-    ctx_mut(|c| *c = context::IsolateDbContext::new());
+    live_metadata::process_wide().clear();
+    service::reset_operator_pools_for_tests();
+    ctx_mut(|c| *c = context::ThreadDbContext::new());
 }
 
 /// Test helper: hand this isolate the column root keys its backends
@@ -490,7 +539,7 @@ pub fn reset_context_for_tests() {
 ///
 /// Each entry is `(key_id, root_hex)` where `root_hex` is 64 hex
 /// characters. The keys land in the per-isolate context
-/// (`IsolateDbContext::set_supplied_root_keys`), so every backend
+/// (`ThreadDbContext::set_supplied_root_keys`), so every backend
 /// constructed on this thread AFTERWARDS picks them up - including the
 /// ones a test never sees, such as the `SqliteBackend` that
 /// `init_pool_async` builds behind a V8 dispatch and the
@@ -608,8 +657,8 @@ pub fn clear_mask_policy_cache_for_tests(app_id: &str) {
 }
 
 /// **Test-only**: install a real Postgres client into the active
-/// isolate's `IsolateDbContext::tx_conn` slot (formerly the `TX_CONN`
-/// thread-local, folded into `IsolateDbContext`) so the Gap B
+/// isolate's `ThreadDbContext::tx_conn` slot (formerly the `TX_CONN`
+/// thread-local, folded into `ThreadDbContext`) so the Gap B
 /// integration tests can drive the deferred-broker-emit queue/drain
 /// machinery without standing up a V8 isolate. Returns the
 /// connection-task handle so the caller can detach it.
@@ -620,16 +669,21 @@ pub fn clear_mask_policy_cache_for_tests(app_id: &str) {
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub async fn install_tx_marker_for_tests(app_id: &str, url: &str) {
-    let (client, connection) = compio_postgres::connect(url, compio_postgres::NoTls)
+    // A pooled checkout, like the production path: `TxConnection::Postgres`
+    // now carries an `OwnedPooledClient`, and a helper that opened a raw
+    // connection would be testing a shape production no longer has.
+    let pool = Rc::new(
+        Pool::connect(url, 2)
+            .await
+            .expect("install_tx_marker_for_tests: pool connect failed"),
+    );
+    let client = pool
+        .get_owned()
         .await
-        .expect("install_tx_marker_for_tests: connect failed");
-    compio::runtime::spawn(async move {
-        let _ = connection.run().await;
-    })
-    .detach();
+        .expect("install_tx_marker_for_tests: pooled checkout failed");
     // Issue a real BEGIN so the dummy connection behaves like a real
     // tx — not strictly required (the queueing path keys off
-    // `IsolateDbContext::has_tx_for`), but matches the production state
+    // `ThreadDbContext::has_tx_for`), but matches the production state
     // machine more honestly.
     let _ = client.execute("BEGIN", &[]).await;
     ctx_mut(|c| {
@@ -645,7 +699,7 @@ pub async fn install_tx_marker_for_tests(app_id: &str, url: &str) {
 /// [`install_tx_marker_for_tests`].
 ///
 /// Async + sends `ROLLBACK` before dropping the Client because the
-/// per-isolate `IsolateDbContext` is thread-local and the test's
+/// per-isolate `ThreadDbContext` is thread-local and the test's
 /// compio runtime drops between tests. With `--test-threads=1` every
 /// test shares one thread; if a prior test's Client is dropped without
 /// explicit `ROLLBACK` the PG backend on the other end can linger as
@@ -718,7 +772,7 @@ pub async fn drop_pooled_lock_guard_without_release_for_tests(
 
     let backend = PostgresBackend::new(Rc::clone(&pool), url.to_string());
     let client = pool
-        .get()
+        .get_owned()
         .await
         .map_err(|e| error::DbError::from_pg(&e).into_string())?;
     let scope = LockScope::GlobalApp {
@@ -733,7 +787,7 @@ pub async fn drop_pooled_lock_guard_without_release_for_tests(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum BackendUrl {
+pub(crate) enum BackendUrl {
     Postgres,
     Sqlite { path: PathBuf },
 }
@@ -759,7 +813,13 @@ pub fn is_sqlite_url(url: &str) -> bool {
     v
 }
 
-fn backend_for_url(url: &str) -> Result<BackendUrl, DbError> {
+/// Classify a database URL.
+///
+/// **Call [`service::select_backend`] instead**, unless you are `is_sqlite_url`
+/// below (a pure grammar check that opens nothing). Every real backend
+/// selection goes through the service wrapper so the process's parse count is
+/// a complete measurement rather than a sample of the sites that remembered.
+pub(crate) fn backend_for_url(url: &str) -> Result<BackendUrl, DbError> {
     let trimmed = url.trim();
     if trimmed.is_empty() {
         return Err(DbError::config_hinted(
@@ -827,10 +887,14 @@ fn backend_for_url(url: &str) -> Result<BackendUrl, DbError> {
 /// before the isolate starts processing requests.
 ///
 /// ```ignore
-/// // Inside a compio runtime:
-/// let runtime = Runtime::builder()
-///     .plugin(DbPlugin::new(url, None, "worker-instance-id"))
-///     .build();
+/// // Once, at composition, before any isolate exists:
+/// let service = DbService::new(DbServiceConfig {
+///     url,
+///     worker_id: "worker-instance-id".into(),
+///     meter: None,
+/// })?;
+/// // Inside a compio runtime, per isolate:
+/// let runtime = Runtime::builder().plugin(service.plugin()).build();
 /// zeroship_plugin_db::init_pool_async().await?;
 /// // Now safe to run JS that calls zeroship.db.*
 /// ```
@@ -843,8 +907,11 @@ impl Drop for BackendInitGuard {
 }
 
 pub async fn init_pool_async() -> Result<(), String> {
-    let url = context::with(|c| c.db_url());
-    let Some(url) = url else {
+    // The URL and the backend selection are installed together, so either both
+    // are present or the DB plugin is disabled on this thread.
+    let Some((url, selection)) =
+        context::with(|c| Some((c.db_url()?, c.backend_selection()?)))
+    else {
         return Ok(()); // No URL configured — DB plugin is disabled
     };
 
@@ -866,8 +933,10 @@ pub async fn init_pool_async() -> Result<(), String> {
     let _init_guard = BackendInitGuard;
 
     async {
-        let backend = backend_for_url(&url).map_err(DbError::into_string)?;
-        match backend {
+        // The backend selection the service made at composition, NOT a fresh
+        // parse of the URL. `install_db_resources` stamped it onto this thread
+        // when the plugin registered.
+        match selection {
             BackendUrl::Postgres => {
                 let pool = Pool::connect(&url, 8).await.map_err(|e| {
                     // Walk the error source chain so the root cause (e.g. ECONNREFUSED,
@@ -882,12 +951,14 @@ pub async fn init_pool_async() -> Result<(), String> {
                     msg
                 })?;
 
+                service::note_backend_open();
                 ctx_mut(|c| c.set_pool(Rc::new(pool)));
             }
             BackendUrl::Sqlite { path } => {
                 let backend = crate::backend::sqlite::SqliteBackend::open(&path)
                     .await
                     .map_err(DbError::into_string)?;
+                service::note_backend_open();
                 ctx_mut(|c| c.set_sqlite_backend(Rc::new(backend)));
             }
         }
@@ -896,28 +967,10 @@ pub async fn init_pool_async() -> Result<(), String> {
     .await
 }
 
-/// Tear down all CDC state for a deleted app without requiring a live V8
-/// isolate.
-///
-/// The worker's process-wide version poller calls this after an app disappears
-/// from the control-plane registry. It closes local subscriptions, stops this
-/// process's consumer, then drops every worker slot. Publication membership
-/// remains owned by the migration service. The Postgres teardown is idempotent
-/// so every worker container may observe the same deletion safely.
-pub async fn deprovision_app_cdc(db_url: &str, app_id: &str) -> Result<(), DbError> {
-    cdc_lifecycle::shutdown_app(app_id).await;
-    broker::drop_app(Some(app_id));
-
-    match backend_for_url(db_url)? {
-        BackendUrl::Sqlite { .. } => Ok(()),
-        BackendUrl::Postgres => {
-            let pool = Pool::connect(db_url, 2).await.map_err(|error| DbError::Transient {
-                message: format!("db CDC app-delete connection failed: {error}"),
-            })?;
-            replication::drop_worker_slots(&pool, app_id).await
-        }
-    }
-}
+// App CDC deprovisioning moved onto the service's neutral operator-lifecycle
+// handle: `DbService::lifecycle().deprovision_app(app_id)`. The free function
+// that used to live here took a `&str` URL, re-ran `backend_for_url` on it and
+// built a fresh two-connection `Pool` per deleted app.
 
 #[cfg(test)]
 mod backend_url_tests {
@@ -991,22 +1044,35 @@ mod backend_url_tests {
 
 #[cfg(test)]
 mod backend_init_tests {
-    use super::{context, ctx_mut, init_pool_async};
+    use super::{context, ctx_mut, init_pool_async, set_db_url_for_tests};
 
     fn set_fresh_db_url(url: &str) {
-        ctx_mut(|c| {
-            c.clear_pool();
-            c.set_db_url(url);
-        });
+        ctx_mut(|c| c.clear_pool());
+        set_db_url_for_tests(url);
     }
 
+    /// Eight concurrent cold inits open exactly ONE backend.
+    ///
+    /// The count is the assertion. "A usable backend is installed" - which is
+    /// all this test asserted until the open counter existed - passes with no
+    /// singleflight at all: eight sequential opens leave one installed too,
+    /// because each overwrites the last. Remove `begin_backend_init` and this
+    /// arm reports 8.
+    ///
+    /// It is also the liveness proof for [`crate::service::backend_open_count`]
+    /// itself. The worker's "building the plugin set opens no pool" guard reads
+    /// that counter and asserts it did NOT move; a counter wired to nothing
+    /// satisfies that forever. This arm shows it moves when a backend really is
+    /// opened.
     #[compio::test]
     async fn concurrent_sqlite_lazy_init_shares_one_backend() {
         let dir = tempfile::tempdir().expect("tempdir");
         let url = format!("sqlite:{}", dir.path().join("cold-init.sqlite").display());
         set_fresh_db_url(&url);
+        let opens_before = crate::service::backend_open_count();
 
-        let handles = (0..8)
+        const CONCURRENCY: usize = 8;
+        let handles = (0..CONCURRENCY)
             .map(|_| compio::runtime::spawn(async { init_pool_async().await }))
             .collect::<Vec<_>>();
 
@@ -1020,6 +1086,11 @@ mod backend_init_tests {
         assert!(
             context::with(|c| c.backend().is_some()),
             "concurrent init calls should leave a usable backend installed"
+        );
+        assert_eq!(
+            crate::service::backend_open_count() - opens_before,
+            1,
+            "{CONCURRENCY} concurrent cold inits must open ONE backend, not one each",
         );
     }
 }

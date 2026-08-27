@@ -46,8 +46,16 @@ use thiserror::Error;
 /// agree with a typo" the proposal rejects in Section 6. A proc-macro crate can
 /// export only macros, so `include!` is the one mechanism that shares the data
 /// without duplicating it.
+///
+/// The path names the crate DIRECTORY, so it is exactly as fragile as a
+/// directory rename. It broke that way once: `refactor(crates): every crate
+/// directory is named for the package it holds` (2026-08-26) moved
+/// `config-macros` to `zeroship-config-macros` and left this string behind, so
+/// `cargo build --workspace` failed on a path no test names and no grep for
+/// the crate NAME finds. This is the only `#[path]` in the tree that escapes
+/// its own crate; if a second one is ever added, it inherits this hazard.
 #[allow(dead_code)]
-#[path = "../../config-macros/src/shared.rs"]
+#[path = "../../zeroship-config-macros/src/shared.rs"]
 mod shared_table;
 
 /// What a row's supply class is, as declared today.

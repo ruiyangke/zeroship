@@ -35,7 +35,7 @@ use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
 use compio_postgres::{NoTls, Pool};
-use zeroship_plugin_db::DbPlugin;
+use zeroship_plugin_db::service::{DbService, DbServiceConfig};
 use zeroship_runtime::channel::{CancelFlag, StreamReader};
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::Runtime;
@@ -68,11 +68,15 @@ fn runtime_for(
 ) -> Runtime {
     let mut env_vars = HashMap::new();
     env_vars.insert("APP_ID".to_string(), app_id.to_string());
-    let plugins: Vec<Arc<dyn NativePlugin>> = vec![Arc::new(DbPlugin::new(
-        url.to_string(),
-        None,
-        worker_id.to_string(),
-    ))];
+    let plugins: Vec<Arc<dyn NativePlugin>> = vec![
+        DbService::new(DbServiceConfig {
+            url: url.to_string(),
+            worker_id: worker_id.to_string(),
+            meter: None,
+        })
+        .expect("db service")
+        .plugin(),
+    ];
     Runtime::builder()
         .modules(modules)
         .env_vars(env_vars)
@@ -764,7 +768,15 @@ fn db_live_stream_crosses_v8_isolates_and_releases_worker_slot() {
     let anchor_result = join_role(anchor, "anchor");
 
     let app_delete_result = io.block_on(async {
-        zeroship_plugin_db::deprovision_app_cdc(&url, &app_id)
+        let service = DbService::new(DbServiceConfig {
+            url: url.clone(),
+            worker_id: "distributed-live-deprovision".to_string(),
+            meter: None,
+        })
+        .map_err(|error| format!("db service: {error}"))?;
+        service
+            .lifecycle()
+            .deprovision_app(&app_id)
             .await
             .map_err(|error| format!("deprovision app CDC: {error}"))?;
         let publication_gone = !publication_exists(&pool, &publication).await?;

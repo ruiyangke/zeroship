@@ -3,7 +3,8 @@
 //!
 //! The migration service owns each per-app `PUBLICATION`. Workers only
 //! verify that publication exists and manage their own logical-decoding
-//! `REPLICATION SLOT`, plus the slot watchdog and abandoned-slot GC.
+//! `REPLICATION SLOT`, plus the app-scoped slot watchdog. Operator-owned
+//! abandoned-slot cleanup lives in [`crate::slot_reaper`].
 //!
 //! ## Naming convention
 //!
@@ -76,6 +77,11 @@ fn validate_worker_id(worker_id: &str) -> Result<(), DbError> {
     Ok(())
 }
 
+pub(crate) fn worker_token(worker_id: &str) -> Result<String, DbError> {
+    validate_worker_id(worker_id)?;
+    Ok(stable_token(worker_id, 10))
+}
+
 /// Return the first `bytes` of SHA-256 as lowercase hexadecimal.
 fn stable_token(value: &str, bytes: usize) -> String {
     let digest = Sha256::digest(value.as_bytes());
@@ -107,11 +113,10 @@ pub fn publication_name(app_id: &str) -> Result<String, DbError> {
 /// below Postgres's 63-byte identifier limit.
 pub fn worker_slot_name(app_id: &str, worker_id: &str) -> Result<String, DbError> {
     validate_app_id(app_id)?;
-    validate_worker_id(worker_id)?;
     Ok(format!(
         "{OBJECT_PREFIX}slot_{}__{}",
         stable_token(app_id, 14),
-        stable_token(worker_id, 10)
+        worker_token(worker_id)?
     ))
 }
 
@@ -334,11 +339,9 @@ pub struct SlotHealth {
 /// `app_id`**.
 ///
 /// Returns one entry per slot whose name starts with the hashed per-app
-/// slot prefix. Callers (the maintenance
-/// cron via the tenant-facing `db.replication.watchdog()`) interpret
-/// the results — warn at >8 GB, page at >24 GB, drop slots that have
-/// been `active=false` longer than the configured abandonment threshold
-/// (see [`drop_abandoned_slots`]).
+/// slot prefix. The platform-internal watchdog uses these records for
+/// per-app lag diagnostics. Cluster-wide cleanup is owned separately by
+/// [`crate::slot_reaper`].
 ///
 /// ## Tenancy
 ///
@@ -415,147 +418,6 @@ pub fn watchdog_to_json(slots: &[SlotHealth]) -> String {
         })
         .collect();
     serde_json::Value::Array(arr).to_string()
-}
-
-// ---------------------------------------------------------------------------
-// Abandoned-slot GC
-// ---------------------------------------------------------------------------
-
-/// Drop slots that have been inactive longer than `inactive_seconds`,
-/// **scoped to `app_id`**.
-///
-/// Implements the "inactive-slot GC" sweeper from the proposal's
-/// maintenance-cron table: any slot whose name starts with the per-app
-/// prefix and has `active=false` AND `restart_lsn` older than the
-/// threshold is reaped via `pg_drop_replication_slot()`. The next
-/// subscriber for the affected app sees a one-time `resync` event.
-///
-/// ## Tenancy
-///
-/// The candidate filter binds the exact hashed app prefix and compares
-/// it with `left(slot_name, length($1)) = $1`. Cluster-wide
-/// DROP from inside a tenant isolate is a cross-tenant DoS vector -
-/// the sibling vulnerability to the cross-app `setup` hijack that is
-/// closed elsewhere.
-///
-/// Returns the list of dropped slot names (for logging / metrics).
-///
-/// ## Why we use `pg_drop_replication_slot` and not `pg_replication_slot_advance`
-///
-/// Advancing the slot only releases retained WAL — it doesn't reclaim
-/// the slot itself. An app whose subscribers all disconnected for a
-/// week should not retain a slot that consumes Postgres's per-slot
-/// metadata; full drop is correct. The app's first reconnect after
-/// drop re-runs [`ensure_worker_slot`] and gets a fresh slot
-/// at the current WAL head.
-///
-/// ## `inactive_seconds` policy
-///
-/// The proposal's maintenance-cron table puts this at 1 hour. We don't
-/// pin it inside this function so a different cron cadence (or a test)
-/// can pass whatever it likes. The control plane's scheduler is the
-/// authoritative policy holder.
-///
-/// Implementation note: we use a single round-trip — a CTE that
-/// SELECTs the candidates, then calls `pg_drop_replication_slot()` for
-/// each via `LATERAL`. This avoids the SELECT-then-DROP race where a
-/// subscriber attaches between phases. The race is benign (the DROP
-/// fails with `object_in_use` which we swallow) but a single statement
-/// is cleaner and gives `pg_replication_slots` a consistent view of
-/// the world to the watchdog running concurrently.
-pub async fn drop_abandoned_slots(
-    pool: &Pool,
-    app_id: &str,
-    inactive_seconds: i64,
-) -> Result<Vec<String>, DbError> {
-    // We can't easily express "slot has been inactive for N seconds"
-    // because `pg_replication_slots` doesn't carry a "last became
-    // inactive" timestamp. The next best proxy is
-    // `confirmed_flush_lsn`'s WAL-distance from the head: if the
-    // distance translates (at a worst-case 16 MB/s emission rate that
-    // Postgres allows) to more than `inactive_seconds` of WAL, the
-    // slot is plainly abandoned.
-    //
-    // We use the simpler proxy that the proposal accepts: any
-    // `active=false` slot is a candidate. The watchdog still warns on
-    // lag separately. Callers wanting time-based reaping should query
-    // `pg_stat_replication_slots.stats_reset` (PG 16+) to track when a
-    // slot last had decoder activity (tracked alongside the replication metrics).
-    //
-    // We DO use `inactive_seconds` as a SAFETY THRESHOLD: a slot that
-    // was newly created but hasn't been started yet has `active=false`
-    // until the first consumer connects. We avoid reaping such slots
-    // by requiring `confirmed_flush_lsn` to lag behind
-    // `pg_current_wal_lsn()` by at least
-    // `inactive_seconds * BYTES_PER_SECOND_FLOOR` bytes. With a
-    // 1-byte/s floor (extremely permissive), a slot whose flush is
-    // exactly at HEAD survives even a 0-second threshold.
-    let floor_bytes = inactive_seconds.max(0);
-
-    // Per-app slot prefix — same shape as the watchdog filter so a
-    // tenant `dropAbandoned` only ever GCs its own slots (sibling fix
-    // to the cross-app `setup` hijack closed at 309ed52f). Cluster-wide
-    // cross-tenant DROP from inside a tenant isolate is a DoS vector.
-    let slot_prefix = worker_slot_name_prefix(app_id)?;
-
-    // We SELECT first, then DROP per-row, because
-    // `pg_drop_replication_slot()` doesn't return the slot name and a
-    // CTE-with-LATERAL gets awkward across pgsql versions.
-    let candidates_sql = r"SELECT slot_name
-          FROM pg_replication_slots
-          WHERE left(slot_name, length($1)) = $1
-            AND active = false
-            AND (
-                  restart_lsn IS NULL
-               OR pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn) >= $2
-            )";
-    let rows = pool
-        .query_text_params(
-            candidates_sql,
-            &[&slot_prefix, &floor_bytes.to_string()],
-        )
-        .await
-        .map_err(|e| {
-            let mut err = DbError::from_pg(&e);
-            prefix_message(&mut err, "replication: enumerate abandoned slots: ");
-            err
-        })?;
-
-    let mut dropped = Vec::new();
-    for row in &rows {
-        let name: String = row.get("slot_name");
-        // SAFETY: name comes from pg_replication_slots' authoritative
-        // text representation; it's already a valid slot name. Still
-        // we go through `pg_drop_replication_slot($1)` (parameterised)
-        // rather than string interpolation in case Postgres ever
-        // tightens identifier rules.
-        match pool
-            .query_text_params(
-                "SELECT pg_drop_replication_slot($1)",
-                &[&name],
-            )
-            .await
-        {
-            Ok(_) => dropped.push(name),
-            Err(e) => {
-                // 55006 (object_in_use) is mapped to
-                // `DbError::LockContention` via `from_pg`. A subscriber
-                // raced to attach between SELECT and DROP — benign; the
-                // next sweep will catch it.
-                let err = DbError::from_pg(&e);
-                if matches!(err, DbError::LockContention { .. }) {
-                    continue;
-                }
-                let mut err = err;
-                prefix_message(
-                    &mut err,
-                    &format!("replication: pg_drop_replication_slot({name}): "),
-                );
-                return Err(err);
-            }
-        }
-    }
-    Ok(dropped)
 }
 
 // Worker-owned slot teardown
@@ -929,7 +791,7 @@ mod tests {
     // These pin the `.code` the SDK branches on for the validation paths
     // through `publication_name` and `worker_slot_name`.
     // The pool-bound helpers (`ensure_worker_slot`,
-    // `watchdog_query`, `drop_abandoned_slots`) can only be reached via
+    // `watchdog_query`) can only be reached via
     // a live Postgres connection; their typed-error mapping is exercised
     // by `tests/integration.rs::b8c_*` against pg-test.
     // -----------------------------------------------------------------
@@ -1000,14 +862,13 @@ mod tests {
     // did.
 
     // -----------------------------------------------------------------
-    // Cross-tenant scoping regression guards (security review r5,
-    // 2026-05-22). Before the fix, `watchdog_query` and
-    // `drop_abandoned_slots` ran cluster-wide enumerations/DROPs against
-    // `pg_replication_slots` with no per-app filter, exposing co-tenant
-    // slot names and enabling cross-tenant DoS via `dropAbandoned`.
+    // Cross-tenant scoping regression guard (security review r5,
+    // 2026-05-22). Before the fix, `watchdog_query` ran a cluster-wide
+    // enumeration against `pg_replication_slots` with no per-app filter,
+    // exposing co-tenant slot names.
     //
-    // Both helpers now build the candidate filter from
-    // `worker_slot_name_prefix(app_id)` and pass it as a `$1` bind.
+    // The helper now builds the candidate filter from
+    // `worker_slot_name_prefix(app_id)` and passes it as a `$1` bind.
     // We can't drive a real `Pool` from a unit test, so these tests pin
     // the exact per-app prefix. Any future change
     // that drops the `app_id` scoping has to first delete these tests.
@@ -1042,27 +903,6 @@ mod tests {
         // Wildcard input is hashed and never reaches the SQL predicate.
         let wildcard = worker_slot_name_prefix("%").unwrap();
         assert!(!wildcard.contains('%'));
-    }
-
-    /// `drop_abandoned_slots` uses the same exact prefix helper, so a tenant
-    /// `dropAbandoned` can only reap its own inactive slots.
-    #[test]
-    fn drop_abandoned_slots_filters_by_app_id() {
-        // Same helper as `watchdog_query`; both call sites must remain aligned.
-        let p = worker_slot_name_prefix("app_a").unwrap();
-        assert!(p.ends_with("__"));
-
-        // App A's bind cannot reap App B's slot.
-        let p_b = worker_slot_name_prefix("app_b").unwrap();
-        assert_ne!(p, p_b);
-
-        // Validation-failure path also pins for dropAbandoned, since a
-        // silent fallback to `%` here is the higher-severity DoS case.
-        let err = worker_slot_name_prefix("").unwrap_err();
-        assert!(
-            matches!(&err, DbError::ValidationFailed { code, .. } if *code == "invalid_app_id"),
-            "empty app_id must reject, not silently broaden the DROP filter: got {err:?}"
-        );
     }
 
 }

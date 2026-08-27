@@ -439,9 +439,6 @@ pub struct IrFlagsOverride {
     /// Override for `repeatable`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repeatable: Option<bool>,
-    /// Override for `engine_goodie_ddl`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub engine_goodie_ddl: Option<bool>,
     /// Override for the optional `timeout_ms` facet (JS-safe-integer bounded).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<SafeU64>,

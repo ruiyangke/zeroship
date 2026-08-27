@@ -51,7 +51,7 @@ export function mapDocOutbound(doc: PlainObject, toColumn: (s: string) => string
  * into `$and` / `$or` / `$not`.
  *
  * Operator objects are intentionally passed through unchanged; the
- * native query builder validates + lowers `$like` / `$ilike` / `$search`.
+ * native query builder validates + lowers `$like` / `$ilike`.
  */
 export function mapFilterOutbound(filter: ZeroshipDbFilter, toColumn: (s: string) => string, depth = 0): ZeroshipDbFilter {
   if (depth > 20) {

@@ -448,8 +448,8 @@ impl DdlEmitter for PgEmitter {
             let null = null_clause(c);
             let identity = pg_identity_clause(c);
             let generated = generated_clause(c.generated.as_ref());
-            // emit the DEFAULT clause (emission-only metadata), including the
-            // legacy `__fts` generated-column sentinel path.
+            // Emit the DEFAULT clause, including emission-only generated-column
+            // metadata.
             let default = default_clause(c.default.as_deref());
             let checks = inline_checks_clause(c);
             // the inline `/* zero-migrate:enc:... */` sentinel rides between
@@ -578,8 +578,8 @@ impl DdlEmitter for PgEmitter {
 
     fn create_index(&self, table: &str, idx: &IndexSnapshot) -> (String, String) {
         let unique = if idx.unique { "UNIQUE " } else { "" };
-        // - `USING <method>` for a non-btree index (GIN over the `__fts`
-        // tsvector, ivfflat/hnsw over a vector column). A btree index omits the
+        // - `USING <method>` for a non-btree index (ivfflat/hnsw over a vector
+        // column). A btree index omits the
         // clause (PG's default), so existing btree indexes are byte-unchanged.
         let using = if idx.access_method == "btree" {
             String::new()

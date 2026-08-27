@@ -460,7 +460,7 @@ async fn sample_rows_sqlite(
         limit = MAX_SAMPLE_ROWS_PER_COLUMN
     );
 
-    let handle = sq.acquire_dedicated_client().await?;
+    let handle = sq.autocommit_client();
     let typed = handle.query_typed_internal(&sql, &[]).await?;
     let mut out: Vec<SampledRow> = Vec::with_capacity(typed.rows.len());
     for cells in typed.rows {
@@ -870,7 +870,7 @@ pub async fn read_drift_audit_rows_for_tests(
                FROM {q_app}."__zeroship_audit_mask_drift"
                ORDER BY detected_at, collection, column_name, row_pk"#
         );
-        let handle = sq.acquire_dedicated_client().await?;
+        let handle = sq.autocommit_client();
         let rows = match handle.query_internal(&sql, &[]).await {
             Ok(r) => r,
             Err(e) => {

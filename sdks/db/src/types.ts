@@ -235,15 +235,14 @@ type EqualityOnlyOps<T> = {
 type StringOps = {
   $like?: string;
   $ilike?: string;
-  $search?: string;
 };
 
 /**
  * Filter value for an ordinary field — either a direct value, null, or
  * operator object.
  *
- * `$like` / `$ilike` / `$search` are real backend operators: plugin-db's
- * query builder validates them and lowers them to SQL / FTS predicates.
+ * `$like` / `$ilike` are real backend operators: plugin-db's query builder
+ * validates them and lowers them to SQL predicates.
  */
 type PlainFilterValue<T> =
   T | null |
@@ -916,24 +915,6 @@ export interface FieldDef {
    */
   vectorMetric?: VectorMetric;
   /**
-   * full-text-search marker. Set to `true` by the
-   * `.fts(language?)` modifier on a `t.string()` field. Every field
-   * carrying this flag is folded into a single composite FTS index per
-   * collection (Q-P4-B); the index emitter (`build_create_indexes` on
-   * the Rust side) walks all `fts === true` fields and emits one
-   * `IndexSpec { kind: Fts { language } }` covering them in declared
-   * order. Reject on non-string fields with code `FTS_ON_NON_STRING`.
-   */
-  fts?: boolean;
-  /**
-   * tsvector configuration language for an FTS-marked
-   * column. Honoured on PG (`to_tsvector('pg_catalog.<lang>', ...)`);
-   * SQLite FTS5 default tokenizer is language-agnostic Unicode and
-   * ignores it. Defaults to `"english"` when `.fts()` is called without
-   * an explicit argument.
-   */
-  ftsLanguage?: string;
-  /**
    * column-encryption metadata. Present iff the SDK
    * declared the column with `t.encrypted({ mode, keyId, wraps })`.
    * The DDL emitter renders BYTEA / BLOB regardless of `wraps`; the
@@ -1143,52 +1124,6 @@ export class TypeBuilder<
   /** For strings: a RegExp the value must match. */
   pattern(re: RegExp): this {
     this._def.pattern = re;
-    return this;
-  }
-
-  /**
-   * mark this field as a source for the per-collection
-   * composite full-text-search index. Only valid on `t.string()` fields;
-   * called on any other type throws synchronously with code
-   * `FTS_ON_NON_STRING`.
-   *
-   * ```ts
-   * const fields = {
-   *   title: t.string().required().fts(),
-   *   body:  t.string().required().fts(),
-   *   lang:  t.string(),  // not searchable
-   * };
-   * ```
-   *
-   * All `.fts()`-marked columns on the same collection are folded into a
-   * single composite tsvector + GIN index on PG (Q-P4-B). The optional
-   * `language` argument selects the tsvector configuration (`"english"`,
-   * `"simple"`, …) — defaults to `"english"`; honoured on PG, ignored on
-   * SQLite FTS5 (its default tokenizer is language-agnostic Unicode).
-   *
-   * Search: `await collection.search({ text: "rust async" })` returns
-   * rows ordered by relevance with a synthetic `_rank` column.
-   */
-  fts(language?: string): this {
-    if (this._def.type !== "string") {
-      throw Object.assign(
-        new Error(
-          `.fts(): only valid on t.string() fields, got "${this._def.type}"`,
-        ),
-        { code: "FTS_ON_NON_STRING" as const },
-      );
-    }
-    const lang = language ?? "english";
-    if (typeof lang !== "string" || lang.length === 0 || !/^[A-Za-z0-9_]+$/.test(lang)) {
-      throw Object.assign(
-        new Error(
-          `.fts(language): language must be a [A-Za-z0-9_]+ token (e.g. "english", "simple"), got "${String(lang)}"`,
-        ),
-        { code: "FTS_INVALID_LANGUAGE" as const },
-      );
-    }
-    this._def.fts = true;
-    this._def.ftsLanguage = lang;
     return this;
   }
 

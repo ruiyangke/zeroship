@@ -10,7 +10,7 @@ use zeroship_migrate_backend::ddl::{
     constraint_supports_fk_columns, fk_local_columns, fk_policy_tail, fk_referenced_columns,
     fk_target_table, generated_clause, index_supports_fk_columns, inline_checks_clause,
     inline_pk_for_column, render_index_order_suffix, should_render_table_pk, CreateTableRequest,
-    DdlEmitter, GENERATED_PREFIX,
+    DdlEmitter,
 };
 use zeroship_migrate_backend::schema::SchemaRenderer;
 use zeroship_migrate_backend::snapshot::{
@@ -175,16 +175,10 @@ fn mysql_default_clause(default: Option<&str>) -> String {
     match default {
         Some("'{}'::jsonb") => " DEFAULT (JSON_OBJECT())".to_string(),
         Some("'[]'::jsonb") => " DEFAULT (JSON_ARRAY())".to_string(),
-        Some(d) => {
-            if let Some(expr) = d.strip_prefix(GENERATED_PREFIX) {
-                format!(" GENERATED ALWAYS AS ({expr}) STORED")
-            } else {
-                // JSON container defaults are translated by the exact arms
-                // above. Never rewrite an arbitrary rendered default: a text
-                // value is allowed to contain the bytes `::jsonb` verbatim.
-                format!(" DEFAULT {d}")
-            }
-        }
+        // JSON container defaults are translated by the exact arms above. Never
+        // rewrite an arbitrary rendered default: a text value is allowed to
+        // contain the bytes `::jsonb` verbatim.
+        Some(d) => format!(" DEFAULT {d}"),
         None => String::new(),
     }
 }

@@ -59,7 +59,7 @@
 - `terminateEmployee` — set status, update headcount
 - `getOrgChart` — recursive manager→reports tree
 - `getDirectReports` — immediate team for a manager
-- `searchEmployees` — full-text search by name/email/skills
+- `searchEmployees` - search by name/email/skills
 - `addSkill` / `removeSkill` — manage skill tags
 - `getEmployeesByDepartment` — filtered list
 - `getEmployeeHistory` — compensation + position changes over time
