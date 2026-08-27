@@ -897,3 +897,76 @@ const _procedures = { setup, probeBegin };
         "env.db.beginTransaction must be undefined (deleted in P9 PR 3); body={body}"
     );
 }
+
+/// L8 REVEAL: a transaction PostgreSQL rolled back must not be reported as a
+/// successful commit.
+///
+/// PostgreSQL answers `COMMIT` with a `ROLLBACK` command tag when the
+/// transaction is in a failed state. MEASURED directly against the server:
+///
+/// ```text
+/// BEGIN; SELECT 1/0;  -> ERROR: division by zero
+/// COMMIT;             -> ROLLBACK          (control: a clean tx replies COMMIT)
+/// ```
+///
+/// The driver detects exactly this and turns it into an error
+/// (`libs/compio-postgres/src/transaction.rs:186-188`), but plugin-db's raw
+/// executor throws the command tag away - `client_exec` returns
+/// `Ok(rows.len() as u64)` (`crates/zeroship-plugin-db/src/backend/postgres.rs:201-212`)
+/// - and the explicit-transaction settle path sends its `COMMIT` through that
+/// same function (`crates/zeroship-plugin-db/src/transaction/mod.rs:1001`).
+///
+/// SCOPE: this drives an EXPLICIT creator transaction on purpose. The autocommit
+/// path already goes through the driver's own `tx.commit()` wrapper
+/// (`crates/zeroship-plugin-db/src/exec.rs:344`), which checks the tag, so the
+/// same test written against autocommit passes pre-fix and proves nothing.
+///
+/// The callback swallows a genuine DB-level error so it RESOLVES: the
+/// orchestrator then proceeds to COMMIT a poisoned transaction, which is the
+/// state that reproduces the defect.
+#[test]
+fn commit_that_postgres_rolled_back_must_not_report_success_l8() {
+    let url = require_pg();
+    reset_schema(&url);
+
+    let src = build_src(
+        r#"
+async function poisonThenCommit(_input, _ctx) {
+    const r = await env.db.transaction(async (tx) => {
+        await tx.notes.insert({ id: "l8-keep", title: "should be durable" });
+        try {
+            // Duplicate primary key: a real server-side error, which puts the
+            // transaction into the failed state where COMMIT answers ROLLBACK.
+            await tx.notes.insert({ id: "l8-keep", title: "duplicate" });
+        } catch (_e) {
+            // Swallowed on purpose so the callback resolves.
+        }
+        return "ok";
+    });
+    return { txResult: r };
+}
+poisonThenCommit.config = { kind: "action" };
+const _procedures = { setup, poisonThenCommit };
+"#,
+    );
+
+    let (status, body) = dispatch_zs(&url, &src, "setup");
+    assert_eq!(status, 200, "setup failed: {body}");
+
+    let (status, body) = dispatch_zs(&url, &src, "poisonThenCommit");
+    let rows = count_notes(&url);
+
+    // The server rolled the transaction back, so the row is gone. The contract
+    // that must hold is simply: SUCCESS MEANS DURABLE. If the dispatch reported
+    // success, the write it claimed to commit has to be there.
+    if status == 200 {
+        assert_eq!(
+            rows, 1,
+            "commit reported SUCCESS (status 200, body={body}) but PostgreSQL \
+             rolled the transaction back and the row is gone (count={rows}). \
+             A rolled-back commit must not be reported as committed."
+        );
+    } else {
+        assert_eq!(rows, 0, "a failed commit must leave nothing behind; body={body}");
+    }
+}

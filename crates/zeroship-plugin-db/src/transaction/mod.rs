@@ -120,6 +120,48 @@ const VALID_ISOLATION_LEVELS: &[&str] = &[
 
 /// Execute a control statement (`BEGIN`, `SAVEPOINT`, `COMMIT`,
 /// `ROLLBACK`, etc.) against the backend-specific pinned tx client.
+/// Run a transaction's TERMINAL statement (`COMMIT` / `ROLLBACK`) and judge its
+/// command tag.
+///
+/// Separate from [`client_exec_on_tx`] because for a terminal statement the tag
+/// is not cosmetic: PostgreSQL answers `COMMIT` with the tag `ROLLBACK` when the
+/// transaction is in a failed state. `client_exec_on_tx` goes through
+/// `client_exec`, which returns `Ok(rows.len())` and throws the tag away - so a
+/// transaction the server discarded was reported to the creator as committed,
+/// and the settle path went on to publish change events for writes that never
+/// landed.
+///
+/// The borrowing `compio_postgres::Transaction::commit` already makes this
+/// check; a raw driver has to make it explicitly.
+///
+/// Only the PostgreSQL `COMMIT` arm can produce it: SQLite has no such tag, and
+/// a `ROLLBACK` we asked for being answered `ROLLBACK` is the correct outcome.
+async fn exec_terminal_on_tx(
+    backend: &crate::backend::BackendHandle,
+    client: &crate::context::TxConnection,
+    cmd: &str,
+) -> Result<u64, crate::error::DbError> {
+    use crate::context::TxConnection;
+
+    if let (crate::backend::BackendHandle::Postgres(_), TxConnection::Postgres(pg_client)) =
+        (backend, client)
+    {
+        let tag = pg_client
+            .batch_execute_reporting_tag(cmd)
+            .await
+            .map_err(|e| crate::error::DbError::from_pg(&e))?;
+        if cmd == "COMMIT" && tag.as_deref() == Some("ROLLBACK") {
+            return Err(crate::error::DbError::internal(
+                "db: COMMIT was answered with ROLLBACK - the transaction was \
+                 not committed and its writes were discarded",
+            ));
+        }
+        return Ok(0);
+    }
+
+    client_exec_on_tx(backend, client, cmd, &[]).await
+}
+
 pub(crate) async fn client_exec_on_tx(
     backend: &crate::backend::BackendHandle,
     client: &crate::context::TxConnection,
@@ -998,7 +1040,7 @@ async fn exec_settle_top_level(app_id: &str, success: bool) -> SettleOutcome {
 
     let teardown = TxTeardownGuard::new(app_id.to_string(), client);
     let cmd = if success { "COMMIT" } else { "ROLLBACK" };
-    let result = client_exec_on_tx(&backend, teardown.client(), cmd, &[]).await;
+    let result = exec_terminal_on_tx(&backend, teardown.client(), cmd).await;
     if success && result.is_err() && matches!(teardown.client(), TxConnection::Sqlite(_)) {
         let _ = client_exec_on_tx(&backend, teardown.client(), "ROLLBACK", &[]).await;
     }

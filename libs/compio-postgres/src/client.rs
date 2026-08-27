@@ -2739,6 +2739,24 @@ impl Client {
         simple_query::batch_execute(self.inner(), query).await
     }
 
+    /// Like [`batch_execute`], but returns the final command tag.
+    ///
+    /// [`batch_execute`]: #method.batch_execute
+    ///
+    /// Exists for callers that drive `BEGIN` / `COMMIT` / `ROLLBACK` themselves
+    /// rather than through [`Transaction`], because for those the tag is not
+    /// cosmetic: PostgreSQL answers `COMMIT` with the tag `ROLLBACK` when the
+    /// transaction is in a failed state, so a caller that discards the tag
+    /// reports a rolled-back transaction as committed.
+    ///
+    /// [`Transaction::commit`] already makes exactly this check (see the
+    /// `ROLLBACK_TAG` comparison there); a raw driver has no way to make it
+    /// without this method, since [`batch_execute`] throws the tag away.
+    pub async fn batch_execute_reporting_tag(&self, query: &str) -> Result<Option<String>, Error> {
+        let responses = simple_query::start_batch_execute(self.inner(), query)?;
+        simple_query::finish_batch_execute_reporting_tag(responses).await
+    }
+
     /// Check that the connection is alive and wait for the confirmation.
     pub async fn check_connection(&self) -> Result<(), Error> {
         query::sync(self.inner()).await
