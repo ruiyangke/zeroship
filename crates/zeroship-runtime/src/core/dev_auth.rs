@@ -78,8 +78,15 @@ pub struct DevAuthSettings {
 impl DevAuthSettings {
     /// Resolve both conditions from the process the operator (or the Vite
     /// plugin) started. Dev mode comes from
-    /// [`crate::transport::ssrf::dev_mode_enabled`], the single reader of
-    /// `ZEROSHIP_DEV`; the secret comes from `ZEROSHIP_DEV_AUTH_SECRET`.
+    /// [`crate::transport::ssrf::dev_mode_enabled`], which answers what the
+    /// binary STATED through `set_dev_mode` and reads no environment at all;
+    /// the secret comes from `ZEROSHIP_DEV_AUTH_SECRET`.
+    ///
+    /// ORDERING. The mode must be stated before this runs. It is: `cmd_serve`
+    /// (`crates/zeroship-cli/src/main.rs`) states it as its first act, and
+    /// this is called from `core/serve.rs` once the server is being built. A
+    /// process that never states one - `zeroship-worker` - resolves dev auth
+    /// off, which is the correct answer for it.
     ///
     /// Call this ONCE at startup. Every later request reuses the answer, so a
     /// mid-flight environment change is not consulted; the Vite plugin sets
