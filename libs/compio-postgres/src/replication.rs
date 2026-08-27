@@ -1313,7 +1313,7 @@ where
                     }
                     return Err(error);
                 }
-                NOTICE_RESPONSE_TAG => {
+                NOTICE_RESPONSE_TAG | PARAMETER_STATUS_TAG | NOTIFICATION_RESPONSE_TAG => {
                     let _ = self.stream.buf().split_to(header.body_len()).freeze();
                 }
                 other => {
@@ -4382,6 +4382,41 @@ mod tests {
             release: None,
             cancel_token: test_cancel_token(),
         }
+    }
+
+    /// CopyBoth remains an ordinary protocol response boundary for
+    /// asynchronous backend messages. A status change or notification can be
+    /// coalesced ahead of the ErrorResponse which actually ends replication;
+    /// neither asynchronous frame may replace that server diagnosis.
+    #[compio::test]
+    async fn copy_both_preserves_an_error_behind_asynchronous_messages() {
+        let mut notification = 17i32.to_be_bytes().to_vec();
+        notification.extend_from_slice(b"scripted_channel\0scripted payload\0");
+
+        let mut wire = startup_frame(PARAMETER_STATUS_TAG, b"TimeZone\0UTC\0");
+        wire.extend_from_slice(&startup_frame(NOTIFICATION_RESPONSE_TAG, &notification));
+        wire.extend_from_slice(&error_response_message(&[
+            (b'S', "ERROR"),
+            (b'C', "55000"),
+            (b'M', "scripted replication stream refusal"),
+        ]));
+        let mut stream = stream_over_failing_writer_with_unread(wire);
+
+        let error = stream
+            .next()
+            .await
+            .expect_err("the scripted replication stream ended with an error");
+        let chain = std::iter::successors(std::error::Error::source(&error), |source| {
+            std::error::Error::source(*source)
+        })
+        .fold(error.to_string(), |chain, source| {
+            format!("{chain}: {source}")
+        });
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("55000"),
+            "replication stream discarded SQLSTATE 55000 behind asynchronous messages: {chain}"
+        );
     }
 
     /// A standby status update that fails part-way through its flush must

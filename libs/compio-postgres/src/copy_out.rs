@@ -133,14 +133,9 @@ async fn start(
             }
             // The connection-owned producer is already sending CopyFail.
             Message::CopyInResponse(_) => {}
-            Message::CommandComplete(_) => {
-                return Err(ExecutionError::after_bind_complete(
-                    drain_refusal(&mut responses, Error::unexpected_message()).await,
-                ));
-            }
             _ => {
                 return Err(ExecutionError::after_bind_complete(
-                    Error::unexpected_message(),
+                    drain_refusal(&mut responses, Error::unexpected_message()).await,
                 ));
             }
         }

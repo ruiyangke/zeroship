@@ -281,3 +281,35 @@ async fn copy_out_prefers_a_later_server_error_to_non_copy_refusal() {
     .await
     .expect("late COPY OUT non-COPY diagnosis exceeded its watchdog");
 }
+
+/// A row-producing statement makes the COPY direction mismatch visible before
+/// execution has finished. The mismatch remains provisional: a later row can
+/// fail, and that server diagnosis owns the statement's outcome.
+#[compio::test]
+async fn copy_out_prefers_a_later_server_error_to_row_response() {
+    compio::time::timeout(TEST_TIMEOUT, async {
+        let client = connect_client().await;
+
+        let error = match client
+            .copy_out("SELECT 10 / (3 - g) FROM generate_series(1, 3) AS g")
+            .await
+        {
+            Ok(_) => panic!("copy_out accepted a row-producing non-COPY statement"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("22012"),
+            "copy_out discarded division_by_zero behind a row response: {}",
+            common::error_chain(&error),
+        );
+
+        let value: i32 = client
+            .query_one_scalar("SELECT 42::int4", &[])
+            .await
+            .expect("the failed row-producing refusal poisoned its connection");
+        assert_eq!(value, 42);
+    })
+    .await
+    .expect("late row-producing COPY OUT diagnosis exceeded its watchdog");
+}
