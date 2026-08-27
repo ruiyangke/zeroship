@@ -1,16 +1,40 @@
-//! `SqliteSession` — single-writer actor wrapping a `rusqlite::Connection`.
+//! `SqliteSession` - the two-connection, reservation-qualified SQLite actor.
 //!
-//! A `compio::runtime::spawn_blocking` worker thread owns the only
-//! `rusqlite::Connection` for the backend and drains a bounded
-//! [`flume`] mpsc queue of [`Command`]s. The actor pattern serialises
-//! every DDL / DML / DQL through a single thread by construction,
-//! which is exactly the access model SQLite prefers (one writer at a
-//! time; readers are currently serialised behind the same queue -
-//! design §18 Q8's "1 writer + 4 readers" split is not yet
-//! implemented).
+//! One OS thread owns **two** `rusqlite::Connection`s per session and drains a
+//! bounded [`flume`] mpsc queue of [`Command`]s.
 //!
-//! **Bootstrap PRAGMAs** (`docs/archive/p1-sqlite-implementation-plan.md`
-//! §2.2 + design §6.2.1): on `open` the worker runs
+//! ## SC-2 Decision 1: two connections, one loop
+//!
+//! `docs/proposals/2026-08-26-sc2-sqlite-actor-protocol.md`:
+//!
+//! - **`tx_conn`** - reserved to at most one explicit creator transaction;
+//! - **`op_conn`** - autocommit operations, each wrapped in
+//!   `BEGIN DEFERRED ... COMMIT` where the statement permits it.
+//!
+//! WAL permits that concurrency; one connection cannot. This **retires** the
+//! divergence formerly recorded at `tx_route.rs:119-124`: an app's autocommit
+//! reads no longer execute inside that app's open creator transaction, and an
+//! autocommit write is no longer destroyed by that transaction's `ROLLBACK`.
+//!
+//! **One loop owns both connections.** Two loops would need their own
+//! coordination to keep a reservation's commands ordered, which is the problem
+//! the reservation exists to solve. So "unblocked" is precise: commands for the
+//! *other* reservation are dispatched **between** commands of the first, not
+//! concurrently with a single command. An autocommit *write* still contends
+//! for SQLite's single writer lock and waits up to `busy_timeout`; no number
+//! of connections changes that.
+//!
+//! ## SC-2 Decision 2: cancellation interrupts in-flight statements
+//!
+//! The caller-side [`reservation::Reservation`] carries a terminal word, a
+//! running-command sequence and a cancel sequence; the actor and the caller
+//! race for the word with a `SeqCst` handshake and exactly one wins. See
+//! [`reservation`] for the four interleavings and why a completion that has
+//! already been claimed is never un-committed by a later cancellation.
+//!
+//! ## Bootstrap PRAGMAs
+//!
+//! Both connections run, in this order:
 //!
 //! ```sql
 //! PRAGMA journal_mode = WAL;
@@ -19,56 +43,54 @@
 //! PRAGMA foreign_keys = ON;
 //! ```
 //!
-//! `journal_mode=WAL` enables concurrent readers + a single writer;
-//! `synchronous=NORMAL` is the WAL-recommended fsync cadence (durable
-//! across crashes, not across power loss — the design accepts this
-//! trade-off because durability is layered on top by the operator's
-//! filesystem replication, §6.2.1). `busy_timeout=5000` gives SQLite a
-//! 5-second internal retry budget before surfacing
-//! `SQLITE_BUSY` to us. `foreign_keys=ON` enables FK enforcement
-//! globally (it's a per-connection setting — SQLite ships it OFF for
-//! historical reasons).
+//! `journal_mode=WAL` MUST come first: `synchronous=NORMAL` is crash-safe in
+//! WAL and is not in rollback-journal mode. `busy_timeout=5000` is the retry
+//! budget before `SQLITE_BUSY` surfaces - and with two connections it is now
+//! load-bearing rather than incidental, because an autocommit write really can
+//! meet a write lock held by `tx_conn`.
 //!
-//! On any PRAGMA failure the worker signals startup-failure back via a
-//! one-shot reply channel and exits cleanly; `SqliteSession::open`
-//! propagates the `DbError` to the caller.
+//! ## Cancellation safety of a dropped caller future
 //!
-//! **Cancellation safety**: every queued [`Command`] carries a
-//! `flume::bounded(1)` reply. Cancelling the awaiting future drops the
-//! receiver — the worker still runs the SQL to completion (it's
-//! synchronous from the thread's view) and the next `recv` picks up
-//! the next command. WAL durability is unaffected.
+//! Dropping the awaiting future drops the reply receiver. That alone still
+//! cancels **nothing** - it is not observable by the actor, which is why the
+//! protocol has an explicit [`Command::Cancel`] rather than treating a drop as
+//! one. A caller that wants a drop to cancel holds a
+//! [`SqliteCancelGuard`], whose `Drop` sets the cancel intent, interrupts the
+//! target connection and enqueues `Cancel`.
 
-use std::path::Path;
+use std::cell::{Cell, RefCell};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Once;
-#[cfg(any(test, feature = "test-helpers"))]
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Once, Weak};
 
 use rusqlite::Connection;
 
 use crate::backend::sqlite::cdc::CommitPacket;
 use crate::backend::sqlite::error::from_sqlite;
+use crate::backend::sqlite::reservation::{
+    self, CancelCleanup, CancelIntent, Lane, Reservation, ReservationKind, TerminalOutcome,
+};
 use crate::error::DbError;
 
 /// One-shot `sqlite-vec` auto-extension registration.
 ///
-/// `sqlite_vec::sqlite3_vec_init` is the C extension's
-/// initialiser; `rusqlite::ffi::sqlite3_auto_extension` registers a
-/// callback that fires for every subsequent `sqlite3_open*` call in the
-/// process. The hook IS process-global by design (it lives inside the
-/// linked SQLite amalgamation's auto-extension table), so we register
-/// exactly ONCE at the first `SqliteSession::open` and rely on every
-/// subsequent connection (writer, future readers) inheriting the
-/// extension automatically.
+/// `sqlite_vec::sqlite3_vec_init` is the C extension's initialiser;
+/// `rusqlite::ffi::sqlite3_auto_extension` registers a callback that fires for
+/// every subsequent `sqlite3_open*` call in the process. The hook IS
+/// process-global by design (it lives inside the linked SQLite amalgamation's
+/// auto-extension table), so we register exactly ONCE at the first
+/// `SqliteSession::open` and rely on every subsequent connection - including
+/// this session's second one, and any connection recycled after a quarantine -
+/// inheriting the extension automatically.
 ///
-/// **Safety**: `sqlite3_auto_extension` is FFI-unsafe — the C signature
-/// is `int (*)(sqlite3*, char**, const sqlite3_api_routines*)` and we
-/// cast `sqlite3_vec_init` (whose signature matches the C contract per
-/// the upstream `sqlite-vec` crate) through `std::mem::transmute`. The
-/// cast is documented in the upstream `sqlite-vec` crate's own
-/// `examples/simple-rust/demo.rs` and is the canonical integration
-/// pattern. (That path is in the sqlite-vec repository, not this one.)
+/// **Safety**: `sqlite3_auto_extension` is FFI-unsafe - the C signature is
+/// `int (*)(sqlite3*, char**, const sqlite3_api_routines*)` and we cast
+/// `sqlite3_vec_init` (whose signature matches the C contract per the upstream
+/// `sqlite-vec` crate) through `std::mem::transmute`. The cast is documented in
+/// the upstream `sqlite-vec` crate's own `examples/simple-rust/demo.rs` and is
+/// the canonical integration pattern. (That path is in the sqlite-vec
+/// repository, not this one.)
 static VEC_INIT: Once = Once::new();
 
 #[allow(unsafe_code)]
@@ -77,7 +99,7 @@ fn register_sqlite_vec_once() {
         // SAFETY: `sqlite3_vec_init` matches the auto-extension callback
         // signature expected by the linked SQLite amalgamation (see
         // the upstream `sqlite-vec` crate's `examples/simple-rust/demo.rs`
-        // — that file is the canonical integration recipe). The
+        // - that file is the canonical integration recipe). The
         // registration is process-global and fires for every connection
         // opened thereafter; see the module-level rustdoc on `VEC_INIT`.
         unsafe {
@@ -99,22 +121,13 @@ fn register_sqlite_vec_once() {
 /// string so the result is `Send` (rusqlite's native value types
 /// borrow from the statement; we materialise to owned `Option<String>`
 /// here so the reply can cross the actor / future boundary).
-///
-/// **Why text-only**: the PG executor's `pool_exec` /
-/// `client_exec` surface takes `&[&str]` params and ignores typed
-/// returns (the SDK consumes rows via the higher-level `crud` layer
-/// that runs against PG today). This mirrors that surface so the
-/// SqlExecutor impl can return row counts; typed-row consumers for
-/// the SQLite arm follow via `SchemaIntrospect`'s PRAGMA walk.
 #[allow(dead_code)]
 pub type Row = Vec<Option<String>>;
 
-/// A typed SQLite cell — preserves the underlying storage-class
+/// A typed SQLite cell - preserves the underlying storage-class
 /// discriminator across the actor boundary instead of collapsing every
 /// value to `Option<String>`. This is the row-decoder shape the
-/// `vector_search` / `spatial_near` paths consume: each emits annotated
-/// JSON rows whose non-vector columns benefit from typed (numeric / boolean) round-tripping so
-/// the SDK doesn't see "everything is a string".
+/// `vector_search` / `spatial_near` paths consume.
 #[derive(Debug, Clone)]
 pub enum TypedCell {
     /// SQLite `NULL`.
@@ -125,10 +138,9 @@ pub enum TypedCell {
     /// `REAL` storage class. SQLite reals are 8-byte IEEE-754.
     Real(f64),
     /// `TEXT` storage class. Decoded to UTF-8; non-UTF-8 TEXT surfaces
-    /// as a `DbError::Internal` at the worker (matches the existing
-    /// `run_query` behaviour at session.rs:516-522).
+    /// as a `DbError::Internal`.
     Text(String),
-    /// `BLOB` storage class. Owned bytes — copied out of the
+    /// `BLOB` storage class. Owned bytes - copied out of the
     /// rusqlite-managed buffer at decode time so the reply is `Send`.
     Blob(Vec<u8>),
 }
@@ -136,12 +148,6 @@ pub enum TypedCell {
 /// A typed row + column names, returned by the `QueryTyped` command
 /// variant. Consumers: [`crate::backend::VectorIndex::vector_search`]
 /// (vec0 JOIN result) and `spatial_near`.
-///
-/// Column names are carried alongside the cells so each caller can
-/// build a `serde_json::Value` row map without re-issuing a `PRAGMA
-/// table_info` round-trip. The names live once per result-set in
-/// `columns`, not per row — the worker copies from
-/// `stmt.column_names()` once before the row loop.
 #[derive(Debug, Clone)]
 pub struct TypedRows {
     /// Column names in result-set order. Length matches every row's
@@ -151,300 +157,307 @@ pub struct TypedRows {
     pub rows: Vec<Vec<TypedCell>>,
 }
 
+/// What a terminal command asks the actor to do with its reservation.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TerminalIntent {
+    Commit,
+    Rollback,
+}
+
+// ---------------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------------
+
 /// Commands queued onto the [`SqliteSession`] actor.
 ///
-/// Every variant carries a `flume::Sender<…>` reply head; the caller
-/// awaits the matching receiver. Sending on a dropped reply channel
-/// is a no-op — the SQL has already committed (or rolled back) by
-/// then, so the only externally observable consequence is the missed
-/// completion notification.
+/// Every data command names its reservation, and the actor refuses one whose
+/// reservation does not own the connection it would run on. That mismatch is
+/// the class of bug the pre-SC-2 shape could not even express: commands then
+/// carried SQL and a reply channel and nothing else.
 pub(crate) enum Command {
+    /// Bind `tx_conn` to a transaction reservation. Any transaction the
+    /// previous binding left open is rolled back first, so a lease that was
+    /// dropped without settling cannot leak its transaction into the next one.
+    Reserve { reservation: Arc<Reservation> },
+    /// Retire a transaction reservation, rolling back anything it left open.
+    /// Sent best-effort from the lease's `Drop`; the `Reserve` above repeats
+    /// the same cleanup, so a lost `Release` cannot strand the lane.
+    Release { reservation: Arc<Reservation> },
     /// Run a non-row-returning statement; reply with the SQLite
     /// `Connection::changes()` value (cast to `u64`).
     Exec {
+        reservation: Arc<Reservation>,
         sql: String,
         params: Vec<String>,
         reply: flume::Sender<Result<u64, DbError>>,
     },
     /// Run a multi-statement batch through `Connection::execute_batch`.
-    /// Consumer is the SQLite register-model apply path, which needs
-    /// the full `CREATE TABLE ...; CREATE INDEX ...; ...` payload to
-    /// land atomically on the writer thread.
     #[cfg(any(test, feature = "test-helpers"))]
     ExecBatch {
+        reservation: Arc<Reservation>,
         sql: String,
         reply: flume::Sender<Result<(), DbError>>,
     },
-    /// Run a row-returning statement; reply with the materialised
-    /// rows. `SchemaIntrospect::introspect_schema` +
-    /// `SchemaIntrospect::estimate_row_count` route through this
-    /// variant for the PRAGMA-walk catalog inspection.
+    /// Run a row-returning statement; reply with the materialised rows.
     Query {
+        reservation: Arc<Reservation>,
         sql: String,
         params: Vec<String>,
         reply: flume::Sender<Result<Vec<Row>, DbError>>,
     },
-    /// Run a row-returning statement; reply with typed rows + column
-    /// names. Consumers:
-    /// [`crate::backend::VectorIndex::vector_search`] (the vec0 JOIN result
-    /// path, using the typed surface for the post-search row
-    /// re-emission to JSON) and `spatial_near` (haversine distance
-    /// ordering). Both need
-    /// numeric / blob / NULL discrimination at the row-out boundary.
+    /// Run a row-returning statement; reply with typed rows + column names.
     QueryTyped {
+        reservation: Arc<Reservation>,
         sql: String,
         params: Vec<String>,
         reply: flume::Sender<Result<TypedRows, DbError>>,
     },
-    /// `ATTACH DATABASE 'file:{db_path}' AS '<app_id>'` for the live
-    /// namespace-manager path.
+    /// Run this transaction reservation's terminal statement and classify the
+    /// outcome by sampling `is_autocommit` - never by the result code.
+    Settle {
+        reservation: Arc<Reservation>,
+        intent: TerminalIntent,
+        reply: flume::Sender<Result<TerminalOutcome, DbError>>,
+    },
+    /// Resolve a cancellation. The caller has already set the intent and (if
+    /// the actor was running) interrupted the target connection; this command
+    /// is how the actor acknowledges, after it has rolled back and retired.
+    Cancel {
+        reservation: Arc<Reservation>,
+        reply: flume::Sender<Result<TerminalOutcome, DbError>>,
+    },
+    /// `ATTACH DATABASE 'file:{db_path}' AS '<app_id>'` on **both**
+    /// connections, and record it so a recycled connection can be rebuilt.
     Attach {
         app_id: String,
         db_path: String,
         reply: flume::Sender<Result<(), DbError>>,
     },
-    /// `VACUUM INTO '<dest_path>'`. Captures the source
-    /// database (or a per-app ATTACH alias if `app_id` is `Some`) to a
-    /// fresh SQLite file at `dest_path`. SQLite's VACUUM INTO takes an
-    /// implicit shared-snapshot read transaction on the source: writers
-    /// can keep appending to the WAL during the copy, and the dest file
+    /// `VACUUM INTO '<dest_path>'` on `op_conn`. Captures the source database
+    /// (or a per-app ATTACH alias if `app_id` is `Some`) to a fresh SQLite
+    /// file. SQLite takes an implicit shared-snapshot read transaction on the
+    /// source: writers keep appending to the WAL during the copy and the dest
     /// matches the snapshot's read-mark commit point.
     ///
-    /// The destination path is interpolated as a single-quoted SQL
-    /// literal (doubled `'`s); VACUUM INTO does not accept bound
-    /// parameters for the file path.
-    ///
-    /// When `app_id` is `Some(alias)`, the statement becomes
-    /// `VACUUM "<alias>" INTO '<dest>'` so the per-app ATTACH-ed
-    /// database is the source. When `None`, the unqualified `VACUUM INTO`
-    /// captures the main database (the control session's own file).
+    /// The destination path is interpolated as a single-quoted SQL literal
+    /// (doubled `'`s); VACUUM INTO does not accept bound parameters for it.
     VacuumInto {
         app_id: Option<String>,
         dest_path: String,
         reply: flume::Sender<Result<(), DbError>>,
     },
-    /// Atomic file-swap restore: DETACH the per-app alias,
-    /// `std::fs::rename(temp_file, live_file)`, ATTACH the alias back
-    /// against the same `live_file`. The three steps run sequentially
-    /// on the worker thread; if any step fails the reply carries the
-    /// typed `DbError` and the actor's state reflects whichever step
-    /// landed (best-effort recovery — operators must inspect).
+    /// Atomic file-swap restore: DETACH the per-app alias on both connections,
+    /// `std::fs::rename(temp_file, live_file)`, ATTACH the alias back on both.
     ///
-    /// POSIX `rename` is atomic only on the same filesystem; the
-    /// integration plan documents this caveat — operator-driven snapshot
-    /// destinations must live on the same FS as the live per-app file.
+    /// POSIX `rename` is atomic only on the same filesystem; operator-driven
+    /// snapshot destinations must live on the same FS as the live per-app file.
     ReattachFile {
         app_id: String,
         temp_path: String,
         live_path: String,
         reply: flume::Sender<Result<(), DbError>>,
     },
-    /// Drain the queue and exit the worker thread. Sent best-effort
-    /// from [`SqliteSession`]'s `Drop` impl.
+    /// Drain the queue and exit the worker thread. Sent best-effort from
+    /// [`SqliteSession`]'s `Drop` impl.
     Shutdown,
 }
 
-/// Single-writer actor wrapping a `rusqlite::Connection`.
+// ---------------------------------------------------------------------------
+// Interrupt registry - the caller-side half of Decision 2
+// ---------------------------------------------------------------------------
+
+/// One lane's interrupt handle plus the generation of the connection it
+/// targets.
 ///
-/// Owns the `flume::Sender<Command>` head of the actor's command
-/// queue; the matching receiver lives on the spawned worker thread.
-/// Dropping the session sends `Shutdown` best-effort and the worker
-/// joins on the next loop iteration.
+/// The generation is what stops a cancellation from landing on the wrong
+/// statement: a quarantined connection is closed and reopened, its generation
+/// bumped, and an interrupt still aimed at the old generation is refused rather
+/// than delivered to the replacement's unrelated work.
+struct LaneInterrupt {
+    generation: AtomicU64,
+    handle: Mutex<rusqlite::InterruptHandle>,
+}
+
+/// The interrupt handles for a session's two connections, shared between the
+/// actor thread (which replaces them on recycle) and every caller holding a
+/// cancel handle.
+pub struct Interrupts {
+    op: LaneInterrupt,
+    tx: LaneInterrupt,
+}
+
+impl std::fmt::Debug for Interrupts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Interrupts").finish()
+    }
+}
+
+impl Interrupts {
+    fn new(op: rusqlite::InterruptHandle, tx: rusqlite::InterruptHandle) -> Self {
+        Self {
+            op: LaneInterrupt {
+                generation: AtomicU64::new(0),
+                handle: Mutex::new(op),
+            },
+            tx: LaneInterrupt {
+                generation: AtomicU64::new(0),
+                handle: Mutex::new(tx),
+            },
+        }
+    }
+
+    fn lane(&self, lane: Lane) -> &LaneInterrupt {
+        match lane {
+            Lane::Op => &self.op,
+            Lane::Tx => &self.tx,
+        }
+    }
+
+    /// Interrupt `lane`'s connection, but only if it is still the generation
+    /// the caller aimed at. Returns whether the interrupt was delivered.
+    ///
+    /// `#[allow(dead_code)]` is REAL, not defensive, and worth stating plainly:
+    /// **nothing in production cancels a SQLite command yet.** SC-2 asked for
+    /// the primitives; SC-1 step 9 owns the deadline and dropped-future wiring
+    /// that will call them. Until that lands the only callers are this crate's
+    /// tests. See the same note on [`SqliteSession::cancel_handle`],
+    /// [`SqliteCancelHandle`] and [`SqliteCancelGuard`].
+    #[allow(dead_code)]
+    fn interrupt(&self, lane: Lane, generation: u64) -> bool {
+        let entry = self.lane(lane);
+        if entry.generation.load(Ordering::SeqCst) != generation {
+            return false;
+        }
+        entry
+            .handle
+            .lock()
+            .expect("sqlite interrupt handle mutex poisoned")
+            .interrupt();
+        true
+    }
+
+    /// Publish a recycled connection's handle under a new generation.
+    fn replace(&self, lane: Lane, generation: u64, handle: rusqlite::InterruptHandle) {
+        let entry = self.lane(lane);
+        *entry
+            .handle
+            .lock()
+            .expect("sqlite interrupt handle mutex poisoned") = handle;
+        entry.generation.store(generation, Ordering::SeqCst);
+    }
+
+    fn generation(&self, lane: Lane) -> u64 {
+        self.lane(lane).generation.load(Ordering::SeqCst)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Session
+// ---------------------------------------------------------------------------
+
+/// Two-connection SQLite actor.
+///
+/// Owns the `flume::Sender<Command>` head of the actor's command queue; the
+/// matching receiver lives on the spawned worker thread. Dropping the session
+/// sends `Shutdown` best-effort and the worker joins on the next iteration.
 ///
 /// **Why `std::thread::spawn` and not `compio::runtime::spawn_blocking`**:
-/// compio's `spawn_blocking` submits the closure as an `Asyncify` op
-/// whose completion the runtime poller observes. The session's
-/// command loop is long-lived (it lives for the backend's lifetime),
-/// which holds the io_uring slot for the entire process — and on
-/// shutdown the runtime might already be torn down before the worker
-/// observes `Shutdown`. A plain OS thread sidesteps both concerns:
-/// the worker runs independently of the compio runtime, the
-/// `flume::Sender::send_async` future on the caller side awaits
-/// purely on flume's atomic-park primitives (no io_uring involvement),
-/// and clean shutdown is fully signalled by the `Shutdown` command.
+/// compio's `spawn_blocking` submits the closure as an `Asyncify` op whose
+/// completion the runtime poller observes. The command loop is long-lived, so
+/// it would hold the io_uring slot for the whole process - and on shutdown the
+/// runtime might already be torn down before the worker observes `Shutdown`. A
+/// plain OS thread sidesteps both: the worker runs independently of compio, the
+/// caller-side `flume::Sender::send_async` future awaits purely on flume's
+/// atomic-park primitives, and clean shutdown is fully signalled by `Shutdown`.
 pub struct SqliteSession {
     tx: flume::Sender<Command>,
-    /// Worker `JoinHandle`. Held only so the OS thread is tracked
-    /// (we never join it from the session side — cancellation is
-    /// signalled via the `Shutdown` command + sender drop, and the
-    /// thread exits at the next loop iteration).
+    interrupts: Arc<Interrupts>,
+    /// Monotonic reservation ids. Shared with nothing else; ids are opaque and
+    /// only ever compared for equality.
+    next_reservation: Cell<u64>,
+    /// The transaction lane's current owner, held weakly.
+    ///
+    /// This is the **admission** authority, and it is caller-side deliberately:
+    /// a `Weak` that no longer upgrades is proof the previous lease was
+    /// dropped, which is a fact only the caller side can observe. The actor's
+    /// own binding merely follows, and repeats the rollback cleanup on every
+    /// `Reserve`, so a `Release` lost to a full queue cannot strand the lane.
+    ///
+    /// It weakly holds the **lease**, not the reservation. The distinction is
+    /// load-bearing: every queued command carries an `Arc<Reservation>` clone,
+    /// so a reservation's strong count stays above zero for as long as the
+    /// actor is still holding the command it is replying to - which is
+    /// precisely the instant after a caller's `await` returns. Keying
+    /// admission on that count made a released lease look live, and a loop
+    /// that takes a lease per iteration would fail intermittently. `TxLease`
+    /// is never cloned into a command, so its count is exactly lease liveness.
+    tx_owner: RefCell<Option<Weak<TxLeaseAlive>>>,
+    /// Worker `JoinHandle`. Held only so the OS thread is tracked (we never
+    /// join it from the session side - cancellation is signalled via the
+    /// `Shutdown` command + sender drop).
     _worker: std::thread::JoinHandle<()>,
 }
 
 impl std::fmt::Debug for SqliteSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Opaque — mirrors `PostgresBackend`'s Debug. The internals
-        // are an mpsc head + an opaque task handle; surfacing either
-        // is operationally noisy.
         f.debug_struct("SqliteSession").finish()
     }
 }
 
+/// Startup handshake payload: the worker publishes both connections' interrupt
+/// handles once the PRAGMA bootstrap and CDC install have succeeded.
+type StartupSignal = Result<Arc<Interrupts>, DbError>;
+
 impl SqliteSession {
-    /// Open a SQLite database at `db_path` and spawn the writer
-    /// actor.
+    /// Open a SQLite database at `db_path`, open its two connections and spawn
+    /// the actor.
     ///
-    /// The worker thread runs the bootstrap PRAGMA sequence
-    /// synchronously before entering the receive loop; any PRAGMA
-    /// failure surfaces here as a typed [`DbError`] and the worker
-    /// thread exits without ever serving a `Command`.
+    /// The worker runs the bootstrap PRAGMA sequence synchronously on both
+    /// connections before entering the receive loop; any failure surfaces here
+    /// as a typed [`DbError`] and the worker exits without serving a
+    /// `Command`.
     ///
-    /// **CDC integration**: when both `app_id` and
-    /// `packet_tx` are `Some`, the worker installs the
-    /// `preupdate_hook`/`commit_hook`/`rollback_hook` triplet via
-    /// [`crate::backend::sqlite::cdc::install`] before entering the
-    /// receive loop. The returned dispatcher is held on the worker's
-    /// stack frame for the lifetime of the connection so the hooks'
-    /// captured state outlives every write. Sessions opened with
-    /// `None` install no hooks (the control session — see
-    /// `SqliteBackend::new` rustdoc).
+    /// **CDC integration**: when both `app_id` and `packet_tx` are `Some`, the
+    /// worker installs the `preupdate_hook`/`commit_hook`/`rollback_hook`
+    /// triplet on **each** connection. Both are now write paths - `tx_conn`
+    /// carries creator transactions and `op_conn` carries autocommit writes -
+    /// so installing on one would silently drop half the change stream. Each
+    /// connection gets its own dispatcher (and therefore its own transaction
+    /// buffer, which is correct: their transactions are independent) and both
+    /// publish into the same channel.
     ///
-    /// The `app_id` parameter is currently unused inside the
-    /// dispatcher (per-event app_id is derived from the
-    /// preupdate hook's `db_name` argument — the ATTACH alias); it is
-    /// retained on the signature so a future change can repoint it.
+    /// The `app_id` parameter is currently unused inside the dispatcher
+    /// (per-event app_id is derived from the preupdate hook's `db_name`
+    /// argument - the ATTACH alias); it is retained on the signature so a
+    /// future change can repoint it.
     pub(crate) fn open(
         db_path: &Path,
         app_id: Option<&str>,
         packet_tx: Option<flume::Sender<CommitPacket>>,
     ) -> Result<Self, DbError> {
-        // Bound the queue at 64 in-flight commands. The single-writer
-        // actor means there is no parallelism downstream; a bigger
-        // queue just delays backpressure without buying any
-        // throughput, so the depth is picked to surface overload
-        // early rather than to absorb it.
+        // Bound the queue at 64 in-flight commands. The single actor loop
+        // means there is no parallelism downstream; a bigger queue just delays
+        // backpressure without buying throughput, so the depth is picked to
+        // surface overload early rather than to absorb it.
         let (tx, rx) = flume::bounded::<Command>(64);
+        let (startup_tx, startup_rx) = flume::bounded::<StartupSignal>(1);
 
-        // One-shot startup channel so the spawning task surfaces
-        // PRAGMA / open failures synchronously to the caller without
-        // having to drain the main command queue first.
-        let (startup_tx, startup_rx) = flume::bounded::<Result<(), DbError>>(1);
-
-        // The `db_path` is `&Path` — we need an owned `PathBuf` to
-        // move into the worker closure (the closure is `'static`).
         let db_path = db_path.to_path_buf();
-        // Owned copies for the worker closure. The dispatcher install
-        // step uses these AFTER the PRAGMA bootstrap; for the no-CDC
-        // case both are `None` and the install step short-circuits.
-        let app_id_owned: Option<String> = app_id.map(|s| s.to_string());
+        let app_id_owned: Option<String> = app_id.map(str::to_string);
         let packet_tx_owned = packet_tx;
 
         let worker = std::thread::Builder::new()
             .name("sqlite-session".to_string())
             .spawn(move || {
-            // 0. Register `sqlite-vec` as a SQLite auto-extension. This
-            //    fires once per process; every connection opened
-            //    thereafter (including the one a few lines below) loads
-            //    the `vec0` virtual table module + the `vec_*` scalar
-            //    functions automatically. See `VEC_INIT` rustdoc.
-            register_sqlite_vec_once();
-
-            // 1. Open the connection. Any failure here is reported
-            //    via the startup channel and the worker exits.
-            let conn = match Connection::open(&db_path) {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = startup_tx.send(Err(from_sqlite(e)));
-                    return;
-                }
-            };
-
-            // 2. Bootstrap PRAGMAs (design §6.2.1). Each statement
-            //    runs via `execute_batch` — `PRAGMA journal_mode=WAL`
-            //    returns a row ("wal"); `execute_batch` ignores
-            //    returned rows, which is the cleanest way to run
-            //    several PRAGMAs in one call without paying for
-            //    per-statement prepare round-trips.
-            //
-            //    Order matters: `journal_mode=WAL` MUST come before
-            //    `synchronous=NORMAL` because the latter's safety
-            //    semantics differ across rollback vs WAL mode (in
-            //    WAL, NORMAL is safe; in rollback mode, FULL is the
-            //    only crash-safe choice). Setting journal_mode first
-            //    ensures we are in WAL when synchronous is evaluated.
-            const BOOT_PRAGMAS: &str = "\
-                PRAGMA journal_mode = WAL; \
-                PRAGMA synchronous = NORMAL; \
-                PRAGMA busy_timeout = 5000; \
-                PRAGMA foreign_keys = ON;";
-            if let Err(e) = conn.execute_batch(BOOT_PRAGMAS) {
-                let _ = startup_tx.send(Err(from_sqlite(e)));
-                return;
-            }
-
-            // 2b. Install the CDC hook triplet on this
-            //     connection. The dispatcher is bound to a local
-            //     `_dispatcher` so its owned `Arc<Mutex<…>>` clones
-            //     outlive `conn` (rusqlite stores the boxed hook
-            //     closures inside `InnerConnection` and frees them at
-            //     `Connection::drop`; the dispatcher's only role
-            //     post-install is to keep the captured `Arc`s alive,
-            //     which is automatic via Rust ownership). Sessions
-            //     opened without a packet_tx skip this step entirely
-            //     (the control session — see `SqliteBackend::new`).
-            let _dispatcher = if let Some(tx) = packet_tx_owned {
-                match crate::backend::sqlite::cdc::install(&conn, app_id_owned, tx) {
-                    Ok(d) => Some(d),
+                let mut actor = match Actor::open(db_path, app_id_owned, packet_tx_owned) {
+                    Ok(a) => a,
                     Err(e) => {
                         let _ = startup_tx.send(Err(e));
                         return;
                     }
-                }
-            } else {
-                None
-            };
-
-            // 3. Bootstrap succeeded — release the caller. From here
-            //    on, errors flow through individual `Command::reply`
-            //    channels and the worker keeps running.
-            let _ = startup_tx.send(Ok(()));
-
-            // 4. Command loop. `rx.recv()` blocks the worker thread
-            //    (we're on a dedicated OS thread — blocking is the
-            //    intended steady state); a disconnect from the
-            //    sender side surfaces as `Err(_)` and ends the loop
-            //    just like `Shutdown`.
-            while let Ok(cmd) = rx.recv() {
-                #[cfg(any(test, feature = "test-helpers"))]
-                if let Some(gate) = take_next_command_gate_for_worker() {
-                    let _ = gate.entered_tx.send(());
-                    let _ = gate.release_rx.recv();
-                }
-                match cmd {
-                    Command::Exec { sql, params, reply } => {
-                        let result = run_exec(&conn, &sql, &params);
-                        let _ = reply.send(result);
-                    }
-                    #[cfg(any(test, feature = "test-helpers"))]
-                    Command::ExecBatch { sql, reply } => {
-                        let result = run_exec_batch(&conn, &sql);
-                        let _ = reply.send(result);
-                    }
-                    Command::Query { sql, params, reply } => {
-                        let result = run_query(&conn, &sql, &params);
-                        let _ = reply.send(result);
-                    }
-                    Command::QueryTyped { sql, params, reply } => {
-                        let result = run_query_typed(&conn, &sql, &params);
-                        let _ = reply.send(result);
-                    }
-                    Command::Attach { app_id, db_path, reply } => {
-                        let result = run_attach(&conn, &app_id, &db_path);
-                        let _ = reply.send(result);
-                    }
-                    Command::VacuumInto { app_id, dest_path, reply } => {
-                        let result = run_vacuum_into(&conn, app_id.as_deref(), &dest_path);
-                        let _ = reply.send(result);
-                    }
-                    Command::ReattachFile { app_id, temp_path, live_path, reply } => {
-                        let result = run_reattach_file(&conn, &app_id, &temp_path, &live_path);
-                        let _ = reply.send(result);
-                    }
-                    Command::Shutdown => break,
-                }
-            }
-            // `conn` drops here, closing the SQLite connection
-            // cleanly. WAL checkpointing happens on close.
+                };
+                let _ = startup_tx.send(Ok(Arc::clone(&actor.interrupts)));
+                actor.run(&rx);
             })
             .map_err(|e| {
                 DbError::internal(format!(
@@ -452,20 +465,19 @@ impl SqliteSession {
                 ))
             })?;
 
-        // Wait synchronously for the startup signal. The worker
-        // thread runs independently of any compio runtime — flume's
-        // `recv()` parks on an `std::thread::park`, so blocking
-        // briefly here does not stall the runtime. This constructor
-        // is called once per backend at boot; the worker either
-        // reports success or failure within four PRAGMA calls, so
-        // the brief block is bounded.
-        //
-        // Returning `Err` here drops the `worker` `JoinHandle`. The
-        // worker has already exited on a PRAGMA failure (we sent
-        // back the error then `return`d from the closure), so no
-        // dangling thread.
+        // Wait synchronously for the startup signal. The worker runs
+        // independently of any compio runtime - flume's `recv()` parks on
+        // `std::thread::park`, so blocking briefly here does not stall the
+        // runtime. This constructor is called once per backend at boot and the
+        // worker reports within two connections' worth of PRAGMAs.
         match startup_rx.recv() {
-            Ok(Ok(())) => Ok(Self { tx, _worker: worker }),
+            Ok(Ok(interrupts)) => Ok(Self {
+                tx,
+                interrupts,
+                next_reservation: Cell::new(1),
+                tx_owner: RefCell::new(None),
+                _worker: worker,
+            }),
             Ok(Err(e)) => Err(e),
             Err(_) => Err(DbError::internal(
                 "SqliteSession::open: worker exited before sending startup signal",
@@ -473,15 +485,107 @@ impl SqliteSession {
         }
     }
 
-    /// Send an `Exec` command and await the reply.
-    pub(crate) async fn exec(&self, sql: &str, params: &[&str]) -> Result<u64, DbError> {
-        let (reply_tx, reply_rx) = flume::bounded::<Result<u64, DbError>>(1);
-        let cmd = Command::Exec {
-            sql: sql.to_string(),
-            params: params.iter().map(|s| s.to_string()).collect(),
-            reply: reply_tx,
+    fn mint(&self, lane: Lane, kind: ReservationKind) -> Arc<Reservation> {
+        let id = self.next_reservation.get();
+        self.next_reservation.set(id + 1);
+        Arc::new(Reservation::new(
+            id,
+            lane,
+            kind,
+            self.interrupts.generation(lane),
+        ))
+    }
+
+    /// An ephemeral autocommit reservation, minted per command.
+    ///
+    /// SC-2: *autocommit reservations settle at command completion.* Making one
+    /// per command is that rule made structural - there is no autocommit
+    /// reservation that outlives the statement it was minted for.
+    fn autocommit_reservation(&self) -> Arc<Reservation> {
+        self.mint(Lane::Op, ReservationKind::Autocommit)
+    }
+
+    /// Reserve `tx_conn` for one explicit creator transaction.
+    ///
+    /// Refuses with a typed error while another lease is live. "Live" is
+    /// decided by whether the previous `Weak` still upgrades, so a lease
+    /// dropped without settling frees the lane immediately rather than after a
+    /// queue round trip.
+    pub(crate) async fn reserve_transaction(
+        self: &Rc<Self>,
+    ) -> Result<Rc<TxLease>, DbError> {
+        // The lease is created and published BEFORE the `Reserve` is queued, so
+        // that dropping this future mid-send frees the lane rather than
+        // stranding it: the `Rc<TxLease>` dies with the future and the `Weak`
+        // stops upgrading. A `Release` that then reaches the actor ahead of its
+        // own `Reserve` is a no-op (the ids do not match) and the next
+        // `Reserve`'s unconditional cleanup covers the binding anyway.
+        let lease = {
+            let mut owner = self.tx_owner.borrow_mut();
+            if owner.as_ref().is_some_and(|previous| previous.strong_count() > 0) {
+                return Err(DbError::validation(
+                    "transaction_connection_busy",
+                    "db: this SQLite session already holds an open transaction on tx_conn; \
+                     one explicit transaction at a time",
+                ));
+            }
+            let alive = Arc::new(TxLeaseAlive);
+            *owner = Some(Arc::downgrade(&alive));
+            Rc::new(TxLease {
+                alive,
+                reservation: self.mint(Lane::Tx, ReservationKind::Transaction),
+                tx: self.tx.clone(),
+            })
         };
-        self.send(cmd).await?;
+
+        self.send(Command::Reserve {
+            reservation: Arc::clone(lease.reservation()),
+        })
+        .await?;
+
+        Ok(lease)
+    }
+
+    /// **Test-only**: a transaction-lane handle whose reservation the actor was
+    /// never told about.
+    ///
+    /// It is the only way to construct a command that names a reservation the
+    /// connection does not belong to - the exact mismatch SC-2 requires be
+    /// refused with a typed error, and the class of bug the pre-SC-2 command
+    /// shape could not express. It deliberately does NOT publish itself in
+    /// `tx_owner`, so it cannot block a legitimate reservation.
+    #[cfg(feature = "test-helpers")]
+    pub fn unregistered_transaction_handle_for_tests(
+        self: &Rc<Self>,
+    ) -> SqliteSessionHandle {
+        let lease = Rc::new(TxLease {
+            alive: Arc::new(TxLeaseAlive),
+            reservation: self.mint(Lane::Tx, ReservationKind::Transaction),
+            tx: self.tx.clone(),
+        });
+        SqliteSessionHandle::with_lease(Rc::clone(self), lease)
+    }
+
+    /// Send an `Exec` command on an autocommit reservation and await the reply.
+    pub(crate) async fn exec(&self, sql: &str, params: &[&str]) -> Result<u64, DbError> {
+        self.exec_on(&self.autocommit_reservation(), sql, params)
+            .await
+    }
+
+    pub(crate) async fn exec_on(
+        &self,
+        reservation: &Arc<Reservation>,
+        sql: &str,
+        params: &[&str],
+    ) -> Result<u64, DbError> {
+        let (reply_tx, reply_rx) = flume::bounded::<Result<u64, DbError>>(1);
+        self.send(Command::Exec {
+            reservation: Arc::clone(reservation),
+            sql: sql.to_string(),
+            params: params.iter().map(|s| (*s).to_string()).collect(),
+            reply: reply_tx,
+        })
+        .await?;
         recv_reply(reply_rx).await?
     }
 
@@ -489,64 +593,91 @@ impl SqliteSession {
     #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) async fn exec_batch(&self, sql: &str) -> Result<(), DbError> {
         let (reply_tx, reply_rx) = flume::bounded::<Result<(), DbError>>(1);
-        let cmd = Command::ExecBatch {
+        self.send(Command::ExecBatch {
+            reservation: self.autocommit_reservation(),
             sql: sql.to_string(),
             reply: reply_tx,
-        };
-        self.send(cmd).await?;
+        })
+        .await?;
         recv_reply(reply_rx).await?
     }
 
     /// Send a `Query` command and await the materialised row slice.
-    ///
-    /// Consumer: `SchemaIntrospect::introspect_schema` and
-    /// `SchemaIntrospect::estimate_row_count` route through
-    /// this method to read PRAGMA / COUNT(*) results. Each call is one
-    /// round-trip through the actor's mpsc queue plus one
-    /// `rusqlite::Statement` lifecycle on the worker thread.
     pub(crate) async fn query(&self, sql: &str, params: &[&str]) -> Result<Vec<Row>, DbError> {
+        self.query_on(&self.autocommit_reservation(), sql, params)
+            .await
+    }
+
+    pub(crate) async fn query_on(
+        &self,
+        reservation: &Arc<Reservation>,
+        sql: &str,
+        params: &[&str],
+    ) -> Result<Vec<Row>, DbError> {
         let (reply_tx, reply_rx) = flume::bounded::<Result<Vec<Row>, DbError>>(1);
-        let cmd = Command::Query {
+        self.send(Command::Query {
+            reservation: Arc::clone(reservation),
             sql: sql.to_string(),
-            params: params.iter().map(|s| s.to_string()).collect(),
+            params: params.iter().map(|s| (*s).to_string()).collect(),
             reply: reply_tx,
-        };
-        self.send(cmd).await?;
+        })
+        .await?;
         recv_reply(reply_rx).await?
     }
 
     /// Send a `QueryTyped` command and await typed rows + column names.
-    ///
-    /// Consumers: [`crate::backend::VectorIndex::vector_search`]
-    /// (vec0 JOIN row decode) and `spatial_near` (haversine distance +
-    /// row re-emit). The
-    /// [`TypedCell`] discriminant lets each caller branch on
-    /// numeric / blob / NULL at the JSON encoder layer.
     pub(crate) async fn query_typed(
         &self,
         sql: &str,
         params: &[&str],
     ) -> Result<TypedRows, DbError> {
+        self.query_typed_on(&self.autocommit_reservation(), sql, params)
+            .await
+    }
+
+    pub(crate) async fn query_typed_on(
+        &self,
+        reservation: &Arc<Reservation>,
+        sql: &str,
+        params: &[&str],
+    ) -> Result<TypedRows, DbError> {
         let (reply_tx, reply_rx) = flume::bounded::<Result<TypedRows, DbError>>(1);
-        let cmd = Command::QueryTyped {
+        self.send(Command::QueryTyped {
+            reservation: Arc::clone(reservation),
             sql: sql.to_string(),
-            params: params.iter().map(|s| s.to_string()).collect(),
+            params: params.iter().map(|s| (*s).to_string()).collect(),
             reply: reply_tx,
-        };
-        self.send(cmd).await?;
+        })
+        .await?;
         recv_reply(reply_rx).await?
     }
 
-    /// Send an `Attach` command and await the reply. Consumer is the
-    /// live `SqliteBackend::attach_app_file` impl.
+    /// Run a transaction reservation's terminal statement and return the
+    /// classified outcome.
+    pub(crate) async fn settle(
+        &self,
+        reservation: &Arc<Reservation>,
+        intent: TerminalIntent,
+    ) -> Result<TerminalOutcome, DbError> {
+        let (reply_tx, reply_rx) = flume::bounded::<Result<TerminalOutcome, DbError>>(1);
+        self.send(Command::Settle {
+            reservation: Arc::clone(reservation),
+            intent,
+            reply: reply_tx,
+        })
+        .await?;
+        recv_reply(reply_rx).await?
+    }
+
+    /// Send an `Attach` command and await the reply.
     pub(crate) async fn attach(&self, app_id: &str, db_path: &str) -> Result<(), DbError> {
         let (reply_tx, reply_rx) = flume::bounded::<Result<(), DbError>>(1);
-        let cmd = Command::Attach {
+        self.send(Command::Attach {
             app_id: app_id.to_string(),
             db_path: db_path.to_string(),
             reply: reply_tx,
-        };
-        self.send(cmd).await?;
+        })
+        .await?;
         recv_reply(reply_rx).await?
     }
 
@@ -556,12 +687,6 @@ impl SqliteSession {
     /// in the `backup_sqlite` module (`backend/sqlite/mod.rs`), which is gated
     /// on `feature = "test-helpers"`. In a default build that module does not
     /// exist, so this method genuinely has no caller and rustc warns.
-    ///
-    /// The gate named here used to be `cfg(feature = "sqlite")`. There is no
-    /// such feature on this crate - both backends compile into every binary
-    /// and the url scheme picks one at runtime. Naming the wrong feature made
-    /// the allow look like it was covering for backend selection, which would
-    /// have made it removable; it is not.
     #[allow(dead_code)]
     pub(crate) async fn vacuum_into(
         &self,
@@ -569,20 +694,17 @@ impl SqliteSession {
         dest_path: &str,
     ) -> Result<(), DbError> {
         let (reply_tx, reply_rx) = flume::bounded::<Result<(), DbError>>(1);
-        let cmd = Command::VacuumInto {
-            app_id: app_id.map(|s| s.to_string()),
+        self.send(Command::VacuumInto {
+            app_id: app_id.map(str::to_string),
             dest_path: dest_path.to_string(),
             reply: reply_tx,
-        };
-        self.send(cmd).await?;
+        })
+        .await?;
         recv_reply(reply_rx).await?
     }
 
-    /// Send a `ReattachFile` command and await the reply.
-    /// Consumer is the SQLite `Backup::restore` impl. The actor body
-    /// DETACHes the alias, `std::fs::rename`s `temp_path → live_path`
-    /// on the same filesystem, and ATTACHes the alias back against
-    /// `live_path`. `#[allow(dead_code)]` matches `vacuum_into` above.
+    /// Send a `ReattachFile` command and await the reply. `#[allow(dead_code)]`
+    /// matches `vacuum_into` above.
     #[allow(dead_code)]
     pub(crate) async fn reattach_file(
         &self,
@@ -591,13 +713,13 @@ impl SqliteSession {
         live_path: &str,
     ) -> Result<(), DbError> {
         let (reply_tx, reply_rx) = flume::bounded::<Result<(), DbError>>(1);
-        let cmd = Command::ReattachFile {
+        self.send(Command::ReattachFile {
             app_id: app_id.to_string(),
             temp_path: temp_path.to_string(),
             live_path: live_path.to_string(),
             reply: reply_tx,
-        };
-        self.send(cmd).await?;
+        })
+        .await?;
         recv_reply(reply_rx).await?
     }
 
@@ -607,11 +729,17 @@ impl SqliteSession {
         })
     }
 
-    pub(crate) fn try_exec_detached(&self, sql: &str, params: &[&str]) -> Result<(), DbError> {
+    pub(crate) fn try_exec_detached(
+        &self,
+        reservation: &Arc<Reservation>,
+        sql: &str,
+        params: &[&str],
+    ) -> Result<(), DbError> {
         let (reply_tx, _reply_rx) = flume::bounded::<Result<u64, DbError>>(1);
         let cmd = Command::Exec {
+            reservation: Arc::clone(reservation),
             sql: sql.to_string(),
-            params: params.iter().map(|s| s.to_string()).collect(),
+            params: params.iter().map(|s| (*s).to_string()).collect(),
             reply: reply_tx,
         };
         self.tx.try_send(cmd).map_err(|e| {
@@ -620,139 +748,353 @@ impl SqliteSession {
             ))
         })
     }
-}
 
-async fn recv_reply<T>(rx: flume::Receiver<T>) -> Result<T, DbError> {
-    rx.recv_async().await.map_err(|_| {
-        DbError::internal(
-            "SqliteSession: worker dropped reply channel before producing a result",
-        )
-    })
-}
-
-fn run_attach(conn: &Connection, app_id: &str, db_path: &str) -> Result<(), DbError> {
-    let escaped_path = db_path.replace('\'', "''");
-    let escaped_alias = app_id.replace('"', "\"\"");
-    let sql = format!("ATTACH DATABASE 'file:{escaped_path}' AS \"{escaped_alias}\"");
-    conn.execute_batch(&sql).map_err(from_sqlite)
+    /// A cancel handle for `reservation`.
+    ///
+    /// Holding one is what makes a cancellation possible at all: a dropped
+    /// caller-side future is not observable by the actor, so there has to be an
+    /// explicit channel.
+    #[allow(dead_code)] // no production canceller yet - see `Interrupts::interrupt`
+    pub fn cancel_handle(&self, reservation: &Arc<Reservation>) -> SqliteCancelHandle {
+        SqliteCancelHandle {
+            queue: self.tx.clone(),
+            interrupts: Arc::clone(&self.interrupts),
+            reservation: Arc::clone(reservation),
+        }
+    }
 }
 
 impl Drop for SqliteSession {
     fn drop(&mut self) {
-        // Best-effort: tell the worker to break out of its loop. If
-        // the queue is full (highly unlikely on shutdown) or the
-        // worker has already exited, ignore — the worker will also
-        // observe the sender drop and end the loop naturally.
+        // Best-effort: tell the worker to break out of its loop. If the queue
+        // is full (unlikely on shutdown) or the worker has already exited,
+        // ignore - the worker also observes the sender drop and ends the loop.
         let _ = self.tx.try_send(Command::Shutdown);
-        // `_worker: std::thread::JoinHandle<()>` drops here without
-        // joining. Dropping a `JoinHandle` detaches the thread; the
-        // OS thread keeps running until the closure returns. The
-        // `Shutdown` command above (or the `rx`-side disconnect when
-        // `self.tx` drops with `self`) terminates the loop and the
-        // thread exits + cleans up its connection on its own. We
-        // deliberately do not `.join()` here because that would
-        // block the dropping context, and the SQL the worker is
-        // processing at this moment will commit (WAL-durable) or
-        // roll back before the loop ends regardless.
+        // `_worker: JoinHandle<()>` drops here without joining, which detaches
+        // the thread. We deliberately do not `.join()`: that would block the
+        // dropping context, and whatever SQL the worker is processing right
+        // now commits (WAL-durable) or rolls back before the loop ends anyway.
     }
 }
 
-/// Clone-cheap handle to a [`SqliteSession`]. Wraps `Rc<SqliteSession>`
-/// so consumers can hold many handles without paying for atomic
-/// reference-counting (the compio runtime is single-threaded per
-/// worker).
+// ---------------------------------------------------------------------------
+// Leases and cancellation, caller side
+// ---------------------------------------------------------------------------
+
+/// A live reservation on `tx_conn`, released when the last handle drops.
 ///
-/// **`SqlExecutor::Client` association**: `SqliteBackend` reports
-/// this type as its `Client` associated type. The PG backend's
-/// `Client` is a real per-connection handle; SQLite has no
-/// per-connection notion — the actor IS the only writer — so the
-/// "client" is just a refcounted pointer to the same session every
-/// other "client" already points at. Long-lived transactions
-/// multiplex through the same mpsc queue and serialise by
-/// construction.
+/// The `Drop` enqueues `Release` best-effort. If that enqueue fails the lane is
+/// still not stranded: `reserve_transaction` decides admission from the `Weak`,
+/// which this drop has already invalidated, and the next `Reserve` repeats the
+/// rollback cleanup.
+pub struct TxLease {
+    /// Liveness token. Held ONLY here and never cloned into a command, so its
+    /// strong count is exactly "is this lease alive" - which is the question
+    /// `reserve_transaction` asks and the reservation's own count cannot
+    /// answer.
+    #[allow(dead_code)] // never read: the Arc reference count IS the value
+    alive: Arc<TxLeaseAlive>,
+    reservation: Arc<Reservation>,
+    tx: flume::Sender<Command>,
+}
+
+/// The value behind [`TxLease::alive`]. It carries no data; its reference
+/// count is the whole point.
+struct TxLeaseAlive;
+
+impl std::fmt::Debug for TxLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TxLease")
+            .field("reservation", &self.reservation.id())
+            .finish()
+    }
+}
+
+impl TxLease {
+    pub(crate) fn reservation(&self) -> &Arc<Reservation> {
+        &self.reservation
+    }
+}
+
+impl Drop for TxLease {
+    fn drop(&mut self) {
+        let _ = self.tx.try_send(Command::Release {
+            reservation: Arc::clone(&self.reservation),
+        });
+    }
+}
+
+/// The caller-side half of Decision 2.
+///
+/// `cancel()` sets the intent, interrupts the target connection when the actor
+/// is already running the command, and then waits for the actor's
+/// acknowledgement - which arrives only after the actor has rolled back and
+/// retired the reservation. A cancellation that arrives after the outcome was
+/// decided is answered [`TerminalOutcome::AlreadyCompleted`] and **no rollback
+/// is claimed**.
 #[derive(Clone)]
-pub struct SqliteSessionHandle(pub(crate) Rc<SqliteSession>);
+pub struct SqliteCancelHandle {
+    queue: flume::Sender<Command>,
+    interrupts: Arc<Interrupts>,
+    reservation: Arc<Reservation>,
+}
+
+impl std::fmt::Debug for SqliteCancelHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqliteCancelHandle").finish()
+    }
+}
+
+impl SqliteCancelHandle {
+    /// Record the intent and, if the actor is already running the target
+    /// command, interrupt its connection. Returns what the intent decided.
+    #[allow(dead_code)] // no production canceller yet - see `Interrupts::interrupt`
+    fn signal(&self) -> CancelIntent {
+        let intent = self.reservation.request_cancel();
+        if matches!(intent, CancelIntent::Interrupt(_)) {
+            self.interrupts.interrupt(
+                self.reservation.lane(),
+                self.reservation.generation(),
+            );
+        }
+        intent
+    }
+
+    /// Cancel, and wait for the actor to acknowledge.
+    ///
+    /// # Errors
+    ///
+    /// `DbError::Internal` when the actor is gone.
+    #[allow(dead_code)] // no production canceller yet - see `Interrupts::interrupt`
+    pub async fn cancel(&self) -> Result<TerminalOutcome, DbError> {
+        self.signal();
+        let (reply_tx, reply_rx) = flume::bounded::<Result<TerminalOutcome, DbError>>(1);
+        self.queue
+            .send_async(Command::Cancel {
+                reservation: Arc::clone(&self.reservation),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| {
+                DbError::internal("SqliteSession: worker thread is dead (cancel not delivered)")
+            })?;
+        recv_reply(reply_rx).await?
+    }
+}
+
+/// Makes a caller-side drop cancel.
+///
+/// SC-2 case 4: the guard must be **disarmed before the reply is delivered**,
+/// so a drop that happens after a result was handed to the caller cannot
+/// retroactively cancel it. [`Self::disarm`] is that moment.
+#[allow(dead_code)] // no production canceller yet - see `Interrupts::interrupt`
+pub struct SqliteCancelGuard {
+    handle: Option<SqliteCancelHandle>,
+}
+
+impl std::fmt::Debug for SqliteCancelGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqliteCancelGuard")
+            .field("armed", &self.handle.is_some())
+            .finish()
+    }
+}
+
+impl SqliteCancelGuard {
+    #[allow(dead_code)] // no production canceller yet
+    #[must_use]
+    pub fn new(handle: SqliteCancelHandle) -> Self {
+        Self {
+            handle: Some(handle),
+        }
+    }
+
+    /// Stop this guard from cancelling. Call it before returning a delivered
+    /// result to the caller.
+    #[allow(dead_code)] // no production canceller yet
+    pub fn disarm(mut self) {
+        self.handle = None;
+    }
+}
+
+impl Drop for SqliteCancelGuard {
+    fn drop(&mut self) {
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+        // Fire-and-forget: a `Drop` cannot await. The intent + interrupt are
+        // synchronous and are what actually stops a running statement; the
+        // queued `Cancel` is what makes the actor roll back and retire.
+        if matches!(handle.signal(), CancelIntent::AlreadyCompleted) {
+            // The outcome was already decided. Sending `Cancel` would only ask
+            // a question nobody is waiting for the answer to.
+            return;
+        }
+        let (reply_tx, _reply_rx) = flume::bounded(1);
+        let _ = handle.queue.try_send(Command::Cancel {
+            reservation: Arc::clone(&handle.reservation),
+            reply: reply_tx,
+        });
+    }
+}
+
+async fn recv_reply<T>(rx: flume::Receiver<T>) -> Result<T, DbError> {
+    rx.recv_async().await.map_err(|_| {
+        DbError::internal("SqliteSession: worker dropped reply channel before producing a result")
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Clone-cheap handle
+// ---------------------------------------------------------------------------
+
+/// Clone-cheap handle to a [`SqliteSession`], optionally bound to a
+/// transaction reservation.
+///
+/// **`SqlExecutor::Client` association**: `SqliteBackend` reports this type as
+/// its `Client`. A handle carrying a [`TxLease`] routes every command onto
+/// `tx_conn` under that reservation; a handle without one mints a fresh
+/// autocommit reservation per command and routes onto `op_conn`. That is the
+/// whole of Decision 1 at the call site.
+#[derive(Clone)]
+pub struct SqliteSessionHandle {
+    pub(crate) session: Rc<SqliteSession>,
+    lease: Option<Rc<TxLease>>,
+}
 
 impl std::fmt::Debug for SqliteSessionHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SqliteSessionHandle").finish()
+        f.debug_struct("SqliteSessionHandle")
+            .field("lease", &self.lease)
+            .finish()
     }
 }
 
 impl SqliteSessionHandle {
-    /// Wrap an existing session in a handle.
+    /// Wrap an existing session in an autocommit-lane handle.
     #[allow(dead_code)]
     pub(crate) fn new(session: Rc<SqliteSession>) -> Self {
-        Self(session)
+        Self {
+            session,
+            lease: None,
+        }
+    }
+
+    /// Wrap a session plus a transaction lease.
+    pub(crate) fn with_lease(session: Rc<SqliteSession>, lease: Rc<TxLease>) -> Self {
+        Self {
+            session,
+            lease: Some(lease),
+        }
+    }
+
+    /// The reservation this handle's commands run under: the transaction lease
+    /// when it holds one, otherwise a freshly minted autocommit reservation.
+    fn reservation(&self) -> Arc<Reservation> {
+        match &self.lease {
+            Some(lease) => Arc::clone(lease.reservation()),
+            None => self.session.autocommit_reservation(),
+        }
+    }
+
+    /// The transaction reservation this handle holds, if any.
+    pub(crate) fn tx_reservation(&self) -> Option<&Arc<Reservation>> {
+        self.lease.as_ref().map(|l| l.reservation())
+    }
+
+    /// A cancel handle for whatever this handle's commands run under.
+    ///
+    /// Only meaningful for a transaction handle: an autocommit reservation is
+    /// minted per command, so there is nothing stable to cancel.
+    #[must_use]
+    #[allow(dead_code)] // no production canceller yet
+    pub fn cancel_handle(&self) -> Option<SqliteCancelHandle> {
+        self.lease
+            .as_ref()
+            .map(|lease| self.session.cancel_handle(lease.reservation()))
     }
 
     /// Convenience: forward an `exec` through the underlying session.
-    /// `SqliteBackend::client_exec` routes here.
     pub(crate) async fn exec(&self, sql: &str, params: &[&str]) -> Result<u64, DbError> {
-        self.0.exec(sql, params).await
+        self.session.exec_on(&self.reservation(), sql, params).await
     }
 
     pub(crate) fn try_exec_detached(&self, sql: &str, params: &[&str]) -> Result<(), DbError> {
-        self.0.try_exec_detached(sql, params)
+        self.session
+            .try_exec_detached(&self.reservation(), sql, params)
+    }
+
+    /// Run this handle's transaction terminal statement.
+    pub(crate) async fn settle(
+        &self,
+        intent: TerminalIntent,
+    ) -> Result<TerminalOutcome, DbError> {
+        let Some(reservation) = self.tx_reservation() else {
+            return Err(DbError::internal(
+                "db: settle called on a SQLite handle that holds no transaction reservation",
+            ));
+        };
+        self.session.settle(reservation, intent).await
     }
 
     /// Forward a `query` through the underlying session.
     ///
-    /// `pub` under the `test-helpers` feature so the integration
-    /// target (`tests/sqlite_integration.rs`) can read PRAGMA values
-    /// back without reaching into the actor surface directly. A future
-    /// change may route the SchemaIntrospect impl through this same
-    /// path, at which point the visibility tightens back to
-    /// `pub(crate)`.
+    /// `pub` under the `test-helpers` feature so the integration target can
+    /// read PRAGMA values back without reaching into the actor surface.
     #[cfg(feature = "test-helpers")]
     pub async fn query(&self, sql: &str, params: &[&str]) -> Result<Vec<Row>, DbError> {
-        self.0.query(sql, params).await
+        self.session.query_on(&self.reservation(), sql, params).await
     }
 
-    /// Forward a `query_typed` through the underlying
-    /// session. `pub` under the `test-helpers` feature so the
-    /// end-to-end encrypted-column round-trip test in
-    /// `tests/sqlite_integration.rs` can read BLOB columns back as raw
-    /// bytes without the `<N bytes blob>` stringification `query`
-    /// emits.
+    /// Forward a `query_typed` through the underlying session. `pub` under
+    /// `test-helpers` so the e2e encrypted-column round-trip can read BLOB
+    /// columns as raw bytes rather than the `<N bytes blob>` stringification.
     #[cfg(feature = "test-helpers")]
     pub async fn query_typed(
         &self,
         sql: &str,
         params: &[&str],
     ) -> Result<TypedRows, DbError> {
-        self.0.query_typed(sql, params).await
+        self.session
+            .query_typed_on(&self.reservation(), sql, params)
+            .await
     }
 
     /// Crate-private `query` for the unmask RPC dispatch.
     ///
     /// Separate symbol from the `cfg(test-helpers)` `query` above so the
-    /// production `crate::crud::unmask::dispatch_unmask` path can reach
-    /// the underlying session without forcing the `test-helpers` feature
-    /// on default-feature builds. Both wrappers ultimately delegate to
-    /// the same `SqliteSession::query` actor command — the visibility
-    /// fork is purely about exposing the symbol at the right scope.
+    /// production `crate::crud::unmask::dispatch_unmask` path can reach the
+    /// session without forcing the feature on default builds.
     pub(crate) async fn query_internal(
         &self,
         sql: &str,
         params: &[&str],
     ) -> Result<Vec<Row>, DbError> {
-        self.0.query(sql, params).await
+        self.session.query_on(&self.reservation(), sql, params).await
     }
 
-    /// Crate-private `query_typed` counterpart for
-    /// the unmask RPC dispatch (encrypted-column read path needs raw
-    /// `TypedCell::Blob` bytes, not the `<N bytes blob>` stringification
-    /// `query` emits). Same visibility-fork rationale as
-    /// [`Self::query_internal`].
+    /// Crate-private `query_typed` counterpart for the unmask RPC dispatch
+    /// (the encrypted-column read path needs raw `TypedCell::Blob` bytes).
     pub(crate) async fn query_typed_internal(
         &self,
         sql: &str,
         params: &[&str],
     ) -> Result<TypedRows, DbError> {
-        self.0.query_typed(sql, params).await
+        self.session
+            .query_typed_on(&self.reservation(), sql, params)
+            .await
     }
 }
+
+impl From<Rc<SqliteSession>> for SqliteSessionHandle {
+    fn from(s: Rc<SqliteSession>) -> Self {
+        Self::new(s)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test gate
+// ---------------------------------------------------------------------------
 
 #[cfg(any(test, feature = "test-helpers"))]
 struct NextCommandGateWorker {
@@ -811,49 +1153,673 @@ pub fn arm_next_command_gate_for_tests() -> NextCommandGate {
     }
 }
 
-impl From<Rc<SqliteSession>> for SqliteSessionHandle {
-    fn from(s: Rc<SqliteSession>) -> Self {
-        Self(s)
+// ---------------------------------------------------------------------------
+// The actor
+// ---------------------------------------------------------------------------
+
+/// One of the actor's two connections.
+struct LaneConn {
+    conn: Connection,
+    generation: u64,
+    /// Set when a terminal classification could not prove the connection's
+    /// state. A quarantined connection is closed and reopened before the next
+    /// reservation touches it - keeping it would hand an unproved transaction
+    /// to the next caller.
+    quarantined: bool,
+    /// Kept alive so the CDC hooks' captured `Arc`s outlive the connection.
+    _dispatcher: Option<crate::backend::sqlite::cdc::SqliteCdcDispatcher>,
+}
+
+struct Actor {
+    op: LaneConn,
+    tx: LaneConn,
+    interrupts: Arc<Interrupts>,
+    /// `(alias, path)` for every ATTACH, replayed onto a recycled connection.
+    attachments: Vec<(String, String)>,
+    /// The reservation whose transaction state `tx_conn` currently holds.
+    tx_bound: Option<u64>,
+    db_path: PathBuf,
+    app_id: Option<String>,
+    packet_tx: Option<flume::Sender<CommitPacket>>,
+    /// Monotonic command sequence. `0` is the not-running sentinel, so this
+    /// starts at 1.
+    seq: u64,
+}
+
+const BOOT_PRAGMAS: &str = "\
+    PRAGMA journal_mode = WAL; \
+    PRAGMA synchronous = NORMAL; \
+    PRAGMA busy_timeout = 5000; \
+    PRAGMA foreign_keys = ON;";
+
+fn open_lane_connection(
+    db_path: &Path,
+    app_id: Option<&str>,
+    packet_tx: Option<&flume::Sender<CommitPacket>>,
+) -> Result<(Connection, Option<crate::backend::sqlite::cdc::SqliteCdcDispatcher>), DbError> {
+    register_sqlite_vec_once();
+    let conn = Connection::open(db_path).map_err(from_sqlite)?;
+    conn.execute_batch(BOOT_PRAGMAS).map_err(from_sqlite)?;
+    let dispatcher = match packet_tx {
+        Some(tx) => Some(crate::backend::sqlite::cdc::install(
+            &conn,
+            app_id.map(str::to_string),
+            tx.clone(),
+        )?),
+        None => None,
+    };
+    Ok((conn, dispatcher))
+}
+
+impl Actor {
+    fn open(
+        db_path: PathBuf,
+        app_id: Option<String>,
+        packet_tx: Option<flume::Sender<CommitPacket>>,
+    ) -> Result<Self, DbError> {
+        let (op_conn, op_dispatcher) =
+            open_lane_connection(&db_path, app_id.as_deref(), packet_tx.as_ref())?;
+        let (tx_conn, tx_dispatcher) =
+            open_lane_connection(&db_path, app_id.as_deref(), packet_tx.as_ref())?;
+        let interrupts = Arc::new(Interrupts::new(
+            op_conn.get_interrupt_handle(),
+            tx_conn.get_interrupt_handle(),
+        ));
+        Ok(Self {
+            op: LaneConn {
+                conn: op_conn,
+                generation: 0,
+                quarantined: false,
+                _dispatcher: op_dispatcher,
+            },
+            tx: LaneConn {
+                conn: tx_conn,
+                generation: 0,
+                quarantined: false,
+                _dispatcher: tx_dispatcher,
+            },
+            interrupts,
+            attachments: Vec::new(),
+            tx_bound: None,
+            db_path,
+            app_id,
+            packet_tx,
+            seq: 0,
+        })
+    }
+
+    fn lane_mut(&mut self, lane: Lane) -> &mut LaneConn {
+        match lane {
+            Lane::Op => &mut self.op,
+            Lane::Tx => &mut self.tx,
+        }
+    }
+
+    fn next_seq(&mut self) -> u64 {
+        self.seq += 1;
+        self.seq
+    }
+
+    /// Close and reopen a quarantined connection, replaying its ATTACHes and
+    /// publishing a fresh interrupt handle under a bumped generation.
+    ///
+    /// The generation bump is the part that matters for cancellation: an
+    /// interrupt aimed at the retired connection is refused rather than
+    /// delivered to whatever the replacement is doing.
+    fn recycle(&mut self, lane: Lane) {
+        let (db_path, app_id, packet_tx) = (
+            self.db_path.clone(),
+            self.app_id.clone(),
+            self.packet_tx.clone(),
+        );
+        let attachments = self.attachments.clone();
+        let entry = self.lane_mut(lane);
+        let generation = entry.generation + 1;
+        match open_lane_connection(&db_path, app_id.as_deref(), packet_tx.as_ref()) {
+            Ok((conn, dispatcher)) => {
+                for (alias, path) in &attachments {
+                    if let Err(e) = run_attach(&conn, alias, path) {
+                        tracing::error!(
+                            error = %e,
+                            alias = %alias,
+                            lane = lane.name(),
+                            "sqlite actor: failed to replay ATTACH onto a recycled connection"
+                        );
+                    }
+                }
+                let handle = conn.get_interrupt_handle();
+                entry.conn = conn;
+                entry._dispatcher = dispatcher;
+                entry.generation = generation;
+                entry.quarantined = false;
+                self.interrupts.replace(lane, generation, handle);
+                tracing::warn!(
+                    lane = lane.name(),
+                    generation,
+                    "sqlite actor: recycled a quarantined connection"
+                );
+            }
+            Err(e) => {
+                // Reopening failed. Leave the lane quarantined: every command
+                // on it is refused with a typed error, which is strictly
+                // better than serving one whose transaction state is unproved.
+                tracing::error!(
+                    error = %e,
+                    lane = lane.name(),
+                    "sqlite actor: could not recycle a quarantined connection"
+                );
+            }
+        }
+    }
+
+    /// Apply an outcome's quarantine verdict, recycling immediately.
+    fn apply_outcome(&mut self, lane: Lane, outcome: &TerminalOutcome) {
+        if outcome.quarantines() {
+            self.lane_mut(lane).quarantined = true;
+            self.recycle(lane);
+        }
+    }
+
+    /// Roll back anything a departing transaction reservation left open.
+    fn unbind_tx(&mut self) {
+        self.tx_bound = None;
+        if self.tx.conn.is_autocommit() {
+            return;
+        }
+        let raw = self.tx.conn.execute_batch("ROLLBACK");
+        let outcome = reservation::classify_rollback(&self.tx.conn, raw, false, None);
+        if outcome.quarantines() {
+            tracing::error!(
+                outcome = ?outcome,
+                "sqlite actor: a released transaction lease left tx_conn in an unproved state"
+            );
+        }
+        self.apply_outcome(Lane::Tx, &outcome);
+    }
+
+    /// Refuse a command whose reservation does not own the connection it would
+    /// run on.
+    fn check_owner(&self, reservation: &Reservation) -> Result<(), DbError> {
+        let lane = reservation.lane();
+        let entry = match lane {
+            Lane::Op => &self.op,
+            Lane::Tx => &self.tx,
+        };
+        if entry.quarantined {
+            return Err(DbError::Coded {
+                code: "connection_quarantined".to_string(),
+                message: format!(
+                    "db: {} is quarantined after an unproved terminal statement and could \
+                     not be recycled",
+                    lane.name()
+                ),
+                hint: None,
+            });
+        }
+        if lane == Lane::Tx && self.tx_bound != Some(reservation.id()) {
+            return Err(DbError::validation(
+                "reservation_not_owner",
+                format!(
+                    "db: reservation {} does not own tx_conn (current owner: {:?})",
+                    reservation.id(),
+                    self.tx_bound
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn run(&mut self, rx: &flume::Receiver<Command>) {
+        while let Ok(cmd) = rx.recv() {
+            #[cfg(any(test, feature = "test-helpers"))]
+            if let Some(gate) = take_next_command_gate_for_worker() {
+                let _ = gate.entered_tx.send(());
+                let _ = gate.release_rx.recv();
+            }
+            match cmd {
+                Command::Reserve { reservation } => {
+                    // Whatever the previous binding left open is rolled back
+                    // here, not merely on `Release`: a lease dropped without
+                    // settling, or a `Release` lost to a full queue, must not
+                    // leak its transaction into the next reservation.
+                    self.unbind_tx();
+                    self.tx_bound = Some(reservation.id());
+                }
+                Command::Release { reservation } => {
+                    if self.tx_bound == Some(reservation.id()) {
+                        self.unbind_tx();
+                    }
+                }
+                Command::Exec {
+                    reservation,
+                    sql,
+                    params,
+                    reply,
+                } => {
+                    let result = self.run_data(&reservation, &sql, |conn| {
+                        run_exec(conn, &sql, &params)
+                    });
+                    let _ = reply.send(result);
+                }
+                #[cfg(any(test, feature = "test-helpers"))]
+                Command::ExecBatch {
+                    reservation,
+                    sql,
+                    reply,
+                } => {
+                    let result = self
+                        .run_data(&reservation, &sql, |conn| {
+                            conn.execute_batch(&sql).map_err(RunError::Sqlite)
+                        });
+                    let _ = reply.send(result);
+                }
+                Command::Query {
+                    reservation,
+                    sql,
+                    params,
+                    reply,
+                } => {
+                    let result = self.run_data(&reservation, &sql, |conn| {
+                        run_query(conn, &sql, &params)
+                    });
+                    let _ = reply.send(result);
+                }
+                Command::QueryTyped {
+                    reservation,
+                    sql,
+                    params,
+                    reply,
+                } => {
+                    let result = self.run_data(&reservation, &sql, |conn| {
+                        run_query_typed(conn, &sql, &params)
+                    });
+                    let _ = reply.send(result);
+                }
+                Command::Settle {
+                    reservation,
+                    intent,
+                    reply,
+                } => {
+                    let result = self.run_settle(&reservation, intent);
+                    let _ = reply.send(result);
+                }
+                Command::Cancel { reservation, reply } => {
+                    let outcome = self.run_cancel(&reservation);
+                    let _ = reply.send(Ok(outcome));
+                }
+                Command::Attach {
+                    app_id,
+                    db_path,
+                    reply,
+                } => {
+                    let result = self.run_attach_both(&app_id, &db_path);
+                    let _ = reply.send(result);
+                }
+                Command::VacuumInto {
+                    app_id,
+                    dest_path,
+                    reply,
+                } => {
+                    let result = run_vacuum_into(&self.op.conn, app_id.as_deref(), &dest_path);
+                    let _ = reply.send(result);
+                }
+                Command::ReattachFile {
+                    app_id,
+                    temp_path,
+                    live_path,
+                    reply,
+                } => {
+                    let result = self.run_reattach(&app_id, &temp_path, &live_path);
+                    let _ = reply.send(result);
+                }
+                Command::Shutdown => break,
+            }
+        }
+        // Both connections drop here, closing cleanly. WAL checkpointing
+        // happens on close.
+    }
+
+    /// Execute one data command under `reservation`.
+    ///
+    /// The order is the protocol: validate ownership, transition to `Running`
+    /// (which is where a pre-start cancellation is observed), issue SQL, leave
+    /// `Running`. An autocommit reservation additionally wraps the statement in
+    /// `BEGIN DEFERRED ... COMMIT` where SQLite permits it.
+    fn run_data<T>(
+        &mut self,
+        reservation: &Arc<Reservation>,
+        sql: &str,
+        op: impl FnOnce(&Connection) -> Result<T, RunError>,
+    ) -> Result<T, DbError> {
+        self.check_owner(reservation)?;
+        let seq = self.next_seq();
+        if !reservation.enter_running(seq) {
+            // SC-2 case 1: a cancellation was recorded before this command
+            // started. It is neutralised here rather than physically removed
+            // from the queue - flume has no mid-queue removal - and the
+            // property SC-2 requires holds either way: no BEGIN and no data
+            // SQL is ever issued for it.
+            //
+            // `enter_running` stored the sequence before it refused, so leave
+            // it again here: a reservation left reading as Running is one a
+            // later cancel handle would aim an interrupt at, and by then the
+            // actor is executing something else on that connection.
+            reservation.leave_running();
+            return Err(cancelled_before_start(reservation));
+        }
+        let lane = reservation.lane();
+        // Three conditions, and the middle one is not defensive. A caller that
+        // drove `BEGIN` onto this connection itself owns the transaction; a
+        // wrap would issue a nested `BEGIN DEFERRED` and SQLite would refuse
+        // with "cannot start a transaction within a transaction". Deferring to
+        // `is_autocommit` here is the same authority the terminal classifier
+        // uses, applied one step earlier.
+        let wrap = reservation.kind() == ReservationKind::Autocommit
+            && self.lane_mut(lane).conn.is_autocommit()
+            && permits_explicit_transaction(sql);
+
+        let result = if wrap {
+            self.run_wrapped_autocommit(reservation, lane, op)
+        } else {
+            reservation.mark_began();
+            let conn = &self.lane_mut(lane).conn;
+            op(conn).map_err(RunError::into_db)
+        };
+        reservation.leave_running();
+        result
+    }
+
+    fn run_wrapped_autocommit<T>(
+        &mut self,
+        reservation: &Arc<Reservation>,
+        lane: Lane,
+        op: impl FnOnce(&Connection) -> Result<T, RunError>,
+    ) -> Result<T, DbError> {
+        {
+            let conn = &self.lane_mut(lane).conn;
+            reservation.mark_began();
+            if let Err(e) = conn.execute_batch("BEGIN DEFERRED") {
+                return Err(from_sqlite(e));
+            }
+        }
+
+        let raw = {
+            let conn = &self.lane_mut(lane).conn;
+            op(conn)
+        };
+
+        match raw {
+            Err(e) => {
+                // SC-2 consequence 3: an autocommit operation error must never
+                // be followed by a COMMIT. Terminalize first.
+                let conn = &self.lane_mut(lane).conn;
+                let rollback = conn.execute_batch("ROLLBACK");
+                let outcome = reservation::classify_rollback(conn, rollback, false, None);
+                self.apply_outcome(lane, &outcome);
+                Err(e.into_db())
+            }
+            Ok(value) => {
+                if !reservation.claim_completed() {
+                    // A cancellation claimed the terminal first. Roll back and
+                    // report the cancellation; the value is discarded because
+                    // its transaction is about to be undone.
+                    let conn = &self.lane_mut(lane).conn;
+                    let rollback = conn.execute_batch("ROLLBACK");
+                    let outcome = reservation::classify_rollback(conn, rollback, true, None);
+                    reservation.store_outcome(outcome.clone());
+                    self.apply_outcome(lane, &outcome);
+                    return Err(outcome.into_result().unwrap_err());
+                }
+                let conn = &self.lane_mut(lane).conn;
+                let commit = conn.execute_batch("COMMIT");
+                let outcome = reservation::classify_commit(conn, commit);
+                reservation.store_outcome(outcome.clone());
+                self.apply_outcome(lane, &outcome);
+                match outcome {
+                    TerminalOutcome::Committed => Ok(value),
+                    other => Err(other.into_result().unwrap_err()),
+                }
+            }
+        }
+    }
+
+    fn run_settle(
+        &mut self,
+        reservation: &Arc<Reservation>,
+        intent: TerminalIntent,
+    ) -> Result<TerminalOutcome, DbError> {
+        self.check_owner(reservation)?;
+        let lane = reservation.lane();
+
+        if intent == TerminalIntent::Commit && !reservation.claim_completed() {
+            // A cancellation holds the terminal. Do not commit.
+            let conn = &self.lane_mut(lane).conn;
+            let rollback = conn.execute_batch("ROLLBACK");
+            let outcome = reservation::classify_rollback(conn, rollback, true, None);
+            reservation.store_outcome(outcome.clone());
+            self.apply_outcome(lane, &outcome);
+            self.tx_bound = None;
+            return Ok(outcome);
+        }
+        if intent == TerminalIntent::Rollback {
+            reservation.claim_completed();
+        }
+
+        let seq = self.next_seq();
+        // The return value is deliberately ignored HERE and nowhere else. A
+        // terminal statement runs whatever the terminal word says: the commit
+        // arm has already lost to a cancellation above and been rerouted to
+        // ROLLBACK, and a rollback that a cancellation raced is still a
+        // rollback. Refusing to start would leave the transaction open.
+        // Storing `Running` still matters - it is what lets an interrupt reach
+        // a COMMIT that is blocked on the write lock.
+        let _ = reservation.enter_running(seq);
+        reservation.mark_began();
+        let outcome = {
+            let conn = &self.lane_mut(lane).conn;
+            match intent {
+                TerminalIntent::Commit => {
+                    let raw = conn.execute_batch("COMMIT");
+                    reservation::classify_commit(conn, raw)
+                }
+                TerminalIntent::Rollback => {
+                    let raw = conn.execute_batch("ROLLBACK");
+                    reservation::classify_rollback(conn, raw, false, None)
+                }
+            }
+        };
+        reservation.leave_running();
+        reservation.store_outcome(outcome.clone());
+        self.apply_outcome(lane, &outcome);
+        self.tx_bound = None;
+        Ok(outcome)
+    }
+
+    /// Resolve a cancellation: roll the reservation's connection back, retire
+    /// the reservation, and only then acknowledge.
+    fn run_cancel(&mut self, reservation: &Arc<Reservation>) -> TerminalOutcome {
+        if !reservation.claim_cancelled() {
+            // A completion already claimed the terminal. Because the queue is
+            // FIFO and the completing command ran before this one, the stored
+            // outcome is here to be read. No ROLLBACK is sent; the write
+            // stays durable.
+            let stored = reservation
+                .stored_outcome()
+                .unwrap_or(TerminalOutcome::Committed);
+            return TerminalOutcome::AlreadyCompleted(Box::new(stored));
+        }
+
+        if !reservation.began() {
+            // No BEGIN, no data SQL, ever issued.
+            let outcome = TerminalOutcome::Cancelled {
+                cleanup: CancelCleanup::NoSqlStarted,
+                cause: None,
+            };
+            reservation.store_outcome(outcome.clone());
+            if reservation.lane() == Lane::Tx && self.tx_bound == Some(reservation.id()) {
+                self.tx_bound = None;
+            }
+            return outcome;
+        }
+
+        let lane = reservation.lane();
+        // One ROLLBACK, unconditionally. An interrupted *write* may already
+        // have been rolled back by SQLite itself while an interrupted *read*
+        // leaves the transaction open; both reach the same end state here, and
+        // "ROLLBACK errored because there was no transaction" is classified by
+        // `is_autocommit`, not treated as a failure.
+        let outcome = {
+            let conn = &self.lane_mut(lane).conn;
+            let raw = conn.execute_batch("ROLLBACK");
+            reservation::classify_rollback(conn, raw, true, None)
+        };
+        reservation.store_outcome(outcome.clone());
+        self.apply_outcome(lane, &outcome);
+        if lane == Lane::Tx && self.tx_bound == Some(reservation.id()) {
+            self.tx_bound = None;
+        }
+        outcome
+    }
+
+    /// ATTACH on both connections, or on neither.
+    ///
+    /// The asymmetric outcome is the one to avoid: `op_conn` sees the app and
+    /// `tx_conn` does not, so an ordinary read succeeds and the same app's
+    /// transaction fails with "no such table". SQLite refuses `ATTACH` inside
+    /// an explicit transaction, so this genuinely can fail on `tx_conn` alone -
+    /// while another app holds a creator transaction open - and the DETACH
+    /// below is what keeps that a clean failure rather than a split view.
+    fn run_attach_both(&mut self, app_id: &str, db_path: &str) -> Result<(), DbError> {
+        run_attach(&self.op.conn, app_id, db_path)?;
+        if let Err(e) = run_attach(&self.tx.conn, app_id, db_path) {
+            let escaped_alias = app_id.replace('"', "\"\"");
+            let _ = self
+                .op
+                .conn
+                .execute_batch(&format!("DETACH DATABASE \"{escaped_alias}\""));
+            return Err(e);
+        }
+        self.attachments
+            .retain(|(alias, _)| alias.as_str() != app_id);
+        self.attachments
+            .push((app_id.to_string(), db_path.to_string()));
+        Ok(())
+    }
+
+    fn run_reattach(
+        &mut self,
+        app_id: &str,
+        temp_path: &str,
+        live_path: &str,
+    ) -> Result<(), DbError> {
+        let result = run_reattach_file(&self.op.conn, &self.tx.conn, app_id, temp_path, live_path);
+        if result.is_ok() {
+            self.attachments
+                .retain(|(alias, _)| alias.as_str() != app_id);
+            self.attachments
+                .push((app_id.to_string(), live_path.to_string()));
+        }
+        result
     }
 }
 
+fn cancelled_before_start(reservation: &Reservation) -> DbError {
+    let outcome = TerminalOutcome::Cancelled {
+        cleanup: CancelCleanup::NoSqlStarted,
+        cause: None,
+    };
+    reservation.store_outcome(outcome.clone());
+    outcome
+        .into_result()
+        .expect_err("a cancellation is never Ok")
+}
+
+/// Does SQLite allow this statement inside an explicit transaction?
+///
+/// A deliberately **lexical** pre-check, not a parser. It inspects the leading
+/// keyword of every `;`-separated fragment and refuses to wrap when any of them
+/// is one SQLite rejects inside a transaction (`PRAGMA` that writes, `VACUUM`,
+/// `ATTACH`, `DETACH`) or one that manages transactions itself.
+///
+/// It is written so that its only failure mode is a **false negative**. A `;`
+/// inside a string literal splits a fragment that is not a statement, whose
+/// leading token may accidentally match the list - and the result is that the
+/// operation runs unwrapped, exactly as it did before SC-2. It can never
+/// wrongly decide that a `VACUUM` is safe to wrap, because the real leading
+/// keyword of a real statement is always examined.
+fn permits_explicit_transaction(sql: &str) -> bool {
+    const REFUSED: &[&str] = &[
+        "PRAGMA", "VACUUM", "ATTACH", "DETACH", "BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT",
+        "RELEASE",
+    ];
+    sql.split(';')
+        .filter_map(|fragment| {
+            fragment
+                .split_whitespace()
+                .next()
+                .map(|word| word.trim_matches(|c: char| !c.is_ascii_alphabetic()))
+        })
+        .filter(|word| !word.is_empty())
+        .all(|word| {
+            let upper = word.to_ascii_uppercase();
+            !REFUSED.contains(&upper.as_str())
+        })
+}
+
 // ---------------------------------------------------------------------------
-// Worker-side sync helpers — each runs inside the `spawn_blocking`
-// thread, owns a `&Connection`, and consumes the owned param strings
-// produced by the async `send`-side helpers.
+// Worker-side sync helpers
 // ---------------------------------------------------------------------------
 
-fn run_exec(conn: &Connection, sql: &str, params: &[String]) -> Result<u64, DbError> {
-    // The param vector carries an optional encrypted-
-    // column side-channel: a value tagged with [`crate::query::SQLITE_BINARY_BIND_PREFIX`]
-    // is base64-decoded to raw bytes and bound as BLOB instead of TEXT.
-    // The PG arm never produces this prefix; non-encrypted params
-    // travel as plain `String` on both arms.
-    let decoded = decode_blob_params(params)?;
-    let refs: Vec<&dyn rusqlite::ToSql> = decoded
-        .iter()
-        .map(|p| p.as_to_sql())
-        .collect();
+/// A worker-side failure that has **not** been mapped yet.
+///
+/// SC-2 consequence 2: the raw `rusqlite` error must survive until the actor
+/// decides. Mapping inside `run_exec` / `run_query`, as this file used to,
+/// erases the reservation, ownership and cancellation-intent context the
+/// classifier needs.
+enum RunError {
+    Sqlite(rusqlite::Error),
+    /// A plugin-side decode failure (bad base64, non-UTF-8 TEXT) that never had
+    /// a rusqlite error to preserve.
+    Db(DbError),
+}
+
+impl RunError {
+    fn into_db(self) -> DbError {
+        match self {
+            Self::Sqlite(e) => from_sqlite(e),
+            Self::Db(e) => e,
+        }
+    }
+}
+
+fn run_attach(conn: &Connection, app_id: &str, db_path: &str) -> Result<(), DbError> {
+    let escaped_path = db_path.replace('\'', "''");
+    let escaped_alias = app_id.replace('"', "\"\"");
+    let sql = format!("ATTACH DATABASE 'file:{escaped_path}' AS \"{escaped_alias}\"");
+    conn.execute_batch(&sql).map_err(from_sqlite)
+}
+
+fn run_exec(conn: &Connection, sql: &str, params: &[String]) -> Result<u64, RunError> {
+    // The param vector carries an optional encrypted-column side-channel: a
+    // value tagged with [`crate::query::SQLITE_BINARY_BIND_PREFIX`] is
+    // base64-decoded to raw bytes and bound as BLOB instead of TEXT. The PG arm
+    // never produces this prefix; non-encrypted params travel as plain `String`
+    // on both arms.
+    let decoded = decode_blob_params(params).map_err(RunError::Db)?;
+    let refs: Vec<&dyn rusqlite::ToSql> = decoded.iter().map(BindParam::as_to_sql).collect();
     let n = conn
         .execute(sql, refs.as_slice())
-        .map_err(from_sqlite)?;
+        .map_err(RunError::Sqlite)?;
     Ok(n as u64)
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
-fn run_exec_batch(conn: &Connection, sql: &str) -> Result<(), DbError> {
-    conn.execute_batch(sql).map_err(from_sqlite)
-}
-
-/// Typed bind value. Either a borrowed `&str` (the
-/// TEXT default - preserves the zero-alloc shape that
-/// `&[String] -> &[&dyn ToSql]` had before this type existed) or an
-/// owned `Vec<u8>` produced by base64-decoding a
+/// Typed bind value. Either a borrowed `&str` (the TEXT default) or an owned
+/// `Vec<u8>` produced by base64-decoding a
 /// [`crate::query::SQLITE_BINARY_BIND_PREFIX`]-tagged param.
 enum BindParam<'a> {
-    /// Plain TEXT bind — borrows from the caller's `Vec<String>`.
+    /// Plain TEXT bind - borrows from the caller's `Vec<String>`.
     Text(&'a str),
-    /// BLOB bind — owns the decoded bytes.
+    /// BLOB bind - owns the decoded bytes.
     Blob(Vec<u8>),
 }
 
@@ -866,10 +1832,8 @@ impl BindParam<'_> {
     }
 }
 
-/// Scan the param vector for encrypted-column side-
-/// channel markers and produce a typed bind list. Values prefixed with
-/// [`crate::query::SQLITE_BINARY_BIND_PREFIX`] are base64-decoded to raw bytes and bound
-/// as BLOB; every other value passes through as TEXT.
+/// Scan the param vector for encrypted-column side-channel markers and produce
+/// a typed bind list.
 fn decode_blob_params(params: &[String]) -> Result<Vec<BindParam<'_>>, DbError> {
     use base64::Engine as _;
     let prefix = crate::query::SQLITE_BINARY_BIND_PREFIX;
@@ -892,57 +1856,47 @@ fn decode_blob_params(params: &[String]) -> Result<Vec<BindParam<'_>>, DbError> 
     Ok(out)
 }
 
-fn run_query(
-    conn: &Connection,
-    sql: &str,
-    params: &[String],
-) -> Result<Vec<Row>, DbError> {
-    let mut stmt = conn.prepare(sql).map_err(from_sqlite)?;
+fn run_query(conn: &Connection, sql: &str, params: &[String]) -> Result<Vec<Row>, RunError> {
+    let mut stmt = conn.prepare(sql).map_err(RunError::Sqlite)?;
     let column_count = stmt.column_count();
-    // Same encrypted-column blob-bind side-channel as
-    // `run_exec` (see [`decode_blob_params`]).
-    let decoded = decode_blob_params(params)?;
-    let refs: Vec<&dyn rusqlite::ToSql> = decoded
-        .iter()
-        .map(|p| p.as_to_sql())
-        .collect();
-    let mut rows = stmt.query(refs.as_slice()).map_err(from_sqlite)?;
+    let decoded = decode_blob_params(params).map_err(RunError::Db)?;
+    let refs: Vec<&dyn rusqlite::ToSql> = decoded.iter().map(BindParam::as_to_sql).collect();
+    let mut rows = stmt.query(refs.as_slice()).map_err(RunError::Sqlite)?;
     let mut out = Vec::<Row>::new();
-    while let Some(row) = rows.next().map_err(from_sqlite)? {
+    while let Some(row) = rows.next().map_err(RunError::Sqlite)? {
         let mut cells = Vec::with_capacity(column_count);
         for i in 0..column_count {
-            // Materialise each cell as `Option<String>` regardless of
-            // the underlying storage class. SQLite's typing is
-            // dynamic — a single column can hold INTEGER / REAL /
-            // TEXT / BLOB / NULL — so we inspect the `ValueRef`
-            // discriminant and stringify uniformly. NULL → None;
-            // everything else → Some(...).
+            // Materialise each cell as `Option<String>` regardless of the
+            // underlying storage class. SQLite's typing is dynamic, so we
+            // inspect the `ValueRef` discriminant and stringify uniformly.
+            // NULL -> None; everything else -> Some(...).
             //
-            // The Query path is consumed by PRAGMA inspection
-            // (integration tests) and by the SchemaIntrospect
-            // PRAGMA walk; both produce INTEGER + TEXT, never BLOB.
-            // Refuse accidental binary reads loudly so callers route
-            // them through `query_typed` instead of silently receiving
-            // a placeholder string that cannot round-trip.
+            // The Query path is consumed by PRAGMA inspection and by the
+            // SchemaIntrospect PRAGMA walk; both produce INTEGER + TEXT, never
+            // BLOB. Refuse accidental binary reads loudly so callers route them
+            // through `query_typed` instead of silently receiving a placeholder
+            // string that cannot round-trip.
             use rusqlite::types::ValueRef;
-            let value_ref = row.get_ref(i).map_err(from_sqlite)?;
+            let value_ref = row.get_ref(i).map_err(RunError::Sqlite)?;
             let cell = match value_ref {
                 ValueRef::Null => None,
                 ValueRef::Integer(n) => Some(n.to_string()),
                 ValueRef::Real(f) => Some(f.to_string()),
                 ValueRef::Text(bytes) => Some(
                     std::str::from_utf8(bytes)
-                        .map_err(|e| DbError::internal(format!(
-                            "sqlite TEXT cell is not valid UTF-8: {e}"
-                        )))?
+                        .map_err(|e| {
+                            RunError::Db(DbError::internal(format!(
+                                "sqlite TEXT cell is not valid UTF-8: {e}"
+                            )))
+                        })?
                         .to_string(),
                 ),
                 ValueRef::Blob(bytes) => {
-                    return Err(DbError::internal(format!(
+                    return Err(RunError::Db(DbError::internal(format!(
                         "sqlite query path does not materialize BLOB column {i} \
                          ({} bytes); use query_typed instead",
                         bytes.len()
-                    )));
+                    ))));
                 }
             };
             cells.push(cell);
@@ -952,36 +1906,30 @@ fn run_query(
     Ok(out)
 }
 
-/// Typed row materialisation - the vector path's
-/// row-decoder. Preserves SQLite's storage-class discriminator so the
-/// BLOB column reaches the caller as `Vec<u8>` (not the `<N bytes
-/// blob>` placeholder string `run_query` emits at session.rs:522).
+/// Typed row materialisation - the vector path's row decoder. Preserves
+/// SQLite's storage-class discriminator so a BLOB column reaches the caller as
+/// `Vec<u8>` rather than a placeholder string.
 fn run_query_typed(
     conn: &Connection,
     sql: &str,
     params: &[String],
-) -> Result<TypedRows, DbError> {
-    let mut stmt = conn.prepare(sql).map_err(from_sqlite)?;
+) -> Result<TypedRows, RunError> {
+    let mut stmt = conn.prepare(sql).map_err(RunError::Sqlite)?;
     let column_count = stmt.column_count();
-    // `column_names` borrows from the statement; copy to owned `String`
-    // BEFORE the row loop so the reply doesn't borrow from `stmt`.
+    // `column_names` borrows from the statement; copy to owned `String` BEFORE
+    // the row loop so the reply doesn't borrow from `stmt`.
     let columns: Vec<String> = (0..column_count)
         .map(|i| stmt.column_name(i).unwrap_or("").to_string())
         .collect();
-    // Same encrypted-column blob-bind side-channel as
-    // `run_exec` (see [`decode_blob_params`]).
-    let decoded = decode_blob_params(params)?;
-    let refs: Vec<&dyn rusqlite::ToSql> = decoded
-        .iter()
-        .map(|p| p.as_to_sql())
-        .collect();
-    let mut rows = stmt.query(refs.as_slice()).map_err(from_sqlite)?;
+    let decoded = decode_blob_params(params).map_err(RunError::Db)?;
+    let refs: Vec<&dyn rusqlite::ToSql> = decoded.iter().map(BindParam::as_to_sql).collect();
+    let mut rows = stmt.query(refs.as_slice()).map_err(RunError::Sqlite)?;
     let mut out = Vec::<Vec<TypedCell>>::new();
-    while let Some(row) = rows.next().map_err(from_sqlite)? {
+    while let Some(row) = rows.next().map_err(RunError::Sqlite)? {
         let mut cells = Vec::with_capacity(column_count);
         for i in 0..column_count {
             use rusqlite::types::ValueRef;
-            let value_ref = row.get_ref(i).map_err(from_sqlite)?;
+            let value_ref = row.get_ref(i).map_err(RunError::Sqlite)?;
             let cell = match value_ref {
                 ValueRef::Null => TypedCell::Null,
                 ValueRef::Integer(n) => TypedCell::Integer(n),
@@ -989,15 +1937,15 @@ fn run_query_typed(
                 ValueRef::Text(bytes) => TypedCell::Text(
                     std::str::from_utf8(bytes)
                         .map_err(|e| {
-                            DbError::internal(format!(
+                            RunError::Db(DbError::internal(format!(
                                 "sqlite TEXT cell is not valid UTF-8: {e}"
-                            ))
+                            )))
                         })?
                         .to_string(),
                 ),
-                // Copy the BLOB bytes into an owned `Vec<u8>` so the
-                // reply crossing the actor boundary doesn't borrow from
-                // rusqlite's statement-owned buffer.
+                // Copy the BLOB bytes into an owned `Vec<u8>` so the reply
+                // crossing the actor boundary doesn't borrow from rusqlite's
+                // statement-owned buffer.
                 ValueRef::Blob(bytes) => TypedCell::Blob(bytes.to_vec()),
             };
             cells.push(cell);
@@ -1012,26 +1960,10 @@ fn run_query_typed(
 
 /// Worker body for [`Command::VacuumInto`].
 ///
-/// `VACUUM INTO 'path'` (optionally prefixed with `"<alias>"`) instructs
-/// SQLite to write a fresh, consistent copy of the source database to
-/// `dest_path`. The engine opens an implicit shared-snapshot READ
-/// transaction on the source — concurrent writers can keep appending
-/// to the WAL during the copy, and the resulting file matches the
-/// read-mark commit point (the last commit visible when VACUUM INTO
-/// began). No exclusive lock is taken on the source; only a brief
-/// internal lock during the snapshot setup.
-///
-/// **String injection note**: VACUUM INTO does NOT accept bind
-/// parameters for the destination path. We construct the statement
-/// inline with SQLite's literal-string escape rule — single quotes are
-/// doubled inside the literal. The `app_id` alias is double-quoted
-/// using the same rule (`"` → `""`).
-///
-/// Both `app_id` (per-app file) and `None` (the control session's main
-/// database) are supported; today the snapshot impl always passes a
-/// `Some(app_id)` so the per-app file is captured. The `None` arm
-/// stays for symmetry with the future "snapshot of admin metadata"
-/// path that lands alongside the cross-process lock pivot.
+/// **String injection note**: VACUUM INTO does NOT accept bind parameters for
+/// the destination path. We construct the statement inline with SQLite's
+/// literal-string escape rule - single quotes are doubled inside the literal.
+/// The `app_id` alias is double-quoted using the same rule (`"` -> `""`).
 fn run_vacuum_into(
     conn: &Connection,
     app_id: Option<&str>,
@@ -1050,115 +1982,95 @@ fn run_vacuum_into(
 
 /// Worker body for [`Command::ReattachFile`].
 ///
-/// Atomic-file-swap restore on the per-app alias:
+/// Atomic-file-swap restore on the per-app alias, across **both** connections:
 ///
-/// 1. `DETACH DATABASE "<app_id>"` — close the connection to the
-///    current live file from this session's view.
-/// 2. `std::fs::rename(temp_path, live_path)` — POSIX rename is
-///    atomic on the same filesystem (the inode swap is a single
-///    directory-entry update). Cross-filesystem rename is NOT atomic;
-///    operators must keep snapshot destinations on the same FS as the
-///    live per-app DB. The plan documents this caveat as the operator
-///    contract.
-/// 3. `ATTACH DATABASE 'file:<live_path>' AS "<app_id>"` — reopen
-///    against the freshly-renamed file. The CDC hooks installed on
-///    this connection (commit/preupdate/rollback) remain armed for
-///    the new content because the hooks live on `sqlite3*` not the
-///    attached database.
+/// 1. `DETACH DATABASE "<app_id>"` on each connection.
+/// 2. `std::fs::rename(temp_path, live_path)` - POSIX rename is atomic on the
+///    same filesystem. Cross-filesystem rename is NOT atomic; operators must
+///    keep snapshot destinations on the same FS as the live per-app DB.
+/// 3. `ATTACH DATABASE 'file:<live_path>' AS "<app_id>"` on each connection.
 ///
-/// If step 1 fails (e.g. the alias was never attached on this
-/// session), DETACH surfaces a typed error and the rename + ATTACH are
-/// skipped — the live file is untouched. If step 2 fails (rename
-/// error, ENOSPC, EXDEV cross-FS), the alias has been detached but no
-/// rename happened; we attempt to re-ATTACH the original live file so
-/// the session recovers to a consistent state. If step 3 fails after a
-/// successful rename, the live file IS the new content but the session
-/// has no alias attached — the caller's `restore` impl returns the
-/// typed error and the app file must be re-attached, via
-/// `SqliteBackend::attach_app_file`, before the session can serve it.
+/// Both connections are detached before the rename because a lock release must
+/// not leave either bound to an obsolete inode. If step 1 fails on `op_conn`,
+/// nothing is renamed and the live file is untouched. If it fails on `tx_conn`
+/// after `op_conn` detached, `op_conn`'s alias is restored before returning.
 fn run_reattach_file(
-    conn: &Connection,
+    op_conn: &Connection,
+    tx_conn: &Connection,
     app_id: &str,
     temp_path: &str,
     live_path: &str,
 ) -> Result<(), DbError> {
     let escaped_alias = app_id.replace('"', "\"\"");
-
-    // Step 1 — DETACH the alias.
     let detach_sql = format!("DETACH DATABASE \"{escaped_alias}\"");
-    conn.execute_batch(&detach_sql).map_err(|e| {
-        // DETACH-side failure: the alias was never attached or the
-        // engine refused the detach. Surface the typed error verbatim;
-        // the live file on disk is untouched at this point.
+    let escaped_live = live_path.replace('\'', "''");
+    let attach_live_sql =
+        format!("ATTACH DATABASE 'file:{escaped_live}' AS \"{escaped_alias}\"");
+
+    // Step 1 - DETACH the alias on both connections.
+    op_conn.execute_batch(&detach_sql).map_err(|e| {
         DbError::Internal {
             message: format!(
-                "ReattachFile: DETACH \"{app_id}\" failed (live file untouched): {}",
+                "ReattachFile: DETACH \"{app_id}\" on op_conn failed (live file untouched): {}",
                 from_sqlite(e)
             ),
         }
     })?;
-
-    // Step 2 — atomic rename.
-    if let Err(e) = std::fs::rename(temp_path, live_path) {
-        // Rename failed — recovery attempt: re-ATTACH the original
-        // live file so the actor's view doesn't lose the alias. The
-        // outer `restore` returns the typed Internal error; the
-        // operator inspects the temp file and decides whether to
-        // re-run with a same-FS destination.
-        let escaped_live = live_path.replace('\'', "''");
-        let reattach_old_sql = format!(
-            "ATTACH DATABASE 'file:{escaped_live}' AS \"{escaped_alias}\""
-        );
-        let _ = conn.execute_batch(&reattach_old_sql);
+    if let Err(e) = tx_conn.execute_batch(&detach_sql) {
+        // Restore op_conn's alias so the session does not lose it over a
+        // failure that changed nothing on disk.
+        let _ = op_conn.execute_batch(&attach_live_sql);
         return Err(DbError::Internal {
             message: format!(
-                "ReattachFile: std::fs::rename({temp_path:?} -> {live_path:?}) failed: {e}; \
-                 attempted re-ATTACH of the original live file (live content unchanged on success). \
-                 NOTE: same-filesystem rename is the operator contract — cross-FS destinations \
-                 cannot complete an atomic restore"
+                "ReattachFile: DETACH \"{app_id}\" on tx_conn failed (live file untouched): {}",
+                from_sqlite(e)
             ),
         });
     }
 
-    // Step 3 — ATTACH the new file under the original alias.
-    let escaped_path = live_path.replace('\'', "''");
-    let attach_sql =
-        format!("ATTACH DATABASE 'file:{escaped_path}' AS \"{escaped_alias}\"");
-    conn.execute_batch(&attach_sql).map_err(|e| {
-        DbError::Internal {
+    // Step 2 - atomic rename.
+    if let Err(e) = std::fs::rename(temp_path, live_path) {
+        let _ = op_conn.execute_batch(&attach_live_sql);
+        let _ = tx_conn.execute_batch(&attach_live_sql);
+        return Err(DbError::Internal {
             message: format!(
-                "ReattachFile: ATTACH new file as \"{app_id}\" failed AFTER rename — \
-                 the renamed snapshot is now the live file but the session has no alias \
-                 attached. The app file must be re-attached for this app_id before \
-                 the session can serve it again. \
-                 Underlying error: {}",
-                from_sqlite(e)
+                "ReattachFile: std::fs::rename({temp_path:?} -> {live_path:?}) failed: {e}; \
+                 attempted re-ATTACH of the original live file (live content unchanged on \
+                 success). NOTE: same-filesystem rename is the operator contract - cross-FS \
+                 destinations cannot complete an atomic restore"
             ),
-        }
-    })?;
+        });
+    }
+
+    // Step 3 - ATTACH the new file under the original alias on both.
+    for (conn, name) in [(op_conn, "op_conn"), (tx_conn, "tx_conn")] {
+        conn.execute_batch(&attach_live_sql).map_err(|e| {
+            DbError::Internal {
+                message: format!(
+                    "ReattachFile: ATTACH new file as \"{app_id}\" on {name} failed AFTER \
+                     rename - the renamed snapshot is now the live file but that connection \
+                     has no alias attached. The app file must be re-attached for this app_id \
+                     before the session can serve it again. Underlying error: {}",
+                    from_sqlite(e)
+                ),
+            }
+        })?;
+    }
 
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    //! Direct unit-tests for the `run_vacuum_into`
-    //! and `run_reattach_file` worker bodies. Each test exercises the
-    //! helper synchronously against a bare `rusqlite::Connection` (no
-    //! session actor, no compio runtime) — the goal is to pin the SQL
-    //! shape + the `std::fs::rename` swap + the DETACH/rename/ATTACH
-    //! ordering, not the end-to-end flow (the integration tests in
-    //! `tests/sqlite_integration.rs` cover the actor path).
-    //!
-    //! All tests run on a `tempfile::TempDir` so the on-disk artefacts
-    //! clean up on drop.
+    //! Direct unit tests for the worker-side bodies and the wrap pre-check.
+    //! The actor-level protocol (two connections, reservations, cancellation)
+    //! is exercised end to end in `tests/sqlite_integration.rs`, which is the
+    //! only place a real actor thread runs.
+
     use super::*;
     use rusqlite::Connection;
 
     fn count_rows(conn: &Connection, alias_or_main: &str, table: &str) -> i64 {
-        // `alias_or_main` is either `"main"` (the main DB) or a quoted
-        // alias like `"my_app"`. We accept the caller-formatted form
-        // because the tests want to exercise both shapes.
         let sql = format!("SELECT COUNT(*) FROM {alias_or_main}.{table}");
         conn.query_row(&sql, [], |row| row.get::<_, i64>(0)).unwrap()
     }
@@ -1169,19 +2081,13 @@ mod tests {
         let live = dir.path().join("src.sqlite");
         let snap = dir.path().join("snap.sqlite");
 
-        // 1. Seed the live file with one row in WAL mode.
         let conn = Connection::open(&live).unwrap();
         conn.execute_batch("PRAGMA journal_mode = WAL;").unwrap();
-        conn.execute_batch(
-            "CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1), (2), (3);",
-        )
-        .unwrap();
+        conn.execute_batch("CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1), (2), (3);")
+            .unwrap();
 
-        // 2. `VACUUM INTO` the main DB to `snap.sqlite`.
-        run_vacuum_into(&conn, None, snap.to_str().unwrap())
-            .expect("VACUUM INTO main db");
+        run_vacuum_into(&conn, None, snap.to_str().unwrap()).expect("VACUUM INTO main db");
 
-        // 3. The snap file must exist and contain the same rows.
         assert!(snap.exists(), "VACUUM INTO must produce the dest file");
         let snap_conn = Connection::open(&snap).unwrap();
         let count = snap_conn
@@ -1197,39 +2103,21 @@ mod tests {
         let app_b_path = dir.path().join("zs-b.sqlite");
         let snap = dir.path().join("snap.sqlite");
 
-        // Seed two per-app files independently first.
         {
             let a = Connection::open(&app_a_path).unwrap();
-            a.execute_batch(
-                "CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (10), (20);",
-            )
-            .unwrap();
+            a.execute_batch("CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (10), (20);")
+                .unwrap();
             let b = Connection::open(&app_b_path).unwrap();
-            b.execute_batch(
-                "CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1000);",
-            )
-            .unwrap();
+            b.execute_batch("CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1000);")
+                .unwrap();
         }
 
-        // Open a fresh control connection and ATTACH both apps.
         let conn = Connection::open_in_memory().unwrap();
-        let attach_a = format!(
-            "ATTACH DATABASE '{}' AS \"a\"",
-            app_a_path.to_str().unwrap().replace('\'', "''")
-        );
-        let attach_b = format!(
-            "ATTACH DATABASE '{}' AS \"b\"",
-            app_b_path.to_str().unwrap().replace('\'', "''")
-        );
-        conn.execute_batch(&attach_a).unwrap();
-        conn.execute_batch(&attach_b).unwrap();
+        run_attach(&conn, "a", app_a_path.to_str().unwrap()).unwrap();
+        run_attach(&conn, "b", app_b_path.to_str().unwrap()).unwrap();
 
-        // VACUUM "a" INTO snap — captures only app-a's content.
-        run_vacuum_into(&conn, Some("a"), snap.to_str().unwrap())
-            .expect("VACUUM 'a' INTO snap");
+        run_vacuum_into(&conn, Some("a"), snap.to_str().unwrap()).expect("VACUUM 'a' INTO snap");
 
-        // Open the snap as a standalone DB and confirm: it sees t with
-        // 2 rows (a's content), NOT b's 1 row.
         let snap_conn = Connection::open(&snap).unwrap();
         let count = snap_conn
             .query_row("SELECT COUNT(*) FROM t", [], |r| r.get::<_, i64>(0))
@@ -1239,28 +2127,15 @@ mod tests {
 
     #[test]
     fn vacuum_into_escapes_single_quote_in_path() {
-        // A path with an embedded `'` must be SQL-escaped to `''`. We
-        // can't actually create a file with a `'` in every test
-        // environment, but we CAN verify the SQL passes prepare —
-        // SQLite rejects an unescaped `'` with a syntax error at the
-        // statement boundary. Using a non-existent dir with a quoted
-        // path proves the escape; the engine then fails opening the
-        // file, which classifies as a different error class than
-        // syntax error.
+        // An unescaped `'` would surface as a `near "x": syntax error` from
+        // rusqlite's prepare. The path below does not exist, so a correctly
+        // escaped statement fails at open-time instead - a different error
+        // class, which is what we assert on.
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE t (x);").unwrap();
 
-        // The path itself doesn't have to be writable for the SQL-
-        // shape assertion: an unescaped `'` would surface as a
-        // `near "x": syntax error` from rusqlite's prepare; an escape
-        // bug would also surface that same error class. We compare
-        // against the well-formed error class instead.
         let bad_path = "/nonexistent/dir/x'y.sqlite";
         let result = run_vacuum_into(&conn, None, bad_path);
-        // The path doesn't exist so the engine fails on open, NOT on
-        // syntax. The DbError variant returned is some Internal /
-        // Configuration variant carrying an "unable to open" message.
-        // Any other variant means the escape was wrong.
         match result {
             Err(e) => {
                 let msg = format!("{e}");
@@ -1269,62 +2144,51 @@ mod tests {
                     "single-quote escape failed; SQL syntax error surfaced: {msg}"
                 );
             }
-            Ok(()) => panic!(
-                "VACUUM INTO into a nonexistent directory must fail at open-time"
-            ),
+            Ok(()) => panic!("VACUUM INTO into a nonexistent directory must fail at open-time"),
         }
     }
 
     #[test]
-    fn reattach_file_atomic_swap_round_trip() {
+    fn reattach_file_atomic_swap_round_trip_across_both_connections() {
         let dir = tempfile::tempdir().unwrap();
         let live_path = dir.path().join("zs-app_demo.sqlite");
         let temp_path = dir.path().join("snap-restore.sqlite");
 
-        // Build the LIVE per-app file with one row.
         {
             let live = Connection::open(&live_path).unwrap();
-            live.execute_batch(
-                "CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1);",
-            )
-            .unwrap();
+            live.execute_batch("CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1);")
+                .unwrap();
         }
-        // Build the TEMP (snapshot-to-restore) file with THREE rows.
-        // Restore semantics: after `run_reattach_file`, the live file
-        // must contain the temp file's content.
         {
             let tmp = Connection::open(&temp_path).unwrap();
             tmp.execute_batch(
-                "CREATE TABLE t (x INTEGER); \
-                 INSERT INTO t VALUES (10), (20), (30);",
+                "CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (10), (20), (30);",
             )
             .unwrap();
         }
 
-        // Control session ATTACHes the live file under alias "app_demo".
-        let conn = Connection::open_in_memory().unwrap();
-        let attach_live = format!(
-            "ATTACH DATABASE '{}' AS \"app_demo\"",
-            live_path.to_str().unwrap().replace('\'', "''")
-        );
-        conn.execute_batch(&attach_live).unwrap();
-        // Pre-restore: live alias sees 1 row.
-        assert_eq!(count_rows(&conn, "\"app_demo\"", "t"), 1);
+        let op = Connection::open_in_memory().unwrap();
+        let tx = Connection::open_in_memory().unwrap();
+        run_attach(&op, "app_demo", live_path.to_str().unwrap()).unwrap();
+        run_attach(&tx, "app_demo", live_path.to_str().unwrap()).unwrap();
+        assert_eq!(count_rows(&op, "\"app_demo\"", "t"), 1);
+        assert_eq!(count_rows(&tx, "\"app_demo\"", "t"), 1);
 
-        // Execute the swap.
         run_reattach_file(
-            &conn,
+            &op,
+            &tx,
             "app_demo",
             temp_path.to_str().unwrap(),
             live_path.to_str().unwrap(),
         )
         .expect("reattach_file swap");
 
-        // Post-restore: live alias sees 3 rows (temp file's content).
-        assert_eq!(count_rows(&conn, "\"app_demo\"", "t"), 3);
-        // Temp path no longer exists — rename consumed it.
+        // BOTH connections must see the restored content. Detaching only one
+        // would leave the other bound to the obsolete inode, which is the
+        // failure SC-2's `DetachApp` bullet names.
+        assert_eq!(count_rows(&op, "\"app_demo\"", "t"), 3);
+        assert_eq!(count_rows(&tx, "\"app_demo\"", "t"), 3);
         assert!(!temp_path.exists(), "rename must consume temp file");
-        // Live path still exists (now carries the new content).
         assert!(live_path.exists(), "live path must exist post-restore");
     }
 
@@ -1342,12 +2206,12 @@ mod tests {
                 .unwrap();
         }
 
-        // Open an in-memory conn but DON'T attach any alias — DETACH
-        // will fail because the alias is unknown.
-        let conn = Connection::open_in_memory().unwrap();
+        let op = Connection::open_in_memory().unwrap();
+        let tx = Connection::open_in_memory().unwrap();
 
         let result = run_reattach_file(
-            &conn,
+            &op,
+            &tx,
             "never_attached",
             temp.to_str().unwrap(),
             live.to_str().unwrap(),
@@ -1356,7 +2220,6 @@ mod tests {
             matches!(result, Err(DbError::Internal { .. })),
             "DETACH-side failure must surface as Internal; got {result:?}"
         );
-        // Both files untouched.
         assert!(temp.exists(), "temp must remain when DETACH fails");
         assert!(live.exists(), "live must remain when DETACH fails");
     }
@@ -1369,7 +2232,8 @@ mod tests {
             .unwrap();
 
         let err = run_query(&conn, "SELECT payload FROM t", &[])
-            .expect_err("untyped query path must refuse BLOB cells");
+            .expect_err("untyped query path must refuse BLOB cells")
+            .into_db();
         match err {
             DbError::Internal { message } => {
                 assert!(
@@ -1382,6 +2246,45 @@ mod tests {
                 );
             }
             other => panic!("expected Internal error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_wrap_precheck_refuses_every_statement_sqlite_bars_from_a_transaction() {
+        let refused = [
+            "PRAGMA journal_mode = WAL",
+            "VACUUM",
+            "VACUUM INTO 'x'",
+            "ATTACH DATABASE 'f' AS \"a\"",
+            "DETACH DATABASE \"a\"",
+            "BEGIN",
+            "COMMIT",
+            "ROLLBACK",
+            "SAVEPOINT zs_sp_1",
+            "RELEASE SAVEPOINT zs_sp_1",
+            "CREATE TABLE t (x); PRAGMA foreign_keys = OFF;",
+        ];
+        assert!(!refused.is_empty(), "the refusal set must not be empty");
+        for sql in refused {
+            assert!(
+                !permits_explicit_transaction(sql),
+                "{sql:?} must not be wrapped in BEGIN DEFERRED"
+            );
+        }
+
+        let wrapped = [
+            "INSERT INTO t (x) VALUES (?)",
+            "SELECT * FROM t",
+            "CREATE TABLE t (x INTEGER); CREATE INDEX i ON t (x);",
+            "UPDATE t SET x = 1 WHERE x = 2",
+            "  delete from t  ",
+        ];
+        assert!(!wrapped.is_empty(), "the wrapped set must not be empty");
+        for sql in wrapped {
+            assert!(
+                permits_explicit_transaction(sql),
+                "{sql:?} should be wrapped in BEGIN DEFERRED"
+            );
         }
     }
 }

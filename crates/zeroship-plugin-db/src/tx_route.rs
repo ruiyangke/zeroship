@@ -116,12 +116,18 @@ impl TxRoute {
     /// a transaction commit unilaterally, which is the mirror image of the
     /// defect this type fixes.
     ///
-    /// What this does NOT buy on the dev tier: SQLite runs the whole app on
-    /// one connection (`backend::sqlite::SqliteBackend`'s writer actor), so
-    /// a correctly pool-routed write still executes inside whatever
-    /// transaction that connection is holding. The decision is right on
-    /// both tiers; only Postgres has somewhere else to send it. Measured
-    /// and recorded in `docs/reference/sqlite-divergences.md`.
+    /// This used to buy nothing on the dev tier: SQLite ran the whole app on
+    /// one connection, so a correctly pool-routed write still executed inside
+    /// whatever transaction that connection was holding, and died with its
+    /// `ROLLBACK`. SC-2 Decision 1 retired that on 2026-08-27 - the actor now
+    /// keeps `tx_conn` and `op_conn` per session, so both tiers have somewhere
+    /// else to send it. The `docs/reference/sqlite-divergences.md` row is
+    /// marked retired in the same change.
+    ///
+    /// What SQLite still cannot give, and no number of connections would: an
+    /// autocommit *write* contends for the single writer lock an open
+    /// transaction holds, and waits out `busy_timeout` before reporting lock
+    /// contention. Reads are unaffected.
     pub(crate) fn in_tx(&self) -> bool {
         self.in_tx
     }

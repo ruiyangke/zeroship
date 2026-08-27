@@ -37,6 +37,16 @@ const SQLITE_BUSY_RECOVERY: i32 = 261;
 const SQLITE_BUSY_SNAPSHOT: i32 = 517;
 const SQLITE_BUSY_TIMEOUT: i32 = 773;
 
+/// `SQLITE_INTERRUPT` (9). The result code `sqlite3_interrupt` produces, and
+/// therefore the one every platform-issued cancellation arrives as.
+///
+/// It has no extended variants, so the primary code is the whole set. Until
+/// SC-2 this string appeared **zero** times anywhere in `crates/` or `libs/`,
+/// which meant a cancellation the platform asked for fell through to the
+/// catch-all and surfaced as `Transient` - indistinguishable from a real fault
+/// at exactly the moment an operator is trying to understand a timeout.
+const SQLITE_INTERRUPT: i32 = 9;
+
 const SQLITE_CONSTRAINT_CHECK: i32 = 275;
 const SQLITE_CONSTRAINT_FOREIGNKEY: i32 = 787;
 const SQLITE_CONSTRAINT_NOTNULL: i32 = 1299;
@@ -56,6 +66,27 @@ pub(crate) fn from_sqlite(e: rusqlite::Error) -> DbError {
     let msg = format!("db: {e}");
 
     match &e {
+        // SQLITE_INTERRUPT — a cancellation the platform asked for, not a
+        // fault. Without this arm it falls through to the catch-all and
+        // surfaces as `Transient`, indistinguishable from a real fault at
+        // exactly the moment an operator is trying to understand a timeout.
+        //
+        // Its position among the other arms is NOT load-bearing - 9 is in no
+        // other arm's set - so do not read the ordering as a guard. What is
+        // load-bearing is that the wire code equals
+        // [`crate::backend::sqlite::reservation::CANCELLED_CODE`], the code the
+        // actor's terminal classifier reports: a caller cannot tell, and does
+        // not need to tell, which of the two produced it.
+        rusqlite::Error::SqliteFailure(ffi_err, _)
+            if ffi_err.extended_code == SQLITE_INTERRUPT =>
+        {
+            DbError::Coded {
+                code: crate::backend::sqlite::reservation::CANCELLED_CODE.to_string(),
+                message: msg,
+                hint: None,
+            }
+        }
+
         // SQLITE_BUSY family — the SQLite analogue of PG's
         // LOCK_NOT_AVAILABLE / OBJECT_IN_USE. The SDK already
         // branches on `code = "lock_not_available"` for this class;
@@ -247,6 +278,45 @@ mod tests {
         match db {
             DbError::Internal { .. } => {}
             other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    /// The arm SC-2 records as absent: without it a cancellation the platform
+    /// asked for is reported as an opaque `Transient` database error.
+    #[test]
+    fn interrupt_maps_to_the_cancellation_code_not_a_transient_fault() {
+        // The LITERAL 9, not `SQLITE_INTERRUPT`. Feeding the constant to the
+        // arm that matches on it makes the test measure nothing: mutating the
+        // constant to an unreachable value moves the input with the matcher
+        // and the test stays green. Verified against
+        // https://www.sqlite.org/rescode.html - `SQLITE_INTERRUPT` is 9, a
+        // primary result code with no extended variants.
+        assert_eq!(SQLITE_INTERRUPT, 9, "SQLITE_INTERRUPT is 9 in SQLite's ABI");
+        let db = from_sqlite(synth(9));
+        match db {
+            DbError::Coded { code, .. } => assert_eq!(
+                code,
+                crate::backend::sqlite::reservation::CANCELLED_CODE,
+                "SQLITE_INTERRUPT must report the cancellation code"
+            ),
+            other => panic!(
+                "SQLITE_INTERRUPT must not fall through to the catch-all; got {other:?}"
+            ),
+        }
+    }
+
+    /// The control that differs in one variable: a neighbouring result code
+    /// with no cancellation meaning must still be `Transient`. Without this,
+    /// an arm that matched everything would pass the test above.
+    #[test]
+    fn a_neighbouring_result_code_is_still_transient() {
+        // SQLITE_LOCKED (6) and SQLITE_NOMEM (7) bracket SQLITE_INTERRUPT (9)
+        // without being cancellations. SQLITE_BUSY (5) has its own arm.
+        for code in [6, 7, 10] {
+            match from_sqlite(synth(code)) {
+                DbError::Transient { .. } => {}
+                other => panic!("code {code} must stay Transient, got {other:?}"),
+            }
         }
     }
 

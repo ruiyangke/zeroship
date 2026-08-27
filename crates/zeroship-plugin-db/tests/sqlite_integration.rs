@@ -30,6 +30,8 @@ mod support;
 mod parity;
 
 use zeroship_plugin_db::backend::sqlite::SqliteBackend;
+use zeroship_plugin_db::backend::sqlite::reservation::TerminalOutcome;
+use zeroship_plugin_db::backend::sqlite::session::TerminalIntent;
 use zeroship_plugin_db::backend::{
     BackendHandle, ChangeStream, IndexBuilder, LockManager, LockScope,
     SchemaIntrospect, SqlExecutor,
@@ -422,15 +424,12 @@ fn lock_try_acquire_blocks_second() {
             .expect("first acquire_advisory_lock");
 
         // A try_acquire with the same `(key1, key2)` must observe the
-        // slot as held — `Ok(false)` is the contended return. We use
-        // a fresh handle (from `acquire_dedicated_client`) to mirror
-        // the "different client, same keys" intent of the plan spec;
-        // SqliteBackend ignores the client argument by design (§7.2)
-        // but the call shape stays faithful to the PG side.
-        let other_client = backend
-            .acquire_dedicated_client()
-            .await
-            .expect("acquire other client");
+        // slot as held — `Ok(false)` is the contended return. The second
+        // handle comes from `autocommit_client()`, which is a handle on the
+        // OTHER connection: `acquire_dedicated_client` is now the exclusive
+        // `tx_conn` reservation and a second one is refused, so asking for it
+        // here would measure lane admission rather than lock contention.
+        let other_client = backend.autocommit_client();
         let got = backend
             .try_acquire_advisory_lock(&other_client, "key1", "key2")
             .await
@@ -6332,10 +6331,10 @@ async fn read_audit_rows(
     app_id: &str,
 ) -> Vec<(String, String, String)> {
     use zeroship_plugin_db::backend::DialectBuilder as _;
-    let client = backend
-        .acquire_dedicated_client()
-        .await
-        .expect("acquire client");
+    // A read: it belongs on `op_conn`, not on the exclusive `tx_conn`
+    // reservation. Asking for the transaction lane here contends with whatever
+    // the unmask dispatch itself is holding.
+    let client = backend.autocommit_client();
     let q_app = backend.quote_ident(app_id);
     let sql = format!(
         r#"SELECT outcome, actor_role, classification
@@ -9848,5 +9847,238 @@ fn p6c_data_plane_reaches_the_app_file_without_a_register() {
 // zeroship-side adoption of a pre-existing dev file, which is fine while
 // nothing can create one, and would need re-testing the day something can.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// SC-2 acceptance arms - the two connections, the reservation, the cancellation
+//
+// `docs/proposals/2026-08-26-sc2-sqlite-actor-protocol.md`. These are the arms
+// that need a REAL actor thread, so they live here rather than beside the code.
+//
+// What is still OWED and is deliberately not asserted below:
+//   - `SQLITE_BUSY_SNAPSHOT` on a write upgrade. SC-2 names it as the real
+//     serialization point and records that it has no arm; reaching it needs a
+//     read snapshot held open ACROSS commands, which the autocommit lane
+//     (one reservation per command) cannot express today.
+//   - the terminal classifier's eight rows. They are ruled on directly in
+//     `backend::sqlite::reservation`'s unit tests, with a fault injected at
+//     each terminal statement and `is_autocommit` sampled after.
+// ---------------------------------------------------------------------------
+
+/// A statement that takes far longer than any assertion window below.
+///
+/// A recursive CTE counting to 400 million: pure CPU inside SQLite's VDBE with
+/// no I/O, so `sqlite3_interrupt` is the only thing that ends it early.
+const LONG_RUNNING_SQL: &str = "WITH RECURSIVE c(x) AS (\
+     SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 400000000\
+   ) SELECT COUNT(*) FROM c";
+
+/// The concurrency arm: app A's autocommit **reads** proceed while A holds an
+/// open explicit transaction, and do not observe its uncommitted write.
+///
+/// It says reads deliberately. WAL gives concurrent readers, not concurrent
+/// writers: an autocommit *write* issued here would contend for the single
+/// write lock `tx_conn` is holding and wait out `busy_timeout`. That limit is
+/// real on any number of connections and SC-2 states it in the same breath.
+#[test]
+fn an_autocommit_read_proceeds_while_the_app_holds_an_open_transaction() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        let probe = backend.autocommit_client();
+        backend
+            .pool_exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", &[])
+            .await
+            .expect("create table");
+        backend
+            .pool_exec("INSERT INTO t (v) VALUES ('committed')", &[])
+            .await
+            .expect("seed");
+
+        let tx = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire tx client");
+        backend.client_exec(&tx, "BEGIN", &[]).await.expect("BEGIN");
+        backend
+            .client_exec(&tx, "INSERT INTO t (v) VALUES ('uncommitted')", &[])
+            .await
+            .expect("write inside the transaction (takes the write lock)");
+
+        // The read runs on op_conn while tx_conn holds an open write
+        // transaction. Before SC-2 it ran on that same connection and saw the
+        // uncommitted row.
+        let rows = probe
+            .query("SELECT v FROM t ORDER BY id", &[])
+            .await
+            .expect("autocommit read while a transaction is open");
+        assert_eq!(
+            rows.len(),
+            1,
+            "the autocommit read must not observe the open transaction's \
+             uncommitted write; got {rows:?}"
+        );
+        assert_eq!(rows[0][0].as_deref(), Some("committed"));
+
+        backend
+            .client_exec(&tx, "ROLLBACK", &[])
+            .await
+            .expect("ROLLBACK");
+    });
+}
+
+/// A command naming a reservation that does not own its connection is refused
+/// with a typed error - not run on whatever connection is free.
+#[test]
+fn a_command_bearing_a_foreign_reservation_is_refused() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .pool_exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", &[])
+            .await
+            .expect("create table");
+
+        let foreign = backend.unregistered_transaction_client_for_tests();
+        let err = backend
+            .client_exec(&foreign, "INSERT INTO t (v) VALUES ('leaked')", &[])
+            .await
+            .expect_err("a foreign reservation must be refused");
+        match &err {
+            DbError::ValidationFailed { code, .. } => {
+                assert_eq!(*code, "reservation_not_owner", "got {err:?}");
+            }
+            other => panic!("expected a typed reservation refusal, got {other:?}"),
+        }
+
+        // The refusal has to be a refusal, not a warning: nothing ran.
+        let rows = backend
+            .autocommit_client()
+            .query("SELECT COUNT(*) FROM t", &[])
+            .await
+            .expect("count after the refusal");
+        assert_eq!(
+            rows[0][0].as_deref(),
+            Some("0"),
+            "the refused command must not have executed"
+        );
+    });
+}
+
+/// The interrupt arm: cancellation takes effect **during** a long-running
+/// statement, not after it.
+///
+/// Pre-SC-2 the actor's own comment said the opposite - "the SQL has already
+/// committed (or rolled back) by then" - because nothing could reach a running
+/// statement.
+///
+/// **What proves "during" is the error, not the clock.** `statement_cancelled`
+/// on this path can only come from `SQLITE_INTERRUPT`, and
+/// `sqlite3_interrupt` only produces it against a statement that was
+/// mid-execution. Had the query finished first, the actor would have left
+/// `Running`, `request_cancel` would have returned `Set` with no interrupt
+/// issued, and the query would have returned rows. The elapsed-time assertion
+/// is a backstop for the case where nothing interrupts and the test would
+/// otherwise sit for minutes.
+#[test]
+fn a_cancellation_interrupts_a_statement_that_is_already_running() {
+    run(async {
+        use std::time::{Duration, Instant};
+
+        let (backend, _dir) = fresh_backend();
+        let tx = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire tx client");
+        let cancel = tx
+            .cancel_handle()
+            .expect("a transaction handle must expose a cancel handle");
+
+        let runner = tx.clone();
+        let query =
+            compio::runtime::spawn(async move { runner.query(LONG_RUNNING_SQL, &[]).await });
+
+        // Let the actor reach `Running` and start stepping. The protocol does
+        // not depend on this sleep - the progress latch covers the window
+        // where `Running` is stored but SQLite has not stepped yet - but
+        // sleeping first is what makes this test exercise the *interrupt*
+        // path rather than the pre-start path, which has its own arm.
+        compio::time::sleep(Duration::from_millis(300)).await;
+
+        let started = Instant::now();
+        let outcome = cancel.cancel().await.expect("cancel acknowledged");
+        let query_result = query.await.expect("query task joined");
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(12),
+            "cancellation did not interrupt the running statement; it took {elapsed:?}"
+        );
+        let err = query_result.expect_err("an interrupted query must not return rows");
+        match &err {
+            DbError::Coded { code, .. } => assert_eq!(
+                code, "statement_cancelled",
+                "an interrupt must surface as a cancellation, not an opaque \
+                 database error; got {err:?}"
+            ),
+            other => panic!("expected the cancellation code, got {other:?}"),
+        }
+        assert!(
+            matches!(outcome, TerminalOutcome::Cancelled { .. }),
+            "the actor must acknowledge a cancellation after rolling back; \
+             got {outcome:?}"
+        );
+    });
+}
+
+/// SC-2 case 3: a cancellation arriving after the outcome was decided is a
+/// question, not a command.
+///
+/// The transaction commits; only then is it cancelled. The commit must stand
+/// and the cancellation must report `AlreadyCompleted` - a naive implementation
+/// sends `ROLLBACK` here and destroys a durable write.
+#[test]
+fn a_cancellation_after_commit_does_not_roll_the_commit_back() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .pool_exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", &[])
+            .await
+            .expect("create table");
+
+        let tx = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire tx client");
+        let cancel = tx.cancel_handle().expect("cancel handle");
+        backend.client_exec(&tx, "BEGIN", &[]).await.expect("BEGIN");
+        backend
+            .client_exec(&tx, "INSERT INTO t (v) VALUES ('durable')", &[])
+            .await
+            .expect("insert");
+        let committed = backend
+            .settle_transaction_for_tests(&tx, TerminalIntent::Commit)
+            .await
+            .expect("commit");
+        assert_eq!(committed, TerminalOutcome::Committed);
+
+        let outcome = cancel.cancel().await.expect("cancel acknowledged");
+        assert!(
+            matches!(outcome, TerminalOutcome::AlreadyCompleted(_)),
+            "a cancellation after the terminal was claimed must report \
+             AlreadyCompleted; got {outcome:?}"
+        );
+
+        let rows = backend
+            .autocommit_client()
+            .query("SELECT v FROM t", &[])
+            .await
+            .expect("read after the late cancellation");
+        assert_eq!(
+            rows.len(),
+            1,
+            "the committed write must survive a cancellation that arrived \
+             after the commit; got {rows:?}"
+        );
+        assert_eq!(rows[0][0].as_deref(), Some("durable"));
+    });
+}
 
 

@@ -138,12 +138,37 @@ const VALID_ISOLATION_LEVELS: &[&str] = &[
 ///
 /// Only the PostgreSQL `COMMIT` arm can produce it: SQLite has no such tag, and
 /// a `ROLLBACK` we asked for being answered `ROLLBACK` is the correct outcome.
+///
+/// **The SQLite arm makes the same judgement on different evidence.** There is
+/// no command tag, so the authority is `is_autocommit` sampled after the
+/// statement - never the result code. `Command::Settle` runs it inside the
+/// actor and returns a classified
+/// [`crate::backend::sqlite::reservation::TerminalOutcome`]; see SC-2's
+/// terminal table. A `COMMIT` that returned `Err` does not prove a rollback,
+/// which is why `CommitIndeterminate` exists as an outcome rather than being
+/// folded into failure - the same mistake as L8, made in the other direction.
 async fn exec_terminal_on_tx(
     backend: &crate::backend::BackendHandle,
     client: &crate::context::TxConnection,
     cmd: &str,
 ) -> Result<u64, crate::error::DbError> {
     use crate::context::TxConnection;
+
+    if let (crate::backend::BackendHandle::Sqlite(_), TxConnection::Sqlite(handle)) =
+        (backend, client)
+    {
+        use crate::backend::sqlite::session::TerminalIntent;
+        let intent = match cmd {
+            "COMMIT" => TerminalIntent::Commit,
+            "ROLLBACK" => TerminalIntent::Rollback,
+            other => {
+                return Err(crate::error::DbError::internal(format!(
+                    "db: exec_terminal_on_tx called with a non-terminal statement: {other}"
+                )));
+            }
+        };
+        return handle.settle(intent).await?.into_result().map(|()| 0);
+    }
 
     if let (crate::backend::BackendHandle::Postgres(_), TxConnection::Postgres(pg_client)) =
         (backend, client)
@@ -1229,13 +1254,14 @@ async fn exec_settle_top_level(app_id: &str, success: bool) -> SettleOutcome {
 
     let teardown = TxTeardownGuard::new(app_id.to_string(), client);
     let cmd = if success { "COMMIT" } else { "ROLLBACK" };
-    let mut result = exec_terminal_on_tx(&backend, teardown.client(), cmd).await;
-    if result.is_err() && matches!(teardown.client(), TxConnection::Sqlite(_)) {
-        let fallback = client_exec_on_tx(&backend, teardown.client(), "ROLLBACK", &[]).await;
-        if !success && fallback.is_ok() {
-            result = Ok(0);
-        }
-    }
+    // No SQLite fallback `ROLLBACK` here any more. The terminal classifier
+    // inside the actor already issues exactly one when a `COMMIT` failed with
+    // the connection still in a transaction, and it decides the outcome from
+    // `is_autocommit` rather than from the result code. Re-sending `ROLLBACK`
+    // from here would arrive after the reservation was retired and be refused
+    // as a non-owner - turning a correctly classified `RolledBack` into a
+    // spurious error.
+    let result = exec_terminal_on_tx(&backend, teardown.client(), cmd).await;
     let client = teardown.into_inner();
     drop(client);
     // The terminal statement has run and the connection is gone: the next
@@ -1451,14 +1477,19 @@ mod tests {
             .expect("expected Undefined for ok+no-body");
     }
 
+    /// The probe reads and seeds through `op_conn`; writes that belong to the
+    /// transaction go through [`run_on_tx_conn`], which is the only path onto
+    /// `tx_conn`.
+    ///
+    /// Before SC-2 these tests used `acquire_dedicated_client()` for the probe
+    /// AND drove the transaction's writes through it, which worked only
+    /// because both were the same single connection. That coupling is the
+    /// divergence SC-2 retires, so the probe now names the lane it wants.
     #[test]
     fn sqlite_top_level_begin_ignores_isolation_and_commits() {
         run(async {
             let (backend, _dir, _reset) = install_sqlite_backend_for_test();
-            let probe = backend
-                .acquire_dedicated_client()
-                .await
-                .expect("acquire sqlite probe");
+            let probe = backend.autocommit_client();
             backend
                 .client_exec(
                     &probe,
@@ -1471,8 +1502,7 @@ mod tests {
             exec_begin_or_savepoint(false, Some("SERIALIZABLE"), "app_sqlite")
                 .await
                 .expect("begin sqlite tx");
-            backend
-                .client_exec(&probe, "INSERT INTO notes (title) VALUES ('kept')", &[])
+            run_on_tx_conn("app_sqlite", "INSERT INTO notes (title) VALUES ('kept')")
                 .await
                 .expect("insert inside sqlite tx");
 
@@ -1494,10 +1524,7 @@ mod tests {
     fn sqlite_top_level_reject_path_actively_rolls_back() {
         run(async {
             let (backend, _dir, _reset) = install_sqlite_backend_for_test();
-            let probe = backend
-                .acquire_dedicated_client()
-                .await
-                .expect("acquire sqlite probe");
+            let probe = backend.autocommit_client();
             backend
                 .client_exec(
                     &probe,
@@ -1510,10 +1537,12 @@ mod tests {
             exec_begin_or_savepoint(false, None, "app_sqlite")
                 .await
                 .expect("begin sqlite tx");
-            backend
-                .client_exec(&probe, "INSERT INTO notes (title) VALUES ('rolled-back')", &[])
-                .await
-                .expect("insert inside sqlite tx");
+            run_on_tx_conn(
+                "app_sqlite",
+                "INSERT INTO notes (title) VALUES ('rolled-back')",
+            )
+            .await
+            .expect("insert inside sqlite tx");
 
             match exec_settle("app_sqlite", false, None).await {
                 SettleOutcome::Ok => {}
@@ -1529,14 +1558,79 @@ mod tests {
         });
     }
 
+    /// **The divergence SC-2 Decision 1 retires**, stated as an assertion.
+    ///
+    /// `tx_route.rs` used to carry: "SQLite runs the whole app on one
+    /// connection ... so a correctly pool-routed write still executes inside
+    /// whatever transaction that connection is holding." That is what this
+    /// test measures: an autocommit write issued while the app's OWN explicit
+    /// transaction is open, followed by that transaction's `ROLLBACK`.
+    ///
+    /// On one connection the autocommit row is destroyed - the pre-SC-2 tree
+    /// leaves `0` rows. With `op_conn` and `tx_conn` split it survives and the
+    /// transaction's own row does not.
+    ///
+    /// It says autocommit **write** and issues it before the transaction takes
+    /// the write lock, deliberately. WAL gives concurrent readers, not
+    /// concurrent writers: an autocommit write racing a `tx_conn` that already
+    /// holds the write lock still waits out `busy_timeout`, and no number of
+    /// connections changes that.
+    #[test]
+    fn an_autocommit_write_survives_the_apps_own_transaction_rollback() {
+        run(async {
+            let (backend, _dir, _reset) = install_sqlite_backend_for_test();
+            let probe = backend.autocommit_client();
+            backend
+                .client_exec(
+                    &probe,
+                    "CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT)",
+                    &[],
+                )
+                .await
+                .expect("create table");
+
+            exec_begin_or_savepoint(false, None, "app_sqlite")
+                .await
+                .expect("begin sqlite tx");
+
+            // No transaction anywhere in this call's async scope.
+            backend
+                .client_exec(
+                    &probe,
+                    "INSERT INTO notes (title) VALUES ('autocommit')",
+                    &[],
+                )
+                .await
+                .expect("autocommit insert while a transaction is open");
+
+            run_on_tx_conn("app_sqlite", "INSERT INTO notes (title) VALUES ('doomed')")
+                .await
+                .expect("insert inside sqlite tx");
+
+            match exec_settle("app_sqlite", false, None).await {
+                SettleOutcome::Ok => {}
+                other => panic!("expected Ok settle outcome, got {other:?}"),
+            }
+
+            let rows = probe
+                .query_internal("SELECT title FROM notes ORDER BY id", &[])
+                .await
+                .expect("read notes after rollback");
+            assert_eq!(
+                rows.len(),
+                1,
+                "the autocommit write must survive the transaction's ROLLBACK \
+                 and the transaction's own write must not; got {rows:?}"
+            );
+            assert_eq!(rows[0][0].as_deref(), Some("autocommit"));
+        });
+    }
+
     #[test]
     fn dropped_atomic_write_frame_rolls_back_top_level_sqlite() {
         run(async {
             let (backend, _dir, _reset) = install_sqlite_backend_for_test();
-            let probe = backend
-                .acquire_dedicated_client()
-                .await
-                .expect("acquire sqlite probe");
+            let probe = backend.autocommit_client();
             backend
                 .client_exec(
                     &probe,
@@ -1549,14 +1643,12 @@ mod tests {
             let frame = AtomicWriteFrame::begin(TxRoute::pool_for_tests("app_sqlite"))
                 .await
                 .expect("begin atomic write frame");
-            backend
-                .client_exec(
-                    &probe,
-                    "INSERT INTO notes (title) VALUES ('must-rollback')",
-                    &[],
-                )
-                .await
-                .expect("insert inside atomic write frame");
+            run_on_tx_conn(
+                "app_sqlite",
+                "INSERT INTO notes (title) VALUES ('must-rollback')",
+            )
+            .await
+            .expect("insert inside atomic write frame");
             drop(frame);
 
             let rows = probe
