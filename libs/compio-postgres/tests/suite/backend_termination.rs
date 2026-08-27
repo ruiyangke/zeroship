@@ -277,6 +277,85 @@ async fn a_backend_killed_mid_copy_fails_the_copy_and_releases_the_connection() 
     );
 }
 
+/// A server ErrorResponse that arrived before COPY's producer disconnected is
+/// the diagnosis. `finish` must not replace its SQLSTATE with a local closed
+/// error merely because the connection task has retired by the time it polls.
+///
+/// RED: `CopyInSink::poll_finish` first polls its disconnected sender and
+/// returns `Error::closed()` without reading the already queued FATAL response.
+#[compio::test]
+async fn copy_finish_preserves_a_queued_fatal_response() {
+    compio::time::timeout(WATCHDOG, async {
+        let url = test_url();
+        let baseline = compio_postgres::live_connections();
+
+        let (victim, victim_connection) =
+            match compio_postgres::connect(&url, common::suite_tls()).await {
+                Ok(pair) => pair,
+                Err(error) => common::postgres_unreachable(&url, &error),
+            };
+        let victim_driver = compio::runtime::spawn(async move { victim_connection.run().await });
+        let (killer, killer_connection) =
+            match compio_postgres::connect(&url, common::suite_tls()).await {
+                Ok(pair) => pair,
+                Err(error) => common::postgres_unreachable(&url, &error),
+            };
+        let killer_driver = compio::runtime::spawn(async move { killer_connection.run().await });
+
+        let pid: i32 = victim
+            .query_one_scalar("SELECT pg_backend_pid()::int4", &[])
+            .await
+            .expect("read the victim's backend pid");
+        victim
+            .batch_execute("CREATE TEMPORARY TABLE cpg_copy_fatal (n int)")
+            .await
+            .expect("create the COPY target");
+
+        let sink = victim
+            .copy_in::<_, Bytes>("COPY cpg_copy_fatal (n) FROM STDIN")
+            .await
+            .expect("enter COPY input mode");
+        let mut sink = std::pin::pin!(sink);
+        sink.as_mut()
+            .send(Bytes::from_static(b"1\n"))
+            .await
+            .expect("send a row before terminating the backend");
+
+        terminate(&killer, pid).await;
+        compio::time::timeout(SETTLE_TIMEOUT, async {
+            while !victim.is_closed() {
+                compio::time::sleep(POLL_INTERVAL).await;
+            }
+        })
+        .await
+        .expect("the terminated COPY connection did not retire");
+
+        let error = sink
+            .as_mut()
+            .finish()
+            .await
+            .expect_err("COPY completed after PostgreSQL terminated its backend");
+        if error.code() != Some(&SqlState::ADMIN_SHUTDOWN) {
+            panic!(
+                "COPY IN lost SQLSTATE 57P01 after backend termination: {}",
+                common::error_chain(&error)
+            );
+        }
+
+        drop(victim);
+        let _ = victim_driver.await;
+        drop(killer);
+        let _ = killer_driver.await;
+        assert_eq!(
+            compio_postgres::live_connections(),
+            baseline,
+            "the queued-FATAL COPY test stranded a connection"
+        );
+    })
+    .await
+    .expect("the queued-FATAL COPY test exceeded its watchdog");
+}
+
 /// A backend killed while rows are still streaming must fail the stream and
 /// give the socket back.
 #[compio::test]
