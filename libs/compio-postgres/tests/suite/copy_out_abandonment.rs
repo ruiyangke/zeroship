@@ -149,3 +149,43 @@ async fn copy_out_error_response_terminates_the_stream() {
 
     assert_answers_its_own_question(&client, 616_161, "a failed COPY OUT").await;
 }
+
+#[compio::test]
+async fn binary_copy_out_error_response_terminates_the_stream() {
+    use compio_postgres::binary_copy::BinaryCopyOutStream;
+    use compio_postgres::types::Type;
+
+    let client = connected().await;
+    let raw = client
+        .copy_out(
+            "COPY (SELECT 10 / (3 - g) FROM generate_series(1, 3) g) \
+             TO STDOUT (FORMAT binary)",
+        )
+        .await
+        .expect("start the failing binary copy out");
+    let stream = BinaryCopyOutStream::new(raw, &[Type::INT4]);
+    futures_util::pin_mut!(stream);
+
+    let server_error = loop {
+        match stream.next().await {
+            Some(Ok(_)) => {}
+            Some(Err(error)) => break error,
+            None => panic!("binary COPY OUT ended without reporting its server error"),
+        }
+    };
+    assert_eq!(
+        server_error.code(),
+        Some(&compio_postgres::error::SqlState::DIVISION_BY_ZERO),
+        "binary COPY OUT reported the wrong server error: {server_error}"
+    );
+
+    match stream.next().await {
+        None => {}
+        Some(Ok(_)) => panic!("binary COPY OUT yielded a row after its terminal ErrorResponse"),
+        Some(Err(error)) => {
+            panic!("binary COPY OUT yielded another item after its terminal ErrorResponse: {error}")
+        }
+    }
+
+    assert_answers_its_own_question(&client, 717_171, "a failed binary COPY OUT").await;
+}

@@ -244,6 +244,8 @@ pin_project! {
         header: Option<Header>,
         // Binary EOF is not clean stream EOF until CopyOut sees CopyDone.
         trailer_seen: bool,
+        // The underlying COPY protocol ended with EOF or ErrorResponse.
+        terminal: bool,
     }
 }
 
@@ -255,6 +257,7 @@ impl BinaryCopyOutStream {
             types: Arc::new(types.to_vec()),
             header: None,
             trailer_seen: false,
+            terminal: false,
         }
     }
 }
@@ -264,6 +267,10 @@ impl Stream for BinaryCopyOutStream {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
+
+        if *this.terminal {
+            return Poll::Ready(None);
+        }
 
         loop {
             if *this.trailer_seen {
@@ -277,14 +284,23 @@ impl Stream for BinaryCopyOutStream {
                             ),
                         )))));
                     }
-                    Some(Err(error)) => return Poll::Ready(Some(Err(error))),
-                    None => return Poll::Ready(None),
+                    Some(Err(error)) => {
+                        *this.terminal = true;
+                        return Poll::Ready(Some(Err(error)));
+                    }
+                    None => {
+                        *this.terminal = true;
+                        return Poll::Ready(None);
+                    }
                 }
             }
 
             let chunk = match ready!(this.stream.as_mut().poll_next(cx)) {
                 Some(Ok(chunk)) => chunk,
-                Some(Err(e)) => return Poll::Ready(Some(Err(e))),
+                Some(Err(e)) => {
+                    *this.terminal = true;
+                    return Poll::Ready(Some(Err(e)));
+                }
                 // The protocol exchange ended cleanly - CopyDone reached
                 // CommandComplete - but the binary stream never produced its
                 // -1 trailer. That is malformed DATA on a healthy connection,
@@ -292,6 +308,7 @@ impl Stream for BinaryCopyOutStream {
                 // reads `is_closed()` to decide whether to discard a session,
                 // and would throw away one that is still perfectly usable.
                 None => {
+                    *this.terminal = true;
                     return Poll::Ready(Some(Err(Error::parse(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "binary COPY stream ended without its trailer",
