@@ -6,7 +6,7 @@ use crate::types::{FromSql, IsNull, ToSql, Type, WrongType};
 use crate::{CopyInSink, CopyOutStream, Error, slice_iter};
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use futures_util::{Sink, SinkExt, Stream};
+use futures_util::{Sink, Stream};
 use pin_project_lite::pin_project;
 use postgres_types::BorrowToSql;
 use std::io;
@@ -19,6 +19,13 @@ use std::task::{Context, Poll, ready};
 const MAGIC: &[u8] = b"PGCOPY\n\xff\r\n\0";
 const HEADER_LEN: usize = MAGIC.len() + 4 + 4;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BinaryCopyFinishState {
+    Open,
+    FrameQueued,
+    FrameFlushed,
+}
+
 pin_project! {
     /// A type which serializes rows into the PostgreSQL binary copy format.
     ///
@@ -28,6 +35,7 @@ pin_project! {
         sink: CopyInSink<Bytes>,
         types: Vec<Type>,
         buf: BytesMut,
+        finish_state: BinaryCopyFinishState,
     }
 }
 
@@ -43,6 +51,7 @@ impl BinaryCopyInWriter {
             sink,
             types: types.to_vec(),
             buf,
+            finish_state: BinaryCopyFinishState::Open,
         }
     }
 
@@ -67,6 +76,7 @@ impl BinaryCopyInWriter {
         I::IntoIter: ExactSizeIterator,
     {
         let mut this = self.project();
+        ensure_binary_copy_writable(*this.finish_state)?;
 
         let values = values.into_iter();
         assert!(
@@ -105,10 +115,45 @@ impl BinaryCopyInWriter {
     pub async fn finish(self: Pin<&mut Self>) -> Result<u64, Error> {
         let mut this = self.project();
 
-        this.buf.put_i16(-1);
-        this.sink.send(this.buf.split().freeze()).await?;
+        send_binary_copy_end(this.sink.as_mut(), this.buf, this.finish_state).await?;
         this.sink.finish().await
     }
+}
+
+fn ensure_binary_copy_writable(state: BinaryCopyFinishState) -> Result<(), Error> {
+    if state == BinaryCopyFinishState::Open {
+        Ok(())
+    } else {
+        Err(Error::copy_in_finished())
+    }
+}
+
+async fn send_binary_copy_end<S>(
+    mut sink: Pin<&mut S>,
+    buf: &mut BytesMut,
+    finish_state: &mut BinaryCopyFinishState,
+) -> Result<(), S::Error>
+where
+    S: Sink<Bytes>,
+{
+    if *finish_state == BinaryCopyFinishState::Open {
+        std::future::poll_fn(|cx| sink.as_mut().poll_ready(cx)).await?;
+
+        // Nothing can cancel between taking the buffered rows and recording
+        // that the sink now owns their frame. Record ownership before
+        // `start_send` as well: an error there does not return the item.
+        buf.put_i16(-1);
+        let frame = buf.split().freeze();
+        *finish_state = BinaryCopyFinishState::FrameQueued;
+        sink.as_mut().start_send(frame)?;
+    }
+
+    if *finish_state == BinaryCopyFinishState::FrameQueued {
+        std::future::poll_fn(|cx| sink.as_mut().poll_flush(cx)).await?;
+        *finish_state = BinaryCopyFinishState::FrameFlushed;
+    }
+
+    Ok(())
 }
 
 async fn send_buffered_rows<S>(
@@ -465,6 +510,7 @@ mod tests {
 
     struct BackpressuredSink {
         ready: bool,
+        flush_ready: bool,
         sent: Vec<Bytes>,
     }
 
@@ -491,7 +537,11 @@ mod tests {
             self: Pin<&mut Self>,
             _cx: &mut Context<'_>,
         ) -> Poll<Result<(), Self::Error>> {
-            Poll::Ready(Ok(()))
+            if self.flush_ready {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
         }
 
         fn poll_close(
@@ -516,6 +566,7 @@ mod tests {
         buf.extend_from_slice(IN_PROGRESS);
         let mut sink = Box::pin(BackpressuredSink {
             ready: false,
+            flush_ready: true,
             sent: Vec::new(),
         });
 
@@ -554,6 +605,94 @@ mod tests {
         expected.extend_from_slice(IN_PROGRESS);
         assert_eq!(sink.sent, [Bytes::from(expected)]);
         assert!(buf.is_empty(), "a transferred frame remained buffered");
+    }
+
+    #[test]
+    fn a_queued_binary_copy_trailer_refuses_more_rows() {
+        assert!(
+            ensure_binary_copy_writable(BinaryCopyFinishState::FrameQueued).is_err(),
+            "binary COPY accepted a row after its trailer was queued"
+        );
+    }
+
+    #[test]
+    fn cancelling_binary_copy_finish_before_readiness_keeps_buffered_rows() {
+        const COMPLETED: &[u8] = b"rows whose writes returned Ok";
+
+        let mut buf = BytesMut::from(COMPLETED);
+        let mut finish_state = BinaryCopyFinishState::Open;
+        let mut sink = Box::pin(BackpressuredSink {
+            ready: false,
+            flush_ready: true,
+            sent: Vec::new(),
+        });
+
+        {
+            let mut sending = Box::pin(send_binary_copy_end(
+                sink.as_mut(),
+                &mut buf,
+                &mut finish_state,
+            ));
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(
+                sending.as_mut().poll(&mut context).is_pending(),
+                "the binary COPY finish fixture did not apply readiness backpressure"
+            );
+        }
+
+        assert_eq!(
+            &buf[..],
+            COMPLETED,
+            "cancelling binary COPY finish discarded completed rows"
+        );
+        assert_eq!(finish_state, BinaryCopyFinishState::Open);
+        assert!(sink.sent.is_empty());
+    }
+
+    #[test]
+    fn retrying_binary_copy_finish_after_enqueue_does_not_duplicate_the_trailer() {
+        let mut buf = BytesMut::from(&b"completed rows"[..]);
+        let mut finish_state = BinaryCopyFinishState::Open;
+        let mut sink = Box::pin(BackpressuredSink {
+            ready: true,
+            flush_ready: false,
+            sent: Vec::new(),
+        });
+
+        {
+            let mut sending = Box::pin(send_binary_copy_end(
+                sink.as_mut(),
+                &mut buf,
+                &mut finish_state,
+            ));
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(
+                sending.as_mut().poll(&mut context).is_pending(),
+                "the binary COPY finish fixture did not park while flushing"
+            );
+        }
+        assert_eq!(sink.sent.len(), 1, "the first trailer was not queued");
+
+        sink.as_mut().get_mut().flush_ready = true;
+        {
+            let mut sending = Box::pin(send_binary_copy_end(
+                sink.as_mut(),
+                &mut buf,
+                &mut finish_state,
+            ));
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(matches!(
+                sending.as_mut().poll(&mut context),
+                Poll::Ready(Ok(()))
+            ));
+        }
+
+        assert_eq!(
+            sink.sent.len(),
+            1,
+            "retrying binary COPY finish duplicated its trailer frame"
+        );
+        assert_eq!(finish_state, BinaryCopyFinishState::FrameFlushed);
     }
 
     /// Build a 19-byte binary-COPY file header: MAGIC + flags (BE i32) +
