@@ -189,3 +189,58 @@ async fn a_failed_copy_stores_no_rows_at_all() {
         .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
         .await;
 }
+
+/// `CommandComplete` precedes the extended-protocol `Sync`. The implicit
+/// transaction can still fail at that boundary when a deferred constraint is
+/// checked, so the provisional row count is not success yet.
+#[compio::test]
+async fn copy_in_waits_for_sync_before_reporting_success() {
+    let client = connected().await;
+    let parent = test_object_name("copy_sync_parent");
+    let child = test_object_name("copy_sync_child");
+    client
+        .batch_execute(&format!(
+            "CREATE TABLE {parent} (id int PRIMARY KEY);
+             CREATE TABLE {child} (
+                 parent_id int REFERENCES {parent} (id)
+                     DEFERRABLE INITIALLY DEFERRED
+             )"
+        ))
+        .await
+        .expect("create the deferred COPY fixture");
+
+    let sink = client
+        .copy_in(&format!("COPY {child} (parent_id) FROM STDIN"))
+        .await
+        .expect("start COPY IN before its deferred constraint is checked");
+    futures_util::pin_mut!(sink);
+    sink.as_mut()
+        .send(Bytes::from_static(b"314159\n"))
+        .await
+        .expect("send the row before its deferred constraint is checked");
+    let result = sink.as_mut().finish().await;
+    assert!(
+        !matches!(result, Ok(1)),
+        "COPY IN reported success before Sync committed its implicit transaction: 1"
+    );
+    let error = result.expect_err("COPY IN accepted a deferred foreign-key violation");
+    assert_eq!(
+        error.code().map(|code| code.code()),
+        Some("23503"),
+        "the Sync failure lost its SQLSTATE: {}",
+        common::error_chain(&error),
+    );
+
+    let stored: i64 = client
+        .query_one_scalar(&format!("SELECT count(*) FROM {child}"), &[])
+        .await
+        .expect("the deferred COPY IN failure poisoned its connection");
+    assert_eq!(
+        stored, 0,
+        "the failed implicit transaction committed its row"
+    );
+
+    let _ = client
+        .batch_execute(&format!("DROP TABLE IF EXISTS {child}, {parent}"))
+        .await;
+}
