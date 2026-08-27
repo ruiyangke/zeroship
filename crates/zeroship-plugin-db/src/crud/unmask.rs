@@ -507,12 +507,12 @@ async fn fetch_and_decrypt(
     // ---- SQLite arm ----
     if let Some(sq) = backend.as_encrypted_column_sqlite() {
         use crate::backend::sqlite::session::TypedCell;
-        use crate::backend::{DialectBuilder as _, EncryptedColumn as _, SqlExecutor as _};
+        use crate::backend::{DialectBuilder as _, EncryptedColumn as _};
         let q_app = sq.quote_ident(app_id);
         let q_coll = sq.quote_ident(&args.collection);
         let q_col = sq.quote_ident(&args.column);
         let sql = format!("SELECT {q_col} FROM {q_app}.{q_coll} WHERE id = ?1");
-        let handle = sq.acquire_dedicated_client().await?;
+        let handle = sq.autocommit_client();
         let typed = handle
             .query_typed_internal(&sql, &[args.row_pk.as_str()])
             .await?;
@@ -602,12 +602,12 @@ async fn fetch_plaintext_parent(app_id: &str, args: &UnmaskFieldArgs) -> Result<
 
     // ---- SQLite arm ----
     if let Some(sq) = backend.as_sqlite() {
-        use crate::backend::{DialectBuilder as _, SqlExecutor as _};
+        use crate::backend::DialectBuilder as _;
         let q_app = sq.quote_ident(app_id);
         let q_coll = sq.quote_ident(&args.collection);
         let q_col = sq.quote_ident(&args.column);
         let sql = format!("SELECT {q_col} FROM {q_app}.{q_coll} WHERE id = ?1");
-        let handle = sq.acquire_dedicated_client().await?;
+        let handle = sq.autocommit_client();
         let rows = handle
             .query_internal(&sql, &[args.row_pk.as_str()])
             .await?;

@@ -49,6 +49,11 @@ pub(crate) mod cdc;
 pub(crate) mod dialect;
 pub(crate) mod error;
 pub(crate) mod lock;
+// SC-2's reservation / cancellation / terminal-classification protocol.
+// Public because the cancellation surface (`SqliteCancelHandle`,
+// `TerminalOutcome`) is the contract a deadline or a dropped caller-side
+// future acts through; the actor in `session` is its only driver.
+pub mod reservation;
 // `pub` under `test-helpers` so the e2e encrypted-column round-trip
 // test in `tests/sqlite_integration.rs` can name `session::TypedCell`
 // for typed BLOB extraction.
@@ -306,7 +311,21 @@ impl SqliteBackend {
                     "SqliteBackend::open: failed to create SQLite temp dir: {e}"
                 ))
             })?;
-            (memory_db_dir.path().to_path_buf(), PathBuf::from(":memory:"), Some(memory_db_dir))
+            // A `:memory:` control session becomes a FILE inside the temp dir
+            // that already exists for this case, not a true in-memory database.
+            //
+            // SC-2's two connections force this: `Connection::open(":memory:")`
+            // twice yields two PRIVATE, unrelated databases, so `op_conn` and
+            // `tx_conn` would not share a single byte. The alternatives are
+            // worse - a shared-cache `file:...?mode=memory&cache=shared` URI
+            // cannot run WAL and changes locking to table granularity - and the
+            // file is just as ephemeral: the `TempDir` deletes it on drop.
+            let session_path = memory_db_dir.path().join("zs-control.sqlite");
+            (
+                memory_db_dir.path().to_path_buf(),
+                session_path,
+                Some(memory_db_dir),
+            )
         } else if path.is_dir() {
             let session_path = path.join("zs-control.sqlite");
             (path, session_path, None)
@@ -503,18 +522,64 @@ struct OpenedBackend {
 // side-by-side as the SQLite side grows.
 // ---------------------------------------------------------------------------
 
+impl SqliteBackend {
+    /// A session handle bound to no reservation: every command it issues mints
+    /// its own autocommit reservation and runs on `op_conn`.
+    ///
+    /// This is what a caller that just wants to *read* should hold.
+    /// [`SqlExecutor::acquire_dedicated_client`] is the transaction lane and is
+    /// exclusive - taking it for a read would serialise that read behind any
+    /// open creator transaction, which is exactly the coupling SC-2 Decision 1
+    /// removes.
+    #[cfg(not(feature = "test-helpers"))]
+    pub(crate) fn autocommit_client(&self) -> SqliteSessionHandle {
+        SqliteSessionHandle::new(self.session.clone())
+    }
+
+    /// `pub` under `test-helpers` so the integration target can hold a probe
+    /// on `op_conn` while a transaction owns `tx_conn` - which is the state
+    /// Decision 1 exists to make representable.
+    #[cfg(feature = "test-helpers")]
+    pub fn autocommit_client(&self) -> SqliteSessionHandle {
+        SqliteSessionHandle::new(self.session.clone())
+    }
+
+    /// **Test-only**: a transaction-lane handle the actor never bound. See
+    /// [`session::SqliteSession::unregistered_transaction_handle_for_tests`].
+    #[cfg(feature = "test-helpers")]
+    pub fn unregistered_transaction_client_for_tests(&self) -> SqliteSessionHandle {
+        self.session.unregistered_transaction_handle_for_tests()
+    }
+
+    /// **Test-only**: run a transaction handle's terminal statement and return
+    /// the classified outcome. Production reaches this through
+    /// `transaction::exec_terminal_on_tx`.
+    #[cfg(feature = "test-helpers")]
+    pub async fn settle_transaction_for_tests(
+        &self,
+        client: &SqliteSessionHandle,
+        intent: session::TerminalIntent,
+    ) -> Result<crate::backend::sqlite::reservation::TerminalOutcome, DbError> {
+        client.settle(intent).await
+    }
+}
+
 impl SqlExecutor for SqliteBackend {
     type Client = SqliteSessionHandle;
 
     async fn acquire_dedicated_client(&self) -> Result<Self::Client, DbError> {
-        // SQLite has no per-client session — the actor IS the only
-        // writer — so every "dedicated client" handle multiplexes
-        // through the same mpsc queue. Long-lived transactions
-        // serialise by construction because every command (BEGIN /
-        // INSERT / COMMIT) flows through the same single-threaded
-        // worker. This is the documented divergence from PG, where a
-        // dedicated client gets its own libpq connection.
-        Ok(SqliteSessionHandle::from(self.session.clone()))
+        // SC-2 Decision 1: a dedicated client is a reservation on `tx_conn`,
+        // the connection kept for at most one explicit creator transaction.
+        // Everything else - `pool_exec`, an unbound handle's `exec` - runs on
+        // `op_conn` instead, which is what retires the divergence formerly
+        // recorded at `tx_route.rs:119-124`: an app's autocommit work no
+        // longer executes inside that app's open transaction.
+        //
+        // The lease is RAII. Dropping every clone of the returned handle frees
+        // the lane and rolls back anything the transaction left open, so a
+        // caller that never settles cannot strand the next one.
+        let lease = self.session.reserve_transaction().await?;
+        Ok(SqliteSessionHandle::with_lease(self.session.clone(), lease))
     }
 
     async fn pool_exec(&self, sql: &str, params: &[&str]) -> Result<u64, DbError> {
