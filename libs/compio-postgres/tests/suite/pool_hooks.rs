@@ -149,6 +149,36 @@ async fn after_connect_failure_discards_the_connection() {
     drop(held);
 }
 
+#[compio::test]
+async fn later_warmup_after_connect_failure_preserves_sqlstate() {
+    let url = test_url();
+    let calls = Rc::new(Cell::new(0));
+    let hook_calls = Rc::clone(&calls);
+    let mut config = config(2, 2);
+    config.after_connect(move |client| {
+        let invocation = hook_calls.get() + 1;
+        hook_calls.set(invocation);
+        Box::pin(async move {
+            if invocation == 2 {
+                client.batch_execute("SELECT 1 / 0").await
+            } else {
+                Ok(())
+            }
+        })
+    });
+
+    let error = Pool::connect_with_pool_config(&url, config)
+        .await
+        .expect_err("the second warm-up hook unexpectedly succeeded");
+
+    assert_eq!(
+        error.code(),
+        Some(&SqlState::DIVISION_BY_ZERO),
+        "later warm-up after_connect discarded SQLSTATE 22012: {error}"
+    );
+    assert_eq!(calls.get(), 2, "the failing second hook was not reached");
+}
+
 /// A rejected candidate is replaced by the NEXT IDLE one, and the borrower
 /// never receives the session the hook turned down.
 ///
