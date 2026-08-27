@@ -10303,4 +10303,78 @@ fn a_spent_autocommit_reservation_is_refused_as_a_non_owner() {
     });
 }
 
+/// Both connections publish CDC. Installing the hooks on one would silently
+/// drop half the change stream now that `op_conn` is a write path too.
+#[test]
+fn writes_on_both_connections_reach_the_broker() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .attach_app_file("app_cdc")
+            .await
+            .expect("ensure_app_schema");
+        backend
+            .pool_exec(
+                "CREATE TABLE \"app_cdc\".\"items\" (\
+                     id INTEGER PRIMARY KEY, \
+                     name TEXT NOT NULL\
+                 )",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE items");
+
+        let sub = subscribe_local("app_cdc", "items");
+
+        // op_conn: an ordinary autocommit write.
+        backend
+            .pool_exec(
+                "INSERT INTO \"app_cdc\".\"items\" (name) VALUES ('from_op_conn')",
+                &[],
+            )
+            .await
+            .expect("autocommit INSERT");
+
+        // tx_conn: a write inside an explicit creator transaction, committed.
+        let tx = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire tx client");
+        backend.client_exec(&tx, "BEGIN", &[]).await.expect("BEGIN");
+        backend
+            .client_exec(
+                &tx,
+                "INSERT INTO \"app_cdc\".\"items\" (name) VALUES ('from_tx_conn')",
+                &[],
+            )
+            .await
+            .expect("transactional INSERT");
+        assert_eq!(
+            backend
+                .settle_transaction_for_tests(&tx, TerminalIntent::Commit)
+                .await
+                .expect("commit"),
+            TerminalOutcome::Committed
+        );
+
+        drain_publisher().await;
+
+        let msgs = drain(&sub);
+        let mut names: Vec<String> = msgs
+            .iter()
+            .filter_map(|m| match m {
+                SubscriptionMessage::Change(ev) => ev.new_tuple.get("name").cloned(),
+                _ => None,
+            })
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["from_op_conn".to_string(), "from_tx_conn".to_string()],
+            "a write on EACH connection must reach the broker; a dispatcher \
+             installed on only one drops the other silently. got {msgs:?}"
+        );
+    });
+}
+
 
