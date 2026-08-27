@@ -117,8 +117,9 @@ Inside the runtime, the harness:
    first allocation is outside the series.
 3. Sustains four concurrent pooled-query workers while also exercising pool
    acquire/release, periodic large responses, clean direct connection churn,
-   server-terminated connections, and query cancellation with verified reuse
-   of the same pooled lease.
+   server-terminated connections, query cancellation with verified reuse
+   of the same pooled lease, and COPY IN / COPY OUT round trips on one
+   long-lived session backed by a temporary table.
 4. Samples RSS, the driver's live-connection count, and the server's tagged
    backend counts throughout the load.
 5. Stops the workers, closes the pool and direct clients, waits for both
@@ -487,20 +488,33 @@ memory reserved but not resident can remain invisible. Increasing the duration
 raises confidence only for behavior exercised during that longer window; it
 does not turn a finite soak into a proof of absence.
 
-**THE MIX CONTAINS NO COPY.** Measured 2026-08-27: `benches/soak.rs` contains
-zero occurrences of `copy_in` or `copy_out`. So every figure this page records
-says nothing whatever about the COPY subsystem - not its descriptors, not its
-pool interaction, not its error paths.
+**THE MIX CONTAINED NO COPY UNTIL 2026-08-27, and every figure recorded above
+that date is blind to it.** `benches/soak.rs` had zero occurrences of `copy_in`
+or `copy_out`, so the 131,510-operation run and everything before it say
+nothing whatever about the COPY subsystem - not its descriptors, not its pool
+interaction, not its error paths.
 
-That gap is worth naming because it is invisible from the output. The soak
+That gap was invisible from the output, which is why it survived. The soak
 prints `clean_connections`, `bad_connections`, `cancellations` and their
-floors, and a reader who watched 131,510 operations pass could easily conclude
-the driver was exercised end to end. It was not. Three COPY fixes landed on
-2026-08-27 - `1f0012aaf`, `5be471843`, `4056b1be1` - and all three changed
-state machines this harness never enters: when a COPY OUT stream ends, which
-error a COPY IN sink reports, and how a malformed binary stream is classified.
-Sustained-load evidence for any of them is absent, not merely thin.
+floors, and a reader watching 131,510 operations pass could reasonably conclude
+the driver was exercised end to end. It was not. Three COPY fixes landed that
+same day - `1f0012aaf`, `5be471843`, `4056b1be1` - and all three changed state
+machines the harness never entered.
 
-The workload shapes this harness DOES cover are listed under "What the run
-does". Read that list as the boundary of what a green result means, and add a
-shape to the harness rather than stretching a claim to reach it.
+A `copy_round_trips` worker now closes it. Each round trip sends 256 rows
+through COPY IN, reads them back through COPY OUT, and checks the ROW COUNT AND
+THE SUM before truncating - a stream that dropped or duplicated a frame can
+still return a plausible byte count. It holds one connection for the whole run
+rather than churning, because the temporary table is session state and reusing
+the session is also what exposes a COPY that leaves the connection subtly
+unusable for whatever runs next. The table is `TEMPORARY`, so the harness still
+creates no persistent object.
+
+MEASURED 2026-08-27, 60s window: **copy_round_trips=1034 against a floor of
+15**, with `pool_acquires` and `pool_releases` still exactly equal at 11,748.
+The floor is deliberately loose - its job is to catch a worker that never ran,
+not to bound throughput.
+
+Read the workload list under "What the run does" as the boundary of what a
+green result means, and add a shape to the harness rather than stretching a
+claim to reach it. That is what this entry is a worked example of.

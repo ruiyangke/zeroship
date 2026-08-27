@@ -16,10 +16,12 @@ use std::process::ExitCode;
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use bytes::Bytes;
 use compio::runtime::JoinHandle;
 #[cfg(feature = "tls")]
 use compio_postgres::MakeRustlsConnect;
 use compio_postgres::{Client, Config, Error, NoTls, Pool, PoolConfig};
+use futures_util::{SinkExt, StreamExt};
 
 const DEFAULT_URL: &str = "postgres://postgres:zeroship@127.0.0.1:5455/zeroship";
 const DEFAULT_DURATION_SECS: u64 = 180;
@@ -46,6 +48,16 @@ const LARGE_PAYLOAD_SQL: &str =
     "SELECT repeat('x', 65536) FROM pg_sleep(0.02) /* cpg_soak_pooled */";
 const CANCEL_SQL: &str = "SELECT pg_sleep(1) /* cpg_soak_cancel */";
 const BAD_CONNECTION_SQL: &str = "SELECT pg_terminate_backend(pg_backend_pid()) /* cpg_soak_bad */";
+/// Rows per COPY round trip. Large enough that the body crosses the sink's
+/// coalescing threshold and arrives as several `CopyData` frames, small enough
+/// that one round trip stays well inside `OPERATION_WATCHDOG`.
+const COPY_ROWS: i64 = 256;
+/// TEMPORARY, so the harness still creates no persistent object: the table
+/// belongs to this worker's session and disappears when it closes.
+const COPY_TABLE_SQL: &str = "CREATE TEMPORARY TABLE cpg_soak_copy (n int8)";
+const COPY_IN_SQL: &str = "COPY cpg_soak_copy (n) FROM STDIN";
+const COPY_OUT_SQL: &str = "COPY (SELECT n FROM cpg_soak_copy ORDER BY n) TO STDOUT";
+const COPY_CLEAR_SQL: &str = "TRUNCATE cpg_soak_copy";
 
 #[derive(Debug)]
 struct Args {
@@ -123,6 +135,7 @@ struct Floors {
     clean_connections: u64,
     bad_connections: u64,
     cancellations: u64,
+    copy_round_trips: u64,
     total_operations: u64,
     rss_samples: usize,
 }
@@ -140,10 +153,15 @@ impl Floors {
         let pool_acquire_releases = pooled_queries
             .checked_add(cancellations)
             .ok_or_else(|| "duration is too large to derive pool floors".to_owned())?;
+        // One round trip is a COPY IN plus a COPY OUT plus a TRUNCATE, and the
+        // worker sleeps 50ms between them, so this stays far under what the
+        // loop achieves while still failing loudly if the worker never runs.
+        let copy_round_trips = (args.duration_secs / 4).max(3);
         let total_operations = pooled_queries
             .checked_add(clean_connections)
             .and_then(|value| value.checked_add(bad_connections))
             .and_then(|value| value.checked_add(cancellations))
+            .and_then(|value| value.checked_add(copy_round_trips))
             .ok_or_else(|| "duration is too large to derive the total floor".to_owned())?;
         let rss_samples = usize::try_from(args.duration_secs / args.sample_interval_secs + 1)
             .map_err(|_| "sample count does not fit usize".to_owned())?;
@@ -155,6 +173,7 @@ impl Floors {
             clean_connections,
             bad_connections,
             cancellations,
+            copy_round_trips,
             total_operations,
             rss_samples,
         })
@@ -171,6 +190,7 @@ struct Counts {
     bad_connections: Cell<u64>,
     cancellations: Cell<u64>,
     cancellation_recoveries: Cell<u64>,
+    copy_round_trips: Cell<u64>,
     per_query_worker: Vec<Cell<u64>>,
 }
 
@@ -185,6 +205,7 @@ impl Counts {
             bad_connections: Cell::new(0),
             cancellations: Cell::new(0),
             cancellation_recoveries: Cell::new(0),
+            copy_round_trips: Cell::new(0),
             per_query_worker: (0..QUERY_WORKERS).map(|_| Cell::new(0)).collect(),
         }
     }
@@ -195,6 +216,7 @@ impl Counts {
             .saturating_add(self.clean_connections.get())
             .saturating_add(self.bad_connections.get())
             .saturating_add(self.cancellations.get())
+            .saturating_add(self.copy_round_trips.get())
     }
 }
 
@@ -461,6 +483,109 @@ async fn clean_connection_worker(
     Ok(())
 }
 
+/// Round-trips rows through COPY IN and back out of COPY OUT.
+///
+/// This worker exists because the rest of the mix never enters the COPY state
+/// machines at all, so nothing else here can see a descriptor, buffer, or pool
+/// permit that only leaks on a COPY path. It holds ONE connection for the whole
+/// run rather than churning: the temporary table is session state, and reusing
+/// the session is also what exposes a COPY that leaves the connection subtly
+/// unusable for the next operation.
+async fn copy_worker(
+    transport: DirectTransport,
+    counts: Rc<Counts>,
+    stop: Rc<Cell<bool>>,
+    deadline: Instant,
+) -> Result<(), String> {
+    let client = open_client(&transport, "open copy worker connection").await?;
+    watched_db(
+        "create the copy worker's temporary table",
+        client.batch_execute(COPY_TABLE_SQL),
+    )
+    .await?;
+
+    let mut first = 0_i64;
+    while Instant::now() < deadline && !stop.get() {
+        let mut body = String::with_capacity((COPY_ROWS as usize) * 8);
+        for offset in 0..COPY_ROWS {
+            body.push_str(&(first + offset).to_string());
+            body.push('\n');
+        }
+        let expected: i64 = (first..first + COPY_ROWS).sum();
+
+        let sink = watched_db(
+            "start the soak COPY IN",
+            client.copy_in::<_, Bytes>(COPY_IN_SQL),
+        )
+        .await?;
+        let mut sink = Box::pin(sink);
+        watched_db(
+            "send the soak COPY IN body",
+            sink.as_mut().send(Bytes::from(body)),
+        )
+        .await?;
+        let written = watched_db("finish the soak COPY IN", sink.as_mut().finish()).await?;
+        drop(sink);
+        let wanted = u64::try_from(COPY_ROWS).expect("COPY_ROWS fits u64");
+        if written != wanted {
+            return Err(format!(
+                "COPY IN reported {written} rows, expected {wanted}"
+            ));
+        }
+
+        // Read the bytes back and check the SUM, not just the length. A COPY
+        // OUT that truncated or duplicated a frame can still return a
+        // plausible byte count.
+        let stream = watched_db("start the soak COPY OUT", client.copy_out(COPY_OUT_SQL)).await?;
+        let mut stream = Box::pin(stream);
+        let mut text = String::new();
+        loop {
+            match compio::time::timeout(OPERATION_WATCHDOG, stream.as_mut().next()).await {
+                Ok(Some(Ok(chunk))) => text.push_str(
+                    std::str::from_utf8(&chunk)
+                        .map_err(|error| format!("COPY OUT produced invalid UTF-8: {error}"))?,
+                ),
+                Ok(Some(Err(error))) => return Err(format!("soak COPY OUT failed: {error}")),
+                Ok(None) => break,
+                Err(_) => {
+                    return Err(format!(
+                        "soak COPY OUT exceeded its {OPERATION_WATCHDOG:?} watchdog"
+                    ));
+                }
+            }
+        }
+        drop(stream);
+
+        let mut seen = 0_i64;
+        let mut rows = 0_i64;
+        for line in text.lines() {
+            seen = seen
+                .saturating_add(line.parse::<i64>().map_err(|error| {
+                    format!("COPY OUT returned {line:?}, not an int8: {error}")
+                })?);
+            rows += 1;
+        }
+        if rows != COPY_ROWS || seen != expected {
+            return Err(format!(
+                "COPY round trip returned {rows} rows summing to {seen}, expected {COPY_ROWS} \
+                 summing to {expected}"
+            ));
+        }
+
+        watched_db(
+            "clear the copy worker's table",
+            client.batch_execute(COPY_CLEAR_SQL),
+        )
+        .await?;
+        counts
+            .copy_round_trips
+            .set(counts.copy_round_trips.get() + 1);
+        first = first.saturating_add(COPY_ROWS);
+        compio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Ok(())
+}
+
 async fn bad_connection_worker(
     transport: DirectTransport,
     observer: Rc<Client>,
@@ -623,7 +748,7 @@ async fn run_load(
 ) -> Result<(), String> {
     let deadline = Instant::now() + duration;
     let stop = Rc::new(Cell::new(false));
-    let mut workers = Vec::with_capacity(QUERY_WORKERS + 3);
+    let mut workers = Vec::with_capacity(QUERY_WORKERS + 4);
 
     for worker in 0..QUERY_WORKERS {
         let pool = Rc::clone(&pool);
@@ -648,6 +773,20 @@ async fn run_load(
         workers.push((
             "clean connection worker",
             spawn_worker("clean connection worker", worker_stop, future),
+        ));
+    }
+    {
+        let counts = Rc::clone(&counts);
+        let worker_stop = Rc::clone(&stop);
+        let future = copy_worker(
+            direct_transport.clone(),
+            counts,
+            Rc::clone(&worker_stop),
+            deadline,
+        );
+        workers.push((
+            "copy worker",
+            spawn_worker("copy worker", worker_stop, future),
         ));
     }
     {
@@ -770,6 +909,11 @@ fn rule_measurements(counts: &Counts, floors: &Floors, samples: &[Sample]) -> Re
             "cancellation_recoveries",
             counts.cancellation_recoveries.get(),
             floors.cancellations,
+        ),
+        check_floor(
+            "copy_round_trips",
+            counts.copy_round_trips.get(),
+            floors.copy_round_trips,
         ),
         check_floor(
             "total_operations",
@@ -1101,7 +1245,7 @@ async fn run(args: Args) -> Result<(), String> {
     println!(
         "counts pooled_queries={} pool_acquires={} pool_releases={} \
          large_payload_queries={} clean_connections={} bad_connections={} \
-         cancellations={} cancellation_recoveries={} total_operations={}",
+         cancellations={} cancellation_recoveries={} copy_round_trips={} total_operations={}",
         counts.pooled_queries.get(),
         counts.pool_acquires.get(),
         counts.pool_releases.get(),
@@ -1110,6 +1254,7 @@ async fn run(args: Args) -> Result<(), String> {
         counts.bad_connections.get(),
         counts.cancellations.get(),
         counts.cancellation_recoveries.get(),
+        counts.copy_round_trips.get(),
         counts.total_operations()
     );
     println!(
