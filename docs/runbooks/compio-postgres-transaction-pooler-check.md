@@ -239,6 +239,14 @@ new, the driver regressed, or the driver stopped hiding something. Check
 provenance first, then the direct server, and only then read the message - the
 third case looks exactly like the second until you do.
 
+RE-MEASURED 2026-08-27 at `e4b4d4c6e`: **533 passed, 66 failed, and the SET IS
+IDENTICAL** - nothing entered, nothing left. Roughly twenty merges landed in
+between, touching client_encoding handling, authentication refusals, the
+handshake, the internal catalog lookups, the decoder, and both write loops. The
+passed total moved 523 -> 533 because those merges added tests. A set that
+holds still through that much churn in the error paths is the strongest thing
+this check produces; the count alone would not have said it.
+
 One name LEFT: `statement_cache_propagates_a_second_consecutive_26000`, which no
 longer exists - `46e919e2d` renamed it to
 `statement_cache_does_not_retry_26000_after_bind_complete`. The replacement is
