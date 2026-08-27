@@ -534,6 +534,7 @@ where
         receiver,
         client.tx_status_handle(),
         client.in_flight_requests_handle(),
+        client.terminal_server_error_handle(),
         drop_release,
     );
 

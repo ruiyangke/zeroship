@@ -776,13 +776,16 @@ async fn a_checked_out_idle_pool_backend_is_discarded_after_termination() {
         let failure_kind = format!("{failure:?}");
         let failure_chain = common::error_chain(&failure);
         let failure_sqlstate = failure.code().map(|code| code.code().to_owned());
-        assert!(
-            failure.is_closed(),
-            "the idle-in-hand query did not report a closed connection: {failure_chain}"
-        );
         assert_eq!(
-            failure_sqlstate, None,
-            "the idle-in-hand failure unexpectedly carried a SQLSTATE"
+            failure_sqlstate,
+            Some(SqlState::ADMIN_SHUTDOWN.code().to_owned()),
+            "the idle-in-hand query discarded PostgreSQL's ADMIN_SHUTDOWN diagnosis: \
+             {failure_chain}"
+        );
+        assert!(
+            !failure.is_closed(),
+            "the idle-in-hand query mislabeled PostgreSQL's FATAL response as local closure: \
+             {failure_chain}"
         );
 
         drop(borrower);
