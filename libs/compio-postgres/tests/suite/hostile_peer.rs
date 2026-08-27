@@ -1797,3 +1797,49 @@ async fn copy_data_after_the_binary_copy_trailer_is_refused() {
     .await
     .expect("cross-frame binary trailer test exceeded its outer watchdog");
 }
+
+/// Protocol `CopyDone` ends COPY OUT, but it is not the binary file trailer.
+/// PostgreSQL emits the -1 tuple-count trailer first (`CopyToBinaryEnd`) and
+/// only then emits `CopyDone` (`SendCopyEnd`). If the peer skips the former,
+/// the protocol exchange is frame-aligned and the connection is still open,
+/// but the binary stream is malformed. Reporting `Error::closed` loses that
+/// distinction and tells a pool to discard a reusable connection.
+#[compio::test]
+async fn protocol_copy_done_without_the_binary_trailer_is_a_parse_error() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut response = binary_copy_out_frames(vec![
+            binary_copy_chunk(&[&binary_int4_tuple(7)]),
+            backend_frame(b'd', &binary_int4_tuple(9)),
+        ]);
+
+        // Start from the conforming response and remove exactly its binary
+        // trailer frame. CopyDone, CommandComplete, and ReadyForQuery remain.
+        let trailer = backend_frame(b'd', &(-1i16).to_be_bytes());
+        let trailer_start = response
+            .windows(trailer.len())
+            .rposition(|window| window == trailer)
+            .expect("the conforming fixture contains its binary trailer");
+        response.drain(trailer_start..trailer_start + trailer.len());
+
+        let outcome = binary_copy_out_against(534, response).await;
+        let error = match outcome {
+            Ok(values) => {
+                panic!("the driver accepted protocol CopyDone without a binary trailer: {values:?}")
+            }
+            Err(error) => error,
+        };
+        let chain = common::error_chain(&error);
+        assert!(
+            !error.is_closed(),
+            "protocol CopyDone without a binary trailer was mislabeled as a closed connection: \
+             {chain:?}"
+        );
+        assert!(
+            chain.contains("error parsing response from server"),
+            "protocol CopyDone without a binary trailer reported {chain:?} rather than a parse \
+             error"
+        );
+    })
+    .await
+    .expect("missing binary trailer test exceeded its outer watchdog");
+}
