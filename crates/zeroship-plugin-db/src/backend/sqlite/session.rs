@@ -925,9 +925,16 @@ impl Drop for SqliteCancelGuard {
         // Fire-and-forget: a `Drop` cannot await. The intent + interrupt are
         // synchronous and are what actually stops a running statement; the
         // queued `Cancel` is what makes the actor roll back and retire.
-        if matches!(handle.signal(), CancelIntent::AlreadyCompleted) {
-            // The outcome was already decided. Sending `Cancel` would only ask
-            // a question nobody is waiting for the answer to.
+        //
+        // Both terminal verdicts short-circuit, and `AlreadyCancelling` is not
+        // the tidier of the two. Nobody is waiting for this guard's answer, so
+        // a `Cancel` it queues can only *act*; queuing a second one for a
+        // reservation another caller is already cancelling asks the actor to
+        // run cleanup twice on a shared connection.
+        if matches!(
+            handle.signal(),
+            CancelIntent::AlreadyCompleted | CancelIntent::AlreadyCancelling
+        ) {
             return;
         }
         let (reply_tx, _reply_rx) = flume::bounded(1);

@@ -10081,4 +10081,51 @@ fn a_cancellation_after_commit_does_not_roll_the_commit_back() {
     });
 }
 
+/// A cancellation is a claim on one terminal, and a claim can be won once.
+///
+/// `claim_cancelled` used to return `true` for a terminal already reading
+/// `CLAIMED_CANCELLED`, so a second `Cancel` re-entered the cleanup path and
+/// issued a second `ROLLBACK` on the lane. Here the second cancel must instead
+/// be answered with what the first one decided.
+#[test]
+fn a_second_cancellation_is_answered_not_re_executed() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        backend
+            .pool_exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)", &[])
+            .await
+            .expect("create table");
+
+        let tx = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire tx client");
+        let cancel = tx.cancel_handle().expect("cancel handle");
+        backend.client_exec(&tx, "BEGIN", &[]).await.expect("BEGIN");
+        backend
+            .client_exec(&tx, "INSERT INTO t (v) VALUES ('doomed')", &[])
+            .await
+            .expect("write inside the transaction");
+
+        let first = cancel.cancel().await.expect("first cancel acknowledged");
+        assert!(
+            matches!(first, TerminalOutcome::Cancelled { .. }),
+            "the first cancellation wins the terminal and rolls back; got {first:?}"
+        );
+
+        let second = cancel.cancel().await.expect("second cancel acknowledged");
+        let TerminalOutcome::AlreadyCompleted(inner) = &second else {
+            panic!(
+                "a second cancellation must be told what the first one decided, not \
+                 granted the terminal again; got {second:?}"
+            );
+        };
+        assert!(
+            matches!(**inner, TerminalOutcome::Cancelled { .. }),
+            "and the answer it is told must be the first cancellation's own \
+             outcome; got {inner:?}"
+        );
+    });
+}
+
 
