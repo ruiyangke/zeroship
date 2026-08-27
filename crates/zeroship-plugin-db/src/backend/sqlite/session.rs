@@ -505,6 +505,14 @@ impl SqliteSession {
         self.mint(Lane::Op, ReservationKind::Autocommit)
     }
 
+    /// **Test-only**: hand an autocommit reservation to the caller so it can be
+    /// submitted twice. See
+    /// [`crate::backend::sqlite::SqliteBackend::spent_autocommit_reservation_for_tests`].
+    #[cfg(feature = "test-helpers")]
+    pub(crate) fn autocommit_reservation_for_tests(&self) -> Arc<Reservation> {
+        self.autocommit_reservation()
+    }
+
     /// Reserve `tx_conn` for one explicit creator transaction.
     ///
     /// Refuses with a typed error while another lease is live. "Live" is
@@ -1185,6 +1193,13 @@ struct Actor {
     attachments: Vec<(String, String)>,
     /// The reservation whose transaction state `tx_conn` currently holds.
     tx_bound: Option<u64>,
+    /// The reservation that last ran a command on `op_conn`.
+    ///
+    /// `op_conn`'s owner is short-lived by construction - one autocommit
+    /// reservation, one command - so this is not an admission gate the way
+    /// [`Self::tx_bound`] is. It names the lane's current occupant, which is
+    /// what a refusal has to report and what a later cancellation has to check.
+    op_bound: Option<u64>,
     db_path: PathBuf,
     app_id: Option<String>,
     packet_tx: Option<flume::Sender<CommitPacket>>,
@@ -1248,6 +1263,7 @@ impl Actor {
             interrupts,
             attachments: Vec::new(),
             tx_bound: None,
+            op_bound: None,
             db_path,
             app_id,
             packet_tx,
@@ -1346,6 +1362,22 @@ impl Actor {
 
     /// Refuse a command whose reservation does not own the connection it would
     /// run on.
+    ///
+    /// **Both lanes, and the two ownership rules are genuinely different.**
+    ///
+    /// - `tx_conn` has a long-lived owner: whichever transaction reservation
+    ///   the actor last bound. A command naming any other one is refused.
+    /// - `op_conn` has no long-lived owner at all - autocommit reservations are
+    ///   minted per command and settle at that command's completion. So its
+    ///   rule is the *lifetime* one: a reservation that has already run a
+    ///   command is spent, and a second command naming it is stale.
+    ///
+    /// The `op_conn` half was missing until 2026-08-27, which made the sentence
+    /// "the actor rejects a command whose reservation does not match the
+    /// connection's current owner" vacuous for half the actor. A stale
+    /// autocommit reservation was still refused - incidentally, by
+    /// `enter_running` finding a non-`PENDING` terminal - and reported as
+    /// `statement_cancelled`: the wrong error naming the wrong reason.
     fn check_owner(&self, reservation: &Reservation) -> Result<(), DbError> {
         let lane = reservation.lane();
         let entry = match lane {
@@ -1363,17 +1395,28 @@ impl Actor {
                 hint: None,
             });
         }
-        if lane == Lane::Tx && self.tx_bound != Some(reservation.id()) {
-            return Err(DbError::validation(
+        match lane {
+            Lane::Tx if self.tx_bound != Some(reservation.id()) => {
+                Err(DbError::validation(
+                    "reservation_not_owner",
+                    format!(
+                        "db: reservation {} does not own tx_conn (current owner: {:?})",
+                        reservation.id(),
+                        self.tx_bound
+                    ),
+                ))
+            }
+            Lane::Op if reservation.used() => Err(DbError::validation(
                 "reservation_not_owner",
                 format!(
-                    "db: reservation {} does not own tx_conn (current owner: {:?})",
+                    "db: autocommit reservation {} has already run its one command and no \
+                     longer owns op_conn (current owner: {:?})",
                     reservation.id(),
-                    self.tx_bound
+                    self.op_bound
                 ),
-            ));
+            )),
+            _ => Ok(()),
         }
-        Ok(())
     }
 
     fn run(&mut self, rx: &flume::Receiver<Command>) {
@@ -1499,6 +1542,15 @@ impl Actor {
         op: impl FnOnce(&Connection) -> Result<T, RunError>,
     ) -> Result<T, DbError> {
         self.check_owner(reservation)?;
+        if reservation.lane() == Lane::Op {
+            // Spend the reservation and take the lane, in that order and
+            // before anything can fail: a command that reached this point has
+            // consumed its one autocommit reservation whether or not it goes
+            // on to run, and anything asking later who owns op_conn must see
+            // the answer now rather than the one from before this command.
+            reservation.mark_used();
+            self.op_bound = Some(reservation.id());
+        }
         let seq = self.next_seq();
         if !reservation.enter_running(seq) {
             // SC-2 case 1: a cancellation was recorded before this command
