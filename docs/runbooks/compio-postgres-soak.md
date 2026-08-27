@@ -384,6 +384,27 @@ So the shape to look for is: errors surface, `live_connections_at_failure=0`,
 no watchdog message. A hang, a panic, or a non-zero live count would each be a
 defect, and each looks different from the ordinary failure above.
 
+RE-MEASURED 2026-08-27 at `dd3ad1de8`, on a DEDICATED 16.15 container rather
+than the shared fixture - a chaos run RESTARTS the server, so doing it on 5455
+would break every other suite on this machine. Restart issued 40s into
+`phase=measure`. All three signals reproduced exactly:
+
+```text
+soak result=failed: pooled query worker: run pooled scalar query failed: db error
+live_connections_at_failure=0
+```
+
+no watchdog message, no panic, no hang. Then 49 `pool_` tests passed against
+the restarted server on the FIRST attempt.
+
+That re-measurement is the point of this section, not a formality. The nine
+cancellation-audit commits merged that day changed when a session is RETIRED
+and when its socket is RELEASED - terminal-severity retirement, pool lease
+revocation that `force_close`s a session whose token escaped, and replication
+retirement after a server ErrorResponse. A defect in any of them shows up here
+as a non-zero live count or a hang, and in neither case would the ordinary
+suite have noticed: it never restarts a server.
+
 ## Chaos: freezing the server without closing anything
 
 A restart makes the server CLOSE, which surfaces as an error at once. The
