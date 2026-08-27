@@ -486,3 +486,21 @@ run, one triggered by a workload shape the mix does not contain, or virtual
 memory reserved but not resident can remain invisible. Increasing the duration
 raises confidence only for behavior exercised during that longer window; it
 does not turn a finite soak into a proof of absence.
+
+**THE MIX CONTAINS NO COPY.** Measured 2026-08-27: `benches/soak.rs` contains
+zero occurrences of `copy_in` or `copy_out`. So every figure this page records
+says nothing whatever about the COPY subsystem - not its descriptors, not its
+pool interaction, not its error paths.
+
+That gap is worth naming because it is invisible from the output. The soak
+prints `clean_connections`, `bad_connections`, `cancellations` and their
+floors, and a reader who watched 131,510 operations pass could easily conclude
+the driver was exercised end to end. It was not. Three COPY fixes landed on
+2026-08-27 - `1f0012aaf`, `5be471843`, `4056b1be1` - and all three changed
+state machines this harness never enters: when a COPY OUT stream ends, which
+error a COPY IN sink reports, and how a malformed binary stream is classified.
+Sustained-load evidence for any of them is absent, not merely thin.
+
+The workload shapes this harness DOES cover are listed under "What the run
+does". Read that list as the boundary of what a green result means, and add a
+shape to the harness rather than stretching a claim to reach it.
