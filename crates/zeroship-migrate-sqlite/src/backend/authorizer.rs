@@ -17,16 +17,16 @@
 //! `Rc<Cell<_>>` would NOT compile: `Rc`/`Cell` are not `Send`.
 //!
 //! - **`CreatorUp`** - the creator/AI `up` runs under this mode. The journal
-//! schema `_mig` is immutable: all writes/DDL to `_mig` are denied; ATTACH /
-//! DETACH / PRAGMA / load_extension / CREATE VTABLE/MODULE are denied; functions
-//! are allowlisted (fail-closed on unknown); creator-authored TRIGGER/VIEW
-//! bodies that target `_mig` are denied at CREATE-prepare time, closing the
-//! defer-into-engine-mode hole: a body prepared under `CreatorUp` cannot wait for
-//! the engine's own mode to run its writes.
+//!   schema `_mig` is immutable: all writes/DDL to `_mig` are denied; ATTACH /
+//!   DETACH / PRAGMA / load_extension / CREATE VTABLE/MODULE are denied; functions
+//!   are allowlisted (fail-closed on unknown); creator-authored TRIGGER/VIEW
+//!   bodies that target `_mig` are denied at CREATE-prepare time, closing the
+//!   defer-into-engine-mode hole: a body prepared under `CreatorUp` cannot wait for
+//!   the engine's own mode to run its writes.
 //! - **`EngineJournal`** - only the engine's own journal writes run here. `_mig`
-//! writes are allowed (the journal tables only); ATTACH/DETACH/load_extension
-//! stay denied for life; a single `PRAGMA foreign_keys` toggle is allowed (the
-//! 12-step rebuild).
+//!   writes are allowed (the journal tables only); ATTACH/DETACH/load_extension
+//!   stay denied for life; a single `PRAGMA foreign_keys` toggle is allowed (the
+//!   12-step rebuild).
 //!
 //! # Matching `_mig` - the OUTER context field (CRITICAL precision)
 //!

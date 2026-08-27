@@ -1059,6 +1059,7 @@ fn build_injected_columns(
     Ok(columns)
 }
 
+#[allow(clippy::result_large_err)]
 fn render_injected_default(
     vendors: VendorSet,
     default: &IrDefault,

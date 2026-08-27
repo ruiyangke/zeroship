@@ -121,6 +121,7 @@ scope = { include = ["app"] }
 
 /// Lower `RLS_ENVELOPE` through the production entry: one policy, both gates, no
 /// manual scope widening.
+#[allow(clippy::result_large_err)]
 fn lower_rls_envelope(
     policy: &EffectivePolicy,
 ) -> Result<LoweredArtifact, LoadAndLowerGuardedError> {

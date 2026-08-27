@@ -23,26 +23,26 @@
 //! Two independent axes:
 //!
 //! - **B1 - checksum / tamper / orphan drift** ([`check_checksum_drift`](crate::apply::backend::MigrationBackend::check_checksum_drift)):
-//! compares the journal's recorded checksum for each NET-applied version
-//! against the checksum of the same version in the supplied set. A mismatch
-//! means the migration SQL was edited after it applied, or the journal row was
-//! tampered. A net-applied version with NO matching
-//! migration in the supplied set is an **orphan** ([`OrphanJournal`]) - the
-//! bundle is missing a migration the database already has. This is the exact
-//! comparison the executor's apply flow does as its abort-on-drift pre-check;
-//! [`apply`](crate::engine::MigrationEngine::apply) calls this function and aborts
-//! if it returns any [`ChecksumDrift`], so the report and the gate share one
-//! implementation.
+//!   compares the journal's recorded checksum for each NET-applied version
+//!   against the checksum of the same version in the supplied set. A mismatch
+//!   means the migration SQL was edited after it applied, or the journal row was
+//!   tampered. A net-applied version with NO matching
+//!   migration in the supplied set is an **orphan** ([`OrphanJournal`]) - the
+//!   bundle is missing a migration the database already has. This is the exact
+//!   comparison the executor's apply flow does as its abort-on-drift pre-check;
+//!   [`apply`](crate::engine::MigrationEngine::apply) calls this function and aborts
+//!   if it returns any [`ChecksumDrift`], so the report and the gate share one
+//!   implementation.
 //!
 //! - **B2 - structural introspection** ([`snapshot_schema`](crate::apply::backend::MigrationBackend::snapshot_schema) +
-//! [`diff_snapshots`]):
-//! introspect the LIVE project schema into a deterministic [`SchemaSnapshot`]
-//! and `diff` it against an **expected** snapshot the CALLER supplies. The
-//! expected snapshot is owned by the control-plane / authoring layer (it holds
-//! the declared/union schema, design); this module does NOT rebuild a schema
-//! model by replaying DDL - that is the authoring layer's job. `diff_snapshots`
-//! is a pure function returning a [`StructuralDrift`] report; it never returns
-//! DDL.
+//!   [`diff_snapshots`]):
+//!   introspect the LIVE project schema into a deterministic [`SchemaSnapshot`]
+//!   and `diff` it against an **expected** snapshot the CALLER supplies. The
+//!   expected snapshot is owned by the control-plane / authoring layer (it holds
+//!   the declared/union schema, design); this module does NOT rebuild a schema
+//!   model by replaying DDL - that is the authoring layer's job. `diff_snapshots`
+//!   is a pure function returning a [`StructuralDrift`] report; it never returns
+//!   DDL.
 
 use std::collections::BTreeMap;
 use zeroship_migrate_backend::registry::VendorSet;
@@ -94,9 +94,9 @@ pub(crate) use zeroship_migrate_backend::drift::partition_divergences;
 ///
 /// Returns:
 /// - `missing_objects` - present in `expected`, absent in `actual` (a declared
-/// table/column/index/constraint the DB never got).
+///   table/column/index/constraint the DB never got).
 /// - `unexpected_objects` - present in `actual`, absent in `expected` (an
-/// out-of-band object created outside the journal - scenario 35).
+///   out-of-band object created outside the journal - scenario 35).
 ///
 /// Object names are qualified for legibility: a table as `"users"`, a column as
 /// `"users.email"`, an index as `"users index orders_email_idx"`, a constraint
@@ -146,8 +146,8 @@ pub fn diff_snapshots(
 /// would never spell. Name-only diffing reports that index as BOTH missing and
 /// unexpected even though the database is exactly right, which is the same false
 /// drift the migration differ avoids by pairing on the same provenance. Pass
-/// [`DesiredSchema::derived_index_aliases`](crate::render::declarative::DesiredSchema::derived_index_aliases)
-/// - `table -> derived name -> the data plane's spelling` - to get the matching
+/// [`DesiredSchema::derived_index_aliases`](crate::render::declarative::DesiredSchema::derived_index_aliases) -
+/// `table -> derived name -> the data plane's spelling` - to get the matching
 /// report; [`diff_snapshots`] passes an empty map and stays name-only.
 ///
 /// An alias is honoured only for a name the author DERIVED and only when the two
@@ -1520,8 +1520,8 @@ fn index_referenced_columns(index: &IndexSnapshot) -> Option<Vec<&str>> {
 /// element while the offline side takes the plain column elements alone. So `EXCLUDE`
 /// is NOT admitted here.
 ///
-/// For a `CHECK` they agree, because both derive the same thing from the same structure
-/// - the live side expands `conkey`, the offline side walks the closed `Expr` the
+/// For a `CHECK` they agree, because both derive the same thing from the same structure -
+/// the live side expands `conkey`, the offline side walks the closed `Expr` the
 /// renderer emitted. Verified on the same live server: an authored `qty > 0` yields
 /// `Some(["qty"])` on BOTH sides while the definitions read `CHECK (("qty" > 0))` and
 /// `CHECK ((qty > 0))`. The text is what diverges; the column set is not.

@@ -8,6 +8,10 @@
 //! calling the delegation "a POINTER to work that `lower.rs`'s own pass has to
 //! finish, not a boundary that is done". That pass has run. MySQL's trigger spelling
 //! was the worked example of where it lands.
+// Every render leaf here returns `IrLowerError`, the cold lower-failure error that
+// sits over the 128-byte heuristic. Boxing it would churn the `?` ergonomics across
+// the whole vendor render path for no real-world win.
+#![allow(clippy::result_large_err)]
 
 use std::collections::BTreeMap;
 

@@ -804,6 +804,7 @@ pub fn id_catalog_columns_with_generated_uuid_extra(
     ]
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn catalog_index_part(
     table: &str,
     index: &str,

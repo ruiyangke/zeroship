@@ -41,7 +41,7 @@
 //!   `hr_sqlite::hr_migrations_apply_in_sequence_on_real_sqlite`, and it fails on the
 //!   ABSENCE check with `… needs the table's full live structure … it is absent`;
 //!   every test in this file still passed;
-//!   * rewriting every column in that map to `{"type":"string"}` and stripping
+//! * rewriting every column in that map to `{"type":"string"}` and stripping
 //!   `required`, `default`, `unique`, `refTarget` and `onDelete` fails NOTHING AT ALL.
 //!
 //! That second number is the honest statement of the gap: on the deploy path a
@@ -764,8 +764,8 @@ async fn the_deploy_path_depends_on_the_maps_PRESENCE_not_its_content() {
 /// 27 recorded fixtures and 22 carriers on 3 dialects. Three of the five never appear on
 /// SQLite at all because the fold refuses the op that creates them; the other two do
 /// appear in the MAP on SQLite. Whether they reach the REBUILD is a different question -
-/// the map is built offline, the rebuild only ever sees ops that a live deploy accepted
-/// - and it is the question this table answers by asking the deploy path.
+/// the map is built offline, the rebuild only ever sees ops that a live deploy accepted -
+/// and it is the question this table answers by asking the deploy path.
 /// Each row carries the substring the engine's refusal must contain, so a stream that
 /// stopped being refused FOR ITS OWN REASON - a typo in the JSON, a table renamed out
 /// from under it, a charter grant that changed - fails here instead of passing the

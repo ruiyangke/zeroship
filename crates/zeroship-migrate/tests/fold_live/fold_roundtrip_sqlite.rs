@@ -142,8 +142,8 @@ async fn apply_doc(
 ///      CHECK would panic in `assert_matches_live` at the fold, never reaching this
 ///      function. On the other side `snapshot_schema_sqlite` only ever pushes
 ///      `PRIMARY KEY`, `UNIQUE` and `FOREIGN KEY` into the constraint bucket.
-///      Measured: a table created with `CONSTRAINT "parts_qty_check" CHECK (("qty"
-///      >= 0))` introspects to `pk_parts` and nothing else, with the CHECK text
+///      Measured: a table created with `CONSTRAINT "parts_qty_check" CHECK (("qty" >=
+///      0))` introspects to `pk_parts` and nothing else, with the CHECK text
 ///      surviving only on the excluded-from-equality `stored_create_sql`. The
 ///      current corpus authors no CHECK either, but that is the weaker fact.
 ///

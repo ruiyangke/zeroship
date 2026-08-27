@@ -3823,6 +3823,7 @@ fn apply_fold_structured_default_to_column(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_fold_named_type_metadata(
     vendors: VendorSet,
     table: &str,
@@ -4028,6 +4029,7 @@ fn apply_fold_value_format_column_metadata(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_fold_named_type_column_metadata(
     vendors: VendorSet,
     table: &str,
@@ -5088,7 +5090,7 @@ fn lift_named_enum_membership(
 /// ```
 ///
 /// - and only the `RuntimeSchemaDescriptor`, which is what a deployed app installs
-/// `env.db` from, called it a string. So the app validated an integer column as text.
+///   `env.db` from, called it a string. So the app validated an integer column as text.
 ///
 /// # Why this is not a line in `col_type_to_token`, either
 ///

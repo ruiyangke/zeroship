@@ -18,14 +18,14 @@
 //! # Immutability
 //!
 //! 1. `DEFENSIVE=ON` (set at open) makes `sqlite_master` read-only to SQL even
-//! under `writable_schema=ON`.
+//!    under `writable_schema=ON`.
 //! 2. `trusted_schema=OFF` (set at open) blocks schema objects from invoking
-//! non-allowlisted functions.
+//!    non-allowlisted functions.
 //! 3. The authorizer denies `PRAGMA` / writes / DROP / ALTER on `_mig` in
-//! CreatorUp (the primary deny, at prepare time).
+//!    CreatorUp (the primary deny, at prepare time).
 //! 4. Append-only `BEFORE UPDATE`/`BEFORE DELETE` triggers (`RAISE(ABORT,...)`) are
-//! the in-DB backstop for row mutation (the operator path where the
-//! authorizer relaxes; on the Confined path the authorizer already denied it).
+//!    the in-DB backstop for row mutation (the operator path where the
+//!    authorizer relaxes; on the Confined path the authorizer already denied it).
 //!
 //! # Atomic apply
 //!
@@ -279,7 +279,7 @@ pub(crate) async fn journal_satisfied_noop(
 /// First-entry semantics, mirroring the PG `baseline`:
 /// - idempotent for the SAME version (a retried boot is safe -> `already_present`);
 /// - refuses if the journal already records a DIFFERENT net-applied migration
-/// (the engine already manages this file) - fail-closed, nothing journaled.
+///   (the engine already manages this file) - fail-closed, nothing journaled.
 ///
 /// The whole thing runs atomically inside one `BEGIN IMMEDIATE` under engine
 /// mode (the `up` is NEVER executed, so there is no CreatorUp phase - this is the

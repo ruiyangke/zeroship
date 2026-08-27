@@ -776,8 +776,8 @@ impl<D: SqlSession> OnlineSchemaChange for PostgresBackend<'_, D> {
     /// Mirror the pre-existing rows of one online rename into the new column.
     ///
     /// This is the whole of PostgreSQL's online capability now. It used to be the
-    /// whole online DRIVE: it applied E1/E2 by calling `apply_with_lock_backend`
-    /// - the engine's orchestrator - back across the backend boundary, tripped an
+    /// whole online DRIVE: it applied E1/E2 by calling `apply_with_lock_backend` -
+    /// the engine's orchestrator - back across the backend boundary, tripped an
     /// engine fault point, and read the journal to decide whether the marker still
     /// needed running. Those phases were neutral in every line and the engine owns
     /// them now; what is left here is the one phase that is irreducibly Postgres:

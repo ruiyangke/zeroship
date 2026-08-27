@@ -441,11 +441,13 @@ fn type_is_one_of(data_type: &str, candidates: &[&str]) -> bool {
     })
 }
 
+#[allow(clippy::result_large_err)]
 fn quote_engine_ident(what: &'static str, ident: &str) -> Result<String, IrLowerError> {
     zeroship_migrate_backend::dml::quote_ident_for_backend(what, ident, &crate::dml::RENDERER)
         .map_err(IrLowerError::DmlAssemble)
 }
 
+#[allow(clippy::result_large_err)]
 fn pg_type_qname(schema: &str, name: &str) -> Result<String, IrLowerError> {
     Ok(format!(
         "{}.{}",

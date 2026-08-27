@@ -142,6 +142,7 @@ pub async fn apply<B: MigrationBackend>(
 /// not in the orchestration. Do not reintroduce an entry point in this module that
 /// constructs a backend for a particular vendor: that is what made this file name a
 /// vendor before, and it is the one thing that would make it name one again.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
     vendors: VendorSet,
     backend: &B,
@@ -334,8 +335,8 @@ fn check_repeatable_wellformed(migrations: &[Migration]) -> Result<(), ApplyErro
 
 /// The apply body, run while holding the project advisory lock.
 ///
-/// Generic over the dialect seam ([`MigrationBackend`]): the orchestration here
-/// - partition, drift/tamper gate, squash/expand gates, `order_pending`, the
+/// Generic over the dialect seam ([`MigrationBackend`]): the orchestration here -
+/// partition, drift/tamper gate, squash/expand gates, `order_pending`, the
 /// FIRST/SECOND pass, the repeatable phase - is dialect-agnostic; every
 /// dialect-coupled leaf (journal reads, the checksum-drift report, the confined
 /// `up`, the non-txn idempotency parse) goes through `backend`.
@@ -1521,6 +1522,7 @@ pub fn plan_rollback<'a>(
 /// # Errors
 /// As [`plan_rollback`], plus [`RollbackError::RecordedInverseUnsupported`] when
 /// a recorded inverse contains anything other than transactional DML.
+#[allow(clippy::too_many_arguments)]
 pub fn plan_rollback_with_inverse_plans<'a>(
     request: &RollbackRequest,
     migrations: &'a [Migration],
@@ -1852,6 +1854,7 @@ pub async fn rollback<B: MigrationBackend>(
 ///
 /// # Errors
 /// As [`rollback`], plus [`RollbackError::Backend`] if the lock cannot be taken.
+#[allow(clippy::too_many_arguments)]
 pub async fn rollback_with_lock<B: MigrationBackend>(
     backend: &B,
     cfg: &ExecutorConfig,
@@ -1922,6 +1925,7 @@ pub async fn rollback_with_lock_and_inverse_plans<B: MigrationBackend>(
 }
 
 /// The rollback body, run while holding the project advisory lock.
+#[allow(clippy::too_many_arguments)]
 async fn rollback_locked<B: MigrationBackend>(
     backend: &B,
     cfg: &ExecutorConfig,

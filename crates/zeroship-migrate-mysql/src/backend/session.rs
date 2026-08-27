@@ -8,34 +8,34 @@
 //! is MySQL-flavoured, so it lives in the MySQL backend, never the shared executor:
 //!
 //! - **project lock** - `GET_LOCK(name, timeout)` / `RELEASE_LOCK(name)`, MySQL's
-//! named advisory lock, replaces `pg_advisory_lock(hashtext($1))`. The lock name
-//! is derived from the project id (bounded to MySQL's 64-char lock-name limit).
-//! A read-only caller takes the same lock with a zero timeout instead, so it
-//! never spends any of a peer deploy's wall clock, and names the holder from
-//! `performance_schema` when the lock is taken.
+//!   named advisory lock, replaces `pg_advisory_lock(hashtext($1))`. The lock name
+//!   is derived from the project id (bounded to MySQL's 64-char lock-name limit).
+//!   A read-only caller takes the same lock with a zero timeout instead, so it
+//!   never spends any of a peer deploy's wall clock, and names the holder from
+//!   `performance_schema` when the lock is taken.
 //! - **session setup** - `SET SESSION max_execution_time` +
-//! `innodb_lock_wait_timeout` replaces the `SET [LOCAL] search_path` +
-//! `statement_timeout` / `lock_timeout` GUCs (MySQL has no per-connection schema
-//! search-path - a migration references its objects by explicit database, or the
-//! connection's default database is the project database). No `SET ROLE`: the
-//! least-privilege migrator-role confinement is a Postgres construct; on MySQL
-//! the connecting user's grants ARE the confinement.
+//!   `innodb_lock_wait_timeout` replaces the `SET [LOCAL] search_path` +
+//!   `statement_timeout` / `lock_timeout` GUCs (MySQL has no per-connection schema
+//!   search-path - a migration references its objects by explicit database, or the
+//!   connection's default database is the project database). No `SET ROLE`: the
+//!   least-privilege migrator-role confinement is a Postgres construct; on MySQL
+//!   the connecting user's grants ARE the confinement.
 //! - **apply** - MySQL DDL is **auto-committing** (an implicit COMMIT brackets
-//! every DDL statement), so a migration's `up` cannot be wrapped with its journal
-//! row in one transaction. Every MySQL migration therefore takes the **two-phase
-//! non-transactional path**: a `started` marker -> run the `up` -> an immutable
-//! `completed` row + clear the marker. Because generated MySQL DDL is not safely
-//! replayable after an ambiguous crash, an unmatched marker is preserved and
-//! recovery fails closed for operator inspection instead of re-running `up`.
+//!   every DDL statement), so a migration's `up` cannot be wrapped with its journal
+//!   row in one transaction. Every MySQL migration therefore takes the **two-phase
+//!   non-transactional path**: a `started` marker -> run the `up` -> an immutable
+//!   `completed` row + clear the marker. Because generated MySQL DDL is not safely
+//!   replayable after an ambiguous crash, an unmatched marker is preserved and
+//!   recovery fails closed for operator inspection instead of re-running `up`.
 //! - **rollback** - the mirror of apply, for the same reason: a rollback marker ->
-//! run the `down` -> the immutable `rolled_back` row + clear the marker, those last
-//! two in one transaction. MySQL DDL auto-commits, so the `down` itself can never
-//! join a transaction and a partially-run `down` is a real outcome. The marker does
-//! not prevent that; it records it, so an interrupted unwind is durable ambiguity an
-//! operator can see rather than a silently half-reverted schema. An unmatched
-//! rollback marker fails closed on BOTH paths - rollback will not replay a `down`
-//! over its own partial work, and apply will not run an `up` over a shape nobody
-//! has verified.
+//!   run the `down` -> the immutable `rolled_back` row + clear the marker, those last
+//!   two in one transaction. MySQL DDL auto-commits, so the `down` itself can never
+//!   join a transaction and a partially-run `down` is a real outcome. The marker does
+//!   not prevent that; it records it, so an interrupted unwind is durable ambiguity an
+//!   operator can see rather than a silently half-reverted schema. An unmatched
+//!   rollback marker fails closed on BOTH paths - rollback will not replay a `down`
+//!   over its own partial work, and apply will not run an `up` over a shape nobody
+//!   has verified.
 //!
 //! Placeholders are the anonymous positional `?`
 //! ([`PlaceholderStyle::Question`](zeroship_migrate_backend::backend::PlaceholderStyle::Question)),

@@ -186,12 +186,12 @@ fn quote_ident(ident: &str) -> String {
 ///
 /// # Errors
 /// - [`PreconditionError::InvalidIdentifier`] - a structured check's table/column
-/// is not a bare identifier.
+///   is not a bare identifier.
 /// - [`PreconditionError::BlockingColumnDependents`] - PostgreSQL could not query
-/// the objects that block a bare column drop, or the ones that block a retype.
+///   the objects that block a bare column drop, or the ones that block a retype.
 /// - [`PreconditionError::Guard`] - a `SqlBoolean` was guard-denied.
 /// - [`PreconditionError::NotABooleanSelect`] - a `SqlBoolean` is not a single
-/// boolean-returning `SELECT`.
+///   boolean-returning `SELECT`.
 /// - [`PreconditionError::Db`] - a query failed.
 pub async fn evaluate<D: SqlSession>(
     conn: &D,
@@ -254,12 +254,12 @@ pub async fn evaluate<D: SqlSession>(
 ///
 /// # Errors
 /// - [`ApplyError::PreconditionFailed`] - an `OnUnmet::Halt` check was UNMET (the
-/// assertion evaluated false), or ANY check could not be evaluated (a
-/// guard-denied / malformed `SqlBoolean`, an invalid identifier). Fail-closed:
-/// an inevaluable precondition is treated as a hard failure regardless of its
-/// `on_unmet`, so a precondition that cannot even be checked never silently
-/// waves a migration through. The caller aborts the whole apply, applying
-/// nothing for this migration.
+///   assertion evaluated false), or ANY check could not be evaluated (a
+///   guard-denied / malformed `SqlBoolean`, an invalid identifier). Fail-closed:
+///   an inevaluable precondition is treated as a hard failure regardless of its
+///   `on_unmet`, so a precondition that cannot even be checked never silently
+///   waves a migration through. The caller aborts the whole apply, applying
+///   nothing for this migration.
 ///
 /// `Halt` is evaluated first-failure-wins: the first unmet/inevaluable Halt check
 /// stops evaluation and aborts. A `Skip` verdict is returned only when no Halt
@@ -461,17 +461,17 @@ async fn row_count<D: SqlSession>(
 /// runs):
 /// - more than one statement, or a single statement that is not a `SELECT`;
 /// - a data-modifying statement (`INSERT`/`UPDATE`/`DELETE`/`MERGE`) ANYWHERE
-/// in the parsed tree - a data-modifying CTE
-/// (`WITH x AS (DELETE ... RETURNING ...) SELECT ...`) hangs its `DeleteStmt` off
-/// the `SelectStmt`'s `with_clause`, so a top-node check alone would miss it. We
-/// walk the whole serialized tree (the same `serde_json` approach the guard
-/// uses) and reject any DML node at any nesting;
+///   in the parsed tree - a data-modifying CTE
+///   (`WITH x AS (DELETE ... RETURNING ...) SELECT ...`) hangs its `DeleteStmt` off
+///   the `SelectStmt`'s `with_clause`, so a top-node check alone would miss it. We
+///   walk the whole serialized tree (the same `serde_json` approach the guard
+///   uses) and reject any DML node at any nesting;
 /// - a non-empty locking clause (`FOR UPDATE`/`FOR SHARE`/`FOR NO KEY
-/// UPDATE`/`FOR KEY SHARE`) - a `LockingClause` node acquires row locks, not
-/// a read-only assertion;
+///   UPDATE`/`FOR KEY SHARE`) - a `LockingClause` node acquires row locks, not
+///   a read-only assertion;
 /// - a sequence-mutating or advisory-lock builtin
-/// ([`MUTATING_OR_LOCK_BUILTINS`]) - `READ ONLY` does NOT block these, and a
-/// session-scoped advisory lock would leak onto the pooled connection.
+///   ([`MUTATING_OR_LOCK_BUILTINS`]) - `READ ONLY` does NOT block these, and a
+///   session-scoped advisory lock would leak onto the pooled connection.
 ///
 /// Shape (single boolean column) is enforced at execution by reading exactly one
 /// `bool` column from the single result row. Parse failure is rejected

@@ -142,8 +142,8 @@ pub enum RoleError {
 /// Quote a SQL identifier (double embedded quotes, wrap in `"`), so a schema /
 /// role name is never interpolated as raw SQL. Routes through the ONE crate-shared
 /// explicit backend seam
-/// ([`quote_ident_checked_for_backend`](zeroship_migrate_backend::dml::quote_ident_checked_for_backend))
-/// - byte-identical to (and uniformly self-defending with)
+/// ([`quote_ident_checked_for_backend`](zeroship_migrate_backend::dml::quote_ident_checked_for_backend)) -
+/// byte-identical to (and uniformly self-defending with)
 /// `author`/`backfill`/`journal`/`dml`: fail-closed on an empty / NUL identifier.
 ///
 /// It takes this vendor's own `dml::RENDERER` rather than a dialect id, so this

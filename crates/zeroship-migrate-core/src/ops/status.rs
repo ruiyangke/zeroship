@@ -18,6 +18,9 @@
 //! [`applied`](crate::apply::backend::MigrationBackend::applied)) and the
 //! executor's pending-ordering (`crate::apply::executor::order_pending`) so status's
 //! view of "applied" and "pending" is byte-for-byte the view apply itself uses.
+// Every verb here returns `StatusError`, which is over the 128-byte heuristic.
+// Boxing it would change this read-only API public `Result` shape for a lint.
+#![allow(clippy::result_large_err)]
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 

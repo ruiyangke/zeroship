@@ -169,8 +169,8 @@ pub struct NotSingleStep {
 }
 
 impl AppliedPlan {
-    /// Build the **degenerate one-step plan** for a single pure-DDL [`Migration`]
-    /// - the loader facade for a `.sql` file. The plan's identity
+    /// Build the **degenerate one-step plan** for a single pure-DDL [`Migration`] -
+    /// the loader facade for a `.sql` file. The plan's identity
     /// fields mirror the migration; `dialect_scope` is
     /// [`DialectScope::Portable`] and `rollbackable` follows the migration's `down`.
     ///

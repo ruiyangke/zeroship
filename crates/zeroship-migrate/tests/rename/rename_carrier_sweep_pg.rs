@@ -49,8 +49,8 @@
 //! ## Why a spelling is scrubbed before it is searched
 //!
 //! `carrier_spellings_that_reference_a_column` strips `'...'` string literals before
-//! looking for the old name. A string literal is NOT a column reference on either side
-//! - PostgreSQL leaves it alone, and so must the fold - so leaving it in the haystack
+//! looking for the old name. A string literal is NOT a column reference on either side -
+//! PostgreSQL leaves it alone, and so must the fold - so leaving it in the haystack
 //! would make the fixture's own anti-corruption witness read as a missed carrier. The
 //! literal is asserted separately, and asserted to SURVIVE.
 

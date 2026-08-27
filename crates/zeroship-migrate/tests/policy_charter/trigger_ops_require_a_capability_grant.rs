@@ -497,6 +497,7 @@ scope = "all"
 /// Lower through the production entry the deploy path uses: one `EffectivePolicy` feeds
 /// both `GuardConfig::from_policy` and `IrAuthor::new`, and nothing widens the scope by
 /// hand.
+#[allow(clippy::result_large_err)]
 fn lower(
     policy: &EffectivePolicy,
     dialect: &DialectId,

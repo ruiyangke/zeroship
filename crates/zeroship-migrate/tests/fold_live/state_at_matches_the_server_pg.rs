@@ -11,8 +11,8 @@
 //! # What was already adjudicated, and what was not
 //!
 //! `fold_roundtrip_pg::assert_lifecycle_roundtrip` already applies op-by-op and
-//! compares a fold against live introspection at checkpoints. It proves a great deal
-//! - but it folds with `fold_ops`, which is `fold_ops_onto(&SchemaSnapshot::default(),
+//! compares a fold against live introspection at checkpoints. It proves a great deal -
+//! but it folds with `fold_ops`, which is `fold_ops_onto(&SchemaSnapshot::default(),
 //! ..)`, and it lowers against `LiveSchema::default()`. Every object it compares was
 //! created by an op in the same plan.
 //!

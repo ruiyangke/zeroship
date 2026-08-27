@@ -24,6 +24,10 @@
 //! (the guard + role defense lines). The engine gate is a third check layered in front: even
 //! if a caller hand-built a plan, the executor still independently denies the
 //! dangerous surface and confines execution. The engine never disables those.
+// `EngineError` and `DeclarativeApplyError` are the cold deploy-failure errors this
+// surface returns, and both sit over the 128-byte heuristic. Boxing them would change
+// the engine public `Result` shape for a lint, so the lint is allowed module-wide.
+#![allow(clippy::result_large_err)]
 
 use std::collections::BTreeMap;
 use zeroship_migrate_backend::registry::VendorSet;
@@ -206,8 +210,8 @@ pub enum EngineError {
     /// executor's own re-run of the guard denied a migration - defense in depth).
     #[error(transparent)]
     Apply(#[from] ApplyError),
-    /// The supplied migration set did not match the expected integrity manifest
-    /// - the bundle was reordered / edited / inserted-into / removed-
+    /// The supplied migration set did not match the expected integrity manifest -
+    /// the bundle was reordered / edited / inserted-into / removed-
     /// from relative to the trusted [`ManifestHash`] stamped at build/review time.
     /// Refused by [`MigrationEngine::apply_verified`] **before** the advisory lock
     /// or any DDL: NOTHING was applied. Carries the
@@ -422,6 +426,7 @@ fn completed_artifact_steps(
 /// when every derived step has exact completed journal evidence. This is the
 /// rerun path for a completed SQLite rename: the current catalog correctly lacks
 /// the old source column, while the historical view still has it.
+#[allow(clippy::too_many_arguments)]
 fn lower_completed_historical(
     preserves_authored_logical_columns: bool,
     author: &IrAuthor,
@@ -840,6 +845,7 @@ impl MigrationEngine {
     /// transition, so the covered creates are refused instead of planned unprotected.
     /// Creates the obligation does not cover, alter-only diffs and no-op diffs are
     /// unaffected.
+    #[allow(clippy::too_many_arguments)]
     pub fn plan_declarative(
         &self,
         desired: &crate::render::declarative::DesiredSchema,
@@ -1061,6 +1067,7 @@ impl MigrationEngine {
     ///   same gate + executor + expand errors as
     ///   [`apply_declarative`](Self::apply_declarative), after a successful
     ///   manifest check.
+    #[allow(clippy::too_many_arguments)]
     pub async fn apply_declarative_verified<B: MigrationBackend>(
         &self,
         plan: &DeclarativeDeployPlan,

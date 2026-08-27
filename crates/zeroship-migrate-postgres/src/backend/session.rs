@@ -876,8 +876,8 @@ fn postgres_dml_params(
         .collect()
 }
 
-/// Transactional apply of a single **parameterized DML** step (`op.*` DSL)
-/// - the PG executor behind
+/// Transactional apply of a single **parameterized DML** step (`op.*` DSL) -
+/// the PG executor behind
 /// [`MigrationBackend::run_dml_step`](zeroship_migrate_backend::backend::MigrationBackend::run_dml_step).
 ///
 /// Mirrors [`apply_transactional`]'s `BEGIN; SET LOCAL ...; SET LOCAL ROLE; <stmt>;
@@ -2095,8 +2095,8 @@ mod non_txn_idempotency_tests {
 /// Every element is an **engine-supplied** identifier (project schema, platform
 /// schemas, extension schemas), so each is rendered through the ONE shared
 /// explicit backend seam
-/// ([`quote_ident_checked_for_dialect`](zeroship_migrate_backend::dml::quote_ident_checked_for_backend))
-/// - fail-closed on an empty / NUL name, byte-identical to the hand-rolled
+/// ([`quote_ident_checked_for_dialect`](zeroship_migrate_backend::dml::quote_ident_checked_for_backend)) -
+/// fail-closed on an empty / NUL name, byte-identical to the hand-rolled
 /// quoting it replaced for every real schema. So the whole quoting surface (not
 /// just the DDL/journal seams) is uniformly self-defending.
 ///

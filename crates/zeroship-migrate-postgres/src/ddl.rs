@@ -20,8 +20,8 @@ use crate::DIALECT;
 
 /// The value half of one storage parameter, in PostgreSQL's spelling.
 ///
-/// Every reloption is written as a quoted string - `fillfactor='85'`, not `fillfactor=85`
-/// - which the server accepts for every type and which is already how this crate spells an
+/// Every reloption is written as a quoted string - `fillfactor='85'`, not `fillfactor=85` -
+/// which the server accepts for every type and which is already how this crate spells an
 /// index's `fillfactor`. One form for all four shapes means no per-shape branch and no
 /// chance of an unquoted value colliding with the grammar.
 fn attribute_value_pg(value: &IrScalar) -> String {

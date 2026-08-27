@@ -1608,8 +1608,8 @@ mod tests {
     /// An unattributed snapshot still spells a plain literal as a LITERAL.
     ///
     /// `catalog_id_default_for_expected` reaches its last arm only when `expected`
-    /// is neither [`IdDefaultSnapshot::UuidLiteral`] nor [`IdDefaultSnapshot::Literal`]
-    /// - both are answered earlier - so the value it returns there can never make a
+    /// is neither [`IdDefaultSnapshot::UuidLiteral`] nor [`IdDefaultSnapshot::Literal`] -
+    /// both are answered earlier - so the value it returns there can never make a
     /// drift verdict flip: a `Literal` and an `Expression` are equally unequal to an
     /// `Absent` expectation. What it CAN do is decide what the operator reads. With
     /// no dialect the arm used to fall through to `Expression("literal:7")`, leaking

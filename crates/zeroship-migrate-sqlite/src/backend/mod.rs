@@ -329,8 +329,8 @@ impl SqliteBackend {
         self.actor.exec(ddl).await
     }
 
-    /// Net-applied migrations as `(version, checksum, name)` for the dump trailer
-    /// - read straight from the `_mig` journal so the dumped checksum/name
+    /// Net-applied migrations as `(version, checksum, name)` for the dump trailer -
+    /// read straight from the `_mig` journal so the dumped checksum/name
     /// are the JOURNAL's, never re-derived from `--dir`. Per version, the LATEST
     /// event must be `applied` (net-applied); its `name`/`checksum` are taken from
     /// that latest completed event. Ordered by version (the trailer order).
