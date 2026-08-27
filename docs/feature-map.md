@@ -227,7 +227,7 @@ provides the native V8 surface; the TS SDK (`@zeroship/db`) wraps it. Both Postg
 | Unmask audit log (__zeroship_audit_unmask) | 🟢 | internal (SQL-readable) | `crates/plugin-db/src/crud/unmask.rs` | `docs/reference/db.md` | — | Granted + denied audited. |
 | Mask drift audit log (__zeroship_audit_mask_drift) | 🟡 | internal (SQL-readable) | `crates/plugin-db/src/crud/mask_drift.rs` | `docs/reference/db.md` | — | Drift cron not scheduled. |
 | App namespace drop (drop_namespace) | 🟢 | internal (control-plane) | `crates/plugin-db/src/drop_namespace.rs` | — | — | DROP SCHEMA CASCADE; PG-only. |
-| Dual-backend support (PG + SQLite) | 🟢 | internal (DbPlugin::new(url)) | `crates/plugin-db/src/lib.rs` | `docs/reference/sqlite-divergences.md` | `crates/plugin-db/tests/sqlite_integration.rs` | URL-driven; SQLite dev/test only. |
+| Dual-backend support (PG + SQLite) | 🟢 | internal (`DbService::new`) | `crates/zeroship-plugin-db/src/service.rs` | `docs/reference/sqlite-divergences.md` | `crates/zeroship-plugin-db/tests/sqlite_integration.rs` | URL-driven; the backend is selected once at composition. SQLite dev/test only. |
 | Per-app auth schema (PG roles, sessions) | 🟢 | internal (bootstrap) | `crates/plugin-db/src/auth/` | — | — | PG-only; SQLite has shim. |
 | DataLoader (batched get by id) | 🟢 | internal (Collection.get) | `sdks/db/src/loader.ts` | — | `sdks/db/tests/loader.test.ts` | Per-collection, per-tx-depth. |
 | Input validation | 🟢 | automatic on insert/update | `sdks/db/src/validate.ts` | `docs/reference/db.md` | `sdks/db/tests/validate.test.ts` | Runs in JS before native call. |

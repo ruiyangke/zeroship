@@ -148,12 +148,6 @@ pub fn init_cache(max_size: usize, max_pinned_isolates_per_app: usize, kernel: K
     PLUGIN_SET.with(|p| *p.borrow_mut() = None);
 }
 
-/// This thread's handle to the process-wide `env.db` service, if one is
-/// configured.
-pub fn db_service() -> Option<Arc<zeroship_plugin_db::service::DbService>> {
-    DB_SERVICE.with(|s| s.borrow().clone())
-}
-
 /// Compose a `DbService` the way `main` does, for tests that need a kernel with
 /// the `db` namespace present.
 ///
