@@ -537,7 +537,9 @@ where
 
     startup(&mut handshake, config, &user).await?;
     authenticate(&mut handshake, config, &user).await?;
-    check_ssl_cert_mode(config, handshake.stream.get_mut().client_cert_status())?;
+    let client_cert_status = handshake.stream.get_mut().client_cert_status();
+    let ssl_cert_check = check_ssl_cert_mode(config, client_cert_status);
+    handshake.prefer_available_server_error(ssl_cert_check)?;
     let (process_id, secret_key, mut parameters) = read_info(&mut handshake).await?;
     probe_target_session_attrs(&mut handshake, target_session_attrs, &mut parameters).await?;
 
@@ -1667,6 +1669,35 @@ mod tests {
             )
             .await;
         }
+    }
+
+    #[compio::test]
+    async fn sslcertmode_refusal_preserves_a_pending_server_error() {
+        let mut script = frame(b'R', &0u32.to_be_bytes());
+        script.extend_from_slice(&error_response("57P01", "terminating after authentication"));
+        let (stream, _) = scripted_server_after_startup(Some(script)).await;
+        let mut config = plaintext_config();
+        config.ssl_cert_mode(config::SslCertMode::Require);
+
+        let error = match connect_raw_with_target_session_attrs(
+            stream,
+            NoTls,
+            Encryption::Plaintext,
+            false,
+            &config,
+            TargetSessionAttrs::Any,
+            None,
+        )
+        .await
+        {
+            Ok(_) => panic!("sslcertmode=require accepted a plaintext session"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("57P01"),
+            "sslcertmode refusal discarded queued SQLSTATE 57P01: {error}"
+        );
     }
 
     #[compio::test]
