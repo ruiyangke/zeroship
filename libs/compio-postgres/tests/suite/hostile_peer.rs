@@ -1068,6 +1068,60 @@ async fn hostile_prepare_retires_session(process_id: i32, response: Vec<u8>) -> 
     common::error_chain(&error)
 }
 
+/// A complete Parse/Describe prefix is not the outcome of the extended query
+/// exchange. If PostgreSQL terminates the session after that prefix, the
+/// ErrorResponse already queued in `Responses` owns the prepare result; a
+/// Statement returned before it is unusable and falsely reports success.
+#[compio::test]
+async fn prepare_preserves_a_terminal_error_after_its_description() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut response = backend_frame(b'1', b"");
+        response.extend_from_slice(&backend_frame(b't', &0u16.to_be_bytes()));
+        response.extend_from_slice(&backend_frame(b'n', b""));
+        response.extend_from_slice(&backend_frame(
+            b'E',
+            b"SFATAL\0VFATAL\0C57P01\0Mscripted termination after Describe\0\0",
+        ));
+
+        let server = StubServer::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_startup(&mut stream, 300);
+            expect_frontend_until_sync(&mut stream);
+            stream
+                .write_all(&response)
+                .expect("write terminal prepare response");
+            stream.flush().expect("flush terminal prepare response");
+            thread::sleep(Duration::from_millis(300));
+        });
+
+        let (client, connection) = stub_config(server.addr)
+            .connect(common::suite_tls())
+            .await
+            .expect("connect to scripted PostgreSQL peer");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let outcome = compio::time::timeout(OPERATION_WATCHDOG, client.prepare("SELECT 1"))
+            .await
+            .expect("prepare hung before its terminal ErrorResponse");
+        let error = match outcome {
+            Err(error) => error,
+            Ok(_) => panic!("prepare returned success before its terminal SQLSTATE 57P01"),
+        };
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("57P01"),
+            "prepare discarded terminal SQLSTATE 57P01: {}",
+            common::error_chain(&error)
+        );
+
+        let _ = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
+        drop(client);
+        server.finish();
+    })
+    .await
+    .expect("terminal prepare response test exceeded its outer watchdog");
+}
+
 /// The extended-protocol twin of
 /// [`a_data_row_with_fewer_fields_than_its_description_is_refused`].
 ///
