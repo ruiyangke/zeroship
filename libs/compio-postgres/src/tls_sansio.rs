@@ -115,6 +115,7 @@ use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use rustls::ClientConnection;
 use std::io::{self, Read, Write};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::ThreadId;
 
 use parking_lot::{Condvar, Mutex};
@@ -367,6 +368,9 @@ struct SharedSessionState {
 struct SharedSessionInner {
     state: Mutex<SharedSessionState>,
     available: Condvar,
+    /// A write future took ciphertext out of the session and never returned.
+    /// The socket may hold any prefix, so no later TLS operation can recover.
+    abandoned_write: AtomicBool,
 }
 
 /// The handle both halves share.
@@ -391,11 +395,27 @@ struct SessionLease<'a> {
     poisoned: bool,
 }
 
+/// Marks ciphertext ownership as lost unless the async socket write returns.
+///
+/// Drop must not lease the rustls state: the read half can be inside a caller
+/// callback on another thread. The atomic marker makes abandonment nonblocking
+/// and lets that lease finish before every later operation is refused.
+struct WriteFlight<'a> {
+    shared: &'a SharedSession,
+    armed: bool,
+}
+
 impl SharedSession {
     fn lease(&self) -> io::Result<SessionLease<'_>> {
         let owner = std::thread::current().id();
         let mut state = self.inner.state.lock();
         loop {
+            if self.inner.abandoned_write.load(Ordering::Acquire) {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "the TLS session lost ciphertext when a write was abandoned",
+                ));
+            }
             if state.poisoned {
                 return Err(io::Error::new(
                     io::ErrorKind::BrokenPipe,
@@ -445,6 +465,31 @@ impl SharedSession {
     }
 }
 
+impl<'a> WriteFlight<'a> {
+    fn new(shared: &'a SharedSession) -> Self {
+        Self {
+            shared,
+            armed: true,
+        }
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for WriteFlight<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.shared
+                .inner
+                .abandoned_write
+                .store(true, Ordering::Release);
+            self.shared.inner.available.notify_all();
+        }
+    }
+}
+
 impl SessionLease<'_> {
     fn session_mut(&mut self) -> &mut TlsSession {
         self.session
@@ -484,6 +529,7 @@ pub(crate) fn share(conn: ClientConnection) -> SharedSession {
                 poisoned: false,
             }),
             available: Condvar::new(),
+            abandoned_write: AtomicBool::new(false),
         }),
     }
 }
@@ -708,11 +754,13 @@ where
         if pending.is_empty() {
             return Ok(());
         }
+        let write_flight = WriteFlight::new(session);
         let BufResult(result, _) = socket.write_all(pending).await;
         session.with(|session| {
             session.write_in_flight = false;
             Ok(())
         })?;
+        write_flight.disarm();
         result?;
     }
 }
@@ -901,6 +949,63 @@ mod tests {
         async fn shutdown(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    /// A writer that makes observable progress and then never gives its buffer
+    /// back. Dropping its future therefore loses an unknowable TLS frame tail.
+    struct ParkedWriter {
+        wire_prefix: Vec<u8>,
+    }
+
+    impl AsyncWrite for ParkedWriter {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            let bytes = buf.as_init();
+            assert!(
+                !bytes.is_empty(),
+                "the TLS fixture tried to park an empty write"
+            );
+            self.wire_prefix.push(bytes[0]);
+            std::future::pending::<()>().await;
+            unreachable!("the parked TLS writer completed")
+        }
+
+        async fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[compio::test]
+    async fn cancelling_a_tls_write_poisons_the_reused_stream() {
+        let (client, _server) = handshaken_pair();
+        let session = share(client);
+        let mut writer = TlsWriteHalf::new(
+            ParkedWriter {
+                wire_prefix: Vec::new(),
+            },
+            session,
+        );
+
+        let mut write = Box::pin(writer.write(b"abandoned plaintext".to_vec()));
+        assert!(
+            futures_util::poll!(write.as_mut()).is_pending(),
+            "the TLS write fixture did not park after making progress"
+        );
+        drop(write);
+        assert_eq!(
+            writer.socket.wire_prefix.len(),
+            1,
+            "the cancelled write made no progress, so its frame boundary stayed known"
+        );
+
+        let error = writer
+            .flush()
+            .await
+            .expect_err("a cancelled TLS write was reported as a successful reusable stream");
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
     }
 
     /// A flush must leave NOTHING inside the session, including what the cap
