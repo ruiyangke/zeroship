@@ -49,6 +49,21 @@ fn main() {
 /// little-endian byte length, then the bytes, so no rename or content shift can
 /// collide with a different tree by concatenation.
 fn workspace_source_digest() -> String {
+    // `clippy.toml` bans `std::env::var` and points at
+    // `zeroship_core::declared_env!`. That macro is real
+    // (`zeroship-core/src/config/declared.rs:634`) but UNREACHABLE from here:
+    // using it needs `zeroship-core` as a BUILD-dependency, and
+    // `cargo tree -p zeroship-core -e normal -i tokio` shows it reaching tokio
+    // through `cyper -> hyper` on two paths. AGENTS.md permits a tokio edge
+    // only for `kind == "dev"`; a build dependency is a hard red.
+    //
+    // The ban targets application CONFIGURATION, which wants a typed key.
+    // `CARGO_MANIFEST_DIR` is build metadata cargo sets itself, has no typed
+    // key to declare, and cannot be absent when a build script runs.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "cargo-provided build metadata; the typed-key macro needs a tokio-reaching build dependency"
+    )]
     let manifest_dir = PathBuf::from(
         env::var("CARGO_MANIFEST_DIR").expect("cargo always sets CARGO_MANIFEST_DIR"),
     );
