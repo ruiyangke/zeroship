@@ -122,6 +122,12 @@ use parking_lot::{Condvar, Mutex};
 
 use crate::buf_stream::SplitStream;
 
+#[cfg(test)]
+thread_local! {
+    static CLOSE_NOTIFY_SERIALIZED_PROBE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// Bytes requested per socket read while handshaking.
 ///
 /// A TLS record is at most 16 KiB of plaintext plus overhead, so this holds a
@@ -362,6 +368,12 @@ impl TlsSession {
                 ));
             }
         }
+        #[cfg(test)]
+        CLOSE_NOTIFY_SERIALIZED_PROBE.with(|slot| {
+            if let Some(probe) = slot.borrow_mut().take() {
+                probe();
+            }
+        });
         Ok(outgoing)
     }
 }
@@ -378,6 +390,11 @@ struct SharedSessionInner {
     /// A write future took ciphertext out of the session and never returned.
     /// The socket may hold any prefix, so no later TLS operation can recover.
     abandoned_write: AtomicBool,
+    /// `close_notify` has been serialized out of the session. The TLS session
+    /// is OVER at that point: any later record would reach the peer after the
+    /// alert, which is a protocol violation. The flag lives here rather than
+    /// on the session itself so `lease` can refuse WITHOUT taking it.
+    close_notify_out: AtomicBool,
 }
 
 /// The handle both halves share.
@@ -423,6 +440,12 @@ impl SharedSession {
                     "the TLS session lost ciphertext when a write was abandoned",
                 ));
             }
+            if self.inner.close_notify_out.load(Ordering::Acquire) {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "the TLS session already sent close_notify",
+                ));
+            }
             if state.poisoned {
                 return Err(io::Error::new(
                     io::ErrorKind::BrokenPipe,
@@ -458,6 +481,12 @@ impl SharedSession {
                 "the TLS session lost ciphertext when a write was abandoned",
             ));
         }
+        if self.inner.close_notify_out.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "the TLS session already sent close_notify",
+            ));
+        }
 
         let Some(mut state) = self.inner.state.try_lock() else {
             return Ok(None);
@@ -466,6 +495,12 @@ impl SharedSession {
             return Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "the TLS session lost ciphertext when a write was abandoned",
+            ));
+        }
+        if self.inner.close_notify_out.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "the TLS session already sent close_notify",
             ));
         }
         if state.poisoned {
@@ -487,6 +522,12 @@ impl SharedSession {
             session: Some(session),
             poisoned: false,
         }))
+    }
+
+    /// Mark the session terminal: `close_notify` is out, so no later lease may
+    /// write another record behind it.
+    pub(crate) fn mark_close_notify_sent(&self) {
+        self.inner.close_notify_out.store(true, Ordering::Release);
     }
 
     pub(crate) fn with<R>(
@@ -592,6 +633,7 @@ pub(crate) fn share(conn: ClientConnection) -> SharedSession {
             }),
             available: Condvar::new(),
             abandoned_write: AtomicBool::new(false),
+            close_notify_out: AtomicBool::new(false),
         }),
     }
 }
@@ -1458,6 +1500,114 @@ mod tests {
         assert!(
             finished_while_held,
             "TLS release waited for an in-flight TLS lease before shutting down the socket"
+        );
+    }
+
+    #[test]
+    fn concurrent_tls_release_guards_do_not_cut_off_close_notify() {
+        let (client, mut server) = handshaken_pair();
+        let session = share(client);
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind release race listener");
+        let socket = TcpStream::connect(listener.local_addr().expect("release race address"))
+            .expect("connect release race socket");
+        let (mut peer, _) = listener.accept().expect("accept release race socket");
+        let mut release = crate::release::ConnectionRelease::dup_of(&socket)
+            .expect("duplicate release race socket");
+        release.set_tls_session(session);
+        let connection_release = release.connection_guard();
+
+        let (serialized_tx, serialized_rx) = mpsc::channel();
+        let (allow_send_tx, allow_send_rx) = mpsc::channel();
+        let releaser = std::thread::spawn(move || {
+            CLOSE_NOTIFY_SERIALIZED_PROBE.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move || {
+                    serialized_tx
+                        .send(())
+                        .expect("report serialized close_notify");
+                    allow_send_rx
+                        .recv()
+                        .expect("allow close_notify transport send");
+                }));
+            });
+            drop(release);
+        });
+        serialized_rx
+            .recv()
+            .expect("wait for serialized close_notify");
+
+        drop(connection_release);
+        allow_send_tx
+            .send(())
+            .expect("allow elected TLS release to finish");
+        releaser.join().expect("join elected TLS releaser");
+
+        let mut wire = Vec::new();
+        peer.read_to_end(&mut wire)
+            .expect("read released TLS transport");
+        let mut cursor = wire.as_slice();
+        let mut peer_has_closed = false;
+        while !cursor.is_empty() {
+            let accepted = server.read_tls(&mut cursor).expect("server read_tls");
+            assert!(
+                accepted > 0,
+                "the server stopped consuming release ciphertext"
+            );
+            peer_has_closed |= server
+                .process_new_packets()
+                .expect("server process close_notify")
+                .peer_has_closed();
+        }
+        assert!(
+            peer_has_closed,
+            "concurrent TLS release cut off close_notify before shutdown"
+        );
+    }
+
+    #[test]
+    fn tls_release_keeps_the_session_until_socket_shutdown() {
+        let (client, _server) = handshaken_pair();
+        let session = share(client);
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind release window listener");
+        let socket = TcpStream::connect(listener.local_addr().expect("release window address"))
+            .expect("connect release window socket");
+        let (_peer, _) = listener.accept().expect("accept release window socket");
+        let mut release = crate::release::ConnectionRelease::dup_of(&socket)
+            .expect("duplicate release window socket");
+        release.set_tls_session(session.clone());
+
+        let writer_acquired = Arc::new(AtomicBool::new(false));
+        let observed = writer_acquired.clone();
+        let probe_session = session;
+        let mut probe_socket = socket.try_clone().expect("duplicate release window writer");
+        crate::release::TLS_BEFORE_SHUTDOWN_PROBE.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                let writer = std::thread::spawn(move || {
+                    // The invariant is that the write does not HAPPEN, not the
+                    // shape of the refusal. A terminal session answers `Err`
+                    // (like poisoned and abandoned-write do); a merely busy one
+                    // answers `Ok(None)`. Only `Ok(Some(_))` means the writer
+                    // got the session and put a record behind `close_notify`.
+                    let acquired = matches!(
+                        probe_session.try_with(|session| {
+                            session.write_plaintext(b"late plaintext")?;
+                            probe_socket.write_all(&session.take_outgoing())?;
+                            Ok(())
+                        }),
+                        Ok(Some(()))
+                    );
+                    observed.store(acquired, Ordering::SeqCst);
+                });
+                writer.join().expect("join late TLS writer");
+            }));
+        });
+
+        release.shutdown();
+
+        assert!(
+            !writer_acquired.load(Ordering::SeqCst),
+            "a TLS writer acquired the session after close_notify but before socket shutdown"
         );
     }
 
