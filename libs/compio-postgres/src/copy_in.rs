@@ -445,7 +445,7 @@ where
         }
         Ok(Message::CopyOutResponse(_)) => {
             abort(&mut sender).await;
-            return Err(Error::copy_out_unsupported());
+            return Err(Error::copy_out_answered_copy_in());
         }
         Ok(_) => {
             abort(&mut sender).await;

@@ -100,11 +100,26 @@ async fn unsupported_copy_out_is_refused_by_name_at_every_public_entry_point() {
             .expect_err("query_typed accepted COPY TO STDOUT");
         assert_named_copy_out_refusal("query_typed", error);
 
+        // `copy_in` gets the WIDER message: at the point it sees CopyOutResponse
+        // the driver cannot tell a misused API from a protocol-violating peer,
+        // because `Statement` does not retain its SQL. So it names both causes
+        // rather than telling a correct caller to change correct code -
+        // `hostile_peer::a_copy_out_response_to_a_copy_in_request_is_refused`
+        // is the same message reached from the other direction.
         let error = match client.copy_in::<_, Bytes>(&copy).await {
             Ok(_) => panic!("copy_in accepted COPY TO STDOUT"),
             Err(error) => error,
         };
-        assert_named_copy_out_refusal("copy_in", error);
+        let chain = error.to_string();
+        assert!(
+            chain.contains("answered a COPY IN request with COPY OUT")
+                && chain.contains("copy_out"),
+            "copy_in did not name both causes: {chain}"
+        );
+        assert!(
+            error.code().is_none(),
+            "copy_in reported a server error instead of a local refusal"
+        );
 
         let value: i32 = client
             .query_one_scalar("SELECT 42::int4", &[])
