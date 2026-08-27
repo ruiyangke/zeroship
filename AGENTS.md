@@ -408,17 +408,33 @@ cargo test -p zeroship-runtime --lib
 cargo test -p compio-postgres -- --test-threads=1   # needs DB
 # compio-postgres declares `default = []`, so THAT LINE IS FEATURE-BLIND: it
 # skips every `tls`-gated test and reports a green that never compiled them.
-# Measured 2026-08-26: 316 lib tests on defaults, 337 under --all-features, and
-# a fix to the rustls key-log path was verified against a run whose filter
-# matched 0 tests and still printed "test result: ok". Add --all-features when a
-# change touches anything feature-gated:
-cargo test -p compio-postgres --all-features -- --test-threads=1
-# --all-features TURNS ON TWO OPT-IN LIVE SUITES, and each needs its own
-# fixture script to have run. They are written NOT to skip: a missing fixture
-# is a loud failure naming the script, never a quiet pass.
+# Measured 2026-08-27 at 04de4a91d: 428 lib tests on defaults, 456 under
+# --all-features, and a fix to the rustls key-log path was verified against a
+# run whose filter matched 0 tests and still printed "test result: ok". Add the
+# feature-gated tests when a change touches anything behind a feature:
+cargo test -p compio-postgres --features tls,live-tls-tests,live-unix-socket \
+  -- --test-threads=1
+# THAT FEATURE SET, NOT `--all-features`, IS THE ONE TO USE WITH `PG_TEST_URL`.
+# `--all-features` also enables `suite-over-tls`, which `#[cfg]`-REPLACES
+# `common::test_url()` so the whole suite reads its DSN from
+# tests/data/live/tls_live.conf and IGNORES PG_TEST_URL entirely. Measured
+# 2026-08-27 with PG_TEST_URL pointed at the 18.4 container: --all-features
+# reported server_version_num=160015 (the fixture server), the feature set above
+# reported 180004. A cross-version verdict was published off runs shaped like
+# the former; both "versions" agreed perfectly because both were one server.
+# Confirm the target rather than the variable:
+#   cargo test -p compio-postgres --test suite -- --nocapture \
+#     cancel_request::raw_cancel_interrupts_running_query_and_preserves_session
+# prints `cancel oracle: server_version_num=... protocol=... backend_key_len=...`
+#
+# EITHER set TURNS ON TWO OPT-IN LIVE SUITES, and each needs its own fixture
+# script to have run. They are written NOT to skip: a missing fixture is a loud
+# failure naming the script, never a quiet pass.
 #   tls_live (48 tests)         libs/compio-postgres/tests/tls_live_setup.sh
 #   unix_socket_live (17 tests) libs/compio-postgres/tests/unix_socket_setup.sh
-# With both present, measured 2026-08-26: **1062 passed, 0 failed, exit 0**.
+# With both present, measured 2026-08-27 at 04de4a91d: **1170 passed, 0 failed,
+# exit 0** for the feature set above, and 1145 under --all-features (which runs
+# a different, smaller set because suite-over-tls cfg-swaps some cases).
 # With neither, the same command fails on fixtures alone and tells you nothing
 # about the code.
 #
