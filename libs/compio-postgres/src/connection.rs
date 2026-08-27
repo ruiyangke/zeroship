@@ -276,9 +276,12 @@ impl ReadObligation {
         }
     }
 
-    fn pause_for_copy_input(&self) {
+    /// Enter COPY IN input mode. Returns true when this response previously
+    /// entered COPY OUT or already queued its COPY terminal, so no producer
+    /// remains which can legally answer the new CopyInResponse.
+    fn pause_for_copy_input(&self) -> bool {
         let Some(inner) = &self.inner else {
-            return;
+            return false;
         };
         if !inner.copy_producer {
             // Keyed to whether THIS DRIVER will feed the copy, not to what the
@@ -288,7 +291,10 @@ impl ReadObligation {
             // byte will ever be sent, so the session is deadlocked rather than
             // waiting on a caller. Pausing the clock there hides precisely the
             // stall the read deadline exists to retire.
-            return;
+            return false;
+        }
+        if inner.copy_terminal_queued.get() {
+            return true;
         }
         match inner.state.get() {
             ReadObligationState::PendingInitialFlush => {
@@ -300,14 +306,13 @@ impl ReadObligation {
                     deadline.finish_response();
                 }
             }
-            ReadObligationState::PausedForCopyInput
-            | ReadObligationState::CopyOutputPendingInitialFlush
+            ReadObligationState::PausedForCopyInput => {}
+            ReadObligationState::CopyOutputPendingInitialFlush
             | ReadObligationState::CopyOutput
-            | ReadObligationState::Complete => {}
-            ReadObligationState::PendingCopyTerminalFlush => {
-                debug_assert!(false, "CopyInResponse arrived after COPY terminal data");
-            }
+            | ReadObligationState::PendingCopyTerminalFlush
+            | ReadObligationState::Complete => return true,
         }
+        false
     }
 
     fn enter_copy_output(&self) {
@@ -1437,13 +1442,17 @@ impl Dispatch<'_> {
         // ReadyForQuery completes one successfully-flushed request. A
         // CopyInResponse pauses that request because PostgreSQL is now waiting
         // for client input rather than owing socket bytes.
-        if request_complete {
+        let copy_input_without_producer = if request_complete {
             response.read_obligation.complete();
+            false
         } else if entered_copy_input {
-            response.read_obligation.pause_for_copy_input();
+            response.read_obligation.pause_for_copy_input()
         } else if entered_copy_output {
             response.read_obligation.enter_copy_output();
-        }
+            false
+        } else {
+            false
+        };
 
         let (messages, completion_observation) =
             observe_response_batch(&mut response, messages, completed_at);
@@ -1502,6 +1511,13 @@ impl Dispatch<'_> {
         if request_complete && let Some(observation) = completion_observation {
             let completed_at = completed_at.unwrap_or_else(Instant::now);
             observation.server_complete(completed_at);
+        }
+        if copy_input_without_producer {
+            // The batch itself has been delivered so the operation retains its
+            // existing UnexpectedMessage diagnosis. Close the session before
+            // any later request can put a non-COPY frontend frame on a peer
+            // which is now waiting for COPY input.
+            return Err(Error::unexpected_message());
         }
         Ok(())
     }
