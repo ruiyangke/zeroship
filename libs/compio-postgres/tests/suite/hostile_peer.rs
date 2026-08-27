@@ -1592,6 +1592,30 @@ async fn a_copy_in_response_cannot_transition_to_copy_out() {
     .expect("COPY direction-transition test exceeded its outer watchdog");
 }
 
+/// Ordinary extended COPY OUT completes Execute once. Replication has a
+/// separate two-CommandComplete contract, but that cannot leak into this
+/// state machine.
+#[compio::test]
+async fn a_duplicate_copy_out_command_complete_is_refused() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut response = backend_frame(b'2', b"");
+        response.extend_from_slice(&backend_frame(b'H', b"\x00\x00\x00"));
+        response.extend_from_slice(&backend_frame(b'd', b"row-one\n"));
+        response.extend_from_slice(&backend_frame(b'c', b""));
+        response.extend_from_slice(&backend_frame(b'C', b"COPY 1\0"));
+        response.extend_from_slice(&backend_frame(b'C', b"COPY 1\0"));
+        response.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let chain = hostile_copy_out_retires_session(506, response).await;
+        assert!(
+            chain.contains("unexpected message from server"),
+            "duplicate COPY OUT completion reported the wrong failure: {chain:?}"
+        );
+    })
+    .await
+    .expect("duplicate-COPY-completion test exceeded its outer watchdog");
+}
+
 /// A COPY that is established correctly and then delivers a `DataRow` mid
 /// stream. This is the site at `copy_out.rs:88`, the one where resynchronising
 /// would hand the caller unparsed bytes as if they were copy data.
