@@ -85,6 +85,15 @@ thread_local! {
     /// a passing runtime build proves nothing on its own, and inferring it from
     /// "the fixture DSN is unreachable, so a connect would have failed" is an
     /// argument about the fixture rather than a measurement of the code.
+    ///
+    /// **What it does NOT count.** It counts the DATA-PLANE backend install,
+    /// not every connection the crate opens. `acquire_dedicated_client` calls
+    /// `compio_postgres::connect` straight through for each explicit
+    /// transaction and is invisible here; so is the replication connection in
+    /// `wal_consumer`. Both are outside what this counter is for, and moving
+    /// the transaction path onto a pooled checkout is a separate step of the
+    /// design. Read a zero as "no backend was installed", never as "no socket
+    /// was opened".
     static BACKENDS_OPENED: Cell<u64> = const { Cell::new(0) };
 
     /// This thread's long-lived operator pools, one per [`DbResourceKey`].
