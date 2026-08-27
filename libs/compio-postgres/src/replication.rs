@@ -3551,6 +3551,38 @@ mod tests {
         }
     }
 
+    /// TupleData's `u` marker means "reuse the unchanged TOAST value", not
+    /// SQL NULL. A caller must be able to tell those states apart while still
+    /// receiving text and binary values from the same tuple.
+    #[test]
+    fn pgoutput_preserves_every_tuple_column_kind() {
+        let mut bytes = vec![b'U'];
+        bytes.extend_from_slice(&16_384u32.to_be_bytes());
+        bytes.push(b'N');
+        bytes.extend_from_slice(&4u16.to_be_bytes());
+        bytes.push(b'n');
+        bytes.push(b'u');
+        bytes.push(b't');
+        bytes.extend_from_slice(&3u32.to_be_bytes());
+        bytes.extend_from_slice(b"abc");
+        bytes.push(b'b');
+        bytes.extend_from_slice(&2u32.to_be_bytes());
+        bytes.extend_from_slice(&[0x00, 0xFF]);
+
+        let PgOutputMessage::Update { new_tuple, .. } = pgoutput::decode(&bytes).unwrap() else {
+            panic!("the tuple fixture did not decode as Update");
+        };
+        assert_eq!(
+            new_tuple.columns,
+            vec![
+                TupleColumn::Null,
+                TupleColumn::Toasted,
+                TupleColumn::Text("abc".into()),
+                TupleColumn::Binary(bytes::Bytes::from_static(&[0x00, 0xFF])),
+            ]
+        );
+    }
+
     #[test]
     fn pgoutput_decode_delete_key() {
         let bytes = pgoutput::encode::delete_key(16384, &[Some("42")]);
