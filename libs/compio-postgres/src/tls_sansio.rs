@@ -444,6 +444,44 @@ impl SharedSession {
         }
     }
 
+    fn try_lease(&self) -> io::Result<Option<SessionLease<'_>>> {
+        if self.inner.abandoned_write.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "the TLS session lost ciphertext when a write was abandoned",
+            ));
+        }
+
+        let Some(mut state) = self.inner.state.try_lock() else {
+            return Ok(None);
+        };
+        if self.inner.abandoned_write.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "the TLS session lost ciphertext when a write was abandoned",
+            ));
+        }
+        if state.poisoned {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "the TLS session was poisoned by a panicking callback",
+            ));
+        }
+        let Some(session) = state.session.take() else {
+            return Ok(None);
+        };
+        debug_assert!(
+            state.owner.is_none(),
+            "available TLS session still had an owner"
+        );
+        state.owner = Some(std::thread::current().id());
+        Ok(Some(SessionLease {
+            shared: self,
+            session: Some(session),
+            poisoned: false,
+        }))
+    }
+
     pub(crate) fn with<R>(
         &self,
         f: impl FnOnce(&mut TlsSession) -> io::Result<R>,
@@ -451,6 +489,23 @@ impl SharedSession {
         let mut lease = self.lease()?;
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(lease.session_mut()))) {
             Ok(result) => result,
+            Err(payload) => {
+                lease.poisoned = true;
+                drop(lease);
+                std::panic::resume_unwind(payload)
+            }
+        }
+    }
+
+    pub(crate) fn try_with<R>(
+        &self,
+        f: impl FnOnce(&mut TlsSession) -> io::Result<R>,
+    ) -> io::Result<Option<R>> {
+        let Some(mut lease) = self.try_lease()? else {
+            return Ok(None);
+        };
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(lease.session_mut()))) {
+            Ok(result) => result.map(Some),
             Err(payload) => {
                 lease.poisoned = true;
                 drop(lease);
@@ -898,7 +953,9 @@ mod tests {
     };
     use rustls::pki_types::ServerName;
     use std::cell::{Cell, RefCell};
-    use std::sync::Arc;
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
 
     /// A peer that accepts every byte and answers every read with EOF.
     ///
@@ -1113,6 +1170,53 @@ mod tests {
     /// only exists behind live keys.
     fn handshaken_pair() -> (ClientConnection, rustls::ServerConnection) {
         handshaken_pair_with_store(None)
+    }
+
+    #[test]
+    fn tls_release_does_not_wait_for_an_in_flight_session_lease() {
+        let (client, _server) = handshaken_pair();
+        let session = share(client);
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind release test listener");
+        let socket = TcpStream::connect(listener.local_addr().expect("release test address"))
+            .expect("connect release test socket");
+        let (_peer, _) = listener.accept().expect("accept release test socket");
+        let mut release = crate::release::ConnectionRelease::dup_of(&socket)
+            .expect("duplicate release test socket");
+        release.set_tls_session(session.clone());
+
+        let (held_tx, held_rx) = mpsc::channel();
+        let (allow_tx, allow_rx) = mpsc::channel();
+        let held_session = session.clone();
+        let holder = std::thread::spawn(move || {
+            held_session
+                .with(|_| {
+                    held_tx.send(()).expect("report held TLS lease");
+                    allow_rx.recv().expect("release held TLS lease");
+                    Ok(())
+                })
+                .expect("hold TLS lease");
+        });
+        held_rx.recv().expect("wait for held TLS lease");
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let releaser = std::thread::spawn(move || {
+            started_tx.send(()).expect("report release start");
+            drop(release);
+            done_tx.send(()).expect("report completed release");
+        });
+        started_rx.recv().expect("wait for release start");
+        let finished_while_held = done_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+
+        allow_tx.send(()).expect("allow held TLS lease to finish");
+        holder.join().expect("join TLS lease holder");
+        releaser.join().expect("join TLS release thread");
+
+        assert!(
+            finished_while_held,
+            "TLS release waited for an in-flight TLS lease before shutting down the socket"
+        );
     }
 
     fn handshaken_pair_with_store(

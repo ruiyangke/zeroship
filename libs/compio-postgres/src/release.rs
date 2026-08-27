@@ -63,10 +63,11 @@
 //! its ordered ciphertext queue are therefore shared through `SharedSession`.
 //! `ConnectionRelease::drop` leases that live state without holding its state
 //! mutex, serializes the alert, sends it nonblocking on the owned dup, and only
-//! then calls `shutdown(Both)`. It skips the alert if an earlier TLS write is
-//! still in flight, because overtaking that record would make the alert
-//! invalid. Every step remains best effort because `Drop` has no caller to
-//! report an error to and the physical session is ending regardless.
+//! then calls `shutdown(Both)`. It skips the alert if another TLS operation
+//! holds the session lease, because waiting in `Drop` can deadlock while
+//! overtaking that operation would make the alert invalid. Every step remains
+//! best effort because `Drop` has no caller to report an error to and the
+//! physical session is ending regardless.
 
 use std::{
     fmt,
@@ -147,12 +148,12 @@ fn send_close_notify_on(
 
     // Keep the exclusive lease through the synchronous sends so no
     // connection-task write can change the record sequence between
-    // serialization and delivery. `with` does not keep its state mutex locked
-    // while rustls invokes caller-supplied crypto or logging callbacks. A
-    // callback panic poisons the rustls state; catch it here because this
-    // best-effort Drop path must still reach the socket shutdown.
+    // serialization and delivery. Never wait for that lease: its holder can
+    // be in a caller-supplied rustls callback waiting for this Drop. A callback
+    // panic poisons the rustls state; catch it here because this best-effort
+    // Drop path must still reach the socket shutdown.
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        session.with(|session| {
+        session.try_with(|session| {
             let ciphertext = session.take_close_notify()?;
             let mut remaining = ciphertext.as_slice();
             while !remaining.is_empty() {
