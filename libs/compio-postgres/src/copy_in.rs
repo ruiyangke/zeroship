@@ -251,7 +251,10 @@ where
         loop {
             match self.as_mut().project().responses.poll_next(cx) {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Err(error)) => {
+                    self.as_mut().clear_copy_mode();
+                    return Poll::Ready(Err(error));
+                }
                 Poll::Ready(Ok(_)) => {}
             }
         }
@@ -651,13 +654,13 @@ async fn send_initial_copy_message(
 #[cfg(test)]
 mod tests {
     use super::{CopyInReceiver, CopyInSink, SinkState, send_initial_copy_message};
-    use crate::Statement;
     use crate::client::{Client, CopyMode, ResponseMessages};
     use crate::codec::FrontendMessage;
     use crate::config::{SslMode, SslNegotiation};
     use crate::connection::RequestMessages;
     use crate::copy_format::CopyResponse;
     use crate::error::{DbError, SqlState};
+    use crate::{Error, Statement};
     use bytes::Bytes;
     use bytes::{BufMut, BytesMut};
     use futures_channel::mpsc;
@@ -833,5 +836,67 @@ mod tests {
                 "malformed COPY count reported the wrong protocol failure"
             ),
         }
+    }
+
+    #[compio::test]
+    async fn poll_ready_error_clears_copy_mode_guard() {
+        use futures_util::Sink;
+
+        let (request_sender, mut requests) = mpsc::unbounded();
+        let client = Client::new(
+            request_sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+        );
+        let (sender, receiver) = mpsc::channel(1);
+        let statement = Statement::unnamed(Vec::new(), Vec::new());
+        let (responses, copy_mode) = client
+            .inner()
+            .send_copy_statement(
+                RequestMessages::CopyIn(CopyInReceiver::new(receiver)),
+                &statement,
+                CopyMode::In,
+            )
+            .expect("enqueue the scripted COPY request");
+        let request = requests
+            .try_recv()
+            .expect("receive the scripted COPY request");
+        let crate::connection::Request {
+            messages,
+            sender: mut response_sender,
+            ..
+        } = request;
+        response_sender
+            .try_send(ResponseMessages::Observed(VecDeque::from([Err(
+                Error::from_db_error(admin_shutdown()),
+            )])))
+            .expect("deliver terminal COPY error");
+        drop(messages);
+
+        let sink = CopyInSink::<Bytes> {
+            sender,
+            responses,
+            response: CopyResponse::default(),
+            buf: BytesMut::new(),
+            state: SinkState::Active,
+            completion: None,
+            _p2: PhantomData,
+            copy_mode: Some(copy_mode),
+        };
+        let mut sink = Box::pin(sink);
+        let error = std::future::poll_fn(|cx| sink.as_mut().poll_ready(cx))
+            .await
+            .expect_err("the disconnected COPY producer hid its server error");
+        assert_eq!(error.code(), Some(&SqlState::ADMIN_SHUTDOWN));
+
+        client
+            .inner()
+            .send(RequestMessages::Single(FrontendMessage::Raw(
+                Bytes::from_static(b"next request"),
+            )))
+            .unwrap_or_else(|error| panic!("the recovered COPY kept rejecting commands: {error}"));
     }
 }
