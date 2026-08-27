@@ -1,7 +1,8 @@
 // Ported from tokio-postgres (MIT/Apache-2.0). Copyright (c) 2016 Steven Fackler.
 
-use crate::config::{SslMode, SslNegotiation};
-use crate::tls::TlsConnect;
+use crate::config::{SslCertMode, SslMode, SslNegotiation};
+use crate::connect_tls::Encryption;
+use crate::tls::{ServerVerification, TlsConnect};
 use crate::{
     Error, Socket, cancel_query, cancel_query_raw, client::SocketConfig, tls::MakeTlsConnect,
 };
@@ -47,6 +48,13 @@ impl From<i32> for CancelKey {
 #[derive(Clone)]
 pub struct CancelToken {
     pub(crate) socket_config: Option<SocketConfig>,
+    /// The transport the original session actually negotiated. Kept apart
+    /// from `socket_config` because `Config::connect_raw` has no address to
+    /// retain but still has a transport policy to preserve.
+    pub(crate) encryption: Encryption,
+    pub(crate) ssl_sni: bool,
+    pub(crate) ssl_cert_mode: SslCertMode,
+    pub(crate) server_verification: ServerVerification,
     pub(crate) ssl_mode: SslMode,
     pub(crate) ssl_negotiation: SslNegotiation,
     pub(crate) process_id: i32,
@@ -112,8 +120,35 @@ impl CancelToken {
         T: TlsConnect<S>,
     {
         let secret_key = self.secret_key.clone().ok_or_else(missing_cancel_key)?;
+        let encryption = self
+            .socket_config
+            .as_ref()
+            .map_or(self.encryption, |config| config.encryption);
+        let (ssl_sni, ssl_cert_mode, server_verification) = self.socket_config.as_ref().map_or(
+            (self.ssl_sni, self.ssl_cert_mode, self.server_verification),
+            |config| {
+                (
+                    config.ssl_sni,
+                    config.ssl_cert_mode,
+                    config.server_verification,
+                )
+            },
+        );
+        // A raw stream removes address pinning, not TLS policy. The cancel key
+        // remains a driver-owned bearer credential, so refuse a caller-supplied
+        // connector that cannot attest to the checks which established the
+        // original session. Do this before the connector can emit a
+        // ClientHello or any key bytes.
+        cancel_query::validate_cancel_tls_policy::<S, _>(
+            &tls,
+            encryption,
+            ssl_sni,
+            ssl_cert_mode,
+            server_verification,
+        )?;
         cancel_query_raw::cancel_query_raw(
             stream,
+            encryption,
             self.ssl_mode,
             self.ssl_negotiation,
             tls,
@@ -126,16 +161,9 @@ impl CancelToken {
             // session used. `true` means "attempt validation", which fails
             // closed - a connector with no name refuses the handshake.
             //
-            // Deriving it from the token was tried and reverted. It reads as
-            // more precise and is a downgrade: `Config::connect_raw` leaves
-            // `socket_config` as `None` forever (`config.rs`), so every
-            // caller-owned-stream client got `false`, and under the default
-            // `sslmode=prefer` that skips TLS and puts the cancel key - a
-            // bearer credential, see `cancel_query_raw` - on the wire in
-            // cleartext. It did not even fix the Unix case it was written for:
-            // `cancel_query_raw` still picks `Encryption::first_for(mode)`, so
-            // Unix plus `require` fails either way, just with a different
-            // message.
+            // This is independent of `encryption`: the token records the
+            // original session's actual transport and replays it exactly, while
+            // `has_hostname` describes the new caller-supplied connector.
             //
             // Upstream tokio-postgres passes `true` here too.
             true,
@@ -212,6 +240,10 @@ mod tests {
                 ssl_cert_mode: crate::config::SslCertMode::Allow,
                 server_verification: crate::tls::ServerVerification::None,
             }),
+            encryption: crate::connect_tls::Encryption::Plaintext,
+            ssl_sni: true,
+            ssl_cert_mode: crate::config::SslCertMode::Allow,
+            server_verification: crate::tls::ServerVerification::None,
             ssl_mode: SslMode::Disable,
             ssl_negotiation: SslNegotiation::Postgres,
             process_id: PROCESS_ID,
@@ -456,6 +488,10 @@ mod tests {
 
             let token = CancelToken {
                 socket_config: None,
+                encryption: crate::connect_tls::Encryption::Tls,
+                ssl_sni: true,
+                ssl_cert_mode: crate::config::SslCertMode::Allow,
+                server_verification: crate::tls::ServerVerification::None,
                 ssl_mode: SslMode::Prefer,
                 ssl_negotiation: SslNegotiation::Postgres,
                 process_id: PROCESS_ID,
@@ -494,5 +530,174 @@ mod tests {
         })
         .await
         .expect("raw cancel TLS-identity test exceeded its 5 second deadline");
+    }
+
+    #[compio::test]
+    async fn raw_cancel_does_not_downgrade_a_tls_session_after_ssl_refusal() {
+        compio::time::timeout(TEST_TIMEOUT, async {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind scripted raw cancel peer");
+            let addr = listener
+                .local_addr()
+                .expect("scripted raw cancel peer address");
+            let mut token = network_token(addr);
+            token.ssl_mode = SslMode::Prefer;
+            token
+                .socket_config
+                .as_mut()
+                .expect("network token has socket policy")
+                .encryption = crate::connect_tls::Encryption::Tls;
+
+            let peer = compio::runtime::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("accept raw cancel");
+                assert_eq!(read_exact(&mut stream, 8).await, ssl_request());
+                write_all(&mut stream, vec![b'N']).await;
+                let compio::BufResult(result, bytes) = stream.read(vec![0; 16]).await;
+                let count = result.expect("read after scripted TLS refusal");
+                bytes[..count].to_vec()
+            });
+
+            let stream = TcpStream::connect(addr)
+                .await
+                .expect("connect scripted raw cancel peer");
+            let result = token
+                .cancel_query_raw(
+                    stream,
+                    PassthroughTls {
+                        connected: Arc::new(AtomicBool::new(false)),
+                    },
+                )
+                .await;
+            let plaintext = peer.await.expect("scripted raw cancel peer panicked");
+
+            result.expect_err("a TLS session's raw cancel accepted a plaintext downgrade");
+            assert!(
+                plaintext.is_empty(),
+                "raw cancel sent bearer credential bytes after TLS was refused: {plaintext:?}"
+            );
+        })
+        .await
+        .expect("raw cancel downgrade test exceeded its 5 second deadline");
+    }
+
+    #[compio::test]
+    async fn raw_cancel_refuses_an_unattested_original_tls_policy() {
+        compio::time::timeout(TEST_TIMEOUT, async {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind scripted raw cancel peer");
+            let addr = listener
+                .local_addr()
+                .expect("scripted raw cancel peer address");
+            let mut token = network_token(addr);
+            token.ssl_mode = SslMode::VerifyFull;
+            let socket_config = token
+                .socket_config
+                .as_mut()
+                .expect("network token has socket policy");
+            socket_config.encryption = crate::connect_tls::Encryption::Tls;
+            socket_config.server_verification = crate::tls::ServerVerification::ChainAndHostname;
+
+            let peer = compio::runtime::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("accept raw cancel");
+                let compio::BufResult(result, first) = stream.read(vec![0; 8]).await;
+                let count = result.expect("read raw cancel first bytes");
+                if count == 0 {
+                    return Vec::new();
+                }
+                let mut observed = first[..count].to_vec();
+                if observed == ssl_request() {
+                    write_all(&mut stream, vec![b'S']).await;
+                    observed.extend_from_slice(&read_exact(&mut stream, 16).await);
+                }
+                observed
+            });
+
+            let stream = TcpStream::connect(addr)
+                .await
+                .expect("connect scripted raw cancel peer");
+            let result = token
+                .cancel_query_raw(
+                    stream,
+                    PassthroughTls {
+                        connected: Arc::new(AtomicBool::new(false)),
+                    },
+                )
+                .await;
+            let observed = peer.await.expect("scripted raw cancel peer panicked");
+
+            let error = result.expect_err(
+                "raw cancel accepted a connector that did not attest to the session's server \
+                 verification",
+            );
+            let chain = std::iter::successors(Some(&error as &dyn std::error::Error), |error| {
+                std::error::Error::source(*error)
+            })
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(": ");
+            assert!(
+                chain.contains("server verification"),
+                "raw cancel refusal did not name server verification: {chain}"
+            );
+            assert!(
+                observed.is_empty(),
+                "raw cancel emitted bytes before refusing the unattested TLS policy: \
+                 {observed:?}"
+            );
+        })
+        .await
+        .expect("raw cancel TLS-policy test exceeded its 5 second deadline");
+    }
+
+    #[compio::test]
+    async fn raw_cancel_replays_a_plaintext_session_when_mode_prefers_tls() {
+        compio::time::timeout(TEST_TIMEOUT, async {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind scripted raw cancel peer");
+            let addr = listener
+                .local_addr()
+                .expect("scripted raw cancel peer address");
+            let mut token = network_token(addr);
+            token.ssl_mode = SslMode::Prefer;
+
+            let peer = compio::runtime::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("accept raw cancel");
+                let first = read_exact(&mut stream, 8).await;
+                if first == ssl_request() {
+                    write_all(&mut stream, vec![b'N']).await;
+                    let mut packet = first;
+                    packet.extend_from_slice(&read_exact(&mut stream, 16).await);
+                    packet
+                } else {
+                    let mut packet = first;
+                    packet.extend_from_slice(&read_exact(&mut stream, 8).await);
+                    packet
+                }
+            });
+
+            let stream = TcpStream::connect(addr)
+                .await
+                .expect("connect scripted raw cancel peer");
+            token
+                .cancel_query_raw(
+                    stream,
+                    PassthroughTls {
+                        connected: Arc::new(AtomicBool::new(false)),
+                    },
+                )
+                .await
+                .expect("cancel the recorded plaintext session");
+            let packet = peer.await.expect("scripted raw cancel peer panicked");
+            assert_eq!(
+                packet,
+                cancel_packet(),
+                "raw cancel re-derived TLS instead of replaying the session's plaintext transport"
+            );
+        })
+        .await
+        .expect("raw cancel plaintext replay test exceeded its 5 second deadline");
     }
 }

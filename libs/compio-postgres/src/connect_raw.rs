@@ -413,9 +413,9 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     T: TlsConnect<S>,
 {
-    // The negotiated transport is dropped here on purpose: a caller-owned
-    // stream has no `SocketConfig`, so it can never issue a `CancelToken`
-    // cancel that would need to reproduce the transport.
+    // A caller-owned stream has no `SocketConfig` address, but the Client still
+    // records the negotiated transport so `CancelToken::cancel_query_raw` can
+    // reproduce it on another caller-owned stream.
     let (client, connection, _negotiated) = connect_raw_with_target_session_attrs(
         stream,
         tls,
@@ -497,7 +497,7 @@ where
 
     let (sender, receiver) = mpsc::unbounded();
     let drop_release = release.as_ref().map(|release| release.connection_guard());
-    let client = Client::new_with_statement_cache(
+    let mut client = Client::new_with_statement_cache(
         sender,
         config.get_ssl_mode(),
         config.get_ssl_negotiation(),
@@ -509,6 +509,16 @@ where
             config.get_statement_cache_capacity(),
             config.get_statement_cache_execution_threshold(),
         ),
+    );
+    client.set_cancel_tls_policy(
+        negotiated,
+        config.get_ssl_sni(),
+        config.get_ssl_cert_mode(),
+        if negotiated == Encryption::Plaintext {
+            ServerVerification::None
+        } else {
+            ServerVerification::demanded_by(config.get_ssl_mode(), config.get_ssl_root_cert())?
+        },
     );
     let connection = Connection::new(
         handshake.stream,

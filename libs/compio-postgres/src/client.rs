@@ -1909,6 +1909,10 @@ pub(crate) enum Addr {
 pub struct Client {
     inner: Arc<InnerClient>,
     socket_config: Option<SocketConfig>,
+    cancel_encryption: Encryption,
+    cancel_ssl_sni: bool,
+    cancel_ssl_cert_mode: SslCertMode,
+    cancel_server_verification: ServerVerification,
     ssl_mode: SslMode,
     ssl_negotiation: SslNegotiation,
     process_id: i32,
@@ -1992,6 +1996,13 @@ impl Client {
                 parameters: Arc::default(),
             }),
             socket_config: None,
+            // Real connections replace this with the negotiated result before
+            // the Client is returned. Test-only clients have no handshake, so
+            // their configured first leg is the only transport fact available.
+            cancel_encryption: Encryption::first_for(ssl_mode),
+            cancel_ssl_sni: true,
+            cancel_ssl_cert_mode: SslCertMode::Allow,
+            cancel_server_verification: ServerVerification::None,
             ssl_mode,
             ssl_negotiation,
             process_id,
@@ -2140,7 +2151,24 @@ impl Client {
     }
 
     pub(crate) fn set_socket_config(&mut self, socket_config: SocketConfig) {
+        self.cancel_encryption = socket_config.encryption;
+        self.cancel_ssl_sni = socket_config.ssl_sni;
+        self.cancel_ssl_cert_mode = socket_config.ssl_cert_mode;
+        self.cancel_server_verification = socket_config.server_verification;
         self.socket_config = Some(socket_config);
+    }
+
+    pub(crate) fn set_cancel_tls_policy(
+        &mut self,
+        encryption: Encryption,
+        ssl_sni: bool,
+        ssl_cert_mode: SslCertMode,
+        server_verification: ServerVerification,
+    ) {
+        self.cancel_encryption = encryption;
+        self.cancel_ssl_sni = ssl_sni;
+        self.cancel_ssl_cert_mode = ssl_cert_mode;
+        self.cancel_server_verification = server_verification;
     }
 
     /// Installs query execution observation for this physical connection.
@@ -2876,6 +2904,10 @@ impl Client {
     pub fn cancel_token(&self) -> CancelToken {
         CancelToken {
             socket_config: self.socket_config.clone(),
+            encryption: self.cancel_encryption,
+            ssl_sni: self.cancel_ssl_sni,
+            ssl_cert_mode: self.cancel_ssl_cert_mode,
+            server_verification: self.cancel_server_verification,
             ssl_mode: self.ssl_mode,
             ssl_negotiation: self.ssl_negotiation,
             process_id: self.process_id,
