@@ -88,10 +88,7 @@ async fn refused_copy_out_of_copy_from_stdin_was_already_synchronised() {
         let client = connect_client(&url).await;
         let missing = common::test_object_name("cpg_copy_out_missing");
 
-        let failure = match client
-            .copy_out(&format!("COPY {missing} FROM STDIN"))
-            .await
-        {
+        let failure = match client.copy_out(&format!("COPY {missing} FROM STDIN")).await {
             Err(error) => error,
             Ok(_) => panic!("COPY unexpectedly found its missing target"),
         };

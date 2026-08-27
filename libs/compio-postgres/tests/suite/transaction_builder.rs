@@ -53,12 +53,7 @@ async fn reported_state(transaction: &Transaction<'_>) -> ReportedState {
     }
 }
 
-async fn set_defaults(
-    client: &Client,
-    isolation: &str,
-    read_only: bool,
-    deferrable: bool,
-) {
+async fn set_defaults(client: &Client, isolation: &str, read_only: bool, deferrable: bool) {
     let sql = format!(
         "SET default_transaction_isolation = '{isolation}'; \
          SET default_transaction_read_only = {}; \
@@ -106,7 +101,10 @@ async fn no_options_start_a_usable_transaction_with_server_defaults() {
             ),
             1
         );
-        expect_ok(transaction.rollback().await, "roll back default transaction");
+        expect_ok(
+            transaction.rollback().await,
+            "roll back default transaction",
+        );
 
         let remaining: i64 = expect_ok(
             client
@@ -115,7 +113,10 @@ async fn no_options_start_a_usable_transaction_with_server_defaults() {
             "count rows after default transaction rollback",
         )
         .get(0);
-        assert_eq!(remaining, 0, "the no-option builder did not open a transaction");
+        assert_eq!(
+            remaining, 0,
+            "the no-option builder did not open a transaction"
+        );
     })
     .await
     .expect("no-option transaction builder test exceeded its 20 second deadline");
@@ -164,7 +165,10 @@ async fn every_isolation_level_reaches_the_server() {
                 },
                 "server did not apply {level:?}"
             );
-            expect_ok(transaction.rollback().await, "roll back isolation transaction");
+            expect_ok(
+                transaction.rollback().await,
+                "roll back isolation transaction",
+            );
         }
     })
     .await
@@ -197,7 +201,10 @@ async fn read_only_and_deferrable_apply_both_boolean_values() {
                     deferrable: "off".to_string(),
                 }
             );
-            expect_ok(transaction.rollback().await, "roll back read-only transaction");
+            expect_ok(
+                transaction.rollback().await,
+                "roll back read-only transaction",
+            );
         }
 
         for requested in [false, true] {
@@ -218,7 +225,10 @@ async fn read_only_and_deferrable_apply_both_boolean_values() {
                     deferrable: if requested { "on" } else { "off" }.to_string(),
                 }
             );
-            expect_ok(transaction.rollback().await, "roll back deferrable transaction");
+            expect_ok(
+                transaction.rollback().await,
+                "roll back deferrable transaction",
+            );
         }
     })
     .await
@@ -251,7 +261,10 @@ async fn every_multiple_option_shape_reaches_the_server() {
                 deferrable: "off".to_string(),
             }
         );
-        expect_ok(transaction.rollback().await, "roll back isolation/read-only transaction");
+        expect_ok(
+            transaction.rollback().await,
+            "roll back isolation/read-only transaction",
+        );
 
         set_defaults(&client, "serializable", false, false).await;
         let transaction = expect_ok(
@@ -271,7 +284,10 @@ async fn every_multiple_option_shape_reaches_the_server() {
                 deferrable: "on".to_string(),
             }
         );
-        expect_ok(transaction.rollback().await, "roll back isolation/deferrable transaction");
+        expect_ok(
+            transaction.rollback().await,
+            "roll back isolation/deferrable transaction",
+        );
 
         set_defaults(&client, "read committed", false, false).await;
         let transaction = expect_ok(
@@ -291,7 +307,10 @@ async fn every_multiple_option_shape_reaches_the_server() {
                 deferrable: "on".to_string(),
             }
         );
-        expect_ok(transaction.rollback().await, "roll back read-only/deferrable transaction");
+        expect_ok(
+            transaction.rollback().await,
+            "roll back read-only/deferrable transaction",
+        );
 
         set_defaults(&client, "read committed", false, false).await;
         let transaction = expect_ok(
@@ -312,7 +331,10 @@ async fn every_multiple_option_shape_reaches_the_server() {
                 deferrable: "on".to_string(),
             }
         );
-        expect_ok(transaction.rollback().await, "roll back all-option transaction");
+        expect_ok(
+            transaction.rollback().await,
+            "roll back all-option transaction",
+        );
     })
     .await
     .expect("combined transaction builder test exceeded its 20 second deadline");

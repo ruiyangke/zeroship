@@ -91,11 +91,7 @@ async fn timeout_inside_raw_transaction_rolls_back_before_same_client_reuse() {
         let backend_pid = client.process_id();
 
         let error = client
-            .command(async |client| {
-                client
-                    .batch_execute("BEGIN; SELECT pg_sleep(3)")
-                    .await
-            })
+            .command(async |client| client.batch_execute("BEGIN; SELECT pg_sleep(3)").await)
             .await
             .expect_err("the command inside BEGIN outlived its deadline");
         assert!(error.is_command_timeout());
@@ -144,10 +140,7 @@ async fn direct_pooled_client_query_does_not_enter_command_scope() {
 
         let started = Instant::now();
         let row = client
-            .query_one(
-                "SELECT pg_backend_pid(), 42::int4 FROM pg_sleep(0.20)",
-                &[],
-            )
+            .query_one("SELECT pg_backend_pid(), 42::int4 FROM pg_sleep(0.20)", &[])
             .await
             .expect("a direct pooled-client query inherited the command deadline");
 

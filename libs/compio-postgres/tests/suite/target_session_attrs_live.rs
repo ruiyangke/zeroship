@@ -99,10 +99,7 @@ async fn standby_rejects_a_read_only_primary() {
 
 #[compio::test]
 async fn primary_accepts_a_read_only_session() {
-    let mut config = config_for(
-        TargetSessionAttrs::Primary,
-        "cpg_standby_primary_read_only",
-    );
+    let mut config = config_for(TargetSessionAttrs::Primary, "cpg_standby_primary_read_only");
     config.options("-c default_transaction_read_only=on");
     let client = connect_and_drive(&config)
         .await

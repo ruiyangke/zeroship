@@ -470,10 +470,7 @@ async fn a_refused_binary_copy_row_leaves_nothing_behind() {
             .expect("finish the binary COPY");
 
         let rows: Vec<String> = client
-            .query(
-                "SELECT v FROM query_claims_binary_rollback ORDER BY v",
-                &[],
-            )
+            .query("SELECT v FROM query_claims_binary_rollback ORDER BY v", &[])
             .await
             .expect("read back the copied rows")
             .iter()
@@ -541,11 +538,7 @@ async fn an_accepted_binary_copy_row_between_two_others_is_kept() {
 
         assert_eq!(
             rows,
-            vec![
-                "alpha".to_string(),
-                "beta".to_string(),
-                "gamma".to_string()
-            ],
+            vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()],
             "an accepted row was dropped"
         );
         assert_eq!(written, 3, "finish undercounted accepted rows");

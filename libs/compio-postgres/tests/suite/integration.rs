@@ -144,10 +144,7 @@ fn execute_admin_sql_bounded(
                     if sqlstate.is_none() {
                         sqlstate = error.code().map(|code| code.code().to_owned());
                     }
-                    failures.push(format!(
-                        "{statement}: {}",
-                        common::error_chain(&error)
-                    ));
+                    failures.push(format!("{statement}: {}", common::error_chain(&error)));
                     if !continue_after_error {
                         break;
                     }
@@ -406,13 +403,10 @@ async fn require_pg() -> TestUrl {
     .await
     .expect("installing fixture timeouts exceeded its outer timeout")
     .unwrap();
-    compio::time::timeout(
-        ADMIN_STATEMENT_TIMEOUT,
-        client.execute(&drop_schema, &[]),
-    )
-    .await
-    .expect("stale-schema cleanup exceeded its fixture timeout")
-    .unwrap();
+    compio::time::timeout(ADMIN_STATEMENT_TIMEOUT, client.execute(&drop_schema, &[]))
+        .await
+        .expect("stale-schema cleanup exceeded its fixture timeout")
+        .unwrap();
     compio::time::timeout(
         ADMIN_STATEMENT_TIMEOUT,
         client.execute(&format!("CREATE SCHEMA {schema}"), &[]),
@@ -577,10 +571,7 @@ async fn create_table_insert_select_drop() {
     assert_eq!(rows[1].get::<_, &str>("name"), "bob");
 
     // Drop
-    client
-        .execute("DROP TABLE test_crud", &[])
-        .await
-        .unwrap();
+    client.execute("DROP TABLE test_crud", &[]).await.unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -754,10 +745,7 @@ async fn pool_reuse() {
     // Use the pool 5 times - should reuse connections, not create new ones each time
     for i in 0..5 {
         let val: i32 = i;
-        let rows = pool
-            .query("SELECT $1::int4 as v", &[&val])
-            .await
-            .unwrap();
+        let rows = pool.query("SELECT $1::int4 as v", &[&val]).await.unwrap();
         assert_eq!(rows[0].get::<_, i32>("v"), i);
     }
 }
@@ -771,10 +759,7 @@ async fn null_values() {
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
 
-    let rows = client
-        .query("SELECT NULL::text as val", &[])
-        .await
-        .unwrap();
+    let rows = client.query("SELECT NULL::text as val", &[]).await.unwrap();
     assert_eq!(rows.len(), 1);
 
     let val: Option<&str> = rows[0].get("val");
@@ -915,10 +900,7 @@ async fn concurrent_connections() {
     let mut results = Vec::new();
     for i in 0..5i32 {
         let conn = pool.get().await.unwrap();
-        let rows = conn
-            .query("SELECT $1::int4 as val", &[&i])
-            .await
-            .unwrap();
+        let rows = conn.query("SELECT $1::int4 as val", &[&i]).await.unwrap();
         results.push(rows[0].get::<_, i32>("val"));
         // conn dropped -> returned to pool
     }
@@ -1029,9 +1011,7 @@ async fn numeric_types() {
 
     let rows = client
         .query(
-            &format!(
-                "SELECT small_num, value, score, flag FROM {COMPLEX_TABLE} WHERE name = $1"
-            ),
+            &format!("SELECT small_num, value, score, flag FROM {COMPLEX_TABLE} WHERE name = $1"),
             &[&"numeric_test"],
         )
         .await
@@ -1818,7 +1798,11 @@ async fn get_cancellation_during_connect_does_not_leak_permits() {
     // = 1). Hold it so `idle` is empty and every further get() must take the
     // on-demand connect path.
     let c1 = pool.get().await.expect("warm connection acquires locally");
-    assert_eq!(pool.total_count(), 1, "warm-up should open exactly one conn");
+    assert_eq!(
+        pool.total_count(),
+        1,
+        "warm-up should open exactly one conn"
+    );
 
     // Drive many cancelled on-demand connects. Each reserves a permit then is
     // dropped while parked in `connect_one().await`.
@@ -1968,12 +1952,12 @@ async fn freed_connection_goes_to_front_waiter_not_a_barging_fresh_caller() {
         // and deterministic.
         .validation_bypass(std::time::Duration::from_secs(60));
     // Warm-up opens exactly one connection (min_idle=0 -> warm = max(0,1) = 1).
-    let pool = Rc::new(
-        Pool::connect_with_pool_config(&url, config)
-            .await
-            .unwrap(),
+    let pool = Rc::new(Pool::connect_with_pool_config(&url, config).await.unwrap());
+    assert_eq!(
+        pool.total_count(),
+        1,
+        "warm-up should open exactly one conn"
     );
-    assert_eq!(pool.total_count(), 1, "warm-up should open exactly one conn");
 
     // Acquire and hold the only slot. idle now empty, pool full.
     let c1 = pool.get().await.expect("warm connection acquires locally");
@@ -1995,7 +1979,10 @@ async fn freed_connection_goes_to_front_waiter_not_a_barging_fresh_caller() {
         let a_reached_get = Rc::clone(&a_reached_get);
         compio::runtime::spawn(async move {
             a_reached_get.set(true);
-            let c = pool.get().await.expect("waiter A must obtain the freed conn");
+            let c = pool
+                .get()
+                .await
+                .expect("waiter A must obtain the freed conn");
             order.borrow_mut().push('A');
             // Hold briefly, then release so a later waiter (C) can proceed.
             yield_n(2).await;
@@ -2082,11 +2069,7 @@ async fn handed_off_connection_is_reclaimed_if_waiter_is_cancelled() {
         .min_idle(0)
         .acquire_timeout(std::time::Duration::from_secs(5))
         .validation_bypass(std::time::Duration::from_secs(60));
-    let pool = Rc::new(
-        Pool::connect_with_pool_config(&url, config)
-            .await
-            .unwrap(),
-    );
+    let pool = Rc::new(Pool::connect_with_pool_config(&url, config).await.unwrap());
     assert_eq!(pool.total_count(), 1);
 
     // Hold the only slot.
@@ -2163,12 +2146,20 @@ async fn handed_off_connection_is_reclaimed_if_waiter_is_cancelled() {
     // And the reclaimed connection is fully usable: a fresh get() reclaims it
     // locally (no network round-trip under the 60 s bypass) and runs a query.
     let c = pool.get().await.expect("reclaimed connection is reusable");
-    assert_eq!(pool.active_count(), 1, "fresh caller took the reclaimed conn");
+    assert_eq!(
+        pool.active_count(),
+        1,
+        "fresh caller took the reclaimed conn"
+    );
     let rows = c.query("SELECT 7::int4 AS v", &[]).await.unwrap();
     assert_eq!(rows[0].get::<_, i32>("v"), 7);
     drop(c);
     assert_eq!(pool.active_count(), 0);
-    assert_eq!(pool.total_count(), 1, "no connection lost or leaked overall");
+    assert_eq!(
+        pool.total_count(),
+        1,
+        "no connection lost or leaked overall"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2384,7 +2375,6 @@ async fn dropped_copy_in_sink_recovers_the_same_connection() {
         .await
         .unwrap();
 }
-
 
 #[compio::test]
 async fn panicking_copy_input_does_not_leak_partial_bytes_into_the_next_item() {
@@ -2659,7 +2649,10 @@ async fn copy_out_error_surfaces_and_recovers_the_same_connection() {
             None => panic!("COPY OUT ended without reporting division by zero"),
         }
     };
-    assert!(chunks > 0, "the COPY failed before exercising its data stream");
+    assert!(
+        chunks > 0,
+        "the COPY failed before exercising its data stream"
+    );
     assert_eq!(error.code(), Some(&SqlState::DIVISION_BY_ZERO));
     drop(stream);
 
@@ -2845,10 +2838,7 @@ async fn binary_copy_out_of_many_variable_width_rows_arrives_one_tuple_per_frame
         .copy_out("COPY (SELECT n, v FROM cpg_copy_binary_widths ORDER BY n) TO STDOUT BINARY")
         .await
         .unwrap();
-    let mut rows = Box::pin(BinaryCopyOutStream::new(
-        stream,
-        &[Type::INT4, Type::TEXT],
-    ));
+    let mut rows = Box::pin(BinaryCopyOutStream::new(stream, &[Type::INT4, Type::TEXT]));
 
     let mut seen = 0i32;
     while let Some(row) = rows
@@ -2864,7 +2854,10 @@ async fn binary_copy_out_of_many_variable_width_rows_arrives_one_tuple_per_frame
         );
         seen += 1;
     }
-    assert_eq!(seen, ROWS, "binary COPY OUT delivered {seen} of {ROWS} rows");
+    assert_eq!(
+        seen, ROWS,
+        "binary COPY OUT delivered {seen} of {ROWS} rows"
+    );
     drop(rows);
 
     client
@@ -3041,8 +3034,7 @@ async fn concurrent_queries_are_pipelined() {
 // distinct echo values make a response routed to the wrong caller observable.
 // ---------------------------------------------------------------------------
 
-const PIPELINED_FAILURE_WATCHDOG: std::time::Duration =
-    std::time::Duration::from_secs(10);
+const PIPELINED_FAILURE_WATCHDOG: std::time::Duration = std::time::Duration::from_secs(10);
 const FAILURE_PIPELINE_LEN: usize = 7;
 const MISSING_PIPELINE_VALUE: i32 = i32::MIN;
 const ECHO_SQL: &str = "SELECT $1::int4 AS v";
@@ -3100,20 +3092,18 @@ async fn execute_failure_pipeline(
     failure_index: usize,
     value_base: i32,
 ) -> Vec<Result<i32, Error>> {
-    futures_util::future::join_all((0..FAILURE_PIPELINE_LEN).map(|index| {
-        async move {
-            if index == failure_index {
-                client
-                    .query_typed(EXECUTE_DIVISION_BY_ZERO_SQL, &[])
-                    .await
-                    .map(first_pipeline_value)
-            } else {
-                let value = value_base + index as i32;
-                client
-                    .query_typed(ECHO_SQL, &[(&value, Type::INT4)])
-                    .await
-                    .map(first_pipeline_value)
-            }
+    futures_util::future::join_all((0..FAILURE_PIPELINE_LEN).map(|index| async move {
+        if index == failure_index {
+            client
+                .query_typed(EXECUTE_DIVISION_BY_ZERO_SQL, &[])
+                .await
+                .map(first_pipeline_value)
+        } else {
+            let value = value_base + index as i32;
+            client
+                .query_typed(ECHO_SQL, &[(&value, Type::INT4)])
+                .await
+                .map(first_pipeline_value)
         }
     }))
     .await
@@ -3124,19 +3114,17 @@ async fn bind_failure_pipeline(
     failure_index: usize,
     value_base: i32,
 ) -> Vec<Result<i32, Error>> {
-    futures_util::future::join_all((0..FAILURE_PIPELINE_LEN).map(|index| {
-        async move {
-            let value = value_base + index as i32;
-            let encoded = if index == failure_index {
-                "not-an-int4".to_string()
-            } else {
-                value.to_string()
-            };
-            client
-                .query_text_params(ECHO_SQL, &[encoded.as_str()])
-                .await
-                .map(first_pipeline_value)
-        }
+    futures_util::future::join_all((0..FAILURE_PIPELINE_LEN).map(|index| async move {
+        let value = value_base + index as i32;
+        let encoded = if index == failure_index {
+            "not-an-int4".to_string()
+        } else {
+            value.to_string()
+        };
+        client
+            .query_text_params(ECHO_SQL, &[encoded.as_str()])
+            .await
+            .map(first_pipeline_value)
     }))
     .await
 }
@@ -3146,51 +3134,44 @@ async fn prepare_failure_pipeline(
     failure_index: usize,
     value_base: i32,
 ) -> Vec<Result<i32, Error>> {
-    futures_util::future::join_all((0..FAILURE_PIPELINE_LEN).map(|index| {
-        async move {
-            if index == failure_index {
-                client
-                    .query_typed(PREPARE_SYNTAX_ERROR_SQL, &[])
-                    .await
-                    .map(first_pipeline_value)
-            } else {
-                let value = value_base + index as i32;
-                client
-                    .query_typed(ECHO_SQL, &[(&value, Type::INT4)])
-                    .await
-                    .map(first_pipeline_value)
-            }
+    futures_util::future::join_all((0..FAILURE_PIPELINE_LEN).map(|index| async move {
+        if index == failure_index {
+            client
+                .query_typed(PREPARE_SYNTAX_ERROR_SQL, &[])
+                .await
+                .map(first_pipeline_value)
+        } else {
+            let value = value_base + index as i32;
+            client
+                .query_typed(ECHO_SQL, &[(&value, Type::INT4)])
+                .await
+                .map(first_pipeline_value)
         }
     }))
     .await
 }
 
-async fn multiple_failure_pipeline(
-    client: &Client,
-    value_base: i32,
-) -> Vec<Result<i32, Error>> {
-    futures_util::future::join_all((0..FAILURE_PIPELINE_LEN).map(|index| {
-        async move {
-            match index {
-                1 => client
-                    .query_typed(EXECUTE_DIVISION_BY_ZERO_SQL, &[])
+async fn multiple_failure_pipeline(client: &Client, value_base: i32) -> Vec<Result<i32, Error>> {
+    futures_util::future::join_all((0..FAILURE_PIPELINE_LEN).map(|index| async move {
+        match index {
+            1 => client
+                .query_typed(EXECUTE_DIVISION_BY_ZERO_SQL, &[])
+                .await
+                .map(first_pipeline_value),
+            3 => client
+                .query_text_params(ECHO_SQL, &["not-an-int4"])
+                .await
+                .map(first_pipeline_value),
+            5 => client
+                .query_typed(PREPARE_MISSING_RELATION_SQL, &[])
+                .await
+                .map(first_pipeline_value),
+            _ => {
+                let value = value_base + index as i32;
+                client
+                    .query_typed(ECHO_SQL, &[(&value, Type::INT4)])
                     .await
-                    .map(first_pipeline_value),
-                3 => client
-                    .query_text_params(ECHO_SQL, &["not-an-int4"])
-                    .await
-                    .map(first_pipeline_value),
-                5 => client
-                    .query_typed(PREPARE_MISSING_RELATION_SQL, &[])
-                    .await
-                    .map(first_pipeline_value),
-                _ => {
-                    let value = value_base + index as i32;
-                    client
-                        .query_typed(ECHO_SQL, &[(&value, Type::INT4)])
-                        .await
-                        .map(first_pipeline_value)
-                }
+                    .map(first_pipeline_value)
             }
         }
     }))
@@ -3684,7 +3665,11 @@ async fn cancelled_prepare_does_not_leak_a_server_statement() {
             before,
             "a prepare cut after {polls} poll(s) ({}) left {} statement(s) on \
              the server that no client handle can close",
-            if finished { "completed" } else { "dropped in flight" },
+            if finished {
+                "completed"
+            } else {
+                "dropped in flight"
+            },
             after - before
         );
     }
@@ -3742,10 +3727,7 @@ async fn frontend_encode_failure_is_not_blamed_on_the_server() {
                 .await
                 .unwrap_err(),
         ),
-        (
-            "prepare",
-            client.prepare(bad_sql).await.unwrap_err(),
-        ),
+        ("prepare", client.prepare(bad_sql).await.unwrap_err()),
     ];
 
     for (api, err) in cases {
@@ -3820,7 +3802,10 @@ async fn released_open_transaction_is_not_inherited_by_the_next_borrower() {
         .query_one_scalar("SELECT count(*) FROM tx_leak", &[])
         .await
         .unwrap();
-    assert_eq!(rows, 0, "the next borrower saw the previous one's uncommitted row");
+    assert_eq!(
+        rows, 0,
+        "the next borrower saw the previous one's uncommitted row"
+    );
 }
 
 #[compio::test]
@@ -4049,7 +4034,10 @@ async fn released_session_changes_in_an_aborted_transaction_are_rolled_back() {
     }
 
     let client = pool.get().await.unwrap();
-    let one: i32 = client.query_one_scalar("SELECT 1::int4", &[]).await.unwrap();
+    let one: i32 = client
+        .query_one_scalar("SELECT 1::int4", &[])
+        .await
+        .unwrap();
     assert_eq!(one, 1);
     assert_eq!(client.transaction_status(), Some(TransactionStatus::Idle));
 
@@ -4144,7 +4132,10 @@ async fn release_rollback_keeps_session_state_the_next_borrower_may_rely_on() {
     {
         let client = pool.get().await.unwrap();
         let got: bool = client
-            .query_one_scalar("SELECT pg_try_advisory_lock(hashtext($1)::int4)", &[&schema])
+            .query_one_scalar(
+                "SELECT pg_try_advisory_lock(hashtext($1)::int4)",
+                &[&schema],
+            )
             .await
             .unwrap();
         assert!(got, "another session is holding this test's advisory key");
@@ -4169,16 +4160,28 @@ async fn release_rollback_keeps_session_state_the_next_borrower_may_rely_on() {
         )
         .await
         .unwrap();
-    assert_eq!(held, 1, "the release path dropped a session-scoped advisory lock");
+    assert_eq!(
+        held, 1,
+        "the release path dropped a session-scoped advisory lock"
+    );
 
     let app_name: String = client
         .query_one_scalar("SELECT current_setting('application_name')", &[])
         .await
         .unwrap();
-    assert_eq!(app_name, "cpg_release_state", "the release path reset a session GUC");
+    assert_eq!(
+        app_name, "cpg_release_state",
+        "the release path reset a session GUC"
+    );
 
-    let bumped: i32 = client.query_one_scalar(&statement, &[&41i32]).await.unwrap();
-    assert_eq!(bumped, 42, "the release path deallocated a prepared statement");
+    let bumped: i32 = client
+        .query_one_scalar(&statement, &[&41i32])
+        .await
+        .unwrap();
+    assert_eq!(
+        bumped, 42,
+        "the release path deallocated a prepared statement"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -4352,7 +4355,8 @@ fn a_connection_does_not_outlive_the_runtime_that_opened_it() {
 }
 
 /// Name of the test below, needed as a literal because it re-executes itself.
-const FD_PROBE_TEST: &str = "a_torn_down_runtime_leaks_two_descriptors_plus_one_per_live_connection";
+const FD_PROBE_TEST: &str =
+    "a_torn_down_runtime_leaks_two_descriptors_plus_one_per_live_connection";
 
 /// The name the HARNESS knows that test by, which is what `--exact` matches.
 ///
@@ -4741,13 +4745,10 @@ async fn a_server_refusal_reaches_the_reader_with_its_sqlstate() {
 /// for the wrong reason.
 #[compio::test]
 async fn nothing_listening_is_not_reported_as_a_server_answer() {
-    let err = compio_postgres::connect(
-        "postgres://postgres:zeroship@127.0.0.1:1/zeroship",
-        NoTls,
-    )
-    .await
-    .err()
-    .expect("nothing listens on port 1");
+    let err = compio_postgres::connect("postgres://postgres:zeroship@127.0.0.1:1/zeroship", NoTls)
+        .await
+        .err()
+        .expect("nothing listens on port 1");
 
     assert!(
         !common::server_answered(&err),
@@ -4809,12 +4810,8 @@ fn a_template_clone_is_not_blocked_by_the_previous_runtime() {
     // killed process whose PID was reused, not the normal cleanup path.
     execute_admin_sql_bounded(&admin_url, &cleanup_statements, true)
         .expect("removing stale template fixtures");
-    execute_admin_sql_bounded(
-        &admin_url,
-        &[format!("CREATE DATABASE {template}")],
-        false,
-    )
-    .expect("provisioning the template");
+    execute_admin_sql_bounded(&admin_url, &[format!("CREATE DATABASE {template}")], false)
+        .expect("provisioning the template");
 
     // One test's shape: open a connection on the template, use it, end the
     // runtime.
@@ -4831,9 +4828,7 @@ fn a_template_clone_is_not_blocked_by_the_previous_runtime() {
     // The next test's fixture.
     let result = execute_admin_sql_bounded(
         &admin_url,
-        &[format!(
-            "CREATE DATABASE {clone} WITH TEMPLATE {template}"
-        )],
+        &[format!("CREATE DATABASE {clone} WITH TEMPLATE {template}")],
         false,
     );
 
@@ -5143,7 +5138,10 @@ async fn dropping_the_client_with_a_server_transaction_open_rolls_back() {
         .await
         .unwrap();
 
-    assert_eq!(row_count, 0, "the disconnected transaction committed its row");
+    assert_eq!(
+        row_count, 0,
+        "the disconnected transaction committed its row"
+    );
     assert_eq!(
         session_count, 0,
         "the client was dropped but its PostgreSQL session stayed open"
@@ -5317,7 +5315,9 @@ INNER JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid
 WHERE t.oid = $1
 ";
         assert_eq!(
-            prepared_statement_names(&client, TYPEINFO_QUERY).await.len(),
+            prepared_statement_names(&client, TYPEINFO_QUERY)
+                .await
+                .len(),
             1,
             "concurrent type-info cache loser leaked its server statement"
         );
@@ -5452,7 +5452,6 @@ async fn statement_cache_execution_threshold_one_promotes_immediately() {
     assert_eq!(prepared_statement_name(&client, SQL).await, first_name);
 }
 
-
 /// Once SQL has crossed the admission threshold, losing its server-side
 /// statement must not charge it the threshold again. The retry itself observes
 /// whether it ran under a name, so a transient unnamed Parse cannot satisfy
@@ -5502,7 +5501,10 @@ async fn statement_cache_does_not_count_wrong_parameter_arity() {
         .expect_err("the SQL requires one parameter");
 
     let first_live: i64 = client.query_one_scalar(SQL, &[&SQL]).await.unwrap();
-    assert_eq!(first_live, 0, "wrong parameter arity earned execution credit");
+    assert_eq!(
+        first_live, 0,
+        "wrong parameter arity earned execution credit"
+    );
     let second_live: i64 = client.query_one_scalar(SQL, &[&SQL]).await.unwrap();
     assert_eq!(second_live, 1);
 }
@@ -5529,7 +5531,10 @@ async fn statement_cache_execution_threshold_applies_to_execute() {
     assert_eq!(prepared_statement_names(&client, SQL).await.len(), 1);
 
     let rows = client
-        .query("SELECT value FROM cpg_cache_execute_seen ORDER BY ctid", &[])
+        .query(
+            "SELECT value FROM cpg_cache_execute_seen ORDER BY ctid",
+            &[],
+        )
         .await
         .unwrap();
     let observed = rows
@@ -5549,14 +5554,27 @@ async fn statement_cache_execution_threshold_applies_to_transaction_bind() {
 
     const SQL: &str = "SELECT $1::int4 /* cpg_cache_threshold_bind */";
     let first = transaction.bind(SQL, &[&7_i32]).await.unwrap();
-    assert!(prepared_statement_names(transaction.client(), SQL).await.is_empty());
+    assert!(
+        prepared_statement_names(transaction.client(), SQL)
+            .await
+            .is_empty()
+    );
     let rows = transaction.query_portal(&first, 0).await.unwrap();
     assert_eq!(rows[0].get::<_, i32>(0), 7);
-    assert!(prepared_statement_names(transaction.client(), SQL).await.is_empty());
+    assert!(
+        prepared_statement_names(transaction.client(), SQL)
+            .await
+            .is_empty()
+    );
     drop(first);
 
     let second = transaction.bind(SQL, &[&8_i32]).await.unwrap();
-    assert_eq!(prepared_statement_names(transaction.client(), SQL).await.len(), 1);
+    assert_eq!(
+        prepared_statement_names(transaction.client(), SQL)
+            .await
+            .len(),
+        1
+    );
     let rows = transaction.query_portal(&second, 0).await.unwrap();
     assert_eq!(rows[0].get::<_, i32>(0), 8);
     drop(second);
@@ -5639,10 +5657,7 @@ async fn clear_type_cache_refreshes_implicitly_cached_statement_metadata() {
         .await
         .unwrap();
     let catalog_variants: String = client
-        .query_one_scalar(
-            "SELECT enum_range(NULL::cpg_cache_enum)::text",
-            &[],
-        )
+        .query_one_scalar("SELECT enum_range(NULL::cpg_cache_enum)::text", &[])
         .await
         .unwrap();
 
@@ -5657,7 +5672,10 @@ async fn clear_type_cache_refreshes_implicitly_cached_statement_metadata() {
     client.clear_type_cache();
     client.simple_query("").await.unwrap();
     assert!(prepared_statement_names(&client, SQL).await.is_empty());
-    assert_eq!(prepared_statement_names(&client, BUILTIN_SQL).await.len(), 1);
+    assert_eq!(
+        prepared_statement_names(&client, BUILTIN_SQL).await.len(),
+        1
+    );
 
     let cleared_rows = client.query(SQL, &[]).await.unwrap();
     let cleared = cleared_rows[0].columns()[0].type_().clone();
@@ -5689,7 +5707,10 @@ async fn clear_type_cache_refreshes_implicitly_cached_statement_metadata() {
     assert_eq!(fresh.kind(), &expected);
 
     drop((builtin_rows, cleared_rows, fresh_rows));
-    client.batch_execute("DROP TYPE cpg_cache_enum").await.unwrap();
+    client
+        .batch_execute("DROP TYPE cpg_cache_enum")
+        .await
+        .unwrap();
 }
 
 #[compio::test]
@@ -5761,11 +5782,8 @@ async fn statement_cache_concurrent_misses_keep_one_statement() {
     let client = connect_with_statement_cache(&url, 2).await.unwrap();
 
     const SQL: &str = "SELECT 55::int4 AS cpg_cache_concurrent";
-    let (first, second) = futures_util::future::join(
-        client.query(SQL, &[]),
-        client.query(SQL, &[]),
-    )
-    .await;
+    let (first, second) =
+        futures_util::future::join(client.query(SQL, &[]), client.query(SQL, &[])).await;
     let first = first.unwrap();
     let second = second.unwrap();
 
@@ -5793,10 +5811,7 @@ async fn statement_cache_bypass_is_one_shot() {
     drop(cached_rows);
     assert_eq!(prepared_statement_names(&client, CACHED_SQL).await.len(), 1);
 
-    let bypass_rows = client
-        .query(&Uncached::new(CACHED_SQL), &[])
-        .await
-        .unwrap();
+    let bypass_rows = client.query(&Uncached::new(CACHED_SQL), &[]).await.unwrap();
     assert_eq!(prepared_statement_names(&client, CACHED_SQL).await.len(), 2);
 
     drop(bypass_rows);
@@ -5810,9 +5825,11 @@ async fn statement_cache_bypass_is_one_shot() {
     assert_eq!(one_shot_rows[0].get::<_, i32>(0), 57);
     drop(one_shot_rows);
     client.simple_query("").await.unwrap();
-    assert!(prepared_statement_names(&client, ONE_SHOT_SQL)
-        .await
-        .is_empty());
+    assert!(
+        prepared_statement_names(&client, ONE_SHOT_SQL)
+            .await
+            .is_empty()
+    );
 }
 
 /// A cached plan whose result shape changed is replaced before the stale-plan
@@ -5822,8 +5839,7 @@ async fn statement_cache_retries_stale_result_shape_once_after_0a000() {
     let url = test_url();
     let client = connect_with_statement_cache(&url, 2).await.unwrap();
 
-    const SQL: &str =
-        "SELECT cpg_cache_plan_shape.*, $1::int4 AS bound FROM cpg_cache_plan_shape";
+    const SQL: &str = "SELECT cpg_cache_plan_shape.*, $1::int4 AS bound FROM cpg_cache_plan_shape";
     client
         .batch_execute(
             "DROP TABLE IF EXISTS cpg_cache_plan_shape; \
@@ -5853,7 +5869,12 @@ async fn statement_cache_retries_stale_result_shape_once_after_0a000() {
     assert_eq!(refreshed_rows[0].get::<_, i32>("bound"), 60);
     assert_eq!(prepared_statement_names(&client, SQL).await.len(), 1);
 
-    assert_eq!(simple_query_scalar_i32(&client, "SELECT 59::int4").await.unwrap(), 59);
+    assert_eq!(
+        simple_query_scalar_i32(&client, "SELECT 59::int4")
+            .await
+            .unwrap(),
+        59
+    );
     client
         .batch_execute("DROP TABLE cpg_cache_plan_shape")
         .await
@@ -5903,19 +5924,13 @@ async fn statement_cache_does_not_retry_0a000_inside_a_transaction() {
     // ErrorResponse can precede ReadyForQuery. This barrier makes the
     // server's failed-transaction status authoritative before we assert it.
     client.simple_query("").await.unwrap();
-    assert_eq!(
-        client.transaction_status(),
-        Some(TransactionStatus::Failed)
-    );
+    assert_eq!(client.transaction_status(), Some(TransactionStatus::Failed));
     client.batch_execute("ROLLBACK").await.unwrap();
 
     let refreshed_rows = client.query(SQL, &[]).await.unwrap();
     assert_eq!(refreshed_rows[0].len(), 2);
     assert_eq!(refreshed_rows[0].get::<_, i32>("id"), 68);
-    assert_eq!(
-        refreshed_rows[0].get::<_, &str>("label"),
-        "transaction"
-    );
+    assert_eq!(refreshed_rows[0].get::<_, &str>("label"), "transaction");
 }
 
 /// The same recovery as `statement_cache_retries_stale_result_shape_once_
@@ -6122,10 +6137,7 @@ async fn statement_cache_does_not_reprepare_an_explicit_statement() {
     let refreshed_rows = client.query(&replacement, &[]).await.unwrap();
     assert_eq!(refreshed_rows[0].len(), 2);
     assert_eq!(refreshed_rows[0].get::<_, i32>("id"), 70);
-    assert_eq!(
-        refreshed_rows[0].get::<_, &str>("label"),
-        "caller-owned"
-    );
+    assert_eq!(refreshed_rows[0].get::<_, &str>("label"), "caller-owned");
 }
 
 /// Cache configuration is not cache provenance. A fresh raw-SQL prepare has
@@ -6229,7 +6241,10 @@ async fn statement_cache_propagates_a_second_consecutive_26000() {
             break;
         }
     }
-    assert_eq!(failed_attempts, 2, "the call must make exactly two attempts");
+    assert_eq!(
+        failed_attempts, 2,
+        "the call must make exactly two attempts"
+    );
 }
 
 /// A borrower can disappear after its cached execution reaches the request
@@ -6424,10 +6439,7 @@ async fn prepared_statement_server_errors_do_not_poison_the_connection() {
         .await
         .unwrap();
     let dropped_error = client.query(&dropped, &[]).await.unwrap_err();
-    let dropped_code = dropped_error
-        .code()
-        .map(SqlState::code)
-        .map(str::to_string);
+    let dropped_code = dropped_error.code().map(SqlState::code).map(str::to_string);
     let dropped_detail = common::error_chain(&dropped_error);
     let recovered_after_drop: i32 = client
         .query_one_scalar("SELECT 46::int4", &[])
@@ -6443,16 +6455,10 @@ async fn prepared_statement_server_errors_do_not_poison_the_connection() {
         .await
         .unwrap();
     let typed_error = client
-        .prepare_typed(
-            "INSERT INTO cpg_prep_typed (n) VALUES ($1)",
-            &[Type::TEXT],
-        )
+        .prepare_typed("INSERT INTO cpg_prep_typed (n) VALUES ($1)", &[Type::TEXT])
         .await
         .unwrap_err();
-    let typed_code = typed_error
-        .code()
-        .map(SqlState::code)
-        .map(str::to_string);
+    let typed_code = typed_error.code().map(SqlState::code).map(str::to_string);
     let typed_detail = common::error_chain(&typed_error);
     let recovered_after_typed: i32 = client
         .query_one_scalar("SELECT 47::int4", &[])
@@ -6503,7 +6509,11 @@ async fn identical_sql_has_distinct_names_and_each_drop_closes_one() {
     client.simple_query("").await.unwrap();
     let after_second_drop = prepared_statement_names(&client, SQL).await;
 
-    assert_eq!(while_both_live.len(), 2, "same SQL was unexpectedly deduplicated");
+    assert_eq!(
+        while_both_live.len(),
+        2,
+        "same SQL was unexpectedly deduplicated"
+    );
     assert_ne!(while_both_live[0], while_both_live[1]);
     assert_eq!(while_clone_live.len(), 2);
     assert_eq!(after_first_drop.len(), 1);
@@ -6520,13 +6530,13 @@ async fn statement_prepared_in_rolled_back_transaction_remains_usable() {
     let mut client = connect(&url).await.unwrap();
 
     let transaction = client.transaction().await.unwrap();
-    let statement = transaction
-        .prepare("SELECT $1::int4 + 1")
-        .await
-        .unwrap();
+    let statement = transaction.prepare("SELECT $1::int4 + 1").await.unwrap();
     transaction.rollback().await.unwrap();
 
-    let value: i32 = client.query_one_scalar(&statement, &[&48_i32]).await.unwrap();
+    let value: i32 = client
+        .query_one_scalar(&statement, &[&48_i32])
+        .await
+        .unwrap();
     let recovered: i32 = client
         .query_one_scalar("SELECT 50::int4", &[])
         .await
@@ -6582,10 +6592,7 @@ async fn generated_name_collision_preserves_existing_statement() {
         .unwrap();
 
     let existing_value = match collided_name.as_ref() {
-        Some(name) => Some(
-            simple_query_scalar_i32(&client, &format!("EXECUTE {name}"))
-                .await,
-        ),
+        Some(name) => Some(simple_query_scalar_i32(&client, &format!("EXECUTE {name}")).await),
         None => None,
     };
 
@@ -6603,11 +6610,7 @@ async fn generated_name_collision_preserves_existing_statement() {
     assert_eq!(prepare_code.as_deref(), Some("42P05"));
     let existing_outcome = match existing_value {
         Some(Ok(value)) => format!("value {value}"),
-        Some(Err(error)) => format!(
-            "error {:?}: {}",
-            error.code(),
-            common::error_chain(&error)
-        ),
+        Some(Err(error)) => format!("error {:?}: {}", error.code(), common::error_chain(&error)),
         None => "prepare did not return a colliding statement name".to_string(),
     };
     assert_eq!(
@@ -6977,7 +6980,10 @@ async fn an_empty_query_is_accepted_by_every_extended_protocol_entry_point() {
         );
         assert_eq!(client.execute_text_params("", &[]).await.unwrap(), 0);
 
-        let empty = client.prepare("").await.expect("prepare an empty statement");
+        let empty = client
+            .prepare("")
+            .await
+            .expect("prepare an empty statement");
         assert_eq!(client.execute(&empty, &[]).await.unwrap(), 0);
         assert!(client.query(&empty, &[]).await.unwrap().is_empty());
 
@@ -6990,7 +6996,10 @@ async fn an_empty_query_is_accepted_by_every_extended_protocol_entry_point() {
                 .unwrap(),
             1
         );
-        assert_eq!(client.execute_typed("SELECT 1, 2, 3", &[]).await.unwrap(), 1);
+        assert_eq!(
+            client.execute_typed("SELECT 1, 2, 3", &[]).await.unwrap(),
+            1
+        );
 
         assert!(!client.is_closed(), "an empty query retired the session");
         assert_autocommit_connection_is_reusable(&client, 7_900).await;
