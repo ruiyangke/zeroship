@@ -198,7 +198,7 @@ impl Stream for CopyOutStream {
                     // not report EOF until CommandComplete arrives.
                     *this.copy_done = true;
                 }
-                Ok(Message::CommandComplete(_)) if *this.copy_done => {
+                Ok(Message::CommandComplete(_)) if *this.copy_done && !*this.command_complete => {
                     // The following Sync closes the implicit transaction. A
                     // deferred constraint can still fail there, so command
                     // completion is not yet stream success.
