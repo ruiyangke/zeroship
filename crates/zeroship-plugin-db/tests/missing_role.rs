@@ -297,14 +297,29 @@ async fn pool_reconnect_missing_app_shaped_login_role_stays_internal() {
     let role = format!("app_{}_role", uuid::Uuid::new_v4().simple());
     let (url, server) = spawn_pool_reconnect_server(&role);
 
+    // A SHORT lifetime the warm entry then outlives, not `Duration::ZERO`.
+    //
+    // Zero used to work and stopped: `is_expired` is `Instant::now() >=
+    // expiry`, so a zero lifetime expires the entry at the instant it is
+    // created, and the pool's warm-up eligibility recheck then refuses to
+    // publish a pool at all - `warm-up connection 1 became unusable before pool
+    // publication`. That recheck is correct and deliberately covers lifetime:
+    // an entry that sat across later connects/hooks may genuinely have aged
+    // out. What was wrong was this fixture asking for a pool that can hold
+    // nothing in order to force one reconnect.
+    //
+    // The sleep is a one-directional wait past a deadline, not a race: the
+    // entry is eligible when `connect_with_pool_config` publishes it
+    // microseconds later, and unambiguously expired 50ms after a 5ms lifetime.
     let mut pool_config = compio_postgres::PoolConfig::new();
     pool_config
         .max_size(1)
         .min_idle(0)
-        .max_lifetime(std::time::Duration::ZERO);
+        .max_lifetime(std::time::Duration::from_millis(5));
     let pool = compio_postgres::Pool::connect_with_pool_config(&url, pool_config)
         .await
         .expect("warm pool as the temporary login role");
+    compio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     let err = match pool.get().await {
         Ok(_) => panic!("expired pool entry must reconnect after its login role is dropped"),
