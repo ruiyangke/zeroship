@@ -268,7 +268,6 @@ impl Stream for BinaryCopyOutStream {
         loop {
             if *this.trailer_seen {
                 match ready!(this.stream.as_mut().poll_next(cx)) {
-                    Some(Ok(chunk)) if chunk.is_empty() => continue,
                     Some(Ok(chunk)) => {
                         return Poll::Ready(Some(Err(Error::parse(io::Error::new(
                             io::ErrorKind::InvalidData,
