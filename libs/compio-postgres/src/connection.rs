@@ -799,7 +799,10 @@ where
     /// ownership rules as ordinary protocol dispatch.
     fn record_buffered_server_error(&mut self) -> Option<Error> {
         let server = take_buffered_server_error(&mut self.stream)?;
-
+        // The response sender may synchronously wake a pooled borrower whose
+        // Drop path decides reuse from this byte. Publish retirement before any
+        // diagnosis becomes visible, just as the ordinary read-error path does.
+        self.tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
         if let Some(error) = server.as_db_error() {
             // A DbError cannot be duplicated through Error's generic terminal
             // wrapper without losing its SQLSTATE. Rebuild it from the parsed
@@ -817,7 +820,6 @@ where
                 remember_server_error(&self.terminal_server_error, error);
             }
         }
-        self.tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
         Some(server)
     }
 
@@ -5766,7 +5768,7 @@ mod tests {
     }
 
     #[compio::test]
-    async fn serialized_request_flush_preserves_a_buffered_server_error() {
+    async fn serialized_request_flush_poisons_before_delivering_a_buffered_server_error() {
         let (request_sender, request_receiver) = mpsc::unbounded();
         let client = crate::client::Client::new(
             request_sender,
@@ -5788,6 +5790,14 @@ mod tests {
                 bytes::Bytes::from_static(b"scripted second request"),
             )))
             .expect("enqueue the second serialized request");
+        let tx_status = client.tx_status_handle();
+        let recorder = StatusRecordingWake::new(&tx_status);
+        let waker = Waker::from(Arc::clone(&recorder));
+        let mut context = Context::from_waker(&waker);
+        assert!(
+            second.poll_next(&mut context).is_pending(),
+            "the empty second response was unexpectedly ready"
+        );
 
         let mut response = completed_response_batch(b'I');
         response.extend_from_slice(&fatal_error_frame("57P01", "scripted backend shutdown"));
@@ -5811,6 +5821,11 @@ mod tests {
             .run_serialized()
             .await
             .expect_err("the scripted second flush unexpectedly succeeded");
+        assert_eq!(
+            recorder.seen.load(Ordering::Acquire),
+            READ_RETIRED_STATUS,
+            "buffered server error woke its borrower before pool poison"
+        );
         let error = match second.next().await {
             Err(error) => error,
             Ok(_) => panic!("the failed second request produced a response"),
