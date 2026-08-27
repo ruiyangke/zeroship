@@ -42,6 +42,7 @@ use std::time::Duration;
 use crate::common;
 
 const WATCHDOG: Duration = Duration::from_secs(120);
+const ABORT_OBSERVATION: Duration = Duration::from_secs(3);
 const SLOT_DETACH_ATTEMPTS: usize = 100;
 const SLOT_DETACH_RETRY: Duration = Duration::from_millis(10);
 
@@ -82,11 +83,24 @@ async fn try_collect(
     streaming: Streaming,
     publication: &str,
 ) -> Result<Vec<PgOutputMessage>, String> {
+    try_collect_with_fast_keepalives(slot, streaming, publication, false).await
+}
+
+async fn try_collect_with_fast_keepalives(
+    slot: &str,
+    streaming: Streaming,
+    publication: &str,
+    fast_keepalives: bool,
+) -> Result<Vec<PgOutputMessage>, String> {
     let mut config = common::replication_config("cpg_streaming");
     // The walsender is the process that decodes, so the limit has to be set
     // on ITS session. Startup options are the only channel a replication
     // connection has for that - it never runs a `SET`.
-    config.options(format!("-c logical_decoding_work_mem={DECODING_WORK_MEM}"));
+    let mut options = format!("-c logical_decoding_work_mem={DECODING_WORK_MEM}");
+    if fast_keepalives {
+        options.push_str(" -c wal_sender_timeout=1s");
+    }
+    config.options(options);
 
     let replication =
         compio_postgres::replication::connect_replication(common::suite_tls(), &config)
@@ -285,10 +299,11 @@ impl Fixture {
 ///
 /// MEASURED ACROSS VERSIONS, 2026-08-24. PostgreSQL 16.14 streams the
 /// transaction and then sends `StreamAbort`. PostgreSQL 18.4 sends NOTHING at
-/// all for the same workload - no StreamStart, no rows, no abort - and simply
-/// ends the stream. Confirmed on 18.4 by two independent instruments (a real
-/// walsender and `pg_logical_slot_peek_binary_changes`) and at 4000 and 40000
-/// rows, so it is a behaviour difference and not a spill threshold.
+/// all for the same workload - no StreamStart, no rows, no abort - and leaves
+/// the replication stream open. Confirmed on 18.4 by two independent
+/// instruments (a real walsender and `pg_logical_slot_peek_binary_changes`) and
+/// at 4000 and 40000 rows, so it is a behaviour difference and not a spill
+/// threshold.
 ///
 /// So `StreamAbort` cannot be REQUIRED without pinning the suite to one server
 /// version. What holds on both is the invariant that matters to a consumer: an
@@ -300,12 +315,23 @@ struct AbortOutcome {
 }
 
 async fn observe_abort(slot: &str, streaming: Streaming, publication: &str) -> AbortOutcome {
-    // A server that sends nothing ends the stream, which surfaces as a
-    // transport error rather than a decode failure. That is an ANSWER here,
-    // not a fault, so the error arm is folded into "no messages".
-    let messages = try_collect(slot, streaming, publication)
-        .await
-        .unwrap_or_default();
+    // PostgreSQL 18 can remain healthily silent for this rollback, so bound the
+    // observation rather than waiting for a transaction-terminal frame. A
+    // one-second server timeout forces a demanded keepalive during the window:
+    // with correct feedback the outer observation expires normally; without
+    // it the walsender terminates and the inner future returns an error. The
+    // old test folded that transport error into an empty result and therefore
+    // mistook a dead stream for PostgreSQL 18's legitimate silence.
+    let messages = match compio::time::timeout(
+        ABORT_OBSERVATION,
+        try_collect_with_fast_keepalives(slot, streaming, publication, true),
+    )
+    .await
+    {
+        Ok(Ok(messages)) => messages,
+        Ok(Err(error)) => panic!("the walsender failed during abort observation: {error}"),
+        Err(_) => Vec::new(),
+    };
     AbortOutcome {
         abort: messages.iter().find_map(|message| match message {
             PgOutputMessage::StreamAbort {

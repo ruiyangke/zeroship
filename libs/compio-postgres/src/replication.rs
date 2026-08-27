@@ -47,8 +47,10 @@
 //!   `START_REPLICATION SLOT ... LOGICAL ...`, waits for
 //!   `CopyBothResponse`, and returns a [`ReplicationStream`].
 //! - [`ReplicationStream::next`] - yields [`ReplicationMessage`]
-//!   (`XLogData` / `PrimaryKeepalive`). The caller drives
-//!   [`ReplicationStream::send_standby_status_update`] periodically.
+//!   (`XLogData` / `PrimaryKeepalive`) and answers a keepalive whose
+//!   `reply_requested` flag is set. The caller drives
+//!   [`ReplicationStream::send_standby_status_update`] periodically for
+//!   durability progress.
 //! - [`pgoutput`] - pure decoder. The stream layer is *agnostic* to
 //!   the logical-decoding plugin; `pgoutput` is just the parser we
 //!   ship because every consumer in zeroship uses it.
@@ -874,11 +876,11 @@ pub enum OriginFilter {
 /// The streaming half of a logical-replication connection.
 ///
 /// Yields [`ReplicationMessage`]s (XLogData / PrimaryKeepalive) via
-/// [`next`](Self::next). The caller drives
-/// [`send_standby_status_update`](Self::send_standby_status_update) on
-/// a schedule (every commit + on keepalive `reply_requested=1`) so
-/// the upstream slot's `confirmed_flush_lsn` advances and WAL retention
-/// stays bounded.
+/// [`next`](Self::next). A PrimaryKeepalive with `reply_requested=1` is
+/// answered before it is yielded. The caller also drives
+/// [`send_standby_status_update`](Self::send_standby_status_update) on a
+/// schedule, typically after durable commit processing, so the upstream
+/// slot's `confirmed_flush_lsn` advances and WAL retention stays bounded.
 ///
 /// Note: this struct intentionally does NOT decode pgoutput payloads.
 /// The XLogData's body is handed to the caller verbatim; the caller
@@ -972,8 +974,9 @@ pub enum ReplicationMessage {
         /// pgoutput frame bytes.
         body: bytes::Bytes,
     },
-    /// Periodic keepalive - the server's current `wal_end`, plus a
-    /// flag asking us to reply with a StandbyStatusUpdate right now.
+    /// Periodic keepalive - the server's current `wal_end`, plus whether it
+    /// asked for an immediate StandbyStatusUpdate. When this variant is
+    /// yielded, that requested update has already been sent.
     PrimaryKeepalive {
         wal_end: u64,
         timestamp: i64,
@@ -1137,6 +1140,20 @@ where
                             ]);
                             let reply_requested = body[17] != 0;
                             self.lsn.observe_received(wal_end);
+                            if reply_requested {
+                                if let Err(error) =
+                                    self.send_standby_status_update_inner(false).await
+                                {
+                                    // The response may have been written only
+                                    // partially, so no later frontend frame can
+                                    // be aligned safely after this failure.
+                                    self.in_flight.poison();
+                                    if let Some(release) = &self.release {
+                                        release.shutdown();
+                                    }
+                                    return Err(error);
+                                }
+                            }
                             return Ok(Some(ReplicationMessage::PrimaryKeepalive {
                                 wal_end,
                                 timestamp,
@@ -4362,6 +4379,7 @@ mod tests {
     /// declared length 999, wrong sub-tag, write and flush LSNs swapped) and
     /// watching all 177 lib tests stay green.
     struct CapturingPeer {
+        unread: Vec<u8>,
         written: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
     }
 
@@ -4370,8 +4388,12 @@ mod tests {
             &mut self,
             buf: B,
         ) -> compio::buf::BufResult<usize, B> {
-            // Nothing to read: the subject is what the driver sends.
-            compio::buf::BufResult(Ok(0), buf)
+            let mut src: &[u8] = &self.unread;
+            let before = src.len();
+            let result = src.read(buf).await;
+            let consumed = before - src.len();
+            self.unread.drain(..consumed);
+            result
         }
     }
 
@@ -4392,6 +4414,83 @@ mod tests {
         async fn shutdown(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    /// A walsender sets the final byte of PrimaryKeepalive to 1 when it needs
+    /// feedback now. Merely exposing that byte makes every generic consumer
+    /// responsible for a timing-critical protocol obligation and lets an idle
+    /// stream be terminated by `wal_sender_timeout` if the caller overlooks
+    /// it. `next` must answer before returning the informational message.
+    #[compio::test]
+    async fn a_requested_primary_keepalive_is_answered_before_it_is_yielded() {
+        let keepalive = |wal_end: u64, reply_requested: u8| {
+            let mut body = vec![PRIMARY_KEEPALIVE_TAG];
+            body.extend_from_slice(&wal_end.to_be_bytes());
+            body.extend_from_slice(&700_000_000_000i64.to_be_bytes());
+            body.push(reply_requested);
+
+            let mut frame = vec![COPY_DATA_TAG];
+            frame.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_be_bytes());
+            frame.extend_from_slice(&body);
+            frame
+        };
+
+        let start_lsn = 0x16B_3750;
+        let wal_end = 0x16B_4000;
+        let written = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut stream: ReplicationStream<CapturingPeer, CapturingPeer> = ReplicationStream {
+            stream: BufStream::new(MaybeTlsStream::Raw(CapturingPeer {
+                unread: keepalive(wal_end, 1),
+                written: std::rc::Rc::clone(&written),
+            })),
+            lsn: LsnTracker::new(start_lsn),
+            copy_response: Default::default(),
+            in_flight: InFlight::default(),
+            release: None,
+        };
+
+        match stream.next().await.expect("keepalive decodes") {
+            Some(ReplicationMessage::PrimaryKeepalive {
+                wal_end: received,
+                reply_requested,
+                ..
+            }) => {
+                assert_eq!(received, wal_end);
+                assert!(reply_requested);
+            }
+            other => panic!("expected PrimaryKeepalive, got {other:?}"),
+        }
+
+        let frame = written.borrow().clone();
+        assert_eq!(frame.len(), 39, "feedback frame was {frame:02x?}");
+        assert_eq!(frame[0], COPY_DATA_TAG);
+        assert_eq!(frame[5], STANDBY_STATUS_UPDATE_TAG);
+        let lsn = |at: usize| u64::from_be_bytes(frame[at..at + 8].try_into().expect("8 bytes"));
+        assert_eq!(lsn(6), wal_end, "write LSN must include the keepalive");
+        assert_eq!(lsn(14), start_lsn, "keepalive receipt is not a flush");
+        assert_eq!(lsn(22), start_lsn, "keepalive receipt is not an apply");
+        assert_eq!(frame[38], 0, "the response must not request another reply");
+
+        let unsolicited = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut stream: ReplicationStream<CapturingPeer, CapturingPeer> = ReplicationStream {
+            stream: BufStream::new(MaybeTlsStream::Raw(CapturingPeer {
+                unread: keepalive(wal_end, 0),
+                written: std::rc::Rc::clone(&unsolicited),
+            })),
+            lsn: LsnTracker::new(start_lsn),
+            copy_response: Default::default(),
+            in_flight: InFlight::default(),
+            release: None,
+        };
+        stream
+            .next()
+            .await
+            .expect("keepalive decodes")
+            .expect("one keepalive");
+        assert!(
+            unsolicited.borrow().is_empty(),
+            "reply_requested=0 must not cause unsolicited feedback"
+        );
     }
 
     /// The bytes `send_standby_status_update` puts on the wire are the bytes
@@ -4417,6 +4516,7 @@ mod tests {
         let written = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let mut stream: ReplicationStream<CapturingPeer, CapturingPeer> = ReplicationStream {
             stream: BufStream::new(MaybeTlsStream::Raw(CapturingPeer {
+                unread: Vec::new(),
                 written: std::rc::Rc::clone(&written),
             })),
             lsn: LsnTracker::new(0x16B_3750),
@@ -4486,6 +4586,7 @@ mod tests {
         let written = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let mut stream: ReplicationStream<CapturingPeer, CapturingPeer> = ReplicationStream {
             stream: BufStream::new(MaybeTlsStream::Raw(CapturingPeer {
+                unread: Vec::new(),
                 written: std::rc::Rc::clone(&written),
             })),
             lsn: LsnTracker::new(0x16B_3750),
