@@ -505,12 +505,48 @@ impl SqliteSession {
         self.mint(Lane::Op, ReservationKind::Autocommit)
     }
 
+    /// **Test-only**: hand an autocommit reservation to the caller so it can be
+    /// submitted twice. See
+    /// [`crate::backend::sqlite::SqliteBackend::spent_autocommit_reservation_for_tests`].
+    #[cfg(feature = "test-helpers")]
+    pub(crate) fn autocommit_reservation_for_tests(&self) -> Arc<Reservation> {
+        self.autocommit_reservation()
+    }
+
     /// Reserve `tx_conn` for one explicit creator transaction.
     ///
     /// Refuses with a typed error while another lease is live. "Live" is
     /// decided by whether the previous `Weak` still upgrades, so a lease
     /// dropped without settling frees the lane immediately rather than after a
     /// queue round trip.
+    ///
+    /// ## Policy chosen here, and OWED to a later decision
+    ///
+    /// Two questions the design did not settle. Both are answered by the code
+    /// below, so they are stated here rather than discovered - the Postgres
+    /// half writes its equivalents into
+    /// [`crate::backend::postgres::PostgresBackend`]'s
+    /// `acquire_dedicated_client`, and these are this half's.
+    ///
+    /// 1. **Exhaustion: refuse immediately, do not queue.** A second
+    ///    `db.transaction()` gets `transaction_connection_busy` at once rather
+    ///    than waiting for the lane. Conservative because a refusal is decided
+    ///    from state the caller can see and needs no deadline to be safe; the
+    ///    Postgres half queues on the pool's `acquire_timeout` instead, so the
+    ///    two arms differ in what a creator observes under contention. When
+    ///    SC-1's deadline lands, whether this becomes a bounded wait is that
+    ///    decision's to make.
+    /// 2. **Scope of the admission key.** SC-1 keys a transaction slot on
+    ///    `(runtime_instance_id, app_id)`. One `SqliteSession` serves **every**
+    ///    ATTACHed app, so the key here is effectively
+    ///    `(runtime_instance_id, session)`: app B's `db.transaction()` is
+    ///    refused while app A holds one. That is narrower than SC-1 asks for
+    ///    and it is a property of the one-file-per-app-with-one-actor layout,
+    ///    not of this function - widening it means a `tx_conn` per app, which
+    ///    is a connection-count decision nobody has taken.
+    ///
+    /// Both are visible to creators, so they are also written down in
+    /// `docs/reference/sqlite-divergences.md`; keep the two in step.
     pub(crate) async fn reserve_transaction(
         self: &Rc<Self>,
     ) -> Result<Rc<TxLease>, DbError> {
@@ -925,9 +961,16 @@ impl Drop for SqliteCancelGuard {
         // Fire-and-forget: a `Drop` cannot await. The intent + interrupt are
         // synchronous and are what actually stops a running statement; the
         // queued `Cancel` is what makes the actor roll back and retire.
-        if matches!(handle.signal(), CancelIntent::AlreadyCompleted) {
-            // The outcome was already decided. Sending `Cancel` would only ask
-            // a question nobody is waiting for the answer to.
+        //
+        // Both terminal verdicts short-circuit, and `AlreadyCancelling` is not
+        // the tidier of the two. Nobody is waiting for this guard's answer, so
+        // a `Cancel` it queues can only *act*; queuing a second one for a
+        // reservation another caller is already cancelling asks the actor to
+        // run cleanup twice on a shared connection.
+        if matches!(
+            handle.signal(),
+            CancelIntent::AlreadyCompleted | CancelIntent::AlreadyCancelling
+        ) {
             return;
         }
         let (reply_tx, _reply_rx) = flume::bounded(1);
@@ -1178,6 +1221,13 @@ struct Actor {
     attachments: Vec<(String, String)>,
     /// The reservation whose transaction state `tx_conn` currently holds.
     tx_bound: Option<u64>,
+    /// The reservation that last ran a command on `op_conn`.
+    ///
+    /// `op_conn`'s owner is short-lived by construction - one autocommit
+    /// reservation, one command - so this is not an admission gate the way
+    /// [`Self::tx_bound`] is. It names the lane's current occupant, which is
+    /// what a refusal has to report and what a later cancellation has to check.
+    op_bound: Option<u64>,
     db_path: PathBuf,
     app_id: Option<String>,
     packet_tx: Option<flume::Sender<CommitPacket>>,
@@ -1241,6 +1291,7 @@ impl Actor {
             interrupts,
             attachments: Vec::new(),
             tx_bound: None,
+            op_bound: None,
             db_path,
             app_id,
             packet_tx,
@@ -1339,6 +1390,22 @@ impl Actor {
 
     /// Refuse a command whose reservation does not own the connection it would
     /// run on.
+    ///
+    /// **Both lanes, and the two ownership rules are genuinely different.**
+    ///
+    /// - `tx_conn` has a long-lived owner: whichever transaction reservation
+    ///   the actor last bound. A command naming any other one is refused.
+    /// - `op_conn` has no long-lived owner at all - autocommit reservations are
+    ///   minted per command and settle at that command's completion. So its
+    ///   rule is the *lifetime* one: a reservation that has already run a
+    ///   command is spent, and a second command naming it is stale.
+    ///
+    /// The `op_conn` half was missing until 2026-08-27, which made the sentence
+    /// "the actor rejects a command whose reservation does not match the
+    /// connection's current owner" vacuous for half the actor. A stale
+    /// autocommit reservation was still refused - incidentally, by
+    /// `enter_running` finding a non-`PENDING` terminal - and reported as
+    /// `statement_cancelled`: the wrong error naming the wrong reason.
     fn check_owner(&self, reservation: &Reservation) -> Result<(), DbError> {
         let lane = reservation.lane();
         let entry = match lane {
@@ -1356,17 +1423,28 @@ impl Actor {
                 hint: None,
             });
         }
-        if lane == Lane::Tx && self.tx_bound != Some(reservation.id()) {
-            return Err(DbError::validation(
+        match lane {
+            Lane::Tx if self.tx_bound != Some(reservation.id()) => {
+                Err(DbError::validation(
+                    "reservation_not_owner",
+                    format!(
+                        "db: reservation {} does not own tx_conn (current owner: {:?})",
+                        reservation.id(),
+                        self.tx_bound
+                    ),
+                ))
+            }
+            Lane::Op if reservation.used() => Err(DbError::validation(
                 "reservation_not_owner",
                 format!(
-                    "db: reservation {} does not own tx_conn (current owner: {:?})",
+                    "db: autocommit reservation {} has already run its one command and no \
+                     longer owns op_conn (current owner: {:?})",
                     reservation.id(),
-                    self.tx_bound
+                    self.op_bound
                 ),
-            ));
+            )),
+            _ => Ok(()),
         }
-        Ok(())
     }
 
     fn run(&mut self, rx: &flume::Receiver<Command>) {
@@ -1492,6 +1570,15 @@ impl Actor {
         op: impl FnOnce(&Connection) -> Result<T, RunError>,
     ) -> Result<T, DbError> {
         self.check_owner(reservation)?;
+        if reservation.lane() == Lane::Op {
+            // Spend the reservation and take the lane, in that order and
+            // before anything can fail: a command that reached this point has
+            // consumed its one autocommit reservation whether or not it goes
+            // on to run, and anything asking later who owns op_conn must see
+            // the answer now rather than the one from before this command.
+            reservation.mark_used();
+            self.op_bound = Some(reservation.id());
+        }
         let seq = self.next_seq();
         if !reservation.enter_running(seq) {
             // SC-2 case 1: a cancellation was recorded before this command
@@ -1635,18 +1722,56 @@ impl Actor {
         Ok(outcome)
     }
 
+    /// Does `reservation` still own the connection a cancellation would clean
+    /// up on?
+    ///
+    /// Two ways to lose it, and a cancellation must survive both:
+    ///
+    /// 1. **The lane moved on.** A lease dropped without settling retires via
+    ///    `Release`/`unbind_tx`, a fresh `Reserve` binds the next reservation,
+    ///    and `tx_conn` is now carrying somebody else's `BEGIN`.
+    /// 2. **The connection was replaced.** A quarantined lane is closed,
+    ///    reopened and its generation bumped; nothing this reservation did
+    ///    survives on the replacement.
+    fn cancellation_still_owns_lane(&self, reservation: &Reservation) -> bool {
+        let lane = reservation.lane();
+        let entry = match lane {
+            Lane::Op => &self.op,
+            Lane::Tx => &self.tx,
+        };
+        if entry.generation != reservation.generation() {
+            return false;
+        }
+        let bound = match lane {
+            Lane::Op => self.op_bound,
+            Lane::Tx => self.tx_bound,
+        };
+        bound == Some(reservation.id())
+    }
+
     /// Resolve a cancellation: roll the reservation's connection back, retire
     /// the reservation, and only then acknowledge.
+    ///
+    /// **The two guards below are the whole safety of this method.** Cleanup
+    /// here is an unqualified `ROLLBACK` on a shared connection, so reaching it
+    /// without the right to must be impossible rather than unlikely. Until
+    /// 2026-08-27 `run_cancel` was the only data-bearing command that consulted
+    /// neither the terminal claim's uniqueness nor `check_owner`, and both
+    /// omissions were reachable: a duplicate `Cancel` (`claim_cancelled` used
+    /// to grant a second claim), and - with no duplicate at all - a `Cancel`
+    /// for a reservation whose lane a later transaction had taken over. Both
+    /// rolled back a stranger's open transaction, and because that stranger's
+    /// `tx_bound` was untouched its later `COMMIT` reported
+    /// `CommitIndeterminate`: the creator told the fate was unknown for a write
+    /// that had been silently destroyed.
     fn run_cancel(&mut self, reservation: &Arc<Reservation>) -> TerminalOutcome {
         if !reservation.claim_cancelled() {
-            // A completion already claimed the terminal. Because the queue is
-            // FIFO and the completing command ran before this one, the stored
-            // outcome is here to be read. No ROLLBACK is sent; the write
-            // stays durable.
-            let stored = reservation
-                .stored_outcome()
-                .unwrap_or(TerminalOutcome::Committed);
-            return TerminalOutcome::AlreadyCompleted(Box::new(stored));
+            // A completion already claimed the terminal, and the winner's
+            // recorded outcome is the answer. No ROLLBACK is sent; the write
+            // stays durable. When the winner recorded nothing this reports an
+            // indeterminate rather than a commit - see
+            // `reservation::outcome_for_a_claimed_terminal`.
+            return reservation::outcome_for_a_claimed_terminal(reservation);
         }
 
         if !reservation.began() {
@@ -1662,12 +1787,27 @@ impl Actor {
             return outcome;
         }
 
+        if !self.cancellation_still_owns_lane(reservation) {
+            // SQL ran, but this reservation has since been retired and its
+            // lane belongs to somebody else. Whoever retired it performed the
+            // cleanup - `unbind_tx` rolls back anything a departing lease left
+            // open, and `Settle` runs the terminal statement. Issuing a
+            // `ROLLBACK` here would land on the current owner's transaction.
+            let outcome = TerminalOutcome::Cancelled {
+                cleanup: CancelCleanup::AlreadyRetired,
+                cause: None,
+            };
+            reservation.store_outcome(outcome.clone());
+            return outcome;
+        }
+
         let lane = reservation.lane();
-        // One ROLLBACK, unconditionally. An interrupted *write* may already
-        // have been rolled back by SQLite itself while an interrupted *read*
-        // leaves the transaction open; both reach the same end state here, and
-        // "ROLLBACK errored because there was no transaction" is classified by
-        // `is_autocommit`, not treated as a failure.
+        // One ROLLBACK, unconditionally *within the ownership the guards above
+        // established*. An interrupted write may already have been rolled back
+        // by SQLite itself while an interrupted read leaves the transaction
+        // open; both reach the same end state here, and "ROLLBACK errored
+        // because there was no transaction" is classified by `is_autocommit`,
+        // not treated as a failure.
         let outcome = {
             let conn = &self.lane_mut(lane).conn;
             let raw = conn.execute_batch("ROLLBACK");
@@ -1675,8 +1815,10 @@ impl Actor {
         };
         reservation.store_outcome(outcome.clone());
         self.apply_outcome(lane, &outcome);
-        if lane == Lane::Tx && self.tx_bound == Some(reservation.id()) {
-            self.tx_bound = None;
+        match lane {
+            Lane::Tx if self.tx_bound == Some(reservation.id()) => self.tx_bound = None,
+            Lane::Op if self.op_bound == Some(reservation.id()) => self.op_bound = None,
+            _ => {}
         }
         outcome
     }
@@ -1741,29 +1883,38 @@ fn cancelled_before_start(reservation: &Reservation) -> DbError {
 /// is one SQLite rejects inside a transaction (`PRAGMA` that writes, `VACUUM`,
 /// `ATTACH`, `DETACH`) or one that manages transactions itself.
 ///
-/// It is written so that its only failure mode is a **false negative**. A `;`
-/// inside a string literal splits a fragment that is not a statement, whose
-/// leading token may accidentally match the list - and the result is that the
-/// operation runs unwrapped, exactly as it did before SC-2. It can never
-/// wrongly decide that a `VACUUM` is safe to wrap, because the real leading
-/// keyword of a real statement is always examined.
+/// It is written so that its only failure mode is a **false negative**: it may
+/// refuse to wrap something SQLite would have allowed, and the operation then
+/// runs unwrapped exactly as it did before SC-2. It can never wrongly decide
+/// that a `VACUUM` is safe to wrap.
+///
+/// That property rests on one rule, and the rule is the reason for the
+/// `is_empty` arm below rather than a filter: **a non-empty fragment whose
+/// leading token is not a bare alphabetic keyword is refused, not skipped.**
+/// Skipping it is how the guarantee above was false until 2026-08-27. Trimming
+/// the non-alphabetic edges off a leading `--` or `/*` leaves the empty string,
+/// the old code dropped empty words, and `all` over an empty iterator is
+/// `true`, so `"-- note\nVACUUM"` and `"/* c */ VACUUM"` both reported that a
+/// `VACUUM` was safe to wrap. Refusing an unrecognised leading token costs a
+/// wrap and keeps the direction of every mistake the same.
 fn permits_explicit_transaction(sql: &str) -> bool {
     const REFUSED: &[&str] = &[
         "PRAGMA", "VACUUM", "ATTACH", "DETACH", "BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT",
         "RELEASE",
     ];
     sql.split(';')
-        .filter_map(|fragment| {
+        // A fragment that is only whitespace is the gap around a `;`, not a
+        // statement. Every other fragment must produce a keyword we recognise.
+        .filter(|fragment| !fragment.trim().is_empty())
+        .map(|fragment| {
             fragment
                 .split_whitespace()
                 .next()
-                .map(|word| word.trim_matches(|c: char| !c.is_ascii_alphabetic()))
+                .unwrap_or_default()
+                .trim_matches(|c: char| !c.is_ascii_alphabetic())
+                .to_ascii_uppercase()
         })
-        .filter(|word| !word.is_empty())
-        .all(|word| {
-            let upper = word.to_ascii_uppercase();
-            !REFUSED.contains(&upper.as_str())
-        })
+        .all(|word| !word.is_empty() && !REFUSED.contains(&word.as_str()))
 }
 
 // ---------------------------------------------------------------------------
@@ -2263,6 +2414,14 @@ mod tests {
             "SAVEPOINT zs_sp_1",
             "RELEASE SAVEPOINT zs_sp_1",
             "CREATE TABLE t (x); PRAGMA foreign_keys = OFF;",
+            // Comment-prefixed. The leading token is `--` / `/*`, which trims
+            // to the empty string - and an empty leading token used to be
+            // dropped, leaving `all` vacuously true and reporting that a
+            // VACUUM was safe to wrap. These are the arms that failed.
+            "-- note\nVACUUM",
+            "/* c */ VACUUM",
+            "-- leading comment\nPRAGMA journal_mode = WAL",
+            "CREATE TABLE t (x);\n-- then\nVACUUM",
         ];
         assert!(!refused.is_empty(), "the refusal set must not be empty");
         for sql in refused {

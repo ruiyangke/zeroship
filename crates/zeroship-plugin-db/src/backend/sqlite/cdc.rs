@@ -139,10 +139,20 @@ pub(crate) struct PendingEvent {
 
 /// Cross-thread payload shipped over the flume channel at COMMIT time.
 ///
-/// `commit_id` is the monotonic per-dispatcher sequence number. The
-/// `ChangeEvent` shape (`crate::broker::ChangeEvent`) does NOT carry
+/// `commit_id` counts commits **within one dispatcher**, and a session has
+/// TWO - one per connection, since SC-2 gave the actor a `tx_conn` and an
+/// `op_conn` and both are write paths. Each starts its own counter at 0 and
+/// both publish into the same channel, so two packets from one session can
+/// carry the same `commit_id` and it identifies nothing on its own. Read it as
+/// "the Nth commit on whichever connection sent this", never as a session-wide
+/// commit sequence. (It said "the monotonic per-dispatcher sequence number"
+/// while the actor had one connection; the second one made that reading wrong.)
+///
+/// The `ChangeEvent` shape (`crate::broker::ChangeEvent`) does NOT carry
 /// `commit_id` today — surfacing it requires a broker-schema change
-/// (plan §10 Q-P2-E) deferred until a subscriber consumes it.
+/// (plan §10 Q-P2-E) deferred until a subscriber consumes it. Any such change
+/// has to pair it with the connection identity first, or subscribers inherit
+/// the collision above.
 #[derive(Debug)]
 pub(crate) struct CommitPacket {
     pub(crate) events: Vec<PendingEvent>,

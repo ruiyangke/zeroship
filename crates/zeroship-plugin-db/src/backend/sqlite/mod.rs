@@ -551,6 +551,31 @@ impl SqliteBackend {
         self.session.unregistered_transaction_handle_for_tests()
     }
 
+    /// **Test-only**: an autocommit reservation the caller keeps, so it can be
+    /// submitted more than once.
+    ///
+    /// Production mints one per command and never holds on to it, which is
+    /// exactly why the op-lane ownership rule needs a helper to be testable at
+    /// all: there is no production path that constructs the stale reservation
+    /// the rule exists to refuse.
+    #[cfg(feature = "test-helpers")]
+    pub fn spent_autocommit_reservation_for_tests(
+        &self,
+    ) -> std::sync::Arc<crate::backend::sqlite::reservation::Reservation> {
+        self.session.autocommit_reservation_for_tests()
+    }
+
+    /// **Test-only**: run one `Exec` under a caller-held reservation.
+    #[cfg(feature = "test-helpers")]
+    pub async fn exec_on_reservation_for_tests(
+        &self,
+        reservation: &std::sync::Arc<crate::backend::sqlite::reservation::Reservation>,
+        sql: &str,
+        params: &[&str],
+    ) -> Result<u64, DbError> {
+        self.session.exec_on(reservation, sql, params).await
+    }
+
     /// **Test-only**: run a transaction handle's terminal statement and return
     /// the classified outcome. Production reaches this through
     /// `transaction::exec_terminal_on_tx`.
