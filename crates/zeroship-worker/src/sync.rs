@@ -187,9 +187,16 @@ async fn version_poll_loop(
                     // maintenance backends opened for the first deleted app
                     // this process ever saw would stay open for the life of the
                     // container, in every container, against whatever
-                    // `max_connections` the cluster is sized for. Deletions are
-                    // rare, so the trade is a reconnect per batch against
-                    // holding idle backends between batches.
+                    // `max_connections` the cluster is sized for.
+                    //
+                    // The trade, stated at its worst: deletions arriving one
+                    // per poll drain the set every time, so each one pays its
+                    // own pool - which IS the per-deletion cost the shared pool
+                    // was introduced to avoid. Two connects on a background
+                    // poller nobody waits on is the cheaper side of that trade
+                    // than two idle backends per container held forever, and
+                    // the sharing still applies where it was argued for: a
+                    // batch of deletions reconciled together.
                     //
                     // Inside the poll loop, on the poller's own compio runtime:
                     // dropping a pool only asks its driver tasks to shut down,
