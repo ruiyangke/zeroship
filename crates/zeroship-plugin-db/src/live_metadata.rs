@@ -29,7 +29,9 @@
 //! entries or two distinct fact objects.
 
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{
+    Arc, OnceLock, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
+};
 
 use serde_json::Value;
 
@@ -82,6 +84,28 @@ pub(crate) fn process_wide() -> Arc<LiveMetadataCache> {
 }
 
 impl LiveMetadataCache {
+    /// The entries map for reading, recovering from a poisoned lock.
+    ///
+    /// **This cache deliberately has no poison semantics, and the recovery is
+    /// not a shortcut.** Poisoning exists to stop a reader observing an
+    /// invariant a panicking writer left half-established. This map has no such
+    /// invariant: keys and values are plain owned data, already constructed
+    /// before either lock is taken, and neither their `Hash`, their `Eq` nor
+    /// their `Drop` can panic - so no panic can be taken *between* two steps
+    /// that must happen together. What propagating the poison DOES do is turn
+    /// one panic anywhere in the process into a permanent panic on every
+    /// subsequent `env.db` operation on every thread, because this map now sits
+    /// on the per-operation path for the whole process rather than inside one
+    /// thread's context.
+    fn read_entries(&self) -> RwLockReadGuard<'_, HashMap<LiveMetadataKey, CachedFacts>> {
+        self.entries.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The entries map for writing. See [`Self::read_entries`].
+    fn write_entries(&self) -> RwLockWriteGuard<'_, HashMap<LiveMetadataKey, CachedFacts>> {
+        self.entries.write().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Read one identity's facts.
     ///
     /// `None` - never introspected, the caller must read the catalog.
@@ -91,28 +115,18 @@ impl LiveMetadataCache {
     /// The `Arc` is handed out rather than the `Value` cloned, so every reader
     /// of one identity - on any thread - observes the same allocation.
     pub(crate) fn get(&self, key: &LiveMetadataKey) -> Option<CachedFacts> {
-        self.entries
-            .read()
-            .expect("live metadata cache poisoned")
-            .get(key)
-            .cloned()
+        self.read_entries().get(key).cloned()
     }
 
     /// True when an entry exists, INCLUDING a cached-absent one. Cheaper than
     /// [`Self::get`] when admission accounting only needs presence.
     pub(crate) fn contains(&self, key: &LiveMetadataKey) -> bool {
-        self.entries
-            .read()
-            .expect("live metadata cache poisoned")
-            .contains_key(key)
+        self.read_entries().contains_key(key)
     }
 
     /// Record one identity's facts. `facts = None` records absence.
     pub(crate) fn insert(&self, key: LiveMetadataKey, facts: CachedFacts) {
-        self.entries
-            .write()
-            .expect("live metadata cache poisoned")
-            .insert(key, facts);
+        self.write_entries().insert(key, facts);
     }
 
     /// Number of cached identities. Test observability only.
@@ -120,10 +134,7 @@ impl LiveMetadataCache {
     #[doc(hidden)]
     #[must_use]
     pub fn len(&self) -> usize {
-        self.entries
-            .read()
-            .expect("live metadata cache poisoned")
-            .len()
+        self.read_entries().len()
     }
 
     /// True when nothing is cached. Present because clippy requires it beside
@@ -143,10 +154,7 @@ impl LiveMetadataCache {
     #[cfg(any(test, feature = "test-helpers"))]
     #[doc(hidden)]
     pub fn clear(&self) {
-        self.entries
-            .write()
-            .expect("live metadata cache poisoned")
-            .clear();
+        self.write_entries().clear();
     }
 }
 
@@ -204,6 +212,15 @@ mod tests {
     }
 
     /// Two OS threads see one handle to one cache.
+    ///
+    /// **Near-tautological, and recorded as such.** [`process_wide`] is a
+    /// `OnceLock`, so "two calls return one value" is what the type guarantees;
+    /// the only edit this can fail on is `process_wide` being rewritten around
+    /// a `thread_local!`. It says NOTHING about entries being shared - a cache
+    /// object can be common while the write path is not, which is why
+    /// [`facts_written_on_one_thread_are_the_same_allocation_on_another`] above
+    /// is the discriminating arm and this one is the cheap structural guard
+    /// beneath it.
     #[test]
     fn every_thread_resolves_one_cache_object() {
         let here = process_wide();
@@ -313,6 +330,59 @@ mod tests {
             Arc::ptr_eq(&written, &read_back),
             "both threads' contexts must resolve ONE fact object",
         );
+    }
+
+    /// A panic taken while a writer holds the lock must not disable the cache
+    /// for the rest of the process.
+    ///
+    /// The cache moved onto the per-operation path of every `env.db` call on
+    /// every thread. With `RwLock`'s default poison propagation, ONE panic
+    /// anywhere in the process turned all five accessors into panics forever -
+    /// a whole-process outage grown from a single failed request.
+    ///
+    /// **On a LOCAL cache, not `process_wide()`, deliberately.** Poisoning is
+    /// permanent, so poisoning the shared instance would sabotage every other
+    /// test in a binary cargo runs multi-threaded - the same mistake
+    /// `reset_context_for_tests` used to make with a global `clear()`. The
+    /// property under test belongs to the type, and the type is what is
+    /// instantiated here.
+    ///
+    /// The `is_poisoned` assertion is the control: without it this arm passes
+    /// vacuously if the fixture ever stops actually poisoning the lock.
+    #[test]
+    fn a_panic_under_the_write_lock_does_not_disable_the_cache() {
+        let cache = Arc::new(LiveMetadataCache::default());
+
+        let poisoner = Arc::clone(&cache);
+        let outcome = std::thread::spawn(move || {
+            let _held = poisoner.entries.write().expect("a fresh lock is unpoisoned");
+            panic!("a writer panicked while holding the live-metadata lock");
+        })
+        .join();
+        assert!(
+            outcome.is_err(),
+            "the fixture must actually panic while holding the write lock",
+        );
+        assert!(
+            cache.entries.is_poisoned(),
+            "the fixture must actually poison the lock, or this arm proves nothing",
+        );
+
+        // All five accessors, because all five carried the `.expect`.
+        let resource = DbResourceKey::for_url("postgres://live-metadata-poison/db");
+        let binding = DbBinding::new("app_poison", "deploy_a");
+        let key = LiveMetadataKey::new(resource, &binding, "notes");
+
+        cache.insert(key.clone(), facts("after the panic"));
+        assert!(cache.contains(&key), "contains must survive the poison");
+        assert!(
+            matches!(cache.get(&key), Some(Some(_))),
+            "get must survive the poison",
+        );
+        assert_eq!(cache.len(), 1, "len must survive the poison");
+        assert!(!cache.is_empty(), "is_empty must survive the poison");
+        cache.clear();
+        assert!(cache.is_empty(), "clear must survive the poison");
     }
 
     /// A cached absence is distinguishable from a cache miss.
