@@ -244,6 +244,70 @@ describe("with: { fk: true } — relation-aware reads", () => {
     assert.ok(seen.has("2"));
   });
 
+  test("more than 100 distinct FKs → the IN list is chunked, never over the cap", async () => {
+    // The native builder REJECTS a membership list longer than
+    // MAX_MEMBERSHIP_LIST_LEN = 100 (`zeroship-schema/src/query.rs:604`),
+    // and the loader issues `{ id: { $in: ids } }` with the whole
+    // deduplicated set (`src/collection/relations.ts:125`) - no chunking,
+    // no length guard. So a page carrying >100 DISTINCT foreign keys is
+    // rejected outright: a documented feature failing on ordinary data.
+    //
+    // Ids are deduplicated first, so this needs >100 distinct targets, which
+    // an unpaginated find() over a modest table reaches easily.
+    //
+    // The assertion is on the CALL SHAPE rather than on an error, because
+    // the cap lives in the Rust builder that this mock does not model.
+    // Asserting "no batch exceeds the cap" tests the property the loader
+    // must hold regardless of who enforces it.
+    const N = 150;
+    const users: Record<string, AnyRec> = {};
+    const todos: Record<string, AnyRec> = {};
+    for (let i = 0; i < N; i++) {
+      const uid = `u${i}`;
+      users[uid] = { id: uid, email: `u${i}@example.com`, name: `User ${i}` };
+      todos[`t${i}`] = { id: `t${i}`, userId: uid, projectId: "10", title: `todo ${i}` };
+    }
+    const mock = makeMock({ users, projects: { "10": { id: "10", name: "Apollo" } }, todos });
+    const db = installSchemaForTest(
+      {
+        users: { email: t.string().required().unique(), name: t.string().required() },
+        projects: { name: t.string().required() },
+        todos: {
+          userId: t.ref("users"),
+          projectId: t.ref("projects").required(),
+          title: t.string().required(),
+        },
+      },
+      { native: mock.native, naming: { toColumn: s => s, toField: s => s } },
+    );
+
+    const { data, error } = await db.todos.find({}, { with: { userId: true } });
+    assert.equal(error, null);
+    assert.ok(data);
+    assert.equal(data!.length, N);
+
+    const batches = mock.calls.findBatched.filter((c) => c.collection === "users");
+    assert.ok(batches.length > 0, "the relation fetch must fire");
+    for (const b of batches) {
+      const list = (b.filter.id as { $in: string[] }).$in;
+      assert.ok(
+        list.length <= 100,
+        `every IN list must stay within the builder's cap of 100; got ${list.length}`,
+      );
+    }
+
+    // And chunking must not lose or duplicate work: every distinct FK is
+    // requested exactly once across all batches. A fix that chunks but drops
+    // the tail would satisfy the cap assertion above on its own.
+    const requested = batches.flatMap((b) => (b.filter.id as { $in: string[] }).$in);
+    assert.equal(new Set(requested).size, requested.length, "no id requested twice");
+    assert.equal(new Set(requested).size, N, "every distinct FK is requested");
+
+    // The joined rows still land, which is the behaviour the cap protects.
+    const first = data!.find((r) => r.id === "t0") as AnyRec;
+    assert.equal((first.userId as AnyRec).id, "u0");
+  });
+
   test("empty result set → no relation fetch fires", async () => {
     const { db, calls } = makeDb();
     // userId = 9999 doesn't exist on any todo (todos table key is id, not userId).

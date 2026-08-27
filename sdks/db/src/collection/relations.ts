@@ -14,6 +14,17 @@ export interface RelationsCollectionInternals {
 }
 
 /**
+ * Largest `$in` list the relation loader will send in one call.
+ *
+ * MUST NOT exceed `MAX_MEMBERSHIP_LIST_LEN` in
+ * `crates/zeroship-schema/src/query.rs`, which rejects longer lists outright.
+ * The two are separate constants in separate languages with no compile-time
+ * link, so the ceiling is restated here rather than assumed; the regression
+ * test asserts the emitted batches stay within it.
+ */
+const MAX_ID_BATCH = 100;
+
+/**
  * @internal — eager-load referenced rows for each `with` key onto every
  * parent row. Mutates the rows in place. Used by both the `get` and
  * `find` paths so the relation-loading logic lives in one place.
@@ -121,15 +132,28 @@ export async function loadRelations(
         for (const r of rows) r[field] = null;
         return;
       }
-      const { data: targetRows, error } = await targetCol.find({
-        id: { $in: ids },
-      } as Filter<unknown>);
-      if (error) throw error;
+      // Chunked, because the native builder REJECTS a membership list longer
+      // than MAX_MEMBERSHIP_LIST_LEN (`zeroship-schema/src/query.rs`). Sending
+      // the whole deduplicated set failed outright for any page carrying more
+      // than that many DISTINCT foreign keys - which an unpaginated find()
+      // reaches easily, so a documented feature broke on ordinary data.
+      //
+      // Deliberately sequential rather than Promise.all: the relations
+      // themselves already run concurrently one level up, and fanning out here
+      // too would multiply in-flight queries by the chunk count for a single
+      // creator call.
       const byId = new Map<string, PlainObject>();
-      for (const tr of (targetRows ?? []) as PlainObject[]) {
-        const tid = tr.id;
-        if (typeof tid === "string") {
-          byId.set(tid, tr);
+      for (let i = 0; i < ids.length; i += MAX_ID_BATCH) {
+        const chunk = ids.slice(i, i + MAX_ID_BATCH);
+        const { data: targetRows, error } = await targetCol.find({
+          id: { $in: chunk },
+        } as Filter<unknown>);
+        if (error) throw error;
+        for (const tr of (targetRows ?? []) as PlainObject[]) {
+          const tid = tr.id;
+          if (typeof tid === "string") {
+            byId.set(tid, tr);
+          }
         }
       }
       for (const r of rows) {
