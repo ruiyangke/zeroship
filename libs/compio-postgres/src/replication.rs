@@ -46,6 +46,9 @@
 //! - [`ReplicationConnection::start_logical_replication`] - issues
 //!   `START_REPLICATION SLOT ... LOGICAL ...`, waits for
 //!   `CopyBothResponse`, and returns a [`ReplicationStream`].
+//! - [`ReplicationConnection::cancel_token`] and
+//!   [`ReplicationStream::cancel_token`] - retain BackendKeyData and expose the
+//!   same out-of-band cancellation capability as an ordinary connection.
 //! - [`ReplicationStream::next`] - yields [`ReplicationMessage`]
 //!   (`XLogData` / `PrimaryKeepalive`) and answers a keepalive whose
 //!   `reply_requested` flag is set. The caller drives
@@ -63,7 +66,8 @@
 //!   and `src/backend/replication/pgoutput/pgoutput.c` (decoder).
 
 use crate::buf_stream::BufStream;
-use crate::client::Addr;
+use crate::cancel_token::CancelKey;
+use crate::client::{Addr, SocketConfig};
 use crate::codec::FrontendMessage;
 use crate::config::{Config, ReplicationMode};
 use crate::connect::{
@@ -71,12 +75,12 @@ use crate::connect::{
     with_connect_timeout,
 };
 use crate::connect_socket::connect_socket;
-use crate::connect_tls::negotiate_tls;
+use crate::connect_tls::{Encryption, negotiate_tls};
 use crate::escape::{escape_literal_body, quote_identifier};
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::release::ConnectionRelease;
-use crate::tls::MakeTlsConnect;
-use crate::{Error, Socket};
+use crate::tls::{MakeTlsConnect, ServerVerification, TlsConnect};
+use crate::{CancelToken, Error, Socket};
 use bytes::{BufMut, BytesMut};
 use compio::io::{AsyncRead, AsyncWrite};
 use fallible_iterator::FallibleIterator;
@@ -103,8 +107,12 @@ pub const COPY_DATA_TAG: u8 = b'd';
 pub const COPY_DONE_TAG: u8 = b'c';
 /// Backend tag: `ErrorResponse`.
 pub const ERROR_RESPONSE_TAG: u8 = b'E';
+/// Backend tag: asynchronous `NotificationResponse`.
+pub const NOTIFICATION_RESPONSE_TAG: u8 = b'A';
 /// Backend tag: `NoticeResponse`.
 pub const NOTICE_RESPONSE_TAG: u8 = b'N';
+/// Backend tag: asynchronous `ParameterStatus`.
+pub const PARAMETER_STATUS_TAG: u8 = b'S';
 
 /// CopyData sub-tag: `XLogData`.
 pub const XLOG_DATA_TAG: u8 = b'w';
@@ -250,6 +258,7 @@ where
     let has_hostname = hostname.is_some();
     let encryption = first_encryption_for_addr(&addr, cfg.get_ssl_mode());
     crate::connect_raw::validate_tls_connector_parameters(&tls_inst, encryption, cfg)?;
+    let cancel_tls_policy_identity = tls_inst.cancel_policy_identity().cloned();
 
     // One transport per address, no reconnect: this path opens its own socket
     // rather than going through `connect::connect`, so it does not inherit the
@@ -273,6 +282,7 @@ where
         has_hostname,
     )
     .await?;
+    let negotiated = stream.negotiated_encryption();
     if let Some(release) = release.as_mut() {
         crate::tls::TlsStream::configure_release(
             &stream,
@@ -284,7 +294,46 @@ where
     // Run the normal startup + auth handshake - connect_raw_into
     // exposes the post-handshake BufStream that the replication
     // connection then owns.
-    let (stream, parameters) = handshake_replication(stream, cfg).await?;
+    let (stream, process_id, secret_key, parameters) = handshake_replication(stream, cfg).await?;
+    let server_verification = if negotiated == Encryption::Plaintext {
+        ServerVerification::None
+    } else {
+        ServerVerification::demanded_by(cfg.get_ssl_mode(), cfg.get_ssl_root_cert())?
+    };
+
+    let cancel_token = CancelToken {
+        socket_config: Some(SocketConfig {
+            addr: addr.clone(),
+            hostname: hostname.map(str::to_owned),
+            port,
+            connect_timeout: cfg.get_connect_timeout().copied(),
+            tcp_user_timeout: cfg.get_tcp_user_timeout().copied(),
+            keepalive: if cfg.get_keepalives() {
+                Some(cfg.keepalive_config.clone())
+            } else {
+                None
+            },
+            require_peer: cfg.get_require_peer().map(str::to_owned),
+            encryption: negotiated,
+            ssl_sni: cfg.get_ssl_sni(),
+            ssl_cert_mode: cfg.get_ssl_cert_mode(),
+            server_verification,
+        }),
+        encryption: negotiated,
+        ssl_sni: cfg.get_ssl_sni(),
+        ssl_cert_mode: cfg.get_ssl_cert_mode(),
+        server_verification,
+        tls_policy_identity: if negotiated == Encryption::Tls {
+            cancel_tls_policy_identity
+        } else {
+            None
+        },
+        ssl_mode: cfg.get_ssl_mode(),
+        ssl_negotiation: cfg.get_ssl_negotiation(),
+        process_id,
+        secret_key,
+        pool_lease: None,
+    };
 
     let mut stream = BufStream::new(stream);
     stream.set_read_timeout(cfg.get_read_timeout().copied());
@@ -305,6 +354,7 @@ where
         parameters,
         in_flight: InFlight::default(),
         release,
+        cancel_token,
     })
 }
 
@@ -323,7 +373,15 @@ where
 async fn handshake_replication<S, T>(
     stream: MaybeTlsStream<S, T>,
     config: &Config,
-) -> Result<(MaybeTlsStream<S, T>, HashMap<String, String>), Error>
+) -> Result<
+    (
+        MaybeTlsStream<S, T>,
+        i32,
+        Option<CancelKey>,
+        HashMap<String, String>,
+    ),
+    Error,
+>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     T: crate::tls::TlsStream + Unpin,
@@ -346,6 +404,7 @@ pub struct ReplicationConnection<S, T> {
     /// Standard socket paths retain a synchronous shutdown handle so a
     /// cancelled partial read cannot leave a live walsender behind.
     release: Option<ConnectionRelease>,
+    cancel_token: CancelToken,
 }
 
 /// Records that an I/O call owns the stream, so that a call which never
@@ -423,6 +482,16 @@ where
     /// callers that need to gate on PG version.
     pub fn parameters(&self) -> &HashMap<String, String> {
         &self.parameters
+    }
+
+    /// Returns a token which can cancel an in-progress replication command or
+    /// CopyBoth stream over PostgreSQL's dedicated CancelRequest connection.
+    ///
+    /// The cancellation result is reported on this original connection. During
+    /// CopyBoth, an effective cancel surfaces SQLSTATE `57014` from
+    /// [`ReplicationStream::next`] and retires the ended replication session.
+    pub fn cancel_token(&self) -> CancelToken {
+        self.cancel_token.clone()
     }
 
     /// Issue `IDENTIFY_SYSTEM` - used at start-up to discover the
@@ -539,7 +608,7 @@ where
                     // instead, so a caller cannot reuse a connection whose
                     // response was abandoned part-way.
                     self.in_flight.poison();
-                    return Err(Error::unexpected_message());
+                    return Err(failure.unwrap_or_else(Error::unexpected_message));
                 }
             }
         }
@@ -709,14 +778,17 @@ where
                         copy_response,
                         in_flight: InFlight::default(),
                         release: self.release,
+                        cancel_token: self.cancel_token,
                     });
                 }
                 ERROR_RESPONSE_TAG => {
                     let bytes = self.stream.buf().split_to(header.body_len()).freeze();
                     return Err(error_from_error_response_frame(&header, &bytes));
                 }
-                NOTICE_RESPONSE_TAG => {
-                    // Drop the notice payload silently.
+                NOTICE_RESPONSE_TAG | NOTIFICATION_RESPONSE_TAG | PARAMETER_STATUS_TAG => {
+                    // These messages are asynchronous and do not answer
+                    // START_REPLICATION. Drop their payloads and keep waiting
+                    // for CopyBothResponse or ErrorResponse.
                     let _ = self.stream.buf().split_to(header.body_len()).freeze();
                 }
                 tag => {
@@ -901,6 +973,7 @@ pub struct ReplicationStream<S, T> {
     /// [`ReplicationStream::send_standby_status_update`] is cancel-safe.
     in_flight: InFlight,
     release: Option<ConnectionRelease>,
+    cancel_token: CancelToken,
 }
 
 /// Tracks the two distinct LSN positions a logical-replication client
@@ -994,6 +1067,13 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     T: AsyncRead + AsyncWrite + Unpin,
 {
+    /// Returns a token which sends an out-of-band CancelRequest for this
+    /// CopyBoth session. An effective cancel is returned as SQLSTATE `57014`
+    /// by [`next`](Self::next), after which the stream is retired.
+    pub fn cancel_token(&self) -> CancelToken {
+        self.cancel_token.clone()
+    }
+
     /// The overall format selected by PostgreSQL for the CopyBoth stream.
     pub fn format(&self) -> crate::CopyFormat {
         self.copy_response.format()
@@ -1066,9 +1146,11 @@ where
             // everything below this point was well-framed, and that arm is the
             // counterexample sitting in the same `match`.
             //
-            // A server-sent `ErrorResponse` is the case that does NOT poison: it
-            // is a complete message, its arm consumes the body, and the wire is
-            // exactly where it should be, so a caller may reasonably carry on.
+            // A server-sent `ErrorResponse` is frame-aligned but not reusable:
+            // it ends CopyBoth protocol state. PostgreSQL may follow it with
+            // ReadyForQuery, but this API cannot send Sync, return to a
+            // ReplicationConnection, or interpret ordinary-query frames. Its
+            // arm therefore preserves the server error and retires the stream.
             let header = match frame {
                 Ok(header) => header,
                 Err(e) => {
@@ -1200,7 +1282,20 @@ where
                             ),
                         )));
                     }
-                    return Ok(None);
+
+                    // CopyBoth is bidirectional: backend CopyDone closes only
+                    // PostgreSQL's sending direction. Acknowledge it, then
+                    // consume the simple-query completion before reporting a
+                    // clean end. Executor cleanup can still fail in that
+                    // interval, and returning here used to discard that
+                    // ErrorResponse as well as leave the server waiting for
+                    // our half-close.
+                    let result = self.finish_copy_both().await;
+                    self.in_flight.poison();
+                    if let Some(release) = &self.release {
+                        release.shutdown();
+                    }
+                    return result.map(|()| None);
                 }
                 ERROR_RESPONSE_TAG => {
                     // The walsender's own failures arrive here: the slot
@@ -1211,9 +1306,14 @@ where
                     // travel with the error rather than being dropped for a
                     // fixed string.
                     let bytes = self.stream.buf().split_to(header.body_len()).freeze();
-                    return Err(error_from_error_response_frame(&header, &bytes));
+                    let error = error_from_error_response_frame(&header, &bytes);
+                    self.in_flight.poison();
+                    if let Some(release) = &self.release {
+                        release.shutdown();
+                    }
+                    return Err(error);
                 }
-                NOTICE_RESPONSE_TAG => {
+                NOTICE_RESPONSE_TAG | PARAMETER_STATUS_TAG | NOTIFICATION_RESPONSE_TAG => {
                     let _ = self.stream.buf().split_to(header.body_len()).freeze();
                 }
                 other => {
@@ -1232,6 +1332,52 @@ where
                     return Err(Error::io(std::io::Error::other(format!(
                         "unexpected tag in replication stream: 0x{other:02x}"
                     ))));
+                }
+            }
+        }
+    }
+
+    /// Acknowledge backend CopyDone and consume the ordinary response which
+    /// finishes the START_REPLICATION simple-query phase.
+    async fn finish_copy_both(&mut self) -> Result<(), Error> {
+        let mut bytes = BytesMut::new();
+        frontend::copy_done(&mut bytes);
+        crate::codec::write_frontend(&mut self.stream, FrontendMessage::Raw(bytes.freeze()))?;
+        if let Err(error) = self.stream.flush().await {
+            return Err(take_buffered_server_error(&mut self.stream).unwrap_or(error));
+        }
+
+        // PostgreSQL owes a terminal CommandComplete/ErrorResponse plus
+        // ReadyForQuery only after the frontend half-close reaches it.
+        self.stream.begin_read_response();
+        let result = self.drain_copy_both_completion().await;
+        self.stream.finish_read_response();
+        result
+    }
+
+    async fn drain_copy_both_completion(&mut self) -> Result<(), Error> {
+        let mut failure: Option<Error> = None;
+
+        loop {
+            let message = match read_one_message(&mut self.stream).await {
+                Ok(message) => message,
+                // PostgreSQL sends no ReadyForQuery after FATAL. In that case
+                // EOF closes the response, but the ErrorResponse already read
+                // from the wire remains the useful diagnosis.
+                Err(error) => return Err(failure.unwrap_or(error)),
+            };
+
+            match message {
+                Message::CommandComplete(_) => {}
+                Message::ReadyForQuery(_) => {
+                    return failure.map_or(Ok(()), Err);
+                }
+                Message::ErrorResponse(body) => failure = failure.or(Some(Error::db(body))),
+                Message::NoticeResponse(_)
+                | Message::ParameterStatus(_)
+                | Message::NotificationResponse(_) => {}
+                _ => {
+                    return Err(failure.unwrap_or_else(Error::unexpected_message));
                 }
             }
         }
@@ -1316,7 +1462,10 @@ where
         let now = postgres_microseconds_since_epoch();
         let (write, flush, apply) = self.lsn.standby_lsns();
         encode_standby_status_update(&mut self.stream, write, flush, apply, now, reply_requested)?;
-        self.stream.flush().await
+        if let Err(error) = self.stream.flush().await {
+            return Err(take_buffered_server_error(&mut self.stream).unwrap_or(error));
+        }
+        Ok(())
     }
 }
 
@@ -1423,6 +1572,41 @@ where
     }
 }
 
+/// Consume a complete ErrorResponse already over-read behind the response
+/// which made the caller attempt a frontend write, skipping only complete
+/// asynchronous messages before it.
+///
+/// This deliberately performs no socket read. A failed write retires the
+/// session, and waiting for bytes which are not already buffered could hang on
+/// a one-way transport failure. The common coalesced-read case still gets the
+/// server diagnosis which is already locally available.
+fn take_buffered_server_error<S>(stream: &mut BufStream<S>) -> Option<Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    loop {
+        let length = stream.peek_u32_be(1)?;
+        if length < 4 || stream.validate_length(length).is_err() {
+            return None;
+        }
+        let total_len = usize::try_from(length).ok()?.checked_add(1)?;
+        if stream.buf().len() < total_len {
+            return None;
+        }
+
+        match stream.buf()[0] {
+            ERROR_RESPONSE_TAG => {
+                let frame = stream.buf().split_to(total_len);
+                return Some(error_from_error_response_body(frame));
+            }
+            NOTICE_RESPONSE_TAG | NOTIFICATION_RESPONSE_TAG | PARAMETER_STATUS_TAG => {
+                let _ = stream.buf().split_to(total_len);
+            }
+            _ => return None,
+        }
+    }
+}
+
 /// Send a simple-query (`Q`) frontend message - used to issue both
 /// `IDENTIFY_SYSTEM` and `START_REPLICATION`. The walsender accepts
 /// the simple-query path for the replication command grammar.
@@ -1433,7 +1617,10 @@ where
     let mut buf = BytesMut::new();
     frontend::query(query, &mut buf).map_err(Error::encode)?;
     crate::codec::write_frontend(stream, FrontendMessage::Raw(buf.freeze()))?;
-    stream.flush().await
+    if let Err(error) = stream.flush().await {
+        return Err(take_buffered_server_error(stream).unwrap_or(error));
+    }
+    Ok(())
 }
 
 /// Encode a `StandbyStatusUpdate` frame into the stream's write
@@ -2678,12 +2865,28 @@ pub mod pgoutput {
 mod tests {
     use super::*;
     use crate::NoTls;
-    use crate::config::{SslMode, SslRootCert};
+    use crate::config::{SslCertMode, SslMode, SslNegotiation, SslRootCert};
     use crate::tls::{NoTlsStream, TlsConnect};
     use compio::io::{AsyncReadExt, AsyncWriteExt};
     use pgoutput::{OldTuple, PgOutputMessage, TupleColumn};
     use std::error::Error as _;
     use std::future;
+
+    fn test_cancel_token() -> CancelToken {
+        CancelToken {
+            socket_config: None,
+            encryption: Encryption::Plaintext,
+            ssl_sni: true,
+            ssl_cert_mode: SslCertMode::Allow,
+            server_verification: ServerVerification::None,
+            tls_policy_identity: None,
+            ssl_mode: SslMode::Disable,
+            ssl_negotiation: SslNegotiation::Postgres,
+            process_id: 0,
+            secret_key: Some(0.into()),
+            pool_lease: None,
+        }
+    }
 
     fn startup_frame(tag: u8, body: &[u8]) -> Vec<u8> {
         let mut frame = Vec::with_capacity(5 + body.len());
@@ -3996,6 +4199,7 @@ mod tests {
             parameters: HashMap::new(),
             in_flight: InFlight::default(),
             release: None,
+            cancel_token: test_cancel_token(),
         }
     }
 
@@ -4069,8 +4273,9 @@ mod tests {
         );
     }
 
-    /// A peer that writes part of the first frame, fails the remainder, and is
-    /// healthy for every write after that.
+    /// A peer that accepts a configured number of writes, writes part of the
+    /// next frame, fails the remainder, and is healthy for every write after
+    /// that.
     ///
     /// The recovery is the whole point. A peer that simply stayed broken would
     /// make the test below pass on the unfixed driver too, because the second
@@ -4084,6 +4289,8 @@ mod tests {
     /// with a write error, which no real peer is needed to produce.
     struct WriteFailingPeer {
         writes: usize,
+        writes_before_failure: usize,
+        unread: Vec<u8>,
     }
 
     impl compio::io::AsyncRead for WriteFailingPeer {
@@ -4091,8 +4298,12 @@ mod tests {
             &mut self,
             buf: B,
         ) -> compio::buf::BufResult<usize, B> {
-            // Nothing to read: the subject is the write path.
-            compio::buf::BufResult(Ok(0), buf)
+            let mut src: &[u8] = &self.unread;
+            let before = src.len();
+            let result = src.read(buf).await;
+            let consumed = before - src.len();
+            self.unread.drain(..consumed);
+            result
         }
     }
 
@@ -4103,12 +4314,13 @@ mod tests {
         ) -> compio::buf::BufResult<usize, B> {
             self.writes += 1;
             let len = compio::buf::IoBuf::buf_len(&buf);
+            let partial_write = self.writes_before_failure + 1;
             match self.writes {
                 // Accept half the frame, so `write_all` comes back for the rest.
-                1 => compio::buf::BufResult(Ok(len / 2), buf),
+                write if write == partial_write => compio::buf::BufResult(Ok(len / 2), buf),
                 // ... and fail it. `BufStream::flush` took the frame out of the
                 // write buffer before awaiting, so the tail is now gone.
-                2 => compio::buf::BufResult(
+                write if write == partial_write + 1 => compio::buf::BufResult(
                     Err(std::io::Error::other("scripted mid-frame write failure")),
                     buf,
                 ),
@@ -4125,12 +4337,86 @@ mod tests {
 
     fn stream_over_failing_writer() -> ReplicationStream<WriteFailingPeer, WriteFailingPeer> {
         ReplicationStream {
-            stream: BufStream::new(MaybeTlsStream::Raw(WriteFailingPeer { writes: 0 })),
+            stream: BufStream::new(MaybeTlsStream::Raw(WriteFailingPeer {
+                writes: 0,
+                writes_before_failure: 0,
+                unread: Vec::new(),
+            })),
             lsn: LsnTracker::new(0),
             copy_response: Default::default(),
             in_flight: InFlight::default(),
             release: None,
+            cancel_token: test_cancel_token(),
         }
+    }
+
+    fn stream_over_failing_writer_with_unread(
+        unread: Vec<u8>,
+    ) -> ReplicationStream<WriteFailingPeer, WriteFailingPeer> {
+        ReplicationStream {
+            stream: BufStream::new(MaybeTlsStream::Raw(WriteFailingPeer {
+                writes: 0,
+                writes_before_failure: 0,
+                unread,
+            })),
+            lsn: LsnTracker::new(0),
+            copy_response: Default::default(),
+            in_flight: InFlight::default(),
+            release: None,
+            cancel_token: test_cancel_token(),
+        }
+    }
+
+    fn replication_connection_over_failing_writer(
+        unread: Vec<u8>,
+        writes_before_failure: usize,
+    ) -> ReplicationConnection<WriteFailingPeer, WriteFailingPeer> {
+        ReplicationConnection {
+            stream: BufStream::new(MaybeTlsStream::Raw(WriteFailingPeer {
+                writes: 0,
+                writes_before_failure,
+                unread,
+            })),
+            parameters: HashMap::new(),
+            in_flight: InFlight::default(),
+            release: None,
+            cancel_token: test_cancel_token(),
+        }
+    }
+
+    /// CopyBoth remains an ordinary protocol response boundary for
+    /// asynchronous backend messages. A status change or notification can be
+    /// coalesced ahead of the ErrorResponse which actually ends replication;
+    /// neither asynchronous frame may replace that server diagnosis.
+    #[compio::test]
+    async fn copy_both_preserves_an_error_behind_asynchronous_messages() {
+        let mut notification = 17i32.to_be_bytes().to_vec();
+        notification.extend_from_slice(b"scripted_channel\0scripted payload\0");
+
+        let mut wire = startup_frame(PARAMETER_STATUS_TAG, b"TimeZone\0UTC\0");
+        wire.extend_from_slice(&startup_frame(NOTIFICATION_RESPONSE_TAG, &notification));
+        wire.extend_from_slice(&error_response_message(&[
+            (b'S', "ERROR"),
+            (b'C', "55000"),
+            (b'M', "scripted replication stream refusal"),
+        ]));
+        let mut stream = stream_over_failing_writer_with_unread(wire);
+
+        let error = stream
+            .next()
+            .await
+            .expect_err("the scripted replication stream ended with an error");
+        let chain = std::iter::successors(std::error::Error::source(&error), |source| {
+            std::error::Error::source(*source)
+        })
+        .fold(error.to_string(), |chain, source| {
+            format!("{chain}: {source}")
+        });
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("55000"),
+            "replication stream discarded SQLSTATE 55000 behind asynchronous messages: {chain}"
+        );
     }
 
     /// A standby status update that fails part-way through its flush must
@@ -4171,6 +4457,196 @@ mod tests {
         assert!(
             second.is_cancelled(),
             "the driver wrote a second frame after a fragment instead of refusing: {second}"
+        );
+    }
+
+    /// The read which delivered a reply-requesting keepalive can over-read a
+    /// following ErrorResponse into the userspace buffer. If the automatic
+    /// StandbyStatusUpdate then fails to flush, that already-available server
+    /// diagnosis outranks the local write symptom.
+    #[compio::test]
+    async fn an_automatic_keepalive_write_failure_preserves_a_buffered_server_error() {
+        let mut keepalive = vec![PRIMARY_KEEPALIVE_TAG];
+        keepalive.extend_from_slice(&0x16B_4000u64.to_be_bytes());
+        keepalive.extend_from_slice(&700_000_000_000i64.to_be_bytes());
+        keepalive.push(1);
+
+        let mut wire = startup_frame(COPY_DATA_TAG, &keepalive);
+        wire.extend_from_slice(&error_response_message(&[
+            (b'S', "FATAL"),
+            (b'C', "57P01"),
+            (b'M', "terminating connection due to administrator command"),
+        ]));
+        let mut stream = stream_over_failing_writer_with_unread(wire);
+
+        let error = stream
+            .next()
+            .await
+            .expect_err("the automatic keepalive reply write was scripted to fail");
+        let chain = std::iter::successors(std::error::Error::source(&error), |source| {
+            std::error::Error::source(*source)
+        })
+        .fold(error.to_string(), |chain, source| {
+            format!("{chain}: {source}")
+        });
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("57P01"),
+            "automatic keepalive reply discarded SQLSTATE 57P01: {chain}"
+        );
+
+        let retry = stream
+            .next()
+            .await
+            .expect_err("a failed automatic keepalive reply left the stream reusable");
+        assert!(
+            retry.is_cancelled(),
+            "the failed automatic keepalive reply did not retire the stream: {retry}"
+        );
+    }
+
+    /// A preceding `next` can over-read an ErrorResponse behind the CopyData
+    /// it returns. If a caller then sends a manual StandbyStatusUpdate and the
+    /// write fails, that buffered server diagnosis outranks the local write
+    /// symptom just as it does for an automatic keepalive reply.
+    #[compio::test]
+    async fn a_manual_status_write_failure_preserves_a_buffered_server_error() {
+        let mut xlog_data = vec![XLOG_DATA_TAG];
+        xlog_data.extend_from_slice(&0x16B_3000u64.to_be_bytes());
+        xlog_data.extend_from_slice(&0x16B_4000u64.to_be_bytes());
+        xlog_data.extend_from_slice(&700_000_000_000i64.to_be_bytes());
+        xlog_data.extend_from_slice(b"payload");
+
+        let mut wire = startup_frame(COPY_DATA_TAG, &xlog_data);
+        wire.extend_from_slice(&error_response_message(&[
+            (b'S', "FATAL"),
+            (b'C', "57P01"),
+            (b'M', "terminating connection due to administrator command"),
+        ]));
+        let mut stream = stream_over_failing_writer_with_unread(wire);
+
+        let message = stream
+            .next()
+            .await
+            .expect("the XLogData preceding the buffered error was rejected")
+            .expect("the XLogData preceding the buffered error ended the stream");
+        assert!(matches!(message, ReplicationMessage::XLogData { .. }));
+
+        let error = stream
+            .send_standby_status_update(false)
+            .await
+            .expect_err("the manual status write was scripted to fail");
+        let chain = std::iter::successors(std::error::Error::source(&error), |source| {
+            std::error::Error::source(*source)
+        })
+        .fold(error.to_string(), |chain, source| {
+            format!("{chain}: {source}")
+        });
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("57P01"),
+            "manual standby status discarded SQLSTATE 57P01: {chain}"
+        );
+
+        let retry = stream
+            .next()
+            .await
+            .expect_err("a failed manual status write left the stream reusable");
+        assert!(
+            retry.is_cancelled(),
+            "the failed manual status write did not retire the stream: {retry}"
+        );
+    }
+
+    /// A command response can end at ReadyForQuery while the same read has
+    /// already buffered a later ErrorResponse. If the next simple-query write
+    /// fails, report that server diagnosis instead of the local write symptom.
+    #[compio::test]
+    async fn a_simple_query_write_failure_preserves_a_buffered_server_error() {
+        let fields = [
+            Some("7012345678901234567"),
+            Some("3"),
+            Some("0/16B3750"),
+            Some("zeroship"),
+        ];
+        let mut row = Vec::new();
+        row.extend_from_slice(&u16::try_from(fields.len()).unwrap().to_be_bytes());
+        for field in fields {
+            let field = field.expect("the fixture has no NULL fields");
+            row.extend_from_slice(&i32::try_from(field.len()).unwrap().to_be_bytes());
+            row.extend_from_slice(field.as_bytes());
+        }
+
+        let mut wire = startup_frame(b'D', &row);
+        wire.extend_from_slice(&startup_frame(b'C', b"IDENTIFY_SYSTEM\0"));
+        wire.extend_from_slice(&startup_frame(b'Z', b"I"));
+        wire.extend_from_slice(&error_response_message(&[
+            (b'S', "FATAL"),
+            (b'C', "57P01"),
+            (b'M', "terminating connection due to administrator command"),
+        ]));
+        let mut connection = replication_connection_over_failing_writer(wire, 1);
+
+        let identity = connection
+            .identify_system()
+            .await
+            .expect("the first IDENTIFY_SYSTEM response was rejected");
+        assert_eq!(identity.systemid, "7012345678901234567");
+
+        let error = connection
+            .identify_system()
+            .await
+            .expect_err("the second simple-query write was scripted to fail");
+        let chain = std::iter::successors(std::error::Error::source(&error), |source| {
+            std::error::Error::source(*source)
+        })
+        .fold(error.to_string(), |chain, source| {
+            format!("{chain}: {source}")
+        });
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("57P01"),
+            "replication command write discarded SQLSTATE 57P01: {chain}"
+        );
+    }
+
+    /// Backend CopyDone and the ErrorResponse raised while ending CopyBoth can
+    /// arrive in one read. If the frontend CopyDone acknowledgment then fails
+    /// to flush, the already-buffered server diagnosis still outranks that
+    /// local write symptom.
+    #[compio::test]
+    async fn a_copy_done_write_failure_preserves_a_buffered_server_error() {
+        let mut wire = startup_frame(COPY_DONE_TAG, b"");
+        wire.extend_from_slice(&error_response_message(&[
+            (b'S', "FATAL"),
+            (b'C', "57P01"),
+            (b'M', "terminating connection due to administrator command"),
+        ]));
+        let mut stream = stream_over_failing_writer_with_unread(wire);
+
+        let error = stream
+            .next()
+            .await
+            .expect_err("the CopyDone acknowledgment write was scripted to fail");
+        let chain = std::iter::successors(std::error::Error::source(&error), |source| {
+            std::error::Error::source(*source)
+        })
+        .fold(error.to_string(), |chain, source| {
+            format!("{chain}: {source}")
+        });
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("57P01"),
+            "CopyDone acknowledgment discarded SQLSTATE 57P01: {chain}"
+        );
+
+        let retry = stream
+            .next()
+            .await
+            .expect_err("a failed CopyDone acknowledgment left the stream reusable");
+        assert!(
+            retry.is_cancelled(),
+            "the failed CopyDone acknowledgment did not retire the stream: {retry}"
         );
     }
 
@@ -4440,6 +4916,7 @@ mod tests {
             copy_response: Default::default(),
             in_flight: InFlight::default(),
             release: None,
+            cancel_token: test_cancel_token(),
         }
     }
 
@@ -4476,8 +4953,10 @@ mod tests {
     /// `length <= 4`, or that demands a non-empty body, turns this red.
     #[compio::test]
     async fn a_frame_declaring_an_empty_body_still_decodes() {
-        let mut wire = vec![COPY_DONE_TAG];
-        wire.extend_from_slice(&4u32.to_be_bytes());
+        let mut wire = startup_frame(COPY_DONE_TAG, b"");
+        wire.extend_from_slice(&startup_frame(b'C', b"COPY 0\0"));
+        wire.extend_from_slice(&startup_frame(b'C', b"START_REPLICATION\0"));
+        wire.extend_from_slice(&startup_frame(b'Z', b"I"));
 
         let mut stream = stream_over(wire);
         assert!(
@@ -4487,6 +4966,15 @@ mod tests {
                 .expect("CopyDone is a valid empty-bodied frame")
                 .is_none(),
             "CopyDone ends the stream"
+        );
+
+        let retry = stream
+            .next()
+            .await
+            .expect_err("a completed CopyBoth exchange became reusable");
+        assert!(
+            retry.is_cancelled(),
+            "the completed CopyBoth exchange was not retired: {retry}"
         );
     }
 
@@ -4792,6 +5280,7 @@ mod tests {
                 copy_response: Default::default(),
                 in_flight: InFlight::default(),
                 release: Some(release),
+                cancel_token: test_cancel_token(),
             },
             server,
         )
@@ -4995,6 +5484,7 @@ mod tests {
             copy_response: Default::default(),
             in_flight: InFlight::default(),
             release: None,
+            cancel_token: test_cancel_token(),
         };
 
         match stream.next().await.expect("keepalive decodes") {
@@ -5029,6 +5519,7 @@ mod tests {
             copy_response: Default::default(),
             in_flight: InFlight::default(),
             release: None,
+            cancel_token: test_cancel_token(),
         };
         stream
             .next()
@@ -5071,6 +5562,7 @@ mod tests {
             copy_response: Default::default(),
             in_flight: InFlight::default(),
             release: None,
+            cancel_token: test_cancel_token(),
         };
 
         // THE THREE LSNs MUST NOT ALL BE EQUAL, or their POSITIONS are not
@@ -5141,6 +5633,7 @@ mod tests {
             copy_response: Default::default(),
             in_flight: InFlight::default(),
             release: None,
+            cancel_token: test_cancel_token(),
         };
         stream
             .send_standby_status_update(false)

@@ -130,3 +130,186 @@ async fn unsupported_copy_out_is_refused_by_name_at_every_public_entry_point() {
     .await
     .expect("COPY refusal test exceeded its watchdog");
 }
+
+/// The direction mismatch is only provisional: `CopyOutResponse` precedes
+/// execution, so the server can still diagnose the statement while producing
+/// its rows. That SQLSTATE is more useful than the local API mismatch.
+#[compio::test]
+async fn copy_in_prefers_a_later_server_error_to_its_direction_refusal() {
+    compio::time::timeout(TEST_TIMEOUT, async {
+        let client = connect_client().await;
+
+        let error = match client
+            .copy_in::<_, Bytes>(
+                "COPY (
+                    SELECT 1 / (n - 2)
+                    FROM generate_series(1, 3) AS series(n)
+                ) TO STDOUT",
+            )
+            .await
+        {
+            Ok(_) => panic!("copy_in accepted COPY TO STDOUT"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("22012"),
+            "copy_in discarded division_by_zero behind its direction refusal: {}",
+            common::error_chain(&error),
+        );
+
+        let value: i32 = client
+            .query_one_scalar("SELECT 41::int4", &[])
+            .await
+            .expect("the failed wrong-direction COPY poisoned its connection");
+        assert_eq!(value, 41);
+    })
+    .await
+    .expect("late wrong-direction diagnosis exceeded its watchdog");
+}
+
+/// A non-COPY statement passed to the COPY API completes its Execute before a
+/// deferred constraint is checked by Sync. The local unexpected-message
+/// fallback must wait long enough for that SQLSTATE to win.
+#[compio::test]
+async fn copy_in_prefers_a_later_server_error_to_non_copy_refusal() {
+    compio::time::timeout(TEST_TIMEOUT, async {
+        let client = connect_client().await;
+        let table = common::test_object_name("copy_in_non_copy");
+        client
+            .batch_execute(&format!(
+                "CREATE TEMPORARY TABLE {table} (
+                    v int UNIQUE DEFERRABLE INITIALLY DEFERRED
+                )"
+            ))
+            .await
+            .expect("create deferred non-COPY fixture");
+
+        let error = match client
+            .copy_in::<_, Bytes>(&format!("INSERT INTO {table} VALUES (1), (1)"))
+            .await
+        {
+            Ok(_) => panic!("copy_in accepted a non-COPY statement"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("23505"),
+            "copy_in discarded unique_violation behind unexpected-message: {}",
+            common::error_chain(&error),
+        );
+
+        let local = match client
+            .copy_in::<_, Bytes>(&format!("INSERT INTO {table} VALUES (2)"))
+            .await
+        {
+            Ok(_) => panic!("copy_in accepted a successful non-COPY statement"),
+            Err(error) => error,
+        };
+        assert!(
+            local.code().is_none(),
+            "successful non-COPY control invented a server diagnosis: {}",
+            common::error_chain(&local),
+        );
+
+        let stored: i64 = client
+            .query_one_scalar(&format!("SELECT count(*) FROM {table}"), &[])
+            .await
+            .expect("the non-COPY refusals poisoned their connection");
+        assert_eq!(
+            stored, 1,
+            "the successful control did not commit exactly once"
+        );
+    })
+    .await
+    .expect("late non-COPY diagnosis exceeded its watchdog");
+}
+
+/// COPY OUT has the same Sync boundary when its statement is valid SQL but is
+/// not actually COPY. Its CommandComplete is a provisional local mismatch,
+/// not permission to discard a deferred server error.
+#[compio::test]
+async fn copy_out_prefers_a_later_server_error_to_non_copy_refusal() {
+    compio::time::timeout(TEST_TIMEOUT, async {
+        let client = connect_client().await;
+        let table = common::test_object_name("copy_out_non_copy");
+        client
+            .batch_execute(&format!(
+                "CREATE TEMPORARY TABLE {table} (
+                    v int UNIQUE DEFERRABLE INITIALLY DEFERRED
+                )"
+            ))
+            .await
+            .expect("create deferred non-COPY fixture");
+
+        let error = match client
+            .copy_out(&format!("INSERT INTO {table} VALUES (1), (1)"))
+            .await
+        {
+            Ok(_) => panic!("copy_out accepted a non-COPY statement"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("23505"),
+            "copy_out discarded unique_violation behind unexpected-message: {}",
+            common::error_chain(&error),
+        );
+
+        let local = match client
+            .copy_out(&format!("INSERT INTO {table} VALUES (2)"))
+            .await
+        {
+            Ok(_) => panic!("copy_out accepted a successful non-COPY statement"),
+            Err(error) => error,
+        };
+        assert!(
+            local.code().is_none(),
+            "successful non-COPY control invented a server diagnosis: {}",
+            common::error_chain(&local),
+        );
+
+        let stored: i64 = client
+            .query_one_scalar(&format!("SELECT count(*) FROM {table}"), &[])
+            .await
+            .expect("the non-COPY refusals poisoned their connection");
+        assert_eq!(
+            stored, 1,
+            "the successful control did not commit exactly once"
+        );
+    })
+    .await
+    .expect("late COPY OUT non-COPY diagnosis exceeded its watchdog");
+}
+
+/// A row-producing statement makes the COPY direction mismatch visible before
+/// execution has finished. The mismatch remains provisional: a later row can
+/// fail, and that server diagnosis owns the statement's outcome.
+#[compio::test]
+async fn copy_out_prefers_a_later_server_error_to_row_response() {
+    compio::time::timeout(TEST_TIMEOUT, async {
+        let client = connect_client().await;
+
+        let error = match client
+            .copy_out("SELECT 10 / (3 - g) FROM generate_series(1, 3) AS g")
+            .await
+        {
+            Ok(_) => panic!("copy_out accepted a row-producing non-COPY statement"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("22012"),
+            "copy_out discarded division_by_zero behind a row response: {}",
+            common::error_chain(&error),
+        );
+
+        let value: i32 = client
+            .query_one_scalar("SELECT 42::int4", &[])
+            .await
+            .expect("the failed row-producing refusal poisoned its connection");
+        assert_eq!(value, 42);
+    })
+    .await
+    .expect("late row-producing COPY OUT diagnosis exceeded its watchdog");
+}

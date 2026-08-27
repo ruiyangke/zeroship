@@ -209,7 +209,9 @@ pub async fn query_text_params(
                 let mut columns: Vec<Column> = vec![];
                 let mut it = row_description.fields();
                 while let Some(field) = it.next().map_err(Error::parse)? {
-                    let type_ = get_type(client, field.type_oid()).await?;
+                    let type_ = get_type(client, field.type_oid())
+                        .await
+                        .map_err(|error| responses.take_request_server_error().unwrap_or(error))?;
                     let column = Column {
                         name: field.name().to_string(),
                         table_oid: Some(field.table_oid()).filter(|n| *n != 0),
@@ -354,7 +356,9 @@ where
                 let mut columns: Vec<Column> = vec![];
                 let mut it = row_description.fields();
                 while let Some(field) = it.next().map_err(Error::parse)? {
-                    let type_ = get_type(client, field.type_oid()).await?;
+                    let type_ = get_type(client, field.type_oid())
+                        .await
+                        .map_err(|error| responses.take_request_server_error().unwrap_or(error))?;
                     let column = Column {
                         name: field.name().to_string(),
                         table_oid: Some(field.table_oid()).filter(|n| *n != 0),

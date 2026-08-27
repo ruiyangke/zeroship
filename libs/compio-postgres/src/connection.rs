@@ -64,7 +64,7 @@
 // batch ordering are identical across them.
 
 use crate::buf_stream::{BufReadHalf, BufStream, BufWriteHalf, ReadDeadline, SplitStream};
-use crate::client::{QueryObservation, ResponseMessages};
+use crate::client::{QueryObservation, RequestServerError, ResponseMessages};
 use crate::codec::{
     BackendMessage, BackendMessages, FrontendMessage, read_backend, write_frontend,
 };
@@ -99,6 +99,7 @@ pub struct Request {
     pub(crate) prepare_cleanup: Option<crate::prepare::PrepareCleanup>,
     pub(crate) statement: Option<Statement>,
     pub(crate) observation: Option<QueryObservation>,
+    pub(crate) request_server_error: RequestServerError,
 }
 
 /// Whether a caller awaits the request outcome.
@@ -152,12 +153,14 @@ struct Response {
     /// write path so an answer that arrives during `flush` can complete the
     /// phase before the successful flush would otherwise activate it.
     read_obligation: ReadObligation,
+    request_server_error: RequestServerError,
 }
 
 struct PendingResponse {
     sender: mpsc::Sender<ResponseMessages>,
     messages: ResponseMessages,
     disposition: RequestDisposition,
+    request_server_error: RequestServerError,
 }
 
 impl Drop for Response {
@@ -171,6 +174,11 @@ impl Drop for Response {
 enum RequestOutcome {
     Continue,
     HousekeepingUndeliverable(Error),
+}
+
+enum DispatchOutcome {
+    Continue,
+    RetireAfterDiagnostics(Error),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -433,6 +441,7 @@ pub struct Connection<S, T> {
     /// every server response exactly once and in wire order.
     tx_status: Arc<AtomicU8>,
     in_flight_requests: Arc<AtomicUsize>,
+    terminal_server_error: Arc<Mutex<Option<DbError>>>,
     /// Weak so a task stranded by compio cannot retain the client's dup after
     /// client-first teardown has synchronously released the server session.
     drop_release: Option<crate::release::ConnectionDropRelease>,
@@ -458,6 +467,7 @@ where
         receiver: mpsc::UnboundedReceiver<Request>,
         tx_status: Arc<AtomicU8>,
         in_flight_requests: Arc<AtomicUsize>,
+        terminal_server_error: Arc<Mutex<Option<DbError>>>,
         drop_release: Option<crate::release::ConnectionDropRelease>,
     ) -> Connection<S, T> {
         *parameters.lock() = startup_parameters;
@@ -471,6 +481,7 @@ where
             async_sender: None,
             tx_status,
             in_flight_requests,
+            terminal_server_error,
             drop_release,
             _live: crate::live::LiveConnectionGuard::new(),
         }
@@ -575,7 +586,7 @@ where
             // finish the awaited responses. No new requests.
             if terminating {
                 match read_backend(&mut self.stream).await {
-                    Ok(msg) => self.handle_message(msg)?,
+                    Ok(msg) => self.dispatch_decoded_message(msg).await?,
                     Err(e) => {
                         self.record_terminal_read(&e);
                         if is_eof(&e)
@@ -611,7 +622,7 @@ where
                         return Err(e);
                     }
                 };
-                self.handle_message(msg)?;
+                self.dispatch_decoded_message(msg).await?;
                 // Drain any requests that arrived while we were reading.
                 while let Ok(request) = self.receiver.try_recv() {
                     if let RequestOutcome::HousekeepingUndeliverable(error) =
@@ -646,6 +657,9 @@ where
                     }
                 }
                 None => {
+                    if let Some(error) = self.record_buffered_server_error() {
+                        return Err(error);
+                    }
                     // Client side dropped. Send Terminate and begin
                     // graceful shutdown.
                     trace!("receiver closed, sending Terminate");
@@ -671,7 +685,7 @@ where
     /// Thin wrapper that borrows the dispatch-relevant fields and defers
     /// to the shared [`Dispatch`] logic, so the serialized and
     /// multiplexed loops route messages identically.
-    fn handle_message(&mut self, message: BackendMessage) -> Result<(), Error> {
+    fn handle_message(&mut self, message: BackendMessage) -> Result<DispatchOutcome, Error> {
         Dispatch {
             parameters: &self.parameters,
             responses: &mut self.responses,
@@ -679,8 +693,64 @@ where
             async_sender: self.async_sender.as_ref(),
             tx_status: &self.tx_status,
             in_flight_requests: &self.in_flight_requests,
+            terminal_server_error: &self.terminal_server_error,
         }
         .handle_message(message)
+    }
+
+    /// Dispatch a valid wire prefix before surfacing a local failure found
+    /// behind it in the same read. Pool poison is published before the prefix
+    /// can wake its consumer, while the local error waits until a stashed
+    /// ErrorResponse has reached that consumer's FIFO.
+    async fn dispatch_decoded_message(&mut self, mut message: BackendMessage) -> Result<(), Error> {
+        let deferred_error = message.take_deferred_error();
+        if deferred_error.is_some() {
+            self.tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
+        }
+
+        match self.handle_message(message)? {
+            DispatchOutcome::Continue => {}
+            DispatchOutcome::RetireAfterDiagnostics(error) => {
+                self.tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
+                self.drain_retirement_responses().await;
+                return Err(error);
+            }
+        }
+
+        if let Some(error) = deferred_error {
+            self.drain_pending_responses().await;
+            publish_terminal_error(&error, &mut self.responses);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Drain exactly the response boundaries which were already flushed when
+    /// an unsupported client_encoding was reported. The stream stays framed,
+    /// but response text after the switch does not: scan only structural tags
+    /// and wholly ASCII ErrorResponses, then retire.
+    async fn drain_retirement_responses(&mut self) {
+        let response_count = self.responses.len();
+        let mut response_offset = 0usize;
+        while response_offset < response_count {
+            let message = match read_backend(&mut self.stream).await {
+                Ok(message) => message,
+                Err(_) => break,
+            };
+            match scan_retirement_message(
+                message,
+                &mut response_offset,
+                response_count,
+                &self.responses,
+                &self.terminal_server_error,
+                &self.tx_status,
+            ) {
+                RetirementProgress::PrefixComplete | RetirementProgress::Stop => {
+                    break;
+                }
+                RetirementProgress::Continue => {}
+            }
+        }
     }
 
     /// Deliver every stashed batch, waiting for downstream capacity, using the
@@ -719,6 +789,38 @@ where
         publish_terminal_error(error, &mut self.responses);
     }
 
+    /// Prefer a complete server diagnosis already in the serialized read
+    /// buffer over the local write failure which exposed it.
+    fn prefer_buffered_server_error(&mut self, local: Error) -> Error {
+        self.record_buffered_server_error().unwrap_or(local)
+    }
+
+    /// Record and publish a complete buffered diagnosis using the same
+    /// ownership rules as ordinary protocol dispatch.
+    fn record_buffered_server_error(&mut self) -> Option<Error> {
+        let server = take_buffered_server_error(&mut self.stream)?;
+
+        if let Some(error) = server.as_db_error() {
+            // A DbError cannot be duplicated through Error's generic terminal
+            // wrapper without losing its SQLSTATE. Rebuild it from the parsed
+            // value for the owning response and keep the request-local copy as
+            // a fallback if that response channel is backpressured.
+            if let Some(response) = self.responses.front_mut() {
+                remember_server_error(&response.request_server_error, error);
+                let _ = response
+                    .sender
+                    .try_send(ResponseMessages::Observed(VecDeque::from([Err(
+                        Error::from_db_error(error.clone()),
+                    )])));
+            }
+            if server_error_ends_session(error) || self.responses.is_empty() {
+                remember_server_error(&self.terminal_server_error, error);
+            }
+        }
+        self.tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
+        Some(server)
+    }
+
     /// Handle a request received from the client (serialized path).
     /// Pushes the response channel onto `responses` and writes the
     /// frontend messages onto the unsplit stream.
@@ -731,6 +833,7 @@ where
             prepare_cleanup,
             statement,
             observation,
+            request_server_error,
         } = request;
         let copy_observation = observation.clone();
         let is_copy = matches!(&messages, RequestMessages::CopyIn(_));
@@ -744,6 +847,7 @@ where
             observation,
             bind_complete_seen: false,
             read_obligation: read_obligation.clone(),
+            request_server_error,
         });
 
         match messages {
@@ -751,6 +855,9 @@ where
                 let mut result = write_frontend(&mut self.stream, msg);
                 if result.is_ok() {
                     result = self.stream.flush().await;
+                }
+                if let Err(error) = result {
+                    result = Err(self.prefer_buffered_server_error(error));
                 }
                 if result.is_ok() {
                     // Writes are outside clock (3). Only a frontend batch that
@@ -785,8 +892,12 @@ where
                             if let Some(observation) = &copy_observation {
                                 observation.inspect_frontend(&msg);
                             }
-                            write_frontend(&mut self.stream, msg)?;
-                            self.stream.flush().await?;
+                            if let Err(error) = write_frontend(&mut self.stream, msg) {
+                                return Err(self.prefer_buffered_server_error(error));
+                            }
+                            if let Err(error) = self.stream.flush().await {
+                                return Err(self.prefer_buffered_server_error(error));
+                            }
                             if !initial_flushed {
                                 read_obligation.activate_initial();
                                 initial_flushed = true;
@@ -807,7 +918,7 @@ where
                                             return Err(error);
                                         }
                                     };
-                                    self.handle_message(message)?;
+                                    self.dispatch_decoded_message(message).await?;
                                 }
 
                                 // CopyInResponse may have arrived in a second
@@ -852,11 +963,205 @@ struct Dispatch<'a> {
     async_sender: Option<&'a mpsc::UnboundedSender<AsyncMessage>>,
     tx_status: &'a AtomicU8,
     in_flight_requests: &'a AtomicUsize,
+    terminal_server_error: &'a Mutex<Option<DbError>>,
+}
+
+fn first_server_error(messages: &BackendMessages) -> Result<Option<DbError>, Error> {
+    messages
+        .first_error_response()
+        .map_err(Error::parse)?
+        .map(|body| DbError::parse(&mut body.fields()).map_err(Error::parse))
+        .transpose()
+}
+
+/// Decode a diagnosis received after the session stopped being UTF-8 only
+/// when every field is ASCII. PostgreSQL encodes ErrorResponse text in the
+/// current client encoding. ASCII has the same byte representation in every
+/// encoding this driver can be switched to; any other byte would make a
+/// lossy UTF-8 conversion look authoritative when it is not.
+fn first_ascii_server_error(messages: &BackendMessages) -> Option<DbError> {
+    let Ok(Some(body)) = messages.first_error_response() else {
+        return None;
+    };
+    let mut fields = body.fields();
+    loop {
+        let field = match fields.next() {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(_) => return None,
+        };
+        if !field.type_().is_ascii() || !field.value_bytes().is_ascii() {
+            return None;
+        }
+    }
+    let Ok(Some(body)) = messages.first_error_response() else {
+        return None;
+    };
+    DbError::parse(&mut body.fields()).ok()
+}
+
+/// Consume a complete ErrorResponse already over-read behind the response
+/// which made the serialized loop attempt another frontend write.
+///
+/// This never reads the socket: a failed write has already retired the
+/// session, and waiting for additional bytes could hang on a one-way failure.
+/// Complete asynchronous frames may precede the diagnosis and are safe to
+/// discard during teardown; any other frame still belongs to protocol dispatch.
+fn take_buffered_server_error<S>(stream: &mut BufStream<S>) -> Option<Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    loop {
+        let length = stream.peek_u32_be(1)?;
+        if length < 4 || stream.validate_length(length).is_err() {
+            return None;
+        }
+        let total_len = usize::try_from(length).ok()?.checked_add(1)?;
+        if stream.buf().len() < total_len {
+            return None;
+        }
+
+        match stream.buf()[0] {
+            b'E' => {
+                let mut frame = stream.buf().split_to(total_len);
+                return match Message::parse(&mut frame).ok()?? {
+                    Message::ErrorResponse(body) => Some(Error::db(body)),
+                    _ => None,
+                };
+            }
+            b'N' | b'A' | b'S' => {
+                let _ = stream.buf().split_to(total_len);
+            }
+            _ => return None,
+        }
+    }
+}
+
+fn server_error_ends_session(error: &DbError) -> bool {
+    matches!(
+        error.parsed_severity(),
+        Some(Severity::Fatal | Severity::Panic)
+    ) || matches!(error.severity(), "FATAL" | "PANIC")
+}
+
+fn remember_server_error(slot: &Mutex<Option<DbError>>, error: &DbError) {
+    let mut stored = slot.lock();
+    if stored.is_none() {
+        *stored = Some(error.clone());
+    }
+}
+
+/// Preserve an ErrorResponse which teardown cannot deliver without violating
+/// the pending-response FIFO. The request-local slot is intentionally the
+/// only visibility for a nonterminal SQL error; publishing it globally would
+/// misattribute it to unrelated callers.
+fn preserve_queued_server_error(
+    messages: &BackendMessages,
+    response: Option<&Response>,
+    terminal_server_error: &Mutex<Option<DbError>>,
+    tx_status: &AtomicU8,
+) -> Result<(), Error> {
+    let Some(error) = first_server_error(messages)? else {
+        return Ok(());
+    };
+
+    let ends_session = server_error_ends_session(&error);
+    if ends_session || response.is_none() {
+        // Match normal dispatch for FATAL/PANIC and for an ErrorResponse with
+        // no owning request. Publish terminal poison before request-local
+        // visibility, just as ordinary dispatch does.
+        remember_server_error(terminal_server_error, &error);
+    }
+    if ends_session {
+        tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
+    }
+    if let Some(response) = response {
+        remember_server_error(&response.request_server_error, &error);
+    }
+    Ok(())
+}
+
+/// Preserve only a diagnosis whose bytes remain unambiguous after a
+/// client_encoding change. Normal response delivery has stopped at this
+/// point: callers receive the saved SQLSTATE when teardown closes their
+/// response channels.
+fn preserve_retirement_server_error(
+    messages: &BackendMessages,
+    response: Option<&Response>,
+    terminal_server_error: &Mutex<Option<DbError>>,
+    tx_status: &AtomicU8,
+) {
+    let Some(error) = first_ascii_server_error(messages) else {
+        return;
+    };
+
+    let ends_session = server_error_ends_session(&error);
+    if ends_session || response.is_none() {
+        remember_server_error(terminal_server_error, &error);
+    }
+    if ends_session {
+        tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
+    }
+    if let Some(response) = response {
+        remember_server_error(&response.request_server_error, &error);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RetirementProgress {
+    Continue,
+    PrefixComplete,
+    Stop,
+}
+
+/// Inspect one backend batch after client_encoding became undecodable.
+///
+/// No row, command tag, notice, or parameter text is exposed after the
+/// switch. We use only validated frame boundaries, ReadyForQuery boundaries,
+/// and wholly ASCII ErrorResponse fields to attribute diagnostics to the
+/// requests that were already on the wire. The result distinguishes a drained
+/// prefix from a protocol state, such as COPY input or a deferred framing
+/// failure, where waiting for another response would be wrong.
+fn scan_retirement_message(
+    message: BackendMessage,
+    response_offset: &mut usize,
+    response_count: usize,
+    responses: &VecDeque<Response>,
+    terminal_server_error: &Mutex<Option<DbError>>,
+    tx_status: &AtomicU8,
+) -> RetirementProgress {
+    match message {
+        BackendMessage::Async { .. } => RetirementProgress::Continue,
+        BackendMessage::Normal {
+            messages,
+            request_complete,
+            deferred_error,
+        } => {
+            let entered_copy_input =
+                messages.contains_tag(postgres_protocol::message::backend::COPY_IN_RESPONSE_TAG);
+            preserve_retirement_server_error(
+                &messages,
+                responses.get(*response_offset),
+                terminal_server_error,
+                tx_status,
+            );
+            if request_complete {
+                *response_offset += 1;
+            }
+            if entered_copy_input || deferred_error.is_some() {
+                RetirementProgress::Stop
+            } else if *response_offset >= response_count {
+                RetirementProgress::PrefixComplete
+            } else {
+                RetirementProgress::Continue
+            }
+        }
+    }
 }
 
 impl Dispatch<'_> {
     /// Dispatch a single decoded backend frame.
-    fn handle_message(&mut self, message: BackendMessage) -> Result<(), Error> {
+    fn handle_message(&mut self, message: BackendMessage) -> Result<DispatchOutcome, Error> {
         match message {
             BackendMessage::Async { message, .. } => {
                 route_async(self.parameters, self.async_sender, message)
@@ -864,7 +1169,12 @@ impl Dispatch<'_> {
             BackendMessage::Normal {
                 messages,
                 request_complete,
+                deferred_error,
             } => {
+                debug_assert!(
+                    deferred_error.is_none(),
+                    "the connection loop must order a deferred read error after its prefix"
+                );
                 let ready_status = if request_complete {
                     Some(
                         messages
@@ -874,7 +1184,8 @@ impl Dispatch<'_> {
                 } else {
                     None
                 };
-                self.deliver_batch(messages, ready_status)
+                self.deliver_batch(messages, ready_status)?;
+                Ok(DispatchOutcome::Continue)
             }
         }
     }
@@ -898,13 +1209,10 @@ impl Dispatch<'_> {
         // the EOF path uses before making that terminal response visible. This
         // keeps synchronous pool return from counting a known-dead session as
         // idle during that protocol-defined window.
-        if let Some(body) = messages.first_error_response().map_err(Error::parse)? {
-            let error = DbError::parse(&mut body.fields()).map_err(Error::parse)?;
-            if matches!(
-                error.parsed_severity(),
-                Some(Severity::Fatal | Severity::Panic)
-            ) || matches!(error.severity(), "FATAL" | "PANIC")
-            {
+        let server_error = first_server_error(&messages)?;
+        if let Some(error) = server_error.as_ref() {
+            if server_error_ends_session(error) {
+                self.remember_terminal_server_error(error);
                 self.tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
             }
         }
@@ -914,10 +1222,17 @@ impl Dispatch<'_> {
         let mut response = match self.responses.pop_front() {
             Some(r) => r,
             None => match messages.next().map_err(Error::parse)? {
-                Some(Message::ErrorResponse(err)) => return Err(Error::db(err)),
+                Some(Message::ErrorResponse(_)) => {
+                    let error = server_error.expect("the first ErrorResponse was parsed above");
+                    self.remember_terminal_server_error(&error);
+                    return Err(Error::from_db_error(error));
+                }
                 _ => return Err(Error::unexpected_message()),
             },
         };
+        if let Some(error) = server_error.as_ref() {
+            remember_server_error(&response.request_server_error, error);
+        }
         let completed_at = (request_complete
             && response
                 .observation
@@ -1030,6 +1345,7 @@ impl Dispatch<'_> {
                     sender: response.sender.clone(),
                     messages,
                     disposition: response.disposition,
+                    request_server_error: Arc::clone(&response.request_server_error),
                 });
                 if !request_complete {
                     self.responses.push_front(response);
@@ -1049,6 +1365,10 @@ impl Dispatch<'_> {
             observation.server_complete(completed_at);
         }
         Ok(())
+    }
+
+    fn remember_terminal_server_error(&self, error: &DbError) {
+        remember_server_error(self.terminal_server_error, error);
     }
 }
 
@@ -1106,7 +1426,7 @@ fn route_async(
     parameters: &Mutex<HashMap<String, String>>,
     async_sender: Option<&mpsc::UnboundedSender<AsyncMessage>>,
     msg: Message,
-) -> Result<(), Error> {
+) -> Result<DispatchOutcome, Error> {
     match msg {
         Message::NoticeResponse(body) => {
             let error = DbError::parse(&mut body.fields()).map_err(Error::parse)?;
@@ -1157,13 +1477,13 @@ fn route_async(
             // the cause is not a mystery.
             if name.eq_ignore_ascii_case("client_encoding") {
                 if !crate::config::is_decodable_encoding(&value) {
-                    return Err(Error::config(
+                    return Ok(DispatchOutcome::RetireAfterDiagnostics(Error::config(
                         format!(
                             "session changed client_encoding to {value}; this driver \
                              decodes text as UTF-8 and cannot read that encoding"
                         )
                         .into(),
-                    ));
+                    )));
                 }
             }
 
@@ -1199,7 +1519,7 @@ fn route_async(
         }
         _ => return Err(Error::unexpected_message()),
     }
-    Ok(())
+    Ok(DispatchOutcome::Continue)
 }
 
 fn inner_encode_terminate() -> bytes::Bytes {
@@ -1374,6 +1694,133 @@ enum MuxEvent {
     CopyFrame(Option<FrontendMessage>),
 }
 
+/// Split-transport counterpart of `Connection::drain_retirement_responses`.
+/// The dedicated reader remains cancel-safe while this consumes the finite
+/// set of ReadyForQuery boundaries owed to requests already flushed.
+async fn drain_retirement_read_channel(
+    read_rx: &mut mpsc::Receiver<ReadEvent>,
+    read_terminal_rx: &mut mpsc::UnboundedReceiver<Error>,
+    response_count: usize,
+    responses: &VecDeque<Response>,
+    terminal_server_error: &Mutex<Option<DbError>>,
+    tx_status: &AtomicU8,
+) -> usize {
+    let mut response_offset = 0usize;
+    while response_offset < response_count {
+        let event = poll_fn(|cx| {
+            if let Poll::Ready(terminal) = read_terminal_rx.poll_next_unpin(cx) {
+                return Poll::Ready(MuxEvent::ReadTerminal(terminal));
+            }
+            match read_rx.poll_next_unpin(cx) {
+                Poll::Ready(event) => Poll::Ready(MuxEvent::Read(event)),
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await;
+
+        match event {
+            MuxEvent::Read(Some(ReadEvent::Message(ReadEnvelope {
+                message,
+                acknowledgement,
+            }))) => {
+                let complete = scan_retirement_message(
+                    message,
+                    &mut response_offset,
+                    response_count,
+                    responses,
+                    terminal_server_error,
+                    tx_status,
+                );
+                if let Some(acknowledgement) = acknowledgement {
+                    let _ = acknowledgement.send(());
+                }
+                match complete {
+                    RetirementProgress::PrefixComplete | RetirementProgress::Stop => {
+                        break;
+                    }
+                    RetirementProgress::Continue => {}
+                }
+            }
+            MuxEvent::Read(Some(ReadEvent::Terminal(_)))
+            | MuxEvent::Read(None)
+            | MuxEvent::ReadTerminal(_) => break,
+            MuxEvent::SenderReady | MuxEvent::Request(_) | MuxEvent::CopyFrame(_) => {
+                unreachable!("retirement drain selects only reader events")
+            }
+        }
+    }
+    response_offset
+}
+
+/// Give the split reader one scheduling turn after acknowledging the
+/// encoding-changing frame, then inspect only events it can produce without
+/// waiting. This is the bounded arm for a COPY response which PostgreSQL does
+/// not currently owe: a queued ErrorResponse is still authoritative, but an
+/// empty queue must not make retirement wait for producer input.
+async fn drain_available_retirement_read_channel(
+    read_rx: &mut mpsc::Receiver<ReadEvent>,
+    response_offset: &mut usize,
+    response_count: usize,
+    responses: &VecDeque<Response>,
+    terminal_server_error: &Mutex<Option<DbError>>,
+    tx_status: &AtomicU8,
+) {
+    // A peer can stream asynchronous notices forever. Retirement is allowed a
+    // short lookahead for the diagnosis already following the encoding change,
+    // not an unbounded new read loop on a response PostgreSQL does not owe.
+    for _ in 0..32 {
+        if *response_offset >= response_count {
+            break;
+        }
+        let mut yielded = false;
+        poll_fn(|cx| {
+            if yielded {
+                Poll::Ready(())
+            } else {
+                yielded = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+        .await;
+
+        let Ok(event) = read_rx.try_recv() else {
+            break;
+        };
+        match event {
+            ReadEvent::Message(ReadEnvelope {
+                message,
+                acknowledgement,
+            }) => {
+                let progress = scan_retirement_message(
+                    message,
+                    response_offset,
+                    response_count,
+                    responses,
+                    terminal_server_error,
+                    tx_status,
+                );
+                if let Some(acknowledgement) = acknowledgement {
+                    let _ = acknowledgement.send(());
+                }
+                if progress != RetirementProgress::Continue {
+                    break;
+                }
+            }
+            ReadEvent::Terminal(_) => break,
+        }
+    }
+}
+
+struct FlushRetirement {
+    error: Error,
+    response_offset: usize,
+    response_count: usize,
+    include_tail_after_flush: bool,
+    flush_complete: bool,
+    stopped: bool,
+}
+
 /// Drive `write_half`'s flush while concurrently draining the read channel -
 /// the cancel-safe interleave that keeps the multiplexed loop's
 /// "reads and writes proceed in the same poll" property even across a large
@@ -1421,6 +1868,8 @@ async fn flush_with_read_draining<W>(
     async_sender: Option<&mpsc::UnboundedSender<AsyncMessage>>,
     tx_status: &AtomicU8,
     in_flight_requests: &AtomicUsize,
+    terminal_server_error: &Mutex<Option<DbError>>,
+    include_tail_after_flush: bool,
 ) -> (Result<(), Error>, Option<Option<Error>>)
 where
     W: AsyncWrite + Unpin,
@@ -1435,6 +1884,16 @@ where
     // At most one terminal read event (Err / closed) is recorded. Once seen,
     // we stop polling both the read channel and the now-useless flush.
     let mut read_terminal: Option<Option<Error>> = None;
+    // A failed flush retires the session, but a response the reader already
+    // queued still belongs to the front request and carries the server's
+    // diagnosis. Hold the local write error just long enough to dispatch every
+    // immediately available FIFO response ahead of it.
+    let mut flush_failure: Option<Error> = None;
+    // An unsupported client_encoding retires immediately, but the server may
+    // already owe responses for an earlier flushed prefix. While the current
+    // frontend flush is pending its tail is excluded; a successful flush
+    // proves that tail is also on the wire and may add it to the bounded scan.
+    let mut retirement: Option<FlushRetirement> = None;
 
     let flush_result = poll_fn(|cx| -> Poll<Result<(), Error>> {
         // (1) ReadTimeout is out-of-band and outranks every FIFO gate. The
@@ -1456,15 +1915,92 @@ where
             return Poll::Ready(Ok(()));
         }
 
-        // (2) Drive the flush to completion while the session is live.
-        if let Poll::Ready(res) = flush.as_mut().poll(cx) {
-            return Poll::Ready(res);
+        // (2) Drive the flush to completion while the session is live. After
+        // an encoding retirement, completion proves the just-buffered tail was
+        // sent and therefore adds it to the finite diagnostic drain. A failure
+        // still gives the already-queued read FIFO one turn below.
+        if flush_failure.is_none()
+            && !retirement
+                .as_ref()
+                .is_some_and(|retirement| retirement.flush_complete)
+            && let Poll::Ready(result) = flush.as_mut().poll(cx)
+        {
+            match result {
+                Ok(()) => {
+                    if let Some(retirement) = retirement.as_mut() {
+                        retirement.flush_complete = true;
+                        if retirement.include_tail_after_flush {
+                            retirement.response_count = responses.len();
+                        }
+                    } else {
+                        return Poll::Ready(Ok(()));
+                    }
+                }
+                Err(error) => {
+                    tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
+                    flush_failure = Some(error);
+                }
+            }
         }
 
         // Keep making inbound progress until the flush is ready. Loop so a
         // delivered batch immediately frees the FIFO gate for the next read
         // within this single wake.
         loop {
+            if retirement.is_some() {
+                if read_terminal.is_some() {
+                    let retirement = retirement.take().expect("checked above");
+                    return Poll::Ready(Err(retirement.error));
+                }
+
+                let finished = retirement.as_ref().is_some_and(|retirement| {
+                    retirement.stopped
+                        || (retirement.flush_complete
+                            && retirement.response_offset >= retirement.response_count)
+                });
+                if finished {
+                    let retirement = retirement.take().expect("checked above");
+                    return Poll::Ready(Err(retirement.error));
+                }
+
+                match read_rx.poll_next_unpin(cx) {
+                    Poll::Ready(Some(ReadEvent::Message(ReadEnvelope {
+                        message,
+                        acknowledgement,
+                    }))) => {
+                        let retirement = retirement.as_mut().expect("checked above");
+                        match scan_retirement_message(
+                            message,
+                            &mut retirement.response_offset,
+                            retirement.response_count,
+                            responses,
+                            terminal_server_error,
+                            tx_status,
+                        ) {
+                            RetirementProgress::Stop => retirement.stopped = true,
+                            RetirementProgress::Continue | RetirementProgress::PrefixComplete => {}
+                        }
+                        if let Some(acknowledgement) = acknowledgement {
+                            let _ = acknowledgement.send(());
+                        }
+                        continue;
+                    }
+                    Poll::Ready(Some(ReadEvent::Terminal(error))) => {
+                        read_terminal = Some(Some(error));
+                        continue;
+                    }
+                    Poll::Ready(None) => {
+                        read_terminal = Some(None);
+                        continue;
+                    }
+                    Poll::Pending => {
+                        return flush_failure
+                            .take()
+                            .map_or(Poll::Pending, |error| Poll::Ready(Err(error)));
+                    }
+                }
+            }
+
             // A normal terminal event travels through `read_rx`, so it is first
             // recorded inside step (4) below rather than by the out-of-band
             // check above. Observe it on the next trip around this inner loop;
@@ -1492,7 +2028,98 @@ where
                         }
                         continue;
                     }
-                    Poll::Pending => return Poll::Pending,
+                    Poll::Pending => {
+                        let Some(error) = flush_failure.take() else {
+                            return Poll::Pending;
+                        };
+
+                        // Delivery must remain behind the stashed batch, but
+                        // teardown must not discard a response the reader has
+                        // already decoded. Inspect immediately queued events
+                        // without dispatching normal batches: only their
+                        // ErrorResponse enters the matching request's private
+                        // diagnosis slot. Track completed responses locally so
+                        // multiple queued batches still map to their owners.
+                        let mut response_offset = 0usize;
+                        let mut encoding_retired = false;
+                        loop {
+                            match read_rx.poll_next_unpin(cx) {
+                                Poll::Ready(Some(ReadEvent::Message(ReadEnvelope {
+                                    message,
+                                    acknowledgement,
+                                }))) => {
+                                    let result = match message {
+                                        BackendMessage::Async { message, .. }
+                                            if !encoding_retired =>
+                                        {
+                                            match route_async(parameters, async_sender, message) {
+                                                Ok(DispatchOutcome::Continue) => Ok(()),
+                                                Ok(DispatchOutcome::RetireAfterDiagnostics(_)) => {
+                                                    tx_status.store(
+                                                        READ_RETIRED_STATUS,
+                                                        Ordering::Release,
+                                                    );
+                                                    encoding_retired = true;
+                                                    Ok(())
+                                                }
+                                                Err(error) => Err(error),
+                                            }
+                                        }
+                                        BackendMessage::Async { .. } => Ok(()),
+                                        BackendMessage::Normal {
+                                            messages,
+                                            request_complete,
+                                            deferred_error,
+                                        } => {
+                                            let result = if encoding_retired {
+                                                preserve_retirement_server_error(
+                                                    &messages,
+                                                    responses.get(response_offset),
+                                                    terminal_server_error,
+                                                    tx_status,
+                                                );
+                                                Ok(())
+                                            } else {
+                                                preserve_queued_server_error(
+                                                    &messages,
+                                                    responses.get(response_offset),
+                                                    terminal_server_error,
+                                                    tx_status,
+                                                )
+                                            };
+                                            if request_complete {
+                                                response_offset += 1;
+                                            }
+                                            if deferred_error.is_some() {
+                                                tx_status
+                                                    .store(READ_RETIRED_STATUS, Ordering::Release);
+                                            }
+                                            result
+                                        }
+                                    };
+                                    if let Some(acknowledgement) = acknowledgement {
+                                        let _ = acknowledgement.send(());
+                                    }
+                                    if let Err(diagnostic_error) = result {
+                                        read_terminal = Some(Some(diagnostic_error));
+                                    }
+                                    if read_terminal.is_some() {
+                                        break;
+                                    }
+                                }
+                                Poll::Ready(Some(ReadEvent::Terminal(terminal))) => {
+                                    read_terminal = Some(Some(terminal));
+                                    break;
+                                }
+                                Poll::Ready(None) => {
+                                    read_terminal = Some(None);
+                                    break;
+                                }
+                                Poll::Pending => break,
+                            }
+                        }
+                        return Poll::Ready(Err(error));
+                    }
                 }
             }
 
@@ -1511,18 +2138,36 @@ where
                             async_sender,
                             tx_status,
                             in_flight_requests,
+                            terminal_server_error,
                         })
                         .handle_message(message);
                         // Dispatch has now completed or paused the matching
                         // obligation. Only now may the reader submit another
                         // socket read.
+                        if matches!(&result, Ok(DispatchOutcome::RetireAfterDiagnostics(_))) {
+                            tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
+                        }
                         if let Some(acknowledgement) = acknowledgement {
                             let _ = acknowledgement.send(());
                         }
-                        if let Err(e) = result {
-                            // A dispatch error retires the session, so the next
-                            // trip around the loop abandons this useless flush.
-                            read_terminal = Some(Some(e));
+                        match result {
+                            Ok(DispatchOutcome::Continue) => {}
+                            Ok(DispatchOutcome::RetireAfterDiagnostics(error)) => {
+                                tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
+                                retirement = Some(FlushRetirement {
+                                    error,
+                                    response_offset: 0,
+                                    response_count: responses.len().saturating_sub(1),
+                                    include_tail_after_flush,
+                                    flush_complete: false,
+                                    stopped: false,
+                                });
+                            }
+                            Err(error) => {
+                                // A dispatch error retires the session, so the next
+                                // trip around the loop abandons this useless flush.
+                                read_terminal = Some(Some(error));
+                            }
                         }
                         continue;
                     }
@@ -1535,12 +2180,18 @@ where
                         read_terminal = Some(None);
                         continue;
                     }
-                    Poll::Pending => return Poll::Pending,
+                    Poll::Pending => {
+                        return flush_failure
+                            .take()
+                            .map_or(Poll::Pending, |error| Poll::Ready(Err(error)));
+                    }
                 }
             }
 
             // Flush still pending, nothing left to drain this wake.
-            return Poll::Pending;
+            return flush_failure
+                .take()
+                .map_or(Poll::Pending, |error| Poll::Ready(Err(error)));
         }
     })
     .await;
@@ -1602,7 +2253,13 @@ where
         // Drain async messages captured during the handshake (e.g.
         // notices from `read_info`) before any socket I/O.
         while let Some(msg) = self.delayed_notices.pop_front() {
-            route_async(&self.parameters, self.async_sender.as_ref(), msg)?;
+            match route_async(&self.parameters, self.async_sender.as_ref(), msg)? {
+                DispatchOutcome::Continue => {}
+                DispatchOutcome::RetireAfterDiagnostics(error) => {
+                    self.tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
+                    return Err(error);
+                }
+            }
         }
 
         // Decompose so the stream can be consumed by the split; if it refuses
@@ -1618,6 +2275,7 @@ where
             async_sender,
             tx_status,
             in_flight_requests,
+            terminal_server_error,
             drop_release: _,
             _live,
         } = self;
@@ -1637,6 +2295,7 @@ where
                     async_sender,
                     tx_status,
                     in_flight_requests,
+                    terminal_server_error,
                     read_deadline,
                     read_error_release,
                     _live.clone(),
@@ -1654,6 +2313,7 @@ where
                     async_sender,
                     tx_status,
                     in_flight_requests,
+                    terminal_server_error,
                     drop_release: None,
                     _live,
                 };
@@ -1741,6 +2401,7 @@ where
         async_sender: Option<mpsc::UnboundedSender<AsyncMessage>>,
         tx_status: Arc<AtomicU8>,
         in_flight_requests: Arc<AtomicUsize>,
+        terminal_server_error: Arc<Mutex<Option<DbError>>>,
         read_deadline: Option<ReadDeadline>,
         read_error_release: Option<crate::release::ConnectionDropRelease>,
         _read_live: crate::live::LiveConnectionGuard,
@@ -1786,7 +2447,20 @@ where
             let mut read_half = read_half;
             loop {
                 match read_backend(&mut read_half).await {
-                    Ok(message) => {
+                    Ok(mut message) => {
+                        let deferred_error = message.take_deferred_error();
+                        if deferred_error.is_some() {
+                            // The valid prefix still owns the operation's
+                            // diagnosis, but the malformed tail has already
+                            // made the physical session unreusable. Publish
+                            // pool poison before the prefix can wake its
+                            // borrower; the terminal error itself remains
+                            // behind that prefix in the read FIFO.
+                            read_error_status.store(READ_RETIRED_STATUS, Ordering::Release);
+                            if let Some(release) = &read_error_release {
+                                release.shutdown();
+                            }
+                        }
                         let (acknowledgement, acknowledged) = if acknowledge_reads {
                             let (sender, receiver) = oneshot::channel();
                             (Some(sender), Some(receiver))
@@ -1814,6 +2488,10 @@ where
                         {
                             // Main loop dropped the acknowledgement side;
                             // connection is already ending.
+                            break;
+                        }
+                        if let Some(error) = deferred_error {
+                            publish_reader_failure(error, &mut read_tx, &read_terminal_tx).await;
                             break;
                         }
                     }
@@ -1990,14 +2668,70 @@ where
                             async_sender: async_sender.as_ref(),
                             tx_status: &tx_status,
                             in_flight_requests: &in_flight_requests,
+                            terminal_server_error: &terminal_server_error,
                         }
                         .handle_message(message);
                         // The reader cannot submit its next socket read until all
                         // clock effects from this decoded frame are visible.
+                        if matches!(
+                            &result,
+                            Ok(DispatchOutcome::RetireAfterDiagnostics(_))
+                        ) {
+                            tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
+                        }
                         if let Some(acknowledgement) = acknowledgement {
                             let _ = acknowledgement.send(());
                         }
-                        result?;
+                        match result? {
+                            DispatchOutcome::Continue => {}
+                            DispatchOutcome::RetireAfterDiagnostics(error) => {
+                                if copy_read_obligation
+                                    .as_ref()
+                                    .is_some_and(ReadObligation::accepts_copy_input)
+                                {
+                                    // PostgreSQL is waiting for producer data,
+                                    // not owing a response. No later request can
+                                    // be in flight behind COPY mode, so waiting
+                                    // for ReadyForQuery would hang and cannot
+                                    // uncover another request's diagnosis.
+                                    let mut response_offset = 0;
+                                    drain_available_retirement_read_channel(
+                                        &mut read_rx,
+                                        &mut response_offset,
+                                        responses.len(),
+                                        &responses,
+                                        &terminal_server_error,
+                                        &tx_status,
+                                    )
+                                    .await;
+                                    return Err(error);
+                                }
+                                let response_count = responses.len().saturating_sub(usize::from(
+                                    copy_in.is_some() && !copy_initial_flushed,
+                                ));
+                                let mut response_offset = drain_retirement_read_channel(
+                                    &mut read_rx,
+                                    &mut read_terminal_rx,
+                                    response_count,
+                                    &responses,
+                                    &terminal_server_error,
+                                    &tx_status,
+                                )
+                                .await;
+                                if response_count < responses.len() {
+                                    drain_available_retirement_read_channel(
+                                        &mut read_rx,
+                                        &mut response_offset,
+                                        responses.len(),
+                                        &responses,
+                                        &terminal_server_error,
+                                        &tx_status,
+                                    )
+                                    .await;
+                                }
+                                return Err(error);
+                            }
+                        }
                     }
                     MuxEvent::Read(Some(ReadEvent::Terminal(error))) => {
                         return classify_read_terminal(
@@ -2045,6 +2779,7 @@ where
                             prepare_cleanup,
                             statement,
                             observation,
+                            request_server_error,
                         } = request;
                         let request_observation = observation.clone();
                         let is_copy = matches!(&messages, RequestMessages::CopyIn(_));
@@ -2059,6 +2794,7 @@ where
                             observation,
                             bind_complete_seen: false,
                             read_obligation: read_obligation.clone(),
+                            request_server_error,
                         });
                         match messages {
                             RequestMessages::Single(msg) => {
@@ -2077,6 +2813,8 @@ where
                                         async_sender.as_ref(),
                                         &tx_status,
                                         &in_flight_requests,
+                                        &terminal_server_error,
+                                        true,
                                     )
                                     .await
                                 } else {
@@ -2164,6 +2902,8 @@ where
                             async_sender.as_ref(),
                             &tx_status,
                             &in_flight_requests,
+                            &terminal_server_error,
+                            !copy_initial_flushed || resume_terminal,
                         )
                         .await;
                         if let Some(error) = take_captured_non_eof_terminal(&mut terminal) {
@@ -2259,6 +2999,12 @@ mod tests {
 
     struct WriteFailingSplitStream {
         read_half_dropped: Rc<Cell<bool>>,
+    }
+
+    struct YieldingWriteSplitStream;
+
+    struct YieldingWriteHalf {
+        yielded: bool,
     }
 
     struct TimeoutSplitStream {
@@ -2550,6 +3296,28 @@ mod tests {
         }
     }
 
+    impl AsyncRead for YieldingWriteSplitStream {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            std::future::pending::<()>().await;
+            BufResult(Ok(0), buf)
+        }
+    }
+
+    impl AsyncWrite for YieldingWriteSplitStream {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            let len = buf.buf_len();
+            BufResult(Ok(len), buf)
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     impl AsyncRead for TimeoutSplitStream {
         async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
             self.read_half_started.set(true);
@@ -2670,6 +3438,31 @@ mod tests {
         }
     }
 
+    impl AsyncWrite for YieldingWriteHalf {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            let len = buf.buf_len();
+            poll_fn(|cx| {
+                if self.yielded {
+                    Poll::Ready(())
+                } else {
+                    self.yielded = true;
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            })
+            .await;
+            BufResult(Ok(len), buf)
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     impl AsyncRead for ObservedReadHalf {
         async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
             let result = self.inner.read(buf).await;
@@ -2722,6 +3515,21 @@ mod tests {
                     dropped: self.read_half_dropped,
                 },
                 FailingWriteHalf,
+            ))
+        }
+    }
+
+    impl SplitStream for YieldingWriteSplitStream {
+        type ReadHalf = ParkedReadHalf;
+        type WriteHalf = YieldingWriteHalf;
+
+        fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+            Ok((
+                ParkedReadHalf {
+                    started: None,
+                    dropped: Rc::new(Cell::new(false)),
+                },
+                YieldingWriteHalf { yielded: false },
             ))
         }
     }
@@ -3196,6 +4004,7 @@ mod tests {
             sender,
             messages: ResponseMessages::Raw(BackendMessages::empty()),
             disposition: RequestDisposition::Awaited,
+            request_server_error: Arc::default(),
         }]);
         let write_error = Error::io(std::io::Error::new(
             std::io::ErrorKind::BrokenPipe,
@@ -3227,10 +4036,12 @@ mod tests {
             observation: None,
             bind_complete_seen: false,
             read_obligation: ReadObligation::new(None, false),
+            request_server_error: Arc::default(),
         }]);
         let mut pending_responses = VecDeque::new();
         let tx_status = AtomicU8::new(b'T');
         let in_flight_requests = AtomicUsize::new(1);
+        let terminal_server_error = Mutex::new(None);
 
         Dispatch {
             parameters: &parameters,
@@ -3239,6 +4050,7 @@ mod tests {
             async_sender: None,
             tx_status: &tx_status,
             in_flight_requests: &in_flight_requests,
+            terminal_server_error: &terminal_server_error,
         }
         .deliver_batch(BackendMessages::empty(), Some(b'I'))
         .expect("deliver transaction-neutral ReadyForQuery");
@@ -3255,6 +4067,782 @@ mod tests {
         let surfaced = take_captured_non_eof_terminal(&mut terminal)
             .expect("a concurrent write failure hid the captured read timeout");
         assert!(surfaced.is_read_timeout());
+    }
+
+    fn error_response_bytes(code: &str, message: &str) -> BytesMut {
+        let mut payload = BytesMut::new();
+        payload.extend_from_slice(b"SERROR\0");
+        payload.extend_from_slice(b"C");
+        payload.extend_from_slice(code.as_bytes());
+        payload.extend_from_slice(b"\0M");
+        payload.extend_from_slice(message.as_bytes());
+        payload.extend_from_slice(b"\0\0");
+
+        let mut bytes = BytesMut::new();
+        bytes.extend_from_slice(b"E");
+        bytes.extend_from_slice(&(u32::try_from(payload.len()).unwrap() + 4).to_be_bytes());
+        bytes.extend_from_slice(&payload);
+        bytes.extend_from_slice(b"Z\0\0\0\x05I");
+        bytes
+    }
+
+    fn error_response_batch(code: &str, message: &str) -> BackendMessages {
+        BackendMessages::from_test_bytes(error_response_bytes(code, message))
+    }
+
+    fn parameter_status_frame(name: &str, value: &str) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(name.as_bytes());
+        payload.push(0);
+        payload.extend_from_slice(value.as_bytes());
+        payload.push(0);
+
+        let mut frame = vec![b'S'];
+        frame.extend_from_slice(&(u32::try_from(payload.len()).unwrap() + 4).to_be_bytes());
+        frame.extend_from_slice(&payload);
+        frame
+    }
+
+    #[test]
+    fn retirement_decodes_only_ascii_server_diagnostics() {
+        let ascii = error_response_batch("22012", "division by zero");
+        let error =
+            first_ascii_server_error(&ascii).expect("the ASCII ErrorResponse was not preserved");
+        assert_eq!(error.code().code(), "22012");
+
+        let non_ascii = error_response_batch("22012", "division by z\u{e9}ro");
+        assert!(
+            first_ascii_server_error(&non_ascii).is_none(),
+            "post-switch non-ASCII text was decoded as though it were UTF-8"
+        );
+    }
+
+    #[compio::test]
+    async fn flush_time_encoding_retirement_preserves_a_queued_server_error() {
+        let stream = BufStream::new(YieldingWriteSplitStream);
+        let (read_half, mut write_half) = match stream.try_into_split() {
+            Ok(halves) => halves,
+            Err(_) => panic!("the yielding-write fixture did not split"),
+        };
+        drop(read_half);
+        write_frontend(
+            &mut write_half,
+            FrontendMessage::Raw(bytes::Bytes::from_static(b"scripted request")),
+        )
+        .expect("buffer the scripted request");
+
+        let mut parameter_frame =
+            BytesMut::from(parameter_status_frame("client_encoding", "LATIN1").as_slice());
+        let frame_len = parameter_frame.len();
+        let parameter_status = Message::parse(&mut parameter_frame)
+            .expect("decode the scripted ParameterStatus")
+            .expect("the scripted ParameterStatus was incomplete");
+        let (mut read_tx, mut read_rx) = mpsc::channel(4);
+        read_tx
+            .try_send(ReadEvent::Message(ReadEnvelope {
+                message: BackendMessage::Async {
+                    message: parameter_status,
+                    frame_len,
+                },
+                acknowledgement: None,
+            }))
+            .expect("queue the encoding change");
+        read_tx
+            .try_send(ReadEvent::Message(ReadEnvelope {
+                message: BackendMessage::Normal {
+                    messages: error_response_batch("22012", "scripted division by zero"),
+                    request_complete: true,
+                    deferred_error: None,
+                },
+                acknowledgement: None,
+            }))
+            .expect("queue the server diagnosis behind the encoding change");
+        let (_read_terminal_tx, mut read_terminal_rx) = mpsc::unbounded();
+
+        let (response_tx, _response_rx) = mpsc::channel(1);
+        let request_server_error = Arc::default();
+        let mut responses = VecDeque::from([Response {
+            sender: response_tx,
+            disposition: RequestDisposition::Awaited,
+            transaction_effect: TransactionEffect::MayChange,
+            prepare_cleanup: None,
+            statement: None,
+            observation: None,
+            bind_complete_seen: false,
+            read_obligation: ReadObligation::new(None, false),
+            request_server_error: Arc::clone(&request_server_error),
+        }]);
+        let mut pending_responses = VecDeque::new();
+        let parameters = Mutex::new(HashMap::new());
+        let tx_status = AtomicU8::new(b'I');
+        let in_flight_requests = AtomicUsize::new(1);
+        let terminal_server_error = Mutex::new(None);
+
+        let (write_result, terminal) = flush_with_read_draining(
+            &mut write_half,
+            &mut read_rx,
+            &mut read_terminal_rx,
+            &parameters,
+            &mut responses,
+            &mut pending_responses,
+            None,
+            &tx_status,
+            &in_flight_requests,
+            &terminal_server_error,
+            true,
+        )
+        .await;
+
+        assert_eq!(
+            request_server_error
+                .lock()
+                .as_ref()
+                .map(|error: &DbError| error.code().code()),
+            Some("22012"),
+            "flush-time client_encoding retirement discarded queued SQLSTATE 22012"
+        );
+        let local = write_result.expect_err("the unsupported encoding left the flush reusable");
+        assert!(local.is_config());
+        assert!(terminal.is_none(), "the fixture invented a read failure");
+        assert_eq!(
+            tx_status.load(Ordering::Acquire),
+            READ_RETIRED_STATUS,
+            "the encoding change did not poison pool reuse before retirement"
+        );
+    }
+
+    /// The serialized fallback used to stop on the unsupported ParameterStatus
+    /// and drop the SQLSTATE for the second request which it had already
+    /// flushed. A CommandComplete prefix gives the loop a dispatch point at
+    /// which to dequeue that second request before the encoding switch arrives.
+    #[compio::test]
+    async fn serialized_encoding_retirement_preserves_a_pipelined_server_error() {
+        let (request_sender, request_receiver) = mpsc::unbounded();
+        let client = crate::client::Client::new(
+            request_sender,
+            crate::config::SslMode::Disable,
+            crate::config::SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+        );
+        let _first = client
+            .inner()
+            .send(RequestMessages::Single(FrontendMessage::Raw(
+                bytes::Bytes::from_static(b"scripted first request"),
+            )))
+            .expect("enqueue the first serialized request");
+        let mut second = client
+            .inner()
+            .send(RequestMessages::Single(FrontendMessage::Raw(
+                bytes::Bytes::from_static(b"scripted second request"),
+            )))
+            .expect("enqueue the second serialized request");
+
+        let mut script = vec![b'C'];
+        script.extend_from_slice(&13u32.to_be_bytes());
+        script.extend_from_slice(b"SELECT 1\0");
+        script.extend_from_slice(&parameter_status_frame("client_encoding", "LATIN1"));
+        script.extend_from_slice(&[b'Z', 0, 0, 0, 5, b'I']);
+        script.extend_from_slice(&error_response_bytes("22012", "scripted division by zero"));
+
+        let connection: Connection<ScriptedDuplex, ScriptedDuplex> = Connection::new(
+            BufStream::new(MaybeTlsStream::Raw(ScriptedDuplex {
+                chunks: VecDeque::from([script]),
+            })),
+            VecDeque::new(),
+            HashMap::new(),
+            client.parameters_handle(),
+            request_receiver,
+            client.tx_status_handle(),
+            client.in_flight_requests_handle(),
+            client.terminal_server_error_handle(),
+            None,
+        );
+
+        let driver_error = connection
+            .run_serialized()
+            .await
+            .expect_err("the unsupported encoding left the serialized session alive");
+        assert!(
+            driver_error.is_config(),
+            "the serialized driver lost its configuration classification: {driver_error}"
+        );
+        let error = match second.next().await {
+            Err(error) => error,
+            Ok(_) => panic!("the scripted division by zero unexpectedly succeeded"),
+        };
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("22012"),
+            "serialized client_encoding retirement discarded SQLSTATE 22012: {error}"
+        );
+    }
+
+    fn error_response_before_malformed_header(code: &str, message: &str) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"SERROR\0C");
+        payload.extend_from_slice(code.as_bytes());
+        payload.extend_from_slice(b"\0M");
+        payload.extend_from_slice(message.as_bytes());
+        payload.extend_from_slice(b"\0\0");
+
+        let mut bytes = vec![postgres_protocol::message::backend::ERROR_RESPONSE_TAG];
+        bytes.extend_from_slice(&(u32::try_from(payload.len()).unwrap() + 4).to_be_bytes());
+        bytes.extend_from_slice(&payload);
+        bytes.push(b'D');
+        bytes.extend_from_slice(&3u32.to_be_bytes());
+        bytes
+    }
+
+    fn response_error(messages: ResponseMessages) -> Error {
+        match messages {
+            ResponseMessages::Raw(mut messages) | ResponseMessages::Filtered(mut messages) => {
+                match messages.next().expect("decode the scripted response") {
+                    Some(Message::ErrorResponse(body)) => Error::db(body),
+                    Some(_) => panic!("the scripted response was not ErrorResponse"),
+                    None => panic!("the scripted response batch was empty"),
+                }
+            }
+            ResponseMessages::Observed(mut messages) => match messages.pop_front() {
+                Some(Err(error)) => error,
+                Some(Ok(_)) => panic!("the observed response was not an error"),
+                None => panic!("the observed response batch was empty"),
+            },
+        }
+    }
+
+    /// A decoded ErrorResponse can be parked behind a full per-request
+    /// channel when an independent terminal read tears down the connection.
+    /// Closing that channel must not replace the request's already-decoded
+    /// SQLSTATE with the local closure symptom.
+    #[compio::test]
+    async fn a_stranded_error_response_outranks_response_channel_closure() {
+        let (request_tx, mut request_rx) = mpsc::unbounded();
+        let client = crate::client::Client::new(
+            request_tx,
+            crate::config::SslMode::Disable,
+            crate::config::SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+        );
+        let mut caller = client
+            .inner()
+            .send(RequestMessages::Single(FrontendMessage::Raw(
+                bytes::Bytes::from_static(b"scripted request"),
+            )))
+            .expect("enqueue the scripted request");
+        let Request {
+            messages: _,
+            mut sender,
+            disposition,
+            transaction_effect,
+            prepare_cleanup,
+            statement,
+            observation,
+            request_server_error,
+        } = request_rx
+            .try_recv()
+            .expect("the client did not enqueue its request");
+
+        sender
+            .try_send(ResponseMessages::Observed(VecDeque::from([Ok(
+                command_complete_message("PREFIX"),
+            )])))
+            .expect("queue the response prefix");
+        sender
+            .try_send(ResponseMessages::Raw(BackendMessages::empty()))
+            .expect("park the response sender at capacity");
+        assert!(
+            sender
+                .try_send(ResponseMessages::Raw(BackendMessages::empty()))
+                .is_err(),
+            "the response sender was not capacity-full"
+        );
+
+        let mut responses = VecDeque::from([Response {
+            sender,
+            disposition,
+            transaction_effect,
+            prepare_cleanup,
+            statement,
+            observation,
+            bind_complete_seen: false,
+            read_obligation: ReadObligation::new(None, false),
+            request_server_error,
+        }]);
+        let mut pending_responses = VecDeque::new();
+        let parameters = Mutex::new(HashMap::new());
+        let tx_status = AtomicU8::new(b'I');
+        let in_flight_requests = AtomicUsize::new(1);
+        let terminal_server_error = Mutex::new(None);
+        Dispatch {
+            parameters: &parameters,
+            responses: &mut responses,
+            pending_responses: &mut pending_responses,
+            async_sender: None,
+            tx_status: &tx_status,
+            in_flight_requests: &in_flight_requests,
+            terminal_server_error: &terminal_server_error,
+        }
+        .deliver_batch(
+            error_response_batch("23505", "scripted unique violation"),
+            Some(b'I'),
+        )
+        .expect("dispatch the decoded ErrorResponse");
+        assert_eq!(
+            pending_responses.len(),
+            1,
+            "the ErrorResponse did not enter the backpressure stash"
+        );
+
+        // Model an out-of-band terminal read: response ownership and the
+        // undelivered stash disappear before this caller consumes capacity.
+        drop(responses);
+        drop(pending_responses);
+
+        match caller.next().await.expect("read the response prefix") {
+            Message::CommandComplete(body) => {
+                assert_eq!(body.tag().expect("decode the response prefix"), "PREFIX")
+            }
+            _ => panic!("the response prefix changed shape"),
+        }
+        let error = match caller.next().await {
+            Err(error) => error,
+            Ok(_) => panic!("response channel closure hid its stranded ErrorResponse"),
+        };
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("23505"),
+            "stranded ErrorResponse was replaced by channel closure: {error}"
+        );
+    }
+
+    /// The split reader can discover the malformed tail before dispatch has
+    /// delivered the ErrorResponse at the front of the same read. It must mark
+    /// the session dead immediately, then preserve FIFO so SQLSTATE still owns
+    /// the operation's result.
+    #[compio::test]
+    async fn split_reader_delivers_server_error_before_coalesced_local_failure() {
+        let tx_status = Arc::new(AtomicU8::new(b'I'));
+        let recorder = StatusRecordingWake::new(&tx_status);
+        let waker = Waker::from(Arc::clone(&recorder));
+        let mut context = Context::from_waker(&waker);
+        let (response_tx, mut response_rx) = mpsc::channel(1);
+        assert!(response_rx.poll_next_unpin(&mut context).is_pending());
+
+        let (request_tx, request_rx) = mpsc::unbounded();
+        request_tx
+            .unbounded_send(Request {
+                messages: RequestMessages::Single(FrontendMessage::Raw(bytes::Bytes::from_static(
+                    b"scripted request",
+                ))),
+                sender: response_tx,
+                disposition: RequestDisposition::Awaited,
+                transaction_effect: TransactionEffect::MayChange,
+                prepare_cleanup: None,
+                statement: None,
+                observation: None,
+                request_server_error: Arc::default(),
+            })
+            .expect("queue the scripted request");
+
+        let stream = BufStream::new(ScriptedReadSplitStream {
+            chunks: VecDeque::from([error_response_before_malformed_header(
+                "23505",
+                "scripted unique violation",
+            )]),
+            eof_after: None,
+        });
+        let (read_half, write_half) = match stream.try_into_split() {
+            Ok(halves) => halves,
+            Err(_) => panic!("the coalesced-failure fixture did not split"),
+        };
+
+        let result = compio::time::timeout(
+            Duration::from_secs(1),
+            Connection::<ScriptedReadSplitStream, ScriptedReadSplitStream>::run_multiplexed(
+                read_half,
+                write_half,
+                Arc::default(),
+                request_rx,
+                None,
+                Arc::clone(&tx_status),
+                Arc::new(AtomicUsize::new(1)),
+                Arc::default(),
+                None,
+                None,
+                crate::live::LiveConnectionGuard::new(),
+            ),
+        )
+        .await
+        .expect("the coalesced-failure split reader exceeded its watchdog");
+        let local = result.expect_err("the malformed tail left the split session reusable");
+        assert!(
+            local
+                .as_io()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::InvalidData),
+            "the split reader retired for the wrong local reason: {local}"
+        );
+
+        let operation = response_error(
+            response_rx
+                .try_recv()
+                .expect("the local framing failure retired before SQLSTATE 23505 was delivered"),
+        );
+        assert_eq!(
+            operation.code().map(|code| code.code()),
+            Some("23505"),
+            "coalesced framing failure discarded SQLSTATE 23505: {operation}"
+        );
+        assert_eq!(
+            recorder.seen.load(Ordering::Acquire),
+            READ_RETIRED_STATUS,
+            "the malformed tail woke its borrower before pool poison"
+        );
+        drop(request_tx);
+    }
+
+    /// The serialized fallback has no reader task to carry a second FIFO
+    /// event. It must explicitly dispatch and unstash the valid ErrorResponse
+    /// before returning the malformed tail's terminal error.
+    #[compio::test]
+    async fn serialized_reader_delivers_server_error_before_coalesced_local_failure() {
+        let tx_status = Arc::new(AtomicU8::new(b'I'));
+        let (mut response_tx, mut response_rx) = mpsc::channel(1);
+        // Park this exact sender handle. `deliver_batch` must stash the server
+        // error, and the serialized deferred-error path must flush that stash
+        // before teardown drops it.
+        for _ in 0..2 {
+            response_tx
+                .try_send(ResponseMessages::Raw(BackendMessages::empty()))
+                .expect("the response channel parked before both primers were queued");
+        }
+        assert!(
+            response_tx
+                .try_send(ResponseMessages::Raw(BackendMessages::empty()))
+                .is_err(),
+            "the response sender was not backpressured by two primers"
+        );
+        let (request_tx, request_rx) = mpsc::unbounded();
+        request_tx
+            .unbounded_send(Request {
+                messages: RequestMessages::Single(FrontendMessage::Raw(bytes::Bytes::from_static(
+                    b"scripted request",
+                ))),
+                sender: response_tx,
+                disposition: RequestDisposition::Awaited,
+                transaction_effect: TransactionEffect::MayChange,
+                prepare_cleanup: None,
+                statement: None,
+                observation: None,
+                request_server_error: Arc::default(),
+            })
+            .expect("queue the scripted request");
+
+        let connection: Connection<ScriptedDuplex, ScriptedDuplex> = Connection::new(
+            BufStream::new(MaybeTlsStream::Raw(ScriptedDuplex {
+                chunks: VecDeque::from([error_response_before_malformed_header(
+                    "23505",
+                    "scripted unique violation",
+                )]),
+            })),
+            VecDeque::new(),
+            HashMap::new(),
+            Arc::default(),
+            request_rx,
+            Arc::clone(&tx_status),
+            Arc::new(AtomicUsize::new(1)),
+            Arc::default(),
+            None,
+        );
+
+        let result = compio::time::timeout(Duration::from_secs(1), connection.run_serialized())
+            .await
+            .expect("the coalesced-failure serialized reader exceeded its watchdog");
+        let local = result.expect_err("the malformed tail left the serialized session reusable");
+        assert!(
+            local
+                .as_io()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::InvalidData),
+            "the serialized reader retired for the wrong local reason: {local}"
+        );
+
+        for _ in 0..2 {
+            response_rx
+                .try_recv()
+                .expect("a response-channel primer disappeared");
+        }
+        let operation =
+            response_error(response_rx.try_recv().expect(
+                "the serialized local framing failure dropped backpressured SQLSTATE 23505",
+            ));
+        assert_eq!(
+            operation.code().map(|code| code.code()),
+            Some("23505"),
+            "serialized framing failure discarded SQLSTATE 23505: {operation}"
+        );
+        assert_eq!(
+            tx_status.load(Ordering::Acquire),
+            READ_RETIRED_STATUS,
+            "the serialized malformed tail left the pool status reusable"
+        );
+        drop(request_tx);
+    }
+
+    #[compio::test]
+    async fn queued_server_error_outranks_a_simultaneous_flush_failure() {
+        let read_half_dropped = Rc::new(Cell::new(false));
+        let stream = BufStream::new(WriteFailingSplitStream {
+            read_half_dropped: Rc::clone(&read_half_dropped),
+        });
+        let (read_half, mut write_half) = match stream.try_into_split() {
+            Ok(halves) => halves,
+            Err(_) => panic!("the flush-failure fixture did not split"),
+        };
+        drop(read_half);
+        write_frontend(
+            &mut write_half,
+            FrontendMessage::Raw(bytes::Bytes::from_static(b"scripted request")),
+        )
+        .expect("buffer the scripted request");
+
+        let (mut read_tx, mut read_rx) = mpsc::channel(1);
+        read_tx
+            .try_send(ReadEvent::Message(ReadEnvelope {
+                message: BackendMessage::Normal {
+                    messages: error_response_batch("23505", "scripted unique violation"),
+                    request_complete: true,
+                    deferred_error: None,
+                },
+                acknowledgement: None,
+            }))
+            .expect("queue the decoded server response");
+        let (_read_terminal_tx, mut read_terminal_rx) = mpsc::unbounded();
+
+        let tx_status = Arc::new(AtomicU8::new(b'I'));
+        let recorder = StatusRecordingWake::new(&tx_status);
+        let waker = Waker::from(Arc::clone(&recorder));
+        let mut context = Context::from_waker(&waker);
+        let (response_tx, mut response_rx) = mpsc::channel(1);
+        assert!(response_rx.poll_next_unpin(&mut context).is_pending());
+        let mut responses = VecDeque::from([Response {
+            sender: response_tx,
+            disposition: RequestDisposition::Awaited,
+            transaction_effect: TransactionEffect::MayChange,
+            prepare_cleanup: None,
+            statement: None,
+            observation: None,
+            bind_complete_seen: false,
+            read_obligation: ReadObligation::new(None, false),
+            request_server_error: Arc::default(),
+        }]);
+        let mut pending_responses = VecDeque::new();
+        let parameters = Mutex::new(HashMap::new());
+        let in_flight_requests = AtomicUsize::new(1);
+        let terminal_server_error = Mutex::new(None);
+
+        let (write_result, terminal) = flush_with_read_draining(
+            &mut write_half,
+            &mut read_rx,
+            &mut read_terminal_rx,
+            &parameters,
+            &mut responses,
+            &mut pending_responses,
+            None,
+            &tx_status,
+            &in_flight_requests,
+            &terminal_server_error,
+            true,
+        )
+        .await;
+        let write_error = write_result.expect_err("the scripted flush unexpectedly succeeded");
+        assert_eq!(
+            write_error.as_io().map(std::io::Error::kind),
+            Some(std::io::ErrorKind::BrokenPipe)
+        );
+        assert!(terminal.is_none(), "the fixture invented a read failure");
+
+        let delivered = response_rx
+            .try_recv()
+            .expect("flush failure returned before dispatching queued SQLSTATE 23505");
+        let error = match delivered {
+            ResponseMessages::Raw(mut messages) | ResponseMessages::Filtered(mut messages) => {
+                match messages.next().expect("decode the queued server response") {
+                    Some(Message::ErrorResponse(body)) => Error::db(body),
+                    Some(_) => panic!("the queued response was not ErrorResponse"),
+                    None => panic!("the queued response batch was empty"),
+                }
+            }
+            ResponseMessages::Observed(mut messages) => match messages.pop_front() {
+                Some(Err(error)) => error,
+                Some(Ok(_)) => panic!("the observed response was not an error"),
+                None => panic!("the observed response batch was empty"),
+            },
+        };
+        assert_eq!(error.code().map(|code| code.code()), Some("23505"));
+        assert_eq!(
+            recorder.seen.load(Ordering::Acquire),
+            READ_RETIRED_STATUS,
+            "the write-dead session woke its borrower before pool poison"
+        );
+        assert!(read_half_dropped.get());
+    }
+
+    /// A response already parked behind one caller's backpressure must keep
+    /// later responses out of the delivery FIFO. That does not make a decoded
+    /// ErrorResponse disappear: if the simultaneous write failure tears the
+    /// connection down, the later request still needs its SQLSTATE through the
+    /// request-scoped diagnosis side channel.
+    #[compio::test]
+    async fn backpressured_flush_failure_preserves_a_queued_server_error() {
+        let read_half_dropped = Rc::new(Cell::new(false));
+        let stream = BufStream::new(WriteFailingSplitStream {
+            read_half_dropped: Rc::clone(&read_half_dropped),
+        });
+        let (read_half, mut write_half) = match stream.try_into_split() {
+            Ok(halves) => halves,
+            Err(_) => panic!("the flush-failure fixture did not split"),
+        };
+        drop(read_half);
+        write_frontend(
+            &mut write_half,
+            FrontendMessage::Raw(bytes::Bytes::from_static(b"scripted request")),
+        )
+        .expect("buffer the scripted request");
+
+        let (mut read_tx, mut read_rx) = mpsc::channel(1);
+        read_tx
+            .try_send(ReadEvent::Message(ReadEnvelope {
+                message: BackendMessage::Normal {
+                    messages: error_response_batch("23505", "scripted unique violation"),
+                    request_complete: true,
+                    deferred_error: None,
+                },
+                acknowledgement: None,
+            }))
+            .expect("queue the decoded server response");
+        let (_read_terminal_tx, mut read_terminal_rx) = mpsc::unbounded();
+
+        let (request_tx, mut request_rx) = mpsc::unbounded();
+        let client = crate::client::Client::new(
+            request_tx,
+            crate::config::SslMode::Disable,
+            crate::config::SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+        );
+        let mut caller = client
+            .inner()
+            .send(RequestMessages::Single(FrontendMessage::Raw(
+                bytes::Bytes::from_static(b"scripted later request"),
+            )))
+            .expect("enqueue the later scripted request");
+        let Request {
+            messages: _,
+            sender,
+            disposition,
+            transaction_effect,
+            prepare_cleanup,
+            statement,
+            observation,
+            request_server_error,
+        } = request_rx
+            .try_recv()
+            .expect("the client did not enqueue its request");
+        let mut responses = VecDeque::from([Response {
+            sender,
+            disposition,
+            transaction_effect,
+            prepare_cleanup,
+            statement,
+            observation,
+            bind_complete_seen: false,
+            read_obligation: ReadObligation::new(None, false),
+            request_server_error,
+        }]);
+
+        // `futures_channel::mpsc` tracks capacity per sender handle. Fill this
+        // exact handle so the earlier pending response remains the active FIFO
+        // gate for the entire flush-failure poll.
+        let (mut blocked_sender, _blocked_receiver) = mpsc::channel(1);
+        for _ in 0..2 {
+            blocked_sender
+                .try_send(ResponseMessages::Raw(BackendMessages::empty()))
+                .expect("the pending response sender filled too early");
+        }
+        assert!(
+            blocked_sender
+                .try_send(ResponseMessages::Raw(BackendMessages::empty()))
+                .is_err(),
+            "the pending response sender was not backpressured"
+        );
+        let blocked_request_server_error = Arc::default();
+        let mut pending_responses = VecDeque::from([PendingResponse {
+            sender: blocked_sender,
+            messages: ResponseMessages::Raw(BackendMessages::empty()),
+            disposition: RequestDisposition::Awaited,
+            request_server_error: Arc::clone(&blocked_request_server_error),
+        }]);
+        let parameters = Mutex::new(HashMap::new());
+        let tx_status = AtomicU8::new(b'I');
+        let in_flight_requests = AtomicUsize::new(1);
+        let terminal_server_error = Mutex::new(None);
+
+        let (write_result, terminal) = flush_with_read_draining(
+            &mut write_half,
+            &mut read_rx,
+            &mut read_terminal_rx,
+            &parameters,
+            &mut responses,
+            &mut pending_responses,
+            None,
+            &tx_status,
+            &in_flight_requests,
+            &terminal_server_error,
+            true,
+        )
+        .await;
+        let write_error = write_result.expect_err("the scripted flush unexpectedly succeeded");
+        assert_eq!(
+            write_error.as_io().map(std::io::Error::kind),
+            Some(std::io::ErrorKind::BrokenPipe)
+        );
+        assert!(terminal.is_none(), "the fixture invented a read failure");
+
+        // Model `Connection::run` teardown. Delivery remains blocked, but the
+        // decoded diagnosis must survive closure of the response sender.
+        drop(responses);
+        drop(pending_responses);
+        let error = match caller.next().await {
+            Err(error) => error,
+            Ok(_) => panic!("response channel closure hid its queued ErrorResponse"),
+        };
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("23505"),
+            "backpressured flush failure discarded queued SQLSTATE 23505: {error}"
+        );
+        assert!(
+            !error.is_closed(),
+            "the preserved server diagnosis still classified the session as a local close"
+        );
+        assert!(
+            blocked_request_server_error.lock().is_none(),
+            "the later ErrorResponse was attributed to the earlier blocked request"
+        );
+        assert!(
+            terminal_server_error.lock().is_none(),
+            "a nonterminal request error leaked into the connection-global diagnosis"
+        );
+        assert_eq!(
+            tx_status.load(Ordering::Acquire),
+            READ_RETIRED_STATUS,
+            "the failed flush left the physical session reusable"
+        );
+        assert!(read_half_dropped.get());
     }
 
     #[compio::test]
@@ -3281,6 +4869,7 @@ mod tests {
                 request_rx,
                 Arc::new(AtomicU8::new(b'I')),
                 Arc::new(AtomicUsize::new(0)),
+                Arc::default(),
                 None,
             );
             assert_eq!(crate::live::live_connections(), 1);
@@ -3351,6 +4940,7 @@ mod tests {
                     prepare_cleanup: None,
                     statement: None,
                     observation: None,
+                    request_server_error: Arc::default(),
                 })
                 .expect("queue the write-failing request");
 
@@ -3363,6 +4953,7 @@ mod tests {
                     None,
                     Arc::new(AtomicU8::new(b'I')),
                     Arc::new(AtomicUsize::new(1)),
+                    Arc::default(),
                     None,
                     None,
                     crate::live::LiveConnectionGuard::new(),
@@ -3414,6 +5005,7 @@ mod tests {
                     prepare_cleanup: None,
                     statement: None,
                     observation: None,
+                    request_server_error: Arc::default(),
                 })
                 .expect("queue the coordinated request");
 
@@ -3428,6 +5020,7 @@ mod tests {
                 None,
                 Arc::new(AtomicU8::new(b'I')),
                 Arc::new(AtomicUsize::new(1)),
+                Arc::default(),
                 None,
                 None,
                 crate::live::LiveConnectionGuard::new(),
@@ -3522,6 +5115,7 @@ mod tests {
                     prepare_cleanup: None,
                     statement: None,
                     observation: None,
+                    request_server_error: Arc::default(),
                 })
                 .expect("queue the timeout request");
 
@@ -3533,6 +5127,7 @@ mod tests {
                 None,
                 Arc::clone(&tx_status),
                 Arc::new(AtomicUsize::new(1)),
+                Arc::default(),
                 read_deadline,
                 None,
                 crate::live::LiveConnectionGuard::new(),
@@ -3561,6 +5156,7 @@ mod tests {
                 message: BackendMessage::Normal {
                     messages: BackendMessages::empty(),
                     request_complete: false,
+                    deferred_error: None,
                 },
                 acknowledgement: None,
             }))
@@ -3634,6 +5230,7 @@ mod tests {
                 prepare_cleanup: None,
                 statement: None,
                 observation: None,
+                request_server_error: Arc::default(),
             })
             .expect("queue the scripted request");
 
@@ -3646,6 +5243,7 @@ mod tests {
                 None,
                 Arc::clone(&tx_status),
                 Arc::new(AtomicUsize::new(1)),
+                Arc::default(),
                 None,
                 None,
                 crate::live::LiveConnectionGuard::new(),
@@ -3709,6 +5307,7 @@ mod tests {
                     message: BackendMessage::Normal {
                         messages: BackendMessages::empty(),
                         request_complete: false,
+                        deferred_error: None,
                     },
                     acknowledgement: None,
                 }))
@@ -3747,6 +5346,7 @@ mod tests {
             observation: None,
             bind_complete_seen: false,
             read_obligation: ReadObligation::new(None, false),
+            request_server_error: Arc::default(),
         }]);
         let pending_responses = VecDeque::new();
 
@@ -4094,6 +5694,13 @@ mod tests {
         chunks: VecDeque<Vec<u8>>,
     }
 
+    /// A non-splittable duplex which over-reads one scripted response, then
+    /// accepts exactly one frontend flush before failing the next one.
+    struct SerializedSecondFlushFailure {
+        chunks: VecDeque<Vec<u8>>,
+        flushes: usize,
+    }
+
     impl AsyncRead for ScriptedDuplex {
         async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
             read_scripted(&mut self.chunks, &mut None, buf).await
@@ -4113,6 +5720,222 @@ mod tests {
         async fn shutdown(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    impl AsyncRead for SerializedSecondFlushFailure {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            read_scripted(&mut self.chunks, &mut None, buf).await
+        }
+    }
+
+    impl AsyncWrite for SerializedSecondFlushFailure {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            let len = buf.buf_len();
+            BufResult(Ok(len), buf)
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            self.flushes += 1;
+            if self.flushes == 1 {
+                Ok(())
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "scripted second flush failure",
+                ))
+            }
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn fatal_error_frame(code: &str, message: &str) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"SFATAL\0VFATAL\0C");
+        payload.extend_from_slice(code.as_bytes());
+        payload.extend_from_slice(b"\0M");
+        payload.extend_from_slice(message.as_bytes());
+        payload.extend_from_slice(b"\0\0");
+
+        let mut frame = vec![b'E'];
+        frame.extend_from_slice(&(u32::try_from(payload.len()).unwrap() + 4).to_be_bytes());
+        frame.extend_from_slice(&payload);
+        frame
+    }
+
+    #[compio::test]
+    async fn serialized_request_flush_preserves_a_buffered_server_error() {
+        let (request_sender, request_receiver) = mpsc::unbounded();
+        let client = crate::client::Client::new(
+            request_sender,
+            crate::config::SslMode::Disable,
+            crate::config::SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+        );
+        let _first = client
+            .inner()
+            .send(RequestMessages::Single(FrontendMessage::Raw(
+                bytes::Bytes::from_static(b"scripted first request"),
+            )))
+            .expect("enqueue the first serialized request");
+        let mut second = client
+            .inner()
+            .send(RequestMessages::Single(FrontendMessage::Raw(
+                bytes::Bytes::from_static(b"scripted second request"),
+            )))
+            .expect("enqueue the second serialized request");
+
+        let mut response = completed_response_batch(b'I');
+        response.extend_from_slice(&fatal_error_frame("57P01", "scripted backend shutdown"));
+        let connection: Connection<SerializedSecondFlushFailure, SerializedSecondFlushFailure> =
+            Connection::new(
+                BufStream::new(MaybeTlsStream::Raw(SerializedSecondFlushFailure {
+                    chunks: VecDeque::from([response]),
+                    flushes: 0,
+                })),
+                VecDeque::new(),
+                HashMap::new(),
+                client.parameters_handle(),
+                request_receiver,
+                client.tx_status_handle(),
+                client.in_flight_requests_handle(),
+                client.terminal_server_error_handle(),
+                None,
+            );
+
+        let _driver_error = connection
+            .run_serialized()
+            .await
+            .expect_err("the scripted second flush unexpectedly succeeded");
+        let error = match second.next().await {
+            Err(error) => error,
+            Ok(_) => panic!("the failed second request produced a response"),
+        };
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("57P01"),
+            "serialized request flush discarded buffered SQLSTATE 57P01: {error}"
+        );
+    }
+
+    #[compio::test]
+    async fn serialized_copy_flush_preserves_a_buffered_server_error() {
+        let (request_sender, request_receiver) = mpsc::unbounded();
+        let client = crate::client::Client::new(
+            request_sender,
+            crate::config::SslMode::Disable,
+            crate::config::SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+        );
+        let _first = client
+            .inner()
+            .send(RequestMessages::Single(FrontendMessage::Raw(
+                bytes::Bytes::from_static(b"scripted first request"),
+            )))
+            .expect("enqueue the first serialized request");
+
+        let mut response = completed_response_batch(b'I');
+        response.extend_from_slice(&fatal_error_frame("57P01", "scripted backend shutdown"));
+        let connection: Connection<SerializedSecondFlushFailure, SerializedSecondFlushFailure> =
+            Connection::new(
+                BufStream::new(MaybeTlsStream::Raw(SerializedSecondFlushFailure {
+                    chunks: VecDeque::from([response]),
+                    flushes: 0,
+                })),
+                VecDeque::new(),
+                HashMap::new(),
+                client.parameters_handle(),
+                request_receiver,
+                client.tx_status_handle(),
+                client.in_flight_requests_handle(),
+                client.terminal_server_error_handle(),
+                None,
+            );
+
+        let copy = crate::copy_in::copy_in::<bytes::Bytes>(
+            client.inner(),
+            Statement::unnamed(Vec::new(), Vec::new()),
+            None,
+        );
+        let driver = connection.run_serialized();
+        let (copy_result, driver_result) = futures_util::join!(copy, driver);
+        driver_result.expect_err("the scripted COPY flush unexpectedly succeeded");
+        let error = match copy_result {
+            Err(error) => error,
+            Ok(_) => panic!("the failed COPY startup returned a sink"),
+        };
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("57P01"),
+            "serialized COPY flush discarded buffered SQLSTATE 57P01: {error}"
+        );
+    }
+
+    #[compio::test]
+    async fn serialized_client_shutdown_preserves_a_buffered_server_error() {
+        let (request_sender, request_receiver) = mpsc::unbounded();
+        let client = crate::client::Client::new(
+            request_sender,
+            crate::config::SslMode::Disable,
+            crate::config::SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+        );
+        let mut response_stream = client
+            .inner()
+            .send(RequestMessages::Single(FrontendMessage::Raw(
+                bytes::Bytes::from_static(b"scripted final request"),
+            )))
+            .expect("enqueue the final serialized request");
+
+        let mut response = completed_response_batch(b'I');
+        response.extend_from_slice(&fatal_error_frame("57P01", "scripted backend shutdown"));
+        let connection: Connection<ScriptedDuplex, ScriptedDuplex> = Connection::new(
+            BufStream::new(MaybeTlsStream::Raw(ScriptedDuplex {
+                chunks: VecDeque::from([response]),
+            })),
+            VecDeque::new(),
+            HashMap::new(),
+            client.parameters_handle(),
+            request_receiver,
+            client.tx_status_handle(),
+            client.in_flight_requests_handle(),
+            client.terminal_server_error_handle(),
+            None,
+        );
+
+        let consume_then_close = async move {
+            match response_stream.next().await.expect("read CommandComplete") {
+                Message::CommandComplete(_) => {}
+                _ => panic!("the final response did not start with CommandComplete"),
+            }
+            match response_stream.next().await.expect("read ReadyForQuery") {
+                Message::ReadyForQuery(_) => {}
+                _ => panic!("the final response did not end with ReadyForQuery"),
+            }
+            drop(response_stream);
+            drop(client);
+        };
+        let (driver_result, ()) =
+            futures_util::join!(connection.run_serialized(), consume_then_close);
+        let error = match driver_result {
+            Err(error) => error,
+            Ok(()) => {
+                panic!("serialized client shutdown discarded buffered SQLSTATE 57P01: ()")
+            }
+        };
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("57P01"),
+            "serialized client shutdown replaced buffered SQLSTATE 57P01: {error}"
+        );
     }
 
     /// A single `CommandComplete` carrying `tag`, as one already-decoded
@@ -4246,6 +6069,7 @@ mod tests {
                 "STASHED",
             ))])),
             disposition: RequestDisposition::Awaited,
+            request_server_error: Arc::default(),
         }]);
 
         // The consumer now catches up, which un-parks `P`'s own handle. This is
@@ -4265,6 +6089,7 @@ mod tests {
             observation: None,
             bind_complete_seen: false,
             read_obligation: ReadObligation::new(None, false),
+            request_server_error: Arc::default(),
         }]);
 
         let (_request_sender, request_receiver) = mpsc::unbounded();
@@ -4281,6 +6106,7 @@ mod tests {
             // `P` plus the COPY: both are transaction-capable, so the
             // ReadyForQuery below decrements rather than underflows.
             Arc::new(AtomicUsize::new(2)),
+            Arc::default(),
             None,
         );
         connection.responses = responses;
@@ -4529,6 +6355,7 @@ mod tests {
             observation: None,
             bind_complete_seen: false,
             read_obligation: ReadObligation::new(None, false),
+            request_server_error: Arc::default(),
         }]);
         let pending_responses = VecDeque::new();
 

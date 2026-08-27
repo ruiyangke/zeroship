@@ -15,8 +15,11 @@
 use crate::common;
 use bytes::Bytes;
 use common::{suite_tls, test_object_name, test_url};
-use compio_postgres::{Client, Error};
-use futures_util::SinkExt;
+use compio_postgres::{Client, CopyInSink, Error};
+use futures_util::{Sink, SinkExt};
+use std::future::poll_fn;
+use std::pin::Pin;
+use std::time::Duration;
 
 async fn connected() -> Client {
     let (client, connection) = compio_postgres::connect(&test_url(), suite_tls())
@@ -68,6 +71,110 @@ async fn assert_still_usable(client: &Client, after: &str) {
         .await
         .unwrap_or_else(|error| panic!("the connection was unusable after {after}: {error}"));
     assert_eq!(one, 1);
+}
+
+async fn terminated_copy() -> (Client, Client, i32, Pin<Box<CopyInSink<Bytes>>>) {
+    let victim = connected().await;
+    let killer = connected().await;
+    let pid: i32 = victim
+        .query_one_scalar("SELECT pg_backend_pid()", &[])
+        .await
+        .expect("read the COPY backend PID");
+    victim
+        .batch_execute("CREATE TEMPORARY TABLE cpg_copy_producer_diagnosis (v int)")
+        .await
+        .expect("create the COPY termination fixture");
+    let sink = victim
+        .copy_in("COPY cpg_copy_producer_diagnosis (v) FROM STDIN")
+        .await
+        .expect("start COPY before terminating its backend");
+    (victim, killer, pid, Box::pin(sink))
+}
+
+fn large_copy_rows(value: i32) -> Bytes {
+    Bytes::from(format!("{value}\n").repeat(3_000))
+}
+
+async fn terminate_copy(killer: &Client, victim: &Client, pid: i32) {
+    killer
+        .batch_execute(&format!("SELECT pg_terminate_backend({pid})"))
+        .await
+        .expect("terminate the COPY backend");
+    compio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if victim.is_closed() {
+                break;
+            }
+            compio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the terminated COPY connection task stayed open");
+}
+
+fn assert_copy_rejection(error: &Error, operation: &str) {
+    assert_eq!(
+        error.code().map(|code| code.code()),
+        Some("57P01"),
+        "{operation} discarded SQLSTATE 57P01: {}",
+        common::error_chain(error),
+    );
+    assert!(
+        !error.is_closed(),
+        "{operation} replaced PostgreSQL's termination diagnosis with connection closed"
+    );
+}
+
+#[compio::test]
+async fn copy_in_poll_ready_prefers_the_queued_server_error() {
+    let (victim, killer, pid, mut sink) = terminated_copy().await;
+    terminate_copy(&killer, &victim, pid).await;
+
+    let error = poll_fn(|cx| Sink::poll_ready(sink.as_mut(), cx))
+        .await
+        .expect_err("poll_ready accepted data after PostgreSQL rejected COPY input");
+    assert_copy_rejection(&error, "poll_ready");
+    drop(sink);
+}
+
+#[compio::test]
+async fn copy_in_start_send_prefers_the_queued_server_error() {
+    let (victim, killer, pid, mut sink) = terminated_copy().await;
+    poll_fn(|cx| Sink::poll_ready(sink.as_mut(), cx))
+        .await
+        .expect("reserve producer capacity before terminating the backend");
+    terminate_copy(&killer, &victim, pid).await;
+
+    let error = Sink::start_send(sink.as_mut(), large_copy_rows(2))
+        .expect_err("start_send accepted data after PostgreSQL rejected COPY input");
+    assert_copy_rejection(&error, "start_send");
+    drop(sink);
+}
+
+#[compio::test]
+async fn copy_in_buffered_flush_prefers_the_queued_server_error() {
+    let (victim, killer, pid, mut sink) = terminated_copy().await;
+    Sink::start_send(sink.as_mut(), Bytes::from_static(b"2\n"))
+        .expect("buffer the row that will be flushed after termination");
+    terminate_copy(&killer, &victim, pid).await;
+
+    let error = poll_fn(|cx| Sink::poll_flush(sink.as_mut(), cx))
+        .await
+        .expect_err("buffered flush accepted data after PostgreSQL rejected COPY input");
+    assert_copy_rejection(&error, "buffered flush");
+    drop(sink);
+}
+
+#[compio::test]
+async fn copy_in_empty_flush_prefers_the_queued_server_error() {
+    let (victim, killer, pid, mut sink) = terminated_copy().await;
+    terminate_copy(&killer, &victim, pid).await;
+
+    let error = poll_fn(|cx| Sink::poll_flush(sink.as_mut(), cx))
+        .await
+        .expect_err("empty flush reported success after PostgreSQL rejected COPY input");
+    assert_copy_rejection(&error, "empty flush");
+    drop(sink);
 }
 
 #[compio::test]
@@ -158,6 +265,57 @@ async fn valid_rows_copy_and_report_their_count() {
         .await;
 }
 
+/// `finish` takes a pinned mutable reference rather than consuming the sink,
+/// and `Sink::poll_close` promises a closed sink once it returns success. A
+/// second terminal poll therefore observes local API state, not transport
+/// death. It must remain idempotent, while attempts to add more data must not
+/// claim that the still-usable PostgreSQL session closed.
+#[compio::test]
+async fn a_finished_copy_sink_does_not_report_connection_closed() {
+    let client = connected().await;
+    let table = fixture(&client).await;
+    let sink = client
+        .copy_in(&format!("COPY {table} FROM STDIN"))
+        .await
+        .expect("start the COPY");
+    futures_util::pin_mut!(sink);
+    sink.as_mut()
+        .send(Bytes::from_static(b"1\ta\n"))
+        .await
+        .expect("send the COPY row");
+
+    assert_eq!(sink.as_mut().finish().await.expect("finish the COPY"), 1);
+    assert_eq!(
+        sink.as_mut()
+            .finish()
+            .await
+            .expect("repeat finish on the finished COPY"),
+        1,
+        "repeat finish forgot the completed COPY row count"
+    );
+    poll_fn(|cx| Sink::poll_close(sink.as_mut(), cx))
+        .await
+        .expect("close the already-finished COPY");
+    poll_fn(|cx| Sink::poll_flush(sink.as_mut(), cx))
+        .await
+        .expect("flush the already-finished COPY");
+
+    let error = poll_fn(|cx| Sink::poll_ready(sink.as_mut(), cx))
+        .await
+        .expect_err("a finished COPY accepted another row");
+    assert!(
+        !error.is_closed(),
+        "finished COPY sink state was misreported as connection closed: {}",
+        common::error_chain(&error),
+    );
+    assert_eq!(error.to_string(), "COPY IN sink is already finished");
+
+    assert_still_usable(&client, "reusing a finished COPY sink").await;
+    let _ = client
+        .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
+        .await;
+}
+
 /// A rejected COPY must leave NOTHING behind: it is one statement, so its
 /// earlier rows go with the failure. Asserting this separately matters because
 /// a driver that recovered the session by committing what it had would pass
@@ -187,5 +345,60 @@ async fn a_failed_copy_stores_no_rows_at_all() {
 
     let _ = client
         .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
+        .await;
+}
+
+/// `CommandComplete` precedes the extended-protocol `Sync`. The implicit
+/// transaction can still fail at that boundary when a deferred constraint is
+/// checked, so the provisional row count is not success yet.
+#[compio::test]
+async fn copy_in_waits_for_sync_before_reporting_success() {
+    let client = connected().await;
+    let parent = test_object_name("copy_sync_parent");
+    let child = test_object_name("copy_sync_child");
+    client
+        .batch_execute(&format!(
+            "CREATE TABLE {parent} (id int PRIMARY KEY);
+             CREATE TABLE {child} (
+                 parent_id int REFERENCES {parent} (id)
+                     DEFERRABLE INITIALLY DEFERRED
+             )"
+        ))
+        .await
+        .expect("create the deferred COPY fixture");
+
+    let sink = client
+        .copy_in(&format!("COPY {child} (parent_id) FROM STDIN"))
+        .await
+        .expect("start COPY IN before its deferred constraint is checked");
+    futures_util::pin_mut!(sink);
+    sink.as_mut()
+        .send(Bytes::from_static(b"314159\n"))
+        .await
+        .expect("send the row before its deferred constraint is checked");
+    let result = sink.as_mut().finish().await;
+    assert!(
+        !matches!(result, Ok(1)),
+        "COPY IN reported success before Sync committed its implicit transaction: 1"
+    );
+    let error = result.expect_err("COPY IN accepted a deferred foreign-key violation");
+    assert_eq!(
+        error.code().map(|code| code.code()),
+        Some("23503"),
+        "the Sync failure lost its SQLSTATE: {}",
+        common::error_chain(&error),
+    );
+
+    let stored: i64 = client
+        .query_one_scalar(&format!("SELECT count(*) FROM {child}"), &[])
+        .await
+        .expect("the deferred COPY IN failure poisoned its connection");
+    assert_eq!(
+        stored, 0,
+        "the failed implicit transaction committed its row"
+    );
+
+    let _ = client
+        .batch_execute(&format!("DROP TABLE IF EXISTS {child}, {parent}"))
         .await;
 }

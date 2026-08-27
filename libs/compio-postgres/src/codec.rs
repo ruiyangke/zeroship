@@ -45,6 +45,11 @@ pub enum BackendMessage {
     Normal {
         messages: BackendMessages,
         request_complete: bool,
+        /// A local framing failure found after every byte in `messages` had
+        /// already been validated. This is populated only when that prefix
+        /// contains an ErrorResponse: the connection must retire immediately,
+        /// but the wire-earlier server diagnosis still belongs to its caller.
+        deferred_error: Option<Error>,
     },
     /// An out-of-band async notification / notice / parameter status
     /// update - must be routed to the dedicated async channel, not the
@@ -62,6 +67,19 @@ pub enum BackendMessage {
     },
 }
 
+impl BackendMessage {
+    /// Remove a local terminal failure which follows this decoded message in
+    /// wire order. The split reader sends it through the same FIFO after the
+    /// message; the serialized loop dispatches and unstashes the message before
+    /// returning it.
+    pub(crate) fn take_deferred_error(&mut self) -> Option<Error> {
+        match self {
+            BackendMessage::Normal { deferred_error, .. } => deferred_error.take(),
+            BackendMessage::Async { .. } => None,
+        }
+    }
+}
+
 /// A lazily-parsed iterator of backend messages sharing a single
 /// `BytesMut` buffer. Consumers call `next()` until `None` to stream
 /// through a request's responses without copying.
@@ -73,6 +91,11 @@ impl BackendMessages {
     #[allow(dead_code)]
     pub fn empty() -> BackendMessages {
         BackendMessages(BytesMut::new())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_bytes(bytes: BytesMut) -> BackendMessages {
+        BackendMessages(bytes)
     }
 
     /// Consume one complete raw frame with `tag` from the head of this batch.
@@ -294,8 +317,19 @@ where
         // tokio-postgres's codec.rs decode().
         let mut idx = 0usize;
         let mut request_complete = false;
+        let mut saw_error_response = false;
+        let mut deferred_error = None;
 
-        while let Some(header) = backend::Header::parse(&stream.buf()[idx..]).map_err(Error::io)? {
+        loop {
+            let header = match backend::Header::parse(&stream.buf()[idx..]) {
+                Ok(Some(header)) => header,
+                Ok(None) => break,
+                Err(error) if saw_error_response => {
+                    deferred_error = Some(Error::io(error));
+                    break;
+                }
+                Err(error) => return Err(Error::io(error)),
+            };
             // EVERY frame in the batch, not just the head one validated above.
             // A single read can append a whole `READ_CHUNK`, so a peer that
             // puts a small frame in front of an oversized one had the second
@@ -328,14 +362,26 @@ where
             // `Header::parse` reads the length as `i32` and refuses anything
             // below 4, so the value is in `4..=i32::MAX` and this cast is
             // exact.
-            stream.validate_length(header.len() as u32)?;
+            if let Err(error) = stream.validate_length(header.len() as u32) {
+                if saw_error_response {
+                    deferred_error = Some(error);
+                    break;
+                }
+                return Err(error);
+            }
             // The per-tag startup limits belong here too. They were head-only,
             // so a `BackendKeyData` claiming more than its own 264 slipped
             // through whenever it arrived behind another frame - and
             // `AuthenticationOk` in front of it is what a real startup sequence
             // looks like. Repeating them is a no-op on a data-phase stream,
             // because both constrained tags are startup-only.
-            validate_startup_message_length(header.tag(), header.len() as u32)?;
+            if let Err(error) = validate_startup_message_length(header.tag(), header.len() as u32) {
+                if saw_error_response {
+                    deferred_error = Some(error);
+                    break;
+                }
+                return Err(error);
+            }
 
             if matches!(
                 header.tag(),
@@ -343,8 +389,29 @@ where
             ) {
                 let body_start = idx + 5;
                 let body_end = idx + msg_len;
-                crate::copy_format::validate_wire(&stream.buf()[body_start..body_end])
-                    .map_err(Error::parse)?;
+                if let Err(error) =
+                    crate::copy_format::validate_wire(&stream.buf()[body_start..body_end])
+                        .map_err(Error::parse)
+                {
+                    if saw_error_response {
+                        deferred_error = Some(error);
+                        break;
+                    }
+                    return Err(error);
+                }
+            }
+
+            if header.tag() == backend::READY_FOR_QUERY_TAG
+                && let Err(error) = validate_ready_for_query(
+                    header.len() as u32,
+                    &stream.buf()[idx + 5..idx + msg_len],
+                )
+            {
+                if saw_error_response {
+                    deferred_error = Some(error);
+                    break;
+                }
+                return Err(error);
             }
 
             match header.tag() {
@@ -369,6 +436,7 @@ where
                 _ => {}
             }
 
+            saw_error_response |= header.tag() == backend::ERROR_RESPONSE_TAG;
             idx += msg_len;
 
             if header.tag() == backend::READY_FOR_QUERY_TAG {
@@ -401,8 +469,30 @@ where
         return Ok(BackendMessage::Normal {
             messages,
             request_complete,
+            deferred_error,
         });
     }
+}
+
+/// ReadyForQuery has exactly one body byte and only three transaction states.
+/// Validating it here keeps a malformed terminator out of the transaction-state
+/// clock and lets `read_backend` preserve a wire-earlier ErrorResponse.
+fn validate_ready_for_query(length: u32, body: &[u8]) -> Result<(), Error> {
+    if length != 5 {
+        return Err(Error::io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid ReadyForQuery length {length}; expected 5"),
+        )));
+    }
+
+    let status = body[0];
+    if !matches!(status, b'I' | b'T' | b'E') {
+        return Err(Error::io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid ReadyForQuery transaction status 0x{status:02x}; expected I, T, or E"),
+        )));
+    }
+    Ok(())
 }
 
 /// PostgreSQL caps the startup body whose option names this message can echo at
@@ -531,6 +621,146 @@ mod tests {
         })
     }
 
+    fn error_response(code: &str, message: &str) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"SERROR\0C");
+        payload.extend_from_slice(code.as_bytes());
+        payload.extend_from_slice(b"\0M");
+        payload.extend_from_slice(message.as_bytes());
+        payload.extend_from_slice(b"\0\0");
+
+        let mut frame = vec![backend::ERROR_RESPONSE_TAG];
+        frame.extend_from_slice(&(u32::try_from(payload.len()).unwrap() + 4).to_be_bytes());
+        frame.extend_from_slice(&payload);
+        frame
+    }
+
+    /// A complete ErrorResponse owns the diagnosis for the request even when
+    /// malformed bytes later in the same socket read retire the session. The
+    /// decoder must split that valid prefix from the local framing failure so
+    /// dispatch can deliver SQLSTATE before connection teardown becomes
+    /// visible to the caller.
+    #[compio::test]
+    async fn a_leading_error_response_survives_every_later_validation_failure() {
+        let mut oversized = data_row(&[b'x'; 192]);
+        let startup = {
+            let mut frame = vec![b'K'];
+            frame.extend_from_slice(&265u32.to_be_bytes());
+            frame.extend_from_slice(&vec![0u8; 265 - 4]);
+            frame
+        };
+        let malformed_copy = copy_response_frame(backend::COPY_IN_RESPONSE_TAG, b"");
+        let malformed_header = [vec![b'D'], 3u32.to_be_bytes().to_vec()].concat();
+        let malformed_ready_length = [
+            vec![backend::READY_FOR_QUERY_TAG],
+            4u32.to_be_bytes().to_vec(),
+        ]
+        .concat();
+        let malformed_ready_status = [
+            vec![backend::READY_FOR_QUERY_TAG],
+            5u32.to_be_bytes().to_vec(),
+            vec![b'X'],
+        ]
+        .concat();
+
+        let cases = [
+            ("invalid header", malformed_header, usize::MAX),
+            ("message ceiling", std::mem::take(&mut oversized), 128),
+            ("startup limit", startup, usize::MAX),
+            ("COPY metadata", malformed_copy, usize::MAX),
+            ("ReadyForQuery length", malformed_ready_length, usize::MAX),
+            ("ReadyForQuery status", malformed_ready_status, usize::MAX),
+        ];
+
+        let mut failures = Vec::new();
+        for (case, malformed, max_message_size) in cases {
+            let mut batch = error_response("23505", "queued unique violation");
+            batch.extend_from_slice(&malformed);
+            let mut framer = ScriptedFramer::new(vec![batch]);
+            framer.max_message_size = max_message_size;
+
+            let mut messages = match read_backend(&mut framer).await {
+                Ok(BackendMessage::Normal {
+                    messages,
+                    request_complete: false,
+                    ..
+                }) => messages,
+                Ok(BackendMessage::Normal {
+                    request_complete: true,
+                    ..
+                }) => {
+                    failures.push(format!(
+                        "{case} was dispatched as a completed response before SQLSTATE 23505"
+                    ));
+                    continue;
+                }
+                Ok(BackendMessage::Async { .. }) => {
+                    failures.push(format!(
+                        "{case} reclassified the leading ErrorResponse as asynchronous"
+                    ));
+                    continue;
+                }
+                Err(error) => {
+                    failures.push(format!(
+                        "{case} discarded SQLSTATE 23505: {}",
+                        error_chain(&error)
+                    ));
+                    continue;
+                }
+            };
+
+            match messages.next() {
+                Ok(Some(backend::Message::ErrorResponse(body))) => {
+                    let error = crate::error::DbError::parse(&mut body.fields())
+                        .expect("parse the scripted ErrorResponse");
+                    if error.code().code() != "23505" {
+                        failures.push(format!(
+                            "{case} changed SQLSTATE 23505 to {}",
+                            error.code().code()
+                        ));
+                    }
+                }
+                Ok(Some(_)) => failures.push(format!(
+                    "{case} delivered a local frame before SQLSTATE 23505"
+                )),
+                Ok(None) => failures.push(format!("{case} dropped SQLSTATE 23505")),
+                Err(error) => {
+                    failures.push(format!("{case} made SQLSTATE 23505 unparsable: {error}"))
+                }
+            }
+            match messages.next() {
+                Ok(None) => {}
+                Ok(Some(_)) => failures.push(format!(
+                    "{case} delivered the malformed frame with SQLSTATE 23505"
+                )),
+                Err(error) => failures.push(format!(
+                    "{case} let the malformed frame corrupt SQLSTATE 23505: {error}"
+                )),
+            }
+
+            let error = match read_backend(&mut framer).await {
+                Ok(_) => {
+                    failures.push(format!(
+                        "{case} disappeared after SQLSTATE 23505 was delivered"
+                    ));
+                    continue;
+                }
+                Err(error) => error,
+            };
+            if error.as_db_error().is_some() {
+                failures.push(format!(
+                    "{case} was mislabeled as a second server ErrorResponse"
+                ));
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "coalesced local validation outranked the server diagnosis:\n{}",
+            failures.join("\n")
+        );
+    }
+
     /// Every frame in a coalesced batch is measured, not just the first.
     ///
     /// `read_backend` validates the head frame from its header and then walks
@@ -643,6 +873,7 @@ mod tests {
         let BackendMessage::Normal {
             mut messages,
             request_complete,
+            ..
         } = message
         else {
             panic!("expected a Normal batch");
