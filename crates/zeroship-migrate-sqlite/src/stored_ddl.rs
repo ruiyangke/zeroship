@@ -857,8 +857,8 @@ fn rewrite_sqlite_stored_foreign_keys(
 /// statement, or `None` when `sql` is not a virtual-table create.
 ///
 /// Recognition is keyed on the `CREATE ... VIRTUAL TABLE ... USING <module>` token
-/// SHAPE, never on a module allowlist or a table-name convention - an `fts5`
-/// vtable, a `vec0` vtable and a module this engine has never heard of are all
+/// SHAPE, never on a module allowlist or a table-name convention - a `vec0`
+/// vtable, an `rtree` vtable and a module this engine has never heard of are all
 /// recognised on identical terms. Only the header (everything ahead of the first
 /// `(`) is tokenised, so a column or option named `virtual` inside the argument
 /// list cannot promote an ordinary table into a virtual one.
@@ -890,18 +890,6 @@ fn virtual_table_module(sql: &str) -> Option<String> {
 #[cfg(test)]
 mod virtual_table_module_tests {
     use super::virtual_table_module;
-
-    /// The FTS5 shape the engine and plugin-db's data plane both emit.
-    #[test]
-    fn recognises_an_fts5_external_content_vtable() {
-        assert_eq!(
-            virtual_table_module(
-                r#"CREATE VIRTUAL TABLE IF NOT EXISTS "posts__fts" USING fts5("body", content="posts", content_rowid="rowid")"#
-            )
-            .as_deref(),
-            Some("fts5")
-        );
-    }
 
     /// The `vec0` shape plugin-db's runtime `ensure_vector_index` emits, verbatim.
     /// The guard cannot be exercised end-to-end against a real `vec0` table (the
@@ -945,7 +933,7 @@ mod virtual_table_module_tests {
         // parent vtable is what stops the drop pass.
         assert_eq!(
             virtual_table_module(
-                r#"CREATE TABLE 'posts__fts_data'(id INTEGER PRIMARY KEY, block BLOB)"#
+                r#"CREATE TABLE 'module_shadow_data'(id INTEGER PRIMARY KEY, block BLOB)"#
             ),
             None
         );

@@ -299,7 +299,7 @@ export const shareToWebhook = action(
 // `runtime_descriptor` (measured 2026-08-10). Runtime boot then installs
 // nothing on `env.db` and every handler hits `undefined.find` -- the #209
 // mechanism db-todos itself hit before it was given migrations. Giving db-e2e
-// a migration-first port is a much larger surface (vector/FTS/geo columns,
+// a migration-first port is a much larger surface (vector/geo columns,
 // masking, replication) with failure modes unrelated to transactions; db-todos
 // is already proven end to end on BOTH tiers.
 //

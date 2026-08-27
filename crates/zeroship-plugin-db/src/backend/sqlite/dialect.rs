@@ -51,7 +51,7 @@ impl DialectBuilder for SqliteDialect {
     ///
     /// SQLite has no `CREATE INDEX CONCURRENTLY`; the `online` flag is a
     /// no-op. Only `IndexKind::BTree` routes through this builder —
-    /// vector/FTS/spatial index kinds have dedicated backend hooks.
+    /// vector/spatial index kinds have dedicated backend hooks.
     ///
     /// `IndexSpec` does not carry the collection name separately, so we
     /// recover the attached-schema/table target from the deterministic PG

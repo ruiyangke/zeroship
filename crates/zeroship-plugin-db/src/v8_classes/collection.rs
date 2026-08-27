@@ -419,15 +419,12 @@ impl Collection {
         dispatch_aggregate(scope, self.binding.clone(), &self.name, pipeline_v, opts_v).into()
     }
 
-    /// `collection.search(args)` — vector / FTS search.
+    /// `collection.search(args)` - vector search.
     ///
     /// `args` is a discriminated union:
     /// - `{ vector: number[], k?: number, metric?, column?, filter? }`
     ///   — pgvector nearest-neighbour search. Resolves with a row
     ///   array; each row carries a synthetic `_distance` field.
-    /// - `{ text, ... }` — reserved for future FTS support (rejects
-    ///   with `fts_unsupported` until implemented).
-    ///
     /// Routes to [`dispatch_search`] which inspects the discriminator
     /// and dispatches to the appropriate backend impl.
     #[v8_method]

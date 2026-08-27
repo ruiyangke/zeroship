@@ -3,9 +3,9 @@
 //!
 //! WHY THIS EXISTS. The differ's drop pass authors `DROP TABLE` for every live
 //! table absent from the desired union. A virtual table is not an ordinary table:
-//! `fts5` and `vec0` keep their real payload in auto-created SHADOW tables, and
+//! modules such as `rtree` and `vec0` keep payload in auto-created SHADOW tables, and
 //! dropping the vtable CASCADES those away. So "tidy up an undeclared table"
-//! silently destroys a search or vector index.
+//! silently destroys a spatial or vector index.
 //!
 //! The pre-existing ownership guard does NOT close this. It fails closed only when
 //! the caller cannot confirm an owner; an orchestrator that maps every live table
@@ -16,8 +16,8 @@
 //! would pass the first test and be useless.
 //!
 //! The guard is keyed on the `CREATE VIRTUAL TABLE` token shape, never on a module
-//! allowlist or a `__fts` name convention, so a module nobody has thought of is
-//! covered on the same terms as the two we know about.
+//! allowlist or a table-name convention, so a module nobody has thought of is
+//! covered on the same terms as known modules.
 
 use crate::support;
 
@@ -117,12 +117,12 @@ async fn diff_with_total_ownership(
     .diff(&desired, &live, &ownership, &[], &effective_policy())
 }
 
-/// DIRECTION 1 — a live FTS5 virtual table is REFUSED, by name and by module, even
+/// DIRECTION 1 - a live virtual table is REFUSED, by name and by module, even
 /// though its ownership resolves to the deploying app.
 ///
-/// Seeded as a real FTS5 external-content vtable, which SQLite backs with four
-/// auto-created shadow tables. Before the guard this planned five `DROP TABLE`s;
-/// the first cascaded the other four away and the remaining four then failed
+/// Seeded as a real `rtree` vtable, which SQLite backs with three auto-created
+/// shadow tables. Before the guard this planned four `DROP TABLE`s; the first
+/// cascaded the other three away and the remaining three then failed
 /// `no such table`, committing the destruction and reporting an unrelated error.
 #[compio::test]
 async fn a_live_virtual_table_is_refused_by_name_and_module() {
@@ -131,7 +131,7 @@ async fn a_live_virtual_table_is_refused_by_name_and_module() {
         &p.app,
         &[
             r#"CREATE TABLE "posts" ("body" TEXT)"#,
-            r#"CREATE VIRTUAL TABLE IF NOT EXISTS "posts__fts" USING fts5("body", content="posts", content_rowid="rowid")"#,
+            r#"CREATE VIRTUAL TABLE IF NOT EXISTS "posts_spatial" USING rtree(id, min_x, max_x, min_y, max_y)"#,
         ],
     );
     let be = SqliteBackend::open(&p.app, &p.journal).expect("open backend");
@@ -139,22 +139,21 @@ async fn a_live_virtual_table_is_refused_by_name_and_module() {
     // The shadow tables really are there — the thing a drop would have cascaded.
     let live = be.snapshot_schema_sqlite().await.expect("introspect");
     for shadow in [
-        "posts__fts_config",
-        "posts__fts_data",
-        "posts__fts_docsize",
-        "posts__fts_idx",
+        "posts_spatial_node",
+        "posts_spatial_parent",
+        "posts_spatial_rowid",
     ] {
         assert!(
             live.tables.contains_key(shadow),
-            "the FTS5 shadow table {shadow} must be visible in the live snapshot, \
+            "the rtree shadow table {shadow} must be visible in the live snapshot, \
              or this test is not exercising the case it claims to"
         );
     }
 
     match diff_with_total_ownership(&be).await {
         Err(DeclarativeError::DropOfVirtualTable { table, module }) => {
-            assert_eq!(table, "posts__fts");
-            assert_eq!(module, "fts5");
+            assert_eq!(table, "posts_spatial");
+            assert_eq!(module, "rtree");
         }
         Err(other) => {
             panic!("a live virtual table must be refused as DropOfVirtualTable, not {other:?}")
@@ -178,7 +177,7 @@ async fn the_refusal_names_the_table_the_kind_and_the_module() {
         &p.app,
         &[
             r#"CREATE TABLE "posts" ("body" TEXT)"#,
-            r#"CREATE VIRTUAL TABLE IF NOT EXISTS "posts__fts" USING fts5("body", content="posts", content_rowid="rowid")"#,
+            r#"CREATE VIRTUAL TABLE IF NOT EXISTS "posts_spatial" USING rtree(id, min_x, max_x, min_y, max_y)"#,
         ],
     );
     let be = SqliteBackend::open(&p.app, &p.journal).expect("open backend");
@@ -186,7 +185,7 @@ async fn the_refusal_names_the_table_the_kind_and_the_module() {
         .await
         .expect_err("must be refused");
     let msg = err.to_string();
-    for needle in ["posts__fts", "VIRTUAL TABLE", "fts5"] {
+    for needle in ["posts_spatial", "VIRTUAL TABLE", "rtree"] {
         assert!(
             msg.contains(needle),
             "the refusal must name {needle:?} so an operator need not guess; got: {msg}"
@@ -225,10 +224,8 @@ async fn an_ordinary_undeclared_table_still_drops() {
     );
 }
 
-/// A table whose NAME merely looks like the FTS convention, but which is an
-/// ordinary table, still drops. The guard reads the stored `CREATE`, not the name —
-/// keying it on a `__fts` suffix would both over-refuse here and under-refuse for
-/// any module that does not follow the convention.
+/// A table whose NAME merely looks like a module-managed index, but which is an
+/// ordinary table, still drops. The guard reads the stored `CREATE`, not the name.
 #[compio::test]
 async fn an_ordinary_table_named_like_an_index_still_drops() {
     let p = paths("vtable_refusal_lookalike");
@@ -236,7 +233,7 @@ async fn an_ordinary_table_named_like_an_index_still_drops() {
         &p.app,
         &[
             r#"CREATE TABLE "posts" ("body" TEXT)"#,
-            r#"CREATE TABLE "notes__fts" ("x" TEXT)"#,
+            r#"CREATE TABLE "notes__module_index" ("x" TEXT)"#,
         ],
     );
     let be = SqliteBackend::open(&p.app, &p.journal).expect("open backend");
@@ -246,7 +243,7 @@ async fn an_ordinary_table_named_like_an_index_still_drops() {
     assert!(
         plan.all_migrations()
             .iter()
-            .any(|m| m.name == "drop_table_notes__fts"),
-        "a PLAIN table named `notes__fts` is not a virtual table and must still drop"
+            .any(|m| m.name == "drop_table_notes__module_index"),
+        "a PLAIN table with a module-shaped name is not virtual and must still drop"
     );
 }

@@ -33,7 +33,6 @@ type ZeroshipDbFilterValue =
   | { $nin?: ZeroshipScalar[] }
   | { $like?: string }
   | { $ilike?: string }
-  | { $search?: string }
   | { $exists?: boolean };
 
 // ---------------------------------------------------------------------------
@@ -304,15 +303,9 @@ interface ZeroshipCollection {
     opts?: { include_deleted?: boolean },
   ): Promise<Record<string, unknown>[]>;
 
-  /**
-   * unified vector / FTS search entry. Discriminated by
-   * `args.vector` (pgvector path) or `args.text` (FTS — PR 3). Each
-   * returned row carries a synthetic `_distance` (vector) or `_rank`
-   * (FTS) column.
-   */
+  /** Vector search. Returned rows carry a synthetic `_distance` column. */
   search(args: {
-    vector?: number[];
-    text?: string;
+    vector: number[];
     k?: number;
     metric?: "cosine" | "l2" | "innerProduct";
     column?: string;

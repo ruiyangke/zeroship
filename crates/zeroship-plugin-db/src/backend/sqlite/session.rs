@@ -112,9 +112,8 @@ pub type Row = Vec<Option<String>>;
 /// A typed SQLite cell — preserves the underlying storage-class
 /// discriminator across the actor boundary instead of collapsing every
 /// value to `Option<String>`. This is the row-decoder shape the
-/// `vector_search` / `fts_search` / `spatial_near` paths consume: each
-/// emits `_distance` / `_rank` annotated JSON rows whose non-vector
-/// columns benefit from typed (numeric / boolean) round-tripping so
+/// `vector_search` / `spatial_near` paths consume: each emits annotated
+/// JSON rows whose non-vector columns benefit from typed (numeric / boolean) round-tripping so
 /// the SDK doesn't see "everything is a string".
 #[derive(Debug, Clone)]
 pub enum TypedCell {
@@ -136,7 +135,7 @@ pub enum TypedCell {
 
 /// A typed row + column names, returned by the `QueryTyped` command
 /// variant. Consumers: [`crate::backend::VectorIndex::vector_search`]
-/// (vec0 JOIN result), `fts_search`, `spatial_near`.
+/// (vec0 JOIN result) and `spatial_near`.
 ///
 /// Column names are carried alongside the cells so each caller can
 /// build a `serde_json::Value` row map without re-issuing a `PRAGMA
@@ -189,8 +188,8 @@ pub(crate) enum Command {
     /// names. Consumers:
     /// [`crate::backend::VectorIndex::vector_search`] (the vec0 JOIN result
     /// path, using the typed surface for the post-search row
-    /// re-emission to JSON), `fts_search` (FTS5 + bm25 ranking),
-    /// `spatial_near` (haversine distance ordering). All three need
+    /// re-emission to JSON) and `spatial_near` (haversine distance
+    /// ordering). Both need
     /// numeric / blob / NULL discrimination at the row-out boundary.
     QueryTyped {
         sql: String,
@@ -519,8 +518,8 @@ impl SqliteSession {
     /// Send a `QueryTyped` command and await typed rows + column names.
     ///
     /// Consumers: [`crate::backend::VectorIndex::vector_search`]
-    /// (vec0 JOIN row decode), `fts_search` (bm25 + row re-emit),
-    /// `spatial_near` (haversine distance + row re-emit). The
+    /// (vec0 JOIN row decode) and `spatial_near` (haversine distance +
+    /// row re-emit). The
     /// [`TypedCell`] discriminant lets each caller branch on
     /// numeric / blob / NULL at the JSON encoder layer.
     pub(crate) async fn query_typed(

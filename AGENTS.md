@@ -299,7 +299,7 @@ Stable contracts, live in `docs/reference/`:
 - `vite-plugin.md` — `@zeroship/vite-plugin`: node-compat shims, server-procedure discovery, the synthetic server entry, dev runtime + `.zship` build
 - `vite-environment-api.md` — Vite dev server inside the V8 runtime
 - `runtime-limits.md` — per-app `AppRuntimeLimits` vs runtime-side `RuntimeLimits` (CPU, wall timeout, heap), plus idle-GC knobs
-- `sqlite-divergences.md` — intentional Postgres↔SQLite differences in vector/full-text/spatial search, transaction isolation, locking, and text ordering
+- `sqlite-divergences.md` - intentional Postgres/SQLite differences in vector/spatial search, transaction isolation, locking, and text ordering
 - `zerobench.md` — the HTTP/SSE/WS benchmark tool
 - `env-vars.md` — every environment variable the tree reads, by service; the
   `ZEROSHIP_*` overlay vs bare CLI-flag naming families; the compose `.env`

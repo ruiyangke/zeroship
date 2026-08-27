@@ -355,7 +355,6 @@ async function main() {
     const search = await rpc(baseUrl, rpcIds.searchShowcase, {
       workspaceId: seeded.workspaces.alpha.id,
     });
-    includesAll("FTS membership includes the coffee places", search.text.map((row) => row.name).sort(), ["Alpha Cafe", "Alpha HQ"]);
     includesAll("vector search membership includes the nearest embeddings", search.vector.map((row) => row.name).sort(), ["Alpha Cafe", "Alpha HQ"]);
     includesAll("geo near membership includes only nearby San Francisco places", search.near.map((row) => row.name).sort(), ["Alpha Cafe", "Alpha HQ"]);
     check(

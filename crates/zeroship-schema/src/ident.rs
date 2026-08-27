@@ -8,7 +8,7 @@
 //! can shorten them, and a refusal tells them so.
 //!
 //! It is wrong for names the platform DERIVES from those — `<coll>_<col>_idx`,
-//! `<coll>__<col>_masked_idx`, `<coll>__fts_idx`, `<field>_fkey`, … . A
+//! `<coll>__<col>_masked_idx`, `<field>_fkey`, ... . A
 //! collection at exactly the 63-byte ceiling passes validation, yet every name
 //! derived from it overflows. Refusing there would fail the creator for
 //! something they did not do, so the derived name is capped instead.
@@ -24,15 +24,12 @@
 //!
 //! For a `CREATE UNIQUE INDEX` that means the uniqueness the schema declares
 //! does not exist in the database, with nothing in the catalog to notice it.
-//! For `<coll>__fts_idx` on a 63-byte collection the truncation lands on
-//! exactly the collection name, and since Postgres indexes share the `pg_class`
-//! namespace with tables, `IF NOT EXISTS` finds the TABLE and skips.
 //!
 //! # One function, no second implementation
 //!
-//! Every derivation site in this crate (and plugin-db's Postgres FTS builder)
-//! routes through [`cap_ident_name`]. A second copy is the actual failure mode
-//! here: this crate previously carried FOUR inlined copies of the cap, and the
+//! Every derivation site in this crate routes through [`cap_ident_name`]. A
+//! second copy is the actual failure mode here: this crate previously carried
+//! FOUR inlined copies of the cap, and the
 //! vendored migration engine carries a fifth with a DIFFERENT budget and hash
 //! encoding — so for a natural name in the 61..=63-byte window the engine
 //! emitted it verbatim while the runtime hashed it, and the two disagreed about

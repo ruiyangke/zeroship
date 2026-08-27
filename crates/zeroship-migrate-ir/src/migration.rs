@@ -239,24 +239,6 @@ pub struct MigrationFlags {
     ///
     /// A repeatable's `down` is always `None` (replace-style; no true reverse).
     pub repeatable: bool,
-    /// **Engine-emitted goodie DDL** - the `up` is descriptor-derived,
-    /// engine-AUTHORED DDL (NOT raw creator/AI SQL) that must run under the `SQLite`
-    /// **`EngineJournal`** authorizer mode rather than the confined **`CreatorUp`** mode.
-    ///
-    /// **NOTHING IN THE ENGINE SETS THIS TODAY.** Its only producer was the `SQLite`
-    /// FTS5 virtual-table create, removed with full-text support; the IR lane cannot
-    /// grant it either, because `validate_ir_plan_execution_metadata` rejects an
-    /// authored value outright. The flag is therefore a constant `false` in the
-    /// current tree. It is retained rather than deleted because it is covered by the
-    /// canonical checksum image below, so removing it would invalidate every
-    /// recorded migration's checksum - a strictly larger change than the removal
-    /// that stranded it, and one that belongs with the IR-version question. See
-    /// `docs/proposals/fts-macro.md`. `false` (default) => the historical
-    /// CreatorUp-confined `up` (every ordinary CREATE TABLE / ADD COLUMN / CREATE
-    /// INDEX), byte-identical to before this flag existed; the **Postgres** path never
-    /// sets it (PG has no confined-creator-mode split).
-    #[serde(default)]
-    pub engine_goodie_ddl: bool,
 }
 
 impl Default for MigrationFlags {
@@ -270,7 +252,6 @@ impl Default for MigrationFlags {
             lock_timeout_ms: None,
             phase: None,
             repeatable: false,
-            engine_goodie_ddl: false,
         }
     }
 }
@@ -297,9 +278,9 @@ pub struct ChecksumInput<'a> {
     pub up: &'a str,
     /// The reverse SQL, or `None` = explicitly irreversible.
     pub down: Option<&'a str>,
-    /// Apply-time flags - all fold in. The six bools `transactional` /
-    /// `destructive` / `online` / `requires_approval` / `repeatable` /
-    /// `engine_goodie_ddl`, plus the OPTIONAL FACETS `timeout_ms`
+    /// Apply-time flags - all fold in. The five bools `transactional` /
+    /// `destructive` / `online` / `requires_approval` / `repeatable`, plus the
+    /// OPTIONAL FACETS `timeout_ms`
     /// (`Option<u64>`), `lock_timeout_ms` (`Option<u64>`) and `phase`
     /// (`Option<OnlinePhase>`).
     pub flags: &'a MigrationFlags,
@@ -641,7 +622,7 @@ fn fold_common_strings(
 ) {
     // flags - canonical JSON, length-prefixed. Covers transactional /
     // destructive / online / requires_approval / timeout_ms / lock_timeout_ms /
-    // phase / repeatable / engine_goodie_ddl in one deterministic image, so any
+    // phase / repeatable in one deterministic image, so any
     // flip changes the hash (an attacker cannot silently inflate the
     // lock-acquisition budget past the fail-fast default without tripping the
     // drift check).
