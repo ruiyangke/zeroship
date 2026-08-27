@@ -1951,6 +1951,11 @@ pub mod pgoutput {
             value: u8,
             expected: &'static str,
         },
+        /// A stream boundary contradicted the currently open block.
+        InvalidStreamSequence {
+            message: &'static str,
+            reason: &'static str,
+        },
         /// A streaming frame reached the stateless [`decode`], which cannot
         /// track the chunk state the rest of the transaction needs. Use
         /// [`Decoder`].
@@ -1978,6 +1983,9 @@ pub mod pgoutput {
                     f,
                     "pgoutput: {message} {field} is 0x{value:02x}; expected {expected}"
                 ),
+                DecodeError::InvalidStreamSequence { message, reason } => {
+                    write!(f, "pgoutput: invalid {message}: {reason}")
+                }
                 DecodeError::StreamingNeedsDecoder => write!(
                     f,
                     "pgoutput: this frame belongs to a streamed transaction, whose framing is \
@@ -2173,7 +2181,10 @@ pub mod pgoutput {
     /// order. It is only stateful because the protocol is: `StreamStart`
     /// opens a chunk in which transactional messages gain an xid prefix, and
     /// `StreamStop` closes it. The prefix is retained in those messages'
-    /// `xid: Option<u32>` field and may name a subtransaction.
+    /// `xid: Option<u32>` field and may name a subtransaction. It also refuses
+    /// boundaries that would make this framing state ambiguous: nested starts,
+    /// a stop without a start, and terminal messages before the current block
+    /// has stopped.
     #[derive(Debug, Default)]
     pub struct Decoder {
         /// The transaction whose chunk is open, if any.
@@ -2193,6 +2204,7 @@ pub mod pgoutput {
         /// Decode one frame, updating the stream state.
         pub fn decode(&mut self, input: &[u8]) -> Result<PgOutputMessage, DecodeError> {
             let message = decode_frame(input, self.stream_xid)?;
+            self.validate_stream_sequence(&message)?;
             match &message {
                 PgOutputMessage::StreamStart { xid, .. } => self.stream_xid = Some(*xid),
                 PgOutputMessage::StreamStop
@@ -2202,6 +2214,37 @@ pub mod pgoutput {
                 _ => {}
             }
             Ok(message)
+        }
+
+        fn validate_stream_sequence(&self, message: &PgOutputMessage) -> Result<(), DecodeError> {
+            let violation = match (self.stream_xid, message) {
+                (Some(_), PgOutputMessage::StreamStart { .. }) => {
+                    Some(("StreamStart", "a stream block is already open"))
+                }
+                (None, PgOutputMessage::StreamStop) => {
+                    Some(("StreamStop", "no stream block is open"))
+                }
+                (Some(_), PgOutputMessage::StreamCommit { .. }) => Some((
+                    "StreamCommit",
+                    "StreamStop must close the current block first",
+                )),
+                (Some(_), PgOutputMessage::StreamAbort { .. }) => Some((
+                    "StreamAbort",
+                    "StreamStop must close the current block first",
+                )),
+                (Some(_), PgOutputMessage::StreamPrepare { .. }) => Some((
+                    "StreamPrepare",
+                    "StreamStop must close the current block first",
+                )),
+                _ => None,
+            };
+
+            match violation {
+                Some((message, reason)) => {
+                    Err(DecodeError::InvalidStreamSequence { message, reason })
+                }
+                None => Ok(()),
+            }
         }
     }
 
@@ -3595,11 +3638,23 @@ mod tests {
 
         let mut ruled_on = 0;
         for (expected_name, mut frame) in frames {
-            pgoutput::Decoder::new()
+            let seed_stream_stop = |decoder: &mut pgoutput::Decoder| {
+                if expected_name == "StreamStop" {
+                    decoder
+                        .decode(&[b'S', 0, 0, 0, 1, 1])
+                        .expect("StreamStart fixture opens the block");
+                }
+            };
+
+            let mut clean_decoder = pgoutput::Decoder::new();
+            seed_stream_stop(&mut clean_decoder);
+            clean_decoder
                 .decode(&frame)
                 .unwrap_or_else(|error| panic!("valid {expected_name} fixture failed: {error}"));
             frame.push(0xAA);
-            let error = pgoutput::Decoder::new().decode(&frame).unwrap_err();
+            let mut trailing_decoder = pgoutput::Decoder::new();
+            seed_stream_stop(&mut trailing_decoder);
+            let error = trailing_decoder.decode(&frame).unwrap_err();
             match error {
                 pgoutput::DecodeError::TrailingData { message, remaining } => {
                     assert_eq!(message, expected_name);
@@ -3681,6 +3736,97 @@ mod tests {
             accepted.len()
         );
         assert_eq!(refused, 7, "every constrained-byte site must be ruled on");
+    }
+
+    /// These five boundaries change the state that decides whether the next
+    /// transactional frame contains a four-byte xid prefix. PostgreSQL names
+    /// each as a protocol violation; accepting one can therefore parse every
+    /// later field four bytes out of phase. Lifecycle checks that require xid
+    /// history remain caller policy, but the currently open block is decoder
+    /// framing state and must be protected here.
+    #[test]
+    fn pgoutput_refuses_invalid_stream_boundaries_without_losing_state() {
+        fn stream_start(xid: u32) -> Vec<u8> {
+            let mut frame = vec![b'S'];
+            frame.extend_from_slice(&xid.to_be_bytes());
+            frame.push(1);
+            frame
+        }
+
+        fn fixed(tag: u8, body_len: usize) -> Vec<u8> {
+            let mut frame = vec![tag];
+            frame.resize(body_len + 1, 0);
+            frame
+        }
+
+        let mut stream_prepare = fixed(b'p', 1 + 8 + 8 + 8 + 4);
+        stream_prepare.extend_from_slice(b"g\0");
+        let cases = [
+            ("StreamStart", true, stream_start(42)),
+            ("StreamStop", false, vec![b'E']),
+            ("StreamCommit", true, fixed(b'c', 4 + 1 + 8 + 8 + 8)),
+            ("StreamAbort", true, fixed(b'A', 4 + 4)),
+            ("StreamPrepare", true, stream_prepare),
+        ];
+
+        let mut refused = 0;
+        let mut accepted = Vec::new();
+        for (expected_name, open_first, frame) in cases {
+            let mut decoder = pgoutput::Decoder::new();
+            if open_first {
+                decoder
+                    .decode(&stream_start(41))
+                    .expect("the control StreamStart opens one block");
+            }
+            let state_before = decoder.stream_xid();
+
+            match decoder.decode(&frame) {
+                Err(pgoutput::DecodeError::InvalidStreamSequence { message, .. }) => {
+                    assert_eq!(message, expected_name);
+                    assert_eq!(
+                        decoder.stream_xid(),
+                        state_before,
+                        "refusing {expected_name} must not change xid-prefix state"
+                    );
+                    refused += 1;
+
+                    if let Some(open_xid) = state_before {
+                        let carried_xid = open_xid + 1;
+                        let mut insert = vec![b'I'];
+                        insert.extend_from_slice(&carried_xid.to_be_bytes());
+                        insert.extend_from_slice(&7u32.to_be_bytes());
+                        insert.push(b'N');
+                        insert.extend_from_slice(&0u16.to_be_bytes());
+                        match decoder
+                            .decode(&insert)
+                            .expect("the open block stays usable")
+                        {
+                            PgOutputMessage::Insert { xid, .. } => {
+                                assert_eq!(xid, Some(carried_xid));
+                            }
+                            other => panic!("expected an in-block Insert, got {other:?}"),
+                        }
+                        decoder.decode(b"E").expect("the block can still stop");
+                    } else {
+                        decoder
+                            .decode(&stream_start(43))
+                            .expect("a fresh block can still start");
+                        decoder.decode(b"E").expect("the fresh block can stop");
+                    }
+                }
+                Ok(_) => accepted.push(expected_name),
+                Err(other) => panic!(
+                    "{expected_name} reached the wrong refusal instead of stream state: {other}"
+                ),
+            }
+        }
+
+        assert!(
+            accepted.is_empty(),
+            "{} of 5 invalid boundaries were accepted: {accepted:?}",
+            accepted.len()
+        );
+        assert_eq!(refused, 5, "every stream boundary must be ruled on");
     }
 
     /// A TRUNCATE naming more relations than any fixed cap would allow must
