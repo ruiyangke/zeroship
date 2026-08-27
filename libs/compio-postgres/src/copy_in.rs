@@ -11,14 +11,14 @@ use crate::client::{CopyMode, CopyModeGuard, InnerClient, Responses};
 use crate::codec::FrontendMessage;
 use crate::connection::RequestMessages;
 use crate::copy_format::CopyResponse;
-use crate::query::{ExecutionError, extract_row_affected};
+use crate::query::ExecutionError;
 use crate::{CopyFormat, Error, Statement, query, slice_iter};
 use bytes::{Buf, BufMut, BytesMut};
 use futures_channel::mpsc;
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use log::debug;
 use pin_project_lite::pin_project;
-use postgres_protocol::message::backend::Message;
+use postgres_protocol::message::backend::{CommandCompleteBody, Message};
 use postgres_protocol::message::frontend;
 use postgres_protocol::message::frontend::CopyData;
 use std::future;
@@ -158,6 +158,15 @@ enum SinkState {
     Closing,
     Reading,
     Finished(u64),
+}
+
+fn copy_row_count(body: &CommandCompleteBody) -> Result<u64, Error> {
+    let tag = body.tag().map_err(Error::parse)?;
+    let rows = tag
+        .strip_prefix("COPY ")
+        .filter(|rows| !rows.is_empty() && rows.bytes().all(|byte| byte.is_ascii_digit()))
+        .ok_or_else(Error::unexpected_message)?;
+    rows.parse().map_err(|_| Error::unexpected_message())
 }
 
 struct BufferedCopyAppend<'a> {
@@ -333,7 +342,7 @@ where
                             if this.completion.is_some() {
                                 *this.completion = Some(Err(Error::unexpected_message()));
                             } else {
-                                *this.completion = Some(extract_row_affected(&body));
+                                *this.completion = Some(copy_row_count(&body));
                             }
                         }
                         Poll::Ready(Ok(Message::ReadyForQuery(_))) => {
@@ -641,18 +650,21 @@ async fn send_initial_copy_message(
 
 #[cfg(test)]
 mod tests {
-    use super::{CopyInReceiver, send_initial_copy_message};
+    use super::{CopyInReceiver, CopyInSink, SinkState, send_initial_copy_message};
     use crate::Statement;
-    use crate::client::{Client, CopyMode};
+    use crate::client::{Client, CopyMode, ResponseMessages};
     use crate::codec::FrontendMessage;
     use crate::config::{SslMode, SslNegotiation};
     use crate::connection::RequestMessages;
+    use crate::copy_format::CopyResponse;
     use crate::error::{DbError, SqlState};
     use bytes::Bytes;
     use bytes::{BufMut, BytesMut};
     use futures_channel::mpsc;
     use futures_util::StreamExt;
     use postgres_protocol::message::backend::Message;
+    use std::collections::VecDeque;
+    use std::marker::PhantomData;
 
     fn admin_shutdown() -> DbError {
         let payload = b"SFATAL\0VFATAL\0C57P01\0Mscripted shutdown\0\0";
@@ -753,5 +765,73 @@ mod tests {
         assert_eq!(bytes[0], b'f');
         let copy_fail_len = 1 + u32::from_be_bytes(bytes[1..5].try_into().unwrap()) as usize;
         assert_eq!(&bytes[copy_fail_len..], &[b'S', 0, 0, 0, 4]);
+    }
+
+    #[compio::test]
+    async fn non_numeric_copy_command_tag_cannot_confirm_a_row_count() {
+        let (request_sender, mut requests) = mpsc::unbounded();
+        let client = Client::new(
+            request_sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+        );
+        let (sender, receiver) = mpsc::channel(1);
+        let statement = Statement::unnamed(Vec::new(), Vec::new());
+        let (responses, copy_mode) = client
+            .inner()
+            .send_copy_statement(
+                RequestMessages::CopyIn(CopyInReceiver::new(receiver)),
+                &statement,
+                CopyMode::In,
+            )
+            .expect("enqueue the scripted COPY request");
+        let mut response_sender = requests
+            .try_recv()
+            .expect("receive the scripted COPY request")
+            .sender;
+
+        let mut command_frame = BytesMut::new();
+        command_frame.put_u8(b'C');
+        command_frame.put_u32(14);
+        command_frame.extend_from_slice(b"COPY nope\0");
+        let command = Message::parse(&mut command_frame)
+            .expect("parse malformed-count CommandComplete")
+            .expect("malformed-count CommandComplete is complete");
+
+        let mut ready_frame = BytesMut::from(&b"Z\0\0\0\x05I"[..]);
+        let ready = Message::parse(&mut ready_frame)
+            .expect("parse ReadyForQuery")
+            .expect("ReadyForQuery is complete");
+        response_sender
+            .try_send(ResponseMessages::Observed(VecDeque::from([
+                Ok(command),
+                Ok(ready),
+            ])))
+            .expect("deliver scripted COPY completion");
+
+        let sink = CopyInSink::<Bytes> {
+            sender,
+            responses,
+            response: CopyResponse::default(),
+            buf: BytesMut::new(),
+            state: SinkState::Reading,
+            completion: None,
+            _p2: PhantomData,
+            copy_mode: Some(copy_mode),
+        };
+        let mut sink = Box::pin(sink);
+        match sink.as_mut().finish().await {
+            Ok(rows) => {
+                panic!("COPY IN invented row count {rows} from malformed command tag")
+            }
+            Err(error) => assert_eq!(
+                error.to_string(),
+                "unexpected message from server",
+                "malformed COPY count reported the wrong protocol failure"
+            ),
+        }
     }
 }
