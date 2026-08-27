@@ -87,6 +87,8 @@ use fallible_iterator::FallibleIterator;
 use postgres_protocol::message::backend::{DataRowBody, Message};
 use postgres_protocol::message::frontend;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 // ---------------------------------------------------------------------------
 // Wire tags
@@ -333,7 +335,9 @@ where
         process_id,
         secret_key,
         pool_lease: None,
-        drop_target: None,
+        drop_target: Some(crate::cancel_token::CancelDropTarget::Replication(
+            Arc::new(AtomicBool::new(false)),
+        )),
     };
 
     let mut stream = BufStream::new(stream);
@@ -449,8 +453,8 @@ struct InFlight {
 impl InFlight {
     /// Claim the stream for one I/O call, or refuse because a previous call
     /// never gave it back, or because the stream is unusable.
-    fn enter(&mut self) -> Result<(), Error> {
-        if self.busy || self.poisoned {
+    fn enter(&mut self, cancel_token: &CancelToken) -> Result<(), Error> {
+        if cancel_token.target_was_abandoned() || self.busy || self.poisoned {
             return Err(Error::cancelled());
         }
         self.busy = true;
@@ -501,7 +505,7 @@ where
     ///
     /// Returns `{systemid, timeline, xlogpos, dbname}` per the docs.
     pub async fn identify_system(&mut self) -> Result<IdentifySystem, Error> {
-        self.in_flight.enter()?;
+        self.in_flight.enter(&self.cancel_token)?;
         self.stream.begin_read_response();
         let result = self.identify_system_inner().await;
         self.stream.finish_read_response();
@@ -709,7 +713,7 @@ where
             }
         }
 
-        self.in_flight.enter()?;
+        self.in_flight.enter(&self.cancel_token)?;
         self.stream.begin_read_response();
 
         // Both names below are IDENTIFIERS the server parses, not opaque
@@ -1110,7 +1114,7 @@ where
     /// has begun. Once the first byte arrives, it bounds completion of that
     /// frame; indefinite WAL silence at a frame boundary remains healthy.
     pub async fn next(&mut self) -> Result<Option<ReplicationMessage>, Error> {
-        self.in_flight.enter()?;
+        self.in_flight.enter(&self.cancel_token)?;
         let result = self.next_inner().await;
         if result.as_ref().is_err_and(Error::is_read_timeout) {
             self.in_flight.poison();
@@ -1439,7 +1443,7 @@ where
     /// fraction of the frame on the wire, which no later frame can repair;
     /// every later call on the stream then fails. See [`InFlight`].
     pub async fn send_standby_status_update(&mut self, reply_requested: bool) -> Result<(), Error> {
-        self.in_flight.enter()?;
+        self.in_flight.enter(&self.cancel_token)?;
         let result = self.send_standby_status_update_inner(reply_requested).await;
         if result.is_err() {
             // ANY write failure retires the stream, not just a cancelled one.
@@ -2895,7 +2899,9 @@ mod tests {
             process_id: 0,
             secret_key: Some(0.into()),
             pool_lease: None,
-            drop_target: None,
+            drop_target: Some(crate::cancel_token::CancelDropTarget::Replication(
+                Arc::new(AtomicBool::new(false)),
+            )),
         }
     }
 
@@ -5304,6 +5310,74 @@ mod tests {
             },
             server,
         )
+    }
+
+    #[compio::test]
+    async fn an_abandoned_cancel_poisons_the_target_replication_stream() {
+        let (mut stream, _wal_peer) = silent_peer().await;
+
+        let listener = compio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind replication CancelRequest listener");
+        let address = listener
+            .local_addr()
+            .expect("replication CancelRequest address");
+        let accepting = compio::runtime::spawn(async move {
+            listener
+                .accept()
+                .await
+                .expect("accept replication CancelRequest")
+                .0
+        });
+        let cancel_socket = compio::net::TcpStream::connect(address)
+            .await
+            .expect("connect replication CancelRequest");
+        let mut cancel_peer = accepting.await.expect("accept CancelRequest task");
+        let (packet_seen_tx, packet_seen_rx) = futures_channel::oneshot::channel();
+        let (release_peer_tx, release_peer_rx) = futures_channel::oneshot::channel();
+        let peer = compio::runtime::spawn(async move {
+            let compio::BufResult(result, packet) = cancel_peer.read_exact(vec![0; 16]).await;
+            result.expect("read replication CancelRequest packet");
+            packet_seen_tx
+                .send(packet)
+                .expect("report replication CancelRequest packet");
+            release_peer_rx
+                .await
+                .expect("release replication CancelRequest peer");
+        });
+
+        let token = stream.cancel_token();
+        let cancel = Box::pin(token.cancel_query_raw(cancel_socket, NoTls));
+        let packet_seen = Box::pin(packet_seen_rx);
+        let cancel = match futures_util::future::select(cancel, packet_seen).await {
+            futures_util::future::Either::Left((result, _)) => {
+                panic!("replication CancelRequest returned before peer EOF: {result:?}")
+            }
+            futures_util::future::Either::Right((packet, cancel)) => {
+                assert_eq!(
+                    packet
+                        .expect("CancelRequest peer dropped its packet report")
+                        .len(),
+                    16
+                );
+                cancel
+            }
+        };
+        drop(cancel);
+
+        let result = stream.send_standby_status_update(false).await;
+        release_peer_tx
+            .send(())
+            .expect("release replication CancelRequest peer");
+        peer.await.expect("replication CancelRequest peer panicked");
+
+        let error = result.expect_err(
+            "dropping an in-flight replication CancelRequest left the target stream usable",
+        );
+        assert!(
+            error.is_cancelled(),
+            "the abandoned CancelRequest refusal was not cancellation: {error}"
+        );
     }
 
     /// A read dropped while its operation is in flight must leave the stream

@@ -98,6 +98,7 @@ struct PoolCancelAttempt {
 #[derive(Clone)]
 pub(crate) enum CancelDropTarget {
     Client(Weak<InnerClient>),
+    Replication(Arc<AtomicBool>),
 }
 
 impl CancelDropTarget {
@@ -108,6 +109,14 @@ impl CancelDropTarget {
                     client.force_close();
                 }
             }
+            Self::Replication(abandoned) => abandoned.store(true, Ordering::Release),
+        }
+    }
+
+    fn was_abandoned(&self) -> bool {
+        match self {
+            Self::Client(_) => false,
+            Self::Replication(abandoned) => abandoned.load(Ordering::Acquire),
         }
     }
 }
@@ -191,6 +200,12 @@ pub struct CancelToken {
 }
 
 impl CancelToken {
+    pub(crate) fn target_was_abandoned(&self) -> bool {
+        self.drop_target
+            .as_ref()
+            .is_some_and(CancelDropTarget::was_abandoned)
+    }
+
     /// Attempts to cancel the in-progress query on the connection associated
     /// with this `CancelToken`.
     ///
