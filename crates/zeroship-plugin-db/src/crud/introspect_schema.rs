@@ -428,10 +428,21 @@ mod tests {
         }
     }
 
-    /// Every entry from one read carries the SAME deploy token, so a redeploy
-    /// landing mid-populate cannot leave two schema versions under one
-    /// identity. Asserted by reading them back under a DIFFERENT token, which
-    /// must miss uniformly rather than partially.
+    /// Every entry from one read carries the SAME deploy token. Asserted by
+    /// reading them back under a DIFFERENT token, which must miss uniformly
+    /// rather than partially.
+    ///
+    /// WHAT THIS DOES NOT CATCH. It passes a constant token into a fresh local
+    /// context: there is no `mint_db`, no shared thread-local context, no
+    /// await, and no second runtime. So it cannot see any race, and in
+    /// particular it stays green while the deploy-token identity bug is live -
+    /// the one where `deploy_tokens` is keyed by `app_id` alone, so a second
+    /// runtime of the SAME app at a different deploy overwrites the first's
+    /// token last-writer-wins. This comment used to claim the test showed "a
+    /// redeploy landing mid-populate cannot leave two schema versions under one
+    /// identity", which is precisely the property it is blind to. Uniform
+    /// stamping within one populate call is a real but much narrower guarantee,
+    /// and it is all that is asserted here.
     #[test]
     fn one_read_stamps_one_token() {
         let live = live_with_tables(vec![
