@@ -229,6 +229,32 @@ where
         self.project().copy_mode.take();
     }
 
+    /// Once the connection task drops the producer it has already published
+    /// every backend message decoded before that drop. Poll that response FIFO
+    /// before turning the local channel symptom into `connection closed`.
+    fn poll_disconnected_diagnosis(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), Error>> {
+        *self.as_mut().project().state = SinkState::Reading;
+        loop {
+            match self.as_mut().project().responses.poll_next(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(_)) => {}
+            }
+        }
+    }
+
+    fn disconnected_diagnosis_now(mut self: Pin<&mut Self>) -> Error {
+        let waker = std::task::Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        match self.as_mut().poll_disconnected_diagnosis(&mut cx) {
+            Poll::Ready(Err(error)) => error,
+            Poll::Pending | Poll::Ready(Ok(())) => Error::closed(),
+        }
+    }
+
     /// A poll-based version of `finish`.
     pub fn poll_finish(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<u64, Error>> {
         loop {
@@ -349,15 +375,17 @@ where
 {
     type Error = Error;
 
-    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        self.project()
-            .sender
-            .poll_ready(cx)
-            .map_err(|_| Error::closed())
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        let ready = self.as_mut().project().sender.poll_ready(cx);
+        match ready {
+            Poll::Ready(Err(_)) => self.poll_disconnected_diagnosis(cx),
+            Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+            Poll::Pending => Poll::Pending,
+        }
     }
 
-    fn start_send(self: Pin<&mut Self>, item: T) -> Result<(), Error> {
-        let this = self.project();
+    fn start_send(mut self: Pin<&mut Self>, item: T) -> Result<(), Error> {
+        let this = self.as_mut().project();
 
         let large_item = item.remaining() > 4096;
         let staged_buffered_prefix = large_item && !this.buf.is_empty();
@@ -379,29 +407,54 @@ where
         };
 
         let data = CopyData::new(data).map_err(Error::encode)?;
-        this.sender
+        if this
+            .sender
             .start_send(CopyInMessage::Message(FrontendMessage::CopyData(data)))
-            .map_err(|_| Error::closed())?;
+            .is_err()
+        {
+            return Err(self.disconnected_diagnosis_now());
+        }
         if staged_buffered_prefix {
             this.buf.clear();
         }
         Ok(())
     }
 
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-        let mut this = self.project();
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        let buffered = !self.as_mut().project().buf.is_empty();
+        if buffered {
+            let ready = self.as_mut().project().sender.as_mut().poll_ready(cx);
+            match ready {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(_)) => return self.poll_disconnected_diagnosis(cx),
+                Poll::Ready(Ok(())) => {}
+            }
 
-        if !this.buf.is_empty() {
-            ready!(this.sender.as_mut().poll_ready(cx)).map_err(|_| Error::closed())?;
-            let data: Box<dyn Buf + Send> = Box::new(this.buf.split().freeze());
-            let data = CopyData::new(data).map_err(Error::encode)?;
-            this.sender
-                .as_mut()
-                .start_send(CopyInMessage::Message(FrontendMessage::CopyData(data)))
-                .map_err(|_| Error::closed())?;
+            let send_result = {
+                let mut this = self.as_mut().project();
+                let data: Box<dyn Buf + Send> = Box::new(this.buf.split().freeze());
+                let data = CopyData::new(data).map_err(Error::encode)?;
+                this.sender
+                    .as_mut()
+                    .start_send(CopyInMessage::Message(FrontendMessage::CopyData(data)))
+            };
+            if send_result.is_err() {
+                return self.poll_disconnected_diagnosis(cx);
+            }
         }
 
-        this.sender.poll_flush(cx).map_err(|_| Error::closed())
+        let (flushed, disconnected) = {
+            let mut this = self.as_mut().project();
+            let flushed = this.sender.as_mut().poll_flush(cx);
+            let disconnected = this.sender.is_closed();
+            (flushed, disconnected)
+        };
+        match flushed {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(_)) => self.poll_disconnected_diagnosis(cx),
+            Poll::Ready(Ok(())) if disconnected => self.poll_disconnected_diagnosis(cx),
+            Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+        }
     }
 
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {

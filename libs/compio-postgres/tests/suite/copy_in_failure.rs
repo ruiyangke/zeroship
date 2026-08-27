@@ -15,8 +15,11 @@
 use crate::common;
 use bytes::Bytes;
 use common::{suite_tls, test_object_name, test_url};
-use compio_postgres::{Client, Error};
-use futures_util::SinkExt;
+use compio_postgres::{Client, CopyInSink, Error};
+use futures_util::{Sink, SinkExt};
+use std::future::poll_fn;
+use std::pin::Pin;
+use std::time::Duration;
 
 async fn connected() -> Client {
     let (client, connection) = compio_postgres::connect(&test_url(), suite_tls())
@@ -68,6 +71,110 @@ async fn assert_still_usable(client: &Client, after: &str) {
         .await
         .unwrap_or_else(|error| panic!("the connection was unusable after {after}: {error}"));
     assert_eq!(one, 1);
+}
+
+async fn terminated_copy() -> (Client, Client, i32, Pin<Box<CopyInSink<Bytes>>>) {
+    let victim = connected().await;
+    let killer = connected().await;
+    let pid: i32 = victim
+        .query_one_scalar("SELECT pg_backend_pid()", &[])
+        .await
+        .expect("read the COPY backend PID");
+    victim
+        .batch_execute("CREATE TEMPORARY TABLE cpg_copy_producer_diagnosis (v int)")
+        .await
+        .expect("create the COPY termination fixture");
+    let sink = victim
+        .copy_in("COPY cpg_copy_producer_diagnosis (v) FROM STDIN")
+        .await
+        .expect("start COPY before terminating its backend");
+    (victim, killer, pid, Box::pin(sink))
+}
+
+fn large_copy_rows(value: i32) -> Bytes {
+    Bytes::from(format!("{value}\n").repeat(3_000))
+}
+
+async fn terminate_copy(killer: &Client, victim: &Client, pid: i32) {
+    killer
+        .batch_execute(&format!("SELECT pg_terminate_backend({pid})"))
+        .await
+        .expect("terminate the COPY backend");
+    compio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if victim.is_closed() {
+                break;
+            }
+            compio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the terminated COPY connection task stayed open");
+}
+
+fn assert_copy_rejection(error: &Error, operation: &str) {
+    assert_eq!(
+        error.code().map(|code| code.code()),
+        Some("57P01"),
+        "{operation} discarded SQLSTATE 57P01: {}",
+        common::error_chain(error),
+    );
+    assert!(
+        !error.is_closed(),
+        "{operation} replaced PostgreSQL's termination diagnosis with connection closed"
+    );
+}
+
+#[compio::test]
+async fn copy_in_poll_ready_prefers_the_queued_server_error() {
+    let (victim, killer, pid, mut sink) = terminated_copy().await;
+    terminate_copy(&killer, &victim, pid).await;
+
+    let error = poll_fn(|cx| Sink::poll_ready(sink.as_mut(), cx))
+        .await
+        .expect_err("poll_ready accepted data after PostgreSQL rejected COPY input");
+    assert_copy_rejection(&error, "poll_ready");
+    drop(sink);
+}
+
+#[compio::test]
+async fn copy_in_start_send_prefers_the_queued_server_error() {
+    let (victim, killer, pid, mut sink) = terminated_copy().await;
+    poll_fn(|cx| Sink::poll_ready(sink.as_mut(), cx))
+        .await
+        .expect("reserve producer capacity before terminating the backend");
+    terminate_copy(&killer, &victim, pid).await;
+
+    let error = Sink::start_send(sink.as_mut(), large_copy_rows(2))
+        .expect_err("start_send accepted data after PostgreSQL rejected COPY input");
+    assert_copy_rejection(&error, "start_send");
+    drop(sink);
+}
+
+#[compio::test]
+async fn copy_in_buffered_flush_prefers_the_queued_server_error() {
+    let (victim, killer, pid, mut sink) = terminated_copy().await;
+    Sink::start_send(sink.as_mut(), Bytes::from_static(b"2\n"))
+        .expect("buffer the row that will be flushed after termination");
+    terminate_copy(&killer, &victim, pid).await;
+
+    let error = poll_fn(|cx| Sink::poll_flush(sink.as_mut(), cx))
+        .await
+        .expect_err("buffered flush accepted data after PostgreSQL rejected COPY input");
+    assert_copy_rejection(&error, "buffered flush");
+    drop(sink);
+}
+
+#[compio::test]
+async fn copy_in_empty_flush_prefers_the_queued_server_error() {
+    let (victim, killer, pid, mut sink) = terminated_copy().await;
+    terminate_copy(&killer, &victim, pid).await;
+
+    let error = poll_fn(|cx| Sink::poll_flush(sink.as_mut(), cx))
+        .await
+        .expect_err("empty flush reported success after PostgreSQL rejected COPY input");
+    assert_copy_rejection(&error, "empty flush");
+    drop(sink);
 }
 
 #[compio::test]
