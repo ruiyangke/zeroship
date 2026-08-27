@@ -575,6 +575,12 @@ impl Error {
         self.0.kind == Kind::Authentication
     }
 
+    /// Whether a locally enforced connection configuration rejected a valid
+    /// server response.
+    pub(crate) fn is_config(&self) -> bool {
+        self.0.kind == Kind::Config
+    }
+
     /// Whether the post-startup session-property check rejected the current
     /// configured host while permitting the next configured host.
     pub(crate) fn is_target_session_attrs(&self) -> bool {
