@@ -1369,6 +1369,9 @@ where
 
     async fn drain_copy_both_completion(&mut self) -> Result<(), Error> {
         let mut failure: Option<Error> = None;
+        let mut confirmation_failure: Option<Error> = None;
+        let confirmations = ["COPY 0", "START_REPLICATION"];
+        let mut next_confirmation = 0usize;
 
         loop {
             let message = match read_one_message(&mut self.stream).await {
@@ -1380,9 +1383,31 @@ where
             };
 
             match message {
+                Message::CommandComplete(body)
+                    if failure.is_none() && confirmation_failure.is_none() =>
+                {
+                    confirmation_failure = match confirmations.get(next_confirmation) {
+                        Some(expected) => match body.tag() {
+                            Ok(tag) if tag == *expected => {
+                                next_confirmation += 1;
+                                None
+                            }
+                            Ok(_) => Some(Error::unexpected_message()),
+                            Err(error) => Some(Error::parse(error)),
+                        },
+                        None => Some(Error::unexpected_message()),
+                    };
+                }
                 Message::CommandComplete(_) => {}
                 Message::ReadyForQuery(_) => {
-                    return failure.map_or(Ok(()), Err);
+                    if let Some(error) = failure.or(confirmation_failure) {
+                        return Err(error);
+                    }
+                    return if next_confirmation == confirmations.len() {
+                        Ok(())
+                    } else {
+                        Err(Error::unexpected_message())
+                    };
                 }
                 Message::ErrorResponse(body) => failure = failure.or(Some(Error::db(body))),
                 Message::NoticeResponse(_)
@@ -5000,6 +5025,45 @@ mod tests {
             retry.is_cancelled(),
             "the completed CopyBoth exchange was not retired: {retry}"
         );
+    }
+
+    /// Logical replication ends with two distinct confirmations: one closes
+    /// COPY and one closes START_REPLICATION. ReadyForQuery cannot make a
+    /// missing, reordered, changed, or extra tag into a clean exchange.
+    #[compio::test]
+    async fn copy_both_completion_requires_exact_server_confirmations() {
+        let invalid = [
+            ("missing one CommandComplete", vec![b"COPY 0\0".as_slice()]),
+            (
+                "wrong COPY confirmation",
+                vec![b"COPY 1\0".as_slice(), b"START_REPLICATION\0".as_slice()],
+            ),
+            (
+                "wrong START_REPLICATION confirmation",
+                vec![b"COPY 0\0".as_slice(), b"SELECT 1\0".as_slice()],
+            ),
+            (
+                "an extra CommandComplete",
+                vec![
+                    b"COPY 0\0".as_slice(),
+                    b"START_REPLICATION\0".as_slice(),
+                    b"START_REPLICATION\0".as_slice(),
+                ],
+            ),
+        ];
+
+        for (description, confirmations) in invalid {
+            let mut wire = startup_frame(COPY_DONE_TAG, b"");
+            for confirmation in confirmations {
+                wire.extend_from_slice(&startup_frame(b'C', confirmation));
+            }
+            wire.extend_from_slice(&startup_frame(b'Z', b"I"));
+
+            let mut stream = stream_over(wire);
+            if let Ok(None) = stream.next().await {
+                panic!("a CopyBoth exchange {description} was accepted as clean");
+            }
+        }
     }
 
     /// CopyDone is exactly a tag plus Int32(4); it has no body. Accepting a
