@@ -511,7 +511,7 @@ if [ "$MODE" = "run" ] || [ "$MODE" = "preflight" ]; then
     echo "" >&2
     if grep -q '/wpt/' "$TMP/missing.txt"; then
       echo "       Fetch the WPT tree (~1.1G, idempotent):" >&2
-      echo "         ./crates/runtime/tests/setup-wpt.sh" >&2
+      echo "         ./crates/zeroship-runtime/tests/setup-wpt.sh" >&2
     fi
     if grep -q '^sdks/' "$TMP/missing.txt"; then
       echo "       Build the SDK dist files the runtime embeds:" >&2

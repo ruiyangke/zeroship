@@ -70,6 +70,26 @@ out=$(zs_check_binary_freshness "$WORK" "$WORK/bin" "crates/does-not-exist/src" 
 [ "$rc" -eq 2 ] && ok "nonexistent source dir returns 2, not a pass" \
   || no "nonexistent source dir returned $rc, want 2"
 
+# --- case 4b: a PARTIALLY missing list is the one that actually shipped -----
+# The all-missing arm above existed from the start; this one did not, and its
+# absence is why the defect survived. The 2026-08-26 crate rename left
+# e2e_dev_vs_deployed_db.sh naming eight directories of which two still
+# existed, so the guard scanned a quarter of its subject and printed what a
+# healthy run prints.
+#
+# The source below is STALE (touched 2022, binary 2021), so the surviving
+# directory alone would produce a warn-and-return-0. Only refusing on the
+# missing member distinguishes the two, which is what makes this arm
+# discriminating rather than decorative.
+out=$(zs_check_binary_freshness "$WORK" "$WORK/bin" \
+        "crates/demo/src crates/renamed-away/src" "demo-bin" 2>&1); rc=$?
+[ "$rc" -eq 2 ] && ok "a partially missing source list returns 2, not a pass" \
+  || no "partially missing list returned $rc, want 2 -- it scanned only the survivors"
+case "$out" in
+  *renamed-away*) ok "the refusal names the missing directory" ;;
+  *) no "refused without naming which path was missing: $out" ;;
+esac
+
 mkdir -p "$WORK/crates/empty/src"
 out=$(zs_check_binary_freshness "$WORK" "$WORK/bin" "crates/empty/src" "demo-bin" 2>&1); rc=$?
 [ "$rc" -eq 2 ] && ok "source dir with no .rs/.ts returns 2, not a pass" \
