@@ -4,6 +4,8 @@ use compio_postgres::config::TargetSessionAttrs;
 use compio_postgres::error::SqlState;
 use compio_postgres::{Config, Pool, PoolConfig};
 use std::cell::Cell;
+use std::io::{ErrorKind, Read, Write};
+use std::net::TcpListener;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -27,6 +29,108 @@ async fn connect_pool(url: &str, config: PoolConfig) -> Pool {
     Pool::connect_with_pool_config(url, config)
         .await
         .unwrap_or_else(|error| common::postgres_unreachable(url, &error))
+}
+
+fn read_startup(stream: &mut std::net::TcpStream) {
+    let mut length = [0_u8; 4];
+    stream.read_exact(&mut length).unwrap();
+    let remaining = u32::from_be_bytes(length) as usize - length.len();
+    let mut startup = vec![0_u8; remaining];
+    stream.read_exact(&mut startup).unwrap();
+}
+
+fn backend_frame(tag: u8, body: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(body.len() + 5);
+    frame.push(tag);
+    frame.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_be_bytes());
+    frame.extend_from_slice(body);
+    frame
+}
+
+fn write_startup_ok(stream: &mut std::net::TcpStream, process_id: u32) {
+    let pid = process_id.to_be_bytes();
+    stream
+        .write_all(&[
+            b'R', 0, 0, 0, 8, 0, 0, 0, 0, b'K', 0, 0, 0, 12, pid[0], pid[1], pid[2], pid[3], 0, 0,
+            0, 46, b'Z', 0, 0, 0, 5, b'I',
+        ])
+        .unwrap();
+}
+
+/// Accept one healthy connection, then answer every later startup with 57P03
+/// until the test signals completion. The measured accept count makes a retry
+/// policy mutation a wrong value instead of a blocked server thread.
+struct StartupFailureServer {
+    address: std::net::SocketAddr,
+    finish: std::sync::mpsc::Sender<()>,
+    result: std::sync::mpsc::Receiver<(usize, bool)>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+fn later_warmup_startup_failure_server() -> StartupFailureServer {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let mut accepted = 0_usize;
+        let mut first = None;
+        loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    read_startup(&mut stream);
+                    if accepted == 0 {
+                        write_startup_ok(&mut stream, 45);
+                        first = Some(stream);
+                    } else {
+                        let frame = backend_frame(
+                            b'E',
+                            b"SFATAL\0VFATAL\0C57P03\0Mscripted startup refusal\0\0",
+                        );
+                        stream.write_all(&frame).unwrap();
+                    }
+                    accepted += 1;
+                }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    if finish_rx.try_recv().is_ok() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(_) => break,
+            }
+        }
+
+        let closed = first.is_some_and(|mut stream| {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut byte = [0_u8; 1];
+            loop {
+                match stream.read(&mut byte) {
+                    Ok(0) => return true,
+                    Ok(_) => {}
+                    Err(error) => {
+                        return matches!(
+                            error.kind(),
+                            ErrorKind::ConnectionAborted
+                                | ErrorKind::ConnectionReset
+                                | ErrorKind::BrokenPipe
+                        );
+                    }
+                }
+            }
+        });
+        let _ = result_tx.send((accepted, closed));
+    });
+    StartupFailureServer {
+        address,
+        finish: finish_tx,
+        result: result_rx,
+        thread: server,
+    }
 }
 
 #[compio::test]
@@ -177,6 +281,46 @@ async fn later_warmup_after_connect_failure_preserves_sqlstate() {
         "later warm-up after_connect discarded SQLSTATE 22012: {error}"
     );
     assert_eq!(calls.get(), 2, "the failing second hook was not reached");
+}
+
+#[compio::test]
+async fn later_warmup_startup_failure_preserves_sqlstate() {
+    let server = later_warmup_startup_failure_server();
+    let connection_config: Config = format!(
+        "postgres://postgres@{}/fake?sslmode=disable",
+        server.address
+    )
+    .parse()
+    .unwrap();
+    let pool_config = config(2, 2);
+
+    let outcome = compio::time::timeout(
+        Duration::from_secs(5),
+        Pool::connect_with_config(connection_config, pool_config),
+    )
+    .await;
+    let _ = server.finish.send(());
+    let (accepted, first_closed) = server
+        .result
+        .recv_timeout(Duration::from_secs(6))
+        .expect("scripted startup server did not finish");
+    server
+        .thread
+        .join()
+        .expect("scripted startup server panicked");
+
+    assert_eq!(
+        accepted, 4,
+        "warm-up did not make one successful connection plus three retries"
+    );
+    assert!(first_closed, "startup failure left the first session open");
+    let outcome = outcome.expect("pool warm-up did not finish");
+    let error = outcome.expect_err("the second warm-up accepted startup refusal");
+    assert_eq!(
+        error.code(),
+        Some(&SqlState::CANNOT_CONNECT_NOW),
+        "later warm-up startup failure discarded SQLSTATE 57P03: {error}"
+    );
 }
 
 /// A rejected candidate is replaced by the NEXT IDLE one, and the borrower

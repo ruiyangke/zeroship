@@ -984,13 +984,7 @@ impl Pool {
                     // Drop any already-opened clients (Client drop closes the
                     // sender, the connection task observes it and exits).
                     drop(entries);
-                    return Err(if i == 0 {
-                        e
-                    } else {
-                        pool_error(format!(
-                            "warm-up failed after {i} successful connection(s): {e}"
-                        ))
-                    });
+                    return Err(e);
                 }
             }
         }
