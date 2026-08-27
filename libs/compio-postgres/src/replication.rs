@@ -4306,13 +4306,50 @@ mod tests {
             out
         }
 
+        /// Anchor the random corpus with both legal CopyData forms followed by
+        /// a body that ends one byte early. The first call must decode, the
+        /// second must report the framing error, and every later call must see
+        /// the poisoned stream. Random bytes rarely satisfy the exact
+        /// PrimaryKeepalive layout, so relying on them alone lets stricter
+        /// protocol validation silently erase the invariant's positive cases.
+        fn decode_then_refuse(case: u32) -> Vec<u8> {
+            let mut body = if case.is_multiple_of(2) {
+                let mut keepalive = vec![PRIMARY_KEEPALIVE_TAG];
+                keepalive.extend_from_slice(&0x16B_4000u64.to_be_bytes());
+                keepalive.extend_from_slice(&700_000_000_000i64.to_be_bytes());
+                keepalive.push(0);
+                keepalive
+            } else {
+                let mut xlog = vec![XLOG_DATA_TAG];
+                xlog.extend_from_slice(&0x16B_4000u64.to_be_bytes());
+                xlog.extend_from_slice(&0x16B_4000u64.to_be_bytes());
+                xlog.extend_from_slice(&700_000_000_000i64.to_be_bytes());
+                xlog
+            };
+
+            let mut wire = vec![COPY_DATA_TAG];
+            wire.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_be_bytes());
+            wire.append(&mut body);
+
+            wire.push(COPY_DATA_TAG);
+            wire.extend_from_slice(&6u32.to_be_bytes());
+            wire.push(XLOG_DATA_TAG);
+            wire
+        }
+
         let mut total_decoded = 0usize;
+        let mut xlog_decoded = 0usize;
+        let mut keepalives_decoded = 0usize;
         let mut total_refused = 0usize;
         let mut cases_with_a_decode = 0usize;
         for case in 0..CASES {
             let seed = ROOT_SEED ^ u64::from(case).wrapping_mul(0x9e37_79b9_7f4a_7c15);
             let mut rng = Rng::new(seed);
-            let wire = generate(&mut rng);
+            let wire = if case < 8 {
+                decode_then_refuse(case)
+            } else {
+                generate(&mut rng)
+            };
 
             let mut stream = stream_over(wire.clone());
             let mut refused = false;
@@ -4334,8 +4371,12 @@ mod tests {
                             "case {case} (seed {seed:#x}) decoded a message after refusing \
                              the stream; the poison flag is documented as unclearable"
                         );
-                        if message.is_none() {
-                            break;
+                        match message {
+                            Some(ReplicationMessage::XLogData { .. }) => xlog_decoded += 1,
+                            Some(ReplicationMessage::PrimaryKeepalive { .. }) => {
+                                keepalives_decoded += 1;
+                            }
+                            None => break,
                         }
                         total_decoded += 1;
                         if !std::mem::replace(&mut counted_this_case, true) {
@@ -4362,12 +4403,11 @@ mod tests {
         // what it ruled on and a floor it must clear); this is that convention
         // applied to a fuzz loop in Rust.
         //
-        // Measured 2026-08-23 over these 192 cases: 10 decoded messages across
-        // 10 distinct cases, and 150 refusals. The floors sit well under those
-        // so ordinary generator drift does not trip them, and far enough above
-        // zero that a generator which stopped producing decodable frames -- the
-        // realistic decay, since most random bytes are refused -- fails here
-        // instead of going quiet.
+        // Measured 2026-08-26 over these 192 cases: 6 XLogData and 4
+        // PrimaryKeepalive messages across 10 distinct cases, and 191
+        // refusals. The floors sit well under the aggregate counts so ordinary
+        // generator drift does not trip them, while the exact anchor counts
+        // keep either legal CopyData form from disappearing silently.
         assert!(
             total_decoded >= 5,
             "the corpus decoded {total_decoded} messages, so the after-refusal invariant \
@@ -4376,6 +4416,14 @@ mod tests {
         assert!(
             cases_with_a_decode >= 5,
             "only {cases_with_a_decode} of {CASES} cases decoded anything"
+        );
+        assert!(
+            xlog_decoded >= 4,
+            "the corpus decoded only {xlog_decoded} XLogData messages"
+        );
+        assert!(
+            keepalives_decoded >= 4,
+            "the corpus decoded only {keepalives_decoded} PrimaryKeepalive messages"
         );
         assert!(
             total_refused >= 50,
