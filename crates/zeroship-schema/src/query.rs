@@ -5406,14 +5406,33 @@ fn build_field_condition_with_dialect(
                                 "$in exceeds the maximum of {MAX_MEMBERSHIP_LIST_LEN} values"
                             )));
                         }
-                        let placeholders: Vec<String> = arr
+                        // A null member means IS NULL, exactly as a bare
+                        // `{field: null}` does in the equality arm above.
+                        // It must NOT reach `value_to_param`, which maps
+                        // `Value::Null` to the empty string - that silently
+                        // matched empty-string rows and missed real NULLs.
+                        // Binding a literal NULL is not the fix either:
+                        // `x IN (NULL)` matches nothing.
+                        let (nulls, values): (Vec<&Value>, Vec<&Value>) =
+                            arr.iter().partition(|v| v.is_null());
+                        let placeholders: Vec<String> = values
                             .iter()
                             .map(|v| {
                                 params.push(value_to_param(v));
                                 format!("${}", params.len())
                             })
                             .collect();
-                        format!("{col} IN ({})", placeholders.join(", "))
+                        match (placeholders.is_empty(), nulls.is_empty()) {
+                            // `$in: []` keeps its existing meaning: an
+                            // empty IN list, which matches nothing.
+                            (true, true) => format!("{col} IN ()"),
+                            (true, false) => format!("{col} IS NULL"),
+                            (false, true) => format!("{col} IN ({})", placeholders.join(", ")),
+                            (false, false) => format!(
+                                "({col} IN ({}) OR {col} IS NULL)",
+                                placeholders.join(", ")
+                            ),
+                        }
                     }
                     "$nin" => {
                         let arr = val.as_array().ok_or_else(|| {
@@ -5424,14 +5443,28 @@ fn build_field_condition_with_dialect(
                                 "$nin exceeds the maximum of {MAX_MEMBERSHIP_LIST_LEN} values"
                             )));
                         }
-                        let placeholders: Vec<String> = arr
+                        // Mirror of `$in`: a null member excludes NULL rows,
+                        // so it becomes IS NOT NULL rather than a bound
+                        // empty string. See the `$in` arm for why binding a
+                        // literal NULL is not the alternative.
+                        let (nulls, values): (Vec<&Value>, Vec<&Value>) =
+                            arr.iter().partition(|v| v.is_null());
+                        let placeholders: Vec<String> = values
                             .iter()
                             .map(|v| {
                                 params.push(value_to_param(v));
                                 format!("${}", params.len())
                             })
                             .collect();
-                        format!("{col} NOT IN ({})", placeholders.join(", "))
+                        match (placeholders.is_empty(), nulls.is_empty()) {
+                            (true, true) => format!("{col} NOT IN ()"),
+                            (true, false) => format!("{col} IS NOT NULL"),
+                            (false, true) => format!("{col} NOT IN ({})", placeholders.join(", ")),
+                            (false, false) => format!(
+                                "({col} NOT IN ({}) AND {col} IS NOT NULL)",
+                                placeholders.join(", ")
+                            ),
+                        }
                     }
                     "$exists" => {
                         let exists = val.as_bool().ok_or_else(|| {
@@ -6042,6 +6075,97 @@ mod tests {
         let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
         assert!(q.sql.contains(r#""status" IN ($1, $2)"#));
         assert_eq!(q.params, vec!["active", "pending"]);
+    }
+
+    /// A `null` member of `$in` must mean `IS NULL`, exactly as a bare
+    /// `{field: null}` already does (see the equality arm, which emits
+    /// `IS NULL` rather than binding a parameter).
+    ///
+    /// Before this was fixed, every `$in` member went through
+    /// `value_to_param`, which maps `Value::Null` to the EMPTY STRING - its
+    /// own comment conceding the case "should not be used as param (use IS
+    /// NULL)". So `{$in: [null]}` compiled to `"f" IN ($1)` with `$1 = ""`.
+    /// Measured against PostgreSQL 16, the three readings differ:
+    ///
+    /// * `f IN ('')`   matches the empty-string row  <- what we emitted
+    /// * `f IS NULL`   matches the NULL row          <- what the caller means
+    /// * `f IN (null)` matches nothing
+    ///
+    /// So the bug returned wrong rows silently on any text column, and
+    /// "just bind a real NULL" is NOT the fix - that matches nothing.
+    #[test]
+    fn in_with_null_member_means_is_null_not_empty_string() {
+        let filter = json!({"status": {"$in": [null]}});
+        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        assert!(
+            q.sql.contains(r#""status" IS NULL"#),
+            "a null $in member must become IS NULL; got {}",
+            q.sql
+        );
+        assert!(
+            !q.params.iter().any(|p| p.is_empty()),
+            "a null must never be bound as the empty string; params={:?}",
+            q.params
+        );
+    }
+
+    /// Mixed members keep both halves: the non-null values stay a bound
+    /// `IN (...)` and the null becomes an `IS NULL` disjunct.
+    #[test]
+    fn in_with_mixed_null_and_values_keeps_both_arms() {
+        let filter = json!({"status": {"$in": ["active", null]}});
+        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        assert!(
+            q.sql.contains(r#""status" IN ($1)"#),
+            "non-null members must still bind; got {}",
+            q.sql
+        );
+        assert!(
+            q.sql.contains(r#""status" IS NULL"#),
+            "the null member must add an IS NULL arm; got {}",
+            q.sql
+        );
+        assert_eq!(
+            q.params,
+            vec!["active"],
+            "only the non-null member is a parameter"
+        );
+    }
+
+    /// `$nin` carries the identical defect and the mirrored meaning: a
+    /// null member excludes NULL rows, so it must become `IS NOT NULL`
+    /// rather than a bound empty string.
+    #[test]
+    fn nin_with_null_member_means_is_not_null() {
+        let filter = json!({"status": {"$nin": [null]}});
+        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        assert!(
+            q.sql.contains(r#""status" IS NOT NULL"#),
+            "a null $nin member must become IS NOT NULL; got {}",
+            q.sql
+        );
+        assert!(
+            !q.params.iter().any(|p| p.is_empty()),
+            "a null must never be bound as the empty string; params={:?}",
+            q.params
+        );
+    }
+
+    #[test]
+    fn nin_with_mixed_null_and_values_keeps_both_arms() {
+        let filter = json!({"status": {"$nin": ["active", null]}});
+        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        assert!(
+            q.sql.contains(r#""status" NOT IN ($1)"#),
+            "non-null members must still bind; got {}",
+            q.sql
+        );
+        assert!(
+            q.sql.contains(r#""status" IS NOT NULL"#),
+            "the null member must add an IS NOT NULL arm; got {}",
+            q.sql
+        );
+        assert_eq!(q.params, vec!["active"]);
     }
 
     #[test]
