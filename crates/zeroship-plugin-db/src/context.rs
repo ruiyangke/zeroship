@@ -210,6 +210,21 @@ pub struct IsolateDbContext {
     /// (a 9th level throws `savepoint_depth_exceeded`).
     savepoint_depths: HashMap<String, u32>,
 
+    /// Per-app stack of `pending_emits` watermarks, one entry per open
+    /// savepoint frame: the length of that app's queued-event buffer at
+    /// the moment the savepoint opened.
+    ///
+    /// `ROLLBACK TO SAVEPOINT` truncates the buffer back to its frame's
+    /// watermark, so events for writes the database just discarded are
+    /// discarded with them. Without this the buffer was flat and
+    /// app-keyed, the nested settle arm never touched it, and the
+    /// top-level `COMMIT` drained *everything* - publishing a change
+    /// event for a row that had been rolled back and does not exist.
+    ///
+    /// `RELEASE SAVEPOINT` pops the watermark without truncating: those
+    /// events belong to the enclosing frame now, exactly as the rows do.
+    savepoint_emit_marks: HashMap<String, Vec<usize>>,
+
     /// Broker events queued during an active transaction, **keyed by
     /// owning `app_id`**.
     ///
@@ -365,6 +380,7 @@ impl IsolateDbContext {
             tx_claims: HashSet::new(),
             tx_waiters: HashMap::new(),
             savepoint_depths: HashMap::new(),
+            savepoint_emit_marks: HashMap::new(),
             pending_emits: HashMap::new(),
             schemas: HashMap::new(),
             introspected_schemas: HashMap::new(),
@@ -825,6 +841,14 @@ impl IsolateDbContext {
             self.tx_conns.contains_key(app_id),
             "push_savepoint_for called without an active tx for the app",
         );
+        let mark = self
+            .pending_emits
+            .get(app_id)
+            .map_or(0, std::vec::Vec::len);
+        self.savepoint_emit_marks
+            .entry(app_id.to_string())
+            .or_default()
+            .push(mark);
         let depth = self.savepoint_depths.entry(app_id.to_string()).or_insert(0);
         *depth = depth.saturating_add(1);
         *depth
@@ -833,9 +857,33 @@ impl IsolateDbContext {
     /// Decrement `app_id`'s nested-savepoint depth on
     /// `RELEASE SAVEPOINT` / `ROLLBACK TO SAVEPOINT`. Saturates at zero
     /// so a double-settle (handler + finalizer race) cannot underflow.
-    pub(crate) fn pop_savepoint_for(&mut self, app_id: &str) {
+    ///
+    /// `rolled_back` selects the frame's effect fate, and the two are not
+    /// interchangeable: on `ROLLBACK TO SAVEPOINT` the frame's queued
+    /// change events are discarded with the rows they describe; on
+    /// `RELEASE` they are inherited by the enclosing frame. Passing the
+    /// wrong one either publishes events for rows that do not exist or
+    /// silently drops events for rows that do.
+    pub(crate) fn pop_savepoint_for(&mut self, app_id: &str, rolled_back: bool) {
         if let Some(depth) = self.savepoint_depths.get_mut(app_id) {
             *depth = depth.saturating_sub(1);
+        }
+        let mark = self
+            .savepoint_emit_marks
+            .get_mut(app_id)
+            .and_then(std::vec::Vec::pop);
+        if rolled_back {
+            // A missing mark means the frame was opened before this
+            // bookkeeping existed for the app, or the stacks desynced.
+            // Truncating to 0 would discard the ENCLOSING frame's events
+            // too, so leave the buffer alone and let the enclosing settle
+            // decide - over-publishing is a bug, but silently dropping a
+            // committed row's event is a worse one.
+            if let (Some(mark), Some(buf)) = (mark, self.pending_emits.get_mut(app_id)) {
+                if mark <= buf.len() {
+                    buf.truncate(mark);
+                }
+            }
         }
     }
 
@@ -847,6 +895,10 @@ impl IsolateDbContext {
     /// untouched (SEC-1).
     pub(crate) fn reset_savepoint_depth_for(&mut self, app_id: &str) {
         self.savepoint_depths.remove(app_id);
+        // The frame watermarks die with the frames. Leaving them would
+        // let the next transaction's first savepoint pop a stale mark and
+        // truncate that transaction's buffer to an unrelated length.
+        self.savepoint_emit_marks.remove(app_id);
     }
 
     // ----- PENDING_EMITS ---------------------------------------------
@@ -1149,9 +1201,17 @@ mod tests {
         let mut ctx = IsolateDbContext::new();
         assert_eq!(ctx.savepoint_depth_for("app_t"), 0);
         // pop on an already-zero depth saturates rather than wrapping to
-        // u32::MAX.
-        ctx.pop_savepoint_for("app_t");
+        // u32::MAX. Both frame fates must saturate: a rollback pop with no
+        // frame open has no watermark to restore either, and must not
+        // truncate the buffer on the strength of a missing mark.
+        ctx.pop_savepoint_for("app_t", false);
         assert_eq!(ctx.savepoint_depth_for("app_t"), 0, "pop must saturate at zero");
+        ctx.pop_savepoint_for("app_t", true);
+        assert_eq!(
+            ctx.savepoint_depth_for("app_t"),
+            0,
+            "a rollback pop must saturate at zero too"
+        );
         // reset on zero is a no-op.
         ctx.reset_savepoint_depth_for("app_t");
         assert_eq!(ctx.savepoint_depth_for("app_t"), 0);
