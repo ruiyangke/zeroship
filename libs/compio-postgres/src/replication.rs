@@ -969,9 +969,9 @@ impl LsnTracker {
 pub enum ReplicationMessage {
     /// A logical-decoding payload. The body is the raw pgoutput frame.
     XLogData {
-        /// LSN of the first byte of `body`.
+        /// Starting WAL position reported for this message.
         wal_start: u64,
-        /// LSN of the byte just past `body`.
+        /// Current end of WAL on the server when this message was sent.
         wal_end: u64,
         /// Server clock in microseconds since the PG epoch
         /// (2000-01-01 00:00:00 UTC).
@@ -1447,7 +1447,7 @@ where
 ///       i64 write_lsn,
 ///       i64 flush_lsn,
 ///       i64 apply_lsn,
-///       i64 timestamp_ms_from_2000,
+///       i64 timestamp_us_from_2000,
 ///       u8  reply_requested (0|1)
 ///   ]
 /// ```
