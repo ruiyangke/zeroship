@@ -57,8 +57,10 @@ impl CancelToken {
     /// Attempts to cancel the in-progress query on the connection associated
     /// with this `CancelToken`.
     ///
-    /// The server provides no information about whether a cancellation attempt was successful or not. An error will
-    /// only be returned if the client was unable to connect to the database.
+    /// Success means PostgreSQL consumed and closed the dedicated cancellation
+    /// connection. The protocol provides no direct result saying whether the
+    /// target query was still running or was cancelled; an effective cancel is
+    /// reported as SQLSTATE `57014` on the target connection.
     ///
     /// Cancellation is inherently racy. There is no guarantee that the
     /// cancellation request will reach the server before the query terminates
@@ -83,9 +85,8 @@ impl CancelToken {
     /// Send cancellation and wait until the postmaster closes its dedicated
     /// connection after consuming the packet.
     ///
-    /// Pool timeout recovery uses this stronger internal primitive before it
-    /// allows the original backend to be reused. The public method preserves
-    /// its established fire-and-forget contract.
+    /// Pool timeout recovery uses this internal form so its own recovery grace,
+    /// rather than `connect_timeout`, bounds the server-close wait.
     pub(crate) async fn cancel_query_confirmed<T>(&self, tls: T) -> Result<(), Error>
     where
         T: MakeTlsConnect<Socket>,
@@ -102,8 +103,9 @@ impl CancelToken {
         .await
     }
 
-    /// Like `cancel_query`, but uses a stream which is already connected to the server rather than opening a new
-    /// connection itself.
+    /// Like `cancel_query`, but uses a stream which is already connected to the
+    /// server rather than opening a new connection itself. It sends the request
+    /// and waits for PostgreSQL to close that dedicated stream.
     pub async fn cancel_query_raw<S, T>(&self, stream: S, tls: T) -> Result<(), Error>
     where
         S: AsyncRead + AsyncWrite + Unpin,
@@ -218,7 +220,7 @@ mod tests {
     }
 
     #[compio::test]
-    async fn public_cancel_is_fire_and_forget_but_confirmed_cancel_waits_for_eof() {
+    async fn public_and_internal_cancel_wait_for_eof() {
         compio::time::timeout(TEST_TIMEOUT, async {
             let listener = TcpListener::bind("127.0.0.1:0")
                 .await
@@ -251,20 +253,30 @@ mod tests {
                 drop(confirmed);
             });
 
-            compio::time::timeout(Duration::from_millis(500), token.cancel_query(NoTls))
-                .await
-                .expect(
-                    "public cancellation waited for peer EOF instead of returning after its \
-                     flushed packet",
-                )
-                .expect("public cancellation failed");
-            compio::time::timeout(Duration::from_millis(500), public_seen_rx)
-                .await
-                .expect("scripted peer did not receive public cancel packet")
-                .expect("scripted peer dropped public packet report");
+            let public = Box::pin(token.cancel_query(NoTls));
+            let public_seen = Box::pin(public_seen_rx);
+            let mut public = match select(public, public_seen).await {
+                Either::Left((result, _)) => {
+                    panic!("public cancellation returned before peer EOF: {result:?}")
+                }
+                Either::Right((seen, public)) => {
+                    seen.expect("scripted peer dropped public packet report");
+                    public
+                }
+            };
+            assert!(
+                compio::time::timeout(Duration::from_millis(100), public.as_mut())
+                    .await
+                    .is_err(),
+                "public cancellation returned before the postmaster-style peer closed"
+            );
             release_public_tx
                 .send(())
                 .expect("release public cancel connection");
+            compio::time::timeout(Duration::from_millis(500), public)
+                .await
+                .expect("public cancellation did not finish after peer EOF")
+                .expect("public cancellation failed after peer EOF");
 
             let confirmed = Box::pin(token.cancel_query_confirmed(NoTls));
             let confirmed_seen = Box::pin(confirmed_seen_rx);
@@ -298,6 +310,64 @@ mod tests {
         })
         .await
         .expect("cancel completion-contract test exceeded its 5 second deadline");
+    }
+
+    #[compio::test]
+    async fn public_raw_cancel_waits_for_eof() {
+        compio::time::timeout(TEST_TIMEOUT, async {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind scripted raw cancel peer");
+            let addr = listener
+                .local_addr()
+                .expect("scripted raw cancel peer address");
+            let token = network_token(addr);
+            let stream = TcpStream::connect(addr)
+                .await
+                .expect("connect scripted raw cancel peer");
+            let (packet_seen_tx, packet_seen_rx) = futures_channel::oneshot::channel();
+            let (allow_close_tx, allow_close_rx) = futures_channel::oneshot::channel();
+
+            let peer = compio::runtime::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("accept raw cancel");
+                assert_eq!(read_exact(&mut stream, 16).await, cancel_packet());
+                packet_seen_tx.send(()).expect("report raw cancel packet");
+                allow_close_rx.await.expect("release raw cancel peer");
+                drop(stream);
+            });
+
+            let cancel = Box::pin(token.cancel_query_raw(stream, NoTls));
+            let packet_seen = Box::pin(packet_seen_rx);
+            let mut cancel = match select(cancel, packet_seen).await {
+                Either::Left((result, _)) => {
+                    panic!("raw cancellation returned before peer EOF: {result:?}")
+                }
+                Either::Right((seen, cancel)) => {
+                    seen.expect("scripted peer dropped raw packet report");
+                    cancel
+                }
+            };
+            assert!(
+                compio::time::timeout(Duration::from_millis(100), cancel.as_mut())
+                    .await
+                    .is_err(),
+                "raw cancellation returned before the postmaster-style peer closed"
+            );
+
+            allow_close_tx
+                .send(())
+                .expect("release raw cancel connection");
+            compio::time::timeout(Duration::from_millis(500), cancel)
+                .await
+                .expect("raw cancellation did not finish after peer EOF")
+                .expect("raw cancellation failed after peer EOF");
+            compio::time::timeout(Duration::from_millis(500), peer)
+                .await
+                .expect("scripted raw cancel peer timed out")
+                .expect("scripted raw cancel peer panicked");
+        })
+        .await
+        .expect("raw cancel completion-contract test exceeded its 5 second deadline");
     }
 
     #[derive(Clone)]
