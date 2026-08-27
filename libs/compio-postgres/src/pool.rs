@@ -504,6 +504,10 @@ impl PoolEntry {
         self.last_used.elapsed() > idle_timeout
     }
 
+    fn has_active_copy(&self) -> bool {
+        self.client.has_active_copy()
+    }
+
     /// Whether the connection's read task published terminal poison before
     /// its main task had a chance to drop the Client request receiver.
     fn is_read_retired(&self) -> bool {
@@ -1145,7 +1149,7 @@ impl Pool {
 
                 // If the Client's sender is closed (connection task exited
                 // due to I/O error, EOF, etc), we cannot use this entry.
-                if entry.client.is_closed() || entry.is_read_retired() {
+                if entry.client.is_closed() || entry.is_read_retired() || entry.has_active_copy() {
                     self.metrics.inc_evictions();
                     continue;
                 }
@@ -1352,7 +1356,11 @@ impl Pool {
         //   - closed: Client::is_closed() indicates the connection task exited
         //   - read-retired: the dedicated reader synchronously marked poison
         //     before its main task could close the Client channel
-        if entry.is_expired() || entry.client.is_closed() || entry.is_read_retired() {
+        if entry.is_expired()
+            || entry.client.is_closed()
+            || entry.is_read_retired()
+            || entry.has_active_copy()
+        {
             self.metrics.inc_evictions();
             return;
         }
@@ -3683,7 +3691,8 @@ mod tests {
         fn record() {
             PROBE_SLOT.with(|slot| {
                 if let Some(slot) = slot.borrow().as_ref() {
-                    PROBE_BORROWED.with(|flag| flag.set(Some(slot.waker.try_borrow_mut().is_err())));
+                    PROBE_BORROWED
+                        .with(|flag| flag.set(Some(slot.waker.try_borrow_mut().is_err())));
                 }
             });
         }
