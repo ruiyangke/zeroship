@@ -333,6 +333,7 @@ where
         process_id,
         secret_key,
         pool_lease: None,
+        drop_target: None,
     };
 
     let mut stream = BufStream::new(stream);
@@ -2894,6 +2895,7 @@ mod tests {
             process_id: 0,
             secret_key: Some(0.into()),
             pool_lease: None,
+            drop_target: None,
         }
     }
 

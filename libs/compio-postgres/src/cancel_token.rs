@@ -4,13 +4,15 @@ use crate::config::{SslCertMode, SslMode, SslNegotiation};
 use crate::connect_tls::Encryption;
 use crate::tls::{ServerVerification, TlsConnect, TlsPolicyIdentity};
 use crate::{
-    Error, Socket, cancel_query, cancel_query_raw, client::SocketConfig, tls::MakeTlsConnect,
+    Error, Socket, cancel_query, cancel_query_raw,
+    client::{InnerClient, SocketConfig},
+    tls::MakeTlsConnect,
 };
 use bytes::Bytes;
 use compio::io::{AsyncRead, AsyncWrite};
 use std::io;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Weak};
 
 pub(crate) const MIN_CANCEL_KEY_LEN: usize = 4;
 pub(crate) const MAX_CANCEL_KEY_LEN: usize = 256;
@@ -93,6 +95,51 @@ struct PoolCancelAttempt {
     confirmed: bool,
 }
 
+#[derive(Clone)]
+pub(crate) enum CancelDropTarget {
+    Client(Weak<InnerClient>),
+}
+
+impl CancelDropTarget {
+    fn abandon(&self) {
+        match self {
+            Self::Client(client) => {
+                if let Some(client) = client.upgrade() {
+                    client.force_close();
+                }
+            }
+        }
+    }
+}
+
+/// Retires the target only while the cancellation operation is still pending.
+///
+/// A returned transport error is not abandonment: the existing pool attempt
+/// records its uncertainty without changing the ordinary bare-client error
+/// path. This guard is disarmed as soon as the underlying future returns,
+/// before its `Result` is interpreted.
+struct CancelAbandonmentGuard<'a> {
+    target: Option<&'a CancelDropTarget>,
+}
+
+impl<'a> CancelAbandonmentGuard<'a> {
+    fn new(target: Option<&'a CancelDropTarget>) -> Self {
+        Self { target }
+    }
+
+    fn disarm(mut self) {
+        self.target = None;
+    }
+}
+
+impl Drop for CancelAbandonmentGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(target) = self.target {
+            target.abandon();
+        }
+    }
+}
+
 impl PoolCancelAttempt {
     fn confirm(mut self) {
         self.confirmed = true;
@@ -140,6 +187,7 @@ pub struct CancelToken {
     pub(crate) process_id: i32,
     pub(crate) secret_key: Option<CancelKey>,
     pub(crate) pool_lease: Option<Arc<PoolCancelLease>>,
+    pub(crate) drop_target: Option<CancelDropTarget>,
 }
 
 impl CancelToken {
@@ -167,6 +215,7 @@ impl CancelToken {
         self.ensure_pool_lease_active()?;
         let secret_key = self.secret_key.clone().ok_or_else(missing_cancel_key)?;
         let attempt = self.begin_pool_cancel_attempt()?;
+        let abandonment = CancelAbandonmentGuard::new(self.drop_target.as_ref());
         let result = cancel_query::cancel_query(
             self.socket_config.clone(),
             self.ssl_mode,
@@ -177,6 +226,7 @@ impl CancelToken {
             self.tls_policy_identity.clone(),
         )
         .await;
+        abandonment.disarm();
         if result.is_ok()
             && let Some(attempt) = attempt
         {
@@ -197,6 +247,7 @@ impl CancelToken {
         self.ensure_pool_lease_active()?;
         let secret_key = self.secret_key.clone().ok_or_else(missing_cancel_key)?;
         let attempt = self.begin_pool_cancel_attempt()?;
+        let abandonment = CancelAbandonmentGuard::new(self.drop_target.as_ref());
         let result = cancel_query::cancel_query_confirmed(
             self.socket_config.clone(),
             self.ssl_mode,
@@ -207,6 +258,7 @@ impl CancelToken {
             self.tls_policy_identity.clone(),
         )
         .await;
+        abandonment.disarm();
         if result.is_ok()
             && let Some(attempt) = attempt
         {
@@ -255,6 +307,7 @@ impl CancelToken {
             self.tls_policy_identity.as_ref(),
         )?;
         let attempt = self.begin_pool_cancel_attempt()?;
+        let abandonment = CancelAbandonmentGuard::new(self.drop_target.as_ref());
         let result = cancel_query_raw::cancel_query_raw(
             stream,
             encryption,
@@ -280,6 +333,7 @@ impl CancelToken {
             secret_key,
         )
         .await;
+        abandonment.disarm();
         if result.is_ok()
             && let Some(attempt) = attempt
         {
@@ -320,7 +374,7 @@ fn pool_lease_ended() -> Error {
 mod tests {
     use super::*;
     use crate::NoTls;
-    use crate::client::Addr;
+    use crate::client::{Addr, Client};
     use crate::tls::{ChannelBinding, TlsStream};
     use compio::buf::{IoBuf, IoBufMut};
     use compio::io::{AsyncReadExt, AsyncWriteExt};
@@ -386,7 +440,130 @@ mod tests {
             process_id: PROCESS_ID,
             secret_key: Some(SECRET_KEY.into()),
             pool_lease: None,
+            drop_target: None,
         }
+    }
+
+    struct ParkedCancelStream {
+        written: Arc<parking_lot::Mutex<Vec<u8>>>,
+        fail_read: bool,
+    }
+
+    impl AsyncRead for ParkedCancelStream {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+            if self.fail_read {
+                return compio::BufResult(
+                    Err(io::Error::new(
+                        io::ErrorKind::ConnectionReset,
+                        "scripted cancel read failure",
+                    )),
+                    buf,
+                );
+            }
+            std::future::pending::<()>().await;
+            unreachable!("the parked CancelRequest read completed")
+        }
+    }
+
+    impl AsyncWrite for ParkedCancelStream {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+            let len = buf.buf_len();
+            self.written.lock().extend_from_slice(buf.as_init());
+            compio::BufResult(Ok(len), buf)
+        }
+
+        async fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn target_client(
+        pooled: bool,
+    ) -> (
+        Client,
+        futures_channel::mpsc::UnboundedReceiver<crate::connection::Request>,
+    ) {
+        let (sender, receiver) = futures_channel::mpsc::unbounded();
+        let mut client = Client::new(
+            sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            PROCESS_ID,
+            Some(SECRET_KEY.into()),
+            None,
+        );
+        if pooled {
+            client.enter_pool();
+            client.activate_pool_cancel_lease();
+        }
+        (client, receiver)
+    }
+
+    async fn park_cancel_against(client: &Client) {
+        let written = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let token = client.cancel_token();
+        let mut cancel = Box::pin(token.cancel_query_raw(
+            ParkedCancelStream {
+                written: Arc::clone(&written),
+                fail_read: false,
+            },
+            NoTls,
+        ));
+        assert!(
+            futures_util::poll!(cancel.as_mut()).is_pending(),
+            "the CancelRequest fixture did not park in its EOF wait"
+        );
+        assert_eq!(
+            *written.lock(),
+            cancel_packet(),
+            "the CancelRequest fixture parked before sending the packet"
+        );
+        drop(cancel);
+    }
+
+    #[compio::test]
+    async fn dropping_an_in_flight_cancel_closes_its_bare_client() {
+        let (client, _receiver) = target_client(false);
+        park_cancel_against(&client).await;
+        assert!(
+            client.is_closed(),
+            "dropping an in-flight bare CancelRequest left its Client reusable"
+        );
+    }
+
+    #[compio::test]
+    async fn dropping_an_in_flight_cancel_closes_its_current_pool_lease() {
+        let (client, _receiver) = target_client(true);
+        park_cancel_against(&client).await;
+        assert!(
+            client.is_closed(),
+            "dropping an in-flight pooled CancelRequest left the current lease usable"
+        );
+    }
+
+    #[compio::test]
+    async fn returned_cancel_error_is_not_abandonment() {
+        let (client, _receiver) = target_client(false);
+        let error = client
+            .cancel_token()
+            .cancel_query_raw(
+                ParkedCancelStream {
+                    written: Arc::new(parking_lot::Mutex::new(Vec::new())),
+                    fail_read: true,
+                },
+                NoTls,
+            )
+            .await
+            .expect_err("the scripted CancelRequest read unexpectedly succeeded");
+        assert!(error.as_db_error().is_none());
+        assert!(
+            !client.is_closed(),
+            "a returned CancelRequest error was mistaken for abandonment"
+        );
     }
 
     #[compio::test]
@@ -652,6 +829,7 @@ mod tests {
                 process_id: PROCESS_ID,
                 secret_key: Some(SECRET_KEY.into()),
                 pool_lease: None,
+                drop_target: None,
             };
             let stream = TcpStream::connect(addr)
                 .await
@@ -706,6 +884,7 @@ mod tests {
                 process_id: PROCESS_ID,
                 secret_key: Some(SECRET_KEY.into()),
                 pool_lease: None,
+                drop_target: None,
             };
             let stream = TcpStream::connect(addr)
                 .await
