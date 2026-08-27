@@ -137,16 +137,53 @@ EVERY FIGURE ABOVE IS A DEFAULT-FEATURES RUN, and this crate declares
 nothing about the TLS surface on either version. Measured 2026-08-26 with both
 live fixture sets generated (`tls_live_setup.sh` and `unix_socket_setup.sh`):
 
-```bash
-PG_TEST_URL=postgres://postgres:zeroship@127.0.0.1:5459/zeroship \
-  cargo test -p compio-postgres --all-features -- --test-threads=1
+## DO NOT CROSS VERSIONS WITH `--all-features`. IT IGNORES `PG_TEST_URL`.
+
+`--all-features` turns on `suite-over-tls`, and that feature does not merely
+add TLS - it `#[cfg]`-replaces `common::test_url()` so the whole suite reads
+its DSN from `tests/data/live/tls_live.conf` instead. `PG_TEST_URL` is then
+DEAD, and the run measures the TLS fixture server no matter what you set.
+
+This is not theoretical. Measured 2026-08-27 with `PG_TEST_URL` pointed at the
+18.4 container on 5459, using the suite's own oracle line:
+
+```text
+--all-features                          -> server_version_num=160015  protocol=V3_0
+--features tls,live-tls-tests,live-unix-socket -> server_version_num=180004  protocol=V3_2
 ```
 
-**1062 passed, 0 failed, exit 0 on 18.4** - identical to 16.14 the same day,
-including the 48 `tls_live` and 17 `unix_socket_live` tests. Note the TLS suite
-talks to its OWN servers on 5447-5452 regardless of `PG_TEST_URL`, so this run
-crosses versions for everything else while still exercising TLS; the fixture
-set includes a PostgreSQL 18 `directtls` server for the direct-SSL case.
+The first is the 16.15 fixture server. A whole cross-version verdict was
+reported off runs shaped like that: both "versions" passed identically because
+both were the same server, and the identical totals read as CONFIRMATION rather
+than as the tell they were. Two runs agreeing perfectly is a reason to ask what
+they were pointed at.
+
+So use the TLS features WITHOUT `suite-over-tls`. That set compiles every
+`tls`-gated test and still honours `PG_TEST_URL`:
+
+```bash
+PG_TEST_URL=postgres://postgres:zeroship@127.0.0.1:5459/zeroship \
+  cargo test -p compio-postgres --features tls,live-tls-tests,live-unix-socket \
+  -- --test-threads=1
+```
+
+Confirm the server before believing any cross-version figure, rather than
+trusting the variable you exported:
+
+```bash
+... --test suite -- --nocapture cancel_request::raw_cancel_interrupts_running_query_and_preserves_session
+# prints: cancel oracle: server_version_num=... protocol=... backend_key_len=...
+```
+
+The TLS suite proper still talks to its OWN servers on 5447-5452 regardless of
+`PG_TEST_URL` - that part of the old note was right - and the fixture set
+includes a PostgreSQL 18 `directtls` server for the direct-SSL case. What was
+wrong was the conclusion that the rest of the suite therefore crossed versions.
+
+The superseded figure, kept so it is not re-derived as if it were sound:
+**1062 passed, 0 failed, exit 0** was recorded on 2026-08-26 as "18.4" from an
+`--all-features` run. It was the fixture server. Nothing is known about 18.4
+from it.
 
 Count BINARIES as well as tests. Both numbers come from the same log and only
 the pair is evidence: every test passing across HALF the binaries would print a
