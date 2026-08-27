@@ -41,7 +41,6 @@ fn frozen_flags() -> MigrationFlags {
         lock_timeout_ms: None,
         phase: None,
         repeatable: false,
-        engine_goodie_ddl: false,
     }
 }
 
@@ -128,9 +127,9 @@ fn corpus_checksums_are_byte_stable() {
     // -- which is the row whose op carries a `language` field, and the other 91 are
     // byte-identical. Aggregate:
     // 7b960d132e2487c27567e906cec97834bf12222a9ca429b375d006072835b7c3 ->
-    // 127f7b8221fd98393e7fe8a704e5ec85eae387c1e8d84ace62418501a521983b.
+    // 7af1f998f5cc38e4db2e25d004b08ff253dd04573df8475be7f10ead264297c7.
     const EXPECTED_AGGREGATE: &str =
-        "127f7b8221fd98393e7fe8a704e5ec85eae387c1e8d84ace62418501a521983b";
+        "7af1f998f5cc38e4db2e25d004b08ff253dd04573df8475be7f10ead264297c7";
     assert_eq!(
         aggregate,
         EXPECTED_AGGREGATE,

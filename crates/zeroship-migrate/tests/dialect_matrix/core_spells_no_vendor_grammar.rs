@@ -71,7 +71,6 @@ const KEYWORD_NEEDLES: &[&str] = &[
     "WITHOUT ROWID",
     "SHOW CREATE",
     "BIGSERIAL",
-    "TSVECTOR",
     "ILIKE",
     "PRAGMA",
     "CONCURRENTLY",

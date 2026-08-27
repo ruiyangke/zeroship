@@ -88,10 +88,10 @@ pub(crate) use zeroship_migrate_backend::constraint_definition::{
     constraintdef_cols, quote_ident_if_needed, NOT_VALID_DEFINITION_SUFFIX,
 };
 
-// `GENERATED_PREFIX`, `default_clause` and `generated_clause` MOVED to
-// `zeroship_migrate_backend::ddl` - all three `DdlEmitter` impls call them, so they had
-// to go below the vendors with the trait. Imported at the top of this module; the
-// engine's own non-emitter render paths are unchanged callers.
+// `default_clause` and `generated_clause` MOVED to
+// `zeroship_migrate_backend::ddl` - all three `DdlEmitter` impls call them, so they
+// had to go below the vendors with the trait. Imported at the top of this module;
+// the engine's own non-emitter render paths are unchanged callers.
 
 // `sqlite_auto_increment_identity_pk` MOVED to `zeroship_migrate_sqlite::schema`,
 // shared by that backend's schema and DDL renderers.
@@ -1861,7 +1861,7 @@ pub fn desired_snapshot_for_dialect(
 
         // MANDATE - the per-column / per-index snapshot construction (system-
         // field injection, default rendering, encryption/comment sentinels, vector/
-        // geo/FTS index modelling) lives in ONE place: the shared, dialect-
+        // geo index modelling) lives in ONE place: the shared, dialect-
         // parameterized [`build_table_snapshot`]. The differ routes through it so
         // `IrAuthor::lower` can reuse the SAME builder and the byte-identity
         // golden guards against accidental regression, not against two independent
@@ -1888,8 +1888,8 @@ pub fn desired_snapshot_for_dialect(
 
 /// The **shared, dialect-parameterized snapshot-builder**: build the
 /// full [`TableSnapshot`] (policy-injected columns, indexes, and pinned primary key,
-/// per-field column/constraint/index modelling, and the dialect-divergent FTS
-/// shape) for a single [`CollectionDescriptor`].
+/// per-field column/constraint/index modelling) for a single
+/// [`CollectionDescriptor`].
 ///
 /// This is the single source of truth for the default / system-field / sentinel
 /// logic. BOTH the declarative differ ([`desired_snapshot_for_dialect`], unchanged
@@ -1899,8 +1899,7 @@ pub fn desired_snapshot_for_dialect(
 /// before and after the lift (a refactor-safety fixture asserts this).
 ///
 /// FK definition spelling is dialect-divergent: SQLite FK targets are
-/// unqualified. (Full-text search was named here too, until it was removed from
-/// the engine entirely.) Column `data_type` is the SELECTED backend's own snapshot
+/// unqualified. Column `data_type` is the SELECTED backend's own snapshot
 /// spelling - core carries the neutral descriptor token and the vendor answers
 /// [`SchemaRenderer::snapshot_data_type`] - and that same backend canonicalises a
 /// live catalog spelling back for comparison (see
@@ -2856,15 +2855,14 @@ pub(crate) fn ensure_fk_supporting_index(
 }
 
 // ---------------------------------------------------------------------------
-// vector-ANN + full-text search index modeling.
+// Vector ANN index modeling.
 //
-// The differ never modeled the access-method dimension, so the live ivfflat
-// (vector) and GIN (FTS) indexes the data plane built were UNKNOWN to it and
-// phantom-DROPped on every diff (and a `btree -> ivfflat` method flip was
-// invisible). Modeling them in the DESIRED snapshot both stops the drop AND
-// makes the engine the authority that EMITS them (the schema-authority cutover
-// intent). The PG access-method names (`ivfflat`, `gin`) and the deterministic
-// index/column names match the shared `crate::schema` kernel + the data
+// The differ never modeled the access-method dimension, so live ivfflat indexes
+// were UNKNOWN to it and phantom-DROPped on every diff (and a `btree -> ivfflat`
+// method flip was invisible). Modeling them in the DESIRED snapshot both stops
+// the drop AND makes the engine the authority that EMITS them (the
+// schema-authority cutover intent). The PG access-method name (`ivfflat`) and the
+// deterministic index/column names match the shared `crate::schema` kernel + the data
 // plane's runtime contract byte-for-byte, so an engine-created object round-trips clean.
 // ---------------------------------------------------------------------------
 
@@ -3575,7 +3573,7 @@ impl DeclarativeAuthor {
     ///   whose ownership the caller did not supply in `live_ownership` (fail-closed
     ///   - defends against a partial-union deploy, 2b).
     /// - [`DeclarativeError::DropOfVirtualTable`] - a `DROP TABLE` of a live
-    ///   VIRTUAL table (`fts5`, `vec0`, any module). Refused ahead of the ownership
+    ///   VIRTUAL table (`vec0`, `rtree`, any module). Refused ahead of the ownership
     ///   check, because dropping a vtable cascades away the shadow tables holding
     ///   its index. This engine never authors virtual tables, so a live one belongs
     ///   to whatever component created it.
@@ -5615,10 +5613,6 @@ impl DeclarativeAuthor {
         // emitter writes them directly, no name-based reconstruction.) This method
         // owns only the migration identity / deps.
         let (up, down) = self.emitter().create_index(table, idx);
-        // Every index this path authors is ordinary CreatorUp-confined DDL. Nothing
-        // here sets `engine_goodie_ddl`: the engine no longer emits any virtual
-        // table, which was the sole reason a create-index `up` ever needed
-        // EngineJournal mode.
         let flags = MigrationFlags::default();
         self.make(
             &format!("create_index_{}", idx.name),
@@ -6549,8 +6543,8 @@ mod snapshot_builder_refactor_safety_tests {
     //! ignores) fails here.
     //!
     //! It freezes the `{:#?}` of a RICH table snapshot (system fields + a unique
-    //! field + a ref/FK + an encrypted+masked column + an FTS field + a named
-    //! index) on BOTH dialects.
+    //! field + a ref/FK + an encrypted+masked column + a named index) on BOTH
+    //! dialects.
 
     fn confined_policy() -> zeroship_migrate_policy::EffectivePolicy {
         crate::test_fixtures::confined_charter()

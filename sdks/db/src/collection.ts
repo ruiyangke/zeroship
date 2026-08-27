@@ -455,16 +455,14 @@ export class Collection<
   }
 
   async search(
-    args:
-      | {
-          vector: number[];
-          k?: number;
-          metric?: import("./types").VectorMetric;
-          column?: string;
-          filter?: Filter<S>;
-        }
-      | { text: string; limit?: number; k?: number; filter?: Filter<S> },
-  ): Promise<Result<(Row<S> & { _distance?: number; _rank?: number })[]>> {
+    args: {
+      vector: number[];
+      k?: number;
+      metric?: import("./types").VectorMetric;
+      column?: string;
+      filter?: Filter<S>;
+    },
+  ): Promise<Result<(Row<S> & { _distance?: number })[]>> {
     return searchCollection(this._vectorGeo(), args);
   }
 

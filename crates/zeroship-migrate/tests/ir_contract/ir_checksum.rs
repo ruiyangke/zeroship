@@ -48,7 +48,6 @@ fn checksum_of_byte_stable_golden() {
         lock_timeout_ms: None,
         phase: Some(OnlinePhase::Contract),
         repeatable: false,
-        engine_goodie_ddl: false,
     };
     let deps = [dep()];
     let sups = [sup()];
@@ -68,7 +67,7 @@ fn checksum_of_byte_stable_golden() {
     // allowed and every golden is updated in the SAME patch). If this ever
     // changes WITHOUT a corresponding flags-shape change, the checksum wire
     // format drifted unintentionally.
-    const EXPECTED: &str = "61075be9920f5cf0e7acde1de5981e6688001ed0ff5e1b7e0033aac560a402cf";
+    const EXPECTED: &str = "5724f4f8c2c511421186d84989f40b872943c1fc4fd27aa1069e7a610de39394";
     assert_eq!(
         Checksum::of(&input).as_str(),
         EXPECTED,
@@ -104,7 +103,6 @@ fn checksum_of_ir_byte_stable_golden() {
         lock_timeout_ms: None,
         phase: None,
         repeatable: false,
-        engine_goodie_ddl: false,
     };
     let ops = vec![
         Op::CreateTable {
@@ -162,9 +160,9 @@ fn checksum_of_ir_byte_stable_golden() {
     // wire tag is `"raw"` - so the op list this golden folds serializes
     // differently by construction:
     // be51301392288399d3622b7a5156b48931dfd1a8472049299a783b017623f64f ->
-    // 2cabce5ae58f72938e4eecd3c8de9618a8819ec264c8e052f331cddb41f60751.
+    // d069260d3e01ca458fff6db9f5cb8d4e25b1394e1cf2ae722c942db515643d9b.
     // The INPUT changed; the assertion did not.
-    const EXPECTED: &str = "2cabce5ae58f72938e4eecd3c8de9618a8819ec264c8e052f331cddb41f60751";
+    const EXPECTED: &str = "d069260d3e01ca458fff6db9f5cb8d4e25b1394e1cf2ae722c942db515643d9b";
     assert_eq!(
         Checksum::of_ir(
             &CanonicalOpList(&ops),

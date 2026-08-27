@@ -789,7 +789,7 @@ pub struct MintedToken {
 ///
 /// See `docs/archive/p1-sqlite-implementation-plan.md` §5. The six
 /// methods listed below are the minimum-viable hook set; additional
-/// hooks (RETURNING/upsert/JSON/vector/FTS) fill in alongside
+/// hooks (RETURNING/upsert/JSON/vector) fill in alongside
 /// the consumers that need them.
 ///
 /// **No production caller yet** — the trait + ZST impls
@@ -1153,58 +1153,6 @@ pub trait VectorIndex: 'static {
 // `zeroship-schema` and is re-exported here so existing
 // `crate::backend::VectorMetric` references resolve unchanged.
 pub use zeroship_schema::descriptors::VectorMetric;
-
-/// Full-text search index capability — the "build a tokeniser-backed
-/// inverted index over one or more text columns and run a phrase /
-/// proximity query" slice of the data-store boundary.
-///
-/// See plan §2. The PG impl maintains
-/// a generated `__fts tsvector` column + GIN index + an `AFTER
-/// INSERT/UPDATE` trigger calling `tsvector_update_trigger(...)`.
-/// The SQLite impl uses FTS5 external-content virtual tables
-/// keyed by `rowid` with `AFTER` triggers mirroring writes.
-///
-/// `language` is honoured on PG (selects the tsvector configuration —
-/// `english`, `simple`, …); SQLite FTS5's default tokenizer is
-/// language-agnostic Unicode and ignores the parameter today (plan §9).
-///
-/// `filter` composes with `MATCH` via `AND`. Results are returned
-/// ordered by relevance DESC — PG: `ts_rank`; SQLite: `bm25`. Each
-/// returned `Value` includes a synthetic `"_rank"` field (`f64`).
-///
-/// **One composite index per collection** (Q-P4-B): the SDK's
-/// `.fts()` per-field modifier collects every flagged column into a
-/// single `__fts` index — `columns: &[String]` carries the ordered
-/// list.
-pub trait FullTextIndex: 'static {
-    /// Idempotently create the FTS index. PG: emits the `__fts`
-    /// column + GIN index + trigger. SQLite: creates the
-    /// `<coll>__fts` external-content virtual table + the
-    /// INSERT/UPDATE/DELETE mirror triggers.
-    #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(async_fn_in_trait)]
-    async fn ensure_fts_index(
-        &self,
-        app_id: &str,
-        collection: &str,
-        columns: &[String],
-        language: &str,
-    ) -> Result<(), DbError>;
-
-    /// Run the FTS query and return matching rows ordered by relevance
-    /// DESC. `limit` of `None` defers to the impl's default (today: no
-    /// explicit limit — caller must guard against `O(table)` results).
-    /// Each returned `Value` includes a synthetic `"_rank"` field.
-    #[allow(async_fn_in_trait)]
-    async fn fts_search(
-        &self,
-        app_id: &str,
-        collection: &str,
-        query: &str,
-        filter: &serde_json::Value,
-        limit: Option<usize>,
-    ) -> Result<Vec<serde_json::Value>, DbError>;
-}
 
 /// Spatial-index capability — the "build an R-tree-like index over a
 /// `geography(POINT)` column and run a within-radius point query"
@@ -1576,7 +1524,6 @@ pub trait RegisterBackend:
     + IndexBuilder
     + PgLockManager
     + VectorIndex
-    + FullTextIndex
     + SpatialIndex
     + EncryptedColumn
 {
@@ -1590,7 +1537,6 @@ impl<T> RegisterBackend for T where
         + IndexBuilder
         + PgLockManager
         + VectorIndex
-        + FullTextIndex
         + SpatialIndex
         + EncryptedColumn
 {
@@ -2055,13 +2001,6 @@ mod tests {
     /// instantiate this against the concrete backends.
     #[allow(dead_code)]
     fn _assert_vector_index<T: VectorIndex>() {}
-
-    /// Compile-time: the [`FullTextIndex`] trait's shape is
-    /// pinned. Ships no impl — neither backend yet satisfies the
-    /// trait. A later change will instantiate this against the concrete
-    /// backends.
-    #[allow(dead_code)]
-    fn _assert_fts_index<T: FullTextIndex>() {}
 
     /// Compile-time: the [`SpatialIndex`] trait's shape is
     /// pinned. Ships no impl — neither backend yet satisfies the

@@ -261,10 +261,10 @@ pub enum DeclarativeError {
     /// `DROP TABLE`.
     ///
     /// A virtual table is not an ordinary table: it is the visible half of a
-    /// module's storage. `fts5` and `vec0` both keep their real payload in
-    /// auto-created SHADOW tables (`<v>_data`, `<v>_idx`, ...), and dropping the
+    /// module's storage. Virtual-table modules can keep their real payload in
+    /// auto-created SHADOW tables, and dropping the
     /// vtable CASCADES those away - so a diff that "tidies up an undeclared table"
-    /// silently destroys a search or vector index that may be expensive or
+    /// silently destroys an index that may be expensive or
     /// impossible to rebuild.
     ///
     /// This engine never AUTHORS a virtual table, so one found live was created by
@@ -278,14 +278,8 @@ pub enum DeclarativeError {
     /// caller that cannot confirm ownership, and a caller that maps every live
     /// table to the deploying app would otherwise sail straight through it.
     ///
-    /// **This is forward infrastructure, not only a safety net.** Full-text search
-    /// is intended to return as something COMPOSED from primitives rather than a
-    /// builtin, and a composed feature that expands to `CREATE VIRTUAL TABLE` needs
-    /// drift to tolerate virtual tables GENERALLY - which is why this is keyed on
-    /// the DDL shape instead of the `fts5` special case it replaced. Refusing to
-    /// drop them is the first half; teaching drift to RECOGNISE a composed vtable as
-    /// a declared object is the second half, and does not exist yet. See
-    /// `docs/proposals/fts-macro.md`.
+    /// The guard is keyed on the DDL shape rather than a specific module, so
+    /// existing and future virtual tables receive the same fail-closed treatment.
     #[error(
         "refusing to drop live table '{table}': it is a VIRTUAL TABLE (module \
          '{module}'), not an ordinary table. Dropping it would cascade away the \
@@ -297,7 +291,7 @@ pub enum DeclarativeError {
     DropOfVirtualTable {
         /// The live virtual table the drop pass refused.
         table: String,
-        /// The module from its `USING` clause (`fts5`, `vec0`, ...).
+        /// The module from its `USING` clause (`vec0`, `rtree`, ...).
         module: String,
     },
     /// A `ref` field declared a cross-app FK whose **target table is not in the
