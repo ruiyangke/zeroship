@@ -1604,6 +1604,10 @@ fn binary_int4_tuple(value: i32) -> Vec<u8> {
 /// The frames around the data: BindComplete and a one-column binary
 /// `CopyOutResponse` before, the -1 trailer and the wrap-up after.
 fn binary_copy_out_frames(data: Vec<Vec<u8>>) -> Vec<u8> {
+    binary_copy_out_frames_with_trailer(data, &(-1i16).to_be_bytes())
+}
+
+fn binary_copy_out_frames_with_trailer(data: Vec<Vec<u8>>, trailer: &[u8]) -> Vec<u8> {
     let mut response = backend_frame(b'2', b"");
     // CopyOutResponse: overall format 1 (binary), one column, that column
     // binary too.
@@ -1611,9 +1615,7 @@ fn binary_copy_out_frames(data: Vec<Vec<u8>>) -> Vec<u8> {
     for chunk in data {
         response.extend_from_slice(&chunk);
     }
-    let mut trailer = Vec::new();
-    trailer.extend_from_slice(&(-1i16).to_be_bytes());
-    response.extend_from_slice(&backend_frame(b'd', &trailer));
+    response.extend_from_slice(&backend_frame(b'd', trailer));
     response.extend_from_slice(&backend_frame(b'c', b""));
     response.extend_from_slice(&backend_frame(b'C', b"COPY 2\0"));
     response.extend_from_slice(&backend_frame(b'Z', b"I"));
@@ -1716,4 +1718,35 @@ async fn two_binary_tuples_in_one_message_are_refused_rather_than_silently_halve
     })
     .await
     .expect("coalesced binary COPY test exceeded its outer watchdog");
+}
+
+/// The binary trailer is a complete tuple-count field of -1, not a prefix
+/// after which arbitrary bytes can be ignored. PostgreSQL's own reader probes
+/// once beyond it and reports "received copy data after EOF marker" when data
+/// remains. Silently accepting that suffix would let a peer append a tuple or
+/// corrupt bytes while presenting the caller with a clean end of stream.
+#[compio::test]
+async fn bytes_after_the_binary_copy_trailer_are_refused() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut trailer = (-1i16).to_be_bytes().to_vec();
+        trailer.push(0);
+        let response = binary_copy_out_frames_with_trailer(
+            vec![binary_copy_chunk(&[&binary_int4_tuple(7)])],
+            &trailer,
+        );
+        let outcome = binary_copy_out_against(532, response).await;
+        let error = match outcome {
+            Ok(values) => {
+                panic!("the driver returned {values:?} after a binary trailer carrying extra bytes")
+            }
+            Err(error) => error,
+        };
+        let chain = common::error_chain(&error);
+        assert!(
+            chain.contains("trailing bytes after the binary COPY trailer"),
+            "binary trailer garbage reported {chain:?} instead of naming the trailer suffix"
+        );
+    })
+    .await
+    .expect("binary trailer suffix test exceeded its outer watchdog");
 }
