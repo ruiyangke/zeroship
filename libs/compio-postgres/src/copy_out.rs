@@ -61,6 +61,7 @@ async fn copy_out_inner(
         responses,
         response,
         copy_done: false,
+        command_complete: false,
         copy_mode: Some(copy_mode),
     })
 }
@@ -137,6 +138,7 @@ pin_project! {
         responses: Responses,
         response: CopyResponse,
         copy_done: bool,
+        command_complete: bool,
         // Last so Drop disconnects the consumer, arming connection-owned
         // draining, before ordinary requests may queue behind it.
         copy_mode: Option<CopyModeGuard>,
@@ -174,6 +176,12 @@ impl Stream for CopyOutStream {
                     *this.copy_done = true;
                 }
                 Ok(Message::CommandComplete(_)) if *this.copy_done => {
+                    // The following Sync closes the implicit transaction. A
+                    // deferred constraint can still fail there, so command
+                    // completion is not yet stream success.
+                    *this.command_complete = true;
+                }
+                Ok(Message::ReadyForQuery(_)) if *this.command_complete => {
                     this.copy_mode.take();
                     return Poll::Ready(None);
                 }
