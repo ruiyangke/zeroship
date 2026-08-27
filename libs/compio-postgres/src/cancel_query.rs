@@ -127,9 +127,11 @@ where
 
 /// Send `CancelRequest` and wait for the postmaster to consume its connection.
 ///
-/// The public cancellation API intentionally remains fire-and-forget. Pool
-/// timeout recovery needs the stronger server-close barrier so a late cancel
-/// cannot race with reuse of the original backend.
+/// This pool-only form keeps its EOF wait outside `connect_timeout`. Public
+/// cancellation uses the same server-close barrier, but its configured timeout
+/// covers the complete attempt. Pool recovery instead supplies a separate,
+/// whole-recovery grace period around this function and the original session's
+/// `ReadyForQuery` barrier.
 pub(crate) async fn cancel_query_confirmed<T>(
     config: Option<SocketConfig>,
     ssl_mode: SslMode,
@@ -625,9 +627,8 @@ mod tests {
 
             let (mut cancel, _) = listener.accept().await.expect("accept cancel connection");
             let observed = observe_cancel_connection(&mut cancel).await;
-            // Returned so neither socket closes before the test has read the
-            // observation off them.
-            (observed, session, cancel)
+            drop(cancel);
+            (observed, session)
         });
 
         let tls = PassthroughTls {
@@ -651,11 +652,10 @@ mod tests {
         .expect("require cancel timed out")
         .expect("require cancel failed");
 
-        let ((opening, packet), _session, _cancel) =
-            compio::time::timeout(Duration::from_secs(2), server)
-                .await
-                .expect("scripted TLS-only server timed out")
-                .expect("scripted TLS-only server panicked");
+        let ((opening, packet), _session) = compio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("scripted TLS-only server timed out")
+            .expect("scripted TLS-only server panicked");
 
         assert_eq!(
             opening,
@@ -789,9 +789,8 @@ mod tests {
 
             let (mut cancel, _) = listener.accept().await.expect("accept cancel connection");
             let observed = observe_cancel_connection(&mut cancel).await;
-            // Returned so neither socket closes before the test has read the
-            // observation off them.
-            (observed, session, cancel)
+            drop(cancel);
+            (observed, session)
         });
 
         let tls = PassthroughTls {
@@ -815,11 +814,10 @@ mod tests {
         .expect("allow cancel timed out")
         .expect("allow cancel failed");
 
-        let ((opening, packet), _session, _cancel) =
-            compio::time::timeout(Duration::from_secs(2), server)
-                .await
-                .expect("scripted hostssl server timed out")
-                .expect("scripted hostssl server panicked");
+        let ((opening, packet), _session) = compio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("scripted hostssl server timed out")
+            .expect("scripted hostssl server panicked");
 
         assert_eq!(
             opening,
@@ -857,9 +855,8 @@ mod tests {
 
             let (mut cancel, _) = listener.accept().await.expect("accept cancel connection");
             let observed = observe_cancel_connection(&mut cancel).await;
-            // Returned so neither socket closes before the test has read the
-            // observation off them.
-            (observed, session, cancel)
+            drop(cancel);
+            (observed, session)
         });
 
         let dsn = format!(
@@ -879,11 +876,10 @@ mod tests {
         .await
         .expect("prefer cancel timed out");
 
-        let ((opening, packet), _session, _cancel) =
-            compio::time::timeout(Duration::from_secs(2), server)
-                .await
-                .expect("scripted TLS-offering server timed out")
-                .expect("scripted TLS-offering server panicked");
+        let ((opening, packet), _session) = compio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("scripted TLS-offering server timed out")
+            .expect("scripted TLS-offering server panicked");
 
         cancelled.expect(
             "the session runs in plaintext, but its cancel re-derived TLS from sslmode and died \

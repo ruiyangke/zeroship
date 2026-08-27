@@ -54,7 +54,7 @@ where
     // `cancel_query::cancel_query` owns its socket and so applies the
     // address-aware rule this function has no address to apply. It does NOT
     // add a retry either - neither entry point has one.
-    send_cancel_request_with_encryption(
+    let stream = send_cancel_request_with_encryption(
         stream,
         connect_tls::Encryption::first_for(mode),
         mode,
@@ -64,8 +64,8 @@ where
         process_id,
         secret_key,
     )
-    .await
-    .map(drop)
+    .await?;
+    wait_for_server_close(stream).await
 }
 
 pub(crate) async fn cancel_query_with_encryption<S, T>(
@@ -82,7 +82,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     T: TlsConnect<S>,
 {
-    send_cancel_request_with_exact_encryption(
+    let stream = send_cancel_request_with_exact_encryption(
         stream,
         encryption,
         mode,
@@ -92,8 +92,8 @@ where
         process_id,
         secret_key,
     )
-    .await
-    .map(drop)
+    .await?;
+    wait_for_server_close(stream).await
 }
 
 /// Send and flush a cancel packet, returning its half-closed connection.
