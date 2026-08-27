@@ -707,6 +707,78 @@ async fn a_stalled_start_replication_exchange_times_out_and_retires_its_session(
     .expect("START_REPLICATION timeout test exceeded its outer watchdog");
 }
 
+/// Asynchronous messages do not answer `START_REPLICATION` and cannot replace
+/// the `ErrorResponse` which eventually does.
+///
+/// The bespoke pre-CopyBoth loop already skipped notices, but treated the
+/// equally asynchronous `ParameterStatus` and `NotificationResponse` as local
+/// protocol failures. If PostgreSQL's actual refusal followed one of them in
+/// the same read, the local unexpected-tag error won and discarded its
+/// SQLSTATE.
+#[compio::test]
+async fn start_replication_preserves_an_error_behind_asynchronous_messages() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            assert_eq!(
+                expect_simple_query(&mut stream),
+                b"START_REPLICATION SLOT \"deadline_slot\" LOGICAL 0/0 (\"proto_version\" '1', \"publication_names\" '\"deadline_publication\"')\0"
+            );
+
+            let mut notification = 17i32.to_be_bytes().to_vec();
+            notification.extend_from_slice(b"scripted_channel\0scripted payload\0");
+            let mut response = backend_frame(b'S', b"TimeZone\0UTC\0");
+            response.extend_from_slice(&backend_frame(b'N', b"Mscripted notice\0\0"));
+            response.extend_from_slice(&backend_frame(b'A', &notification));
+            response.extend_from_slice(&backend_frame(
+                b'E',
+                b"SERROR\0C55000\0Mscripted START_REPLICATION refusal\0\0",
+            ));
+            response.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream
+                .write_all(&response)
+                .expect("write asynchronous START_REPLICATION refusal");
+            stream
+                .flush()
+                .expect("flush asynchronous START_REPLICATION refusal");
+            expect_disconnect(&mut stream);
+        });
+
+        let replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(
+                common::suite_tls(),
+                &stub_config(server.addr),
+            ),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+
+        let outcome = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            replication.start_logical_replication(start_options()),
+        )
+        .await
+        .expect("START_REPLICATION exceeded its watchdog");
+        let error = match outcome {
+            Ok(_) => panic!("the scripted peer refused START_REPLICATION"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("55000"),
+            "START_REPLICATION discarded SQLSTATE 55000 behind an asynchronous message: {}",
+            common::error_chain(&error)
+        );
+
+        server.finish();
+    })
+    .await
+    .expect("asynchronous START_REPLICATION error test exceeded its outer watchdog");
+}
+
 /// Waiting for the first byte of a CopyBoth frame is legitimate idle time.
 /// Keep one `next()` future alive across three read budgets, then require the
 /// exact later keepalive. A second interval follows a skipped NoticeResponse,

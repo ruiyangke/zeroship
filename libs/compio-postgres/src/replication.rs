@@ -107,8 +107,12 @@ pub const COPY_DATA_TAG: u8 = b'd';
 pub const COPY_DONE_TAG: u8 = b'c';
 /// Backend tag: `ErrorResponse`.
 pub const ERROR_RESPONSE_TAG: u8 = b'E';
+/// Backend tag: asynchronous `NotificationResponse`.
+pub const NOTIFICATION_RESPONSE_TAG: u8 = b'A';
 /// Backend tag: `NoticeResponse`.
 pub const NOTICE_RESPONSE_TAG: u8 = b'N';
+/// Backend tag: asynchronous `ParameterStatus`.
+pub const PARAMETER_STATUS_TAG: u8 = b'S';
 
 /// CopyData sub-tag: `XLogData`.
 pub const XLOG_DATA_TAG: u8 = b'w';
@@ -781,8 +785,10 @@ where
                     let bytes = self.stream.buf().split_to(header.body_len()).freeze();
                     return Err(error_from_error_response_frame(&header, &bytes));
                 }
-                NOTICE_RESPONSE_TAG => {
-                    // Drop the notice payload silently.
+                NOTICE_RESPONSE_TAG | NOTIFICATION_RESPONSE_TAG | PARAMETER_STATUS_TAG => {
+                    // These messages are asynchronous and do not answer
+                    // START_REPLICATION. Drop their payloads and keep waiting
+                    // for CopyBothResponse or ErrorResponse.
                     let _ = self.stream.buf().split_to(header.body_len()).freeze();
                 }
                 tag => {
