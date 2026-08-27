@@ -174,6 +174,8 @@ pin_project! {
         stream: CopyOutStream,
         types: Arc<Vec<Type>>,
         header: Option<Header>,
+        // Binary EOF is not clean stream EOF until CopyOut sees CopyDone.
+        trailer_seen: bool,
     }
 }
 
@@ -184,6 +186,7 @@ impl BinaryCopyOutStream {
             stream,
             types: Arc::new(types.to_vec()),
             header: None,
+            trailer_seen: false,
         }
     }
 }
@@ -192,89 +195,109 @@ impl Stream for BinaryCopyOutStream {
     type Item = Result<BinaryCopyOutRow, Error>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.project();
+        let mut this = self.project();
 
-        let chunk = match ready!(this.stream.poll_next(cx)) {
-            Some(Ok(chunk)) => chunk,
-            Some(Err(e)) => return Poll::Ready(Some(Err(e))),
-            None => return Poll::Ready(Some(Err(Error::closed()))),
-        };
-        let mut chunk = Cursor::new(chunk);
-
-        let has_oids = match &this.header {
-            Some(header) => header.has_oids,
-            None => {
-                let header = match parse_binary_copy_header(&mut chunk) {
-                    Ok(header) => header,
-                    Err(e) => return Poll::Ready(Some(Err(e))),
-                };
-                let has_oids = header.has_oids;
-                *this.header = Some(header);
-                has_oids
+        loop {
+            if *this.trailer_seen {
+                match ready!(this.stream.as_mut().poll_next(cx)) {
+                    Some(Ok(chunk)) if chunk.is_empty() => continue,
+                    Some(Ok(chunk)) => {
+                        return Poll::Ready(Some(Err(Error::parse(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "{} bytes of CopyData after the binary COPY trailer",
+                                chunk.len()
+                            ),
+                        )))));
+                    }
+                    Some(Err(error)) => return Poll::Ready(Some(Err(error))),
+                    None => return Poll::Ready(None),
+                }
             }
-        };
 
-        check_remaining(&chunk, 2)?;
-        let raw = chunk.get_i16();
-        if raw == -1 {
+            let chunk = match ready!(this.stream.as_mut().poll_next(cx)) {
+                Some(Ok(chunk)) => chunk,
+                Some(Err(e)) => return Poll::Ready(Some(Err(e))),
+                None => return Poll::Ready(Some(Err(Error::closed()))),
+            };
+            let mut chunk = Cursor::new(chunk);
+
+            let has_oids = match &this.header {
+                Some(header) => header.has_oids,
+                None => {
+                    let header = match parse_binary_copy_header(&mut chunk) {
+                        Ok(header) => header,
+                        Err(e) => return Poll::Ready(Some(Err(e))),
+                    };
+                    let has_oids = header.has_oids;
+                    *this.header = Some(header);
+                    has_oids
+                }
+            };
+
+            check_remaining(&chunk, 2)?;
+            let raw = chunk.get_i16();
+            if raw == -1 {
+                if chunk.has_remaining() {
+                    return Poll::Ready(Some(Err(Error::parse(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "{} trailing bytes after the binary COPY trailer",
+                            chunk.remaining()
+                        ),
+                    )))));
+                }
+                *this.trailer_seen = true;
+                continue;
+            }
+
+            let len = match tuple_field_count(raw, has_oids, this.types.len()) {
+                Ok(len) => len,
+                Err(e) => return Poll::Ready(Some(Err(e))),
+            };
+
+            let mut ranges = vec![];
+            for _ in 0..len {
+                check_remaining(&chunk, 4)?;
+                let len = chunk.get_i32();
+                if len == -1 {
+                    ranges.push(None);
+                } else {
+                    let len = len as usize;
+                    check_remaining(&chunk, len)?;
+                    let start = chunk.position() as usize;
+                    ranges.push(Some(start..start + len));
+                    chunk.advance(len);
+                }
+            }
+
+            // Every byte of a binary tuple is accounted for above, so a conforming
+            // peer leaves NOTHING here: the PostgreSQL protocol's COPY Operations
+            // section binds the backend to "zero or more CopyData messages (always
+            // one per row)" in copy-out mode -- the frontend direction is
+            // explicitly free to frame arbitrarily, this one is not. Whatever is
+            // still in the chunk therefore belongs to tuples that will never be
+            // returned, because the next poll reads the NEXT message. Dropping
+            // them silently hands the caller a SHORT result with no error, which
+            // is the one failure a caller cannot detect. Parsing on instead would
+            // not close it: a peer free to pack two tuples into a message is
+            // equally free to split one across two.
             if chunk.has_remaining() {
                 return Poll::Ready(Some(Err(Error::parse(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(
-                        "{} trailing bytes after the binary COPY trailer",
+                        "{} trailing bytes after a binary COPY tuple",
                         chunk.remaining()
                     ),
                 )))));
             }
-            return Poll::Ready(None);
+
+            return Poll::Ready(Some(Ok(BinaryCopyOutRow {
+                buf: chunk.into_inner(),
+                ranges,
+                types: this.types.clone(),
+            })));
         }
-
-        let len = match tuple_field_count(raw, has_oids, this.types.len()) {
-            Ok(len) => len,
-            Err(e) => return Poll::Ready(Some(Err(e))),
-        };
-
-        let mut ranges = vec![];
-        for _ in 0..len {
-            check_remaining(&chunk, 4)?;
-            let len = chunk.get_i32();
-            if len == -1 {
-                ranges.push(None);
-            } else {
-                let len = len as usize;
-                check_remaining(&chunk, len)?;
-                let start = chunk.position() as usize;
-                ranges.push(Some(start..start + len));
-                chunk.advance(len);
-            }
-        }
-
-        // Every byte of a binary tuple is accounted for above, so a conforming
-        // peer leaves NOTHING here: the PostgreSQL protocol's COPY Operations
-        // section binds the backend to "zero or more CopyData messages (always
-        // one per row)" in copy-out mode -- the frontend direction is
-        // explicitly free to frame arbitrarily, this one is not. Whatever is
-        // still in the chunk therefore belongs to tuples that will never be
-        // returned, because the next poll reads the NEXT message. Dropping
-        // them silently hands the caller a SHORT result with no error, which
-        // is the one failure a caller cannot detect. Parsing on instead would
-        // not close it: a peer free to pack two tuples into a message is
-        // equally free to split one across two.
-        if chunk.has_remaining() {
-            return Poll::Ready(Some(Err(Error::parse(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "{} trailing bytes after a binary COPY tuple",
-                    chunk.remaining()
-                ),
-            )))));
-        }
-
-        Poll::Ready(Some(Ok(BinaryCopyOutRow {
-            buf: chunk.into_inner(),
-            ranges,
-            types: this.types.clone(),
-        })))
     }
 }
 
