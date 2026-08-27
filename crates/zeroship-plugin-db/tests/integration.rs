@@ -11,11 +11,12 @@
 //! compiled default; see `crates/core/src/config/test_overlay.rs`.
 //! Run:
 //! ```text
+//! RUST_MIN_STACK=33554432 \
 //! cargo test -p zeroship-plugin-db --test integration --features test-helpers \
 //!   -- --test-threads=1
 //! ```
 //!
-//! **Both flags are required and each fails differently when omitted.**
+//! **All three are required and each fails differently when omitted.**
 //!
 //! `--features test-helpers` is this target's `required-features`. Without it
 //! cargo does not build the target at all - it FILTERS IT OUT, printing
