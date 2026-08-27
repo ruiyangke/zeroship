@@ -47,8 +47,10 @@
 //!   `START_REPLICATION SLOT ... LOGICAL ...`, waits for
 //!   `CopyBothResponse`, and returns a [`ReplicationStream`].
 //! - [`ReplicationStream::next`] - yields [`ReplicationMessage`]
-//!   (`XLogData` / `PrimaryKeepalive`). The caller drives
-//!   [`ReplicationStream::send_standby_status_update`] periodically.
+//!   (`XLogData` / `PrimaryKeepalive`) and answers a keepalive whose
+//!   `reply_requested` flag is set. The caller drives
+//!   [`ReplicationStream::send_standby_status_update`] periodically for
+//!   durability progress.
 //! - [`pgoutput`] - pure decoder. The stream layer is *agnostic* to
 //!   the logical-decoding plugin; `pgoutput` is just the parser we
 //!   ship because every consumer in zeroship uses it.
@@ -597,6 +599,11 @@ where
         // command goes out, and these floors are properties of the message
         // formats THIS decoder implements, so they are ours to state.
         //
+        if opts.proto_version == 0 {
+            return Err(Error::config(
+                "proto_version 0 is not supported; use proto_version 1 or higher".into(),
+            ));
+        }
         if opts.proto_version > 4 {
             return Err(Error::config(
                 format!(
@@ -874,11 +881,11 @@ pub enum OriginFilter {
 /// The streaming half of a logical-replication connection.
 ///
 /// Yields [`ReplicationMessage`]s (XLogData / PrimaryKeepalive) via
-/// [`next`](Self::next). The caller drives
-/// [`send_standby_status_update`](Self::send_standby_status_update) on
-/// a schedule (every commit + on keepalive `reply_requested=1`) so
-/// the upstream slot's `confirmed_flush_lsn` advances and WAL retention
-/// stays bounded.
+/// [`next`](Self::next). A PrimaryKeepalive with `reply_requested=1` is
+/// answered before it is yielded. The caller also drives
+/// [`send_standby_status_update`](Self::send_standby_status_update) on a
+/// schedule, typically after durable commit processing, so the upstream
+/// slot's `confirmed_flush_lsn` advances and WAL retention stays bounded.
 ///
 /// Note: this struct intentionally does NOT decode pgoutput payloads.
 /// The XLogData's body is handed to the caller verbatim; the caller
@@ -972,8 +979,9 @@ pub enum ReplicationMessage {
         /// pgoutput frame bytes.
         body: bytes::Bytes,
     },
-    /// Periodic keepalive - the server's current `wal_end`, plus a
-    /// flag asking us to reply with a StandbyStatusUpdate right now.
+    /// Periodic keepalive - the server's current `wal_end`, plus whether it
+    /// asked for an immediate StandbyStatusUpdate. When this variant is
+    /// yielded, that requested update has already been sent.
     PrimaryKeepalive {
         wal_end: u64,
         timestamp: i64,
@@ -1122,10 +1130,11 @@ where
                             // body[1..9]   = wal_end (i64)
                             // body[9..17]  = timestamp (i64)
                             // body[17]     = reply_requested (u8)
-                            if body.len() < 18 {
-                                return Err(Error::io(std::io::Error::other(
-                                    "PrimaryKeepalive frame too small",
-                                )));
+                            if body.len() != 18 {
+                                return Err(Error::io(std::io::Error::other(format!(
+                                    "PrimaryKeepalive must be exactly 18 bytes, but the server sent {}",
+                                    body.len()
+                                ))));
                             }
                             let wal_end = u64::from_be_bytes([
                                 body[1], body[2], body[3], body[4], body[5], body[6], body[7],
@@ -1137,6 +1146,20 @@ where
                             ]);
                             let reply_requested = body[17] != 0;
                             self.lsn.observe_received(wal_end);
+                            if reply_requested {
+                                if let Err(error) =
+                                    self.send_standby_status_update_inner(false).await
+                                {
+                                    // The response may have been written only
+                                    // partially, so no later frontend frame can
+                                    // be aligned safely after this failure.
+                                    self.in_flight.poison();
+                                    if let Some(release) = &self.release {
+                                        release.shutdown();
+                                    }
+                                    return Err(error);
+                                }
+                            }
                             return Ok(Some(ReplicationMessage::PrimaryKeepalive {
                                 wal_end,
                                 timestamp,
@@ -1916,6 +1939,11 @@ pub mod pgoutput {
         InvalidUtf8,
         UnknownTag(u8),
         UnknownTupleFormat(u8),
+        /// Bytes remained after a known message's documented field list.
+        TrailingData {
+            message: &'static str,
+            remaining: usize,
+        },
         /// A streaming frame reached the stateless [`decode`], which cannot
         /// track the chunk state the rest of the transaction needs. Use
         /// [`Decoder`].
@@ -1930,6 +1958,9 @@ pub mod pgoutput {
                 DecodeError::UnknownTag(t) => write!(f, "pgoutput: unknown tag 0x{t:02x}"),
                 DecodeError::UnknownTupleFormat(t) => {
                     write!(f, "pgoutput: unknown tuple column format 0x{t:02x}")
+                }
+                DecodeError::TrailingData { message, remaining } => {
+                    write!(f, "pgoutput: {message} has {remaining} trailing byte(s)")
                 }
                 DecodeError::StreamingNeedsDecoder => write!(
                     f,
@@ -1998,6 +2029,31 @@ pub mod pgoutput {
 
     fn read_i64(buf: &mut &[u8]) -> Result<i64, DecodeError> {
         Ok(read_u64(buf)? as i64)
+    }
+
+    const fn message_name(tag: u8) -> &'static str {
+        match tag {
+            b'B' => "Begin",
+            b'C' => "Commit",
+            b'O' => "Origin",
+            b'R' => "Relation",
+            b'Y' => "Type",
+            b'I' => "Insert",
+            b'U' => "Update",
+            b'D' => "Delete",
+            b'T' => "Truncate",
+            b'M' => "Message",
+            b'b' => "BeginPrepare",
+            b'P' => "Prepare",
+            b'K' => "CommitPrepared",
+            b'r' => "RollbackPrepared",
+            b'S' => "StreamStart",
+            b'E' => "StreamStop",
+            b'c' => "StreamCommit",
+            b'A' => "StreamAbort",
+            b'p' => "StreamPrepare",
+            _ => "unknown pgoutput message",
+        }
     }
 
     /// Decode a tuple - a u16 column count followed by per-column
@@ -2338,6 +2394,7 @@ pub mod pgoutput {
                     return Err(DecodeError::UnexpectedEof);
                 }
                 let content = Bytes::copy_from_slice(&cur[..len]);
+                cur = &cur[len..];
                 PgOutputMessage::Message {
                     xid: carried_xid,
                     flags,
@@ -2369,10 +2426,15 @@ pub mod pgoutput {
             b'A' => {
                 let xid = read_u32(&mut cur)?;
                 let subxid = read_u32(&mut cur)?;
-                let (abort_lsn, abort_timestamp) = if cur.is_empty() {
-                    (None, None)
-                } else {
-                    (Some(read_u64(&mut cur)?), Some(read_i64(&mut cur)?))
+                let (abort_lsn, abort_timestamp) = match cur.len() {
+                    0 => (None, None),
+                    16 => (Some(read_u64(&mut cur)?), Some(read_i64(&mut cur)?)),
+                    remaining => {
+                        return Err(DecodeError::TrailingData {
+                            message: message_name(tag),
+                            remaining,
+                        });
+                    }
                 };
                 PgOutputMessage::StreamAbort {
                     xid,
@@ -2383,11 +2445,12 @@ pub mod pgoutput {
             }
             other => return Err(DecodeError::UnknownTag(other)),
         };
-        // We do NOT enforce `cur.is_empty()` - a future pgoutput proto
-        // version may append optional fields, and the docs explicitly
-        // reserve forward-compatibility space. The caller has the data
-        // it needs.
-        let _ = cur; // suppress "value assigned but not read"
+        if !cur.is_empty() {
+            return Err(DecodeError::TrailingData {
+                message: message_name(tag),
+                remaining: cur.len(),
+            });
+        }
         Ok(msg)
     }
 
@@ -3423,6 +3486,90 @@ mod tests {
         }
     }
 
+    /// pgoutput versions are selected explicitly, and each selected version
+    /// defines a complete field list for every message. Bytes after that list
+    /// are unsupported structure, not an extension the decoder may discard.
+    /// Exercise all 19 legal tags so adding an exhaustion check to only the
+    /// common fixed-layout cases cannot print a clean result.
+    #[test]
+    fn every_pgoutput_message_refuses_trailing_bytes_by_name() {
+        fn fixed(tag: u8, body_len: usize) -> Vec<u8> {
+            let mut frame = vec![tag];
+            frame.resize(body_len + 1, 0);
+            frame
+        }
+
+        let mut relation = fixed(b'R', 4);
+        relation.extend_from_slice(b"public\0t\0d\0\0");
+        let mut type_message = fixed(b'Y', 4);
+        type_message.extend_from_slice(b"public\0t\0");
+        let empty_tuple = [0u8, 0];
+        let mut insert = fixed(b'I', 4);
+        insert.push(b'N');
+        insert.extend_from_slice(&empty_tuple);
+        let mut update = fixed(b'U', 4);
+        update.push(b'N');
+        update.extend_from_slice(&empty_tuple);
+        let mut delete = fixed(b'D', 4);
+        delete.push(b'K');
+        delete.extend_from_slice(&empty_tuple);
+        let mut origin = fixed(b'O', 8);
+        origin.extend_from_slice(b"origin\0");
+        let mut message = fixed(b'M', 1 + 8);
+        message.extend_from_slice(b"prefix\0");
+        message.extend_from_slice(&0u32.to_be_bytes());
+        let mut begin_prepare = fixed(b'b', 8 + 8 + 8 + 4);
+        begin_prepare.extend_from_slice(b"g\0");
+        let mut prepare = fixed(b'P', 1 + 8 + 8 + 8 + 4);
+        prepare.extend_from_slice(b"g\0");
+        let mut commit_prepared = fixed(b'K', 1 + 8 + 8 + 8 + 4);
+        commit_prepared.extend_from_slice(b"g\0");
+        let mut rollback_prepared = fixed(b'r', 1 + 8 + 8 + 8 + 8 + 4);
+        rollback_prepared.extend_from_slice(b"g\0");
+        let mut stream_prepare = fixed(b'p', 1 + 8 + 8 + 8 + 4);
+        stream_prepare.extend_from_slice(b"g\0");
+
+        let frames = [
+            ("Begin", fixed(b'B', 8 + 8 + 4)),
+            ("Commit", fixed(b'C', 1 + 8 + 8 + 8)),
+            ("Origin", origin),
+            ("Relation", relation),
+            ("Type", type_message),
+            ("Insert", insert),
+            ("Update", update),
+            ("Delete", delete),
+            ("Truncate", fixed(b'T', 4 + 1)),
+            ("Message", message),
+            ("BeginPrepare", begin_prepare),
+            ("Prepare", prepare),
+            ("CommitPrepared", commit_prepared),
+            ("RollbackPrepared", rollback_prepared),
+            ("StreamStart", fixed(b'S', 4 + 1)),
+            ("StreamStop", fixed(b'E', 0)),
+            ("StreamCommit", fixed(b'c', 4 + 1 + 8 + 8 + 8)),
+            ("StreamAbort", fixed(b'A', 4 + 4)),
+            ("StreamPrepare", stream_prepare),
+        ];
+
+        let mut ruled_on = 0;
+        for (expected_name, mut frame) in frames {
+            pgoutput::Decoder::new()
+                .decode(&frame)
+                .unwrap_or_else(|error| panic!("valid {expected_name} fixture failed: {error}"));
+            frame.push(0xAA);
+            let error = pgoutput::Decoder::new().decode(&frame).unwrap_err();
+            match error {
+                pgoutput::DecodeError::TrailingData { message, remaining } => {
+                    assert_eq!(message, expected_name);
+                    assert_eq!(remaining, 1);
+                }
+                other => panic!("{expected_name} was not refused by name: {other}"),
+            }
+            ruled_on += 1;
+        }
+        assert_eq!(ruled_on, 19, "the complete legal tag set must be ruled on");
+    }
+
     /// A TRUNCATE naming more relations than any fixed cap would allow must
     /// still decode.
     ///
@@ -4025,6 +4172,40 @@ mod tests {
         assert!(retry.is_cancelled(), "the malformed stream was not retired");
     }
 
+    /// PrimaryKeepalive has one fixed 18-byte CopyData body. Accepting a
+    /// suffix silently claims support for fields no replication protocol
+    /// version defines, so the refusal must name the known message.
+    #[compio::test]
+    async fn primary_keepalive_with_a_suffix_is_rejected_by_name() {
+        let mut body = vec![PRIMARY_KEEPALIVE_TAG];
+        body.extend_from_slice(&0x16B_4000u64.to_be_bytes());
+        body.extend_from_slice(&700_000_000_000i64.to_be_bytes());
+        body.push(0);
+        body.push(0xAA);
+
+        let mut wire = vec![COPY_DATA_TAG];
+        wire.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_be_bytes());
+        wire.extend_from_slice(&body);
+
+        let mut stream = stream_over(wire);
+        let error = stream
+            .next()
+            .await
+            .expect_err("PrimaryKeepalive with a suffix was accepted");
+        let chain = std::iter::successors(std::error::Error::source(&error), |source| {
+            std::error::Error::source(*source)
+        })
+        .fold(error.to_string(), |chain, source| {
+            format!("{chain}: {source}")
+        });
+        assert!(
+            chain.contains("PrimaryKeepalive")
+                && chain.contains("exactly 18 bytes")
+                && chain.contains("19"),
+            "the malformed keepalive was not refused by name and size: {chain}"
+        );
+    }
+
     /// An unhandled tag must retire the stream too, because its body was
     /// never consumed.
     ///
@@ -4362,6 +4543,7 @@ mod tests {
     /// declared length 999, wrong sub-tag, write and flush LSNs swapped) and
     /// watching all 177 lib tests stay green.
     struct CapturingPeer {
+        unread: Vec<u8>,
         written: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
     }
 
@@ -4370,8 +4552,12 @@ mod tests {
             &mut self,
             buf: B,
         ) -> compio::buf::BufResult<usize, B> {
-            // Nothing to read: the subject is what the driver sends.
-            compio::buf::BufResult(Ok(0), buf)
+            let mut src: &[u8] = &self.unread;
+            let before = src.len();
+            let result = src.read(buf).await;
+            let consumed = before - src.len();
+            self.unread.drain(..consumed);
+            result
         }
     }
 
@@ -4392,6 +4578,83 @@ mod tests {
         async fn shutdown(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    /// A walsender sets the final byte of PrimaryKeepalive to 1 when it needs
+    /// feedback now. Merely exposing that byte makes every generic consumer
+    /// responsible for a timing-critical protocol obligation and lets an idle
+    /// stream be terminated by `wal_sender_timeout` if the caller overlooks
+    /// it. `next` must answer before returning the informational message.
+    #[compio::test]
+    async fn a_requested_primary_keepalive_is_answered_before_it_is_yielded() {
+        let keepalive = |wal_end: u64, reply_requested: u8| {
+            let mut body = vec![PRIMARY_KEEPALIVE_TAG];
+            body.extend_from_slice(&wal_end.to_be_bytes());
+            body.extend_from_slice(&700_000_000_000i64.to_be_bytes());
+            body.push(reply_requested);
+
+            let mut frame = vec![COPY_DATA_TAG];
+            frame.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_be_bytes());
+            frame.extend_from_slice(&body);
+            frame
+        };
+
+        let start_lsn = 0x16B_3750;
+        let wal_end = 0x16B_4000;
+        let written = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut stream: ReplicationStream<CapturingPeer, CapturingPeer> = ReplicationStream {
+            stream: BufStream::new(MaybeTlsStream::Raw(CapturingPeer {
+                unread: keepalive(wal_end, 1),
+                written: std::rc::Rc::clone(&written),
+            })),
+            lsn: LsnTracker::new(start_lsn),
+            copy_response: Default::default(),
+            in_flight: InFlight::default(),
+            release: None,
+        };
+
+        match stream.next().await.expect("keepalive decodes") {
+            Some(ReplicationMessage::PrimaryKeepalive {
+                wal_end: received,
+                reply_requested,
+                ..
+            }) => {
+                assert_eq!(received, wal_end);
+                assert!(reply_requested);
+            }
+            other => panic!("expected PrimaryKeepalive, got {other:?}"),
+        }
+
+        let frame = written.borrow().clone();
+        assert_eq!(frame.len(), 39, "feedback frame was {frame:02x?}");
+        assert_eq!(frame[0], COPY_DATA_TAG);
+        assert_eq!(frame[5], STANDBY_STATUS_UPDATE_TAG);
+        let lsn = |at: usize| u64::from_be_bytes(frame[at..at + 8].try_into().expect("8 bytes"));
+        assert_eq!(lsn(6), wal_end, "write LSN must include the keepalive");
+        assert_eq!(lsn(14), start_lsn, "keepalive receipt is not a flush");
+        assert_eq!(lsn(22), start_lsn, "keepalive receipt is not an apply");
+        assert_eq!(frame[38], 0, "the response must not request another reply");
+
+        let unsolicited = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut stream: ReplicationStream<CapturingPeer, CapturingPeer> = ReplicationStream {
+            stream: BufStream::new(MaybeTlsStream::Raw(CapturingPeer {
+                unread: keepalive(wal_end, 0),
+                written: std::rc::Rc::clone(&unsolicited),
+            })),
+            lsn: LsnTracker::new(start_lsn),
+            copy_response: Default::default(),
+            in_flight: InFlight::default(),
+            release: None,
+        };
+        stream
+            .next()
+            .await
+            .expect("keepalive decodes")
+            .expect("one keepalive");
+        assert!(
+            unsolicited.borrow().is_empty(),
+            "reply_requested=0 must not cause unsolicited feedback"
+        );
     }
 
     /// The bytes `send_standby_status_update` puts on the wire are the bytes
@@ -4417,6 +4680,7 @@ mod tests {
         let written = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let mut stream: ReplicationStream<CapturingPeer, CapturingPeer> = ReplicationStream {
             stream: BufStream::new(MaybeTlsStream::Raw(CapturingPeer {
+                unread: Vec::new(),
                 written: std::rc::Rc::clone(&written),
             })),
             lsn: LsnTracker::new(0x16B_3750),
@@ -4486,6 +4750,7 @@ mod tests {
         let written = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let mut stream: ReplicationStream<CapturingPeer, CapturingPeer> = ReplicationStream {
             stream: BufStream::new(MaybeTlsStream::Raw(CapturingPeer {
+                unread: Vec::new(),
                 written: std::rc::Rc::clone(&written),
             })),
             lsn: LsnTracker::new(0x16B_3750),

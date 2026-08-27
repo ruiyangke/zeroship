@@ -116,9 +116,9 @@ question rather than gate a change:
 - `docs/runbooks/compio-postgres-cross-version-check.md` - a second server
   version. The runbook exists because a protocol claim measured on one version
   is a claim about that version: 16.14 streams a rolled-back transaction and
-  sends `StreamAbort`, while 18.4 sends nothing at all. Both are green as of
-  2026-08-25, same totals on each; the runbook records the figure and says to
-  re-measure rather than trust it.
+  sends `StreamAbort`, while 18.4 sends no pgoutput messages and keeps the
+  walsender open. Both are green as of 2026-08-26; the runbook records the
+  feedback-timeout trap and says to re-measure rather than trust its totals.
 - `docs/runbooks/compio-postgres-tls-teardown-noise.md` - what this driver
   leaves in a server log when a TLS session ends. Read it before touching
   `release.rs` or `tls_sansio.rs`: the teardown has three separate paths, and
