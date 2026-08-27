@@ -46,6 +46,9 @@
 //! - [`ReplicationConnection::start_logical_replication`] - issues
 //!   `START_REPLICATION SLOT ... LOGICAL ...`, waits for
 //!   `CopyBothResponse`, and returns a [`ReplicationStream`].
+//! - [`ReplicationConnection::cancel_token`] and
+//!   [`ReplicationStream::cancel_token`] - retain BackendKeyData and expose the
+//!   same out-of-band cancellation capability as an ordinary connection.
 //! - [`ReplicationStream::next`] - yields [`ReplicationMessage`]
 //!   (`XLogData` / `PrimaryKeepalive`) and answers a keepalive whose
 //!   `reply_requested` flag is set. The caller drives
@@ -63,7 +66,8 @@
 //!   and `src/backend/replication/pgoutput/pgoutput.c` (decoder).
 
 use crate::buf_stream::BufStream;
-use crate::client::Addr;
+use crate::cancel_token::CancelKey;
+use crate::client::{Addr, SocketConfig};
 use crate::codec::FrontendMessage;
 use crate::config::{Config, ReplicationMode};
 use crate::connect::{
@@ -71,12 +75,12 @@ use crate::connect::{
     with_connect_timeout,
 };
 use crate::connect_socket::connect_socket;
-use crate::connect_tls::negotiate_tls;
+use crate::connect_tls::{Encryption, negotiate_tls};
 use crate::escape::{escape_literal_body, quote_identifier};
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::release::ConnectionRelease;
-use crate::tls::MakeTlsConnect;
-use crate::{Error, Socket};
+use crate::tls::{MakeTlsConnect, ServerVerification};
+use crate::{CancelToken, Error, Socket};
 use bytes::{BufMut, BytesMut};
 use compio::io::{AsyncRead, AsyncWrite};
 use fallible_iterator::FallibleIterator;
@@ -273,6 +277,7 @@ where
         has_hostname,
     )
     .await?;
+    let negotiated = stream.negotiated_encryption();
     if let Some(release) = release.as_mut() {
         crate::tls::TlsStream::configure_release(
             &stream,
@@ -284,7 +289,41 @@ where
     // Run the normal startup + auth handshake - connect_raw_into
     // exposes the post-handshake BufStream that the replication
     // connection then owns.
-    let (stream, parameters) = handshake_replication(stream, cfg).await?;
+    let (stream, process_id, secret_key, parameters) = handshake_replication(stream, cfg).await?;
+    let server_verification = if negotiated == Encryption::Plaintext {
+        ServerVerification::None
+    } else {
+        ServerVerification::demanded_by(cfg.get_ssl_mode(), cfg.get_ssl_root_cert())?
+    };
+
+    let cancel_token = CancelToken {
+        socket_config: Some(SocketConfig {
+            addr: addr.clone(),
+            hostname: hostname.map(str::to_owned),
+            port,
+            connect_timeout: cfg.get_connect_timeout().copied(),
+            tcp_user_timeout: cfg.get_tcp_user_timeout().copied(),
+            keepalive: if cfg.get_keepalives() {
+                Some(cfg.keepalive_config.clone())
+            } else {
+                None
+            },
+            require_peer: cfg.get_require_peer().map(str::to_owned),
+            encryption: negotiated,
+            ssl_sni: cfg.get_ssl_sni(),
+            ssl_cert_mode: cfg.get_ssl_cert_mode(),
+            server_verification,
+        }),
+        encryption: negotiated,
+        ssl_sni: cfg.get_ssl_sni(),
+        ssl_cert_mode: cfg.get_ssl_cert_mode(),
+        server_verification,
+        ssl_mode: cfg.get_ssl_mode(),
+        ssl_negotiation: cfg.get_ssl_negotiation(),
+        process_id,
+        secret_key,
+        pool_lease: None,
+    };
 
     let mut stream = BufStream::new(stream);
     stream.set_read_timeout(cfg.get_read_timeout().copied());
@@ -305,6 +344,7 @@ where
         parameters,
         in_flight: InFlight::default(),
         release,
+        cancel_token,
     })
 }
 
@@ -323,7 +363,15 @@ where
 async fn handshake_replication<S, T>(
     stream: MaybeTlsStream<S, T>,
     config: &Config,
-) -> Result<(MaybeTlsStream<S, T>, HashMap<String, String>), Error>
+) -> Result<
+    (
+        MaybeTlsStream<S, T>,
+        i32,
+        Option<CancelKey>,
+        HashMap<String, String>,
+    ),
+    Error,
+>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     T: crate::tls::TlsStream + Unpin,
@@ -346,6 +394,7 @@ pub struct ReplicationConnection<S, T> {
     /// Standard socket paths retain a synchronous shutdown handle so a
     /// cancelled partial read cannot leave a live walsender behind.
     release: Option<ConnectionRelease>,
+    cancel_token: CancelToken,
 }
 
 /// Records that an I/O call owns the stream, so that a call which never
@@ -423,6 +472,16 @@ where
     /// callers that need to gate on PG version.
     pub fn parameters(&self) -> &HashMap<String, String> {
         &self.parameters
+    }
+
+    /// Returns a token which can cancel an in-progress replication command or
+    /// CopyBoth stream over PostgreSQL's dedicated CancelRequest connection.
+    ///
+    /// The cancellation result is reported on this original connection. During
+    /// CopyBoth, an effective cancel surfaces SQLSTATE `57014` from
+    /// [`ReplicationStream::next`] and retires the ended replication session.
+    pub fn cancel_token(&self) -> CancelToken {
+        self.cancel_token.clone()
     }
 
     /// Issue `IDENTIFY_SYSTEM` - used at start-up to discover the
@@ -709,6 +768,7 @@ where
                         copy_response,
                         in_flight: InFlight::default(),
                         release: self.release,
+                        cancel_token: self.cancel_token,
                     });
                 }
                 ERROR_RESPONSE_TAG => {
@@ -901,6 +961,7 @@ pub struct ReplicationStream<S, T> {
     /// [`ReplicationStream::send_standby_status_update`] is cancel-safe.
     in_flight: InFlight,
     release: Option<ConnectionRelease>,
+    cancel_token: CancelToken,
 }
 
 /// Tracks the two distinct LSN positions a logical-replication client
@@ -994,6 +1055,13 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     T: AsyncRead + AsyncWrite + Unpin,
 {
+    /// Returns a token which sends an out-of-band CancelRequest for this
+    /// CopyBoth session. An effective cancel is returned as SQLSTATE `57014`
+    /// by [`next`](Self::next), after which the stream is retired.
+    pub fn cancel_token(&self) -> CancelToken {
+        self.cancel_token.clone()
+    }
+
     /// The overall format selected by PostgreSQL for the CopyBoth stream.
     pub fn format(&self) -> crate::CopyFormat {
         self.copy_response.format()
@@ -2685,12 +2753,27 @@ pub mod pgoutput {
 mod tests {
     use super::*;
     use crate::NoTls;
-    use crate::config::{SslMode, SslRootCert};
+    use crate::config::{SslCertMode, SslMode, SslNegotiation, SslRootCert};
     use crate::tls::{NoTlsStream, TlsConnect};
     use compio::io::{AsyncReadExt, AsyncWriteExt};
     use pgoutput::{OldTuple, PgOutputMessage, TupleColumn};
     use std::error::Error as _;
     use std::future;
+
+    fn test_cancel_token() -> CancelToken {
+        CancelToken {
+            socket_config: None,
+            encryption: Encryption::Plaintext,
+            ssl_sni: true,
+            ssl_cert_mode: SslCertMode::Allow,
+            server_verification: ServerVerification::None,
+            ssl_mode: SslMode::Disable,
+            ssl_negotiation: SslNegotiation::Postgres,
+            process_id: 0,
+            secret_key: Some(0.into()),
+            pool_lease: None,
+        }
+    }
 
     fn startup_frame(tag: u8, body: &[u8]) -> Vec<u8> {
         let mut frame = Vec::with_capacity(5 + body.len());
@@ -4003,6 +4086,7 @@ mod tests {
             parameters: HashMap::new(),
             in_flight: InFlight::default(),
             release: None,
+            cancel_token: test_cancel_token(),
         }
     }
 
@@ -4137,6 +4221,7 @@ mod tests {
             copy_response: Default::default(),
             in_flight: InFlight::default(),
             release: None,
+            cancel_token: test_cancel_token(),
         }
     }
 
@@ -4447,6 +4532,7 @@ mod tests {
             copy_response: Default::default(),
             in_flight: InFlight::default(),
             release: None,
+            cancel_token: test_cancel_token(),
         }
     }
 
@@ -4799,6 +4885,7 @@ mod tests {
                 copy_response: Default::default(),
                 in_flight: InFlight::default(),
                 release: Some(release),
+                cancel_token: test_cancel_token(),
             },
             server,
         )
@@ -5002,6 +5089,7 @@ mod tests {
             copy_response: Default::default(),
             in_flight: InFlight::default(),
             release: None,
+            cancel_token: test_cancel_token(),
         };
 
         match stream.next().await.expect("keepalive decodes") {
@@ -5036,6 +5124,7 @@ mod tests {
             copy_response: Default::default(),
             in_flight: InFlight::default(),
             release: None,
+            cancel_token: test_cancel_token(),
         };
         stream
             .next()
@@ -5078,6 +5167,7 @@ mod tests {
             copy_response: Default::default(),
             in_flight: InFlight::default(),
             release: None,
+            cancel_token: test_cancel_token(),
         };
 
         // THE THREE LSNs MUST NOT ALL BE EQUAL, or their POSITIONS are not
@@ -5148,6 +5238,7 @@ mod tests {
             copy_response: Default::default(),
             in_flight: InFlight::default(),
             release: None,
+            cancel_token: test_cancel_token(),
         };
         stream
             .send_standby_status_update(false)

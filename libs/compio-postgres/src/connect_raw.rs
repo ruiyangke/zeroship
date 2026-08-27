@@ -854,6 +854,8 @@ pub(crate) async fn handshake_for_replication<S, T>(
 ) -> Result<
     (
         MaybeTlsStream<S, T>,
+        i32,
+        Option<CancelKey>,
         std::collections::HashMap<String, String>,
     ),
     Error,
@@ -872,9 +874,14 @@ where
     startup(&mut handshake, config, &user).await?;
     authenticate(&mut handshake, config, &user).await?;
     check_ssl_cert_mode(config, handshake.stream.get_mut().client_cert_status())?;
-    let (_pid, _key, parameters) = read_info(&mut handshake).await?;
+    let (process_id, secret_key, parameters) = read_info(&mut handshake).await?;
 
-    Ok((handshake.stream.into_inner(), parameters))
+    Ok((
+        handshake.stream.into_inner(),
+        process_id,
+        secret_key,
+        parameters,
+    ))
 }
 
 /// Enforce `sslcertmode=require` only after PostgreSQL authentication succeeds.
