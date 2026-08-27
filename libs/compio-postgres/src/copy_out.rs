@@ -74,7 +74,11 @@ async fn start(
 ) -> Result<(Responses, CopyResponse, CopyModeGuard), ExecutionError> {
     let (mut responses, copy_mode) = client
         .send_copy_statement(
-            query::producerless_request(buf, statement.may_enter_copy_in()),
+            // A malformed or rewritten peer can answer this COPY OUT request
+            // with CopyInResponse. Arm the same connection-owned CopyFail used
+            // by producerless queries so that wrong-way COPY IN is actively
+            // terminated instead of waiting forever for frontend input.
+            query::producerless_request(buf, true),
             statement,
             CopyMode::Out,
         )

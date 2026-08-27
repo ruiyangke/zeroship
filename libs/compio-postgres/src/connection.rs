@@ -190,6 +190,13 @@ enum ReadObligationState {
     Active,
     /// COPY IN entered input mode and PostgreSQL is waiting for caller data.
     PausedForCopyInput,
+    /// COPY OUT began while the opening frontend batch is still flushing.
+    /// The connection-owned COPY IN fallback must not emit its terminal frame,
+    /// but the read deadline cannot start until the flush succeeds.
+    CopyOutputPendingInitialFlush,
+    /// COPY OUT began. PostgreSQL still owes output and command completion,
+    /// while the connection-owned COPY IN fallback is no longer applicable.
+    CopyOutput,
     /// The terminal CopyDone/CopyFail frame is flushing, including Sync when
     /// the protocol requires it; the server does not owe its final response
     /// until that flush succeeds.
@@ -237,8 +244,18 @@ impl ReadObligation {
         let Some(inner) = &self.inner else {
             return;
         };
-        if inner.state.get() == ReadObligationState::PendingInitialFlush {
-            inner.state.set(ReadObligationState::Active);
+        let state = inner.state.get();
+        if matches!(
+            state,
+            ReadObligationState::PendingInitialFlush
+                | ReadObligationState::CopyOutputPendingInitialFlush
+        ) {
+            inner.state.set(match state {
+                ReadObligationState::CopyOutputPendingInitialFlush => {
+                    ReadObligationState::CopyOutput
+                }
+                _ => ReadObligationState::Active,
+            });
             if let Some(deadline) = &inner.deadline {
                 deadline.begin_response();
             }
@@ -269,10 +286,33 @@ impl ReadObligation {
                     deadline.finish_response();
                 }
             }
-            ReadObligationState::PausedForCopyInput | ReadObligationState::Complete => {}
+            ReadObligationState::PausedForCopyInput
+            | ReadObligationState::CopyOutputPendingInitialFlush
+            | ReadObligationState::CopyOutput
+            | ReadObligationState::Complete => {}
             ReadObligationState::PendingCopyTerminalFlush => {
                 debug_assert!(false, "CopyInResponse arrived after COPY terminal data");
             }
+        }
+    }
+
+    fn enter_copy_output(&self) {
+        let Some(inner) = &self.inner else {
+            return;
+        };
+        if !inner.copy_producer {
+            return;
+        }
+        match inner.state.get() {
+            ReadObligationState::PendingInitialFlush => inner
+                .state
+                .set(ReadObligationState::CopyOutputPendingInitialFlush),
+            ReadObligationState::Active => inner.state.set(ReadObligationState::CopyOutput),
+            ReadObligationState::PausedForCopyInput
+            | ReadObligationState::CopyOutputPendingInitialFlush
+            | ReadObligationState::CopyOutput
+            | ReadObligationState::PendingCopyTerminalFlush
+            | ReadObligationState::Complete => {}
         }
     }
 
@@ -310,8 +350,10 @@ impl ReadObligation {
             return;
         };
         let previous = inner.state.replace(ReadObligationState::Complete);
-        if previous == ReadObligationState::Active
-            && let Some(deadline) = &inner.deadline
+        if matches!(
+            previous,
+            ReadObligationState::Active | ReadObligationState::CopyOutput
+        ) && let Some(deadline) = &inner.deadline
         {
             deadline.finish_response();
         }
@@ -321,7 +363,21 @@ impl ReadObligation {
         self.inner.as_ref().is_some_and(|inner| {
             matches!(
                 inner.state.get(),
-                ReadObligationState::PausedForCopyInput | ReadObligationState::Complete
+                ReadObligationState::PausedForCopyInput
+                    | ReadObligationState::CopyOutputPendingInitialFlush
+                    | ReadObligationState::CopyOutput
+                    | ReadObligationState::Complete
+            )
+        })
+    }
+
+    fn copy_producer_finished(&self) -> bool {
+        self.inner.as_ref().is_some_and(|inner| {
+            matches!(
+                inner.state.get(),
+                ReadObligationState::CopyOutputPendingInitialFlush
+                    | ReadObligationState::CopyOutput
+                    | ReadObligationState::Complete
             )
         })
     }
@@ -330,12 +386,6 @@ impl ReadObligation {
         self.inner
             .as_ref()
             .is_some_and(|inner| inner.state.get() == ReadObligationState::PausedForCopyInput)
-    }
-
-    fn is_complete(&self) -> bool {
-        self.inner
-            .as_ref()
-            .is_some_and(|inner| inner.state.get() == ReadObligationState::Complete)
     }
 }
 
@@ -930,7 +980,7 @@ where
                                 // producer cannot proceed until it sees that
                                 // very response.
                                 self.drain_pending_responses().await;
-                                if read_obligation.is_complete() {
+                                if read_obligation.copy_producer_finished() {
                                     return Ok(RequestOutcome::Continue);
                                 }
                             } else if resume_terminal {
@@ -1220,6 +1270,8 @@ impl Dispatch<'_> {
         let request_complete = ready_status.is_some();
         let entered_copy_input = !request_complete
             && messages.contains_tag(postgres_protocol::message::backend::COPY_IN_RESPONSE_TAG);
+        let entered_copy_output = !request_complete
+            && messages.contains_tag(postgres_protocol::message::backend::COPY_OUT_RESPONSE_TAG);
 
         // PostgreSQL sends FATAL/PANIC before closing the socket, and the
         // response consumer can wake and drop its pooled lease before the
@@ -1320,6 +1372,8 @@ impl Dispatch<'_> {
             response.read_obligation.complete();
         } else if entered_copy_input {
             response.read_obligation.pause_for_copy_input();
+        } else if entered_copy_output {
+            response.read_obligation.enter_copy_output();
         }
 
         let (messages, completion_observation) =
@@ -2552,7 +2606,7 @@ where
                 if copy_initial_flushed
                     && copy_read_obligation
                         .as_ref()
-                        .is_some_and(ReadObligation::is_complete)
+                        .is_some_and(ReadObligation::copy_producer_finished)
                 {
                     copy_in = None;
                     copy_in_observation = None;
