@@ -6,7 +6,7 @@ use crate::types::{FromSql, IsNull, ToSql, Type, WrongType};
 use crate::{CopyInSink, CopyOutStream, Error, slice_iter};
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use futures_util::{SinkExt, Stream};
+use futures_util::{Sink, SinkExt, Stream};
 use pin_project_lite::pin_project;
 use postgres_types::BorrowToSql;
 use std::io;
@@ -93,7 +93,7 @@ impl BinaryCopyInWriter {
         }
 
         if this.buf.len() > 4096 {
-            this.sink.send(this.buf.split().freeze()).await?;
+            send_buffered_rows(this.sink.as_mut(), this.buf, checkpoint).await?;
         }
 
         Ok(())
@@ -109,6 +109,29 @@ impl BinaryCopyInWriter {
         this.sink.send(this.buf.split().freeze()).await?;
         this.sink.finish().await
     }
+}
+
+async fn send_buffered_rows<S>(
+    mut sink: Pin<&mut S>,
+    buf: &mut BytesMut,
+    row_start: usize,
+) -> Result<(), S::Error>
+where
+    S: Sink<Bytes>,
+{
+    // Keep rows whose calls already returned `Ok` in `buf` until the sink can
+    // accept their frame. The row which crossed the threshold stays local to
+    // this future, so cancellation while readiness is pending rolls back only
+    // that unfinished call.
+    let row = buf.split_off(row_start);
+    std::future::poll_fn(|cx| sink.as_mut().poll_ready(cx)).await?;
+
+    // No cancellation point separates removing the completed prefix from
+    // transferring the combined frame into the sink. Once `start_send`
+    // succeeds, the sink owns the bytes while `poll_flush` is pending.
+    buf.unsplit(row);
+    sink.as_mut().start_send(buf.split().freeze())?;
+    std::future::poll_fn(|cx| sink.as_mut().poll_flush(cx)).await
 }
 
 /// Append one tuple -- field count, then a four-byte length and its payload per
@@ -436,6 +459,102 @@ impl BinaryCopyOutRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::convert::Infallible;
+    use std::future::Future;
+    use std::task::Waker;
+
+    struct BackpressuredSink {
+        ready: bool,
+        sent: Vec<Bytes>,
+    }
+
+    impl Sink<Bytes> for BackpressuredSink {
+        type Error = Infallible;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            if self.ready {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
+        }
+
+        fn start_send(mut self: Pin<&mut Self>, item: Bytes) -> Result<(), Self::Error> {
+            self.sent.push(item);
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Rows from completed `write_raw` calls stay buffered if the call which
+    /// crosses the flush threshold is cancelled while the COPY sink applies
+    /// backpressure. The in-progress row has no completed result and is rolled
+    /// back, so retrying it cannot duplicate it later.
+    #[test]
+    fn cancelling_a_backpressured_flush_keeps_completed_rows() {
+        const COMPLETED: &[u8] = b"rows whose writes returned Ok";
+        const IN_PROGRESS: &[u8] = b"row whose write is pending";
+
+        let mut buf = BytesMut::from(COMPLETED);
+        let row_start = buf.len();
+        buf.extend_from_slice(IN_PROGRESS);
+        let mut sink = Box::pin(BackpressuredSink {
+            ready: false,
+            sent: Vec::new(),
+        });
+
+        {
+            let mut sending = Box::pin(send_buffered_rows(sink.as_mut(), &mut buf, row_start));
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(
+                sending.as_mut().poll(&mut context).is_pending(),
+                "the control sink did not apply backpressure"
+            );
+        }
+
+        assert_eq!(
+            &buf[..],
+            COMPLETED,
+            "cancelling one write discarded rows whose write_raw calls returned Ok"
+        );
+        assert!(
+            sink.sent.is_empty(),
+            "a sink which never became ready accepted bytes"
+        );
+
+        let row_start = buf.len();
+        buf.extend_from_slice(IN_PROGRESS);
+        sink.as_mut().get_mut().ready = true;
+        {
+            let mut sending = Box::pin(send_buffered_rows(sink.as_mut(), &mut buf, row_start));
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(
+                matches!(sending.as_mut().poll(&mut context), Poll::Ready(Ok(()))),
+                "the control sink did not accept bytes after becoming ready"
+            );
+        }
+
+        let mut expected = COMPLETED.to_vec();
+        expected.extend_from_slice(IN_PROGRESS);
+        assert_eq!(sink.sent, [Bytes::from(expected)]);
+        assert!(buf.is_empty(), "a transferred frame remained buffered");
+    }
 
     /// Build a 19-byte binary-COPY file header: MAGIC + flags (BE i32) +
     /// header-extension-length 0 (BE u32), wrapped in a `Cursor<Bytes>`.
