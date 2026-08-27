@@ -276,6 +276,15 @@ async fn read_prepare_response(
         _ => return Err(Error::unexpected_message()),
     };
 
+    // ParseComplete and the two descriptions prove that PostgreSQL accepted
+    // the Parse/Describe prefix, not that the Sync-terminated exchange
+    // succeeded. A terminal ErrorResponse can follow that valid prefix; keep
+    // the request alive through ReadyForQuery so it owns the prepare result.
+    match responses.next().await? {
+        Message::ReadyForQuery(_) => {}
+        _ => return Err(Error::unexpected_message()),
+    }
+
     let mut parameters = vec![];
     let mut it = parameter_description.parameters();
     while let Some(oid) = it.next().map_err(Error::parse)? {
