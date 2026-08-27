@@ -353,7 +353,7 @@ impl DbService {
     ///
     /// "Neutral" in the design's sense: it holds no connection of its own. It
     /// borrows the service's validated configuration and resolves the calling
-    /// thread's long-lived operator pool when it actually needs one.
+    /// thread's shared operator pool when it actually needs one.
     #[must_use]
     pub fn lifecycle(&self) -> DbLifecycle<'_> {
         DbLifecycle { service: self }
@@ -381,8 +381,8 @@ impl DbLifecycle<'_> {
     /// the same deletion safely.
     ///
     /// The backend selection is the service's, decided once at composition, and
-    /// the pool is this thread's long-lived operator pool. Neither is derived
-    /// per deletion.
+    /// the pool is this thread's shared operator pool. Neither is derived per
+    /// deletion. That pool is not free and is not zero; see the module header.
     ///
     /// It also drops the app's live-metadata entries. That is the ONLY reclaim
     /// path the cache has: every component of an entry's identity is immutable,
