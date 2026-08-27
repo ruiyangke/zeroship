@@ -2441,13 +2441,13 @@ fn session_canonical_payload_byte_pin() {
     // Cross-backend payload-equivalence pin — the SQLite-side
     // analogue to a live-PG byte equivalence assertion.
     //
-    // The PG impl signs via `__zeroship_admin.sign_session`'s
-    // SECURITY DEFINER body, which constructs the canonical payload
-    // as SQL string concatenation:
+    // The payload shape came from the deleted PG
+    // `__zeroship_admin.sign_session` body, which built it as SQL
+    // string concatenation:
     //   actor_kind || '|' || COALESCE(actor_id,'') || '|' ||
     //   COALESCE(pid::TEXT,'') || '|' || encode(nonce,'hex') || '|' ||
     //   expires_at_iso
-    // and HMACs it via `pgcrypto.hmac(payload, key, 'sha256')`.
+    // and HMACd it via `pgcrypto.hmac(payload, key, 'sha256')`.
     //
     // The SQLite impl runs the equivalent helper
     // (`session_minter::canonical_payload` +
@@ -2458,11 +2458,11 @@ fn session_canonical_payload_byte_pin() {
     // If anyone refactors the canonical_payload formula or swaps
     // the HMAC variant, this test fails immediately.
     //
-    // A live-PG byte equivalence test would replace this with a
-    // direct comparison against `__zeroship_admin.sign_session(...)`
-    // output. Per the plan §7 commentary the structural equivalence
-    // is only fully verifiable against a live PG; this test is the
-    // regression catch for the SQLite side.
+    // This was the SQLite half of a cross-backend pair. The PG half
+    // -- a direct comparison against `__zeroship_admin.sign_session(...)`
+    // -- can never be written now: that routine was deleted with the
+    // admin schema on 2026-08-27, and this file is the only remaining
+    // definition of the payload.
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 

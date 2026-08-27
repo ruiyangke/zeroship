@@ -683,7 +683,7 @@ fn nibble(c: u8) -> Result<u8, DbError> {
 
 /// Write one row into `<app>.__zeroship_audit_mask_drift`. The audit
 /// table lives in the per-app schema (PG) / per-app database (SQLite)
-/// alongside `__zeroship_audit_unmask`, not in `__zeroship_admin`.
+/// alongside `__zeroship_audit_unmask`.
 ///
 /// We deliberately do NOT polute the existing `__zeroship_audit_unmask`
 /// table: drift fires periodically and would drown the unmask audit

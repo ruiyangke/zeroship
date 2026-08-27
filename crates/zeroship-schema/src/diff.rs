@@ -326,7 +326,8 @@ pub struct EncryptionMeta {
     /// leak). See `crate::descriptors::EncryptionMode`.
     pub mode: crate::descriptors::EncryptionMode,
     /// Key id selecting the per-platform root from
-    /// `ZEROSHIP_COLUMN_KEY_<KEYID>` / `__zeroship_admin.column_keys`.
+    /// `ZEROSHIP_COLUMN_KEY_<KEYID>` (or a root supplied to the
+    /// process directly).
     /// Defaults to `"default"` when the SDK caller omits the field.
     pub key_id: String,
     /// Wrapped primitive type. The DDL emitter uses `BYTEA`/`BLOB`

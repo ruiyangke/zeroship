@@ -692,8 +692,7 @@ export declare class MaskedValue<T extends string | number | Uint8Array = string
  *
  * - `mode` — defaults to `"randomised"` (fail-safe).
  * - `keyId` — selects the per-platform root key (env var
- *   `ZEROSHIP_COLUMN_KEY_<KEYID>` or `__zeroship_admin.column_keys`).
- *   Defaults to `"default"`.
+ *   `ZEROSHIP_COLUMN_KEY_<KEYID>`). Defaults to `"default"`.
  * - `wraps` — the inner primitive type, ONE OF `t.string()` /
  *   `t.number()` / `t.bytes()` (the `bytes` wrap accepts base64-encoded
  *   string at the JS layer). Defaults to `t.string()`. Other types

@@ -41,9 +41,10 @@ pub struct PostgresBackend {
     url: String,
     /// Per-backend column-key cache. Lazily resolves
     /// `(app_id, key_id) → AeadKey` via the
-    /// `__zeroship_admin.get_column_key` SECURITY DEFINER getter; falls
-    /// back to `ZEROSHIP_COLUMN_KEY_<KEYID>` env vars when the getter
-    /// returns NULL (pre-migration / dev parity). Single-threaded
+    /// `__zeroship_admin.get_column_key` getter; falls back to
+    /// `ZEROSHIP_COLUMN_KEY_<KEYID>` env vars when the getter returns
+    /// NULL or errors -- which is always, since nothing installs it
+    /// (see `crate::encryption::keys`). Single-threaded
     /// (`RefCell` inside `KeyStore`) since every `PostgresBackend` is
     /// owned by a single compio thread.
     key_store: crate::encryption::KeyStore,
@@ -94,10 +95,12 @@ impl PostgresBackend {
     pub fn new(pool: Rc<compio_postgres::Pool>, url: String) -> Self {
         // Wire the column-key store. We clone the `Rc<Pool>`
         // into `KeySource::PgAdminTable` so the `KeyStore`'s
-        // `resolve(...)` method can call the SECURITY DEFINER getter
+        // `resolve(...)` method can attempt the `get_column_key` lookup
         // without re-reaching into `PostgresBackend`. The pool clone is
         // cheap (Rc inc), and the cache is invalidated naturally on
-        // backend drop.
+        // backend drop. Nothing installs that getter any more, so the
+        // lookup always falls through to the local source - see
+        // `crate::encryption::keys`.
         let key_source = crate::context::pg_key_source(pool.clone());
         Self::new_with_key_source(pool, url, key_source)
     }
@@ -1135,19 +1138,24 @@ async fn create_index_with_recovery_audited(
 // ===========================================================================
 //
 // Both impls are unconditional on the PG arm:
-//   * `EncryptedColumn` -- PG-prod key sourcing reads from
-//     `__zeroship_admin.column_keys` via a SECURITY DEFINER getter,
-//     with an env-var fallback for dev parity.
+//   * `EncryptedColumn` -- PG key sourcing attempts
+//     `__zeroship_admin.get_column_key` and falls back to the local
+//     source. The getter has had no installer since the admin schema
+//     was deleted (2026-08-27), so the fallback always wins.
 //   * `Backup` -- the PITR placeholder writes to
-//     `__zeroship_admin.pitr_targets`. Snapshot / restore themselves don't strictly
-//     need the admin schema. The impl is unconditional, but nothing outside
-//     this crate's own tests reaches it.
+//     `__zeroship_admin.pitr_targets`, a table with no installer for
+//     the same reason, so `pitr_replay` now always errors. Snapshot /
+//     restore do not touch it. The impl is unconditional, but nothing
+//     outside this crate reaches it at all, so nothing observes the
+//     failure. Whether PITR gets a real home or is deleted is an open
+//     operator decision.
 
 // Real `EncryptedColumn` body. Delegates to the workspace
 // `crate::encryption::aead` module (mode-dispatch on encrypt; mode-
 // agnostic on decrypt because the wire format carries the nonce). Key
-// resolution goes through `self.key_store` which prefers the
-// SECURITY DEFINER getter and falls back to env-var sourcing.
+// resolution goes through `self.key_store`, which tries the
+// `get_column_key` lookup and falls back to local sourcing (in
+// practice: always the fallback, since nothing installs the getter).
 impl crate::backend::EncryptedColumn for PostgresBackend {
     type KeyHandle = crate::encryption::aead::AeadKey;
 
@@ -1205,7 +1213,11 @@ impl crate::backend::EncryptedColumn for PostgresBackend {
 //
 // Notes:
 //   1. The PITR placeholder writes to the `__zeroship_admin` schema,
-//      provisioned by the auth/bootstrap subtree.
+//      which NO LONGER EXISTS - the auth/bootstrap subtree that
+//      provisioned it was deleted on 2026-08-27. The INSERT below
+//      therefore fails on every database. It is left in place because
+//      picking a new home for PITR targets is a design decision, not a
+//      deletion.
 //   2. `Backup` is admin-tier surface — app code never reaches it. Nor does
 //      anything else: there is no accessor and no consumer, so today the impl
 //      is exercised only by this crate's tests through the trait. Whether the

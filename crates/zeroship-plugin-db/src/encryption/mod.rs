@@ -17,8 +17,10 @@
 //! - [`keys`] — [`KeyStore`] caches `(app_id, key_id) → AeadKey`,
 //!   derived via HKDF-SHA256 from a per-platform root key. Two
 //!   [`KeySource`] variants: env-var lookup (`ZEROSHIP_COLUMN_KEY_<KEYID>`)
-//!   for the SQLite tier and PG dev parity, and the PG-prod source that
-//!   reads `__zeroship_admin.column_keys` via a SECURITY DEFINER getter.
+//!   for the SQLite tier and PG dev parity, and the PG source that
+//!   tries `__zeroship_admin.get_column_key` -- a getter with no
+//!   installer since the admin schema was deleted, so it always falls
+//!   back to the local source.
 //! - [`aad`] — canonical, length-prefixed AAD construction.
 //!   `Randomised` mode binds `(collection, column, row_pk_bytes)`;
 //!   `Deterministic` mode binds `(collection, column)` only.

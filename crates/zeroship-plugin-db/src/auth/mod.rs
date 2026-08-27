@@ -1,98 +1,61 @@
-//! SECURITY DEFINER trust anchor + HMAC-signed session init
-//! for the C1 reactive-query subsystem.
+//! Per-app PostgreSQL role provisioning, plus the shared helpers the
+//! SQLite session minter reuses.
 //!
 //! ## What this module ships
 //!
-//! Per the zeroship-db proposal, the C1 replication-slot owner and
-//! audit-table writer must be a **platform service role** (`__zeroship_platform_role`), not the
-//! per-app role. App roles get USAGE on a privileged admin schema and
-//! EXECUTE on SECURITY DEFINER wrappers — never direct DML on slots,
-//! publications, or audit tables.
+//! One thing: the **per-app PG role**. `bootstrap.rs` composes the role
+//! name, creates the role `NOLOGIN NOREPLICATION` under the
+//! [`APP_ROLE_TEMPLATE`] anchor, scopes its grants to the app's own
+//! schema, and emits the `SET [LOCAL] ROLE` + timeout batch the data
+//! plane runs per transaction. Privilege is carried by the connection's
+//! role - by the PROCESS - and nothing here hands the worker a
+//! capability it can invoke.
 //!
-//! ### Stages
+//! ## What was deleted, and why it is not coming back
 //!
-//! 1. **Admin schema + platform role** (`bootstrap.rs`)
-//!    `__zeroship_admin` schema owned by `__zeroship_platform_role`,
-//!    plus `__zeroship_app_role_template` whose grants per-app roles
-//!    inherit.
+//! An earlier design put a `__zeroship_admin` schema here, owned by a
+//! `__zeroship_platform_role`, holding six tables (`hmac_keys`,
+//! `session_ctx`, `session_nonces`, `column_keys`, `pitr_targets`,
+//! `mask_policies`) and 32 `SECURITY DEFINER` routines, with the
+//! per-app role granted `EXECUTE` on the "safe" ones. On top of it sat
+//! an HMAC session anchor: `sign_session` minted a PID-bound token,
+//! `init_session` verified it and wrote a `session_ctx` row, and
+//! `rotate_session_keys` rolled the secret.
 //!
-//! 2. **SECURITY DEFINER wrappers** (`bootstrap.rs`)
-//!    `__zeroship_admin.ensure_publication_and_slot(app)`,
-//!    `__zeroship_admin.watchdog()`.
+//! All of it is deleted (operator decision, 2026-08-27), not reduced.
+//! The reason is the AGENTS.md invariant "privilege follows the
+//! PROCESS, not the function": a `SECURITY DEFINER` wrapper the worker
+//! can call is reachable by anything that reaches the worker, so it
+//! does not create a boundary - it creates the appearance of one. If
+//! the worker can do it, it is not privileged and belongs in the app's
+//! own schema under ordinary parameterised SQL. If it must be
+//! privileged, it belongs to a service that does not execute creator
+//! code (the migration service, the CDC relay, the control plane) - not
+//! to a routine the worker invokes.
 //!
-//! 3. **HMAC session init** (this file + `session.rs`)
-//!    Per-session token minted by the platform via
-//!    `__zeroship_admin.sign_session(actor_kind, actor_id, pid,
-//!    nonce, expires_at)` — the raw HMAC key never leaves Postgres.
-//!    Verification via `__zeroship_admin.init_session(actor_kind,
-//!    actor_id, signature, nonce, expires_at)`; constant-time HMAC
-//!    compare; nonce replay protection via
-//!    `__zeroship_admin.session_nonces`.
-//!
-//! 4. **Key rotation primitives** (`keys.rs`)
-//!    `__zeroship_admin.hmac_keys (key_id, secret, created_at,
-//!    retired_at)`; `__zeroship_admin.rotate_session_keys()` retires
-//!    `current` to `previous` and inserts a fresh one; verification
-//!    function accepts both within the grace window. The maintenance
-//!    cron that drives daily rotation is **deferred** (Rust primitives
-//!    shipped, scheduling is the control plane's job).
-//!
-//! ## Bootstrap ceremony
-//!
-//! The very first HMAC secret is generated **inside Postgres** by
-//! `pgcrypto.gen_random_bytes(32)` during the bootstrap function. The
-//! raw bytes never cross the wire. The platform asks the DB to sign
-//! tokens via `__zeroship_admin.sign_session` over a privileged
-//! connection (the runtime maintains a separate "platform pool" — see
-//! `crates/plugin-db/src/auth/session.rs`).
-//!
-//! This sidesteps the "where does the first secret come from?"
-//! problem entirely: the secret lives in the DB from the moment the
-//! cluster is bootstrapped; an env-var bootstrap is unnecessary.
-//!
-//! The original `--harden` CLI flag in the proposal is one possible
-//! runtime opt-in for the control-plane wire-up; it is NOT a
-//! compile-time gate on this subtree.
+//! Concretely: slot and publication ownership belongs to the CDC relay,
+//! and the runtime descriptor - not a platform-owned schema epoch - is
+//! the schema authority.
 
 // `util` owns the helpers — TTL default, getrandom fallback, ISO
-// timestamp formatter, hex codec — used by the test-only
-// session-minter surface. The runtime build does not expose session
-// minting today, so keep the helpers behind the same gate.
+// timestamp formatter, hex codec — used by the SQLite session-minter
+// surface. That surface is test-only today, so keep the helpers behind
+// the same gate.
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod util;
 
-// The PG-side `bootstrap` / `keys` / `session` modules speak SECURITY
-// DEFINER + `compio_postgres` and aren't reachable from the SQLite arm.
+// Per-app PG role provisioning. Always compiled: the data plane's
+// `SET LOCAL ROLE` batch comes from here on every transaction.
 pub mod bootstrap;
-#[cfg(any(test, feature = "test-helpers"))]
-pub mod keys;
-#[cfg(any(test, feature = "test-helpers"))]
-pub mod session;
 
-#[cfg(feature = "test-helpers")]
-pub use bootstrap::{ensure_admin_schema, BootstrapOutcome};
-#[cfg(feature = "test-helpers")]
-pub use keys::{rotate_session_keys, RotationOutcome};
-#[cfg(feature = "test-helpers")]
-pub use session::{init_session, mint_session_token, MintedToken, SessionInit};
-
-// Re-export the schema/role names so other modules (replication.rs,
-// the runtime control plane) can address them without stringly-typed
-// literals duplicated across the codebase.
-
-/// The privileged schema that owns every C1 platform object.
-#[cfg(any(test, feature = "test-helpers"))]
-pub const ADMIN_SCHEMA: &str = "__zeroship_admin";
-
-/// The platform service role — owns the admin schema, replication
-/// slots, publications. Workers running the WAL consumer connect under
-/// this role; app code does not.
-#[cfg(any(test, feature = "test-helpers"))]
-pub const PLATFORM_ROLE: &str = "__zeroship_platform_role";
-
-/// A template role that per-app roles inherit grants from. Provides
-/// USAGE on `__zeroship_admin` + EXECUTE on the safe-to-call wrapper
-/// functions. Per-app roles (`app_<id>_role`) are created downstream
-/// by the control plane during app provisioning — they're outside
-/// this module's scope.
+/// A template role that per-app roles inherit membership from. Per-app
+/// roles (`app_<id>_role`) are created by
+/// [`bootstrap::ensure_per_app_role`], which also creates this anchor
+/// on first use.
+///
+/// It carries no grants of its own. It exists so a cluster-wide audit
+/// reads one membership edge per app rather than N unrelated roles;
+/// nothing is granted THROUGH it, and in particular there is no
+/// `EXECUTE` on any privileged routine to inherit - there are no
+/// privileged routines left.
 pub const APP_ROLE_TEMPLATE: &str = "__zeroship_app_role_template";

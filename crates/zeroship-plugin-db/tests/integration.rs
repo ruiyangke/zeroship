@@ -2977,29 +2977,24 @@ async fn p8a2_consumer_publishes_wal_event_to_broker() {
 }
 
 // ===========================================================================
-// SECURITY DEFINER trust anchor + HMAC-signed session init.
+// Per-app role privilege floor.
 //
-// These tests verify the hardened C1 path:
+// One test survives here. The rest of this section tested the
+// `__zeroship_admin` schema, its HMAC session anchor and its SECURITY
+// DEFINER wrappers, all deleted on 2026-08-27 (see `crate::auth`);
+// those tests were deleted with their subject rather than weakened.
 //
-// 1. After `auth::ensure_admin_schema(pool)` runs, the cluster has
-//    `__zeroship_admin` schema, `__zeroship_platform_role`,
-//    HMAC keys table, nonces table, and every SECURITY DEFINER
-//    wrapper.
+// What is still asserted: a role created NOREPLICATION cannot create a
+// logical replication slot. That is the floor `ensure_per_app_role`
+// builds on -- it is the reason the per-app role spells NOREPLICATION
+// explicitly, and the reason slot ownership can never sit with a role
+// the worker connects as.
 //
-// 2. A bare per-app role cannot:
-//      - call `pg_create_logical_replication_slot()` directly
-//        (no REPLICATION attribute)
-//      - SELECT from `__zeroship_admin.hmac_keys` (no privilege)
-//
-// 3. A per-app role granted membership in
-//    `__zeroship_app_role_template` CAN call
-//    `__zeroship_admin.init_session(...)` when presented with a
-//    correctly minted token.
-//
-// 4. Replay nonces are rejected.
-// 5. Expired tokens are rejected.
-// 6. Key rotation grace window keeps tokens minted under the
-//    previous key valid for 24h.
+// What it does NOT catch: it builds its own role by hand rather than
+// calling `ensure_per_app_role`, so a regression that DROPPED
+// NOREPLICATION from that function would leave this green. The
+// source-level guard for that is
+// `auth::bootstrap::tests::create_role_attrs_assert_noreplication`.
 // ===========================================================================
 
 /// Drop a test role if it exists. Tolerates `does not exist`.
@@ -3034,68 +3029,9 @@ fn role_url(role: &str, password: &str) -> String {
 }
 
 #[compio::test]
-async fn b8c_bootstrap_is_idempotent_and_creates_objects() {
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-
-    let first = zeroship_plugin_db::auth::ensure_admin_schema(&pool)
-        .await
-        .unwrap();
-    // Either we just created everything OR a prior test run did.
-    // What matters is the second call must be a no-op for the *_table
-    // flags.
-    let second = zeroship_plugin_db::auth::ensure_admin_schema(&pool)
-        .await
-        .unwrap();
-    assert!(!second.created_admin_schema);
-    assert!(!second.created_hmac_keys_table);
-    assert!(!second.created_nonces_table);
-    assert!(!second.created_session_ctx_table);
-    assert!(!second.created_pitr_targets_table);
-    assert!(!second.created_platform_role);
-    assert!(!second.created_app_role_template);
-    assert!(!second.minted_initial_hmac_key);
-
-    // After bootstrap, the admin schema exists and is owned by the
-    // platform role.
-    let rows = pool
-        .query_text_params(
-            "SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = $1",
-            &["__zeroship_admin"],
-        )
-        .await
-        .unwrap();
-    let owner: String = rows
-        .first()
-        .map(|r| r.get::<_, String>("owner"))
-        .unwrap_or_default();
-    assert_eq!(owner, "__zeroship_platform_role");
-
-    // An initial HMAC key was minted at first bootstrap OR is already
-    // present from a previous run.
-    let current = zeroship_plugin_db::auth::keys::current_key_id(&pool)
-        .await
-        .unwrap();
-    assert!(
-        current.is_some(),
-        "expected an active HMAC key after bootstrap"
-    );
-    // Use `first` as the indicator of whether THIS run minted: if
-    // first.minted_initial_hmac_key was false, a previous run left a
-    // key; either is OK.
-    let _ = first;
-    release_pg(pool).await;
-}
-
-#[compio::test]
 async fn b8c_per_app_role_cannot_create_slot_directly() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-
-    // Make sure the admin objects exist (idempotent).
-    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
-        .await
-        .unwrap();
 
     let role = "b8c_no_repl_role";
     let pw = "b8c_pw_no_repl";
@@ -3144,463 +3080,6 @@ async fn b8c_per_app_role_cannot_create_slot_directly() {
     release_pg(pool).await;
 }
 
-#[compio::test]
-async fn b8c_per_app_role_cannot_read_hmac_keys() {
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
-        .await
-        .unwrap();
-
-    let role = "b8c_no_hmac_role";
-    let pw = "b8c_pw_no_hmac";
-    b8c_drop_role(&pool, role).await;
-    pool.execute(
-        &format!(r#"CREATE ROLE "{role}" LOGIN PASSWORD '{pw}' NOREPLICATION"#),
-        &[],
-    )
-    .await
-    .unwrap();
-    pool.execute(
-        &format!(r#"GRANT "__zeroship_app_role_template" TO "{role}""#),
-        &[],
-    )
-    .await
-    .unwrap();
-
-    let role_url = role_url(role, pw);
-    let role_pool = match Pool::connect(&role_url, 1).await {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!(
-                "Skipping b8c_per_app_role_cannot_read_hmac_keys — \
-                 cannot connect as test role: {e}"
-            );
-            b8c_drop_role(&pool, role).await;
-            return release_pg(pool).await;
-        }
-    };
-
-    // SELECT on the HMAC keys table must be denied — even with USAGE
-    // on the schema and EXECUTE on init_session.
-    let res = role_pool
-        .query_text_params("SELECT key_id FROM __zeroship_admin.hmac_keys", &[])
-        .await;
-    assert!(res.is_err(), "per-app role must NOT read hmac_keys");
-    let err = err_chain(&res.unwrap_err());
-    assert!(
-        err.contains("permission denied") || err.contains("acl"),
-        "expected permission-denied on hmac_keys, got: {err}"
-    );
-
-    drop(role_pool);
-    b8c_drop_role(&pool, role).await;
-    release_pg(pool).await;
-}
-
-#[compio::test]
-async fn b8c_per_app_role_can_init_session_via_function() {
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
-        .await
-        .unwrap();
-
-    // We mint+init under the superuser pool (which is granted into
-    // __zeroship_platform_role via the next two statements).
-    // `mint_session_token` needs EXECUTE on sign_session; the postgres
-    // superuser bypasses ACL checks, so this works.
-    let client = pool.get().await.unwrap();
-    let token = zeroship_plugin_db::auth::mint_session_token(
-        &client,
-        zeroship_plugin_db::auth::SessionInit {
-            app_id: "b8c_init_app".into(),
-            actor_kind: "platform".into(),
-            actor_id: None,
-        },
-        Some(60),
-    )
-    .await
-    .unwrap();
-    zeroship_plugin_db::auth::init_session(&client, &token)
-        .await
-        .unwrap();
-
-    // The session_ctx row exists for our PID.
-    let rows = client
-        .query_text_params(
-            "SELECT app_id, actor_kind FROM __zeroship_admin.session_ctx WHERE pid = pg_backend_pid()",
-            &[],
-        )
-        .await
-        .unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].get::<_, String>("app_id"), "b8c_init_app");
-    assert_eq!(rows[0].get::<_, String>("actor_kind"), "platform");
-    drop(client);
-    release_pg(pool).await;
-}
-
-#[compio::test]
-async fn b8c_init_session_rejects_expired_token() {
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
-        .await
-        .unwrap();
-
-    let client = pool.get().await.unwrap();
-    // TTL = -1 means expires_at is in the past.
-    let res = zeroship_plugin_db::auth::mint_session_token(
-        &client,
-        zeroship_plugin_db::auth::SessionInit {
-            app_id: "b8c_expired_app".into(),
-            actor_kind: "platform".into(),
-            actor_id: None,
-        },
-        Some(-1),
-    )
-    .await
-    .unwrap();
-    let result = zeroship_plugin_db::auth::init_session(&client, &res).await;
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    let body = err.to_string();
-    assert!(
-        body.contains("expired"),
-        "expected 'expired' in error, got: {body}"
-    );
-    // The SQL function raises P0001 with the
-    // structured "signature expired" message; init_session promotes it
-    // to a ValidationFailed with a stable `.code`.
-    match err {
-        zeroship_plugin_db::error::DbError::ValidationFailed { code, .. } => {
-            assert_eq!(code, "session_signature_expired");
-        }
-        other => panic!("expected ValidationFailed, got: {other:?}"),
-    }
-    drop(client);
-    release_pg(pool).await;
-}
-
-#[compio::test]
-async fn b8c_init_session_rejects_replay_nonce() {
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
-        .await
-        .unwrap();
-
-    let client = pool.get().await.unwrap();
-    let token = zeroship_plugin_db::auth::mint_session_token(
-        &client,
-        zeroship_plugin_db::auth::SessionInit {
-            app_id: "b8c_replay_app".into(),
-            actor_kind: "platform".into(),
-            actor_id: None,
-        },
-        Some(60),
-    )
-    .await
-    .unwrap();
-    // First init succeeds.
-    zeroship_plugin_db::auth::init_session(&client, &token)
-        .await
-        .unwrap();
-    // Second init with the SAME nonce must fail.
-    let result = zeroship_plugin_db::auth::init_session(&client, &token).await;
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    let body = err.to_string();
-    assert!(
-        body.contains("replay"),
-        "expected 'replay' in error, got: {body}"
-    );
-    // init_session promotes the nonce-replay
-    // SQL refusal to a ValidationFailed with a stable `.code`.
-    match err {
-        zeroship_plugin_db::error::DbError::ValidationFailed { code, .. } => {
-            assert_eq!(code, "session_nonce_replay");
-        }
-        other => panic!("expected ValidationFailed, got: {other:?}"),
-    }
-    drop(client);
-    release_pg(pool).await;
-}
-
-#[compio::test]
-async fn b8c_init_session_rejects_tampered_signature() {
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
-        .await
-        .unwrap();
-
-    let client = pool.get().await.unwrap();
-    let mut token = zeroship_plugin_db::auth::mint_session_token(
-        &client,
-        zeroship_plugin_db::auth::SessionInit {
-            app_id: "b8c_tamper_app".into(),
-            actor_kind: "platform".into(),
-            actor_id: None,
-        },
-        Some(60),
-    )
-    .await
-    .unwrap();
-    // Flip a byte in the signature.
-    token.signature[0] ^= 0xFF;
-    let result = zeroship_plugin_db::auth::init_session(&client, &token).await;
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    let body = err.to_string();
-    assert!(
-        body.contains("invalid signature") || body.contains("invalid"),
-        "expected invalid-signature error, got: {body}"
-    );
-    // Tampered signatures surface a stable
-    // ValidationFailed code so the SDK can branch without substring
-    // matching.
-    match err {
-        zeroship_plugin_db::error::DbError::ValidationFailed { code, .. } => {
-            assert_eq!(code, "session_invalid_signature");
-        }
-        other => panic!("expected ValidationFailed, got: {other:?}"),
-    }
-    drop(client);
-    release_pg(pool).await;
-}
-
-#[compio::test]
-async fn b8c_key_rotation_grace_window_accepts_both() {
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
-        .await
-        .unwrap();
-
-    // Capture the current key id; mint a token under it.
-    let key_before = zeroship_plugin_db::auth::keys::current_key_id(&pool)
-        .await
-        .unwrap()
-        .expect("must have a current key after bootstrap");
-
-    let client_a = pool.get().await.unwrap();
-    let token_under_previous = zeroship_plugin_db::auth::mint_session_token(
-        &client_a,
-        zeroship_plugin_db::auth::SessionInit {
-            app_id: "b8c_rot_app".into(),
-            actor_kind: "platform".into(),
-            actor_id: None,
-        },
-        Some(300),
-    )
-    .await
-    .unwrap();
-    drop(client_a);
-
-    // Rotate.
-    let rot = zeroship_plugin_db::auth::keys::rotate_session_keys(&pool)
-        .await
-        .unwrap();
-    assert_eq!(rot.previous_key_id, Some(key_before));
-    assert_ne!(rot.new_key_id, key_before);
-
-    // The token minted under the previous key is still accepted
-    // because verify_signature iterates every key whose retired_at
-    // is inside the 24h grace window. Use a NEW connection — the
-    // signature is bound to the minting backend PID, so we present
-    // the token on the same connection it was minted on. Since
-    // client_a was dropped, mint a fresh token on client_b under the
-    // NEW key for the "current key still works after rotation"
-    // direction.
-    let client_b = pool.get().await.unwrap();
-    let token_under_current = zeroship_plugin_db::auth::mint_session_token(
-        &client_b,
-        zeroship_plugin_db::auth::SessionInit {
-            app_id: "b8c_rot_app".into(),
-            actor_kind: "platform".into(),
-            actor_id: None,
-        },
-        Some(300),
-    )
-    .await
-    .unwrap();
-    zeroship_plugin_db::auth::init_session(&client_b, &token_under_current)
-        .await
-        .unwrap();
-
-    // Direction (b): tokens whose signature was generated under
-    // `key_before` (now in grace window) must still verify.
-    //
-    // BUT: the token's signature is bound to a specific
-    // pg_backend_pid(), so we need a separate test where we re-use
-    // the same connection across rotation. Because client_a went
-    // back to the pool when dropped — and may or may not be the
-    // SAME backend client_b is using — we re-mint under previous to
-    // get an authoritative signal.
-    //
-    // We do this by:
-    //   1. Going back to the previous key (we just rotated; the
-    //      previously-current is now retired but still in-grace).
-    //   2. Manually computing a signature would re-implement HMAC in
-    //      Rust; instead the most-honest thing is to verify the
-    //      grace window via the `verify_signature` function call
-    //      directly.
-    let verify_rows = client_b
-        .query_text_params(
-            r#"SELECT __zeroship_admin.verify_signature(
-                  $1::text, $2::text, pg_backend_pid(),
-                  decode($3, 'hex'),
-                  $4::timestamptz,
-                  decode($5, 'hex')
-               ) AS ok"#,
-            &[
-                &token_under_current.actor_kind,
-                &token_under_current.actor_id.clone().unwrap_or_default(),
-                &hex(&token_under_current.nonce),
-                &token_under_current.expires_at_iso,
-                &hex(&token_under_current.signature),
-            ],
-        )
-        .await
-        .unwrap();
-    let ok: bool = verify_rows
-        .first()
-        .map(|r| r.get::<_, bool>("ok"))
-        .unwrap_or(false);
-    assert!(
-        ok,
-        "verify_signature must accept the freshly-minted token under \
-         the new current key"
-    );
-
-    // Now check that ALSO a hand-rolled "previous key" verification
-    // works: we ask verify_signature to validate a payload signed
-    // by `sign_session` BEFORE rotation. Since sign_session always
-    // uses the *current* key (newest unretired), we instead test
-    // grace via a manual INSERT: rotate again to get a key in the
-    // retired pool, mint under the new current, then verify against
-    // both.
-    let _ = token_under_previous;
-    drop(client_b);
-    release_pg(pool).await;
-}
-
-#[compio::test]
-async fn b8c_per_app_role_can_call_init_session_via_grant() {
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
-        .await
-        .unwrap();
-
-    let role = "b8c_grant_role";
-    let pw = "b8c_pw_grant";
-    b8c_drop_role(&pool, role).await;
-    pool.execute(
-        &format!(r#"CREATE ROLE "{role}" LOGIN PASSWORD '{pw}' NOREPLICATION INHERIT"#),
-        &[],
-    )
-    .await
-    .unwrap();
-    pool.execute(
-        &format!(r#"GRANT "__zeroship_app_role_template" TO "{role}""#),
-        &[],
-    )
-    .await
-    .unwrap();
-    // The per-app role needs EXECUTE on sign_session to mint its own
-    // token — in production, the platform mints and hands the signed
-    // bytes to the worker. For this test we grant it directly.
-    //
-    // We do NOT grant verify_signature — proves verification is
-    // mediated only by init_session.
-    pool.execute(
-        &format!(
-            r#"GRANT EXECUTE ON FUNCTION
-               __zeroship_admin.sign_session(TEXT,TEXT,INTEGER,BYTEA,TIMESTAMPTZ)
-               TO "{role}""#
-        ),
-        &[],
-    )
-    .await
-    .unwrap();
-
-    let r_url = role_url(role, pw);
-    let role_pool = match Pool::connect(&r_url, 1).await {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!(
-                "Skipping b8c_per_app_role_can_call_init_session_via_grant — \
-                 cannot connect as test role: {e}"
-            );
-            b8c_drop_role(&pool, role).await;
-            return release_pg(pool).await;
-        }
-    };
-    let rc = role_pool.get().await.unwrap();
-    let token = zeroship_plugin_db::auth::mint_session_token(
-        &rc,
-        zeroship_plugin_db::auth::SessionInit {
-            app_id: "b8c_grant_app".into(),
-            actor_kind: "user".into(),
-            actor_id: Some("u_alice".into()),
-        },
-        Some(60),
-    )
-    .await
-    .unwrap();
-    zeroship_plugin_db::auth::init_session(&rc, &token)
-        .await
-        .unwrap();
-
-    // The per-app role itself cannot SELECT from session_ctx (that's
-    // the point — only SECURITY DEFINER functions touch it). We
-    // verify the row from the superuser pool instead. Look up by the
-    // backend PID we know is the per-app role's.
-    let pid_rows = rc
-        .query_text_params("SELECT pg_backend_pid()::text AS pid", &[])
-        .await
-        .unwrap();
-    let pid_str: String = pid_rows[0].get("pid");
-    let pid: i32 = pid_str.parse().unwrap();
-
-    // Direct SELECT must fail (proves the function-mediated boundary).
-    let direct = rc
-        .query_text_params(
-            "SELECT actor_kind FROM __zeroship_admin.session_ctx
-             WHERE pid = pg_backend_pid()",
-            &[],
-        )
-        .await;
-    assert!(
-        direct.is_err(),
-        "per-app role must NOT have SELECT on session_ctx (function gating)"
-    );
-
-    // Use the superuser pool to read the row by its known PID. This
-    // proves init_session DID write the row — just not visibly to
-    // the app role.
-    let rows = pool
-        .query_text_params(
-            &format!(
-                "SELECT actor_kind, actor_id FROM __zeroship_admin.session_ctx WHERE pid = {pid}"
-            ),
-            &[],
-        )
-        .await
-        .unwrap();
-    assert_eq!(rows.len(), 1, "session_ctx row missing for pid {pid}");
-    assert_eq!(rows[0].get::<_, String>("actor_kind"), "user");
-    assert_eq!(rows[0].get::<_, String>("actor_id"), "u_alice");
-
-    drop(rc);
-    drop(role_pool);
-    b8c_drop_role(&pool, role).await;
-    release_pg(pool).await;
-}
-
 // -----------------------------------------------------------------------
 // The additive `p_pid` SECURITY DEFINER parameter + SessionMinter
 // trait impl on PostgresBackend.
@@ -3618,295 +3097,6 @@ async fn b8c_per_app_role_can_call_init_session_via_grant() {
 //     mint-time PID explicitly. Without `p_pid` this would fail with
 //     `session_invalid_signature`; with it, init succeeds.
 // -----------------------------------------------------------------------
-
-#[compio::test]
-async fn b8c_init_session_p_pid_null_uses_pg_backend_pid() {
-    // p_pid = NULL path: the existing free fn `init_session` passes
-    // None implicitly via `init_session_with_pid(.., None)`, which
-    // renders an empty string for $7 and the SQL's
-    // `NULLIF($7, '')::integer` produces a true NULL → the SECURITY
-    // DEFINER's `COALESCE(p_pid, pg_backend_pid())` falls through to
-    // `pg_backend_pid()`. Byte-for-byte the legacy 6-arg behaviour
-    // every b8c_* test above already pins.
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
-        .await
-        .unwrap();
-
-    let client = pool.get().await.unwrap();
-    let token = zeroship_plugin_db::auth::mint_session_token(
-        &client,
-        zeroship_plugin_db::auth::SessionInit {
-            app_id: "b8c_p_pid_null_app".into(),
-            actor_kind: "platform".into(),
-            actor_id: None,
-        },
-        Some(60),
-    )
-    .await
-    .unwrap();
-
-    // Legacy free-fn `init_session` → passes p_pid = NULL → SECURITY
-    // DEFINER uses pg_backend_pid() (= token.backend_pid because mint
-    // + init share the same Client). Must succeed.
-    zeroship_plugin_db::auth::init_session(&client, &token)
-        .await
-        .unwrap();
-
-    // session_ctx row exists keyed by the current pid.
-    let rows = client
-        .query_text_params(
-            "SELECT app_id FROM __zeroship_admin.session_ctx
-             WHERE pid = pg_backend_pid()",
-            &[],
-        )
-        .await
-        .unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].get::<_, String>("app_id"), "b8c_p_pid_null_app");
-    drop(client);
-    release_pg(pool).await;
-}
-
-#[compio::test]
-async fn b8c_session_minter_trait_init_succeeds_on_different_pool_client() {
-    // p_pid = Some(token.backend_pid) path: the `SessionMinter` trait
-    // impl on `PostgresBackend` acquires a fresh pool client for
-    // each method call. Mint runs on client A (pg_backend_pid = pid_A);
-    // init runs on client B (pg_backend_pid = pid_B ≠ pid_A in
-    // general). The impl passes `Some(token.backend_pid = pid_A)` so
-    // the SECURITY DEFINER's HMAC verification reproduces the
-    // mint-time payload even though the current backend's PID differs.
-    //
-    // Without the additive `p_pid` parameter, the SECURITY DEFINER
-    // would derive the payload using `pg_backend_pid() = pid_B`,
-    // signature verify would fail, and this test would error with
-    // `session_invalid_signature`.
-    use zeroship_plugin_db::backend::{PostgresBackend, SessionInit as BeSessionInit, SessionMinter};
-
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
-        .await
-        .unwrap();
-
-    // Sweep stale rows from prior runs — `session_ctx` is keyed by
-    // pg_backend_pid() and accumulates across the test process; we
-    // assert by app_id below, which would otherwise count old rows.
-    pool.execute(
-        "DELETE FROM __zeroship_admin.session_ctx WHERE app_id = $1",
-        &[&"b8c_minter_app"],
-    )
-    .await
-    .unwrap();
-
-    let backend = PostgresBackend::new(pool.clone(), url.clone());
-
-    // Mint → acquires pool client A internally.
-    let token = SessionMinter::mint_session_token(
-        &backend,
-        BeSessionInit {
-            app_id: "b8c_minter_app".into(),
-            actor_kind: "platform".into(),
-            actor_id: None,
-            pid: None,
-        },
-        Some(60),
-    )
-    .await
-    .unwrap();
-
-    // Init → acquires pool client B internally. The mint client was
-    // dropped at the end of `mint_session_token`, so the pool may or
-    // may not hand us the same backend — either way the impl passes
-    // `Some(token.backend_pid)` as p_pid, so HMAC verifies correctly.
-    SessionMinter::init_session(&backend, &token).await.unwrap();
-
-    // Confirm: the session_ctx row was written keyed by the INIT-time
-    // backend pid (= the impl's pool-client-B pid), not by
-    // `token.backend_pid` — see the SECURITY DEFINER body's
-    // `INSERT INTO session_ctx ... (pid = pg_backend_pid())` line; the
-    // p_pid override applies ONLY to HMAC verification.
-    let probe = pool.get().await.unwrap();
-    let rows = probe
-        .query_text_params(
-            "SELECT app_id FROM __zeroship_admin.session_ctx
-             WHERE app_id = $1",
-            &["b8c_minter_app"],
-        )
-        .await
-        .unwrap();
-    assert!(
-        !rows.is_empty(),
-        "session_ctx row must be written for the trait-routed init (got 0 rows)"
-    );
-    assert_eq!(rows[0].get::<_, String>("app_id"), "b8c_minter_app");
-    drop(probe);
-    drop(backend);
-    release_pg(pool).await;
-}
-
-#[compio::test]
-async fn b8c_session_minter_trait_rejects_tampered_signature() {
-    // Defensive: even on the `p_pid` path, the SECURITY DEFINER
-    // must still reject a tampered signature with the typed
-    // `session_invalid_signature` ValidationFailed code. Ensures the
-    // additive change didn't accidentally weaken the
-    // cryptographic verifier -- only the PID-source-of-truth changed.
-    use zeroship_plugin_db::backend::{PostgresBackend, SessionInit as BeSessionInit, SessionMinter};
-
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
-        .await
-        .unwrap();
-
-    let backend = PostgresBackend::new(pool.clone(), url.clone());
-
-    let mut token = SessionMinter::mint_session_token(
-        &backend,
-        BeSessionInit {
-            app_id: "b8c_minter_tamper_app".into(),
-            actor_kind: "platform".into(),
-            actor_id: None,
-            pid: None,
-        },
-        Some(60),
-    )
-    .await
-    .unwrap();
-
-    // Flip a signature byte. The SECURITY DEFINER's HMAC verify must
-    // reject — even though we're on the new `p_pid` path.
-    assert!(!token.signature.is_empty());
-    token.signature[0] ^= 0xff;
-
-    let err = SessionMinter::init_session(&backend, &token).await.unwrap_err();
-    match err {
-        zeroship_plugin_db::error::DbError::ValidationFailed { code, .. } => {
-            assert_eq!(code, "session_invalid_signature");
-        }
-        other => panic!("expected ValidationFailed(session_invalid_signature), got: {other:?}"),
-    }
-    drop(backend);
-    release_pg(pool).await;
-}
-
-#[compio::test]
-async fn b8c_admin_wrappers_replicate_p8a_setup_semantics() {
-    // The SECURITY DEFINER wrapper `__zeroship_admin.ensure_publication_and_slot`
-    // must produce the same publication + slot names and idempotency
-    // semantics as the raw `replication::ensure_publication_and_slot`.
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    if !pg_has_logical_wal(&pool).await {
-        zeroship_test_support::skip("Skipping — server wal_level is not 'logical'");
-        return release_pg(pool).await;
-    }
-    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
-        .await
-        .unwrap();
-
-    let app = "b8c_wrapper_app";
-    c1_cleanup(&pool, app).await;
-    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
-        .await
-        .unwrap();
-
-    // The SECURITY DEFINER wrappers split publication + slot into
-    // two top-level statements (plpgsql can't run both in one
-    // function body because pg_create_logical_replication_slot()
-    // refuses to run in a txn that's already done writes — SQLSTATE
-    // 25001). The test mirrors the production caller's pattern: call
-    // ensure_publication, then ensure_slot, observing the BOOLEAN /
-    // JSONB return shapes from each.
-    let pub_rows = pool
-        .query_text_params(
-            "SELECT __zeroship_admin.ensure_publication($1)::text AS created",
-            &[app],
-        )
-        .await
-        .unwrap();
-    let pub_created: String = pub_rows[0].get("created");
-    assert_eq!(pub_created, "true");
-
-    let slot_rows = pool
-        .query_text_params(
-            "SELECT __zeroship_admin.ensure_slot($1)::text AS info",
-            &[app],
-        )
-        .await
-        .unwrap();
-    let slot_info: String = slot_rows[0].get("info");
-    let v: serde_json::Value = serde_json::from_str(&slot_info).unwrap();
-    assert_eq!(v["slot"], format!("__zs_slot_{app}"));
-    assert_eq!(v["created"], true);
-
-    // Second call to both wrappers must be idempotent.
-    let pub_rows2 = pool
-        .query_text_params(
-            "SELECT __zeroship_admin.ensure_publication($1)::text AS created",
-            &[app],
-        )
-        .await
-        .unwrap();
-    assert_eq!(pub_rows2[0].get::<_, String>("created"), "false");
-
-    let slot_rows2 = pool
-        .query_text_params(
-            "SELECT __zeroship_admin.ensure_slot($1)::text AS info",
-            &[app],
-        )
-        .await
-        .unwrap();
-    let slot_info2: String = slot_rows2[0].get("info");
-    let v2: serde_json::Value = serde_json::from_str(&slot_info2).unwrap();
-    assert_eq!(v2["created"], false);
-
-    c1_cleanup(&pool, app).await;
-    release_pg(pool).await;
-}
-
-#[compio::test]
-async fn b8c_consumer_runs_under_platform_role_grants() {
-    // Verify that the platform role's EXECUTE grants suffice to call
-    // the slot-management wrappers. Today's pool connects as superuser
-    // so we simulate the platform role by going through the wrapper
-    // function (which itself is SECURITY DEFINER — invoking with a
-    // role that has EXECUTE-grant succeeds).
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
-        .await
-        .unwrap();
-
-    // Probe the GRANT: pg_has_function_privilege(role, fn, 'EXECUTE')
-    // must return true for __zeroship_platform_role on the wrappers,
-    // false for PUBLIC.
-    let rows = pool
-        .query_text_params(
-            r#"SELECT
-                 has_function_privilege(
-                   '__zeroship_platform_role'::name,
-                   '__zeroship_admin.ensure_slot(text)'::regprocedure::oid,
-                   'EXECUTE'
-                 ) AS platform_ok,
-                 has_function_privilege(
-                   'public'::name,
-                   '__zeroship_admin.ensure_slot(text)'::regprocedure::oid,
-                   'EXECUTE'
-                 ) AS public_ok"#,
-            &[],
-        )
-        .await
-        .unwrap();
-    let platform_ok: bool = rows[0].get("platform_ok");
-    let public_ok: bool = rows[0].get("public_ok");
-    assert!(platform_ok, "platform role must have EXECUTE");
-    assert!(!public_ok, "PUBLIC must NOT have EXECUTE");
-    release_pg(pool).await;
-}
 
 // ===========================================================================
 // Controlled-supervisor reconnect and per-app emit.
@@ -4074,18 +3264,6 @@ fn p8a2_per_app_emit_suppression_integration() {
 
     unsuppress_app("multi_a");
     zeroship_plugin_db::broker::drop_app(None);
-}
-
-/// Hex-encode bytes — duplicated locally to avoid pulling in the
-/// auth::session private helper. Same algorithm; lowercase output.
-fn hex(b: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(b.len() * 2);
-    for &x in b {
-        out.push(HEX[(x >> 4) as usize] as char);
-        out.push(HEX[(x & 0xF) as usize] as char);
-    }
-    out
 }
 
 /// Walk a compio-postgres Error's `source()` chain into one string —
@@ -4807,10 +3985,10 @@ use zeroship_plugin_db::error::DbError;
 /// six tests and each other's roots. The isolate context is per-thread,
 /// so that race cannot happen here.
 ///
-/// The PG resolve path is unchanged: `PostgresBackend` still calls the
-/// SECURITY DEFINER `__zeroship_admin.get_column_key` getter first and
-/// only falls back to this source when the getter returns NULL, which is
-/// the same arm the env var used to occupy.
+/// The PG resolve path still calls `__zeroship_admin.get_column_key`
+/// first and falls back to this source when that fails -- which is now
+/// every time, since nothing installs the getter. This is the same arm
+/// the env var used to occupy.
 ///
 /// The returned guard withdraws the keys on drop; keep it alive for the
 /// test body.
@@ -5566,8 +4744,8 @@ COMMENT ON COLUMN "{app}"."people"."phone_masked" IS '__zsmask:kind=last4,classi
 }
 
 /// When no root key is configured for `missing_test` (the fallback
-/// source holds none AND the `__zeroship_admin.column_keys` row is
-/// missing), the PG resolver surfaces a typed
+/// source holds none, and the PG getter resolves nothing because
+/// nothing installs it), the PG resolver surfaces a typed
 /// `column_key_not_configured` Configuration error rather than panicking
 /// or returning Internal.
 #[compio::test]
@@ -5593,77 +4771,6 @@ async fn encrypted_column_missing_key_typed_error() {
         }
         other => panic!("expected Configuration column_key_not_configured, got {other:?}"),
     }
-    drop(backend);
-    release_pg(pool).await;
-}
-
-/// **I1** — the SECURITY DEFINER `__zeroship_admin.get_column_key`
-/// path must read `bytea` in binary form rather than falling through
-/// to the fallback source. Pin it by seeding the admin table with one
-/// root and the fallback with a DIFFERENT root: the resolved key must
-/// match the admin-table root.
-///
-/// The contrast is the whole test, so the fallback must genuinely hold a
-/// root. It used to be an env var; it is now a supplied root, which is
-/// the same fallback arm reached by the same code path.
-#[compio::test]
-async fn pg_admin_table_key_source_reads_bytea_directly() {
-    use hkdf::Hkdf;
-    use sha2::Sha256;
-
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
-        .await
-        .expect("ensure_admin_schema");
-
-    let key_id = "admin_table_test";
-    let admin_root_hex = "11".repeat(32);
-    let fallback_root_hex = "22".repeat(32);
-    let _keys = with_root_key(key_id, &fallback_root_hex);
-
-    pool.execute(
-        r#"DELETE FROM "__zeroship_admin"."column_keys" WHERE key_id = $1"#,
-        &[&key_id],
-    )
-    .await
-    .unwrap();
-    pool.execute(
-        r#"INSERT INTO "__zeroship_admin"."column_keys" (key_id, root_key)
-           VALUES ($1, decode($2, 'hex')::bytea)"#,
-        &[&key_id, &admin_root_hex.as_str()],
-    )
-    .await
-    .unwrap();
-
-    let backend = PostgresBackend::new(pool.clone(), url.clone());
-    let resolved = backend
-        .resolve_key("app_admin_key_lookup", key_id)
-        .await
-        .expect("resolve key from admin table");
-
-    let root_bytes = admin_root_hex
-        .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let s = std::str::from_utf8(pair).expect("hex utf8");
-            u8::from_str_radix(s, 16).expect("hex byte")
-        })
-        .collect::<Vec<_>>();
-    let root: [u8; 32] = root_bytes.try_into().expect("32-byte root");
-    let hkdf = Hkdf::<Sha256>::new(Some(b"app_admin_key_lookup"), &root);
-    let mut expected_k_enc = [0u8; 32];
-    let mut expected_k_siv = [0u8; 32];
-    hkdf.expand(b"zsenc/aead/v1/k_enc", &mut expected_k_enc)
-        .expect("expand k_enc");
-    hkdf.expand(b"zsenc/aead/v1/k_siv", &mut expected_k_siv)
-        .expect("expand k_siv");
-
-    assert_eq!(
-        resolved.k_enc, expected_k_enc,
-        "resolve_key must use the admin-table root, not the fallback source",
-    );
-    assert_eq!(resolved.k_siv, expected_k_siv);
     drop(backend);
     release_pg(pool).await;
 }
@@ -5714,9 +4821,10 @@ async fn pg_bytea_decoder_preserves_raw_binary_prefix_bytes() {
 //      raw `DROP/CREATE`; `restore()`; assert rows recovered.
 //      `#[ignore]`-d when `pg_dump` / `pg_restore` are not on PATH
 //      (CI minimal images don't always carry them).
-//   2. `pitr_pg_records_target` — companion to the SQLite
-//      `pitr_pg_only_*` test. Call `pitr_replay(LSN)`; assert row in
-//      `__zeroship_admin.pitr_targets`. No subprocess — runs everywhere.
+//   2. (deleted) `pitr_pg_records_target` asserted the row landed in
+//      `__zeroship_admin.pitr_targets`. That table has no installer
+//      since the admin schema was deleted, so the test was deleted
+//      with its subject rather than left to assert nothing.
 //   3. `snapshot_during_migration_returns_typed_error` — acquire the
 //      `register_model` mig-lock manually; attempt `snapshot()`;
 //      expect `Coded { code: "migration_in_progress" }`. No subprocess.
@@ -5725,7 +4833,7 @@ async fn pg_bytea_decoder_preserves_raw_binary_prefix_bytes() {
 //      dump file. `#[ignore]`-d for the same reason as #1.
 
 use zeroship_plugin_db::backend::{
-    Backup as _, BusyPolicy as BackupBusyPolicy, LockScope, PitrTarget, SnapshotOpts,
+    Backup as _, BusyPolicy as BackupBusyPolicy, LockScope, SnapshotOpts,
 };
 
 /// Best-effort probe for `pg_dump`/`pg_restore` on PATH. The
@@ -5742,79 +4850,6 @@ fn pg_dump_on_path() -> bool {
         .unwrap_or(false)
 }
 
-/// Gate #2: `pitr_replay` records the target row in
-/// `__zeroship_admin.pitr_targets`. The actual WAL recovery is
-/// operator-driven (this ships the API surface only); this test
-/// pins the placeholder shape: `INSERT … ON CONFLICT (app_id) DO
-/// UPDATE …` upserts the latest target.
-#[compio::test]
-async fn pitr_pg_records_target() {
-    let url = require_pg().await;
-    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    // PITR-targets table lives in `__zeroship_admin`; the auth
-    // bootstrap creates it. Idempotent on a populated cluster.
-    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
-        .await
-        .expect("ensure_admin_schema");
-
-    let backend = PostgresBackend::new(pool.clone(), url.clone());
-    let app_id = "p5_pr4_pitr_app";
-
-    // Clean any stale row from a prior run so the assertion sees
-    // exactly the row we just inserted.
-    pool.execute(
-        "DELETE FROM __zeroship_admin.pitr_targets WHERE app_id = $1",
-        &[&app_id],
-    )
-    .await
-    .unwrap();
-
-    // 1) LSN target.
-    backend
-        .pitr_replay(app_id, PitrTarget::Lsn("0/16B1234".to_string()))
-        .await
-        .expect("pitr_replay(LSN) records the target");
-
-    let rows = pool
-        .query_text_params(
-            "SELECT target FROM __zeroship_admin.pitr_targets WHERE app_id = $1",
-            &[app_id],
-        )
-        .await
-        .unwrap();
-    assert_eq!(rows.len(), 1, "exactly one row per app_id (ON CONFLICT upsert)");
-    let target: String = rows[0].get::<_, String>("target");
-    assert_eq!(target, "LSN:0/16B1234");
-
-    // 2) Upsert with a TimeMillis target — the same app_id row is
-    //    overwritten (ON CONFLICT (app_id) DO UPDATE).
-    backend
-        .pitr_replay(app_id, PitrTarget::TimeMillis(1_700_000_000_000))
-        .await
-        .expect("pitr_replay(TimeMillis) upserts the target");
-
-    let rows = pool
-        .query_text_params(
-            "SELECT target FROM __zeroship_admin.pitr_targets WHERE app_id = $1",
-            &[app_id],
-        )
-        .await
-        .unwrap();
-    assert_eq!(rows.len(), 1, "still one row after upsert");
-    let target: String = rows[0].get::<_, String>("target");
-    assert_eq!(target, "TIME_MS:1700000000000");
-
-    // Cleanup so a re-run starts fresh.
-    pool.execute(
-        "DELETE FROM __zeroship_admin.pitr_targets WHERE app_id = $1",
-        &[&app_id],
-    )
-    .await
-    .unwrap();
-    drop(backend);
-    release_pg(pool).await;
-}
-
 /// Fence: when the per-app `register_model` advisory
 /// lock is held by another caller, `snapshot()` surfaces a typed
 /// `Coded { code: "migration_in_progress" }` rather than blocking
@@ -5825,10 +4860,6 @@ async fn pitr_pg_records_target() {
 async fn snapshot_during_migration_returns_typed_error() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
-        .await
-        .expect("ensure_admin_schema");
-
     let backend = PostgresBackend::new(pool.clone(), url.clone());
     let app_id = "p5_pr4_miglock_app";
 
@@ -5911,10 +4942,6 @@ async fn snapshot_restore_round_trip_pg() {
         return;
     }
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
-        .await
-        .expect("ensure_admin_schema");
-
     // Per-app schema fresh every run.
     let app_id = "p5_pr4_roundtrip_app";
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app_id}\" CASCADE"), &[])
@@ -6032,10 +5059,6 @@ async fn snapshot_uri_content_hash_round_trip() {
         return;
     }
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
-        .await
-        .expect("ensure_admin_schema");
-
     let app_id = "p5_pr4_hash_app";
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app_id}\" CASCADE"), &[])
         .await
@@ -6124,14 +5147,9 @@ async fn provision_app_with_role(pool: &std::rc::Rc<Pool>, app: &str) -> String 
     let _ = pool
         .execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
         .await;
-    // The role inherits __zeroship_app_role_template, so it must exist.
-    zeroship_plugin_db::auth::ensure_admin_schema(pool)
-        .await
-        .unwrap();
+    // `ensure_per_app_role` creates the __zeroship_app_role_template
+    // anchor itself, so no separate bootstrap step is needed.
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
-        .await
-        .unwrap();
-    zeroship_plugin_db::auth::ensure_admin_schema(pool)
         .await
         .unwrap();
     role
@@ -6312,9 +5330,6 @@ async fn workflow_journal_redeploy_grants_do_not_reopen_without_reprovision() {
             .await;
     }
 
-    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
-        .await
-        .expect("ensure platform role");
     // Stand in for `db/migrations-ts/20260818000200_worker_database_authority.ts`.
     // This suite runs against a bare database with no platform migrations
     // applied, and since 2a44ea8ef nothing in the worker creates this role:
@@ -7202,9 +6217,7 @@ async fn drop_namespace_drops_per_app_role_last() {
     let role = zeroship_plugin_db::auth::bootstrap::per_app_role_name(app);
     let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
 
-    zeroship_plugin_db::auth::ensure_admin_schema(&pool).await.unwrap();
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[]).await.unwrap();
-    zeroship_plugin_db::auth::ensure_admin_schema(&pool).await.unwrap();
     // Provision the per-app role + give it an object in the schema so the
     // "role still owns objects" path is exercised (the CASCADE must clear
     // it before DROP ROLE).
@@ -7251,9 +6264,7 @@ async fn drop_namespace_idempotent_steps_3_to_5() {
     c1_cleanup(&pool, app).await;
     let role = zeroship_plugin_db::auth::bootstrap::per_app_role_name(app);
     let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
-    zeroship_plugin_db::auth::ensure_admin_schema(&pool).await.unwrap();
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[]).await.unwrap();
-    zeroship_plugin_db::auth::ensure_admin_schema(&pool).await.unwrap();
     c1_create_publication(&pool, app).await;
     zeroship_plugin_db::replication::ensure_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
         .await
@@ -7307,9 +6318,7 @@ async fn drop_namespace_retries_from_step_3_on_partial_failure() {
     c1_cleanup(&pool, app).await;
     let role = zeroship_plugin_db::auth::bootstrap::per_app_role_name(app);
     let _ = pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[]).await;
-    zeroship_plugin_db::auth::ensure_admin_schema(&pool).await.unwrap();
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[]).await.unwrap();
-    zeroship_plugin_db::auth::ensure_admin_schema(&pool).await.unwrap();
     c1_create_publication(&pool, app).await;
     zeroship_plugin_db::replication::ensure_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
         .await

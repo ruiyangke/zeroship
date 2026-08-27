@@ -264,9 +264,6 @@ fn apply_matrix_schema_ahead_of_postgres(url: &str, collection: &str) {
         // the equivalent step is plugin-db's own `ensure_per_app_role`, which
         // must run AFTER the table exists because it grants `ON ALL TABLES IN
         // SCHEMA`.
-        zeroship_plugin_db::auth::ensure_admin_schema(&pool)
-            .await
-            .expect("ensure the platform admin schema");
         zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, MATRIX_APP_ID)
             .await
             .expect("provision the matrix app's runtime role");

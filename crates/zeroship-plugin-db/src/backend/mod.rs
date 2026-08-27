@@ -681,29 +681,34 @@ pub trait AuditWriter: 'static {
     ) -> Result<bool, DbError>;
 }
 
-/// HMAC-signed session-init capability — the cross-backend trust
-/// anchor used by both the PG SECURITY DEFINER pipeline and the
-/// upcoming SQLite in-process minter.
+/// HMAC-signed session-init capability.
 ///
-/// The trait declaration is **not** feature-gated — both backends
-/// implement it. The PG impl lives at the bottom of
-/// `crate::auth::session` and wraps SECURITY DEFINER functions managed
-/// by `crate::auth::bootstrap`. The SQLite impl lives in
-/// `crate::backend::sqlite::session_minter` and is gated only by the
-/// `sqlite` feature — dev tier, no SQL surface,
-/// HMAC-SHA256 + bounded LRU nonce cache in Rust.
+/// **Only the SQLite arm implements this.** The PG impl lived at the
+/// bottom of `crate::auth::session` and wrapped SECURITY DEFINER
+/// routines in a platform-owned `__zeroship_admin` schema; both were
+/// deleted on 2026-08-27 because a privileged routine the worker can
+/// call is not a boundary (AGENTS.md, "privilege follows the PROCESS,
+/// not the function"). On PG, privilege is carried by the connection
+/// role instead - see `crate::auth::bootstrap`.
+///
+/// The surviving SQLite impl lives in
+/// `crate::backend::sqlite::session_minter` — dev tier, no SQL surface,
+/// HMAC-SHA256 + bounded LRU nonce cache in Rust. It has no production
+/// consumer: the whole trait is `test-helpers`-gated.
 ///
 /// ## Token canonical payload
 ///
-/// Both impls produce identical payload bytes + signatures for the
-/// same `(secret, init, nonce, expires_at)`:
+/// The canonical payload for the same `(secret, init, nonce,
+/// expires_at)` is:
 ///
 /// ```text
 /// actor_kind || '|' || actor_id || '|' || pid || '|'
 ///            || hex(nonce) || '|' || expires_at_iso
 /// ```
 ///
-/// A cross-backend equivalence test pins the bytes.
+/// `sqlite_integration.rs::session_canonical_payload_byte_pin` pins
+/// the bytes. It used to be half of a cross-backend equivalence pair;
+/// the PG half is gone with the PG impl.
 ///
 /// ## Dyn-compatibility
 ///
@@ -728,11 +733,9 @@ pub trait SessionMinter: 'static {
     ) -> Result<MintedToken, DbError>;
 
     /// Present a previously-minted token to the backend's session
-    /// authority. PG impl calls `__zeroship_admin.init_session(...)`
-    /// (SECURITY DEFINER, verifies HMAC + nonce + expiry, writes the
-    /// session-context row). SQLite impl verifies in-process against
-    /// the configured secret(s) + nonce LRU cache; no persistent
-    /// state. Both surface the same 5 typed `.code`s on refusal:
+    /// authority. The SQLite impl verifies in-process against the
+    /// configured secret(s) + nonce LRU cache; no persistent state. It
+    /// surfaces 5 typed `.code`s on refusal:
     /// `session_signature_expired`, `session_nonce_replay`,
     /// `session_invalid_signature`, `session_invalid_actor_kind`,
     /// `session_nonce_too_short`.
@@ -740,16 +743,11 @@ pub trait SessionMinter: 'static {
     async fn init_session(&self, token: &MintedToken) -> Result<(), DbError>;
 }
 
-/// Inputs for [`SessionMinter::mint_session_token`]. The cross-backend
-/// shape — distinct from the legacy `crate::auth::session::SessionInit`
-/// which carries no `pid` field. The PG impl translates the
-/// trait shape into the legacy free-fn shape before calling into
-/// `__zeroship_admin.sign_session`.
+/// Inputs for [`SessionMinter::mint_session_token`].
 ///
-/// `pid` is the design §12 project-id binding. Today's PG
-/// free-fn impl ties tokens to `pg_backend_pid()`; trait-routed PG
-/// callers can pass `pid: Some(...)` to opt into the canonical-payload
-/// shape, and `pid: None` preserves today's PG-side behaviour.
+/// `pid` is the design §12 project-id binding, used verbatim by the
+/// SQLite impl. `backend_pid` on [`MintedToken`] is a leftover of the
+/// deleted PG impl, which bound tokens to `pg_backend_pid()`.
 #[cfg(feature = "test-helpers")]
 #[derive(Debug, Clone)]
 pub struct SessionInit {
@@ -1240,8 +1238,9 @@ pub use zeroship_schema::descriptors::GeoPoint;
 ///
 /// - PG and SQLite share the same AEAD impl (`crate::encryption::aead`),
 ///   so per-backend trait impls are thin delegations.
-/// - **Key sourcing differs**: PG uses `__zeroship_admin.column_keys`
-///   via SECURITY DEFINER; SQLite uses the
+/// - **Key sourcing differs**: PG asks a `get_column_key` getter that
+///   NOTHING NOW INSTALLS (see `crate::encryption::keys`) and falls
+///   through to its local source; SQLite uses the
 ///   `ZEROSHIP_COLUMN_KEY_<KEYID>` env var. The trait's
 ///   [`Self::KeyHandle`] associated type lets each backend pick its
 ///   own key-material container without forcing a common type on the
@@ -1362,8 +1361,10 @@ pub trait Backup: 'static {
         snapshot: &SnapshotHandle,
     ) -> Result<(), DbError>;
 
-    /// Replay WAL up to `target`. PG: records the target in
-    /// `__zeroship_admin.pitr_targets`; operator runs `recovery.conf`.
+    /// Replay WAL up to `target`. PG: writes the target to a
+    /// `__zeroship_admin.pitr_targets` table NOTHING NOW CREATES, so
+    /// the call fails; operator runs `recovery.conf`. The impl has no
+    /// caller - see `backend/postgres.rs`.
     /// SQLite: returns `Configuration { code: "pitr_pg_only" }`
     /// — SQLite has no WAL-archive PITR story.
     #[allow(async_fn_in_trait)]
@@ -2055,8 +2056,8 @@ mod tests {
 
     /// Compile-time: `PostgresBackend` satisfies [`Backup`].
     /// The `pg_dump`/`pg_restore` shell-out body is backfilled; the
-    /// PITR placeholder writes to the `__zeroship_admin.pitr_targets`
-    /// table. Mirrors the
+    /// PITR placeholder still targets a `__zeroship_admin.pitr_targets`
+    /// table that no longer has an installer. Mirrors the
     /// `_assert_postgres_backend_impls_encrypted_column` shape above.
     #[cfg(feature = "test-helpers")]
     #[allow(dead_code)]
