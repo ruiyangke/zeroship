@@ -44,6 +44,8 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::task::{Context, Poll, ready};
 use std::time::{Duration, Instant};
 
+pub(crate) type RequestServerError = Arc<Mutex<Option<DbError>>>;
+
 /// The result of one SQL execution reported by the query observer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -701,6 +703,7 @@ pub struct Responses {
     receiver: mpsc::Receiver<ResponseMessages>,
     cur: ResponseMessages,
     observation: Option<QueryObservation>,
+    request_server_error: RequestServerError,
     terminal_server_error: Arc<Mutex<Option<DbError>>>,
 }
 
@@ -738,7 +741,9 @@ impl Responses {
                         observation.observe_consumer_message(&message);
                     }
                     if let Message::ErrorResponse(body) = message {
-                        return Poll::Ready(Err(Error::db(body)));
+                        let error = Error::db(body);
+                        self.request_server_error.lock().take();
+                        return Poll::Ready(Err(error));
                     }
                     return Poll::Ready(Ok(message));
                 }
@@ -753,6 +758,9 @@ impl Responses {
                     self.cur = messages;
                 }
                 None => {
+                    if let Some(error) = self.request_server_error.lock().take() {
+                        return Poll::Ready(Err(Error::from_db_error(error)));
+                    }
                     return Poll::Ready(Err(self
                         .terminal_server_error
                         .lock()
@@ -1467,6 +1475,7 @@ impl InnerClient {
     ) -> Result<Responses, Request> {
         let observation = self.start_observation(&messages);
         let (sender, receiver) = mpsc::channel(1);
+        let request_server_error = Arc::default();
         let request = Request {
             messages,
             sender,
@@ -1475,6 +1484,7 @@ impl InnerClient {
             prepare_cleanup,
             statement,
             observation: observation.clone(),
+            request_server_error: Arc::clone(&request_server_error),
         };
         if transaction_effect == TransactionEffect::MayChange {
             self.in_flight_requests.fetch_add(1, Ordering::Relaxed);
@@ -1494,6 +1504,7 @@ impl InnerClient {
             receiver,
             cur: ResponseMessages::empty(),
             observation,
+            request_server_error,
             terminal_server_error: Arc::clone(&self.terminal_server_error),
         })
     }

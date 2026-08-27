@@ -64,7 +64,7 @@
 // batch ordering are identical across them.
 
 use crate::buf_stream::{BufReadHalf, BufStream, BufWriteHalf, ReadDeadline, SplitStream};
-use crate::client::{QueryObservation, ResponseMessages};
+use crate::client::{QueryObservation, RequestServerError, ResponseMessages};
 use crate::codec::{
     BackendMessage, BackendMessages, FrontendMessage, read_backend, write_frontend,
 };
@@ -99,6 +99,7 @@ pub struct Request {
     pub(crate) prepare_cleanup: Option<crate::prepare::PrepareCleanup>,
     pub(crate) statement: Option<Statement>,
     pub(crate) observation: Option<QueryObservation>,
+    pub(crate) request_server_error: RequestServerError,
 }
 
 /// Whether a caller awaits the request outcome.
@@ -152,12 +153,14 @@ struct Response {
     /// write path so an answer that arrives during `flush` can complete the
     /// phase before the successful flush would otherwise activate it.
     read_obligation: ReadObligation,
+    request_server_error: RequestServerError,
 }
 
 struct PendingResponse {
     sender: mpsc::Sender<ResponseMessages>,
     messages: ResponseMessages,
     disposition: RequestDisposition,
+    request_server_error: RequestServerError,
 }
 
 impl Drop for Response {
@@ -735,6 +738,7 @@ where
             prepare_cleanup,
             statement,
             observation,
+            request_server_error,
         } = request;
         let copy_observation = observation.clone();
         let is_copy = matches!(&messages, RequestMessages::CopyIn(_));
@@ -748,6 +752,7 @@ where
             observation,
             bind_complete_seen: false,
             read_obligation: read_obligation.clone(),
+            request_server_error,
         });
 
         match messages {
@@ -932,6 +937,12 @@ impl Dispatch<'_> {
                 _ => return Err(Error::unexpected_message()),
             },
         };
+        if let Some(error) = server_error.as_ref() {
+            let mut request_error = response.request_server_error.lock();
+            if request_error.is_none() {
+                *request_error = Some(error.clone());
+            }
+        }
         let completed_at = (request_complete
             && response
                 .observation
@@ -1044,6 +1055,7 @@ impl Dispatch<'_> {
                     sender: response.sender.clone(),
                     messages,
                     disposition: response.disposition,
+                    request_server_error: Arc::clone(&response.request_server_error),
                 });
                 if !request_complete {
                     self.responses.push_front(response);
@@ -2098,6 +2110,7 @@ where
                             prepare_cleanup,
                             statement,
                             observation,
+                            request_server_error,
                         } = request;
                         let request_observation = observation.clone();
                         let is_copy = matches!(&messages, RequestMessages::CopyIn(_));
@@ -2112,6 +2125,7 @@ where
                             observation,
                             bind_complete_seen: false,
                             read_obligation: read_obligation.clone(),
+                            request_server_error,
                         });
                         match messages {
                             RequestMessages::Single(msg) => {
@@ -3251,6 +3265,7 @@ mod tests {
             sender,
             messages: ResponseMessages::Raw(BackendMessages::empty()),
             disposition: RequestDisposition::Awaited,
+            request_server_error: Arc::default(),
         }]);
         let write_error = Error::io(std::io::Error::new(
             std::io::ErrorKind::BrokenPipe,
@@ -3282,6 +3297,7 @@ mod tests {
             observation: None,
             bind_complete_seen: false,
             read_obligation: ReadObligation::new(None, false),
+            request_server_error: Arc::default(),
         }]);
         let mut pending_responses = VecDeque::new();
         let tx_status = AtomicU8::new(b'T');
@@ -3331,6 +3347,113 @@ mod tests {
         BackendMessages::from_test_bytes(bytes)
     }
 
+    /// A decoded ErrorResponse can be parked behind a full per-request
+    /// channel when an independent terminal read tears down the connection.
+    /// Closing that channel must not replace the request's already-decoded
+    /// SQLSTATE with the local closure symptom.
+    #[compio::test]
+    async fn a_stranded_error_response_outranks_response_channel_closure() {
+        let (request_tx, mut request_rx) = mpsc::unbounded();
+        let client = crate::client::Client::new(
+            request_tx,
+            crate::config::SslMode::Disable,
+            crate::config::SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+        );
+        let mut caller = client
+            .inner()
+            .send(RequestMessages::Single(FrontendMessage::Raw(
+                bytes::Bytes::from_static(b"scripted request"),
+            )))
+            .expect("enqueue the scripted request");
+        let Request {
+            messages: _,
+            mut sender,
+            disposition,
+            transaction_effect,
+            prepare_cleanup,
+            statement,
+            observation,
+            request_server_error,
+        } = request_rx
+            .try_recv()
+            .expect("the client did not enqueue its request");
+
+        sender
+            .try_send(ResponseMessages::Observed(VecDeque::from([Ok(
+                command_complete_message("PREFIX"),
+            )])))
+            .expect("queue the response prefix");
+        sender
+            .try_send(ResponseMessages::Raw(BackendMessages::empty()))
+            .expect("park the response sender at capacity");
+        assert!(
+            sender
+                .try_send(ResponseMessages::Raw(BackendMessages::empty()))
+                .is_err(),
+            "the response sender was not capacity-full"
+        );
+
+        let mut responses = VecDeque::from([Response {
+            sender,
+            disposition,
+            transaction_effect,
+            prepare_cleanup,
+            statement,
+            observation,
+            bind_complete_seen: false,
+            read_obligation: ReadObligation::new(None, false),
+            request_server_error,
+        }]);
+        let mut pending_responses = VecDeque::new();
+        let parameters = Mutex::new(HashMap::new());
+        let tx_status = AtomicU8::new(b'I');
+        let in_flight_requests = AtomicUsize::new(1);
+        let terminal_server_error = Mutex::new(None);
+        Dispatch {
+            parameters: &parameters,
+            responses: &mut responses,
+            pending_responses: &mut pending_responses,
+            async_sender: None,
+            tx_status: &tx_status,
+            in_flight_requests: &in_flight_requests,
+            terminal_server_error: &terminal_server_error,
+        }
+        .deliver_batch(
+            error_response_batch("23505", "scripted unique violation"),
+            Some(b'I'),
+        )
+        .expect("dispatch the decoded ErrorResponse");
+        assert_eq!(
+            pending_responses.len(),
+            1,
+            "the ErrorResponse did not enter the backpressure stash"
+        );
+
+        // Model an out-of-band terminal read: response ownership and the
+        // undelivered stash disappear before this caller consumes capacity.
+        drop(responses);
+        drop(pending_responses);
+
+        match caller.next().await.expect("read the response prefix") {
+            Message::CommandComplete(body) => {
+                assert_eq!(body.tag().expect("decode the response prefix"), "PREFIX")
+            }
+            _ => panic!("the response prefix changed shape"),
+        }
+        let error = match caller.next().await {
+            Err(error) => error,
+            Ok(_) => panic!("response channel closure hid its stranded ErrorResponse"),
+        };
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("23505"),
+            "stranded ErrorResponse was replaced by channel closure: {error}"
+        );
+    }
+
     #[compio::test]
     async fn queued_server_error_outranks_a_simultaneous_flush_failure() {
         let read_half_dropped = Rc::new(Cell::new(false));
@@ -3375,6 +3498,7 @@ mod tests {
             observation: None,
             bind_complete_seen: false,
             read_obligation: ReadObligation::new(None, false),
+            request_server_error: Arc::default(),
         }]);
         let mut pending_responses = VecDeque::new();
         let parameters = Mutex::new(HashMap::new());
@@ -3522,6 +3646,7 @@ mod tests {
                     prepare_cleanup: None,
                     statement: None,
                     observation: None,
+                    request_server_error: Arc::default(),
                 })
                 .expect("queue the write-failing request");
 
@@ -3586,6 +3711,7 @@ mod tests {
                     prepare_cleanup: None,
                     statement: None,
                     observation: None,
+                    request_server_error: Arc::default(),
                 })
                 .expect("queue the coordinated request");
 
@@ -3695,6 +3821,7 @@ mod tests {
                     prepare_cleanup: None,
                     statement: None,
                     observation: None,
+                    request_server_error: Arc::default(),
                 })
                 .expect("queue the timeout request");
 
@@ -3808,6 +3935,7 @@ mod tests {
                 prepare_cleanup: None,
                 statement: None,
                 observation: None,
+                request_server_error: Arc::default(),
             })
             .expect("queue the scripted request");
 
@@ -3922,6 +4050,7 @@ mod tests {
             observation: None,
             bind_complete_seen: false,
             read_obligation: ReadObligation::new(None, false),
+            request_server_error: Arc::default(),
         }]);
         let pending_responses = VecDeque::new();
 
@@ -4421,6 +4550,7 @@ mod tests {
                 "STASHED",
             ))])),
             disposition: RequestDisposition::Awaited,
+            request_server_error: Arc::default(),
         }]);
 
         // The consumer now catches up, which un-parks `P`'s own handle. This is
@@ -4440,6 +4570,7 @@ mod tests {
             observation: None,
             bind_complete_seen: false,
             read_obligation: ReadObligation::new(None, false),
+            request_server_error: Arc::default(),
         }]);
 
         let (_request_sender, request_receiver) = mpsc::unbounded();
@@ -4705,6 +4836,7 @@ mod tests {
             observation: None,
             bind_complete_seen: false,
             read_obligation: ReadObligation::new(None, false),
+            request_server_error: Arc::default(),
         }]);
         let pending_responses = VecDeque::new();
 
