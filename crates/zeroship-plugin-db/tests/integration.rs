@@ -9,7 +9,28 @@
 //! (`deploy/ops/zeroship.test.toml`, written by
 //! `tests/provision_test_backends.sh`) or by `PG_TEST_URL`. There is no
 //! compiled default; see `crates/core/src/config/test_overlay.rs`.
-//! Run: `cargo test -p zeroship-plugin-db --test integration -- --test-threads=1`
+//! Run:
+//! ```text
+//! cargo test -p zeroship-plugin-db --test integration --features test-helpers \
+//!   -- --test-threads=1
+//! ```
+//!
+//! **Both flags are required and each fails differently when omitted.**
+//!
+//! `--features test-helpers` is this target's `required-features`. Without it
+//! cargo does not build the target at all - it FILTERS IT OUT, printing
+//! `error: target `integration` ... requires the features: `test-helpers``
+//! only if you named the target explicitly. A plain `cargo test -p
+//! zeroship-plugin-db` names no target, so it silently runs the lib tests
+//! alone and reports a healthy green while none of the 99 tests in this file
+//! were compiled. This line omitted the flag until 2026-08-27, so the command
+//! documented here did not run.
+//!
+//! `--test-threads=1` is required because every test in this file builds the
+//! same schema, `SCHEMA = "plugin_db_test"` below. Run in parallel they race
+//! `CREATE SCHEMA` against one server and fail with
+//! `duplicate key value violates unique constraint "pg_namespace_nspname_index"`.
+//! Measured 2026-08-27: 32 of 99 failed that way at default parallelism.
 
 use compio_postgres::{NoTls, Pool};
 use serde_json::{json, Value};
