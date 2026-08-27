@@ -1149,19 +1149,19 @@ impl Config {
     /// statements are scoped to a `PostgreSQL` session, while successive
     /// transactions through such a pooler may use different sessions.
     ///
-    /// If `PostgreSQL` reports that a cached statement's result type changed
-    /// (`0A000` from its plan-cache routines) or that its server-side name is
-    /// missing (`26000`), the stale entry is evicted and the operation is
-    /// prepared and run again, once. The caller sees the result, not the
-    /// error. A second consecutive failure propagates.
+    /// If `PostgreSQL` reports that a cached statement's server-side name is
+    /// missing (`26000` from `FetchPreparedStatement`), the stale entry is
+    /// evicted and the operation is prepared and run again, once. A changed
+    /// result type (`0A000` from the plan-cache routines) receives the same
+    /// recovery only when the statement has no parameters. A second failure
+    /// propagates.
     ///
-    /// Two limits are worth knowing before enabling this. Inside a transaction
-    /// nothing is retried, because `0A000` has already aborted it, so the error
-    /// propagates and the transaction still needs recovery. And `26000` is
-    /// matched on its SQLSTATE alone, which cannot prove the statement did no
-    /// work: a function that performs non-transactional work and then raises
-    /// `26000` would be run twice. No row reaches the caller before the retry
-    /// decision, so a retry never duplicates rows -- only such side effects.
+    /// Nothing is retried inside a transaction, after `BindComplete`, or for a
+    /// matching SQLSTATE raised by application code. A parameterized 0A000 is
+    /// also propagated: PostgreSQL can run user-defined domain input checks
+    /// before it revalidates the plan, and their nontransactional side effects
+    /// cannot be replayed safely. The stale entry is still evicted, so the next
+    /// call prepares against the current result shape.
     pub const fn statement_cache_capacity(&mut self, capacity: usize) -> &mut Config {
         self.statement_cache_capacity = capacity;
         self

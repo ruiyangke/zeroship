@@ -2049,10 +2049,19 @@ impl Client {
         &self,
         cache_sql: Option<&str>,
         replay_permitted: bool,
+        parameter_count: usize,
         error: &Error,
     ) -> Option<Result<Statement, Error>> {
-        let sql =
-            cache_sql.filter(|_| replay_permitted && cached_statement_error_is_stale(error))?;
+        // PostgreSQL decodes Bind parameters, including user-defined domain
+        // checks, before GetCachedPlan revalidates a stale result descriptor.
+        // Such input code can perform nontransactional work before 0A000, so
+        // only a parameter-free stale-plan failure is replay-safe. A genuine
+        // missing-name 26000 happens before parameter decoding.
+        let parameter_input_is_safe = parameter_count == 0
+            || error.code() != Some(&crate::error::SqlState::FEATURE_NOT_SUPPORTED);
+        let sql = cache_sql.filter(|_| {
+            replay_permitted && parameter_input_is_safe && cached_statement_error_is_stale(error)
+        })?;
         if !matches!(
             self.sync_transaction_status().await,
             Ok(TransactionStatus::Idle)
@@ -2401,7 +2410,12 @@ impl Client {
                 Ok(stream) => Ok(stream),
                 Err(error) => {
                     let Some(replacement) = self
-                        .reprepare_cached_statement_once(Some(cache_sql), replay_permitted, &error)
+                        .reprepare_cached_statement_once(
+                            Some(cache_sql),
+                            replay_permitted,
+                            params.len(),
+                            &error,
+                        )
                         .await
                     else {
                         return Err(error);
@@ -2434,7 +2448,12 @@ impl Client {
             Ok(stream) => Ok(stream),
             Err(error) => {
                 let Some(replacement) = self
-                    .reprepare_cached_statement_once(Some(cache_sql), replay_permitted, &error)
+                    .reprepare_cached_statement_once(
+                        Some(cache_sql),
+                        replay_permitted,
+                        params.len(),
+                        &error,
+                    )
                     .await
                 else {
                     return Err(error);
@@ -2615,7 +2634,12 @@ impl Client {
                         return Err(error);
                     }
                     let Some(replacement) = self
-                        .reprepare_cached_statement_once(Some(cache_sql), replay_permitted, &error)
+                        .reprepare_cached_statement_once(
+                            Some(cache_sql),
+                            replay_permitted,
+                            params.len(),
+                            &error,
+                        )
                         .await
                     else {
                         return Err(error);
@@ -2652,7 +2676,12 @@ impl Client {
                     return Err(error);
                 }
                 let Some(replacement) = self
-                    .reprepare_cached_statement_once(Some(cache_sql), replay_permitted, &error)
+                    .reprepare_cached_statement_once(
+                        Some(cache_sql),
+                        replay_permitted,
+                        params.len(),
+                        &error,
+                    )
                     .await
                 else {
                     return Err(error);
@@ -2697,7 +2726,12 @@ impl Client {
                     return Err(error);
                 }
                 let Some(replacement) = self
-                    .reprepare_cached_statement_once(execution.cache_sql, replay_permitted, &error)
+                    .reprepare_cached_statement_once(
+                        execution.cache_sql,
+                        replay_permitted,
+                        0,
+                        &error,
+                    )
                     .await
                 else {
                     return Err(error);
@@ -2733,7 +2767,12 @@ impl Client {
                     return Err(error);
                 }
                 let Some(replacement) = self
-                    .reprepare_cached_statement_once(execution.cache_sql, replay_permitted, &error)
+                    .reprepare_cached_statement_once(
+                        execution.cache_sql,
+                        replay_permitted,
+                        0,
+                        &error,
+                    )
                     .await
                 else {
                     return Err(error);

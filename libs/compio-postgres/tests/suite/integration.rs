@@ -13,7 +13,7 @@
 //!       cargo test -p compio-postgres --test integration
 
 use compio_postgres::error::SqlState;
-use compio_postgres::types::Type;
+use compio_postgres::types::{IsNull, ToSql, Type, to_sql_checked};
 use compio_postgres::{
     Client, Config, Error, NoTls, Pool, PoolConfig, QueryOutcome, Row, SimpleQueryMessage,
     TransactionStatus, Uncached,
@@ -5248,6 +5248,29 @@ fn driver_statement_id(name: &str) -> usize {
         .expect("driver statement names are s followed by a usize")
 }
 
+/// Raw text for a PostgreSQL domain parameter. `postgres-types` deliberately
+/// does not guess that an arbitrary Rust string satisfies a user-defined
+/// domain, while these cache tests need the server to decode that exact OID.
+#[derive(Debug)]
+struct DomainText(&'static str);
+
+impl ToSql for DomainText {
+    fn to_sql(
+        &self,
+        _: &Type,
+        out: &mut bytes::BytesMut,
+    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        out.extend_from_slice(self.0.as_bytes());
+        Ok(IsNull::No)
+    }
+
+    fn accepts(_: &Type) -> bool {
+        true
+    }
+
+    to_sql_checked!();
+}
+
 /// Reserve enough consecutive names on this session that unrelated parallel
 /// tests cannot advance prepare.rs's process-global counter past all of them
 /// between the probe and the colliding Parse.
@@ -5839,7 +5862,7 @@ async fn statement_cache_retries_stale_result_shape_once_after_0a000() {
     let url = test_url();
     let client = connect_with_statement_cache(&url, 2).await.unwrap();
 
-    const SQL: &str = "SELECT cpg_cache_plan_shape.*, $1::int4 AS bound FROM cpg_cache_plan_shape";
+    const SQL: &str = "SELECT * FROM cpg_cache_plan_shape";
     client
         .batch_execute(
             "DROP TABLE IF EXISTS cpg_cache_plan_shape; \
@@ -5849,9 +5872,8 @@ async fn statement_cache_retries_stale_result_shape_once_after_0a000() {
         .await
         .unwrap();
 
-    let first_rows = client.query(SQL, &[&57_i32]).await.unwrap();
+    let first_rows = client.query(SQL, &[]).await.unwrap();
     assert_eq!(first_rows[0].get::<_, i32>("id"), 58);
-    assert_eq!(first_rows[0].get::<_, i32>("bound"), 57);
     drop(first_rows);
 
     client
@@ -5862,11 +5884,10 @@ async fn statement_cache_retries_stale_result_shape_once_after_0a000() {
         .await
         .unwrap();
 
-    let refreshed_rows = client.query(SQL, &[&60_i32]).await.unwrap();
-    assert_eq!(refreshed_rows[0].len(), 3);
+    let refreshed_rows = client.query(SQL, &[]).await.unwrap();
+    assert_eq!(refreshed_rows[0].len(), 2);
     assert_eq!(refreshed_rows[0].get::<_, i32>("id"), 58);
     assert_eq!(refreshed_rows[0].get::<_, &str>("label"), "fresh");
-    assert_eq!(refreshed_rows[0].get::<_, i32>("bound"), 60);
     assert_eq!(prepared_statement_names(&client, SQL).await.len(), 1);
 
     assert_eq!(
@@ -5879,6 +5900,90 @@ async fn statement_cache_retries_stale_result_shape_once_after_0a000() {
         .batch_execute("DROP TABLE cpg_cache_plan_shape")
         .await
         .unwrap();
+}
+
+/// PostgreSQL decodes domain parameters before it asks the plan cache to
+/// revalidate a fixed result descriptor. The first domain check therefore ran
+/// even though this Bind later reports 0A000. Propagate that first error rather
+/// than replaying input code whose nontransactional effects cannot be undone.
+#[compio::test]
+async fn statement_cache_does_not_retry_0a000_after_parameter_input() {
+    let url = test_url();
+    let client = connect_with_statement_cache(&url, 3).await.unwrap();
+    client
+        .batch_execute(
+            "CREATE TEMP SEQUENCE cpg_cache_domain_0a000_seq; \
+             CREATE FUNCTION pg_temp.cpg_cache_domain_0a000_check(value text) \
+             RETURNS boolean LANGUAGE plpgsql VOLATILE AS $function$ \
+             BEGIN \
+               PERFORM nextval('pg_temp.cpg_cache_domain_0a000_seq'); \
+               RETURN true; \
+             END \
+             $function$; \
+             CREATE DOMAIN pg_temp.cpg_cache_domain_0a000 AS text \
+             CHECK (pg_temp.cpg_cache_domain_0a000_check(VALUE)); \
+             CREATE TEMP TABLE cpg_cache_domain_shape (id int4); \
+             INSERT INTO cpg_cache_domain_shape VALUES (73)",
+        )
+        .await
+        .unwrap();
+
+    const SQL: &str = "SELECT cpg_cache_domain_shape.*, \
+        $1::pg_temp.cpg_cache_domain_0a000::text AS bound \
+        FROM cpg_cache_domain_shape";
+    let warm = client.query(SQL, &[&DomainText("warm")]).await.unwrap();
+    assert_eq!(warm[0].len(), 2);
+    drop(warm);
+    let stale_name = prepared_statement_name(&client, SQL).await;
+
+    client
+        .batch_execute(
+            "ALTER TABLE cpg_cache_domain_shape \
+             ADD COLUMN label text NOT NULL DEFAULT 'fresh'",
+        )
+        .await
+        .unwrap();
+
+    let error = client
+        .query(SQL, &[&DomainText("stale")])
+        .await
+        .expect_err("parameterized stale-plan input was replayed");
+    assert_eq!(error.code(), Some(&SqlState::FEATURE_NOT_SUPPORTED));
+    assert_eq!(
+        error.as_db_error().and_then(|error| error.routine()),
+        Some("RevalidateCachedQuery")
+    );
+    let after_error: i64 = client
+        .query_one_scalar(
+            "SELECT last_value FROM pg_temp.cpg_cache_domain_0a000_seq",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        after_error, 2,
+        "the failed call ran its domain input more than once"
+    );
+    assert!(
+        prepared_statement_names(&client, SQL).await.is_empty(),
+        "the unsafe stale entry was not invalidated"
+    );
+
+    let refreshed = client.query(SQL, &[&DomainText("fresh")]).await.unwrap();
+    assert_eq!(refreshed[0].len(), 3);
+    assert_eq!(refreshed[0].get::<_, i32>("id"), 73);
+    assert_eq!(refreshed[0].get::<_, &str>("label"), "fresh");
+    assert_eq!(refreshed[0].get::<_, &str>("bound"), "fresh");
+    assert_ne!(prepared_statement_name(&client, SQL).await, stale_name);
+
+    let after_fresh: i64 = client
+        .query_one_scalar(
+            "SELECT last_value FROM pg_temp.cpg_cache_domain_0a000_seq",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(after_fresh, 3);
 }
 
 /// PostgreSQL aborts an open transaction after 0A000. Repreparing there
@@ -6185,28 +6290,6 @@ async fn statement_cache_does_not_retry_a_cold_26000() {
 /// without evicting or replaying the healthy cached statement.
 #[compio::test]
 async fn statement_cache_requires_server_provenance_before_retrying_26000() {
-    use compio_postgres::types::{IsNull, ToSql, to_sql_checked};
-
-    #[derive(Debug)]
-    struct DomainText(&'static str);
-
-    impl ToSql for DomainText {
-        fn to_sql(
-            &self,
-            _: &Type,
-            out: &mut bytes::BytesMut,
-        ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
-            out.extend_from_slice(self.0.as_bytes());
-            Ok(IsNull::No)
-        }
-
-        fn accepts(_: &Type) -> bool {
-            true
-        }
-
-        to_sql_checked!();
-    }
-
     let url = test_url();
     let client = connect_with_statement_cache(&url, 2).await.unwrap();
     client
