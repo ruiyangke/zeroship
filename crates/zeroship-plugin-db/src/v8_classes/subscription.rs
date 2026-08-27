@@ -302,7 +302,7 @@ pub fn mint_subscription<'s>(
         .ok_or_else(|| OpError::type_error("Subscription prototype missing"))?;
     obj.set_prototype(scope, proto_v);
 
-    // STEP 2 — broker subscribe through the production fallible gate. A
+    // STEP 2 - broker subscribe through the production fallible gate. A
     // refusal owns no broker handle, so returning its typed OpError here
     // cannot leak an entry. From the success arm onward the broker entry's
     // ONLY owner is the `Subscription` state we're about to install in

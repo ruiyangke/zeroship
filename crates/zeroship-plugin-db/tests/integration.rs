@@ -1940,8 +1940,8 @@ SELECT con.conname AS name, con.condeferrable AS def, con.condeferred AS init_de
 // Replication slot + publication setup, watchdog, broker plumbing.
 //
 // These tests exercise the Rust-side primitives that the V8 layer
-// exposes through the CDC lifecycle, replication watchdog maintenance,
-// abandoned-slot cleanup, and the process-wide broker.
+// exposes through the CDC lifecycle, replication watchdog diagnostics,
+// operator-owned abandoned-slot cleanup, and the process-wide broker.
 //
 // Tests that need `wal_level=logical` skip themselves when the
 // running Postgres is `replica`. The runbook
@@ -2171,7 +2171,7 @@ async fn c1_watchdog_reports_new_slot() {
 }
 
 #[compio::test]
-async fn c1_drop_abandoned_reaps_inactive_slot() {
+async fn c1_abandoned_reaper_measures_elapsed_inactivity_not_wal_bytes() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
@@ -2190,23 +2190,335 @@ async fn c1_drop_abandoned_reaps_inactive_slot() {
         .unwrap();
     assert!(setup.created);
 
-    // The slot is brand-new and inactive (no consumer). Run the GC
-    // with a 0-byte floor — must reap.
-    let dropped = zeroship_plugin_db::replication::drop_abandoned_slots(&pool, app, 0)
+    let slot = zeroship_plugin_db::replication::worker_slot_name(app, CDC_TEST_WORKER_ID).unwrap();
+    let candidates = pool
+        .query_text_params(
+            "SELECT slot_name FROM pg_replication_slots WHERE slot_name = $1 AND active = false",
+            &[&slot],
+        )
         .await
         .unwrap();
+    assert_eq!(candidates.len(), 1, "test must exercise one inactive slot");
+
+    // Advance WAL by more bytes than the one-hour threshold's numeric value.
+    // The old implementation compared those unlike units and reaped this
+    // brand-new slot immediately.
+    pool.query_text_params(
+        "SELECT pg_logical_emit_message(true, 'zeroship-reaper-test', repeat('x', 8192))::text",
+        &[],
+    )
+    .await
+    .unwrap();
+    let threshold = std::time::Duration::from_secs(3600);
+    let start = std::time::Instant::now();
+    let mut reaper = zeroship_plugin_db::slot_reaper::OperatorSlotReaper::connect_for_tests(
+        &url,
+        "elapsed-time-reaper",
+        threshold,
+    )
+    .await
+    .unwrap();
+    let first = reaper.sweep_at_for_tests(start).await.unwrap();
+    assert!(first.is_leader, "single test reaper must lead its sweep");
     assert!(
-        dropped.contains(
-            &zeroship_plugin_db::replication::worker_slot_name(app, CDC_TEST_WORKER_ID).unwrap()
+        first.inspected > 0,
+        "test sweep must inspect at least one managed slot"
+    );
+    assert!(
+        first.dropped.is_empty(),
+        "a first observation cannot prove one hour of inactivity: {first:?}"
+    );
+    let remaining = pool
+        .query_text_params(
+            "SELECT slot_name FROM pg_replication_slots WHERE slot_name = $1",
+            &[&slot],
+        )
+        .await
+        .unwrap();
+    assert_eq!(remaining.len(), 1, "young inactive slot must remain");
+
+    let early = reaper
+        .sweep_at_for_tests(start + threshold - std::time::Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert!(early.inspected > 0, "early sweep must inspect the slot");
+    assert!(early.dropped.is_empty(), "slot reaped before threshold: {early:?}");
+
+    let due = reaper
+        .sweep_at_for_tests(start + threshold)
+        .await
+        .unwrap();
+    assert!(due.inspected > 0, "due sweep must inspect the slot");
+    assert_eq!(due.dropped, vec![slot.clone()]);
+    let remaining = pool
+        .query_text_params(
+            "SELECT slot_name FROM pg_replication_slots WHERE slot_name = $1",
+            &[&slot],
+        )
+        .await
+        .unwrap();
+    assert!(remaining.is_empty(), "due abandoned slot must be gone");
+
+    drop(reaper);
+    c1_cleanup(&pool, app).await;
+    release_pg(pool).await;
+}
+
+#[compio::test]
+async fn c1_abandoned_reaper_preserves_inactive_slot_owned_by_live_worker() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    if !pg_has_logical_wal(&pool).await {
+        zeroship_test_support::skip("Skipping - server wal_level is not 'logical'");
+        return release_pg(pool).await;
+    }
+
+    let app = "c1_live_worker_lease";
+    let worker_id = "live-worker-with-reconnecting-consumer";
+    c1_cleanup(&pool, app).await;
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+        .await
+        .unwrap();
+    c1_create_publication(&pool, app).await;
+    zeroship_plugin_db::replication::ensure_worker_slot(&pool, app, worker_id)
+        .await
+        .unwrap();
+    let slot = zeroship_plugin_db::replication::worker_slot_name(app, worker_id).unwrap();
+
+    let threshold = std::time::Duration::from_secs(3600);
+    let owner = zeroship_plugin_db::slot_reaper::OperatorSlotReaper::connect_for_tests(
+        &url,
+        worker_id,
+        threshold,
+    )
+    .await
+    .unwrap();
+    let conflict = zeroship_plugin_db::slot_reaper::OperatorSlotReaper::connect_for_tests(
+        &url,
+        worker_id,
+        threshold,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            conflict,
+            zeroship_plugin_db::error::DbError::Configuration {
+                code: "cdc_worker_lease_conflict",
+                ..
+            }
         ),
-        "expected to reap our slot, got: {dropped:?}"
+        "duplicate live worker identity must be refused: {conflict:?}"
     );
 
-    // A second sweep with the same threshold must not error.
-    let _ = zeroship_plugin_db::replication::drop_abandoned_slots(&pool, app, 0)
+    let mut observer = zeroship_plugin_db::slot_reaper::OperatorSlotReaper::connect_for_tests(
+        &url,
+        "live-worker-lease-observer",
+        threshold,
+    )
+    .await
+    .unwrap();
+    let start = std::time::Instant::now();
+    let first = observer.sweep_at_for_tests(start).await.unwrap();
+    assert!(first.is_leader, "observer must own the fleet sweep");
+    assert!(first.inspected > 0, "test must inspect the leased inactive slot");
+    assert!(first.dropped.is_empty(), "live worker slot was reaped: {first:?}");
+    let aged = observer
+        .sweep_at_for_tests(start + threshold + std::time::Duration::from_secs(1))
         .await
         .unwrap();
+    assert!(aged.inspected > 0, "aged sweep must inspect the leased slot");
+    assert!(aged.dropped.is_empty(), "live worker lease was ignored: {aged:?}");
 
+    let rows = pool
+        .query_text_params(
+            "SELECT active FROM pg_replication_slots WHERE slot_name = $1",
+            &[&slot],
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "leased inactive slot must remain");
+    assert!(!rows[0].get::<_, bool>("active"));
+
+    drop(observer);
+    drop(owner);
+    c1_cleanup(&pool, app).await;
+    release_pg(pool).await;
+}
+
+#[compio::test]
+async fn c1_abandoned_reaper_preserves_a_connected_idle_consumer() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+    if !pg_has_logical_wal(&pool).await {
+        zeroship_test_support::skip("Skipping - server wal_level is not 'logical'");
+        return release_pg(pool).await;
+    }
+
+    let app = "c1_idle_live_consumer";
+    let worker_id = "idle-live-consumer-worker";
+    c1_cleanup(&pool, app).await;
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+        .await
+        .unwrap();
+    pool.execute(
+        &format!(r#"CREATE TABLE "{app}"."events" (id BIGSERIAL PRIMARY KEY)"#),
+        &[],
+    )
+    .await
+    .unwrap();
+    c1_create_publication_for_tables(&pool, app, &["events"]).await;
+
+    let threshold = std::time::Duration::from_secs(3600);
+    let backend = zeroship_plugin_db::backend::BackendHandle::Postgres(std::rc::Rc::new(
+        zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone()),
+    ));
+    let consumer = backend
+        .as_change_stream_pg()
+        .expect("Postgres backend must expose CDC")
+        .spawn_consumer(app, worker_id)
+        .await
+        .expect("idle consumer must reach START_REPLICATION");
+    let slot = zeroship_plugin_db::replication::worker_slot_name(app, worker_id).unwrap();
+    let active = pool
+        .query_text_params(
+            "SELECT active FROM pg_replication_slots WHERE slot_name = $1",
+            &[&slot],
+        )
+        .await
+        .unwrap();
+    assert_eq!(active.len(), 1, "test must exercise one live consumer slot");
+    assert!(active[0].get::<_, bool>("active"));
+
+    let mut observer = zeroship_plugin_db::slot_reaper::OperatorSlotReaper::connect_for_tests(
+        &url,
+        "idle-consumer-observer",
+        threshold,
+    )
+    .await
+    .unwrap();
+    let start = std::time::Instant::now();
+    let first = observer.sweep_at_for_tests(start).await.unwrap();
+    assert!(first.is_leader, "observer must own the fleet sweep");
+    assert!(first.inspected > 0, "test sweep must inspect the active slot");
+    assert_eq!(
+        observer.tracked_slots_for_tests(),
+        0,
+        "an active idle consumer must not enter the inactivity clock"
+    );
+    let aged = observer
+        .sweep_at_for_tests(start + threshold + std::time::Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert!(aged.inspected > 0, "aged sweep must inspect the active slot");
+    assert!(first.dropped.is_empty() && aged.dropped.is_empty());
+    assert_eq!(
+        observer.tracked_slots_for_tests(),
+        0,
+        "an active idle consumer must stay outside the inactivity clock"
+    );
+    let still_active = pool
+        .query_text_params(
+            "SELECT active FROM pg_replication_slots WHERE slot_name = $1",
+            &[&slot],
+        )
+        .await
+        .unwrap();
+    assert_eq!(still_active.len(), 1, "idle live slot must remain");
+    assert!(still_active[0].get::<_, bool>("active"));
+
+    drop(observer);
+    consumer.shutdown().await.unwrap();
+    c1_cleanup(&pool, app).await;
+    drop(backend);
+    release_pg(pool).await;
+}
+
+#[compio::test]
+async fn c1_abandoned_reaper_elects_one_leader_across_concurrent_workers() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+    if !pg_has_logical_wal(&pool).await {
+        zeroship_test_support::skip("Skipping - server wal_level is not 'logical'");
+        return release_pg(pool).await;
+    }
+
+    let app = "c1_concurrent_reapers";
+    let worker_id = "crashed-worker-for-concurrent-reapers";
+    c1_cleanup(&pool, app).await;
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+        .await
+        .unwrap();
+    c1_create_publication(&pool, app).await;
+    zeroship_plugin_db::replication::ensure_worker_slot(&pool, app, worker_id)
+        .await
+        .unwrap();
+    let slot = zeroship_plugin_db::replication::worker_slot_name(app, worker_id).unwrap();
+
+    let threshold = std::time::Duration::from_secs(3600);
+    let start = std::time::Instant::now();
+    let mut first = zeroship_plugin_db::slot_reaper::OperatorSlotReaper::connect_for_tests(
+        &url,
+        "concurrent-reaper-a",
+        threshold,
+    )
+    .await
+    .unwrap();
+    let mut second = zeroship_plugin_db::slot_reaper::OperatorSlotReaper::connect_for_tests(
+        &url,
+        "concurrent-reaper-b",
+        threshold,
+    )
+    .await
+    .unwrap();
+    let (first_observation, second_observation) = futures::join!(
+        first.sweep_at_for_tests(start),
+        second.sweep_at_for_tests(start),
+    );
+    let first_observation = first_observation.unwrap();
+    let second_observation = second_observation.unwrap();
+    assert_eq!(
+        usize::from(first_observation.is_leader) + usize::from(second_observation.is_leader),
+        1,
+        "concurrent workers must elect exactly one fleet observer"
+    );
+    let inspected = first_observation.inspected + second_observation.inspected;
+    assert!(inspected > 0, "the elected reaper must inspect a non-empty set");
+    assert!(first_observation.dropped.is_empty() && second_observation.dropped.is_empty());
+
+    let due = start + threshold;
+    let (first_result, second_result) = futures::join!(
+        first.sweep_at_for_tests(due),
+        second.sweep_at_for_tests(due),
+    );
+    let first_result = first_result.unwrap();
+    let second_result = second_result.unwrap();
+    assert_eq!(
+        usize::from(first_result.is_leader) + usize::from(second_result.is_leader),
+        1,
+        "fleet observer leadership must remain single-flight"
+    );
+    assert!(
+        first_result.inspected + second_result.inspected > 0,
+        "the due sweep must inspect the fixture"
+    );
+    let dropped = first_result.dropped.len() + second_result.dropped.len();
+    assert_eq!(dropped, 1, "exactly one concurrent reaper must win the drop");
+    assert!(
+        first_result.dropped.contains(&slot) || second_result.dropped.contains(&slot),
+        "the dropped slot must be the test fixture"
+    );
+    let remaining = pool
+        .query_text_params(
+            "SELECT slot_name FROM pg_replication_slots WHERE slot_name = $1",
+            &[&slot],
+        )
+        .await
+        .unwrap();
+    assert!(remaining.is_empty(), "concurrent sweep must leave the slot absent");
+
+    drop(first);
+    drop(second);
     c1_cleanup(&pool, app).await;
     release_pg(pool).await;
 }
@@ -6835,8 +7147,8 @@ async fn unmask_fetch_runs_under_per_app_role_via_rls() {
 async fn wal_connection_stays_platform_role() {
     // §17.5: the WAL/replication connection stays under the platform
     // role and is NEVER switched to a per-app role. This is a structural
-    // assertion: the replication helpers (`ensure_publication_and_slot`,
-    // `drop_abandoned_slots`, the §17.7 deprovision) run on the pool
+    // assertion: the replication helpers (`ensure_worker_slot` and the
+    // section 17.7 deprovision) run on the pool
     // directly with NO `SET ROLE` — only the transaction BEGIN paths
     // (`exec_begin`) applies the per-app role. We pin
     // that the role-application surface is exactly the two tx-begin

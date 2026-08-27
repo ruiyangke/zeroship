@@ -32,14 +32,6 @@ interface ZeroshipReplication {
    * confirmedFlushLsn, lagBytes, walStatus}]`.
    */
   watchdog(): Promise<string>;
-
-  /**
-   * Drop replication slots that have been inactive for at least
-   * `opts.inactiveSeconds` (default 3600). Returns the names of dropped
-   * slots as a JSON array. Apps whose slot was reaped see a `resync`
-   * event on next subscriber attach.
-   */
-  dropAbandoned(opts?: { inactiveSeconds?: number }): Promise<string>;
 }
 
 /**
