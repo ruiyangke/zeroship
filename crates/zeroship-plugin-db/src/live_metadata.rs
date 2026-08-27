@@ -18,6 +18,39 @@
 //! app/deploy/collection triple. The key is therefore qualified by the
 //! service's [`DbResourceKey`].
 //!
+//! # Reclaim, and what is still owed (disclosed, not deferred silently)
+//!
+//! Going process-wide widened the blast radius of any entry that IS stale from
+//! one worker thread to the whole worker process, so what can retire an entry
+//! matters more than it did.
+//!
+//! **What reclaims today.** [`LiveMetadataCache::purge_app`], called by
+//! `DbLifecycle::deprovision_app` when the version poller sees an app leave the
+//! control-plane registry. That is the only event that makes a generation of
+//! entries unreachable, because every component of the key is immutable for the
+//! entry's life.
+//!
+//! **What does NOT, and is owed to a later step.**
+//!
+//! - *Growth across redeploys.* A redeploy mints a new deploy token, so its
+//!   entries land beside the previous deploy's rather than replacing them. The
+//!   old generation is unreachable - no live isolate holds that token - but
+//!   nothing evicts it, so a long-lived worker accumulates one generation per
+//!   deploy per app until the app is deleted. There is no size bound and no LRU.
+//!   Retiring a generation needs to know that no deploy-pinned isolate can still
+//!   be replaying against it, which is the isolate-lifetime bookkeeping 5b/5c
+//!   introduces; guessing at it here would evict entries out from under a pinned
+//!   workflow replay.
+//! - *Staleness without a new token.* Two identities can outlive the facts they
+//!   describe. A schema changed without a redeploy (an operator applying a
+//!   migration out of band) keeps its token, and everything binding under
+//!   [`crate::binding::COLD_START_DEPLOY_TOKEN`] - local dev, raw-JS deploys,
+//!   narrow test harnesses - shares ONE token for every deploy there will ever
+//!   be. Both were already stale per thread before the cache moved; what changed
+//!   is that one thread's stale read is now every thread's. Fixing it needs a
+//!   catalog-version signal (the design's WAL epoch carrier), which is
+//!   explicitly a later step and is not approximated here.
+//!
 //! # What this module deliberately does NOT own
 //!
 //! The **singleflight** that collapses concurrent cold misses stays per thread
@@ -161,6 +194,24 @@ impl LiveMetadataCache {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Drop every entry belonging to one app on one database, and report how
+    /// many went.
+    ///
+    /// The reclaim path for a DELETED app. Nothing else can retire an entry:
+    /// every component of the identity is immutable for the entry's life, so a
+    /// redeploy accumulates a second generation rather than replacing the first,
+    /// and only the app itself going away makes a generation unreachable.
+    ///
+    /// It is scoped to `(resource, app)`, never process-global. Deprovisioning
+    /// is per app, and a wipe would take every other app's facts on the way -
+    /// the same mistake [`Self::clear`] documents.
+    pub(crate) fn purge_app(&self, resource: DbResourceKey, app_id: &str) -> usize {
+        let mut entries = self.write_entries();
+        let before = entries.len();
+        entries.retain(|key, _| key.resource != resource || key.binding.app_id() != app_id);
+        before - entries.len()
     }
 
     /// Drop every entry in THIS cache object.
