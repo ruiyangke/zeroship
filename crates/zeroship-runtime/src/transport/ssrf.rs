@@ -9,7 +9,17 @@
 //!      public hostname that resolves into RFC1918 space cannot reach an
 //!      internal service.
 //!
-//! Both layers share `is_blocked_ip` as the single blocklist source of truth.
+//! Both layers share `is_blocked_ip` as the single blocklist source of truth,
+//! and both consult it through `is_blocked_ip_under_dev`, which is where the
+//! ONE narrowing lives: a process that stated the dev relaxation reaches
+//! loopback and nothing else. `transport::egress::filter_answer` - the
+//! `node:net` / `node:tls` / outbound WebSocket floor - reads the same
+//! predicate, so all three agree on what dev opens.
+//!
+//! DEV-NESS IS A STATED INPUT, NOT AN ENVIRONMENT READ. `dev_mode_enabled`
+//! answers only what `set_dev_mode` stored; `dev_mode_from_process_env` is a
+//! separate function that no gate calls, and its one caller is `zeroship serve`
+//! in `crates/zeroship-cli/src/main.rs`.
 //!
 //! Note: cyper 0.8 does **not** follow HTTP redirects automatically. The
 //! native fetch in `crate::fetch_native` does redirect handling and
@@ -22,7 +32,7 @@
 //! callback installed by `fetch_native::install_fetch_global`.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use cyper::resolve::Resolve;
 use futures::Stream;
@@ -32,76 +42,82 @@ use http::Uri;
 /// Maximum response body size: 10 MB.
 pub const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024;
 
-/// The process-level dev-relaxation cell. `0` = not yet resolved, `1` = off,
-/// `2` = on. Written once by [`dev_mode_enabled`] on the first read, or
-/// explicitly at any time by [`set_dev_mode`].
-static DEV_MODE: AtomicU8 = AtomicU8::new(DEV_MODE_UNRESOLVED);
-
-const DEV_MODE_UNRESOLVED: u8 = 0;
-const DEV_MODE_OFF: u8 = 1;
-const DEV_MODE_ON: u8 = 2;
+/// The process-level dev-relaxation cell. Written ONLY by [`set_dev_mode`];
+/// a process in which nothing called it holds `false`.
+static DEV_MODE: AtomicBool = AtomicBool::new(false);
 
 /// Development-only network relaxation gate.
 ///
-/// PRECEDENCE. An explicit [`set_dev_mode`] always wins. Otherwise the first
-/// call resolves the mode ONCE from the environment - the dev runtime's
-/// parent sets `ZEROSHIP_DEV=1` on the child (`sdks/vite-plugin/src/
-/// constants.ts`, `tests/e2e_durable_workflows.sh`) - and every later call
-/// returns that same answer. Any other value, including `0` or the empty
-/// string, is non-dev and fails closed.
+/// FALSE UNLESS A CALLER STATED OTHERWISE. There is no environment arm: this
+/// returns exactly what [`set_dev_mode`] last stored, and a process in which
+/// nothing stated a mode runs the whole guard.
 ///
-/// The parent-to-child environment contract is unchanged; what the cell
-/// removes is the need for anything INSIDE this process to mutate the
-/// environment to change the answer. `std::env::set_var` races concurrent
-/// libc `getenv` (undefined behaviour, which is why Rust 2024 marks it
-/// `unsafe`), so a caller that wants a mode states it with [`set_dev_mode`]
-/// instead.
+/// It used to fall back, on its first read, to
+/// `declared_env!(dev, "ZEROSHIP_DEV", ..)`, and [`validate_url`] returned
+/// `Ok(())` for every host the moment that answered yes. An environment
+/// variable is not a construction boundary: `ZEROSHIP_DEV=1` exported into a
+/// production `zeroship-worker` turned SSRF validation off for every `fetch`
+/// that worker made, and nothing reported it. The tree already states the
+/// opposite standard about the same process, at
+/// `crates/zeroship-worker/src/main.rs:146-147` - "The authority is the
+/// worker's identity, not an env flag: `SQLite` is refused even if
+/// `ZEROSHIP_DEV=1` leaked into a prod worker."
+///
+/// The surviving read is [`dev_mode_from_process_env`], whose one caller is
+/// `cmd_serve` in `crates/zeroship-cli/src/main.rs` - the binary that IS the
+/// dev tier by identity.
 #[must_use]
 pub fn dev_mode_enabled() -> bool {
-    match DEV_MODE.load(Ordering::Relaxed) {
-        DEV_MODE_ON => true,
-        DEV_MODE_OFF => false,
-        _ => {
-            let enabled = dev_mode_from_env_value(
-                zeroship_core::declared_env!(dev, "ZEROSHIP_DEV", crate::RuntimeConsumer)
-                    .as_deref(),
-            );
-            DEV_MODE.store(
-                if enabled { DEV_MODE_ON } else { DEV_MODE_OFF },
-                Ordering::Relaxed,
-            );
-            enabled
-        }
-    }
+    DEV_MODE.load(Ordering::Relaxed)
+}
+
+/// Read `ZEROSHIP_DEV` from the process environment, at the construction
+/// boundary of a binary that is the dev tier BY IDENTITY.
+///
+/// NO GATE CALLS THIS. [`validate_url`], [`SsrfResolver`] and
+/// `egress::filter_answer` read [`dev_mode_enabled`], which answers only what
+/// [`set_dev_mode`] stated. The environment therefore reaches a security
+/// decision exactly once - when a dev-tier binary chooses to pass this value
+/// to the setter - instead of on every gate evaluation in every process.
+///
+/// The one caller is `cmd_serve` in `crates/zeroship-cli/src/main.rs`: the
+/// single-process runtime `@zeroship/vite-plugin` spawns as
+/// `zeroship serve <entry>` with `ZEROSHIP_DEV=1`
+/// (`sdks/vite-plugin/src/dev-server.ts:939`). `zeroship-worker` does not call
+/// it, which is what makes a leaked `ZEROSHIP_DEV=1` inert there.
+#[must_use]
+pub fn dev_mode_from_process_env() -> bool {
+    dev_mode_from_env_value(
+        zeroship_core::declared_env!(dev, "ZEROSHIP_DEV", crate::RuntimeConsumer).as_deref(),
+    )
 }
 
 /// Which spellings of `ZEROSHIP_DEV` mean dev: exactly `1`, and nothing else.
 ///
-/// Split out from [`dev_mode_enabled`] so the question is answerable without
-/// an environment at all - the cached cell above resolves this once per
-/// process, so a test cannot ask it twice by any other route.
+/// Split out from [`dev_mode_from_process_env`] so the question is answerable
+/// without an environment at all.
 fn dev_mode_from_env_value(raw: Option<&str>) -> bool {
     zeroship_core::config::env_is_exact(raw, "1")
 }
 
-/// State the dev relaxation explicitly, overriding `ZEROSHIP_DEV` for the rest
-/// of the process.
+/// State the dev relaxation for the rest of the process.
 ///
-/// PRECEDENCE. This wins over the environment, whether or not
-/// [`dev_mode_enabled`] has already resolved it, and it wins permanently -
-/// there is no arm that re-reads the environment afterwards.
+/// THE ONLY WRITER of the cell [`dev_mode_enabled`] reads, and therefore the
+/// only way anything can relax the SSRF floor. A caller - an embedding
+/// process, or a test - SAYS which mode it wants; nothing infers one.
 ///
-/// It exists so a caller - an embedding process, or a test - can SAY which
-/// mode it wants. The alternative a test would otherwise reach for is
+/// The alternative a test would otherwise reach for is
 /// `std::env::set_var("ZEROSHIP_DEV", ..)`, which mutates the process-global
-/// environment underneath every other thread and races libc `getenv`. A test
-/// that toggles the mode still needs its own mutual exclusion: this cell is
-/// process-wide, so two tests disagreeing about the mode still disagree.
+/// environment underneath every other thread and races libc `getenv`
+/// (undefined behaviour, and `unsafe` in Rust 2024). Since the environment no
+/// longer reaches the gate, that spelling would not even work.
+///
+/// A test that toggles the mode still needs its own mutual exclusion: this
+/// cell is process-wide, so two tests disagreeing about the mode still
+/// disagree. The unit tests in this file resolve that by running each stated
+/// mode alone, in a child process.
 pub fn set_dev_mode(enabled: bool) {
-    DEV_MODE.store(
-        if enabled { DEV_MODE_ON } else { DEV_MODE_OFF },
-        Ordering::Relaxed,
-    );
+    DEV_MODE.store(enabled, Ordering::Relaxed);
 }
 
 fn ipv4_from_segments(high: u16, low: u16) -> Ipv4Addr {
@@ -176,16 +192,61 @@ pub fn is_blocked_ip(addr: IpAddr) -> bool {
     }
 }
 
+/// True for the loopback forms a developer machine actually reaches:
+/// `127.0.0.0/8`, `::1`, and the v4-mapped spelling `::ffff:127.0.0.0/8` a
+/// dual-stack `getaddrinfo` can hand back for `localhost`.
+///
+/// DELIBERATELY NARROWER than "an address that would end up at 127.0.0.1".
+/// The NAT64 (`64:ff9b::/96`) and IPv4-compatible (`::a.b.c.d`) embeddings
+/// [`is_blocked_ip`] also unwraps are NOT loopback here: reaching 127.0.0.1
+/// through either needs a translating gateway no `pnpm dev` box has, so
+/// admitting them would widen the relaxation for no workflow.
+#[must_use]
+pub fn is_loopback_ip(addr: IpAddr) -> bool {
+    match addr {
+        IpAddr::V4(v4) => v4.is_loopback(),
+        IpAddr::V6(v6) => v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback()),
+    }
+}
+
+/// The SSRF floor, evaluated under a stated dev relaxation.
+///
+/// ONE definition of what dev opens - loopback, and nothing else - shared by
+/// every place the floor is consulted: [`validate_url`] (the string fast
+/// path), [`SsrfResolver`] (the DNS layer) and `egress::filter_answer` (the
+/// `node:net` / `node:tls` / outbound WebSocket connect path). They diverged
+/// once already: dev turned the first two off wholesale while the third kept
+/// its rule phases, so "what dev allows" had three different answers and only
+/// one of them was written down.
+#[must_use]
+pub fn is_blocked_ip_under_dev(addr: IpAddr, dev_loopback: bool) -> bool {
+    is_blocked_ip(addr) && !(dev_loopback && is_loopback_ip(addr))
+}
+
 /// Validate the URL to prevent SSRF attacks (string-level fast path).
 ///
 /// Blocks non-HTTP(S) schemes and literal private/loopback/link-local/etc IPs
 /// embedded in the URL. A second layer of protection runs at DNS resolution
-/// time via `SsrfResolver` — domain names that resolve into blocked ranges
+/// time via [`SsrfResolver`] — domain names that resolve into blocked ranges
 /// are rejected there, since this function cannot see them.
 ///
-/// In dev mode (see [`dev_mode_enabled`]), localhost/loopback is allowed so
-/// the Vite plugin's ModuleRunner can fetch modules from the Vite dev server.
+/// Under a stated dev relaxation ([`set_dev_mode`]) LOOPBACK ONLY is allowed,
+/// so the Vite plugin's `ModuleRunner` can fetch modules from the Vite dev
+/// server. Every other blocked range stays refused in dev. Until 2026-08-27
+/// this returned `Ok(())` above the host lookup for any process the relaxation
+/// was on in, which is orders of magnitude wider than that purpose - the cloud
+/// metadata endpoint, RFC1918, CGNAT and link-local were all reachable.
 pub fn validate_url(url: &str) -> Result<(), String> {
+    validate_url_under(url, dev_mode_enabled())
+}
+
+/// [`validate_url`], with the dev relaxation supplied rather than read.
+///
+/// Exists so the matrix in the tests is a pure function of its arguments. The
+/// cell is process-wide: a unit test that flipped it to cover the dev arm
+/// would be deciding the result of every other test in the binary, and which
+/// result depended on which test ran first.
+fn validate_url_under(url: &str, dev_loopback: bool) -> Result<(), String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
 
     // `fetch` is the only caller. `ws`/`wss` used to be accepted here because
@@ -203,18 +264,23 @@ pub fn validate_url(url: &str) -> Result<(), String> {
         scheme => return Err(format!("Blocked URL scheme: {scheme}")),
     }
 
-    // In dev mode, skip host/IP validation (allows localhost fetch to Vite).
-    if dev_mode_enabled() {
-        return Ok(());
-    }
-
     let host = parsed
         .host_str()
         .ok_or_else(|| "URL has no host".to_string())?
         .to_lowercase();
 
-    // Block localhost
+    // Block localhost. This is the ONE name the dev relaxation admits, and it
+    // is the name the Vite dev server is addressed by: the ModuleRunner
+    // transport fetches `${ZEROSHIP_VITE_ORIGIN}/__zeroship_fetch_module`
+    // (`sdks/vite-plugin/src/dev-bootstrap/transport.ts:38`) and the plugin
+    // sets that origin to `http://localhost:<vitePort>`
+    // (`sdks/vite-plugin/src/dev-server.ts:947`). It is spawned as a CHILD of
+    // the Vite process (`dev-server.ts:970`), so the dev server is always on
+    // this host and loopback always reaches it.
     if host == "localhost" {
+        if dev_loopback {
+            return Ok(());
+        }
         return Err("Blocked request to localhost".to_string());
     }
 
@@ -226,7 +292,7 @@ pub fn validate_url(url: &str) -> Result<(), String> {
         .ok();
 
     if let Some(addr) = ip
-        && is_blocked_ip(addr)
+        && is_blocked_ip_under_dev(addr, dev_loopback)
     {
         return Err(format!("Blocked request to private/internal IP: {addr}"));
     }
@@ -239,13 +305,51 @@ pub fn validate_url(url: &str) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 /// Custom cyper resolver. Performs the same work as the default (std DNS
-/// lookup) then strips every `IpAddr` that `is_blocked_ip` rejects. If the
-/// remaining set is empty, returns an error so cyper fails the connection.
+/// lookup) then strips every `IpAddr` that [`is_blocked_ip_under_dev`]
+/// rejects. If the remaining set is empty, returns an error so cyper fails the
+/// connection.
 ///
 /// This closes the SSRF hole where a public hostname resolves to an RFC1918
 /// address — the caller sees a generic connect error instead of reaching the
 /// internal service.
-pub struct SsrfResolver;
+///
+/// IT MUST BE INSTALLED IN BOTH MODES. Until 2026-08-27 the dev arm of
+/// `transport::client::shared_cyper_client` built the client with NO custom
+/// resolver at all, so `fetch("http://metadata.internal.example/")` resolving
+/// into link-local space connected. Narrowing [`validate_url`] alone would
+/// have left that intact and read as closed: the string fast path cannot see a
+/// hostname's addresses, which is the whole reason this layer exists.
+pub struct SsrfResolver {
+    /// Whether loopback survives the filter. Everything else
+    /// [`is_blocked_ip`] rejects is stripped either way.
+    dev_loopback: bool,
+}
+
+impl SsrfResolver {
+    /// The production resolver: every blocked range is stripped.
+    #[must_use]
+    pub const fn strict() -> Self {
+        Self {
+            dev_loopback: false,
+        }
+    }
+
+    /// The resolver for a process that stated the dev relaxation: loopback
+    /// survives so `pnpm dev` can reach the Vite dev server by name, and every
+    /// other blocked range is still stripped.
+    #[must_use]
+    pub const fn dev_loopback() -> Self {
+        Self { dev_loopback: true }
+    }
+
+    /// Whether this resolver lets loopback through. The one observable
+    /// difference between the two constructors, and what
+    /// `transport::client` pins its selection with.
+    #[must_use]
+    pub const fn admits_loopback(&self) -> bool {
+        self.dev_loopback
+    }
+}
 
 impl Resolve for SsrfResolver {
     type Err = std::io::Error;
@@ -269,7 +373,7 @@ impl Resolve for SsrfResolver {
         // acceptable for fetch since this happens once per request.
         let addrs: Vec<IpAddr> = std::net::ToSocketAddrs::to_socket_addrs(&target)?
             .map(|sa| sa.ip())
-            .filter(|ip| !is_blocked_ip(*ip))
+            .filter(|ip| !is_blocked_ip_under_dev(*ip, self.dev_loopback))
             .collect();
 
         if addrs.is_empty() {
@@ -313,7 +417,8 @@ mod tests {
         assert!(!dev_mode_from_env_value(None));
     }
 
-    // NO TEST IN THIS MODULE CALLS `set_dev_mode`, deliberately.
+    // NO TEST THAT THE ORDINARY `cargo test` RUN EXECUTES IN THIS PROCESS
+    // CALLS `set_dev_mode`.
     //
     // The cell is process-wide, and `dev_mode_enabled` is read by
     // `validate_url` here AND by `egress::filter_answer`, whose floor tests
@@ -324,13 +429,219 @@ mod tests {
     // mode they never asked for, and the failure would surface in a module
     // that changed nothing.
     //
-    // `set_dev_mode` is exercised in both directions by the integration
-    // binaries instead, which already serialise on a per-binary `ENV_LOCK`:
+    // The rows below that DO need a stated mode are `#[ignore]`, so the
+    // ordinary run never executes them, and each has a spawner that runs it -
+    // alone, under `--exact` - in a CHILD copy of this same test binary. A
+    // child runs exactly one test, so the cell it writes is observed by
+    // nothing else and no neighbour can have written it first. That is the
+    // whole ordering argument: in the parent process the cell is never
+    // written, and in each child it is written by the only test running.
+    //
+    // `set_dev_mode` is additionally exercised in both directions by the
+    // integration binaries, which serialise on a per-binary `ENV_LOCK`:
     // `tests/node_net.rs` (`SettingsGuard::set(false, ..)` versus
     // `set(true, ..)`) and `tests/node_net_security.rs`
     // (`dev_mode_off_does_not_relax_ssrf` versus the `dev_mode: true` rows).
-    // What is checked HERE is the part with no cell in it: which spellings of
-    // the environment value mean dev.
+
+    /// Run ONE test of this same binary in a CHILD process; return
+    /// `(the child passed, its combined output)`.
+    ///
+    /// `--exact` plus a single name is what keeps the child's process-wide
+    /// state private to that one test. Every caller MUST also assert on
+    /// `1 passed`: a name matching nothing runs zero tests and libtest still
+    /// exits 0, so a typo in the path would otherwise read as a green.
+    fn run_one_test_in_child(
+        name: &str,
+        ignored: bool,
+        apply: impl FnOnce(&mut std::process::Command),
+    ) -> (bool, String) {
+        let exe = std::env::current_exe().expect("current_exe");
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg("--exact")
+            .arg(name)
+            .arg("--nocapture")
+            .arg("--test-threads=1");
+        if ignored {
+            cmd.arg("--ignored");
+        }
+        apply(&mut cmd);
+        let out = cmd.output().expect("spawn a child copy of this test binary");
+        let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+        text.push_str(&String::from_utf8_lossy(&out.stderr));
+        (out.status.success(), text)
+    }
+
+    /// The addresses this guard exists for, asserted about the SHIPPED entry
+    /// point rather than about `is_blocked_ip` in isolation.
+    ///
+    /// `is_blocked_ip` had a row for every one of these before this test
+    /// existed, and all of them were green while `validate_url` returned
+    /// `Ok(())` above its host lookup for any process holding
+    /// `ZEROSHIP_DEV=1`. A blocklist test cannot see a caller that never
+    /// consults the blocklist.
+    ///
+    /// This is also the body the environment regression test re-runs in a
+    /// child process, so keep it free of process-wide state.
+    #[test]
+    fn validate_url_refuses_metadata_and_rfc1918() {
+        for url in [
+            "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+            "http://10.0.0.1/",
+            "http://172.16.0.1/",
+            "http://192.168.1.1/",
+            "http://100.64.0.1/",
+            "http://[fd00::1]/",
+            "http://[fe80::1]/",
+        ] {
+            assert!(validate_url(url).is_err(), "the SSRF guard must refuse {url}");
+        }
+    }
+
+    /// THE REGRESSION TEST. `ZEROSHIP_DEV=1` in the process environment must
+    /// not disable SSRF validation.
+    ///
+    /// The variable is set on a CHILD process, never with `std::env::set_var`:
+    /// that mutates the environment underneath every other thread and races
+    /// libc `getenv` (undefined behaviour, and `unsafe` in Rust 2024).
+    #[test]
+    fn zeroship_dev_in_the_environment_cannot_disable_the_guard() {
+        let (passed, out) = run_one_test_in_child(
+            "transport::ssrf::tests::validate_url_refuses_metadata_and_rfc1918",
+            false,
+            |cmd| {
+                cmd.env("ZEROSHIP_DEV", "1");
+            },
+        );
+        assert!(
+            passed,
+            "ZEROSHIP_DEV=1 in the environment disabled the SSRF guard:\n{out}"
+        );
+        assert!(
+            out.contains("1 passed"),
+            "the child ran no test, so it proved nothing:\n{out}"
+        );
+    }
+
+    /// `ZEROSHIP_DEV` reaches the dev relaxation through NO path at all.
+    ///
+    /// Sharper than the row above, which would also pass if the guard read the
+    /// variable and then happened to refuse the addresses asked about: this
+    /// asserts the cell itself is off in a process whose environment carries
+    /// the affirmative spelling.
+    #[test]
+    #[ignore = "asserts a process-wide cell; its spawner runs it alone in a child"]
+    fn dev_relaxation_ignores_the_environment() {
+        assert!(
+            !dev_mode_enabled(),
+            "ZEROSHIP_DEV=1 in the environment must not resolve the dev relaxation"
+        );
+        assert!(validate_url("http://127.0.0.1:5173/x").is_err());
+        assert!(validate_url("http://localhost:5173/x").is_err());
+    }
+
+    #[test]
+    fn dev_relaxation_ignores_the_environment_in_an_isolated_process() {
+        let (passed, out) = run_one_test_in_child(
+            "transport::ssrf::tests::dev_relaxation_ignores_the_environment",
+            true,
+            |cmd| {
+                cmd.env("ZEROSHIP_DEV", "1");
+            },
+        );
+        assert!(passed, "the environment still reaches the dev cell:\n{out}");
+        assert!(
+            out.contains("1 passed"),
+            "the child ran no test, so it proved nothing:\n{out}"
+        );
+    }
+
+    /// THE NARROWING. With the relaxation stated through the typed setter,
+    /// loopback is reachable - that is the whole of its stated purpose, the
+    /// Vite dev server - and every other blocked range is still refused.
+    #[test]
+    #[ignore = "states a process-wide cell; its spawner runs it alone in a child"]
+    fn dev_relaxation_is_loopback_only() {
+        set_dev_mode(true);
+        for url in [
+            "http://localhost:5173/@vite/client",
+            "http://127.0.0.1:5173/x",
+            "http://127.0.0.2:5173/x",
+            "http://[::1]:5173/x",
+            "https://example.com/x",
+        ] {
+            assert!(
+                validate_url(url).is_ok(),
+                "the dev relaxation must still reach {url}"
+            );
+        }
+        for url in [
+            "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+            "http://10.0.0.1/",
+            "http://172.16.0.1/",
+            "http://192.168.1.1/",
+            "http://100.64.0.1/",
+            "http://[fd00::1]/",
+            "http://[fe80::1]/",
+            "http://0.0.0.0/",
+        ] {
+            assert!(
+                validate_url(url).is_err(),
+                "the dev relaxation must not open {url}"
+            );
+        }
+        // The scheme check sits above the relaxation and stays above it.
+        assert!(validate_url("file:///etc/passwd").is_err());
+        assert!(validate_url("wss://example.com/").is_err());
+    }
+
+    #[test]
+    fn dev_relaxation_is_loopback_only_in_an_isolated_process() {
+        let (passed, out) = run_one_test_in_child(
+            "transport::ssrf::tests::dev_relaxation_is_loopback_only",
+            true,
+            |cmd| {
+                cmd.env_remove("ZEROSHIP_DEV");
+            },
+        );
+        assert!(passed, "the dev relaxation is wider than loopback:\n{out}");
+        assert!(
+            out.contains("1 passed"),
+            "the child ran no test, so it proved nothing:\n{out}"
+        );
+    }
+
+    /// FAIL CLOSED. A process in which nothing stated a mode runs the full
+    /// guard, loopback included.
+    #[test]
+    #[ignore = "asserts a process-wide cell; its spawner runs it alone in a child"]
+    fn absent_dev_relaxation_fails_closed() {
+        assert!(
+            !dev_mode_enabled(),
+            "an unstated dev relaxation must read as off"
+        );
+        assert!(validate_url("http://127.0.0.1:5173/x").is_err());
+        assert!(validate_url("http://localhost:5173/x").is_err());
+        assert!(validate_url("http://169.254.169.254/").is_err());
+    }
+
+    #[test]
+    fn absent_dev_relaxation_fails_closed_in_an_isolated_process() {
+        let (passed, out) = run_one_test_in_child(
+            "transport::ssrf::tests::absent_dev_relaxation_fails_closed",
+            true,
+            |cmd| {
+                cmd.env_remove("ZEROSHIP_DEV");
+            },
+        );
+        assert!(
+            passed,
+            "an unstated dev relaxation did not fail closed:\n{out}"
+        );
+        assert!(
+            out.contains("1 passed"),
+            "the child ran no test, so it proved nothing:\n{out}"
+        );
+    }
 
     #[test]
     fn blocks_loopback_v4() {
@@ -442,5 +753,130 @@ mod tests {
     #[test]
     fn validate_url_allows_public_http() {
         assert!(validate_url("https://example.com/x").is_ok());
+    }
+
+    /// What the dev relaxation opens and what it leaves shut, asked of the
+    /// pure form so the matrix needs no process-wide state and cannot be
+    /// decided by which test ran first.
+    ///
+    /// The `false` column is the CONTROL: it differs from the `true` column in
+    /// exactly one variable, so a green here says the loopback rows are about
+    /// the relaxation and not about the address being reachable anyway.
+    #[test]
+    fn validate_url_under_dev_opens_loopback_and_nothing_else() {
+        // (url, allowed under dev, allowed under production)
+        let rows = [
+            ("http://localhost:5173/@vite/client", true, false),
+            ("http://127.0.0.1:5173/x", true, false),
+            ("http://127.0.0.2:5173/x", true, false),
+            ("http://[::1]:5173/x", true, false),
+            ("http://[::ffff:127.0.0.1]:5173/x", true, false),
+            ("https://example.com/x", true, true),
+            ("http://169.254.169.254/latest/meta-data/", false, false),
+            ("http://10.0.0.1/", false, false),
+            ("http://172.16.0.1/", false, false),
+            ("http://192.168.1.1/", false, false),
+            ("http://100.64.0.1/", false, false),
+            ("http://0.0.0.0/", false, false),
+            ("http://[fd00::1]/", false, false),
+            ("http://[fe80::1]/", false, false),
+            ("http://[64:ff9b::7f00:1]/", false, false),
+            ("file:///etc/passwd", false, false),
+            ("wss://example.com/", false, false),
+        ];
+        for (url, dev_ok, prod_ok) in rows {
+            assert_eq!(
+                validate_url_under(url, true).is_ok(),
+                dev_ok,
+                "dev relaxation verdict for {url}"
+            );
+            assert_eq!(
+                validate_url_under(url, false).is_ok(),
+                prod_ok,
+                "production verdict for {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_loopback_ip_is_narrower_than_is_blocked_ip() {
+        for loopback in ["127.0.0.1", "127.0.0.2", "::1", "::ffff:127.0.0.1"] {
+            let addr: IpAddr = loopback.parse().unwrap();
+            assert!(is_loopback_ip(addr), "{loopback} is loopback");
+            assert!(is_blocked_ip(addr), "{loopback} is still on the blocklist");
+            assert!(
+                !is_blocked_ip_under_dev(addr, true),
+                "{loopback} must be reachable under the dev relaxation"
+            );
+            assert!(
+                is_blocked_ip_under_dev(addr, false),
+                "{loopback} must stay blocked in production"
+            );
+        }
+        // Blocked, and NOT opened by the relaxation. `64:ff9b::7f00:1` and
+        // `::7f00:1` reach 127.0.0.1 only through a translating gateway, so
+        // they are deliberately outside what dev admits.
+        for blocked in [
+            "169.254.169.254",
+            "10.0.0.1",
+            "192.168.1.1",
+            "100.64.0.1",
+            "fd00::1",
+            "fe80::1",
+            "64:ff9b::7f00:1",
+            "::7f00:1",
+        ] {
+            let addr: IpAddr = blocked.parse().unwrap();
+            assert!(!is_loopback_ip(addr), "{blocked} is not loopback");
+            assert!(
+                is_blocked_ip_under_dev(addr, true),
+                "the dev relaxation must not open {blocked}"
+            );
+        }
+        // Public space is unaffected in both directions.
+        let public: IpAddr = "93.184.216.34".parse().unwrap();
+        assert!(!is_blocked_ip_under_dev(public, true));
+        assert!(!is_blocked_ip_under_dev(public, false));
+    }
+
+    /// THE DNS LAYER, which the string fast path cannot stand in for: a
+    /// hostname's addresses are invisible to `validate_url`, so narrowing that
+    /// function while `client.rs` built its dev client with no resolver at all
+    /// would have left `fetch("http://metadata.internal.example/")` connecting.
+    ///
+    /// Both arms use IP literals, which `to_socket_addrs` resolves without a
+    /// nameserver, so the row is deterministic on a machine with no DNS.
+    #[test]
+    fn ssrf_resolver_admits_loopback_only_under_the_dev_relaxation() {
+        use futures::StreamExt;
+
+        let strict = SsrfResolver::strict();
+        let dev = SsrfResolver::dev_loopback();
+        let loopback: Uri = "http://127.0.0.1:9/".parse().unwrap();
+        let metadata: Uri = "http://169.254.169.254:80/".parse().unwrap();
+
+        futures::executor::block_on(async {
+            assert!(
+                strict.resolve(&loopback).await.is_err(),
+                "production must strip loopback"
+            );
+            let admitted: Vec<IpAddr> = dev
+                .resolve(&loopback)
+                .await
+                .expect("the dev relaxation must admit loopback")
+                .collect()
+                .await;
+            assert_eq!(admitted, vec!["127.0.0.1".parse::<IpAddr>().unwrap()]);
+
+            assert!(
+                strict.resolve(&metadata).await.is_err(),
+                "production must strip the metadata address"
+            );
+            assert!(
+                dev.resolve(&metadata).await.is_err(),
+                "the dev relaxation must NOT open the metadata address at the \
+                 DNS layer either"
+            );
+        });
     }
 }

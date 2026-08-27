@@ -76,6 +76,24 @@ fn main() {
 // ---------------------------------------------------------------------------
 
 fn cmd_serve(args: &[String]) {
+    // THE ONE PLACE THE DEV RELAXATION IS STATED. `zeroship serve` is the
+    // single-process dev-tier runtime by identity - it is what
+    // `@zeroship/vite-plugin` spawns (`sdks/vite-plugin/src/dev-server.ts:970`)
+    // with `ZEROSHIP_DEV=1` (`dev-server.ts:939`), and the only vector on
+    // which SQLite is an accepted `env.db` backend.
+    //
+    // The runtime's SSRF guard no longer reads the environment at all; it
+    // answers what this call stated (`crates/zeroship-runtime/src/transport/
+    // ssrf.rs`, `dev_mode_enabled`). `zeroship-worker` makes no such call, so
+    // a `ZEROSHIP_DEV=1` that leaks into a production worker's environment
+    // changes nothing there - the same standard the worker already applies to
+    // its database backend at `crates/zeroship-worker/src/main.rs:146-147`.
+    //
+    // It runs before anything builds a `cyper::Client` or a `DevAuthSettings`,
+    // both of which resolve the mode once and keep the answer
+    // (`transport/client.rs`, `core/serve.rs:1749`).
+    zeroship_runtime::set_dev_mode(zeroship_runtime::dev_mode_from_process_env());
+
     let input = args.get(2).expect(
         "Usage: zeroship serve <file> [--port=3000] [--workers=0] [--cpu-limit=MS] [--wall-timeout=MS]",
     );

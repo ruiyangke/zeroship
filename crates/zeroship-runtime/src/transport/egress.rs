@@ -65,7 +65,7 @@ use std::time::Duration;
 use zeroship_core::net_policy::{AddressPhase, NamePhase};
 
 use super::net_policy::NetPolicy;
-use super::ssrf::{dev_mode_enabled, is_blocked_ip};
+use super::ssrf::{dev_mode_enabled, is_blocked_ip_under_dev};
 
 /// Fallback bound on PHASE 2. Overridable with
 /// `ZEROSHIP_NET_RESOLVE_TIMEOUT_MS`; the timeout fails CLOSED.
@@ -427,9 +427,9 @@ fn filter_answer(
     policy: &NetPolicy,
     port: u16,
     name_accepted: bool,
+    dev_loopback: bool,
     answer: Vec<SocketAddr>,
 ) -> Result<Vec<SocketAddr>, EgressRefusal> {
-    let dev_mode = dev_mode_enabled();
     let mut kept = Vec::with_capacity(answer.len());
     let mut floor = Vec::new();
     let mut range_rejected = Vec::new();
@@ -443,7 +443,20 @@ fn filter_answer(
         // arm below can be reached for an address this drops. Moving this
         // after step 6, or conditioning it on `name_accepted` or on an ACCEPT
         // match, lets a creator grant widen the floor.
-        if !dev_mode && is_blocked_ip(ip) {
+        //
+        // `dev_loopback` opens LOOPBACK ONLY, and it is a parameter rather
+        // than a `dev_mode_enabled()` read here for two reasons. It is the
+        // same narrowing `ssrf::validate_url` applies, through the same
+        // predicate, so the two cannot drift; and a unit test can cover the
+        // dev arm without writing a process-wide cell that would decide the
+        // result of every other test in the binary. Until 2026-08-27 this read
+        // `!dev_mode && is_blocked_ip(ip)`, so a dev process skipped the floor
+        // ENTIRELY and INVARIANT GRANTS-NARROW did not hold for it: a creator
+        // `Range` ACCEPT naming 169.254.169.254 was then admitted by step 6,
+        // which is the exact widening step 4 exists to prevent. (`Trusted`
+        // skipped it too, but no creator app can hold `Trusted` -
+        // `crates/zeroship-worker/src/cache.rs:1570-1588` pins that.)
+        if is_blocked_ip_under_dev(ip, dev_loopback) {
             floor.push(ip);
             continue;
         }
@@ -484,8 +497,18 @@ pub async fn evaluate(
     port: u16,
     resolver: &dyn EgressResolver,
 ) -> Result<Vec<SocketAddr>, EgressRefusal> {
+    // The dev relaxation is read ONCE per evaluation, here, and handed to
+    // phase 3. Reading it inside the loop would let the answer change
+    // mid-verdict; reading it in two places would let the two disagree.
+    let dev_loopback = dev_mode_enabled();
     match pre_dns(policy, target, port)? {
-        PreDns::Literal(ip) => filter_answer(policy, port, false, vec![SocketAddr::new(ip, port)]),
+        PreDns::Literal(ip) => filter_answer(
+            policy,
+            port,
+            false,
+            dev_loopback,
+            vec![SocketAddr::new(ip, port)],
+        ),
         PreDns::Resolve { name_accepted } => {
             if !name_accepted {
                 GATE_OPENED_RESOLUTIONS.fetch_add(1, Ordering::Relaxed);
@@ -505,7 +528,7 @@ pub async fn evaluate(
                 .resolve(target, port)
                 .await
                 .map_err(EgressRefusal::ResolveFailed)?;
-            filter_answer(policy, port, name_accepted, answer)
+            filter_answer(policy, port, name_accepted, dev_loopback, answer)
         }
     }
 }
@@ -865,6 +888,51 @@ mod tests {
         // being ignored.
         let outside = RecordingResolver::new(&[&format!("{OUT_OF_RANGE}:443")]);
         assert!(evaluate(&p, "api.example.test", 443, &outside).is_ok());
+    }
+
+    /// The platform floor under a stated dev relaxation: LOOPBACK ONLY.
+    ///
+    /// Phase 3 is called directly, with the relaxation as an argument, because
+    /// the alternative is writing the process-wide cell and deciding the
+    /// result of every other row in this binary
+    /// (`transport/ssrf.rs`, `set_dev_mode`).
+    ///
+    /// `Trusted` is the policy that makes the floor observable on its own: it
+    /// matches no rules, so step 5 and step 6 admit everything and the only
+    /// thing that can drop an address is step 4. Until 2026-08-27 step 4 read
+    /// `!dev_mode && is_blocked_ip(ip)`, so this exact combination - a dev
+    /// process on a `Trusted` policy - reached 169.254.169.254 outright, and
+    /// no row in this module could see it because every row ran with the mode
+    /// off.
+    #[test]
+    fn the_dev_relaxation_opens_loopback_only_at_the_floor() {
+        let trusted = NetPolicy::trusted(4, 1024 * 1024);
+        let loopback: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let metadata: SocketAddr = "169.254.169.254:80".parse().unwrap();
+        let private: SocketAddr = "10.0.0.5:8080".parse().unwrap();
+
+        // Dev: loopback survives.
+        assert_eq!(
+            filter_answer(&trusted, 8080, false, true, vec![loopback]).unwrap(),
+            vec![loopback]
+        );
+        // Dev: nothing else does.
+        for blocked in [metadata, private] {
+            let refusal = filter_answer(&trusted, blocked.port(), false, true, vec![blocked])
+                .expect_err("the dev relaxation must not open the whole floor");
+            assert!(
+                matches!(refusal, EgressRefusal::NoAddressSurvived { ref floor, .. } if floor == &[blocked.ip()]),
+                "the FLOOR must be the arm that refused {blocked}, got {refusal:?}"
+            );
+        }
+        // The control, differing in ONE variable: with the relaxation off,
+        // loopback is refused by the same arm.
+        let refusal = filter_answer(&trusted, 8080, false, false, vec![loopback])
+            .expect_err("production must refuse loopback");
+        assert!(
+            matches!(refusal, EgressRefusal::NoAddressSurvived { ref floor, .. } if floor == &[loopback.ip()]),
+            "got {refusal:?}"
+        );
     }
 
     /// The survivors are ALL of them, in the resolver's own order. Nothing else

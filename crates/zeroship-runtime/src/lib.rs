@@ -125,7 +125,13 @@ pub use transport::ssrf as fetch;
 // callers that STATE the mode - the embedding process, and the integration
 // tests and bench that live outside this crate - should not have to know
 // which transport module owns the cell.
-pub use transport::ssrf::{dev_mode_enabled, set_dev_mode};
+//
+// `dev_mode_from_process_env` is the environment read, and it is NOT the gate:
+// nothing inside this crate calls it. `zeroship serve` does
+// (`crates/zeroship-cli/src/main.rs`, `cmd_serve`), because that binary is the
+// dev tier by identity. Every other embedding - the worker above all - simply
+// never states a mode and therefore runs the full SSRF guard.
+pub use transport::ssrf::{dev_mode_enabled, dev_mode_from_process_env, set_dev_mode};
 
 #[cfg(feature = "runtime_tls")]
 pub use transport::tls::set_native_roots_pem;
