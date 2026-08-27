@@ -13,7 +13,7 @@
 //!       cargo test -p compio-postgres --test integration
 
 use compio_postgres::error::SqlState;
-use compio_postgres::types::Type;
+use compio_postgres::types::{IsNull, ToSql, Type, to_sql_checked};
 use compio_postgres::{
     Client, Config, Error, NoTls, Pool, PoolConfig, QueryOutcome, Row, SimpleQueryMessage,
     TransactionStatus, Uncached,
@@ -5248,6 +5248,29 @@ fn driver_statement_id(name: &str) -> usize {
         .expect("driver statement names are s followed by a usize")
 }
 
+/// Raw text for a PostgreSQL domain parameter. `postgres-types` deliberately
+/// does not guess that an arbitrary Rust string satisfies a user-defined
+/// domain, while these cache tests need the server to decode that exact OID.
+#[derive(Debug)]
+struct DomainText(&'static str);
+
+impl ToSql for DomainText {
+    fn to_sql(
+        &self,
+        _: &Type,
+        out: &mut bytes::BytesMut,
+    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        out.extend_from_slice(self.0.as_bytes());
+        Ok(IsNull::No)
+    }
+
+    fn accepts(_: &Type) -> bool {
+        true
+    }
+
+    to_sql_checked!();
+}
+
 /// Reserve enough consecutive names on this session that unrelated parallel
 /// tests cannot advance prepare.rs's process-global counter past all of them
 /// between the probe and the colliding Parse.
@@ -5350,6 +5373,28 @@ async fn statement_cache_capacity_zero_prepares_every_call() {
     drop(results);
     client.simple_query("").await.unwrap();
     assert!(prepared_statement_names(&client, SQL).await.is_empty());
+}
+
+/// Capacity zero disables the entire admission mechanism, not merely prepared
+/// entry retention. A configured threshold therefore cannot send early calls
+/// through the unnamed statement slot.
+#[compio::test]
+async fn statement_cache_capacity_zero_ignores_the_execution_threshold() {
+    let url = test_url();
+    let client = connect_with_statement_cache_threshold(&url, 0, 3)
+        .await
+        .unwrap();
+
+    const SQL: &str = "SELECT 87::int4 AS cpg_cache_zero_threshold";
+    let first = client.query(SQL, &[]).await.unwrap();
+    let second = client.query(SQL, &[]).await.unwrap();
+    assert_eq!(first[0].get::<_, i32>(0), 87);
+    assert_eq!(second[0].get::<_, i32>(0), 87);
+    assert_eq!(
+        prepared_statement_names(&client, SQL).await.len(),
+        2,
+        "a zero-capacity cache still applied its execution threshold"
+    );
 }
 
 /// An enabled cache prepares one server statement and reuses it for every
@@ -5773,6 +5818,46 @@ async fn statement_cache_eviction_closes_after_outstanding_clones() {
     assert_eq!(prepared_statement_names(&client, SQL_B).await.len(), 1);
 }
 
+/// Protocol Close of a statement also closes every portal made from it. The
+/// cache may evict its clone, but a caller-owned Portal must keep the server
+/// statement alive until that portal is dropped.
+#[compio::test]
+async fn statement_cache_eviction_waits_for_a_bound_portal() {
+    let url = test_url();
+    let mut client = connect_with_statement_cache(&url, 1).await.unwrap();
+    let transaction = client.transaction().await.unwrap();
+
+    const SQL_A: &str = "SELECT $1::int4 AS cpg_cache_portal_owner";
+    const SQL_B: &str = "SELECT $1::int4 AS cpg_cache_portal_evictor";
+    let portal_a = transaction.bind(SQL_A, &[&81_i32]).await.unwrap();
+    let name_a = prepared_statement_name(transaction.client(), SQL_A).await;
+
+    let portal_b = transaction.bind(SQL_B, &[&82_i32]).await.unwrap();
+    assert_eq!(
+        prepared_statement_names(transaction.client(), SQL_A).await,
+        vec![name_a.clone()],
+        "eviction closed a statement while its portal still named it"
+    );
+
+    let rows = transaction.query_portal(&portal_a, 0).await.unwrap();
+    assert_eq!(rows[0].get::<_, i32>(0), 81);
+    drop((rows, portal_b));
+    assert_eq!(
+        prepared_statement_names(transaction.client(), SQL_A).await,
+        vec![name_a],
+        "executing the portal released its statement ownership early"
+    );
+
+    drop(portal_a);
+    transaction.client().simple_query("").await.unwrap();
+    assert!(
+        prepared_statement_names(transaction.client(), SQL_A)
+            .await
+            .is_empty()
+    );
+    transaction.rollback().await.unwrap();
+}
+
 /// Concurrent cold misses may race through Parse/Describe, but cache
 /// insertion elects one winner and drops every losing Statement. Both callers
 /// execute the winner, so no losing server name remains live.
@@ -5794,6 +5879,31 @@ async fn statement_cache_concurrent_misses_keep_one_statement() {
     drop((first, second));
     client.simple_query("").await.unwrap();
     assert_eq!(prepared_statement_names(&client, SQL).await.len(), 1);
+}
+
+/// Both callers can clone the same cached Statement before either missing-name
+/// response is delivered. They must each recover without evicting the other's
+/// replacement, and the race must converge on one live server name.
+#[compio::test]
+async fn statement_cache_concurrent_stale_callers_share_one_replacement() {
+    let url = test_url();
+    let client = connect_with_statement_cache(&url, 2).await.unwrap();
+
+    const SQL: &str = "SELECT 83::int4 AS cpg_cache_concurrent_stale";
+    drop(client.query(SQL, &[]).await.unwrap());
+    client.batch_execute("DEALLOCATE ALL").await.unwrap();
+
+    let (first, second) =
+        futures_util::future::join(client.query(SQL, &[]), client.query(SQL, &[])).await;
+    let first = first.unwrap();
+    let second = second.unwrap();
+    assert_eq!(first[0].get::<_, i32>(0), 83);
+    assert_eq!(second[0].get::<_, i32>(0), 83);
+    assert_eq!(
+        prepared_statement_names(&client, SQL).await.len(),
+        1,
+        "concurrent recovery left more than one cached server statement"
+    );
 }
 
 /// `Uncached` skips both cache lookup and insertion for exactly this use. The
@@ -5839,7 +5949,7 @@ async fn statement_cache_retries_stale_result_shape_once_after_0a000() {
     let url = test_url();
     let client = connect_with_statement_cache(&url, 2).await.unwrap();
 
-    const SQL: &str = "SELECT cpg_cache_plan_shape.*, $1::int4 AS bound FROM cpg_cache_plan_shape";
+    const SQL: &str = "SELECT * FROM cpg_cache_plan_shape";
     client
         .batch_execute(
             "DROP TABLE IF EXISTS cpg_cache_plan_shape; \
@@ -5849,9 +5959,8 @@ async fn statement_cache_retries_stale_result_shape_once_after_0a000() {
         .await
         .unwrap();
 
-    let first_rows = client.query(SQL, &[&57_i32]).await.unwrap();
+    let first_rows = client.query(SQL, &[]).await.unwrap();
     assert_eq!(first_rows[0].get::<_, i32>("id"), 58);
-    assert_eq!(first_rows[0].get::<_, i32>("bound"), 57);
     drop(first_rows);
 
     client
@@ -5862,11 +5971,10 @@ async fn statement_cache_retries_stale_result_shape_once_after_0a000() {
         .await
         .unwrap();
 
-    let refreshed_rows = client.query(SQL, &[&60_i32]).await.unwrap();
-    assert_eq!(refreshed_rows[0].len(), 3);
+    let refreshed_rows = client.query(SQL, &[]).await.unwrap();
+    assert_eq!(refreshed_rows[0].len(), 2);
     assert_eq!(refreshed_rows[0].get::<_, i32>("id"), 58);
     assert_eq!(refreshed_rows[0].get::<_, &str>("label"), "fresh");
-    assert_eq!(refreshed_rows[0].get::<_, i32>("bound"), 60);
     assert_eq!(prepared_statement_names(&client, SQL).await.len(), 1);
 
     assert_eq!(
@@ -5879,6 +5987,90 @@ async fn statement_cache_retries_stale_result_shape_once_after_0a000() {
         .batch_execute("DROP TABLE cpg_cache_plan_shape")
         .await
         .unwrap();
+}
+
+/// PostgreSQL decodes domain parameters before it asks the plan cache to
+/// revalidate a fixed result descriptor. The first domain check therefore ran
+/// even though this Bind later reports 0A000. Propagate that first error rather
+/// than replaying input code whose nontransactional effects cannot be undone.
+#[compio::test]
+async fn statement_cache_does_not_retry_0a000_after_parameter_input() {
+    let url = test_url();
+    let client = connect_with_statement_cache(&url, 3).await.unwrap();
+    client
+        .batch_execute(
+            "CREATE TEMP SEQUENCE cpg_cache_domain_0a000_seq; \
+             CREATE FUNCTION pg_temp.cpg_cache_domain_0a000_check(value text) \
+             RETURNS boolean LANGUAGE plpgsql VOLATILE AS $function$ \
+             BEGIN \
+               PERFORM nextval('pg_temp.cpg_cache_domain_0a000_seq'); \
+               RETURN true; \
+             END \
+             $function$; \
+             CREATE DOMAIN pg_temp.cpg_cache_domain_0a000 AS text \
+             CHECK (pg_temp.cpg_cache_domain_0a000_check(VALUE)); \
+             CREATE TEMP TABLE cpg_cache_domain_shape (id int4); \
+             INSERT INTO cpg_cache_domain_shape VALUES (73)",
+        )
+        .await
+        .unwrap();
+
+    const SQL: &str = "SELECT cpg_cache_domain_shape.*, \
+        $1::pg_temp.cpg_cache_domain_0a000::text AS bound \
+        FROM cpg_cache_domain_shape";
+    let warm = client.query(SQL, &[&DomainText("warm")]).await.unwrap();
+    assert_eq!(warm[0].len(), 2);
+    drop(warm);
+    let stale_name = prepared_statement_name(&client, SQL).await;
+
+    client
+        .batch_execute(
+            "ALTER TABLE cpg_cache_domain_shape \
+             ADD COLUMN label text NOT NULL DEFAULT 'fresh'",
+        )
+        .await
+        .unwrap();
+
+    let error = client
+        .query(SQL, &[&DomainText("stale")])
+        .await
+        .expect_err("parameterized stale-plan input was replayed");
+    assert_eq!(error.code(), Some(&SqlState::FEATURE_NOT_SUPPORTED));
+    assert_eq!(
+        error.as_db_error().and_then(|error| error.routine()),
+        Some("RevalidateCachedQuery")
+    );
+    let after_error: i64 = client
+        .query_one_scalar(
+            "SELECT last_value FROM pg_temp.cpg_cache_domain_0a000_seq",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        after_error, 2,
+        "the failed call ran its domain input more than once"
+    );
+    assert!(
+        prepared_statement_names(&client, SQL).await.is_empty(),
+        "the unsafe stale entry was not invalidated"
+    );
+
+    let refreshed = client.query(SQL, &[&DomainText("fresh")]).await.unwrap();
+    assert_eq!(refreshed[0].len(), 3);
+    assert_eq!(refreshed[0].get::<_, i32>("id"), 73);
+    assert_eq!(refreshed[0].get::<_, &str>("label"), "fresh");
+    assert_eq!(refreshed[0].get::<_, &str>("bound"), "fresh");
+    assert_ne!(prepared_statement_name(&client, SQL).await, stale_name);
+
+    let after_fresh: i64 = client
+        .query_one_scalar(
+            "SELECT last_value FROM pg_temp.cpg_cache_domain_0a000_seq",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(after_fresh, 3);
 }
 
 /// PostgreSQL aborts an open transaction after 0A000. Repreparing there
@@ -5931,6 +6123,73 @@ async fn statement_cache_does_not_retry_0a000_inside_a_transaction() {
     assert_eq!(refreshed_rows[0].len(), 2);
     assert_eq!(refreshed_rows[0].get::<_, i32>("id"), 68);
     assert_eq!(refreshed_rows[0].get::<_, &str>("label"), "transaction");
+}
+
+/// ReadyForQuery reports `T` after SAVEPOINT, not only after a bare BEGIN. A
+/// genuine missing-name failure there aborts the block and must remain the
+/// caller's one server attempt rather than becoming a futile 25P02 retry.
+#[compio::test]
+async fn statement_cache_does_not_retry_after_a_savepoint() {
+    let url = test_url();
+    let client = connect_with_statement_cache(&url, 2).await.unwrap();
+
+    const SQL: &str = "SELECT 85::int4 AS cpg_cache_savepoint";
+    drop(client.query(SQL, &[]).await.unwrap());
+    client
+        .batch_execute("BEGIN; SAVEPOINT cpg_cache_retry_savepoint; DEALLOCATE ALL")
+        .await
+        .unwrap();
+    assert_eq!(
+        client.transaction_status(),
+        Some(TransactionStatus::InTransaction),
+        "SAVEPOINT did not leave the server status at T"
+    );
+
+    let error = client.query(SQL, &[]).await.unwrap_err();
+    assert_eq!(error.code(), Some(&SqlState::INVALID_SQL_STATEMENT_NAME));
+    client.simple_query("").await.unwrap();
+    assert_eq!(
+        client.transaction_status(),
+        Some(TransactionStatus::Failed),
+        "the missing-name Bind did not publish failed status E"
+    );
+
+    client.batch_execute("ROLLBACK").await.unwrap();
+    let refreshed = client.query(SQL, &[]).await.unwrap();
+    assert_eq!(refreshed[0].get::<_, i32>(0), 85);
+}
+
+/// Once ReadyForQuery has reported `E`, PostgreSQL rejects every ordinary
+/// command until recovery. The cache must preserve that 25P02 and must not
+/// mistake the block for an idle session eligible for stale replay.
+#[compio::test]
+async fn statement_cache_knows_an_existing_transaction_is_aborted() {
+    let url = test_url();
+    let client = connect_with_statement_cache(&url, 2).await.unwrap();
+
+    const SQL: &str = "SELECT 86::int4 AS cpg_cache_already_failed";
+    drop(client.query(SQL, &[]).await.unwrap());
+    let cached_name = prepared_statement_name(&client, SQL).await;
+
+    client.batch_execute("BEGIN").await.unwrap();
+    let division_error = client.query("SELECT 1 / 0", &[]).await.unwrap_err();
+    assert_eq!(division_error.code(), Some(&SqlState::DIVISION_BY_ZERO));
+    client.simple_query("").await.unwrap();
+    assert_eq!(client.transaction_status(), Some(TransactionStatus::Failed));
+
+    let failed_error = client.query(SQL, &[]).await.unwrap_err();
+    assert_eq!(
+        failed_error.code(),
+        Some(&SqlState::IN_FAILED_SQL_TRANSACTION)
+    );
+    client.batch_execute("ROLLBACK").await.unwrap();
+    assert_eq!(
+        prepared_statement_name(&client, SQL).await,
+        cached_name,
+        "a failed transaction displaced a healthy cached statement"
+    );
+    let rows = client.query(SQL, &[]).await.unwrap();
+    assert_eq!(rows[0].get::<_, i32>(0), 86);
 }
 
 /// The same recovery as `statement_cache_retries_stale_result_shape_once_
@@ -6179,6 +6438,64 @@ async fn statement_cache_does_not_retry_a_cold_26000() {
     assert_eq!(failed_attempts, 1, "a cold prepare is not retry eligible");
 }
 
+/// A SQLSTATE is not proof that PostgreSQL's outer prepared-statement lookup
+/// produced it. Domain input runs during Bind before plan acquisition, so this
+/// application-raised 26000 crosses the phase check but must still propagate
+/// without evicting or replaying the healthy cached statement.
+#[compio::test]
+async fn statement_cache_requires_server_provenance_before_retrying_26000() {
+    let url = test_url();
+    let client = connect_with_statement_cache(&url, 2).await.unwrap();
+    client
+        .batch_execute(
+            "CREATE TEMP SEQUENCE cpg_cache_domain_26000_seq; \
+             CREATE FUNCTION pg_temp.cpg_cache_domain_26000_check(value text) \
+             RETURNS boolean LANGUAGE plpgsql VOLATILE AS $function$ \
+             BEGIN \
+               IF value = 'raise' THEN \
+                 PERFORM nextval('pg_temp.cpg_cache_domain_26000_seq'); \
+                 RAISE EXCEPTION USING \
+                   ERRCODE = '26000', MESSAGE = 'domain input raised 26000'; \
+               END IF; \
+               RETURN true; \
+             END \
+             $function$; \
+             CREATE DOMAIN pg_temp.cpg_cache_domain_26000 AS text \
+             CHECK (pg_temp.cpg_cache_domain_26000_check(VALUE))",
+        )
+        .await
+        .unwrap();
+
+    const SQL: &str = "SELECT $1::pg_temp.cpg_cache_domain_26000";
+    drop(client.query(SQL, &[&DomainText("ok")]).await.unwrap());
+    let cached_name = prepared_statement_name(&client, SQL).await;
+
+    let error = client
+        .query(SQL, &[&DomainText("raise")])
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Some(&SqlState::INVALID_SQL_STATEMENT_NAME));
+    assert_eq!(
+        error.as_db_error().and_then(|error| error.routine()),
+        Some("exec_stmt_raise"),
+        "the fixture did not raise 26000 from application code"
+    );
+
+    let side_effects: i64 = client
+        .query_one_scalar(
+            "SELECT last_value FROM pg_temp.cpg_cache_domain_26000_seq",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(side_effects, 1, "Bind parameter input ran more than once");
+    assert_eq!(
+        prepared_statement_name(&client, SQL).await,
+        cached_name,
+        "an application-raised 26000 evicted a healthy cached statement"
+    );
+}
+
 /// SQL `EXECUTE` runs after the outer protocol Bind completed. Its 26000 names
 /// the SQL-level target, not the driver's still-live cached statement, so the
 /// call must propagate the first failure without replaying it.
@@ -6390,6 +6707,27 @@ async fn statement_cache_retries_a_statement_missing_after_deallocate_all() {
             .unwrap(),
         65
     );
+}
+
+/// `DISCARD ALL` includes `DEALLOCATE ALL`, so it invalidates protocol-level
+/// prepared names just as directly as the narrower command. The next cached
+/// use must recover on the same session.
+#[compio::test]
+async fn statement_cache_retries_a_statement_missing_after_discard_all() {
+    let url = test_url();
+    let client = connect_with_statement_cache(&url, 2).await.unwrap();
+
+    const SQL: &str = "SELECT 84::int4 AS cpg_cache_discarded";
+    let first = client.query(SQL, &[]).await.unwrap();
+    assert_eq!(first[0].get::<_, i32>(0), 84);
+    drop(first);
+
+    client.batch_execute("DISCARD ALL").await.unwrap();
+    assert!(prepared_statement_names(&client, SQL).await.is_empty());
+
+    let refreshed = client.query(SQL, &[]).await.unwrap();
+    assert_eq!(refreshed[0].get::<_, i32>(0), 84);
+    assert_eq!(prepared_statement_names(&client, SQL).await.len(), 1);
 }
 
 /// A missing cached DML statement failed before execution. Its replacement
