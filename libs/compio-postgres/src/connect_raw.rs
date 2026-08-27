@@ -965,14 +965,15 @@ fn target_session_attrs_mismatch(message: &'static str) -> Error {
 /// (`CopyBothResponse` is not in postgres-protocol's tag list).
 ///
 /// This is exported `pub(crate)` so the replication module can reuse
-/// the handshake state machine without duplicating ~250 LOC of
-/// auth/SASL code.
+/// the handshake state machine without duplicating ~250 LOC of auth/SASL
+/// code. The returned [`BufStream`] is the SAME one that decoded startup:
+/// bytes following `ReadyForQuery` may already be in its read buffer.
 pub(crate) async fn handshake_for_replication<S, T>(
     stream: MaybeTlsStream<S, T>,
     config: &Config,
 ) -> Result<
     (
-        MaybeTlsStream<S, T>,
+        BufStream<MaybeTlsStream<S, T>>,
         i32,
         Option<CancelKey>,
         std::collections::HashMap<String, String>,
@@ -997,12 +998,7 @@ where
     handshake.prefer_available_server_error(ssl_cert_check)?;
     let (process_id, secret_key, parameters) = read_info(&mut handshake).await?;
 
-    Ok((
-        handshake.stream.into_inner(),
-        process_id,
-        secret_key,
-        parameters,
-    ))
+    Ok((handshake.stream, process_id, secret_key, parameters))
 }
 
 /// Enforce `sslcertmode=require` only after PostgreSQL authentication succeeds.
@@ -1799,6 +1795,52 @@ mod tests {
             error.code().map(crate::error::SqlState::code),
             Some("57P01"),
             "replication sslcertmode refusal discarded queued SQLSTATE 57P01: {error}"
+        );
+    }
+
+    /// An idle PostgreSQL backend can send a FATAL ErrorResponse immediately
+    /// after ReadyForQuery, for example when `pg_terminate_backend` reaches it.
+    /// One socket read can therefore over-read the start of that frame while
+    /// decoding startup. The replication handoff must carry those bytes into
+    /// its data-phase framer; the ordinary handoff already keeps its BufStream.
+    #[compio::test]
+    async fn replication_handshake_preserves_coalesced_post_ready_bytes() {
+        let post_ready = error_response("57P01", "terminating connection after startup");
+        let mut script = successful_handshake(std::iter::empty());
+        script.extend_from_slice(&post_ready);
+
+        let config = plaintext_config();
+        let stream = MaybeTlsStream::<_, crate::tls::NoTlsStream>::Raw(HandshakeWriteSuccess {
+            input: script,
+            offset: 0,
+        });
+        let (stream, _, _, _) = handshake_for_replication(stream, &config)
+            .await
+            .expect("scripted replication startup must succeed");
+        let mut stream = stream;
+
+        assert_eq!(
+            stream.buf().len(),
+            post_ready.len(),
+            "replication handshake discarded coalesced post-ReadyForQuery bytes"
+        );
+
+        let BackendMessage::Normal { mut messages, .. } =
+            read_backend_detached_async_frames(&mut stream)
+                .await
+                .expect("decode the preserved post-ReadyForQuery frame")
+        else {
+            panic!("a FATAL ErrorResponse is not an asynchronous frame");
+        };
+        let Some(Message::ErrorResponse(error)) =
+            messages.next().expect("parse the preserved ErrorResponse")
+        else {
+            panic!("the preserved frame was not the scripted ErrorResponse");
+        };
+        let error = Error::db(error);
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("57P01")
         );
     }
 
