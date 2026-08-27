@@ -152,10 +152,12 @@ impl Stream for CopyInReceiver {
     }
 }
 
+#[derive(Clone, Copy)]
 enum SinkState {
     Active,
     Closing,
     Reading,
+    Finished(u64),
 }
 
 struct BufferedCopyAppend<'a> {
@@ -342,7 +344,13 @@ where
                                 .take()
                                 .unwrap_or_else(|| Err(Error::unexpected_message()));
                             self.as_mut().clear_copy_mode();
-                            return Poll::Ready(result);
+                            match result {
+                                Ok(rows) => {
+                                    *self.as_mut().project().state = SinkState::Finished(rows);
+                                    return Poll::Ready(Ok(rows));
+                                }
+                                Err(error) => return Poll::Ready(Err(error)),
+                            }
                         }
                         Poll::Ready(Ok(_)) => {
                             let this = self.as_mut().project();
@@ -356,6 +364,7 @@ where
                         }
                     }
                 }
+                SinkState::Finished(rows) => return Poll::Ready(Ok(rows)),
             }
         }
     }
@@ -363,7 +372,8 @@ where
     /// Completes the copy, returning the number of rows inserted.
     ///
     /// The `Sink::close` method is equivalent to `finish`, except that it
-    /// does not return the number of rows.
+    /// does not return the number of rows. After successful completion,
+    /// repeated calls return the same row count without touching the session.
     pub async fn finish(mut self: Pin<&mut Self>) -> Result<u64, Error> {
         future::poll_fn(|cx| self.as_mut().poll_finish(cx)).await
     }
@@ -376,6 +386,9 @@ where
     type Error = Error;
 
     fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        if matches!(self.state, SinkState::Finished(_)) {
+            return Poll::Ready(Err(Error::copy_in_finished()));
+        }
         let ready = self.as_mut().project().sender.poll_ready(cx);
         match ready {
             Poll::Ready(Err(_)) => self.poll_disconnected_diagnosis(cx),
@@ -385,6 +398,9 @@ where
     }
 
     fn start_send(mut self: Pin<&mut Self>, item: T) -> Result<(), Error> {
+        if matches!(self.state, SinkState::Finished(_)) {
+            return Err(Error::copy_in_finished());
+        }
         let this = self.as_mut().project();
 
         let large_item = item.remaining() > 4096;
@@ -421,6 +437,9 @@ where
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        if matches!(self.state, SinkState::Finished(_)) {
+            return Poll::Ready(Ok(()));
+        }
         let buffered = !self.as_mut().project().buf.is_empty();
         if buffered {
             let ready = self.as_mut().project().sender.as_mut().poll_ready(cx);
