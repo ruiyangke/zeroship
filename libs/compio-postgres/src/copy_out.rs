@@ -108,6 +108,19 @@ async fn start(
         }
     }
 
+    // A non-COPY command can complete Execute and then fail while Sync closes
+    // its implicit transaction. Keep the local mismatch only as a fallback at
+    // ReadyForQuery so the later ErrorResponse can win.
+    async fn drain_refusal(responses: &mut Responses, fallback: Error) -> Error {
+        loop {
+            match responses.next().await {
+                Ok(Message::ReadyForQuery(_)) => return fallback,
+                Ok(_) => {}
+                Err(error) => return error,
+            }
+        }
+    }
+
     let response = loop {
         match responses
             .next()
@@ -120,6 +133,11 @@ async fn start(
             }
             // The connection-owned producer is already sending CopyFail.
             Message::CopyInResponse(_) => {}
+            Message::CommandComplete(_) => {
+                return Err(ExecutionError::after_bind_complete(
+                    drain_refusal(&mut responses, Error::unexpected_message()).await,
+                ));
+            }
             _ => {
                 return Err(ExecutionError::after_bind_complete(
                     Error::unexpected_message(),
