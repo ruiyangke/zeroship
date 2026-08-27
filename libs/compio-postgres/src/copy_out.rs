@@ -5,7 +5,8 @@
 // the `Responses` channel until `CopyDone`.
 
 use crate::client::{InnerClient, Responses};
-use crate::{Error, Statement, query, slice_iter};
+use crate::copy_format::CopyResponse;
+use crate::{CopyFormat, Error, Statement, query, slice_iter};
 use bytes::Bytes;
 use futures_util::Stream;
 use log::debug;
@@ -25,14 +26,17 @@ pub async fn copy_out(
         Some(sql) => query::encode_unnamed(client, sql, &statement, slice_iter(&[]))?,
         None => query::encode(client, &statement, slice_iter(&[]))?,
     };
-    let responses = match start(client, buf, &statement, unnamed_sql.is_some()).await {
-        Ok(responses) => responses,
+    let (responses, response) = match start(client, buf, &statement, unnamed_sql.is_some()).await {
+        Ok(result) => result,
         Err(error) => {
             statement.invalidate_cache_on_error(&error);
             return Err(error);
         }
     };
-    Ok(CopyOutStream { responses })
+    Ok(CopyOutStream {
+        responses,
+        response,
+    })
 }
 
 async fn start(
@@ -40,7 +44,7 @@ async fn start(
     buf: Bytes,
     statement: &Statement,
     reparsed: bool,
-) -> Result<Responses, Error> {
+) -> Result<(Responses, CopyResponse), Error> {
     let mut responses = client.send_statement(
         query::producerless_request(buf, statement.may_enter_copy_in()),
         statement,
@@ -58,16 +62,18 @@ async fn start(
         _ => return Err(Error::unexpected_message()),
     }
 
-    loop {
+    let response = loop {
         match responses.next().await? {
-            Message::CopyOutResponse(_) => break,
+            Message::CopyOutResponse(body) => {
+                break CopyResponse::from_backend(body.format(), body.column_formats())?;
+            }
             // The connection-owned producer is already sending CopyFail.
             Message::CopyInResponse(_) => {}
             _ => return Err(Error::unexpected_message()),
         }
-    }
+    };
 
-    Ok(responses)
+    Ok((responses, response))
 }
 
 pin_project! {
@@ -75,6 +81,19 @@ pin_project! {
     #[project(!Unpin)]
     pub struct CopyOutStream {
         responses: Responses,
+        response: CopyResponse,
+    }
+}
+
+impl CopyOutStream {
+    /// The overall format selected by PostgreSQL for this copy.
+    pub fn format(&self) -> CopyFormat {
+        self.response.format()
+    }
+
+    /// The format PostgreSQL selected for each copied column.
+    pub fn column_formats(&self) -> &[CopyFormat] {
+        self.response.column_formats()
     }
 }
 
