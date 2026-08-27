@@ -746,6 +746,34 @@ where
         publish_terminal_error(error, &mut self.responses);
     }
 
+    /// Prefer a complete server diagnosis already in the serialized read
+    /// buffer over the local write failure which exposed it.
+    fn prefer_buffered_server_error(&mut self, local: Error) -> Error {
+        let Some(server) = take_buffered_server_error(&mut self.stream) else {
+            return local;
+        };
+
+        if let Some(error) = server.as_db_error() {
+            // A DbError cannot be duplicated through Error's generic terminal
+            // wrapper without losing its SQLSTATE. Rebuild it from the parsed
+            // value for the owning response and keep the request-local copy as
+            // a fallback if that response channel is backpressured.
+            if let Some(response) = self.responses.front_mut() {
+                remember_server_error(&response.request_server_error, error);
+                let _ = response
+                    .sender
+                    .try_send(ResponseMessages::Observed(VecDeque::from([Err(
+                        Error::from_db_error(error.clone()),
+                    )])));
+            }
+            if server_error_ends_session(error) {
+                remember_server_error(&self.terminal_server_error, error);
+            }
+        }
+        self.tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
+        server
+    }
+
     /// Handle a request received from the client (serialized path).
     /// Pushes the response channel onto `responses` and writes the
     /// frontend messages onto the unsplit stream.
@@ -780,6 +808,9 @@ where
                 let mut result = write_frontend(&mut self.stream, msg);
                 if result.is_ok() {
                     result = self.stream.flush().await;
+                }
+                if let Err(error) = result {
+                    result = Err(self.prefer_buffered_server_error(error));
                 }
                 if result.is_ok() {
                     // Writes are outside clock (3). Only a frontend batch that
@@ -890,6 +921,43 @@ fn first_server_error(messages: &BackendMessages) -> Result<Option<DbError>, Err
         .map_err(Error::parse)?
         .map(|body| DbError::parse(&mut body.fields()).map_err(Error::parse))
         .transpose()
+}
+
+/// Consume a complete ErrorResponse already over-read behind the response
+/// which made the serialized loop attempt another frontend write.
+///
+/// This never reads the socket: a failed write has already retired the
+/// session, and waiting for additional bytes could hang on a one-way failure.
+/// Complete asynchronous frames may precede the diagnosis and are safe to
+/// discard during teardown; any other frame still belongs to protocol dispatch.
+fn take_buffered_server_error<S>(stream: &mut BufStream<S>) -> Option<Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    loop {
+        let length = stream.peek_u32_be(1)?;
+        if length < 4 || stream.validate_length(length).is_err() {
+            return None;
+        }
+        let total_len = usize::try_from(length).ok()?.checked_add(1)?;
+        if stream.buf().len() < total_len {
+            return None;
+        }
+
+        match stream.buf()[0] {
+            b'E' => {
+                let mut frame = stream.buf().split_to(total_len);
+                return match Message::parse(&mut frame).ok()?? {
+                    Message::ErrorResponse(body) => Some(Error::db(body)),
+                    _ => None,
+                };
+            }
+            b'N' | b'A' | b'S' => {
+                let _ = stream.buf().split_to(total_len);
+            }
+            _ => return None,
+        }
+    }
 }
 
 fn server_error_ends_session(error: &DbError) -> bool {
@@ -4902,6 +4970,13 @@ mod tests {
         chunks: VecDeque<Vec<u8>>,
     }
 
+    /// A non-splittable duplex which over-reads one scripted response, then
+    /// accepts exactly one frontend flush before failing the next one.
+    struct SerializedSecondFlushFailure {
+        chunks: VecDeque<Vec<u8>>,
+        flushes: usize,
+    }
+
     impl AsyncRead for ScriptedDuplex {
         async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
             read_scripted(&mut self.chunks, &mut None, buf).await
@@ -4921,6 +4996,106 @@ mod tests {
         async fn shutdown(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    impl AsyncRead for SerializedSecondFlushFailure {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            read_scripted(&mut self.chunks, &mut None, buf).await
+        }
+    }
+
+    impl AsyncWrite for SerializedSecondFlushFailure {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            let len = buf.buf_len();
+            BufResult(Ok(len), buf)
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            self.flushes += 1;
+            if self.flushes == 1 {
+                Ok(())
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "scripted second flush failure",
+                ))
+            }
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn fatal_error_frame(code: &str, message: &str) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"SFATAL\0VFATAL\0C");
+        payload.extend_from_slice(code.as_bytes());
+        payload.extend_from_slice(b"\0M");
+        payload.extend_from_slice(message.as_bytes());
+        payload.extend_from_slice(b"\0\0");
+
+        let mut frame = vec![b'E'];
+        frame.extend_from_slice(&(u32::try_from(payload.len()).unwrap() + 4).to_be_bytes());
+        frame.extend_from_slice(&payload);
+        frame
+    }
+
+    #[compio::test]
+    async fn serialized_request_flush_preserves_a_buffered_server_error() {
+        let (request_sender, request_receiver) = mpsc::unbounded();
+        let client = crate::client::Client::new(
+            request_sender,
+            crate::config::SslMode::Disable,
+            crate::config::SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+        );
+        let _first = client
+            .inner()
+            .send(RequestMessages::Single(FrontendMessage::Raw(
+                bytes::Bytes::from_static(b"scripted first request"),
+            )))
+            .expect("enqueue the first serialized request");
+        let mut second = client
+            .inner()
+            .send(RequestMessages::Single(FrontendMessage::Raw(
+                bytes::Bytes::from_static(b"scripted second request"),
+            )))
+            .expect("enqueue the second serialized request");
+
+        let mut response = completed_response_batch(b'I');
+        response.extend_from_slice(&fatal_error_frame("57P01", "scripted backend shutdown"));
+        let connection: Connection<SerializedSecondFlushFailure, SerializedSecondFlushFailure> =
+            Connection::new(
+                BufStream::new(MaybeTlsStream::Raw(SerializedSecondFlushFailure {
+                    chunks: VecDeque::from([response]),
+                    flushes: 0,
+                })),
+                VecDeque::new(),
+                HashMap::new(),
+                client.parameters_handle(),
+                request_receiver,
+                client.tx_status_handle(),
+                client.in_flight_requests_handle(),
+                client.terminal_server_error_handle(),
+                None,
+            );
+
+        let _driver_error = connection
+            .run_serialized()
+            .await
+            .expect_err("the scripted second flush unexpectedly succeeded");
+        let error = match second.next().await {
+            Err(error) => error,
+            Ok(_) => panic!("the failed second request produced a response"),
+        };
+        assert_eq!(
+            error.code().map(|code| code.code()),
+            Some("57P01"),
+            "serialized request flush discarded buffered SQLSTATE 57P01: {error}"
+        );
     }
 
     /// A single `CommandComplete` carrying `tag`, as one already-decoded
