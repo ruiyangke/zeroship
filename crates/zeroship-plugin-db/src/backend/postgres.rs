@@ -194,6 +194,28 @@ impl SqlExecutor for PostgresBackend {
     ///    unbounded model made this impossible. No per-app fairness is
     ///    implemented, because inventing one would settle a question the
     ///    design explicitly left open.
+    /// 4. **Autocommit work shares the same slots, and this is the one that
+    ///    bites first.** The three questions above are the design's; this one
+    ///    is not a refinement of the third, it is a fourth. A transaction does
+    ///    not merely compete with other *transactions* for the pool - it
+    ///    competes with every co-resident autocommit operation, because those
+    ///    take a SECOND checkout from the very same pool:
+    ///    `exec::query_postgres_pool_with_autocommit_role`, `pool_exec` just
+    ///    below, the unmask path in `crud::unmask` and `audit::write_audit_row`
+    ///    all call `pool.get()` / `pool.query_*`. `TxRoute` routes an operation
+    ///    with no transaction in its call chain to the pool *deliberately*,
+    ///    including while that app holds a transaction open, so this is the
+    ///    designed path and not a leak.
+    ///
+    ///    With `max_size = 8`, eight concurrent transactions on one worker
+    ///    thread therefore pin every slot, and each co-resident autocommit op
+    ///    blocks for the full `acquire_timeout` before failing - while a
+    ///    transaction may hold its slot idle for `DB_IDLE_IN_TX_TIMEOUT_MS`
+    ///    plus a statement timeout per statement. The unbounded model made
+    ///    this shape impossible, because a transaction never touched the pool.
+    ///    Nothing here reserves headroom for autocommit work, and adding a
+    ///    reservation is a sizing decision - like (1) - that this change does
+    ///    not get to take on its own.
     async fn acquire_dedicated_client(&self) -> Result<Self::Client, DbError> {
         self.pool.get_owned().await.map_err(|e| {
             // Walk the source chain. The pool renders an exhausted acquire as
