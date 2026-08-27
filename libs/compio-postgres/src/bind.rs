@@ -115,12 +115,26 @@ where
         _ => return Err(Error::unexpected_message()),
     }
 
-    let statement = if unnamed_sql.is_some() {
-        let row_description = match responses.next().await? {
+    let row_description = if unnamed_sql.is_some() {
+        match responses.next().await? {
             Message::RowDescription(body) => Some(body),
             Message::NoData => None,
             _ => return Err(Error::unexpected_message()),
-        };
+        }
+    } else {
+        None
+    };
+
+    // BindComplete (and the optional descriptor) only confirms the prefix of
+    // this Sync-terminated exchange. Keep the response alive through
+    // ReadyForQuery so a later ErrorResponse owns the bind result, and do so
+    // before decoding the descriptor can produce a competing local error.
+    match responses.next().await? {
+        Message::ReadyForQuery(_) => {}
+        _ => return Err(Error::unexpected_message()),
+    }
+
+    let statement = if unnamed_sql.is_some() {
         let mut columns = Vec::new();
         if let Some(row_description) = row_description {
             let mut fields = row_description.fields();
@@ -150,12 +164,100 @@ where
 #[cfg(test)]
 mod tests {
     use super::PortalCleanup;
-    use crate::client::{Client, StatementCacheSettings};
-    use crate::codec::FrontendMessage;
+    use crate::client::{Client, ResponseMessages, StatementCacheSettings};
+    use crate::codec::{BackendMessages, FrontendMessage};
     use crate::config::{ProtocolVersion, SslMode, SslNegotiation};
     use crate::connection::{RequestDisposition, RequestMessages, TransactionEffect};
+    use crate::{Error, Statement};
+    use bytes::BytesMut;
     use futures_channel::mpsc;
+    use futures_util::StreamExt;
     use std::num::NonZeroUsize;
+    use std::sync::Arc;
+
+    fn backend_frame(tag: u8, body: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(body.len() + 5);
+        frame.push(tag);
+        frame.extend_from_slice(&(u32::try_from(body.len()).unwrap() + 4).to_be_bytes());
+        frame.extend_from_slice(body);
+        frame
+    }
+
+    async fn bind_with_terminal_response(unnamed: bool) -> Result<crate::Portal, Error> {
+        let (sender, mut receiver) = mpsc::unbounded();
+        let client = Client::new_with_statement_cache(
+            sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+            ProtocolVersion::V3_0,
+            StatementCacheSettings::new(0, NonZeroUsize::MIN),
+        );
+        let inner = Arc::clone(client.inner());
+        let statement =
+            Statement::new(&inner, "s_terminal_bind".to_string(), vec![], vec![], false);
+        let bind = super::bind(
+            &inner,
+            statement,
+            std::iter::empty::<i32>(),
+            unnamed.then_some("SELECT 1"),
+        );
+        let respond = async {
+            let mut request = receiver
+                .next()
+                .await
+                .expect("bind did not enqueue its protocol request");
+            let mut bytes = BytesMut::new();
+            if unnamed {
+                bytes.extend_from_slice(&backend_frame(b'1', b""));
+            }
+            bytes.extend_from_slice(&backend_frame(b'2', b""));
+            if unnamed {
+                bytes.extend_from_slice(&backend_frame(b'n', b""));
+            }
+            bytes.extend_from_slice(&backend_frame(
+                b'E',
+                b"SFATAL\0VFATAL\0C57P01\0Mscripted termination after Bind\0\0",
+            ));
+            request
+                .sender
+                .try_send(ResponseMessages::Raw(BackendMessages::from_test_bytes(
+                    bytes,
+                )))
+                .expect("deliver the terminal bind response");
+        };
+
+        let (result, ()) = futures_util::join!(bind, respond);
+        result
+    }
+
+    #[compio::test]
+    async fn named_bind_preserves_a_terminal_error_after_bind_complete() {
+        let error = match bind_with_terminal_response(false).await {
+            Err(error) => error,
+            Ok(_) => panic!("named bind returned success before its terminal SQLSTATE 57P01"),
+        };
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("57P01"),
+            "named bind discarded terminal SQLSTATE 57P01: {error}"
+        );
+    }
+
+    #[compio::test]
+    async fn unnamed_bind_preserves_a_terminal_error_after_description() {
+        let error = match bind_with_terminal_response(true).await {
+            Err(error) => error,
+            Ok(_) => panic!("unnamed bind returned success before its terminal SQLSTATE 57P01"),
+        };
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("57P01"),
+            "unnamed bind discarded terminal SQLSTATE 57P01: {error}"
+        );
+    }
 
     #[test]
     fn dropping_armed_portal_cleanup_enqueues_close() {
