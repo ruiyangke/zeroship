@@ -1694,8 +1694,48 @@ impl Actor {
         Ok(outcome)
     }
 
+    /// Does `reservation` still own the connection a cancellation would clean
+    /// up on?
+    ///
+    /// Two ways to lose it, and a cancellation must survive both:
+    ///
+    /// 1. **The lane moved on.** A lease dropped without settling retires via
+    ///    `Release`/`unbind_tx`, a fresh `Reserve` binds the next reservation,
+    ///    and `tx_conn` is now carrying somebody else's `BEGIN`.
+    /// 2. **The connection was replaced.** A quarantined lane is closed,
+    ///    reopened and its generation bumped; nothing this reservation did
+    ///    survives on the replacement.
+    fn cancellation_still_owns_lane(&self, reservation: &Reservation) -> bool {
+        let lane = reservation.lane();
+        let entry = match lane {
+            Lane::Op => &self.op,
+            Lane::Tx => &self.tx,
+        };
+        if entry.generation != reservation.generation() {
+            return false;
+        }
+        let bound = match lane {
+            Lane::Op => self.op_bound,
+            Lane::Tx => self.tx_bound,
+        };
+        bound == Some(reservation.id())
+    }
+
     /// Resolve a cancellation: roll the reservation's connection back, retire
     /// the reservation, and only then acknowledge.
+    ///
+    /// **The two guards below are the whole safety of this method.** Cleanup
+    /// here is an unqualified `ROLLBACK` on a shared connection, so reaching it
+    /// without the right to must be impossible rather than unlikely. Until
+    /// 2026-08-27 `run_cancel` was the only data-bearing command that consulted
+    /// neither the terminal claim's uniqueness nor `check_owner`, and both
+    /// omissions were reachable: a duplicate `Cancel` (`claim_cancelled` used
+    /// to grant a second claim), and - with no duplicate at all - a `Cancel`
+    /// for a reservation whose lane a later transaction had taken over. Both
+    /// rolled back a stranger's open transaction, and because that stranger's
+    /// `tx_bound` was untouched its later `COMMIT` reported
+    /// `CommitIndeterminate`: the creator told the fate was unknown for a write
+    /// that had been silently destroyed.
     fn run_cancel(&mut self, reservation: &Arc<Reservation>) -> TerminalOutcome {
         if !reservation.claim_cancelled() {
             // A completion already claimed the terminal, and the winner's
@@ -1719,12 +1759,27 @@ impl Actor {
             return outcome;
         }
 
+        if !self.cancellation_still_owns_lane(reservation) {
+            // SQL ran, but this reservation has since been retired and its
+            // lane belongs to somebody else. Whoever retired it performed the
+            // cleanup - `unbind_tx` rolls back anything a departing lease left
+            // open, and `Settle` runs the terminal statement. Issuing a
+            // `ROLLBACK` here would land on the current owner's transaction.
+            let outcome = TerminalOutcome::Cancelled {
+                cleanup: CancelCleanup::AlreadyRetired,
+                cause: None,
+            };
+            reservation.store_outcome(outcome.clone());
+            return outcome;
+        }
+
         let lane = reservation.lane();
-        // One ROLLBACK, unconditionally. An interrupted *write* may already
-        // have been rolled back by SQLite itself while an interrupted *read*
-        // leaves the transaction open; both reach the same end state here, and
-        // "ROLLBACK errored because there was no transaction" is classified by
-        // `is_autocommit`, not treated as a failure.
+        // One ROLLBACK, unconditionally *within the ownership the guards above
+        // established*. An interrupted write may already have been rolled back
+        // by SQLite itself while an interrupted read leaves the transaction
+        // open; both reach the same end state here, and "ROLLBACK errored
+        // because there was no transaction" is classified by `is_autocommit`,
+        // not treated as a failure.
         let outcome = {
             let conn = &self.lane_mut(lane).conn;
             let raw = conn.execute_batch("ROLLBACK");
@@ -1732,8 +1787,10 @@ impl Actor {
         };
         reservation.store_outcome(outcome.clone());
         self.apply_outcome(lane, &outcome);
-        if lane == Lane::Tx && self.tx_bound == Some(reservation.id()) {
-            self.tx_bound = None;
+        match lane {
+            Lane::Tx if self.tx_bound == Some(reservation.id()) => self.tx_bound = None,
+            Lane::Op if self.op_bound == Some(reservation.id()) => self.op_bound = None,
+            _ => {}
         }
         outcome
     }

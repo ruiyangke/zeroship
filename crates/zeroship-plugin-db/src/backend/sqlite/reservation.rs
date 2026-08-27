@@ -316,6 +316,14 @@ pub enum CancelCleanup {
     /// `ROLLBACK` errored because SQLite had already ended the transaction
     /// itself - the ordinary result of interrupting a write. Not a failure.
     AlreadyRolledBack,
+    /// The reservation no longer owned the connection it names, so this
+    /// cancellation cleaned up **nothing**: whoever retired the reservation
+    /// (`Release`/`Reserve`'s `unbind_tx`, or its own `Settle`) already did.
+    ///
+    /// It exists so the actor never has to choose between issuing a `ROLLBACK`
+    /// on a lane a stranger now owns and *reporting* a rollback it did not
+    /// perform. Both are lies; this names the state instead.
+    AlreadyRetired,
 }
 
 /// The terminal fate of a reservation, as classified by `is_autocommit`.
