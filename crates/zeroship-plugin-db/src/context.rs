@@ -33,6 +33,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::task::{Context, Poll, Waker};
 
 use compio_postgres::{Client, Pool};
 
@@ -51,6 +52,14 @@ pub(crate) enum BackendInitState {
     Acquired,
     /// Another request is currently building the backend.
     InProgress,
+}
+
+/// Result of polling the per-thread live-schema singleflight.
+pub(crate) enum SchemaIntrospectionState {
+    /// Another resolution already populated this exact cache key.
+    Cached(Option<serde_json::Value>),
+    /// This caller owns the catalog read and must release the marker.
+    Acquired,
 }
 
 /// Pinned transaction client parked in the app-keyed, per-thread tx map.
@@ -278,10 +287,19 @@ pub struct ThreadDbContext {
     /// app id and deploy/schema-version token. Current and deploy-pinned
     /// isolates of one app therefore retain independent entries instead of
     /// evicting or reading one another's metadata. The inner `Option`
-    /// distinguishes "introspected, collection absent / has no goodies" (`None`)
-    /// from "not yet introspected" (no map entry) so a goodie-free collection is
-    /// cached as a negative result rather than re-introspected every call.
+    /// distinguishes "introspected, collection absent" (`None`) from "not yet
+    /// introspected" (no map entry), so absence is cached rather than causing a
+    /// catalog read on every call.
     introspected_schemas: HashMap<(DbBinding, String), Option<serde_json::Value>>,
+
+    /// Success-only singleflight state for live-schema cache misses.
+    ///
+    /// Entry existence marks one catalog read in progress for the exact same
+    /// `(DbBinding, collection)` identity as [`Self::introspected_schemas`].
+    /// Waiters are woken after either success or failure. Success is shared via
+    /// the cache; failures are never stored, so one woken waiter acquires and
+    /// retries while the failed owner alone receives its error.
+    introspection_in_progress: HashMap<(DbBinding, String), Vec<Waker>>,
 
     /// Per-thread, per-app mask-policy cache. Seeded
     /// on first unmask attempt by reading durable storage (PG admin
@@ -370,6 +388,7 @@ impl ThreadDbContext {
             pending_emits: HashMap::new(),
             schemas: HashMap::new(),
             introspected_schemas: HashMap::new(),
+            introspection_in_progress: HashMap::new(),
             mask_policies: HashMap::new(),
             backend: None,
             backend_init_in_progress: false,
@@ -605,10 +624,8 @@ impl ThreadDbContext {
 
     /// Read the cached INTROSPECTED schema for one immutable
     /// `(app_id, deploy_token, collection)` binding. Returns:
-    ///   - `Some(Some(schema))` — cached, collection has goodies;
-    ///   - `Some(None)` — cached, collection has NO goodies (negative
-    ///     cache — the caller skips the encrypt/mask passes without
-    ///     re-introspecting);
+    ///   - `Some(Some(schema))` - cached, collection exists;
+    ///   - `Some(None)` - cached, collection is absent (negative cache);
     ///   - `None` — this binding has not cached the collection → caller must
     ///     introspect.
     pub(crate) fn introspected_schema_for(
@@ -620,10 +637,17 @@ impl ThreadDbContext {
         self.introspected_schemas.get(&key).cloned()
     }
 
+    /// True when an introspected cache entry exists, including a cached
+    /// negative result. Unlike [`Self::introspected_schema_for`], this avoids
+    /// cloning a potentially large schema when admission only needs presence.
+    pub(crate) fn has_introspected_schema(&self, binding: &DbBinding, collection: &str) -> bool {
+        let key = (binding.clone(), collection.to_string());
+        self.introspected_schemas.contains_key(&key)
+    }
+
     /// Cache the result of a live introspection for one immutable binding and
-    /// collection. `schema = None` records a negative result (the collection
-    /// has no encrypted/masked columns — the passes are skipped). Other deploys
-    /// of the same app retain their own entries.
+    /// collection. `schema = None` records that the collection is absent. Other
+    /// deploys of the same app retain their own entries.
     pub(crate) fn cache_introspected_schema(
         &mut self,
         binding: &DbBinding,
@@ -632,6 +656,52 @@ impl ThreadDbContext {
     ) {
         let key = (binding.clone(), collection.to_string());
         self.introspected_schemas.insert(key, schema);
+    }
+
+    /// Poll the success-only singleflight for one exact introspection key.
+    ///
+    /// Cache lookup and marker acquisition happen in the same mutable borrow,
+    /// so no same-thread future can slip between them. A pending caller parks
+    /// its waker and is polled again when the owner releases the marker.
+    pub(crate) fn poll_schema_introspection(
+        &mut self,
+        binding: &DbBinding,
+        collection: &str,
+        cx: &mut Context<'_>,
+    ) -> Poll<SchemaIntrospectionState> {
+        let key = (binding.clone(), collection.to_string());
+        if let Some(cached) = self.introspected_schemas.get(&key).cloned() {
+            return Poll::Ready(SchemaIntrospectionState::Cached(cached));
+        }
+
+        match self.introspection_in_progress.entry(key) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(Vec::new());
+                Poll::Ready(SchemaIntrospectionState::Acquired)
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                let waiters = entry.get_mut();
+                if !waiters.iter().any(|waiter| waiter.will_wake(cx.waker())) {
+                    waiters.push(cx.waker().clone());
+                }
+                Poll::Pending
+            }
+        }
+    }
+
+    /// Release one introspection owner and return its waiters for wakeup.
+    ///
+    /// Callers wake after dropping the context borrow so a waker cannot
+    /// synchronously re-enter the thread-local `RefCell` while it is borrowed.
+    pub(crate) fn finish_schema_introspection(
+        &mut self,
+        binding: &DbBinding,
+        collection: &str,
+    ) -> Vec<Waker> {
+        let key = (binding.clone(), collection.to_string());
+        self.introspection_in_progress
+            .remove(&key)
+            .unwrap_or_default()
     }
 
     /// Enumerate every `(collection, schema)` pair the
