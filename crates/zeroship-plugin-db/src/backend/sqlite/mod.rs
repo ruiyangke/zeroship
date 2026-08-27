@@ -48,13 +48,6 @@ use crate::query::IndexSpec;
 pub(crate) mod cdc;
 pub(crate) mod dialect;
 pub(crate) mod error;
-// FTS5 vtable lifecycle + MATCH query composition. The
-// `impl FullTextIndex for SqliteBackend` block at the bottom of this
-// file orchestrates the five idempotent DDL statements + the search
-// path; the SQL primitives (`build_create_fts_table_sql`,
-// `build_insert_trigger_sql`, `build_fts_search_sql`, etc.) live in
-// `fts.rs` so the documented shapes stay unit-testable in isolation.
-pub(crate) mod fts;
 pub(crate) mod lock;
 // `pub` under `test-helpers` so the e2e encrypted-column round-trip
 // test in `tests/sqlite_integration.rs` can name `session::TypedCell`
@@ -868,7 +861,7 @@ impl SchemaIntrospect for SqliteBackend {
                         // (`CURRENT_TIMESTAMP`, `(unixepoch())`, etc.).
                         default_volatility: None,
                         // New fields default; `vector_dims` /
-                        // `is_fts_source` / `is_geopoint` are populated
+                        // `is_geopoint` are populated
                         // from `sqlite_master.sql` introspection regexes.
                         encryption,
                         mask,
@@ -1611,11 +1604,10 @@ impl crate::backend::SessionMinter for SqliteBackend {
 //     `build_find` machinery, and decodes the result rows through the
 //     session actor's `query_typed` path.
 //
-// **Trigger-vs-preupdate-hook coexistence** (Q-P4-F): same ordering
-// guarantees as FTS5 — preupdate fires BEFORE the row mutation, AFTER
-// triggers fire after, both run inside the same transaction. The
-// broker sees the base-row event with the vec0 index already updated
-// at COMMIT time. See `fts.rs` rustdoc for the canonical walkthrough.
+// **Trigger-vs-preupdate-hook coexistence** (Q-P4-F): preupdate fires
+// BEFORE the row mutation, AFTER triggers fire after, both run inside
+// the same transaction. The broker sees the base-row event with the
+// vec0 index already updated at COMMIT time.
 
 impl crate::backend::VectorIndex for SqliteBackend {
     #[cfg(any(test, feature = "test-helpers"))]
@@ -1769,157 +1761,6 @@ impl crate::backend::VectorIndex for SqliteBackend {
             &query_hex,
             k,
             &where_expr,
-            schema_hint.as_ref(),
-        );
-        let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
-        let typed = self.session.query_typed(&sql, &param_refs).await?;
-        Ok(crate::v8_bridge::typed_rows_to_json_value(&typed))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// `FullTextIndex` impl (FTS5 external-content vtables)
-// ---------------------------------------------------------------------------
-//
-// FTS5 ships in rusqlite's `bundled` feature by default (the SQLite
-// amalgamation we link in already carries `SQLITE_ENABLE_FTS5`). No
-// Cargo flag toggle, no runtime extension load.
-//
-// Two methods:
-//   * `ensure_fts_index` — runs five idempotent statements:
-//       1. CREATE VIRTUAL TABLE IF NOT EXISTS `<coll>__fts` USING fts5(...)
-//       2. Initial population INSERT INTO __fts SELECT FROM `<coll>`
-//          (guarded by a vtable-presence probe so we only seed once)
-//       3. AFTER INSERT trigger `<coll>__fts_ai`
-//       4. AFTER DELETE trigger `<coll>__fts_ad`
-//       5. AFTER UPDATE OF cols trigger `<coll>__fts_au`
-//     `language` is logged via `tracing::debug!` but otherwise ignored —
-//     FTS5's default tokeniser is language-agnostic Unicode.
-//   * `fts_search` — composes the JOIN + MATCH + filter + ORDER BY bm25
-//     SQL via `fts::build_fts_search_sql`, binds (query, limit, filter
-//     params) positionally, and re-emits each row as `serde_json::Value`
-//     with a synthetic `_rank: f64` field.
-//
-// **Trigger-vs-preupdate-hook coexistence** (Q-P4-F): preupdate fires
-// BEFORE the row mutation; AFTER triggers fire after. Both run within
-// the same transaction — the broker sees the base-row event with the
-// FTS index already updated at COMMIT time. See `fts.rs` module
-// rustdoc for the canonical ordering walkthrough.
-
-impl crate::backend::FullTextIndex for SqliteBackend {
-    #[cfg(any(test, feature = "test-helpers"))]
-    async fn ensure_fts_index(
-        &self,
-        app_id: &str,
-        collection: &str,
-        columns: &[String],
-        language: &str,
-    ) -> Result<(), DbError> {
-        if columns.is_empty() {
-            return Err(DbError::Configuration {
-                code: "fts_no_columns",
-                message: "db: ensure_fts_index requires at least one source column"
-                    .to_string(),
-                hint: Some(
-                    "mark at least one t.string() field with `.fts()` in the schema"
-                        .to_string(),
-                ),
-            });
-        }
-        // SQLite FTS5's default tokeniser is language-agnostic Unicode;
-        // `language` is honoured on the PG arm but ignored here. The
-        // SDK already validates the language token; log it so an
-        // operator wondering why an `es` tokeniser produces the same
-        // hits as `en` sees the cause in the structured log.
-        tracing::debug!(
-            app_id = %app_id,
-            collection = %collection,
-            language = %language,
-            "SqliteBackend::ensure_fts_index: `language` is ignored \
-             — FTS5 default tokeniser is language-agnostic Unicode"
-        );
-
-        // Probe whether the FTS vtable already exists. If it does, we
-        // skip the initial-population INSERT (which is NOT idempotent
-        // — running it twice doubles the index payload). The CREATE
-        // VIRTUAL TABLE / CREATE TRIGGER statements ARE idempotent via
-        // `IF NOT EXISTS`, so we re-run them unconditionally — cheap,
-        // and it picks up any column-list drift across `registerModel`
-        // calls (though changing the column list isn't supported on
-        // FTS5 in-place; that's a DROP + RECREATE path the diff engine
-        // handles in a future PR).
-        let probe_sql = format!(
-            "SELECT 1 FROM {qschema}.sqlite_master \
-             WHERE type = 'table' AND name = '{coll}__fts'",
-            qschema = SqliteDialect.quote_ident(app_id),
-            // The probe's `name = '<lit>'` is a single-quoted SQL
-            // literal — escape any embedded `'` by doubling. The
-            // collection name was validated at the SDK boundary.
-            coll = collection.replace('\'', "''"),
-        );
-        let existing = self.session.query(&probe_sql, &[]).await?;
-        let vtable_exists = !existing.is_empty();
-
-        // 1. CREATE VIRTUAL TABLE IF NOT EXISTS — emits the external-
-        //    content FTS5 vtable.
-        let create_sql =
-            fts::build_create_fts_table_sql(app_id, collection, columns);
-        self.session.exec(&create_sql, &[]).await?;
-
-        // 2. Initial population — only if the vtable did NOT exist
-        //    before this call. Skipping the re-population is the only
-        //    reason we needed the sqlite_master probe; the rest of
-        //    the DDL is idempotent.
-        if !vtable_exists {
-            let populate_sql =
-                fts::build_initial_population_sql(app_id, collection, columns);
-            self.session.exec(&populate_sql, &[]).await?;
-        }
-
-        // 3-5. AFTER triggers (idempotent via `IF NOT EXISTS`).
-        let insert_trg =
-            fts::build_insert_trigger_sql(app_id, collection, columns);
-        self.session.exec(&insert_trg, &[]).await?;
-        let delete_trg =
-            fts::build_delete_trigger_sql(app_id, collection, columns);
-        self.session.exec(&delete_trg, &[]).await?;
-        let update_trg =
-            fts::build_update_trigger_sql(app_id, collection, columns);
-        self.session.exec(&update_trg, &[]).await?;
-
-        Ok(())
-    }
-
-    async fn fts_search(
-        &self,
-        app_id: &str,
-        collection: &str,
-        query: &str,
-        filter: &serde_json::Value,
-        limit: Option<usize>,
-    ) -> Result<Vec<serde_json::Value>, DbError> {
-        // Param layout: `[$1=query, $2+...=filter_params, ?=limit?]`.
-        // SQLite/rusqlite binds parameters in placeholder appearance
-        // order, so the trailing LIMIT value must be appended AFTER the
-        // filter params rather than pre-seeded ahead of them.
-        let mut params: Vec<String> = Vec::with_capacity(4);
-        // DB-16: bind the query as LITERAL terms — FTS5 would otherwise parse it
-        // as MATCH query syntax (diverging from PG's plainto_tsquery and
-        // raising a per-request syntax error on malformed input).
-        params.push(fts::normalize_fts_query_literal(query));
-
-        let filter_clause = fts::build_fts_filter_clause(filter, &mut params)
-            .map_err(DbError::from)?;
-        let has_limit = limit.is_some();
-        if let Some(l) = limit {
-            params.push(l.to_string());
-        }
-        let schema_hint = crate::context::with(|c| c.schema_for(app_id, collection));
-        let sql = fts::build_fts_search_sql(
-            app_id,
-            collection,
-            &filter_clause,
-            has_limit,
             schema_hint.as_ref(),
         );
         let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
@@ -2983,14 +2824,6 @@ mod tests {
         assert_impl::<SqliteBackend>();
     }
 
-    /// `FullTextIndex` capability - pin the SQLite-arm impl
-    /// wire so the FTS5 vtable + AFTER-trigger path's trait composition
-    /// regresses at compile time if the impl block is detached.
-    fn assert_sqlite_backend_impls_full_text_index() {
-        fn assert_impl<T: crate::backend::FullTextIndex>() {}
-        assert_impl::<SqliteBackend>();
-    }
-
     /// `SpatialIndex` capability - pin the SQLite-arm impl
     /// wire so the haversine flat-scan path's trait composition
     /// regresses at compile time if the impl block is detached.
@@ -3249,7 +3082,6 @@ mod tests {
         #[cfg(feature = "test-helpers")]
         let _ = assert_sqlite_backend_impls_session_minter as fn();
         let _ = assert_sqlite_backend_impls_vector_index as fn();
-        let _ = assert_sqlite_backend_impls_full_text_index as fn();
         let _ = assert_sqlite_backend_impls_spatial_index as fn();
         let _ = assert_sqlite_change_stream_impls_change_stream as fn();
         let _ = assert_sqlite_backend_is_static as fn();

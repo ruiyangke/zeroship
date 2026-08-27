@@ -505,7 +505,7 @@ fn create_table_primary_key_round_trips_and_schema_carries_field() {
 fn migration_ir_envelope_stays_snake_case() {
     // The envelope + flags keep snake_case per the normative example.
     let json = r#"{"ir_version":1,"name":"n","owner_app":"app_x","ops":[],
-        "flags":{"requires_approval":true,"engine_goodie_ddl":false},
+        "flags":{"requires_approval":true},
         "depends_on":["mig_a"],"supersedes":[],"preconditions":[]}"#;
     let ir: MigrationIr = serde_json::from_str(json).unwrap();
     assert_eq!(ir.owner_app, "app_x");

@@ -8868,9 +8868,6 @@ fn merge_ir_flags(
     if let Some(value) = overrides.repeatable {
         derived.repeatable = value;
     }
-    // `engine_goodie_ddl` is an engine-authored trust bit. IR metadata is never
-    // allowed to grant it; `validate_ir_plan_execution_metadata` rejects an
-    // authored value before this helper is reached.
     if let Some(value) = overrides.timeout_ms {
         derived.timeout_ms = Some(value.get());
     }
@@ -8900,12 +8897,6 @@ fn validate_ir_plan_execution_metadata(
     if !ir.supersedes.is_empty() {
         return Err(IrLowerError::PlanMetadataUnsupported("supersedes"));
     }
-    if ir.flags.engine_goodie_ddl.is_some() {
-        return Err(IrLowerError::PlanMetadataUnsupported(
-            "flags.engine_goodie_ddl",
-        ));
-    }
-
     let has_rich_step = steps.iter().any(|step| !matches!(step, PlanStep::Ddl(_)));
     if !has_rich_step {
         return Ok(());

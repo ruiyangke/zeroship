@@ -352,8 +352,8 @@ pub(crate) enum ReservedName {
 /// validator (the latter fences `db.users.find({ ssn_masked: ... })`
 /// with the same error code path).
 pub(crate) const RESERVED_NAMES: &[ReservedName] = &[
-    // Synthetic-result columns the runtime emits (e.g. `_rank`,
-    // `_score` on FTS / vector search). Reserved so creator-declared
+    // Synthetic-result columns the runtime emits (e.g. `_distance` and
+    // `_score` on vector / spatial search). Reserved so creator-declared
     // columns can't shadow them.
     ReservedName::Prefix("_"),
     // Platform bookkeeping table prefixes. Mirrors the
@@ -4139,11 +4139,10 @@ columns = [
         }
     }
 
-    /// (`_rank`, `_distance`, `_score`) emitted by FTS / vector /
-    /// spatial native paths.
+    /// (`_distance`, `_score`) emitted by vector / spatial native paths.
     #[test]
     fn validate_field_name_rejects_reserved_underscore_prefix() {
-        for name in &["_rank", "_distance", "_score", "_anything"] {
+        for name in &["_distance", "_score", "_anything"] {
             let err = validate_field_name(crate::test_fixtures::VENDORS, name).unwrap_err();
             assert!(
                 matches!(err, QueryError::InvalidIdent(_)),
@@ -4160,7 +4159,7 @@ columns = [
     fn is_schema_metadata_key_matches_meta_and_indexes() {
         assert!(is_schema_metadata_key("_meta"));
         assert!(is_schema_metadata_key("_indexes"));
-        assert!(!is_schema_metadata_key("_rank"));
+        assert!(!is_schema_metadata_key("_distance"));
         assert!(!is_schema_metadata_key("ssn"));
     }
 
@@ -4887,7 +4886,7 @@ columns = [
         ));
         // `_` prefix inherited from `RESERVED_NAMES`.
         assert!(matches!(
-            validate_field_name_for_declaration("_rank").unwrap_err(),
+            validate_field_name_for_declaration("_score").unwrap_err(),
             QueryError::InvalidIdent(_)
         ));
     }

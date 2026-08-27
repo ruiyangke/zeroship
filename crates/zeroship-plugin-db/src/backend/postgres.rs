@@ -19,7 +19,7 @@ use crate::diff::LiveSchema;
 use crate::error::DbError;
 
 use super::{
-    DialectBuilder, FullTextIndex, GeoPoint, LockManager, PgSqlExecutor,
+    DialectBuilder, GeoPoint, LockManager, PgSqlExecutor,
     SpatialIndex, SqlExecutor, VectorIndex, VectorMetric,
 };
 #[cfg(any(test, feature = "test-helpers"))]
@@ -520,202 +520,6 @@ impl VectorIndex for PostgresBackend {
         )
         .map_err(DbError::from)?;
 
-        let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-        let rows =
-            crate::exec::query_postgres_pool_with_autocommit_role(&self.pool, app_id, &bq.sql, &param_refs)
-                .await?;
-        Ok(crate::v8_bridge::rows_to_json_value(&rows))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// FullTextIndex — tsvector + GIN + tsvector_update_trigger
-// ---------------------------------------------------------------------------
-//
-// Two methods:
-//   * `ensure_fts_index` — four idempotent statements:
-//       1. ADD COLUMN IF NOT EXISTS "__fts" tsvector
-//       2. backfill the column for rows where it's NULL
-//       3. CREATE INDEX CONCURRENTLY IF NOT EXISTS "..."__fts_idx
-//          USING GIN ("__fts")
-//       4. CREATE TRIGGER "..."__fts_trg BEFORE INSERT OR UPDATE OF
-//          <cols> EXECUTE FUNCTION tsvector_update_trigger(...)
-//   * `fts_search` — `WHERE __fts @@ plainto_tsquery($1) ORDER BY
-//     ts_rank(__fts, plainto_tsquery($1)) DESC LIMIT $2`.
-//
-// No extension probe: tsvector + GIN + plainto_tsquery +
-// tsvector_update_trigger are all part of core Postgres — they ship in
-// every supported PG image, including the `postgres:16` default. No
-// `CREATE EXTENSION` needed.
-// ---------------------------------------------------------------------------
-
-impl FullTextIndex for PostgresBackend {
-    #[cfg(any(test, feature = "test-helpers"))]
-    async fn ensure_fts_index(
-        &self,
-        app_id: &str,
-        collection: &str,
-        columns: &[String],
-        language: &str,
-    ) -> Result<(), DbError> {
-        if columns.is_empty() {
-            // Nothing to index. Refuse loudly so a SDK bug emitting an
-            // empty FTS index spec gets surfaced rather than silently
-            // becoming a no-op (which would later present as "search
-            // returns nothing" without any logged cause).
-            return Err(DbError::Configuration {
-                code: "fts_no_columns",
-                message: "db: ensure_fts_index requires at least one source column"
-                    .to_string(),
-                hint: Some(
-                    "mark at least one t.string() field with `.fts()` in the schema"
-                        .to_string(),
-                ),
-            });
-        }
-
-        // Whitelist the language token against the same character set we
-        // allow in identifiers — splicing it into a SQL literal is safe
-        // because plainto_tsquery accepts it verbatim, but we still
-        // reject anything that smells of injection. The SDK already
-        // restricts the language token at validate time; this is
-        // defense-in-depth.
-        if language.is_empty()
-            || !language
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_')
-        {
-            return Err(DbError::Configuration {
-                code: "fts_invalid_language",
-                message: format!(
-                    "db: ensure_fts_index language {language:?} must be [A-Za-z0-9_]+"
-                ),
-                hint: Some("use a tsvector configuration name such as 'english' or 'simple'".to_string()),
-            });
-        }
-
-        // DB-9: validate every FTS source column with the identifier fence
-        // BEFORE it is spliced UNQUOTED into the `tsvector_update_trigger` arg
-        // list below. That arg list requires bare column names, so quoting is
-        // not an option — validation is the only guard. Today CreateTable
-        // validates these columns first, but that is a non-local cross-statement
-        // ordering invariant; enforce it locally so a direct or FTS-only
-        // re-apply against an unvalidated spec can't inject DDL via a column name.
-        validate_fts_columns(columns)?;
-
-        let qschema = self.quote_ident(app_id);
-        let qcoll = self.quote_ident(collection);
-        let qtable = format!("{qschema}.{qcoll}");
-        // Derived, so NAMEDATALEN-capped — and derived by the SAME functions
-        // `zeroship_schema::query::build_create_indexes` uses, so the name this
-        // executor creates is the name the planner emitted. A local `format!`
-        // here is exactly how the two would drift apart.
-        let idx_name = zeroship_schema::query::fts_index_name(collection);
-        let trg_name = zeroship_schema::query::fts_trigger_name(collection);
-        let qidx = self.quote_ident(&idx_name);
-        let qtrg = self.quote_ident(&trg_name);
-        let qfts_col = self.quote_ident("__fts");
-
-        // For the tsvector backfill + trigger we need both the unquoted
-        // form (passed as a positional arg to `tsvector_update_trigger`)
-        // and the safely-quoted form (spliced into the UPDATE / column
-        // list). The trigger function only accepts column NAMES (not
-        // dotted identifiers), so the unquoted form is what PG expects
-        // there.
-        let qcols_csv: String = columns
-            .iter()
-            .map(|c| self.quote_ident(c))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let unquoted_cols_csv: String = columns.join(", ");
-        let coalesce_concat: String = columns
-            .iter()
-            .map(|c| format!("coalesce({}, '')", self.quote_ident(c)))
-            .collect::<Vec<_>>()
-            .join(" || ' ' || ");
-
-        let empty: Vec<&str> = Vec::new();
-
-        // 1. Add the tsvector column. Idempotent via IF NOT EXISTS.
-        let add_col_sql =
-            format!("ALTER TABLE {qtable} ADD COLUMN IF NOT EXISTS {qfts_col} tsvector");
-        self.pool
-            .query_text_params(&add_col_sql, &empty)
-            .await
-            .map_err(|e| DbError::from_pg(&e))?;
-
-        // 2. Backfill rows where the tsvector column is still NULL.
-        //    A second registerModel call after schema change re-runs the
-        //    backfill on any rows where new source columns nulled the
-        //    derived value, but typical case is the post-ADD-COLUMN seed.
-        let backfill_sql = format!(
-            "UPDATE {qtable} SET {qfts_col} = to_tsvector('pg_catalog.{language}', {coalesce_concat}) WHERE {qfts_col} IS NULL"
-        );
-        self.pool
-            .query_text_params(&backfill_sql, &empty)
-            .await
-            .map_err(|e| DbError::from_pg(&e))?;
-
-        // 3. CREATE INDEX CONCURRENTLY. We do NOT route through the
-        //    audited retry loop here because the GIN over tsvector index
-        //    cannot land INVALID the same way ivfflat can (no NULL-key
-        //    edge cases). Idempotent via IF NOT EXISTS.
-        let cic_sql = format!(
-            "CREATE INDEX CONCURRENTLY IF NOT EXISTS {qidx} ON {qtable} USING GIN ({qfts_col})"
-        );
-        self.pool
-            .query_text_params(&cic_sql, &empty)
-            .await
-            .map_err(|e| DbError::from_pg(&e))?;
-
-        // 4. CREATE TRIGGER. Idempotent via DROP TRIGGER IF EXISTS +
-        //    CREATE TRIGGER (PG 14+ supports `CREATE OR REPLACE TRIGGER`
-        //    but we stay compatible with PG 13/14 minimum since the
-        //    rest of the codebase doesn't pin a higher minimum).
-        let drop_trg_sql = format!("DROP TRIGGER IF EXISTS {qtrg} ON {qtable}");
-        self.pool
-            .query_text_params(&drop_trg_sql, &empty)
-            .await
-            .map_err(|e| DbError::from_pg(&e))?;
-        // tsvector_update_trigger args:
-        //   1. target column NAME (unquoted, but the trigger function
-        //      tokenises by identifier rules — quoting with the standard
-        //      identifier syntax is safe).
-        //   2. text-cast config name (we pin pg_catalog.<lang> so the
-        //      config resolution is deterministic regardless of search_path).
-        //   3..n. source column names (unquoted; the trigger reads the
-        //      NEW row by name).
-        let create_trg_sql = format!(
-            "CREATE TRIGGER {qtrg} BEFORE INSERT OR UPDATE OF {qcols_csv} \
-             ON {qtable} FOR EACH ROW EXECUTE FUNCTION \
-             tsvector_update_trigger(__fts, 'pg_catalog.{language}', {unquoted_cols_csv})"
-        );
-        self.pool
-            .query_text_params(&create_trg_sql, &empty)
-            .await
-            .map_err(|e| DbError::from_pg(&e))?;
-
-        Ok(())
-    }
-
-    async fn fts_search(
-        &self,
-        app_id: &str,
-        collection: &str,
-        query: &str,
-        filter: &serde_json::Value,
-        limit: Option<usize>,
-    ) -> Result<Vec<serde_json::Value>, DbError> {
-        let schema_hint = crate::context::with(|c| c.schema_for(app_id, collection));
-        let bq = crate::query::build_fts_search(
-            app_id,
-            collection,
-            query,
-            filter,
-            limit,
-            schema_hint.as_ref(),
-        )
-        .map_err(DbError::from)?;
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
         let rows =
             crate::exec::query_postgres_pool_with_autocommit_role(&self.pool, app_id, &bq.sql, &param_refs)
@@ -1865,16 +1669,6 @@ mod backup_pg {
     }
 }
 
-/// DB-9: validate FTS source column names with the shared identifier fence
-/// before they are spliced unquoted into the `tsvector_update_trigger` DDL.
-#[cfg(any(test, feature = "test-helpers"))]
-fn validate_fts_columns(columns: &[String]) -> Result<(), DbError> {
-    for col in columns {
-        crate::query::validate_field_name(col).map_err(DbError::from)?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     //! Unit tests for [`PostgresBackend`].
@@ -1972,16 +1766,6 @@ mod tests {
     // PgDialect hook unit tests. ZST has no I/O -- each test
     // is a string-compare against the expected SQL fragment.
     // ---------------------------------------------------------------------
-
-    #[test]
-    fn validate_fts_columns_rejects_unsafe_names_db9() {
-        // Normal FTS source columns pass.
-        assert!(super::validate_fts_columns(&["title".into(), "body".into()]).is_ok());
-        // A column name that would break out of the unquoted trigger arg list
-        // (or carry a null byte) is rejected before any DDL is built.
-        assert!(super::validate_fts_columns(&["body); DROP TABLE x; --".into()]).is_err());
-        assert!(super::validate_fts_columns(&["a\u{0}b".into()]).is_err());
-    }
 
     #[test]
     fn pg_dialect_quote_ident_doubles_embedded_quote() {

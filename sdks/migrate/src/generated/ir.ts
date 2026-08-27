@@ -731,7 +731,6 @@ export interface IrFlagsOverride {
   online?: boolean | null;
   requires_approval?: boolean | null;
   repeatable?: boolean | null;
-  engine_goodie_ddl?: boolean | null;
   timeout_ms?: number | null;
   /** Per-deploy maintenance-window lock-acquisition budget (JS-safe-integer
    *  bounded); distinct from `timeout_ms` (the statement budget). */

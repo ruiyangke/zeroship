@@ -513,7 +513,7 @@ table("orders").index("orders_customer_idx")
 table("orders").index("orders_customer_idx").drop({ ifExists: true });   // drop args also support concurrently
 ```
 
-- `IndexMethod` = `"btree" | "hash" | "gin" | "gist" | "spgist" | "brin" | "ivfflat" | "hnsw" | "fts5"`.
+- `IndexMethod` = `"btree" | "hash" | "gin" | "gist" | "spgist" | "brin" | "ivfflat" | "hnsw"`.
 - `IndexStorageParams` (`with`) recognizes `pagesPerRange` and `fillfactor` (u32, compacted).
 - On `.drop(...)`, `unique: true` is kept because `Op::DropIndex.unique` drives destructive/approval gating (dropping a unique index removes a data-integrity guarantee).
 
@@ -1214,7 +1214,7 @@ Two divergence surfaces are deliberately kept distinct: the **runtime** `plugin-
 | Partial / expression indexes | supported | supported | **unsupported** | `support.rs:443-453` |
 | Column-shape drift verify | full `information_schema` type spelling | SQLite **type affinity** only (a within-affinity change is invisible; a genuine affinity change IS detected) | native | `snapshot_schema` seam |
 
-The runtime `plugin-db` divergences (vector metrics, full-text scoring, `ST_DWithin`/PostGIS vs haversine, isolation-level honoring, native locking vs WAL single-writer-actor, collation-aware text ordering) are the runtime peer of the same discipline but are not migration-engine behavior (`docs/reference/sqlite-divergences.md:9-25`).
+The runtime `plugin-db` divergences (vector metrics, `ST_DWithin`/PostGIS vs haversine, isolation-level honoring, native locking vs WAL single-writer-actor, collation-aware text ordering) are the runtime peer of the same discipline but are not migration-engine behavior (`docs/reference/sqlite-divergences.md:9-25`).
 
 ### 8.8 Why this shape
 

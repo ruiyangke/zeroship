@@ -567,8 +567,8 @@ async fn introspect_indexes_and_unique(
             unique: index.unique,
             elements: index.elements,
             columns: index.columns,
-            // SQLite indexes are b-tree (the only built-in index AM). fts5/vec0 are
-            // vtables, not indexes, and surface as tables; see the divergences doc.
+            // SQLite indexes are b-tree (the only built-in index AM). Virtual-table
+            // modules such as vec0 surface as tables rather than indexes.
             access_method: "btree".to_string(),
             predicate: index.predicate,
             include: Vec::new(),
