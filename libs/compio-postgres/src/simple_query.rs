@@ -397,7 +397,10 @@ fn may_enter_copy_in_with_string_mode(query: &str, ordinary_backslash_escapes: b
                     copy = word.eq_ignore_ascii_case(b"copy");
                     copy_from = false;
                 } else if copy && paren_depth == 0 {
-                    if copy_from && word.eq_ignore_ascii_case(b"stdin") {
+                    if copy_from
+                        && (word.eq_ignore_ascii_case(b"stdin")
+                            || word.eq_ignore_ascii_case(b"stdout"))
+                    {
                         return true;
                     }
                     copy_from = word.eq_ignore_ascii_case(b"from");
@@ -507,9 +510,10 @@ mod tests {
     use super::may_enter_copy_in;
 
     #[test]
-    fn copy_in_classifier_finds_statement_level_from_stdin() {
+    fn copy_in_classifier_finds_frontend_copy_sources() {
         for query in [
             "COPY t FROM STDIN",
+            "COPY t FROM STDOUT",
             "SELECT 1; COPY t (a) FrOm /* nested /* comment */ ok */ StDiN",
             "; -- lead\n COPY BINARY t FROM STDIN WITH (FORMAT binary)",
             r"SELECT 'a\'; COPY t FROM STDIN",
