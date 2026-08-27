@@ -11,9 +11,11 @@
 //!
 //! ## Cross-backend payload equivalence
 //!
-//! [`canonical_payload`] produces the same bytes as the PG SECURITY
-//! DEFINER `__zeroship_admin.sign_session` for the same
-//! `(actor_kind, actor_id, pid, nonce, expires_at)` tuple:
+//! [`canonical_payload`] is now the ONLY definition of the token
+//! payload: the PG `__zeroship_admin.sign_session` it was written to
+//! match was deleted with the rest of the admin schema on 2026-08-27.
+//! For a `(actor_kind, actor_id, pid, nonce, expires_at)` tuple it
+//! produces:
 //!
 //! ```text
 //! actor_kind || '|' || actor_id || '|' || pid || '|'
@@ -275,17 +277,17 @@ pub(crate) fn compute_signature(secret: &[u8], payload: &[u8]) -> Vec<u8> {
     mac.finalize().into_bytes().to_vec()
 }
 
-/// Build the canonical signing payload — byte-identical to the
-/// PG SECURITY DEFINER `__zeroship_admin.sign_session`:
+/// Build the canonical signing payload. It was written byte-identical
+/// to the deleted PG `__zeroship_admin.sign_session`, and keeps that
+/// shape:
 ///
 /// ```text
 /// actor_kind || '|' || actor_id || '|' || pid || '|'
 ///            || hex(nonce) || '|' || expires_at_iso
 /// ```
 ///
-/// Empty `actor_id` / `pid` mirror PG's `COALESCE(p_actor_id, '')`
-/// and `p_pid::TEXT` (the PG impl casts a `NULL`-able integer to
-/// text via `COALESCE`).
+/// Empty `actor_id` / `pid` mirrored PG's `COALESCE(p_actor_id, '')`
+/// and `p_pid::TEXT`.
 #[cfg(any(test, feature = "test-helpers"))]
 pub(crate) fn canonical_payload(
     actor_kind: &str,
@@ -353,8 +355,8 @@ pub(crate) fn verify_signature(
 /// Constant-time byte-slice equality. Returns `false` for
 /// length-mismatched slices but still consumes the loop in
 /// `min(len)` time so an attacker can't gate on early-exit
-/// length checks. Mirrors the PG `__zeroship_admin.const_eq`
-/// body.
+/// length checks. Was written to mirror the PG
+/// `__zeroship_admin.const_eq` body, since deleted.
 #[cfg(any(test, feature = "test-helpers"))]
 fn const_eq(a: &[u8], b: &[u8]) -> bool {
     let mut diff: u8 = (a.len() ^ b.len()) as u8;

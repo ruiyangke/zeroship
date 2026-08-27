@@ -34,11 +34,13 @@
 //! directly to `__zeroship_migrations`. Provenance is therefore enforced
 //! at the Rust call boundary, not at the SQL boundary.
 //!
-//! When the proposal's `SECURITY DEFINER` + `__zeroship_admin` machinery
-//! lands (control-plane provisioning task), the body of
-//! [`write_audit_row`] and [`update_audit_status`] can be swapped to call
-//! the privileged functions without changing the public Rust API. This
-//! is tracked as deferred follow-up in the dispatch report.
+//! That machinery is not deferred, it is REFUSED. The
+//! `__zeroship_admin` schema and its 32 `SECURITY DEFINER` routines
+//! were deleted on 2026-08-27 (operator decision; see `crate::auth`):
+//! a privileged routine the worker can invoke is reachable by anything
+//! that reaches the worker, so it is not a boundary. The bodies of
+//! [`write_audit_row`] and [`update_audit_status`] are the end state,
+//! not a placeholder for a privileged version.
 
 use compio_postgres::{Client, Pool, Row};
 use serde_json::Value;

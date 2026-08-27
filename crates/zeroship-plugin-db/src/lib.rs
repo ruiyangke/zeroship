@@ -182,10 +182,12 @@ pub(crate) mod audit;
 #[cfg(feature = "test-helpers")]
 pub mod audit;
 
-// The `auth` module is always compiled: the PG-side submodules
-// (`bootstrap`, `keys`, `session`) carry the per-app role + session
-// machinery, and `auth::util` is the shared-helper subtree the SQLite
-// `SessionMinter` impl reuses.
+// The `auth` module is always compiled: `auth::bootstrap` carries the
+// per-app PG role machinery the data plane runs on every transaction,
+// and `auth::util` is the shared-helper subtree the SQLite
+// `SessionMinter` impl reuses. The `keys` / `session` submodules and
+// the `__zeroship_admin` schema they spoke to are deleted -- see
+// `auth/mod.rs` for why they are not coming back.
 #[cfg(not(feature = "test-helpers"))]
 pub(crate) mod auth;
 #[cfg(feature = "test-helpers")]

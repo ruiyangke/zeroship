@@ -21,15 +21,16 @@
 //!    impl. If plaintext (mask-only, no encryption), SELECT the parent
 //!    column directly.
 //! 4. Emit a `granted`-outcome audit row to `__zeroship_audit_unmask`
-//!    (per-app schema, NOT in `__zeroship_admin`).
+//!    in the app's own schema.
 //! 5. Return the plaintext.
 //!
 //! ## Audit-table location
 //!
 //! `__zeroship_audit_unmask` lives in the **per-app schema** (alongside
-//! `__zeroship_migrations`), not in the platform-wide `__zeroship_admin`
-//! schema. App-scoped audit data should not require platform-role
-//! access to query — operators query via the per-app schema.
+//! `__zeroship_migrations`). App-scoped audit data should not require
+//! platform-role access to query — operators query via the per-app
+//! schema. A platform-wide `__zeroship_admin` schema was proposed for
+//! it and refused; it is now deleted outright (see `crate::auth`).
 //!
 //! ## Default-deny authorization fallback
 //!
@@ -720,10 +721,9 @@ fn nibble(c: u8) -> Result<u8, DbError> {
 /// granted path on success AND the denied path on refusal — per
 /// design Q-MASK-C "both granted and denied attempts logged".
 ///
-/// The table is **per-app** (lives in the app's schema, NOT in
-/// `__zeroship_admin`). Per-app placement keeps audit data accessible
-/// to operators querying the app's schema directly, without needing
-/// platform-role access.
+/// The table is **per-app** (lives in the app's schema). Per-app
+/// placement keeps audit data accessible to operators querying the
+/// app's schema directly, without needing platform-role access.
 ///
 /// Idempotency on schema: each call lazily ensures the table exists
 /// (`CREATE TABLE IF NOT EXISTS`). The check is one cheap round-trip

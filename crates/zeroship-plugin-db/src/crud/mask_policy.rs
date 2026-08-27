@@ -7,11 +7,21 @@
 //! seeded from durable storage:
 //!
 //! - **PG** (selected at runtime by a `postgres://` url):
-//!   `__zeroship_admin.mask_policies`
-//!   table; read via the SECURITY DEFINER `get_mask_policy(app_id)`
-//!   helper, written via the SECURITY DEFINER `set_mask_policy(app_id,
-//!   policy)` helper. The admin schema mirrors the `column_keys`
-//!   pattern used for column encryption.
+//!   `__zeroship_admin.get_mask_policy(app_id)` /
+//!   `set_mask_policy(app_id, policy)`.
+//!
+//!   **This arm is broken and needs a home, not a repair.** Both
+//!   routines and the `__zeroship_admin.mask_policies` table behind
+//!   them were installed only by
+//!   `auth::bootstrap::ensure_admin_schema`, which was `cfg(test,
+//!   feature = "test-helpers")` - so they never existed in a shipped
+//!   worker even before that function was deleted on 2026-08-27. Per
+//!   AGENTS.md a policy the worker both reads and writes is not
+//!   privileged state and belongs in the APP'S OWN SCHEMA under
+//!   ordinary parameterised SQL, exactly like
+//!   `__zeroship_audit_unmask` (see `crate::crud::unmask`). Making
+//!   that move is an operator decision, so the calls below are left
+//!   pointing at the deleted routines rather than quietly rehomed.
 //!
 //! - **SQLite** (selected at runtime by a `sqlite://` url): a sidecar JSON file at
 //!   `<db_dir>/mask_policies.json`. Reads/writes run off-thread via
@@ -210,8 +220,8 @@ impl MaskPolicy {
 /// 1. Validate the policy JSON via [`MaskPolicy::from_json`] (both shape
 ///    + classification taxonomy).
 /// 2. Persist:
-///    - **PG**: `INSERT ... ON CONFLICT (app_id) DO UPDATE`
-///      through the SECURITY DEFINER `__zeroship_admin.set_mask_policy`.
+///    - **PG**: `__zeroship_admin.set_mask_policy` - a routine nothing
+///      installs any more; see the module header.
 ///    - **SQLite**: read sidecar JSON, update the app's entry, atomic
 ///      write back via `<file>.tmp + rename`.
 /// 3. Refresh the in-process cache on
@@ -252,11 +262,13 @@ pub async fn dispatch_set_mask_policy(app_id: &str, policy_v: Value) -> Result<(
 // PG persistence
 // ---------------------------------------------------------------------------
 
-/// PG storage write through the SECURITY DEFINER
-/// `__zeroship_admin.set_mask_policy(app_id, policy)`. The policy
-/// arrives as canonical JSON; PG receives it as JSONB via a text
-/// parameter (`::jsonb` cast inside the function body — the wire is
-/// text only).
+/// PG storage write through `__zeroship_admin.set_mask_policy(app_id,
+/// policy)`. The policy arrives as canonical JSON; PG receives it as
+/// JSONB via a text parameter (`::jsonb` cast inside the function body
+/// — the wire is text only).
+///
+/// The routine has no installer (module header); this call fails on
+/// every database.
 async fn persist_pg(
     pg: &crate::backend::PostgresBackend,
     app_id: &str,
@@ -272,9 +284,11 @@ async fn persist_pg(
     Ok(())
 }
 
-/// PG storage read through the SECURITY DEFINER
-/// `__zeroship_admin.get_mask_policy(app_id)`. Returns `None` when
-/// the app has no policy row.
+/// PG storage read through `__zeroship_admin.get_mask_policy(app_id)`.
+/// Returns `None` when the app has no policy row.
+///
+/// The routine has no installer (module header); this call fails on
+/// every database.
 pub async fn load_pg(
     pg: &crate::backend::PostgresBackend,
     app_id: &str,

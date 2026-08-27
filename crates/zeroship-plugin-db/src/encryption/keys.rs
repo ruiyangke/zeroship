@@ -27,10 +27,18 @@
 //! [`LocalKeySource::Supplied`], where the operator hands the process
 //! the root bytes directly instead of exporting them into the
 //! environment. [`KeySource`] wraps that: either the local source
-//! alone, or the PG production path, which reads
-//! `__zeroship_admin.column_keys` through a SECURITY DEFINER getter so
-//! the raw bytes never reach app code and falls back to a local source
-//! when the getter returns NULL.
+//! alone, or the PG path, which asks
+//! `__zeroship_admin.get_column_key($1)` and falls back to a local
+//! source when that returns NULL or errors.
+//!
+//! **The PG arm currently resolves nothing.** The getter and its
+//! `__zeroship_admin.column_keys` table were installed only by
+//! `auth::bootstrap::ensure_admin_schema`, deleted on 2026-08-27 with
+//! the rest of the admin schema. The call now always errors and the
+//! fallback always wins, so PG behaves exactly like SQLite. Whether
+//! the PG arm gets a new home (an app-schema table, an external KMS)
+//! or is deleted outright is an open operator decision - it is NOT
+//! resolved by pretending the getter is still there.
 //!
 //! The fallback is a `LocalKeySource` by TYPE, not by convention: a PG
 //! lookup can never be the fallback for another PG lookup, so the
@@ -197,12 +205,13 @@ impl LocalKeySource {
 /// Source of root key material.
 ///
 /// [`Self::Local`] is the SQLite / dev-parity path and the
-/// operator-supplied path. [`Self::PgAdminTable`] is the production PG
-/// path:
-///   1. Calls `__zeroship_admin.get_column_key($1)` (SECURITY DEFINER).
-///   2. If the getter returns NULL (table empty / key id missing),
-///      **falls back to its `fallback` local source** so apps that
-///      haven't yet run the column-keys migration still resolve a key.
+/// operator-supplied path. [`Self::PgAdminTable`] is the PG path:
+///   1. Calls `__zeroship_admin.get_column_key($1)`.
+///   2. If that returns NULL or errors, **falls back to its `fallback`
+///      local source**.
+///
+/// Since the admin schema was deleted (2026-08-27) nothing installs
+/// that getter, so step 1 always fails and step 2 always runs.
 ///
 /// `PgAdminTable` is instantiated by `PostgresBackend::new`; the
 /// SQLite tier uses `Local`.
@@ -211,11 +220,10 @@ impl LocalKeySource {
 pub enum KeySource {
     /// Resolve locally, with no database round-trip.
     Local(LocalKeySource),
-    /// PG production source. Reads
-    /// `__zeroship_admin.column_keys` via the SECURITY DEFINER getter
-    /// installed by `crate::auth::bootstrap::ensure_admin_schema`.
-    /// Falls through to `fallback` when the getter returns NULL (covers
-    /// the pre-migration / dev-parity case).
+    /// PG source. Reads `__zeroship_admin.column_keys` via a
+    /// `get_column_key` getter that NOTHING NOW INSTALLS - it came
+    /// from `auth::bootstrap::ensure_admin_schema`, deleted 2026-08-27.
+    /// So this always falls through to `fallback`.
     PgAdminTable {
         /// Pool the SECURITY DEFINER getter is called on.
         pool: Rc<compio_postgres::Pool>,
@@ -462,14 +470,16 @@ fn hex_nibble(c: u8) -> Result<u8, String> {
 
 /// PG production root-key fetcher.
 ///
-/// Calls `__zeroship_admin.get_column_key($1)` (the SECURITY DEFINER
-/// getter installed by `crate::auth::bootstrap::ensure_admin_schema`).
-/// Returns `Ok(Some(bytes))` on a successful lookup, `Ok(None)` when
-/// the getter returns NULL (table empty / row missing), and `Err(...)`
-/// when the call itself failed (table doesn't exist, permission denied,
-/// connection error). Callers fall through to env-var sourcing on
-/// `Ok(None)` OR `Err(_)` so apps that haven't run the column-keys
-/// migration still resolve a key.
+/// Calls `__zeroship_admin.get_column_key($1)`. Returns `Ok(Some(bytes))`
+/// on a successful lookup, `Ok(None)` when the getter returns NULL, and
+/// `Err(...)` when the call itself failed. Callers fall through to the
+/// local source on `Ok(None)` OR `Err(_)`.
+///
+/// **Today that is always `Err(_)`:** the getter was installed only by
+/// `auth::bootstrap::ensure_admin_schema` (deleted 2026-08-27), so the
+/// function does not exist on any database. This body is left intact
+/// rather than removed because choosing where PG column roots come
+/// from instead is a design decision, not a deletion.
 ///
 /// The function returns the raw 32-byte root; HKDF expansion happens
 /// in `derive_key`.
@@ -492,7 +502,8 @@ async fn pg_admin_lookup_root(
                 "PG getter call failed for key_id '{key_id}': {e}"
             ),
             hint: Some(
-                "Run __zeroship_admin bootstrap migration or set ZEROSHIP_COLUMN_KEY_<KEYID>"
+                "Set ZEROSHIP_COLUMN_KEY_<KEYID> or supply the root directly; \
+                 there is no admin-schema getter any more"
                     .to_string(),
             ),
         })?;
