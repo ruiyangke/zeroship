@@ -302,7 +302,9 @@ pub fn mint_subscription<'s>(
         .ok_or_else(|| OpError::type_error("Subscription prototype missing"))?;
     obj.set_prototype(scope, proto_v);
 
-    // STEP 2 — broker subscribe. From this point on the broker entry's
+    // STEP 2 — broker subscribe through the production fallible gate. A
+    // refusal owns no broker handle, so returning its typed OpError here
+    // cannot leak an entry. From the success arm onward the broker entry's
     // ONLY owner is the `Subscription` state we're about to install in
     // internal field 0. The remaining operations (`Box::new`,
     // `Box::into_raw`, `External::new`, `set_internal_field`,
@@ -311,7 +313,10 @@ pub fn mint_subscription<'s>(
     // `Subscription::install`), and `with_guaranteed_finalizer` is
     // documented as infallible. So no `?` can run between here and the
     // wrapper being live.
-    let broker_sub = broker::subscribe(app_id, collection);
+    let broker_sub = match broker::try_subscribe(app_id, collection) {
+        Ok(subscription) => subscription,
+        Err(error) => return Err(error.to_op_error()),
+    };
     let cdc_lease = crate::cdc_lifecycle::acquire(app_id);
 
     let state = Subscription {
@@ -355,7 +360,7 @@ mod tests {
     //! Simulating V8 allocation failure deterministically in a unit
     //! test is impractical (we'd need to drive the isolate into OOM),
     //! so this is a structural assertion: the source text of
-    //! `mint_subscription` must place `broker::subscribe(` AFTER every
+    //! `mint_subscription` must place `broker::try_subscribe(` AFTER every
     //! `?` operator in the function body. Future refactors that
     //! reintroduce the bug will trip this test.
     //!
@@ -364,7 +369,12 @@ mod tests {
     //! covers the happy path (V8 alloc succeeds → broker entry reclaimed
     //! on GC); this test covers the unhappy path's structural invariant.
 
-    use crate::broker;
+    use std::collections::HashMap;
+
+    use serde_json::Value;
+    use zeroship_runtime::{Runtime, RuntimeState, SharedState};
+
+    use crate::{broker, v8_classes::db::mint_db};
 
     const MINT_SUBSCRIPTION_SOURCE: &str = include_str!("subscription.rs");
 
@@ -410,8 +420,8 @@ mod tests {
         // broker's is_closed() filter never prunes it).
         let body = mint_subscription_body();
         let subscribe_pos = body
-            .find("broker::subscribe(")
-            .expect("broker::subscribe call not found in mint_subscription");
+            .find("broker::try_subscribe(")
+            .expect("broker::try_subscribe call not found in mint_subscription");
 
         // Find every `?` operator. Ignore `?` characters inside
         // doc/line comments and string literals — but in this function
@@ -444,11 +454,11 @@ mod tests {
         for q in &question_positions {
             assert!(
                 *q < subscribe_pos,
-                "found `?` operator at byte {q} AFTER broker::subscribe call \
+                "found `?` operator at byte {q} AFTER broker::try_subscribe call \
                  at byte {subscribe_pos} in mint_subscription. This means a \
                  V8 alloc failure between subscribe() and the wrapper install \
                  would leak a broker entry. Reorder so every fallible V8 op \
-                 runs BEFORE broker::subscribe."
+                 runs BEFORE broker::try_subscribe."
             );
         }
 
@@ -489,5 +499,104 @@ mod tests {
             assert_eq!(broker::live_subscription_count(), 0);
         });
         handle.join().expect("thread panicked");
+    }
+
+    #[test]
+    fn open_subscription_refuses_the_257th_live_handle_with_typed_error() {
+        const COLLECTION: &str = "users";
+        let app_id = format!("subscription-cap-{}", uuid::Uuid::new_v4());
+        let mut env_vars = HashMap::new();
+        env_vars.insert("APP_ID".to_string(), app_id.clone());
+        let runtime = Runtime::builder().env_vars(env_vars).build();
+
+        let outcome = runtime.with_scope(|scope| {
+            let state: SharedState = std::rc::Rc::new(std::cell::RefCell::new(RuntimeState::new(
+                HashMap::new(),
+                None,
+                None,
+            )));
+            scope.set_slot(state);
+
+            let db = mint_db(scope, &app_id).expect("mint production Db binding");
+            let global = scope.get_current_context().global(scope);
+            let db_key = v8::String::new(scope, "db").unwrap();
+            assert_eq!(
+                global.set(scope, db_key.into(), db.into()),
+                Some(true),
+                "bind Db for creator script"
+            );
+
+            let source = format!(
+                r#"(() => {{
+                    const held = [];
+                    let error = null;
+                    try {{
+                        for (let i = 0; i <= {limit}; i += 1) {{
+                            held.push(db.collection({collection:?}).openSubscription());
+                        }}
+                    }} catch (caught) {{
+                        error = caught;
+                    }} finally {{
+                        for (const subscription of held) subscription.close();
+                    }}
+                    return JSON.stringify({{
+                        opened: held.length,
+                        isError: error instanceof Error,
+                        code: error?.code ?? null,
+                        message: error?.message ?? null,
+                        hint: error?.hint ?? null,
+                    }});
+                }})()"#,
+                limit = broker::MAX_SUBSCRIPTIONS_PER_APP,
+                collection = COLLECTION,
+            );
+            let source = v8::String::new(scope, &source).unwrap();
+            let script = v8::Script::compile(scope, source, None).expect("compile creator script");
+            let result = script
+                .run(scope)
+                .expect("creator script must catch the refusal");
+            result.to_rust_string_lossy(scope)
+        });
+
+        let outcome: Value = serde_json::from_str(&outcome).expect("subscription outcome JSON");
+        let opened = outcome["opened"]
+            .as_u64()
+            .expect("opened must be an integer");
+        assert!(
+            opened > 0,
+            "production-path loop must open at least one subscription"
+        );
+        assert_eq!(
+            opened,
+            broker::MAX_SUBSCRIPTIONS_PER_APP as u64,
+            "the production openSubscription path must refuse the first handle beyond the cap: {outcome}"
+        );
+        assert_eq!(
+            outcome["isError"], true,
+            "refusal must be a real JS Error: {outcome}"
+        );
+        assert_eq!(
+            outcome["code"], "subscription_limit",
+            "refusal must expose the typed creator-facing code: {outcome}"
+        );
+        assert!(
+            outcome["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("maximum of 256 concurrent subscriptions")),
+            "refusal message must state the cap: {outcome}"
+        );
+        assert!(
+            outcome["hint"]
+                .as_str()
+                .is_some_and(|hint| hint.contains("close unused subscriptions")),
+            "refusal hint must tell the creator how to recover: {outcome}"
+        );
+
+        broker::drop_app(Some(&app_id));
+        assert_eq!(
+            broker::app_subscription_count(&app_id),
+            0,
+            "test cleanup must remove every routing entry"
+        );
     }
 }
