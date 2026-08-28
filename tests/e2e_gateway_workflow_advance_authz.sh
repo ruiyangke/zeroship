@@ -309,9 +309,17 @@ e2e_export_database_urls "$DBURL"
 echo $! >> "$PIDFILE"
 wait_health control "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" "$WORK/control.log"
 
+# NO `ZEROSHIP_DEV=1` HERE, and nothing needs one. The only thing that variable
+# ever bought a worker was the SSRF relaxation, and `zeroship-worker` no longer
+# reads it: dev-ness is a stated input written only by `set_dev_mode`, whose one
+# caller is `cmd_serve` (crates/zeroship-cli/src/main.rs:96), and the gate reads
+# the cell rather than the environment
+# (crates/zeroship-runtime/src/transport/ssrf.rs:70-72). `ProbeWorkflow` below
+# (line 241) is a single pure step with no fetch, no timer and no `env.*` call,
+# so it never approached the gate even when the variable did reach it.
 start_worker() {
   local extra="$1"
-  ZEROSHIP_DEV=1 "$BIN/zeroship-worker" \
+  "$BIN/zeroship-worker" \
     --port "$ZEROSHIP_WORKER_PORT" --threads 1 \
     --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
     --blob-store "$WORK/blobs" --poll-interval 1 --max-step-blob-bytes 2097152 \

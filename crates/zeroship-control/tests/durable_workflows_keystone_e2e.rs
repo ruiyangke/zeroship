@@ -10,12 +10,9 @@ use crate::common;
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -69,7 +66,6 @@ const PARENT_MANY_CASCADE_WORKFLOW_NAME: &str = "ParentManyCascadeWorkflow";
 const CONTINUE_AS_NEW_WORKFLOW_NAME: &str = "ContinueAsNewWorkflow";
 const COMPENSABLE_CARRY_WORKFLOW_NAME: &str = "CompensableCarryWorkflow";
 
-static SIDE_EFFECT_SERVER_PORT: OnceLock<u16> = OnceLock::new();
 static SCHEDULER_PROVISIONED_DB: OnceLock<AsyncMutex<Option<String>>> = OnceLock::new();
 
 fn enabled() -> bool {
@@ -116,6 +112,13 @@ impl TestPg {
 
     fn rewrite(&self, sql: &str) -> String {
         let tables = WorkflowTables::for_app_id(&self.app_id);
+        // The three `workflow_e2e_*` tables are the harness's own out-of-band
+        // side-effect record, and they live in the app's DATA schema (the bare
+        // `<app_id>`, quoted) rather than in `zeroship`, because that is the only
+        // schema `env.db` can address - see `prepare_side_effect_table`. Mapping
+        // them here rather than at ~30 call sites keeps every accessor's SQL
+        // reading as the plain table name.
+        let app_data_schema = quote_ident(&self.app_id.to_string());
         sql.replace("zeroship.workflow_runs", &tables.runs)
             .replace("zeroship.workflow_steps", &tables.steps)
             .replace("zeroship.workflow_signals", &tables.signals)
@@ -124,6 +127,10 @@ impl TestPg {
                 &tables.subscriptions,
             )
             .replace("zeroship.workflow_blobs", &tables.blobs)
+            .replace(
+                "zeroship.workflow_e2e_",
+                &format!("{app_data_schema}.workflow_e2e_"),
+            )
     }
 
     async fn batch_execute(&self, sql: &str) -> Result<(), compio_postgres::Error> {
@@ -474,331 +481,135 @@ fn assert_ack_run(response: &WorkflowAdvanceResponse, run_id: &str, label: &str)
     );
 }
 
-#[derive(Clone)]
-struct SideEffectConfig {
-    pg_container: String,
-    pg_user: String,
-    pg_db: String,
-}
+// ---------------------------------------------------------------------------
+// The out-of-band side-effect record
+// ---------------------------------------------------------------------------
+//
+// WHAT USED TO BE HERE, and why it is gone. Until 2026-08-27 this file carried
+// a small HTTP server (`start_side_effect_server` + `handle_side_effect_request`
+// + a hand-rolled percent-decoder and `write_http`) bound to 127.0.0.1 on a port
+// the shell harness passed in as `ZEROSHIP_DW_E2E_SIDE_PORT`. The deployed
+// workflow's step bodies `fetch`ed it, and it shelled out to
+// `docker exec … psql -c "<interpolated SQL>"` to append a row.
+//
+// It connected for exactly one reason: `tests/e2e_durable_workflows.sh` launched
+// `zeroship-worker` with `ZEROSHIP_DEV=1`, and the runtime's SSRF gate read that
+// variable straight out of the process environment and skipped ALL host/IP
+// validation when it was set. That was a production hole - a worker inheriting
+// the variable from a unit file had SSRF off for every `fetch` - and it is
+// closed: dev-ness is a stated input, written only by `set_dev_mode`, whose one
+// caller is `zeroship serve`, and the relaxation it grants is loopback only
+// (crates/zeroship-runtime/src/transport/ssrf.rs:45-72, :212-224). A worker
+// states nothing, so it refuses 127.0.0.1, and the fixture cannot reach a
+// harness server at any address a test machine can bind.
+//
+// WHAT REPLACED IT: the step bodies call `env.db` (see the fixture in
+// tests/e2e_durable_workflows.sh). Same three tables, same columns, same
+// assertions below - the WRITER changed from "HTTP -> psql subprocess" to "a
+// native platform primitive", and the transport disappeared rather than moving.
+// The tables moved out of the `zeroship` schema into the app's own schema,
+// because that is the only schema `env.db` addresses; `TestPg::rewrite` maps the
+// names, so the SQL in every accessor below is unchanged.
 
-fn sql_literal(value: &str) -> String {
-    value.replace('\'', "''")
-}
-
-fn decode_component(value: &str) -> Result<String, String> {
-    let mut out = Vec::with_capacity(value.len());
-    let mut bytes = value.as_bytes().iter().copied();
-    while let Some(b) = bytes.next() {
-        if b == b'%' {
-            let hi = bytes.next().ok_or_else(|| "truncated percent escape".to_string())?;
-            let lo = bytes.next().ok_or_else(|| "truncated percent escape".to_string())?;
-            let hex = [hi, lo];
-            let hex = std::str::from_utf8(&hex).map_err(|e| e.to_string())?;
-            let decoded = u8::from_str_radix(hex, 16).map_err(|e| e.to_string())?;
-            out.push(decoded);
-        } else if b == b'+' {
-            out.push(b' ');
-        } else {
-            out.push(b);
-        }
-    }
-    String::from_utf8(out).map_err(|e| e.to_string())
-}
-
-fn record_side_effect(cfg: &SideEffectConfig, run_id: &str, step: &str) -> Result<i64, String> {
-    let run_id = sql_literal(run_id);
-    let step = sql_literal(step);
-    let sql = format!(
-        "WITH inserted AS ( \
-             INSERT INTO zeroship.workflow_e2e_side_effects \
-                 (run_id, step_name, created_at) \
-             VALUES ('{run_id}', '{step}', now()) \
-             RETURNING 1 \
-         ) \
-         SELECT COUNT(*)::bigint \
-           FROM zeroship.workflow_e2e_side_effects \
-          WHERE run_id = '{run_id}' AND step_name = '{step}';"
-    );
-    let output = Command::new("docker")
-        .arg("exec")
-        .arg(&cfg.pg_container)
-        .arg("psql")
-        .arg("-U")
-        .arg(&cfg.pg_user)
-        .arg("-d")
-        .arg(&cfg.pg_db)
-        .arg("-tA")
-        .arg("-v")
-        .arg("ON_ERROR_STOP=1")
-        .arg("-c")
-        .arg(sql)
-        .output()
-        .map_err(|e| format!("spawn docker exec psql: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "psql failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse::<i64>()
-        .map_err(|e| format!("parse psql count: {e}; stdout={:?}", output.stdout))
-}
-
-fn record_idempotent_commit(
-    cfg: &SideEffectConfig,
-    run_id: &str,
-    step: &str,
-    key: &str,
-) -> Result<serde_json::Value, String> {
-    let run_id = sql_literal(run_id);
-    let step = sql_literal(step);
-    let key = sql_literal(key);
-    let sql = format!(
-        "WITH attempt AS ( \
-             INSERT INTO zeroship.workflow_e2e_effect_attempts \
-                 (run_id, step_name, idempotency_key, created_at) \
-             VALUES ('{run_id}', '{step}', '{key}', now()) \
-             RETURNING 1 \
-         ), inserted AS ( \
-             INSERT INTO zeroship.workflow_e2e_effect_commits \
-                 (run_id, step_name, idempotency_key, created_at) \
-             VALUES ('{run_id}', '{step}', '{key}', now()) \
-             ON CONFLICT (idempotency_key) DO NOTHING \
-             RETURNING 1 \
-         ) \
-         SELECT \
-             (SELECT COUNT(*)::bigint FROM attempt), \
-             (SELECT COUNT(*)::bigint FROM inserted), \
-             (SELECT COUNT(*)::bigint FROM zeroship.workflow_e2e_effect_commits WHERE idempotency_key = '{key}');"
-    );
-    let output = Command::new("docker")
-        .arg("exec")
-        .arg(&cfg.pg_container)
-        .arg("psql")
-        .arg("-U")
-        .arg(&cfg.pg_user)
-        .arg("-d")
-        .arg(&cfg.pg_db)
-        .arg("-tA")
-        .arg("-v")
-        .arg("ON_ERROR_STOP=1")
-        .arg("-c")
-        .arg(sql)
-        .output()
-        .map_err(|e| format!("spawn docker exec psql: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "psql failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut parts = stdout.trim().split('|');
-    let attempt = parts
-        .next()
-        .ok_or_else(|| format!("missing attempt count: {stdout:?}"))?
-        .parse::<i64>()
-        .map_err(|e| format!("parse attempt count: {e}; stdout={stdout:?}"))?;
-    let inserted = parts
-        .next()
-        .ok_or_else(|| format!("missing inserted count: {stdout:?}"))?
-        .parse::<i64>()
-        .map_err(|e| format!("parse inserted count: {e}; stdout={stdout:?}"))?;
-    let committed = parts
-        .next()
-        .ok_or_else(|| format!("missing committed count: {stdout:?}"))?
-        .parse::<i64>()
-        .map_err(|e| format!("parse committed count: {e}; stdout={stdout:?}"))?;
-    Ok(serde_json::json!({
-        "step": step,
-        "attempt": attempt,
-        "inserted": inserted,
-        "committed": committed,
-    }))
-}
-
-fn write_http(stream: &mut TcpStream, status: &str, body: serde_json::Value) {
-    let body = body.to_string();
-    let response = format!(
-        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    let _ = stream.write_all(response.as_bytes());
-}
-
-fn handle_side_effect_request(mut stream: TcpStream, cfg: Arc<SideEffectConfig>) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-    let mut buf = [0u8; 4096];
-    let Ok(n) = stream.read(&mut buf) else {
-        return;
-    };
-    let request = String::from_utf8_lossy(&buf[..n]);
-    let Some(line) = request.lines().next() else {
-        write_http(
-            &mut stream,
-            "400 Bad Request",
-            serde_json::json!({"error": "missing request line"}),
-        );
-        return;
-    };
-    let mut parts = line.split_whitespace();
-    let method = parts.next().unwrap_or_default();
-    let target = parts.next().unwrap_or_default();
-    if method != "POST" {
-        write_http(
-            &mut stream,
-            "405 Method Not Allowed",
-            serde_json::json!({"error": "POST required"}),
-        );
-        return;
-    }
-    let (endpoint, query) = if let Some(query) = target.strip_prefix("/bump?") {
-        ("bump", query)
-    } else if let Some(query) = target.strip_prefix("/commit?") {
-        ("commit", query)
-    } else {
-        write_http(
-            &mut stream,
-            "404 Not Found",
-            serde_json::json!({"error": "unknown endpoint"}),
-        );
-        return;
-    };
-    let mut run_id = None;
-    let mut step = None;
-    let mut idempotency_key = None;
-    for part in query.split('&') {
-        let Some((param, value)) = part.split_once('=') else {
-            continue;
-        };
-        let value = match decode_component(value) {
-            Ok(value) => value,
-            Err(e) => {
-                write_http(
-                    &mut stream,
-                    "400 Bad Request",
-                    serde_json::json!({"error": e}),
-                );
-                return;
-            }
-        };
-        match param {
-            "run" => run_id = Some(value),
-            "step" => step = Some(value),
-            "key" => idempotency_key = Some(value),
-            _ => {}
-        }
-    }
-    let Some(run_id) = run_id else {
-        write_http(
-            &mut stream,
-            "400 Bad Request",
-            serde_json::json!({"error": "missing run"}),
-        );
-        return;
-    };
-    let Some(step) = step else {
-        write_http(
-            &mut stream,
-            "400 Bad Request",
-            serde_json::json!({"error": "missing step"}),
-        );
-        return;
-    };
-    let result = if endpoint == "commit" {
-        let Some(key) = idempotency_key else {
-            write_http(
-                &mut stream,
-                "400 Bad Request",
-                serde_json::json!({"error": "missing key"}),
-            );
-            return;
-        };
-        record_idempotent_commit(&cfg, &run_id, &step, &key)
-    } else {
-        record_side_effect(&cfg, &run_id, &step)
-            .map(|count| serde_json::json!({"step": step, "count": count}))
-    };
-    match result {
-        Ok(body) => write_http(&mut stream, "200 OK", body),
-        Err(e) => write_http(
-            &mut stream,
-            "500 Internal Server Error",
-            serde_json::json!({"error": e}),
-        ),
-    }
-}
-
-fn start_side_effect_server(cfg: SideEffectConfig, port: u16) {
-    if let Some(started_port) = SIDE_EFFECT_SERVER_PORT.get() {
-        assert_eq!(
-            *started_port, port,
-            "side-effect server already started on a different port"
-        );
-        return;
-    }
-    let (started_tx, started_rx) = mpsc::channel();
-    let bind = format!("127.0.0.1:{port}");
-    thread::Builder::new()
-        .name("dw07-side-effect-server".to_string())
-        .spawn(move || {
-            let listener = match TcpListener::bind(&bind) {
-                Ok(listener) => listener,
-                Err(e) => {
-                    let _ = started_tx.send(Err(format!("bind side-effect server {bind}: {e}")));
-                    return;
-                }
-            };
-            let _ = started_tx.send(Ok(()));
-            let cfg = Arc::new(cfg);
-            for stream in listener.incoming() {
-                match stream {
-                    Ok(stream) => {
-                        let cfg = Arc::clone(&cfg);
-                        thread::spawn(move || handle_side_effect_request(stream, cfg));
-                    }
-                    Err(_) => break,
-                }
-            }
-        })
-        .expect("spawn side-effect server thread");
-    started_rx
-        .recv()
-        .expect("side-effect server reports startup")
-        .expect("side-effect server starts");
-    let _ = SIDE_EFFECT_SERVER_PORT.set(port);
-}
-
+/// The three side-effect tables, in the app's OWN data schema, plus the runtime
+/// role `env.db` speaks as.
+///
+/// WHY THE APP SCHEMA AND NOT `zeroship`. `env.db.collection("foo")` addresses
+/// exactly one place: `"<app_id>"."foo"`
+/// (crates/zeroship-schema/src/query.rs:3504-3505, :3551). There is no
+/// cross-schema qualifier - an op-level `schema:` naming another schema is
+/// refused - so the tables the step bodies write have to live there. Every
+/// accessor below still spells them `zeroship.workflow_e2e_*`;
+/// [`TestPg::rewrite`] maps that to the app schema, the same trick the workflow
+/// journal tables already use.
+///
+/// WHY THE ROLE AND THE GRANTS. Every autocommit `env.db` statement opens a
+/// transaction and runs `SET LOCAL ROLE "app_<app_id>_role"` first
+/// (crates/zeroship-plugin-db/src/auth/bootstrap.rs:200-207,
+/// crates/zeroship-plugin-db/src/exec.rs:522-542), so the effective privileges
+/// are that role's, not `zeroship_worker`'s. In production the role, the
+/// membership edge and the grants are all created by `migrated`'s apply
+/// (crates/zeroship-migrated/src/apply.rs:1669-1712, :1638-1649). THIS HARNESS
+/// DOES NOT RUN `migrated` - it deploys a `.zship` with `dev-provision` and
+/// nothing else - so the statements below are that apply's runtime half,
+/// reproduced. They are a deliberate mirror, not an invention: keep them in step
+/// with `provision_runtime_app_role` if it changes. Without them the first
+/// `env.db` call fails with `role "app_..._role" does not exist`, which
+/// plugin-db reports as `schema_not_provisioned`
+/// (crates/zeroship-plugin-db/src/error.rs:216-243).
+///
+/// The grants are re-issued on every call because `ON ALL TABLES IN SCHEMA` is a
+/// point-in-time snapshot and this function drops and recreates the tables.
 async fn prepare_side_effect_table(pg: &TestPg) {
-    pg.batch_execute(
-        "DROP TABLE IF EXISTS zeroship.workflow_e2e_effect_attempts; \
+    let app_schema = quote_ident(&pg.app_id.to_string());
+    let app_role = quote_ident(&format!("app_{}_role", pg.app_id));
+    // The seven platform system columns, verbatim from the DDL the platform
+    // itself emits for a creator table
+    // (crates/zeroship-schema/src/query.rs:208-219). `id` is TEXT because
+    // plugin-db mints a typed_id string into it when the document omits one
+    // (crates/zeroship-plugin-db/src/crud/system_fields_pass.rs:244-249); a uuid
+    // column would reject that. `deleted_at` is not optional either - `find` and
+    // `count` add `AND deleted_at IS NULL` unless asked not to.
+    //
+    // `seq bigserial` is OURS, not the platform's. The accessors order by it.
+    // `id` would very probably work (typed_id is UUIDv7 base62-encoded to a
+    // fixed 22 chars, so lexical order is time order), but that is a property of
+    // the id codec and this test has no business depending on it.
+    const SYSTEM_COLUMNS: &str = "id text PRIMARY KEY, \
+         created_at timestamptz NOT NULL DEFAULT now(), \
+         updated_at timestamptz NOT NULL DEFAULT now(), \
+         created_by text NULL, \
+         updated_by text NULL, \
+         version integer NOT NULL DEFAULT 1, \
+         deleted_at timestamptz NULL, \
+         seq bigserial NOT NULL";
+    pg.batch_execute(&format!(
+        "DO $dw07_role$ BEGIN \
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '__zeroship_app_role_template') THEN \
+                EXECUTE 'CREATE ROLE \"__zeroship_app_role_template\" NOLOGIN NOREPLICATION NOCREATEDB NOCREATEROLE NOINHERIT'; \
+            END IF; \
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_{app_id}_role') THEN \
+                EXECUTE 'CREATE ROLE {app_role} NOLOGIN NOREPLICATION NOCREATEDB NOCREATEROLE INHERIT IN ROLE \"__zeroship_app_role_template\"'; \
+            END IF; \
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'zeroship_worker') THEN \
+                GRANT {app_role} TO \"zeroship_worker\"; \
+            END IF; \
+         END $dw07_role$; \
+         CREATE SCHEMA IF NOT EXISTS {app_schema}; \
+         GRANT USAGE ON SCHEMA {app_schema} TO {app_role}; \
+         DROP TABLE IF EXISTS zeroship.workflow_e2e_effect_attempts; \
          DROP TABLE IF EXISTS zeroship.workflow_e2e_effect_commits; \
          DROP TABLE IF EXISTS zeroship.workflow_e2e_side_effects; \
          CREATE TABLE zeroship.workflow_e2e_side_effects ( \
-            id bigserial PRIMARY KEY, \
+            {SYSTEM_COLUMNS}, \
             run_id text NOT NULL, \
-            step_name text NOT NULL, \
-            created_at timestamptz NOT NULL DEFAULT now() \
+            step_name text NOT NULL \
          ); \
          CREATE TABLE zeroship.workflow_e2e_effect_attempts ( \
-            id bigserial PRIMARY KEY, \
+            {SYSTEM_COLUMNS}, \
             run_id text NOT NULL, \
             step_name text NOT NULL, \
-            idempotency_key text NOT NULL, \
-            created_at timestamptz NOT NULL DEFAULT now() \
+            idempotency_key text NOT NULL \
          ); \
          CREATE TABLE zeroship.workflow_e2e_effect_commits ( \
-            id bigserial PRIMARY KEY, \
+            {SYSTEM_COLUMNS}, \
             run_id text NOT NULL, \
             step_name text NOT NULL, \
-            idempotency_key text NOT NULL UNIQUE, \
-            created_at timestamptz NOT NULL DEFAULT now() \
-         );",
-    )
+            idempotency_key text NOT NULL UNIQUE \
+         ); \
+         GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {app_schema} TO {app_role}; \
+         GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {app_schema} TO {app_role};",
+        app_id = pg.app_id,
+    ))
     .await
     .expect("prepare side-effect table");
+}
+
+/// Double-quote a Postgres identifier. The two values this is used on are a
+/// `Uuid` rendering and a name derived from it, so neither can carry a quote;
+/// the escape is here so a future caller does not have to notice that.
+fn quote_ident(ident: &str) -> String {
+    format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
 fn config(owner: &str) -> WorkflowEngineConfig {
@@ -1984,12 +1795,12 @@ async fn assert_side_effect_steps(fx: &Fixture, run_id: &str) {
         .expect("load sideEffect output");
     let output: serde_json::Value = row.get("output");
     assert_eq!(output["step"], "v");
-    // The side-effect server returns a PRE-insert count: record_side_effect uses a
-    // data-modifying CTE (WITH inserted AS (INSERT ...) SELECT COUNT(*) ...), and in
-    // Postgres a data-modifying CTE's effects are not visible to a sibling SELECT of
-    // the same table in the same statement — so the first "v" bump returns 0. This
-    // asserts the sideEffect journaled bump's real return value faithfully; that the
-    // fn ran exactly ONCE (memoized on replay) is proven by side_counts["v"] == 1 below.
+    // `bump` returns a PRE-insert count - it counts, then inserts - so the first
+    // "v" bump answers 0. (It read 0 for the same reason under the old
+    // side-effect server, whose data-modifying CTE could not see its own INSERT.)
+    // This asserts the sideEffect journaled bump's real return value faithfully;
+    // that the fn ran exactly ONCE (memoized on replay) is proven by
+    // side_counts["v"] == 1 below.
     assert_eq!(output["count"], 0);
 }
 
@@ -2068,7 +1879,7 @@ async fn ordered_side_effect_steps(fx: &Fixture, run_id: &str) -> Vec<String> {
             "SELECT step_name \
                FROM zeroship.workflow_e2e_side_effects \
               WHERE run_id = $1 \
-              ORDER BY id",
+              ORDER BY seq",
             &[&run_id],
         )
         .await
@@ -2116,7 +1927,7 @@ async fn ordered_commit_steps(fx: &Fixture, run_id: &str) -> Vec<String> {
             "SELECT step_name \
                FROM zeroship.workflow_e2e_effect_commits \
               WHERE run_id = $1 \
-              ORDER BY id",
+              ORDER BY seq",
             &[&run_id],
         )
         .await
@@ -2953,19 +2764,9 @@ async fn keystone_real_spine() {
         .parse()
         .expect("app id uuid");
     let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_DEPLOY_ID"));
-    let side_port: u16 = required_env("ZEROSHIP_DW_E2E_SIDE_PORT", zeroship_core::test_env!("ZEROSHIP_DW_E2E_SIDE_PORT"))
-        .parse()
-        .expect("side port");
-    let side_cfg = SideEffectConfig {
-        pg_container: required_env("ZEROSHIP_DW_E2E_PG_CONTAINER", zeroship_core::test_env!("ZEROSHIP_DW_E2E_PG_CONTAINER")),
-        pg_user: required_env("ZEROSHIP_DW_E2E_PG_USER", zeroship_core::test_env!("ZEROSHIP_DW_E2E_PG_USER")),
-        pg_db: required_env("ZEROSHIP_DW_E2E_PG_DB", zeroship_core::test_env!("ZEROSHIP_DW_E2E_PG_DB")),
-    };
 
     let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id).await;
     prepare_side_effect_table(&fx.pg).await;
-    start_side_effect_server(side_cfg, side_port);
-    compio::time::sleep(Duration::from_millis(100)).await;
 
     let real_dispatcher = Arc::new(GatewayStepDispatcher::new(gateway_url.clone()));
     rollout_switch_drill(
@@ -3746,9 +3547,9 @@ async fn keystone_real_spine() {
     );
     let side_effect_output = run_output(&fx, &side_effect_run).await;
     assert_eq!(side_effect_output["v"]["step"], "v");
-    // Pre-insert count from the side-effect server's data-modifying CTE (see
-    // assert_side_effect_steps); the frozen sideEffect value is replayed into the
-    // run output verbatim. Exactly-once execution is proven by side_counts above.
+    // `bump`'s pre-insert count (see assert_side_effect_steps); the frozen
+    // sideEffect value is replayed into the run output verbatim. Exactly-once
+    // execution is proven by side_counts above.
     assert_eq!(side_effect_output["v"]["count"], 0);
     assert_eq!(side_effect_output["after"]["step"], "after");
 
@@ -5077,11 +4878,15 @@ async fn bare_await_body_io_is_rejected() {
     let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_DEPLOY_ID"));
     let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id).await;
     prepare_side_effect_table(&fx.pg).await;
-    // No side-effect server here: the BareAwaitWorkflow body fetch is rejected
-    // synchronously by the dispatch-scoped I/O guard before any in-step fetch is
-    // reached, so no server is needed; starting a second server would collide
-    // with the keystone test's server on the shared ZEROSHIP_DW_E2E_SIDE_PORT
-    // (#[serial] serializes the tests, but the detached server thread holds the port).
+    // `prepare_side_effect_table` still runs so the `first` step has somewhere to
+    // write if it ever gets that far - it must not. BareAwaitWorkflow's body-level
+    // `fetch` is rejected synchronously by the dispatch-scoped I/O guard
+    // (`installWorkflowIoGuards` replaces `globalThis.fetch` and throws
+    // NondeterministicError in body mode - sdks/workflows/src/journal.ts:250-254,
+    // :263-273) before the real fetch runs, and therefore before the SSRF floor
+    // ever sees the URL. That ordering is what keeps this arm measuring the guard
+    // rather than the network, and it is why the fixture's body-level call stayed
+    // a `fetch` when the step bodies moved to `env.db`.
 
     let bare_await_run = seed_workflow_run(
         &fx,
@@ -5122,19 +4927,9 @@ async fn scheduler_misfire_lost_register_recovers() {
         .parse()
         .expect("app id uuid");
     let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_DEPLOY_ID"));
-    let side_port: u16 = required_env("ZEROSHIP_DW_E2E_SIDE_PORT", zeroship_core::test_env!("ZEROSHIP_DW_E2E_SIDE_PORT"))
-        .parse()
-        .expect("side port");
-    let side_cfg = SideEffectConfig {
-        pg_container: required_env("ZEROSHIP_DW_E2E_PG_CONTAINER", zeroship_core::test_env!("ZEROSHIP_DW_E2E_PG_CONTAINER")),
-        pg_user: required_env("ZEROSHIP_DW_E2E_PG_USER", zeroship_core::test_env!("ZEROSHIP_DW_E2E_PG_USER")),
-        pg_db: required_env("ZEROSHIP_DW_E2E_PG_DB", zeroship_core::test_env!("ZEROSHIP_DW_E2E_PG_DB")),
-    };
 
     let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id).await;
     prepare_side_effect_table(&fx.pg).await;
-    start_side_effect_server(side_cfg, side_port);
-    compio::time::sleep(Duration::from_millis(100)).await;
 
     let run_id = seed_workflow_run(
         &fx,
@@ -5238,19 +5033,9 @@ async fn scheduler_overfire_duplicate_dispatch_noops() {
         .parse()
         .expect("app id uuid");
     let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_DEPLOY_ID"));
-    let side_port: u16 = required_env("ZEROSHIP_DW_E2E_SIDE_PORT", zeroship_core::test_env!("ZEROSHIP_DW_E2E_SIDE_PORT"))
-        .parse()
-        .expect("side port");
-    let side_cfg = SideEffectConfig {
-        pg_container: required_env("ZEROSHIP_DW_E2E_PG_CONTAINER", zeroship_core::test_env!("ZEROSHIP_DW_E2E_PG_CONTAINER")),
-        pg_user: required_env("ZEROSHIP_DW_E2E_PG_USER", zeroship_core::test_env!("ZEROSHIP_DW_E2E_PG_USER")),
-        pg_db: required_env("ZEROSHIP_DW_E2E_PG_DB", zeroship_core::test_env!("ZEROSHIP_DW_E2E_PG_DB")),
-    };
 
     let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id).await;
     prepare_side_effect_table(&fx.pg).await;
-    start_side_effect_server(side_cfg, side_port);
-    compio::time::sleep(Duration::from_millis(100)).await;
 
     let run_id = seed_workflow_run(
         &fx,
@@ -5357,19 +5142,9 @@ async fn compensation_saga_rollback_real_spine() {
         .parse()
         .expect("app id uuid");
     let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_DEPLOY_ID"));
-    let side_port: u16 = required_env("ZEROSHIP_DW_E2E_SIDE_PORT", zeroship_core::test_env!("ZEROSHIP_DW_E2E_SIDE_PORT"))
-        .parse()
-        .expect("side port");
-    let side_cfg = SideEffectConfig {
-        pg_container: required_env("ZEROSHIP_DW_E2E_PG_CONTAINER", zeroship_core::test_env!("ZEROSHIP_DW_E2E_PG_CONTAINER")),
-        pg_user: required_env("ZEROSHIP_DW_E2E_PG_USER", zeroship_core::test_env!("ZEROSHIP_DW_E2E_PG_USER")),
-        pg_db: required_env("ZEROSHIP_DW_E2E_PG_DB", zeroship_core::test_env!("ZEROSHIP_DW_E2E_PG_DB")),
-    };
 
     let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id).await;
     prepare_side_effect_table(&fx.pg).await;
-    start_side_effect_server(side_cfg, side_port);
-    compio::time::sleep(Duration::from_millis(100)).await;
     let real_dispatcher = Arc::new(GatewayStepDispatcher::new(gateway_url.clone()));
 
     let failed_run = seed_workflow_run(
