@@ -53,6 +53,7 @@ import {
   readGeneratedRuntimeDescriptorAt,
 } from "./gen-types/read-descriptor.js";
 import {
+  DevDatabaseUrlSchemeError,
   logDatabaseUrlSource,
   parseDotenvVars,
   resolveDatabaseUrl,
@@ -645,11 +646,20 @@ export function devServerPlugin(
           // default); a hardcoded `.zeroship` would inspect the wrong file
           // whenever a caller redirected it -- see `devSqliteDir`.
           if (!devDb) devDb = resolveDevDatabase(root);
-          const { databaseUrl } = resolveDatabaseUrl(
-            process.env,
-            parseDotenvVars(root),
-            devDb.databaseUrl,
-          );
+          // A non-SQLite DATABASE_URL is a creator misconfiguration, not a
+          // platform fault — report it the same way an invalid migration is
+          // reported just above (loud, non-fatal) rather than letting it
+          // reject `bootRegenDone` and surface as a bare unhandled rejection.
+          // `spawnRuntime` (below) hits the SAME rejection independently and
+          // is what actually stops a runtime from being spawned against it.
+          let databaseUrl: string;
+          try {
+            ({ databaseUrl } = resolveDatabaseUrl(process.env, parseDotenvVars(root), devDb.databaseUrl));
+          } catch (e) {
+            if (!(e instanceof DevDatabaseUrlSchemeError)) throw e;
+            console.error(`[zeroship] ${(e as Error).message}`);
+            return;
+          }
           reportDevSchemaState(root, projectConfig.migrations, json, databaseUrl);
         });
       }
