@@ -168,21 +168,64 @@ corrections, both measured 2026-08-28:
   33-36). The eight span sections 1.3, 1.4 and 1.5.
 - **The eight is scoped to the DATA PLANE, and is about right there.** But that
   review's stated scope is "every *data-plane* consumer", so it correctly omits
-  the side that **creates** the column. Measured across the four crates that know
-  the name, **31 sites construct or destructure it** (includes inline test
-  modules). Six of those are on the migration side and are counted nowhere in
-  this set: `migrate-core/src/schema/diff.rs:410`, `:747`, `:825`, `:847`,
-  `migrate-backend/src/schema.rs:566`, and a **second, independent**
-  `ReservedName::Suffix("_masked")` at `migrate-core/src/schema/query.rs:379`.
+  the side that **creates** the column.
+
+  **Re-derived 2026-08-28 with the boundary stated: 22 PRODUCTION sites** across
+  four crates, from 41 total hits (22 production, 3 in `test-helpers`-gated
+  modules, 9 inline `#[cfg(test)]` assertions, 1 integration target, 6 prose).
+  *An earlier revision of this page said 31, which counted test code as
+  production - the same class of error as the 34-vs-12 above, made by me on the
+  same day I corrected that one.*
+
+  | crate | production sites |
+  | --- | --- |
+  | `zeroship-schema` | 9 - `query.rs:754`, `:2160`, `:3414`; `diff.rs:582`, `:671`, `:716`, `:1203`, `:1286`, `:1308` |
+  | `zeroship-migrate-core` | 9 - `schema/query.rs:379`; `schema/diff.rs:410`, `:747`, `:825`, `:847`; `render/fold.rs:3678`; `render/lower.rs:4803`, `:7185`; `render/declarative.rs:2223` |
+  | `zeroship-plugin-db` | 3 - `crud/mask_pass.rs:150`, `:469`; `crud/encryption_pass.rs:295` |
+  | `zeroship-migrate-backend` | 1 - `schema.rs:566` |
+
+  **The migration side is TEN, not the six this page previously named** - four
+  more live in the fold/lower/declarative pipeline and had been counted nowhere.
+  It also carries a **second, independent** `mask_sibling_column_for_field`
+  (`migrate-backend/src/schema.rs:557-566`) and a **second** reservation table
+  (`migrate-core/src/schema/query.rs:379`). There is **no dependency edge**
+  between the two forks, so nothing can make them agree by construction.
 
   That second reservation list matters on its own: the flip's one-line `_raw`
   fix has to land in **two** places, and a reader who greps `zeroship-schema`
   alone will find one of them.
 
-  This is also why SC-6's owed item 4 is not a detail. The AAD binds the physical
-  column name, so moving ciphertext is a re-encrypt rather than a rename - and
-  the emitter that would do the moving is exactly this uncounted migration-side
-  set.
+**RETRACTED 2026-08-28: SC-6's owed item 4 is WRONG ABOUT THE CODE, and this
+page repeated it.** Both said the AAD binds the PHYSICAL column, making the flip
+a re-encrypt rather than a rename. Measured: `canonical_aad(collection, &col,
+..)` is passed `col` from `for (col, def) in schema_obj.iter()`
+(`crud/encryption_pass.rs:173`, `:200-207`) - **the logical schema field key**,
+not `storage.rawColumn`. The same holds at `encryption_pass.rs:337` and
+`crud/unmask.rs:452-458`.
+
+Today the two are the same string for every masked+encrypted field, so "binds
+the logical name" and "binds the physical column" are **indistinguishable in the
+current tree**. Post-flip they diverge, and which one it is was never decided.
+
+**So the flip is not necessarily a re-encrypt. It is an unmade decision, and the
+cheap branch is available:** keep binding the logical field name and zero rows
+are re-encrypted, because a `RENAME COLUMN` does not change the logical key.
+
+The false constraint is stated as fact in a doc comment
+(`migrate-core/src/render/gen_types.rs:160-169`: "`canonical_aad`
+length-prefixes the column name ... an `ALTER TABLE ... RENAME COLUMN` leaves
+every stored cell authenticated under the old name"). That comment describes
+behaviour the code does not have, and it is what made an expensive migration
+look mandatory. It must be corrected in the same commit as any flip work, or the
+next reader "fixes" the AAD to match the comment and destroys every ciphertext
+in the deployment.
+
+**Neither branch is right, though.** Binding the bare logical name stops being
+sufficient the moment SC-6's own owed item 2 lands: a keyed lookup column holds
+a SECOND deterministic ciphertext for the SAME logical field, so two encrypted
+columns share one AAD and swapping their contents passes tag verification. Bind
+the logical field name **plus a stable role discriminator** (`value` | `lookup`).
+A role survives renames; a physical name does not.
 
 **Measured 2026-08-28: 12 SQL-emitting `RETURNING *` sites** in
 `zeroship-schema/src/query.rs` (12,104 lines). A bare `grep -c` reports 34; of
@@ -193,7 +236,48 @@ those, 14 are in tests and 8 more are `///` doc comments. *This page carried the
 because it is invisible to any review written against the generated types.
 Three further silent breakages are verified in SC-6.
 
-**Blocks:** SC-6. Full detail there under "BLOCKING".
+**The flip is not a rename plus a backfill. It swaps which column carries the
+declared TYPE and the entire constraint set** - found 2026-08-28, and absent
+from SC-6, from this page, and from the 966-line write-path review, all three of
+which were grepped for `CHECK`, `NOT NULL`, `enum` and `DOUBLE PRECISION`.
+
+`.mask()` is legal on string, number and bytes, and every mask kind returns a
+**String**. Today that is harmless: the sibling is bare `TEXT` while the field's
+own column keeps its declared type and all its constraints from
+`def_to_constraints_for_dialect` (`query.rs:2719-2827`) - `NOT NULL`, `DEFAULT`,
+range `CHECK`, literal `CHECK`, enum `CHECK`. Post-flip the logical column holds
+`'***'`:
+
+- `t.number().mask(...)` leaves `ssn` as `DOUBLE PRECISION`; writing `'***'` is
+  a hard error.
+- `t.string().enum([...]).mask(...)` leaves `CHECK ("ssn" IN (...))`, which
+  refuses `'***'`. **Every write fails.**
+- an encrypted+masked field leaves `ssn` as `BYTEA`.
+
+**And the migration engine cannot see any of it.** `migrate-core/src/schema/diff.rs:856-882`
+says so in its own comment - the column-additions branch is "NAME-ONLY ... no
+matter how its declared type has changed" - and the `RewriteColumnType` arm keys
+strictly off the `encrypted` toggle (`:894-900`). The flip changes neither the
+name nor that toggle, **so the differ emits nothing at all**, the DDL and the
+runtime silently disagree, and the runtime writes a mask string into a numeric
+or binary column. That is precisely the failure `RewriteColumnType` exists to
+prevent, arriving through the one door it does not watch.
+
+For an EXISTING table a double rename fixes this for free, because types and
+constraints travel with the renamed columns:
+
+```sql
+ALTER TABLE t RENAME COLUMN ssn        TO ssn_raw;  -- free the logical name first
+ALTER TABLE t RENAME COLUMN ssn_masked TO ssn;
+```
+
+For a NEW table, `build_create_table_with_fks_for_dialect` must emit the declared
+type and constraints under the **raw** name and a bare `TEXT` sibling under the
+**logical** name. Nothing does that today.
+
+**Blocks:** SC-6. Full detail there under "BLOCKING", and in
+`docs/reviews/2026-08-28-flip-write-path.md` (966 lines, in the tree, and
+referenced from neither SC-6 nor this page until now).
 
 ### 3. SC-1's executable form is larger than SC-1
 
@@ -310,9 +394,42 @@ crates.**
 
 ---
 
-## What is exactly zero
+## What is actually built, per sub-contract
 
-**SC-1, SC-2, SC-3, SC-4, SC-5, SC-6.** All six.
+**RETRACTED 2026-08-28: this section said "SC-1 through SC-6 are exactly zero.
+All six."** That is false, and worse, the design had **already retracted the
+same sentence** (`design.md:1183-1188`: *"it is now misleading, because SC-5's
+service ownership partly landed as step 5a"*) before this page was restructured.
+The restructure reinstated it. The whole point of splitting these documents was
+to stop superseded text reading as current, and the router reintroduced a
+superseded measurement on the same day. **Superseded DECISIONS were moved to the
+decision log; superseded MEASUREMENTS were not, and they are the ones that rot.**
+
+The design numbers work as **steps**; the sub-contracts number themselves. The
+mapping is `design.md:1168-1173` and `:1432-1445`: **step 3 = SC-2's actor
+substance; step 5a = SC-5's behaviour-neutral half.**
+
+| contract | state |
+| --- | --- |
+| **SC-2** | **~80% implemented** (`a21640bf4` + `32f9bb189`, `4ec1c701f`, and four fixes). Two connections, the interrupt generation guard, the terminal CAS, all four cancellation interleavings, and all eight classifier rows are in the tree with tests. **Missing:** the per-app-file actor, a production cancellation consumer (the surface is `#[allow(dead_code)]` awaiting SC-1's deadline rule), and the `SQLITE_BUSY_SNAPSHOT` arm |
+| **SC-5** | **step 5a fully implemented** (`40c3df95f` + three fixes), with unusually strong instrumentation. **SC-5-as-contract is at zero**: Fork C (`AppIncarnationId` occurs 0 times), the ceiling as a service field, service-owned key custody |
+| **SC-3** | shared core + read family built (`5c83046fc`), zero dependencies. Five families and the ledger absent |
+| **SC-4** | **decision 4 IS implemented** (`8c6caa465`, dev-ness as a typed input) and SC-4 does not record it. Decision 1 unblocked and small. Decision 2 underspecified **by SC-4's own admission** |
+| **SC-1** | **not structurally blocked.** Its substrate (interruptible actor, terminal CAS) now exists. It needs one yes/no answer |
+| **SC-6** | write path **specified** (`docs/reviews/2026-08-28-flip-write-path.md`, 966 lines). Its author recommends **cancelling the flip** |
+
+**The load-bearing consequence for SC-6:** most of that specification **is not
+flip work**. The row-surface filter, the unnameable raw column, the introspector
+fall-throughs and the `_raw` reservation all repair the CURRENT layout, because
+**`RETURNING *` returns plaintext under `ssn` today, pre-flip, for every
+mask-only field.** That is unblocked security work regardless of which way the
+flip decision goes.
+
+**L28 is CLOSED by the platform-migrate removal** - the `platform-cli` feature it
+named no longer exists, so the 26 harnesses it blocked are unblocked. An example
+of why defect repair waits for the refactor rather than racing it.
+
+### Still exactly zero
 
 **And the masking storage flip is not in the tree** -
 `mask_sibling_column_for_field` still returns `format!("{field}_masked")` and
