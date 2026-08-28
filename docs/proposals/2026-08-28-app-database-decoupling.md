@@ -518,8 +518,20 @@ exact role name, because `22023` is the generic bad-GUC code shared with
 `SET statement_timeout = 'yes'`); `42501` needs no such qualifier, being
 specific to the membership check.
 
-*Still unverified: whether a multi-statement session-setup batch whose FIRST
-statement fails surfaces that error unreordered. The above is single-statement.*
+**The batch cannot reorder it, for a structural reason.** The setup really is a
+multi-statement simple query - `tx.simple_query(&setup_sql)`
+(`crates/zeroship-plugin-db/src/exec.rs:322`) over
+`autocommit_local_session_setup_sql`
+(`crates/zeroship-plugin-db/src/auth/bootstrap.rs:226-231`) - but its first
+statement is `SET LOCAL ROLE`, followed by `statement_timeout` and
+`lock_timeout`. PostgreSQL aborts a simple-query batch at the first failing
+statement and emits exactly one `ErrorResponse`, so the role error is the only
+error there is; nothing later runs to compete with it. Measured: that batch from
+a non-member session returns `permission denied to set role` and nothing else.
+
+The ordering is therefore load-bearing. **If a statement is ever placed before
+`SET LOCAL ROLE` in that batch, its failure masks the role failure and the
+taxonomy silently collapses.**
 
 **This closes section 15's item 2 only, and nothing else.** Items 1 and 3
 through 8 remain measured on 18.4 alone - the revocation bound, the column-list
