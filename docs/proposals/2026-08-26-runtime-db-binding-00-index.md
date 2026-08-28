@@ -172,6 +172,26 @@ that creator code has no raw-SQL surface. That is probably sufficient today, but
 it is a **new trust edge** and the design should say so rather than describing
 the marker as dissolving the problem.
 
+**4. The crate-move table inverts the SQLite/Postgres polarity**, which would
+leave an implementer holding dead code. Verified:
+
+```rust
+fn backend_publishes_committed_changes() -> bool {          // exec.rs:442
+    context::with(|c| matches!(c.backend(), Some(BackendHandle::Sqlite(_))))
+}
+...
+if backend_publishes_committed_changes() { return; }        // exec.rs:494
+// "The old SDK-local emit was kept for the Postgres/no-WAL-consumer path;
+//  on SQLite it races the CDC publisher"
+```
+
+The predicate is true **iff the backend is SQLite**, and `emit_for_rows` returns
+early on it. So `emit_for_rows` / `queue_or_emit` /
+`drain_pending_emits_on_commit` serve **Postgres**, and SQLite - which publishes
+through `backend/sqlite/cdc.rs` - never reaches them. The design says they "stay
+only for the SQLite dev tier", which is backwards: deleting the Postgres arm
+means deleting these three **entirely**, and SQLite is untouched.
+
 **A version trap in the recommended mitigation, found by measuring two servers.**
 `REVOKE EXECUTE ... FROM PUBLIC` must name the right overloads, and **the
 signature changed**: PG 16 has `pg_logical_emit_message(boolean,text,text)`;
