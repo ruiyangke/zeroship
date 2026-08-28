@@ -1168,6 +1168,89 @@ jobs:
         env:
           PG_TEST_URL: postgres://postgres:zeroship@127.0.0.1:5441/zeroship
 
+  # The live-Postgres gate for zeroship-worker: seven tests that drive
+  # `workflow_advance_unsigned` end to end and whose claim path joins
+  # `zeroship.apps` / `plans` / `app_deploys`.
+  #
+  # WHY IT IS ITS OWN JOB. Those seven were UNGATED until 2026-08-28 and nothing
+  # provisioned a migrated database for them, so the `rust` job above - which
+  # runs `tests/provision_test_backends.sh` and gets a live but EMPTY `zeroship`
+  # - failed all seven on `relation "zeroship.plans" does not exist`. That is a
+  # void run presented as seven regressions, and `zeroship-control` hit the
+  # identical shape on 2026-08-20. The fix is the same pair: the tests moved
+  # behind `--features live-db-tests` (so `cargo test --workspace` above is
+  # honest about what it ruled on) and this job runs them against a database the
+  # suite script creates and migrates itself.
+  #
+  # NOT folded into auth-gate, which already owns a migrated database. Two
+  # reasons, and the second is the binding one: auth-gate builds no crate that
+  # depends on zeroship-runtime, so adding zeroship-worker would pull V8 into a
+  # job that does not otherwise need it; and auth-gate's AUTH_MIN_PASSED floor
+  # is a sum over every binary it runs, so adding ~114 passes to it means
+  # re-measuring that floor against the whole auth suite - a number this crate's
+  # change has no way to establish.
+  #
+  # THE SCRIPT DOES NOT SKIP. Without an overlay, a server, or the `zero-migrate`
+  # CLI it exits 2 naming the fix and never reaches `cargo test`, so this job
+  # cannot go green having run nothing.
+  worker-live-gate:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: zeroship
+          POSTGRES_DB: zeroship
+        ports:
+          - 5440:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      # NOT used by any test here - the worker's live tests build their kernel
+      # with `kv_url: None`. It is here because the overlay writer below waits
+      # on BOTH backends before describing either (`--check` skips the
+      # `docker compose up`, and nothing else), so a job without Redis cannot
+      # get a file written and the suite then refuses for want of one.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6390:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      PG_HOST: localhost
+      PG_PORT: 5440
+      PG_USER: postgres
+      PG_PASS: zeroship
+      PG_DB: zeroship
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Twice load-bearing, same as billing-gate / auth-gate / plugin-db-live-gate:
+      # zeroship-worker depends on zeroship-runtime, which `include_str!`s three
+      # gitignored SDK dist files, AND deploy/ops/db-migrate.sh is a Node program
+      # that the suite script shells out to.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter zero-migrate build
+      - run: pnpm build
+      # The suite reads its server's coordinates from the generated overlay and
+      # from nowhere else; without this file it refuses rather than guessing.
+      - name: Write the test overlay naming this job's service containers
+        run: bash tests/provision_test_backends.sh --check
+      - name: Run the worker live-database gate
+        run: tests/run_worker_suite.sh
+
   # Gate the SDK type-level + unit suites. In particular this runs
   # @zeroship/migrate's `check` (tsc + the `tsconfig.types.json`
   # `@ts-expect-error` structural-safety / names-stay-strings suite) and its

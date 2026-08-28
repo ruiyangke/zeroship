@@ -234,6 +234,12 @@ cargo test -p zeroship-control
 # To run the whole crate, provision the database first (tests/run_billing_suite.sh
 # does both):
 cargo test -p zeroship-control --features live-db-tests
+cargo test -p zeroship-worker
+# Same arrangement in the worker: the seven `workflow_advance_*` tests claim a
+# run by joining `zeroship.apps` / `plans` / `app_deploys`, so they need a
+# MIGRATED database and not merely a reachable one. They are behind
+# `live-db-tests`, and `tests/run_worker_suite.sh` is what provisions the
+# database and runs them.
 cargo test -p zeroship-runtime --lib
 cargo test -p compio-postgres -- --test-threads=1
 ./tests/e2e_platform.sh
@@ -255,9 +261,16 @@ migrated, and never dropped. Three things follow, and they are the point:
 - a database whose hash no branch produces is provably dead, which is what lets
   `tests/sweep_test_databases.sh` reclaim it without guessing.
 
+`tests/run_worker_suite.sh` uses the same scheme under its own prefix
+(`zeroship_worker_test_<hash>`), and additionally takes `--dsn <url>` for a
+server you control outright — the way to exercise it without writing to a
+shared one.
+
 ```bash
 tests/run_auth_suite.sh                        # the shared, schema-keyed database
 tests/run_auth_suite.sh --database mine        # a private one you name and own
+tests/run_worker_suite.sh                      # the same, for zeroship-worker
+tests/run_worker_suite.sh --dsn postgres://... # a server you control
 tests/sweep_test_databases.sh                  # what is reclaimable (dry run)
 tests/sweep_test_databases.sh --apply          # reclaim it
 ```

@@ -121,6 +121,10 @@ tests/run_auth_suite.sh         # the auth live-database gate. Uses a SHARED
 tests/run_billing_suite.sh      # provisions the DB + runs every live-database suite
                                 # (everything behind the `live-db-tests` feature
                                 #  in zeroship-control / zeroship-migrate-server)
+tests/run_worker_suite.sh       # the same, for zeroship-worker: seven workflow-
+                                # advance tests that join zeroship.apps/plans/
+                                # app_deploys and so need a MIGRATED database.
+                                # --dsn <url> points it at a server you control.
 tests/sweep_test_databases.sh   # reclaim the test databases no branch can ask
                                 # for. Dry run unless --apply; never FORCE.
 ./tests/golden_path.sh          # build a creator app locally and deploy it
