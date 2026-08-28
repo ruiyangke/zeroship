@@ -444,8 +444,26 @@ that never enters `read_pipeline` at all.** Verified:
 - `broker.rs` then puts that tuple on the wire under `"row"`.
 
 So for a mask-only field the **parent column holds plaintext and reaches every
-subscriber, today.** The existing contract test covers only the *encrypted*
-shape, so it has never ruled on the shape that leaks.
+subscriber, today.** Masking is independent of encryption: `read_pipeline::apply`
+gates decrypt on `schema_has_encrypted_columns` and mask-wrap on
+`schema_has_masked_columns` as **separate** conditions, and
+`wrap_row_on_read`'s fallback re-masks the parent precisely because the parent
+can hold plaintext.
+
+**And the test that looks like it covers this is the reason nobody found it.**
+`broker.rs:1863` is named `cdc_event_carries_masked_value_for_masked_columns` -
+a name asserting the general property. Its fixture is
+`parent_ciphertext_text = "\\x0123456789abcdef..."` (`:1868`), a BYTEA hex
+literal, and it asserts the wire row equals that ciphertext (`:1908`). Its own
+comment says what it is really for: *"A regression that wires decrypt-on-CDC
+would land the plaintext in `new_tuple["ssn"]` and flip this assertion."*
+
+**It guards a different regression, on the safe shape, under a name that claims
+the dangerous one.** For a mask-only field the same assertion would fail today -
+there is simply no fixture that constructs one. This is the
+verification-record's own thesis appearing in the masking code: not a vacuous
+test, but a real test whose NAME describes a property strictly wider than what
+it rules on, so every later reader treats the question as settled.
 
 **This changes the flip's ledger in both directions:** the flip would CLOSE this
 leak for the parent (which becomes the mask) while OPENING a new one for
