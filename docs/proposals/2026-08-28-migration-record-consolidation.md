@@ -150,9 +150,18 @@ made tenant-owned journals acceptable in the first place.
 
 ### What this deletes
 
-- the three tables, and `zeroship.migrated_app_policies` /
-  `zeroship.migrated_migration_audit` if they prove to have the same status
-  (not yet measured);
+- the three named tables, **plus `zeroship.migrated_migration_audit`** -
+  measured 2026-08-28: **one writer (`migration_store.rs:302`), zero readers**
+  anywhere in the tree. It is append-only by trigger
+  (`reject_migrated_migration_audit_mutation`) and its own comment scopes it to
+  *"submit, approval, pending rejection, and apply outcomes"* - three of those
+  four actions belong to the approval flow that is unreachable, and the fourth
+  duplicates the journal;
+- **NOT `zeroship.migrated_app_policies`.** An earlier revision of this list
+  named it as a candidate; that was wrong. Measured: one INSERT and **four
+  SELECTs** in `policy_store.rs` (`:76`, `:81`, `:132`, `:143`, `:164`). It is
+  the creator policy-draft store, it is actively read, and it has nothing to do
+  with the approval workflow. **It stays;**
 - `migration_store.rs`'s approval transitions (`insert_pending`, approve,
   reject) and the `status` state machine;
 - the `zeroship_control` grant on `migrated_migrations`
