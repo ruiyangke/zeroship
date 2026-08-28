@@ -234,13 +234,14 @@ async fn a_backend_killed_mid_copy_fails_the_copy_and_releases_the_connection() 
         .await
         .expect("read the victim's backend pid")
         .get(0);
+    let table = common::test_object_name("cpg_kill_copy");
 
     victim
-        .batch_execute("CREATE TEMPORARY TABLE cpg_kill_copy (n int)")
+        .batch_execute(&format!("CREATE TEMPORARY TABLE {table} (n int)"))
         .await
         .expect("create the COPY target");
     let sink = victim
-        .copy_in::<_, Bytes>("COPY cpg_kill_copy (n) FROM STDIN")
+        .copy_in::<_, Bytes>(&format!("COPY {table} (n) FROM STDIN"))
         .await
         .expect("enter COPY input mode");
     let mut sink = std::pin::pin!(sink);
@@ -306,13 +307,14 @@ async fn copy_finish_preserves_a_queued_fatal_response() {
             .query_one_scalar("SELECT pg_backend_pid()::int4", &[])
             .await
             .expect("read the victim's backend pid");
+        let table = common::test_object_name("cpg_copy_fatal");
         victim
-            .batch_execute("CREATE TEMPORARY TABLE cpg_copy_fatal (n int)")
+            .batch_execute(&format!("CREATE TEMPORARY TABLE {table} (n int)"))
             .await
             .expect("create the COPY target");
 
         let sink = victim
-            .copy_in::<_, Bytes>("COPY cpg_copy_fatal (n) FROM STDIN")
+            .copy_in::<_, Bytes>(&format!("COPY {table} (n) FROM STDIN"))
             .await
             .expect("enter COPY input mode");
         let mut sink = std::pin::pin!(sink);

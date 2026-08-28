@@ -1186,9 +1186,10 @@ async fn savepoint_name_with_a_space_is_quoted() {
 async fn mixed_case_savepoint_keeps_its_exact_name_and_rolls_back_rows() {
     let url = require_pg().await;
     let mut client = connect(&url).await.unwrap();
+    let table = common::test_object_name("cpg_tx_mixed_case");
 
     client
-        .batch_execute("CREATE TABLE cpg_tx_mixed_case (n int)")
+        .batch_execute(&format!("CREATE TABLE {table} (n int)"))
         .await
         .unwrap();
 
@@ -1196,7 +1197,7 @@ async fn mixed_case_savepoint_keeps_its_exact_name_and_rolls_back_rows() {
         let mut tx = client.transaction().await.unwrap();
         let savepoint = tx.savepoint("MyPoint").await.unwrap();
         savepoint
-            .execute("INSERT INTO cpg_tx_mixed_case VALUES (1)", &[])
+            .execute(&format!("INSERT INTO {table} VALUES (1)"), &[])
             .await
             .unwrap();
 
@@ -1215,12 +1216,12 @@ async fn mixed_case_savepoint_keeps_its_exact_name_and_rolls_back_rows() {
     };
 
     let rows = client
-        .query("SELECT n FROM cpg_tx_mixed_case", &[])
+        .query(&format!("SELECT n FROM {table}"), &[])
         .await
         .unwrap();
 
     client
-        .batch_execute("DROP TABLE cpg_tx_mixed_case")
+        .batch_execute(&format!("DROP TABLE {table}"))
         .await
         .unwrap();
 
@@ -1270,21 +1271,20 @@ async fn savepoint_name_with_a_double_quote_is_escaped() {
 async fn semicolon_in_savepoint_name_does_not_split_the_simple_query() {
     let url = require_pg().await;
     let mut client = connect(&url).await.unwrap();
+    let table = common::test_object_name("cpg_tx_semicolon");
+    let injected_savepoint = format!("point; INSERT INTO {table} VALUES (99); --");
 
     client
-        .batch_execute("CREATE TABLE cpg_tx_semicolon (n int)")
+        .batch_execute(&format!("CREATE TABLE {table} (n int)"))
         .await
         .unwrap();
 
     let injected_rows = {
         let mut tx = client.transaction().await.unwrap();
-        let savepoint = tx
-            .savepoint("point; INSERT INTO cpg_tx_semicolon VALUES (99); --")
-            .await
-            .unwrap();
+        let savepoint = tx.savepoint(&injected_savepoint).await.unwrap();
         savepoint.rollback().await.unwrap();
         let count: i64 = tx
-            .query_one("SELECT count(*) FROM cpg_tx_semicolon", &[])
+            .query_one(&format!("SELECT count(*) FROM {table}"), &[])
             .await
             .unwrap()
             .get(0);
@@ -1293,7 +1293,7 @@ async fn semicolon_in_savepoint_name_does_not_split_the_simple_query() {
     };
 
     client
-        .batch_execute("DROP TABLE cpg_tx_semicolon")
+        .batch_execute(&format!("DROP TABLE {table}"))
         .await
         .unwrap();
 
@@ -1307,33 +1307,34 @@ async fn semicolon_in_savepoint_name_does_not_split_the_simple_query() {
 async fn inner_savepoint_rollback_keeps_outer_work() {
     let url = require_pg().await;
     let mut client = connect(&url).await.unwrap();
+    let table = common::test_object_name("cpg_tx_nested");
 
     client
-        .batch_execute("CREATE TABLE cpg_tx_nested (n int)")
+        .batch_execute(&format!("CREATE TABLE {table} (n int)"))
         .await
         .unwrap();
 
     {
         let mut tx = client.transaction().await.unwrap();
-        tx.execute("INSERT INTO cpg_tx_nested VALUES (1)", &[])
+        tx.execute(&format!("INSERT INTO {table} VALUES (1)"), &[])
             .await
             .unwrap();
         {
             let mut outer = tx.transaction().await.unwrap();
             outer
-                .execute("INSERT INTO cpg_tx_nested VALUES (2)", &[])
+                .execute(&format!("INSERT INTO {table} VALUES (2)"), &[])
                 .await
                 .unwrap();
             {
                 let inner = outer.transaction().await.unwrap();
                 inner
-                    .execute("INSERT INTO cpg_tx_nested VALUES (3)", &[])
+                    .execute(&format!("INSERT INTO {table} VALUES (3)"), &[])
                     .await
                     .unwrap();
                 inner.rollback().await.unwrap();
             }
             outer
-                .execute("INSERT INTO cpg_tx_nested VALUES (4)", &[])
+                .execute(&format!("INSERT INTO {table} VALUES (4)"), &[])
                 .await
                 .unwrap();
             outer.commit().await.unwrap();
@@ -1342,13 +1343,13 @@ async fn inner_savepoint_rollback_keeps_outer_work() {
     }
 
     let rows = client
-        .query("SELECT n FROM cpg_tx_nested ORDER BY n", &[])
+        .query(&format!("SELECT n FROM {table} ORDER BY n"), &[])
         .await
         .unwrap();
     let kept: Vec<i32> = rows.iter().map(|row| row.get(0)).collect();
 
     client
-        .batch_execute("DROP TABLE cpg_tx_nested")
+        .batch_execute(&format!("DROP TABLE {table}"))
         .await
         .unwrap();
 
@@ -2255,10 +2256,11 @@ async fn copy_in_error_does_not_deadlock() {
 
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
+    let table = common::test_object_name("cpg_copy_rejected");
 
     client
         .execute(
-            "CREATE TEMPORARY TABLE cpg_copy_rejected (id int, n int)",
+            &format!("CREATE TEMPORARY TABLE {table} (id int, n int)"),
             &[],
         )
         .await
@@ -2281,7 +2283,7 @@ async fn copy_in_error_does_not_deadlock() {
     // deadlock it is meant to probe.
     let copy_fut = async {
         let sink = client
-            .copy_in::<_, Bytes>("COPY cpg_copy_rejected (id, n) FROM STDIN")
+            .copy_in::<_, Bytes>(&format!("COPY {table} (id, n) FROM STDIN"))
             .await?;
         let mut sink = pin!(sink);
 
@@ -2319,7 +2321,7 @@ async fn copy_in_error_does_not_deadlock() {
     // Recovery is a property of this protocol session, not of the server as a
     // whole. Reuse the exact connection that PostgreSQL rejected mid-COPY.
     let rows = client
-        .query("SELECT count(*)::int8 AS c FROM cpg_copy_rejected", &[])
+        .query(&format!("SELECT count(*)::int8 AS c FROM {table}"), &[])
         .await
         .expect("the rejected COPY poisoned its connection");
     assert_eq!(
@@ -2328,7 +2330,7 @@ async fn copy_in_error_does_not_deadlock() {
         "a rejected COPY must leave no rows committed"
     );
     client
-        .execute("DROP TABLE cpg_copy_rejected", &[])
+        .execute(&format!("DROP TABLE {table}"), &[])
         .await
         .unwrap();
 }
@@ -2342,15 +2344,16 @@ async fn dropped_copy_in_sink_recovers_the_same_connection() {
 
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
+    let table = common::test_object_name("cpg_copy_drop_in");
 
     client
-        .execute("CREATE TEMPORARY TABLE cpg_copy_drop_in (n int)", &[])
+        .execute(&format!("CREATE TEMPORARY TABLE {table} (n int)"), &[])
         .await
         .unwrap();
 
     {
         let sink = client
-            .copy_in::<_, Bytes>("COPY cpg_copy_drop_in (n) FROM STDIN")
+            .copy_in::<_, Bytes>(&format!("COPY {table} (n) FROM STDIN"))
             .await
             .unwrap();
         let mut sink = Box::pin(sink);
@@ -2363,7 +2366,7 @@ async fn dropped_copy_in_sink_recovers_the_same_connection() {
 
     let rows = compio::time::timeout(
         std::time::Duration::from_secs(5),
-        client.query("SELECT count(*)::int8 AS n FROM cpg_copy_drop_in", &[]),
+        client.query(&format!("SELECT count(*)::int8 AS n FROM {table}"), &[]),
     )
     .await
     .expect("the query after dropping CopyInSink timed out")
@@ -2371,7 +2374,7 @@ async fn dropped_copy_in_sink_recovers_the_same_connection() {
     assert_eq!(rows[0].get::<_, i64>("n"), 0);
 
     client
-        .execute("DROP TABLE cpg_copy_drop_in", &[])
+        .execute(&format!("DROP TABLE {table}"), &[])
         .await
         .unwrap();
 }
@@ -2577,19 +2580,20 @@ async fn dropped_copy_out_stream_recovers_the_same_connection() {
 
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
+    let table = common::test_object_name("cpg_copy_drop_out");
 
     client
-        .batch_execute(
-            "CREATE TEMPORARY TABLE cpg_copy_drop_out AS
+        .batch_execute(&format!(
+            "CREATE TEMPORARY TABLE {table} AS
              SELECT i::int AS n, repeat('x', 1024)::text AS payload
-             FROM generate_series(1, 16384) AS i",
-        )
+             FROM generate_series(1, 16384) AS i"
+        ))
         .await
         .unwrap();
 
     {
         let stream = client
-            .copy_out("COPY cpg_copy_drop_out TO STDOUT")
+            .copy_out(&format!("COPY {table} TO STDOUT"))
             .await
             .unwrap();
         let mut stream = Box::pin(stream);
@@ -2613,7 +2617,7 @@ async fn dropped_copy_out_stream_recovers_the_same_connection() {
     assert_eq!(row.get::<_, i32>(0), 42);
 
     client
-        .execute("DROP TABLE cpg_copy_drop_out", &[])
+        .execute(&format!("DROP TABLE {table}"), &[])
         .await
         .unwrap();
 }
@@ -2672,10 +2676,11 @@ async fn copy_out_waits_for_the_final_command_status_after_copy_done() {
 
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
+    let table = common::test_object_name("cpg_copy_out_late_failure");
 
     client
-        .batch_execute(
-            "CREATE TEMPORARY TABLE cpg_copy_out_late_failure (n int);
+        .batch_execute(&format!(
+            "CREATE TEMPORARY TABLE {table} (n int);
              CREATE FUNCTION pg_temp.cpg_copy_out_late_failure() RETURNS trigger
              LANGUAGE plpgsql AS $$
              BEGIN
@@ -2685,19 +2690,19 @@ async fn copy_out_waits_for_the_final_command_status_after_copy_done() {
              END
              $$;
              CREATE TRIGGER cpg_copy_out_late_failure
-             AFTER INSERT ON cpg_copy_out_late_failure
-             FOR EACH ROW EXECUTE FUNCTION pg_temp.cpg_copy_out_late_failure();",
-        )
+             AFTER INSERT ON {table}
+             FOR EACH ROW EXECUTE FUNCTION pg_temp.cpg_copy_out_late_failure();"
+        ))
         .await
         .unwrap();
 
     let stream = client
-        .copy_out(
+        .copy_out(&format!(
             "COPY (
-                 INSERT INTO cpg_copy_out_late_failure VALUES (7)
+                 INSERT INTO {table} VALUES (7)
                  RETURNING n
-             ) TO STDOUT",
-        )
+             ) TO STDOUT"
+        ))
         .await
         .expect("start the COPY OUT before its late executor failure");
     let mut stream = Box::pin(stream);
@@ -2725,7 +2730,7 @@ async fn copy_out_waits_for_the_final_command_status_after_copy_done() {
     drop(stream);
 
     let row = client
-        .query_one("SELECT count(*)::int8 FROM cpg_copy_out_late_failure", &[])
+        .query_one(&format!("SELECT count(*)::int8 FROM {table}"), &[])
         .await
         .expect("the late COPY OUT failure poisoned its connection");
     assert_eq!(
@@ -2745,25 +2750,27 @@ async fn copy_out_waits_for_sync_before_reporting_eof() {
 
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
+    let parent = common::test_object_name("cpg_copy_out_sync_parent");
+    let child = common::test_object_name("cpg_copy_out_sync_child");
 
     client
-        .batch_execute(
-            "CREATE TEMPORARY TABLE cpg_copy_out_sync_parent (id int PRIMARY KEY);
-             CREATE TEMPORARY TABLE cpg_copy_out_sync_child (
-                 parent_id int REFERENCES cpg_copy_out_sync_parent (id)
+        .batch_execute(&format!(
+            "CREATE TEMPORARY TABLE {parent} (id int PRIMARY KEY);
+             CREATE TEMPORARY TABLE {child} (
+                 parent_id int REFERENCES {parent} (id)
                      DEFERRABLE INITIALLY DEFERRED
-             );",
-        )
+             );"
+        ))
         .await
         .unwrap();
 
     let stream = client
-        .copy_out(
+        .copy_out(&format!(
             "COPY (
-                 INSERT INTO cpg_copy_out_sync_child VALUES (314159)
+                 INSERT INTO {child} VALUES (314159)
                  RETURNING parent_id
-             ) TO STDOUT",
-        )
+             ) TO STDOUT"
+        ))
         .await
         .expect("start COPY OUT before its deferred constraint is checked");
     let mut stream = Box::pin(stream);
@@ -2791,7 +2798,7 @@ async fn copy_out_waits_for_sync_before_reporting_eof() {
     drop(stream);
 
     let count: i64 = client
-        .query_one_scalar("SELECT count(*)::int8 FROM cpg_copy_out_sync_child", &[])
+        .query_one_scalar(&format!("SELECT count(*)::int8 FROM {child}"), &[])
         .await
         .expect("the deferred COPY OUT failure poisoned its connection");
     assert_eq!(
@@ -2813,13 +2820,14 @@ async fn copy_in_spans_many_copy_data_frames() {
 
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
+    let table = common::test_object_name("cpg_copy_many_frames");
     client
-        .execute("CREATE TEMPORARY TABLE cpg_copy_many_frames (n int)", &[])
+        .execute(&format!("CREATE TEMPORARY TABLE {table} (n int)"), &[])
         .await
         .unwrap();
 
     let sink = client
-        .copy_in::<_, Bytes>("COPY cpg_copy_many_frames (n) FROM STDIN")
+        .copy_in::<_, Bytes>(&format!("COPY {table} (n) FROM STDIN"))
         .await
         .unwrap();
     let mut sink = Box::pin(sink);
@@ -2841,7 +2849,7 @@ async fn copy_in_spans_many_copy_data_frames() {
 
     let row = client
         .query_one(
-            "SELECT count(*)::int8, min(n), max(n) FROM cpg_copy_many_frames",
+            &format!("SELECT count(*)::int8, min(n), max(n) FROM {table}"),
             &[],
         )
         .await
@@ -2851,7 +2859,7 @@ async fn copy_in_spans_many_copy_data_frames() {
     assert_eq!(row.get::<_, i32>(2), FRAMES * ROWS_PER_FRAME - 1);
 
     client
-        .execute("DROP TABLE cpg_copy_many_frames", &[])
+        .execute(&format!("DROP TABLE {table}"), &[])
         .await
         .unwrap();
 }
@@ -2866,20 +2874,23 @@ async fn binary_copy_round_trips_empty_and_null_fields() {
 
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
+    let table = common::test_object_name("cpg_copy_binary_fields");
     client
         .execute(
-            "CREATE TEMPORARY TABLE cpg_copy_binary_fields (
+            &format!(
+                "CREATE TEMPORARY TABLE {table} (
                 id int,
                 empty text NOT NULL,
                 missing text
-            )",
+            )"
+            ),
             &[],
         )
         .await
         .unwrap();
 
     let sink = client
-        .copy_in("COPY cpg_copy_binary_fields FROM STDIN BINARY")
+        .copy_in(&format!("COPY {table} FROM STDIN BINARY"))
         .await
         .unwrap();
     let mut writer = Box::pin(BinaryCopyInWriter::new(
@@ -2896,7 +2907,7 @@ async fn binary_copy_round_trips_empty_and_null_fields() {
 
     let sql_row = client
         .query_one(
-            "SELECT octet_length(empty), missing IS NULL FROM cpg_copy_binary_fields",
+            &format!("SELECT octet_length(empty), missing IS NULL FROM {table}"),
             &[],
         )
         .await
@@ -2905,7 +2916,7 @@ async fn binary_copy_round_trips_empty_and_null_fields() {
     assert!(sql_row.get::<_, bool>(1));
 
     let stream = client
-        .copy_out("COPY cpg_copy_binary_fields TO STDOUT BINARY")
+        .copy_out(&format!("COPY {table} TO STDOUT BINARY"))
         .await
         .unwrap();
     let mut rows = Box::pin(BinaryCopyOutStream::new(
@@ -2925,7 +2936,7 @@ async fn binary_copy_round_trips_empty_and_null_fields() {
     drop(rows);
 
     client
-        .execute("DROP TABLE cpg_copy_binary_fields", &[])
+        .execute(&format!("DROP TABLE {table}"), &[])
         .await
         .unwrap();
 }
@@ -2955,24 +2966,29 @@ async fn binary_copy_out_of_many_variable_width_rows_arrives_one_tuple_per_frame
 
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
+    let table = common::test_object_name("cpg_copy_binary_widths");
     client
         .execute(
-            "CREATE TEMPORARY TABLE cpg_copy_binary_widths (n int4, v text)",
+            &format!("CREATE TEMPORARY TABLE {table} (n int4, v text)"),
             &[],
         )
         .await
         .unwrap();
     client
         .execute(
-            "INSERT INTO cpg_copy_binary_widths \
+            &format!(
+                "INSERT INTO {table} \
              SELECT g, repeat('x', g % 300) FROM generate_series(0, $1 - 1) AS g",
+            ),
             &[&ROWS],
         )
         .await
         .unwrap();
 
     let stream = client
-        .copy_out("COPY (SELECT n, v FROM cpg_copy_binary_widths ORDER BY n) TO STDOUT BINARY")
+        .copy_out(&format!(
+            "COPY (SELECT n, v FROM {table} ORDER BY n) TO STDOUT BINARY"
+        ))
         .await
         .unwrap();
     let mut rows = Box::pin(BinaryCopyOutStream::new(stream, &[Type::INT4, Type::TEXT]));
@@ -2998,7 +3014,7 @@ async fn binary_copy_out_of_many_variable_width_rows_arrives_one_tuple_per_frame
     drop(rows);
 
     client
-        .execute("DROP TABLE cpg_copy_binary_widths", &[])
+        .execute(&format!("DROP TABLE {table}"), &[])
         .await
         .unwrap();
 }
@@ -3012,15 +3028,16 @@ async fn copy_in_inside_transaction_is_rolled_back() {
 
     let url = require_pg().await;
     let mut client = connect(&url).await.unwrap();
+    let table = common::test_object_name("cpg_copy_transaction");
     client
-        .execute("CREATE TEMPORARY TABLE cpg_copy_transaction (n int)", &[])
+        .execute(&format!("CREATE TEMPORARY TABLE {table} (n int)"), &[])
         .await
         .unwrap();
 
     {
         let transaction = client.transaction().await.unwrap();
         let sink = transaction
-            .copy_in::<_, Bytes>("COPY cpg_copy_transaction (n) FROM STDIN")
+            .copy_in::<_, Bytes>(&format!("COPY {table} (n) FROM STDIN"))
             .await
             .unwrap();
         let mut sink = Box::pin(sink);
@@ -3032,7 +3049,7 @@ async fn copy_in_inside_transaction_is_rolled_back() {
         drop(sink);
 
         let row = transaction
-            .query_one("SELECT count(*)::int8 FROM cpg_copy_transaction", &[])
+            .query_one(&format!("SELECT count(*)::int8 FROM {table}"), &[])
             .await
             .unwrap();
         assert_eq!(row.get::<_, i64>(0), 3);
@@ -3040,12 +3057,12 @@ async fn copy_in_inside_transaction_is_rolled_back() {
     }
 
     let row = client
-        .query_one("SELECT count(*)::int8 FROM cpg_copy_transaction", &[])
+        .query_one(&format!("SELECT count(*)::int8 FROM {table}"), &[])
         .await
         .unwrap();
     assert_eq!(row.get::<_, i64>(0), 0);
     client
-        .execute("DROP TABLE cpg_copy_transaction", &[])
+        .execute(&format!("DROP TABLE {table}"), &[])
         .await
         .unwrap();
 }
@@ -3059,9 +3076,10 @@ async fn failed_copy_in_transaction_can_be_rolled_back() {
 
     let url = require_pg().await;
     let mut client = connect(&url).await.unwrap();
+    let table = common::test_object_name("cpg_copy_failed_transaction");
     client
         .execute(
-            "CREATE TEMPORARY TABLE cpg_copy_failed_transaction (n int PRIMARY KEY)",
+            &format!("CREATE TEMPORARY TABLE {table} (n int PRIMARY KEY)"),
             &[],
         )
         .await
@@ -3070,7 +3088,7 @@ async fn failed_copy_in_transaction_can_be_rolled_back() {
     {
         let transaction = client.transaction().await.unwrap();
         let sink = transaction
-            .copy_in::<_, Bytes>("COPY cpg_copy_failed_transaction (n) FROM STDIN")
+            .copy_in::<_, Bytes>(&format!("COPY {table} (n) FROM STDIN"))
             .await
             .unwrap();
         let mut sink = Box::pin(sink);
@@ -3089,15 +3107,12 @@ async fn failed_copy_in_transaction_can_be_rolled_back() {
     }
 
     let row = client
-        .query_one(
-            "SELECT count(*)::int8 FROM cpg_copy_failed_transaction",
-            &[],
-        )
+        .query_one(&format!("SELECT count(*)::int8 FROM {table}"), &[])
         .await
         .expect("ROLLBACK did not recover the connection after failed COPY");
     assert_eq!(row.get::<_, i64>(0), 0);
     client
-        .execute("DROP TABLE cpg_copy_failed_transaction", &[])
+        .execute(&format!("DROP TABLE {table}"), &[])
         .await
         .unwrap();
 }
@@ -5238,10 +5253,11 @@ async fn dropping_an_unfinished_transaction_and_the_client_closes_without_an_err
 #[compio::test]
 async fn dropping_the_client_with_a_server_transaction_open_rolls_back() {
     let url = require_pg().await;
+    let table = common::test_object_name("cpg_tx_client_drop");
 
     let observer = connect(&url).await.unwrap();
     observer
-        .batch_execute("CREATE TABLE cpg_tx_client_drop (n int)")
+        .batch_execute(&format!("CREATE TABLE {table} (n int)"))
         .await
         .unwrap();
 
@@ -5256,7 +5272,7 @@ async fn dropping_the_client_with_a_server_transaction_open_rolls_back() {
 
     let transaction = client.transaction().await.unwrap();
     transaction
-        .execute("INSERT INTO cpg_tx_client_drop VALUES (1)", &[])
+        .execute(&format!("INSERT INTO {table} VALUES (1)"), &[])
         .await
         .unwrap();
 
@@ -5267,7 +5283,7 @@ async fn dropping_the_client_with_a_server_transaction_open_rolls_back() {
     let task_outcome = compio::time::timeout(std::time::Duration::from_secs(5), task).await;
 
     let row_count: i64 = observer
-        .query_one_scalar("SELECT count(*) FROM cpg_tx_client_drop", &[])
+        .query_one_scalar(&format!("SELECT count(*) FROM {table}"), &[])
         .await
         .unwrap();
 
@@ -5276,7 +5292,7 @@ async fn dropping_the_client_with_a_server_transaction_open_rolls_back() {
         .await
         .unwrap();
     observer
-        .batch_execute("DROP TABLE cpg_tx_client_drop")
+        .batch_execute(&format!("DROP TABLE {table}"))
         .await
         .unwrap();
     let session_count: i64 = observer
@@ -5709,26 +5725,38 @@ async fn statement_cache_execution_threshold_applies_to_execute() {
     let client = connect_with_statement_cache_threshold(&url, 2, 2)
         .await
         .unwrap();
+    let table = common::test_object_name("cpg_cache_execute_seen");
     client
-        .batch_execute("CREATE TEMP TABLE cpg_cache_execute_seen (value int8)")
+        .batch_execute(&format!("CREATE TEMP TABLE {table} (value int8)"))
         .await
         .unwrap();
 
-    const SQL: &str = "INSERT INTO cpg_cache_execute_seen(value) \
+    let sql = format!(
+        "INSERT INTO {table}(value) \
         SELECT count(*)::int8 FROM pg_prepared_statements \
         WHERE statement = $1::text AND NOT from_sql \
-        /* cpg_cache_threshold_execute */";
+        /* cpg_cache_threshold_execute */"
+    );
 
-    assert_eq!(client.execute(SQL, &[&SQL]).await.unwrap(), 1);
-    assert!(prepared_statement_names(&client, SQL).await.is_empty());
-    assert_eq!(client.execute(SQL, &[&SQL]).await.unwrap(), 1);
-    assert_eq!(prepared_statement_names(&client, SQL).await.len(), 1);
+    assert_eq!(
+        client
+            .execute(sql.as_str(), &[&sql.as_str()])
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(prepared_statement_names(&client, &sql).await.is_empty());
+    assert_eq!(
+        client
+            .execute(sql.as_str(), &[&sql.as_str()])
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(prepared_statement_names(&client, &sql).await.len(), 1);
 
     let rows = client
-        .query(
-            "SELECT value FROM cpg_cache_execute_seen ORDER BY ctid",
-            &[],
-        )
+        .query(&format!("SELECT value FROM {table} ORDER BY ctid"), &[])
         .await
         .unwrap();
     let observed = rows
@@ -6097,34 +6125,34 @@ async fn statement_cache_bypass_is_one_shot() {
 async fn statement_cache_retries_stale_result_shape_once_after_0a000() {
     let url = test_url();
     let client = connect_with_statement_cache(&url, 2).await.unwrap();
+    let table = common::test_object_name("cpg_cache_plan_shape");
+    let sql = format!("SELECT * FROM {table}");
 
-    const SQL: &str = "SELECT * FROM cpg_cache_plan_shape";
     client
-        .batch_execute(
-            "DROP TABLE IF EXISTS cpg_cache_plan_shape; \
-             CREATE TEMP TABLE cpg_cache_plan_shape (id int4); \
-             INSERT INTO cpg_cache_plan_shape VALUES (58)",
-        )
+        .batch_execute(&format!(
+            "DROP TABLE IF EXISTS {table}; \
+             CREATE TEMP TABLE {table} (id int4); \
+             INSERT INTO {table} VALUES (58)"
+        ))
         .await
         .unwrap();
 
-    let first_rows = client.query(SQL, &[]).await.unwrap();
+    let first_rows = client.query(sql.as_str(), &[]).await.unwrap();
     assert_eq!(first_rows[0].get::<_, i32>("id"), 58);
     drop(first_rows);
 
     client
-        .batch_execute(
-            "ALTER TABLE cpg_cache_plan_shape \
-             ADD COLUMN label text NOT NULL DEFAULT 'fresh'",
-        )
+        .batch_execute(&format!(
+            "ALTER TABLE {table} ADD COLUMN label text NOT NULL DEFAULT 'fresh'"
+        ))
         .await
         .unwrap();
 
-    let refreshed_rows = client.query(SQL, &[]).await.unwrap();
+    let refreshed_rows = client.query(sql.as_str(), &[]).await.unwrap();
     assert_eq!(refreshed_rows[0].len(), 2);
     assert_eq!(refreshed_rows[0].get::<_, i32>("id"), 58);
     assert_eq!(refreshed_rows[0].get::<_, &str>("label"), "fresh");
-    assert_eq!(prepared_statement_names(&client, SQL).await.len(), 1);
+    assert_eq!(prepared_statement_names(&client, &sql).await.len(), 1);
 
     assert_eq!(
         simple_query_scalar_i32(&client, "SELECT 59::int4")
@@ -6133,7 +6161,7 @@ async fn statement_cache_retries_stale_result_shape_once_after_0a000() {
         59
     );
     client
-        .batch_execute("DROP TABLE cpg_cache_plan_shape")
+        .batch_execute(&format!("DROP TABLE {table}"))
         .await
         .unwrap();
 }
@@ -6146,8 +6174,9 @@ async fn statement_cache_retries_stale_result_shape_once_after_0a000() {
 async fn statement_cache_does_not_retry_0a000_after_parameter_input() {
     let url = test_url();
     let client = connect_with_statement_cache(&url, 3).await.unwrap();
+    let table = common::test_object_name("cpg_cache_domain_shape");
     client
-        .batch_execute(
+        .batch_execute(&format!(
             "CREATE TEMP SEQUENCE cpg_cache_domain_0a000_seq; \
              CREATE FUNCTION pg_temp.cpg_cache_domain_0a000_check(value text) \
              RETURNS boolean LANGUAGE plpgsql VOLATILE AS $function$ \
@@ -6158,30 +6187,34 @@ async fn statement_cache_does_not_retry_0a000_after_parameter_input() {
              $function$; \
              CREATE DOMAIN pg_temp.cpg_cache_domain_0a000 AS text \
              CHECK (pg_temp.cpg_cache_domain_0a000_check(VALUE)); \
-             CREATE TEMP TABLE cpg_cache_domain_shape (id int4); \
-             INSERT INTO cpg_cache_domain_shape VALUES (73)",
-        )
+             CREATE TEMP TABLE {table} (id int4); \
+             INSERT INTO {table} VALUES (73)"
+        ))
         .await
         .unwrap();
 
-    const SQL: &str = "SELECT cpg_cache_domain_shape.*, \
+    let sql = format!(
+        "SELECT {table}.*, \
         $1::pg_temp.cpg_cache_domain_0a000::text AS bound \
-        FROM cpg_cache_domain_shape";
-    let warm = client.query(SQL, &[&DomainText("warm")]).await.unwrap();
+        FROM {table}"
+    );
+    let warm = client
+        .query(sql.as_str(), &[&DomainText("warm")])
+        .await
+        .unwrap();
     assert_eq!(warm[0].len(), 2);
     drop(warm);
-    let stale_name = prepared_statement_name(&client, SQL).await;
+    let stale_name = prepared_statement_name(&client, &sql).await;
 
     client
-        .batch_execute(
-            "ALTER TABLE cpg_cache_domain_shape \
-             ADD COLUMN label text NOT NULL DEFAULT 'fresh'",
-        )
+        .batch_execute(&format!(
+            "ALTER TABLE {table} ADD COLUMN label text NOT NULL DEFAULT 'fresh'"
+        ))
         .await
         .unwrap();
 
     let error = client
-        .query(SQL, &[&DomainText("stale")])
+        .query(sql.as_str(), &[&DomainText("stale")])
         .await
         .expect_err("parameterized stale-plan input was replayed");
     assert_eq!(error.code(), Some(&SqlState::FEATURE_NOT_SUPPORTED));
@@ -6201,16 +6234,19 @@ async fn statement_cache_does_not_retry_0a000_after_parameter_input() {
         "the failed call ran its domain input more than once"
     );
     assert!(
-        prepared_statement_names(&client, SQL).await.is_empty(),
+        prepared_statement_names(&client, &sql).await.is_empty(),
         "the unsafe stale entry was not invalidated"
     );
 
-    let refreshed = client.query(SQL, &[&DomainText("fresh")]).await.unwrap();
+    let refreshed = client
+        .query(sql.as_str(), &[&DomainText("fresh")])
+        .await
+        .unwrap();
     assert_eq!(refreshed[0].len(), 3);
     assert_eq!(refreshed[0].get::<_, i32>("id"), 73);
     assert_eq!(refreshed[0].get::<_, &str>("label"), "fresh");
     assert_eq!(refreshed[0].get::<_, &str>("bound"), "fresh");
-    assert_ne!(prepared_statement_name(&client, SQL).await, stale_name);
+    assert_ne!(prepared_statement_name(&client, &sql).await, stale_name);
 
     let after_fresh: i64 = client
         .query_one_scalar(
@@ -6229,23 +6265,23 @@ async fn statement_cache_does_not_retry_0a000_after_parameter_input() {
 async fn statement_cache_does_not_retry_0a000_inside_a_transaction() {
     let url = test_url();
     let client = connect_with_statement_cache(&url, 2).await.unwrap();
+    let table = common::test_object_name("cpg_cache_plan_shape_in_tx");
+    let sql = format!("SELECT * FROM {table}");
 
-    const SQL: &str = "SELECT * FROM cpg_cache_plan_shape_in_tx";
     client
-        .batch_execute(
-            "DROP TABLE IF EXISTS cpg_cache_plan_shape_in_tx; \
-             CREATE TEMP TABLE cpg_cache_plan_shape_in_tx (id int4); \
-             INSERT INTO cpg_cache_plan_shape_in_tx VALUES (68)",
-        )
+        .batch_execute(&format!(
+            "DROP TABLE IF EXISTS {table}; \
+             CREATE TEMP TABLE {table} (id int4); \
+             INSERT INTO {table} VALUES (68)"
+        ))
         .await
         .unwrap();
-    drop(client.query(SQL, &[]).await.unwrap());
+    drop(client.query(sql.as_str(), &[]).await.unwrap());
 
     client
-        .batch_execute(
-            "ALTER TABLE cpg_cache_plan_shape_in_tx \
-             ADD COLUMN label text NOT NULL DEFAULT 'transaction'",
-        )
+        .batch_execute(&format!(
+            "ALTER TABLE {table} ADD COLUMN label text NOT NULL DEFAULT 'transaction'"
+        ))
         .await
         .unwrap();
 
@@ -6255,7 +6291,7 @@ async fn statement_cache_does_not_retry_0a000_inside_a_transaction() {
         Some(TransactionStatus::InTransaction)
     );
 
-    let stale_error = client.query(SQL, &[]).await.unwrap_err();
+    let stale_error = client.query(sql.as_str(), &[]).await.unwrap_err();
     assert_eq!(stale_error.code(), Some(&SqlState::FEATURE_NOT_SUPPORTED));
     assert_eq!(
         stale_error.as_db_error().map(|error| error.message()),
@@ -6268,7 +6304,7 @@ async fn statement_cache_does_not_retry_0a000_inside_a_transaction() {
     assert_eq!(client.transaction_status(), Some(TransactionStatus::Failed));
     client.batch_execute("ROLLBACK").await.unwrap();
 
-    let refreshed_rows = client.query(SQL, &[]).await.unwrap();
+    let refreshed_rows = client.query(sql.as_str(), &[]).await.unwrap();
     assert_eq!(refreshed_rows[0].len(), 2);
     assert_eq!(refreshed_rows[0].get::<_, i32>("id"), 68);
     assert_eq!(refreshed_rows[0].get::<_, &str>("label"), "transaction");
@@ -6518,30 +6554,30 @@ async fn statement_cache_retries_stale_result_shape_under_sustained_concurrency(
 async fn statement_cache_does_not_reprepare_an_explicit_statement() {
     let url = test_url();
     let client = connect_with_statement_cache(&url, 2).await.unwrap();
+    let table = common::test_object_name("cpg_explicit_plan_shape");
+    let sql = format!("SELECT * FROM {table}");
 
-    const SQL: &str = "SELECT * FROM cpg_explicit_plan_shape";
     client
-        .batch_execute(
-            "CREATE TEMP TABLE cpg_explicit_plan_shape (id int4); \
-             INSERT INTO cpg_explicit_plan_shape VALUES (70)",
-        )
+        .batch_execute(&format!(
+            "CREATE TEMP TABLE {table} (id int4); \
+             INSERT INTO {table} VALUES (70)"
+        ))
         .await
         .unwrap();
-    let statement = client.prepare(SQL).await.unwrap();
+    let statement = client.prepare(sql.as_str()).await.unwrap();
     drop(client.query(&statement, &[]).await.unwrap());
 
     client
-        .batch_execute(
-            "ALTER TABLE cpg_explicit_plan_shape \
-             ADD COLUMN label text NOT NULL DEFAULT 'caller-owned'",
-        )
+        .batch_execute(&format!(
+            "ALTER TABLE {table} ADD COLUMN label text NOT NULL DEFAULT 'caller-owned'"
+        ))
         .await
         .unwrap();
 
     let stale_error = client.query(&statement, &[]).await.unwrap_err();
     assert_eq!(stale_error.code(), Some(&SqlState::FEATURE_NOT_SUPPORTED));
 
-    let replacement = client.prepare(SQL).await.unwrap();
+    let replacement = client.prepare(sql.as_str()).await.unwrap();
     let refreshed_rows = client.query(&replacement, &[]).await.unwrap();
     assert_eq!(refreshed_rows[0].len(), 2);
     assert_eq!(refreshed_rows[0].get::<_, i32>("id"), 70);
@@ -6722,18 +6758,19 @@ async fn statement_cache_does_not_retry_26000_after_bind_complete() {
 async fn statement_cache_never_replays_a_committed_effect_after_bind_complete() {
     let url = test_url();
     let client = connect_with_statement_cache(&url, 2).await.unwrap();
+    let table = common::test_object_name("cpg_cache_retry_rows");
     let procedure = common::test_object_name("cpg_cache_retry_procedure");
     let missing = common::test_object_name("cpg_cache_retry_missing");
     let sql = format!("CALL pg_temp.{procedure}($1)");
 
     client
         .batch_execute(&format!(
-            "CREATE TEMP TABLE cpg_cache_retry_rows (attempt int4 NOT NULL); \
+            "CREATE TEMP TABLE {table} (attempt int4 NOT NULL); \
              CREATE PROCEDURE pg_temp.{procedure}(run bool) \
              LANGUAGE plpgsql AS $procedure$ \
              BEGIN \
                IF run THEN \
-                 INSERT INTO cpg_cache_retry_rows VALUES (1); \
+                 INSERT INTO {table} VALUES (1); \
                  COMMIT; \
                  EXECUTE 'EXECUTE {missing}'; \
                END IF; \
@@ -6753,7 +6790,7 @@ async fn statement_cache_never_replays_a_committed_effect_after_bind_complete() 
     );
 
     let committed: i64 = client
-        .query_one_scalar("SELECT count(*) FROM cpg_cache_retry_rows", &[])
+        .query_one_scalar(&format!("SELECT count(*) FROM {table}"), &[])
         .await
         .unwrap();
     assert_eq!(
@@ -6783,33 +6820,33 @@ async fn cancelled_cached_plan_error_is_not_handed_to_the_next_borrower() {
     let pool = Pool::connect_with_config(connection_config, pool_config)
         .await
         .unwrap();
+    let table = common::test_object_name("cpg_cancelled_cache_plan_shape");
+    let sql = format!("SELECT * FROM {table}");
 
-    const SQL: &str = "SELECT * FROM cpg_cancelled_cache_plan_shape";
     let backend_pid;
     {
         let client = pool.get().await.unwrap();
         backend_pid = client.process_id();
         client
-            .batch_execute(
-                "CREATE TEMP TABLE cpg_cancelled_cache_plan_shape (id int4); \
-                 INSERT INTO cpg_cancelled_cache_plan_shape VALUES (60)",
-            )
+            .batch_execute(&format!(
+                "CREATE TEMP TABLE {table} (id int4); \
+                 INSERT INTO {table} VALUES (60)"
+            ))
             .await
             .unwrap();
 
-        let first_rows = client.query(SQL, &[]).await.unwrap();
+        let first_rows = client.query(sql.as_str(), &[]).await.unwrap();
         assert_eq!(first_rows[0].get::<_, i32>("id"), 60);
         drop(first_rows);
 
         client
-            .batch_execute(
-                "ALTER TABLE cpg_cancelled_cache_plan_shape \
-                 ADD COLUMN label text NOT NULL DEFAULT 'borrower'",
-            )
+            .batch_execute(&format!(
+                "ALTER TABLE {table} ADD COLUMN label text NOT NULL DEFAULT 'borrower'"
+            ))
             .await
             .unwrap();
 
-        let mut stale = Box::pin(client.query_raw(SQL, std::iter::empty::<&i32>()));
+        let mut stale = Box::pin(client.query_raw(sql.as_str(), std::iter::empty::<&i32>()));
         let mut context = Context::from_waker(Waker::noop());
         assert!(
             stale.as_mut().poll(&mut context).is_pending(),
@@ -6825,7 +6862,7 @@ async fn cancelled_cached_plan_error_is_not_handed_to_the_next_borrower() {
         backend_pid,
         "the pool replaced the physical session instead of testing cache reuse"
     );
-    let refreshed_rows = client.query(SQL, &[]).await.unwrap();
+    let refreshed_rows = client.query(sql.as_str(), &[]).await.unwrap();
     assert_eq!(refreshed_rows[0].len(), 2);
     assert_eq!(refreshed_rows[0].get::<_, i32>("id"), 60);
     assert_eq!(refreshed_rows[0].get::<_, &str>("label"), "borrower");
@@ -6885,23 +6922,24 @@ async fn statement_cache_retries_a_statement_missing_after_discard_all() {
 async fn statement_cache_retries_execute_without_double_applying() {
     let url = test_url();
     let client = connect_with_statement_cache(&url, 2).await.unwrap();
+    let table = common::test_object_name("cpg_cache_execute_retry");
 
     client
-        .batch_execute("CREATE TEMP TABLE cpg_cache_execute_retry (n int4 NOT NULL)")
+        .batch_execute(&format!("CREATE TEMP TABLE {table} (n int4 NOT NULL)"))
         .await
         .unwrap();
     client
-        .execute("INSERT INTO cpg_cache_execute_retry VALUES (0)", &[])
+        .execute(&format!("INSERT INTO {table} VALUES (0)"), &[])
         .await
         .unwrap();
 
-    const SQL: &str = "UPDATE cpg_cache_execute_retry SET n = n + $1";
-    assert_eq!(client.execute(SQL, &[&1_i32]).await.unwrap(), 1);
+    let sql = format!("UPDATE {table} SET n = n + $1");
+    assert_eq!(client.execute(sql.as_str(), &[&1_i32]).await.unwrap(), 1);
     client.batch_execute("DEALLOCATE ALL").await.unwrap();
-    assert_eq!(client.execute(SQL, &[&2_i32]).await.unwrap(), 1);
+    assert_eq!(client.execute(sql.as_str(), &[&2_i32]).await.unwrap(), 1);
 
     let value: i32 = client
-        .query_one_scalar("SELECT n FROM cpg_cache_execute_retry", &[])
+        .query_one_scalar(&format!("SELECT n FROM {table}"), &[])
         .await
         .unwrap();
     assert_eq!(value, 3, "the failed cached execution applied no mutation");
@@ -6929,21 +6967,26 @@ async fn prepared_statement_server_errors_do_not_poison_the_connection() {
 
     let url = require_pg().await;
     let client = connect(&url).await.unwrap();
+    let result_shape_table = common::test_object_name("cpg_prep_result_shape");
+    let dropped_table = common::test_object_name("cpg_prep_dropped");
+    let typed_table = common::test_object_name("cpg_prep_typed");
 
     client
-        .batch_execute(
-            "DROP TABLE IF EXISTS cpg_prep_result_shape; \
-             CREATE TEMP TABLE cpg_prep_result_shape (id int4); \
-             INSERT INTO cpg_prep_result_shape VALUES (1)",
-        )
+        .batch_execute(&format!(
+            "DROP TABLE IF EXISTS {result_shape_table}; \
+             CREATE TEMP TABLE {result_shape_table} (id int4); \
+             INSERT INTO {result_shape_table} VALUES (1)"
+        ))
         .await
         .unwrap();
     let result_shape = client
-        .prepare("SELECT * FROM cpg_prep_result_shape")
+        .prepare(&format!("SELECT * FROM {result_shape_table}"))
         .await
         .unwrap();
     client
-        .batch_execute("ALTER TABLE cpg_prep_result_shape ADD COLUMN label text")
+        .batch_execute(&format!(
+            "ALTER TABLE {result_shape_table} ADD COLUMN label text"
+        ))
         .await
         .unwrap();
     let shape_error = client.query(&result_shape, &[]).await.unwrap_err();
@@ -6955,23 +6998,23 @@ async fn prepared_statement_server_errors_do_not_poison_the_connection() {
         .unwrap();
     drop(result_shape);
     client
-        .batch_execute("DROP TABLE cpg_prep_result_shape")
+        .batch_execute(&format!("DROP TABLE {result_shape_table}"))
         .await
         .unwrap();
 
     client
-        .batch_execute(
-            "DROP TABLE IF EXISTS cpg_prep_dropped; \
-             CREATE TEMP TABLE cpg_prep_dropped (id int4)",
-        )
+        .batch_execute(&format!(
+            "DROP TABLE IF EXISTS {dropped_table}; \
+             CREATE TEMP TABLE {dropped_table} (id int4)"
+        ))
         .await
         .unwrap();
     let dropped = client
-        .prepare("SELECT * FROM cpg_prep_dropped")
+        .prepare(&format!("SELECT * FROM {dropped_table}"))
         .await
         .unwrap();
     client
-        .batch_execute("DROP TABLE cpg_prep_dropped")
+        .batch_execute(&format!("DROP TABLE {dropped_table}"))
         .await
         .unwrap();
     let dropped_error = client.query(&dropped, &[]).await.unwrap_err();
@@ -6984,14 +7027,17 @@ async fn prepared_statement_server_errors_do_not_poison_the_connection() {
     drop(dropped);
 
     client
-        .batch_execute(
-            "DROP TABLE IF EXISTS cpg_prep_typed; \
-             CREATE TEMP TABLE cpg_prep_typed (n int4)",
-        )
+        .batch_execute(&format!(
+            "DROP TABLE IF EXISTS {typed_table}; \
+             CREATE TEMP TABLE {typed_table} (n int4)"
+        ))
         .await
         .unwrap();
     let typed_error = client
-        .prepare_typed("INSERT INTO cpg_prep_typed (n) VALUES ($1)", &[Type::TEXT])
+        .prepare_typed(
+            &format!("INSERT INTO {typed_table} (n) VALUES ($1)"),
+            &[Type::TEXT],
+        )
         .await
         .unwrap_err();
     let typed_code = typed_error.code().map(SqlState::code).map(str::to_string);
@@ -7001,7 +7047,7 @@ async fn prepared_statement_server_errors_do_not_poison_the_connection() {
         .await
         .unwrap();
     client
-        .batch_execute("DROP TABLE cpg_prep_typed")
+        .batch_execute(&format!("DROP TABLE {typed_table}"))
         .await
         .unwrap();
 
@@ -7343,18 +7389,19 @@ async fn an_abandoned_copy_in_returns_a_usable_entry_to_the_pool() {
     let pool = Pool::connect_with_pool_config(&url, pool_config)
         .await
         .unwrap();
+    let table = common::test_object_name("cpg_pooled_abandoned_copy");
 
     let borrowed_pid = {
         let client = pool.get().await.unwrap();
         let pid = client.process_id();
         client
-            .batch_execute("CREATE TABLE IF NOT EXISTS cpg_pooled_abandoned_copy (n int4)")
+            .batch_execute(&format!("CREATE TABLE IF NOT EXISTS {table} (n int4)"))
             .await
             .unwrap();
         {
             let mut sink = std::pin::pin!(
                 client
-                    .copy_in::<_, Bytes>("COPY cpg_pooled_abandoned_copy (n) FROM STDIN")
+                    .copy_in::<_, Bytes>(&format!("COPY {table} (n) FROM STDIN"))
                     .await
                     .expect("the COPY must start")
             );
@@ -7382,7 +7429,7 @@ async fn an_abandoned_copy_in_returns_a_usable_entry_to_the_pool() {
     assert_eq!(row.get::<_, i32>("n"), 1);
 
     client
-        .batch_execute("DROP TABLE IF EXISTS cpg_pooled_abandoned_copy")
+        .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
         .await
         .unwrap();
 }
