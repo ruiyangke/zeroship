@@ -100,6 +100,146 @@ impl core::hash::Hash for Finite {
     }
 }
 
+/// A finite `f32`, for the elements of a [`QueryVector`].
+///
+/// The same argument as [`Finite`] and the same hand-written impls, at the
+/// width the value actually has. An embedding is `f32` at every layer that
+/// carries it - `VectorIndex::vector_search` takes `&[f32]`
+/// (`crates/zeroship-plugin-db/src/backend/mod.rs:1023`) and `vec0` reads a
+/// buffer of `f32` (`backend/sqlite/vector.rs:127`) - so widening to `f64` here
+/// and narrowing again at the driver would make the plan's value and the bound
+/// value different numbers for no gain.
+#[derive(Debug, Clone, Copy)]
+pub struct Finite32(f32);
+
+impl Finite32 {
+    /// Wrap a float, refusing NaN and the infinities.
+    ///
+    /// # Errors
+    ///
+    /// [`LiteralError::NonFiniteFloat`] if `value` is NaN or infinite.
+    pub const fn new(value: f32) -> Result<Self, LiteralError> {
+        if value.is_finite() {
+            Ok(Self(value))
+        } else {
+            Err(LiteralError::NonFiniteFloat)
+        }
+    }
+
+    /// The wrapped value.
+    #[must_use]
+    pub const fn get(self) -> f32 {
+        self.0
+    }
+}
+
+// Hand-written for the reason given on `Finite`: `f32` has no `Eq`/`Ord`, and
+// a canonical plan needs a TOTAL one.
+impl PartialEq for Finite32 {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.total_cmp(&other.0) == core::cmp::Ordering::Equal
+    }
+}
+
+impl Eq for Finite32 {}
+
+impl PartialOrd for Finite32 {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Finite32 {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.0.total_cmp(&other.0)
+    }
+}
+
+impl core::hash::Hash for Finite32 {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.0.to_bits().hash(state);
+    }
+}
+
+/// The most dimensions a query vector may carry.
+///
+/// **Measured, not recalled.** `pgvector` 0.8.6 accepts `vector(16000)` and
+/// refuses `vector(16001)` - probed 2026-08-28 against the container this
+/// family's live tests run on (`server_version_num = 170011`). A vector wider
+/// than the column type can hold is an error the server raises after the whole
+/// buffer has crossed the wire, so the bound belongs at construction.
+///
+/// It is deliberately **not** the tighter index limit (`2000` for `hnsw` and
+/// `ivfflat`): an unindexed `vector` column is legal and searchable by exact
+/// scan, and refusing it here would refuse a query `PostgreSQL` serves.
+pub const MAX_VECTOR_DIMS: usize = 16_000;
+
+/// A query vector: non-empty, finite in every element, and bounded in width.
+///
+/// # Why this is a [`Literal`] variant and not an encoding
+///
+/// The shipped builders carry a vector to the database by **two unrelated
+/// mechanisms for one concept**, which is the exact defect
+/// [`crate::render::ValueFormat`] was introduced to close for `bytes`:
+/// `build_vector_search` formats the elements into a text literal `[1,2,3]` and
+/// binds that string, casting it `::vector` in the SQL
+/// (`crates/zeroship-schema/src/query.rs:4980-5013`), while the `SQLite` arm
+/// encodes the same values as a raw little-endian `f32` buffer and binds a BLOB
+/// (`crates/zeroship-plugin-db/src/backend/sqlite/vector.rs:127`).
+///
+/// Neither encoding is the *value*; both are a dialect's spelling of it. So the
+/// plan carries the numbers, [`crate::render::ValueFormat::vector_placeholder`]
+/// carries the SQL-side spelling, and how a driver puts `f32`s on the wire is
+/// the driver's business. A new dialect that gets this wrong now fails to
+/// compile rather than silently inheriting `PostgreSQL`'s text form.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct QueryVector(Vec<Finite32>);
+
+impl QueryVector {
+    /// Wrap a query vector.
+    ///
+    /// # Errors
+    ///
+    /// [`LiteralError::EmptyQueryVector`] for a zero-dimension vector - the
+    /// `vector` type has no such value and the distance would be undefined
+    /// rather than zero. [`LiteralError::NonFiniteFloat`] if any element is NaN
+    /// or infinite: `pgvector` refuses both outright, and a NaN distance sorts
+    /// arbitrarily under `ORDER BY`, which is a ranking that silently means
+    /// nothing. [`LiteralError::QueryVectorTooWide`] past
+    /// [`MAX_VECTOR_DIMS`].
+    pub fn new(values: &[f32]) -> Result<Self, LiteralError> {
+        if values.is_empty() {
+            return Err(LiteralError::EmptyQueryVector);
+        }
+        if values.len() > MAX_VECTOR_DIMS {
+            return Err(LiteralError::QueryVectorTooWide { dims: values.len() });
+        }
+        let mut out = Vec::with_capacity(values.len());
+        for value in values {
+            out.push(Finite32::new(*value)?);
+        }
+        Ok(Self(out))
+    }
+
+    /// The elements, in the order given.
+    ///
+    /// **Not sorted, and never will be.** Every other list in this crate is
+    /// canonicalised by sorting; a vector's element order *is* its meaning, so
+    /// sorting one would silently change which rows a search returns. It is
+    /// called out here because the surrounding convention makes the omission
+    /// look like one.
+    #[must_use]
+    pub fn elements(&self) -> &[Finite32] {
+        &self.0
+    }
+
+    /// How many dimensions. Never zero.
+    #[must_use]
+    pub const fn dims(&self) -> usize {
+        self.0.len()
+    }
+}
+
 /// A bind parameter value.
 ///
 /// The variant set is deliberately small. It covers what the runtime query
@@ -113,6 +253,8 @@ pub enum Literal {
     Float(Finite),
     Text(String),
     Bytes(Vec<u8>),
+    /// An embedding, bound whole. See [`QueryVector`].
+    Vector(QueryVector),
 }
 
 impl Literal {
@@ -163,6 +305,7 @@ impl Literal {
             Self::Float(_) => "float",
             Self::Text(_) => "text",
             Self::Bytes(_) => "bytes",
+            Self::Vector(_) => "vector",
         }
     }
 }
@@ -261,6 +404,10 @@ pub enum LiteralError {
     },
     /// A membership set exceeded [`MAX_MEMBERSHIP_LIST_LEN`].
     MembershipListTooLong { len: usize },
+    /// A query vector with no dimensions.
+    EmptyQueryVector,
+    /// A query vector wider than [`MAX_VECTOR_DIMS`].
+    QueryVectorTooWide { dims: usize },
 }
 
 impl fmt::Display for LiteralError {
@@ -285,6 +432,16 @@ impl fmt::Display for LiteralError {
                 f,
                 "a membership set of {len} values exceeds the maximum of \
                  {MAX_MEMBERSHIP_LIST_LEN}"
+            ),
+            Self::EmptyQueryVector => f.write_str(
+                "a query vector must have at least one dimension; the distance to a \
+                 zero-dimension vector is undefined, not zero",
+            ),
+            Self::QueryVectorTooWide { dims } => write!(
+                f,
+                "a query vector of {dims} dimensions exceeds the maximum of \
+                 {MAX_VECTOR_DIMS}, which is the widest `vector` column pgvector will \
+                 create"
             ),
         }
     }

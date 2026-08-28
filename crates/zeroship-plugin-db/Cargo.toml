@@ -90,6 +90,12 @@ tempfile = { workspace = true }
 
 [dev-dependencies]
 zeroship-test-support = { workspace = true }
+# The DbPlan IR. A DEV dependency on purpose: nothing in this crate's `src/`
+# uses it yet, and declaring it a normal dependency would say otherwise. The
+# search family's lowering is exercised by `tests/search_ir_live.rs`, which
+# executes the SQL it renders against a real server - the half its own crate
+# cannot reach, having no dependencies at all.
+zeroship-data-plan = { workspace = true }
 compio = { workspace = true }
 serde_json = { workspace = true }
 # Test-only constructors (`row_for_test` / `column_for_test`) for the
@@ -223,6 +229,19 @@ required-features = ["live-db-tests"]
 [[test]]
 name = "missing_role"
 path = "tests/missing_role.rs"
+required-features = ["test-helpers"]
+
+# The DbPlan search family, executed. `zeroship-data-plan` renders SQL with no
+# database in reach, so its own tests can only compare strings; this target runs
+# the same statements against real PostgreSQL with pgvector and PostGIS, and
+# holds the one arm that needs both backends in one process - the metric
+# Postgres serves and SQLite refuses.
+#
+# Guarded like its siblings so bare `cargo test -p zeroship-plugin-db` does not
+# auto-discover a target that panics without a database.
+[[test]]
+name = "search_ir_live"
+path = "tests/search_ir_live.rs"
 required-features = ["test-helpers"]
 
 [lints]
