@@ -24,13 +24,41 @@
 //!    in the app's own schema.
 //! 5. Return the plaintext.
 //!
-//! ## Audit-table location
+//! ## Audit-table location, and who creates it
 //!
 //! `__zeroship_audit_unmask` lives in the **per-app schema** (alongside
-//! `__zeroship_migrations`). App-scoped audit data should not require
-//! platform-role access to query — operators query via the per-app
-//! schema. A platform-wide `__zeroship_admin` schema was proposed for
-//! it and refused; it is now deleted outright (see `crate::auth`).
+//! `__zeroship_schema_migrations`). App-scoped audit data should not
+//! require platform-role access to query — operators query via the
+//! per-app schema. A platform-wide `__zeroship_admin` schema was
+//! proposed for it and refused; it is now deleted outright (see
+//! `crate::auth`).
+//!
+//! **This module does not create it.** It did until 2026-08-28, from
+//! `write_audit_unmask_row`, which meant eight DDL statements — one
+//! `CREATE TABLE IF NOT EXISTS` and three `CREATE INDEX IF NOT EXISTS`
+//! per dialect arm — on every `unmask()` dispatch, granted and denied
+//! alike, on the privileged read path, issued by the process that runs
+//! creator code. Schema change belongs to `zeroship-migrate`; the data
+//! plane emits no DDL, and this was the last live site.
+//!
+//! The table now has the same lifecycle as the app's schema itself,
+//! established by whichever migration apply host owns that dialect:
+//!
+//! | Dialect | Creator |
+//! |---|---|
+//! | Postgres | `zeroship_migrate_server::provisioning::provision_audit_unmask_table`, from the apply path |
+//! | SQLite | `zeroship_migrate_sqlite::backend::audit_unmask_sql`, from the dev-tier `applyIrSqlite` host |
+//!
+//! Both are idempotent and run on every apply, so a redeploy is what
+//! gives an app provisioned before the table existed its copy. Neither
+//! runs in the worker.
+//!
+//! The two definitions are deliberately NOT shared. They cannot be: the
+//! shapes differ by dialect (`BIGSERIAL` vs `INTEGER PRIMARY KEY`,
+//! `TIMESTAMPTZ DEFAULT NOW()` vs `TEXT DEFAULT CURRENT_TIMESTAMP`), which
+//! is the same split the engine's own journal tables already take —
+//! `zeroship-migrate-postgres` and `zeroship-migrate-sqlite` each hold
+//! their own `journal_sql.rs`.
 //!
 //! ## Default-deny authorization fallback
 //!
@@ -719,18 +747,37 @@ fn nibble(c: u8) -> Result<u8, DbError> {
 /// placement keeps audit data accessible to operators querying the
 /// app's schema directly, without needing platform-role access.
 ///
-/// Idempotency on schema: each call lazily ensures the table exists
-/// (`CREATE TABLE IF NOT EXISTS`). The check is one cheap round-trip
-/// per call against the planner — the actual DDL runs only on first
-/// use per app.
+/// # This function does not create the table, and that is the point
+///
+/// It used to. Every call ran `ensure_audit_unmask_table` first, which
+/// issued `CREATE TABLE IF NOT EXISTS` plus three `CREATE INDEX IF NOT
+/// EXISTS` on both dialects — eight DDL statements per `unmask()`
+/// dispatch, granted and denied alike, on the privileged read path, from
+/// the process that executes creator code. That was the last live DDL
+/// the data plane emitted; schema change belongs to `zeroship-migrate`.
+///
+/// The creators are now the two migration apply hosts, which run before
+/// the worker serves and do not execute creator code:
+///
+/// * Postgres — `zeroship_migrate_server::provisioning::provision_audit_unmask_table`,
+///   called from the apply path BEFORE the runtime role's snapshot grants,
+///   so the role reaches both the table and its `BIGSERIAL` sequence.
+/// * SQLite — `zeroship_migrate_sqlite::backend::audit_unmask_sql`, called
+///   by the dev-tier `applyIrSqlite` host after the envelopes deploy.
+///
+/// If an authority somehow has not run, this INSERT fails normally
+/// ("relation does not exist" / "no such table") and the unmask refuses
+/// with it. That is deliberate and it is the SAFE direction: an unmask
+/// whose audit row cannot be written must not return plaintext, and the
+/// granted-path caller sequences this before it hands the value back.
+/// There is no create-on-demand fallback, because a fallback is a second
+/// schema authority.
 async fn write_audit_unmask_row(
     app_id: &str,
     args: &UnmaskFieldArgs,
     classification: &str,
     outcome: &str,
 ) -> Result<(), DbError> {
-    ensure_audit_unmask_table(app_id).await?;
-
     let (actor_id, actor_role) = args
         .actor
         .as_ref()
@@ -822,125 +869,6 @@ async fn write_audit_unmask_row(
     Err(DbError::Configuration {
         code: "backend_unsupported",
         message: "db: no backend arm available for unmask audit".to_string(),
-        hint: None,
-    })
-}
-
-/// `CREATE TABLE IF NOT EXISTS <app>.__zeroship_audit_unmask` on the
-/// active backend arm. Idempotent — re-running on every unmask
-/// dispatch is cheap (the table-exists fast path in both PG and SQLite
-/// is a catalog probe).
-///
-/// **Per-app placement** (design Q-MASK-J): the audit table lives in
-/// the app's schema (PG) / per-app database (SQLite) alongside
-/// `__zeroship_migrations`. App-scoped audit data should not require
-/// platform-role access to query.
-async fn ensure_audit_unmask_table(app_id: &str) -> Result<(), DbError> {
-    let backend = crate::context::with(|c| c.backend())
-        .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
-
-    // ---- PG arm ----
-    if let Some(pg) = backend.as_postgres() {
-        use crate::backend::PgSqlExecutor as _;
-        let pool = pg.pool_handle();
-        // BIGSERIAL PRIMARY KEY mirrors the platform's other audit
-        // tables; `outcome` is a CHECK-constrained text column so
-        // a malformed insert refuses at the engine.
-        let sql = format!(
-            r#"CREATE TABLE IF NOT EXISTS "{app_id}"."__zeroship_audit_unmask" (
-                id              BIGSERIAL PRIMARY KEY,
-                ts              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                actor_id        TEXT NULL,
-                actor_role      TEXT NULL,
-                collection      TEXT NOT NULL,
-                row_pk          TEXT NOT NULL,
-                "column"        TEXT NOT NULL,
-                classification  TEXT NOT NULL,
-                reason          TEXT NULL,
-                request_id      TEXT NULL,
-                outcome         TEXT NOT NULL CHECK (outcome IN ('granted', 'denied'))
-            )"#
-        );
-        let empty: Vec<&str> = Vec::new();
-        pool.query_text_params(&sql, &empty)
-            .await
-            .map_err(|e| crate::error::DbError::from_pg(&e))?;
-        // Indexes — `IF NOT EXISTS` keeps the per-call cost flat.
-        let idx1 = format!(
-            r#"CREATE INDEX IF NOT EXISTS "__zeroship_audit_unmask_ts_idx"
-               ON "{app_id}"."__zeroship_audit_unmask" (ts)"#
-        );
-        let idx2 = format!(
-            r#"CREATE INDEX IF NOT EXISTS "__zeroship_audit_unmask_actor_idx"
-               ON "{app_id}"."__zeroship_audit_unmask" (actor_id, ts)"#
-        );
-        let idx3 = format!(
-            r#"CREATE INDEX IF NOT EXISTS "__zeroship_audit_unmask_row_idx"
-               ON "{app_id}"."__zeroship_audit_unmask" (row_pk, "column", ts)"#
-        );
-        pool.query_text_params(&idx1, &empty)
-            .await
-            .map_err(|e| crate::error::DbError::from_pg(&e))?;
-        pool.query_text_params(&idx2, &empty)
-            .await
-            .map_err(|e| crate::error::DbError::from_pg(&e))?;
-        pool.query_text_params(&idx3, &empty)
-            .await
-            .map_err(|e| crate::error::DbError::from_pg(&e))?;
-        return Ok(());
-    }
-
-    // ---- SQLite arm ----
-    if let Some(sq) = backend.as_sqlite() {
-        use crate::backend::{DialectBuilder as _, SqlExecutor as _};
-        let q_app = sq.quote_ident(app_id);
-        // SQLite analogues:
-        //   - BIGSERIAL → INTEGER PRIMARY KEY (alias for ROWID)
-        //   - TIMESTAMPTZ → TEXT (ISO 8601 via CURRENT_TIMESTAMP)
-        let sql = format!(
-            r#"CREATE TABLE IF NOT EXISTS {q_app}."__zeroship_audit_unmask" (
-                id              INTEGER PRIMARY KEY,
-                ts              TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                actor_id        TEXT,
-                actor_role      TEXT,
-                collection      TEXT NOT NULL,
-                row_pk          TEXT NOT NULL,
-                "column"        TEXT NOT NULL,
-                classification  TEXT NOT NULL,
-                reason          TEXT,
-                request_id      TEXT,
-                outcome         TEXT NOT NULL CHECK (outcome IN ('granted', 'denied'))
-            )"#
-        );
-        sq.pool_exec(&sql, &[]).await?;
-        // SQLite's `CREATE INDEX` syntax puts the schema BEFORE the
-        // index name, NOT before the table — `CREATE INDEX
-        // <schema>.<idx> ON <table>` is the dotted shape SQLite
-        // accepts. The `<schema>.<table>` shape PG uses is rejected
-        // at parse time on this arm. We also scope the index name
-        // to the per-app schema so two attached apps don't collide
-        // on `__zeroship_audit_unmask_ts_idx`.
-        let idx1 = format!(
-            r#"CREATE INDEX IF NOT EXISTS {q_app}."__zeroship_audit_unmask_ts_idx"
-               ON "__zeroship_audit_unmask" (ts)"#
-        );
-        let idx2 = format!(
-            r#"CREATE INDEX IF NOT EXISTS {q_app}."__zeroship_audit_unmask_actor_idx"
-               ON "__zeroship_audit_unmask" (actor_id, ts)"#
-        );
-        let idx3 = format!(
-            r#"CREATE INDEX IF NOT EXISTS {q_app}."__zeroship_audit_unmask_row_idx"
-               ON "__zeroship_audit_unmask" (row_pk, "column", ts)"#
-        );
-        sq.pool_exec(&idx1, &[]).await?;
-        sq.pool_exec(&idx2, &[]).await?;
-        sq.pool_exec(&idx3, &[]).await?;
-        return Ok(());
-    }
-
-    Err(DbError::Configuration {
-        code: "backend_unsupported",
-        message: "db: no backend arm available to provision __zeroship_audit_unmask".to_string(),
         hint: None,
     })
 }

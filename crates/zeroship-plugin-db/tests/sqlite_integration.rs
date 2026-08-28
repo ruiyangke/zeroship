@@ -6256,6 +6256,29 @@ async fn unmask_setup_with_schema(
         .attach_app_file(app_id)
         .await
         .expect("ensure_app_schema");
+    // The audit table, APPLY-AHEAD. `crud/unmask.rs` used to create it itself
+    // on every dispatch; it no longer emits DDL at all, so something has to
+    // stand in here for the dev-tier apply host
+    // (`zeroship-migrate-node`'s `applyIrSqlite`), exactly as the
+    // `apply_schema_ahead_of_runtime` fixtures stand in for it for creator
+    // tables.
+    //
+    // These are the PRODUCTION bytes, from the production generator, not a copy
+    // of them: `audit_unmask_ddl` is the same function the host calls. The
+    // qualifier differs because the CONNECTION differs - the host opened the
+    // app file as `main`, the worker's backend reaches it through the
+    // `<app_id>` ATTACH alias - and that parameter is the only thing that
+    // varies between the two callers.
+    //
+    // WHAT THIS FIXTURE CANNOT PROVE: that the host actually calls it. It pins
+    // the shape and the writer against each other, nothing more. The call in
+    // `bridge.rs::apply_ir_sqlite` is covered by no test in this file.
+    for stmt in zeroship_migrate_sqlite::backend::audit_unmask_ddl(app_id) {
+        backend
+            .pool_exec(&stmt, &[])
+            .await
+            .expect("apply-ahead: unmask audit table");
+    }
     // Install into the per-isolate context so dispatch_unmask's
     // backend() lookup succeeds.
     zeroship_plugin_db::set_sqlite_backend_for_tests(backend.clone());

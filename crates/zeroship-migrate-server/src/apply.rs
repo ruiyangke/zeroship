@@ -40,7 +40,9 @@ use crate::publication::{reconcile_app_publication, PublicationError};
 use crate::schema_apply_store::{
     SchemaApplyInput, SchemaApplyStore, SchemaApplyStoreError, TerminalTransition,
 };
-use crate::provisioning::{exec_retry, provision_migrator, ProvisionRoleError};
+use crate::provisioning::{
+    exec_retry, provision_audit_unmask_table, provision_migrator, ProvisionRoleError,
+};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ApplyMigrationsRequest {
@@ -205,6 +207,8 @@ pub enum ApplyRequestError {
     ProvisionRole(#[from] ProvisionRoleError),
     #[error("runtime app role provision: {0}")]
     ProvisionRuntimeRole(compio_postgres::Error),
+    #[error("unmask audit table provision: {0}")]
+    ProvisionAuditUnmask(compio_postgres::Error),
     #[error("app publication provision: {0}")]
     ProvisionPublication(#[from] PublicationError),
     #[error("migration preflight: {0}")]
@@ -293,6 +297,19 @@ pub async fn apply_ir_documents(
     // creator-declared collections are refused from.
     exec_cfg.confinement.meta_schema = schema.clone();
     provision_migrator(session.client(), &exec_cfg).await?;
+    // The per-app unmask audit table, which the worker WRITES and creates no
+    // longer. Until this change `crud/unmask.rs` emitted its `CREATE TABLE` and
+    // three `CREATE INDEX` on every `unmask()` call; that was the last live DDL
+    // in the data plane.
+    //
+    // BEFORE `provision_runtime_app_role` below, and that is not cosmetic. The
+    // runtime role's `INSERT` and its `USAGE` on the `BIGSERIAL` sequence both
+    // come from `GRANT ... ON ALL TABLES/SEQUENCES IN SCHEMA`, which grants over
+    // what exists when it runs. Created after them, the table and its sequence
+    // would both be unreachable to the only process that writes to it.
+    provision_audit_unmask_table(session.client(), &schema)
+        .await
+        .map_err(ApplyRequestError::ProvisionAuditUnmask)?;
     let backend = PostgresBackend::new_generic(&session);
 
     // PREFLIGHT runs before any row is written and before any DDL: it lowers every
@@ -1006,6 +1023,7 @@ pub fn apply_error_kind(err: &ApplyRequestError) -> (ntex::http::StatusCode, &'s
         | ApplyRequestError::ProvisionSchema(_)
         | ApplyRequestError::ProvisionRole(_)
         | ApplyRequestError::ProvisionRuntimeRole(_)
+        | ApplyRequestError::ProvisionAuditUnmask(_)
         | ApplyRequestError::ProvisionPublication(_) => (
             ntex::http::StatusCode::SERVICE_UNAVAILABLE,
             "migration_infrastructure",

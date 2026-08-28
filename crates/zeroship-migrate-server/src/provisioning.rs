@@ -269,3 +269,140 @@ pub async fn provision_workflow_journal_schema(
     )
     .await
 }
+
+/// The unqualified name of the per-app unmask audit table.
+///
+/// Shared with the data plane's INSERT (`zeroship-plugin-db`'s
+/// `crud/unmask.rs`), which is the only writer. The SQLite peer of this constant
+/// is `zeroship_migrate_sqlite::backend::AUDIT_UNMASK_TABLE`.
+pub const AUDIT_UNMASK_TABLE: &str = "__zeroship_audit_unmask";
+
+/// The DDL that gives an app its unmask audit table, in the app's OWN schema.
+///
+/// # Why this is here and not in the worker
+///
+/// It used to be in the worker. `crud/unmask.rs` called
+/// `ensure_audit_unmask_table` from `write_audit_unmask_row`, so every single
+/// `unmask()` dispatch - granted AND denied - issued this `CREATE TABLE IF NOT
+/// EXISTS` plus three `CREATE INDEX IF NOT EXISTS` before it could log anything.
+/// Eight DDL statements on the privileged read path, emitted by the process that
+/// executes creator code. Schema change belongs to `zeroship-migrate`; the data
+/// plane emits none.
+///
+/// Deleting the DDL without moving it was not an option: the audit row is where
+/// authorization and provenance for a plaintext read live, so dropping the
+/// writer's dependency while keeping the writer would have kept the call and
+/// lost the record. This function is the Postgres creator; the SQLite creator is
+/// `zeroship_migrate_sqlite::backend::audit_unmask_sql`.
+///
+/// # Placement
+///
+/// The APP'S OWN SCHEMA, beside `__zeroship_schema_migrations` and its siblings,
+/// not `__zeroship_admin`. That is not a weakening: the platform's system schema
+/// is for state a separate service WRITES and the worker only READS, and this
+/// table is the other way round. The worker is the sole writer, over ordinary
+/// parameterised SQL, with provenance enforced at the Rust call boundary rather
+/// than at the SQL boundary - the position `zeroship-plugin-db`'s `audit.rs`
+/// already argues for the sibling audit log, and the reason neither needs a
+/// `SECURITY DEFINER` wrapper. App-scoped audit data also stays queryable by an
+/// operator holding only the app's schema.
+///
+/// # Ordering against the runtime role
+///
+/// This must run BEFORE `apply::provision_runtime_app_role`. That function
+/// grants the runtime role `INSERT` via `GRANT ... ON ALL TABLES IN SCHEMA` and
+/// sequence access via `GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA`, both of
+/// which are SNAPSHOT grants over what exists at the moment they run. A table
+/// created after them is not covered, and because the primary key is
+/// `BIGSERIAL` the miss would be TWO objects, not one - the worker would fail on
+/// the implicit sequence even if the table grant were somehow repaired.
+///
+/// # Idempotence
+///
+/// `IF NOT EXISTS` throughout, so it is safe on every apply, which is how a
+/// redeploy of an app provisioned before this table existed acquires it.
+#[must_use]
+pub fn audit_unmask_table_sql(app_schema: &str) -> String {
+    let schema_q = quote_ident(app_schema);
+    let table_q = quote_ident(AUDIT_UNMASK_TABLE);
+    format!(
+        r#"CREATE TABLE IF NOT EXISTS {schema_q}.{table_q} (
+            id              BIGSERIAL PRIMARY KEY,
+            ts              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            actor_id        TEXT NULL,
+            actor_role      TEXT NULL,
+            collection      TEXT NOT NULL,
+            row_pk          TEXT NOT NULL,
+            "column"        TEXT NOT NULL,
+            classification  TEXT NOT NULL,
+            reason          TEXT NULL,
+            request_id      TEXT NULL,
+            outcome         TEXT NOT NULL CHECK (outcome IN ('granted', 'denied'))
+        );
+        CREATE INDEX IF NOT EXISTS "{AUDIT_UNMASK_TABLE}_ts_idx"
+            ON {schema_q}.{table_q} (ts);
+        CREATE INDEX IF NOT EXISTS "{AUDIT_UNMASK_TABLE}_actor_idx"
+            ON {schema_q}.{table_q} (actor_id, ts);
+        CREATE INDEX IF NOT EXISTS "{AUDIT_UNMASK_TABLE}_row_idx"
+            ON {schema_q}.{table_q} (row_pk, "column", ts);"#
+    )
+}
+
+/// Idempotently establish an app's unmask audit table, as an admin principal.
+///
+/// Runs [`audit_unmask_table_sql`], the one generator for this DDL. Exported for
+/// the same reason [`provision_workflow_journal_schema`] is: a caller that needs
+/// a deployed app's audit table to exist must get it from the production
+/// statement rather than a `CREATE TABLE` of its own, or the test proves the
+/// shape of its own fixture instead of the shape production builds.
+///
+/// # Errors
+/// Any database error from the DDL, including a permission failure when the
+/// connection is not the admin principal this expects.
+pub async fn provision_audit_unmask_table(
+    admin: &Client,
+    app_schema: &str,
+) -> Result<(), compio_postgres::Error> {
+    exec_retry(admin, &audit_unmask_table_sql(app_schema)).await
+}
+
+#[cfg(test)]
+mod audit_unmask_tests {
+    use super::*;
+
+    /// The identifier goes through `quote_ident`, which doubles embedded quotes.
+    /// The app schema is a UUID in production, but this generator is exported and
+    /// a caller passing anything else must not be able to break out of the
+    /// identifier.
+    #[test]
+    fn app_schema_is_quoted_not_interpolated_raw() {
+        let sql = audit_unmask_table_sql("a\"; DROP SCHEMA public; --");
+        assert!(
+            sql.contains(r#""a""; DROP SCHEMA public; --""#),
+            "the schema must survive as ONE doubled-quote identifier; got: {sql}"
+        );
+        assert!(
+            !sql.contains("\n        DROP SCHEMA"),
+            "no statement boundary may be reachable from the schema name: {sql}"
+        );
+    }
+
+    /// Re-run on every apply, so every statement has to be re-runnable.
+    #[test]
+    fn every_statement_is_idempotent() {
+        let sql = audit_unmask_table_sql("app");
+        assert_eq!(
+            sql.matches("IF NOT EXISTS").count(),
+            4,
+            "one table + three indexes, all IF NOT EXISTS: {sql}"
+        );
+    }
+
+    /// The data plane INSERTs into the name this constant carries; if the DDL
+    /// stopped naming it, every unmask would fail at runtime rather than here.
+    #[test]
+    fn ddl_creates_the_table_the_constant_names() {
+        let sql = audit_unmask_table_sql("app");
+        assert!(sql.contains(&format!(r#""app"."{AUDIT_UNMASK_TABLE}""#)), "{sql}");
+    }
+}

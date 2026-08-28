@@ -133,6 +133,15 @@ hmac = { workspace = true }
 # whoever the test connected as: a privilege shape production never has.
 # DEV-only, and `zeroship-migrate-server` does not depend on plugin-db, so no cycle.
 zeroship-migrate-server = { workspace = true }
+# The SAME argument, one dialect over. `crud/unmask.rs` stopped creating
+# `__zeroship_audit_unmask` on 2026-08-28 - that was the last live DDL in the
+# data plane - and the two migration apply hosts create it instead. The SQLite
+# integration fixtures stand in for the dev-tier host, so they run
+# `backend::audit_unmask_ddl`, the PRODUCTION generator, rather than a hardcoded
+# copy: a fixture holding its own copy of the shape would keep reporting green
+# while production drifted away from it. DEV-only; `zeroship-migrate-sqlite`
+# does not depend on plugin-db, so no cycle.
+zeroship-migrate-sqlite = { workspace = true }
 
 [[bench]]
 name = "bench_query_build"

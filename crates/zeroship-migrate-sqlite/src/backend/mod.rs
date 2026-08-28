@@ -47,6 +47,7 @@
 //! nothing else covers it.
 
 pub mod actor;
+pub mod audit_unmask_sql;
 pub mod authorizer;
 mod backfill_sql;
 mod drift_sql;
@@ -77,6 +78,7 @@ use zeroship_migrate_ir::dialect::DialectId;
 use zeroship_migrate_ir::migration::Migration;
 
 pub use actor::{MigrationActor, SqliteActorError};
+pub use audit_unmask_sql::{audit_unmask_ddl, AUDIT_UNMASK_TABLE};
 pub use authorizer::Mode;
 pub use journal_sql::LoadedVersion;
 pub use rebuild_sql::RebuildError;
@@ -164,6 +166,20 @@ impl SqliteBackend {
     /// Bootstrap the `_mig` journal (idempotent) under engine mode.
     pub async fn ensure_journal_sqlite(&self) -> Result<(), SqliteActorError> {
         journal_sql::ensure_journal(&self.actor).await
+    }
+
+    /// Establish the per-app unmask audit table in `main` (idempotent).
+    ///
+    /// The peer of [`Self::ensure_journal_sqlite`] for the ONE platform table the
+    /// worker writes rather than reads. See
+    /// [`audit_unmask_sql`](crate::backend::audit_unmask_sql) for why it lives in
+    /// the app file rather than the journal, and why the data plane no longer
+    /// creates it itself.
+    ///
+    /// # Errors
+    /// [`SqliteActorError`] on a failed mode flip or DDL statement.
+    pub async fn ensure_audit_unmask_table_sqlite(&self) -> Result<(), SqliteActorError> {
+        audit_unmask_sql::ensure_audit_unmask_table(&self.actor).await
     }
 
     /// Apply ONE additive migration atomically with confinement. This is
