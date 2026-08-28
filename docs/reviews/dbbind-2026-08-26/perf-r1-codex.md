@@ -157,7 +157,7 @@ parent (`relkind = 'p'`).
 
 The repository's correct creator-table enumeration is
 `relkind IN ('r', 'p') AND NOT c.relispartition`
-(`526b19e37:crates/zeroship-migrated/src/publication.rs:15-23`). Partitioned creator tables
+(`526b19e37:crates/zeroship-migrate-server/src/publication.rs:15-23`). Partitioned creator tables
 are supported by the public migration authoring path
 (`526b19e37:sdks/migrate/src/ops.ts:3054-3063`) and emitted as PostgreSQL `PARTITION BY`
 (`526b19e37:crates/zeroship-migrate-postgres/src/ddl.rs:504-520`); this is not an operator-only

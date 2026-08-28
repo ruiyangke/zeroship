@@ -711,13 +711,13 @@ settled is not premature.
 
 Today: **9 declared config fields** across 5 services
 (`auth.platform_mint_key`; `control.{control_key, auth_platform_mint_key,
-worker_key}`; `gateway.{control_key, worker_key}`; `migrated.control_key`;
+worker_key}`; `gateway.{control_key, worker_key}`; `migrate_server.control_key`;
 `worker.{control_key, worker_key}`), 12 references in compose, 9 in
 `docs/reference/env-vars.md`.
 
 | change | fields |
 | --- | --- |
-| deleted as auth credentials | 4 - `migrated.control_key` (measured unused), `worker.control_key`, `gateway.control_key`, `control.control_key` |
+| deleted as auth credentials | 4 - `migrate_server.control_key` (measured unused), `worker.control_key`, `gateway.control_key`, `control.control_key` |
 | narrowed to derivation-only | 2 - `worker_key` and `control_key` remain HMAC keys for `derive_app_scoped_control_token` (`crates/core/src/auth/mod.rs:165`), app workflow bearers (`crates/plugin-workflow/src/client.rs:163`), the runtime output-read token (`crates/worker/src/handler.rs:516`) and the `ZeroShip-User` HMAC (`crates/gateway/src/router/auth.rs:264`) |
 | added | 5 signing keypair paths (one per service) + 1 trust-anchor location |
 | **net** | **about 9 to 11 declared fields** |
@@ -1112,13 +1112,13 @@ anticipated:
    `if len(conf.GetToken()) == 0 { return ctx, nil }` in another language,
    sitting in this tree while 6.5.3 cited it as somebody else's bug. Every row
    now runs a validator over the MATERIAL.
-2. **`zeroship-migrated --check-config` validated nothing.** Its report emitted
+2. **`zeroship-migrate-server --check-config` validated nothing.** Its report emitted
    and the process returned `Ok` at `main.rs:33`; every credential guard it had
    sat below, from line 87 on. A dry run over a placeholder seal key exited 0.
    The gate now runs before the dry-run return.
 3. **The compose gate could not see the two credentials that matter most here.**
    `enforced_rules` drops every `SecretStrength::Unrestricted` row, and those
-   rows are `ZEROSHIP_CONTROL_KEY` and `ZEROSHIP_MIGRATED_POLICY_SEAL_KEY` - so
+   rows are `ZEROSHIP_CONTROL_KEY` and `ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY` - so
    a compose file shipping either as empty or as the placeholder printed exactly
    what a clean one prints. It judged 9 occurrences before and judges 14 now,
    measured by running it on both branches.
@@ -1128,10 +1128,10 @@ anticipated:
    `..._unread = 4`. The posture gained a third value, `unverified`.
 
 **One finding NOT fixed, recorded so it is not lost.** `PLATFORM_SECRETS` gives
-`ZEROSHIP_MIGRATED_POLICY_SEAL_KEY` `SecretStrength::Unrestricted` with
+`ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY` `SecretStrength::Unrestricted` with
 `require_nonempty`, but the value's real consumer,
 `ManagedPolicyConfig::default_confined`, refuses anything under 32 bytes
-(`crates/migrated/src/main.rs`, test `policy_config_refuses_one_byte_key`). The
+(`crates/zeroship-migrate-server/src/main.rs`, test `policy_config_refuses_one_byte_key`). The
 table therefore describes a check that is not the strictest one that runs, which
 is the class of defect the table exists to prevent. Fixing it means changing the
 row's strength AND its validator together, since

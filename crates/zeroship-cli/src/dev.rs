@@ -224,7 +224,7 @@ type SecretSpec = (
 
 /// The compose deployment's privileged DSN, read by BOTH services that need
 /// one: the `migrate` one-shot (`--database-url-file`) and `migrated`'s
-/// provisioning setting (`ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL`, spelled
+/// provisioning setting (`ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL`, spelled
 /// as a `urn:zeroship:file:` reference at the same container path).
 ///
 /// COUPLED TO deploy/compose/docker-compose.yml: `postgres` there is reachable

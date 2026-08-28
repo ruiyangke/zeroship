@@ -1,5 +1,5 @@
 //! `/healthz` + `/readyz` for the creator migration service, through the REAL
-//! `zeroship_migrated::configure` route table.
+//! `zeroship_migrate_server::configure` route table.
 //!
 //! The valuable arm here is the DOWN one, and it needs no database at all: a
 //! policy-store DSN pointing at a closed port must make `/readyz` answer 503
@@ -15,9 +15,9 @@ use ntex::http::StatusCode;
 use ntex::web::{self, test};
 use uuid::Uuid;
 use zeroship_authz::Action;
-use zeroship_migrated::auth::{AuthError, Authenticator, VerifiedCaller};
-use zeroship_migrated::policy::ManagedPolicyConfig;
-use zeroship_migrated::MigrationServiceState;
+use zeroship_migrate_server::auth::{AuthError, Authenticator, VerifiedCaller};
+use zeroship_migrate_server::policy::ManagedPolicyConfig;
+use zeroship_migrate_server::MigrationServiceState;
 
 const TEST_POLICY_SEAL_KEY: &[u8] = b"migrated health probe policy seal key";
 
@@ -77,7 +77,7 @@ async fn status_of(state: Arc<MigrationServiceState>, path: &str) -> (StatusCode
     let app = test::init_service(
         web::App::new()
             .state(state)
-            .configure(zeroship_migrated::configure),
+            .configure(zeroship_migrate_server::configure),
     )
     .await;
     let resp = test::call_service(&app, test::TestRequest::get().uri(path).to_request()).await;

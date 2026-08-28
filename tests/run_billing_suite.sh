@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # ============================================================================
 # run_billing_suite.sh - the CI runner for every zeroship-control /
-# zeroship-migrated test that needs a live, migrated PostgreSQL.
+# zeroship-migrate-server test that needs a live, migrated PostgreSQL.
 #
 # WHAT THIS SCRIPT GATES
 # ----------------------
 # `cargo test --workspace` provisions no database, so any target that dials one
 # either fails there or (worse) skips and reports a pass. Those targets carry
 # `required-features = ["live-db-tests"]` in crates/control/Cargo.toml and
-# crates/migrated/Cargo.toml, which removes them from the default build. This
+# crates/zeroship-migrate-server/Cargo.toml, which removes them from the default build. This
 # script is what runs them, against a database it creates and migrates itself.
 #
 # NO NAME LIST. Earlier revisions enumerated the binaries here by hand, which
@@ -150,9 +150,9 @@ fi
 
 DSN="postgresql://${PG_USER}:${PG_PASS}@${PG_HOST}:${PG_PORT}/${TEST_DB}"
 # ONE name for one database. This exported CONTROL_TEST_DB, AUTH_DB_URL and
-# MIGRATED_TEST_DB, because the control suite was not consistent about which it
+# MIGRATE_SERVER_TEST_DB, because the control suite was not consistent about which it
 # read - billing and registry targets took CONTROL_TEST_DB, the auth-adjacent
-# handlers took AUTH_DB_URL, and zeroship-migrated took MIGRATED_TEST_DB.
+# handlers took AUTH_DB_URL, and zeroship-migrate-server took MIGRATE_SERVER_TEST_DB.
 # Exporting all three was how one cargo invocation covered all of them, and it
 # is also why adding a target meant guessing which name it had picked.
 #
@@ -312,54 +312,27 @@ else
 fi
 
 echo "------------------------------------------------------------------"
-echo "==> zeroship-migrated live-database suite (--features live-db-tests)"
-if run_group cargo test -p zeroship-migrated --features live-db-tests --no-fail-fast \
-     -- "${THREAD_ARG[@]}"; then
-  :
-else
-  fail=1
-  failed+=("zeroship-migrated::live-db-tests")
-fi
-
-echo "------------------------------------------------------------------"
-echo "==> zeroship-migrate-adapter live-PG targets"
-# ZERO_MIGRATE_TEST_PG_URL was set NOWHERE in this repo, and was this crate's
-# private name for the same server everything else already had. Three targets
-# read it, and each announced a skip and counted as passed on every run:
+echo "==> zeroship-migrate-server live-database suite (--features live-db-tests)"
+# This package holds the service's own targets AND the two live-PG session proofs
+# `smoke_apply_pg` / `author_and_apply_pg`. The invocation below names no targets,
+# so a target added to the package is covered here the moment it is added.
 #
-#   crates/zeroship-migrate-adapter/tests/smoke_apply_pg.rs
-#                                  1 test of 1
-#   crates/zeroship-migrate-adapter/tests/author_and_apply_pg.rs
-#                                  1 test of 2
-#   crates/zeroship-migrate-adapter/tests/platform_migrate.rs
-#                                  the PG-apply half (ci.yml said so in a
-#                                  comment and left it that way)
+# No `env PG_TEST_URL=` prefix is needed: `PG_TEST_URL` is EXPORTED near the top of
+# this script to `$DSN`, the database THIS SCRIPT ALREADY CREATED. Nothing new is
+# provisioned - the two PG proofs create and drop their own token-suffixed
+# `proj_*` / `meta_*` schemas.
 #
-# MEASURED, one variable changed, on `author_and_apply_pg`:
+# WHY THE DSN MATTERS, measured on `author_and_apply_pg`, one variable changed:
 #   unset -> "test result: ok. 2 passed ... finished in 0.04s", one skip line
 #   set   -> "test result: ok. 2 passed ... finished in 0.34s", no skip line
 # The result lines are IDENTICAL. Only the clock and the announcement differ,
 # which is exactly why being named in a script is not evidence of coverage.
-#
-# The private name is gone; the three targets resolve the one test DSN like
-# every other target, so there is nothing left here that can go unexported.
-#
-# The database is the one THIS SCRIPT ALREADY CREATED. Nothing new is
-# provisioned: `smoke_apply_pg` and `author_and_apply_pg` create and drop their
-# own token-suffixed `proj_*` / `meta_*` schemas, and `platform_migrate`
-# provisions and drops its own scratch database through the admin session. They
-# run after the control and migrated groups so neither can disturb them.
-#
-# No name list, same as the two groups above: the package invocation runs every
-# target in the crate, so a target added there is covered here the moment it is
-# added.
-if run_group env PG_TEST_URL="$DSN" \
-     cargo test -p zeroship-migrate-adapter --no-fail-fast \
+if run_group cargo test -p zeroship-migrate-server --features live-db-tests --no-fail-fast \
      -- "${THREAD_ARG[@]}"; then
   :
 else
   fail=1
-  failed+=("zeroship-migrate-adapter")
+  failed+=("zeroship-migrate-server::live-db-tests")
 fi
 
 echo "------------------------------------------------------------------"
@@ -456,9 +429,6 @@ passed="$(grep -oE '^test result: ok\. [0-9]+ passed' "$SUITE_LOG" \
 # Raise it deliberately when the suite grows. A fixed floor gets looser with
 # every test added, which is the wrong direction for a guard against coverage
 # loss.
-# 660 -> 670 for the zeroship-migrate-adapter group added above, on the +10 that
-# group's then-passing targets contributed.
-#
 # 670 -> 758, MEASURED 2026-08-20 on the first run of this script that ever
 # reached its end: 816 passed, 0 failed, WITHOUT REDPANDA_BROKERS, so 816 is
 # still the lower of the two legitimate configurations. 758 is ~7 percent under
@@ -468,6 +438,10 @@ passed="$(grep -oE '^test result: ok\. [0-9]+ passed' "$SUITE_LOG" \
 #   migrated 30 + 5 + 25 + 3 + 3              =  66
 #   adapter  6 + 5 + 2 + 15 + 1               =  29
 #   metering 7                                =   7
+#
+# The per-group split above is one 2026-08-20 reading; the SUM is what this floor
+# sits under. Do not lower it because the groups were rearranged - a run under 758
+# means coverage was lost, not that the accounting drifted.
 #
 # TWO REASONS THE GAP WAS 146 AND NOT SLACK, and the note that stood here
 # asserted the second one is why it is worth spelling out:

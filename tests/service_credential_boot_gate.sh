@@ -4,7 +4,7 @@
 # REAL BINARIES.
 #
 # The unit tests in crates/core, crates/gateway, crates/worker and
-# crates/migrated all rule on the same functions `main` calls. Not one of them
+# crates/zeroship-migrate-server all rule on the same functions `main` calls. Not one of them
 # rules on whether `main` CALLS them, and each says so in its own "does NOT
 # cover" note. This gate closes that: it launches the compiled binary with a
 # credential file and reads the exit code and the banner.
@@ -315,13 +315,13 @@ fi
 # need is still refused as a placeholder.
 # ---------------------------------------------------------------------------
 SUBSYSTEM_EXAMINED=0
-if [ -x "$BIN/zeroship-migrated" ]; then
+if [ -x "$BIN/zeroship-migrate-server" ]; then
   status=$(run_gate "$TMP/mg_skip.log" env \
-    "ZEROSHIP_MIGRATED_POLICY_SEAL_KEY=$STRONG" \
-    "$BIN/zeroship-migrated" --check-config)
+    "ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY=$STRONG" \
+    "$BIN/zeroship-migrate-server" --check-config)
   SUBSYSTEM_EXAMINED=$((SUBSYSTEM_EXAMINED + 1))
   if [ "$status" -ne 0 ]; then
-    note_fail "zeroship-migrated refused a launch that omits a credential it does not need"
+    note_fail "zeroship-migrate-server refused a launch that omits a credential it does not need"
     sed 's/^/    /' "$TMP/mg_skip.log"
   fi
   grep -q 'service_credentials_skipped = 1' "$TMP/mg_skip.log" \
@@ -330,9 +330,9 @@ if [ -x "$BIN/zeroship-migrated" ]; then
   # The one-variable partner for the skip: the SAME launch with the optional
   # credential supplied as a placeholder is now checked, and refused.
   status=$(run_gate "$TMP/mg_optional_sentinel.log" env \
-    "ZEROSHIP_MIGRATED_POLICY_SEAL_KEY=$STRONG" \
+    "ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY=$STRONG" \
     "ZEROSHIP_CONTROL_KEY=$SENTINEL" \
-    "$BIN/zeroship-migrated" --check-config)
+    "$BIN/zeroship-migrate-server" --check-config)
   SUBSYSTEM_EXAMINED=$((SUBSYSTEM_EXAMINED + 1))
   SENTINEL_EXAMINED=$((SENTINEL_EXAMINED + 1))
   [ "$status" -eq 0 ] \
@@ -343,14 +343,14 @@ if [ -x "$BIN/zeroship-migrated" ]; then
   # return, so the report emitted and the process returned Ok without ever
   # reaching a credential check.
   status=$(run_gate "$TMP/mg_seal_sentinel.log" env \
-    "ZEROSHIP_MIGRATED_POLICY_SEAL_KEY=$SENTINEL" \
-    "$BIN/zeroship-migrated" --check-config)
+    "ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY=$SENTINEL" \
+    "$BIN/zeroship-migrate-server" --check-config)
   SENTINEL_EXAMINED=$((SENTINEL_EXAMINED + 1))
   SUBSYSTEM_EXAMINED=$((SUBSYSTEM_EXAMINED + 1))
   [ "$status" -eq 0 ] \
-    && note_fail "zeroship-migrated --check-config accepted a placeholder seal key"
+    && note_fail "zeroship-migrate-server --check-config accepted a placeholder seal key"
 else
-  echo "  note: $BIN/zeroship-migrated not built; its arms did not run"
+  echo "  note: $BIN/zeroship-migrate-server not built; its arms did not run"
 fi
 
 # ---------------------------------------------------------------------------

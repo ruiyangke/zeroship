@@ -111,8 +111,8 @@ zs_scratch_db_resolve() {
     return 2
   fi
 
-  # pid + nanoseconds, the same shape the migrate-adapter tests use for their
-  # token-suffixed schemas (crates/zeroship-migrate-adapter/tests/
+  # pid + nanoseconds, the same shape the migrate-server PG tests use for their
+  # token-suffixed schemas (crates/zeroship-migrate-server/tests/
   # smoke_apply_pg.rs:80). Identifier length is not a concern: the longest
   # prefix here is 22 characters, leaving 41 of Postgres's 63-byte limit for a
   # 7-digit pid and a 19-digit nanosecond count.

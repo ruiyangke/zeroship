@@ -9,7 +9,7 @@
 # THE ONE INTENTIONAL DIFFERENCE is that this charter is used ALONE, while
 # confined.policy.toml is concatenated with
 # policies/confined-system-shape.inject.toml before it is loaded
-# (`crates/migrated/src/policy.rs`). The two grant files now look almost
+# (`crates/zeroship-migrate-server/src/policy.rs`). The two grant files now look almost
 # identical because the inject rule left both of them; the difference is in the
 # constant, not in the file. Do not "fix" that by adding the fragment here - the
 # rendered-DDL guard must vet a CREATE TABLE that the inject already expanded,

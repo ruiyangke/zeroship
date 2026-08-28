@@ -19,7 +19,7 @@ agent scaffolds (examples/starter)            ← CLAUDE.md teaches the contract
   → zeroship deploy                            ← path, app and control from the file
   → control plane ingests → BlobStore + route registry
   → zeroship migrate                           ← env.db apps ONLY, and REQUIRED
-  → control authorizes → zeroship-migrated applies → per-app schema + role
+  → control authorizes → zeroship-migrate-server applies → per-app schema + role
   → gateway pulls routes (5s) → serves the app (static + RPC + env.* primitives)
 ```
 
@@ -38,7 +38,7 @@ carries the app's code and the folded runtime schema *descriptor*; it does not
 carry the migration documents, and the deploy endpoint refuses to apply them
 (`crates/control/src/api.rs`, `migration_approval_removed`). Applying them is
 what creates the per-app schema and the `app_<id>_role` the runtime does
-`SET LOCAL ROLE` to on every database call, and `zeroship-migrated`'s apply path
+`SET LOCAL ROLE` to on every database call, and `zeroship-migrate-server`'s apply path
 is that role's only producer. Deploy without migrating and the app serves its
 static assets, dispatches its RPCs, and fails the first `env.db` call with
 `role "app_..._role" does not exist` — which reaches the end user as

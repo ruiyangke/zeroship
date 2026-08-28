@@ -8,7 +8,7 @@
 # workflow invokes `--test integration`, and no `pg-test` image exists in the
 # tree. The `rust` job omits the target deliberately, deferring it to "the other
 # live-database gates", but that gate runs
-# `--features zeroship-control/live-db-tests,zeroship-migrated/live-db-tests`
+# `--features zeroship-control/live-db-tests,zeroship-migrate-server/live-db-tests`
 # and this crate declares no `live-db-tests` feature, so the deferral named a
 # destination that could not accept it. The binary fell between two jobs.
 #

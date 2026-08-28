@@ -23,6 +23,7 @@ pub mod policy;
 pub mod policy_store;
 pub mod provisioning;
 pub mod publication;
+pub mod session;
 
 use std::path::PathBuf;
 use std::sync::Arc;

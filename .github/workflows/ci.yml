@@ -494,7 +494,7 @@ jobs:
       # arm floor turns that into a refusal.
       - name: services refuse to boot on a placeholder service credential
         run: |
-          cargo build --bins -p zeroship-gateway -p zeroship-worker -p zeroship-migrated
+          cargo build --bins -p zeroship-gateway -p zeroship-worker -p zeroship-migrate-server
           cargo build --release -p zeroship-gateway --bin zeroship-gate
           tests/service_credential_boot_gate.sh
       # deploy/scripts/{deploy-remote,deploy-app}.sh had no test of any kind.
@@ -725,22 +725,23 @@ jobs:
           set -o pipefail
           cargo test -p zeroship-plugin-db --features test-helpers --test sqlite_integration 2>&1 \
             | tee -a "$RUNNER_TEMP/rust-tests.log"
-      # The adapter suite. It USED to be `--features platform-cli --test
-      # platform_migrate`, a single feature-gated module that compiled away
-      # without the feature and ran empty - "running 0 tests ... ok". Both the
-      # feature and that test file are deleted with the `zeroship-platform-migrate`
-      # binary they existed for (2026-08-28). What is left is the crate's two live
-      # PG proofs plus its unit tests; they skip internally with no database.
+      # The migration service's suite: the service's own targets, the two live-PG
+      # session proofs (`smoke_apply_pg`, `author_and_apply_pg`) and the
+      # `CompioPgSession` unit test. Without a database the PG proofs skip
+      # internally, so this stays a DB-free step; the live half runs in the billing
+      # gate, which exports PG_TEST_URL.
       #
-      # WHAT WENT WITH THEM, so nobody reads this shorter step as a tidy-up:
-      # platform_migrate.rs also held the DB-free guard comparing db/migrations-ts
-      # against db/released_migrations.tsv. Nothing in CI checks that now. It was
-      # already inert on this branch - the file has not compiled since the corpus
-      # was rewritten to the schema() form - but inert-and-present is not the same
-      # as gone, and this is the note that says which one it is.
+      # THE PACKAGE IS NAMED WITH NO TARGET FILTER ON PURPOSE. That is what makes a
+      # test target that stops COMPILING a hard failure here rather than a silent
+      # absence - a `--test <name>` filter would only build the one named, and a
+      # sibling could rot unnoticed against engine API drift.
+      #
+      # NOT CHECKED ANYWHERE, and named here because its absence is otherwise
+      # invisible: the DB-free guard comparing db/migrations-ts against
+      # db/released_migrations.tsv. No CI job holds it.
       - run: |
           set -o pipefail
-          cargo test -p zeroship-migrate-adapter 2>&1 \
+          cargo test -p zeroship-migrate-server 2>&1 \
             | tee -a "$RUNNER_TEMP/rust-tests.log"
       # compio-postgres' `tls` feature has never been compiled by any workflow,
       # let alone run: `tls` appeared ZERO times in .github/ until this step.
@@ -865,7 +866,7 @@ jobs:
       - name: Clippy, with proof every crate was linted
         run: tests/clippy_gate.sh
 
-  # The live-database gate. zeroship-control and zeroship-migrated between them
+  # The live-database gate. zeroship-control and zeroship-migrate-server between them
   # hold 45 test targets that dial a real Postgres and panic on connect without
   # one - the billing money path (which additionally drives the advisory-locked
   # fleet-wide cron sweeps), plus deploy, oauth, device, token, admin, bootstrap,
@@ -2214,13 +2215,13 @@ jobs:
       # `pnpm build` before cargo is load-bearing: the runtime crate
       # include_str!s sdks/bootstrap/dist/{runtime-entry,dispatcher}.js.
       - run: pnpm build
-      # zeroship-migrated is in this list because e03f00353 wired a migration
+      # zeroship-migrate-server is in this list because e03f00353 wired a migration
       # apply into the harness - the probe is migration-first now, and without
       # that binary its env.db has no table.
       - name: Build the release binaries the harness starts
         run: |
           cargo build --release -p zeroship-control -p zeroship-worker \
-            -p zeroship-gateway -p zeroship -p zeroship-migrated --bins
+            -p zeroship-gateway -p zeroship -p zeroship-migrate-server --bins
           # The platform schema is applied by the `zero-migrate` CLI now, which is
           # a Node program. `pnpm build` earlier in this job builds the napi addon
           # and the DSL; this builds the CLI itself, which the root build script

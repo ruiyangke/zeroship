@@ -54,7 +54,7 @@ out was `migrate-dsn`, the privileged DSN, which is also the file
 The env overlay contains eight generated scalar values:
 
 `ZEROSHIP_CONTROL_KEY` `ZEROSHIP_CONTROL_MASTER_KEY` `ZEROSHIP_WORKER_KEY`
-`ZEROSHIP_MIGRATED_POLICY_SEAL_KEY` `ZEROSHIP_GATEWAY_STASH_SIGNING_KEY`
+`ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY` `ZEROSHIP_GATEWAY_STASH_SIGNING_KEY`
 `ZEROSHIP_PAIRWISE_SALT` `ZEROSHIP_AUTH_STASH_SIGNING_KEY`
 `ZEROSHIP_AUTH_TOTP_ENC_KEY`
 
@@ -316,7 +316,7 @@ defined ONCE instead of being repeated as per-service flags:
 For local compose, the referenced scalar secret values come from the gitignored
 `.env` written by `zeroship dev init`. In particular, one generated
 `ZEROSHIP_CONTROL_KEY` is interpolated into control, gateway, worker, and
-migrated.
+migrate-server.
 
 Precedence is CLI/env-flag > `[secrets]`/`[auth]` file reference > default, so a
 leftover literal flag would silently WIN and defeat the file - keep config-covered
@@ -421,14 +421,14 @@ setting: the data-plane pool is per thread.
 
 ## Service health
 
-Every platform service (`control`, `gateway`, `worker`, `migrated`, `auth`)
+Every platform service (`control`, `gateway`, `worker`, `migrate-server`, `auth`)
 exposes the SAME pair, and compose gives each one a `healthcheck` pointed at
 `/readyz`:
 
 | Endpoint | Meaning | Checks |
 | --- | --- | --- |
 | `GET /healthz` | Liveness. Constant 200. | Nothing. It must never fail because a dependency did, or an outage in Postgres would get every container killed on top of it. |
-| `GET /readyz` | Readiness. 200 or 503. | control / migrated / auth: Postgres. worker: control poll current AND blob store reachable. gateway: control route pull current. |
+| `GET /readyz` | Readiness. 200 or 503. | control / migrate-server / auth: Postgres. worker: control poll current AND blob store reachable. gateway: control route pull current. |
 
 ```bash
 docker compose -f deploy/compose/docker-compose.yml ps   # STATUS shows (healthy)
@@ -468,13 +468,13 @@ The privileged DSN is mounted as a file, not passed as an argument: there is no
 `docker inspect`, `docker ps --no-trunc` and /proc/<pid>/cmdline. The file must
 be mode 0600.
 
-`migrated` mounts the SAME file and reads it through
-`ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL`, which defaults to
+`migrate-server` mounts the SAME file and reads it through
+`ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL`, which defaults to
 `urn:zeroship:file:/etc/zeroship/secrets/migrate-dsn`. Those are the only two
 readers of a superuser credential in the deployment and they now take it from
 one place: repointing `secrets/migrate-dsn` at a real database moves both. Until
-2026-08-21 `migrated` carried its own inline superuser DSN default, so the same
-repointing moved the one-shot and silently left `migrated` provisioning against
+2026-08-21 `migrate-server` carried its own inline superuser DSN default, so the same
+repointing moved the one-shot and silently left `migrate-server` provisioning against
 the in-compose Postgres.
 
 The source of truth is the committed JS DSL corpus in `db/migrations-ts/`; the

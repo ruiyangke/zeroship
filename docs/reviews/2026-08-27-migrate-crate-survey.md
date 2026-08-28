@@ -4,16 +4,16 @@ Date: 2026-08-27
 
 ## Answer
 
-`zeroship-migrated` and `zeroship-migrate-adapter` are both still needed today.
+`zeroship-migrate-server` and `zeroship-migrate-adapter` are both still needed today.
 They do different jobs:
 
-- `zeroship-migrated` is the deployed, long-running creator migration service. It
+- `zeroship-migrate-server` is the deployed, long-running creator migration service. It
   authenticates an app migration request, composes the operator ceiling with the
   creator's policy draft, provisions the app's Postgres role/schema, and applies
   the app's frozen IR. Its HTTP routes are registered at
-  `crates/zeroship-migrated/src/api.rs:20-47`, the apply route authenticates and
-  enters the apply path at `crates/zeroship-migrated/src/api.rs:87-128`, and the
-  binary starts that service at `crates/zeroship-migrated/src/main.rs:263-279`.
+  `crates/zeroship-migrate-server/src/api.rs:20-47`, the apply route authenticates and
+  enters the apply path at `crates/zeroship-migrate-server/src/api.rs:87-128`, and the
+  binary starts that service at `crates/zeroship-migrate-server/src/main.rs:263-279`.
 - `zeroship-migrate-adapter` is the native host integration between the
   driver-neutral migration engine and `compio-postgres`. It owns the
   `CompioPgSession` newtype and its `SqlSession` implementation
@@ -36,10 +36,10 @@ boundary. It did not remove the Rust driver boundary or either shipped consumer.
 The consumer inventory came from these tree-wide searches:
 
 ```text
-rg -n --glob Cargo.toml 'zeroship-migrate-adapter|zeroship-migrated' .
+rg -n --glob Cargo.toml 'zeroship-migrate-adapter|zeroship-migrate-server' .
 rg -n --glob '*.rs' '^\s*use zeroship_migrate_adapter' .
-rg -n --glob '*.rs' '^\s*use zeroship_migrated' .
-rg -n --glob '*.rs' 'zeroship_migrate_adapter::|zeroship_migrated::' crates
+rg -n --glob '*.rs' '^\s*use zeroship_migrate_server' .
+rg -n --glob '*.rs' 'zeroship_migrate_adapter::|zeroship_migrate_server::' crates
 ```
 
 The platform-binary and guard searches were:
@@ -164,7 +164,7 @@ also test-only at `crates/zeroship-migrate-postgres/Cargo.toml:70-74`.
 
 Therefore deleting the adapter today would:
 
-1. break the shipped `zeroship-migrated` app-migration apply path;
+1. break the shipped `zeroship-migrate-server` app-migration apply path;
 2. remove the platform migration binary used by the production image and
    compose startup;
 3. remove the Rust released-byte, released-file-presence, unreleased-order, and
@@ -184,7 +184,7 @@ coverage or how much generic engine test behavior moved elsewhere.
 
 | Dependent | Kind | Evidence and actual use |
 | --- | --- | --- |
-| `zeroship-migrated` | Normal, shipped library dependency | `crates/zeroship-migrated/Cargo.toml:16-64`; production code imports `CompioPgSession` at `crates/zeroship-migrated/src/apply.rs:23`. |
+| `zeroship-migrate-server` | Normal, shipped library dependency | `crates/zeroship-migrate-server/Cargo.toml:16-64`; production code imports `CompioPgSession` at `crates/zeroship-migrate-server/src/apply.rs:23`. |
 | `zeroship-config-contract` | Normal dependency of a non-shipped tool | The tool declares itself non-shipped at `crates/zeroship-config-contract/Cargo.toml:1-15`, declares the adapter at `crates/zeroship-config-contract/Cargo.toml:17-33`, and reads `PlatformMigrateSettings::SPECS` at `crates/zeroship-config-contract/src/registry.rs:43-53`. |
 | `zeroship-plugin-db` | Dev-dependency only | The entry is under `[dev-dependencies]` at `crates/zeroship-plugin-db/Cargo.toml:91-134`. There is no current `zeroship_migrate_adapter` reference in that crate's Rust source, so this is presently an unused test dependency, not a library consumer. |
 
@@ -197,8 +197,8 @@ The anchored search returned exactly eight statements:
 
 - shipped/production: the platform binary has two at
   `crates/zeroship-migrate-adapter/src/bin/zeroship-platform-migrate.rs:62-65`,
-  and `zeroship-migrated` has one at
-  `crates/zeroship-migrated/src/apply.rs:23`;
+  and `zeroship-migrate-server` has one at
+  `crates/zeroship-migrate-server/src/apply.rs:23`;
 - test-only: the platform suite has three at
   `crates/zeroship-migrate-adapter/tests/platform_migrate.rs:52-58`, the V8 author
   test has one at
@@ -211,7 +211,7 @@ The config checker uses a fully qualified path rather than a `use` statement at
 uses its own crate-relative session type at
 `crates/zeroship-migrate-adapter/src/platform.rs:86`.
 
-## 2. Consumers of `zeroship-migrated` and division of labor
+## 2. Consumers of `zeroship-migrate-server` and division of labor
 
 ### Cargo dependents
 
@@ -222,19 +222,19 @@ uses its own crate-relative session type at
 | `zeroship-plugin-db` | Dev-dependency only | `crates/zeroship-plugin-db/Cargo.toml:91-143`; its test calls migrated's workflow-schema provisioning and constants at `crates/zeroship-plugin-db/tests/integration.rs:6295-6315` and `crates/zeroship-plugin-db/tests/integration.rs:6351-6359`. |
 
 The package's own binary is a shipped consumer of its library: the binary target
-is declared at `crates/zeroship-migrated/Cargo.toml:7-14`, and the image builds and
+is declared at `crates/zeroship-migrate-server/Cargo.toml:7-14`, and the image builds and
 copies it at `deploy/Dockerfile:184-192` and `deploy/Dockerfile:210-223`.
 
-### Every literal `use zeroship_migrated` statement
+### Every literal `use zeroship_migrate_server` statement
 
 The anchored search returned exactly twelve statements, all inside the package:
 
-- four in the shipped binary at `crates/zeroship-migrated/src/main.rs:13-16`;
+- four in the shipped binary at `crates/zeroship-migrate-server/src/main.rs:13-16`;
 - three in `health_endpoints_test` at
-  `crates/zeroship-migrated/tests/health_endpoints_test.rs:18-20`;
+  `crates/zeroship-migrate-server/tests/health_endpoints_test.rs:18-20`;
 - three top-level and two nested imports in `apply_api_test` at
-  `crates/zeroship-migrated/tests/apply_api_test.rs:18-22` and
-  `crates/zeroship-migrated/tests/apply_api_test.rs:1304-1305`.
+  `crates/zeroship-migrate-server/tests/apply_api_test.rs:18-22` and
+  `crates/zeroship-migrate-server/tests/apply_api_test.rs:1304-1305`.
 
 The external test/tool consumers use fully qualified paths at the config-contract,
 control, and plugin-db locations cited in the preceding table.
@@ -245,15 +245,15 @@ The AGENTS description of migrated as the managed-policy creator migration
 service is accurate. The service owns:
 
 - the creator-facing apply/approve/policy HTTP boundary
-  (`crates/zeroship-migrated/src/api.rs:20-47`);
+  (`crates/zeroship-migrate-server/src/api.rs:20-47`);
 - operator-ceiling plus creator-draft composition, including escalation rejection
-  (`crates/zeroship-migrated/src/policy.rs:1-25`,
-  `crates/zeroship-migrated/src/policy.rs:119-142`);
+  (`crates/zeroship-migrate-server/src/policy.rs:1-25`,
+  `crates/zeroship-migrate-server/src/policy.rs:119-142`);
 - app role/schema provisioning over the raw Compio client
-  (`crates/zeroship-migrated/src/provisioning.rs:1-15`,
-  `crates/zeroship-migrated/src/provisioning.rs:91-105`); and
+  (`crates/zeroship-migrate-server/src/provisioning.rs:1-15`,
+  `crates/zeroship-migrate-server/src/provisioning.rs:91-105`); and
 - current-API guarded lower and engine apply
-  (`crates/zeroship-migrated/src/apply.rs:1085-1152`).
+  (`crates/zeroship-migrate-server/src/apply.rs:1085-1152`).
 
 The adapter description is accurate about the architectural bridge and stale
 about provenance. Its own documentation explains that the newtype maps the
@@ -266,7 +266,7 @@ workspace at `crates/zeroship-migrate-adapter/Cargo.toml:41-52`.
 
 Thus `AGENTS.md:123-124` should eventually be updated from "vendored" and
 `third_party/zero-migrate` to the in-sourced paths, and from the old directory
-name `migrated` to `zeroship-migrated`. The division of labor in those lines did
+name `migrated` to `zeroship-migrate-server`. The division of labor in those lines did
 not outlive the code.
 
 ## 3. `CompioPgSession` reaches shipped binaries
@@ -275,9 +275,9 @@ not outlive the code.
 
 ### Creator migrations
 
-The deployed `zeroship-migrated` binary has a normal adapter dependency
-(`crates/zeroship-migrated/Cargo.toml:12-20`,
-`crates/zeroship-migrated/Cargo.toml:64`). Its live HTTP apply path is:
+The deployed `zeroship-migrate-server` binary has a normal adapter dependency
+(`crates/zeroship-migrate-server/Cargo.toml:12-20`,
+`crates/zeroship-migrate-server/Cargo.toml:64`). Its live HTTP apply path is:
 
 ```text
 POST route
@@ -288,10 +288,10 @@ POST route
   -> guarded lower and engine apply
 ```
 
-The corresponding evidence is `crates/zeroship-migrated/src/api.rs:87-116`,
-`crates/zeroship-migrated/src/apply.rs:235-260`,
-`crates/zeroship-migrated/src/apply.rs:409-461`, and
-`crates/zeroship-migrated/src/apply.rs:737-749`. Compose starts the service at
+The corresponding evidence is `crates/zeroship-migrate-server/src/api.rs:87-116`,
+`crates/zeroship-migrate-server/src/apply.rs:235-260`,
+`crates/zeroship-migrate-server/src/apply.rs:409-461`, and
+`crates/zeroship-migrate-server/src/apply.rs:737-749`. Compose starts the service at
 `deploy/compose/docker-compose.yml:382-405`.
 
 ### Platform migrations
@@ -418,7 +418,7 @@ documented in the next subsection:
   `crates/zeroship-migrate-adapter/tests/platform_migrate.rs:1069-1174`; and
 - migrated's live API test drives current IR through the production Compio path
   and asserts the app table, confinement, and journal at
-  `crates/zeroship-migrated/tests/apply_api_test.rs:1018-1057`.
+  `crates/zeroship-migrate-server/tests/apply_api_test.rs:1018-1057`.
 
 That means the old tests are partially redundant, but not genuinely superseded
 by `crates/zeroship-migrate/tests`. In particular, migrated's live test does not
@@ -445,9 +445,9 @@ removed root journal reader and `exec_cfg.pg` at
 This is source-level proof that deleting only the 22-error tests does not make
 the feature or binary current. The working migrated implementation shows the
 intended current shape: vendor imports at
-`crates/zeroship-migrated/src/apply.rs:15-23`, five-argument author construction
-at `crates/zeroship-migrated/src/apply.rs:1120-1135`, and vendor-set engine apply
-at `crates/zeroship-migrated/src/apply.rs:1137-1152`.
+`crates/zeroship-migrate-server/src/apply.rs:15-23`, five-argument author construction
+at `crates/zeroship-migrate-server/src/apply.rs:1120-1135`, and vendor-set engine apply
+at `crates/zeroship-migrate-server/src/apply.rs:1137-1152`.
 
 ## History: wired path, not unused future scaffolding
 
@@ -456,8 +456,8 @@ Git history shows both long-lived shipped paths and one removed test consumer:
 - `38acd2685` (2026-07-13) introduced `CompioPgSession` and its smoke test.
 - `170be8f16` (2026-07-13) rewired migrated onto the adapter. Current blame still
   traces the normal dependency and import to that commit at
-  `crates/zeroship-migrated/Cargo.toml:64` and
-  `crates/zeroship-migrated/src/apply.rs:23`.
+  `crates/zeroship-migrate-server/Cargo.toml:64` and
+  `crates/zeroship-migrate-server/src/apply.rs:23`.
 - `8c3c24324` (2026-07-13) added the platform binary/runner; current runner
   construction remains at `crates/zeroship-migrate-adapter/src/platform.rs:873-905`.
 - `a6349f240` (2026-08-11) put migrated in the production image/compose; the

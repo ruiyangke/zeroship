@@ -61,7 +61,7 @@ struct Cli {
     /// provisioned in two calls:
     ///
     ///   dev-provision --defer-deploy ...   # app_id + api_key, nothing live
-    ///   <apply migrations through zeroship-migrated>
+    ///   <apply migrations through zeroship-migrate-server>
     ///   dev-provision ...                  # same command, now activates
     ///
     /// The second call reuses the existing app by name and re-ingests the same
@@ -180,7 +180,7 @@ async fn run(cli: Cli) -> Result<zeroship_core::types::AppRecord, DevProvisionEr
             RegistryError::SchemaNotApplied { .. } => err(format!(
                 "deploy commit refused: {e}\n\
                  app {} exists and its blobs are ingested. Apply its migrations through \
-                 zeroship-migrated, then re-run this command. To create the app WITHOUT \
+                 zeroship-migrate-server, then re-run this command. To create the app WITHOUT \
                  this failure, pass --defer-deploy on the first call.",
                 app.id
             )),

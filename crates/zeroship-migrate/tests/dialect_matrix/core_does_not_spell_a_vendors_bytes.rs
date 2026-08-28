@@ -134,18 +134,8 @@ const CRATES_THAT_MAY_SPELL: &[&str] = &[
 /// correct rather than a loosening: every line of that crate parsed PostgreSQL with
 /// `libpg_query`, so it was always one vendor's bytes filed under a neutral-sounding
 /// name.
-///
-/// `zeroship-migrate-adapter` joined this list when the engine was folded into the
-/// product workspace. It is the monorepo's native-PostgreSQL producer, so it is the
-/// entry most likely to be waved onto [`CRATES_THAT_MAY_SPELL`] by analogy with the
-/// vendors — and that would be wrong. It supplies a `SqlSession` over a PG driver; it
-/// does not EMIT DDL bytes, and the classification was measured rather than argued:
-/// it calls neither [`SPELLING_PRIMITIVES`] entry anywhere. Filing it as "must not
-/// spell" is therefore the true and stronger claim, and it is the one that goes red
-/// if that ever stops being true.
 const CRATES_THAT_MUST_NOT_SPELL: &[&str] = &[
     "zeroship-migrate",
-    "zeroship-migrate-adapter",
     "zeroship-migrate-core",
     "zeroship-migrate-ir",
     "zeroship-migrate-node",
@@ -162,13 +152,28 @@ const CRATES_THAT_MUST_NOT_SPELL: &[&str] = &[
 /// to catch, and it duly failed CLOSED on all 27.
 ///
 /// So membership is decided by name: the composition crate, or one of its
-/// `-`-suffixed siblings. The suffix is required rather than a bare `starts_with`,
-/// because `zeroship-migrated` — the policy SERVER, no relation — shares the prefix
-/// and a prefix match would scoop it in. That is not hypothetical: the deploy gate
-/// keeps a `zero-migrate-other` decoy for the identical mistake.
+/// `-`-suffixed siblings, MINUS [`NOT_THE_ENGINE`].
+///
+/// The exclusion is load-bearing, not decoration. `zeroship-migrate-server` is a
+/// PRODUCT crate — the platform's managed-policy creator migration service — and its
+/// name is a `-`-separated extension of the engine's, indistinguishable by any rule
+/// that reads only the name. Without the exclusion the census admits it as engine
+/// code and demands a spelling classification for a product service.
+///
+/// Note the failure direction: a NEW product crate named `zeroship-migrate-<x>` that
+/// nobody lists in [`NOT_THE_ENGINE`] is admitted as engine code and then fails
+/// CLOSED on the unclassified-crate assertion. That is the right way round.
 pub(crate) fn is_engine_crate(dir_name: &str) -> bool {
-    dir_name == ENGINE_PREFIX || dir_name.starts_with(&format!("{ENGINE_PREFIX}-"))
+    !NOT_THE_ENGINE.contains(&dir_name)
+        && (dir_name == ENGINE_PREFIX || dir_name.starts_with(&format!("{ENGINE_PREFIX}-")))
 }
+
+/// Crates that wear the engine's name and are not the engine.
+///
+/// `zeroship-migrate-server` CONSUMES the engine and carries the `CompioPgSession`
+/// driver newtype it drives it through, but it is product code in the product's
+/// configuration scope, not a member of the engine this census is about.
+const NOT_THE_ENGINE: &[&str] = &["zeroship-migrate-server"];
 
 /// The composition crate's own name, taken from Cargo rather than written down twice.
 pub(crate) const ENGINE_PREFIX: &str = env!("CARGO_PKG_NAME");
@@ -192,14 +197,17 @@ pub(crate) const ENGINE_PREFIX: &str = env!("CARGO_PKG_NAME");
 /// must find all of them. This is the direction the doc above prescribes for an added
 /// crate, and the new root is the one this census is most about: the engine.
 ///
-/// RAISED 9 -> 10: `zeroship-migrate-adapter` was ADDED — not written, but brought into
-/// scope, because the engine moved into the product workspace where the adapter already
-/// lived and it carries the engine's name. This is the added-crate direction again. Note
-/// what this floor now counts: ENGINE roots ([`is_engine_crate`]), not every directory
-/// under `crates/`. The product's other 27 crates are not the engine and never were the
-/// subject; before the graft the two sets were equal, which is why the walk could get
-/// away with saying `crates/*`.
-const WORKSPACE_CRATE_FLOOR: usize = 10;
+/// WHAT THIS COUNTS, because the number alone would hide it: ENGINE roots
+/// ([`is_engine_crate`]), not every directory under `crates/`. The product's other
+/// crates are not the engine and never were the subject; while the engine owned its
+/// own workspace the two sets were equal, which is why the walk could get away with
+/// saying `crates/*`.
+///
+/// NINE is that set today: `zeroship-migrate` plus the eight `-`-suffixed siblings
+/// [`is_engine_crate`] admits. `ls crates/ | grep '^zeroship-migrate'` lists ten
+/// directories; the tenth is `zeroship-migrate-server`, which [`NOT_THE_ENGINE`]
+/// excludes because it is a product service rather than engine code.
+const WORKSPACE_CRATE_FLOOR: usize = 9;
 
 /// The NEEDLE-LIVENESS floor: the calls the vendors are known to make today.
 ///
@@ -477,11 +485,12 @@ fn count_spelling_calls(src: &str, primitive: &str) -> usize {
 /// what the census can SEE. Get it wrong in the narrowing direction and the walk goes
 /// blind; get it wrong in the widening direction and 27 product crates come back.
 ///
-/// The `zeroship-migrated` case is the one that matters and the reason the rule is not
-/// a bare `starts_with`: the policy SERVER shares the composition crate's name as a
-/// prefix, so a prefix match would file an unrelated crate as engine code and demand a
-/// classification for it. The deploy gate keeps a `zero-migrate-other` decoy against
-/// the identical mistake; this is the same decoy in Rust.
+/// The `zeroship-migrate-server` case is the one that matters and the reason
+/// [`is_engine_crate`] carries [`NOT_THE_ENGINE`]: the migration SERVICE shares the
+/// composition crate's name as a `-`-separated prefix, so nothing about the NAME
+/// tells it apart from a vendor crate. This decoy is what goes red if the exclusion
+/// is dropped. The deploy gate keeps a `zero-migrate-other` decoy against the
+/// neighbouring mistake; this is the same decoy in Rust.
 #[test]
 fn the_membership_rule_admits_the_engine_and_nothing_that_merely_rhymes() {
     assert!(
@@ -496,12 +505,9 @@ fn the_membership_rule_admits_the_engine_and_nothing_that_merely_rhymes() {
         );
     }
     for outsider in [
-        // The collision the `-` in the rule exists for: a DIFFERENT crate whose name
-        // extends the prefix without a separator. `zeroship-migrated` is the policy
-        // server. (`zeroship-migrate-other` would NOT belong here: it takes the
-        // separator, so by name it would be an engine crate, and this control caught
-        // that when it was wrongly listed as an outsider.)
-        "zeroship-migrated",
+        // The collision `NOT_THE_ENGINE` exists for: the migration SERVICE takes the
+        // `-` separator, so the name alone cannot exclude it and the list must.
+        "zeroship-migrate-server",
         "zeroship-schema",
         "zeroship-plugin-db",
         "zeroship-runtime",

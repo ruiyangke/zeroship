@@ -815,7 +815,7 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
         // `runtime.lock_timeout_ms` / `runtime.statement_timeout_ms` used to be in
         // this list. Both charters now grant NEITHER -- the engine registers every
         // `runtime.*` knob `DeclaredOnly` and refuses a document that raises one
-        // above its default, which is what stopped `zeroship-migrated` from
+        // above its default, which is what stopped `zeroship-migrate-server` from
         // starting at all (see the note in policies/confined.policy.toml). Keeping
         // them here would compare "not granted" against "not granted": a row that
         // passes because neither side has the knob, not because they agree on it.

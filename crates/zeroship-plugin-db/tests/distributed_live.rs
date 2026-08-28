@@ -174,7 +174,7 @@ const RUNTIME_DESCRIPTOR: &str = r#"{
   }
 }"#;
 
-/// The table [`RUNTIME_DESCRIPTOR`] describes, as `zeroship-migrated` would have
+/// The table [`RUNTIME_DESCRIPTOR`] describes, as `zeroship-migrate-server` would have
 /// created it.
 ///
 /// The pairing with the descriptor is the point: eight columns for eight
@@ -764,7 +764,7 @@ async fn publication_exists(pool: &Pool, publication: &str) -> Result<bool, Stri
     .map_err(|error| format!("query publication: {error}"))
 }
 
-/// Stand in for `zeroship-migrated`, which owns the app publication.
+/// Stand in for `zeroship-migrate-server`, which owns the app publication.
 ///
 /// The worker only PROVES the publication exists: `replication::
 /// ensure_worker_slot` fails closed with `replication_publication_missing`
@@ -772,7 +772,7 @@ async fn publication_exists(pool: &Pool, publication: &str) -> Result<bool, Stri
 /// `worker_setup_only_probes_for_the_migrated_publication` pins that the
 /// worker setup path carries no publication DDL at all. Membership is an
 /// authorization decision the migration service makes while holding
-/// table-owner authority (`crates/zeroship-migrated/src/publication.rs`), so
+/// table-owner authority (`crates/zeroship-migrate-server/src/publication.rs`), so
 /// this harness makes it on the migration service's behalf, exactly as
 /// `tests/integration.rs::c1_create_publication_for_tables` does for the C1
 /// suite. `events` has to be IN the set or pgoutput sends nothing and the

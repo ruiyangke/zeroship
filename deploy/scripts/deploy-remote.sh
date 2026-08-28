@@ -420,7 +420,7 @@ rename_norm() {
 }
 
 rename_suspects() {
-  local stopwords=" ZEROSHIP AUTH CONTROL GATEWAY WORKER MIGRATED DB DATABASE URL KEY SECRET "
+  local stopwords=" ZEROSHIP AUTH CONTROL GATEWAY WORKER MIGRATE SERVER DB DATABASE URL KEY SECRET "
   local o d tok on dn hit
   for o in $1; do
     on="$(rename_norm "$o")"
@@ -464,7 +464,7 @@ SNAPSHOT_FILES="compose/.env compose/docker-compose.yml ops/Caddyfile ops/zerosh
 # `--check-config` is run against the rendered environment and the mounted
 # overlay before the stack is touched. The `migrate` one-shot is absent because
 # `zeroship-platform-migrate` has no --check-config and mounts no overlay.
-CHECK_SERVICES="control:zeroship-control migrated:zeroship-migrated gateway:zeroship-gate worker:zeroship-worker auth:zeroship-auth"
+CHECK_SERVICES="control:zeroship-control migrate-server:zeroship-migrate-server gateway:zeroship-gate worker:zeroship-worker auth:zeroship-auth"
 
 # A remote-shell fragment that sets $SEC to the host's secrets directory, run
 # from $REMOTE_DIR. Three separate ssh bodies need it -- the snapshot, the

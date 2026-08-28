@@ -45,7 +45,7 @@ scope = "all"
 #
 # so every confined SQLite registerModel failed and three `register_model::tests::
 # sqlite_*` cases were red on main. The identical grants were dropped from
-# `crates/migrated/policies/confined.policy.toml` the same day, for the same
+# `crates/zeroship-migrate-server/policies/confined.policy.toml` the same day, for the same
 # refusal, and that file carries the full reasoning; this one was missed, so the
 # fix was half-applied and only the plugin-db half stayed broken.
 #

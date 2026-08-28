@@ -10,7 +10,7 @@
 //! `migrator_<project>_<hash>` role.
 //!
 //! The provisioning runs over the SAME raw compio `Client` the service already
-//! holds (borrowed from the [`CompioPgSession`](zeroship_migrate_adapter::CompioPgSession)
+//! holds (borrowed from the [`CompioPgSession`](crate::session::CompioPgSession)
 //! that wraps it for the engine's `SqlSession` seam) — the engine's neutral
 //! apply path never provisions; that is the platform admin principal's job.
 //!

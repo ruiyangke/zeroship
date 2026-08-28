@@ -51,7 +51,7 @@ const ENV_KEYS: [&str; 8] = [
     "ZEROSHIP_CONTROL_KEY",
     "ZEROSHIP_CONTROL_MASTER_KEY",
     "ZEROSHIP_GATEWAY_STASH_SIGNING_KEY",
-    "ZEROSHIP_MIGRATED_POLICY_SEAL_KEY",
+    "ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY",
     "ZEROSHIP_PAIRWISE_SALT",
     "ZEROSHIP_WORKER_KEY",
 ];
@@ -326,7 +326,7 @@ fn dev_init_rejects_an_empty_pairwise_file_before_creating_siblings() {
 /// writes, and neither inlines it.
 ///
 /// WHAT WENT WRONG. `migrate` has read `/etc/zeroship/secrets/migrate-dsn`
-/// since 2026-08-16, but `migrated` - the other service that needs superuser
+/// since 2026-08-16, but `migrate-server` - the other service that needs superuser
 /// rights, to `CREATE SCHEMA` and `CREATE ROLE` per app - carried its own
 /// inline default, `postgres://postgres:<password>@postgres:5432/zeroship`, in
 /// its `environment:` block. Two consequences, and the second is the one a
@@ -337,7 +337,7 @@ fn dev_init_rejects_an_empty_pairwise_file_before_creating_siblings() {
 ///      `tests/config_name_alignment_gate.sh` does not read (it parses argv);
 ///   2. `generate_migrate_dsn` writes that file only when it is ABSENT,
 ///      precisely so an operator can repoint it at a real database. Doing so
-///      moved the platform one-shot and left `migrated` provisioning against
+///      moved the platform one-shot and left `migrate-server` provisioning against
 ///      the in-compose Postgres, with nothing anywhere reporting the split.
 ///
 /// This asserts the coupling directly, which the gate cannot: the gate rules on
@@ -363,7 +363,7 @@ fn compose_takes_the_privileged_dsn_from_the_one_file_dev_init_writes() {
     let container_path = format!("/etc/zeroship/secrets/{dsn_file}");
     let mount = format!("${{ZEROSHIP_SECRETS_DIR:-./secrets}}/{dsn_file}:{container_path}:ro");
 
-    for service in ["migrate", "migrated"] {
+    for service in ["migrate", "migrate-server"] {
         let block = service_block(&compose, service);
         assert!(
             block.contains(&mount),
@@ -376,14 +376,14 @@ fn compose_takes_the_privileged_dsn_from_the_one_file_dev_init_writes() {
         );
     }
 
-    let migrated = service_block(&compose, "migrated");
+    let migrate_server = service_block(&compose, "migrate-server");
     assert!(
-        migrated.contains(&format!(
-            "ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL: \
-             ${{ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL:-urn:zeroship:file:{container_path}}}"
+        migrate_server.contains(&format!(
+            "ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL: \
+             ${{ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL:-urn:zeroship:file:{container_path}}}"
         )),
-        "migrated's provisioning DSN must default to a urn:zeroship:file: reference, \
-         not to material; got:\n{migrated}"
+        "migrate_server's provisioning DSN must default to a urn:zeroship:file: reference, \
+         not to material; got:\n{migrate_server}"
     );
 
     // The superuser's own role name, read from the postgres service rather than
@@ -394,7 +394,7 @@ fn compose_takes_the_privileged_dsn_from_the_one_file_dev_init_writes() {
         "the postgres service must still declare POSTGRES_PASSWORD"
     );
     let superuser = "postgres";
-    for service in ["control", "gateway", "worker", "auth", "migrated", "migrate"] {
+    for service in ["control", "gateway", "worker", "auth", "migrate-server", "migrate"] {
         let block = service_block(&compose, service);
         assert!(
             !block.contains(&format!("://{superuser}:")),
@@ -412,14 +412,14 @@ fn compose_preserves_shared_secret_topology_and_has_no_weak_literals() {
         .unwrap_or_else(|error| panic!("read {}: {error}", compose_path.display()));
 
     let control = service_block(&compose, "control");
-    let migrated = service_block(&compose, "migrated");
+    let migrate_server = service_block(&compose, "migrate-server");
     let gateway = service_block(&compose, "gateway");
     let worker = service_block(&compose, "worker");
     let auth = service_block(&compose, "auth");
 
     for (name, block) in [
         ("control", control),
-        ("migrated", migrated),
+        ("migrate-server", migrate_server),
         ("gateway", gateway),
         ("auth", auth),
     ] {
@@ -460,15 +460,15 @@ fn compose_preserves_shared_secret_topology_and_has_no_weak_literals() {
         );
     }
     assert!(
-        migrated.contains(required_control),
-        "migrated is not wired to the same generated control key"
+        migrate_server.contains(required_control),
+        "migrate-server is not wired to the same generated control key"
     );
     assert_eq!(
         compose
             .matches("${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}")
             .count(),
         4,
-        "only control, gateway, worker, and migrated consume the control key"
+        "only control, gateway, worker, and migrate-server consume the control key"
     );
     assert!(
         !auth.contains(required_control),
@@ -490,10 +490,10 @@ fn compose_preserves_shared_secret_topology_and_has_no_weak_literals() {
         !compose.contains("${ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET:?"),
         "no service may REQUIRE a Stripe webhook secret to render compose"
     );
-    assert!(migrated.contains(
-        "ZEROSHIP_MIGRATED_POLICY_SEAL_KEY: ${ZEROSHIP_MIGRATED_POLICY_SEAL_KEY:?run zeroship dev init}"
+    assert!(migrate_server.contains(
+        "ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY: ${ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY:?run zeroship dev init}"
     ));
-    assert!(migrated.contains(
+    assert!(migrate_server.contains(
         "AUTH_PLATFORM_ISSUER: ${ZEROSHIP_ORIGIN_SCHEME:-http}://auth.${ZEROSHIP_DOMAIN:-zeroship.localhost}/oauth2"
     ));
 
@@ -510,8 +510,8 @@ fn compose_preserves_shared_secret_topology_and_has_no_weak_literals() {
             "ZEROSHIP_AUTH_PLATFORM_JWKS_URL: http://auth:9092/oauth2/.well-known/jwks.json",
         ),
         (
-            "migrated jwks",
-            migrated,
+            "migrate-server jwks",
+            migrate_server,
             "ZEROSHIP_AUTH_PLATFORM_JWKS_URL: http://auth:9092/oauth2/.well-known/jwks.json",
         ),
     ] {
@@ -744,8 +744,26 @@ fn workspace_root() -> PathBuf {
 fn no_server_binary_redeclares_the_relaxation_flag() {
     let root = workspace_root();
     let mut sources = Vec::new();
-    for crate_name in ["control", "gateway", "worker", "auth", "migrated", "cli"] {
-        collect_rs_files(&root.join("crates").join(crate_name).join("src"), &mut sources);
+    // DIRECTORY names, not service nicknames: every crate directory carries the
+    // `zeroship-` prefix. `collect_rs_files` returns SILENTLY on a missing path, so
+    // a nickname here collects zero files and this test rules on nothing. The
+    // assertion below and the floor after it are what make that loud; keep both.
+    for crate_name in [
+        "zeroship-control",
+        "zeroship-gateway",
+        "zeroship-worker",
+        "zeroship-auth",
+        "zeroship-migrate-server",
+        "zeroship-cli",
+    ] {
+        let dir = root.join("crates").join(crate_name).join("src");
+        assert!(
+            dir.is_dir(),
+            "{} is not a directory -- the walk would collect nothing from it and \
+             `collect_rs_files` returns silently on a missing path",
+            dir.display()
+        );
+        collect_rs_files(&dir, &mut sources);
     }
     assert!(
         sources.len() > 50,

@@ -48,7 +48,7 @@
 //! column ref is refused by `reject_cross_app_ref` in the vendored
 //! `zero-migrate` (`render/declarative.rs`), the renderer qualifies
 //! every `REFERENCES` with the schema it was called FOR, and
-//! `crates/migrated` derives that schema from the app id server-side.
+//! `crates/zeroship-migrate-server` derives that schema from the app id server-side.
 //! The foreign keys section of `docs/reference/db.md` lays out the four
 //! layers with file:line. `crates/zeroship-schema` is NOT one of them -
 //! its FK builders are reached only from the same cfg-gated pipeline

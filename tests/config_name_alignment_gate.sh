@@ -479,7 +479,7 @@ check_compose_alias_equality() {
 # check because it reads as coverage.
 #
 #   A. USERINFO IN A URL - `scheme://user:secret@host`. This is the product's
-#      OWN classification rule, not one invented here: crates/migrated/src/
+#      OWN classification rule, not one invented here: crates/zeroship-migrate-server/src/
 #      config.rs classes every DSN `Secret<String>` and says why - "Secret-
 #      classed by grammar: a DSN admits userinfo, so the type cannot depend on
 #      whether a particular deployment's value happens to carry a password."
@@ -600,7 +600,7 @@ compose_superuser_role() {
 # narrower exposure than argv, not a safe one". Check 8's header then counted
 # what that leaves uncovered - eight inline `${NAME:-<default>}` secrets, six of
 # them DSNs carrying userinfo - and deferred them as "a KNOWN, COUNTED hole".
-# One of the six was `ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL`, whose default
+# One of the six was `ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL`, whose default
 # was the cluster SUPERUSER's DSN. This arm is the half that closes it.
 #
 # WHY SUPERUSER AND NOT ALL USERINFO, which is what 6c bans in argv. The other
@@ -964,15 +964,15 @@ if [ "${1:-}" = "--self-test" ]; then
     fi
 
     # Check 6d: the SUPERUSER credential inlined as an `environment:` default.
-    # This is the exact text that stood at `migrated`'s
-    # ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL until 2026-08-21, and which check
-    # 6c could not see because it reads `command:` blocks alone. The planted
+    # It is planted at `migrate-server`'s
+    # ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL, the shape check
+    # 6c cannot see because it reads `command:` blocks alone. The planted
     # password is deliberately NOT the one the postgres service carries, so this
     # also proves the detector keys on the superuser ROLE and not on a value it
     # happened to find elsewhere in the file.
-    sed 's|^      ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL: .*|      ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL: ${ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL:-postgres://postgres:hunter2@postgres:5432/zeroship}|' \
+    sed 's|^      ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL: .*|      ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL: ${ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL:-postgres://postgres:hunter2@postgres:5432/zeroship}|' \
         "$COMPOSE" >"$TMP/self/env_superuser.yml"
-    if ! grep -q 'PROVISION_DATABASE_URL: ${ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL:-postgres://postgres:hunter2@' "$TMP/self/env_superuser.yml"; then
+    if ! grep -q 'PROVISION_DATABASE_URL: ${ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL:-postgres://postgres:hunter2@' "$TMP/self/env_superuser.yml"; then
         fail "self-test: the environment-superuser mutation did not apply; the run below proves nothing"
         exit 1
     fi

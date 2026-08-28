@@ -24,7 +24,7 @@ zeroship-core = { workspace = true }
 zeroship-auth = { workspace = true }
 zeroship-control = { workspace = true }
 zeroship-gateway = { workspace = true }
-zeroship-migrated = { workspace = true }
+zeroship-migrate-server = { workspace = true }
 zeroship-worker = { workspace = true }
 zeroship-workflow-scheduler = { workspace = true }
 # A SEVENTH ENTRY USED TO SIT HERE: `zeroship-migrate-adapter`, linked for the

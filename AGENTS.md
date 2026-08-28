@@ -42,7 +42,7 @@ This is a deliberate stance — not a limitation. Pre-launch is the moment to ge
 | **Deploy artifact** (.zship + manifest + blob storage) | `docs/reference/zship.md` · `docs/architecture/blob-store.md` · `crates/bundle/` (manifest types, BlobStore, pack/unpack) |
 | **Auth** (OIDC IdP + login UI + RPs) | `docs/reference/auth.md` · `crates/auth/` · `crates/gateway/src/oidc_rp.rs` · gates: `tests/run_auth_suite.sh` (live PG) + `tests/e2e_auth_ui.sh` (real Chromium against the real auth binary) |
 | **The DB SDK** (`@zeroship/db`) | `docs/reference/db.md` · `crates/plugin-db/` |
-| **The migration DSL** (`@zeroship/migrate`, portable op DSL) | `docs/reference/migrate-op-dsl.md` · `sdks/migrate/` · `crates/zeroship-schema/` · `crates/zeroship-migrate-adapter/` · `crates/migrated/` · `third_party/zero-migrate/` (vendored engine) · `db/migrations-ts/` (JS DSL; sole platform migration source — no SQL/Flyway) |
+| **The migration DSL** (`@zeroship/migrate`, portable op DSL) | `docs/reference/migrate-op-dsl.md` · `sdks/migrate/` · `crates/zeroship-schema/` · `crates/zeroship-migrate-server/` · `crates/zeroship-migrate*/` (the engine crates, in-sourced) · `db/migrations-ts/` (JS DSL; sole platform migration source — no SQL/Flyway) |
 | **The KV SDK** (`@zeroship/kv`) | `docs/reference/kv.md` · `sdks/kv/` · `crates/plugin-kv/` |
 | **The RPC SDK / server functions** (`@zeroship/rpc`) | `docs/reference/rpc.md` · `sdks/rpc/` · `sdks/vite-plugin/src/{transform,rpc-registry,manifest}.ts` · `sdks/bootstrap/src/dispatcher.ts` |
 | **Durable workflows** (`@zeroship/workflows`, `env.workflows`) | `docs/reference/workflows.md` · `sdks/workflows/` · `crates/plugin-workflow/` · `crates/control/src/{workflow_instance_api.rs,cron/workflow_engine.rs}` · `crates/worker/src/handler.rs` |
@@ -102,7 +102,7 @@ Creator Platform                          App Runtime
 ────────────────                          ───────────
 Control Plane ───deploy bundle──────────→ Object Storage
               ───update routes──────────→ Gateway (HTTP pull every 5s)
-zeroship-migrated ─apply app migrations──→ PostgreSQL (per-app schema)
+zeroship-migrate-server ─apply app migrations──→ PostgreSQL (per-app schema)
 
 Auth Service ←──401 redirect────────────← Gateway (end-user not logged in)
              ───JWT cookie──────────────→ Gateway (validates per request)
@@ -120,8 +120,7 @@ crates/
 ├── core/             Inter-service wire types (RouteEntry, AppRecord, UsageReport, ControlEvent), typed_id, auth utils, observability
 ├── bundle/           .zship deploy artifact: Manifest types, BlobStore, BundleStore, tar.zst pack/unpack
 ├── zeroship-schema/  Shared schema authority — DDL builders, diff classifier, live introspection, sentinel codec. Leaf (no v8/runtime); reused by the migration engine (write/diff) + plugin-db's data plane (read/introspect).
-├── zeroship-migrate-adapter/ Bridges the vendored zero-migrate engine (third_party/zero-migrate submodule) to compio-postgres via a SqlSession newtype. PostgreSQL only — it applies pure DDL and REFUSES anything else, including the SQLite rebuild step. The engine is multi-dialect; this adapter is not, and nothing here drives its MySQL or SQLite backends.
-├── migrated/         Managed-policy creator migration *service* — applies app migrations under the operator-ceiling ⊓ creator-draft trust profile. (Engine itself: third_party/zero-migrate.)
+├── zeroship-migrate-server/ Managed-policy creator migration *service* — applies app migrations under the operator-ceiling ⊓ creator-draft trust profile. Its `session.rs` also carries `CompioPgSession`, the newtype bridging the `zeroship-migrate-*` engine crates to compio-postgres over their `SqlSession` seam. PostgreSQL only — it applies pure DDL and REFUSES anything else, including the SQLite rebuild step. The engine is multi-dialect; this host is not, and nothing here drives its MySQL or SQLite backends.
 ├── runtime/          V8 + compio event loop + fetch + WebSocket + crypto + auth context
 ├── runtime-macros/   #[v8_class] proc macro (V8 ObjectTemplate-backed classes)
 ├── plugin-db/        env.db.* native ops

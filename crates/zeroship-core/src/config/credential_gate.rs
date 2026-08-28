@@ -115,7 +115,7 @@ pub fn dev_escape_active() -> bool {
 /// [`crate::config::MIN_SECRET_BYTES`] (30 bytes against 32), which matters:
 /// a reader must not be able to conclude "the length floor catches it anyway",
 /// because the two secrets this gate exists for -- `ZEROSHIP_CONTROL_KEY` and
-/// `ZEROSHIP_MIGRATED_POLICY_SEAL_KEY` -- are
+/// `ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY` -- are
 /// [`crate::config::SecretStrength::Unrestricted`] and have no length floor at
 /// all. The sentinel branch, not the length branch, is what refuses them.
 pub const SERVICE_CREDENTIAL_SENTINEL: &str = "CHANGE_ME_ZEROSHIP_SERVICE_KEY";

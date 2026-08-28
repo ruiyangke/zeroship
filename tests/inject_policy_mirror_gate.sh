@@ -18,9 +18,9 @@
 #   Rust        concat!(include_str!("<its grants>"), include_str!("<fragment>"))
 #               rustc folds both at compile time, so the fragment's bytes are
 #               literally in the binary. Three consumers:
-#                 crates/zeroship-migrated/src/policy.rs       (deployed ceiling)
-#                 crates/zeroship-migrate-adapter/tests/smoke_apply_pg.rs
-#                 crates/zeroship-migrate-adapter/tests/author_and_apply_pg.rs
+#                 crates/zeroship-migrate-server/src/policy.rs       (deployed ceiling)
+#                 crates/zeroship-migrate-server/tests/smoke_apply_pg.rs
+#                 crates/zeroship-migrate-server/tests/author_and_apply_pg.rs
 #               The two plugin-db consumers were deleted with the engine
 #               dependency; see the EXPECTED_RUST_CONSUMERS note below.
 #   TypeScript  policies/codegen.mjs emits the fragment as a const into
@@ -143,7 +143,7 @@ EXPECTED_TS_CONSUMERS=2
 #
 # The predicate is an actual TOML assignment (`author_primary_key =` at the
 # start of a line), not the bare word. Prose that merely names the key -
-# crates/migrated/src/apply.rs's comments, the migrate guide's markdown table -
+# crates/zeroship-migrate-server/src/apply.rs's comments, the migrate guide's markdown table -
 # is correctly not a copy and is not counted.
 #
 # `git ls-files` prints paths relative to the repo root, so the grep has to run

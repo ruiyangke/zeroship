@@ -1,4 +1,4 @@
-//! zeroship-migrated - standalone creator migration service.
+//! zeroship-migrate-server - standalone creator migration service.
 
 use std::sync::Arc;
 
@@ -10,17 +10,17 @@ use zeroship_core::config::{
     audit_credentials, bootstrap_or_exit, mark_dev_escape_active, require_nonempty, BuildProfile,
     CheckConfigReport, CheckValue, CredentialPosture, CredentialVerdict, SubsystemCredential,
 };
-use zeroship_migrated::auth::ControlPlaneAuthenticator;
-use zeroship_migrated::config::{MigratedSettings, MigratedSettingsSources, DEFAULT_LOG_FILTER};
-use zeroship_migrated::policy::ManagedPolicyConfig;
-use zeroship_migrated::MigrationServiceState;
+use zeroship_migrate_server::auth::ControlPlaneAuthenticator;
+use zeroship_migrate_server::config::{MigrateServerSettings, MigrateServerSettingsSources, DEFAULT_LOG_FILTER};
+use zeroship_migrate_server::policy::ManagedPolicyConfig;
+use zeroship_migrate_server::MigrationServiceState;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 /// Operator-facing spelling of the migration-policy seal key.
 const POLICY_SEAL_KEY_LABEL: &str =
-    "ZEROSHIP_MIGRATED_POLICY_SEAL_KEY / --policy-seal-key-file";
+    "ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY / --policy-seal-key-file";
 /// Operator-facing spelling of the shared internal control key.
 const CONTROL_KEY_LABEL: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file";
 
@@ -37,7 +37,7 @@ const CONTROL_KEY_LABEL: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file";
 /// subsystem that does not exist. A blanket `enabled: true` here would refuse
 /// to start a service that needs nothing, which is exactly the outage the
 /// per-subsystem rule exists to prevent.
-fn migrated_credentials(settings: &MigratedSettings) -> Vec<SubsystemCredential<'_>> {
+fn migrated_credentials(settings: &MigrateServerSettings) -> Vec<SubsystemCredential<'_>> {
     vec![
         SubsystemCredential {
             subsystem: "migration-policy-seal",
@@ -58,13 +58,13 @@ fn migrated_credentials(settings: &MigratedSettings) -> Vec<SubsystemCredential<
 
 /// Apply the boot gate, or exit.
 fn enforce_migrated_credentials(
-    settings: &MigratedSettings,
+    settings: &MigrateServerSettings,
     overlay: &zeroship_core::config::ConfigSource,
     check_config: bool,
 ) -> CredentialPosture {
     let posture = audit_credentials(&migrated_credentials(settings));
     let verdict = posture.verdict(BuildProfile::current(), check_config);
-    if let Some(banner) = posture.banner("zeroship-migrated", overlay, verdict) {
+    if let Some(banner) = posture.banner("zeroship-migrate-server", overlay, verdict) {
         eprint!("{banner}");
         tracing::error!(
             subsystems = %posture
@@ -87,16 +87,16 @@ fn enforce_migrated_credentials(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (settings, boot) = bootstrap_or_exit::<MigratedSettings>(
-        MigratedSettingsSources::parse(),
+    let (settings, boot) = bootstrap_or_exit::<MigrateServerSettings>(
+        MigrateServerSettingsSources::parse(),
         DEFAULT_LOG_FILTER,
-        "migrated",
+        "migrate-server",
     );
     let check_config = *settings.check_config.get();
     let tmp_dir = settings.tmp_dir.get().clone();
 
     // THE BOOT GATE, and it runs BEFORE the dry-run return below. Until this
-    // moved, `zeroship-migrated --check-config` reached `report.emit` and
+    // moved, `zeroship-migrate-server --check-config` reached `report.emit` and
     // `return Ok(())` without ever validating `policy_seal_key` or
     // `control_key`: every credential guard this binary had sat further down,
     // at lines the dry run never executed. A dry run that exits 0 on a
@@ -185,7 +185,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let provision_database_url = settings.provision_database_url.expose_str().to_owned();
     if provision_database_url.trim().is_empty() {
         tracing::error!(
-            "migrated: --provision-database-url-file / ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL is required for per-app schema provisioning"
+            "migrated: --provision-database-url-file / ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL is required for per-app schema provisioning"
         );
         std::process::exit(1);
     }
@@ -198,7 +198,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         port = *settings.port.get(),
         control_key_present,
         tmp_dir = %tmp_dir.display(),
-        "starting zeroship-migrated"
+        "starting zeroship-migrate-server"
     );
     let auth_provider = match build_auth_provider(
         settings.auth_platform_issuer.get(),
@@ -231,7 +231,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     Ok(ntex::rt::System::build()
-        .name("zeroship-migrated")
+        .name("zeroship-migrate-server")
         .build(ntex::rt::DefaultRuntime)
         .block_on(async move {
             let (control_pg, control_conn) =
@@ -268,11 +268,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 policy_config,
             ));
             let bind_addr = format!("{}:{}", settings.bind.get(), settings.port.get());
-            tracing::info!(bind = %bind_addr, "zeroship-migrated listening");
+            tracing::info!(bind = %bind_addr, "zeroship-migrate-server listening");
             web::server(async move || {
                 web::App::new()
                     .state(state.clone())
-                    .configure(zeroship_migrated::configure)
+                    .configure(zeroship_migrate_server::configure)
             })
             .bind(&bind_addr)?
             .run()
@@ -286,7 +286,7 @@ fn build_policy_config(
 ) -> Result<ManagedPolicyConfig, String> {
     if policy_seal_key.is_empty() {
         return Err(
-            "--policy-seal-key-file / ZEROSHIP_MIGRATED_POLICY_SEAL_KEY is required for \
+            "--policy-seal-key-file / ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY is required for \
              shared-infra migration policy sealing."
                 .to_string(),
         );
@@ -330,7 +330,7 @@ mod tests {
         let err = build_policy_config("", 1)
             .expect_err("missing policy seal key must fail closed");
 
-        assert!(err.contains("--policy-seal-key-file / ZEROSHIP_MIGRATED_POLICY_SEAL_KEY"));
+        assert!(err.contains("--policy-seal-key-file / ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY"));
     }
 
     #[test]
@@ -349,19 +349,19 @@ mod tests {
         assert!(error.contains("ZEROSHIP_AUTH_PLATFORM_ISSUER"));
     }
 
-    /// Every environment variable name `zeroship-migrated` actually reads.
+    /// Every environment variable name `zeroship-migrate-server` actually reads.
     ///
     /// DERIVED, never listed - see the twin of this helper in
     /// `crates/control/src/main.rs` for why a list would defeat the point.
     fn env_names_migrated_reads() -> std::collections::BTreeSet<String> {
         let mut names = std::collections::BTreeSet::new();
-        let command = <MigratedSettingsSources as clap::CommandFactory>::command();
+        let command = <MigrateServerSettingsSources as clap::CommandFactory>::command();
         for arg in command.get_arguments() {
             if let Some(env) = arg.get_env() {
                 names.insert(env.to_string_lossy().into_owned());
             }
         }
-        for spec in MigratedSettings::SPECS {
+        for spec in MigrateServerSettings::SPECS {
             if let Some(env) = spec.env_name() {
                 names.insert(env);
             }
@@ -401,7 +401,7 @@ mod tests {
                 assert!(
                     readable.contains(&token),
                     "diagnostic {diagnostic:?} tells the operator to set {token}, \
-                     which zeroship-migrated does not read"
+                     which zeroship-migrate-server does not read"
                 );
             }
         }

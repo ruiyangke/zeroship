@@ -299,7 +299,7 @@ async fn build_test_state_with_admin_quota(
         stripe_secret_key: SecretString::new(String::new()),
         stripe_base_url: "https://api.stripe.com".to_string(),
         gateway_url: "http://127.0.0.1:9".to_string(),
-        migrated_url: "http://127.0.0.1:9".to_string(),
+        migrate_server_url: "http://127.0.0.1:9".to_string(),
         worker_urls: Vec::new(),
         worker_key: SecretString::new(String::new()),
         admin_limiter: Arc::new(RateLimiter::new(admin_quota)),

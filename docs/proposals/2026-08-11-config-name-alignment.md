@@ -51,7 +51,7 @@ It rejected config-rs, figment, confique, and a required primary config file
 does not reopen those choices.
 
 The initial server conformance set is `zeroship-control`, `zeroship-gate`,
-`zeroship-worker`, `zeroship-auth`, and `zeroship-migrated`.
+`zeroship-worker`, `zeroship-auth`, and `zeroship-migrate-server`.
 
 AMENDED 2026-08-12. That set is the CONVERSION order, not the scope. There are
 SIX server binaries and SEVEN targets classified `platform` in workspace
@@ -69,7 +69,7 @@ Migrated is a
 deployed long-running service and receives the shared overlay mount
 (`deploy/compose/docker-compose.yml:285-330`), but its parser currently ends
 without `--config` or `--check-config` and initializes tracing directly
-(`crates/migrated/src/main.rs:20-119`). The same declaration and environment
+(`crates/zeroship-migrate-server/src/main.rs:20-119`). The same declaration and environment
 access rules apply workspace-wide to other production zeroship processes. For
 example, the standalone scheduler has its own clap/env spellings
 (`crates/workflow-scheduler/src/main.rs:13-52`), while the deployed platform
@@ -192,7 +192,7 @@ That separation has produced concrete drift:
   also supplies `PROVISION_DATABASE_URL` to control
   (`deploy/compose/docker-compose.yml:204-209`) even though migrated is the
   parser that declares the provisioning DSN
-  (`crates/migrated/src/main.rs:40-47`).
+  (`crates/zeroship-migrate-server/src/main.rs:40-47`).
 
 The current secret merge API makes drift easy: `obtain_secret` accepts a
 free-form label, a clap-merged string, and an unrelated TOML string, then
@@ -305,7 +305,7 @@ setting; it does not preserve the current spelling as an alias.
 | `auth.postmark_webhook_password` | Secret | `--postmark-webhook-password-file` | `ZEROSHIP_AUTH_POSTMARK_WEBHOOK_PASSWORD` | `[auth] postmark_webhook_password` | `crates/auth/src/config.rs:498-514` |
 | `auth.public_url` | Operational | `--public-url` | `ZEROSHIP_AUTH_PUBLIC_URL` | `[auth] public_url` | `crates/auth/src/config.rs:348-360` |
 | `observability.log_filter` | Operational | `--observability-log-filter` | `ZEROSHIP_OBSERVABILITY_LOG_FILTER` | `[observability] log_filter` | current independent flag/env at `crates/core/src/observability.rs:70-78` and TOML field at `crates/core/src/config/file.rs:173-183` |
-| `migrated.provision_database_url` | Secret | `--provision-database-url-file` | `ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL` | `[migrated] provision_database_url` | `crates/migrated/src/main.rs:40-47` |
+| `migrate_server.provision_database_url` | Secret | `--provision-database-url-file` | `ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL` | `[migrated] provision_database_url` | `crates/zeroship-migrate-server/src/main.rs:40-47` |
 
 The transformation deliberately renames `--db` to the unambiguous
 `--database-url-file`, and it deliberately removes `DATABASE_URL`,
@@ -645,7 +645,7 @@ surface. The present parser locations are
 `crates/control/src/main.rs:38-399`,
 `crates/gateway/src/main.rs:25-204`,
 `crates/worker/src/main.rs:26-177`,
-`crates/migrated/src/main.rs:20-114`,
+`crates/zeroship-migrate-server/src/main.rs:20-114`,
 `crates/workflow-scheduler/src/main.rs:13-52`, and
 `crates/auth/src/config.rs:31-533`.
 
@@ -1007,7 +1007,7 @@ migration bin, and `tests/config_check_e2e.sh`. The current shared-bootstrap cal
 `crates/gateway/src/main.rs:277-291`,
 `crates/worker/src/main.rs:307-320`, and
 `crates/auth/src/main.rs:24-51`; migrated's direct path is
-`crates/migrated/src/main.rs:116-125`.
+`crates/zeroship-migrate-server/src/main.rs:116-125`.
 
 ### Step 3: Convert operational values
 
@@ -1020,7 +1020,7 @@ Blast radius: parser structs in `crates/control/src/main.rs:38-399`,
 `crates/gateway/src/main.rs:25-204`,
 `crates/worker/src/main.rs:26-177`, and
 `crates/auth/src/config.rs:31-533`; migrated at
-`crates/migrated/src/main.rs:20-114`; scheduler at
+`crates/zeroship-migrate-server/src/main.rs:20-114`; scheduler at
 `crates/workflow-scheduler/src/main.rs:13-52`; and the new exported config
 modules introduced in Step 2. Before editing, run
 `cargo run --quiet -p zeroship-config-contract -- inventory --format tsv` to
@@ -1077,7 +1077,7 @@ parsers and resolution blocks at `crates/control/src/main.rs:694-820`,
 `crates/gateway/src/main.rs:306-373`,
 `crates/worker/src/main.rs:328-380`, and
 `crates/auth/src/main.rs:324-445`; migrated's DSNs/keys at
-`crates/migrated/src/main.rs:31-55` and `crates/migrated/src/main.rs:98-105`;
+`crates/zeroship-migrate-server/src/main.rs:31-55` and `crates/zeroship-migrate-server/src/main.rs:98-105`;
 the platform migration one's manual DSN flag/read at
 `crates/zeroship-migrate-adapter/src/bin/zeroship-platform-migrate.rs:73-105`;
 its generated source in
@@ -1210,7 +1210,7 @@ than the proposed mechanism. A small test could compare every current
 `urn:zeroship:env:` target with the current clap/raw-read union, another could
 compare rendered Compose keys with per-service readers, and a focused change
 could add migrated's missing `--check-config`
-(`crates/migrated/src/main.rs:20-119`). The current TOML structs already
+(`crates/zeroship-migrate-server/src/main.rs:20-119`). The current TOML structs already
 reject unknown keys (`crates/core/src/config/file.rs:40-60`), current clap
 parsers already provide typed validation
 (`crates/control/src/main.rs:38-110` and

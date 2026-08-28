@@ -16,7 +16,7 @@
 # system-table `[[inject]]` rule - the seven system columns + three system indexes
 # + `["id"]` PK + `author_primary_key = "forbid"` - is NOT written here: it lives
 # once, in `policies/confined-system-shape.inject.toml` at the repo root, and
-# `crates/migrated/src/policy.rs` concatenates the two with
+# `crates/zeroship-migrate-server/src/policy.rs` concatenates the two with
 # `concat!(include_str!(..), include_str!(..))`. Read that file for the shape and
 # for why it is shared; loading this file alone gets a ceiling that injects
 # nothing.
@@ -53,7 +53,7 @@ scope = "all"
 #   migrated: invalid migration policy seal config: load operator ceiling:
 #   DeclaredOnlyNonDefault { key: "runtime.lock_timeout_ms" }
 #
-# so `zeroship-migrated` exited before binding its port and the deployed creator
+# so `zeroship-migrate-server` exited before binding its port and the deployed creator
 # migration path was dead. Found by tests/e2e_dev_vs_deployed_db.sh.
 #
 # The refusal is CORRECT and is the engine's II.6 gate. Every `runtime.*` knob is

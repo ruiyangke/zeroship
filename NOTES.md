@@ -189,8 +189,8 @@ Properties:
   section 4.2 materializes, so the two never disagree.
 
 The unmarked fallback also makes the rule safe for `authn`'s other consumer.
-`crates/migrated` uses the same `BearerVerifier`
-(`crates/migrated/src/main.rs:167`) against a deployment-configured DSN whose
+`crates/zeroship-migrate-server` uses the same `BearerVerifier`
+(`crates/zeroship-migrate-server/src/main.rs:167`) against a deployment-configured DSN whose
 role I could not confirm, so a token first presented to `migrated` must not
 depend on `migrated` being able to write. Under the fallback it does not.
 
@@ -270,9 +270,9 @@ provisioning and therefore what forces the design.
 
 ### 5.2 Section 4.1's worry about `migrated` was unfounded
 
-I wrote that `crates/migrated`'s DB role was unverifiable and let that shape the
+I wrote that `crates/zeroship-migrate-server`'s DB role was unverifiable and let that shape the
 read/write split. It is verifiable: `deploy/compose/docker-compose.yml:431`
-defaults `ZEROSHIP_MIGRATED_DATABASE_URL` to
+defaults `ZEROSHIP_MIGRATE_SERVER_DATABASE_URL` to
 `postgres://zeroship_control:zeroship_control@postgres:5432/zeroship`. So the
 reference deployment runs `migrated` as `zeroship_control` and the read is safe
 there for the same reason it is safe in control.
@@ -376,6 +376,6 @@ the total, and the unrelated crates failed for their own cache reasons.
 80 pointed at the cache; it read exactly like a real, broad regression.
 
 The structural check that settled it before the re-run: `zeroship-authn` is
-named in only two `Cargo.toml` files (`crates/control`, `crates/migrated`), and
+named in only two `Cargo.toml` files (`crates/control`, `crates/zeroship-migrate-server`), and
 neither `crates/gateway` nor `crates/authz` depends on `authn` or `control`. So
 those failures were not reachable from this diff whatever their cause.

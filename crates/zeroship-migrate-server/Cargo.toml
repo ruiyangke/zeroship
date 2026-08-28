@@ -1,16 +1,16 @@
 [package]
-name = "zeroship-migrated"
+name = "zeroship-migrate-server"
 version = "0.1.0"
 edition = "2021"
 description = "zeroship standalone creator migration service"
 
 [[package.metadata.zeroship-config.targets]]
-target = "zeroship-migrated"
+target = "zeroship-migrate-server"
 class = "platform"
 reason = "Deployed long-running migration service in the server configuration scope."
 
 [[bin]]
-name = "zeroship-migrated"
+name = "zeroship-migrate-server"
 path = "src/main.rs"
 
 [dependencies]
@@ -29,19 +29,18 @@ uuid = { workspace = true }
 zeroship-authz = { workspace = true }
 zeroship-authn = { workspace = true }
 zeroship-core = { workspace = true }
-# Phase F Stage 3: this service consumes ONLY the published `zeroship-migrate` engine
-# (vendored as a submodule at third_party/zeroship-migrate) plus the monorepo's
-# `zeroship-migrate-adapter` (the `CompioPgSession` mapping the platform's io_uring
-# PG driver onto the engine's driver-neutral `SqlSession` seam). The in-tree
-# `zeroship-migrate` (v6) dependency is GONE: this crate no longer links the
-# platform's migration source.
+# This service consumes ONLY the `zeroship-migrate` engine crates. It owns the
+# concrete driver producer itself, in `src/session.rs`: `CompioPgSession`, the
+# newtype mapping the platform's io_uring PG driver onto the engine's
+# driver-neutral `SqlSession` seam. The orphan rule needs that newtype to be LOCAL
+# to whichever crate implements the foreign trait, which this one does.
 #
 # The engine ships NO native Rust network PG driver — its PG apply path is generic
 # over `SqlSession`. `zeroship-migrate`'s default features light `host-pg` → the
 # `pg_seam` cfg (the generic `PostgresBackend<D>`, `IrAuthor::load_and_lower*`, the
-# `<D: SqlSession>` apply/journal/snapshot free functions). The adapter supplies the
-# concrete `CompioPgSession` producer; migrator-role + schema provisioning runs
-# inline over the wrapped raw compio `Client`.
+# `<D: SqlSession>` apply/journal/snapshot free functions). `session.rs` supplies
+# the concrete producer; migrator-role + schema provisioning runs inline over the
+# wrapped raw compio `Client`.
 zeroship-migrate = { workspace = true }
 # The managed-policy server composes the monorepo-owned confined/platform ceilings
 # against untrusted creator drafts. That requires the engine's Policy Decision Point
@@ -61,7 +60,6 @@ zeroship-migrate-backend = { workspace = true }
 # re-export the facade deliberately no longer carries.
 zeroship-migrate-postgres = { workspace = true }
 toml = { workspace = true }
-zeroship-migrate-adapter = { workspace = true }
 
 [dev-dependencies]
 # `apply_api_test` drives the REAL `ControlPlaneAuthenticator`, whose only
@@ -73,6 +71,17 @@ zeroship-migrate-adapter = { workspace = true }
 base64 = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["pkcs8", "pem", "rand_core"] }
 jsonwebtoken = { workspace = true }
+# The two live-PG session proofs (`smoke_apply_pg`, `author_and_apply_pg`) return
+# early when there is no test database (PG_TEST_URL unset), which is the normal
+# state in this repo's CI. The announcement goes through `skip`, not `eprintln!`:
+# the harness replays captured output only for a FAILING test, so an eprintln on an
+# early return is invisible on the green run that is exactly when it matters.
+zeroship-test-support = { workspace = true }
+# Authoring proof: run the zero-migrate recorder inside zeroship-runtime's V8 isolate
+# to author an ir_version:1 envelope from a `.ts` migration - the platform's own V8
+# (no Node in the loop). Dev-only: the library surface stays V8-free.
+zeroship-runtime = { workspace = true }
+v8 = { workspace = true }
 
 # ---------------------------------------------------------------------------
 # Live-database test gate
@@ -90,7 +99,7 @@ jsonwebtoken = { workspace = true }
 #
 # Covered in CI by one invocation, with no second list to drift from this one:
 #
-#     cargo test -p zeroship-migrated --features live-db-tests
+#     cargo test -p zeroship-migrate-server --features live-db-tests
 #
 # driven by `tests/run_billing_suite.sh` (the `billing-gate` job).
 [features]

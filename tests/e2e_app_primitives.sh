@@ -85,7 +85,7 @@ STRICT="${STRICT:-0}"
 ZEROSHIP_CONTROL_PORT=9099
 ZEROSHIP_WORKER_PORT=8087
 ZEROSHIP_GATEWAY_PORT=8001
-ZEROSHIP_MIGRATED_PORT=9098
+ZEROSHIP_MIGRATE_SERVER_PORT=9098
 PG_PORT=5443
 PG_CONTAINER="zs-e2e-pg"
 
@@ -129,7 +129,7 @@ echo "  zeroship E2E — app primitives over the edge (ISS-54/G1)"
 echo "============================================"
 
 # --- preflight -------------------------------------------------------------
-for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-migrated; do
+for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-migrate-server; do
   [ -x "$BIN/$b" ] || { echo "missing $BIN/$b - run cargo build --release"; exit 2; }
 done
 [ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { echo "missing the zero-migrate CLI - run: pnpm install && pnpm build && pnpm --filter zero-migrate-cli build"; exit 2; }
@@ -189,7 +189,7 @@ echo "=== Stage 2: boot authenticated stack ==="
 openssl genpkey -algorithm ed25519 -out "$WORK/signing-key.pem" 2>/dev/null
 chmod 600 "$WORK/signing-key.pem"
 
-for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT $ZEROSHIP_MIGRATED_PORT; do lsof -ti :$p 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
+for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT $ZEROSHIP_MIGRATE_SERVER_PORT; do lsof -ti :$p 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 
 ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$WORK/signing-key.pem"
 # The issuer control verifies the admin bearer against, on the same key the
@@ -201,7 +201,7 @@ e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DBURL"
 "$BIN/zeroship-control" --port $ZEROSHIP_CONTROL_PORT \
   --blob-store "$WORK/blobs" \
-  --migrated-url "http://localhost:$ZEROSHIP_MIGRATED_PORT" \
+  --migrate-server-url "http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT" \
  > "$WORK/control.log" 2>&1 &
 PIDS+=($!)
 for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
@@ -215,12 +215,12 @@ curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && pas
 # (`role "app_..._role" does not exist`) names a role whose only producer is
 # this service. It takes no signing key of its own: `zeroship migrate` posts to
 # control, which authorizes the caller's bearer and forwards the apply.
-"$BIN/zeroship-migrated" --port $ZEROSHIP_MIGRATED_PORT \
+"$BIN/zeroship-migrate-server" --port $ZEROSHIP_MIGRATE_SERVER_PORT \
   --tmp-dir "$WORK/migrated-tmp" \
  > "$WORK/migrated.log" 2>&1 &
 PIDS+=($!)
-for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_MIGRATED_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "http://localhost:$ZEROSHIP_MIGRATED_PORT/readyz" >/dev/null 2>&1 && pass "migrated healthy" || { fail "migrated unhealthy"; tail -20 "$WORK/migrated.log"; exit 1; }
+for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT/readyz" >/dev/null 2>&1 && pass "migrated healthy" || { fail "migrated unhealthy"; tail -20 "$WORK/migrated.log"; exit 1; }
 
 # worker: generated worker_key; direct /dispatch calls present its bearer;
 # shared blob-store with control (single-host shared-volume pattern);
@@ -284,7 +284,7 @@ echo "$DEP" | grep -q "deploy_hash" && pass "deployed db-todos .zship" || fail "
 # above. The two services differ: control's deploy handler stops at the Cedar
 # decision (crates/control/src/authz_guard.rs), which `admin.cedar` satisfies on
 # its own, while migrated ALSO requires a literal `role = 'owner'` row
-# (crates/migrated/src/auth.rs, `requires_app_owner`). A platform admin with no
+# (crates/zeroship-migrate-server/src/auth.rs, `requires_app_owner`). A platform admin with no
 # membership row can therefore deploy an app and be refused when migrating it.
 docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ('$APP_ID', '$OWNER', 'owner')

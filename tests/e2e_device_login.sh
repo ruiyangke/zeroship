@@ -64,8 +64,8 @@ export ZEROSHIP_WORKER_PORT="${ZEROSHIP_WORKER_PORT:-8481}"
 export ZEROSHIP_GATEWAY_PORT="${ZEROSHIP_GATEWAY_PORT:-8382}"
 export PG_PORT="${PG_PORT:-5481}"
 export PG_CONTAINER="${PG_CONTAINER:-zs-devlogin-pg}"
-MIGRATED_PORT="${MIGRATED_PORT:-9484}"
-MIGRATED_URL="http://localhost:$MIGRATED_PORT"
+MIGRATE_SERVER_PORT="${MIGRATE_SERVER_PORT:-9484}"
+MIGRATE_SERVER_URL="http://localhost:$MIGRATE_SERVER_PORT"
 
 AUTH_URL="http://localhost:$AUTH_PORT"
 CONTROL_URL="http://localhost:$ZEROSHIP_CONTROL_PORT"
@@ -146,7 +146,7 @@ psql_q() { docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -tAc "$1"
 step "Preflight"
 stack_preflight || exit 2
 [ -x "$BIN/zeroship-auth" ] || { fail "missing $BIN/zeroship-auth"; exit 2; }
-[ -x "$BIN/zeroship-migrated" ] || { fail "missing $BIN/zeroship-migrated"; exit 2; }
+[ -x "$BIN/zeroship-migrate-server" ] || { fail "missing $BIN/zeroship-migrate-server"; exit 2; }
 if [ ! -f "$ZSHIP" ]; then
   e2e_skipped "no $ZSHIP; run: pnpm --filter ./examples/auth-probe build"
   e2e_verdict || exit 1
@@ -196,7 +196,7 @@ curl -sf "$AUTH_URL/oauth2/.well-known/jwks.json" >/dev/null 2>&1 \
 "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
   --blob-store "$WORK/blobs" \
   --app-base-domain "localhost" \
-  --migrated-url "$MIGRATED_URL" \
+  --migrate-server-url "$MIGRATE_SERVER_URL" \
   > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 && break; sleep 1; done
@@ -209,12 +209,12 @@ curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 \
 # token the REAL OP issued through the device flow, so this is the leg that
 # covers the issuer, the device grant and the scope narrowing together rather
 # than the token shape alone.
-"$BIN/zeroship-migrated" --port "$MIGRATED_PORT" \
+"$BIN/zeroship-migrate-server" --port "$MIGRATE_SERVER_PORT" \
   --tmp-dir "$WORK/migrated-tmp" \
   > "$WORK/migrated.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "$MIGRATED_URL/readyz" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "$MIGRATED_URL/readyz" >/dev/null 2>&1 \
+for _ in $(seq 1 30); do curl -sf "$MIGRATE_SERVER_URL/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "$MIGRATE_SERVER_URL/readyz" >/dev/null 2>&1 \
   && pass "migrated ready" || { fail "migrated not ready"; tail -30 "$WORK/migrated.log"; exit 1; }
 
 "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 \
@@ -625,7 +625,7 @@ else
   # CONTROL, which authorizes before it forwards, so this arm says nothing about
   # migrated's own gate. That gate exists and is independent (migrated
   # re-verifies the bearer and additionally requires an `app_members` owner row,
-  # crates/migrated/src/auth.rs), but proving it would mean reaching migrated
+  # crates/zeroship-migrate-server/src/auth.rs), but proving it would mean reaching migrated
   # directly, which is exactly the topology this design removes. Read this as
   # "the creator-facing surface refuses", not "defence in depth was measured".
   FOREIGN_APP="$(node -e 'console.log(require("crypto").randomUUID())')"

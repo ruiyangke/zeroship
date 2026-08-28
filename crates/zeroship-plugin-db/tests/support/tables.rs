@@ -1,7 +1,7 @@
 //! Raw-SQL fixture tables for plugin-db's SQLite tests.
 //!
 //! plugin-db does not own DDL. `registerModel` is metadata; the schema authority
-//! is a separate process (`crates/zeroship-migrated` at deploy, the vite plugin's
+//! is a separate process (`crates/zeroship-migrate-server` at deploy, the vite plugin's
 //! dev apply locally). A test that wants to exercise the data plane therefore has
 //! to put the table there itself, and it does so by SPELLING THE SQL, not by
 //! calling a builder.

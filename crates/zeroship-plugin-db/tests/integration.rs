@@ -2007,7 +2007,7 @@ SELECT con.conname AS name, con.condeferrable AS def, con.condeferred AS init_de
 // `pg-test` image anywhere in the tree. The `rust` job deliberately
 // omits it (ci.yml, "they belong with the other live-database gates
 // rather than here"), but the live-DB gate runs
-// `--features zeroship-control/live-db-tests,zeroship-migrated/live-db-tests`
+// `--features zeroship-control/live-db-tests,zeroship-migrate-server/live-db-tests`
 // and this crate declared NO `live-db-tests` feature, so the deferral
 // named a destination that could not accept it. FIXED 2026-08-12: the
 // crate now declares `live-db-tests = ["test-helpers"]`, and
@@ -5436,7 +5436,7 @@ async fn workflow_journal_redeploy_grants_do_not_reopen_without_reprovision() {
                                          NOINHERIT NOREPLICATION NOBYPASSRLS; \
                END IF; \
              END $$",
-            owner = zeroship_migrated::provisioning::WORKFLOW_OWNER_ROLE,
+            owner = zeroship_migrate_server::provisioning::WORKFLOW_OWNER_ROLE,
         ),
         &[],
     )
@@ -5446,7 +5446,7 @@ async fn workflow_journal_redeploy_grants_do_not_reopen_without_reprovision() {
     // worker -- `PgStore::provision` holds no CREATE on the database. Call the
     // migration service's own statement rather than a CREATE SCHEMA of our own,
     // so the journal below is owned the way production owns it.
-    zeroship_migrated::provisioning::provision_workflow_journal_schema(&client, &app_id)
+    zeroship_migrate_server::provisioning::provision_workflow_journal_schema(&client, &app_id)
         .await
         .expect("provision the app workflow journal schema");
     zeroship_plugin_workflow::store::pg::PgStore::provision(&client, &app_id)
@@ -5484,7 +5484,7 @@ async fn workflow_journal_redeploy_grants_do_not_reopen_without_reprovision() {
             .await
             .expect("check journal table owner");
         let owner: String = owner_rows[0].get("owner");
-        // Bound to `zeroship-migrated`'s copy of the owner-role name while the
+        // Bound to `zeroship-migrate-server`'s copy of the owner-role name while the
         // writer is `plugin-workflow`'s private copy of it, so the two
         // duplicated constants disagreeing shows up here rather than as a
         // journal nobody can reach. Until 2026-08-20 this compared against
@@ -5492,7 +5492,7 @@ async fn workflow_journal_redeploy_grants_do_not_reopen_without_reprovision() {
         // before 2a44ea8ef removed `provision_owner_sql`.
         assert_eq!(
             owner,
-            zeroship_migrated::provisioning::WORKFLOW_OWNER_ROLE,
+            zeroship_migrate_server::provisioning::WORKFLOW_OWNER_ROLE,
             "journal owner for {table}"
         );
         // The security property the name is a proxy for: no role an app's own

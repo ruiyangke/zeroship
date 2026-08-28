@@ -64,7 +64,7 @@ _dev_secrets_missing() {
   # empty. Control still refuses every webhook while it is empty.
   for name in \
     ZEROSHIP_CONTROL_KEY ZEROSHIP_CONTROL_MASTER_KEY ZEROSHIP_WORKER_KEY \
-    ZEROSHIP_MIGRATED_POLICY_SEAL_KEY ZEROSHIP_GATEWAY_STASH_SIGNING_KEY \
+    ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY ZEROSHIP_GATEWAY_STASH_SIGNING_KEY \
     ZEROSHIP_PAIRWISE_SALT ZEROSHIP_AUTH_STASH_SIGNING_KEY ZEROSHIP_AUTH_TOTP_ENC_KEY; do
     grep -q "^${name}=" "$env_file" || printf '%s\n' "$name (variable)"
   done

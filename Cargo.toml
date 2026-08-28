@@ -224,18 +224,15 @@ zeroship-schema = { path = "crates/zeroship-schema" }
 # plan rather than merely discouraged. Nothing consumes it yet; porting
 # `zeroship-schema`'s runtime query builders onto it is a later step.
 zeroship-data-plan = { path = "crates/zeroship-data-plan" }
-# Phase F: the monorepo's native-PG producer (`CompioPgSession`) for the published
-# `zeroship-migrate` engine's driver-neutral `SqlSession` seam. This adapter — together
-# with the published `zeroship-migrate` engine below — is the sole migration path now;
-# the in-tree `crates/zeroship-migrate` engine has been deleted.
-zeroship-migrate-adapter = { path = "crates/zeroship-migrate-adapter" }
 # The `zeroship-migrate` engine, a full member of this workspace. It was a git submodule
 # pinned to a commit recorded here; its history was grafted in so the engine and its
 # consumers move together and a wire-format change is one commit, not two repos in
-# lockstep. The `zeroship-migrated` service consumes it via the adapter.
+# lockstep. The `zeroship-migrate-server` service consumes it directly: it owns the
+# native-PG producer (`CompioPgSession`) for the engine's driver-neutral `SqlSession`
+# seam in its own `src/session.rs`.
 zeroship-migrate = { path = "crates/zeroship-migrate" }
 # The engine's Policy Decision Point (the knob/rule/document model + composition
-# algebra) and its IR-side builtin registry. The `zeroship-migrated` managed-policy
+# algebra) and its IR-side builtin registry. The `zeroship-migrate-server` managed-policy
 # server composes the monorepo-owned confined/platform ceilings against untrusted
 # creator drafts through these directly (`compose_strict` + `RootCeiling` +
 # `builtin_registry`); the top-level `zeroship-migrate` facade re-exports only the seal +
@@ -269,7 +266,7 @@ zeroship-workflow-scheduler = { path = "crates/zeroship-workflow-scheduler" }
 zeroship-control = { path = "crates/zeroship-control" }
 zeroship-gateway = { path = "crates/zeroship-gateway" }
 zeroship-worker = { path = "crates/zeroship-worker" }
-zeroship-migrated = { path = "crates/zeroship-migrated" }
+zeroship-migrate-server = { path = "crates/zeroship-migrate-server" }
 zeroship-auth = { path = "crates/zeroship-auth" }
 zeroship-authn = { path = "crates/zeroship-authn" }
 zeroship-authz = { path = "crates/zeroship-authz" }

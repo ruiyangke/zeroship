@@ -7,7 +7,7 @@
 //!
 //!   * `zeroship-auth` SERVES a provider. `Native` means it runs its own
 //!     OAuth2/OIDC OP; `Supabase` means it drives browser-side GoTrue instead.
-//!   * `zeroship-control`, `zeroship-authn` and `zeroship-migrated` VERIFY
+//!   * `zeroship-control`, `zeroship-authn` and `zeroship-migrate-server` VERIFY
 //!     tokens through [`crate::auth_provider`], which the auth service does not
 //!     use at all. `Native` means the platform OP is the issuer they trust.
 //!

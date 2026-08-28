@@ -1081,7 +1081,7 @@ the SQLite rebuild apply end-to-end in
 `ir_rename_sqlite_basic.rs`).
 
 **What is not yet wired for routine production deploy.** Creator-app Postgres
-migrations are applied by the standalone `zeroship-migrated` service, not by the
+migrations are applied by the standalone `zeroship-migrate-server` service, not by the
 deleted in-control deploy-time applier. The routine
 `POST /v1/apps/{id}/migrations/apply` flow uses `Approval::None`, so it refuses
 an online rename's approval-gated phase before it can complete; approved

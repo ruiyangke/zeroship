@@ -15,12 +15,12 @@ use zeroship_core::config::{
 use zeroship_core::observability::LogFormat;
 
 /// Tracing directive applied when nothing supplies `observability.log_filter`.
-pub const DEFAULT_LOG_FILTER: &str = "info,zeroship_migrated=debug";
+pub const DEFAULT_LOG_FILTER: &str = "info,zeroship_migrate_server=debug";
 
 /// The controls every migration-service launch resolves before anything else.
-#[zeroship_config(binary = "zeroship-migrated", scope = "migrated")]
+#[zeroship_config(binary = "zeroship-migrate-server", scope = "migrate_server")]
 #[derive(Debug)]
-pub struct MigratedSettings {
+pub struct MigrateServerSettings {
     /// Optional shared config overlay path.
     #[config(shared = CONFIG)]
     pub config: BootstrapControl<Option<PathBuf>>,
@@ -47,19 +47,19 @@ pub struct MigratedSettings {
     pub log_format: Operational<LogFormat>,
 
     /// HTTP listen port.
-    #[config(name = "migrated.port", default = 9091)]
+    #[config(name = "migrate_server.port", default = 9091)]
     pub port: Operational<u16>,
 
     /// Address to bind.
-    #[config(name = "migrated.bind", default = "127.0.0.1".to_owned())]
+    #[config(name = "migrate_server.bind", default = "127.0.0.1".to_owned())]
     pub bind: Operational<String>,
 
     /// Directory for staged request migration files.
-    #[config(name = "migrated.tmp_dir", default = std::env::temp_dir().join("zeroship-migrated"))]
+    #[config(name = "migrate_server.tmp_dir", default = std::env::temp_dir().join("zeroship-migrate-server"))]
     pub tmp_dir: Operational<PathBuf>,
 
     /// Active managed ceiling version stamped into sealed migration profiles.
-    #[config(name = "migrated.policy_ceiling_version", default = 1)]
+    #[config(name = "migrate_server.policy_ceiling_version", default = 1)]
     pub policy_ceiling_version: Operational<u64>,
 
     /// Expected OAuth audience for accepted bearer tokens.
@@ -82,11 +82,11 @@ pub struct MigratedSettings {
     /// Secret-classed by grammar: a DSN admits userinfo, so the type cannot
     /// depend on whether a particular deployment's value happens to carry a
     /// password.
-    #[config(name = "migrated.database_url")]
+    #[config(name = "migrate_server.database_url")]
     pub database_url: Secret<String>,
 
     /// Privileged `PostgreSQL` DSN used to provision/apply per-app migrations.
-    #[config(name = "migrated.provision_database_url")]
+    #[config(name = "migrate_server.provision_database_url")]
     pub provision_database_url: Secret<String>,
 
     /// Admin/control API shared secret.
@@ -94,11 +94,11 @@ pub struct MigratedSettings {
     pub control_key: Secret<String>,
 
     /// HMAC key used to seal server-composed migration policy profiles.
-    #[config(name = "migrated.policy_seal_key")]
+    #[config(name = "migrate_server.policy_seal_key")]
     pub policy_seal_key: Secret<String>,
 }
 
-impl OverlaySelector for MigratedSettingsSources {
+impl OverlaySelector for MigrateServerSettingsSources {
     fn overlay_path(&self) -> Option<&Path> {
         self.config.as_deref()
     }
@@ -108,7 +108,7 @@ impl OverlaySelector for MigratedSettingsSources {
     }
 }
 
-impl ObservabilityControls for MigratedSettings {
+impl ObservabilityControls for MigrateServerSettings {
     fn log_filter(&self) -> &str {
         self.log_filter.get()
     }
@@ -123,15 +123,15 @@ impl ObservabilityControls for MigratedSettings {
 mod tests {
     use clap::Parser;
 
-    use super::MigratedSettingsSources;
+    use super::MigrateServerSettingsSources;
 
     #[test]
     fn migrated_now_carries_the_same_bootstrap_controls_as_its_siblings() {
         // Before this conversion migrated had no --config, no --no-config and
         // no --check-config at all, which is why tests/config_check_e2e.sh
         // could not exercise it.
-        let sources = MigratedSettingsSources::try_parse_from([
-            "zeroship-migrated",
+        let sources = MigrateServerSettingsSources::try_parse_from([
+            "zeroship-migrate-server",
             "--check-config",
             "--no-config",
             "--check-config-format",
@@ -147,8 +147,8 @@ mod tests {
 
     #[test]
     fn migrated_cli_rejects_deleted_security_relaxation_flag() {
-        let error = MigratedSettingsSources::try_parse_from([
-            "zeroship-migrated",
+        let error = MigrateServerSettingsSources::try_parse_from([
+            "zeroship-migrate-server",
             "--dev-insecure",
         ])
         .expect_err("deleted --dev-insecure flag must be rejected");
@@ -160,8 +160,8 @@ mod tests {
     // existed before this conversion must be GONE, not merely discouraged.
     #[test]
     fn a_secret_has_a_path_flag_and_no_value_flag() {
-        let sources = MigratedSettingsSources::try_parse_from([
-            "zeroship-migrated",
+        let sources = MigrateServerSettingsSources::try_parse_from([
+            "zeroship-migrate-server",
             "--policy-seal-key-file",
             "/run/secrets/seal",
             "--control-key-file",
@@ -179,7 +179,7 @@ mod tests {
 
         for value_flag in ["--policy-seal-key", "--control-key", "--db", "--provision-db"] {
             let error =
-                MigratedSettingsSources::try_parse_from(["zeroship-migrated", value_flag, "x"])
+                MigrateServerSettingsSources::try_parse_from(["zeroship-migrate-server", value_flag, "x"])
                     .expect_err("a secret value flag must not exist");
             assert_eq!(
                 error.kind(),

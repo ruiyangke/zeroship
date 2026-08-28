@@ -228,7 +228,7 @@ pub struct OverlayLeaves {
 }
 
 impl OverlayLeaves {
-    /// Parse `crates/core/src/config/file.rs` into dotted leaf paths.
+    /// Parse `crates/zeroship-core/src/config/file.rs` into dotted leaf paths.
     ///
     /// # Errors
     ///

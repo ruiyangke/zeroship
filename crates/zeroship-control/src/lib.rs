@@ -500,7 +500,7 @@ pub struct AppState {
     /// construction: `migrated` holds the superuser provisioning DSN and binds
     /// loopback everywhere we ship it, so this hop is the only creator-reachable
     /// route to the migration service.
-    pub migrated_url: String,
+    pub migrate_server_url: String,
     /// Worker HTTP base URLs used for admin log fan-out.
     pub worker_urls: Vec<String>,
     /// Shared secret for worker admin endpoints.

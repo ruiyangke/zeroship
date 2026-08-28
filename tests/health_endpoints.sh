@@ -51,7 +51,7 @@
 #   ./tests/health_endpoints.sh
 #
 # Requires: docker, openssl, curl, lsof; a release build of zeroship-control,
-#   zeroship-gate, zeroship-worker, zeroship-auth and zeroship-migrated; and
+#   zeroship-gate, zeroship-worker, zeroship-auth and zeroship-migrate-server; and
 #   the zero-migrate CLI, built by
 #   pnpm install && pnpm build && pnpm --filter zero-migrate-cli build.
 # ============================================================================
@@ -66,7 +66,7 @@ export ZEROSHIP_WORKER_PORT=8102
 export ZEROSHIP_GATEWAY_PORT=8016
 export PG_PORT=5458
 export PG_CONTAINER="zs-e2e-health-pg"
-MIGRATED_PORT=9131
+MIGRATE_SERVER_PORT=9131
 AUTH_PORT=9134
 GATEWAY_DOWN_PORT=8017
 # A port nothing listens on. Both down cases point a dependency here.
@@ -120,7 +120,7 @@ assert_healthy_pair() {
 }
 
 echo "=== Build check ==="
-for b in zeroship-control zeroship-gate zeroship-worker zeroship-auth zeroship-migrated; do
+for b in zeroship-control zeroship-gate zeroship-worker zeroship-auth zeroship-migrate-server; do
   [ -x "$BIN/$b" ] || { fail "missing $BIN/$b - run: cargo build --release"; exit 2; }
 done
 [ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { fail "missing the zero-migrate CLI - run: pnpm install && pnpm build && pnpm --filter zero-migrate-cli build"; exit 2; }
@@ -139,7 +139,7 @@ stack_workspace || { fail "stack_workspace failed"; exit 1; }
 stack_pg_up || { fail "stack_pg_up failed"; exit 1; }
 
 for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT \
-         $MIGRATED_PORT $AUTH_PORT $GATEWAY_DOWN_PORT; do
+         $MIGRATE_SERVER_PORT $AUTH_PORT $GATEWAY_DOWN_PORT; do
   lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 done
 
@@ -173,12 +173,12 @@ done
 
 echo ""
 echo "=== Stack: migrated + auth ==="
-"$BIN/zeroship-migrated" --port "$MIGRATED_PORT" \
+"$BIN/zeroship-migrate-server" --port "$MIGRATE_SERVER_PORT" \
   --tmp-dir "$WORK/migrated-tmp" \
   > "$WORK/migrated.log" 2>&1 &
 EXTRA_PIDS+=($!)
 for _ in $(seq 1 30); do
-  [ "$(code "http://localhost:$MIGRATED_PORT/readyz")" = "200" ] && break; sleep 1
+  [ "$(code "http://localhost:$MIGRATE_SERVER_PORT/readyz")" = "200" ] && break; sleep 1
 done
 
 AUTH_URL="http://localhost:$AUTH_PORT"
@@ -201,7 +201,7 @@ echo "=== The pair, on every platform service ==="
 assert_healthy_pair "control " "http://localhost:$ZEROSHIP_CONTROL_PORT"
 assert_healthy_pair "gateway " "http://localhost:$ZEROSHIP_GATEWAY_PORT"
 assert_healthy_pair "worker  " "http://localhost:$ZEROSHIP_WORKER_PORT"
-assert_healthy_pair "migrated" "http://localhost:$MIGRATED_PORT"
+assert_healthy_pair "migrated" "http://localhost:$MIGRATE_SERVER_PORT"
 assert_healthy_pair "auth    " "$AUTH_URL"
 
 echo ""
@@ -244,7 +244,7 @@ docker stop "$PG_CONTAINER" >/dev/null 2>&1 \
 # serving the 200 it cached a moment ago.
 sleep 4
 
-for svc in "control :$ZEROSHIP_CONTROL_PORT" "migrated:$MIGRATED_PORT" "auth    :$AUTH_PORT"; do
+for svc in "control :$ZEROSHIP_CONTROL_PORT" "migrated:$MIGRATE_SERVER_PORT" "auth    :$AUTH_PORT"; do
   name="${svc%%:*}"; port="${svc##*:}"
   C="$(code "http://localhost:$port/healthz")"
   [ "$C" = "200" ] && pass "$name /healthz still 200 with Postgres gone" \

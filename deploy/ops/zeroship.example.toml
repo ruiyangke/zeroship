@@ -161,7 +161,7 @@ broker_secret_file = "/etc/zeroship/secrets/broker_secret"
 database_url = "urn:zeroship:file:/etc/zeroship/secrets/worker_database_url"
 kv_url = "urn:zeroship:file:/etc/zeroship/secrets/kv_url"
 
-[migrated]
+[migrate_server]
 database_url = "urn:zeroship:file:/etc/zeroship/secrets/migrated_database_url"
 provision_database_url = "urn:zeroship:file:/etc/zeroship/secrets/provision_database_url"
 policy_seal_key = "urn:zeroship:file:/etc/zeroship/secrets/policy_seal_key"

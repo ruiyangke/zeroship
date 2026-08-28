@@ -97,7 +97,7 @@ if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
 fi
 
 # --- preflight: binaries + tooling + built example -------------------------
-for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-mock-stripe zeroship-migrated; do
+for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-mock-stripe zeroship-migrate-server; do
   [ -x "$BIN/$b" ] || { echo "missing $BIN/$b - run cargo build --release"; exit 2; }
 done
 [ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { echo "missing the zero-migrate CLI - run: pnpm install && pnpm build && pnpm --filter zero-migrate-cli build"; exit 2; }
@@ -129,13 +129,13 @@ JOSE_JS="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index
 # container name is the thing that was shared, not the database inside it.
 # shellcheck source=tests/lib/e2e_ports.sh
 source "$ROOT/tests/lib/e2e_ports.sh"
-# ZEROSHIP_MIGRATED_PORT is in this list because zeroship-migrated applies the
+# ZEROSHIP_MIGRATE_SERVER_PORT is in this list because zeroship-migrate-server applies the
 # probe's committed migrations to its per-app schema. Without it env.db has no
 # table and every insert fails -- which is exactly the state this harness
 # shipped in until 2026-08-11, undetected because both env.db guards were
 # unfailable (eda51b973).
 zs_ports_reserve ZEROSHIP_CONTROL_PORT ZEROSHIP_WORKER_PORT ZEROSHIP_GATEWAY_PORT \
-                 ZEROSHIP_MIGRATED_PORT PG_PORT MOCK_PORT REDPANDA_PORT || exit 1
+                 ZEROSHIP_MIGRATE_SERVER_PORT PG_PORT MOCK_PORT REDPANDA_PORT || exit 1
 # pid + nanoseconds, the same token shape tests/lib/scratch_db.sh uses: pid is
 # unique among live processes and the clock separates a reused pid from the run
 # that held it before.
@@ -145,7 +145,7 @@ RP_CONTAINER="zs-e2e-billing-redpanda-$RUN_TOKEN"
 ZEROSHIP_WORKER_THREADS=2
 DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"
 CONTROL_URL="http://localhost:$ZEROSHIP_CONTROL_PORT"
-MIGRATED_URL="http://localhost:$ZEROSHIP_MIGRATED_PORT"
+MIGRATE_SERVER_URL="http://localhost:$ZEROSHIP_MIGRATE_SERVER_PORT"
 MOCK_URL="http://127.0.0.1:$MOCK_PORT"
 # The worker producer and control's forwarder/recompute consumers share ONE topic.
 RP_BROKERS="127.0.0.1:$REDPANDA_PORT"
@@ -445,14 +445,14 @@ curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 \
 e2e_assert_usage_producer "$WORK/gate.log" "gateway"
 
 # The migration service. Same invocation as tests/e2e_db_app_end_to_end.sh.
-"$BIN/zeroship-migrated" --port "$ZEROSHIP_MIGRATED_PORT" \
+"$BIN/zeroship-migrate-server" --port "$ZEROSHIP_MIGRATE_SERVER_PORT" \
   --tmp-dir "$WORK/migrated-tmp" \
   > "$WORK/migrated.log" 2>&1 &
 echo $! >> "$PIDFILE"
-for _ in $(seq 1 30); do curl -sf "$MIGRATED_URL/readyz" >/dev/null 2>&1 && break; sleep 1; done
-curl -sf "$MIGRATED_URL/readyz" >/dev/null 2>&1 \
-  && pass "zeroship-migrated healthy (applies the probe's committed migrations)" \
-  || { fail "zeroship-migrated unhealthy"; tail -30 "$WORK/migrated.log"; exit 1; }
+for _ in $(seq 1 30); do curl -sf "$MIGRATE_SERVER_URL/readyz" >/dev/null 2>&1 && break; sleep 1; done
+curl -sf "$MIGRATE_SERVER_URL/readyz" >/dev/null 2>&1 \
+  && pass "zeroship-migrate-server healthy (applies the probe's committed migrations)" \
+  || { fail "zeroship-migrate-server unhealthy"; tail -30 "$WORK/migrated.log"; exit 1; }
 
 # ===========================================================================
 echo ""
@@ -494,12 +494,12 @@ SQL
 # POST /api/apps above is what does.
 write_apply_request || { fail "could not record migration IR"; exit 1; }
 APPLY_CODE="$(curl -s -o "$WORK/apply-response.json" -w '%{http_code}' \
-  -X POST "$MIGRATED_URL/v1/apps/$APP/migrations/apply" \
+  -X POST "$MIGRATE_SERVER_URL/v1/apps/$APP/migrations/apply" \
   -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" \
   --data-binary @"$WORK/apply-migrations.json")"
 APPLIED="$(jget '.applied.length' < "$WORK/apply-response.json")"
 if [ "$APPLY_CODE" = "200" ] && [ -n "$APPLIED" ] && [ "$APPLIED" -ge 1 ] 2>/dev/null; then
-  pass "zeroship-migrated applied the probe's migrations (applied=$APPLIED)"
+  pass "zeroship-migrate-server applied the probe's migrations (applied=$APPLIED)"
 else
   fail "migration apply failed (http=$APPLY_CODE): $(cat "$WORK/apply-response.json")"
   tail -30 "$WORK/migrated.log"; exit 1
@@ -724,7 +724,7 @@ if [ -n "$CPU" ] && [ "$CPU" -ge 0 ] 2>/dev/null; then pass "cpu_us present (syn
 # schema builds a servable .zship whose manifest carries no runtime_descriptor,
 # so nothing installs on env.db and every insert fails -- which is exactly what
 # `probe db write ok=false` above was reporting. This harness also never invokes
-# zeroship-migrated (zero references in the file), unlike
+# zeroship-migrate-server (zero references in the file), unlike
 # tests/e2e_db_app_end_to_end.sh, whose db-hitcounter has a committed
 # migrations/20260711000000_create_hits.ts and an apply step.
 #

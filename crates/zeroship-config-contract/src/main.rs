@@ -100,7 +100,7 @@ fn check_overlay_schema(specs: &[ConfigSpec], overlay: &OverlayLeaves) -> usize 
 
 /// Read and parse the overlay schema, or exit.
 fn overlay_leaves(root: &Path) -> OverlayLeaves {
-    let overlay_path = root.join("crates/core/src/config/file.rs");
+    let overlay_path = root.join("crates/zeroship-core/src/config/file.rs");
     match std::fs::read_to_string(&overlay_path) {
         Ok(source) => match OverlayLeaves::from_source(&overlay_path.display().to_string(), &source)
         {
@@ -126,7 +126,7 @@ fn overlay_leaves(root: &Path) -> OverlayLeaves {
 /// of the tree would produce a SHORTER row set, and a shorter set on one side of
 /// an equality check is exactly the failure mode that reads as agreement.
 fn extract_rows(root: &Path) -> Vec<InventoryRow> {
-    let overlay_path = root.join("crates/core/src/config/file.rs");
+    let overlay_path = root.join("crates/zeroship-core/src/config/file.rs");
     let overlay = match std::fs::read_to_string(&overlay_path) {
         Ok(source) => match OverlayLeaves::from_source(&overlay_path.display().to_string(), &source)
         {
@@ -554,7 +554,7 @@ fn inventory(args: &[String]) {
         std::process::exit(2);
     }
 
-    let overlay_path = root.join("crates/core/src/config/file.rs");
+    let overlay_path = root.join("crates/zeroship-core/src/config/file.rs");
     let overlay = match std::fs::read_to_string(&overlay_path) {
         Ok(source) => match OverlayLeaves::from_source(&overlay_path.display().to_string(), &source)
         {

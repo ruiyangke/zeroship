@@ -23,9 +23,17 @@ use zeroship_migrate::driver::SqlSession;
 use zeroship_migrate::{
     effective_policy_from_charter_toml, resolve_create_table_policy, Approval, EffectivePolicy,
     ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine, MigrationIr,
-    PostgresBackend, SqlDialect,
 };
-use zeroship_migrate_adapter::CompioPgSession;
+// PG-shaped surfaces live in the vendor crate: the neutrality refactor moved
+// `PostgresBackend`, the dialect id and the journal reader off the facade, and the
+// dialect enum (`SqlDialect::Postgres`) became a `DialectId` const.
+use zeroship_migrate_postgres::backend::journal_sql::applied as read_journal;
+use zeroship_migrate_postgres::{PostgresBackend, DIALECT as POSTGRES};
+use zeroship_migrate_server::session::CompioPgSession;
+
+/// The vendor backends handed to every engine entry point. `zeroship-migrate` is the
+/// composition root; a host takes the set rather than naming vendors itself.
+const VENDORS: zeroship_migrate_backend::registry::VendorSet = zeroship_migrate::shipping_vendors();
 
 /// The confined table-shape ceiling (the seven system columns + three indexes +
 /// `["id"]` PK + `author_primary_key = "forbid"`) — a `RootCharter` document composed
@@ -101,7 +109,7 @@ fn cfg_for(tok: &str) -> (ExecutorConfig, EffectivePolicy) {
         project_schema,
         effective.clone(),
     );
-    c.pg.meta_schema = format!("meta_{tok}");
+    c.confinement.meta_schema = format!("meta_{tok}");
     (c, effective)
 }
 
@@ -124,7 +132,7 @@ async fn drop_schemas(session: &CompioPgSession, cfg: &ExecutorConfig) {
     let _ = session
         .batch(&format!(
             "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
-            cfg.project_schema, cfg.pg.meta_schema
+            cfg.project_schema, cfg.confinement.meta_schema
         ))
         .await;
 }
@@ -204,21 +212,15 @@ async fn ir_envelope_lowers_and_applies_over_native_compio_seam() {
     );
 
     // (b→c) The REAL fail-closed gate + lower, Postgres dialect.
-    let author = IrAuthor::new(
-        &cfg.project_schema,
-        APP,
-        SqlDialect::Postgres,
-        &effective,
-    );
+    let author = IrAuthor::new(VENDORS, &cfg.project_schema, APP, &POSTGRES, &effective);
     let migrations = author
         .load_and_lower(&ir, APP, &Default::default(), &LiveSchema::default())
         .expect("a valid IR envelope must lower on Postgres");
     assert!(!migrations.is_empty(), "lowering must yield migration(s)");
 
     // (c) PostgresBackend over the compio adapter + MigrationEngine.
-    let engine = MigrationEngine::new();
-    let guard_cfg =
-        GuardConfig::confined_with_effective(cfg.project_schema.clone(), effective.clone());
+    let engine = MigrationEngine::new(VENDORS);
+    let guard_cfg = GuardConfig::from_policy(effective.clone(), POSTGRES);
     let plan = engine.plan(&migrations, &guard_cfg);
     assert!(
         plan.denied.is_empty(),
@@ -254,7 +256,7 @@ async fn ir_envelope_lowers_and_applies_over_native_compio_seam() {
     // (The confined table-shape policy injects system-column/index migrations, so
     // the envelope lowers to `migrations.len()` migrations, not one — the journal
     // row count must match the number applied.)
-    let applied = zeroship_migrate::applied(&session, &cfg)
+    let applied = read_journal(&session, &cfg)
         .await
         .expect("journal read over the seam");
     assert_eq!(
@@ -270,7 +272,7 @@ async fn ir_envelope_lowers_and_applies_over_native_compio_seam() {
         .await
         .expect("idempotent re-apply");
     assert!(out2.is_noop(), "second apply is a no-op");
-    let applied2 = zeroship_migrate::applied(&session, &cfg)
+    let applied2 = read_journal(&session, &cfg)
         .await
         .expect("journal re-read");
     assert_eq!(

@@ -143,7 +143,7 @@ async fn exec_register_model(app_id: &str) -> Result<(), DbError> {
     // NEITHER ARM APPLIES SCHEMA, and the reason is the same on both: something
     // else already did, before this code could run.
     //
-    // On PostgreSQL the `zeroship-migrated` service creates and migrates the
+    // On PostgreSQL the `zeroship-migrate-server` service creates and migrates the
     // per-app schema (and provisions the migration/runtime roles) before
     // go-live, via `POST /v1/apps/{id}/migrations/apply`. On SQLite the vite
     // dev server applies the committed migrations to the app file before it

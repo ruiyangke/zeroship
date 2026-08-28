@@ -64,7 +64,7 @@ fn parse_worker_urls(raw: &str) -> Vec<String> {
 /// unconditional today - route sync, worker dispatch, the OIDC stash and the
 /// pairwise anchor are not optional in a gateway that serves anything - and
 /// `enabled: true` states that as a positive claim rather than leaving the
-/// dimension absent. `crates/migrated` is where a `false` actually appears.
+/// dimension absent. `crates/zeroship-migrate-server` is where a `false` actually appears.
 ///
 /// Each row carries the validator `main` runs, so
 /// [`zeroship_core::config::audit_credentials`] runs the check itself rather

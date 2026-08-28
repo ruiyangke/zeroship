@@ -14,7 +14,7 @@
 //! exactly the way binding did. Both are covered below.
 //!
 //! This is not a theoretical shape. `sdks/migrate` can create domains, and
-//! `crates/zeroship-migrate-adapter` already carries a `resolve_domain()`
+//! `crates/zeroship-migrate-server/src/session.rs` already carries a `resolve_domain()`
 //! helper for `information_schema`'s `cardinal_number`, `sql_identifier` and
 //! `yes_or_no` -- all domains -- because it hit the decode half of the same
 //! problem one layer up.

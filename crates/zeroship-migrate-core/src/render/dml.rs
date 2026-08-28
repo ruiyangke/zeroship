@@ -407,7 +407,7 @@ mod tests {
         // spelling them is its job.
         //
         // The `-` is required rather than a bare `starts_with`, because
-        // `zeroship-migrated` — the policy server, no relation — extends the prefix
+        // `zeroship-migrate-server` — the policy server, no relation — extends the prefix
         // without a separator and a prefix match would drag it in.
         const ENGINE: &str = "zeroship-migrate";
         let is_engine = |name: &str| name == ENGINE || name.starts_with("zeroship-migrate-");
