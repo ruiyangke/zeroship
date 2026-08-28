@@ -213,7 +213,8 @@ impl PoolConfig {
     /// is discarded when it is returned, not only when background maintenance
     /// sweeps. So this setting takes effect on a pool that never called
     /// [`Pool::start_housekeeper`] - unlike [`PoolConfig::idle_timeout`], which
-    /// does not. Measured, and pinned by `tests/pool_lifetime.rs`.
+    /// does not. No-housekeeper checkout rotation is measured and pinned by
+    /// `tests/suite/pool_lifetime.rs`.
     pub fn max_lifetime(&mut self, max_lifetime: Duration) -> &mut Self {
         self.max_lifetime = max_lifetime;
         self
@@ -743,9 +744,11 @@ impl Transport {
         token.cancel_query_confirmed(NoTls).await
     }
 
-    /// Retry [`Transport::connect_one`] up to 3 times with 100ms, 400ms, 1.6s
-    /// backoff. Only used for pool warm-up - `get_inner`'s on-demand connect
-    /// stays single-shot to keep the latency budget tight.
+    /// Retry [`Transport::connect_one`] up to 3 times, sleeping 100ms and then
+    /// 400ms between failures. The third attempt is never followed by a sleep,
+    /// so the computed 1.6s delay is only ever discarded. Only used for pool
+    /// warm-up - `get_inner`'s on-demand connect stays single-shot to keep the
+    /// latency budget tight.
     async fn connect_with_retry(&self) -> Result<Client, Error> {
         let mut delay = Duration::from_millis(100);
         let mut last_err: Option<Error> = None;
@@ -901,9 +904,9 @@ impl Pool {
     ///
     /// Opens the configured minimum idle count upfront, or one connection when
     /// that count is zero, so the first burst of traffic does not pay full
-    /// connect latency. Each connection attempt is retried with exponential
-    /// backoff (3 attempts: 100ms, 400ms, 1.6s) to survive Docker ordering, DNS
-    /// blips, and brief PG restarts.
+    /// connect latency. Each warm-up connection gets up to three attempts,
+    /// with 100ms and 400ms delays between failures, to survive Docker
+    /// ordering, DNS blips, and brief PG restarts.
     ///
     /// # Errors
     ///
@@ -1947,9 +1950,9 @@ impl Pool {
             .await
     }
 
-    /// Query with text-format string parameters. Parameters are bound as
-    /// `Type::TEXT`; the server performs implicit text-to-target conversion
-    /// on the first reference in the query.
+    /// Query with text-format string parameters. Parse is sent without type
+    /// hints, so the server infers each parameter's type from its SQL position;
+    /// Bind then sends each value in text format.
     pub async fn query_text_params(
         &self,
         sql: &str,

@@ -3,10 +3,11 @@
 //! compio-postgres - a native, asynchronous PostgreSQL client for compio/io_uring.
 //!
 //! Port of [`tokio-postgres`](https://github.com/rust-postgres/rust-postgres), adapted to
-//! compio's completion-based, owned-buffer I/O model. Client/Connection split preserved;
-//! pipelining and async notifications preserved - over PLAINTEXT. A TLS stream
-//! cannot be split into owned halves, so it runs a serialized loop that reads
-//! no socket while idle: see
+//! compio's completion-based, owned-buffer I/O model. The Client/Connection
+//! split, pipelining, and async notifications are preserved. Plaintext and the
+//! built-in rustls transport split into owned halves. A custom TLS stream that
+//! refuses owned splitting falls back to a serialized loop that reads no
+//! socket while idle: see
 //! [`Connection::notifications`](crate::Connection::notifications) for what
 //! that costs a LISTEN/NOTIFY subscriber.
 //!
@@ -138,8 +139,8 @@
 //!
 //! # SSL/TLS support
 //!
-//! `Client::connect` and `Config::connect` take a TLS implementation as an argument. The `NoTls` type in this crate can
-//! be used when TLS is not required.
+//! [`connect`] and [`Config::connect`] take a TLS implementation as an argument.
+//! The [`NoTls`] type in this crate can be used when TLS is not required.
 //!
 //! The `tls` Cargo feature adds `MakeRustlsConnect`, a rustls backend that reads its trust anchors from the
 //! connection configuration (TLS version bounds, SNI policy, `sslrootcert`,

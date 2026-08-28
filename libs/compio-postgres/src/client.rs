@@ -61,11 +61,12 @@ pub enum QueryOutcome {
         code: Option<crate::error::SqlState>,
     },
     /// The caller dropped the response future or stream before its terminal
-    /// protocol message, or PostgreSQL returned SQLSTATE `57014`.
+    /// protocol message, PostgreSQL returned SQLSTATE `57014`, or the
+    /// connection closed before that terminal message arrived.
     Cancelled,
 }
 
-/// A completed SQL execution.
+/// A terminal observation of one SQL execution.
 ///
 /// The SQL text is reported verbatim, including placeholders such as `$1`.
 /// Bound parameter values are never decoded, copied, or attached to the
@@ -86,13 +87,15 @@ impl QueryEvent {
         &self.sql
     }
 
-    /// Time from enqueueing the execution until its terminal server response.
+    /// Time from enqueueing the execution until its terminal server response,
+    /// or until the driver observed that the connection had closed.
     #[must_use]
     pub const fn elapsed(&self) -> Duration {
         self.elapsed
     }
 
-    /// Whether the execution succeeded, failed, or was abandoned by its caller.
+    /// Whether the execution succeeded, failed, was abandoned by its caller,
+    /// or lost its connection before a terminal response.
     #[must_use]
     pub const fn outcome(&self) -> &QueryOutcome {
         &self.outcome
@@ -151,6 +154,7 @@ struct QueryObservationState {
     data_rows: u64,
     command_rows: Option<u64>,
     portal_suspended: bool,
+    saw_error_response: bool,
     error: Option<crate::error::SqlState>,
     server_completed_at: Option<Instant>,
     emitted: bool,
@@ -228,6 +232,7 @@ impl QueryObservation {
                 data_rows: 0,
                 command_rows: None,
                 portal_suspended: false,
+                saw_error_response: false,
                 error: None,
                 server_completed_at: None,
                 emitted: false,
@@ -270,7 +275,10 @@ impl QueryObservation {
                 state.command_rows = query::extract_row_affected(body).ok();
             }
             Message::PortalSuspended => state.portal_suspended = true,
-            Message::ErrorResponse(body) => state.error = error_sqlstate(body),
+            Message::ErrorResponse(body) => {
+                state.saw_error_response = true;
+                state.error = error_sqlstate(body);
+            }
             _ => {}
         }
     }
@@ -370,7 +378,7 @@ impl QueryObservation {
                 || state.error.as_ref() == Some(&crate::error::SqlState::QUERY_CANCELED)
             {
                 QueryOutcome::Cancelled
-            } else if state.error.is_some() {
+            } else if state.saw_error_response {
                 QueryOutcome::DatabaseError {
                     code: state.error.clone(),
                 }
@@ -529,8 +537,9 @@ pub enum TransactionStatus {
     Idle,
     /// Inside a transaction block.
     InTransaction,
-    /// Inside a failed transaction block: the server rejects every statement
-    /// with `25P02` until the block is rolled back.
+    /// Inside a failed transaction block. Ordinary commands are rejected with
+    /// `25P02`; transaction-exit commands remain accepted, and `ROLLBACK TO`
+    /// can recover a failed subtransaction.
     Failed,
 }
 
@@ -2418,10 +2427,11 @@ impl Client {
     /// the observer for future requests; already in-flight requests retain the
     /// receiver that observed their start.
     ///
-    /// The driver only performs a non-blocking channel send. It never invokes
-    /// caller code from the connection task, so an async consumer may issue a
-    /// query on this client without re-entering that task. Because the channel
-    /// is unbounded, callers must keep draining it to bound memory use.
+    /// The driver only performs a non-blocking channel send and never polls the
+    /// receiver. Sending can synchronously invoke the receiver's waker on the
+    /// connection task, so observer locks are released before delivery. Because
+    /// the channel is unbounded, callers must keep draining it to bound memory
+    /// use.
     ///
     /// Install before preparing statements whose later executions need their
     /// SQL reported. Observation is intentionally disabled by default.
@@ -2438,8 +2448,8 @@ impl Client {
     /// `threshold` are reported. The cutoff applies equally to successful,
     /// failed, and cancelled executions. A zero threshold reports every
     /// execution and is equivalent to [`Client::query_events`].
-    /// Elapsed time has the same enqueue-to-terminal-server-response meaning
-    /// as [`QueryEvent::elapsed`]; it is not PostgreSQL execution time alone.
+    /// Elapsed time has the same enqueue-to-terminal-observation meaning as
+    /// [`QueryEvent::elapsed`]; it is not PostgreSQL execution time alone.
     ///
     /// Calling this method follows the same replacement and in-flight request
     /// semantics as [`Client::query_events`].
@@ -2787,8 +2797,10 @@ impl Client {
             .await
     }
 
-    /// Execute a non-row statement with NULL-aware **text-format** parameters,
-    /// returning the affected-row count. The `execute` peer of
+    /// Execute a statement with NULL-aware **text-format** parameters,
+    /// discarding any rows and returning the numeric count from `PostgreSQL`'s
+    /// command tag. For `SELECT` and `FETCH`, that is the number of rows
+    /// retrieved; a tag without a count returns zero. The `execute` peer of
     /// [`query_text_params`](Self::query_text_params): the server infers each
     /// parameter's type from its SQL position and a text value implicit-casts to
     /// the target column type - the coercion model a schema-blind DML assembler
@@ -2851,7 +2863,11 @@ impl Client {
         query::query_typed(&self.inner, query, params).await
     }
 
-    /// Executes a statement, returning the number of rows modified.
+    /// Executes a statement, discarding any rows and returning the numeric
+    /// count from `PostgreSQL`'s command tag.
+    ///
+    /// For `SELECT` and `FETCH`, this is the number of rows retrieved. A
+    /// command tag without a numeric count returns zero.
     pub async fn execute<T>(
         &self,
         statement: &T,
@@ -3137,9 +3153,10 @@ impl Client {
     /// The wire protocol version this session SETTLED ON.
     ///
     /// Not the same as [`crate::Config::max_protocol_version`], which is only
-    /// what was requested: a server that cannot speak it answers
-    /// `NegotiateProtocolVersion` and the session continues one version down,
-    /// so a connection asking for 3.2 reports 3.0 against PostgreSQL 15 or 16.
+    /// what was requested. A peer with minor-version negotiation support can
+    /// answer `NegotiateProtocolVersion` and continue one version down, so a
+    /// connection asking for 3.2 reports 3.0 against PostgreSQL 15 or 16. A
+    /// peer without that support may reject the connection instead.
     ///
     /// This is the only way to find out. PostgreSQL exposes NO server-side view
     /// of the negotiated version - `pg_stat_activity` has no such column and
@@ -3334,18 +3351,22 @@ impl fmt::Debug for Client {
 
 #[cfg(test)]
 mod query_observer_reentrancy_tests {
-    use super::{Client, InnerClient, QueryObservation, QueryObserver, StatementCacheSettings};
+    use super::{
+        Client, InnerClient, QueryObservation, QueryObserver, QueryOutcome, QueryProtocol,
+        StatementCacheSettings,
+    };
     use crate::codec::FrontendMessage;
     use crate::config::{ProtocolVersion, SslMode, SslNegotiation};
     use bytes::BytesMut;
     use futures_channel::mpsc;
     use futures_util::Stream;
-    use postgres_protocol::message::frontend;
+    use postgres_protocol::message::{backend::Message, frontend};
     use std::cell::{Cell, RefCell};
     use std::num::NonZeroUsize;
     use std::pin::Pin;
     use std::sync::Arc;
     use std::task::{Context, Wake, Waker};
+    use std::time::Instant;
 
     thread_local! {
         /// The client whose observer lock the probe interrogates.
@@ -3494,6 +3515,39 @@ mod query_observer_reentrancy_tests {
             "query event delivery ran while the frontend registry was locked \
              (None means the event waker never ran at all)"
         );
+    }
+
+    /// The public outcome keeps SQLSTATE optional because a peer can send an
+    /// `ErrorResponse` whose fields do not form a valid `PostgreSQL` diagnosis.
+    /// Seeing that frame is still a database rejection, never a success.
+    #[test]
+    fn malformed_error_response_is_observed_as_database_error_without_sqlstate() {
+        let (sender, mut events) = mpsc::unbounded();
+        let observation = QueryObservation::new(QueryObserver::new(sender, None));
+        observation.set_execution(Arc::from("SELECT broken"), QueryProtocol::Extended);
+        observation.mark_enqueued();
+
+        let body = b"SERROR\0Mscripted missing code\0\0";
+        let mut frame = BytesMut::new();
+        frame.extend_from_slice(b"E");
+        frame.extend_from_slice(
+            &i32::try_from(body.len() + 4)
+                .expect("the test frame length fits")
+                .to_be_bytes(),
+        );
+        frame.extend_from_slice(body);
+        let message = Message::parse(&mut frame)
+            .expect("the ErrorResponse frame parses structurally")
+            .expect("the complete frame yields a message");
+
+        observation.observe_server_message(&message);
+        observation.observe_consumer_message(&message);
+        observation.server_complete(Instant::now());
+
+        let event = events
+            .try_recv()
+            .expect("the terminal response emits an event");
+        assert_eq!(event.outcome(), &QueryOutcome::DatabaseError { code: None });
     }
 }
 
