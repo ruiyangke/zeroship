@@ -1,8 +1,8 @@
 # The migration service is one crate named `zeroship-migrate-server`
 
-**Status:** landed (`8f69c7e53`). This page is kept for the one constraint the
-change deliberately did not resolve: the service's three database tables still
-carry the old `migrated_` prefix, and that mismatch is intentional.
+**Status:** landed (`8f69c7e53`). Kept for two decisions a later tidy-up would
+otherwise undo: why the service is one crate rather than two, and why
+plugin-db's dev-dependency on it is load-bearing.
 
 ## Shape
 
@@ -34,7 +34,7 @@ depend on plugin-db, so there is no cycle.
 | config scope | `migrate_server` (`src/config.rs:21`), settings `migrate_server.*` |
 | compose service / network DNS | `migrate-server`, port 9091 |
 | control setting | `control.migrate_server_url`, flag `--migrate-server-url`, default `http://localhost:9091` |
-| **database objects** | **`migrated_migrations`, `migrated_app_policies`, `migrated_migration_audit` -- unchanged** |
+| database objects | `zeroship.app_schema_applies`, plus the per-app engine journals |
 
 The compose service name and `ZEROSHIP_CONTROL_MIGRATE_SERVER_URL` are one fact
 in two places (`deploy/compose/docker-compose.yml:340` sets the latter to
@@ -44,27 +44,20 @@ There is no `zeroship_migrated` database role, so no grant migration was needed.
 `db/migrations-ts/20260816000100_service_assertion_replay.ts:112-113` records the
 absence explicitly.
 
-## The `migrated_` table prefix is a deliberate, permanent cost
+## What the service owns in the database
 
-**Do not rename those three tables in place.** They are created, indexed,
-constrained, granted and commented by *applied* migrations
-(`20260702000200_control_tables.ts`, `20260702000600_constraints_indexes_fks.ts`,
-`20260702000700_functions_triggers_comments.ts`,
-`20260702000900_grants.ts`). Editing an applied migration file aborts every
-later run against that database, permanently and with no self-healing arm --
-see the migration-freeze rule in `AGENTS.md`.
+`zeroship.app_schema_applies`
+(`db/migrations-ts/20260702000200_control_tables.ts:82`) is the platform's own
+record of what an app's schema corresponds to. The engine journal cannot serve
+as one: it lives in the app's own schema, whose migrator role owns it and can
+drop it (`2026-08-28-migration-record-consolidation.md`).
 
-A newer applied migration extends one of them:
-`db/migrations-ts/20260828000000_migrated_descriptor_sha256.ts:26` adds
-`descriptor_sha256` to `zeroship.migrated_migrations`.
-
-The result is a service called `migrate-server` whose tables are named
-`migrated_*`. That reads like an oversight and it is not. **A broad
-find-and-replace on the string `migrated` is the single most dangerous edit
-anyone can make in this area** -- it will hit those table names and brick the
-platform migration runner against the deployed database. Any change to these
-tables must be a NEW migration file dated after the last row of
-`db/released_migrations.tsv`, never an edit to an existing one.
+**The `migrated_` table prefix is gone, and this page used to exist to defend
+it.** `migrated_migrations`, `migrated_app_policies` and
+`migrated_migration_audit` were removed from the corpus outright rather than
+renamed, so the fossil resolved itself: crate, binary, config scope, DNS name
+and table names now all agree. The old warning against a find-and-replace on
+the string `migrated` no longer has a subject.
 
 A handful of comments in `tests/`, `policies/platform.policy.toml` and
 `crates/zeroship-config-contract/` still name `zeroship-migrate-adapter`. They
