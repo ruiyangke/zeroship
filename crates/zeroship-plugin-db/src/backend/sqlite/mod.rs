@@ -571,7 +571,8 @@ impl SqliteBackend {
 
     /// **Test-only**: run a transaction handle's terminal statement and return
     /// the classified outcome. Production reaches this through
-    /// `transaction::exec_terminal_on_tx`.
+    /// `transaction::driver::terminal`, which projects the classified outcome
+    /// onto SC-1's `TerminalResult`.
     #[cfg(feature = "test-helpers")]
     pub async fn settle_transaction_for_tests(
         &self,

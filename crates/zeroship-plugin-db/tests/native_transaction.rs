@@ -1607,3 +1607,479 @@ mod sc1_live {
         });
     }
 }
+
+// ===========================================================================
+// SC-1 driver: the actions, executed against a real server
+// ===========================================================================
+
+/// Arms binding the SC-1 **driver** to a real server.
+///
+/// The module above proves the server behaves the way the reducer models. This
+/// one proves the driver acts on those behaviours correctly - it drives
+/// `transaction::driver` through `transaction::probe` and asserts on the session
+/// disposition, the pool, and the savepoint names that actually reached the
+/// wire.
+///
+/// It reuses this target's `pg_url()` - `zeroship_core::config::test_database_url()`,
+/// the typed accessor - so it introduces no environment variable of its own and
+/// calls no `set_var`.
+///
+/// Every arm uses a unique `zs_sc1drv_*` app id and drops the role and schema it
+/// created, so a shared server is left as it was found.
+///
+/// Run with:
+///
+/// ```text
+/// cargo test -p zeroship-plugin-db --test native_transaction \
+///   --features test-helpers -- --test-threads=1 sc1_driver
+/// ```
+mod sc1_driver {
+    use compio_postgres::{Client, NoTls, Pool};
+    use zeroship_plugin_db::transaction::probe;
+    use zeroship_plugin_db::transaction::reducer::{
+        CleanupCause, SessionOwnership, TerminalOutcome, TxState,
+    };
+
+    use super::{block_on, pg_url};
+
+    /// Connect an out-of-band admin session, and report the server reached.
+    ///
+    /// **Prints `server_version_num`, not a container tag.** A cross-version
+    /// claim published off the variable rather than the server is a recorded
+    /// failure in this repository; the number below comes from the session that
+    /// ran the assertions.
+    async fn admin() -> Client {
+        let url = pg_url();
+        let (client, connection) = compio_postgres::connect(&url, NoTls)
+            .await
+            .unwrap_or_else(|e| panic!("sc1_driver needs a live PostgreSQL at {url}: {e}"));
+        compio::runtime::spawn(async move {
+            let _ = connection.run().await;
+        })
+        .detach();
+        let version: String = client
+            .query_one("SELECT current_setting('server_version_num')", &[])
+            .await
+            .expect("read server_version_num")
+            .get(0);
+        println!("sc1_driver oracle: server_version_num={version}");
+        client
+    }
+
+    /// Provision the schema and per-app role the transaction session's
+    /// `SET LOCAL ROLE` needs, and install the pool the driver checks out from.
+    ///
+    /// The pool is sized to **one** connection deliberately: with a single slot,
+    /// "did the session come back" is answerable by taking the next checkout and
+    /// comparing its backend PID, with no chance of being handed a different
+    /// idle entry.
+    async fn provision(app_id: &str) -> Client {
+        let client = admin().await;
+        let role = zeroship_plugin_db::auth::bootstrap::per_app_role_name(app_id);
+        client
+            .batch_execute(&format!(
+                "DROP SCHEMA IF EXISTS \"{app_id}\" CASCADE; \
+                 CREATE SCHEMA \"{app_id}\"; \
+                 DO $$ BEGIN \
+                   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{role}') THEN \
+                     CREATE ROLE \"{role}\" NOLOGIN NOREPLICATION; \
+                   END IF; \
+                 END $$; \
+                 GRANT USAGE, CREATE ON SCHEMA \"{app_id}\" TO \"{role}\""
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("provision {app_id}: {e}"));
+
+        let pool = Pool::connect(&pg_url(), 1)
+            .await
+            .expect("a one-connection pool for the driver to check out from");
+        zeroship_plugin_db::set_postgres_pool_for_tests(std::rc::Rc::new(pool), &pg_url());
+        client
+    }
+
+    /// Drop everything the arm created, and clear this thread's driver state.
+    async fn teardown(admin: &Client, app_id: &str) {
+        probe::reset(app_id);
+        zeroship_plugin_db::reset_context_for_tests();
+        let role = zeroship_plugin_db::auth::bootstrap::per_app_role_name(app_id);
+        let _ = admin
+            .batch_execute(&format!(
+                "DROP SCHEMA IF EXISTS \"{app_id}\" CASCADE; \
+                 DROP ROLE IF EXISTS \"{role}\""
+            ))
+            .await;
+    }
+
+    /// Destroy this arm's transaction session even if the arm PANICS.
+    ///
+    /// Not belt-and-braces. An assertion that fires mid-transaction skips
+    /// `teardown`, and the session then stays checked out with an open
+    /// transaction for the rest of the binary - holding locks in its schema and
+    /// a slot in a pool sized to one. Under mutation that is exactly what
+    /// happens, and it turned a mutation of the SAVEPOINT NAMING into a second,
+    /// unrelated failure in `transaction_rolls_back_on_async_reject`: a count of
+    /// "how many tests did this mutation redden" that includes collateral from
+    /// the harness measures the harness, not the code.
+    struct SessionGuard(&'static str);
+
+    impl Drop for SessionGuard {
+        fn drop(&mut self) {
+            probe::reset(self.0);
+            zeroship_plugin_db::reset_context_for_tests();
+        }
+    }
+
+    /// **The oracle-sampling trap, as an assertion.**
+    ///
+    /// A forced cleanup of a POISONED transaction must not withdraw the
+    /// connection. Inside a poisoned block `transaction_status()` answers
+    /// `None`, because the failed statement's trailing `ReadyForQuery` has not
+    /// been consumed, and no retry changes that while the block stays poisoned.
+    /// SC-1 defines `None` as indeterminate and indeterminate withdraws, so a
+    /// driver that samples the oracle on entry to `Cancelling` destroys a
+    /// healthy connection on **every** forced cleanup.
+    ///
+    /// `driver::cleanup_postgres` therefore issues the cleanup `ROLLBACK` first
+    /// and samples after it.
+    ///
+    /// **Mutation that reddens this arm:** swap the two statements in
+    /// `cleanup_postgres` so the `transaction_status()` read precedes the
+    /// `batch_execute("ROLLBACK")`. The ack becomes `Indeterminate`, the outcome
+    /// becomes `Indeterminate(Cancelled)` instead of `Cancelled(Cancelled)`, the
+    /// session reads `Withdrawn`, and the pool loses its only connection.
+    #[test]
+    fn a_forced_cleanup_on_a_poisoned_block_keeps_a_healthy_connection() {
+        const APP: &str = "zs_sc1drv_poisoned";
+        block_on(async {
+            let admin = provision(APP).await;
+            let _session_guard = SessionGuard(APP);
+
+            probe::begin(APP, None).await.expect("BEGIN");
+            probe::operation(APP, &format!("CREATE TABLE \"{APP}\".kept (id int)"))
+                .await
+                .expect("a statement inside the transaction");
+
+            // Poison the block with a real server-side error. A creator callback
+            // can swallow exactly this and carry on, which is what makes a
+            // forced cleanup of a poisoned transaction an ordinary case.
+            let poisoned = probe::operation(APP, "SELECT 1 / 0").await;
+            assert!(poisoned.is_err(), "the block must actually be poisoned");
+            assert_eq!(
+                probe::state(APP),
+                Some(TxState::Poisoned),
+                "a statement that errored parks the transaction where PostgreSQL \
+                 has already put it"
+            );
+            let pid_before = probe::session_backend_pid(APP).expect("a pinned session");
+
+            // Force it. Cleanup runs from Cancelling, which is the state whose
+            // oracle read is the trap.
+            let forced = probe::cancel(APP).await;
+
+            assert_eq!(
+                forced.outcome,
+                Some(TerminalOutcome::Cancelled(CleanupCause::Cancelled)),
+                "the cleanup ROLLBACK succeeds from a poisoned block and PROVES \
+                 CleanupGoal::OpenTransaction; sampling the oracle before it \
+                 reads None, which is indeterminate and withdraws"
+            );
+            assert_ne!(
+                forced.session,
+                Some(SessionOwnership::Withdrawn),
+                "a poisoned block is a HEALTHY connection once it is rolled back - \
+                 withdrawing it destroys a connection on every forced cleanup"
+            );
+            assert!(
+                !probe::withdrawn(APP),
+                "no withdrawal tombstone may be set for a proved cleanup"
+            );
+
+            // The connection is back in the pool and reusable: the next checkout
+            // is the SAME backend. With max_size = 1 there is nothing else it
+            // could be handed.
+            let (idle, active, total) = probe::pool_counts().expect("a pool is installed");
+            assert_eq!(
+                (idle, active, total),
+                (1, 0, 1),
+                "a released session returns to the pool as idle"
+            );
+            probe::begin(APP, None).await.expect("a second BEGIN reuses it");
+            assert_eq!(
+                probe::session_backend_pid(APP),
+                Some(pid_before),
+                "the very same physical connection served the next transaction"
+            );
+            let settled = probe::settle(APP, false).await;
+            assert_eq!(settled.outcome, Some(TerminalOutcome::RolledBack));
+
+            teardown(&admin, APP).await;
+        });
+    }
+
+    /// **`WithdrawSession` genuinely withdraws.**
+    ///
+    /// The disposition SC-1 gives unknown backend health is to destroy the
+    /// physical connection rather than return it, and on PostgreSQL that is not
+    /// what a drop does: `OwnedPooledClient::drop` calls
+    /// `pool.return_client(entry)`, which republishes the lease as idle.
+    ///
+    /// The arm reaches the withdrawal through the case that makes health
+    /// genuinely unknown - a force landing while another future holds the
+    /// session out of the slot, so the cleanup `ROLLBACK` cannot run at all -
+    /// and then asserts on the POOL, not on the reducer's own bookkeeping: the
+    /// session must not come back for reuse.
+    ///
+    /// **Mutation that reddens this arm:** make
+    /// `context::destroy_tx_connection`'s Postgres arm a plain `drop(client)`
+    /// (delete the `__private_api_close()` call). The lease returns to the pool,
+    /// `total_count` stays 1, and the next checkout reports the SAME backend PID
+    /// the protocol withdrew.
+    #[test]
+    fn a_withdrawn_session_never_comes_back_from_the_pool() {
+        const APP: &str = "zs_sc1drv_withdraw";
+        block_on(async {
+            let admin = provision(APP).await;
+            let _session_guard = SessionGuard(APP);
+
+            probe::begin(APP, None).await.expect("BEGIN");
+            let (_, _, total_before) = probe::pool_counts().expect("a pool is installed");
+            assert_eq!(total_before, 1, "one connection, checked out");
+
+            // An operation owns the session. A force arriving now cannot reach
+            // the connection to roll it back, so backend health is unknown -
+            // which is exactly the case SC-1 answers with a withdrawal.
+            let held = probe::HeldSession::take(APP).expect("hold the session");
+            let withdrawn_pid = held.backend_pid().expect("a Postgres session");
+
+            let forced = probe::cancel(APP).await;
+            assert_eq!(
+                forced.outcome,
+                Some(TerminalOutcome::Indeterminate(CleanupCause::Cancelled)),
+                "cleanup that could not run proves no goal"
+            );
+            assert!(
+                probe::withdrawn(APP),
+                "an indeterminate cleanup withdraws the session"
+            );
+
+            // The holder gives it back, exactly as a TxClientSlotGuard's Drop
+            // does. THIS is the moment a withdrawal has to survive.
+            held.restore();
+
+            let (idle, _, total_after) = probe::pool_counts().expect("a pool is installed");
+            assert_eq!(
+                idle, 0,
+                "a withdrawn session must not be published as idle - a plain \
+                 drop() would republish it and the next borrower would inherit \
+                 the connection the protocol withdrew"
+            );
+            assert_eq!(
+                total_after, 0,
+                "the capacity slot is released by eviction, not by redeposit"
+            );
+
+            // And the strongest form: whatever the pool opens next is a
+            // DIFFERENT backend.
+            probe::reset(APP);
+            probe::begin(APP, None).await.expect("a fresh BEGIN");
+            let fresh_pid = probe::session_backend_pid(APP).expect("a pinned session");
+            assert_ne!(
+                fresh_pid, withdrawn_pid,
+                "the withdrawn backend must be gone; the pool opened a new one"
+            );
+
+            // The withdrawn backend is really gone from the server, not merely
+            // unreachable from the pool.
+            let still_there: i64 = admin
+                .query_one(
+                    "SELECT count(*) FROM pg_stat_activity WHERE pid = $1",
+                    &[&withdrawn_pid],
+                )
+                .await
+                .expect("count the withdrawn backend")
+                .get(0);
+            assert_eq!(
+                still_there, 0,
+                "closing the client's request channel terminates the backend; a \
+                 session that is still on the server is one a later user could \
+                 still be handed"
+            );
+
+            let settled = probe::settle(APP, false).await;
+            assert_eq!(settled.outcome, Some(TerminalOutcome::RolledBack));
+            teardown(&admin, APP).await;
+        });
+    }
+
+    /// **The savepoint names dispatch emits are the reducer's.**
+    ///
+    /// Two frames opened at the same depth get DIFFERENT names. Under the
+    /// depth-derived scheme this replaced they got the same one, and the arm
+    /// proves the difference is observable on the server: after the first frame
+    /// is released, rolling back to its name must fail with `3B001`. Under a
+    /// reused name that rollback would SUCCEED - silently unwinding to the
+    /// second frame's scope under the first frame's name.
+    ///
+    /// **Mutation that reddens this arm:** change `FrameStack::open_child`'s
+    /// name to `format!("zs_sp_{}", self.frames.len())`. Both frames are then
+    /// `zs_sp_1`, `minted_names()` collapses to one entry, and the
+    /// `ROLLBACK TO SAVEPOINT zs_sp_1` at the end succeeds instead of raising
+    /// `3B001`.
+    #[test]
+    fn dispatch_emits_the_reducers_monotonic_savepoint_names() {
+        const APP: &str = "zs_sc1drv_names";
+        block_on(async {
+            let admin = provision(APP).await;
+            let _session_guard = SessionGuard(APP);
+
+            probe::begin(APP, None).await.expect("BEGIN");
+            probe::operation(APP, &format!("CREATE TABLE \"{APP}\".rows_ (tag text)"))
+                .await
+                .expect("create table");
+
+            let first = probe::open_frame(APP).await.expect("first frame");
+            probe::operation(APP, &format!("INSERT INTO \"{APP}\".rows_ VALUES ('a')"))
+                .await
+                .expect("write inside the first frame");
+            let closed = probe::close_frame(APP, first, true).await;
+            assert_eq!(closed.refused, None, "RELEASE must succeed");
+
+            let second = probe::open_frame(APP).await.expect("second frame");
+            assert_ne!(first, second, "frame ids are never reused");
+
+            let names = probe::minted_savepoint_names(APP);
+            assert_eq!(
+                names.len(),
+                2,
+                "two frames at the SAME depth must mint two distinct names; a \
+                 depth-derived scheme mints one name twice and this set collapses \
+                 to a single entry. got {names:?}"
+            );
+            // The names are `zs_sp_<frame sequence>`, NOT `zs_sp_<depth>`, so the
+            // first frame's number is whichever is lower - the root frame takes
+            // sequence 1, which is why neither of these is `zs_sp_1`.
+            let mut ordered = names.clone();
+            ordered.sort_by_key(|name| {
+                name.rsplit('_')
+                    .next()
+                    .and_then(|n| n.parse::<u64>().ok())
+                    .unwrap_or(u64::MAX)
+            });
+            let first_name = ordered[0].clone();
+
+            // The decisive server-side check: the first frame's savepoint is
+            // GONE, because it was released under its own name and no later
+            // frame reused it. A reused name would still be established here and
+            // this rollback would SUCCEED, unwinding to the second frame's scope
+            // under the first frame's name.
+            let shadowed =
+                probe::operation(APP, &format!("ROLLBACK TO SAVEPOINT {first_name}")).await;
+            let message = shadowed
+                .as_ref()
+                .err()
+                .map(|error| format!("{error:?}"))
+                .unwrap_or_default();
+            assert!(
+                shadowed.is_err(),
+                "rolling back to a RELEASED savepoint must be refused; if it \
+                 succeeded, a later frame had re-established the same name and \
+                 this rollback reached the WRONG scope. names={names:?}"
+            );
+            assert!(
+                message.contains(&format!("savepoint \\\"{first_name}\\\" does not exist"))
+                    || message.contains(&format!("savepoint \"{first_name}\" does not exist")),
+                "the refusal must be PostgreSQL's 3B001 naming THIS savepoint, not \
+                 some other failure that would pass this arm for the wrong reason: \
+                 {message}"
+            );
+
+            // That statement poisoned the block, so the settle is a rollback.
+            let settled = probe::settle(APP, false).await;
+            assert_eq!(settled.outcome, Some(TerminalOutcome::RolledBack));
+            let _ = second;
+            teardown(&admin, APP).await;
+        });
+    }
+
+    /// **A fired execution deadline in `Preparing`, where no `BEGIN` was ever
+    /// sent.**
+    ///
+    /// The goal `NoTransaction` is fixed only from `Preparing`, and it is proved
+    /// by "the session reports no open transaction". There is no session at all
+    /// there - `Preparing` is admission plus the authority read, and the client
+    /// is acquired by `IssueBegin` - so the driver must prove the goal from the
+    /// protocol's own session ownership rather than from an empty slot, and must
+    /// send no SQL.
+    ///
+    /// The transaction still settles, still releases its admission claim, and
+    /// still does NOT withdraw: nothing was opened, so there is nothing whose
+    /// health is unknown.
+    ///
+    /// **Mutation that reddens this arm:** in `driver::cleanup`, answer the
+    /// empty-slot case with `CleanupAck::Indeterminate` unconditionally (delete
+    /// the `SessionOwnership::None` arm). The goal is then unproved, the outcome
+    /// becomes `Indeterminate` instead of `Cancelled`, and the tombstone is set
+    /// for a session that never existed - which would destroy the NEXT
+    /// transaction's connection, because `put_tx_client_for` consults it.
+    #[test]
+    fn a_deadline_that_fires_in_preparing_settles_without_a_begin() {
+        const APP: &str = "zs_sc1drv_preparing";
+        block_on(async {
+            let admin = provision(APP).await;
+            let _session_guard = SessionGuard(APP);
+
+            // Admit, and stop there. `admit_in_preparing_for_tests` performs the
+            // admission half of `begin_top_level` and returns before the
+            // authority observation that would issue BEGIN.
+            probe::admit_only(APP);
+            assert_eq!(
+                probe::state(APP),
+                Some(TxState::Preparing),
+                "no BEGIN has been sent"
+            );
+            assert_eq!(
+                probe::session(APP),
+                Some(SessionOwnership::None),
+                "Preparing holds no session: the client is acquired by IssueBegin"
+            );
+            let (idle_before, _, _) = probe::pool_counts().expect("a pool is installed");
+
+            let fired = probe::fire_execution_deadline(APP).await;
+
+            assert_eq!(
+                fired.outcome,
+                Some(TerminalOutcome::Cancelled(CleanupCause::DeadlineExpired(
+                    zeroship_plugin_db::transaction::reducer::deadline::DeadlineKind::Execution
+                ))),
+                "the goal NoTransaction is proved by construction - BEGIN was \
+                 never sent, so nothing can be open"
+            );
+            assert!(
+                !probe::withdrawn(APP),
+                "there is no session to withdraw, and setting the tombstone here \
+                 would destroy the NEXT transaction's connection"
+            );
+            assert!(
+                probe::state(APP).is_none(),
+                "ReleaseAdmission retires the transaction on every path to Settled"
+            );
+
+            let (idle_after, active_after, _) = probe::pool_counts().expect("a pool is installed");
+            assert_eq!(
+                (idle_after, active_after),
+                (idle_before, 0),
+                "a cleanup in Preparing touches no connection at all"
+            );
+
+            // The claim was released, so the next transaction is admitted
+            // rather than parked forever.
+            probe::begin(APP, None)
+                .await
+                .expect("the admission claim was released");
+            let settled = probe::settle(APP, false).await;
+            assert_eq!(settled.outcome, Some(TerminalOutcome::RolledBack));
+
+            teardown(&admin, APP).await;
+        });
+    }
+}

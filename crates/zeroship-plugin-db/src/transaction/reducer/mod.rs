@@ -698,6 +698,17 @@ impl TxReducer {
         self.state
     }
 
+    /// The authority this transaction was admitted under.
+    ///
+    /// For the driver, which has to stamp it onto every forcing publisher's
+    /// event so guard order step 1 has something to compare. Read-only: the
+    /// expectation is fixed at admission and an entry never follows a new one
+    /// in place - a changed authority re-resolves to a fresh handle.
+    #[must_use]
+    pub const fn expected(&self) -> &ExpectedAuthority {
+        &self.expected
+    }
+
     #[must_use]
     pub const fn session(&self) -> SessionOwnership {
         self.session

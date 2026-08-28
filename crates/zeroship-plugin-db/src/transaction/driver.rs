@@ -1,0 +1,1037 @@
+//! The SC-1 driver: the only place a reducer [`Action`] becomes I/O.
+//!
+//! [`super::reducer`] is pure - it owns no session, no client, no timer and no
+//! future. This module is its counterpart: it holds the session, executes every
+//! action the reducer emits, and feeds the outcome straight back in as the next
+//! event. Nothing here decides a transition; every branch below is either
+//! "perform this action" or "report what the backend did".
+//!
+//! ## The constraint that decides this file: WHEN the health oracle is sampled
+//!
+//! SC-1 (`docs/proposals/2026-08-26-sc1-transaction-protocol.md`, the
+//! health-oracle paragraph under the cleanup-goal table) pins it:
+//!
+//! > On PostgreSQL `transaction_status()` returns `None` while a request is in
+//! > flight, and a *failed* statement's trailing `ReadyForQuery` is not consumed
+//! > when its `await` returns. Inside a poisoned block - where every data
+//! > statement fails with `25P02` - **no retry makes the oracle answer**. Since
+//! > `None` is indeterminate and indeterminate withdraws the session, a driver
+//! > that samples on entry to `Cancelling` would withdraw a perfectly healthy
+//! > connection on *every* forced cleanup.
+//!
+//! [`cleanup_postgres`] therefore issues the cleanup `ROLLBACK` **first** and
+//! samples **after** it. The `ROLLBACK` succeeds from a poisoned block, and
+//! answering it resolves the status byte. `a_forced_cleanup_on_a_poisoned_block_keeps_a_healthy_connection`
+//! in `tests/native_transaction.rs` is the arm that fails if the two are ever
+//! reordered.
+//!
+//! ## What a withdrawal has to defeat here, specifically
+//!
+//! [`Action::WithdrawSession`] says "destroy the physical connection rather than
+//! returning it". On PostgreSQL the transaction session is a
+//! [`compio_postgres::OwnedPooledClient`], whose `Drop` calls
+//! `pool.return_client(entry)` - so **dropping a withdrawn session hands it to
+//! the next borrower**, which is the exact opposite of the action. Withdrawal is
+//! therefore [`destroy_session`], which closes the client's request channel
+//! first: `Pool::return_client` checks `PoolEntry::is_pool_eligible`, that checks
+//! `!client.is_closed()`, and a closed client is evicted and its capacity slot
+//! released instead of being published as idle.
+//!
+//! The same closure has to survive a *race*: a withdrawal can land while some
+//! other future holds the session out of the slot behind a
+//! [`crate::context::TxClientSlotGuard`], whose `Drop` puts it back. So
+//! withdrawal also sets a per-app tombstone
+//! ([`crate::context::ThreadDbContext::withdraw_tx_session`]) and
+//! `put_tx_client_for` destroys anything that returns under it. Without that,
+//! "withdrawn" would hold only for the sessions that happened to be in the slot.
+
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
+
+use compio_postgres::TransactionStatus;
+
+use crate::context::TxConnection;
+use crate::error::DbError;
+use crate::exec::{clear_pending_emits, drain_pending_emits_on_commit};
+
+use super::reducer::deadline::{DeadlineGeneration, DeadlineKind};
+use super::reducer::frames::{FrameClose, FrameId};
+use super::reducer::identity::{
+    AuthorityDomain, AuthorityIdentity, ExpectedAuthority, LifecycleState, MaskCeiling,
+    ObservedAuthority, SchemaEpoch,
+};
+use super::reducer::{
+    Action, BackendGeneration, CleanupAck, CleanupGoal, CommandToken, EventAuthority, SettleIntent,
+    TerminalOutcome, TerminalResult, TxBudgets, TxEvent, TxProtocolError, TxReducer, TxReply,
+};
+
+/// The authority axis a transaction is admitted under, today.
+///
+/// **Deliberately opaque, and named for the axis rather than baked into it.**
+/// [`AuthorityIdentity`] compares only for equality and never parses its key;
+/// the operator is weighing decoupling apps from databases, which would re-key
+/// this onto the database or the grant. That move must be a change *here* and
+/// nowhere else, so nothing downstream of this function may look inside the key.
+///
+/// The incarnation is `0` because no authority record exists to read one from
+/// yet. That is stated rather than hidden: until a lifecycle record is published
+/// and observed, the classifier has nothing to disagree with and
+/// [`observation_for`] echoes the expectation. The wiring is real; the *input*
+/// is not yet.
+fn expected_authority(app_id: &str) -> ExpectedAuthority {
+    ExpectedAuthority {
+        identity: AuthorityIdentity::for_app(app_id, 0),
+        domain: AuthorityDomain::new(0, 0),
+        epoch: SchemaEpoch::new(0),
+    }
+}
+
+/// The authority observation the driver submits for `Preparing`.
+///
+/// See [`expected_authority`]: there is no lifecycle record to read, so this
+/// echoes the expectation and the classifier returns `Current`. It runs anyway,
+/// because the reducer re-runs the classifier on the observation itself - a
+/// publisher cannot smuggle a verdict past it - and because the day a record
+/// exists, this is the one function that has to change.
+fn observation_for(expected: &ExpectedAuthority) -> ObservedAuthority {
+    ObservedAuthority {
+        identity: expected.identity.clone(),
+        domain: expected.domain.clone(),
+        epoch: expected.epoch,
+        lifecycle: LifecycleState::Stable,
+        // No ceiling is published yet, so the fold starts from the empty
+        // ceiling. `meet` can only tighten it, which is invariant 8.
+        ceiling: MaskCeiling::default(),
+    }
+}
+
+/// What one driven step produced for its caller.
+///
+/// The reply is the **last** one the loop saw, which is the reply of the event
+/// the loop finished on rather than the one it started from. That is the
+/// intended reading: a `BEGIN` that failed does not answer `Began`, it answers
+/// the `Settled(Cancelled(BeginFailed))` its forced cleanup reached.
+#[derive(Debug, Default)]
+pub(crate) struct Driven {
+    pub(crate) reply: Option<Result<TxReply, TxProtocolError>>,
+    /// The backend error behind a failed step, kept so the creator sees the
+    /// server's message rather than only the protocol's classification.
+    pub(crate) error: Option<DbError>,
+    /// The token an [`Action::IssueDataSql`] minted, carried out of the step
+    /// that emitted it so the caller can report the matching completion. The
+    /// reducer hands the session over; the SQL is the caller's.
+    issued_operation: Option<CommandToken>,
+}
+
+impl Driven {
+    /// The outcome recorded on the reply, if this step settled the transaction.
+    pub(crate) fn outcome(&self) -> Option<TerminalOutcome> {
+        match &self.reply {
+            Some(Ok(TxReply::Settled(outcome))) => Some(*outcome),
+            _ => None,
+        }
+    }
+
+    /// The frame this step opened or closed, if any.
+    pub(crate) fn frame(&self) -> Option<FrameId> {
+        match &self.reply {
+            Some(Ok(TxReply::FrameOpened(id) | TxReply::FrameClosed(id))) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// The protocol refusal, if the step was refused.
+    pub(crate) fn refusal(&self) -> Option<TxProtocolError> {
+        match &self.reply {
+            Some(Err(error)) => Some(*error),
+            _ => None,
+        }
+    }
+}
+
+/// Per-step inputs the reducer does not model but the driver needs.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct StepConfig {
+    /// The already-validated `BEGIN [ISOLATION LEVEL ...]` statement, for the
+    /// step that runs [`Action::IssueBegin`].
+    pub(crate) begin_sql: Option<String>,
+}
+
+/// Admit a top-level transaction, then drive it to `Idle`.
+///
+/// The admission claim is taken by the caller before this runs - it has to be,
+/// because SC-1 arms the execution deadline on the same transition that grants
+/// admission, and admission is what serialises two top-level transactions for
+/// one app.
+///
+/// **DBR-11 closes here.** The reducer's `settle_now` emits
+/// [`Action::ReleaseAdmission`] on *every* path to `Settled`, including the ones
+/// that never sent a `BEGIN`, so a cancelled admission cannot leave the claim
+/// held. The orchestrator no longer has to remember to release it per-arm.
+pub(crate) async fn begin_top_level(
+    app_id: &str,
+    isolation_level: Option<&str>,
+) -> Result<Driven, DbError> {
+    let begin_sql = super::build_begin_sql(isolation_level)?;
+    let admit = admit_in_preparing(app_id);
+    let config = StepConfig {
+        begin_sql: Some(begin_sql),
+    };
+    // The admission actions are only ever `ScheduleTimer`; run them through the
+    // same interpreter so no action has a second, quieter implementation.
+    let mut driven = run(app_id, admit, &config).await;
+    let Some(authority) = authority_of(app_id) else {
+        return Err(DbError::internal(
+            "db.transaction: admission did not install a reducer",
+        ));
+    };
+    let observed = observation_for(&crate::context::with(|c| {
+        c.transaction_expected_authority(app_id)
+            .cloned()
+            .expect("just admitted")
+    }));
+    let began = step(
+        app_id,
+        TxEvent::AuthorityObserved {
+            authority,
+            observed: Box::new(observed),
+        },
+        &config,
+    )
+    .await;
+    driven.absorb(began);
+    Ok(driven)
+}
+
+/// Admit a transaction and return admission's actions, leaving it in
+/// `Preparing`.
+///
+/// Split out of [`begin_top_level`] because `Preparing` is the only state that
+/// fixes the `NoTransaction` cleanup goal, and an arm that must reach it cannot
+/// go through a function that leaves `Preparing` in the same call.
+pub(crate) fn admit_in_preparing(app_id: &str) -> Vec<Action> {
+    crate::context::with_mut(|c| {
+        c.admit_transaction(
+            app_id,
+            expected_authority(app_id),
+            budgets(),
+            Instant::now(),
+            super::MAX_SAVEPOINT_DEPTH,
+        )
+    })
+}
+
+/// Open a nested frame: `SAVEPOINT <the reducer's monotonic name>`.
+///
+/// The name is **never** derived from the nesting depth. `ROLLBACK TO SAVEPOINT`
+/// leaves the savepoint defined and PostgreSQL resolves a name to the most
+/// recently established one, so a depth-derived name is reused after the depth
+/// decrements and the enclosing frame's rollback lands in the wrong scope. See
+/// [`super::reducer::frames`].
+pub(crate) async fn open_frame(app_id: &str) -> Driven {
+    step(app_id, TxEvent::OpenFrame, &StepConfig::default()).await
+}
+
+/// Close a nested frame with `RELEASE` or `ROLLBACK TO` + `RELEASE`.
+pub(crate) async fn close_frame(app_id: &str, frame: FrameId, close: FrameClose) -> Driven {
+    step(
+        app_id,
+        TxEvent::CloseFrame { frame, close },
+        &StepConfig::default(),
+    )
+    .await
+}
+
+/// Settle the root with `COMMIT` or `ROLLBACK`.
+///
+/// **DBR-03 closes here.** There is no "the slot is empty, so treat it as
+/// settled" arm any more: the reducer decides, and the only state that ends a
+/// settle without sending anything is `Settled` itself. A settle arriving while
+/// an operation owns the session parks in `Quiescing` and issues its terminal
+/// SQL when the operation returns.
+pub(crate) async fn settle_root(app_id: &str, intent: SettleIntent) -> Driven {
+    step(
+        app_id,
+        TxEvent::SettleRequested { intent },
+        &StepConfig::default(),
+    )
+    .await
+}
+
+/// Run one creator data statement under the reducer's operation guard.
+///
+/// This is what makes `Poisoned` a state the driver can actually reach: a
+/// statement that errors reports `errored: true`, and the reducer parks the
+/// transaction where PostgreSQL has already put it.
+///
+/// **No production caller yet, and that is a stated gap rather than an
+/// oversight.** Creator CRUD issued inside a transaction goes through
+/// `exec::run_sql` / `exec::exec_sqlite_json`, which take the session with a
+/// bare [`crate::context::TxClientSlotGuard`] and report nothing to the state
+/// machine. Routing them here is the same work the module header already names
+/// as open - "capturing the async scope at each CRUD dispatch site" - and it is
+/// not folded into this change because every one of those call sites has tests
+/// that install a transaction session with no reducer behind it. Until then a
+/// failed creator statement leaves the reducer reading `Idle` while PostgreSQL
+/// reads `Failed`; forced cleanup still handles it correctly, because the goal
+/// `OpenTransaction` fixes from `Idle` and `Poisoned` alike and the health
+/// oracle is sampled from the server rather than from the reducer.
+#[allow(
+    dead_code,
+    reason = "exercised by transaction::run_on_tx_conn's tests; see the paragraph above \
+              for the production call sites that must move onto it"
+)]
+pub(crate) async fn run_operation(app_id: &str, sql: &str, params: &[&str]) -> Result<(), DbError> {
+    let started = step(app_id, TxEvent::OperationRequested, &StepConfig::default()).await;
+    if let Some(refusal) = started.refusal() {
+        return Err(protocol_error(refusal, started.error));
+    }
+    let Some(token) = started.issued_operation else {
+        return Err(DbError::internal(
+            "db: the reducer accepted an operation without issuing one",
+        ));
+    };
+
+    let result = exec_on_session(app_id, sql, params).await;
+    let errored = result.is_err();
+    let finished = step(
+        app_id,
+        TxEvent::OperationCompleted { token, errored },
+        &StepConfig::default(),
+    )
+    .await;
+    // The statement's own error is what the creator must see; the reducer's
+    // `TransactionNotReady` reply on the errored arm is the state transition,
+    // not the diagnosis.
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = finished;
+            Err(error)
+        }
+    }
+}
+
+/// Deliver an expired timer.
+///
+/// The task that calls this carries only the app key, the kind and the
+/// generation - no session, no client, no settle future - which is what makes
+/// SC-1 rule 4's "independent of callback behaviour" true rather than
+/// aspirational.
+pub(crate) async fn deadline_fired(
+    app_id: &str,
+    kind: DeadlineKind,
+    generation: DeadlineGeneration,
+) -> Driven {
+    step(
+        app_id,
+        TxEvent::DeadlineFired { kind, generation },
+        &StepConfig::default(),
+    )
+    .await
+}
+
+/// Force this transaction to end under [`CleanupCause::Cancelled`].
+///
+/// The event carries the authority the transaction was admitted under, so guard
+/// order step 1 has something to compare: a cancel naming a different identity
+/// must not touch this entry's session, actor, timer or admission - not even to
+/// cancel it.
+#[allow(
+    dead_code,
+    reason = "no production cancel publisher yet - the creator API has no tx.cancel(), \
+              and the deadline path reaches Cancelling through `deadline_fired`. \
+              Exercised by `transaction::probe::cancel`."
+)]
+pub(crate) async fn cancel(app_id: &str) -> Driven {
+    let Some(authority) = authority_of(app_id) else {
+        return Driven::default();
+    };
+    step(
+        app_id,
+        TxEvent::Cancel { authority },
+        &StepConfig::default(),
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// The interpreter
+// ---------------------------------------------------------------------------
+
+impl Driven {
+    /// Fold a later step's answers over this one's. Later wins, per field, so a
+    /// step that produced no reply does not erase the one before it.
+    fn absorb(&mut self, other: Self) {
+        if other.reply.is_some() {
+            self.reply = other.reply;
+        }
+        if other.error.is_some() {
+            self.error = other.error;
+        }
+        if other.issued_operation.is_some() {
+            self.issued_operation = other.issued_operation;
+        }
+    }
+}
+
+/// Apply one event and run every action it produces, to quiescence.
+async fn step(app_id: &str, event: TxEvent, config: &StepConfig) -> Driven {
+    let Some(actions) = apply(app_id, event) else {
+        // No reducer for this app: no transaction is admitted. This is the one
+        // "there is nothing here" answer, and it is a REFUSAL rather than a
+        // silent success - reading absence as "already settled" is the shape
+        // DBR-03 turned into a false commit.
+        return Driven {
+            reply: Some(Err(TxProtocolError::TransactionNotReady)),
+            ..Driven::default()
+        };
+    };
+    run(app_id, actions, config).await
+}
+
+fn apply(app_id: &str, event: TxEvent) -> Option<Vec<Action>> {
+    let now = Instant::now();
+    crate::context::with_mut(|c| c.apply_transaction_event(app_id, event, now))
+}
+
+fn authority_of(app_id: &str) -> Option<EventAuthority> {
+    crate::context::with(|c| {
+        c.transaction_expected_authority(app_id)
+            .map(|expected| EventAuthority {
+                identity: expected.identity.clone(),
+                domain: expected.domain.clone(),
+            })
+    })
+}
+
+/// Interpret actions in order, feeding each completion straight back in.
+///
+/// Ordering is load-bearing and is the reducer's, not this loop's: `settle_now`
+/// emits effects -> session disposition -> admission release -> reply, and a
+/// loop that reordered them would publish a commit's events after the session
+/// was already back in the pool.
+async fn run(app_id: &str, actions: Vec<Action>, config: &StepConfig) -> Driven {
+    let mut driven = Driven::default();
+    let mut queue: VecDeque<Action> = actions.into();
+
+    while let Some(action) = queue.pop_front() {
+        match action {
+            Action::Reply(reply) => driven.reply = Some(reply),
+
+            Action::ScheduleTimer(scheduled) => schedule_timer(app_id, scheduled),
+
+            Action::IssueBegin { token } => {
+                let generation = crate::context::with_mut(|c| c.next_backend_generation());
+                let begin_sql = config.begin_sql.as_deref().unwrap_or("BEGIN");
+                let opened = match open_session(app_id, begin_sql).await {
+                    Ok(()) => true,
+                    Err(error) => {
+                        driven.error = Some(error);
+                        false
+                    }
+                };
+                extend(
+                    &mut queue,
+                    app_id,
+                    TxEvent::BeginCompleted {
+                        token,
+                        generation: BackendGeneration(generation),
+                        opened,
+                    },
+                );
+            }
+
+            Action::IssueDataSql { token } => {
+                // The statement itself is run by `run_operation`, which owns the
+                // SQL; the reducer only says "the session is yours now".
+                driven.issued_operation = Some(token);
+            }
+
+            Action::IssueSavepoint { token, name } => {
+                let frame = current_frame(app_id);
+                let ok = record(
+                    &mut driven,
+                    exec_on_session(app_id, &format!("SAVEPOINT {name}"), &[]).await,
+                );
+                if ok {
+                    crate::context::with_mut(|c| c.push_frame_emit_mark(app_id));
+                }
+                let Some(frame) = frame else {
+                    driven.error = Some(missing_frame());
+                    continue;
+                };
+                extend(
+                    &mut queue,
+                    app_id,
+                    TxEvent::OpenFrameCompleted { token, frame, ok },
+                );
+            }
+
+            Action::IssueRollbackTo { token, name } => {
+                let frame = current_frame(app_id);
+                let ok = record(
+                    &mut driven,
+                    exec_on_session(app_id, &format!("ROLLBACK TO SAVEPOINT {name}"), &[]).await,
+                );
+                if ok {
+                    // The frame's queued events are discarded only now that the
+                    // statement has succeeded and the rows they describe are
+                    // known to be gone. Discarding first makes the failure row's
+                    // documented fate - retain the evidence, poison the
+                    // transaction - unachievable.
+                    crate::context::with_mut(|c| c.discard_frame_effects(app_id));
+                }
+                let Some(frame) = frame else {
+                    driven.error = Some(missing_frame());
+                    continue;
+                };
+                extend(
+                    &mut queue,
+                    app_id,
+                    TxEvent::CloseFrameCompleted {
+                        token,
+                        frame,
+                        close: FrameClose::RolledBackTo,
+                        ok,
+                    },
+                );
+            }
+
+            Action::IssueRelease { token, name } => {
+                let frame = current_frame(app_id);
+                let ok = record(
+                    &mut driven,
+                    exec_on_session(app_id, &format!("RELEASE SAVEPOINT {name}"), &[]).await,
+                );
+                if ok {
+                    // A released frame's events belong to the enclosing frame
+                    // now, exactly as its rows do: pop the watermark without
+                    // truncating.
+                    crate::context::with_mut(|c| c.pop_frame_emit_mark(app_id));
+                }
+                let Some(frame) = frame else {
+                    driven.error = Some(missing_frame());
+                    continue;
+                };
+                extend(
+                    &mut queue,
+                    app_id,
+                    TxEvent::CloseFrameCompleted {
+                        token,
+                        frame,
+                        close: FrameClose::Released,
+                        ok,
+                    },
+                );
+            }
+
+            Action::IssueTerminal { token, intent } => {
+                let (result, error) = terminal(app_id, intent).await;
+                if let Some(error) = error {
+                    driven.error = Some(error);
+                }
+                extend(
+                    &mut queue,
+                    app_id,
+                    TxEvent::TerminalCompleted { token, result },
+                );
+            }
+
+            Action::IssueCancellation { token, goal } => {
+                let ack = cleanup(app_id, goal).await;
+                extend(
+                    &mut queue,
+                    app_id,
+                    TxEvent::CancellationAcknowledged { token, ack },
+                );
+            }
+
+            Action::PublishEffects(_) => drain_pending_emits_on_commit(app_id),
+            Action::DiscardEffects => clear_pending_emits(app_id),
+
+            Action::WithdrawSession => destroy_session(app_id),
+            Action::ReleaseSession => release_session(app_id),
+
+            Action::ReleaseAdmission => {
+                crate::context::with_mut(|c| {
+                    c.retire_transaction(app_id);
+                    c.release_tx_claim(app_id);
+                });
+            }
+        }
+    }
+    driven
+}
+
+/// Apply a follow-up event and append its actions to the queue.
+///
+/// Appended, not prepended: the reducer emitted the actions ahead of this one in
+/// the order it wants them run, and a completion's consequences come after them.
+fn extend(queue: &mut VecDeque<Action>, app_id: &str, event: TxEvent) {
+    if let Some(actions) = apply(app_id, event) {
+        queue.extend(actions);
+    }
+}
+
+/// Latch a statement's error and report whether it succeeded.
+fn record(driven: &mut Driven, result: Result<(), DbError>) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(error) => {
+            driven.error = Some(error);
+            false
+        }
+    }
+}
+
+/// The frame the reducer just pushed, or is about to close.
+///
+/// `Action::IssueSavepoint` / `IssueRelease` / `IssueRollbackTo` carry the
+/// savepoint NAME but not the frame id, so the completion's id is read back off
+/// the stack. The top frame is the only one that can be acting - strict LIFO is
+/// the frame stack's invariant, not an assumption made here.
+/// The error for a frame action whose frame is not on the stack.
+///
+/// Unreachable through any sequence of public calls - the reducer pushes or
+/// selects the frame in the same `apply` that emitted the action - but it is a
+/// value the caller receives rather than a silent `continue`, because a frame
+/// completion that is never fed leaves the transaction in `InFlight` until its
+/// deadline fires.
+fn missing_frame() -> DbError {
+    DbError::internal("db.transaction: a frame action named no frame on the stack")
+}
+
+fn current_frame(app_id: &str) -> Option<FrameId> {
+    crate::context::with(|c| {
+        c.transaction_reducer(app_id).and_then(|reducer| {
+            reducer
+                .frames()
+                .top()
+                .map(super::reducer::frames::Frame::id)
+        })
+    })
+}
+
+// ---------------------------------------------------------------------------
+// The I/O each action turns into
+// ---------------------------------------------------------------------------
+
+/// Acquire the session, send `BEGIN`, and apply the per-app role.
+///
+/// Ordering is the existing one: `BEGIN` first, then `SET LOCAL ROLE` + the DB-1
+/// guards, because `SET LOCAL` needs a transaction to be local to.
+///
+/// ## Every statement this driver issues runs narrowed, and `BEGIN` is why that
+/// is checkable
+///
+/// The pooled checkout arrives carrying the shared login role. Exactly ONE
+/// statement runs before [`super::apply_per_app_role`] narrows it, and that
+/// statement is `BEGIN`, which touches no object and needs no privilege. From
+/// there the session is the app role's until it settles, and every later action
+/// runs on that same narrowed session rather than on a fresh checkout: data SQL,
+/// `SAVEPOINT`, `RELEASE`, `ROLLBACK TO`, terminal SQL, and the forced-cleanup
+/// `ROLLBACK`. So this driver has no ambient-privilege path to lose if the
+/// worker role stops inheriting app roles.
+///
+/// If `apply_per_app_role` itself fails, `open_session` returns `Err` and the
+/// lease drops un-installed. It goes back to the pool with a transaction open,
+/// which `Pool::return_client` handles: it rolls back any session it cannot
+/// prove `Idle` before publishing it.
+async fn open_session(app_id: &str, begin_sql: &str) -> Result<(), DbError> {
+    let backend = crate::context::with(|c| c.backend())
+        .ok_or_else(|| DbError::config("not_configured", "db: not configured"))?;
+
+    match &backend {
+        crate::backend::BackendHandle::Postgres(pg) => {
+            use crate::backend::SqlExecutor;
+            let client = pg.acquire_dedicated_client(app_id).await?;
+            let tx_client = TxConnection::Postgres(client);
+            super::client_exec_on_tx(&backend, &tx_client, begin_sql, &[]).await?;
+            let TxConnection::Postgres(client) = tx_client else {
+                unreachable!("just constructed a Postgres tx client")
+            };
+            super::apply_per_app_role(&client, app_id).await?;
+            install(app_id, TxConnection::Postgres(client));
+        }
+        crate::backend::BackendHandle::Sqlite(sq) => {
+            use crate::backend::SqlExecutor;
+            // Bind the app's file into the session BEFORE its transaction
+            // connection is opened: the connection reads the path from the
+            // session's attachment list, so an app that has never been attached
+            // gets a lane that cannot see its own tables.
+            sq.attach_app_file(app_id).await?;
+            let client = sq.acquire_dedicated_client(app_id).await?;
+            let tx_client = TxConnection::Sqlite(client);
+            super::client_exec_on_tx(&backend, &tx_client, "BEGIN", &[]).await?;
+            let TxConnection::Sqlite(client) = tx_client else {
+                unreachable!("just constructed a SQLite tx client")
+            };
+            install(app_id, TxConnection::Sqlite(client));
+        }
+    }
+    // Drop any broker residue from an interrupted prior run so it cannot leak
+    // into this transaction's drain.
+    clear_pending_emits(app_id);
+    Ok(())
+}
+
+fn install(app_id: &str, client: TxConnection) {
+    crate::context::with_mut(|c| {
+        let previous = c.install_tx_client(app_id, client);
+        debug_assert!(
+            previous.is_none(),
+            "open_session: the tx slot was already occupied for this app"
+        );
+    });
+}
+
+/// Run one statement on the app's pinned transaction session.
+async fn exec_on_session(app_id: &str, sql: &str, params: &[&str]) -> Result<(), DbError> {
+    let backend = crate::context::with(|c| c.backend())
+        .ok_or_else(|| DbError::config("not_configured", "db: not configured"))?;
+    let client = crate::context::TxClientSlotGuard::take(app_id)?;
+    super::client_exec_on_tx(&backend, client.client(), sql, params)
+        .await
+        .map(|_| ())
+}
+
+/// Send terminal SQL and classify what the backend actually did.
+///
+/// **The command tag is not cosmetic.** PostgreSQL answers `COMMIT` with the tag
+/// `ROLLBACK` when the transaction is in a failed state, and a driver that reads
+/// only "did it error" reports a discarded transaction as committed - which is
+/// what published change events for writes that never landed. The check stays
+/// scoped to the PostgreSQL `COMMIT` arm: `RELEASE` answers with the tag
+/// `RELEASE`, so "anything but COMMIT is a failure" would reject every healthy
+/// nested commit.
+async fn terminal(app_id: &str, intent: SettleIntent) -> (TerminalResult, Option<DbError>) {
+    let Some(backend) = crate::context::with(|c| c.backend()) else {
+        return (
+            TerminalResult::Indeterminate,
+            Some(DbError::config("not_configured", "db: not configured")),
+        );
+    };
+    let Some(client) = crate::context::with_mut(|c| c.take_tx_client_for(app_id)) else {
+        // The session is gone before terminal SQL was sent. This does NOT prove
+        // the transaction ended - that inference is DBR-03 - so it is
+        // indeterminate and the reducer withdraws.
+        return (
+            TerminalResult::Indeterminate,
+            Some(DbError::internal(
+                "db: the transaction session was unavailable when terminal SQL was due",
+            )),
+        );
+    };
+
+    let verb = intent.verb();
+    let outcome = match (&backend, &client) {
+        (crate::backend::BackendHandle::Postgres(_), TxConnection::Postgres(pg)) => {
+            match pg.batch_execute_reporting_tag(verb).await {
+                Ok(tag) => match (intent, tag.as_deref()) {
+                    // The L8 case: a COMMIT PostgreSQL answered ROLLBACK is a
+                    // FAILED transaction and publishes nothing.
+                    (SettleIntent::Commit, Some("ROLLBACK")) => (TerminalResult::RolledBack, None),
+                    (SettleIntent::Commit, _) => (TerminalResult::Committed, None),
+                    (SettleIntent::Rollback, _) => (TerminalResult::RolledBack, None),
+                },
+                Err(error) => {
+                    // Sample AFTER the statement answered, never before it.
+                    let status = pg.transaction_status();
+                    let result = if status == Some(TransactionStatus::Idle) {
+                        TerminalResult::RolledBack
+                    } else {
+                        TerminalResult::Indeterminate
+                    };
+                    (result, Some(DbError::from_pg(&error)))
+                }
+            }
+        }
+        (crate::backend::BackendHandle::Sqlite(_), TxConnection::Sqlite(handle)) => {
+            use crate::backend::sqlite::session::TerminalIntent;
+            let sqlite_intent = match intent {
+                SettleIntent::Commit => TerminalIntent::Commit,
+                SettleIntent::Rollback => TerminalIntent::Rollback,
+            };
+            match handle.settle(sqlite_intent).await {
+                Ok(outcome) => sqlite_terminal(&outcome),
+                Err(error) => (TerminalResult::Indeterminate, Some(error)),
+            }
+        }
+        _ => (
+            TerminalResult::Indeterminate,
+            Some(DbError::internal("db: transaction backend/client mismatch")),
+        ),
+    };
+
+    // The session is disposed of by `Action::ReleaseSession` / `WithdrawSession`,
+    // which the reducer emits next, so put it back for that action to act on.
+    // Returning it here rather than dropping it is what lets the withdrawal
+    // arm reach the physical connection at all.
+    crate::context::with_mut(|c| c.put_tx_client_for(app_id, client));
+    outcome
+}
+
+/// Project SC-2's classified SQLite terminal outcome onto SC-1's.
+fn sqlite_terminal(
+    outcome: &crate::backend::sqlite::reservation::TerminalOutcome,
+) -> (TerminalResult, Option<DbError>) {
+    use crate::backend::sqlite::reservation::TerminalOutcome as Sqlite;
+    match outcome {
+        Sqlite::Committed => (TerminalResult::Committed, None),
+        Sqlite::RolledBack | Sqlite::Cancelled { .. } => (TerminalResult::RolledBack, None),
+        Sqlite::CommitFailed { message } => (
+            TerminalResult::RolledBack,
+            Some(DbError::internal(message.clone())),
+        ),
+        Sqlite::CommitIndeterminate { message }
+        | Sqlite::RollbackFailed { message }
+        | Sqlite::CleanupIndeterminate { message } => (
+            TerminalResult::Indeterminate,
+            Some(DbError::internal(message.clone())),
+        ),
+        Sqlite::AlreadyCompleted(inner) => sqlite_terminal(inner),
+    }
+}
+
+/// Perform forced cleanup and report what the health oracle said **afterwards**.
+///
+/// This function is the one SC-1 constrains by name. Read the module docs before
+/// touching the order of the two steps inside [`cleanup_postgres`].
+async fn cleanup(app_id: &str, goal: CleanupGoal) -> CleanupAck {
+    let backend = crate::context::with(|c| c.backend());
+    let client = crate::context::with_mut(|c| c.take_tx_client_for(app_id));
+
+    let Some(client) = client else {
+        // An empty slot has two causes and they are NOT the same, so the answer
+        // is taken from the PROTOCOL's view of session ownership rather than
+        // from the slot being empty. Reading emptiness as proof of anything is
+        // the DBR-03 shape.
+        //
+        // - `SessionOwnership::None` - no session was ever acquired. That is
+        //   `Preparing`, and it is also a `BEGIN` that failed before its client
+        //   was installed. Nothing can be open, so "no open transaction" is
+        //   proved by construction with no I/O.
+        // - `Registry` or `Command` - a session exists and some other future
+        //   holds it out of the slot. Cleanup could not run, backend health is
+        //   unknown, and the withdrawal that follows is caught by the slot
+        //   tombstone when the holder returns it.
+        let session =
+            crate::context::with(|c| c.transaction_reducer(app_id).map(TxReducer::session));
+        let _ = goal;
+        return if session == Some(super::reducer::SessionOwnership::None) {
+            CleanupAck::NoOpenTransaction
+        } else {
+            CleanupAck::Indeterminate
+        };
+    };
+
+    let ack = match (&backend, &client) {
+        (Some(crate::backend::BackendHandle::Postgres(_)), TxConnection::Postgres(pg)) => {
+            cleanup_postgres(pg).await
+        }
+        (Some(crate::backend::BackendHandle::Sqlite(_)), TxConnection::Sqlite(handle)) => {
+            cleanup_sqlite(handle).await
+        }
+        _ => CleanupAck::Indeterminate,
+    };
+
+    // Put it back so the reducer's session disposition can act on it.
+    crate::context::with_mut(|c| c.put_tx_client_for(app_id, client));
+    ack
+}
+
+/// **Cleanup `ROLLBACK` first, health oracle second.**
+///
+/// `transaction_status()` returns `None` whenever a request is in flight, and a
+/// failed statement's trailing `ReadyForQuery` is not consumed when its `await`
+/// returns. Inside a poisoned block every data statement fails with `25P02`, so
+/// no retry makes the oracle answer - and `None` is indeterminate, which
+/// withdraws. Sampling on entry to `Cancelling` therefore destroys a healthy
+/// connection on **every** forced cleanup of a poisoned transaction.
+///
+/// `ROLLBACK` is accepted from a poisoned block, and answering it resolves the
+/// status byte. That is why the two lines below are in this order and must stay
+/// in it.
+async fn cleanup_postgres(client: &compio_postgres::Client) -> CleanupAck {
+    let rolled_back = client.batch_execute("ROLLBACK").await;
+    match client.transaction_status() {
+        Some(TransactionStatus::Idle) => {
+            if rolled_back.is_ok() {
+                CleanupAck::RolledBack
+            } else {
+                // The statement errored but the session is provably out of any
+                // transaction block. Nothing is open; report the weaker proof.
+                CleanupAck::NoOpenTransaction
+            }
+        }
+        // Still in a block, or the oracle cannot say. Either way the cleanup is
+        // unproved.
+        Some(TransactionStatus::InTransaction | TransactionStatus::Failed) | None => {
+            CleanupAck::Indeterminate
+        }
+    }
+}
+
+/// The SQLite arm makes the same judgement on different evidence.
+///
+/// There is no command tag, so the authority is `is_autocommit` sampled inside
+/// the actor **after** the statement - the same "sample after, never before"
+/// rule, enforced by SC-2's own terminal classifier rather than restated here.
+async fn cleanup_sqlite(
+    handle: &crate::backend::sqlite::session::SqliteSessionHandle,
+) -> CleanupAck {
+    use crate::backend::sqlite::session::TerminalIntent;
+    match handle.settle(TerminalIntent::Rollback).await {
+        Ok(outcome) => match sqlite_terminal(&outcome).0 {
+            TerminalResult::RolledBack => CleanupAck::RolledBack,
+            TerminalResult::Committed | TerminalResult::Indeterminate => CleanupAck::Indeterminate,
+        },
+        Err(_) => CleanupAck::Indeterminate,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Session disposition
+// ---------------------------------------------------------------------------
+
+/// [`Action::ReleaseSession`]: hand the session back.
+///
+/// On PostgreSQL that is a plain drop, whose `Drop` returns the lease to the
+/// pool. This is the ONLY disposition that may do that.
+fn release_session(app_id: &str) {
+    let client = crate::context::with_mut(|c| c.take_tx_client_for(app_id));
+    drop(client);
+}
+
+/// [`Action::WithdrawSession`]: destroy the physical connection.
+///
+/// **A drop is not a withdrawal.** `OwnedPooledClient::drop` calls
+/// `pool.return_client(entry)`, which republishes the lease as idle - so the
+/// next borrower inherits precisely the session SC-1 withdrew. Closing the
+/// client's request channel first makes `PoolEntry::is_pool_eligible` false
+/// (it checks `!client.is_closed()`), and `return_client` then evicts the entry
+/// and releases its capacity slot instead of publishing it.
+///
+/// [`crate::context::ThreadDbContext::withdraw_tx_session`] also sets a
+/// per-app tombstone, so a session another future is holding out of the slot is
+/// destroyed when that future returns it rather than quietly parked.
+fn destroy_session(app_id: &str) {
+    let client = crate::context::with_mut(|c| c.withdraw_tx_session(app_id));
+    if let Some(client) = client {
+        crate::context::destroy_tx_connection(client);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Timers
+// ---------------------------------------------------------------------------
+
+/// The execution budget a transaction is admitted under.
+///
+/// `execution` matches the DB-1 `idle_in_transaction_session_timeout` the
+/// session already carries, so the protocol deadline and the server-side guard
+/// bound the same window rather than two different ones. The two cleanup
+/// budgets are the grace SC-1 gives a backend that owes an answer; there is no
+/// third timer and no escalation past them - the session is withdrawn.
+fn budgets() -> TxBudgets {
+    TxBudgets {
+        execution: Duration::from_millis(u64::from(
+            crate::auth::bootstrap::DB_IDLE_IN_TX_TIMEOUT_MS,
+        )),
+        cancellation_sql: Duration::from_secs(5),
+        terminal_sql: Duration::from_secs(10),
+    }
+}
+
+/// Spawn the timer [`Action::ScheduleTimer`] asks for.
+///
+/// The task carries the app key, the kind and the generation, and nothing else -
+/// no session, no client, no settle future. A stale delivery is a pure
+/// diagnostic: the reducer's slot refuses any `(kind, generation)` pair it is
+/// not holding, and refusing produces no SQL, no reply and no state change.
+fn schedule_timer(app_id: &str, scheduled: super::reducer::deadline::ScheduleTimer) {
+    let app_id = app_id.to_string();
+    compio::runtime::spawn(async move {
+        let delay = scheduled.at.saturating_duration_since(Instant::now());
+        compio::time::sleep(delay).await;
+        let _ = deadline_fired(&app_id, scheduled.kind, scheduled.generation).await;
+    })
+    .detach();
+}
+
+// ---------------------------------------------------------------------------
+// Error mapping
+// ---------------------------------------------------------------------------
+
+/// Lower a protocol refusal to the creator-visible error.
+///
+/// Every refusal carries its own code - `TxProtocolError::code()` - so a caller
+/// can branch on what was refused rather than on a collapsed message. The
+/// backend error, when there is one, supplies the detail.
+pub(crate) fn protocol_error(refusal: TxProtocolError, detail: Option<DbError>) -> DbError {
+    let message = detail.as_ref().map_or_else(
+        || format!("db.transaction: {}", refusal.code()),
+        |error| {
+            format!(
+                "db.transaction: {}: {}",
+                refusal.code(),
+                error.message_str()
+            )
+        },
+    );
+    DbError::Coded {
+        code: refusal.code().to_string(),
+        message,
+        hint: None,
+    }
+}
+
+/// Lower a terminal outcome to the creator-visible error, or `None` when the
+/// transaction ended the way the creator asked.
+pub(crate) fn outcome_error(
+    outcome: TerminalOutcome,
+    intent: SettleIntent,
+    detail: Option<DbError>,
+) -> Option<DbError> {
+    let coded = |code: &str, message: String| DbError::Coded {
+        code: code.to_string(),
+        message,
+        hint: None,
+    };
+    let detail_text = detail
+        .as_ref()
+        .map_or_else(String::new, |error| format!(": {}", error.message_str()));
+    match (intent, outcome) {
+        (SettleIntent::Commit, TerminalOutcome::Committed)
+        | (SettleIntent::Rollback, TerminalOutcome::RolledBack) => None,
+        // A COMMIT the server answered ROLLBACK. The writes are gone and this
+        // must never read as success.
+        (SettleIntent::Commit, TerminalOutcome::RolledBack) => Some(coded(
+            "commit_rolled_back",
+            format!(
+                "commit failed - PostgreSQL rolled the transaction back and its \
+                 writes were discarded{detail_text}"
+            ),
+        )),
+        (_, TerminalOutcome::Indeterminate(cause)) => Some(coded(
+            "commit_failed_indeterminate",
+            format!(
+                "transaction state indeterminate ({}){detail_text}",
+                cause.code()
+            ),
+        )),
+        (_, TerminalOutcome::Cancelled(cause)) => Some(coded(
+            cause.code(),
+            format!("db.transaction: {}{detail_text}", cause.code()),
+        )),
+        (_, TerminalOutcome::ResultMismatch) => Some(coded(
+            "settle_result_mismatch",
+            format!("the backend's terminal answer contradicts the request{detail_text}"),
+        )),
+        (SettleIntent::Rollback, TerminalOutcome::Committed) => Some(coded(
+            "settle_result_mismatch",
+            format!("a rollback was answered with a commit{detail_text}"),
+        )),
+    }
+}
