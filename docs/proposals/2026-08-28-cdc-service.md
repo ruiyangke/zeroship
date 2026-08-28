@@ -9,6 +9,77 @@ code.
 
 ---
 
+## DO NOT IMPLEMENT FROM THIS DOCUMENT AS WRITTEN
+
+Reviewed three ways after it was written - an adversarial review, a second
+opinion, and an eight-system prior-art study. **Ten findings; none
+disqualifying, but three are correctness bugs and two change the shape.** They
+are recorded in full in
+`2026-08-26-runtime-db-binding-00-index.md`, section "L12: DECIDED". Building
+the text below without applying them means building it twice.
+
+### Three correctness bugs
+
+1. **Section 6.3's dedup rule drops every row of a transaction after the
+   first.** Every change in one pgoutput transaction carries the same
+   `commit_lsn`, and the frame table in 5.2 has no transaction boundary, so
+   "keep the highest and drop anything at or below" delivers row 1 and silently
+   discards the rest. **Measured on PG 18.4, and the fix is one field:**
+   per-change LSNs are distinct (`0/BAA70A58`, `0/BAA70B38`, `0/BAA70BB8` for
+   three rows under commit `0/BAA70C68`), so stamp each `Change` frame with its
+   OWN lsn. No sequence number, no boundary frame.
+2. **The keepalive handler becomes a durability bug on the way in.**
+   `wal_consumer.rs:441` does `advance_lsn(wal_end)`, which is correct today
+   and prevents idle-slot WAL growth - but `wal_end` is the SERVER's position,
+   which can exceed anything the relay has made durable. Under this document's
+   own promise (confirm once frames are durable in the ring) that confirms WAL
+   the relay cannot replay. Must be `min(wal_end, highest_durable_lsn)`; on an
+   idle database those are equal, so the idle-slot protection survives.
+3. **"Reset the watermark when the Hello term increases" (6.3) is backwards.** A
+   new leader replaying from `confirmed_flush_lsn` produces only duplicates,
+   which the monotone rule already drops - so the reset turns every routine
+   leader change into a duplicate storm, while still missing the one case that
+   genuinely invalidates a watermark: a **PostgreSQL timeline change**, which
+   this document never reads or validates.
+
+### Two shape changes
+
+4. **Reconciliation must BRACKET the migration DDL, not follow it.** A column
+   named in a publication column list becomes a catalog dependency, so
+   `DROP COLUMN` of a listed column fails with `2BP01` (reproduced), and
+   `DROP ... CASCADE` silently removes the whole TABLE from the publication.
+   Since `reconcile_app_publication` runs after `apply_sealed`, any migration
+   dropping a masked column aborts. Split into shrink-before / widen-after,
+   which also fixes the marker landing one transaction late.
+5. **Publications collapse to ONE.** `publication_names` is fixed at
+   `START_REPLICATION`, so per-app publications would force a stream restart for
+   every tenant on every app creation. Measured on 18.4: one publication picks
+   up a table added mid-stream, live, with its column list applied and the
+   existing stream undisturbed. **But that makes the publication a SHARED
+   object**, and `publication_membership_sql` emits `ALTER PUBLICATION ... SET
+   TABLE` - a full replace computed from one app's view. Two tenants migrating
+   concurrently would silently remove each other's tables from CDC. Use
+   `ADD TABLE` / `DROP TABLE`, or lock.
+
+### Five omissions the prior art predicts will bite
+
+None of these appear anywhere in this document, and every studied system had to
+solve them: **slow-consumer policy** (a slow Vitess client once hung a replica
+promotion), **per-app fault isolation in a shared process** (Supabase had three
+project-wide outages from one un-trapped subscriber loop), **what the relay
+measures** - made worse by the retention inversion, since `confirmed_flush_lsn`
+advances fastest when delivery is dead - **ring sizing** (named seven times,
+dimensioned nowhere), and **a lossy-degradation vocabulary** for a change the
+relay cannot represent.
+
+Two smaller corrections: section 4 inverts the SQLite/Postgres polarity
+(`emit_for_rows` returns early on SQLite, so those three functions serve
+Postgres and are deleted with it), and the migration service does not receive
+the descriptor this document tells it to project from - it receives the IR the
+descriptor is folded from, so the projection must come from that same fold.
+
+---
+
 ## 0. How to read the citations in this document
 
 Every `file:line` below was opened in this session, in this worktree
