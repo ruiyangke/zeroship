@@ -19,14 +19,21 @@ schema, under the platform prefix:
 <app_id>.__zeroship_schema_backfills
 ```
 
-**Platform migrations get a schema of their own:**
+**Platform migrations keep the schema they already have:**
 
 ```
-zeroship_migrate.<table>          (was zeroship_migrations.<table>)
+zeroship_migrations.<table>       (unchanged)
 ```
 
-No new schema for creator apps. No separate meta schema. The creator is
-responsible for their own migrations.
+No new schema for creator apps, and no rename on the platform side. The creator
+is responsible for their own migrations.
+
+**The asymmetry is deliberate.** The platform keeps a separate meta schema
+because it has no tenant: nothing owns `zeroship` the way a migrator role owns
+an app schema, so the engine's default derivation (`<project_schema>` +
+`_migrations`) costs nothing and stays correct. The creator case had to move
+in-schema precisely because a tenant DOES own theirs - see "What this costs"
+below.
 
 ## Why `__zeroship_`
 
@@ -80,7 +87,7 @@ database and their app, and corrupting it breaks only them.
    in-sourced at `crates/zeroship-migrate-*`, so this is an ordinary change.
 2. **Config:** `meta_schema` becomes the app's own schema. `conn.rs` already
    exposes `meta_schema` and nothing else, so this is the one knob that exists.
-3. **Platform:** `zeroship_migrations` -> `zeroship_migrate`.
+3. **Platform: nothing.** `zeroship_migrations` stays as it is.
 4. **Delete** `provisioning.rs` step 5's `REVOKE ALL ON ... SCHEMA {meta}`. With
    no separate meta schema it names nothing, and a revoke that names nothing
    reads as protection.
@@ -93,7 +100,7 @@ paths that decision removes. See the index, "Decision 10".
 
 ## The platform half: two shadows can go
 
-`zeroship_migrate.schema_migrations` is append-only, enforced by a
+`zeroship_migrations.schema_migrations` is append-only, enforced by a
 `schema_migrations_immutable` trigger. Two other records duplicate slices of it
 and are both already broken:
 
