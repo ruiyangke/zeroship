@@ -227,6 +227,35 @@ them needs a NEW migration dated after the last applied file, not an edit. And
 reads it (`released_ledger_misordered`) must move to the journal in the same
 change or it silently stops guarding.
 
+## The freeze rule, and why it exists
+
+*Moved here from `AGENTS.md` on 2026-08-28: it is operational detail about a
+subsystem, not a high-level guideline.*
+
+**A migration file that a deployed database has applied is FROZEN.** The
+platform schema IS deployed: a running deployment holds `zeroship` with real
+rows and a journal of the platform migrations it has applied, keyed by a sha256
+of each file's source bytes. Edit an applied file and the runner refuses every
+later run against that database with `ChecksumMismatch`, **permanently** - there
+is no self-healing arm, and adding one would defeat the guard.
+
+**This has already happened.** Four commits on 2026-08-16 edited five applied
+files in place and blocked the production deploy. The repair is to restore the
+released bytes and re-land the change as a NEW file.
+
+**A NEW migration must also sort AFTER every applied one.** The runner applies
+files in filename order and skips any the ledger already records, so a file
+inserted mid-corpus lands, on a deployed database, after every file that sorts
+later than it - while on a fresh database it lands in position. The two schemas
+then agree only if the inserted migration commutes with everything it jumped.
+That is a property of the corpus, not of the numbering, and would survive any
+other version scheme (`docs/decisions/2026-08-20-migration-version-derivation.md`
+weighs four and says why the current one is kept). `20260819000000_app_egress_rules.ts`
+did exactly this on 2026-08-20 and was renamed.
+
+**Practical rule:** date a new migration later than `db/released_migrations.tsv`'s
+last row. It is in no journal yet, so a rename is free.
+
 ## What still enforces the freeze, measured 2026-08-28
 
 `AGENTS.md` states the rule and points here for the mechanisms, because an
