@@ -200,3 +200,31 @@ The six tests added between those two commits (three startup-handoff cases and
 the `differential_server_errors`, `differential_config_parsing` and
 `differential_copy` oracles) appear in NEITHER fringe, so the new suites are
 pooler-stable.
+
+## After fixture isolation (`4255a2e42` + `1d8bbed27`), measured 2026-08-28
+
+54 literal-named relation fixtures were given process-scoped names across the
+two sweeps; a `grep` for a literal `CREATE ... TABLE <name>` in the suite now
+matches only a string inside an assertion message. Measured against 6548:
+
+    42P07 matches, two consecutive full runs   0 and 0
+    failure totals, two consecutive full runs  61 and 62
+
+**The self-collision is gone.** `read_timeout::copy_input_time_is_not_charged_as_server_read_silence`
+now passes TWICE in isolation on the pooler (10.01s each); before the sweep it
+passed once at 10.02s and then failed four times in 0.05s each.
+
+Set-differenced against the 58-name core rather than compared by total:
+
+- **One core member now PASSES**:
+  `integration::released_open_transaction_is_not_inherited_by_the_next_borrower`.
+  It had been failing on a fixture collision, not on pooler semantics.
+- **Five sit above the core**, all COPY-related: the four
+  `differential_tokio::*` copy cases and the `read_timeout` case above. Each
+  passes in isolation and fails only inside a full serial run, so the remaining
+  mechanism is session state left by an EARLIER TEST, not by a previous run of
+  itself. That is category A and outside the driver.
+
+**A rising total after this change is not a regression.** A test that used to die
+early on 42P07 never reached the assertions that could fail for a genuine pooled
+reason; removing the collision lets it run further. Compare the SET.
