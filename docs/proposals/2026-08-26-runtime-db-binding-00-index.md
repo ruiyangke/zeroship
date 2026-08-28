@@ -259,6 +259,44 @@ caveat to carry into that spike: `zeroship-bundle/src/s3_blob.rs:18` records tha
 `bytes_stream` path above - but anyone reaching for a streaming upload should
 expect to hit that wall.
 
+**6. The keepalive handler is CORRECT today and becomes a DURABILITY BUG in the
+relay** - found 2026-08-28 while checking for the opposite problem.
+
+The famous Postgres CDC footgun is that an idle slot never advances
+`confirmed_flush_lsn`, so WAL accumulates with zero changes (this is why
+Debezium ships a heartbeat). **This tree already handles it**, correctly:
+
+```rust
+ReplicationMessage::PrimaryKeepalive { wal_end, reply_requested, .. } => {
+    stream.advance_lsn(wal_end);                      // wal_consumer.rs:441
+    if reply_requested { stream.send_standby_status_update(false).await?; }
+}
+```
+
+Advancing to the server's current `wal_end` on a keepalive is exactly what
+prevents idle-slot WAL growth.
+
+**But the relay makes a promise this line breaks.** Section 6.3 of the service
+design states the relay confirms an LSN *"once the transaction's frames are
+durable in the relay's own ring, not once a worker acknowledges them - that is
+what converts WAL retention into relay-owned retention."* A keepalive's
+`wal_end` is **the server's current WAL position**, which can be ahead of
+anything the relay has persisted. Blindly advancing to it confirms WAL the relay
+does not hold; PostgreSQL is then free to recycle it, and after a relay crash
+those changes are **gone from the WAL and never delivered.**
+
+Today this is harmless because the in-process consumer promises no durability -
+it feeds a broker and a lost event is a missed live-query tick. The relay
+promises retention, and `wal_consumer.rs` is on the **move** list (section 4).
+**So the rule for the relay is: advance to `min(wal_end, highest_durable_lsn)`,
+never to `wal_end` alone** - and on an idle database those are equal, so the
+idle-slot protection is preserved.
+
+*Verified: the code path and the design's promise. Inferred: that a keepalive's
+`wal_end` can exceed the relay's durable position between commits - which
+follows from `wal_end` being the server's position, but I did not construct the
+race.*
+
 **What it does NOT need to re-derive:** the decode multiplier is structural.
 Verified in the PostgreSQL sources (REL_16 and REL_18): publication and row
 filters run at commit replay, **after** decode, buffering and per-slot spill,
