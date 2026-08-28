@@ -567,6 +567,40 @@ own journal, which `journal_sql::applied`
 platform service calls. `2026-08-28-migration-record-consolidation.md` specifies
 the second, which is the better end state.
 
+### L33 - SQLite vector search cannot work on any migration-produced database
+
+`.search()` on a `t.vector()` field fails with "no such table" on the dev tier,
+on any database an actual migration produced. It has never worked there.
+
+The `vec0` shadow relation the search JOIN targets is **authored by nothing**:
+
+- the SQLite renderer folds a derived ANN index to a plain B-tree and drops the
+  opclass - `project_derived_ann_index` sets `access_method = "btree"` and
+  `opclass = None` (`zeroship-migrate-sqlite/src/schema.rs:98-105`);
+- the engine states outright that it **never authors a virtual table**
+  (`zeroship-migrate-backend/src/error.rs:270`);
+- the runtime descriptor nevertheless *names* the relation
+  (`AuxiliaryObject::ShadowTable`, `migrate-core/src/render/gen_types.rs:219`,
+  `:255`), and `vector_search`'s JOIN depends on that name.
+
+**Why it stayed invisible is the useful part.** The only thing that ever created
+the relation was `ensure_vector_index` in the data plane - which was
+`#[cfg(any(test, feature = "test-helpers"))]`, so it ran in tests and in no
+shipped binary. The tests therefore passed against a relation the tests
+themselves created, on a code path production could not reach. Deleting that
+function (`ac38fac0e`) did not cause this; it removed the thing that hid it.
+
+**One property already works in its favour:** the engine's drop pass refuses to
+cascade a live `vec0` virtual table away (`DropOfVirtualTable`,
+`error.rs:291`), so a migration that *does* create one will not be undone by the
+next diff. Only the authoring half is missing.
+
+**PostgreSQL is not proven either, for a different reason.** Every PG search
+test is `#[ignore]`d or self-skips on an image without pgvector and PostGIS -
+and `spatial_near_runs_under_per_app_role_via_rls` reports `ok` via an internal
+skip, which is a green that ruled on nothing. Verifying the PG side needs a
+pgvector+PostGIS image and `--ignored`.
+
 ---
 
 ## Not a defect: a missing gate arm
