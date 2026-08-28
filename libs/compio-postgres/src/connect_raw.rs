@@ -1245,11 +1245,7 @@ where
         }
     }
 
-    // Channel binding hook: the source introspects the TlsStream via
-    // `get_ref()` on the Framed wrapper. Our BufStream exposes
-    // `get_mut()` which yields &mut MaybeTlsStream<_, T>. MaybeTlsStream
-    // implements TlsStream (forwarding to the inner T), so we can query
-    // channel_binding() directly.
+    let negotiated_encryption = handshake.stream.get_mut().negotiated_encryption();
     let tls_server_end_point = handshake
         .stream
         .get_mut()
@@ -1258,17 +1254,15 @@ where
 
     let channel_binding_cfg = config.get_channel_binding();
 
-    // Enforce `ChannelBinding::Require` *before* the mechanism is picked
-    // so we reject both downgrade shapes with a precise error instead of
-    // relying on the post-hoc `can_skip_channel_binding` check:
-    //
-    //   1. Server advertises SCRAM-SHA-256-PLUS but the TLS backend
-    //      cannot export the server endpoint (no tls-server-end-point
-    //      channel binding). Silently falling back to plain
-    //      SCRAM-SHA-256 under `prefer` would be a downgrade surface.
-    //   2. Server does not advertise SCRAM-SHA-256-PLUS at all.
-    //
-    // Both are fatal when the user asked for `require`.
+    // A plaintext PLUS offer can signal that a proxy stripped TLS. Refuse it
+    // even when channel binding was explicitly disabled, as libpq does.
+    if has_scram_plus && negotiated_encryption == Encryption::Plaintext {
+        return handshake.prefer_available_server_error(Err(Error::authentication(
+            "server offered SCRAM-SHA-256-PLUS authentication over a non-TLS connection".into(),
+        )));
+    }
+
+    // Give `require` precise errors before the general selector below.
     if channel_binding_cfg == config::ChannelBinding::Require {
         if !has_scram_plus {
             return handshake.prefer_available_server_error(Err(Error::authentication(
@@ -1282,38 +1276,36 @@ where
         }
     }
 
-    // Under `prefer`, log an operator-visible warning when the server
-    // offered -PLUS but the backend can't bind, so the silent fallback
-    // to plain SCRAM-SHA-256 is still traceable.
-    if has_scram_plus
-        && tls_server_end_point.is_none()
-        && channel_binding_cfg == config::ChannelBinding::Prefer
-    {
-        log::warn!(
-            "server offered SCRAM-SHA-256-PLUS but TLS backend did not expose \
-             tls-server-end-point channel binding; falling back to plain SCRAM-SHA-256"
-        );
-    }
-
     let channel_binding = tls_server_end_point
         .filter(|_| channel_binding_cfg != config::ChannelBinding::Disable)
         .map(sasl::ChannelBinding::tls_server_end_point);
 
-    let (channel_binding, mechanism) = if has_scram_plus {
-        match channel_binding {
-            Some(channel_binding) => (channel_binding, sasl::SCRAM_SHA_256_PLUS),
-            None => (sasl::ChannelBinding::unsupported(), sasl::SCRAM_SHA_256),
-        }
-    } else if has_scram {
-        match channel_binding {
-            Some(_) => (sasl::ChannelBinding::unrequested(), sasl::SCRAM_SHA_256),
-            None => (sasl::ChannelBinding::unsupported(), sasl::SCRAM_SHA_256),
-        }
-    } else {
-        return handshake.prefer_available_server_error(Err(Error::authentication(
-            "unsupported SASL mechanism".into(),
-        )));
-    };
+    let (channel_binding, mechanism) =
+        if has_scram_plus && channel_binding_cfg != config::ChannelBinding::Disable {
+            match channel_binding {
+                Some(channel_binding) => (channel_binding, sasl::SCRAM_SHA_256_PLUS),
+                None => {
+                    return handshake.prefer_available_server_error(Err(Error::tls(
+                        "tls-server-end-point channel binding is unavailable for SCRAM-SHA-256-PLUS"
+                            .into(),
+                    )));
+                }
+            }
+        } else if has_scram {
+            let channel_binding = if negotiated_encryption == Encryption::Tls
+                && channel_binding_cfg != config::ChannelBinding::Disable
+            {
+                // `y` lets a capable server detect a stripped PLUS advertisement.
+                sasl::ChannelBinding::unrequested()
+            } else {
+                sasl::ChannelBinding::unsupported()
+            };
+            (channel_binding, sasl::SCRAM_SHA_256)
+        } else {
+            return handshake.prefer_available_server_error(Err(Error::authentication(
+                "unsupported SASL mechanism".into(),
+            )));
+        };
 
     if mechanism != sasl::SCRAM_SHA_256_PLUS {
         handshake.prefer_available_server_error(can_skip_channel_binding(config))?;
@@ -1508,6 +1500,7 @@ mod tests {
     struct HandshakeWriteSuccess {
         input: Vec<u8>,
         offset: usize,
+        output: Vec<u8>,
     }
 
     impl AsyncRead for HandshakeWriteSuccess {
@@ -1522,6 +1515,7 @@ mod tests {
 
     impl AsyncWrite for HandshakeWriteSuccess {
         async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            self.output.extend_from_slice(buf.as_init());
             BufResult(Ok(buf.buf_len()), buf)
         }
 
@@ -1534,12 +1528,57 @@ mod tests {
         }
     }
 
+    impl TlsStream for HandshakeWriteSuccess {
+        fn channel_binding(&self) -> crate::tls::ChannelBinding {
+            crate::tls::ChannelBinding::none()
+        }
+    }
+
     fn frame(tag: u8, body: &[u8]) -> Vec<u8> {
         let mut frame = Vec::with_capacity(5 + body.len());
         frame.push(tag);
         frame.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_be_bytes());
         frame.extend_from_slice(body);
         frame
+    }
+
+    const SCRAM: &[u8] = b"SCRAM-SHA-256\0\0";
+    const SCRAM_PLUS: &[u8] = b"SCRAM-SHA-256-PLUS\0\0";
+    const SCRAM_BOTH: &[u8] = b"SCRAM-SHA-256-PLUS\0SCRAM-SHA-256\0\0";
+
+    #[allow(clippy::future_not_send)] // compio test futures are thread-local.
+    async fn sasl_attempt(
+        config: &Config,
+        encryption: Encryption,
+        mechanisms: &[u8],
+    ) -> (String, String) {
+        let mut body = 10i32.to_be_bytes().to_vec();
+        body.extend_from_slice(mechanisms);
+
+        let stream = HandshakeWriteSuccess {
+            input: frame(b'R', &body),
+            offset: 0,
+            output: vec![],
+        };
+        let mut handshake = Handshake::new(
+            match encryption {
+                Encryption::Plaintext => MaybeTlsStream::Raw(stream),
+                Encryption::Tls => MaybeTlsStream::Tls(stream),
+            },
+            config,
+        );
+        let error = authenticate(&mut handshake, config, "scripted-user")
+            .await
+            .expect_err("the scripted peer never completes SCRAM");
+        let output = match handshake.stream.get_mut() {
+            MaybeTlsStream::Raw(stream) | MaybeTlsStream::Tls(stream) => {
+                std::mem::take(&mut stream.output)
+            }
+        };
+        (
+            authentication_error_chain(error),
+            String::from_utf8_lossy(&output).into_owned(),
+        )
     }
 
     fn notice(message: &str) -> Vec<u8> {
@@ -1813,6 +1852,7 @@ mod tests {
         let stream = MaybeTlsStream::<_, crate::tls::NoTlsStream>::Raw(HandshakeWriteSuccess {
             input: script,
             offset: 0,
+            output: vec![],
         });
         let (stream, _, _, _) = handshake_for_replication(stream, &config)
             .await
@@ -1881,6 +1921,7 @@ mod tests {
         let stream = MaybeTlsStream::<_, crate::tls::NoTlsStream>::Raw(HandshakeWriteSuccess {
             input: script,
             offset: 0,
+            output: vec![],
         });
         let mut handshake = Handshake::new(stream, &config);
         handshake.phase = HandshakePhase::Complete;
@@ -3453,6 +3494,7 @@ mod tests {
         let stream = MaybeTlsStream::<_, crate::tls::NoTlsStream>::Raw(HandshakeWriteSuccess {
             input: script,
             offset: 0,
+            output: vec![],
         });
         let mut handshake = Handshake::new(stream, &config);
         handshake.stream.buf().reserve(1024 * 1024);
@@ -3690,6 +3732,55 @@ mod tests {
         validate_tls_connector_parameters::<crate::Socket, _>(&connector, Encryption::Tls, &strong)
             .expect_err("a connector built for sslmode=require must not serve verify-full");
     }
+
+    #[compio::test]
+    async fn scram_plus_advertised_over_plaintext_is_refused() {
+        let mut config = scram_config();
+        config.channel_binding(crate::config::ChannelBinding::Disable);
+        let (error, output) = sasl_attempt(&config, Encryption::Plaintext, SCRAM_BOTH).await;
+        assert!(
+            output.is_empty() && error.contains("non-TLS"),
+            "{error}: {output:?}"
+        );
+    }
+
+    #[compio::test]
+    async fn scram_plus_without_tls_endpoint_does_not_fallback() {
+        let config = scram_config();
+        let (error, output) = sasl_attempt(&config, Encryption::Tls, SCRAM_BOTH).await;
+        assert!(
+            output.is_empty() && error.contains("tls-server-end-point"),
+            "{error}: {output:?}"
+        );
+    }
+
+    #[compio::test]
+    async fn tls_without_endpoint_uses_y_for_bare_scram() {
+        let config = scram_config();
+        let (_, output) = sasl_attempt(&config, Encryption::Tls, SCRAM).await;
+        assert!(
+            output.contains("SCRAM-SHA-256") && output.contains("y,,n="),
+            "TLS without endpoint material suppressed the y downgrade sentinel: {output:?}"
+        );
+    }
+
+    #[compio::test]
+    async fn scram_plus_only_never_selects_unadvertised_bare_mechanism() {
+        let mut config = scram_config();
+        config.channel_binding(crate::config::ChannelBinding::Disable);
+        let (error, output) = sasl_attempt(&config, Encryption::Tls, SCRAM_PLUS).await;
+        assert!(
+            output.is_empty() && error.contains("unsupported SASL mechanism"),
+            "{error}: {output:?}"
+        );
+
+        let (_, output) = sasl_attempt(&config, Encryption::Tls, SCRAM_BOTH).await;
+        assert!(
+            output.contains("SCRAM-SHA-256") && output.contains("n,,n="),
+            "disable did not select the advertised bare mechanism with n: {output:?}"
+        );
+    }
+
     /// `channel_binding=require` refuses a server that never offers
     /// SCRAM-SHA-256-PLUS, and says SO.
     ///
