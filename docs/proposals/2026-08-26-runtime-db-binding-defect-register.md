@@ -1331,6 +1331,47 @@ write family already makes this unrepresentable - `RowLimit` is mandatory on
 `Update` and `Delete` with no "all rows" value - so the port closes it by
 construction rather than by adding a second guard to the second branch.
 
+### L32 (NEW 2026-08-28) - the migration-freeze guard reports instead of failing, and its data source has no writer
+
+**`AGENTS.md` devotes its longest passage to one rule: a migration file a
+deployed database has applied is FROZEN, edit it and every later run against
+that database aborts permanently. The pre-flight guard that detects such an edit
+is now advisory, and the table it reads is no longer written by anything.**
+
+Both halves verified 2026-08-28:
+
+- **It reports.** `deploy/scripts/deploy-remote.sh:150-159` `printf`s
+  `"... DELETED from the tree"` and `"... journal=X tree=Y"` rather than calling
+  `fail()` (which exists at `:91` and is used ~8 times elsewhere in the same
+  script). A mismatch prints and the roll continues.
+- **Its source has no producer.** The check reads
+  `zeroship_migrations.platform_migration_files` (`:551`). That table's only
+  writer was `zeroship-migrate-adapter/src/platform.rs`, **deleted** by the
+  platform-migrate removal merged today (`ccda4bb42`). Its 34 recorded
+  checksums are all stale against the `schema()`-form corpus rewritten in
+  `d92efa740`.
+
+**This was a deliberate, correct call by the agent that did the removal, not an
+oversight** - it measured 34 of 34 checksums differing and demoted the arm rather
+than let the next roll hard-fail on 34 false "edited after applied" reports. The
+alternative would have been a guard that cries wolf on every roll, which is
+worse. It is recorded here because the *consequence* outlived the reasoning: the
+freeze discipline currently rests on nothing mechanical.
+
+**Two things still stand and should not be confused with this one.**
+`released_ledger_misordered` (`deploy-remote.sh:184`) is a different check - it
+catches a NEW file that sorts before an applied one - and it is still enforced.
+`PlatformMigrateError::VersionCollision` in the runner is keyed to the database
+being migrated rather than to any snapshot, and is unaffected.
+
+**NOT FIXED, per the standing deferral, and the fix is a decision rather than a
+patch:** either the CLI re-baseline writes `platform_migration_files` (restoring
+the producer), or `db/released_migrations.tsv` is retired and the freeze check
+moves to the engine's own journal, which `journal_sql::applied`
+(`migrate-postgres/src/backend/journal_sql.rs:506`) can already read and **no
+platform service calls**. The second is the better end state and is the same
+unused-reader observation that made the deploy precondition cheap.
+
 ---
 
 ## Reclassified from v3: not live defects
