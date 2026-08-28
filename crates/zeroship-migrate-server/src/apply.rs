@@ -1331,3 +1331,392 @@ mod tests {
         assert!(matches!(err, ApplyRequestError::InvalidDocument(_)));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Live provisioning proofs for the unmask audit table
+// ---------------------------------------------------------------------------
+//
+// Every case here opens a real PostgreSQL connection and creates roles, so the
+// module carries the same `live-db-tests` gate `schema_apply_store`'s tests do:
+// `required-features` in Cargo.toml cannot reach inside a lib target, and a
+// `cargo test --workspace` that provisions no database must not be made red by
+// a case that needs one.
+//
+// WHAT THESE COVER THAT THE UNIT TESTS ABOVE CANNOT. `audit_unmask_tests` in
+// `provisioning.rs` greps the generated string: it proves the DDL SAYS
+// `CREATE TABLE IF NOT EXISTS "app"."__zeroship_audit_unmask"`, never that a
+// server accepted it, that the table came out with the columns the data plane
+// binds, or that the runtime role can reach it afterwards. The whole point of
+// moving this DDL out of the worker is a privilege change, and a privilege
+// change is only observable against a live catalog.
+#[cfg(all(test, feature = "live-db-tests"))]
+mod live_audit_unmask_provisioning {
+    use super::*;
+    use compio_postgres::NoTls;
+
+    /// The database these cases dial. The DSN is typed config
+    /// (`zeroship_core::config::test_database_url`, backed by the overlay at
+    /// `deploy/ops/zeroship.test.toml` or the pre-existing `PG_TEST_URL`
+    /// override) - this module introduces no environment variable of its own
+    /// and sets none.
+    fn test_dsn() -> String {
+        zeroship_core::config::test_database_url()
+    }
+
+    async fn admin_client() -> compio_postgres::Client {
+        let (client, conn) = compio_postgres::connect(&test_dsn(), NoTls)
+            .await
+            .expect("connect to the migrate-server test database");
+        compio::runtime::spawn(async move {
+            let _ = conn.run().await;
+        })
+        .detach();
+        client
+    }
+
+    /// A scratch app schema whose name is a real `Uuid`, because
+    /// `provision_migrator` derives the migrator role from it and production
+    /// only ever passes an app id.
+    fn scratch_schema() -> String {
+        Uuid::new_v4().to_string()
+    }
+
+    fn audit_table_ref(schema: &str) -> String {
+        format!("{}.\"__zeroship_audit_unmask\"", quote_ident(schema))
+    }
+
+    /// Drop everything a case created, by name. Never a blanket sweep: this
+    /// server is shared with other work.
+    async fn teardown(admin: &compio_postgres::Client, schema: &str) {
+        let _ = admin
+            .batch_execute(&format!(
+                "DROP SCHEMA IF EXISTS {} CASCADE; DROP SCHEMA IF EXISTS {} CASCADE;",
+                quote_ident(schema),
+                quote_ident(&format!("app_{schema}")),
+            ))
+            .await;
+        for role in [
+            runtime_app_role_name(schema),
+            migrator_role_name(schema).unwrap_or_default(),
+        ] {
+            if role.is_empty() {
+                continue;
+            }
+            let q = quote_ident(&role);
+            let _ = admin.batch_execute(&format!("DROP OWNED BY {q} CASCADE")).await;
+            let _ = admin.batch_execute(&format!("DROP ROLE IF EXISTS {q}")).await;
+        }
+    }
+
+    /// The production prelude of `apply_ir_request`: `CREATE SCHEMA`, then
+    /// `provision_migrator`. Returns the migrator role name, which is what the
+    /// apply path passes on to `provision_runtime_app_role`.
+    async fn provision_schema_and_migrator(
+        admin: &compio_postgres::Client,
+        schema: &str,
+    ) -> String {
+        admin
+            .batch_execute(&format!(
+                "CREATE SCHEMA IF NOT EXISTS {}",
+                quote_ident(schema)
+            ))
+            .await
+            .expect("create scratch app schema");
+        let role = migrator_role_name(schema).expect("derive migrator role");
+        let mut cfg = ExecutorConfig::new(
+            schema.to_string(),
+            schema.to_string(),
+            guard_policy_for_managed(schema),
+        )
+        .with_migrator_role(role.clone());
+        cfg.confinement.meta_schema = schema.to_string();
+        provision_migrator(admin, &cfg)
+            .await
+            .expect("provision migrator role");
+        role
+    }
+
+    async fn probe(admin: &compio_postgres::Client, sql: &str) -> bool {
+        admin
+            .query_one_scalar::<bool, _>(sql, &[])
+            .await
+            .unwrap_or_else(|e| panic!("probe failed: {sql}: {e}"))
+    }
+
+    /// 1. THE TABLE IS ACTUALLY CREATED, with the shape the data plane binds.
+    ///
+    /// `crud/unmask.rs` INSERTs eight columns by name (`actor_id, actor_role,
+    /// collection, row_pk, "column", classification, reason, outcome`) and
+    /// relies on `id` and `ts` defaulting. This case reads the catalog for all
+    /// eleven, for the `BIGSERIAL`-implied sequence, for the three indexes, and
+    /// for the `outcome` CHECK - then re-runs the provisioning, which is what
+    /// makes it safe on every apply.
+    #[compio::test]
+    async fn provisioning_creates_the_audit_table_with_its_columns_and_indexes() {
+        let admin = admin_client().await;
+        let schema = scratch_schema();
+        teardown(&admin, &schema).await;
+        provision_schema_and_migrator(&admin, &schema).await;
+
+        provision_audit_unmask_table(&admin, &schema)
+            .await
+            .expect("provision the audit table");
+
+        let columns: Vec<(String, String, bool)> = admin
+            .query(
+                "SELECT column_name, data_type, is_nullable = 'YES' \
+                   FROM information_schema.columns \
+                  WHERE table_schema = $1 AND table_name = '__zeroship_audit_unmask' \
+                  ORDER BY ordinal_position",
+                &[&schema],
+            )
+            .await
+            .expect("read columns")
+            .iter()
+            .map(|r| (r.get(0), r.get(1), r.get(2)))
+            .collect();
+        let names: Vec<&str> = columns.iter().map(|c| c.0.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "id",
+                "ts",
+                "actor_id",
+                "actor_role",
+                "collection",
+                "row_pk",
+                "column",
+                "classification",
+                "reason",
+                "request_id",
+                "outcome",
+            ],
+            "the audit table's columns, in order: {columns:?}"
+        );
+        // The five the data plane always supplies must be NOT NULL; the four it
+        // may omit must accept a NULL rather than refuse the row.
+        for (name, nullable) in [
+            ("collection", false),
+            ("row_pk", false),
+            ("column", false),
+            ("classification", false),
+            ("outcome", false),
+            ("actor_id", true),
+            ("actor_role", true),
+            ("reason", true),
+            ("request_id", true),
+        ] {
+            let got = columns
+                .iter()
+                .find(|c| c.0 == name)
+                .unwrap_or_else(|| panic!("column {name} missing: {columns:?}"));
+            assert_eq!(got.2, nullable, "nullability of {name}: {got:?}");
+        }
+        assert_eq!(
+            columns.iter().find(|c| c.0 == "id").map(|c| c.1.as_str()),
+            Some("bigint"),
+            "id must be the BIGSERIAL pk: {columns:?}"
+        );
+
+        // The BIGSERIAL sequence. Its absence is the second half of the ordering
+        // hazard documented on `audit_unmask_table_sql`: a grant reaching the
+        // table but not the sequence would still fail every INSERT.
+        assert!(
+            probe(
+                &admin,
+                &format!(
+                    "SELECT pg_get_serial_sequence('{}', 'id') IS NOT NULL",
+                    audit_table_ref(&schema)
+                ),
+            )
+            .await,
+            "the id column must own an implicit sequence"
+        );
+
+        // OWNERSHIP, which is the change this commit made: the table is created
+        // by the migration service's admin principal, so the worker's runtime
+        // role is an ordinary grantee rather than the owner it used to be.
+        let owner: String = admin
+            .query_one_scalar(
+                "SELECT tableowner FROM pg_tables \
+                  WHERE schemaname = $1 AND tablename = '__zeroship_audit_unmask'",
+                &[&schema],
+            )
+            .await
+            .expect("read table owner");
+        assert_ne!(
+            owner,
+            runtime_app_role_name(&schema),
+            "the runtime role must NOT own its own audit log"
+        );
+
+        let indexes: Vec<String> = admin
+            .query(
+                "SELECT indexname FROM pg_indexes \
+                  WHERE schemaname = $1 AND tablename = '__zeroship_audit_unmask' \
+                  ORDER BY indexname",
+                &[&schema],
+            )
+            .await
+            .expect("read indexes")
+            .iter()
+            .map(|r| r.get::<_, String>(0))
+            .collect();
+        assert_eq!(
+            indexes,
+            [
+                "__zeroship_audit_unmask_actor_idx",
+                "__zeroship_audit_unmask_pkey",
+                "__zeroship_audit_unmask_row_idx",
+                "__zeroship_audit_unmask_ts_idx",
+            ],
+            "three declared indexes plus the primary key: {indexes:?}"
+        );
+
+        // The outcome CHECK is the only thing stopping a third outcome string
+        // from being recorded, so the server has to be the one enforcing it.
+        let bad = admin
+            .execute(
+                &format!(
+                    "INSERT INTO {} (collection, row_pk, \"column\", classification, outcome) \
+                     VALUES ('users', '1', 'ssn', 'pii', 'maybe')",
+                    audit_table_ref(&schema)
+                ),
+                &[],
+            )
+            .await
+            .expect_err("outcome CHECK must refuse an unknown outcome");
+        assert_eq!(
+            bad.code(),
+            Some(&compio_postgres::error::SqlState::CHECK_VIOLATION),
+            "expected a check violation, got {bad}"
+        );
+
+        // Idempotent: this runs on EVERY apply.
+        provision_audit_unmask_table(&admin, &schema)
+            .await
+            .expect("re-running the provisioning must be a no-op");
+
+        teardown(&admin, &schema).await;
+    }
+
+    /// 2. THE ORDERING MATTERS, shown by running it the other way round rather
+    /// than asserted.
+    ///
+    /// `provision_runtime_app_role` grants the runtime role its DML with
+    /// `GRANT ... ON ALL TABLES IN SCHEMA` / `ON ALL SEQUENCES IN SCHEMA`, which
+    /// are snapshots over what exists at that instant, plus `ALTER DEFAULT
+    /// PRIVILEGES FOR ROLE <migrator>` for the future - and the audit table is
+    /// created by the ADMIN principal, not the migrator, so the default
+    /// privileges do not cover it either. Every arm runs exactly the same
+    /// production functions against equivalent scratch schemas; only their order
+    /// differs.
+    ///
+    /// ARM C locates the boundary rather than assuming it. `apply_ir_request`
+    /// calls `provision_runtime_app_role` TWICE - once before `apply_sealed` and
+    /// once after - so the binding constraint is "before the LAST call", not
+    /// "before the first". A table created between the two is still reached,
+    /// because the second call re-runs the snapshot grants.
+    #[compio::test]
+    async fn the_audit_table_must_be_provisioned_before_the_runtime_role() {
+        let admin = admin_client().await;
+
+        // ARM A - production order: audit table, then runtime role.
+        let before = scratch_schema();
+        teardown(&admin, &before).await;
+        let migrator_before = provision_schema_and_migrator(&admin, &before).await;
+        provision_audit_unmask_table(&admin, &before)
+            .await
+            .expect("provision audit table (production order)");
+        provision_runtime_app_role(&admin, &before, &migrator_before)
+            .await
+            .expect("provision runtime role (production order)");
+
+        // ARM B - the inversion, differing in exactly one variable.
+        let after = scratch_schema();
+        teardown(&admin, &after).await;
+        let migrator_after = provision_schema_and_migrator(&admin, &after).await;
+        provision_runtime_app_role(&admin, &after, &migrator_after)
+            .await
+            .expect("provision runtime role (inverted order)");
+        provision_audit_unmask_table(&admin, &after)
+            .await
+            .expect("provision audit table (inverted order)");
+
+        // ARM C - between the apply path's TWO `provision_runtime_app_role`
+        // calls. The second one re-snapshots, so this arm is expected to be
+        // REACHABLE, and that is the honest statement of where the boundary is.
+        let between = scratch_schema();
+        teardown(&admin, &between).await;
+        let migrator_between = provision_schema_and_migrator(&admin, &between).await;
+        provision_runtime_app_role(&admin, &between, &migrator_between)
+            .await
+            .expect("provision runtime role (first apply-path call)");
+        provision_audit_unmask_table(&admin, &between)
+            .await
+            .expect("provision audit table (between the two calls)");
+        provision_runtime_app_role(&admin, &between, &migrator_between)
+            .await
+            .expect("provision runtime role (second apply-path call)");
+
+        let insert_priv = |schema: &str| {
+            format!(
+                "SELECT has_table_privilege('{role}', '{table}', 'INSERT')",
+                role = runtime_app_role_name(schema),
+                table = audit_table_ref(schema),
+            )
+        };
+        let sequence_priv = |schema: &str| {
+            format!(
+                "SELECT has_sequence_privilege('{role}', \
+                   pg_get_serial_sequence('{table}', 'id'), 'USAGE')",
+                role = runtime_app_role_name(schema),
+                table = audit_table_ref(schema),
+            )
+        };
+
+        assert!(
+            probe(&admin, &insert_priv(&before)).await,
+            "production order must leave the runtime role able to INSERT"
+        );
+        assert!(
+            probe(&admin, &sequence_priv(&before)).await,
+            "production order must leave the runtime role able to use the id sequence"
+        );
+        // THE CONTROL. Same two calls, opposite order, and the snapshot grants
+        // now miss both objects. If this arm ever went true, the ordering
+        // comment on `audit_unmask_table_sql` would be describing nothing and
+        // arm A would be passing for some other reason.
+        assert!(
+            !probe(&admin, &insert_priv(&after)).await,
+            "a table created AFTER the snapshot grants must NOT be reachable - \
+             if it is, the ordering constraint is not what makes the production \
+             order work and arm A proves nothing"
+        );
+        assert!(
+            !probe(&admin, &sequence_priv(&after)).await,
+            "the implicit sequence must be missed too - it is the second object \
+             the ordering hazard costs"
+        );
+        // ARM C. `audit_unmask_table_sql`'s docstring says "BEFORE
+        // `provision_runtime_app_role`"; this is what that actually buys, and it
+        // is looser than the sentence reads. Written as an assertion so a change
+        // that removed the apply path's SECOND call - making the strict reading
+        // true - fails here and forces the docstring to be re-read.
+        assert!(
+            probe(&admin, &insert_priv(&between)).await,
+            "the apply path calls provision_runtime_app_role twice; a table \
+             created between them is re-snapshotted by the second call. If this \
+             is false, one of those two calls is gone and the ordering docstring \
+             on audit_unmask_table_sql needs re-reading"
+        );
+        assert!(
+            probe(&admin, &sequence_priv(&between)).await,
+            "the second call must re-snapshot the sequence as well"
+        );
+
+        teardown(&admin, &before).await;
+        teardown(&admin, &after).await;
+        teardown(&admin, &between).await;
+    }
+}

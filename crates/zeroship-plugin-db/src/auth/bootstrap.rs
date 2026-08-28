@@ -574,3 +574,314 @@ mod tests {
         assert_eq!(APP_ROLE_TEMPLATE, "__zeroship_app_role_template");
     }
 }
+
+// ---------------------------------------------------------------------------
+// The reserved-prefix sweep, against a live catalog
+// ---------------------------------------------------------------------------
+//
+// `reserved_table_revoke_tests` above greps the generated SQL for the exemption
+// clause. THAT CANNOT ANSWER THE QUESTION IT IS ASKED. A string test proves the
+// statement mentions `__zeroship_audit_unmask`; it cannot prove PostgreSQL left
+// the runtime role's `INSERT` in place afterwards, and the exemption exists for
+// exactly one reason - that the worker stopped OWNING that table on 2026-08-28
+// and owner rights no longer carry it through a `REVOKE`. Ownership, grants and
+// revokes are catalog facts, so this module goes to the catalog.
+//
+// Gated behind `live-db-tests` (which implies `test-helpers`) so
+// `cargo test -p zeroship-plugin-db --lib` stays database-free.
+#[cfg(all(test, feature = "live-db-tests"))]
+mod live_reserved_sweep_tests {
+    use super::*;
+    use compio_postgres::{Client, NoTls};
+
+    /// The DSN comes from typed config
+    /// (`zeroship_core::config::test_database_url`, backed by the overlay at
+    /// `deploy/ops/zeroship.test.toml` or the pre-existing `PG_TEST_URL`
+    /// override). This module declares no environment variable of its own and
+    /// calls no `set_var`.
+    fn test_dsn() -> String {
+        zeroship_core::config::test_database_url()
+    }
+
+    async fn admin_client() -> Client {
+        let (client, conn) = compio_postgres::connect(&test_dsn(), NoTls)
+            .await
+            .expect("connect to the plugin-db test database");
+        compio::runtime::spawn(async move {
+            let _ = conn.run().await;
+        })
+        .detach();
+        client
+    }
+
+    /// A scratch app id with a unique prefix - this server is shared.
+    fn scratch_app() -> String {
+        format!("zsaudit_{}", uuid::Uuid::new_v4().simple())
+    }
+
+    fn audit_ref(app: &str) -> String {
+        format!("{}.\"__zeroship_audit_unmask\"", crate::query::quote_ident(app))
+    }
+
+    fn journal_ref(app: &str) -> String {
+        format!(
+            "{}.\"__zeroship_schema_migrations\"",
+            crate::query::quote_ident(app)
+        )
+    }
+
+    /// The eight columns `crud/unmask.rs`'s PG arm binds, with `id` and `ts`
+    /// left to their defaults.
+    ///
+    /// A COPY of that column list, not the production statement - the producer
+    /// is a private `async fn` that resolves its backend out of the isolate
+    /// context, which this module has no reason to stand up. So this case cannot
+    /// catch the column list drifting apart from the DDL; the live `unmask()`
+    /// cases in `tests/integration.rs` are what covers that. What it IS here to
+    /// catch is the privilege, which those cases run as the owning superuser and
+    /// therefore cannot see.
+    fn audit_insert_sql(app: &str) -> String {
+        format!(
+            "INSERT INTO {} (actor_id, actor_role, collection, row_pk, \"column\", \
+             classification, reason, outcome) \
+             VALUES ('usr_1', 'admin', 'users', '1', 'ssn', 'pii', 'support', 'granted')",
+            audit_ref(app)
+        )
+    }
+
+    /// Provision one scratch app the way production does: the migration service
+    /// (an ADMIN principal, not the worker) creates the reserved tables, then
+    /// the per-app role is provisioned over them.
+    ///
+    /// `provision_audit_unmask_table` is `zeroship-migrate-server`'s production
+    /// entry point, reached through the dev-dependency this crate already
+    /// declares for exactly this reason - a fixture holding its own `CREATE
+    /// TABLE` would prove the shape of the fixture.
+    ///
+    /// The journal table beside it is NOT from a production generator: the
+    /// engine bootstraps `__zeroship_schema_migrations` from inside an apply,
+    /// which is far more machinery than this case needs. It stands in for "any
+    /// other reserved-prefix table", and all that is asserted about it is that
+    /// the sweep still strips it.
+    async fn provision_scratch_app(admin: &Client, app: &str) -> String {
+        admin
+            .batch_execute(&format!(
+                "CREATE SCHEMA IF NOT EXISTS {}",
+                crate::query::quote_ident(app)
+            ))
+            .await
+            .expect("create scratch app schema");
+        zeroship_migrate_server::provisioning::provision_audit_unmask_table(admin, app)
+            .await
+            .expect("provision the unmask audit table as the migration service does");
+        admin
+            .batch_execute(&format!(
+                "CREATE TABLE IF NOT EXISTS {} (id BIGSERIAL PRIMARY KEY, name TEXT); \
+                 CREATE TABLE IF NOT EXISTS {}.\"widgets\" (id BIGSERIAL PRIMARY KEY);",
+                journal_ref(app),
+                crate::query::quote_ident(app),
+            ))
+            .await
+            .expect("seed the swept journal stand-in and a creator table");
+        per_app_role_name(app)
+    }
+
+    /// Named-object teardown only. `__zeroship_app_role_template` is
+    /// deliberately left alone: `ensure_per_app_role` creates it idempotently,
+    /// it is shared by every app on the cluster, and dropping it would break
+    /// concurrent work on this server.
+    async fn teardown(admin: &Client, app: &str) {
+        let role = crate::query::quote_ident(&per_app_role_name(app));
+        let _ = admin
+            .batch_execute(&format!(
+                "DROP SCHEMA IF EXISTS {} CASCADE",
+                crate::query::quote_ident(app)
+            ))
+            .await;
+        let _ = admin.batch_execute(&format!("DROP OWNED BY {role} CASCADE")).await;
+        let _ = admin.batch_execute(&format!("DROP ROLE IF EXISTS {role}")).await;
+    }
+
+    /// Run `sql` with the connection's role narrowed to the app's runtime role
+    /// exactly the way the data plane narrows it - `tx_session_setup_sql`, the
+    /// production statement, inside the transaction whose COMMIT/ROLLBACK is
+    /// what reverts it.
+    async fn as_runtime_role(
+        admin: &Client,
+        app: &str,
+        sql: &str,
+    ) -> Result<(), compio_postgres::Error> {
+        admin.batch_execute("BEGIN").await?;
+        let scoped = async {
+            admin.batch_execute(&tx_session_setup_sql(app)).await?;
+            admin.batch_execute(sql).await
+        }
+        .await;
+        let _ = admin
+            .batch_execute(if scoped.is_ok() { "COMMIT" } else { "ROLLBACK" })
+            .await;
+        scoped
+    }
+
+    fn denied(err: &compio_postgres::Error) -> bool {
+        err.code() == Some(&compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
+    }
+
+    /// THE ONE THAT MATTERS. The worker must still be able to append to its own
+    /// audit log after the reserved-prefix sweep has run over the schema.
+    ///
+    /// Positive half: a real `INSERT`, as the real runtime role, lands a row.
+    /// Negative half: the same role cannot `TRUNCATE` or `DROP` that table, and
+    /// cannot write the journal beside it. Losing ownership was claimed as a
+    /// security GAIN; a test that only proved the append still works would have
+    /// measured the loss and not the gain.
+    #[compio::test]
+    async fn the_runtime_role_can_append_to_the_audit_log_after_the_sweep() {
+        let admin = admin_client().await;
+        let app = scratch_app();
+        teardown(&admin, &app).await;
+        let role = provision_scratch_app(&admin, &app).await;
+
+        let pool = compio_postgres::Pool::connect(&test_dsn(), 2)
+            .await
+            .expect("pool for ensure_per_app_role");
+        ensure_per_app_role(&pool, &app)
+            .await
+            .expect("provision the per-app role (this is what runs the sweep)");
+
+        // The table is NOT owned by the role that writes it - the premise the
+        // exemption exists for. While the worker created it, this assertion
+        // would have been false and the sweep would have been a no-op.
+        let owner: String = admin
+            .query_one_scalar(
+                "SELECT tableowner FROM pg_tables \
+                  WHERE schemaname = $1 AND tablename = '__zeroship_audit_unmask'",
+                &[&app],
+            )
+            .await
+            .expect("read audit table owner");
+        assert_ne!(owner, role, "the worker must not own its own audit log");
+
+        // POSITIVE HALF - a real INSERT, as the real role.
+        as_runtime_role(&admin, &app, &audit_insert_sql(&app))
+            .await
+            .expect("the runtime role must be able to append an unmask audit row");
+        let rows: i64 = admin
+            .query_one_scalar(&format!("SELECT count(*) FROM {}", audit_ref(&app)), &[])
+            .await
+            .expect("count audit rows");
+        assert_eq!(rows, 1, "the append must actually have landed a row");
+
+        // NEGATIVE HALF - the reach it must NOT have.
+        for (what, sql) in [
+            ("TRUNCATE", format!("TRUNCATE {}", audit_ref(&app))),
+            ("DROP", format!("DROP TABLE {}", audit_ref(&app))),
+            (
+                "forge a journal row",
+                format!("INSERT INTO {} (name) VALUES ('forged')", journal_ref(&app)),
+            ),
+        ] {
+            let err = as_runtime_role(&admin, &app, &sql)
+                .await
+                .expect_err(&format!("the runtime role must not be able to {what}"));
+            assert!(
+                err.as_db_error().is_some(),
+                "{what} must be refused by the server, not by the client: {err}"
+            );
+        }
+        // Only the appended row survives all of that.
+        let rows: i64 = admin
+            .query_one_scalar(&format!("SELECT count(*) FROM {}", audit_ref(&app)), &[])
+            .await
+            .expect("re-count audit rows");
+        assert_eq!(rows, 1, "no denied statement may have changed the log");
+
+        teardown(&admin, &app).await;
+    }
+
+    /// THE CONTROL, differing in exactly one variable: the exemption clause.
+    ///
+    /// Same production provisioning, same production sweep statement - with the
+    /// `AND c.relname <> '__zeroship_audit_unmask'` predicate deleted from the
+    /// generated text. The INSERT above must now be refused with
+    /// `insufficient_privilege`, which is the exact failure the exemption's
+    /// docstring predicts. Without this arm the case above would pass whether or
+    /// not the exemption did anything.
+    ///
+    /// The clause is rebuilt from the two constants rather than typed out, so a
+    /// rename that made the strip a no-op fails the `assert_ne!` instead of
+    /// quietly turning this control into a duplicate of the case above.
+    #[compio::test]
+    async fn without_the_exemption_the_sweep_takes_the_runtime_role_insert() {
+        let admin = admin_client().await;
+        let app = scratch_app();
+        teardown(&admin, &app).await;
+        let role = provision_scratch_app(&admin, &app).await;
+
+        let pool = compio_postgres::Pool::connect(&test_dsn(), 2)
+            .await
+            .expect("pool for ensure_per_app_role");
+        ensure_per_app_role(&pool, &app)
+            .await
+            .expect("provision the per-app role");
+
+        let shipped = revoke_reserved_system_table_privileges_sql(&app, &role);
+        let exemption = format!(
+            "AND c.relname <> {} ",
+            sql_string_literal(WORKER_WRITABLE_RESERVED_TABLE)
+        );
+        let unexempted = shipped.replace(&exemption, "");
+        assert_ne!(
+            shipped, unexempted,
+            "the exemption clause {exemption:?} was not found in the shipped sweep, \
+             so this control would have re-run the shipped statement and proved \
+             nothing:\n{shipped}"
+        );
+
+        admin
+            .batch_execute(&unexempted)
+            .await
+            .expect("run the sweep without its exemption");
+
+        let err = as_runtime_role(&admin, &app, &audit_insert_sql(&app))
+            .await
+            .expect_err("without the exemption the append MUST be refused");
+        assert!(
+            denied(&err),
+            "expected insufficient_privilege, got {:?}: {err}",
+            err.code()
+        );
+        // `compio_postgres::Error`'s Display is the bare string "db error"; the
+        // server's text is on the wrapped `DbError`, which is where the
+        // docstring's predicted `permission denied for table
+        // __zeroship_audit_unmask` actually appears.
+        let message = err
+            .as_db_error()
+            .map(|db| db.message().to_string())
+            .unwrap_or_default();
+        assert!(
+            message.contains("__zeroship_audit_unmask"),
+            "the refusal must name the audit table; got {message:?}"
+        );
+
+        // And the swept privilege is exactly the one the exemption protects:
+        // the creator table beside it is untouched, so the sweep did not simply
+        // strip everything.
+        let creator_insert: bool = admin
+            .query_one_scalar(
+                &format!(
+                    "SELECT has_table_privilege('{role}', '{}.\"widgets\"', 'INSERT')",
+                    crate::query::quote_ident(&app)
+                ),
+                &[],
+            )
+            .await
+            .expect("probe creator-table privilege");
+        assert!(
+            creator_insert,
+            "the sweep must leave ordinary creator tables alone"
+        );
+
+        teardown(&admin, &app).await;
+    }
+}

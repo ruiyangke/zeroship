@@ -309,13 +309,26 @@ pub const AUDIT_UNMASK_TABLE: &str = "__zeroship_audit_unmask";
 ///
 /// # Ordering against the runtime role
 ///
-/// This must run BEFORE `apply::provision_runtime_app_role`. That function
-/// grants the runtime role `INSERT` via `GRANT ... ON ALL TABLES IN SCHEMA` and
-/// sequence access via `GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA`, both of
-/// which are SNAPSHOT grants over what exists at the moment they run. A table
-/// created after them is not covered, and because the primary key is
-/// `BIGSERIAL` the miss would be TWO objects, not one - the worker would fail on
-/// the implicit sequence even if the table grant were somehow repaired.
+/// This must run BEFORE THE LAST `apply::provision_runtime_app_role`. That
+/// function grants the runtime role `INSERT` via `GRANT ... ON ALL TABLES IN
+/// SCHEMA` and sequence access via `GRANT USAGE, SELECT ON ALL SEQUENCES IN
+/// SCHEMA`, both of which are SNAPSHOT grants over what exists at the moment
+/// they run. A table created after them is not covered, and because the primary
+/// key is `BIGSERIAL` the miss would be TWO objects, not one - the worker would
+/// fail on the implicit sequence even if the table grant were somehow repaired.
+/// The `ALTER DEFAULT PRIVILEGES` clauses beside those grants do not save it
+/// either: they are `FOR ROLE <migrator>`, and this table is created by the
+/// admin principal.
+///
+/// "THE LAST" IS THE ACCURATE READING, and this paragraph said "BEFORE
+/// `provision_runtime_app_role`" until it was measured. `apply_ir_request` calls
+/// that function TWICE - once before `apply_sealed` and once after - so a table
+/// created between the two is re-snapshotted by the second call and stays
+/// reachable. The strict sentence describes a constraint the code does not
+/// actually impose. `live_audit_unmask_provisioning::
+/// the_audit_table_must_be_provisioned_before_the_runtime_role` rules on all
+/// three positions against a live catalog; its third arm is what would go red
+/// if the second call were ever removed.
 ///
 /// # Idempotence
 ///
