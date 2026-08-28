@@ -1689,7 +1689,13 @@ mod tests {
                     AppNetPolicy::default(),
                     Some("deploy-bad"),
                     Some(
-                        r#"{"version":1,"collections":{"notes":{"fields":{"title":{"type":"string"}},"options":{"softDelete":false,"versioning":false},"indexes":[{"name":"bad","fields":[123]}]}}}"#,
+                        // `version` MUST be 2, and the corruption MUST be the
+                        // `indexes` entry below. Both arms assert the error
+                        // names `indexes`, so a v1 fixture would fail the
+                        // version check FIRST and the arm would pass on the
+                        // wrong error - which is exactly what happened when the
+                        // descriptor went to v2 and these fixtures did not.
+                        r#"{"version":2,"collections":{"notes":{"fields":{"title":{"type":"string"}},"options":{"softDelete":false,"versioning":false},"indexes":[{"name":"bad","fields":[123]}]}}}"#,
                     ),
                     &EnvSnapshot::empty(),
                 )
@@ -1739,7 +1745,13 @@ mod tests {
                     AppNetPolicy::default(),
                     Some("deploy-bad"),
                     Some(
-                        r#"{"version":1,"collections":{"notes":{"fields":{"title":{"type":"string"}},"options":{"softDelete":false,"versioning":false},"indexes":[{"name":"bad","fields":[123]}]}}}"#,
+                        // `version` MUST be 2, and the corruption MUST be the
+                        // `indexes` entry below. Both arms assert the error
+                        // names `indexes`, so a v1 fixture would fail the
+                        // version check FIRST and the arm would pass on the
+                        // wrong error - which is exactly what happened when the
+                        // descriptor went to v2 and these fixtures did not.
+                        r#"{"version":2,"collections":{"notes":{"fields":{"title":{"type":"string"}},"options":{"softDelete":false,"versioning":false},"indexes":[{"name":"bad","fields":[123]}]}}}"#,
                     ),
                     &EnvSnapshot::empty(),
                 )
