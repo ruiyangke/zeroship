@@ -1346,8 +1346,8 @@ impl Config {
 
     /// Sets the oldest PostgreSQL wire protocol the connection may use.
     ///
-    /// Defaults to [`ProtocolVersion::V3_0`], allowing a server that does not
-    /// support the requested maximum to negotiate the connection down to 3.0.
+    /// Defaults to [`ProtocolVersion::V3_0`], allowing a server with protocol
+    /// negotiation support to negotiate the connection down to 3.0.
     pub fn min_protocol_version(&mut self, version: ProtocolVersion) -> &mut Config {
         self.min_protocol_version = version;
         self
@@ -1369,8 +1369,10 @@ impl Config {
     /// Requesting 3.2 by default is worth the divergence because 3.2 is what
     /// carries the longer cancel key; 3.0's is a fixed 32 bits, which is
     /// brute-forceable, and that is why upstream lengthened it. Nothing is lost
-    /// against an older server: the server answers `NegotiateProtocolVersion`
-    /// and the session continues on 3.0.
+    /// when a peer answers `NegotiateProtocolVersion`: the session continues on
+    /// 3.0. `PostgreSQL` versions before 9.3.21 reject the newer minor, and other
+    /// peers without negotiation support may do the same; use
+    /// `max_protocol_version=3.0` for those peers.
     ///
     /// The fallback was measured in every shape this driver is deployed in,
     /// because a default that breaks a pooler is not a default: direct to

@@ -240,10 +240,15 @@ where
     async fn next(&mut self) -> Result<Option<Message>, Error> {
         loop {
             if let Some(body) = self.pending.take_raw_frame(b'v').map_err(Error::parse)? {
-                if self.phase != HandshakePhase::AwaitingAuthentication {
-                    return Err(protocol_error(
-                        "PostgreSQL sent NegotiateProtocolVersion after authentication began",
-                    ));
+                match self.phase {
+                    HandshakePhase::AwaitingAuthentication
+                    | HandshakePhase::Authenticating
+                    | HandshakePhase::ReadingStartupInfo => {}
+                    HandshakePhase::Complete => {
+                        return Err(protocol_error(
+                            "PostgreSQL sent NegotiateProtocolVersion after startup completed",
+                        ));
+                    }
                 }
                 match self.negotiate_protocol(body) {
                     Ok(()) => continue,
@@ -421,6 +426,9 @@ where
                 "PostgreSQL reported unrequested protocol option `{option}`"
             )));
         }
+        if let Some((_, secret_key)) = &self.backend_key {
+            Self::validate_cancel_key(protocol, secret_key)?;
+        }
 
         self.negotiation_seen = true;
         self.protocol = protocol;
@@ -441,14 +449,20 @@ where
 
         let process_id = i32::from_be_bytes(body[..4].try_into().unwrap());
         let secret_key = CancelKey::new(body.slice(4..)).map_err(Error::parse)?;
-        if self.protocol == ProtocolVersion::V3_0 && secret_key.as_bytes().len() != 4 {
+        Self::validate_cancel_key(self.protocol, &secret_key)?;
+
+        self.backend_key = Some((process_id, secret_key));
+        Ok(())
+    }
+
+    fn validate_cancel_key(protocol: ProtocolVersion, secret_key: &CancelKey) -> Result<(), Error> {
+        if protocol == ProtocolVersion::V3_0 && secret_key.as_bytes().len() != 4 {
             return Err(protocol_error(format!(
                 "PostgreSQL sent a {}-byte cancel key for protocol 3.0; expected 4 bytes",
                 secret_key.as_bytes().len()
             )));
         }
 
-        self.backend_key = Some((process_id, secret_key));
         Ok(())
     }
 
@@ -2171,11 +2185,12 @@ mod tests {
         );
     }
 
-    /// Negotiation is the first server response to the startup packet. Once
-    /// authentication has begun, a later negotiation cannot change the
-    /// protocol governing already-consumed messages.
+    /// `AuthenticationOk` does not end startup. The wire contract explicitly
+    /// allows the server to decline the requested minor version afterward, so
+    /// a valid downgrade before version-shaped `BackendKeyData` must continue on
+    /// the same connection.
     #[compio::test]
-    async fn negotiation_after_authentication_is_rejected() {
+    async fn post_authentication_negotiation_continues_before_backend_key_data() {
         let mut negotiation = Vec::new();
         negotiation.extend_from_slice(&0x0003_0000u32.to_be_bytes());
         negotiation.extend_from_slice(&0u32.to_be_bytes());
@@ -2189,14 +2204,107 @@ mod tests {
         let config: Config = "user=scripted-user sslmode=disable"
             .parse()
             .expect("parse scripted config");
-        let error = match config.connect_raw(stream, NoTls).await {
-            Ok(_) => panic!("NegotiateProtocolVersion after authentication was accepted"),
-            Err(error) => error,
+        let (client, connection) = config
+            .connect_raw(stream, NoTls)
+            .await
+            .expect("post-authentication protocol negotiation did not continue startup");
+
+        assert_eq!(
+            client.protocol_version(),
+            ProtocolVersion::V3_0,
+            "the post-authentication downgrade was not retained"
+        );
+        drop((client, connection));
+    }
+
+    /// Protocol negotiation remains legal between authentication exchanges.
+    /// The downgrade must be transparent to the password response and the
+    /// following `AuthenticationOk`.
+    #[compio::test]
+    async fn negotiation_during_password_authentication_continues() {
+        let mut negotiation = Vec::new();
+        negotiation.extend_from_slice(&0x0003_0000u32.to_be_bytes());
+        negotiation.extend_from_slice(&0u32.to_be_bytes());
+
+        let mut script = frame(b'R', &3u32.to_be_bytes());
+        script.extend_from_slice(&frame(b'v', &negotiation));
+        script.extend_from_slice(&frame(b'R', &0u32.to_be_bytes()));
+        script.extend_from_slice(&frame(b'K', &[0; 8]));
+        script.extend_from_slice(&frame(b'Z', b"I"));
+
+        let mut config = plaintext_config();
+        config.password("scripted-password");
+        let stream = MaybeTlsStream::<_, crate::tls::NoTlsStream>::Raw(HandshakeWriteSuccess {
+            input: script,
+            offset: 0,
+            output: Vec::new(),
+        });
+        let mut handshake = Handshake::new(stream, &config);
+
+        authenticate(&mut handshake, &config, "scripted-user")
+            .await
+            .expect("protocol negotiation interrupted password authentication");
+        read_info(&mut handshake)
+            .await
+            .expect("startup did not continue after the authentication downgrade");
+        assert_eq!(handshake.protocol, ProtocolVersion::V3_0);
+    }
+
+    /// A four-byte cancel key is valid under both 3.2 and 3.0, so a later
+    /// downgrade can retain it unchanged.
+    #[compio::test]
+    async fn negotiation_after_four_byte_backend_key_data_continues() {
+        let mut negotiation = Vec::new();
+        negotiation.extend_from_slice(&0x0003_0000u32.to_be_bytes());
+        negotiation.extend_from_slice(&0u32.to_be_bytes());
+
+        let mut script = frame(b'R', &0u32.to_be_bytes());
+        script.extend_from_slice(&frame(b'K', &[0; 8]));
+        script.extend_from_slice(&frame(b'v', &negotiation));
+        script.extend_from_slice(&frame(b'Z', b"I"));
+
+        let (stream, _) = scripted_server_after_startup(Some(script)).await;
+        let config: Config = "user=scripted-user sslmode=disable"
+            .parse()
+            .expect("parse scripted config");
+        let (client, connection) = config
+            .connect_raw(stream, NoTls)
+            .await
+            .expect("a valid four-byte cancel key prevented protocol downgrade");
+
+        assert_eq!(client.protocol_version(), ProtocolVersion::V3_0);
+        drop((client, connection));
+    }
+
+    /// `BackendKeyData` is shaped by the protocol version: 3.0 fixes the key at
+    /// four bytes while 3.2 permits a variable length. A peer cannot first have
+    /// a variable key accepted under requested 3.2 and then change the version
+    /// governing that already-consumed key.
+    #[compio::test]
+    async fn downgrade_after_variable_backend_key_data_is_rejected() {
+        let mut key_data = 1234i32.to_be_bytes().to_vec();
+        key_data.extend_from_slice(&[0x5a; 32]);
+
+        let mut negotiation = Vec::new();
+        negotiation.extend_from_slice(&0x0003_0000u32.to_be_bytes());
+        negotiation.extend_from_slice(&0u32.to_be_bytes());
+
+        let mut script = frame(b'R', &0u32.to_be_bytes());
+        script.extend_from_slice(&frame(b'K', &key_data));
+        script.extend_from_slice(&frame(b'v', &negotiation));
+        script.extend_from_slice(&frame(b'Z', b"I"));
+
+        let (stream, _) = scripted_server_after_startup(Some(script)).await;
+        let config: Config = "user=scripted-user sslmode=disable"
+            .parse()
+            .expect("parse scripted config");
+        let Err(error) = config.connect_raw(stream, NoTls).await else {
+            panic!("protocol downgrade retained a variable-length cancel key");
         };
         let chain = authentication_error_chain(error);
         assert!(
-            chain.contains("NegotiateProtocolVersion") && chain.contains("after authentication"),
-            "the out-of-phase negotiation was not identified: {chain}"
+            chain.contains("32-byte cancel key") && chain.contains("protocol 3.0"),
+            "the cancel key was not revalidated against the negotiated version: {chain}"
         );
     }
 
